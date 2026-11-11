@@ -87,6 +87,8 @@ extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
 extern "C" void nvrm_power_stop(void);
 extern "C" void nvrm_power_suspend(void);
 extern "C" void nvrm_power_resume(void);
+extern "C" void nv_xnu_rc_suspend(nv_state_t *nv);   // os-xnu2.cpp: the RM's 1 Hz timer (boot-arg nvrmrctimer=1), paused across sleep
+extern "C" void nv_xnu_rc_resume(nv_state_t *nv);
 extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
@@ -2294,6 +2296,7 @@ void NVRM::gpuSuspend()
     uint64_t t0 = mach_absolute_time();
     fPmCycles++;
     nvrm_power_suspend();
+    nv_xnu_rc_suspend(&fNv);
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
     setProperty("nvrm-pm", "suspended");
     LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", fPmCycles);
@@ -2332,7 +2335,7 @@ void NVRM::gpuResume()
     OSCompareAndSwap(kGpuPmSuspended, ok ? kGpuPmRunning : kGpuPmLost, &fGpuPm);
     nvkms_xnu_resume(fNv.gpu_id, ok);
     nv_xnu_pm_open();   // also when lost: RM then answers the waiting calls with errors instead of leaving them blocked
-    if (ok) nvrm_power_resume();
+    if (ok) { nvrm_power_resume(); nv_xnu_rc_resume(&fNv); }
     setProperty("nvrm-pm", ok ? "running" : "lost (resume failed)");
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", fPmCycles,
