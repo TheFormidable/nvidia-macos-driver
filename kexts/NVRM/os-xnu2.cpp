@@ -1721,6 +1721,114 @@ void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
     TRC; if (!t) return; if (t->call) { thread_call_cancel(t->call); thread_call_free(t->call); } kern_os_free(t);
 }
 
+// ---- RC timer (boot-arg nvrmrctimer=1) -------------------------------------------------------------------------------
+// Linux (kernel-open/nvidia/nv.c): nv_start_rc_timer arms a 1 s kernel timer whose callback is rm_run_rc_callback, and
+// that runs the RM's 1 Hz callback list (osRun1HzCallbacksNow): the GSP firmware heartbeat check, the check that the GPU
+// still answers on the bus, the NVENC session statistics, and the channel watchdog once a client turns it on. Both
+// functions were stubs here, so that list never ran. With nvrmrctimer=1 a thread call does the timer's job; without the
+// boot-arg nothing below runs and nv->rc_timer_enabled stays 0, exactly as with the stubs.
+//   debug.nvrm_rc_ticks  RO  timer ticks (registered only with the boot-arg)
+//   debug.nvrm_rc_runs   RO  ticks on which rm_run_rc_callback returned NV_OK
+// Differences from Linux, both on purpose: the tick is re-armed whatever rm_run_rc_callback returns (Linux lets the
+// timer die on the first refusal, such as a tick that lands during a power transition), and the timer is paused across
+// system sleep by the driver (nv_xnu_rc_suspend / nv_xnu_rc_resume from NVRM.cpp) instead of being left to fire.
+#define NV_XNU_RC_SLOTS 4   // one per GPU; GPUs start one at a time, so the table needs no lock
+struct nv_xnu_rc { nv_state_t *nv; thread_call_t call; volatile SInt32 running; volatile SInt32 paused; volatile thread_t owner; };
+static nv_xnu_rc gNvRc[NV_XNU_RC_SLOTS];
+static volatile SInt64 gNvRcTicks = 0, gNvRcRuns = 0;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_ticks, CTLFLAG_RD, (int64_t *)&gNvRcTicks, "RC timer ticks");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_runs, CTLFLAG_RD, (int64_t *)&gNvRcRuns, "RC timer ticks the RM accepted");
+static int nv_xnu_rc_on(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 0; on = (PE_parse_boot_argn("nvrmrctimer", &v, sizeof(v)) && v == 1) ? 1 : 0; }
+    return on;
+}
+static nv_xnu_rc *nv_xnu_rc_find(nv_state_t *nv)
+{
+    for (int i = 0; i < NV_XNU_RC_SLOTS; i++) if (gNvRc[i].nv == nv) return &gNvRc[i];
+    return NULL;
+}
+static void nv_xnu_rc_arm(nv_xnu_rc *rc)
+{
+    uint64_t deadline; clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(rc->call, deadline);
+}
+static void nv_xnu_rc_tick(thread_call_param_t p0, thread_call_param_t p1)
+{
+    nv_xnu_rc *rc = (nv_xnu_rc *)p0;
+    OSIncrementAtomic(&rc->running);
+    rc->owner = current_thread();
+    nv_state_t *nv = rc->nv;
+    if (nv && nv->rc_timer_enabled && !rc->paused) {
+        OSIncrementAtomic64(&gNvRcTicks);
+        // rm_run_rc_callback only tries the GPU lock (GPU_LOCK_FLAGS_COND_ACQUIRE): a busy RM costs this tick, not a wait.
+        if (rm_run_rc_callback(NULL, nv) == NV_OK) OSIncrementAtomic64(&gNvRcRuns);
+        if (nv->rc_timer_enabled && !rc->paused) nv_xnu_rc_arm(rc);
+    }
+    rc->owner = NULL;
+    OSDecrementAtomic(&rc->running);
+}
+// thread_call_cancel_wait is not exported to kexts (nvrm_power.cpp has the same pattern): cancel, wait for a tick that is
+// running, then cancel what that tick may have armed before it saw the flag the caller set.
+static void nv_xnu_rc_quiesce(nv_xnu_rc *rc)
+{
+    thread_call_cancel(rc->call);
+    if (rc->owner == current_thread()) return;   // asked from inside a 1 Hz callback: the tick sees the flag on its way out
+    for (int i = 0; i < 1000 && rc->running; i++) IOSleep(10);
+    thread_call_cancel(rc->call);
+}
+NvS32 NV_API_CALL nv_start_rc_timer(nv_state_t *nv)
+{
+    if (!nv || !nv_xnu_rc_on()) return 0;
+    if (nv->rc_timer_enabled) return -1;
+    nv_xnu_rc *rc = nv_xnu_rc_find(nv);
+    if (!rc) rc = nv_xnu_rc_find(NULL);
+    if (!rc) { kprintf("NVRM-xnu: RC timer: no free slot, the 1 Hz callbacks stay off for this GPU\n"); return -1; }
+    if (!rc->call) rc->call = thread_call_allocate(nv_xnu_rc_tick, rc);
+    if (!rc->call) { kprintf("NVRM-xnu: RC timer: no thread call\n"); return -1; }
+    {
+        static bool sysctlsUp;
+        if (!sysctlsUp) { sysctlsUp = true; sysctl_register_oid(&sysctl__debug_nvrm_rc_ticks); sysctl_register_oid(&sysctl__debug_nvrm_rc_runs); }
+    }
+    rc->paused = 0;
+    rc->nv = nv;
+    nv->rc_timer_enabled = 1;
+    nv_xnu_rc_arm(rc);
+    kprintf("NVRM-xnu: RC timer armed (nvrmrctimer=1): the RM's 1 Hz callbacks run\n");
+    return 0;
+}
+NvS32 NV_API_CALL nv_stop_rc_timer(nv_state_t *nv)
+{
+    if (!nv || !nv_xnu_rc_on()) return 0;
+    if (!nv->rc_timer_enabled) return -1;
+    nv->rc_timer_enabled = 0;
+    nv_xnu_rc *rc = nv_xnu_rc_find(nv);
+    if (!rc || !rc->call) return 0;
+    nv_xnu_rc_quiesce(rc);
+    if (rc->owner == current_thread()) return 0;   // cannot free a call from inside itself; the slot is reused by the next start
+    for (int i = 0; i < 100 && !thread_call_free(rc->call); i++) { IOSleep(10); thread_call_cancel(rc->call); }
+    rc->call = NULL;
+    rc->nv = NULL;
+    kprintf("NVRM-xnu: RC timer stopped\n");
+    return 0;
+}
+// System sleep and wake (NVRM::gpuSuspend, NVRM::gpuResume): no tick may reach a GPU that is in standby or powered off.
+extern "C" void nv_xnu_rc_suspend(nv_state_t *nv)
+{
+    nv_xnu_rc *rc = (nv && nv_xnu_rc_on()) ? nv_xnu_rc_find(nv) : NULL;
+    if (!rc || !rc->call) return;
+    rc->paused = 1;
+    nv_xnu_rc_quiesce(rc);
+}
+extern "C" void nv_xnu_rc_resume(nv_state_t *nv)
+{
+    nv_xnu_rc *rc = (nv && nv_xnu_rc_on()) ? nv_xnu_rc_find(nv) : NULL;
+    if (!rc || !rc->call) return;
+    rc->paused = 0;
+    if (nv->rc_timer_enabled) nv_xnu_rc_arm(rc);
+}
+
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
 extern "C" void nv_xnu_put_client(void *priv);
 extern "C" void nv_xnu_note_map_len(NvU64 bytes);
