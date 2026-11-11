@@ -221,6 +221,44 @@ static volatile unsigned long gNvIsrCount = 0, gNvIsrHandled = 0;
 // Read from a shell (also over SSH while the screen is frozen): do GPU interrupts still arrive and get handled?
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_count, CTLFLAG_RD, (int64_t *)&gNvIsrCount, "GPU MSIs taken");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_handled, CTLFLAG_RD, (int64_t *)&gNvIsrHandled, "GPU MSIs RM claimed");
+// Interrupt timing. On Linux rm_isr runs in the hard interrupt and rm_isr_bh on the interrupt's own thread, so a bottom
+// half that waits for the GPU lock never keeps the next top half (vblank, non-stall notifiers) waiting. Here both run on
+// the one work loop thread. These say whether that costs anything on this machine; all read-only, compare two readings:
+//   debug.nvrm_isr_latency_max_us  longest wait between an MSI and its rm_isr
+//   debug.nvrm_isr_late_1ms, _4ms  such waits longer than 1 ms and 4 ms
+//   debug.nvrm_isr_during_bh       MSIs that arrived while a bottom half was still running
+//   debug.nvrm_bh_runs             bottom halves run
+//   debug.nvrm_bh_max_us           longest bottom half, its wait for the GPU lock included
+//   debug.nvrm_bh_over_1ms, _4ms   bottom halves longer than 1 ms and 4 ms
+static volatile UInt64 gNvIsrFilterAt = 0;   // mach_absolute_time of the first MSI the work loop has not served yet
+static volatile SInt32 gNvBhActive = 0;
+static volatile SInt64 gNvIsrLatMaxUs = 0, gNvIsrLate1 = 0, gNvIsrLate4 = 0, gNvIsrDuringBh = 0;
+static volatile SInt64 gNvBhRuns = 0, gNvBhMaxUs = 0, gNvBhOver1 = 0, gNvBhOver4 = 0;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_latency_max_us, CTLFLAG_RD, (int64_t *)&gNvIsrLatMaxUs, "longest MSI to rm_isr wait, microseconds");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_late_1ms, CTLFLAG_RD, (int64_t *)&gNvIsrLate1, "MSI to rm_isr waits over 1 ms");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_late_4ms, CTLFLAG_RD, (int64_t *)&gNvIsrLate4, "MSI to rm_isr waits over 4 ms");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_during_bh, CTLFLAG_RD, (int64_t *)&gNvIsrDuringBh, "GPU MSIs that arrived while a bottom half ran");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_runs, CTLFLAG_RD, (int64_t *)&gNvBhRuns, "RM bottom halves run");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_max_us, CTLFLAG_RD, (int64_t *)&gNvBhMaxUs, "longest RM bottom half, microseconds");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_1ms, CTLFLAG_RD, (int64_t *)&gNvBhOver1, "RM bottom halves over 1 ms");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_4ms, CTLFLAG_RD, (int64_t *)&gNvBhOver4, "RM bottom halves over 4 ms");
+static inline SInt64 nvrmUsSince(uint64_t t0)
+{
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    return (SInt64)(ns / 1000ULL);
+}
+static void nvrmRunBottomHalf(nv_state_t *nv)
+{
+    const uint64_t t0 = mach_absolute_time();
+    OSIncrementAtomic(&gNvBhActive);
+    rm_isr_bh(NULL, nv);
+    OSDecrementAtomic(&gNvBhActive);
+    const SInt64 us = nvrmUsSince(t0);
+    OSIncrementAtomic64(&gNvBhRuns);
+    if (us > 1000) OSIncrementAtomic64(&gNvBhOver1);
+    if (us > 4000) OSIncrementAtomic64(&gNvBhOver4);
+    if (us > gNvBhMaxUs) gNvBhMaxUs = us;
+}
 static volatile SInt64 gNvEvtPosts = 0, gNvEvtMatched = 0, gNvEvtWaits = 0, gNvEvtSlept = 0;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_posts, CTLFLAG_RD, (int64_t *)&gNvEvtPosts, "RM events posted to user clients");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_waits, CTLFLAG_RD, (int64_t *)&gNvEvtWaits, "user event waits");
@@ -725,6 +763,10 @@ bool NVRM::startGPU(IOService *provider)
         if (!sysctlsUp) {
             sysctlsUp = true;
             sysctl_register_oid(&sysctl__debug_nvrm_isr_count); sysctl_register_oid(&sysctl__debug_nvrm_isr_handled);
+            sysctl_register_oid(&sysctl__debug_nvrm_isr_latency_max_us); sysctl_register_oid(&sysctl__debug_nvrm_isr_during_bh);
+            sysctl_register_oid(&sysctl__debug_nvrm_isr_late_1ms); sysctl_register_oid(&sysctl__debug_nvrm_isr_late_4ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_runs); sysctl_register_oid(&sysctl__debug_nvrm_bh_max_us);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_over_1ms); sysctl_register_oid(&sysctl__debug_nvrm_bh_over_4ms);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_posts); sysctl_register_oid(&sysctl__debug_nvrm_evt_waits);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
         }
@@ -1933,16 +1975,28 @@ bool NVRM::interruptFilter(IOFilterInterruptEventSource *src)
 {
     unsigned long n = ++gNvIsrCount;
     if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", n, gNvIsrHandled);
+    if (gNvBhActive) OSIncrementAtomic64(&gNvIsrDuringBh);
+    OSCompareAndSwap64(0, mach_absolute_time(), &gNvIsrFilterAt);   // keeps the oldest unserved MSI's time
     return true;
 }
 void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 {
     NvU32 needBottomHalf = 0;
+    {
+        // Taken and cleared before rm_isr: an MSI that arrives from here on is served by the next call, and timed by it.
+        const UInt64 at = gNvIsrFilterAt;
+        if (at && OSCompareAndSwap64(at, 0, &gNvIsrFilterAt)) {
+            const SInt64 us = nvrmUsSince(at);
+            if (us > 1000) OSIncrementAtomic64(&gNvIsrLate1);
+            if (us > 4000) OSIncrementAtomic64(&gNvIsrLate4);
+            if (us > gNvIsrLatMaxUs) gNvIsrLatMaxUs = us;
+        }
+    }
     nv_xnu_isr_thread = current_thread();
     NvBool handled = rm_isr(NULL, &fNv, &needBottomHalf);
     nv_xnu_isr_thread = NULL;
     if (handled) gNvIsrHandled++;
-    if (handled && needBottomHalf) rm_isr_bh(NULL, &fNv);
+    if (handled && needBottomHalf) nvrmRunBottomHalf(&fNv);
 }
 
 void NVRM::stop(IOService *provider)
