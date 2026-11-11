@@ -1286,17 +1286,31 @@ const void *NV_API_CALL nv_get_firmware(nv_state_t *nv, nv_firmware_type_t fw_ty
 }
 void NV_API_CALL nv_put_firmware(const void *fw_handle) { TRC; if (fw_handle) kern_os_free((void *)fw_handle); }
 
-struct os_wait_queue { IOLock *lock; };
+// Linux backs this with a completion and wakes with complete_all (kernel-open/nvidia/os-interface.c): a wake that comes
+// before the wait is remembered, and every wait after it returns at once. Without the latch a wake that won the race left
+// the waiter asleep for good. Only the RM's NVLink fabric code waits here, so no GeForce card takes this path today.
+struct os_wait_queue { IOLock *lock; bool done; };
 NV_STATUS NV_API_CALL os_alloc_wait_queue(os_wait_queue **wq)
 {
     TRC; os_wait_queue *q = (os_wait_queue *)kern_os_malloc(sizeof *q); if (!q) return NV_ERR_NO_MEMORY;
     q->lock = IOLockAlloc(); if (!q->lock) { kern_os_free(q); return NV_ERR_NO_MEMORY; }
+    q->done = false;
     *wq = q; return NV_OK;
 }
 void NV_API_CALL os_free_wait_queue(os_wait_queue *wq) { TRC; if (wq) { IOLockFree(wq->lock); kern_os_free(wq); } }
-void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq) { TRC; IOLockLock(wq->lock); IOLockSleep(wq->lock, wq, THREAD_UNINT); IOLockUnlock(wq->lock); }
-void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)   { TRC; IOLockLock(wq->lock); IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE); IOLockUnlock(wq->lock); }
-void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
+void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq)
+{
+    TRC; IOLockLock(wq->lock);
+    while (!wq->done) IOLockSleep(wq->lock, wq, THREAD_UNINT);
+    IOLockUnlock(wq->lock);
+}
+void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)
+{
+    TRC; IOLockLock(wq->lock);
+    while (!wq->done) if (IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE) != THREAD_AWAKENED) break;   // a signal ends the wait, as on Linux
+    IOLockUnlock(wq->lock);
+}
+void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); wq->done = true; IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
 
 // Each work item runs on its own thread. rm_power_management() flushes the queue before suspend/resume
 // (nv_kthread_q_flush on Linux), so count the items still running and let os_flush_work_queue() wait for them.
