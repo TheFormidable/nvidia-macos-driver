@@ -210,6 +210,14 @@ private:
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
+    // Boot-arg nvrmbhthread=1: rm_isr_bh runs on a thread of its own, as Linux's threaded interrupt handler does, and the
+    // work loop thread stays free for the next rm_isr. Without the boot-arg fBhLock stays NULL and nothing changes.
+    IOLock      *fBhLock = NULL;
+    bool         fBhPending = false, fBhBusy = false, fBhQuit = false, fBhAlive = false;
+    static void bottomHalfThread(void *p0, wait_result_t w);
+    void bottomHalfStart();
+    void bottomHalfDrain(uint32_t waitMs);
+    void bottomHalfStop();
     void readBARs();
     void publishGpuProfile();
     bool placeLargeBar1();
@@ -1938,6 +1946,7 @@ IOReturn NVRM::go(uint32_t pass)
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
                     OSMemberFunctionCast(IOFilterInterruptAction, this, &NVRM::interruptFilter), fPCI, msi);
         if (!fWorkLoop || !fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess) { LOG("interrupt source setup FAILED"); return kIOReturnError; }
+        bottomHalfStart();
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
@@ -1996,7 +2005,80 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
     NvBool handled = rm_isr(NULL, &fNv, &needBottomHalf);
     nv_xnu_isr_thread = NULL;
     if (handled) gNvIsrHandled++;
-    if (handled && needBottomHalf) nvrmRunBottomHalf(&fNv);
+    if (handled && needBottomHalf) {
+        if (fBhLock) {
+            IOLockLock(fBhLock);
+            fBhPending = true;
+            IOLockWakeup(fBhLock, &fBhPending, true);
+            IOLockUnlock(fBhLock);
+        } else nvrmRunBottomHalf(&fNv);
+    }
+}
+
+// The bottom half's own thread (nvrmbhthread=1). One thread per GPU, so bottom halves stay serialized as they are on
+// Linux; a request that arrives while one runs is remembered in fBhPending and served by one more run.
+void NVRM::bottomHalfThread(void *p0, wait_result_t)
+{
+    NVRM *s = (NVRM *)p0;
+    IOLockLock(s->fBhLock);
+    for (;;) {
+        while (!s->fBhPending && !s->fBhQuit) IOLockSleep(s->fBhLock, &s->fBhPending, THREAD_UNINT);
+        if (s->fBhQuit) break;
+        s->fBhPending = false;
+        s->fBhBusy = true;
+        IOLockUnlock(s->fBhLock);
+        nvrmRunBottomHalf(&s->fNv);
+        IOLockLock(s->fBhLock);
+        s->fBhBusy = false;
+        IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
+    }
+    s->fBhAlive = false;
+    IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
+    IOLockUnlock(s->fBhLock);   // bottomHalfStop frees the lock once it has seen fBhAlive false: nothing of s is touched after this
+    thread_terminate(current_thread());
+}
+void NVRM::bottomHalfStart()
+{
+    uint32_t on = 0;
+    if (fBhLock || !PE_parse_boot_argn("nvrmbhthread", &on, sizeof on) || on != 1) return;
+    IOLock *lock = IOLockAlloc();
+    if (!lock) { LOG("nvrmbhthread=1: no lock - the bottom half stays on the work loop"); return; }
+    fBhPending = false; fBhBusy = false; fBhQuit = false; fBhAlive = true;
+    fBhLock = lock;
+    thread_t th = THREAD_NULL;
+    if (kernel_thread_start(&NVRM::bottomHalfThread, this, &th) != KERN_SUCCESS) {
+        fBhAlive = false; fBhLock = NULL;
+        IOLockFree(lock);
+        LOG("nvrmbhthread=1: no thread - the bottom half stays on the work loop");
+        return;
+    }
+    thread_deallocate(th);
+    setProperty("nvrm-bottom-half", "own thread (nvrmbhthread=1)");
+    LOG("nvrmbhthread=1: the RM bottom half runs on a thread of its own");
+}
+// After the interrupt source is disabled: wait for a requested or running bottom half, at most waitMs.
+void NVRM::bottomHalfDrain(uint32_t waitMs)
+{
+    if (!fBhLock) return;
+    uint64_t deadline; clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
+    IOLockLock(fBhLock);
+    while (fBhPending || fBhBusy)
+        if (IOLockSleepDeadline(fBhLock, &fBhBusy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const bool left = fBhPending || fBhBusy;
+    IOLockUnlock(fBhLock);
+    if (left) LOG("a bottom half was still running after %u ms", waitMs);
+}
+// After the interrupt source is removed from the work loop, so no one can request another run.
+void NVRM::bottomHalfStop()
+{
+    if (!fBhLock) return;
+    IOLockLock(fBhLock);
+    fBhQuit = true;
+    IOLockWakeup(fBhLock, &fBhPending, false);
+    while (fBhAlive) IOLockSleep(fBhLock, &fBhBusy, THREAD_UNINT);
+    IOLockUnlock(fBhLock);
+    IOLockFree(fBhLock);
+    fBhLock = NULL;
 }
 
 void NVRM::stop(IOService *provider)
@@ -2022,6 +2104,7 @@ void NVRM::stop(IOService *provider)
     if (fPmJoined) { PMstop(); fPmJoined = false; }
     if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
+    bottomHalfStop();
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     gNVRMTab.remove(this, nvrmMultiGpu());   // a no-op without nvmultigpu=1: the old pointer was never cleared
@@ -2084,6 +2167,7 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
             } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
         }
         if (fIntSrc) fIntSrc->disable();
+        bottomHalfDrain(1000);
         NvrmStep plan[16];
         const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
         if (n) {
@@ -2225,6 +2309,7 @@ void NVRM::gpuSuspend()
     pciSaveForSleep();
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
     if (fIntSrc) fIntSrc->disable();
+    bottomHalfDrain(2000);
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms%s", fPmCycles,
         (unsigned)cst, (unsigned)st, ns / 1000000ULL, st == NV_OK ? "" : " - resume will still be tried, as on Linux");
