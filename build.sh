@@ -431,24 +431,45 @@ on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during ste
 
 # ---------------------------------------------------------------------------------------------------------- tools
 BREW=""; BREW_PREFIX=""; BREW_OTHER=""
-# The two places Homebrew installs itself to, the one of this Mac's processor first: /opt/homebrew on Apple silicon,
-# /usr/local on Intel. A Mac can carry both (an Intel Mac with a copy in /opt/homebrew, an Apple-silicon Mac with an
-# Intel Homebrew for Rosetta); the native one is the one whose formulas are built for this processor.
+# The two places Homebrew installs itself to, the one of this Mac's processor FIRST: /opt/homebrew on Apple silicon,
+# /usr/local on Intel. A Mac can carry both, and the second can be a Homebrew of the OTHER architecture: an Intel Mac
+# may have an Apple-silicon Homebrew in /opt/homebrew (software that runs ARM code on Intel installs one), an
+# Apple-silicon Mac an Intel Homebrew in /usr/local under Rosetta. Only the Homebrew of this processor builds formulas
+# this build can link against, so only it is used without being told; a Homebrew of the other architecture is recorded
+# as BREW_OTHER (doctor names it and how to choose it) but is never used on its own. First token = native, second = other.
 brew_places() { if [ "$(mac_arch)" = arm64 ]; then echo "/opt/homebrew/bin/brew /usr/local/bin/brew"; else echo "/usr/local/bin/brew /opt/homebrew/bin/brew"; fi; }
-# NM_BREW, when set, is the only Homebrew considered: a setting that names a brew which is not there is not answered
-# with another one found elsewhere (the test suite relies on this to keep the Homebrew of the machine it runs on out
-# of its imitated Macs). Without it: the two places above, then PATH; BREW_OTHER is a second one found (doctor names it).
+# Resolve a path through its symlinks (macOS has no "readlink -f") and canonicalise it, so a brew found on PATH can be
+# judged by the prefix its real file sits in, not by where the command happened to be on PATH. A wrapper script is not
+# run to find out where it leads (a wrapper may do anything): only its own location, after following symlinks, is read.
+resolve_path() {
+  local p=$1 t n=0
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do t=$(readlink "$p" 2>/dev/null) || break; case "$t" in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac; n=$((n + 1)); done
+  local d; d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1; printf '%s/%s' "$d" "$(basename "$p")"
+}
+# NM_BREW, when set, is the only Homebrew considered (trusted as named, whatever its architecture): a setting that names
+# a brew which is not there is not answered with another one found elsewhere (the test suite relies on this to keep the
+# Homebrew of the machine it runs on out of its imitated Macs). Without it: the processor's own place; then a brew on
+# PATH, but only when it resolves into that same prefix (a wrapper in no Homebrew prefix, or a brew that resolves into
+# the other architecture's prefix, is not taken). A Homebrew of the other architecture that was seen is kept in BREW_OTHER.
 find_brew() {
   BREW=""; BREW_PREFIX=""; BREW_OTHER=""
-  local c
+  local places native other c r
   if [ -n "${NM_BREW:-}" ]; then
     if [ -f "$NM_BREW" ] && [ -x "$NM_BREW" ]; then BREW=$NM_BREW; fi
   else
-    for c in $(brew_places) "$(command -v brew 2>/dev/null || true)"; do
-      [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] || continue
-      if [ -z "$BREW" ]; then BREW=$c
-      elif [ -z "$BREW_OTHER" ] && [ "$c" != "$BREW" ]; then BREW_OTHER=$c; fi
-    done
+    places=$(brew_places); native=${places%% *}; other=${places##* }
+    [ -f "$native" ] && [ -x "$native" ] && BREW=$native
+    [ -n "$other" ] && [ -f "$other" ] && [ -x "$other" ] && BREW_OTHER=$other
+    if [ -z "$BREW" ]; then
+      c=$(command -v brew 2>/dev/null || true)
+      if [ -n "$c" ] && [ -x "$c" ]; then
+        r=$(resolve_path "$c" 2>/dev/null || true)
+        case "$r" in
+          "${native%/bin/brew}"/*) BREW=$c ;;
+          "${other%/bin/brew}"/*)  [ -n "$BREW_OTHER" ] || BREW_OTHER=$c ;;
+        esac
+      fi
+    fi
   fi
   [ -n "$BREW" ] && BREW_PREFIX=$(cd "$(dirname "$BREW")/.." && pwd -P)
   return 0
@@ -672,6 +693,8 @@ doctor() {   # prints; sets D_MISSING
   if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"
     [ -z "$BREW_OTHER" ] || d_note "a second Homebrew is at $BREW_OTHER; build.sh uses $BREW, the one of this Mac's processor ($(mac_arch)). NM_BREW=$BREW_OTHER makes it use the other"
   elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
+  elif [ -n "$BREW_OTHER" ]; then d_missing "Homebrew for this Mac's processor ($(mac_arch))"
+    d_note "a second Homebrew is at $BREW_OTHER, but its formulas are built for the other architecture and this build cannot link them, so it is not used on its own. NM_BREW=$BREW_OTHER uses it anyway"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
   if [ -n "$T_PATCH" ]; then d_ok "patch $T_PATCH ($("$T_PATCH" --version 2>/dev/null | first_line)): applies the kexts' patch chain as build_rm620.sh calls it"
     [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain (Homebrew gpatch; nvk only)"
@@ -939,11 +962,23 @@ Xcode cannot be installed by a script. Do this once:
 Then run ./build.sh doctor again.
 EOF
 }
+# Every call to Homebrew goes through here. The tester's login shell may export HOMEBREW_PREFIX, HOMEBREW_CELLAR and
+# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them); inherited, they
+# would make the brew build.sh chose read the wrong prefix and act on the wrong installation. So each call drops the
+# three, and runs with HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the
+# working directory, the install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+run_brew() {
+  local kv=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do kv+=( "$1" ); shift; done
+  [ "${1:-}" = -- ] && shift
+  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 ${kv[@]+"${kv[@]}"} "$BREW" "$@"
+}
 # "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
 # otherwise). Only deps asks it, never during a dry run or offline, and with a cache in the working directory.
 brew_info() {
   mkdir -p "$TOOLS/homebrew-cache"
-  HOMEBREW_CACHE=$TOOLS/homebrew-cache HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 "$BREW" info --json=v2 "$1"
+  run_brew "HOMEBREW_CACHE=$TOOLS/homebrew-cache" -- info --json=v2 "$1"
 }
 brew_llvm_is_pinned() { local j; j=$(brew_info llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
 brew_formula_exists() { brew_info "$1" >/dev/null 2>&1; }
@@ -1010,12 +1045,11 @@ cmd_deps() {
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
-    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 brew install $f"; done
+    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 brew install $f"; done
     elif ask "Install them now?"; then
       for f in "${want[@]}"; do
         say "brew install $f"
-        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_ENV_HINTS=1 \
-          "$BREW" install "$f" || die "brew install $f failed"
+        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 -- install "$f" || die "brew install $f failed"
       done
     else say "not installed; the build needs them"; fi
     find_tools
