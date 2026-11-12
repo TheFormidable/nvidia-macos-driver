@@ -777,9 +777,14 @@ x() {
   x_status "$@" || rc=$?
   [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"
 }
-# The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables.
+# The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables, and
+# none of the search-path variables a compiler or build system reads (PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LIBRARY_PATH,
+# CPATH): dropped here so a tester's login shell, which may point them into a Homebrew of the other architecture, cannot
+# reach a step. A step that needs one is given it explicitly afterwards (the NVK step sets its own PKG_CONFIG_PATH), and
+# a later assignment overrides the -u, so those keep working.
 step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
+    -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
     "JOBS=${JOBS:-$NM_JOBS}"
 }

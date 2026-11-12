@@ -1362,6 +1362,23 @@ def arm_vars(mac):
         mac.clear()
         mac.run("build", "fb", extra={"CC": "/usr/local/bin/gcc-14"})
         negative("a CC from the user's shell left in the step's environment", vars_problems(mac))
+    # A login shell may point the compiler and build-system search paths at a Homebrew of the other architecture; no
+    # step may inherit them.
+    leak = {"CMAKE_PREFIX_PATH": "/opt/homebrew/lib/cmake", "LIBRARY_PATH": "/opt/homebrew/lib",
+            "CPATH": "/opt/homebrew/include", "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig"}
+
+    def leak_problems(tag):
+        mac.clear()
+        e = dict(leak); e["FB_DEFS"] = f"-DNM_LEAK_{tag}=1"   # a fresh value each call so fb really re-runs
+        mac.run("build", "fb", extra=e)
+        steps = mac.steps()
+        bad = [f"{key}: {v}={env[v]} inherited from the caller" for key, args, env in steps for v in leak if v in env]
+        return bad or ([] if steps else ["no step ran"])
+
+    with mac.scratch():
+        check("a step inherits no PKG_CONFIG_PATH/CMAKE_PREFIX_PATH/LIBRARY_PATH/CPATH from the caller", not (q := leak_problems("a")), q)
+        mac.break_script("-u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \\", "\\")
+        negative("a step_env that keeps the caller's search-path variables", leak_problems("b"))
 
 
 def rebuilt(sb, *args, extra=None, edit=None):
