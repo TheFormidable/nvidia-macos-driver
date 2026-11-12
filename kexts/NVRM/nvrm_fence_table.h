@@ -33,6 +33,7 @@
 #define NVF_CAP_GPU_MS      2000u    /* a hold whose completion depends on the GPU */
 #define NVF_CAP_CPU_MS       100u    /* a hold whose completion depends only on its writer's CPU (2.9 abandoned a busy tag after 100 ms) */
 #define NVF_CAP_PEN_MS        20u    /* any hold of an owner in a penalty window (2.9 waited 10 ms) */
+#define NVF_CAP_PEN_COMP_MS  100u    /* the same for a compositor hold: NVAccel's flips and page-offs (2.9 waited 100 ms) */
 #define NVF_PENALTY_MS     10000u    /* first penalty window; doubles with each strike */
 #define NVF_STRIKES            3u    /* strikes that distrust an owner */
 #define NVF_FORGIVE_MS    600000u    /* one strike is forgiven per 10 minutes without one */
@@ -134,6 +135,7 @@ struct nvf_wait_ops {
 NVRM_FENCE_SASSERT(sizeof(struct nvf_entry) == 64, nvf_entry_size);
 NVRM_FENCE_SASSERT(NVF_CHANS <= (1u << NVF_CHAN_INDEX_BITS), nvf_chan_index_fits);
 NVRM_FENCE_SASSERT(NVF_ENTRIES < NVF_NIL && NVF_OWNERS < NVF_NIL, nvf_links_fit);
+NVRM_FENCE_SASSERT(NVF_CAP_PEN_COMP_MS >= NVF_CAP_CPU_MS && NVF_CAP_PEN_COMP_MS < NVF_CAP_GPU_MS, nvf_compositor_penalty);
 /* nvf_result_from_recent takes the largest: the precedence TIMEOUT > DEAD > READY > NONE is their numeric order */
 NVRM_FENCE_SASSERT(NVRM_FENCE_R_NONE < NVRM_FENCE_R_READY && NVRM_FENCE_R_READY < NVRM_FENCE_R_DEAD &&
                    NVRM_FENCE_R_DEAD < NVRM_FENCE_R_TIMEOUT, nvf_result_order);
@@ -493,12 +495,18 @@ static inline int nvf_owner_gpu_busy(struct nvf_table *T, unsigned oi, nvf_read_
     return 0;
 }
 
-/* The longest the hold may stay in its state, in ms, and which rule gave it. */
+/* The longest the hold may stay in its state, in ms, and which rule gave it. In a penalty window every hold of the
+ * owner gets the penalty bound, whatever its state; a compositor hold's is never below the CPU bound, because NVAccel
+ * waits on it before a flip or a page-off, where 2.9 waited up to 100 ms on the mark the plugin no longer sends for a
+ * surface the kernel holds: a shorter bound would flip WindowServer's composites unfinished for the whole window. */
 static inline unsigned nvf_bound_ms(struct nvf_table *T, const struct nvf_entry *e, unsigned long long now,
                                     nvf_read_fn read, void *ctx, unsigned *kind)
 {
     const unsigned long long age = now > e->sinceNs ? now - e->sinceNs : 0;
-    if (now < T->o[e->oidx].penaltyUntilNs) { *kind = NVF_BOUND_PENALTY; return NVF_CAP_PEN_MS; }
+    if (now < T->o[e->oidx].penaltyUntilNs) {
+        *kind = NVF_BOUND_PENALTY;
+        return (e->flags & NVRM_FENCE_F_COMPOSITOR) ? NVF_CAP_PEN_COMP_MS : NVF_CAP_PEN_MS;
+    }
     if (e->state == NVRM_FENCE_E_ARMED) { *kind = NVF_BOUND_GPU; return NVF_CAP_GPU_MS; }
     if (age >= NVF_CAP_CPU_MS * NVF_NS_PER_MS && nvf_owner_gpu_busy(T, e->oidx, read, ctx)) {
         *kind = NVF_BOUND_GPU;

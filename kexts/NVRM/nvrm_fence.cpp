@@ -134,7 +134,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_done_on_state, CTLFLAG_RD | CTLFLAG_LOC
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_done_on_slice, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(DONE_ON_SLICE), "the same after a time slice: no interrupt told them");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_expired_gpu, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(EXPIRED_GPU), "holds given up after 2000 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_expired_cpu, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(EXPIRED_CPU), "holds given up after 100 ms with their writer's GPU idle");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_expired_penalty, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(EXPIRED_PENALTY), "holds given up after 20 ms in a penalty window");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_expired_penalty, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(EXPIRED_PENALTY), "holds given up in a penalty window: after 20 ms, a compositor hold after 100 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_strikes, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(STRIKES), "strikes against connections whose holds were given up");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_owners_distrusted, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(OWNERS_DISTRUSTED), "connections refused after three strikes");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_close_gpu_agree, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(CLOSE_GPU_AGREE), "armed holds closed with the kernel seeing their work complete");
