@@ -121,7 +121,8 @@ RMINC=( -I"$NV/arch/nvalloc/unix/include" -I"$NV/arch/nvalloc/common/inc" -I"$NV
   -I"$T/src/common/inc/displayport" -I"$T/src/common/nvlink/inband/interface" )
 KMSINC=( -I"$KMS/os-interface/include" -I"$KMS/kapi/interface" -I"$KMS/kapi/include" -I"$T/src/common/unix/nvidia-push/interface" -I"$KMS/interface" -I"$KMS/include"
          -I"$T/src/common/unix/common/inc" -I"$T/src/common/modeset" -I"$T/src/common/unix/common/utils/interface" )
-RMDEFS=(); while read -r d; do RMDEFS+=("$d"); done < <(head -1 "$NV/_out/Darwin_x86_64/compile_cmds.sh" | tr ' ' '\n' | grep -E '^-D' | sed -e 's/"//g' | grep -v -E '^-D(NVRM|_LANGUAGE_C)$')
+RMDEFS_TEXT=$(bash "$HERE/build/rm_defines.sh" "$NV" 2>&1) || stop "${RMDEFS_TEXT#STOP: }"   # the -D flags of the RM's compile command for osapi.c
+RMDEFS=(); while read -r d; do RMDEFS+=("$d"); done <<< "$RMDEFS_TEXT"
 [ ${#RMDEFS[@]} -gt 0 ] || stop "the RM's compile line in $NV/_out/Darwin_x86_64/compile_cmds.sh names no -D"
 # KEXT_FLAGS is the flag set every build script under build/ and kexts/*/build.sh gives its compiler; tools/test_kext_check.py
 # compares the two, so a flag added to a build script and not here fails a host test.

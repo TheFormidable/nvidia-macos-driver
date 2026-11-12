@@ -1187,8 +1187,17 @@ recipe() {   # <component>: everything its output depends on, as text
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
-  for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none)"; done
+  for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"; done
   return 0
+}
+# dep_outputs_id <component>: the content of what a dependent takes from it. A rebuild with the same recipe (--force)
+# leaves the same stamp but new files: rm's archive, and the compile list whose osapi.c command gives the kexts their
+# -D flags. Every component that reads them is then built again.
+dep_outputs_id() {
+  ( comp_info "$1"
+    local f; for f in "$C_OUT" $([ "$1" = rm ] && printf '%s' "$OGKM620/src/nvidia/_out/Darwin_x86_64/compile_cmds.sh"); do
+      sha256_file "$f" 2>/dev/null | cut -c1-16 || echo none
+    done | tr '\n' ' ' )
 }
 
 STATUS_LINES=""

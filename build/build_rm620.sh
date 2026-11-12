@@ -50,7 +50,13 @@ print("source edits applied")
 PY
 cd "$T/src/nvidia" || exit 2
 O=_out/Darwin_x86_64; mkdir -p "$O"
+# "make -n" lists only what is out of date: run again in a folder built before, it listed one command and compile_cmds.sh,
+# which the kext builds read their -D flags from, lost the rest. It is asked against an empty output folder, as on a
+# first build, and the built one is put back.
+[ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2   # left by an interrupted run
+[ -z "$(ls -A "$O")" ] || { mv "$O" "$O.nm-aside" && mkdir -p "$O"; } || exit 2
 make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 2>/dev/null > "$B/make-n.txt"
+[ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2
 # the generated version header and string file are make steps, not compiles: run those first
 grep -E "^echo .*version\.h" "$B/make-n.txt" > "$B/pre.sh"; bash "$B/pre.sh"
 # NVIDIA's rule bakes user@host and the date into the identity string; the shipped string names no machine or person.
@@ -63,8 +69,14 @@ for l in sys.stdin:
     assert l.startswith("cc "), l[:40]
     l = "clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + l[3:]
     l = l.replace(" -mcmodel=kernel", "").replace(" -fno-pic", "")
-    print(l)' > "$O/compile_cmds.sh"
-n=$(wc -l < "$O/compile_cmds.sh"); echo "compile commands: $n"
+    print(l)' > "$O/compile_cmds.sh.new"
+# never a shorter list than the one there: a list that lost commands would give the kexts the wrong -D flags
+n=$(wc -l < "$O/compile_cmds.sh.new")
+if [ -f "$O/compile_cmds.sh" ] && [ "$n" -lt "$(wc -l < "$O/compile_cmds.sh")" ]; then
+  echo "STOP: make -n listed $n compile commands, fewer than the $(wc -l < "$O/compile_cmds.sh" | tr -d ' ') of the list there; kept that list. Use a new work dir"
+  rm -f "$O/compile_cmds.sh.new"; exit 2
+fi
+mv "$O/compile_cmds.sh.new" "$O/compile_cmds.sh"; echo "compile commands: $n"
 # NM_PREPARE_ONLY=1 stops here: the patched tree and the RM's compile line are all build/kext_check.sh needs, and
 # everything up to this point runs on any host with make, patch and python3 (no Xcode).
 [ -z "${NM_PREPARE_ONLY:-}" ] || { echo "prepared $T: $n compile commands, nothing compiled (NM_PREPARE_ONLY)"; exit 0; }
