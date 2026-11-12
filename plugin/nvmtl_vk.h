@@ -21,6 +21,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_live.h"
 #include "nvmtl_slots.h"
 #include "nvmtl_fence.h"
+#include "nvmtl_plane_alias.h"
 #include "nvmtl_nvk_layout.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
@@ -561,6 +562,19 @@ int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
 
 int nvmtl_vk_surface_share_on(void);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);
+/* Two-plane surfaces whose planes live in their own VRAM (nvmtl_plane_alias.h). vram_ranged: one plane's VRAM granted with
+   its byte range. plane_vram_gate: NULL when the accelerator offers ranged grants and its page-off waits unlocked, else
+   why not. plane_vram_state: 1 the process's self-test passed; 0 not now; -1 the caller must start the self-test (one
+   caller per process). plane_vram_verdict: the self-test's result, logged once. plane_image_create: an eligible plane as
+   a texture over its VRAM (0: *vb and *img are the caller's). plane_selftest: the round trip on a private surface,
+   r->step 0 = passed; it waits for the GPU and the kernel, so never on a caller's thread. */
+int nvmtl_vk_surface_vram_ranged(uint32_t surfaceID, uint32_t plane, uint64_t off, uint64_t len, nvk_buffer *out);
+const char *nvmtl_vk_plane_vram_gate(void);
+int  nvmtl_vk_plane_vram_state(void);
+void nvmtl_vk_plane_vram_verdict(const nvmtl_pa_result *r, uint64_t ns);
+int  nvmtl_vk_plane_image_create(uint32_t surfaceID, const nvmtl_pa_surface *s, uint32_t plane, uint32_t w, uint32_t h, uint32_t vkf,
+                                 uint32_t bpp, int a8, int storage, nvk_buffer *vb, nvk_image *img);
+int  nvmtl_vk_plane_selftest(uint32_t surfaceID, const nvmtl_pa_surface *s, const nvmtl_pa_host *hst, nvmtl_pa_result *r);
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane);
 int nvmtl_vk_surface_dirty_try(uint32_t surfaceID, uint32_t plane);
 uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending);
