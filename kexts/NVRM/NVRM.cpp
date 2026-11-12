@@ -1448,6 +1448,10 @@ void NVRM::autoGo(void *p0, wait_result_t)
             IOSleep(w.stepMs);
             sinceRead += w.stepMs; sinceWalk += w.stepMs;
             if (!nvrmHeadsWaitSlept(&w)) { why = kNvrmHeadsTimeout; break; }
+            // The stepper counts sleeps. Twenty times more polls than 2.9 add twenty times its per-poll cost (a sysctl,
+            // a registry read, the timer slack of each sleep), so the clock bounds the wait as well: it never ends
+            // later than 2.9's twenty one-second sleeps did. -nvrmoldwaits keeps 2.9's count of polls exactly.
+            if (!old && nvrmMsSince(t0) >= kNvrmHeadsWaitMs) { why = kNvrmHeadsTimeout; break; }
         }
         gNvBootHeadsMs = nvrmMsSince(t0); gNvBootHeadsPolls = polls; gNvBootHeadsWhy = (unsigned)why;
         if (why == kNvrmHeadsNoDisplay) LOG("auto-go: no display on any NVIDIA connector - not waiting for heads");
@@ -1461,7 +1465,12 @@ void NVRM::autoGo(void *p0, wait_result_t)
             // display path, which NVRMFB reports by clearing the boot guard. Wait for that, then let WindowServer start.
             const unsigned cap = nvrmAccelRefusedWaitMs(w.elapsedMs);
             unsigned waited = 0; int cleared = 0;
-            while (waited < cap && (nvrmSysR("debug.nvrmfb_guard_cleared", &cleared) != 0 || cleared != 1)) { IOSleep(kNvrmHeadsPollMs); waited += kNvrmHeadsPollMs; }
+            const uint64_t tw = nvrmNowNs();   // bounded by the clock, as the heads wait is
+            while (waited < cap && (nvrmSysR("debug.nvrmfb_guard_cleared", &cleared) != 0 || cleared != 1)) {
+                const unsigned left = cap - waited;
+                IOSleep(left < kNvrmHeadsPollMs ? left : kNvrmHeadsPollMs);
+                waited = nvrmMsSince(tw);
+            }
             LOG("auto-go: the accelerator declined this macOS's classes: no arming; the framebuffer's display %s after %u ms",
                 cleared == 1 ? "is up" : "did not report up", waited);
             s->fBringUp = 0;
@@ -1490,8 +1499,11 @@ void NVRM::autoGo(void *p0, wait_result_t)
             int m = 0;
             const bool readable = !old && nvrmSysR("debug.nvaccel_heads_published", &m) == 0;
             if (nvrmArmRetryMayPoll(readable, (unsigned)m)) {
-                for (unsigned ms = 0; ms < kNvrmArmStepMs; ms += kNvrmHeadsPollMs) {
-                    IOSleep(kNvrmHeadsPollMs);
+                // At most the 1 s 2.9 slept, by the clock: twenty short sleeps and reads take longer than one long one.
+                const uint64_t ts = nvrmNowNs();
+                for (unsigned ms = 0; ms < kNvrmArmStepMs; ms = nvrmMsSince(ts)) {
+                    const unsigned left = kNvrmArmStepMs - ms;
+                    IOSleep(left < kNvrmHeadsPollMs ? left : kNvrmHeadsPollMs);
                     if (nvrmSysR("debug.nvaccel_heads_published", &m) == 0 && (m & 1)) break;
                 }
             } else {
