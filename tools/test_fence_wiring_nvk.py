@@ -8,7 +8,9 @@ This test reads the patch and holds what only NVK's glue can get wrong:
   the chain      nvk-fence is applied by the default 2.9 build, after nvk-evwait and before the channel rebuild
   the seam       the event wait's loop is not edited: only the wait callback's branch for a channel without an event
                  changes, to a WAIT_SEQ on that channel's own semaphore, and only a real sleep or a real completion
-                 is reported as one (anything else is a polling step and quiets that channel for a while)
+                 is reported as one (anything else is a polling step and quiets that channel for a while); the kernel
+                 is given the whole milliseconds of the round's time, rounded down, and is not asked for less than
+                 one, so the sleep cannot run past the round (an application's deadline)
   registration   every channel that takes a slot is registered: CHAN_ADD, a new probe value, CHAN_VERIFY, and the slot
                  gets its handle only after both; a refused CHAN_VERIFY is followed by CHAN_DEL; a failure leaves the
                  channel running
@@ -125,8 +127,12 @@ def chk_seam(t):
                       "nvrm_xnu_wait_event2(fd,")
             and order(first, "nvrm_fence_req(&r, NVRM_FENCE_OP_WAIT_SEQ, 0);", "r.u.wait.id = handle;",
                       "r.u.wait.seq = seq;", "r.u.wait.timeoutMs = timeout_ms;")
-            and "ms > NVRM_FENCE_SEQ_MAX_MS ? NVRM_FENCE_SEQ_MAX_MS" in first and "ms < 1 ? 1" in first
-            and "((uint64_t)timeout_us + 999) / 1000" in first
+            # whole milliseconds of the round's time, rounded down and capped; less than one: no request, no lock
+            and order(first, "const uint32_t whole_ms = timeout_us / 1000;",
+                      "const uint32_t timeout_ms = whole_ms > NVRM_FENCE_SEQ_MAX_MS ? NVRM_FENCE_SEQ_MAX_MS : whole_ms;",
+                      "if (timeout_ms == 0 || __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) <= 0)\n      return -1;",
+                      "pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);")
+            and first.count("uint32_t timeout_ms =") == 1 and "999" not in first
             # only READY / NONE (the value reached, confirmed by the semaphore) and BUDGET (slept at least half) count
             and "r.u.wait.result == NVRM_FENCE_R_READY || r.u.wait.result == NVRM_FENCE_R_NONE" in first
             and "__atomic_load_n(s->sem, __ATOMIC_ACQUIRE) >= seq" in first
@@ -235,10 +241,11 @@ def chk_kext(t):
             and "if (kr != KERN_SUCCESS || outSize != sizeof out) return -1;" in fx and order(fx, "return -1;", "*r = out;")
             # one connection, opened for the fence at the first request; closed only when the kext has no fence
             and add.count("NVRM_OPEN(") == 1 and order(call, "pthread_mutex_lock(&nvrm_fence_open_mtx);",
+                                                       "have = __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE);",
                                                        "const int fd = NVRM_OPEN(NVRM_CTL_NODE_NAME);",
                                                        "__atomic_store_n(&nvrm_fence_fd, fd,", "NVRM_CLOSE(fd);",
                                                        "__atomic_store_n(&nvrm_fence_have, have, __ATOMIC_RELEASE);")
-            and add.count("NVRM_CLOSE(") == 1 and "ctlFd" not in add
+            and add.count("NVRM_CLOSE(") == 1 and "ctlFd" not in add and "= nvrm_fence_have;" not in add
             and "r->status = NVRM_FENCE_ST_OFF;\n   return false;" in call)
 
 
@@ -278,6 +285,10 @@ CHECKS = [
      "sleep or completion counts", chk_seam, "took >= (int64_t)timeout_ms * 500000", "took >= 0"),
     ("the seam: a hunk inside the wait loops themselves is refused", chk_seam,
      "@@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)", "@@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx)"),
+    ("the seam: a sleep rounded up past the round's time is refused", chk_seam,
+     "const uint32_t whole_ms = timeout_us / 1000;", "const uint32_t whole_ms = (timeout_us + 999) / 1000;"),
+    ("the seam: a request for less than a millisecond, stretched to one, is refused", chk_seam,
+     "if (timeout_ms == 0 || __atomic_load_n(&nvrm_fence_have,", "if (__atomic_load_n(&nvrm_fence_have,"),
     ("registration: CHAN_ADD, a new probe, CHAN_VERIFY, then the handle; CHAN_DEL after a refused verify", chk_register,
      "+      nvrm_fence_chan_del(handle);\n+      nvrm_fence_say(", "+      nvrm_fence_say("),
     ("teardown: the handle leaves the slot in one helper, CHAN_DEL after unlocking, before the pages go", chk_teardown,
@@ -294,10 +305,11 @@ CHECKS = [
      "   nvrm_fence_chan_del(gone);", "   (void)gone;"),
 ]
 for name, fn, good, broken in CHECKS:
-    if not name.startswith("the seam: a hunk"):
+    more = name.startswith("the seam: a ")      # further controls of the seam check: it runs on the patch itself once
+    if not more:
         arm(name, fn(patch))
     damaged = patch.replace(good, broken)
-    arm("control: " + (name.split(":")[1].strip() if name.startswith("the seam: a hunk") else name.split(":")[0])
+    arm("control: " + (name.split(":")[1].strip() if more else name.split(":")[0])
         + " - a damaged copy fails",
         damaged != patch and not fn(damaged), "the damage did not apply" if damaged == patch else "")
 
