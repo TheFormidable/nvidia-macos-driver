@@ -255,8 +255,8 @@ class Scan:
                     self.problems.append(f"{at}: {name}(...): this use of a macro that declares sysctls cannot be read "
                                          "(several definitions, a variable argument list, or unbalanced brackets)")
                     continue
-                c2, m2 = lex(text)
-                self.walk(rel, c2, m2, via or name, where(m.start()), depth + 1)
+                expanded_code, expanded_masked = lex(text)
+                self.walk(rel, expanded_code, expanded_masked, via or name, where(m.start()), depth + 1)
 
     def loose_ends(self, rel, masked):
         for m in re.finditer(r"(\bextern\s+)?\bstruct\s+sysctl_oid\s+(\w+)\s*(=|\{)", masked):
