@@ -180,7 +180,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NVK_EXTRA_PATCHES` | none | build_nvk.sh: patches applied after the chain |
 | `NVK_SKIP_PATCHES` | none | build_nvk.sh: patches of the chain to leave out (the result is then not the release's) |
 | `NVK_REF_EXPORTS` | none | build_nvk.sh: a file of exports to compare with |
-| `PKG_CONFIG_PATH` | SPIRV-LLVM-Translator, SPIRV-Tools and LLVM | Yours is put first |
+| `PKG_CONFIG_PATH` | SPIRV-LLVM-Translator, SPIRV-Tools and LLVM | Yours is put after these (pkg-config takes the first match, and Homebrew's translator follows its current LLVM) |
 | `LIBCLANG_PATH` | LLVM's `lib` | bindgen's libclang |
 | `JOBS` | `NM_JOBS` | build_rm620.sh and build_kms620.sh: make jobs |
 | `NULLMOTH_RUST_VERSION` | `1.98.1` | build_xlate_release.sh: the Rust version expected; another one builds different bytes, and `build.sh` warns |

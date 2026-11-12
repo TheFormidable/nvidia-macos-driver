@@ -157,7 +157,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NVK_EXTRA_PATCHES` | build_nvk.sh |
 | `NVK_SKIP_PATCHES` | build_nvk.sh |
 | `NVK_REF_EXPORTS` | build_nvk.sh |
-| `PKG_CONFIG_PATH` | Se pone delante del que arma `build.sh` |
+| `PKG_CONFIG_PATH` | Se pone detrás del que arma `build.sh` |
 | `LIBCLANG_PATH` | libclang para bindgen |
 | `JOBS` | build_rm620.sh y build_kms620.sh |
 | `NULLMOTH_RUST_VERSION` | build_xlate_release.sh (por defecto 1.98.1) |

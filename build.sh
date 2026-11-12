@@ -1329,7 +1329,10 @@ nvk_pkg_config_path() {
   [ -z "$PC_SPIRV_LLVM" ] || p=$PC_SPIRV_LLVM
   [ -z "$PC_SPIRV_TOOLS" ] || p="${p:+$p:}$PC_SPIRV_TOOLS"
   [ -z "$LLVM_PREFIX" ] || p="${p:+$p:}$LLVM_PREFIX/lib/pkgconfig"
-  [ -z "${PKG_CONFIG_PATH:-}" ] || p="$PKG_CONFIG_PATH${p:+:$p}"
+  # yours after these: pkg-config takes the first LLVMSPIRVLib.pc it finds, and a PKG_CONFIG_PATH that names
+  # Homebrew's lib/pkgconfig (common in a shell set up for development) holds the translator for Homebrew's current
+  # LLVM, which Mesa refuses with LLVM 22
+  [ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"
   printf '%s' "$p"
 }
 package_name() { printf 'nullmoth-nvidia-local-%s.tar.gz' "$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"; }
