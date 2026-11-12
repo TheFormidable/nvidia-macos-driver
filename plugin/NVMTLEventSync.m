@@ -403,7 +403,9 @@ static int nvmtl_skip_empty_on(void) {
     for (NVMTLTexture *s in part->surfaces) {
         if (s == drawable || !after) continue;
         NVMTLTexture *r = s->_parent ? s->_parent : s;
-        if (after == 1 || (r->_surf && !r->_vramOn && (after != 3 || IOSurfaceGetPlaneCount(r->_surf) > 1))) _scheduleAfterPublish = YES;
+        const unsigned long planes = r->_surf ? (unsigned long)IOSurfaceGetPlaneCount(r->_surf) : 0;
+        const int waits = r->_vramOn && planes > 1 && nvmtl_ws_kernel_waits() && nvmtl_ws_surface_wait();
+        if (nvmtl_schedule_after_surface(after, r->_surf != NULL, r->_vramOn, planes, waits)) _scheduleAfterPublish = YES;
     }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
