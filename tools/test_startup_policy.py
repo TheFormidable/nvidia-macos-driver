@@ -297,10 +297,9 @@ def mutated(old, new):
     return nvrm.replace(old, new, 1) if old in nvrm else None
 for name, m, rule in [
     ("control: the guard counted before the framebuffer's verdict is read",
-     mutated("    nvrm_guard_count_start();\n    if (!super::start(provider)) return false;",
-             "    if (!super::start(provider)) return false;").replace(
+     mutated("    nvrm_guard_count_start();\n", "").replace(
          "    // NVRMFB's verdict on the Apple framebuffer classes", "    nvrm_guard_count_start();\n    // NVRMFB's verdict on the Apple framebuffer classes", 1)
-     if mutated("    nvrm_guard_count_start();\n    if (!super::start(provider)) return false;", "    if (!super::start(provider)) return false;") else None,
+     if mutated("    nvrm_guard_count_start();\n", "") else None,
      "startGPU reads nvrmfb-layout and declines on a refusal before nvrm_guard_count_start()"),
     ("control: the mark written before registerService", (nvrm.replace("    OSCompareAndSwap(0, 1, &fStartReturned);\n    return true;", "    return true;", 1)
           .replace("    registerService();\n", "    OSCompareAndSwap(0, 1, &fStartReturned);\n    registerService();\n", 1)

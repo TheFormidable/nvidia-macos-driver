@@ -87,7 +87,7 @@ static bool nvrmMultiGpu(void)
     return on == 1;
 }
 #include "nv_rtd3_policy.h"
-#include "nvrm_dma.h"   // nvrm_dma_detach in stop()
+#include "nvrm_dma.h"   // attach in startGPU, detach in stop() and on a failed start, nvSurfDma
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
 extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
 extern "C" void nvrm_power_stop(void);
@@ -895,16 +895,27 @@ bool NVRM::startGPU(IOService *provider)
             return false;
         }
     }
+    // How this GPU's addresses reach the bus (nvrm_dma.h), decided before the RM is told anything about the card and
+    // before the boot guard counts this start. A GPU behind a DMA mapper the driver may not or cannot use is not
+    // started: its untranslated addresses would go out on a translated bus. That is a decline, not a failed boot, and
+    // nvrm-dma on the PCI device names the reason. Without a mapper nothing changes (the RM keeps physical addresses).
+    // A start that returns false gets no stop(), so every false return from here on detaches first.
+    if (!fNv.dma_dev) fNv.dma_dev = nvrm_dma_attach(&fNv, OSDynamicCast(IOPCIDevice, provider));
+    if (!fNv.dma_dev || nvrm_dma_mode_of(&fNv) == NVRM_DMA_REFUSE) {
+        LOG("NOT STARTING THE GPU: %s. Not counted as a failed start.", fNv.dma_dev ? nvrm_dma_why(&fNv) : "no memory to record how its DMA reaches the bus");
+        nvrm_dma_detach(&fNv);
+        return false;
+    }
     nvrm_guard_count_start();
-    if (!super::start(provider)) return false;
+    if (!super::start(provider)) { nvrm_dma_detach(&fNv); return false; }
     fPCI = OSDynamicCast(IOPCIDevice, provider);
-    if (!fPCI) return false;
+    if (!fPCI) { nvrm_dma_detach(&fNv); return false; }
     // An unavailable telemetry lock disables this optional interface, not the GPU.
     fUtilizationLock = IOLockAlloc();
     gNVRMTab.add(this, nvrmMultiGpu(), provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
-    if (!nv_xnu_maps_init()) { LOG("IOSimpleLockAlloc FAILED for the kernel mapping index"); return false; }
+    if (!nv_xnu_maps_init()) { LOG("IOSimpleLockAlloc FAILED for the kernel mapping index"); nvrm_dma_detach(&fNv); return false; }
     // Before the RM is entered for the first time: the context answers and the global work queue (once per boot).
     nv_xnu_kcore_init();
     // Say which build is running, first thing. A machine reported "2.3.2" from the app while the kernel collection still
@@ -986,7 +997,7 @@ bool NVRM::startGPU(IOService *provider)
     LOG("armed on %02x:%02x.%d %04x:%04x", bus, dev, fn, nv->pci_info.vendor_id, nv->pci_info.device_id);
     fPCI->setProperty("nvrm-claimed", kOSBooleanTrue);
     if (!gNvClientsLock) gNvClientsLock = IOLockAlloc();
-    if (!gNvClientsLock) { LOG("IOLockAlloc FAILED"); return false; }
+    if (!gNvClientsLock) { LOG("IOLockAlloc FAILED"); nvrm_dma_detach(&fNv); return false; }
     {
         char nogo[8] = { 0 };
         thread_t th = THREAD_NULL;
@@ -3084,6 +3095,12 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     // before the power-management admission below.
     if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))
         return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;
+    // The bus address of a shared surface (nvrm_dma.h). It touches no hardware and must not wake the GPU, so it too is
+    // answered before the power-management admission.
+    if (fn && fn->isEqualTo(NVRM_SS_FN_DMA)) {
+        if (!p1) return kIOReturnBadArgument;
+        return nvrm_dma_surf((struct NVRMSurfDma *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
+    }
     if (fn && p1) {
         const bool rmCall = fn->isEqualTo(NVRM_GPUVA_FN_ALLOC) || fn->isEqualTo(NVRM_GPUVA_FN_MAP) || fn->isEqualTo(NVRM_GPUVA_FN_FREE)
                          || fn->isEqualTo(NVRM_SS_FN_RM) || fn->isEqualTo(NVRM_SS_FN_PAGEOFF);
