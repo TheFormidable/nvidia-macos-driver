@@ -68,9 +68,11 @@ public:
     // One plane of a two-plane surface (nvaccel_plane_range.h): where the plane's bytes are in the surface's memory, and
     // the bit of the family's validity words this resource uses. Written once, by the first grant that names the range
     // (NVRM_SS_PLANE_RANGED), with the accelerator lock held, and read with it held. fRangeLen 0: the resource is paged
-    // off as it always was (offset 0, bit 0).
+    // off as it always was (offset 0, bit 0). fRangeSid: the surface the range was given for; a page-off of the resource
+    // while it belongs to any other surface copies nothing, since the range says nothing about that surface's layout.
     unsigned long long fRangeOff = 0, fRangeLen = 0;
     unsigned short fValidBit = 0;
+    unsigned fRangeSid = 0;
     unsigned short validBit() const { return fRangeLen ? fValidBit : (unsigned short)1; }
 };
 OSDefineMetaClassAndStructors(NVResource, IOAccelResource2)

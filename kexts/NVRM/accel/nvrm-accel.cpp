@@ -1966,8 +1966,8 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_surf_plane_validbits, CTLFLAG_RD | CTLFLAG_
 NVACCEL_CNT(nvaccel_surfvram_ranged,        gCntSvRanged,       "plane-ranged VRAM grants that passed every check");
 NVACCEL_CNT(nvaccel_surfvram_ranged_off,    gCntSvRangedOff,    "plane-ranged grants refused because the feature is off, the page-off waits locked, or the GPU is translated and no staging buffer is mapped");
 NVACCEL_CNT(nvaccel_surfvram_ranged_small,  gCntSvRangedSmall,  "plane-ranged grants refused because the plane is empty or larger than its VRAM");
-NVACCEL_CNT(nvaccel_surfvram_ranged_range,  gCntSvRangedRange,  "plane-ranged grants refused because the range leaves the surface or differs from the one already recorded");
-NVACCEL_CNT(nvaccel_surfvram_ranged_shared, gCntSvRangedShared, "plane-ranged grants refused because plane 0 and this plane share a resource or VRAM");
+NVACCEL_CNT(nvaccel_surfvram_ranged_range,  gCntSvRangedRange,  "plane-ranged grants refused because the range leaves the surface or differs from the one already recorded (or was recorded for another surface)");
+NVACCEL_CNT(nvaccel_surfvram_ranged_shared, gCntSvRangedShared, "plane-ranged grants refused because plane 0 and this plane share a resource, VRAM or validity words");
 NVACCEL_CNT(nvaccel_surfvram_ranged_validbit, gCntSvRangedBit,  "plane-ranged grants refused because the resource's validity words are not understood");
 NVACCEL_CNT(nvaccel_pageoff_ranged,         gCntPoRanged,       "plane-ranged page-offs that copied the plane into its range");
 NVACCEL_CNT(nvaccel_pageoff_ranged_fail,    gCntPoRangedFail,   "plane-ranged page-offs that copied nothing (never left to the family's whole-surface copy)");
@@ -2348,31 +2348,39 @@ static unsigned nvAccelPlaneGrant(NVAccel *a, void *surf, NVResource *res, NVVid
     const unsigned long long mdLen = md ? (unsigned long long)md->getLength() : 0;
     unsigned long long off = 0, len = 0;
     nvaccel_range_decode(p->size, &off, &len);
+    const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
     void *res0 = nullptr, *vm0 = nullptr;
     unsigned st = 0; unsigned short bit = 0; const char *why = "granted";
     if (r[0x14] != 0xc0 || !valid) { st = NVRM_SS_NO_CACHE; why = "not a surface resource with validity words"; }
+    // A plane is never scanned out. A range recorded on a scanout resource would make every page-off of it fail (the
+    // page-off leaves scanout VRAM to the family, which a ranged resource never reaches).
+    else if (vm->fScanout) { st = NVRM_SS_NO_VRAM; why = "scanout VRAM"; }
     else if ((st = nvaccel_range_check(off, len, mdLen, vm->fBytes)) != 0) {
         if (st == NVRM_SS_TOO_SMALL) { OSAddAtomic64(1, &gCntSvRangedSmall); why = "empty, or larger than the VRAM"; }
         else { OSAddAtomic64(1, &gCntSvRangedRange); why = "outside the surface"; }
-    } else if (!nvaccel_range_same(res->fRangeOff, res->fRangeLen, off, len)) {
-        st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedRange); why = "another range than the resource's";
+    } else if (!nvaccel_range_same(res->fRangeOff, res->fRangeLen, off, len) || (res->fRangeLen && res->fRangeSid != sid)) {
+        st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedRange); why = "another range, or another surface, than the resource's";
     }
     if (!st && p->plane > 0) {
-        // The family is expected to give each plane its own resource and VRAM. If plane 0's are the same objects, one
-        // copy would serve two ranges: refused, and the counter says so.
+        // The family is expected to give each plane its own resource, VRAM and validity words. If plane 0's are the same
+        // objects, one copy would serve two ranges, or one plane's page-off would mark the other's pixels current (both
+        // would record the same bit in the same words): refused, and the counter says so.
         void *c0 = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, 0);
         OSObject *ctx0 = c0 ? *(OSObject *volatile *)((unsigned char *)c0 + 0x20) : nullptr;
         NVResource *r0 = OSDynamicCast(NVResource, ctx0);
         NVVidMemory *m0 = r0 ? nvres_vidmem(r0) : nullptr;
+        volatile unsigned short *const w0 = r0 ? *(unsigned short *volatile *)((volatile unsigned char *)r0 + 0x30) : nullptr;
         res0 = r0; vm0 = m0;
-        if (r0 == res || (m0 && m0 == vm)) { st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedShared); why = "plane 0 has the same resource or VRAM"; }
+        if (r0 == res || (m0 && m0 == vm) || (w0 && w0 == valid)) {
+            st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedShared); why = "plane 0 has the same resource, VRAM or validity words";
+        }
         if (c0) ((OSObject *)c0)->release();
     }
     if (!st && !(bit = nvaccel_grant_bit(res->fRangeLen ? res->fValidBit : 0, v0, v6))) {
         st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedBit); why = "validity words not understood";
     }
     if (!st) {
-        res->fRangeOff = off; res->fValidBit = bit; res->fRangeLen = len;
+        res->fRangeOff = off; res->fValidBit = bit; res->fRangeSid = sid; res->fRangeLen = len;
         if (p->plane > 0) OSBitOrAtomic(bit, (volatile UInt32 *)&gSurfPlaneBits);
         p->size = len;
         OSAddAtomic64(1, &gCntSvRanged);
@@ -2693,7 +2701,13 @@ static void nvSVPageoffRanged(NVResource *res, IOMemoryDescriptor *md, void *sur
 {
     unsigned long long dstOff = 0, len = 0;
     if (dmaMode >= NVRM_DMA_REFUSE) { nvSVRangedFail(res, out, NVRM_SS_NO_DMA, "the GPU is behind a DMA mapper the driver may not use"); return; }
-    if (!md || !nvaccel_pageoff_span(1, res->fRangeOff, res->fRangeLen, md->getLength(), vm->fBytes, &dstOff, &len)) {
+    // The range describes the layout of the surface it was granted for. Should the family ever bind this resource to
+    // another surface, the range says nothing about where that surface keeps the plane: nothing is copied.
+    if (_ZNK9IOSurface12getSurfaceIDEv(surf) != res->fRangeSid) {
+        nvSVRangedFail(res, out, NVRM_SS_BAD_RANGE, "the resource now belongs to another surface than its range");
+        return;
+    }
+    if (!md ||!nvaccel_pageoff_span(1, res->fRangeOff, res->fRangeLen, md->getLength(), vm->fBytes, &dstOff, &len)) {
         nvSVRangedFail(res, out, NVRM_SS_BAD_RANGE, "the range no longer fits the surface or its VRAM");
         return;
     }
