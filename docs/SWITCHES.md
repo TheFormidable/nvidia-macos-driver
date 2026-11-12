@@ -749,7 +749,7 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_surf_planes` | diag | read-only | 3.0 | - | 1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence` | diag | read-only | 3.0 | - | 1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_dead` | diag | read-only | 3.0 | - | fence waits that ended because the writer exited, its channel faulted or the GPU slept | kexts/NVRM/accel/nvrm-accel.cpp |
-| `debug.nvaccel_surface_fence_errors` | diag | read-only | 3.0 | - | fence waits NVRM did not serve (the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_errors` | diag | read-only | 3.0 | - | fence waits NVRM refused (the 2.9 marks only); 0 with this NVRM, which refuses none | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_pending` | diag | read-only | 3.0 | - | page-offs that found a fence hold on the surface | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_ready` | diag | read-only | 3.0 | - | fence waits that ended because the GPU work was done | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_timeouts` | diag | read-only | 3.0 | - | fence waits that a bound ended with the work not done (the caller went on, as 2.9) | kexts/NVRM/accel/nvrm-accel.cpp |
