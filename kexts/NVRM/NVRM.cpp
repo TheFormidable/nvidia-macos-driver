@@ -2301,6 +2301,18 @@ IOReturn NVRM::go(uint32_t pass)
         fPassDone = 1;
     }
     if (pass >= 2 && fPassDone < 2) {
+        // This pass can be asked for again after it failed (by hand, as root; auto-go tries once). When the first try
+        // got as far as its interrupt source, that source is still registered for the card's MSI, enabled if the RM's
+        // start was reached, and it is the one stop() takes away. A second try used to make a second source on a
+        // second work loop and put it in fIntSrc (or NULL: an MSI is not registered twice). stop() then removed the
+        // wrong one or none, and the first went on delivering the card's interrupts to an object whose interrupt slot,
+        // RM state and memory stop() had let go. The second try is refused before it does anything: what the first
+        // set up stays as it is, for stop() to take down.
+        if (fIntSrc) {
+            LOG("pass 2 failed before, after its interrupt source was set up - not started a second time "
+                "(the GPU stays down until the driver is started again)");
+            return kIOReturnError;
+        }
         // The GPU's own serialized work queue, before anything can queue work for it (Linux makes it at the same point).
         // NULL is not a failure: the GPU's items then go to the global queue, which is serialized too.
         if (!fNv.queue) fNv.queue = nv_xnu_wq_gpu_start();
@@ -2319,7 +2331,7 @@ IOReturn NVRM::go(uint32_t pass)
         // os_is_isr() answers per GPU: this GPU's interrupt handler marks its thread in a slot of its own.
         if (fIsrSlot < 0) fIsrSlot = nv_xnu_isr_slot_claim(this);
         if (fIsrSlot < 0) { LOG("no free interrupt-thread slot (%d GPUs are started) - refusing", NV_XNU_ISR_SLOTS); return kIOReturnNoResources; }
-        fWorkLoop = IOWorkLoop::workLoop();
+        if (!fWorkLoop) fWorkLoop = IOWorkLoop::workLoop();   // one may be left from a try that failed on the next line
         fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
                     OSMemberFunctionCast(IOFilterInterruptAction, this, &NVRM::interruptFilter), fPCI, msi);
