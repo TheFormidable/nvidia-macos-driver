@@ -9,7 +9,8 @@ source reads and holds the two against each other; tools/test_switch_registry.py
 
   switch_registry.py check       the registry and the source agree and every rule below holds
   switch_registry.py gen         write docs/SWITCHES.md and kexts/NVRM/nvrm_switch_table.h from the registry
-  switch_registry.py sync        bring the registry up to the tree where that needs no judgement (see below), then gen
+  switch_registry.py sync        bring the registry up to the tree where that needs no judgement (see below), then gen;
+                                 run it after each merge of a branch that adds or removes switches
   switch_registry.py finalize    sync, and close the rows that were written ahead of their code; then check
   switch_registry.py scan [-v]   what the source reads, by kind (needs no registry)
   switch_registry.py doctor      on an installed Mac: which switches this machine has set and what each is
@@ -929,6 +930,10 @@ def sync(reg, found, version, final=False):
     for key in sorted(k for k, r in reg.rows.items() if k[0] == "sysctl" and r["tier"] == "diag" and k[1] not in found["sysctl"] and k not in reg.pending):
         del reg.rows[key]
         did.append(f"dropped sysctl {key[1]}: a read-only counter that left with its code")
+    arrived = sorted(k for k in reg.pending if k in reg.rows and k[1] in found[k[0]])
+    for key in arrived:                     # its code is merged: from here on the row is held to it like any other
+        reg.pending.discard(key)
+        did.append(f"removed the #pending mark of {key[0]} {key[1]}: its code is in the tree")
     if final and reg.pending:
         late = sorted(k for k in reg.pending if k in reg.rows and k[1] not in found[k[0]])
         did.append(f"removed {len(reg.pending)} #pending mark(s)" + (f"; {len(late)} of those rows have no code and are errors now" if late else ""))

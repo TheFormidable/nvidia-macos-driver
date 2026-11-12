@@ -20,7 +20,6 @@
 #pending bootarg -nvrmoldwaits
 #pending bootarg nvaccel_pageoff_locked
 #pending bootarg nvaccel_surf_planes
-#pending bootarg nvlayout
 #pending bootarg nvrmatomic
 #pending bootarg nvrmdma
 #pending bootarg nvrmfence
@@ -29,7 +28,6 @@
 #pending sysctl debug.nvrm_switches
 #pending sysctl debug.nvrm_switches_nondefault
 #pending sysctl debug.nvrm_switches_set
-#pending build NVK_SKIP_PATCHES
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
