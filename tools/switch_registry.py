@@ -370,7 +370,7 @@ def scan(root):
         if not pf.is_file():
             problems.append(f"{pf.relative_to(root)}: named by build/build_nvk.sh and missing"); continue
         for i, line in enumerate(pf.read_text(errors="replace").splitlines(), 1):
-            if line.startswith(("+++", "---")) or line[:1] not in "+-":
+            if line.startswith(("+++", "---")) or line[:1] not in ("+", "-"):    # an empty line is neither
                 continue
             body = line[1:]
             if re.match(r"\s*(//|/\*|\*( |/|$))", body):

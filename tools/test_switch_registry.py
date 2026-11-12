@@ -66,7 +66,7 @@ def tree(t):
     (t / "nvk/fixes.patch").write_text('+++ b/y.c\n+   os_get_option("NVK_FIXES");\n')
     (t / "nvk/two.patch").write_text('+++ b/z.c\n+   getenv("NVK_TWO");\n')
     (t / "nvk/old.patch").write_text('+++ b/o.c\n+   getenv("NVK_OLD_RELEASE");\n')
-    (t / "nvk/one.patch").write_text('--- a/x.c\n+++ b/x.c\n+   if (getenv("NVK_ONE")) return;\n+   /* getenv("NVK_NOT") */\n-   getenv("NVK_GONE");\n')
+    (t / "nvk/one.patch").write_text('--- a/x.c\n+++ b/x.c\n+   if (getenv("NVK_ONE")) return;\n\n+   /* getenv("NVK_NOT") */\n-   getenv("NVK_GONE");\n')   # with an empty line, as real patches have
     (t / "nvk/extra.h").write_text('static inline int e(void) { return getenv("NVK_COPIED") != 0; }\n')
     (t / "plugin/a.m").write_text('static int f(void) { return nvmtl_env_uint(@"NVMTL_WRAPPED") + (getenv("NVMTL_PLAIN") != 0); }\n'
                                   '// getenv("NVMTL_COMMENT")\nstatic void g(void) { setenv("NVMTL_SETONLY", "1", 0); }\n'
