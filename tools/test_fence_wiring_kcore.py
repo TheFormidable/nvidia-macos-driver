@@ -20,6 +20,11 @@ is right in one place only; what is asserted on the source text:
   channels; the owner word is never written by NVRM.cpp; a client that is freed without ever having been closed (its
   attach or start failed) hands its owner back in free(), after it has left the client table under the table's lock
   and before anything it owns is released, so that the table never points at freed memory;
+- when the closing client's process is exiting, the fence state of the WHOLE process ends there, right after the
+  client's own and still BEFORE the RM frees anything: a process keeps its holds on one connection and its channels on
+  another, and a dying process's connections close in no set order. A live process's close does not: the exit test is
+  the closing thread's own exiting flag when the thread is the process's, otherwise proc_find, which no longer answers
+  for a dying process (a process it does find is let go again);
 - the kick follows rm_isr in the interrupt action (whatever it answered), right after the line that clears the GPU's
   interrupt-thread slot and before the action leaves the interrupt gate, and rm_isr_bh in the bottom half, which both
   bottom-half variants (own thread, inline on the work loop) run; never in the primary interrupt filter.
@@ -220,6 +225,14 @@ def arms(src, header):
         order(cc, [r"if\s*\(\s*OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fCleaned\s*\)\s*\)\s*\{", r"gNvClients\s*\[\s*fFd\s*\]\s*=\s*NULL",
                    r"\bnvrm_fence_owner_gone\s*\(\s*fFenceOwner\s*\)\s*;", r"\brm_cleanup_file_private\s*\("])
         and len(re.findall(r"\bnvrm_fence_owner_gone\s*\(", cc)) == 1)
+    arm("clientClose: when its process is exiting, every connection of the process gives its fence state back, after this one's own and BEFORE the RM cleanup",
+        order(cc, [r"if\s*\(\s*OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fCleaned\s*\)\s*\)\s*\{", r"\bnvrm_fence_owner_gone\s*\(\s*fFenceOwner\s*\)\s*;",
+                   r"if\s*\(\s*nvrmClientProcExiting\s*\(\s*fPid\s*\)\s*\)\s*nvrm_fence_pid_gone\s*\(\s*fPid\s*\)\s*;", r"\brm_cleanup_file_private\s*\("])
+        and len(re.findall(r"\bnvrm_fence_pid_gone\s*\(", code)) == 1 and len(re.findall(r"\bnvrmClientProcExiting\s*\(", code)) == 2)
+    arm("the exit test: the closing thread's own process by its exiting flag, another by proc_find, which a dying process no longer answers; a found process is let go",
+        statements(body(code, "nvrmClientProcExiting")) == [
+            "if (pid <= 0) return false;", "if (proc_selfpid() == pid) return proc_exiting(current_proc()) != 0;", "proc_t p = proc_find(pid);",
+            "if (!p) return true;", "const bool exiting = proc_exiting(p) != 0;", "proc_rele(p);", "return exiting;"])
     fr = body(code, "NVRMUserClient::free")
     frs = statements(fr)
     # free()'s first statement: the one-winner test with a block of two statements, (the table), then the owner
@@ -271,6 +284,7 @@ SUSPEND = "    if (fFenceStarted && OSCompareAndSwap(0, 1, &fFenceAsleep)) nvrm_
 RESUME = "    if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST);\n"
 GONE = "        nvrm_fence_owner_gone(fFenceOwner);\n"
 CLEANUP = "        if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }\n"
+PID_GONE = "        if (nvrmClientProcExiting(fPid)) nvrm_fence_pid_gone(fPid);\n"
 FREE_IF = "    if (OSCompareAndSwap(0, 1, &fCleaned)) {\n"
 FREE_SLOT = "            if (gNvClients[fFd] == this) gNvClients[fFd] = NULL;\n"
 FREE_UNCLOSED = (FREE_IF + "        if (gNvClientsLock && fFd >= 0) {\n" + "            IOLockLock(gNvClientsLock);\n" + FREE_SLOT
@@ -317,6 +331,15 @@ CONTROLS = [
      lambda s: broken(s, RESUME, RESUME + "    fFenceAsleep = 0;\n")),
     ("owner handed back after the RM cleanup", "clientClose: the fence owner",
      lambda s: broken(broken(s, GONE, ""), CLEANUP, CLEANUP + GONE)),
+    ("the process's fence state ends after the RM cleanup", "clientClose: when its process is exiting",
+     lambda s: broken(broken(s, PID_GONE, ""), CLEANUP, CLEANUP + PID_GONE)),
+    ("the process's fence state ends at every close, also a live process's", "clientClose: when its process is exiting",
+     lambda s: broken(s, PID_GONE, "        nvrm_fence_pid_gone(fPid);\n")),
+    ("the process's fence state never ends at its exit", "clientClose: when its process is exiting", lambda s: broken(s, PID_GONE, "")),
+    ("the exit test asks for a reference that an exiting process no longer gives", "the exit test",
+     lambda s: broken(s, "    if (proc_selfpid() == pid) return proc_exiting(current_proc()) != 0;\n", "")),
+    ("a process that can no longer be found is taken for a live one", "the exit test", lambda s: broken(s, "    if (!p) return true;\n", "    if (!p) return false;\n")),
+    ("a found process is not let go", "the exit test", lambda s: broken(s, "    proc_rele(p);\n", "")),
     ("free() hands the owner back every time", "free(): a client", lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace(FREE_IF, "    {\n", 1))),
     ("free() leaves a never-closed client in the table", "free(): such a client first leaves", lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace(FREE_SLOT, "", 1))),
     ("free() empties the slot without the table's lock", "free(): such a client first leaves",
