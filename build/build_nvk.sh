@@ -17,6 +17,8 @@
 #        Mesa main: barrier handling, RTX 50 matrix-instruction latencies), nvk-nak-sched-main (four code generation
 #        changes that are only on Mesa main: instruction order before register allocation, fall-through branches,
 #        flattening of small ifs)
+#        then nvk-evwait (waits that have run 1 ms sleep on the GPU's completion event instead of polling, in every process;
+#        nvkmd/nvrm/nvrm_evwait.h in it is a copy of kexts/NVRM/nvrm_evwait.h; NVRM_EVENT_WAIT=0 in nvrm610.conf polls)
 #   2.8  the set the 2.8 / 2.8.1 package was built from: the same chain without hubfix, perf-boost-burst, rated-tdp and
 #        gps-maxpower, and with nvk/release-2.8/nvk-fixes-after-def16.patch (the copy-engine retry still logged to stderr)
 # The NAK changes (nvk/speed267) are already part of nvk-macos.patch; the scripts there are the history of how they
@@ -49,7 +51,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
        BASE=17ca6174   # the 2.8 / 2.8.1 package was built on this Mesa; 2.9 moved to nvk/MESA_BASE (26.3)
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
