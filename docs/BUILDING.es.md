@@ -150,7 +150,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
-| `NM_BREW` | El `brew` que se usa. Si se indica, no se busca ningún otro Homebrew. Sin él, `build.sh` toma primero el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), luego el otro y luego un `brew` del `PATH`; si hay dos, `doctor` dice cuál usa y cuál es el otro |
+| `NM_BREW` | El `brew` que se usa. Si se indica, es el único Homebrew que se considera, sea cual sea su arquitectura. Sin él, `build.sh` usa solo el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), y si no, un `brew` del `PATH` solo cuando se resuelve dentro de ese mismo prefijo (un envoltorio que no está en ningún prefijo de Homebrew, o uno que se resuelve en el prefijo de la otra arquitectura, no se toma). Un Homebrew de la otra arquitectura, cuyas fórmulas están compiladas para el otro procesador y no se pueden enlazar aquí, lo nombra `doctor` pero solo se usa si `NM_BREW` lo indica. Cada llamada a `brew` se ejecuta con `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` y `HOMEBREW_REPOSITORY` sin definir, para que la configuración de otro Homebrew en la shell no pueda redirigirla |
 | `NM_PYTHON` | Un Python 3.10 o posterior para el entorno virtual |
 | `NM_LLVM_PREFIX` | Un LLVM 22.x con sus bibliotecas de clang |
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
