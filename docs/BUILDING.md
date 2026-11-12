@@ -39,8 +39,11 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 
 ## Quick start
 
+Clone the repository and the branch this file came from, with its owner and branch name in place of `<owner>` and
+`<branch>`. The original project's repository does not have `build.sh`; a clone of it gives a tree without the script.
+
 ```bash
-git clone https://github.com/nullmoth/nvidia-macos-driver.git
+git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
 cd nvidia-macos-driver
 ./build.sh doctor
 ./build.sh
