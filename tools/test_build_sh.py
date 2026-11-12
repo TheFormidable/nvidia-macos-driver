@@ -1162,7 +1162,30 @@ def python_problems(sb):
     return p
 
 
+def pkgconfig_problems(sb):
+    """a PKG_CONFIG_PATH from the tester's shell comes after build.sh's: pkg-config takes the first LLVMSPIRVLib.pc"""
+    sb.clear()
+    sb.run("--force", "build", "nvk", extra={"PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig"})
+    envs = [e for k, _, e in sb.steps() if k == "nvk"]
+    if not envs:
+        return ["nvk did not run"]
+    parts = envs[0].get("PKG_CONFIG_PATH", "").split(":")
+    p = []
+    if not os.path.isfile(os.path.join(parts[0], "LLVMSPIRVLib.pc")):
+        p.append(f"the first PKG_CONFIG_PATH entry is not the chosen SPIRV-LLVM-Translator: {parts[:2]}")
+    if "/opt/homebrew/lib/pkgconfig" not in parts:
+        p.append("the tester's PKG_CONFIG_PATH was dropped")
+    return p
+
+
 def arm_steps(mac):
+    with mac.scratch():
+        p = pkgconfig_problems(mac)
+        check("a PKG_CONFIG_PATH from the shell is kept but put after the translator build.sh chose", not p, p)
+    with mac.scratch():
+        mac.break_script('[ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"',
+                         '[ -z "${PKG_CONFIG_PATH:-}" ] || p="$PKG_CONFIG_PATH${p:+:$p}"')
+        negative("the shell's PKG_CONFIG_PATH first", pkgconfig_problems(mac))
     with mac.scratch():
         p, out = stale_problems(mac)
         check("a build script that fails stops its step, even when a previous build left an output behind", not p, (p, out[-700:]))
