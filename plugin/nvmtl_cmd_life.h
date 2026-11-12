@@ -30,6 +30,9 @@
    though they had (counted in `forced`): from then on it is exactly as safe as no grace at all, as in 2.9 by default,
    and the memory a lost record can hold is what dies during that many submits.
 
+   A holder keeps its marks in death order and, each time it looks, settles every one of them it has not settled yet
+   (nvmtl_cl_settle) before it releases the due ones from the front: see nvmtl_cl_settle for why.
+
    Pure over its own state: the caller serialises every call with one lock (the plugin's grace lock), and
    tools/test_cmd_life.c drives it through every kind of command-buffer life the plugin has. */
 #ifndef NVMTL_CMD_LIFE_H
@@ -119,17 +122,26 @@ static inline uint64_t nvmtl_cl_oldest_open(const nvmtl_cl_state *s)
     if (s->n && s->open[s->front % NVMTL_CL_COHORTS]) return s->front;
     return s->front + (s->n ? s->n : 1);   /* trim leaves an empty front only when it is the sole, current cohort */
 }
-/* May the thing marked m be released, with finished the highest sequence the queue has completed? Resolves the mark
-   the first time every command buffer of its cohort and older has ended: from then on it waits for the queue to finish
-   the last sequence handed out at that moment, which covers every one of them that was submitted and every submit
-   that was in flight at the death. */
-static inline int nvmtl_cl_due(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t finished)
+/* Resolves the mark when it can be, and says whether it is resolved: the first time every command buffer of its cohort
+   and older has ended, it starts waiting for the queue to finish the last sequence handed out at that moment, which
+   covers every one of them that was submitted and every submit that was in flight at the death.
+   The sequence is the one current when this is called, so a holder must settle EVERY mark it keeps each time it looks,
+   in death order, stopping at the first that does not settle (marks settle in death order: cohorts and death sequences
+   only grow). Settling only the oldest held mark, and the next one only once the oldest is released, gives each mark
+   the sequence handed out when its predecessor went, one more round trip of the queue per held mark: with work in
+   flight a steady rate of deaths is then never caught up with, and held memory grows without bound. */
+static inline int nvmtl_cl_settle(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t finished)
 {
     if (!m->resolved && nvmtl_cl_oldest_open(s) > m->cohort) {
         m->resolved = 1;
         if (s->submitted > m->seq) m->seq = s->submitted;
     }
     if (!m->resolved && finished >= m->seq + NVMTL_CL_PATIENCE) { m->resolved = 1; s->forced++; }   /* seq stays the death's */
-    return m->resolved && m->seq <= finished;
+    return (int)m->resolved;
+}
+/* May the thing marked m be released, with finished the highest sequence the queue has completed? */
+static inline int nvmtl_cl_due(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t finished)
+{
+    return nvmtl_cl_settle(s, m, finished) && m->seq <= finished;
 }
 #endif
