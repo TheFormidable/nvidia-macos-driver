@@ -124,10 +124,8 @@ int main() {
 cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
 if not cxx:
     raise SystemExit("A C++ compiler is required")
-test_root = (root / "build-out/tests").resolve()
-assert test_root.is_relative_to(root.resolve())
-test_root.mkdir(parents=True, exist_ok=True)
-with tempfile.TemporaryDirectory(prefix="bar-preflight-", dir=test_root) as temp:
+# the system's temporary folder, not the checkout: a folder made there stays behind after the run
+with tempfile.TemporaryDirectory(prefix="bar-preflight-") as temp:
     temp = Path(temp)
     src = temp / "test.cpp"
     binary = temp / ("test.exe" if os.name == "nt" else "test")
