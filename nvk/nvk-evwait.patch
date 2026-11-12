@@ -1,6 +1,6 @@
 The event wait in every process. NullMoth's own change (not an upstream Mesa commit).
 Waits on GPU work (vkWaitForFences, the channel's own waits) poll their first millisecond as before, then sleep in
-the NVRM kext on the device's graphics completion event instead of polling (a thread whose waits run 3 ms or more
+the NVRM kext on the device's graphics completion event instead of polling (a thread whose waits run past 2 ms
 sleeps after a 50 us spin); WindowServer keeps the eager sleep it had. The rules are in nvkmd/nvrm/nvrm_evwait.h,
 a byte-for-byte copy of kexts/NVRM/nvrm_evwait.h
 (tools/test_shared_headers.py compares them; tools/test_evwait_policy.c and tools/test_evwait_loop.c test them).
@@ -70,10 +70,10 @@ index 27f936c..71cd898 100644
 + * while polling a long wait burns a core (usleep(50) is 20,000 wakeups a second per waiting thread). nvrm_evwait.h,
 + * the same rules the kext's tree carries and host-tests, now decides each round:
 + *   WindowServer, or NVRM_EVENT_WAIT=1: as 2.9 - sleep after a 20 us spin, 2 ms at most per sleep.
-+ *   every other process (NVRM_EVENT_WAIT unset, or 2): a thread whose waits run about 3 ms or more sleeps right after
-+ *     the 50 us spin; shorter waits are polled exactly as 2.9 for their first millisecond, then sleep (the thread's
-+ *     mean samples the time into each wait at which its last round began, which passes 1 ms only for waits longer
-+ *     than the polled millisecond and one 2 ms sleep); never with under 100 us left before the deadline, nor past it.
++ *   every other process (NVRM_EVENT_WAIT unset, or 2): waits under 1 ms are polled exactly as 2.9, longer ones for
++ *     their first millisecond, then they sleep; a thread whose waits run longer than the 50 us spin and one 2 ms sleep
++ *     sleeps right after the spin (the thread's mean, and the numbers, are at nvrm_evw_begin in nvrm_evwait.h);
++ *     never with under 100 us left before the deadline, nor past it.
 + *   NVRM_EVENT_WAIT=0: every process polls, as 2.9's applications did.
 + * The setting is read once per process, from the environment or from nvrm610.conf (nvmtl_cfg_getenv): a release
 + * plugin removes inherited NVRM_ variables before NVK is loaded, so the file is the way to set it there.
@@ -307,10 +307,10 @@ index 7322b4c..b466cb7 100644
  
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
 new file mode 100644
-index 0000000..c9b28a5
+index 0000000..6ed44aa
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,234 @@
 +/*
 + * NullMoth NVIDIA driver for macOS
 + * Copyright (c) 2026 NullMoth Systems.
@@ -404,10 +404,13 @@ index 0000000..c9b28a5
 +/* Call first in every wait round. Returns 1 when a new wait began (the previous one is folded into the mean).
 +   The sample is last_waited_ns, the time into the previous wait at which its last round began. It falls short of the
 +   wait's length by what that round took, up to a whole sleep: a wait polled for its first millisecond that then sleeps
-+   until the GPU is done is a sample of about 1 ms however long it took, and once the mean is up a wait that ends in its
-+   first sleep is a sample of 50 us. What follows in the adaptive mode: a thread whose waits run about 3 ms or more
-+   (longer than the polled millisecond and one 2 ms sleep) reaches a mean of NVRM_EVW_LONG_NS and sleeps right after
-+   the 50 us spin; shorter waits are polled for their first millisecond and then sleep. */
++   until the GPU is done is a sample of 1 ms or a little more however long it took, and the mean (whose update rounds
++   up) reaches NVRM_EVW_LONG_NS on such samples within about fifty waits; a wait that sleeps right after the 50 us spin
++   and ends in that first sleep is a sample of 50 us. What follows in the adaptive mode, for steady waits: under 1 ms,
++   polled; from 1 ms to about 2.05 ms (one spin and one 2 ms sleep), polled for the first millisecond and then asleep,
++   except about one wait in forty that sleeps right after the spin and pulls the mean down again; longer than that,
++   asleep right after the spin, from the third wait on when they run longer than 3 ms (the polled millisecond and one
++   whole sleep), after some fifty waits when they run less. tools/test_evwait_policy.c checks these numbers. */
 +static inline int nvrm_evw_begin(struct nvrm_evw_thread *t, uint64_t waited_ns)
 +{
 +    int fresh = 0;
@@ -450,8 +453,8 @@ index 0000000..c9b28a5
 +   sleep that runs out between the two is a missed wake although its event is on the way. That event shows at the
 +   thread's next call as a moved count: WOKEN when it comes during a sleep, MOVED when it came before the call. Either
 +   proves that events arrive, so either ends the run. What proves a dead event is NVRM_EVW_MISS_LIMIT missed wakes in a
-+   row with the count standing still all the while. Any other answer leaves the run as it is; a kext that gives no
-+   reason (2.9) never counts a miss. */
++   row with the count standing still all the while. Any other reason leaves the run as it is here (nvrm_evw_round also
++   ends it on a capped or aborted answer whose count moved); a kext that gives no reason (2.9) never counts a miss. */
 +static inline int nvrm_evw_account(struct nvrm_evw_thread *t, unsigned reason, int done, uint32_t slept_us, int *missed)
 +{
 +    *missed = 0;
@@ -536,6 +539,8 @@ index 0000000..c9b28a5
 +        const int give_up = nvrm_evw_account(t, why, done, us, &missed);
 +        if (missed) ops->stat(ctx, NVRM_EVW_S_MISSED);
 +        if (give_up && !*fell_back) { *fell_back = 1; ops->stat(ctx, NVRM_EVW_S_FELL_BACK); }
++    } else if ((why == NVRM_EVW_R_CAPPED || why == NVRM_EVW_R_ABORTED) && nvrm_evw_seq(out) != seen) {
++        t->misses = 0;   /* did not sleep its time, but the count moved all the same: the same proof that events arrive */
 +    }
 +    if (nvrm_evw_must_poll(why)) ops->backoff(ctx, waited_ns);
 +}
