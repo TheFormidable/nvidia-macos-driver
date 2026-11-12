@@ -14,6 +14,7 @@
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_aspm.h"
 #include "nv_xnu_kcore.h"
+#include "nv_xnu_quiesce.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -85,13 +86,12 @@ static bool nvrmMultiGpu(void)
     return on == 1;
 }
 #include "nv_rtd3_policy.h"
+#include "nvrm_dma.h"   // nvrm_dma_detach in stop()
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
 extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
 extern "C" void nvrm_power_stop(void);
 extern "C" void nvrm_power_suspend(void);
 extern "C" void nvrm_power_resume(void);
-extern "C" void nv_xnu_rc_suspend(nv_state_t *nv);   // os-xnu2.cpp: the RM's 1 Hz timer (boot-arg nvrmrctimer=1), paused across sleep
-extern "C" void nv_xnu_rc_resume(nv_state_t *nv);
 extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
@@ -222,13 +222,23 @@ private:
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
-    // Boot-arg nvrmbhthread=1: rm_isr_bh runs on a thread of its own, as Linux's threaded interrupt handler does, and the
-    // work loop thread stays free for the next rm_isr. Without the boot-arg fBhLock stays NULL and nothing changes.
+    // The interrupt gate: interruptOccurred enters the RM only through it. irqSettle() closes it and waits until no handler
+    // is inside any more and no bottom half is pending or running (sleep, shutdown, stop); irqOpen() opens it again, and
+    // comes before every fIntSrc->enable(). Zeroed it is open, so a path that never started has nothing to undo.
+    NvXnuGate    fIrqGate = {};
+    int          fIsrSlot = -1;   // this GPU's slot in nv_xnu_isr_threads (os_is_isr), from go() to stop()
+    void irqOpen();
+    void irqSettle(uint32_t waitMs);
+    // rm_isr_bh runs on a thread of its own, as Linux's threaded interrupt handler does, and the work loop thread stays
+    // free for the next rm_isr. On by default; boot-arg nvrmbhthread=0 (or no lock or thread to be had) leaves fBhLock
+    // NULL and the bottom half runs on the work loop right after rm_isr. fBhLock is a leaf: it protects fBh and
+    // fBhAskedAt only, and no RM call is made while it is held.
     IOLock      *fBhLock = NULL;
-    bool         fBhPending = false, fBhBusy = false, fBhQuit = false, fBhAlive = false;
+    NvXnuBh      fBh = {};
+    uint64_t     fBhAskedAt = 0;   // mach_absolute_time of the request the thread serves next
     static void bottomHalfThread(void *p0, wait_result_t w);
     void bottomHalfStart();
-    void bottomHalfDrain(uint32_t waitMs);
+    bool bottomHalfDrain(uint32_t waitMs);
     void bottomHalfStop();
     // The GPU's own work queue is taken away (items queued from then on go to the global queue) and stopped; each of
     // the two waits inside is bounded by capMs.
@@ -239,20 +249,26 @@ private:
     bool interruptFilter(IOFilterInterruptEventSource *src);
     void interruptOccurred(IOInterruptEventSource *src, int count);
 };
-extern "C" { extern volatile int nv_xnu_in_isr; extern volatile thread_t nv_xnu_isr_thread; void nv_xnu_dump_live_allocs(void); }
+extern "C" { void nv_xnu_dump_live_allocs(void); }
 static volatile unsigned long gNvIsrCount = 0, gNvIsrHandled = 0;
 // Read from a shell (also over SSH while the screen is frozen): do GPU interrupts still arrive and get handled?
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_count, CTLFLAG_RD, (int64_t *)&gNvIsrCount, "GPU MSIs taken");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_handled, CTLFLAG_RD, (int64_t *)&gNvIsrHandled, "GPU MSIs RM claimed");
 // Interrupt timing. On Linux rm_isr runs in the hard interrupt and rm_isr_bh on the interrupt's own thread, so a bottom
-// half that waits for the GPU lock never keeps the next top half (vblank, non-stall notifiers) waiting. Here both run on
-// the one work loop thread. These say whether that costs anything on this machine; all read-only, compare two readings:
+// half that waits for the GPU lock never keeps the next top half (vblank, non-stall notifiers) waiting. Here rm_isr runs
+// on the work loop thread and rm_isr_bh on a thread of its own (with nvrmbhthread=0 both on the work loop). These say
+// what that costs on this machine; all read-only, compare two readings:
 //   debug.nvrm_isr_latency_max_us  longest wait between an MSI and its rm_isr
 //   debug.nvrm_isr_late_1ms, _4ms  such waits longer than 1 ms and 4 ms
 //   debug.nvrm_isr_during_bh       MSIs that arrived while a bottom half was still running
 //   debug.nvrm_bh_runs             bottom halves run
 //   debug.nvrm_bh_max_us           longest bottom half, its wait for the GPU lock included
 //   debug.nvrm_bh_over_1ms, _4ms   bottom halves longer than 1 ms and 4 ms
+//   debug.nvrm_bh_thread           GPUs whose bottom half runs on its own thread
+//   debug.nvrm_bh_wake_max_us      longest wait between a bottom half's request and the start of its run on that thread
+//   debug.nvrm_bh_stuck            bottom-half threads that did not exit within 5 s of the GPU's stop (should stay 0)
+//   debug.nvrm_isr_skipped         interrupts that found the gate closed (sleep, shutdown, stop) and were not given to the RM
+//   debug.nvrm_irq_settle_timeouts waits for the interrupt path to go quiet that ran out (should stay 0)
 static volatile UInt64 gNvIsrFilterAt = 0;   // mach_absolute_time of the first MSI the work loop has not served yet
 static volatile SInt32 gNvBhActive = 0;
 static volatile SInt64 gNvIsrLatMaxUs = 0, gNvIsrLate1 = 0, gNvIsrLate4 = 0, gNvIsrDuringBh = 0;
@@ -265,6 +281,13 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_runs, CTLFLAG_RD, (int64_t *)&gNvBhRuns, "
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_max_us, CTLFLAG_RD, (int64_t *)&gNvBhMaxUs, "longest RM bottom half, microseconds");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_1ms, CTLFLAG_RD, (int64_t *)&gNvBhOver1, "RM bottom halves over 1 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_4ms, CTLFLAG_RD, (int64_t *)&gNvBhOver4, "RM bottom halves over 4 ms");
+static volatile SInt64 gNvBhThreads = 0, gNvBhWakeMaxUs = 0, gNvBhStuck = 0, gNvIsrSkipped = 0, gNvIrqSettleTimeouts = 0;
+static volatile SInt32 gNvIsrServed = 0;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_thread, CTLFLAG_RD, (int64_t *)&gNvBhThreads, "GPUs whose RM bottom half runs on its own thread");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_wake_max_us, CTLFLAG_RD, (int64_t *)&gNvBhWakeMaxUs, "longest bottom-half request to run, microseconds");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_stuck, CTLFLAG_RD, (int64_t *)&gNvBhStuck, "bottom-half threads that did not exit at stop");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_skipped, CTLFLAG_RD, (int64_t *)&gNvIsrSkipped, "GPU interrupts not given to the RM: gate closed");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_irq_settle_timeouts, CTLFLAG_RD, (int64_t *)&gNvIrqSettleTimeouts, "interrupt path settle waits that ran out");
 static inline SInt64 nvrmUsSince(uint64_t t0)
 {
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
@@ -816,6 +839,9 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_isr_late_1ms); sysctl_register_oid(&sysctl__debug_nvrm_isr_late_4ms);
             sysctl_register_oid(&sysctl__debug_nvrm_bh_runs); sysctl_register_oid(&sysctl__debug_nvrm_bh_max_us);
             sysctl_register_oid(&sysctl__debug_nvrm_bh_over_1ms); sysctl_register_oid(&sysctl__debug_nvrm_bh_over_4ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_thread); sysctl_register_oid(&sysctl__debug_nvrm_bh_wake_max_us);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_stuck); sysctl_register_oid(&sysctl__debug_nvrm_isr_skipped);
+            sysctl_register_oid(&sysctl__debug_nvrm_irq_settle_timeouts);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_posts); sysctl_register_oid(&sysctl__debug_nvrm_evt_waits);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_matched); sysctl_register_oid(&sysctl__debug_nvrm_evt_slept);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_woken); sysctl_register_oid(&sysctl__debug_nvrm_evt_timeouts);
@@ -824,6 +850,7 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
             nv_xnu_kcore_sysctls_register();
+            nv_xnu_timers_sysctls();
         }
     }
     UInt8 bus = fPCI->getBusNumber(), dev = fPCI->getDeviceNumber(), fn = fPCI->getFunctionNumber();
@@ -2014,12 +2041,16 @@ IOReturn NVRM::go(uint32_t pass)
             if (msi < 0 && (type & kIOInterruptTypePCIMessaged)) msi = i;
         }
         if (msi < 0) { LOG("no MSI source on the device — refusing (the RM needs message-signalled interrupts)"); return kIOReturnUnsupported; }
+        // os_is_isr() answers per GPU: this GPU's interrupt handler marks its thread in a slot of its own.
+        if (fIsrSlot < 0) fIsrSlot = nv_xnu_isr_slot_claim(this);
+        if (fIsrSlot < 0) { LOG("no free interrupt-thread slot (%d GPUs are started) - refusing", NV_XNU_ISR_SLOTS); return kIOReturnNoResources; }
         fWorkLoop = IOWorkLoop::workLoop();
         fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
                     OSMemberFunctionCast(IOFilterInterruptAction, this, &NVRM::interruptFilter), fPCI, msi);
         if (!fWorkLoop || !fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess) { LOG("interrupt source setup FAILED"); return kIOReturnError; }
         bottomHalfStart();
+        irqOpen();
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
@@ -2059,15 +2090,21 @@ IOReturn NVRM::go(uint32_t pass)
 
 bool NVRM::interruptFilter(IOFilterInterruptEventSource *src)
 {
-    unsigned long n = ++gNvIsrCount;
-    if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", n, gNvIsrHandled);
+    // Primary interrupt context: counters and a time stamp only (the log line of the first MSIs is in interruptOccurred).
+    ++gNvIsrCount;
     if (gNvBhActive) OSIncrementAtomic64(&gNvIsrDuringBh);
     OSCompareAndSwap64(0, mach_absolute_time(), &gNvIsrFilterAt);   // keeps the oldest unserved MSI's time
     return true;
 }
 void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 {
-    NvU32 needBottomHalf = 0;
+    if (!nv_gate_enter(&fIrqGate)) {
+        // Quiesced (sleep, shutdown, stop): the RM is not entered. The source is disabled already or about to be; an
+        // MSI latched before that is dropped, as a disabled source drops it, and the RM raises again after its resume.
+        OSIncrementAtomic64(&gNvIsrSkipped);
+        gNvIsrFilterAt = 0;   // no latency measured across a sleep
+        return;
+    }
     {
         // Taken and cleared before rm_isr: an MSI that arrives from here on is served by the next call, and timed by it.
         const UInt64 at = gNvIsrFilterAt;
@@ -2077,88 +2114,171 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
             if (us > 4000) OSIncrementAtomic64(&gNvIsrLate4);
             if (us > gNvIsrLatMaxUs) gNvIsrLatMaxUs = us;
         }
+        const SInt32 n = OSIncrementAtomic(&gNvIsrServed) + 1;
+        if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", gNvIsrCount, gNvIsrHandled);
     }
-    nv_xnu_isr_thread = current_thread();
+    NvU32 needBottomHalf = 0;
+    nv_xnu_isr_threads[fIsrSlot] = current_thread();
     NvBool handled = rm_isr(NULL, &fNv, &needBottomHalf);
-    nv_xnu_isr_thread = NULL;
+    nv_xnu_isr_threads[fIsrSlot] = NULL;
     // Whatever rm_isr answered: a channel's semaphore release is in memory before its interrupt is raised, so a fence
     // wait on it can be decided now. Two atomics, and a wakeup only when somebody waits.
     nvrm_fence_kick();
     if (handled) gNvIsrHandled++;
-    if (handled && needBottomHalf) {
+    // As on Linux, the request alone decides: when rm_isr asks for a bottom half it has handed the GPU lock over to it,
+    // and only rm_isr_bh gives it back. The request is made inside the gate, so a closed and idle gate means no request
+    // can still appear.
+    if (needBottomHalf) {
         if (fBhLock) {
             IOLockLock(fBhLock);
-            fBhPending = true;
-            IOLockWakeup(fBhLock, &fBhPending, true);
+            nv_bh_request(&fBh);
+            fBhAskedAt = mach_absolute_time();
+            IOLockWakeup(fBhLock, &fBh.pending, true);
             IOLockUnlock(fBhLock);
         } else nvrmRunBottomHalf(&fNv);
     }
+    nv_gate_leave(&fIrqGate);
 }
 
-// The bottom half's own thread (nvrmbhthread=1). One thread per GPU, so bottom halves stay serialized as they are on
-// Linux; a request that arrives while one runs is remembered in fBhPending and served by one more run.
+// The bottom half's own thread. One per GPU, so bottom halves stay serialized as they are on Linux; a request that
+// arrives while one runs is remembered and served by one more run. A pending request is always run before the thread
+// exits (nv_bh_next tests pending before quit): it carries the GPU lock rm_isr handed over.
 void NVRM::bottomHalfThread(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
-    IOLockLock(s->fBhLock);
+    IOLock *lock = s->fBhLock;   // kept here: bottomHalfStop clears the member, and leaves the lock alive if this thread is stuck
+    IOLockLock(lock);
     for (;;) {
-        while (!s->fBhPending && !s->fBhQuit) IOLockSleep(s->fBhLock, &s->fBhPending, THREAD_UNINT);
-        if (s->fBhQuit) break;
-        s->fBhPending = false;
-        s->fBhBusy = true;
-        IOLockUnlock(s->fBhLock);
+        const int what = nv_bh_next(&s->fBh);
+        if (what == NV_BH_EXIT) break;
+        if (what == NV_BH_SLEEP) { IOLockSleep(lock, &s->fBh.pending, THREAD_UNINT); continue; }
+        const uint64_t asked = s->fBhAskedAt;
+        IOLockUnlock(lock);
+        if (asked) {
+            const SInt64 us = nvrmUsSince(asked);
+            if (us > gNvBhWakeMaxUs) gNvBhWakeMaxUs = us;
+        }
         nvrmRunBottomHalf(&s->fNv);
-        IOLockLock(s->fBhLock);
-        s->fBhBusy = false;
-        IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
+        IOLockLock(lock);
+        nv_bh_done(&s->fBh);
+        IOLockWakeup(lock, &s->fBh.busy, false);
     }
-    s->fBhAlive = false;
-    IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
-    IOLockUnlock(s->fBhLock);   // bottomHalfStop frees the lock once it has seen fBhAlive false: nothing of s is touched after this
+    s->fBh.alive = 0;
+    IOLockWakeup(lock, &s->fBh.busy, false);
+    IOLockUnlock(lock);   // bottomHalfStop frees the lock once it has seen alive 0: the lock is not touched after this
+    s->release();         // the reference bottomHalfStart took for this thread
     thread_terminate(current_thread());
+}
+// Boot-arg nvrmbhthread=0 keeps the bottom half on the work loop; any other value, or none, is the default (its own
+// thread). Read once.
+static bool nvrmBhThreadOn(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 1; on = (PE_parse_boot_argn("nvrmbhthread", &v, sizeof v) && v == 0) ? 0 : 1; }
+    return on == 1;
 }
 void NVRM::bottomHalfStart()
 {
-    uint32_t on = 0;
-    if (fBhLock || !PE_parse_boot_argn("nvrmbhthread", &on, sizeof on) || on != 1) return;
-    IOLock *lock = IOLockAlloc();
-    if (!lock) { LOG("nvrmbhthread=1: no lock - the bottom half stays on the work loop"); return; }
-    fBhPending = false; fBhBusy = false; fBhQuit = false; fBhAlive = true;
-    fBhLock = lock;
-    thread_t th = THREAD_NULL;
-    if (kernel_thread_start(&NVRM::bottomHalfThread, this, &th) != KERN_SUCCESS) {
-        fBhAlive = false; fBhLock = NULL;
-        IOLockFree(lock);
-        LOG("nvrmbhthread=1: no thread - the bottom half stays on the work loop");
+    if (fBhLock) return;
+    if (!nvrmBhThreadOn()) {
+        setProperty("nvrm-bottom-half", "work loop (nvrmbhthread=0)");
+        LOG("nvrmbhthread=0: the RM bottom half runs on the work loop, after rm_isr");
         return;
     }
+    IOLock *lock = IOLockAlloc();
+    if (!lock) {
+        setProperty("nvrm-bottom-half", "work loop (no thread)");
+        LOG("no lock for the bottom-half thread - the bottom half runs on the work loop");
+        return;
+    }
+    fBh = {};
+    fBh.alive = 1;
+    fBhAskedAt = 0;
+    fBhLock = lock;
+    retain();
+    thread_t th = THREAD_NULL;
+    if (kernel_thread_start(&NVRM::bottomHalfThread, this, &th) != KERN_SUCCESS) {
+        release();
+        fBh.alive = 0;
+        fBhLock = NULL;
+        IOLockFree(lock);
+        setProperty("nvrm-bottom-half", "work loop (no thread)");
+        LOG("no bottom-half thread - the bottom half runs on the work loop");
+        return;
+    }
+    thread_set_thread_name(th, "NVRM bottom half");
     thread_deallocate(th);
-    setProperty("nvrm-bottom-half", "own thread (nvrmbhthread=1)");
-    LOG("nvrmbhthread=1: the RM bottom half runs on a thread of its own");
+    OSIncrementAtomic64(&gNvBhThreads);
+    setProperty("nvrm-bottom-half", "own thread");
+    LOG("the RM bottom half runs on a thread of its own (boot-arg nvrmbhthread=0 keeps it on the work loop)");
 }
-// After the interrupt source is disabled: wait for a requested or running bottom half, at most waitMs.
-void NVRM::bottomHalfDrain(uint32_t waitMs)
+// Once no new request can come (the interrupt gate is closed and idle): wait for a requested or running bottom half,
+// at most waitMs. Returns whether none is left. Nothing to wait for without the thread: there the bottom half runs
+// inside the handler, which the gate has already waited for.
+bool NVRM::bottomHalfDrain(uint32_t waitMs)
 {
-    if (!fBhLock) return;
+    if (!fBhLock) return true;
     uint64_t deadline; clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
     IOLockLock(fBhLock);
-    while (fBhPending || fBhBusy)
-        if (IOLockSleepDeadline(fBhLock, &fBhBusy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
-    const bool left = fBhPending || fBhBusy;
+    while (!nv_bh_drained(&fBh))
+        if (IOLockSleepDeadline(fBhLock, &fBh.busy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const bool drained = nv_bh_drained(&fBh);
     IOLockUnlock(fBhLock);
-    if (left) LOG("a bottom half was still running after %u ms", waitMs);
+    return drained;
 }
-// After the interrupt source is removed from the work loop, so no one can request another run.
+// After the interrupt source is removed from the work loop, so no one can request another run. A request still
+// pending is run before the thread exits. Bounded: a bottom half stuck in the RM costs 5 s, is counted, and its thread
+// and lock are left alone (the thread holds a reference to this object, so nothing it uses goes away).
 void NVRM::bottomHalfStop()
 {
     if (!fBhLock) return;
-    IOLockLock(fBhLock);
-    fBhQuit = true;
-    IOLockWakeup(fBhLock, &fBhPending, false);
-    while (fBhAlive) IOLockSleep(fBhLock, &fBhBusy, THREAD_UNINT);
-    IOLockUnlock(fBhLock);
-    IOLockFree(fBhLock);
+    IOLock *lock = fBhLock;
+    uint64_t deadline; clock_interval_to_deadline(5000, kMillisecondScale, &deadline);
+    IOLockLock(lock);
+    fBh.quit = 1;
+    IOLockWakeup(lock, &fBh.pending, false);
+    while (fBh.alive)
+        if (IOLockSleepDeadline(lock, &fBh.busy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const bool gone = !fBh.alive;
+    IOLockUnlock(lock);
     fBhLock = NULL;
+    OSDecrementAtomic64(&gNvBhThreads);
+    if (gone) IOLockFree(lock);
+    else { OSIncrementAtomic64(&gNvBhStuck); LOG("the bottom-half thread did not exit within 5 s - left running"); }
+}
+void NVRM::irqOpen()
+{
+    gNvIsrFilterAt = 0;   // nothing waits since before the gate was opened
+    nv_gate_open(&fIrqGate);
+}
+// The interrupt path goes quiet: the gate is closed, so no handler enters the RM any more; then this waits until none
+// is inside and no bottom half is pending or running, at most waitMs in all. Callers disable the interrupt source
+// themselves, on the line before. Thread context (power management, stop, shutdown); still safe where it may not sleep,
+// as it then only spins, at most 20 ms, and skips the bottom-half wait. Whether it may sleep is asked of the kernel
+// itself (nv_quiesce_may_sleep, raw preemption_enabled()), never of nvx_can_block(): that one answers yes everywhere
+// when the OS layer's non-blocking branches are switched off, and a sleep with preemption off panics.
+void NVRM::irqSettle(uint32_t waitMs)
+{
+    nv_gate_close(&fIrqGate);
+    bool quiet = nv_gate_idle(&fIrqGate);
+    if (nv_quiesce_may_sleep()) {
+        const uint64_t t0 = mach_absolute_time();
+        uint64_t span = 0; nanoseconds_to_absolutetime((uint64_t)waitMs * 1000000ULL, &span);
+        while (!quiet && mach_absolute_time() - t0 < span) { IOSleep(1); quiet = nv_gate_idle(&fIrqGate); }
+        const SInt64 spentMs = nvrmUsSince(t0) / 1000;
+        const uint32_t left = spentMs < (SInt64)waitMs ? waitMs - (uint32_t)spentMs : 1;
+        if (quiet) quiet = bottomHalfDrain(left);
+        if (!quiet) {
+            OSIncrementAtomic64(&gNvIrqSettleTimeouts);
+            LOG("interrupt path did not settle within %u ms (handler inside: %s) - going on", waitMs, nv_gate_idle(&fIrqGate) ? "no" : "yes");
+        }
+        return;
+    }
+    for (unsigned us = 0; !quiet && us < 20000; us += 10) { IODelay(10); quiet = nv_gate_idle(&fIrqGate); }
+    if (!quiet) {
+        OSIncrementAtomic64(&gNvIrqSettleTimeouts);
+        kprintf("NVRM-xnu: interrupt path did not settle (may not sleep here) - going on\n");
+    }
 }
 void NVRM::workQueueDown(uint32_t capMs)
 {
@@ -2196,21 +2316,35 @@ void NVRM::stop(IOService *provider)
         }
     }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
+    // The adapter goes down in Linux's order (nv_shutdown_adapter): rm_disable_adapter, the interrupt off, then
+    // rm_shutdown_adapter. shutdownFull() uses the same order with shorter waits.
     if (fAdapter) {
         // What is queued for this GPU runs before its adapter goes (an unload flush: the RM drops the items that ask
-        // for it). At most 30 s; a queue that does not finish is given up on and the teardown goes on.
+        // for it). At most 30 s; a queue that does not finish is given up on (abandoned: the RM's own flushes inside
+        // rm_disable_adapter then return at once) and the teardown goes on.
         nv_xnu_wq_flush(fNv.queue, true, 30000);
+        // Stops the RC timer and masks the GPU's interrupts. Not for a GPU that stopped while suspended: its RM is in
+        // standby, GSP is unloaded and the slot may be without power.
+        if (OSAddAtomic(0, &fGpuPm) != kGpuPmSuspended) rm_disable_adapter(NULL, &fNv);
         workQueueDown(30000);
+        if (fIntSrc) fIntSrc->disable();
+        irqSettle(2000);
         rm_shutdown_adapter(NULL, &fNv); fAdapter = false;
     }
+    // Whatever the start reached: no RC tick and no nano timer callback carries this GPU from here on (each does nothing
+    // when it never started).
+    nv_xnu_rc_detach(&fNv);
+    nv_xnu_nano_retire(&fNv);
     workQueueDown(30000);   // a start that failed after its queue was made; nothing when it is already down
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
     bottomHalfStop();
+    nv_xnu_isr_slot_release(fIsrSlot, this); fIsrSlot = -1;
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
     // Items queued for this GPU after its queue was taken away went to the global queue: none may still run when the
     // RM's private state goes.
     nv_xnu_wq_flush(NULL, false, 30000);
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
+    nvrm_dma_detach(&fNv);   // after the RM unmapped what it unmaps; nothing for a GPU never attached
     gNVRMTab.remove(this, nvrmMultiGpu());   // a no-op without nvmultigpu=1: the old pointer was never cleared
     super::stop(provider);
 }
@@ -2237,6 +2371,7 @@ void NVRM::shutdownFull(void *p0, wait_result_t)
     NVRM *s = (NVRM *)p0;
     // First, as in stop(): no RM call, and the processes still asleep in a fence wait return before they are killed.
     if (OSCompareAndSwap(1, 0, &s->fFenceStarted)) nvrm_fence_stop();
+    nv_xnu_rc_suspend(&s->fNv);   // no 1 Hz tick reaches the GPU while it goes down
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &s->fGpuPm);
     s->notifyFramebuffers(0);
     nvkms_xnu_suspend(s->fNv.gpu_id);
@@ -2246,9 +2381,14 @@ void NVRM::shutdownFull(void *p0, wait_result_t)
     if (s->fAdapter) {
         // As in stop(), within the 8 s systemWillShutdown() waits for all of this: 2 s for each wait.
         nv_xnu_wq_flush(s->fNv.queue, true, 2000);
+        rm_disable_adapter(NULL, &s->fNv);
         s->workQueueDown(2000);
+        if (s->fIntSrc) s->fIntSrc->disable();
+        s->irqSettle(2000);
         rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;
     }
+    nv_xnu_rc_detach(&s->fNv);
+    nv_xnu_nano_retire(&s->fNv);
     OSCompareAndSwap(0, 1, &s->fShutdownDone);
     s->release();
     thread_terminate(current_thread());
@@ -2277,8 +2417,10 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
                 LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? (full ? "shut down" : "in standby") : "did not finish in time, going on", waited);
             } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
         }
+        // Also when the wait above ran out and the shutdown thread is still inside the RM: from here no interrupt
+        // handler enters the RM, whatever that thread is doing.
         if (fIntSrc) fIntSrc->disable();
-        bottomHalfDrain(1000);
+        irqSettle(1000);
         NvrmStep plan[16];
         const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
         if (n) {
@@ -2427,7 +2569,7 @@ void NVRM::gpuSuspend()
     nv_xnu_wq_flush(NULL, false, 5000);
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
     if (fIntSrc) fIntSrc->disable();
-    bottomHalfDrain(2000);
+    irqSettle(2000);
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms%s", fPmCycles,
         (unsigned)cst, (unsigned)st, ns / 1000000ULL, st == NV_OK ? "" : " - resume will still be tried, as on Linux");
@@ -2443,6 +2585,7 @@ void NVRM::gpuResume()
     nv_xnu_pm_take();
     bool ok = pciRestoreAfterWake() && gpuAnswers();
     if (ok) enableAspmL1();   // the link comes back with whatever IOPCIFamily restored
+    irqOpen();                // closed by gpuSuspend's irqSettle: interrupts must reach the RM for its resume
     if (fIntSrc) fIntSrc->enable();
     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
     ok = st == NV_OK;
@@ -3101,7 +3244,7 @@ extern "C" void NV_API_CALL nv_post_event(nv_event_t *event, NvHandle hEvent, Nv
     if (c) { OSIncrementAtomic64(&gNvEvtMatched); OSIncrementAtomic((volatile SInt32 *)&c->fEvtSeq); thread_wakeup((event_t)&c->fEvtSeq); }
     if (k == 999 || k == 99999 || k == 999999)
         OSReportWithBacktrace("NVRM-xnu: post #%lld caller chain (nv_post_event at %p, isr-thread %d)", (long long)k + 1,
-                              (void *)&nv_post_event, current_thread() == nv_xnu_isr_thread);
+                              (void *)&nv_post_event, (int)os_is_isr());
     if (k < 4 || ((k + 1) & 0x3FFF) == 0)
         kprintf("NVRM-xnu: nv_post_event #%lld hEvent 0x%x index %u -> %s | matched %lld, waits %lld, slept %lld\n",
                 (long long)k + 1, hEvent, index, c ? "connection woken" : "no connection", (long long)gNvEvtMatched,

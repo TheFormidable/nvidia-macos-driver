@@ -197,7 +197,9 @@ def main():
     control("the GPU's queue made after the adapter", "NVRM.cpp", "if (!fNv.queue) fNv.queue = nv_xnu_wq_gpu_start();", "",
             "go() does not give the GPU its queue")
     control("shutdownFull() stops the queue after rm_shutdown_adapter", "NVRM.cpp",
-            "        s->workQueueDown(2000);\n        rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;\n",
+            "        s->workQueueDown(2000);\n        if (s->fIntSrc) s->fIntSrc->disable();\n        s->irqSettle(2000);\n"
+            "        rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;\n",
+            "        if (s->fIntSrc) s->fIntSrc->disable();\n        s->irqSettle(2000);\n"
             "        rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;\n        s->workQueueDown(2000);\n",
             "shutdownFull) does not flush and stop")
     control("stop() with the global flush after the private state", "NVRM.cpp", "    nv_xnu_wq_flush(NULL, false, 30000);\n", "",
