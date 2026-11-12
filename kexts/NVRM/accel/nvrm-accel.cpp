@@ -1936,7 +1936,7 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_dma_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &gNv
 NVACCEL_CNT(nvaccel_dma_staged,    gCntDmaStaged,    "page-offs copied into the staging buffer through its bus mapping (DMA mode 1 or 2)");
 NVACCEL_CNT(nvaccel_dma_maps,      gCntDmaMaps,      "staging buffers mapped for the GPU through NVRM");
 NVACCEL_CNT(nvaccel_dma_map_fail,  gCntDmaMapFail,   "staging buffers NVRM could not map (the buffer is freed; the family copies)");
-NVACCEL_CNT(nvaccel_dma_unmaps,    gCntDmaUnmaps,    "staging buffer mappings given back to NVRM when the buffer was replaced");
+NVACCEL_CNT(nvaccel_dma_unmaps,    gCntDmaUnmaps,    "staging buffer mappings given back to NVRM when the buffer was replaced, refused or its accelerator stopped");
 NVACCEL_CNT(nvaccel_dma_abandoned, gCntDmaAbandoned, "staging buffer mappings left in place after a copy-engine timeout (the GPU may still write)");
 NVACCEL_CNT(nvaccel_dma_refused,   gCntDmaRefused,   "page-offs NVRM refused because the pages were not mapped for the GPU (the mapping is made again)");
 NVACCEL_CNT(nvaccel_dma_family,    gCntDmaFamily,    "page-offs left to the accelerator family because the GPU is translated and no mapped staging buffer was at hand");
