@@ -262,15 +262,17 @@ path_problem() { PATH_PROBLEMS="$PATH_PROBLEMS$1
 "; }
 check_paths() {
   PATH_PROBLEMS=""
-  local ws
+  local ws nl='
+'
   ws=$(printf ' \t')
+  case "$HERE$NM_WORK${HOME:-}${NULLMOTH_BUILD_ROOT:-}" in *"$nl"*) path_problem "a path (checkout, working directory, home folder or NULLMOTH_BUILD_ROOT) contains a line break" ;; esac
   case "$HERE" in *[$ws]*) path_problem "the checkout path contains a space or tab ($HERE): the release scripts' commands and build_nvk.sh's compiler flags split on spaces; move the checkout" ;; esac
   case "${HOME:-}" in ''|/) path_problem "HOME is not set to a home folder" ;; *[$ws]*) path_problem "the home folder path contains a space ($HOME): build_nvk.sh and the release scripts put it into space-separated flags" ;; esac
-  case "$NM_WORK" in /*) ;; *) path_problem "the working directory must be an absolute path (got $NM_WORK)" ;; esac
+  case "$NM_WORK" in /*) ;; '') path_problem "the working directory may not be /" ;; *) path_problem "the working directory must be an absolute path (got $NM_WORK)" ;; esac
   case "$NM_WORK/" in */./*|*/../*) path_problem "the working directory may not contain . or .. parts (got $NM_WORK)" ;; esac
   case "$NM_WORK" in *[$ws]*) path_problem "the working directory contains a space ($NM_WORK): the release scripts' commands split on it" ;; esac
   case "$NM_WORK/" in "$HERE/"*) path_problem "the working directory $NM_WORK is inside the checkout; choose one outside it (default ~/nullmoth-build)" ;; esac
-  case "$HERE/" in "$NM_WORK/"*) path_problem "the checkout is inside the working directory $NM_WORK; choose another working directory" ;; esac
+  [ -z "$NM_WORK" ] || case "$HERE/" in "$NM_WORK/"*) path_problem "the checkout is inside the working directory $NM_WORK; choose another working directory" ;; esac
   local rh; rh=$(absolute_path "${HOME:-/}")
   case "${NM_WORK%/}" in /|"${HOME%/}"|"${HOME%/}/nvmtl-build"|"$rh"|"$rh/nvmtl-build") path_problem "the working directory may not be / , the home folder or ~/nvmtl-build (the original author's folder); default is ~/nullmoth-build" ;; esac
   if [ -n "${NULLMOTH_BUILD_ROOT:-}" ]; then
@@ -1633,6 +1635,7 @@ main() {
       fi ;;
   esac
   [ "$NM_DRY_RUN" = 0 ] || say "(dry run: nothing is changed; the commands are printed)"
+  if [ "$CMD" = clean ] && [ ! -d "$W" ]; then say "nothing to clean: $W does not exist"; return 0; fi
   ensure_workdir
   take_lock
   case "$CMD" in
