@@ -192,8 +192,9 @@ private:
     volatile SInt32 fGpuPm = kGpuPmRunning;
     // The surface fence is told about this GPU only between its start and its stop: fFenceStarted is 1 from the
     // nvrm_fence_start() at the end of go() until the one nvrm_fence_stop() of stop() or shutdownFull(), and
-    // fFenceAsleep is 1 between the fence's SUSPENDING and the RESUMED or LOST that pairs with it. A GPU whose start
-    // never reached the fence, or that slept before it did, makes no fence call at all.
+    // fFenceAsleep is 1 between the fence's SUSPENDING and the RESUMED or LOST that pairs with it (gpuResume() sends
+    // it, or stop() when the GPU stops suspended). A GPU whose start never reached the fence, or that slept before it
+    // did, makes no fence call at all.
     volatile UInt32 fFenceStarted = 0;
     volatile UInt32 fFenceAsleep = 0;
     bool         fPmJoined = false;
@@ -2130,7 +2131,13 @@ void NVRM::stop(IOService *provider)
 {
     nvrm_power_stop();
     // Before anything is torn down: it makes no RM call, and whoever sleeps in a fence wait is woken and leaves.
-    if (OSCompareAndSwap(1, 0, &fFenceStarted)) nvrm_fence_stop();
+    // A GPU that stops while it is suspended (unplugged or unloaded during sleep, or while its slot is powered off)
+    // will not reach gpuResume() again, so the SUSPENDING it sent is answered here first: the fence wants one answer
+    // for each, and until it comes it refuses new holds, also for the cards that stay when this one goes.
+    if (OSCompareAndSwap(1, 0, &fFenceStarted)) {
+        if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);
+        nvrm_fence_stop();
+    }
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
     if (fUtilizationLock) {
