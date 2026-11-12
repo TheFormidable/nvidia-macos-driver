@@ -178,6 +178,9 @@ static inline void nvmtl_fence_mark_sent(nvmtl_fence_legacy *L, uint32_t sid, ui
    than 100 ms is passed at once, a newer one is polled for up to 10 ms). `waited_us` is how long the kernel kept this
    reader, the second word of the wait's answer.
      READY    the kernel saw the write complete, or its writer closed the hold: always 1. Nothing else says "complete".
+              The kernel also answers READY when more holds ended during the wait than it keeps the reasons of, so
+              that it cannot say how this one ended; nothing in the answer tells that case apart, and it ends the
+              wait like any READY.
      NONE     the kernel holds nothing for this reader: the writer closed its hold and writes its tag next, or the hold
               was let go before this reader came (the cases of DEAD and TIMEOUT below).
      DEAD     the hold was let go without completion: the writer exited, its channel faulted, the GPU went to sleep or
@@ -186,7 +189,8 @@ static inline void nvmtl_fence_mark_sent(nvmtl_fence_legacy *L, uint32_t sid, ui
      BUDGET   this reader's own two seconds ran out.
    These four end the wait only when the kernel has by then kept the reader at least as long as the older poll would
    have, NVMTL_FENCE_POLL_US: that reader has given the writer what it always got. A reader the kernel sends away
-   sooner goes on to the older wait, so no reader ever reads earlier than it did without a fence.
+   sooner goes on to the older wait. So READY is the only answer on which a reader can read earlier than it did
+   without a fence.
    0 for everything else (ABORTED, PENDING, an unknown result, any error status), whatever the time. */
 static inline int nvmtl_fence_wait_handled(uint32_t status, uint32_t result, uint32_t waited_us)
 {
