@@ -232,6 +232,18 @@ ADAPTER_DOWN = [OWN_FLUSH, call("rm_disable_adapter"), call("workQueueDown"), IR
 RESUME_LINES = ("if (ok) nvrm_power_resume();", "if (ok) nv_xnu_rc_resume(&fNv);")
 
 
+# the functions the rules are about; each has its own steps, so one of them having a step says nothing about another
+PATHS = {"NVRM::go", "NVRM::stop", "NVRM::shutdownFull", "NVRM::systemWillShutdown", "NVRM::gpuSuspend", "NVRM::gpuResume",
+         "NVRMUserClient::clientClose"}
+
+
+def missing(src, function, step):
+    """How to say that a step is not in a function. When a helper elsewhere in the file has it, the helper is named:
+    the step was written, and the function does not get to it by a call that is followed here (see Source.callee)."""
+    has = [name for name, (_, own, _) in src.functions.items() if name not in PATHS and step.found(own)]
+    return f"{step.said} is not there" + (f" (it is in {', '.join(has[:3])}, which {function} does not reach by a call this test follows)" if has else "")
+
+
 def in_order(src, function, steps):
     """'' when each step is in the function, its first place after the first place of the step before it (a step that
     is not needed and not there is passed over). Otherwise what is missing or out of place."""
@@ -243,7 +255,7 @@ def in_order(src, function, steps):
         at = min((p for p, _ in s.found(body)), default=None)
         if at is None:
             if s.needed:
-                wrong.append(f"{s.said} is not there")
+                wrong.append(missing(src, function, s))
             continue
         if before is not None and at <= before[0]:
             wrong.append(f"{s.said} comes before {before[1]}, and has to come after it")
@@ -259,7 +271,7 @@ def bounded(src, function, step, arg, most, least=1):
         return f"{function} is not in the file"
     places = step.found(body)
     if not places:
-        return f"{step.said} is not there"
+        return missing(src, function, step)
     wrong = []
     for _, args in places:
         shown = args[arg] if arg < len(args) else ""
