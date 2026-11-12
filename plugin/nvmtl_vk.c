@@ -344,6 +344,7 @@ static int nvmtl_image_grace_on(void)
 typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; nvmtl_cl_mark mark; struct nvmtl_grace_img *next; } nvmtl_grace_img;
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
+static nvmtl_grace_img *g_grace_unsettled;   // the oldest held entry whose mark is not settled; every one before it is
 static nvmtl_cl_state g_cl;   // the open command buffers by cohort and the queue sequence (nvmtl_cmd_life.h); under g_grace_lock
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
@@ -397,6 +398,7 @@ static int nvmtl_grace_hold(nvmtl_grace_img *e)
     static uint64_t peak = 255;
     uint64_t held = 0, open = 0;
     if (keep) { if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e; g_grace_tail = e; g_grace_n++;
+                if (!e->mark.resolved && !g_grace_unsettled) g_grace_unsettled = e;
                 if (g_grace_n > peak && !(g_grace_n & (g_grace_n - 1))) { peak = g_grace_n; held = g_grace_n; open = nvmtl_cl_open(&g_cl); } }
     pthread_mutex_unlock(&g_grace_lock);
     if (held) nvlog("vk: image grace: %llu dead images held at once (most so far; %llu command buffers open) in %s", (unsigned long long)held, (unsigned long long)open, getprogname());
@@ -408,8 +410,12 @@ static void nvmtl_image_grace_reap(void)
     nvmtl_grace_img *due = NULL, **tail = &due; uint64_t n = 0;
     pthread_mutex_lock(&g_grace_lock);
     const uint64_t forced0 = g_cl.forced;
+    // Every held mark that can be settled is settled now, not when it reaches the front: settled later, it would wait
+    // for a submit made after its predecessor went, and a steady rate of deaths would never be caught up with.
+    while (g_grace_unsettled && nvmtl_cl_settle(&g_cl, &g_grace_unsettled->mark, g_cmd_finished_seq)) g_grace_unsettled = g_grace_unsettled->next;
     while (g_grace_head && nvmtl_cl_due(&g_cl, &g_grace_head->mark, g_cmd_finished_seq)) {
         nvmtl_grace_img *e = g_grace_head; g_grace_head = e->next; if (!g_grace_head) g_grace_tail = NULL;
+        if (g_grace_unsettled == e) g_grace_unsettled = e->next;
         e->next = NULL; *tail = e; tail = &e->next; g_grace_n--; g_grace_reaped++; n++;
     }
     const uint64_t forced = g_cl.forced, reaped = g_grace_reaped, held = g_grace_n, open = nvmtl_cl_open(&g_cl);

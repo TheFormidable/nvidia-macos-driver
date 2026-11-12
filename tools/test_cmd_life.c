@@ -32,9 +32,11 @@ enum { L_FREE, L_OPEN, L_ENDED };
 typedef struct { nvmtl_cl_tag tag; int state, rider, owner, nriders; uint64_t seq; } life;
 typedef struct { nvmtl_cl_mark m; uint64_t sub_at_death; int first_open, nopen; int *open; int live; } dead;
 typedef int (*due_fn)(nvmtl_cl_state *, nvmtl_cl_mark *, uint64_t);
+static int due_real(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t f);
+static const due_fn due_real_fn = due_real;
 
 static life L[MAXL]; static int nl;
-static dead D[MAXD]; static int nd, dhead;
+static dead D[MAXD]; static int nd, dhead, dunset;   /* dunset: the oldest held death not yet settled (the plugin's g_grace_unsettled) */
 static int openv[MAXL], nopen;          /* indices of open lives */
 static nvmtl_cl_state S; static uint64_t finished;
 static int violations;
@@ -97,6 +99,11 @@ static void death(due_fn due)
 }
 static void reap(due_fn due)
 {
+    /* the plugin's reaper: settle every held mark it can, in death order, then release from the front */
+    if (due == due_real_fn) {
+        if (dunset < dhead) dunset = dhead;
+        while (dunset < nd && (!D[dunset].live || nvmtl_cl_settle(&S, &D[dunset].m, finished))) dunset++;
+    }
     while (dhead < nd && (!D[dhead].live || due(&S, &D[dhead].m, finished))) { if (D[dhead].live) release(&D[dhead], "reap"); dhead++; }
 }
 static int open_rand(int want_rider)
@@ -109,7 +116,7 @@ static int open_rand(int want_rider)
 /* One random run. Returns the number of unsafe releases; *stuck counts dead things left after a full drain. */
 static int run(due_fn due, unsigned steps, unsigned seed, int *stuck, int *bad_counts)
 {
-    memset(&S, 0, sizeof S); nl = 0; nd = 0; dhead = 0; nopen = 0; finished = 0; violations = 0;
+    memset(&S, 0, sizeof S); nl = 0; nd = 0; dhead = 0; dunset = 0; nopen = 0; finished = 0; violations = 0;
     rng = 88172645463325252ull ^ ((unsigned long long)seed * 0x9E3779B97F4A7C15ull);
     *stuck = 0; *bad_counts = 0;
     for (unsigned t = 0; t < steps && nl < MAXL - 16 && nd < MAXD - 4; t++) {
@@ -149,6 +156,38 @@ static int due_real(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t f) { return nv
 /* ---- 2.9's three counters, for the controls ---------------------------------------------------------------- */
 typedef struct { uint64_t begun, submitted, abandoned; } c29;
 static uint64_t h29(const c29 *c) { const uint64_t p = c->begun > c->submitted + c->abandoned ? c->begun - c->submitted - c->abandoned : 0; return c->submitted + p; }
+
+/* ---- steady rendering: is held memory bounded? ------------------------------------------------------------------
+   A pipelined application: two command buffers recording at once (one is begun before the other is submitted), each
+   submit carrying a prologue, `depth` submits in flight, `per` textures dying in every frame while a command buffer is
+   open. The holder keeps its marks in death order like the plugin's grace list and either settles them all each time it
+   looks (the plugin since this fix) or only the front one (`front_only`, what the plugin did first). Returns the most
+   held at once over the last half of the run, and sets *grew when the held count at the end exceeds the bound by far. */
+static unsigned steady(int front_only, unsigned depth, unsigned per, unsigned frames, unsigned *unsafe)
+{
+    static nvmtl_cl_state s; static nvmtl_cl_mark m[1u << 16]; static uint64_t dseq[1u << 16];
+    memset(&s, 0, sizeof s);
+    unsigned head = 0, unset = 0, n = 0, most = 0; uint64_t fin = 0;
+    nvmtl_cl_tag a, b; nvmtl_cl_begin(&s, &a);
+    *unsafe = 0;
+    for (unsigned f = 0; f < frames && n + per < (1u << 16); f++) {
+        nvmtl_cl_begin(&s, &b);                                    /* the next frame starts recording before this one is submitted */
+        for (unsigned k = 0; k < per; k++) {
+            nvmtl_cl_death(&s, &m[n]); dseq[n] = s.submitted + 1;  /* a, open at the death, takes the next sequence below */
+            if (!nvmtl_cl_due(&s, &m[n], fin)) n++; else { (*unsafe)++; }   /* nothing can be due with a open */
+        }
+        nvmtl_cl_tag p; nvmtl_cl_begin(&s, &p); nvmtl_cl_ride(&s, &p); nvmtl_cl_submit(&s, &a);
+        a = b;
+        if (s.submitted > depth) fin = s.submitted - depth;        /* the queue completes in order, `depth` behind */
+        if (!front_only) while (unset < n && nvmtl_cl_settle(&s, &m[unset], fin)) unset++;
+        while (head < n && nvmtl_cl_due(&s, &m[head], fin)) {
+            if (fin < dseq[head]) (*unsafe)++;                     /* released before the command buffer open at its death completed */
+            head++;
+        }
+        if (f >= frames / 2 && n - head > most) most = n - head;
+    }
+    return most;
+}
 
 int main(void)
 {
@@ -249,6 +288,43 @@ int main(void)
         check(!nvmtl_cl_due(&s, &m, ys), "with the header the dead image is not released when Y completes");
         const uint64_t xs = nvmtl_cl_submit(&s, &X);
         check(!nvmtl_cl_due(&s, &m, xs - 1) && nvmtl_cl_due(&s, &m, xs), "but when X does");
+    }
+    /* 5. steady rendering: a dead texture is held for a few frames, not for a time that grows with the run */
+    {
+        unsigned u1, u2, u3, u4;
+        const unsigned m2 = steady(0, 2, 3, 6000, &u1), m3 = steady(0, 3, 40, 1500, &u2);
+        printf("  steady: most held at once %u (2 in flight, 3 deaths a frame), %u (3 in flight, 40 a frame)\n", m2, m3);
+        check(u1 == 0 && u2 == 0, "steady: nothing is released before the command buffer open at its death has completed");
+        check(m2 <= 3 * 4 && m3 <= 40 * 5, "steady: what is held stays within a few frames of deaths");
+        const unsigned c2 = steady(1, 2, 3, 6000, &u3), c1 = steady(1, 1, 3, 6000, &u4);
+        printf("  steady, control (only the front mark settled): most held %u (2 in flight), %u (1 in flight)\n", c2, c1);
+        check(c2 > 1000 && u3 == 0, "control: settling only the front mark lets the held count grow with the run when work is in flight");
+        (void)c1; (void)u4;
+    }
+    /* 6. interleavings the plugin rules out, to see what the counts would do */
+    {
+        nvmtl_cl_state s; nvmtl_cl_tag a, p; nvmtl_cl_mark m;
+        /* an abandon after the submit of the same record (two owners of one record): the second end counts nothing */
+        memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_death(&s, &m);
+        const uint64_t q = nvmtl_cl_submit(&s, &a); nvmtl_cl_drop(&s, &a);
+        check(s.own == 1 && s.dropped == 0 && !nvmtl_cl_due(&s, &m, q - 1) && nvmtl_cl_due(&s, &m, q),
+              "abandon after submit of one record: counted once, the dead image still waits for the submit");
+        /* the abandon first, then the submit: the end is the drop, the submit takes a sequence and is counted apart -
+           and the dead image waits for that sequence, because it was handed out before the mark was settled */
+        memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_death(&s, &m);
+        nvmtl_cl_drop(&s, &a); const uint64_t q2 = nvmtl_cl_submit(&s, &a);
+        check(s.dropped == 1 && s.own == 0 && s.uncounted == 1, "abandon then submit of one record: one end, the submit counted apart");
+        check(!nvmtl_cl_due(&s, &m, q2 - 1) && nvmtl_cl_due(&s, &m, q2), "and a mark settled after that submit waits for it");
+        /* a prologue whose owner is retired before the submit (the plugin opens the prologue only after the owner's last
+           failure point, so this cannot happen there): the prologue still holds the dead image until it is dropped */
+        memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_begin(&s, &p); nvmtl_cl_death(&s, &m); nvmtl_cl_drop(&s, &a);
+        check(!nvmtl_cl_due(&s, &m, 0), "owner retired, prologue open: the dead image is held");
+        nvmtl_cl_drop(&s, &p);
+        check(nvmtl_cl_due(&s, &m, 0) && nvmtl_cl_open(&s) == 0, "and released once the prologue is dropped");
+        /* records left open by a device torn down: later deaths are held, then released after the patience */
+        memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_death(&s, &m);
+        check(!nvmtl_cl_due(&s, &m, NVMTL_CL_PATIENCE - 1) && nvmtl_cl_due(&s, &m, NVMTL_CL_PATIENCE) && s.forced == 1,
+              "a record never ended: the dead image is released after NVMTL_CL_PATIENCE completed submits, counted as forced");
     }
     printf("%s: %d passed, %d failed\n", g_fail ? "FAIL" : "OK", g_pass, g_fail);
     return g_fail ? 1 : 0;
