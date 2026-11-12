@@ -33,7 +33,7 @@ def cut(text, start, end_marker='\n}\n'):
 typedef = re.search(r'^typedef uint32_t nvmtl_nvk_fence_v1_fn\(.*?\);\n', src, re.M)
 assert typedef, 'nvmtl_vk.c: the typedef of NVK\'s fence entry is missing'
 proto = 'VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6]'
-assert '(' + proto + ');' in typedef.group(0), 'the plugin\'s prototype of nvmtl_nvk_fence_v1 is not the contract\'s, word for word'
+assert '(' + proto + ');' in typedef.group(0), 'the plugin\'s prototype of nvmtl_nvk_fence_v1 is not the published one, word for word'
 assert src.count('dlsym(g_lib, "nvmtl_nvk_fence_v1")') == 1, 'nvmtl_nvk_fence_v1 is looked up exactly once'
 
 block_start = src.index('/* ---- the kernel surface fence (nvmtl_fence.h) ----')

@@ -14,7 +14,7 @@ Each line is present exactly once, in its function, at the place its order matte
     precedes the older poll, which stays;
   - the compositor wait in nvmtlSurfaceIn follows the busy-tag check and the early return for an unchanged surface.
 And: the older mechanisms are all still there; surface 0 is forwarded before the mark routing; NVK's entry is looked up
-once under its contract name and called through the contract's prototype, which is the one NVK's patch exports (that arm
+once under its published name and called through its published prototype, which is the one NVK's patch exports (that arm
 needs nvk/nvk-fence.patch, from the NVK side of this change); no NVMTL_FENCE_* number is defined twice.
 Negative controls: each check is run again on a copy of the source with its line moved or removed, and must fail.
 """
@@ -24,9 +24,10 @@ root = pathlib.Path(__file__).resolve().parents[1]
 FILES = {k: (root / 'plugin' / k).read_text() for k in
          ('NVMTLEventSync.m', 'NVMTLDevice.m', 'NVMTLObjects.m', 'NVMTLObjects.h', 'nvmtl_vk.c', 'nvmtl_vk.h', 'nvmtl_fence.h')}
 PATCH = root / 'nvk' / 'nvk-fence.patch'
-CONTRACT = ('uint32_t nvmtl_nvk_fence_v1(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, '
+PUBLISHED = ('uint32_t nvmtl_nvk_fence_v1(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, '
             'const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6])')
 
+# the twelve lines, numbered as in the message of the commit that added them
 ROW = {
     1: 'nvmtl_fence_hold _fence;',
     2: 'BOOL early; uint64_t fence; }',
@@ -124,7 +125,7 @@ def check(f):
         'nvmtl_vk_surface_gpu_mark does not forward surface 0 before it consults the routing'
     assert vk.count('dlsym(g_lib, "nvmtl_nvk_fence_v1")') == 1, 'NVK\'s fence entry is not looked up exactly once'
     td = re.search(r'^typedef uint32_t nvmtl_nvk_fence_v1_fn(\(.*?\));$', vk, re.M)
-    assert td and 'uint32_t nvmtl_nvk_fence_v1' + td.group(1) == CONTRACT, 'the plugin\'s prototype of nvmtl_nvk_fence_v1 is not the contract\'s'
+    assert td and 'uint32_t nvmtl_nvk_fence_v1' + td.group(1) == PUBLISHED, 'the plugin\'s prototype of nvmtl_nvk_fence_v1 is not the published one'
     assert vk.count('pnvk_fence(') == 2, 'NVK\'s fence entry is called from more than the two places that check it first'
     defs = re.findall(r'^#define (NVMTL_FENCE_\w+|NVMTL_BUSY_KFENCE)\b', '\n'.join(t for k, t in f.items() if k != 'nvmtl_fence.h'), re.M)
     assert not defs, 'a fence number is defined outside nvmtl_fence.h: ' + ', '.join(defs)
@@ -153,8 +154,8 @@ sig = patch_signature()
 if sig is None:
     print('FAIL nvk/nvk-fence.patch is not in this tree: the prototype cannot be compared with what NVK exports '
           '(expected until the NVK side of the fence is merged)'); fails += 1
-elif sig != CONTRACT:
-    print('FAIL NVK exports', sig or 'no nvmtl_nvk_fence_v1', 'and the plugin calls', CONTRACT); fails += 1
+elif sig != PUBLISHED:
+    print('FAIL NVK exports', sig or 'no nvmtl_nvk_fence_v1', 'and the plugin calls', PUBLISHED); fails += 1
 else:
     print('ok   the plugin calls nvmtl_nvk_fence_v1 with the signature NVK exports')
 
@@ -190,7 +191,7 @@ controls = [
     ('the older poll removed', mutate('NVMTLDevice.m', 'usleep(NVMTL_BUSY_POLL_US);', 'usleep(1);')),
     ('the older clear removed', mutate('NVMTLEventSync.m', 'nvmtl_ws_mark(sid, NO);', '')),
     ('surface 0 routed', mutate('nvmtl_vk.c', '    if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);\n', '')),
-    ('a prototype that differs from the contract', mutate('nvmtl_vk.c', 'uint32_t timeout_ms, uint32_t out[6]);', 'uint32_t timeout, uint32_t out[6]);')),
+    ('a prototype that differs from the published one', mutate('nvmtl_vk.c', 'uint32_t timeout_ms, uint32_t out[6]);', 'uint32_t timeout, uint32_t out[6]);')),
     ('a fence number repeated in nvmtl_vk.c', mutate('nvmtl_vk.c', '/* ---- the kernel surface fence', '#define NVMTL_FENCE_WAIT_MS 100u\n/* ---- the kernel surface fence')),
     ('nvmtl_fence.h not included', mutate('nvmtl_vk.h', '#include "nvmtl_fence.h"\n', '')),
 ]
