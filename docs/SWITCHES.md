@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 4 | 1 | 54 | 411 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 336 |  |  |  | 357 |
+| sysctl |  | 5 | 4 | 12 |  |  | 346 |  |  |  | 367 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -810,6 +810,14 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_boot_settle_ms` | diag | read-only | 3.0 | - | start-up: settle before the card is touched, ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bugcheck_last` | diag | read-only | 3.0 | - | code of the last bug check the RM asked for, -1 none | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_bugchecks` | diag | read-only | 3.0 | - | bug checks the RM asked for | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_chan_dropped` | diag | read-only | 3.0 | - | submissions those rebuilds did not run | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_gave_up` | diag | read-only | 3.0 | - | channel recoveries given up: that process lost its device | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_injected` | diag | read-only | 3.0 | - | faults made by NVK's test hook | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_kicks` | diag | read-only | 3.0 | - | stalled channels whose doorbell NVK rang again | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_last_kind` | diag | read-only | 3.0 | - | kind of loss of the last recovery given up (1 channel, 2 stall, 3 memory, 4 GSP, 5 bus, 6 wake, 7 unknown; -1 not understood) | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_last_why` | diag | read-only | 3.0 | - | why the last recovery was given up, as NVK numbers it (-1 not understood) | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_last_xid` | diag | read-only | 3.0 | - | Xid of the last channel event a process reported | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_chan_recovered` | diag | read-only | 3.0 | - | channels NVK rebuilt after a fault or a stall | kexts/NVRM/nvrm_chan_note.cpp |
 | `debug.nvrm_dma_bad_priv` | diag | read-only | 3.0 | - | map or unmap calls with private data that is not this driver's | kexts/NVRM/nvrm_dma.cpp |
 | `debug.nvrm_dma_budget_refused` | diag | read-only | 3.0 | - | mappings refused to keep the mapper's space from filling | kexts/NVRM/nvrm_dma.cpp |
 | `debug.nvrm_dma_fail` | diag | read-only | 3.0 | - | mappings the mapper refused or could not serve | kexts/NVRM/nvrm_dma.cpp |
@@ -966,6 +974,8 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_wq_mode` | diag | read-only | 3.0 | - | RM work queues: 1 serialized, 0 off (nvrmworkq=0), -1 could not start | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_wq_queued` | diag | read-only | 3.0 | - | RM work items queued | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_wq_run` | diag | read-only | 3.0 | - | RM work items run | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_xid_count` | diag | read-only | 3.0 | - | Xids the RM logged since the kext loaded | kexts/NVRM/nvrm_chan_note.cpp |
+| `debug.nvrm_xid_last` | diag | read-only | 3.0 | - | the last Xid the RM logged | kexts/NVRM/nvrm_chan_note.cpp |
 | `debug.nvrmfb_agdc` | recovery | writable by root | 2.9 | - | write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, \<0 failed step) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_cmds` | diag | read-only | 2.9 | - | AGDC vendor calls received | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_fbmap` | diag | read-only | 2.9 | - | the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex | kexts/NVRMAGDC/nvrm-agdc.cpp |
