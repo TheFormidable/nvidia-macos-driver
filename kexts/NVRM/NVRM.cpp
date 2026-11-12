@@ -46,6 +46,7 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+#include "nvrm_chan_note_abi.h"
 #include "nvrm_evwait.h"
 #include "nvrm_fence.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
@@ -972,6 +973,7 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_polls); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_why);
             sysctl_register_oid(&sysctl__debug_nvrm_boot_arm_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_hold_ms);
             sysctl_register_oid(&sysctl__debug_nvrm_layout_fb); sysctl_register_oid(&sysctl__debug_nvrm_layout_accel);
+            nvrm_chan_note_sysctls();
             nv_xnu_kcore_sysctls_register();
             nv_xnu_timers_sysctls();
         }
@@ -3712,6 +3714,12 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
         if (!accel) return kIOReturnSuccess;
         const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVACCEL_SS_FN);
         if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
+        return kIOReturnSuccess;
+    }
+    case NVRM_ESC_CHAN_NOTE: {
+        // A process's note about a channel it rebuilt or gave up on: counters only, and the power state back.
+        if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument;
+        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm);
         return kIOReturnSuccess;
     }
     default: {
