@@ -1207,9 +1207,10 @@ source_rev() {   # the revision the git-archive based scripts build: HEAD, or th
 }
 # build_rm620.sh and build_kms620.sh end by looking for the account name and the computer's short name anywhere in the
 # archive, as a substring, and exit 6 when they find one. A short account name is found inside ordinary words of
-# NVIDIA's own strings (an account "ana" in "banana" on the owner's Mac), after the archive is complete. personal_recheck <archive>
-# looks for the two names as whole words (what a path, user@host or a name in an identity string would be); only
-# when there is none is the archive accepted, and the log says what the scripts matched and why it was accepted.
+# NVIDIA's own strings (an account "ana" in "banana"); it stopped every RM build on the owner's Mac, after the archive
+# was complete. personal_recheck <archive> looks for the two names as whole words (what a path, user@host or a name in
+# an identity string would be); only when there is none is the archive accepted, and the log says what the scripts
+# matched and why it was accepted.
 personal_recheck() {
   local a=$1 u h re n
   [ -f "$a" ] || { say "personal-string recheck: $a is missing" >> "$CUR_LOG"; return 1; }
