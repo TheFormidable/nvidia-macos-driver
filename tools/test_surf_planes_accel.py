@@ -34,6 +34,7 @@ What this checks:
     that only a plane takes are taken out.
 Each group has negative controls on altered copies of the source.
    python3 tools/test_surf_planes_accel.py"""
+import hashlib
 import pathlib
 import re
 import subprocess
@@ -42,7 +43,10 @@ import tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
 SRC = R / "kexts/NVRM/accel/nvrm-accel.cpp"
-BEFORE = "2714281"   # the accelerator's page-off before plane ranges
+BEFORE = "2714281"   # the accelerator's page-off before plane ranges (read only to show where a difference is)
+# sha256 of that page-off, comments and blank lines out (norm()): the arm needs no history, so it holds after the
+# branch is merged, squashed or rebased. A change to the page-off on purpose updates this value in the same commit.
+BEFORE_SHA256 = "35ee68e385f25d21f184fd8e7839467d4630d6c0aaac48dddf7fda98d8a64791"
 FAILS = []
 
 
@@ -612,15 +616,19 @@ def main():
     pr = sysctl_problems(src)
     arm("the plane counters are read-only and registered once", not pr, "; ".join(pr))
 
+    def digest(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    a = unranged(pageoff(src))
     before = git_show(BEFORE, "kexts/NVRM/accel/nvrm-accel.cpp")
-    if before is None:
-        arm(f"the page-off before plane ranges ({BEFORE}) is readable", False)
-    else:
-        a, b = unranged(pageoff(src)), norm(pageoff(before))
-        arm("a resource without a range runs the page-off of the step before, byte for byte", a == b and bool(a),
-            next((f"first difference at {i}: {a[i-80:i+80]!r} vs {b[i-80:i+80]!r}" for i in range(min(len(a), len(b))) if a[i] != b[i]), "lengths differ"))
-        alt = src.replace("    if (dmaMode >= NVRM_DMA_REFUSE) { OSAddAtomic64(1, &gCntDmaFamily);", "    if (dmaMode >= NVRM_DMA_REFUSE && !fRangeLen) { OSAddAtomic64(1, &gCntDmaFamily);", 1)
-        arm("control: a change on the path of a resource without a range is caught", unranged(pageoff(alt)) != b)
+    b = norm(pageoff(before)) if before is not None else None
+    where = "" if b is None else next((f"first difference at {i}: {a[i-80:i+80]!r} vs {b[i-80:i+80]!r}"
+                                       for i in range(min(len(a), len(b))) if a[i] != b[i]), "lengths differ")
+    arm("a resource without a range runs the page-off of the step before, byte for byte", bool(a) and digest(a) == BEFORE_SHA256, where)
+    if b is not None:
+        arm(f"the recorded digest is the one of {BEFORE}'s page-off", digest(b) == BEFORE_SHA256)
+    alt = src.replace("    if (dmaMode >= NVRM_DMA_REFUSE) { OSAddAtomic64(1, &gCntDmaFamily);", "    if (dmaMode >= NVRM_DMA_REFUSE && !fRangeLen) { OSAddAtomic64(1, &gCntDmaFamily);", 1)
+    arm("control: a change on the path of a resource without a range is caught", alt != src and digest(unranged(pageoff(alt))) != BEFORE_SHA256)
 
     # text controls
     arm("control: the switch checked after the cache lookup is caught", any("before the cache lookup" in x for x in text_problems(
