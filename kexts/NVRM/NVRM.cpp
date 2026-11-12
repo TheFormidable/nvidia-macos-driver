@@ -44,6 +44,7 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
 #include "nvrm_evwait.h"
+#include "nvrm_fence.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
 extern "C" task_t current_task(void);
@@ -189,6 +190,12 @@ private:
     // loses power and to power on once IOPCIFamily has the device back in D0.
     enum { kGpuPmRunning = 0, kGpuPmSuspended = 1, kGpuPmLost = 2 };
     volatile SInt32 fGpuPm = kGpuPmRunning;
+    // The surface fence is told about this GPU only between its start and its stop: fFenceStarted is 1 from the
+    // nvrm_fence_start() at the end of go() until the one nvrm_fence_stop() of stop() or shutdownFull(), and
+    // fFenceAsleep is 1 between the fence's SUSPENDING and the RESUMED or LOST that pairs with it. A GPU whose start
+    // never reached the fence, or that slept before it did, makes no fence call at all.
+    volatile UInt32 fFenceStarted = 0;
+    volatile UInt32 fFenceAsleep = 0;
     bool         fPmJoined = false;
     unsigned     fPmCycles = 0;
     struct PciSave {
@@ -263,6 +270,7 @@ static void nvrmRunBottomHalf(nv_state_t *nv)
     const uint64_t t0 = mach_absolute_time();
     OSIncrementAtomic(&gNvBhActive);
     rm_isr_bh(NULL, nv);
+    nvrm_fence_kick();   // a channel error reaches its notifier here, so fence waits on that channel look again
     OSDecrementAtomic(&gNvBhActive);
     const SInt64 us = nvrmUsSince(t0);
     OSIncrementAtomic64(&gNvBhRuns);
@@ -488,6 +496,10 @@ private:
     static IOReturn sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sEvtNote(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sFence(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    // This connection's owner id in the surface fence: zero when the client is made, assigned by the fence itself on
+    // the first request that needs one, and handed back to it when the client closes (nvrm_fence_owner_gone).
+    volatile UInt64 fFenceOwner = 0;
     SInt32 fEvtEverSlept = 0;   // 0 -> 1 once, for debug.nvrm_evt_clients
     bool evtDrainPosts();
 public:
@@ -2002,6 +2014,10 @@ IOReturn NVRM::go(uint32_t pass)
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
         nvrm_power_start(&fNv);   // boot-arg nvrmtgp=1: the notebook power budget while on mains power (nvrm_power.cpp)
+        // The surface fence (nvrm_fence.cpp), once per GPU and only after a start that worked: from here user space may
+        // register its channels with it. With boot-arg nvrmfence=0, or when it cannot allocate its table, it stays off
+        // and every fence call made by this file does nothing.
+        if (OSCompareAndSwap(0, 1, &fFenceStarted)) nvrm_fence_start();
     }
     return kIOReturnSuccess;
 }
@@ -2030,6 +2046,9 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
     nv_xnu_isr_thread = current_thread();
     NvBool handled = rm_isr(NULL, &fNv, &needBottomHalf);
     nv_xnu_isr_thread = NULL;
+    // Whatever rm_isr answered: a channel's semaphore release is in memory before its interrupt is raised, so a fence
+    // wait on it can be decided now. Two atomics, and a wakeup only when somebody waits.
+    nvrm_fence_kick();
     if (handled) gNvIsrHandled++;
     if (handled && needBottomHalf) {
         if (fBhLock) {
@@ -2110,6 +2129,8 @@ void NVRM::bottomHalfStop()
 void NVRM::stop(IOService *provider)
 {
     nvrm_power_stop();
+    // Before anything is torn down: it makes no RM call, and whoever sleeps in a fence wait is woken and leaves.
+    if (OSCompareAndSwap(1, 0, &fFenceStarted)) nvrm_fence_stop();
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
     if (fUtilizationLock) {
@@ -2157,6 +2178,8 @@ extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); }
 void NVRM::shutdownFull(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
+    // First, as in stop(): no RM call, and the processes still asleep in a fence wait return before they are killed.
+    if (OSCompareAndSwap(1, 0, &s->fFenceStarted)) nvrm_fence_stop();
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &s->fGpuPm);
     s->notifyFramebuffers(0);
     nvkms_xnu_suspend(s->fNv.gpu_id);
@@ -2320,6 +2343,9 @@ void NVRM::gpuSuspend()
     uint64_t t0 = mach_absolute_time();
     fPmCycles++;
     nvrm_power_suspend();
+    // Before the user channels stop: every surface hold ends now and new ones are refused until the wake, so nobody
+    // waits on a channel that is about to stand still, and work committed across the transition uses the older marks.
+    if (fFenceStarted && OSCompareAndSwap(0, 1, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_SUSPENDING);
     nv_xnu_rc_suspend(&fNv);
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
     setProperty("nvrm-pm", "suspended");
@@ -2361,6 +2387,8 @@ void NVRM::gpuResume()
     nv_xnu_pm_open();   // also when lost: RM then answers the waiting calls with errors instead of leaving them blocked
     if (ok) nvrm_power_resume();
     if (ok) nv_xnu_rc_resume(&fNv);
+    // A failed resume leaves the fence off for good (LOST): user space keeps the older marks on a GPU that is gone.
+    if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST);
     setProperty("nvrm-pm", ok ? "running" : "lost (resume failed)");
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", fPmCycles,
@@ -2613,6 +2641,10 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         *out = uc;
         return kIOReturnSuccess;
     }
+    // NVAccel fetches the fence's wait function once. No RM call and nothing that needs the GPU awake, so it is answered
+    // before the power-management admission below.
+    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))
+        return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;
     if (fn && p1) {
         const bool rmCall = fn->isEqualTo(NVRM_GPUVA_FN_ALLOC) || fn->isEqualTo(NVRM_GPUVA_FN_MAP) || fn->isEqualTo(NVRM_GPUVA_FN_FREE)
                          || fn->isEqualTo(NVRM_SS_FN_RM) || fn->isEqualTo(NVRM_SS_FN_PAGEOFF);
@@ -2709,6 +2741,10 @@ IOReturn NVRMUserClient::clientClose(void)
     if (OSCompareAndSwap(0, 1, &fCleaned)) {
         Gate g(fGate);
         if (gNvClientsLock && fFd >= 0) { IOLockLock(gNvClientsLock); gNvClients[fFd] = NULL; nv_pm_close(fPm); IOLockUnlock(gNvClientsLock); }
+        // Before the RM frees this process's channels, which can take seconds: its surface holds end now and whoever
+        // waits on them (WindowServer) is released at once instead of waiting out a bound. fCleaned is already set, and
+        // the fence re-reads it under its own lock, so a fence request racing this close cannot add anything after it.
+        nvrm_fence_owner_gone(fFenceOwner);
         if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
         // The RM posts an event outside its event lock, holding only event_posting_refcount on this nvfp (os.c,
         // referenceEventForPost / postEvent). The events are freed now, so no new post can start, but one that had
@@ -2740,6 +2776,8 @@ void NVRMUserClient::free(void)
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
+    // A client freed without its close having run the cleanup still gives its fence owner back (0 does nothing).
+    if (OSCompareAndSwap(0, 1, &fCleaned)) nvrm_fence_owner_gone(fFenceOwner);
     // nv_post_event must never write into freed memory. If a post is still in flight after the drain, this object's
     // memory is kept for good (one object, counted in debug.nvrm_evt_post_drain_stuck): everything it owns is released
     // above, and the post touches only fEvtMagic and fEvtSeq.
@@ -2940,6 +2978,7 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sEvtNote, 1, 0, 0, 0 },                     // 9: NVRM_EVW_SEL_NOTE
         { sRetired, 0, 0, 0, 0 },                     // 10 and 11: placeholders that answer an error
         { sRetired, 0, 0, 0, 0 },
+        { sFence, 0, sizeof(struct NVRMFenceReq), 0, sizeof(struct NVRMFenceReq) },   // 12: NVRM_FENCE_SELECTOR, no fGate
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];
@@ -3040,6 +3079,25 @@ IOReturn NVRMUserClient::sEvtNote(OSObject *target, void *reference, IOExternalM
         if (OSIncrementAtomic64(&gNvEvtUserFellBack) < 8)
             kprintf("NVRM-xnu: pid %d went back to polling: its event wakes did not arrive (fd %d)\n", me->fPid, me->fFd);
     } else return kIOReturnBadArgument;
+    return kIOReturnSuccess;
+}
+// Selector 12: the surface fence (nvrm_fence_abi.h, body in nvrm_fence.cpp). Deliberately not under fGate: a wait in it
+// may sleep up to NVRM_FENCE_WAIT_MAX_MS, and this process's other RM calls on the connection must not queue behind it.
+// The request is copied into the kernel and its size and version checked before anything in it is used; the whole of
+// it goes back, the answer in r.status. A kext without this row answers kIOReturnBadArgument, which user space takes
+// as "no fence".
+IOReturn NVRMUserClient::sFence(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me) return kIOReturnNotAttached;
+    if (args->structureInputDescriptor || args->structureOutputDescriptor) return kIOReturnBadArgument;
+    if (!args->structureInput || args->structureInputSize != sizeof(struct NVRMFenceReq)) return kIOReturnBadArgument;
+    if (!args->structureOutput || args->structureOutputSize != sizeof(struct NVRMFenceReq)) return kIOReturnBadArgument;
+    struct NVRMFenceReq r;
+    nvu_memcpy(&r, args->structureInput, sizeof r);
+    if (r.version != NVRM_FENCE_ABI_VERSION) r.status = NVRM_FENCE_ST_BAD_VERSION;
+    else nvrm_fence_user(&me->fFenceOwner, &me->fCleaned, &r);
+    nvu_memcpy(args->structureOutput, &r, sizeof r);
     return kIOReturnSuccess;
 }
 IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMethodArguments *args)
