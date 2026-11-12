@@ -1135,6 +1135,11 @@ static bool blackwell_decode_proven(void)
     if (first) LOG("%s", line);
     return ok;
 }
+// How the driver plugin tells this build from an older one before it asks for the library on Blackwell: it looks this
+// symbol up. A build that has it registers nothing there before the self-test has passed; the library as first
+// vendored registered the Blackwell decoder untested, and beside a plugin that asks for it by default that would be
+// the unproven decoder in Safari. The value counts the tests a card must pass (1: H.264 decode).
+__attribute__((visibility("default"))) const int NVEncVT_BlackwellSelfTest = 1;
 
 // registers the H.264 (avc1) and HEVC (hvc1) encoders; returns the H.264 registration's status
 __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)

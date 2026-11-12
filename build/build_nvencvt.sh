@@ -61,8 +61,9 @@ scp -q "$H:$R/out/libnvencvt.dylib" "$H:$R/out/build.err" "$OUT/"
 bash "$HERE/build/warn_ceiling.sh" nvencvt "$(grep -c ': warning:' "$OUT/build.err" || true)" "$OUT/build.err" || exit 4
 minos=$(vtool -show-build "$OUT/libnvencvt.dylib" | awk '/minos/{print $2; exit}')
 [ "$minos" = 15.0 ] || { echo "STOP: minos $minos, not 15.0"; exit 1; }
-# only the four entry points leave the library: the plugin looks up two, VideoToolbox is handed the other two
-want="_NVDecVT_CreateInstance _NVEncVT_CreateInstance _NVEncVT_Register _NVEncVT_RegisterDecoders"
+# only the four entry points and one marker leave the library: the plugin looks up two entry points, VideoToolbox is
+# handed the other two, and the marker tells the plugin that this build tests its Blackwell decoder before it registers
+want="_NVDecVT_CreateInstance _NVEncVT_BlackwellSelfTest _NVEncVT_CreateInstance _NVEncVT_Register _NVEncVT_RegisterDecoders"
 have=$(nm -gU "$OUT/libnvencvt.dylib" | awk '{print $3}' | sort | tr '\n' ' ' | sed 's/ $//')
 [ "$have" = "$want" ] || { echo "STOP: exports are [$have], want [$want]"; exit 1; }
 echo "libnvencvt $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$OUT/libnvencvt.dylib" | cut -c1-8) minos $minos warnings $(grep -c ': warning:' "$OUT/build.err" || true)"
