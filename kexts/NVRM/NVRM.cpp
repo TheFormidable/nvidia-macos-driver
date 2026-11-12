@@ -30,6 +30,7 @@ extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <mach/mach_time.h>
 #include <kern/sched_prim.h>
 #include <libkern/OSDebug.h>
+#include "nvrm_layout.h"
 
 extern "C" {
 #include <mach/mach_types.h>
@@ -171,6 +172,19 @@ public:
     uint32_t        fHoldCapMs = 120000;   // boot-arg nvrmholdcap (seconds)
     uint32_t        fHoldWaitedMs = 0;     // how long the cap has waited past its first deadline
     thread_call_t   fHoldCapCall = nullptr;
+    uint64_t        fHoldStartNs = 0;      // when the hold was taken, for debug.nvrm_boot_hold_ms
+    // Two marks of the start-up, for two different moments. fStartReturned: startGPU has done everything start() does
+    // (joined power management, registered the service); its last statement writes it, and auto-go waits for it after
+    // the settle and before it touches the card. fStartDone: go() has brought the GPU up and started everything that
+    // hangs off it (work queue, interrupt path, power manager, surface fence); the last statement of go()'s successful
+    // path writes it, so whoever reads it may use all of that. auto-go never waits for fStartDone: only its own go(2)
+    // writes it.
+    volatile SInt32 fStartReturned = 0;
+    volatile SInt32 fStartDone = 0;
+    // -nvrmoldwaits: auto-go waits exactly as 2.9 did (1 s polls, full raster windows, no start gate, no shortcut when the
+    // accelerator declined, no firmware progress sample). Read once in startGPU.
+    bool            fOldWaits = false;
+    uint32_t peekBar0(uint32_t off);
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
@@ -290,6 +304,50 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_wake_max_us, CTLFLAG_RD, (int64_t *)&gNvBh
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_stuck, CTLFLAG_RD, (int64_t *)&gNvBhStuck, "bottom-half threads that did not exit at stop");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_skipped, CTLFLAG_RD, (int64_t *)&gNvIsrSkipped, "GPU interrupts not given to the RM: gate closed");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_irq_settle_timeouts, CTLFLAG_RD, (int64_t *)&gNvIrqSettleTimeouts, "interrupt path settle waits that ran out");
+// Start-up, phase by phase, as the auto-go thread of the last card to start went through it (milliseconds). Written by
+// that thread only, read by sysctl; the same line is the nvrm-boot-timing property of the NVRM service.
+//   debug.nvrm_boot_settle_ms     the settle before the card is touched (500 ms, 10 s on Turing, 100 s without BAR1 placed)
+//   debug.nvrm_boot_gate_ms       how long auto-go then waited for start() to have returned (0 normally; 5000 = never)
+//   debug.nvrm_boot_raster_ms     the boot raster measurement; _raster_idle: heads it left after 50 ms as not scanning
+//   debug.nvrm_boot_go_ms         go(2), the RM's bring-up of the GPU
+//   debug.nvrm_boot_heads_ms      the wait for the accelerator's heads; _heads_polls: its polls (above 20: 50 ms polls
+//                                 ran); _heads_why: why it ended (nvrm_startup_policy.h NvrmHeadsWhy: 1 enough heads,
+//                                 2 unchanged for 3 s, 3 every connected display, 4 no display anywhere, 5 the hybrid
+//                                 panel, 6 the accelerator declined, 7 the 20 s bound)
+//   debug.nvrm_boot_arm_ms        the tries of debug.nvaccelfb=1
+//   debug.nvrm_boot_hold_ms       how long the registry was held busy for the display
+// And what NVRM read from the other kexts' verdicts on Apple's class layouts (nvrm_layout.h): 0 none published, 1 ok,
+// 2 refused, 3 overridden by nvlayout=0, 4 nothing could be compared.
+//   debug.nvrm_layout_fb          NVRMFB's (nvrmfb-layout); refused: NVRM does not start the card
+//   debug.nvrm_layout_accel       NVAccel's (nvaccel-layout); refused: no acceleration, the display is not armed
+static unsigned gNvBootSettleMs, gNvBootGateMs, gNvBootRasterMs, gNvBootRasterIdle, gNvBootGoMs, gNvBootHeadsMs,
+                gNvBootHeadsPolls, gNvBootHeadsWhy, gNvBootArmMs, gNvBootHoldMs, gNvLayoutFb, gNvLayoutAccel;
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_settle_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootSettleMs, 0, "start-up: settle before the card is touched, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_gate_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootGateMs, 0, "start-up: wait for start() to have returned, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_raster_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootRasterMs, 0, "start-up: boot raster measurement, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_raster_idle, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootRasterIdle, 0, "start-up: heads left early as not scanning");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_go_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootGoMs, 0, "start-up: go(2), ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsMs, 0, "start-up: wait for the accelerator's heads, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_polls, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsPolls, 0, "start-up: polls of the heads wait");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_why, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsWhy, 0, "start-up: why the heads wait ended");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_arm_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootArmMs, 0, "start-up: tries to arm the accelerator, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_hold_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHoldMs, 0, "start-up: registry held busy for the display, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_fb, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutFb, 0, "framebuffer layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_accel, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutAccel, 0, "accelerator layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
+static uint64_t nvrmNowNs(void) { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
+static unsigned nvrmMsSince(uint64_t ns0) { const uint64_t now = nvrmNowNs(); return now > ns0 ? (unsigned)((now - ns0) / 1000000ULL) : 0; }
+// The verdict another kext published on this card's PCI device about Apple's class layouts (nvrm_layout.h), and its
+// text for the log. No property, or one that is not such a verdict, is kNvLayoutNotRun: carry on as 2.9 did.
+static NvLayoutState nvrmPeerLayout(IORegistryEntry *dev, const char *key, char *text, size_t cap)
+{
+    if (text && cap) text[0] = 0;
+    OSObject *o = dev ? dev->copyProperty(key) : NULL;
+    OSString *s = OSDynamicCast(OSString, o);
+    const NvLayoutState st = s ? nvLayoutTextState(s->getCStringNoCopy()) : kNvLayoutNotRun;
+    if (s && text && cap) strlcpy(text, s->getCStringNoCopy(), cap);
+    OSSafeReleaseNULL(o);
+    return st;
+}
 static inline SInt64 nvrmUsSince(uint64_t t0)
 {
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
@@ -813,6 +871,30 @@ bool NVRM::startGPU(IOService *provider)
         return false;
     }
     if (!nvrm_kernel_supported()) return false;
+    // NVRMFB's verdict on the Apple framebuffer classes of this macOS (nvrm_layout.h). Every way the driver has of
+    // lighting this card's display is a subclass of them, so when the framebuffer refuses, starting the card only takes
+    // the firmware's picture away. Declined here, before the boot guard counts this start: the Mac still boots and can
+    // be reached over the network, and a refusal that is right is not counted as a failed boot that would switch the
+    // driver off or roll the install back. nvlayout=0 makes the framebuffer publish "overridden" instead, and both
+    // start as before.
+    // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
+    // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
+    // logs the same from its side. A verdict published later is read again just before go(2).
+    {
+        char text[200];
+        gNvLayoutFb = (unsigned)nvrmPeerLayout(provider, "nvrmfb-layout", text, sizeof text);
+        if (gNvLayoutFb == kNvLayoutNotRun)
+            LOG("framebuffer layout: no verdict on this device before NVRM starts (NVRMFB's claim has not probed it); "
+                "one published later is read again before go(2), and this start is counted by the boot guard either way");
+        else
+            LOG("framebuffer layout: %s (read before the boot guard counts this start: NVRMFB's claim probed the device first)", text);
+        if (gNvLayoutFb == kNvLayoutRefused) {
+            provider->setProperty("nvrm-layout", "declined: the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
+            LOG("NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS (its Apple classes differ from the ones it "
+                "was built for), so the firmware's picture stays. Not counted as a failed start. Boot-arg nvlayout=0 starts it anyway.");
+            return false;
+        }
+    }
     nvrm_guard_count_start();
     if (!super::start(provider)) return false;
     fPCI = OSDynamicCast(IOPCIDevice, provider);
@@ -851,6 +933,12 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_waits); sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_stuck);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_settle_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_gate_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_idle);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_go_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_polls); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_why);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_arm_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_hold_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_layout_fb); sysctl_register_oid(&sysctl__debug_nvrm_layout_accel);
             nv_xnu_kcore_sysctls_register();
             nv_xnu_timers_sysctls();
         }
@@ -904,10 +992,13 @@ bool NVRM::startGPU(IOService *provider)
         thread_t th = THREAD_NULL;
         { uint32_t ms = 0; const bool haveArg = PE_parse_boot_argn("nvrmsettle", &ms, sizeof(ms));
           fAutoGoSettleMs = nvrmAutoGoSettleMs(bar1Placed, nvrmIsTuringDeviceId(nv->pci_info.device_id), haveArg, ms); }
+        { char ow[8] = { 0 }; fOldWaits = PE_parse_boot_argn("-nvrmoldwaits", ow, sizeof ow); }
+        if (fOldWaits) LOG("auto-go: -nvrmoldwaits: start-up waits as in 2.9 (1 s polls, full raster windows, no start gate)");
         if (PE_parse_boot_argn("-nvrmnogo", nogo, sizeof(nogo))) {
             setProperty("nvrm-autogo", "off (-nvrmnogo)"); LOG("auto-go OFF (-nvrmnogo): idle until `nvrmctl go <pass>`");
         } else {
             fBootHold = 1; adjustBusy(1); setProperty("nvrm-boot-hold", "holding");
+            fHoldStartNs = nvrmNowNs();
             { uint32_t sec = 0; if (PE_parse_boot_argn("nvrmholdcap", &sec, sizeof(sec)) && sec >= 40 && sec <= 600) fHoldCapMs = sec * 1000; }
             if (thread_call_t cap = thread_call_allocate(&NVRM::bootHoldCap, this)) {
                 // The BAR fallback settles for 100 s. A 40 s timer from start() expired before
@@ -963,6 +1054,9 @@ bool NVRM::startGPU(IOService *provider)
         }
     }
     registerService();
+    // auto-go, started above, waits for this mark after its settle before it touches the card: with nvrmsettle=0 it
+    // could otherwise reach go(2) before this service had joined power management and been registered.
+    OSCompareAndSwap(0, 1, &fStartReturned);
     return true;
 }
 
@@ -1059,6 +1153,7 @@ void NVRM::measureBootRaster()
     if (!map) { LOG("boot raster: BAR0 map failed — unknown"); if (md) md->release(); return; }
     volatile uint8_t *b = (volatile uint8_t *)map->getVirtualAddress();
     char out[256]; int o = 0; out[0] = 0;
+    unsigned idle = 0;
     for (unsigned h = 0; h < 4; h++) {
         const uint32_t rs = *(volatile uint32_t *)(b + 0x682064 + 0x8000 + h * 0x400);
         const uint32_t pc = *(volatile uint32_t *)(b + 0x68200c + 0x8000 + h * 0x400);
@@ -1073,6 +1168,9 @@ void NVRM::measureBootRaster()
             if (v > maxv) maxv = v;
             last = v;
             absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            // A head whose counter has not moved once in 50 ms is not scanning out (nvrm_startup_policy.h): the rest of
+            // its 250 ms window could not change the verdict.
+            if (!fOldWaits && nvrmRasterHeadIdle(ns, moves)) { idle++; break; }
         } while (ns < 250000000ull);
         uint64_t span = 0; if (wraps >= 2) absolutetime_to_nanoseconds(tLast - tFirst, &span);
         const uint32_t mhz = (wraps >= 2 && span) ? (uint32_t)((uint64_t)(wraps - 1) * 1000000000000ull / span) : 0;
@@ -1086,6 +1184,7 @@ void NVRM::measureBootRaster()
         if (ok && o < (int)sizeof(out) - 40) o += snprintf(out + o, sizeof(out) - (size_t)o, "%shead%u %u.%03uHz", o ? " " : "", h, mhz / 1000, mhz % 1000);
     }
     setProperty("nvrm-boot-raster", o ? out : "unknown");
+    gNvBootRasterIdle = idle;
     map->release(); md->release();
 }
 
@@ -1142,6 +1241,7 @@ void NVRM::headWatch(void *p0, wait_result_t)
 void NVRM::releaseBootHold(const char *why)
 {
     if (!OSCompareAndSwap(1, 0, &fBootHold) && !OSCompareAndSwap(2, 0, &fBootHold)) return;
+    if (fHoldStartNs) gNvBootHoldMs = nvrmMsSince(fHoldStartNs);
     adjustBusy(-1);
     setProperty("nvrm-boot-hold", why);
     LOG("boot hold RELEASED (%s) — WindowServer's IOKitWaitQuiet may return", why);
@@ -1162,6 +1262,7 @@ void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
         return;
     }
     if (OSCompareAndSwap(1, 0, &s->fBootHold)) {
+        if (s->fHoldStartNs) gNvBootHoldMs = nvrmMsSince(s->fHoldStartNs);
         s->adjustBusy(-1); s->setProperty("nvrm-boot-hold", "CAP: bring-up not finished in time, NOT arming");
         LOG("boot hold RELEASED by the settle + %u s cap — the bring-up will not arm with WindowServer up", 40 + s->fHoldWaitedMs / 1000);   // the cap is no longer fixed at 40 s
     }
@@ -1184,10 +1285,47 @@ static bool nvrmNoDisplayAnywhere()
     return nvrmNoDisplayOnAnyConnector(counts, n);
 }
 
+// One 32-bit register of BAR0, read through a one-page mapping made for it; 0xffffffff when BAR0 is not known or the
+// page cannot be mapped. For the few samples auto-go takes before the RM owns the card (measureBootRaster maps BAR0
+// the same way at the same moment).
+uint32_t NVRM::peekBar0(uint32_t off)
+{
+    const nv_state_t *nv = &fNv;
+    if (!nv->bars[0].cpu_address || nv->bars[0].size < (NvU64)off + 4) return 0xffffffffu;
+    IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)(nv->bars[0].cpu_address + (off & ~0xfffu)),
+                                                                     0x1000, kIODirectionIn);
+    IOMemoryMap *map = md ? md->map(kIOMapInhibitCache) : NULL;
+    uint32_t v = 0xffffffffu;
+    if (map) { v = *(volatile uint32_t *)(map->getVirtualAddress() + (off & 0xfffu)); map->release(); }
+    if (md) md->release();
+    return v;
+}
+
+static const char *nvrmHeadsWhyName(unsigned why)
+{
+    static const char *const names[] = { "still waiting", "enough heads", "mask unchanged 3 s", "every connected display",
+                                         "no display anywhere", "hybrid panel", "accelerator declined", "20 s bound" };
+    return why < sizeof names / sizeof names[0] ? names[why] : "?";
+}
+// The phases of this start-up as one line, on the NVRM service (nvrm-boot-timing); the same numbers are the
+// debug.nvrm_boot_* sysctls. Phases auto-go did not reach read 0.
+static void nvrmBootTiming(IOService *s)
+{
+    char t[192];
+    snprintf(t, sizeof t, "settle %u gate %u raster %u go %u heads %u (%s) arm %u hold %u ms", gNvBootSettleMs, gNvBootGateMs,
+             gNvBootRasterMs, gNvBootGoMs, gNvBootHeadsMs, nvrmHeadsWhyName(gNvBootHeadsWhy), gNvBootArmMs, gNvBootHoldMs);
+    s->setProperty("nvrm-boot-timing", t);
+}
+
 void NVRM::autoGo(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
     char nb[8] = { 0 };
+    const bool old = s->fOldWaits;
+    // The firmware's boot progress register (GFW_BOOT_PROGRESS, which nv_xnu_dump_gsp_regs also names), before and after
+    // the settle: a card whose value still changes during the settle is evidence about what the settle waits for.
+    const uint32_t gfw0 = old ? 0xffffffffu : s->peekBar0(0x118234);
+    uint64_t t0 = nvrmNowNs();
     // A card whose BAR1 could not be placed outside the boot screen (Resizable BAR off: 256 MB) waits 100 s here with
     // the registry held busy, so the verbose screen showed only "busy timeout ... 'NVRM'" for two minutes and users
     // reset machines that were still starting (7 reports, RTX 2070 SUPER/3050/3060/3070, GTX 1660 SUPER, Quadro T2000,
@@ -1212,14 +1350,48 @@ void NVRM::autoGo(void *p0, wait_result_t)
     } else {
         IOSleep(s->fAutoGoSettleMs);
     }
+    gNvBootSettleMs = nvrmMsSince(t0);
+    if (!old) {
+        const uint32_t gfw1 = s->peekBar0(0x118234);
+        char g[40]; snprintf(g, sizeof g, "0x%08x -> 0x%08x", gfw0, gfw1);
+        s->setProperty("nvrm-gfw-boot", g);
+        // start() runs on, past the thread it started: power management and registerService come after it. Wait until
+        // it has returned before the card is touched (normally it has, long before the settle ends).
+        unsigned waited = 0;
+        while (!OSAddAtomic(0, &s->fStartReturned) && waited < kNvrmStartGateMaxMs) { IOSleep(kNvrmStartGateStepMs); waited += kNvrmStartGateStepMs; }
+        gNvBootGateMs = waited;
+        if (!OSAddAtomic(0, &s->fStartReturned))
+            LOG("auto-go: start() had still not returned %u ms after the settle - going on as before", waited);
+        else if (waited)
+            LOG("auto-go: waited %u ms after the settle for start() to return", waited);
+    }
+    t0 = nvrmNowNs();
     s->measureBootRaster();
+    gNvBootRasterMs = nvrmMsSince(t0);
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
+    // The framebuffer may have published its verdict after startGPU read it (kexts loaded on their own rather than
+    // from one collection). A refusal now still keeps the card as the firmware left it; this boot's start stays counted,
+    // and two such boots switch the driver off through the boot guard.
+    {
+        char text[200];
+        gNvLayoutFb = (unsigned)nvrmPeerLayout(s->fPCI, "nvrmfb-layout", text, sizeof text);
+        if (gNvLayoutFb == kNvLayoutRefused) {
+            LOG("auto-go: NOT STARTING THE GPU: the framebuffer refused this macOS's classes after NVRM had started (%s). "
+                "Boot-arg nvlayout=0 starts it anyway.", text);
+            s->fPCI->setProperty("nvrm-layout", "declined late (before go(2)): the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
+            s->setProperty("nvrm-autogo", "not started: framebuffer layout refused");
+            s->releaseBootHold("framebuffer layout refused - the card stays as the firmware left it");
+            nvrmBootTiming(s);
+            s->release(); thread_terminate(current_thread()); return;
+        }
+    }
     { uint64_t t; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &s->fBringUpStartNs); }
     s->fBringUp = 1;
     IOReturn r = s->go(2);
     // how long go(2) took, which says whether the cap was wide enough
     { uint64_t t, ns = 0; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &ns);
+      gNvBootGoMs = (unsigned)((ns - s->fBringUpStartNs) / 1000000ULL);
       LOG("auto-go: go(2) took %llu ms (hold cap settle + %u s)", (unsigned long long)((ns - s->fBringUpStartNs) / 1000000ULL), s->fHoldCapMs / 1000); }
     kprintf("NVRM-xnu: auto-go: go(2) -> 0x%x (fPassDone %u)\n", r, s->fPassDone);
     if (r != kIOReturnSuccess) {
@@ -1234,39 +1406,89 @@ void NVRM::autoGo(void *p0, wait_result_t)
         // so wait for it, bounded by the same 20 s as the NVIDIA heads.
         bool hyWait = false;
         { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hyWait = present && lv >= 1 && lv <= 4; }
-        int mask = 0, last = -1, still = 0, i;
-        for (i = 0; i < 20; i++) {
+        // The heads wait: the 2.9 exits and bound, polled every 50 ms (1 s with -nvrmoldwaits). The connector counts are
+        // read at most every 250 ms (each poll with -nvrmoldwaits, as 2.9 did); the registry walk only while no head is
+        // published, as in 2.9. A refusal by the accelerator ends it: no head will ever be published to it.
+        int mask = 0, i;
+        NvrmHeadsWait w; nvrmHeadsWaitInit(&w, old ? 1000u : (unsigned)kNvrmHeadsPollMs, want, hyWait);
+        NvrmHeadsWhy why = kNvrmHeadsKeepWaiting;
+        unsigned polls = 0, connected = 0, sinceRead = kNvrmHeadsRefreshMs, sinceWalk = kNvrmHeadsRefreshMs;
+        bool noDisplay = false;
+        if (hyWait) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
+        t0 = nvrmNowNs();
+        for (;;) {
             if (nvrmSysR("debug.nvaccel_heads_published", &mask) != 0) mask = 0;
-            if (hyWait) {
-                if (mask & 0x10) { LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %d s", i); break; }
-                if (i == 0) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
-                IOSleep(1000);
-                continue;
-            }
-            if ((int)nvrmPop((unsigned)mask) >= want) break;
-            still = (mask && mask == last) ? still + 1 : 0; last = mask;
-            if (still >= 3) break;
-            if (gDisplayNub0) {
-                OSNumber *cd = OSDynamicCast(OSNumber, gDisplayNub0->getProperty("connected-displays"));
-                if (cd && cd->unsigned32BitValue() > 0 && (int)nvrmPop((unsigned)mask) >= (int)cd->unsigned32BitValue()) break;
+            polls++;
+            if (!hyWait && (old || sinceRead >= kNvrmHeadsRefreshMs)) {
+                sinceRead = 0;
+                OSNumber *cd = gDisplayNub0 ? OSDynamicCast(OSNumber, gDisplayNub0->getProperty("connected-displays")) : NULL;
+                connected = cd ? cd->unsigned32BitValue() : 0;
             }
             // Every connector list is enumerated and none carries a display (a panel on the Intel or AMD GPU): no head
             // will ever publish, so waiting out the full twenty seconds only holds the registry for nothing.
-            if (!mask && nvrmNoDisplayAnywhere()) { LOG("auto-go: no display on any NVIDIA connector - not waiting for heads"); break; }
-            IOSleep(1000);
+            if (!hyWait && !mask && (old || sinceWalk >= kNvrmHeadsRefreshMs)) { sinceWalk = 0; noDisplay = nvrmNoDisplayAnywhere(); }
+            bool accelRefused = false;
+            if (!old) {
+                gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", NULL, 0);
+                accelRefused = gNvLayoutAccel == kNvLayoutRefused;
+            }
+            why = nvrmHeadsWaitPoll(&w, (unsigned)mask, connected, noDisplay, accelRefused);
+            if (why != kNvrmHeadsKeepWaiting) break;
+            IOSleep(w.stepMs);
+            sinceRead += w.stepMs; sinceWalk += w.stepMs;
+            if (!nvrmHeadsWaitSlept(&w)) { why = kNvrmHeadsTimeout; break; }
         }
-        LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %d s", mask, nvrmPop((unsigned)mask), want, i);
+        gNvBootHeadsMs = nvrmMsSince(t0); gNvBootHeadsPolls = polls; gNvBootHeadsWhy = (unsigned)why;
+        if (why == kNvrmHeadsNoDisplay) LOG("auto-go: no display on any NVIDIA connector - not waiting for heads");
+        if (why == kNvrmHeadsHybridPanel) LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %u ms", w.elapsedMs);
+        LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %u ms, %u polls: %s", mask, nvrmPop((unsigned)mask),
+            want, w.elapsedMs, polls, nvrmHeadsWhyName(why));
+        { char ld[64]; gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", ld, sizeof ld);
+          if (gNvLayoutAccel != kNvLayoutNotRun) LOG("auto-go: accelerator layout: %s", ld); }
+        if (why == kNvrmHeadsNoAccel) {
+            // NVAccel stepped aside: no acceleration on this macOS, and nothing will arm. What the hold is for is the
+            // display path, which NVRMFB reports by clearing the boot guard. Wait for that, then let WindowServer start.
+            const unsigned cap = nvrmAccelRefusedWaitMs(w.elapsedMs);
+            unsigned waited = 0; int cleared = 0;
+            while (waited < cap && (nvrmSysR("debug.nvrmfb_guard_cleared", &cleared) != 0 || cleared != 1)) { IOSleep(kNvrmHeadsPollMs); waited += kNvrmHeadsPollMs; }
+            LOG("auto-go: the accelerator declined this macOS's classes: no arming; the framebuffer's display %s after %u ms",
+                cleared == 1 ? "is up" : "did not report up", waited);
+            s->fBringUp = 0;
+            s->setProperty("nvrm-display", "not armed: the accelerator declined this macOS (nvaccel-layout)");
+            s->releaseBootHold(cleared == 1 ? "accelerator declined; display up without acceleration"
+                                            : "accelerator declined; display not reported up");
+            nvrmBootTiming(s);
+            s->release(); thread_terminate(current_thread()); return;
+        }
         s->fBringUp = 0;   // the cap may fire from here on; the next line decides whether it got there first
         const bool earlyRelease = nvrmReleaseBeforeArming((unsigned)mask, nvrmNoDisplayAnywhere());
         if (!OSCompareAndSwap(1, 2, &s->fBootHold)) {
             LOG("auto-go: the hold was already released (cap) — NOT arming with WindowServer up; heads 0x%x", mask);
             s->setProperty("nvrm-display", "not armed: hold released by the cap first");
+            nvrmBootTiming(s);
             s->release(); thread_terminate(current_thread()); return;
         }
         if (earlyRelease) s->releaseBootHold("no NVIDIA display head can arm yet; arming continues for a later hotplug");
+        // Ten tries, 1 s apart as in 2.9. A try that failed while head 0 was not published yet is repeated as soon as
+        // it is (polled every 50 ms, at most the same second later); otherwise nothing says when to retry.
         int armed = 0;
-        for (i = 0; i < 10; i++) { nvrmSysW("debug.nvaccelfb", 1); nvrmSysR("debug.nvaccelfb", &armed); if (armed == 1) break; IOSleep(1000); }
+        t0 = nvrmNowNs();
+        for (i = 0; i < (int)kNvrmArmTries; i++) {
+            nvrmSysW("debug.nvaccelfb", 1); nvrmSysR("debug.nvaccelfb", &armed);
+            if (armed == 1) break;
+            int m = 0;
+            const bool readable = !old && nvrmSysR("debug.nvaccel_heads_published", &m) == 0;
+            if (nvrmArmRetryMayPoll(readable, (unsigned)m)) {
+                for (unsigned ms = 0; ms < kNvrmArmStepMs; ms += kNvrmHeadsPollMs) {
+                    IOSleep(kNvrmHeadsPollMs);
+                    if (nvrmSysR("debug.nvaccel_heads_published", &m) == 0 && (m & 1)) break;
+                }
+            } else {
+                IOSleep(kNvrmArmStepMs);
+            }
+        }
         if (armed == 1) nvrmSysW("debug.nvaccelfb", 4);
+        gNvBootArmMs = nvrmMsSince(t0);
         LOG("auto-go: accelerator level 1 %s after %d tr%s%s", armed == 1 ? "took" : "NEVER took", i + 1, i ? "ies" : "y",
             armed == 1 ? ", level 4 written" : " — not arming further");
         int k5 = -99, ag = -99, iop = -99;
@@ -1282,6 +1504,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
         s->setProperty("nvrm-display", sum);
         LOG("auto-go: display stack: %s", sum);
         if (!earlyRelease) s->releaseBootHold(armed == 1 && ag == 1 && iop == 1 ? "display armed" : "display PARTIAL");
+        nvrmBootTiming(s);
         if (armed == 1 && iop == 1 && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
             // Zero-copy scan-out shows only what sits in this GPU's VRAM. One setup blacks the screen (cursor only) the
             // moment it starts, and every report was fixed by -nvrmnoflip: a second accelerated GPU (Intel/AMD iGPU;
@@ -1311,6 +1534,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
             s->setProperty("nvrm-flip", f == 1 ? "on" : "FAILED");
         }
     }
+    nvrmBootTiming(s);
     s->release();
     thread_terminate(current_thread());
 }
@@ -2088,6 +2312,9 @@ IOReturn NVRM::go(uint32_t pass)
         // register its channels with it. With boot-arg nvrmfence=0, or when it cannot allocate its table, it stays off
         // and every fence call made by this file does nothing.
         if (OSCompareAndSwap(0, 1, &fFenceStarted)) nvrm_fence_start();
+        // The GPU's start is complete, and everything above that hangs off it is running. Nothing may follow this line
+        // on the successful path (tools/test_lifecycle_order.py).
+        OSCompareAndSwap(0, 1, &fStartDone);
     }
     return kIOReturnSuccess;
 }
