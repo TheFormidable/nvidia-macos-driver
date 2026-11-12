@@ -14,8 +14,9 @@ shares with it, the copies the accelerator makes of surfaces. Every such address
   VT-d off in the firmware, the DMAR table dropped (the installer does this on Core Ultra machines), or the mapper
   disabled.
 - **With a mapper** every address on the bus is translated by AppleVTD. A physical address then means nothing, or
-  worse, means some other device's buffer. 2.9 did exactly that: on such a machine the GPU firmware does not boot,
-  and in the worst case the GPU writes into memory that belongs to something else.
+  worse, means some other device's buffer. 2.9 did exactly that. Nobody has tried 2.9 on such a machine; what to
+  expect, from how VT-d works, is GPU firmware that does not boot or, worse, GPU writes landing in memory that belongs
+  to something else.
 
 The driver now asks IOKit, once per GPU at start, which case it is in, and acts on the answer.
 
@@ -39,8 +40,9 @@ In modes 1 and 2:
   a list of raw physical pages is refused before the copy engine sees it;
 - when a GPU stops, anything still mapped for it is unmapped (and counted).
 
-Sleep and wake change nothing: AppleVTD keeps its tables in memory and restores them before drivers wake, so the
-GPU's addresses stay valid.
+Sleep and wake: the driver does nothing special. According to AppleVTD's published source it keeps its tables in
+memory and turns translation back on before drivers are woken, so a mapping made before sleep is still valid after
+it. This has not been tried (see the last section).
 
 ## How to see which mode a machine is in
 
@@ -81,7 +83,8 @@ All read-only. In mode 0 every one of them except `nvrm_dma_mode` stays 0.
 
 ## The boot-arg `nvrmdma=0`
 
-It is read once, at the first GPU start.
+It is read when each GPU starts (the boot arguments cannot change while the machine runs, so every GPU gets the same
+answer).
 
 - **Without a mapper** it changes nothing: mode 0, the 2.9 behaviour.
 - **With a mapper** it selects mode 3: the GPU is not started. It can never select "physical addresses on a
