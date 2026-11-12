@@ -2,14 +2,21 @@
 """NVRMFBClaim retires IONDRVFramebuffer on the NVIDIA GPU only (#119: with IONameMatch "display" alone it also held the
 IOFramebuffer category on a muxless laptop's Intel GPU, whose panel then had no framebuffer at all).
 
-Reads both fb Info.plists and NVRM.kext's, then applies IOPCIFamily's masked compares (IOPCIPrimaryMatch: the
+Reads the framebuffer's Info.plist and NVRM.kext's, then applies IOPCIFamily's masked compares (IOPCIPrimaryMatch: the
 (device << 16 | vendor) word; IOPCIClassMatch: the class/revision register) to the devices that matter."""
 import pathlib
 import plistlib
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FB = [ROOT / "kexts/NVRMFB/fb/Info.plist", ROOT / "kexts/NVRM/fb/Info.plist"]
+FB = [ROOT / "kexts/NVRMFB/fb/Info.plist"]
+
+
+def claim_holders(root):
+    """The Info.plist files under root/kexts that declare the NVRMFBClaim personality."""
+    return sorted(str(p.relative_to(root)) for p in (root / "kexts").rglob("Info.plist")
+                  if "NVRMFBClaim" in p.read_text(errors="replace"))
 
 
 def matches(spec, word):
@@ -37,8 +44,21 @@ class FBClaim(unittest.TestCase):
     def setUp(self):
         self.claim = plistlib.loads(FB[0].read_bytes())["IOKitPersonalities"]["NVRMFBClaim"]
 
-    def test_both_fb_plists_identical(self):
-        self.assertEqual(FB[0].read_bytes(), FB[1].read_bytes())
+    def test_one_fb_plist(self):
+        # kexts/NVRM/fb held a second copy of this plist that no build used, and this test kept the two identical.
+        # The copy is gone; a new one would drift unseen, so the claim may be declared in exactly one place.
+        self.assertEqual(claim_holders(ROOT), ["kexts/NVRMFB/fb/Info.plist"])
+
+    def test_a_second_copy_is_found(self):
+        # control for the arm above: the search reports every plist that declares the claim, wherever it lies
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            for rel, text in (("kexts/NVRMFB/fb/Info.plist", "<key>NVRMFBClaim</key>"),
+                              ("kexts/NVRM/fb/Info.plist", "<key>NVRMFBClaim</key>"),
+                              ("kexts/NVRM/Info.plist", "<key>NVRM</key>")):
+                (d / rel).parent.mkdir(parents=True, exist_ok=True)
+                (d / rel).write_text(text)
+            self.assertEqual(claim_holders(d), ["kexts/NVRM/fb/Info.plist", "kexts/NVRMFB/fb/Info.plist"])
 
     def test_same_vendor_and_class_match_as_nvrm(self):
         nvrm = plistlib.loads((ROOT / "kexts/NVRM/Info.plist").read_bytes())["IOKitPersonalities"]["NVRM"]
