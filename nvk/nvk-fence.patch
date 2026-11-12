@@ -112,7 +112,7 @@ index 2a61354..36e74e5 100644
  
  /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 71cd898..47a706d 100644
+index 71cd898..63e9929 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -6,6 +6,7 @@
@@ -123,7 +123,7 @@ index 71cd898..47a706d 100644
  #include <stdlib.h>
  #include "ctrl/ctrl0080/ctrl0080fifo.h" // NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES
  #include "ctrl/ctrl2080/ctrl2080gr.h" // NV2080_CTRL_CMD_GR_{GET_CTXSW_MODES,SET_CTXSW_PREEMPTION_MODE}
-@@ -198,6 +199,242 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
+@@ -198,6 +199,249 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
     usleep(200);
  }
  
@@ -145,7 +145,8 @@ index 71cd898..47a706d 100644
 + * device and may then be pooled and handed to a later open, which would strand the channels registered under it. When
 + * the process exits the connection closes and the kernel ends everything it owned.
 + * EVERY FAILURE COSTS ONLY THE FENCE. A kext without selector 12 (2.9) fails the first request: the fence is absent for
-+ * the life of the process and nothing more is asked. A kext whose fence is off (nvrmfence=0) answers NVRM_FENCE_ST_OFF.
++ * the life of the process, nothing more is asked and nothing is printed (NVK_DIAG=1 says it). A kext whose fence is off
++ * (nvrmfence=0) answers NVRM_FENCE_ST_OFF.
 + * A channel the kernel will not watch keeps kchan 0 and runs as before; while such a channel exists OPEN answers
 + * NVRM_FENCE_ST_MAP, and the plugin covers the process's surfaces with the 2.9 marks and tags (a hold whose completion
 + * the kernel cannot see would run into its time bound and count against the process). */
@@ -166,7 +167,8 @@ index 71cd898..47a706d 100644
 +   r->flags = flags;
 +}
 +
-+/* One line per process, for the first thing that keeps the fence from a channel or from the process. */
++/* One line per process, for the first thing that keeps the fence from a channel or from the process when the kext
++ * has a fence. */
 +static void
 +nvrm_fence_say(const char *what, unsigned status)
 +{
@@ -197,7 +199,12 @@ index 71cd898..47a706d 100644
 +            if (fd >= 0)
 +               NVRM_CLOSE(fd);
 +            have = -1;
-+            nvrm_fence_say(fd < 0 ? "no connection to the kext" : "the kext has none", 0);
++            /* A kext older than the fence (2.9, still loaded after an update until the restart) is not a fault, and
++             * a program on a healthy GPU prints nothing: that case is said only when the diagnostics are on. */
++            if (fd < 0)
++               nvrm_fence_say("no connection to the kext", 0);
++            else if (nvkmd_nvrm_diag_on())
++               nvrm_fence_say("the kext has none", 0);
 +         }
 +         __atomic_store_n(&nvrm_fence_have, have, __ATOMIC_RELEASE);
 +      }
@@ -366,7 +373,7 @@ index 71cd898..47a706d 100644
  /* b73 SLEEP ON THE GPU'S COMPLETION EVENT. NVK ends every submission with NON_STALL_INTERRUPT after its semaphore
   * release; RM's event for it reaches the device's osEvent connection (one per VkDevice, and GPU-wide: every graphics
   * completion posts it), and the kext's selector 6 sleeps until that event's count moves.
-@@ -289,14 +526,24 @@ nvrm_evw_nvk_pending(void *p, int *fd)
+@@ -289,14 +533,24 @@ nvrm_evw_nvk_pending(void *p, int *fd)
     return pending;
  }
  
@@ -394,7 +401,7 @@ index 71cd898..47a706d 100644
     const int64_t t0 = timeout_us != 0 ? os_time_get_nano() : 0;
     if (nvrm_xnu_wait_event2(fd, seen, timeout_us, out) != 0) {
        c->refused = true;
-@@ -641,8 +888,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -641,8 +895,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        return;
     volatile uint64_t *sem = ctx->sem->map;
     *sem = 0;   // compared >= seq now: it must start below the first seq (the old == never needed it)
@@ -406,7 +413,7 @@ index 71cd898..47a706d 100644
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
        struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
-@@ -653,8 +903,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -653,8 +910,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        s->semVA = ctx->sem->va->addr;
        s->dev = ctx->base.dev;
        s->flushed = 0;
@@ -418,7 +425,7 @@ index 71cd898..47a706d 100644
        ctx->slot1 = i + 1;
        break;
     }
-@@ -663,6 +915,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -663,6 +922,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        fprintf(stderr, "nvrm: G-SUB: all %d channel slots in use - this channel stays SYNCHRONOUS\n", NVRM_CTX_MAX);
        return;
     }
@@ -427,7 +434,7 @@ index 71cd898..47a706d 100644
     ctx->gsub = true;
     ctx->curSlot = 0;
     nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
-@@ -682,7 +936,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -682,7 +943,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     s->ctx = NULL;
     s->sem = NULL;
     s->gen++;
@@ -439,7 +446,7 @@ index 71cd898..47a706d 100644
     ctx->slot1 = 0;
     ctx->gsub = false;
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
-@@ -701,6 +959,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -701,6 +966,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     nvkmd_nvrm_reap_deferred();
  }
  
@@ -598,7 +605,7 @@ index 71cd898..47a706d 100644
  
  static void
  write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
-@@ -1177,6 +1587,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1177,6 +1594,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        return r;
  
     ctx->wSeq++;
@@ -607,7 +614,7 @@ index 71cd898..47a706d 100644
     write_l2_sysmem_tail(&ctx->push);
     write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
     const struct nvkmd_ctx_exec seg = {
-@@ -1355,6 +1767,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1355,6 +1774,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
        return nvrm_gsub_submit(ctx, log_obj);
  
     ctx->wSeq++;

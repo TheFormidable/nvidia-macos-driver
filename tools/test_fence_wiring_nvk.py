@@ -24,7 +24,9 @@ This test reads the patch and holds what only NVK's glue can get wrong:
                  is 0 without asynchronous submission; OPEN is refused while a channel is not watched; ARM resolves the
                  fence under the mutex and arms only a watched channel
   the kext       selector 12 through the header's number, the whole struct back or nothing; one connection opened for
-                 the fence alone, at the first request
+                 the fence alone, at the first request; a kext that simply has no fence (2.9, still loaded after an
+                 update until the restart) is not announced unless NVK_DIAG asks, because a program on a healthy GPU
+                 prints nothing
   the rebuild    the rebind function exists for the channel rebuild to call, is declared in nvkmd_nvrm.h, and on any
                  refusal deletes the registration
 
@@ -254,7 +256,11 @@ def chk_kext(t):
                                                        "__atomic_store_n(&nvrm_fence_fd, fd,", "NVRM_CLOSE(fd);",
                                                        "__atomic_store_n(&nvrm_fence_have, have, __ATOMIC_RELEASE);")
             and add.count("NVRM_CLOSE(") == 1 and "ctlFd" not in add and "= nvrm_fence_have;" not in add
-            and "r->status = NVRM_FENCE_ST_OFF;\n   return false;" in call)
+            and "r->status = NVRM_FENCE_ST_OFF;\n   return false;" in call
+            # a kext without the fence is said only under NVK_DIAG; a connection that cannot be opened always
+            and order(call, 'if (fd < 0)\n               nvrm_fence_say("no connection to the kext", 0);',
+                      'else if (nvkmd_nvrm_diag_on())\n               nvrm_fence_say("the kext has none", 0);')
+            and add.count('"the kext has none"') == 1)
 
 
 def chk_rebind(t):
@@ -313,11 +319,14 @@ CHECKS = [
      chk_requests, "if (op == NVRM_FENCE_OP_OPEN && !nvrm_fence_all_watched())", "if (op == NVRM_FENCE_OP_OPEN && 0)"),
     ("the kext: selector 12 whole or nothing, through one connection opened for the fence", chk_kext,
      "if (kr != KERN_SUCCESS || outSize != sizeof out) return -1;", "if (kr != KERN_SUCCESS) return -1;"),
+    ("the kext, quiet: a line in every program for a kext that has no fence is refused", chk_kext,
+     "            else if (nvkmd_nvrm_diag_on())\n", "            else\n"),
     ("the rebuild: the rebind is declared for its caller and deletes the registration when refused", chk_rebind,
      "   nvrm_fence_chan_del(gone);", "   (void)gone;"),
 ]
 for name, fn, good, broken in CHECKS:
-    more = name.startswith("the seam: a ")      # further controls of the seam check: it runs on the patch itself once
+    # further controls of a check that has already run on the patch itself
+    more = name.startswith(("the seam: a ", "the kext, quiet: "))
     if not more:
         arm(name, fn(patch))
     damaged = patch.replace(good, broken)
