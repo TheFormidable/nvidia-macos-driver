@@ -504,8 +504,9 @@ static void nvmtl_nvencvt_register(bool decodersOnly)
         if (!h) { nvlog("nvencvt: dlopen %s FAILED: %s", path, dlerror()); return; }
         // Blackwell: only a build of the library that decodes its test streams on the card before it registers. Such a
         // build exports this marker (vendor/nvenc/vt/nvencvt.c); an older one registered its Blackwell decoder untested,
-        // and VideoToolbox does not fall back once it has picked a decoder.
-        if (haveGen && nvmtl_gen_is(gen, "Blackwell") && !dlsym(h, "NVEncVT_BlackwellSelfTest")) {
+        // and VideoToolbox does not fall back once it has picked a decoder. A driver that publishes no generation (an older
+        // NVRM, reached with NVMTL_NVENCVT=1 or a process list) is told apart by the video layout or the device name.
+        if ((haveGen ? nvmtl_gen_is(gen, "Blackwell") : nvmtl_video_is_blackwell()) && !dlsym(h, "NVEncVT_BlackwellSelfTest")) {
             nvlog("nvencvt: %s is a build without the Blackwell decode self-test - REFUSED on this card", path);
             return;
         }
