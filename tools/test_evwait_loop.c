@@ -79,10 +79,16 @@ static const struct nvrm_evw_ops ops = { w_pending, k_wait, w_backoff, w_stat };
 static volatile int fell_back;
 static int gpu_delay_us, gpu_jobs;
 static volatile int gpu_stop;      /* the waiter stopped early: the GPU thread ends after the job in hand */
+/* The job the waiter has begun to wait for. The GPU starts job i only then, so that every wait has a whole job ahead of
+   it however late the scheduler runs the waiter; unpaced, a waiter held up for a few milliseconds finds the next jobs
+   already complete and never sleeps for them, and the arms that count woken sleeps would depend on the load. */
+static volatile uint64_t gpu_go;
 static void *gpu_thread(void *arg)
 {
     (void)arg;
     for (int i = 1; i <= gpu_jobs && !gpu_stop; i++) {
+        while (gpu_go < (uint64_t)i && !gpu_stop) { struct timespec p = { 0, 10000 }; nanosleep(&p, NULL); }
+        if (gpu_stop) break;
         struct timespec ts = { 0, gpu_delay_us * 1000L }; nanosleep(&ts, NULL);
         done_seq = (uint64_t)i;            /* the completion is visible first, the event comes after: as on the GPU */
         if (!kdrop) k_post((uint64_t)i);
@@ -113,14 +119,15 @@ static void after_round(struct waiter *w, const struct nvrm_evw_thread *t, unsig
 static int run(int mode, int jobs, int delay_us, int until_fallback, struct waiter *w, struct nvrm_evw_thread *t)
 {
     pthread_t g; unsigned prev = t->misses; uint64_t last_job = 0; int i;
-    memset(w, 0, sizeof *w); done_seq = 0; kseq = 0; kposted = 0; gpu_jobs = jobs; gpu_delay_us = delay_us; gpu_stop = 0;
+    memset(w, 0, sizeof *w); done_seq = 0; kseq = 0; kposted = 0; gpu_jobs = jobs; gpu_delay_us = delay_us; gpu_stop = 0; gpu_go = 0;
     pthread_create(&g, NULL, gpu_thread, NULL);
     for (i = 1; i <= jobs; i++) {
-        w->want = (uint64_t)i;
+        w->want = (uint64_t)i; gpu_go = (uint64_t)i;
         const uint64_t t0 = now_ns();
         while (done_seq < w->want) { nvrm_evw_round(t, mode, now_ns() - t0, UINT64_MAX, 1, &fell_back, &ops, w); after_round(w, t, &prev, &last_job); }
-        if (until_fallback && fell_back) { gpu_stop = 1; break; }
+        if (until_fallback && fell_back) break;
     }
+    gpu_stop = 1;      /* the GPU thread waits for no job the waiter will not ask for */
     pthread_join(g, NULL);
     return i > jobs ? jobs : i;
 }
@@ -233,6 +240,22 @@ static void scripted(void)
     s.pending = 1; s.fd = s.fd_second = 3; s.rc = -1;
     round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
     T("control: a failed call on a real event does switch the process to polling", fb == 1 && s.stats[NVRM_EVW_S_FELL_BACK] == 1 && s.noevent == 0);
+
+    /* a capped or aborted answer did not sleep its time, but when its count moved an event was posted all the same */
+    static const unsigned cut[] = { NVRM_EVW_R_CAPPED, NVRM_EVW_R_ABORTED };
+    int cut_ok = 1, kept_ok = 1;
+    for (unsigned i = 0; i < sizeof cut / sizeof cut[0]; i++) {
+        memset(&s, 0, sizeof s); memset(&t, 0, sizeof t); t.seq_fd = -1; fb = 0;
+        s.pending = 1; s.fd = s.fd_second = 3; s.reason = cut[i];
+        nvrm_evw_remember(&t, 3, 40); t.misses = 5; s.count = 41;
+        round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
+        if (t.misses != 0 || s.backoffs != 1 || s.stats[NVRM_EVW_S_MISSED] || t.seq != 41) cut_ok = 0;
+        nvrm_evw_remember(&t, 3, 40); t.misses = 5; s.count = 40;
+        round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
+        if (t.misses != 5 || s.backoffs != 1 || s.stats[NVRM_EVW_S_MISSED]) kept_ok = 0;
+    }
+    T("a capped or aborted answer whose count moved ends a run of missed wakes, and still takes its polling step", cut_ok && !fb);
+    T("control: the same answers with the count where it was leave the run as it is", kept_ok && !fb);
 }
 
 /* the missed-wake control needs pending() to change its answer inside one round: busy before the sleep, complete after */
@@ -282,8 +305,10 @@ static void lost_control(void)
 
 /* Late events, scripted (no clock, no thread): job after job the sleep runs out with the count where it was although the
    work has just completed, and its event is posted after; the thread's next call finds the count moved. This is what the
-   GPU does to a thread whose waits keep ending near a sleep bound. `hide` rewrites each MOVED answer, as a kext that
-   could not say "moved" would. */
+   GPU does to a thread whose waits keep ending near a sleep bound. `hide` changes the answer to the call that finds the
+   count moved: 1 says COUNT, as a kext that could not say "moved" would (the control); 2 and 3 say ABORTED and CAPPED,
+   a signal or the sleeper ceiling in the call that would have seen it (the round polls one step, and here that step finds
+   the next job complete, so every other job ends without a sleep). */
 struct late { int busy, late, hide; uint32_t count; unsigned rounds, moved, sleeps, backoffs, missed, fellback, max_run; };
 static int l_pending(void *ctx, int *fd) { struct late *l = ctx; *fd = 3; return l->busy; }
 static int l_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
@@ -291,7 +316,10 @@ static int l_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
     struct late *l = ctx; (void)fd;
     if (l->late) { l->count++; l->late = 0; }                          /* the last job's event arrived in between */
     if (us == 0) { *out = nvrm_evw_pack(l->count, NVRM_EVW_R_COUNT); return 0; }
-    if (l->count != seen) { l->moved++; *out = nvrm_evw_pack(l->count, l->hide ? NVRM_EVW_R_COUNT : NVRM_EVW_R_MOVED); return 0; }
+    if (l->count != seen) {
+        static const unsigned as[] = { NVRM_EVW_R_MOVED, NVRM_EVW_R_COUNT, NVRM_EVW_R_ABORTED, NVRM_EVW_R_CAPPED };
+        l->moved++; *out = nvrm_evw_pack(l->count, as[l->hide]); return 0;
+    }
     l->busy = 0; l->late = 1;                                           /* the work completes as the sleep runs out */
     *out = nvrm_evw_pack(l->count, NVRM_EVW_R_TIMEOUT);
     return 0;
@@ -331,6 +359,11 @@ static void late_scripted(void)
     jobs = late_events(NVRM_EVW_ADAPT, 1, 1000, &l, &fb);
     T("control: the same script with every moved count hidden from the round falls back, at the sixteenth missed wake",
       fb && l.fellback == 1 && l.missed == NVRM_EVW_MISS_LIMIT && l.max_run == NVRM_EVW_MISS_LIMIT && jobs == NVRM_EVW_MISS_LIMIT);
+    jobs = late_events(NVRM_EVW_ADAPT, 2, 1000, &l, &fb);
+    T("late events seen by an aborted call: never a fallback, the run never above 1",
+      jobs == 1000 && !fb && l.missed == 500 && l.max_run == 1 && l.backoffs == 500);
+    jobs = late_events(NVRM_EVW_ADAPT, 3, 1000, &l, &fb);
+    T("late events seen by a capped call: the same", jobs == 1000 && !fb && l.missed == 500 && l.max_run == 1 && l.backoffs == 500);
 }
 
 int main(void)
@@ -361,7 +394,7 @@ int main(void)
       w.stats[NVRM_EVW_S_WOKEN] >= 30 && w.lost == 0 && w.bad_runs == 0 && w.max_run <= 2 && !fell_back);
     /* 3. events never arrive: bounded sleeps, then polling for good. This is also the control for arms 1 and 2: the
           same waiter against a kernel that loses every wake is seen to miss them. A job that the scheduler makes finish
-          after its sleep ran out gives no miss, so the arm runs until the fallback (about twenty jobs), not a fixed
+          after its sleep ran out gives no miss, so the arm runs until the fallback (sixteen jobs or a few more), not a fixed
           number of jobs that a loaded machine might not fill with sixteen misses. */
     memset(&t, 0, sizeof t); t.seq_fd = -1; kdrop = 1; kmax_us = 0;
     const uint64_t a = now_ns();
