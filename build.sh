@@ -136,6 +136,10 @@ check_pins() {
   esac
   pin_agree "RyzenAdj tag" "$NM_PIN_RYZENADJ_REF" tools/ryzenadj-macos/build.sh "TAG=$NM_PIN_RYZENADJ_REF"
   pin_agree "RyzenAdj commit" "$NM_PIN_RYZENADJ_COMMIT" tools/ryzenadj-macos/build.sh "COMMIT=$NM_PIN_RYZENADJ_COMMIT"
+  case "$NM_PIN_SPIRVLLVM_REF" in
+    "v$NM_PIN_TOOL_LLVM_MAJOR".*) say "  pin ok    SPIRV-LLVM-Translator = $NM_PIN_SPIRVLLVM_REF (LLVM $NM_PIN_TOOL_LLVM_MAJOR)" ;;
+    *) say "  pin FAIL  SPIRV-LLVM-Translator = $NM_PIN_SPIRVLLVM_REF, but LLVM is $NM_PIN_TOOL_LLVM_MAJOR (Mesa needs the same major.minor)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
+  esac
   pin_agree "Rust (translator)" "$NM_PIN_RUST_VERSION" build/build_xlate_release.sh "RV=\${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}"
   return 0
 }
@@ -146,7 +150,7 @@ OPTION_VARS="NM_WORK NM_JOBS NM_ASSUME_YES NM_NO_INSTALL NM_OFFLINE NM_DRY_RUN N
 NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"
 # where outside things come from
 LOCATION_VARS="NM_OGKM_URL NM_MESA_URL NM_KHRONOS_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_RUSTUP_URL
-RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
+NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
 NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK NULLMOTH_BUILD_ROOT NULLMOTH_BUILD_HOST NM_LOCAL_HOST_PATH"
 # read by the existing build scripts and passed through when set (their defaults are the scripts' own)
 SCRIPT_VARS="NV_VERSION KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB MACOSX_DEPLOYMENT_TARGET NVK_PATH NVK_SYSROOT NVK_JOBS
@@ -241,6 +245,7 @@ derive_paths() {
   THOST=$TOOLS/host
   # always under the working directory: a RUSTUP_HOME or CARGO_HOME from your shell (~/.rustup, ~/.cargo) is not used
   RUSTUP_DIR=$TOOLS/rustup
+  SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator
   CARGO_DIR=$TOOLS/cargo
   BUILD_HOST=${NULLMOTH_BUILD_HOST:-$LOCAL_HOST}
   case "$(uname -m)" in arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
@@ -442,17 +447,30 @@ find_tools() {
     T_LLVMCONFIG=$LLVM_PREFIX/bin/llvm-config
     LIBCLANG_DIR=$LLVM_PREFIX/lib
   fi
-  # SPIRV-LLVM-Translator: its .pc must have LLVM's major.minor
+  # SPIRV-LLVM-Translator: its .pc must have LLVM's major.minor. The one deps builds, then Homebrew's (which follows
+  # Homebrew's current llvm), then one inside the LLVM prefix; the first that matches LLVM, else the first found
   PC_SPIRV_LLVM=""; T_LLVMSPIRV=""
-  for p in "$(brew_opt spirv-llvm-translator)" "$LLVM_PREFIX"; do
+  local first="" mm=""
+  [ -z "$T_LLVMCONFIG" ] || mm=$("$T_LLVMCONFIG" --version 2>/dev/null | cut -d. -f1-2)
+  for p in "$SPIRVLLVM_PREFIX" "$(brew_opt spirv-llvm-translator)" "$LLVM_PREFIX"; do
     [ -n "$p" ] && [ -f "$p/lib/pkgconfig/LLVMSPIRVLib.pc" ] || continue
-    PC_SPIRV_LLVM=$p/lib/pkgconfig
-    [ -x "$p/bin/llvm-spirv" ] && T_LLVMSPIRV=$p/bin/llvm-spirv
-    break
+    [ -n "$first" ] || first=$p
+    if [ -n "$mm" ]; then case "$(pc_version "$p/lib/pkgconfig/LLVMSPIRVLib.pc")" in "$mm"|"$mm".*) first=$p; break ;; esac; fi
   done
+  if [ -n "$first" ]; then
+    PC_SPIRV_LLVM=$first/lib/pkgconfig
+    [ ! -x "$first/bin/llvm-spirv" ] || T_LLVMSPIRV=$first/bin/llvm-spirv
+  fi
   PC_SPIRV_TOOLS=""
   p=$(brew_opt spirv-tools); [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] && PC_SPIRV_TOOLS=$p/lib/pkgconfig
   return 0
+}
+spirv_llvm_ok() {   # a SPIRV-LLVM-Translator of the chosen LLVM's major.minor was found
+  local mm
+  [ -n "$PC_SPIRV_LLVM" ] && [ -n "$T_LLVMCONFIG" ] || return 1
+  mm=$("$T_LLVMCONFIG" --version 2>/dev/null | cut -d. -f1-2)
+  case "$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")" in "$mm"|"$mm".*) return 0 ;; esac
+  return 1
 }
 llvm_version() { [ -z "$T_LLVMCONFIG" ] || "$T_LLVMCONFIG" --version 2>/dev/null || true; }
 venv_python() { [ -x "$VENV/bin/python3" ] && printf '%s' "$VENV/bin/python3"; return 0; }
@@ -581,9 +599,9 @@ doctor() {   # prints; sets D_MISSING
     v=$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")
     if [ -n "$LLVM_PREFIX" ]; then
       x=$("$T_LLVMCONFIG" --version | cut -d. -f1-2)
-      case "$v" in "$x"|"$x".*) d_ok "SPIRV-LLVM-Translator $v" ;; *) d_old "SPIRV-LLVM-Translator $v does not match LLVM $x (Mesa needs the same major.minor)" ;; esac
+      case "$v" in "$x"|"$x".*) d_ok "SPIRV-LLVM-Translator $v" ;; *) d_old "SPIRV-LLVM-Translator $v does not match LLVM $x (Mesa needs the same major.minor; deps builds $NM_PIN_SPIRVLLVM_REF into $SPIRVLLVM_PREFIX)" ;; esac
     else d_note "SPIRV-LLVM-Translator $v (LLVM $NM_PIN_TOOL_LLVM_MAJOR missing)"; fi
-  else d_missing "SPIRV-LLVM-Translator for LLVM $NM_PIN_TOOL_LLVM_MAJOR (Homebrew spirv-llvm-translator)"; fi
+  else d_missing "SPIRV-LLVM-Translator for LLVM $NM_PIN_TOOL_LLVM_MAJOR (deps builds $NM_PIN_SPIRVLLVM_REF into $SPIRVLLVM_PREFIX)"; fi
   if [ -n "$PC_SPIRV_TOOLS" ]; then
     v=$(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc")
     ver_ge "$v" "$NM_PIN_TOOL_SPIRV_TOOLS_MIN" && d_ok "SPIRV-Tools $v" || d_old "SPIRV-Tools $v ($NM_PIN_TOOL_SPIRV_TOOLS_MIN or later)"
@@ -862,11 +880,10 @@ cmd_deps() {
     else warn "Homebrew has no LLVM $NM_PIN_TOOL_LLVM_MAJOR formula today: install LLVM $NM_PIN_TOOL_LLVM_MAJOR.x yourself (with its clang libraries) and set NM_LLVM_PREFIX to it"; fi
     [ -z "$llvmf" ] || want+=( "$llvmf" )
   fi
-  if [ -z "$PC_SPIRV_LLVM" ] && [ "$nobrew" = 1 ]; then want+=( spirv-llvm-translator )
-  elif [ -z "$PC_SPIRV_LLVM" ]; then
-    # Homebrew builds spirv-llvm-translator against its current llvm; only then is it the matching version
-    if brew_llvm_is_pinned; then want+=( spirv-llvm-translator )
-    else warn "Homebrew's spirv-llvm-translator follows its current llvm, which is not $NM_PIN_TOOL_LLVM_MAJOR: build SPIRV-LLVM-Translator (branch llvm_release_${NM_PIN_TOOL_LLVM_MAJOR}0) against LLVM $NM_PIN_TOOL_LLVM_MAJOR and set PKG_CONFIG_PATH to its lib/pkgconfig"; fi
+  # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22. Otherwise
+  # deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
+  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
+    want+=( spirv-llvm-translator )
   fi
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
@@ -883,6 +900,7 @@ cmd_deps() {
     else say "not installed; the build needs them"; fi
     find_tools
   fi
+  deps_spirv_llvm
   deps_python
   deps_rust
   if [ "$NM_DRY_RUN" = 1 ]; then say "deps: dry run; the commands above would run, nothing was installed"; return 0; fi
@@ -892,6 +910,48 @@ cmd_deps() {
   if [ "$missing_xcode" = 1 ]; then die "Xcode is still missing (see above)"; fi
   if [ "$D_MISSING" != 0 ]; then say "deps: still missing:"; printf '%s' "$D_LINES"; exit 1; fi
   say "deps: everything required is present"
+}
+# SPIRV-LLVM-Translator for LLVM 22, from the pinned source, into the working directory; the recipe is Homebrew's
+# formula's (shared library, absolute install name, SPIRV-Headers at the commit the translator names)
+deps_spirv_llvm() {
+  local src=$SRC/SPIRV-LLVM-Translator hdr=$SRC/SPIRV-Headers bld=$TOOLS/spirv-llvm-translator-build pre=$SPIRVLLVM_PREFIX
+  local tpath="$TBIN:/usr/bin:/bin:/usr/sbin:/sbin" conf
+  if spirv_llvm_ok; then say "SPIRV-LLVM-Translator: $PC_SPIRV_LLVM (matches LLVM $(llvm_version))"; return 0; fi
+  say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (a few minutes)"
+  if [ "$NM_NO_INSTALL" = 1 ]; then say "not building it (--no-install)"; return 0; fi
+  if [ "$NM_DRY_RUN" = 1 ]; then
+    say "    git fetch $(mirror_url SPIRVLLVM) refs/tags/$NM_PIN_SPIRVLLVM_REF; git fetch $(mirror_url SPIRVHEADERS) $NM_PIN_SPIRVHEADERS_COMMIT"
+    say "    cmake -S $(q "$src") -B $(q "$bld") -G Ninja -DLLVM_DIR=<LLVM $NM_PIN_TOOL_LLVM_MAJOR>/lib/cmake/llvm -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=$(q "$pre") ...; cmake --build; cmake --install"
+    return 0
+  fi
+  if [ -z "$LLVM_PREFIX" ] || [ -z "$T_CMAKE" ] || [ -z "$T_NINJA" ]; then
+    warn "SPIRV-LLVM-Translator is built with LLVM $NM_PIN_TOOL_LLVM_MAJOR, cmake and ninja, and one of them is missing"; return 0
+  fi
+  if [ "$NM_OFFLINE" = 1 ] && ! { git_q -C "$GITDIR/SPIRV-LLVM-Translator.git" cat-file -e "$NM_PIN_SPIRVLLVM_COMMIT^{commit}" &&
+                                  git_q -C "$GITDIR/SPIRV-Headers.git" cat-file -e "$NM_PIN_SPIRVHEADERS_COMMIT^{commit}"; } 2>/dev/null; then
+    warn "offline: the SPIRV-LLVM-Translator sources are not here yet"; return 0
+  fi
+  ask "Build SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF into $pre?" || { say "not built; NVK needs it"; return 0; }
+  CUR_STEP=spirv-llvm-translator; CUR_LOG=$LOGS/spirv-llvm-translator.log
+  { say "build.sh deps: SPIRV-LLVM-Translator, $(date -u +%Y-%m-%dT%H:%M:%SZ), LLVM $(llvm_version) at $LLVM_PREFIX"; say "----"; } > "$CUR_LOG"
+  fetch_bare SPIRVLLVM "$GITDIR/SPIRV-LLVM-Translator.git"; export_tree SPIRVLLVM "$GITDIR/SPIRV-LLVM-Translator.git" "$src"
+  conf=$(tr -d ' \n' < "$src/spirv-headers-tag.conf" 2>/dev/null || true)
+  [ "$conf" = "$NM_PIN_SPIRVHEADERS_COMMIT" ] || die "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF names SPIRV-Headers ${conf:-(nothing)} in spirv-headers-tag.conf, the pin is $NM_PIN_SPIRVHEADERS_COMMIT: change build/pins.sh"
+  fetch_bare SPIRVHEADERS "$GITDIR/SPIRV-Headers.git"; export_tree SPIRVHEADERS "$GITDIR/SPIRV-Headers.git" "$hdr"
+  make_tool_links   # cmake finds ninja and pkg-config in tools/bin
+  [ ! -e "$bld" ] || safe_rm "$bld"
+  [ ! -e "$pre" ] || safe_rm "$pre"
+  say "building SPIRV-LLVM-Translator (log: $(printf '%s' "$CUR_LOG" | tilde))"
+  x env "PATH=$tpath" "$T_CMAKE" -S "$src" -B "$bld" -G Ninja "-DCMAKE_MAKE_PROGRAM=$T_NINJA" -DCMAKE_BUILD_TYPE=Release \
+    "-DCMAKE_INSTALL_PREFIX=$pre" -DCMAKE_INSTALL_LIBDIR=lib "-DCMAKE_INSTALL_NAME_DIR=$pre/lib" "-DCMAKE_INSTALL_RPATH=$pre/lib" \
+    -DBUILD_SHARED_LIBS=ON -DCCACHE_ALLOWED=OFF -DLLVM_BUILD_TOOLS=ON -DLLVM_SPIRV_INCLUDE_TESTS=OFF \
+    "-DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm" "-DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=$hdr"
+  x env "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
+  x env "PATH=$tpath" "$T_CMAKE" --install "$bld"
+  [ -f "$pre/lib/pkgconfig/LLVMSPIRVLib.pc" ] || { say "the install left no $pre/lib/pkgconfig/LLVMSPIRVLib.pc" >> "$CUR_LOG"; fail_step spirv-llvm-translator 1; }
+  CUR_STEP=""
+  find_tools
+  spirv_llvm_ok || warn "the SPIRV-LLVM-Translator just built says $(pc_version "$pre/lib/pkgconfig/LLVMSPIRVLib.pc"), LLVM is $(llvm_version)"
 }
 write_requirements() {   # pip --require-hashes file from build/pins.sh
   local p spec h
@@ -1009,7 +1069,7 @@ comp_info() {
     nvk)   C_DESC="NVK, the Vulkan driver (libvulkan_nouveau.dylib)"
            C_SRC="build/build_nvk.sh build/gen_nvk_rust_crates.py nvk licenses/nvk-rust-crates.txt"
            C_VARS="NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS NVK_JOBS NVK_PATH PKG_CONFIG_PATH LIBCLANG_PATH NM_MESA_GIT NM_OGKM610"
-           C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR="
+           C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR= SPIRVLLVM_ SPIRVHEADERS_"
            C_TOOLS="xcode patch python nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
     vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
@@ -1428,7 +1488,8 @@ print_env() {
   say "export NM_PACKAGE_NAME=$(q "$(package_name)")"
   say "export NM_BUILD_INFO=$(q "$PKGDIR/build-info.txt")"
   say "# -- mirrors (empty = the URL in build/pins.sh)"
-  for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_RUSTUP_URL RUSTUP_DIST_SERVER; do
+  for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL \
+           NM_RUSTUP_URL RUSTUP_DIST_SERVER; do
     eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(q \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- not used by build.sh: STEPS and NM_REV (build_release_inputs.sh, which build.sh replaces), X and RELEASE"
