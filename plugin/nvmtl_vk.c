@@ -800,6 +800,17 @@ static int (*pnvk_sparse)(void);
 // this process's existing channel groups (level -1 restores what they had). The decision is nvmtl_live_decide; this keeps
 // the caller's memory ("applied") and re-runs it each time com.nullmoth.gamemode.active changes. Off unless a switch is on.
 static int (*pnvk_reprio)(int, unsigned long);
+// NVK's channel recovery: after a GPU fault it can rebuild the faulted channel instead of losing the device, and then
+// signals the fence of the work it did not run from the CPU. These two say which fences that was and what NVK counted.
+// Both NULL in an older NVK: no command buffer is ever taken for dropped, as before.
+static int (*pnvk_fence_dropped)(VkDevice, VkFence);
+static unsigned (*pnvk_rec_stats)(uint64_t *, unsigned);
+static int nvmtl_drop_report_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = nvmtl_drop_report_parse(getenv("NVMTL_DROP_REPORT"));
+    return on;
+}
 static struct {
     pthread_mutex_t mu; int applied; int started; int pinned; int is_game;
     const char *raise_sw, *lower_sw; int token;
@@ -1145,6 +1156,8 @@ static int nvmtl_vk_initialize(void)
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
             pnvk_reprio = (int (*)(int, unsigned long))dlsym(g_lib, "nvmtl_nvk_tsg_reprioritise_v1");
+            pnvk_fence_dropped = (int (*)(VkDevice, VkFence))dlsym(g_lib, "nvmtl_nvk_fence_dropped_v1");
+            pnvk_rec_stats = (unsigned (*)(uint64_t *, unsigned))dlsym(g_lib, "nvmtl_nvk_recover_stats_v1");
         }
         else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
     } else {
@@ -1662,6 +1675,11 @@ static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
     char cause[512];
     nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
     nvlog("vk: %s", cause);
+    if (pnvk_rec_stats) {   // what NVK called this loss (a firmware crash, the bus, a failed wake...) and why it did not rebuild
+        uint64_t st[NVMTL_REC_N] = { 0 };
+        const unsigned n = pnvk_rec_stats(st, NVMTL_REC_N);
+        if (nvmtl_loss_recovery_line(cause, sizeof cause, st, n)) nvlog("vk: %s", cause);
+    }
     nvlog("vk: every command buffer made in %s from now on records nothing and completes with a device-removed error; objects made before the loss stay inert", getprogname());
     nvmtl_vk_stub_recording();
 }
@@ -8680,12 +8698,28 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     f->fence = fence;
     return 0;
 }
+/* A submission NVK dropped in a channel rebuild: counted, logged (the first and every 256th), and on the first one the
+   fault-context rings are written out so that the work that faulted is on record. Not the device-loss file and not
+   nvmtl_vk_note_loss: the device is up. */
+static void nvmtl_vk_note_dropped(long waited_ms)
+{
+    static _Atomic unsigned long long dropped;
+    const unsigned long long n = atomic_fetch_add(&dropped, 1) + 1;
+    if (!nvmtl_drop_log_due(n)) return;
+    uint64_t st[NVMTL_REC_N] = { 0 };
+    const unsigned k = pnvk_rec_stats ? pnvk_rec_stats(st, NVMTL_REC_N) : 0;
+    char line[400];
+    nvmtl_drop_line(line, sizeof line, n, waited_ms, getprogname(), nvmtl_drop_report_on(), st, k);
+    nvlog_every("vk: %s", line);
+    if (n == 1) nvmtl_fx_dump("a channel rebuild dropped this command buffer");
+}
 int nvmtl_vk_submit_finish(nvmtl_inflight *f)
 {
     nvk_cmdbuf *const c = f->c; const VkFence fence = f->fence; uint64_t *const pt = f->pt;
     nvmtl_prologue *const pre = &f->pre;
     const long budget_ms = nvmtl_gpu_wait_budget_ms();
-    const uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    // Awake time, not wall time: a fence pending when the machine went to sleep is not given up as lost at wake.
+    const uint64_t w0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     VkResult wr; long waited_ms = 0, said_ms = 0;
     // A fence that is late is a GPU that is busy, not a GPU that is gone. Giving up at the budget used to disable the
     // backend for the rest of the process; in WindowServer every later command buffer was then refused and CoreDisplay
@@ -8698,7 +8732,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     for (;;) {
         const long slice_ms = budget_ms < 250 ? 500 : budget_ms * 2;
         wr = pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, (uint64_t)slice_ms * 1000 * 1000);
-        waited_ms = (long)((clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0) / 1000000ull);
+        waited_ms = (long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0) / 1000000ull);
         if (wr != VK_TIMEOUT) break;
         if (g_state != 1) break;
         if (waited_ms >= give_up_ms) {
@@ -8711,7 +8745,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         }
     }
     pt[5] = nvmtl_perf_now();
-    atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0);
+    atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0);
     atomic_fetch_add(&g_submit_waits, 1);
     if (waited_ms > g_slow_submit_ms) {
         g_slow_submit_ms = waited_ms;
@@ -8741,6 +8775,12 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         }
         return -2;
     }
+    // NVK rebuilt this queue's channel after a GPU fault and did not run this submission: it signalled the fence from the
+    // CPU. The command buffer is finished, not lost, and no completion witness will ever land for it, so do not wait for
+    // one or count it missing (a few of those would switch pool reuse off for the process); retire destroys its pool and
+    // pages, and the prologue that rode with it inherits the same below.
+    const int dropped = pnvk_fence_dropped && nvmtl_drop_seen(pnvk_fence_dropped(g_dev, fence));
+    if (dropped) { c->wseq = NVMTL_WSEQ_BLIND; nvmtl_vk_note_dropped(waited_ms); }
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) __atomic_store_n(&g_cmd_finished_seq, c->fx_seq, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_grace_lock);
@@ -8806,7 +8846,9 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     nvmtl_cmd_retire(c);
     pt[7] = nvmtl_perf_now();
     nvmtl_perf_submit(perf_sets, pt);
-    return 0;
+    // -1 is "retired with an error": Metal completes the command buffer with an error and nothing is quarantined, and an
+    // upload that was dropped is not taken as done. Never -2: the device is up and the next command buffer runs.
+    return nvmtl_drop_result(dropped, nvmtl_drop_report_on());
 }
 
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b);
