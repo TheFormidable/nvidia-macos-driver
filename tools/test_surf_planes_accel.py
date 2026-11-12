@@ -185,7 +185,7 @@ static unsigned char *physByte(addr64_t a) {
     return off < b->mem.size() ? b->mem.data() + off : nullptr;
 }
 // ---- the plane's VRAM and NVRM ----------------------------------------------------------------------------------------
-struct NVVidMemory : OSObject { enum { kKind = 2 }; void *fRmHandle; unsigned long long fBytes; std::vector<unsigned char> data; };
+struct NVVidMemory : OSObject { enum { kKind = 2 }; void *fRmHandle; unsigned long long fBytes; bool fScanout = false; std::vector<unsigned char> data; };
 struct NVRMSurfDma;
 static IOLock *volatile *gStageLockPtr;
 struct IOService : OSObject {
@@ -265,6 +265,7 @@ struct NVResource : OSObject {
     nvaccel_pageoff_copies fPoCopies = { 0, 0 };
     unsigned long long fRangeOff = 0, fRangeLen = 0;
     unsigned short fValidBit = 0;
+    unsigned fRangeSid = 0;
 };
 template <class X> static X &raw(void *o, unsigned off) { return *(X *)((unsigned char *)o + off); }
 static NVVidMemory *nvres_vidmem(NVResource *r) { return r ? OSDynamicCast(NVVidMemory, raw<OSObject *>(r, 0x88)) : nullptr; }
@@ -301,9 +302,9 @@ static void world(int mode, unsigned bit = 2)
     A.mode = mode; A.pageoffStatus = 0; A.mapFails = false; A.queries = A.maps = A.unmaps = A.pageoffs = A.unlockedCalls = 0;
     B.mode = mode;
     ACC = NVAccel(); ACC.fNVRM = &A;
-    RES = new NVResource(); RES->fAccel = &ACC; RES->fRangeOff = OFF; RES->fRangeLen = LEN; RES->fValidBit = bit;
+    RES = new NVResource(); RES->fAccel = &ACC; RES->fRangeOff = OFF; RES->fRangeLen = LEN; RES->fValidBit = bit; RES->fRangeSid = 42;
     memset(VALID, 0, sizeof VALID); raw<unsigned short *>(RES, 0x30) = VALID; raw<unsigned char>(RES, 0x14) = 0xc0;
-    VM.kind = 2; VM.fRmHandle = (void *)0x77; VM.fBytes = 16384; VM.data.resize(16384);
+    VM.kind = 2; VM.fScanout = false; VM.fRmHandle = (void *)0x77; VM.fBytes = 16384; VM.data.resize(16384);
     for (unsigned i = 0; i < 16384; i++) VM.data[i] = (unsigned char)(i * 7 + 3);
     gVram[VM.fRmHandle] = &VM; raw<OSObject *>(RES, 0x88) = &VM;
     MD.mem.assign(32768, 0x5A); MD.prepared = 0; MD.prepares = 0; MD.writes = 0;
@@ -388,6 +389,11 @@ int main()
               o1 && unl && !out && untouched() && ACC.fDmaAnswer == 0 && A.unmaps == 1 && !gNVSVStageBuf && gCntDmaRefused >= 1); }
     world(0, 1); { const bool unl = run(0, &out);
         check("a plane whose grant recorded bit 0 sets bit 0", unl && out && landed() && VALID[0] == 1); }
+    world(0); SURF.id = 43; { const bool unl = run(0, &out);
+        check("the resource now belongs to another surface than its range: nothing copied, wired or counted, the page-off fails",
+              unl && !out && untouched() && A.pageoffs == 0 && MD.prepares == 0 && RES->fPoCopies.started == 0 && gCntPoRangedFail == 1
+              && !(VALID[0] & 2)); }
+    SURF.id = 42;
     // ---- whether a grant may be made ----
     world(0); gSurfPlanes = 0; { const int q = A.queries; NVAccel fresh; fresh.fNVRM = &A; const SInt64 off = gCntSvRangedOff;
         check("switched off: refused and counted, and the mode is not even asked", !nvAccelPlanesOn(&fresh) && A.queries == q && gCntSvRangedOff == off + 1); }
@@ -457,6 +463,17 @@ int main()
         reset(); g = ask(1, 2073600, 1036800, &r1, &v1); raw<unsigned short *>(&r1, 0x30)[6] = 2;
         const auto g2 = ask(1, 2073600, 1036800, &r1, &v1);
         check("a later grant whose words name another bit than the recorded one: refused", g.first == 0 && r1.fValidBit == 1 && g2.first == NVRM_SS_BAD_RANGE && gCntSvRangedBit == 1);
+        reset(); raw<unsigned short *>(&r0, 0x30) = raw<unsigned short *>(&r1, 0x30);
+        g = ask(1, 2073600, 1036800, &r1, &v1);
+        check("plane 0 has the same validity words: refused as shared, nothing recorded, the cache given back",
+              g.first == NVRM_SS_BAD_RANGE && gCntSvRangedShared == 1 && !r1.fRangeLen && c0.rc == 1);
+        reset(); v1.fScanout = true;
+        g = ask(1, 2073600, 1036800, &r1, &v1);
+        check("scanout VRAM: refused, nothing recorded, nothing looked up", g.first == NVRM_SS_NO_VRAM && !r1.fRangeLen && gCacheLookups == 0);
+        reset(); g = ask(1, 2073600, 1036800, &r1, &v1); SURF.id = 77;
+        const auto g3 = ask(1, 2073600, 1036800, &r1, &v1); SURF.id = 42;
+        check("the surface is recorded with the range; the same range for another surface is refused",
+              g.first == 0 && r1.fRangeSid == 42 && g3.first == NVRM_SS_BAD_RANGE && gCntSvRangedRange == 1 && r1.fRangeSid == 42);
     }
     nvSVStageFree();
     check("every symbol given back", OSSymbol::live == 0);
@@ -630,7 +647,7 @@ def main():
         d = pathlib.Path(d)
         code, out = build_run(d, "real", st, gr, rg)
         lines = [l for l in (out or "").splitlines() if l[:4] in ("ok  ", "FAIL")]
-        arm(f"the lifted code compiles and runs on the host ({len(lines)} arms)", code == 0 and len(lines) == 31, out)
+        arm(f"the lifted code compiles and runs on the host ({len(lines)} arms)", code == 0 and len(lines) == 35, out)
         for l in lines:
             arm("host: " + l[5:], l.startswith("ok"))
 
@@ -650,12 +667,16 @@ def main():
             ("d", "rg", "its own buffer freed after a timeout", "else { if (t.tok) OSAddAtomic64(1, &gCntDmaAbandoned); t.b = nullptr; t.tok = nullptr; }", "else {}"),
             ("e", "rg", "physical pages offered when the mapping failed", "        if (!nvSVDmaMap(nvrm, b, want, &t->tok, &bus)) { nvSVTempFree(t, nvrm); return false; }\n", "        (void)nvSVDmaMap(nvrm, b, want, &t->tok, &bus); dmaMode = 0;\n"),
             ("f", "rg", "the mode-3 refusal taken out", "    if (dmaMode >= NVRM_DMA_REFUSE) { nvSVRangedFail(", "    if (false) { nvSVRangedFail("),
-            ("g", "gr", "plane 0's resource not compared", "if (r0 == res || (m0 && m0 == vm))", "if (false)"),
+            ("g", "gr", "plane 0's resource not compared", "if (r0 == res || (m0 && m0 == vm) || (w0 && w0 == valid))", "if ((w0 && w0 == valid))"),
             ("h", "gr", "the range checked with an addition", "else if ((st = nvaccel_range_check(off, len, mdLen, vm->fBytes)) != 0) {",
              "else if ((st = (len && len <= vm->fBytes && off + len <= mdLen) ? 0u : (unsigned)NVRM_SS_BAD_RANGE) != 0) {"),
             ("i", "gr", "the plane-0 cache not given back", "        if (c0) ((OSObject *)c0)->release();\n", ""),
             ("j", "rg", "a mapping of another GPU's NVRM accepted", "const bool mapped = mode && nvrm && gNVSVStageTok && gNVSVStageNvrm == nvrm;",
              "const bool mapped = mode && nvrm && gNVSVStageTok;"),
+            ("l", "rg", "the surface of the range not compared", "    if (_ZNK9IOSurface12getSurfaceIDEv(surf) != res->fRangeSid) {\n",
+             "    if (false) {\n"),
+            ("m", "gr", "plane 0's validity words not compared", "|| (w0 && w0 == valid)) {", ") {"),
+            ("n", "gr", "scanout VRAM granted", "    else if (vm->fScanout) { st = NVRM_SS_NO_VRAM;", "    else if (false) { st = NVRM_SS_NO_VRAM;"),
             ("k", "rg", "the staging lock let go before the copy", "        IOBufferMemoryDescriptor *buf = nullptr;\n",
              "        IOBufferMemoryDescriptor *buf = nullptr; IOLockUnlock(lk); IOLockLock(lk);\n        IOLockUnlock(lk);\n"),
         ]:
