@@ -111,6 +111,10 @@ static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeall
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
 static void nvaccelInstallSysctl(void);
 static void nvPoReadOptOut(void);
+static void nvSurfPlanesReadOptOut(void);
+static bool nvSurfPlanesOffered(void);
+static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provider, const char *kext);   // nvaccel_layout.h
+static void nvSVStageDrop(IOService *nvrm);
 static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
@@ -438,8 +442,10 @@ public:
     // display on any of this card's connectors, and another GPU's framebuffer already shows the desktop. A desktop whose
     // monitor is slow to wake has no other GPU's framebuffer and still waits for the deadline.
     static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of auto-go's bring-up (#76 log)
-    // base wait counted from the end of auto-go's settle delay, not from this accelerator's start
-    uint32_t fHeadlessDeadlineSec = kHeadlessDeadlineSec;
+    // base wait counted from the end of auto-go's settle delay, not from this accelerator's start; armHeadlessCheck sets
+    // it before the check can run. Its initializer is 0 like every other field's: the constructor runs before probe's
+    // layout check, and if Apple's base had grown, these fields would lie on Apple's, which must still read zero then.
+    uint32_t fHeadlessDeadlineSec = 0;
     static constexpr uint32_t kHeadlessPollSec = 2;        // chosen: a small fraction of the ~7 s NVKMS takes to enumerate
     struct thread_call *fHeadlessCall = nullptr;
     uint32_t fHeadlessWaited = 0;
@@ -712,6 +718,9 @@ public:
         return nullptr;
     }
     IOService *fNVRM = nullptr;
+    // How this GPU's addresses reach the bus, as NVRM answered "nvSurfDma" QUERY (nvAccelDmaMode): 0 not asked yet,
+    // otherwise 1 + the mode.
+    unsigned fDmaAnswer = 0;
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
                            IOUserClient **handler) APPLE_KEXT_OVERRIDE {
         if ((type & 0xFFFF0000u) != 0x4E560000u) {
@@ -800,6 +809,12 @@ public:
             }
             ALOG("%s display device %04x:%04x class %02x.%02x - claiming", kind, ven, dev, cls, sub);
         }
+        // Before anything reads or calls Apple's part of this instance: are the family's classes laid out as built?
+#ifdef NMX_ACCEL
+        if (!nvaccelLayoutAllows(this, provider, "NMXAccel")) return NULL;
+#else
+        if (!nvaccelLayoutAllows(this, provider, "NVAccel")) return NULL;
+#endif
         return IOGraphicsAccelerator2::probe(provider, score);
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
@@ -847,6 +862,7 @@ public:
         }
 #endif
         nvPoReadOptOut();   // before the family can call a page-off on anything of this accelerator
+        nvSurfPlanesReadOptOut();   // before the plugin can ask for a plane's VRAM
         ALOG("start(%s): calling IOGraphicsAccelerator2::start — the family's own bring-up", provider ? provider->getName() : "?");
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
@@ -862,6 +878,12 @@ public:
             // The NVIDIA accelerator only. An AMD/Intel one has no NVRM, and looking for one waits up to 100 ms for a
             // service that may never come, in a start() that must not wait (see "No waiting here" above).
             nvFenceAsk(locateNVRM());
+#endif
+#ifndef NMX_ACCEL
+            // Tells the plugin that a plane of a two-plane surface may be asked for with its byte range
+            // (NVRM_SS_PLANE_RANGED): 0 when boot-arg nvaccel_surf_planes=0 switched it off. The plugin still proves the
+            // path on a private surface in its own process before a real surface takes it.
+            setProperty("NVAccelSurfPlanes", nvSurfPlanesOffered() ? 1ULL : 0ULL, 32);
 #endif
             // Properties an Apple accelerator publishes that programs read when they walk the registry for the GPU in use
             // (game engines list IOAccelerator services to pick the primary GPU, and the OpenGL renderer id ties a
@@ -1124,6 +1146,7 @@ public:
         gAccelTab.remove(this, nvaccelMultiGpu());   // a no-op without nvmultigpu=1
         gAccel = gAccelTab.primary();
         publishPrimary();
+        nvSVStageDrop(fNVRM);   // a staging buffer mapped through this GPU's NVRM is given back while NVRM still answers
         IOGraphicsAccelerator2::stop(provider);
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
@@ -1134,6 +1157,7 @@ NvrmDevTab<NVAccel> NVAccel::gAccelTab;
 NvrmStartGate NVAccel::gAccelGate;
 NvrmWaitQueue<IOService> NVAccel::gAccelWait;
 NVAccelStartScope::~NVAccelStartScope() { nvrm_gate_leave(&NVAccel::gAccelGate, multi, started); if (multi) NVAccel::reofferNext(); }
+#include "nvaccel_layout.h"   // the Apple class layout check NVAccel::probe makes
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
@@ -1912,6 +1936,53 @@ NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-
 NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
+// A DMA mapper (VT-d) that translates the GPU: the page-off copies through a staging buffer NVRM mapped ("nvSurfDma").
+// Without a mapper (mode 0) none of these moves; debug.nvaccel_dma_mode reads 0 once a page-off has asked.
+static int gNvAccelDmaMode = -1;
+static SInt64 gCntDmaStaged, gCntDmaMaps, gCntDmaMapFail, gCntDmaUnmaps, gCntDmaAbandoned, gCntDmaRefused, gCntDmaFamily,
+              gCntDmaHybrid;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_dma_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvAccelDmaMode, 0, "how the GPU's addresses reach the bus, as NVRM last answered: -1 not asked yet, 0 no mapper (or an NVRM without the question), 1 system mapper, 2 device mapper, 3 a mapper the driver may not use");
+NVACCEL_CNT(nvaccel_dma_staged,    gCntDmaStaged,    "page-offs copied into the staging buffer through its bus mapping (DMA mode 1 or 2)");
+NVACCEL_CNT(nvaccel_dma_maps,      gCntDmaMaps,      "staging buffers mapped for the GPU through NVRM");
+NVACCEL_CNT(nvaccel_dma_map_fail,  gCntDmaMapFail,   "staging buffers NVRM could not map (the buffer is freed; the family copies)");
+NVACCEL_CNT(nvaccel_dma_unmaps,    gCntDmaUnmaps,    "staging buffer mappings given back to NVRM when the buffer was replaced, refused or its accelerator stopped");
+NVACCEL_CNT(nvaccel_dma_abandoned, gCntDmaAbandoned, "staging buffer mappings left in place after a copy-engine timeout (the GPU may still write)");
+NVACCEL_CNT(nvaccel_dma_refused,   gCntDmaRefused,   "page-offs NVRM refused because the pages were not mapped for the GPU (the mapping is made again)");
+NVACCEL_CNT(nvaccel_dma_family,    gCntDmaFamily,    "page-offs left to the accelerator family because the GPU is translated and no mapped staging buffer was at hand");
+NVACCEL_CNT(nvaccel_dma_hybrid,    gCntDmaHybrid,    "hybrid frames copied the old way because the GPU is translated");
+// Two-plane surfaces (NV12) in VRAM, one plane per resource. The plugin asks for each plane's VRAM with the plane's byte
+// range in the surface's memory (NVRM_SS_PLANE_RANGED); a page-off of such a resource copies that plane into that range
+// and nowhere else. The plugin uses this only after a round trip on a private surface came back right in its own
+// process, and only when the accelerator publishes NVAccelSurfPlanes = 1. Boot-arg nvaccel_surf_planes=0, read once
+// before the first accelerator starts, refuses every ranged grant for the boot (before any plane's device cache is
+// looked up) and publishes 0, so no process starts its round trip.
+static int gSurfPlanes = 1;
+static int gSurfPlaneBits;          // OR of the validity bits recorded for planes above 0
+static unsigned gSurfPlaneLogs;
+static SInt64 gCntSvRanged, gCntSvRangedOff, gCntSvRangedSmall, gCntSvRangedRange, gCntSvRangedShared, gCntSvRangedBit;
+static SInt64 gCntPoRanged, gCntPoRangedFail, gCntPoRangedTemp;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surf_planes, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfPlanes, 0, "1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0)");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surf_plane_validbits, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfPlaneBits, 0, "OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane)");
+NVACCEL_CNT(nvaccel_surfvram_ranged,        gCntSvRanged,       "plane-ranged VRAM grants that passed every check");
+NVACCEL_CNT(nvaccel_surfvram_ranged_off,    gCntSvRangedOff,    "plane-ranged grants refused because the feature is off, the page-off waits locked, or the GPU is translated and no staging buffer is mapped");
+NVACCEL_CNT(nvaccel_surfvram_ranged_small,  gCntSvRangedSmall,  "plane-ranged grants refused because the plane is empty or larger than its VRAM");
+NVACCEL_CNT(nvaccel_surfvram_ranged_range,  gCntSvRangedRange,  "plane-ranged grants refused because the range leaves the surface or differs from the one already recorded (or was recorded for another surface)");
+NVACCEL_CNT(nvaccel_surfvram_ranged_shared, gCntSvRangedShared, "plane-ranged grants refused because plane 0 and this plane share a resource, VRAM or validity words");
+NVACCEL_CNT(nvaccel_surfvram_ranged_validbit, gCntSvRangedBit,  "plane-ranged grants refused because the resource's validity words are not understood");
+NVACCEL_CNT(nvaccel_pageoff_ranged,         gCntPoRanged,       "plane-ranged page-offs that copied the plane into its range");
+NVACCEL_CNT(nvaccel_pageoff_ranged_fail,    gCntPoRangedFail,   "plane-ranged page-offs that copied nothing (never left to the family's whole-surface copy)");
+NVACCEL_CNT(nvaccel_pageoff_ranged_temp,    gCntPoRangedTemp,   "plane-ranged page-offs that staged through a buffer of their own because the shared one could not serve");
+static void nvSurfPlanesReadOptOut(void)
+{
+    static volatile UInt32 once;
+    if (!OSCompareAndSwap(0, 1, &once)) return;
+    int v = 1;
+    if (PE_parse_boot_argn("nvaccel_surf_planes", &v, sizeof v) && !v) {
+        gSurfPlanes = 0;
+        ALOG("surfvram: plane-ranged grants off (boot-arg nvaccel_surf_planes=0): two-plane surfaces stay in system memory");
+    }
+}
+static bool nvSurfPlanesOffered(void) { return gSurfPlanes != 0; }
 // The unlocked wait saw something it does not expect: the lock could not be taken back, or the page-off held the last
 // reference to the resource or the accelerator when it returned (so the family's caller relied on the lock alone to keep
 // the object alive). Every later page-off waits with the lock held, as 2.9 did; said once.
@@ -1966,6 +2037,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nmxaccel_headless);
     gSysctlInstalled = true;
 #else
+    nvaccelLayoutSysctls();
     sysctl_register_oid(&sysctl__debug_nvaccelfb);
     sysctl_register_oid(&sysctl__debug_nvaccel_headless);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc);       sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc_bytes);
@@ -2004,6 +2076,17 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_already); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_changed);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_recopied);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_mode);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_staged);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_maps);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_map_fail);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_unmaps);     sysctl_register_oid(&sysctl__debug_nvaccel_dma_abandoned);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_refused);    sysctl_register_oid(&sysctl__debug_nvaccel_dma_family);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_hybrid);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surf_planes);    sysctl_register_oid(&sysctl__debug_nvaccel_surf_plane_validbits);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged); sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged_off);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged_small); sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged_range);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged_shared); sysctl_register_oid(&sysctl__debug_nvaccel_surfvram_ranged_validbit);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_ranged); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_ranged_fail);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_ranged_temp);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
@@ -2113,6 +2196,9 @@ static IOReturn nvAccelGpuVaCall(NVAccel *owner, const char *fn, struct NVRMGpuV
 
 #define NVRM_SS_KERNEL_ABI 1
 #include "../nvrm_surfshare_abi.h"
+#include "nvaccel_plane_range.h"
+static unsigned nvAccelDmaMode(NVAccel *owner);
+static bool nvAccelPlanesOn(NVAccel *a);
 extern "C" {
 void *_ZN13IOSurfaceRoot13lookupSurfaceEjP4task(void *root, unsigned int id, task_t task);
 void *_ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej(void *accel, void *surface, unsigned int plane);
@@ -2203,11 +2289,15 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
+    // A plane's resource marks the bit its grant recorded. A plane above 0 without a range is refused: its page-off would
+    // copy the plane over the start of the surface (2.9 never marks one).
+    const unsigned short bit = nvaccel_dirty_bit(res->fRangeLen, res->fValidBit, plane);
+    if (!bit) return NVRM_SS_NO_CACHE;
     if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
     if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return NVRM_SS_NO_CACHE;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
-    valid[6] |= (unsigned short)(1u << plane);
-    valid[0] &= (unsigned short)~(1u << plane);
+    valid[6] |= bit;
+    valid[0] &= (unsigned short)~bit;
     { NVVidMemory *vm = nvres_vidmem(res); res->fPluginWroteCookie = vm ? vm->fAllocationCookie : 0; }
     return 0;
 }
@@ -2245,6 +2335,63 @@ static unsigned nvSurfGpuEscape(const struct NVRMSurfShareEsc *p)
     if (p->surfaceID) nvSurfMark(p->surfaceID, (p->plane & 1u) != 0);
     return 0;
 }
+// The checks of a plane-ranged grant, after the plane's device cache, resource and VRAM were found as for any grant
+// (accelerator lock held). 0: the range and the validity bit are recorded on the resource and p->size is the plane's
+// length, which the grant then compares with the VRAM as it does any size. Otherwise the refusal, and nothing written.
+// A plane's resource keeps the range of its first grant for its life: an IOSurface's layout never changes.
+static unsigned nvAccelPlaneGrant(NVAccel *a, void *surf, NVResource *res, NVVidMemory *vm, struct NVRMSurfShareEsc *p)
+{
+    volatile unsigned char *r = (volatile unsigned char *)res;
+    volatile unsigned short *const valid = *(unsigned short *volatile *)(r + 0x30);
+    const unsigned short v0 = valid ? valid[0] : 0, v6 = valid ? valid[6] : 0;
+    IOMemoryDescriptor *const md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
+    const unsigned long long mdLen = md ? (unsigned long long)md->getLength() : 0;
+    unsigned long long off = 0, len = 0;
+    nvaccel_range_decode(p->size, &off, &len);
+    const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
+    void *res0 = nullptr, *vm0 = nullptr;
+    unsigned st = 0; unsigned short bit = 0; const char *why = "granted";
+    if (r[0x14] != 0xc0 || !valid) { st = NVRM_SS_NO_CACHE; why = "not a surface resource with validity words"; }
+    // A plane is never scanned out. A range recorded on a scanout resource would make every page-off of it fail (the
+    // page-off leaves scanout VRAM to the family, which a ranged resource never reaches).
+    else if (vm->fScanout) { st = NVRM_SS_NO_VRAM; why = "scanout VRAM"; }
+    else if ((st = nvaccel_range_check(off, len, mdLen, vm->fBytes)) != 0) {
+        if (st == NVRM_SS_TOO_SMALL) { OSAddAtomic64(1, &gCntSvRangedSmall); why = "empty, or larger than the VRAM"; }
+        else { OSAddAtomic64(1, &gCntSvRangedRange); why = "outside the surface"; }
+    } else if (!nvaccel_range_same(res->fRangeOff, res->fRangeLen, off, len) || (res->fRangeLen && res->fRangeSid != sid)) {
+        st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedRange); why = "another range, or another surface, than the resource's";
+    }
+    if (!st && p->plane > 0) {
+        // The family is expected to give each plane its own resource, VRAM and validity words. If plane 0's are the same
+        // objects, one copy would serve two ranges, or one plane's page-off would mark the other's pixels current (both
+        // would record the same bit in the same words): refused, and the counter says so.
+        void *c0 = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, 0);
+        OSObject *ctx0 = c0 ? *(OSObject *volatile *)((unsigned char *)c0 + 0x20) : nullptr;
+        NVResource *r0 = OSDynamicCast(NVResource, ctx0);
+        NVVidMemory *m0 = r0 ? nvres_vidmem(r0) : nullptr;
+        volatile unsigned short *const w0 = r0 ? *(unsigned short *volatile *)((volatile unsigned char *)r0 + 0x30) : nullptr;
+        res0 = r0; vm0 = m0;
+        if (r0 == res || (m0 && m0 == vm) || (w0 && w0 == valid)) {
+            st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedShared); why = "plane 0 has the same resource, VRAM or validity words";
+        }
+        if (c0) ((OSObject *)c0)->release();
+    }
+    if (!st && !(bit = nvaccel_grant_bit(res->fRangeLen ? res->fValidBit : 0, v0, v6))) {
+        st = NVRM_SS_BAD_RANGE; OSAddAtomic64(1, &gCntSvRangedBit); why = "validity words not understood";
+    }
+    if (!st) {
+        res->fRangeOff = off; res->fValidBit = bit; res->fRangeSid = sid; res->fRangeLen = len;
+        if (p->plane > 0) OSBitOrAtomic(bit, (volatile UInt32 *)&gSurfPlaneBits);
+        p->size = len;
+        OSAddAtomic64(1, &gCntSvRanged);
+    }
+    if (gSurfPlaneLogs < 16) {
+        gSurfPlaneLogs++;
+        ALOG("surfvram: surface %u plane %u ranged off %llu len %llu (VRAM %llu B, surface %llu B, valid %#x/%#x, res %p, plane 0 res %p vidmem %p/%p) -> %#x %s, bit %#x",
+             p->surfaceID, p->plane, off, len, vm->fBytes, mdLen, v0, v6, res, res0, vm, vm0, st, why, bit);
+    }
+    return st;
+}
 static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task_t task, unsigned cmd)
 {
     if (p->version == NVRM_SURFSHARE_VERSION && cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_GPU_MARK)) {
@@ -2258,13 +2405,15 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
     // waiting for one of those marks holds the accelerator lock, so that re-mark must not wait for the lock: it is
     // dropped instead, and the mark taken at commit stands.
     const bool tryOnly = cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_TRYLOCK);
-    p->plane &= ~(NVRM_SS_PLANE_TRYLOCK | NVRM_SS_PLANE_GPU_MARK);
+    const bool ranged = cmd == NVRM_ESC_SURF_VRAM && (p->plane & NVRM_SS_PLANE_RANGED);   // a VRAM grant only
+    p->plane &= ~(NVRM_SS_PLANE_TRYLOCK | NVRM_SS_PLANE_GPU_MARK | (ranged ? NVRM_SS_PLANE_RANGED : 0u));
     // plane is a full uint32 from the caller and reaches IOGraphicsAccelerator2::deviceCacheForIOSurface
     // below. The plane > 15 refusals further down run after that call, and only on the dirty path.
     if (p->plane > 15) { p->status = NVRM_SS_NO_CACHE; return kIOReturnSuccess; }
     NVAccel *a = NVAccel::resolve(owner);
     struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
     if (!task || !a || !nvAccelRmHandles(a, &h)) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
+    if (ranged && !nvAccelPlanesOn(a)) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }   // no plane cache is looked up
     if (!gNVSVRoot) {
         OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
         if (m) { gNVSVRoot = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000); m->release(); }
@@ -2295,6 +2444,7 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
     if (vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
     if (!cache || !res) p->status = NVRM_SS_NO_CACHE;
     else if (!vm || !vm->fRmHandle || !vm->fBytes) p->status = NVRM_SS_NO_VRAM;
+    else if (ranged && (p->status = nvAccelPlaneGrant(a, surf, res, vm, p)) != 0) {}   // p->size is the plane's length after it
     else if (p->size > vm->fBytes) p->status = NVRM_SS_TOO_SMALL;
     else {
         struct NVRMSurfShareRm g; nvSVZero(&g, sizeof g);
@@ -2328,23 +2478,304 @@ static IOLock *nvSVStageLock(void)
     }
     return gNVSVStageLock;
 }
-static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
+// DMA through a mapper (VT-d). NVRM answers "nvSurfDma" (nvrm_surfshare_abi.h) with how its GPU's addresses reach the
+// bus. Mode 0, every machine without a mapper and every NVRM without the question: a physical address is a bus address
+// and the page-off below runs as it always did. Modes 1 and 2: the copy engine may only be given bus addresses NVRM
+// mapped, so the staging buffer is mapped once through MAP and the page list is busBase + k * 4096; a surface's own pages
+// are never handed over. Mode 3 (a mapper the driver may not use): no address is handed over; the family copies.
+// The staging buffer's mapping, all under gNVSVStageLock: the token is NVRM's opaque serial (never dereferenced, handed
+// back to UNMAP unchanged), the NVRM that made it is held while it lives, and the buffer stays prepared until UNMAP.
+static void *gNVSVStageTok;
+static unsigned long long gNVSVStageBus, gNVSVStageMapLen;
+static IOService *gNVSVStageNvrm;
+static IOReturn nvSVDmaCall(IOService *nvrm, struct NVRMSurfDma *d)
 {
-    if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len) return gNVSVStageBuf;
+    if (!nvrm) return kIOReturnNotAttached;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_DMA);
+    if (!sym) return kIOReturnNoMemory;
+    const IOReturn r = nvrm->callPlatformFunction(sym, false, d, nullptr, nullptr, nullptr);
+    sym->release();
+    return r;
+}
+// The mode for owner's GPU. Asked once per accelerator, at its first page-off or hybrid frame (NVRM decided it before it
+// published nvrm-claimed, which the accelerator waits for). Thread context; no lock of this driver needed (QUERY takes
+// none in NVRM either, and wakes nothing). An NVRM that does not know the question answers through IOService, normally
+// kIOReturnUnsupported (whatever its providers say instead is read the same way): mode 0 for good, as NVRM answers
+// kIOReturnSuccess whenever it knows the question. No NVRM yet: mode 0 for this call, asked again next time. An answer
+// this driver does not understand (another version, a mode above 3) is mode 3.
+static unsigned nvAccelDmaMode(NVAccel *owner)
+{
+    NVAccel *a = NVAccel::resolve(owner);
+    if (!a) return 0;
+    if (a->fDmaAnswer) return a->fDmaAnswer - 1;
+    IOService *const nvrm = a->locateNVRM();
+    if (!nvrm) return 0;
+    struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+    d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_QUERY; d.status = NVRM_SS_OFF;
+    const IOReturn r = nvSVDmaCall(nvrm, &d);
+    unsigned mode;
+    if (r != kIOReturnSuccess) mode = NVRM_DMA_NONE;
+    else if (d.status != 0) mode = NVRM_DMA_REFUSE;
+    else mode = d.mode > NVRM_DMA_REFUSE ? (unsigned)NVRM_DMA_REFUSE : d.mode;
+    a->fDmaAnswer = 1 + mode;
+    gNvAccelDmaMode = (int)mode;
+    if (mode != NVRM_DMA_NONE)      // mode 0 says nothing: debug.nvaccel_dma_mode shows it
+        ALOG("surfvram pageoff: NVRM says DMA mode %u (status %#x) -- %s", mode, d.status,
+             mode == NVRM_DMA_REFUSE ? "page-offs go to the family" : "the staging buffer is mapped for the GPU");
+    return mode;
+}
+// After NVRM refused a page list as not mapped: ask again at the next page-off (its GPU may have restarted).
+static void nvAccelDmaForget(NVAccel *owner)
+{
+    if (NVAccel *a = NVAccel::resolve(owner)) a->fDmaAnswer = 0;
+}
+// MAP b (prepared, kIODirectionInOut) for nvrm's GPU. True with the token and the bus address of byte 0.
+static bool nvSVDmaMap(IOService *nvrm, IOBufferMemoryDescriptor *b, unsigned long long len, void **tok, unsigned long long *bus)
+{
+    struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+    d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_MAP; d.status = NVRM_SS_OFF; d.md = (IOMemoryDescriptor *)b; d.length = len;
+    const IOReturn r = nvSVDmaCall(nvrm, &d);
+    if (r == kIOReturnSuccess && d.status == 0 && d.token && !(d.busBase & 4095ull)) {
+        *tok = d.token; *bus = d.busBase;
+        OSAddAtomic64(1, &gCntDmaMaps);
+        return true;
+    }
+    if (r == kIOReturnSuccess && d.status == 0 && d.token) {    // mapped, but not on a page boundary: give it back
+        struct NVRMSurfDma u; nvSVZero(&u, sizeof u);
+        u.version = NVRM_SS_DMA_VERSION; u.op = NVRM_SS_DMA_UNMAP; u.status = NVRM_SS_OFF; u.token = d.token;
+        nvSVDmaCall(nvrm, &u);
+    }
+    if (OSAddAtomic64(1, &gCntDmaMapFail) < 8)
+        ALOG("surfvram pageoff: NVRM could not map a %llu B staging buffer for the GPU (%#x, status %#x, bus %#llx)", len, r, d.status, d.busBase);
+    return false;
+}
+// Free the staging buffer, after giving its mapping back to the NVRM that made it (gNVSVStageLock held). NVRM answers
+// NVRM_SS_OFF for a mapping it dropped already (its GPU stopped): nothing to do then either.
+static void nvSVStageFree(void)
+{
+    if (gNVSVStageTok) {
+        struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+        d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_UNMAP; d.status = NVRM_SS_OFF; d.token = gNVSVStageTok;
+        nvSVDmaCall(gNVSVStageNvrm, &d);
+        OSAddAtomic64(1, &gCntDmaUnmaps);
+    }
+    if (gNVSVStageNvrm) gNVSVStageNvrm->release();
+    gNVSVStageTok = nullptr; gNVSVStageBus = 0; gNVSVStageMapLen = 0; gNVSVStageNvrm = nullptr;
+    if (gNVSVStageBuf) { gNVSVStageBuf->complete(); gNVSVStageBuf->release(); }
+    gNVSVStageBuf = nullptr;
+}
+// After a copy-engine timeout the GPU may still write into the buffer: it is abandoned, and so is its mapping (no
+// UNMAP), so that those writes still land in the buffer. NVRM drops the mapping when its GPU stops.
+static void nvSVStageAbandon(void)
+{
+    if (gNVSVStageTok) {
+        OSAddAtomic64(1, &gCntDmaAbandoned);
+        gNVSVStageTok = nullptr; gNVSVStageBus = 0; gNVSVStageMapLen = 0;
+        if (gNVSVStageNvrm) gNVSVStageNvrm->release();
+        gNVSVStageNvrm = nullptr;
+    }
+    gNVSVStageBuf = nullptr;
+}
+// An accelerator stops: a staging buffer mapped through its NVRM is unmapped and freed now, while that NVRM still
+// answers, instead of staying mapped (and NVRM held) until a later page-off replaces it or NVRM drops the mapping when
+// its GPU stops (which NVRM counts as leaked). A page-off that is using the buffer holds the staging lock, so this waits
+// for its copy to end. No mapping (mode 0, every machine without a mapper): the lock is not even taken.
+static void nvSVStageDrop(IOService *nvrm)
+{
+    IOLock *const lk = gNVSVStageLock;
+    if (!nvrm || !lk || !gNVSVStageTok) return;
+    IOLockLock(lk);
+    if (gNVSVStageTok && gNVSVStageNvrm == nvrm) nvSVStageFree();
+    IOLockUnlock(lk);
+}
+// The staging buffer for a page-off of len bytes (gNVSVStageLock held). dmaMode and nvrm: the GPU's (nvAccelDmaMode,
+// and the NVRM the page-off goes to). The buffer in hand serves if it is long enough and addressed the way this GPU
+// needs: physically (mode 0, no mapping) or through a mapping made by the same NVRM.
+static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len, unsigned dmaMode, IOService *nvrm)
+{
+    if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len && (dmaMode ? gNVSVStageTok && gNVSVStageNvrm == nvrm : !gNVSVStageTok))
+        return gNVSVStageBuf;
     if (len > (64ull << 20) || gNVSVStageBackoff) { if (gNVSVStageBackoff) gNVSVStageBackoff--; return nullptr; }
     const unsigned long long want = (len + 0xFFFFFull) & ~0xFFFFFull;
-    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+    // translated: the mapper makes the buffer one run on the bus, so its memory need not be physically contiguous
+    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | (dmaMode ? 0 : kIOMemoryPhysicallyContiguous),
                                                                       (vm_size_t)want, PAGE_SIZE);
     if (b && b->prepare() != kIOReturnSuccess) { b->release(); b = nullptr; }
+    void *tok = nullptr; unsigned long long bus = 0;
+    if (b && dmaMode && !nvSVDmaMap(nvrm, b, want, &tok, &bus)) { b->complete(); b->release(); b = nullptr; }
     if (!b) {
         gNVSVStageNoBuf++; gNVSVStageBackoff = 1024;
-        ALOG("surfvram pageoff: no %llu B physically contiguous staging buffer (miss %u) -- per-page copies for the next 1024", want, gNVSVStageNoBuf);
+        if (dmaMode) ALOG("surfvram pageoff: no %llu B staging buffer mapped for the GPU (miss %u) -- the family's page-off for the next 1024", want, gNVSVStageNoBuf);
+        else ALOG("surfvram pageoff: no %llu B physically contiguous staging buffer (miss %u) -- per-page copies for the next 1024", want, gNVSVStageNoBuf);
         return nullptr;
     }
-    if (gNVSVStageBuf) { gNVSVStageBuf->complete(); gNVSVStageBuf->release(); }
+    nvSVStageFree();
     gNVSVStageBuf = b;
-    ALOG("surfvram pageoff: staging buffer %llu B, physically contiguous", want);
+    if (dmaMode) {
+        nvrm->retain();
+        gNVSVStageTok = tok; gNVSVStageBus = bus; gNVSVStageMapLen = want; gNVSVStageNvrm = nvrm;
+        ALOG("surfvram pageoff: staging buffer %llu B, mapped for the GPU at bus %#llx", want, bus);
+    } else ALOG("surfvram pageoff: staging buffer %llu B, physically contiguous", want);
     return b;
+}
+// Whether this accelerator may make a ranged grant now (nvaccel_planes_allowed). Asked before the plane's device cache is
+// looked up, without the accelerator lock or the staging lock: the staging buffer's mapping is only compared, never
+// followed, and a page-off that later finds it gone stages through a mapped buffer of its own or copies nothing.
+static bool nvAccelPlanesOn(NVAccel *a)
+{
+    const unsigned mode = (gSurfPlanes && gPoUnlocked) ? nvAccelDmaMode(a) : 0;
+    IOService *const nvrm = a->fNVRM;
+    const bool mapped = mode && nvrm && gNVSVStageTok && gNVSVStageNvrm == nvrm;
+    if (nvaccel_planes_allowed(gSurfPlanes, gPoUnlocked, mode, mapped)) return true;
+    OSAddAtomic64(1, &gCntSvRangedOff);
+    if (gSurfPlaneLogs < 16) {
+        gSurfPlaneLogs++;
+        ALOG("surfvram: ranged grant refused (planes %d, unlocked page-off wait %d, DMA mode %u, staging mapped %d)",
+             gSurfPlanes, gPoUnlocked, mode, mapped ? 1 : 0);
+    }
+    return false;
+}
+// A plane's page-off that copies nothing. It never falls to the family's own page-off: that one copies a whole surface
+// from offset 0, and for a plane it would put the plane's pixels over the start of the surface. The family is told the
+// page-off failed, as it is for any copy that failed.
+static void nvSVRangedFail(NVResource *res, bool *out, unsigned st, const char *why)
+{
+    gNVSVPageoffFail++;
+    if (OSAddAtomic64(1, &gCntPoRangedFail) < 16)
+        ALOG("surfvram pageoff: res %p plane range %llu+%llu NOT copied: %s (%#x)", res, res->fRangeOff, res->fRangeLen, why, st);
+    if (out) *out = false;
+}
+// The staging buffer of one plane's page-off, used when the shared one cannot serve (too large, backing off after a
+// failed allocation, or not mapped). Taken and given back under gNVSVStageLock within that page-off; behind a mapper it
+// is mapped through the NVRM the page-off goes to and given back (UNMAP) before it is completed and released, as the
+// shared one is. After a copy-engine timeout it is abandoned, wired and mapped, like the shared one (the GPU may still
+// write into it); NVRM drops the mapping when its GPU stops.
+struct NVSVTemp { IOBufferMemoryDescriptor *b; void *tok; };
+static void nvSVTempFree(NVSVTemp *t, IOService *nvrm)
+{
+    if (t->tok) {
+        struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+        d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_UNMAP; d.status = NVRM_SS_OFF; d.token = t->tok;
+        nvSVDmaCall(nvrm, &d);
+        OSAddAtomic64(1, &gCntDmaUnmaps);
+    }
+    if (t->b) { t->b->complete(); t->b->release(); }
+    t->b = nullptr; t->tok = nullptr;
+}
+// A buffer for len bytes, its pages listed in pa[0..pages) as the copy engine must see them: bus addresses of one MAP
+// (modes 1 and 2), physical ones without a mapper. False with nothing held.
+static bool nvSVTempGet(NVSVTemp *t, unsigned long long len, unsigned dmaMode, IOService *nvrm, unsigned long long *pa,
+                        unsigned long long pages)
+{
+    const unsigned long long want = (len + 4095ull) & ~4095ull;
+    t->b = nullptr; t->tok = nullptr;
+    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut, (vm_size_t)want, PAGE_SIZE);
+    if (!b) return false;
+    if (b->prepare() != kIOReturnSuccess) { b->release(); return false; }
+    t->b = b;
+    if (dmaMode) {
+        unsigned long long bus = 0;
+        if (!nvSVDmaMap(nvrm, b, want, &t->tok, &bus)) { nvSVTempFree(t, nvrm); return false; }
+        for (unsigned long long k = 0; k < pages; k++) pa[k] = bus + k * 4096;
+        return true;
+    }
+    unsigned long long i = 0;
+    for (IOByteCount off = 0; i < pages; ) {
+        IOByteCount seglen = 0;
+        const addr64_t phys = b->getPhysicalSegment(off, &seglen, kIOMemoryMapperNone);
+        if (!phys || !seglen) break;
+        for (IOByteCount k = 0; k < seglen && i < pages; k += 4096, off += 4096) pa[i++] = phys + k;
+    }
+    if (i == pages) return true;
+    nvSVTempFree(t, nvrm);
+    return false;
+}
+// The page-off of a plane's resource (a ranged grant recorded fRangeOff, fRangeLen, fValidBit). The accelerator lock is
+// held, as for every page-off, and the waits for the GPU are behind it. The copy engine copies the plane's VRAM from
+// offset 0 into a staging buffer, never into the surface's own pages (a plane does not start on a page boundary), and
+// the CPU writes the buffer into the surface at the plane's offset. Success sets the plane's own validity bit.
+// Lock order: accelerator lock, then gNVSVStageLock (held across MAP, the copy, the read out of the buffer and UNMAP),
+// then NVRM's DMA list lock inside "nvSurfDma" (a leaf).
+static void nvSVPageoffRanged(NVResource *res, IOMemoryDescriptor *md, void *surf, NVVidMemory *vm,
+                              const struct NVRMRmHandles *h, unsigned dmaMode, bool *out)
+{
+    unsigned long long dstOff = 0, len = 0;
+    if (dmaMode >= NVRM_DMA_REFUSE) { nvSVRangedFail(res, out, NVRM_SS_NO_DMA, "the GPU is behind a DMA mapper the driver may not use"); return; }
+    // The range describes the layout of the surface it was granted for. Should the family ever bind this resource to
+    // another surface, the range says nothing about where that surface keeps the plane: nothing is copied.
+    if (_ZNK9IOSurface12getSurfaceIDEv(surf) != res->fRangeSid) {
+        nvSVRangedFail(res, out, NVRM_SS_BAD_RANGE, "the resource now belongs to another surface than its range");
+        return;
+    }
+    if (!md ||!nvaccel_pageoff_span(1, res->fRangeOff, res->fRangeLen, md->getLength(), vm->fBytes, &dstOff, &len)) {
+        nvSVRangedFail(res, out, NVRM_SS_BAD_RANGE, "the range no longer fits the surface or its VRAM");
+        return;
+    }
+    if (md->prepare(kIODirectionNone) != kIOReturnSuccess) { nvSVRangedFail(res, out, NVRM_SS_OFF, "the surface's pages could not be wired"); return; }
+    const unsigned long long copyNumber = nvaccel_pageoff_copy_begin(&res->fPoCopies);
+    const unsigned long long pages = (len + 4095) >> 12;
+    IOService *const nvrm = nvAccelNVRM(res->fAccel);   // the same NVRM maps the buffer and copies into it
+    unsigned long long *pa = nvrm ? (unsigned long long *)IOMalloc(pages * sizeof *pa) : nullptr;
+    bool ok = false, temp = false; unsigned st = NVRM_SS_OFF; unsigned long long usec = 0;
+    const char *why = !nvrm ? "no NVRM" : !pa ? "no memory for the page list" : "the copy engine did not copy it";
+    IOLock *const lk = nvSVStageLock();
+    if (pa && lk) {
+        IOLockLock(lk);
+        NVSVTemp t = { nullptr, nullptr };
+        IOBufferMemoryDescriptor *buf = nullptr;
+        IOBufferMemoryDescriptor *sb = nvSVStage(len, dmaMode, dmaMode ? nvrm : nullptr);
+        IOByteCount sl = 0;
+        const addr64_t sp = !sb ? 0 : dmaMode ? (addr64_t)gNVSVStageBus : sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone);
+        if (sb && dmaMode) sl = (IOByteCount)gNVSVStageMapLen;
+        if (sp && sl >= len) {
+            for (unsigned long long k = 0; k < pages; k++) pa[k] = sp + k * 4096;
+            buf = sb;
+        } else if (nvSVTempGet(&t, len, dmaMode, nvrm, pa, pages)) {
+            buf = t.b; temp = true;
+            OSAddAtomic64(1, &gCntPoRangedTemp);
+        } else {   // nothing the GPU may write into: nothing is copied
+            st = dmaMode ? NVRM_SS_NO_DMA : NVRM_SS_OFF;
+            why = dmaMode ? "no staging buffer could be mapped for the GPU" : "no staging buffer";
+        }
+        if (buf) {
+            struct NVRMSurfPageoff q; nvSVZero(&q, sizeof q);
+            q.version = NVRM_SS_RM_VERSION; q.status = NVRM_SS_OFF; q.kapiDevice = h->kapiDevice; q.kapiMemory = vm->fRmHandle;
+            q.pages = pa; q.pageCount = pages; q.length = len;
+            const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+            if (sym) { nvrm->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr); sym->release(); }
+            st = q.status; usec = q.usec;
+            if (st == 0) {
+                const IOByteCount w = md->writeBytes((IOByteCount)dstOff, buf->getBytesNoCopy(), (IOByteCount)len);
+                ok = w == (IOByteCount)len;
+                if (!ok) st = NVRM_SS_TOO_SMALL;
+            } else if (st == 0x65u) {
+                ALOG("surfvram pageoff: res %p plane CE copy TIMED OUT into the %s staging buffer -- abandoning it (%llu B)",
+                     res, temp ? "plane's own" : "shared", (unsigned long long)buf->getLength());
+                if (!temp) nvSVStageAbandon();
+                else { if (t.tok) OSAddAtomic64(1, &gCntDmaAbandoned); t.b = nullptr; t.tok = nullptr; }
+            } else if (st == NVRM_SS_NO_DMA) {
+                // NVRM no longer has these pages mapped for its GPU: nothing was copied. Ask for the mode again.
+                OSAddAtomic64(1, &gCntDmaRefused);
+                nvAccelDmaForget(res->fAccel);
+                if (!temp) nvSVStageFree();
+            }
+            if (temp) nvSVTempFree(&t, nvrm);   // nothing left to give back after a timeout
+        }
+        IOLockUnlock(lk);
+    }
+    if (pa) IOFree(pa, pages * sizeof *pa);
+    md->complete(kIODirectionNone);   // the copy engine wrote a staging buffer, never these pages
+    if (ok) {
+        nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(surf), 0);
+        volatile unsigned short *valid = *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30);
+        if (valid) valid[0] |= res->fValidBit;
+        nvaccel_pageoff_copy_end(&res->fPoCopies, copyNumber);
+        gNVSVPageoff++;
+        if (OSAddAtomic64(1, &gCntPoRanged) < 8)
+            ALOG("surfvram pageoff: res %p plane %llu B into the surface at %llu -> ok in %llu us (%s staging buffer, bit %#x)",
+                 res, len, dstOff, usec, temp ? "its own" : "the shared", res->fValidBit);
+    } else nvSVRangedFail(res, out, st, why);
+    if (out) *out = ok;
 }
 
 void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
@@ -2360,6 +2791,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
              (unsigned)r[0x14], vm ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0, vm ? (int)vm->fScanout : -1, vd ? vd[0] : 0xffff, vd ? vd[6] : 0xffff);
     }
     if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {
+        if (fRangeLen) { nvSVRangedFail(this, out, NVRM_SS_NO_VRAM, "no surface, VRAM or RM handles"); return; }   // never the family's copy
         IOAccelResource2::pageoff(ev, a1, out, a3);
         return;
     }
@@ -2380,9 +2812,10 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         if (pending && a->mayRelease()) {
             const uint64_t t0 = mach_absolute_time();
             // What the copy below would act on, as it stood with the lock held, so the state after the wait can be
-            // compared with it. valid[0] bit 0 = the system-memory copy holds the newest pixels (set by a page-off).
+            // compared with it. valid[0] = the system-memory copy holds the newest pixels (set by a page-off), on bit 0,
+            // or on the bit a plane's grant recorded (validBit()).
             volatile unsigned short *const v0 = *(unsigned short *volatile *)(r + 0x30);
-            const bool wasCurrent = v0 && (v0[0] & 1u);
+            const bool wasCurrent = v0 && (v0[0] & validBit());
             const unsigned long long copies0 = nvaccel_pageoff_copies_started(&fPoCopies);
             void *const surf0 = surf; NVVidMemory *const vm0 = vm;
             retain(); holdRes.o = this;
@@ -2419,10 +2852,13 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             // newer ones: report the page-off done and copy nothing. A copy that began before this wait ended may
             // have come too early, and is made again. The rules are in nvaccel_pageoff_recheck.h.
             {   volatile unsigned short *const v1 = *(unsigned short *volatile *)(r + 0x30);
-                const bool currentNow = v1 && (v1[0] & 1u);
+                const bool currentNow = v1 && (v1[0] & validBit());
                 if (nvaccel_pageoff_already_done(&fPoCopies, wasCurrent, currentNow, copies0, copies1)) { OSAddAtomic64(1, &gCntPoAlready); if (out) *out = true; return; }
                 if (currentNow && nvaccel_pageoff_copied_after(&fPoCopies, copies0)) OSAddAtomic64(1, &gCntPoRecopied); }
-            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
+            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {
+                if (fRangeLen) { nvSVRangedFail(this, out, NVRM_SS_NO_VRAM, "no surface, VRAM or RM handles after the wait"); return; }
+                IOAccelResource2::pageoff(ev, a1, out, a3); return;
+            }
         } else {
             if (pending) OSAddAtomic64(1, a->lockPinned() ? &gCntPoPinned : &gCntPoNotOwner);
             // The accelerator lock is held here, and the producer's next step may need it: 2.9's 100 ms, fence and marks
@@ -2431,6 +2867,14 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         }
     }
     IOMemoryDescriptor *md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
+    // How this GPU's addresses reach the bus (asked once per accelerator). Mode 0, no mapper: nothing below differs from
+    // what the page-off always did. Mode 3, a mapper the driver may not use: no address may be handed over, the family
+    // copies (before any page is wired or any copy counted).
+    const unsigned dmaMode = nvAccelDmaMode(fAccel);
+    // A plane of a two-plane surface (a ranged grant): staged into the plane's range, and never left to the family's
+    // page-off, which would copy the plane over the start of the surface. Every other resource goes on below as before.
+    if (fRangeLen) { nvSVPageoffRanged(this, md, surf, vm, &h, dmaMode, out); return; }
+    if (dmaMode >= NVRM_DMA_REFUSE) { OSAddAtomic64(1, &gCntDmaFamily); IOAccelResource2::pageoff(ev, a1, out, a3); return; }
     if (!md || md->prepare(kIODirectionNone) != kIOReturnSuccess) {
         gNVSVPageoffFail++;
         ALOG("surfvram pageoff: res %p surface pages could not be wired (md %p) -- family pageoff instead", this, md);
@@ -2448,9 +2892,12 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     bool staged = false;
     if (IOLock *lk = nvSVStageLock()) {
         IOLockLock(lk);
-        IOBufferMemoryDescriptor *sb = nvSVStage(len);
+        // Held from here across MAP, the copy into the buffer and any UNMAP: a buffer is never unmapped under a copy.
+        IOBufferMemoryDescriptor *sb = nvSVStage(len, dmaMode, dmaMode ? nvAccelNVRM(fAccel) : nullptr);
         IOByteCount sl = 0;
-        addr64_t sp = sb ? sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone) : 0;
+        // translated: the bus address NVRM mapped the buffer at (one run), never a physical one
+        addr64_t sp = !sb ? 0 : dmaMode ? (addr64_t)gNVSVStageBus : sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone);
+        if (sb && dmaMode) sl = (IOByteCount)gNVSVStageMapLen;
         unsigned long long *spa = (sp && sl >= len && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
         if (spa) {
             for (unsigned long long k = 0; k < pages; k++) spa[k] = sp + k * 4096;
@@ -2468,16 +2915,25 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
                 cpuUs = (mach_absolute_time() - t0) / 1000;
                 ok = (w == (IOByteCount)len);
                 if (!ok) st = NVRM_SS_TOO_SMALL;
-                else gNVSVStaged++;
+                else { gNVSVStaged++; if (dmaMode) OSAddAtomic64(1, &gCntDmaStaged); }
             } else if (st == 0x65u) {
                 ALOG("surfvram pageoff: CE copy TIMED OUT into the staging buffer -- abandoning it (%llu B)", (unsigned long long)sb->getLength());
-                gNVSVStageBuf = nullptr;
+                nvSVStageAbandon();
+            } else if (st == NVRM_SS_NO_DMA) {
+                // NVRM no longer has these pages mapped for its GPU (it restarted, or it translates now): nothing was
+                // copied. Ask for the mode again and map a new buffer at the next page-off.
+                OSAddAtomic64(1, &gCntDmaRefused);
+                nvAccelDmaForget(fAccel);
+                nvSVStageFree();
             }
             staged = true;
             IOFree(spa, pages * sizeof *spa);
         }
         IOLockUnlock(lk);
     }
+    // Translated and no mapped staging buffer: the surface's own pages are not mapped for the GPU and are never handed
+    // over, so the family copies. This copy was begun above and has no end: it counts as one that failed.
+    if (dmaMode && !staged) { md->complete(kIODirectionNone); OSAddAtomic64(1, &gCntDmaFamily); IOAccelResource2::pageoff(ev, a1, out, a3); return; }
     unsigned long long *pa = (!staged && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *pa) : nullptr;
     if (pa) {
         unsigned long long i = 0;
@@ -2497,6 +2953,8 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             if (sym) sym->release();
             st = q.status; usec = q.usec; ok = st == 0;
             if (st == 0x65u) mayUnwire = false;
+            // a GPU this accelerator took for untranslated is translated after all: ask for the mode again next time
+            else if (st == NVRM_SS_NO_DMA) { OSAddAtomic64(1, &gCntDmaRefused); nvAccelDmaForget(fAccel); }
         }
         IOFree(pa, pages * sizeof *pa);
     }
@@ -2996,6 +3454,8 @@ static bool nvAccelHybridDma(NVDisplayPipe *pipe, IOService *fb, unsigned head, 
     x.len = (unsigned long long)s->getBytesPerRow() * s->getHeight();
     x.accel = NVAccel::resolve(pipe->fAccel);
     if (!x.accel || !nvSVPend(x.id, 2, nullptr)) return false;           // the newest pixels are not only in the GPU's memory: level 3
+    // The panel driver's pages are not mapped for a translated GPU: copy the old way (level 3).
+    if (nvAccelDmaMode(x.accel) != NVRM_DMA_NONE) { OSAddAtomic64(1, &gCntDmaHybrid); return false; }
     x.sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
     if (!x.sym) return false;
     struct nmh_dma_ops ops = { &x, hyDmaRender, hyDmaLockLookup, hyDmaUnlock, hyDmaAcquire, hyDmaCopy, hyDmaPresent, hyDmaAbort, hyDmaQuarantine };
