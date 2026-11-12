@@ -29,8 +29,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 - A git clone of this repository (not a downloaded archive): the plugin, translator and video library are built from
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
-- Homebrew. When it is missing, `./build.sh deps` explains how to install it and offers to run its official installer,
-  but only after you type `yes` (`--yes` does not count for this).
+- Homebrew, for NVK, the Vulkan loader and the translator only (see [Tools each component needs](#tools-each-component-needs)):
+  every other component builds with Xcode and what macOS has. When Homebrew is missing, `./build.sh deps` explains how
+  to install it and offers to run its official installer, but only after you type `yes` (`--yes` does not count for this).
 - Free disk space: not measured on a Mac yet. The NVIDIA trees, Mesa, LLVM from Homebrew and the NVK build together
   take several gigabytes.
 - Time, on an **Intel Mac**: Homebrew no longer has ready-made builds (bottles) of these formulas for Intel Macs, so
@@ -67,7 +68,7 @@ folder that carries that mark.
 
 | What | Where |
 |---|---|
-| Homebrew formulas, only the missing ones: `gpatch`, `ninja`, `cmake`, `pkgconf`, `glslang`, `spirv-tools`, `llvm@22` (or `llvm` while Homebrew's is 22), `python@3.14`, and `spirv-llvm-translator` only while Homebrew's `llvm` is 22 | Homebrew's own prefix (`/opt/homebrew` on Apple silicon, `/usr/local` on Intel). Nothing you already have is upgraded or removed by `build.sh`; Homebrew itself may upgrade an outdated dependency of a formula it installs, and the prompt says so |
+| Homebrew formulas, only the missing ones: `gpatch` (only when no `patch` here does what the scripts need), `ninja`, `cmake`, `pkgconf`, `glslang`, `spirv-tools`, `llvm@22` (or `llvm` while Homebrew's is 22), `python@3.14`, and `spirv-llvm-translator` only while Homebrew's `llvm` is 22 | Homebrew's own prefix (`/opt/homebrew` on Apple silicon, `/usr/local` on Intel). Nothing you already have is upgraded or removed by `build.sh`; Homebrew itself may upgrade an outdated dependency of a formula it installs, and the prompt says so |
 | SPIRV-LLVM-Translator v22.1.8 for LLVM 22, built from source when no matching one is found (Homebrew's follows its current LLVM, 23 today) | `<workdir>/tools/spirv-llvm-translator`; its sources in `<workdir>/src`, its log `<workdir>/logs/spirv-llvm-translator.log` |
 | Python packages for Mesa (meson 1.12.1, mako, MarkupSafe, PyYAML, packaging), each checked against its SHA-256 | `<workdir>/tools/venv` |
 | Rust 1.98.1 with the x86_64-apple-darwin target, bindgen-cli 0.73.2, cbindgen 0.29.4 (rustup-init 1.29.3, SHA-256 checked, run with `--no-modify-path`) | `<workdir>/tools/rustup` (RUSTUP_HOME), `<workdir>/tools/cargo` (CARGO_HOME) |
@@ -277,6 +278,27 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `nmhda` | NMHDA.kext; optional, built only when `NM_LILU_DEBUG_KEXT` and `NM_MACKERNELSDK` are set | kexts/NMHDA/build.sh | |
 <!-- end -->
 
+### Tools each component needs
+
+Beyond Xcode, what each component's scripts (and the helpers they run: kexts/NVRM/rmcc.py, tools/test_patch_chain.sh,
+tools/nvencvt_header_abi.py, NVK's generators) really use, and the oldest version known to work. `build.sh` tests each
+tool for what the scripts do with it, not for its name, for every component a build will run (the ones pulled in as
+dependencies too) before the first step starts.
+
+| Component | Needs, besides Xcode | How build.sh tests it |
+|---|---|---|
+| `rm` | GNU make (Xcode's 3.81; only `make -n`); a `patch` that applies the kexts' chain with `-p1 --fuzz=0 --dry-run` and `--no-backup-if-mismatch` (macOS's `patch 2.0-12u11-Apple` does); `python3` 3.8 or later (f-strings; macOS's 3.9 does) | `make --version` says GNU Make; the patch applies a change in a temporary folder as the scripts call it; `python3 --version` on the step's PATH |
+| `kms` | GNU make, `python3` 3.8 or later | the same |
+| `nvrm` | `python3` 3.8 or later (rmcc.py: `subprocess.run(capture_output=, text=)`, 3.7); the same `patch` (the chain test against the pristine tree) | the same |
+| `fb`, `accel`, `agdc`, `nmsmn`, `ryzenadj`, `airdis`, `dlss`, `osver`, `plugin`, `selector` | nothing else | |
+| `nvencvt` | `python3` 3.8 or later on the build Mac's PATH (`NM_LOCAL_HOST_PATH`, default `/usr/bin:/bin:/usr/sbin:/sbin`) | `python3 --version` there |
+| `vulkan` | cmake 3.22.1 or later and ninja | Homebrew's or on PATH |
+| `xlate` | Rust 1.98.1 in the working directory | `deps` installs it |
+| `nvk` (and `boost`, built from it) | Python 3.10 or later (Mesa's meson.build) with meson, mako, PyYAML, packaging in `<workdir>/tools/venv`; LLVM 22 with its clang libraries; SPIRV-LLVM-Translator for LLVM 22; SPIRV-Tools; glslang; pkg-config; Rust with bindgen and cbindgen; a `patch` that also creates files (NVK's chain adds files; Homebrew `gpatch` when macOS's cannot) | each one, as `doctor` shows |
+
+`deps` installs `gpatch` only when no `patch` found passes both tests. 3.8 is the oldest Python the kext and video
+scripts were run with; nothing in them needs 3.10.
+
 They are built in the order of the table. Groups: `all` (the seventeen components above the optional ones), `kexts`
 (rm to nmsmn) and `userland` (airdis to nvencvt). The kext order is fixed: build_rm620.sh copies the pristine NVIDIA
 tree, applies the patches in kexts/NVRM/patches and writes the command lines every later kext step reads back;
@@ -391,7 +413,7 @@ back as it was before the app's install.
 | `STOP: another build.sh run (pid N) is using ...` | Two runs on one working directory | Wait for it or stop it; a lock of a run that is gone is taken over |
 | `offline, and ... is not in ... yet` | `--offline` before any fetch | Run `./build.sh fetch` with the network once |
 | `offline: NVK needs the network` | See [What is not automated](#what-is-not-automated-and-why) | Build NVK with the network |
-| `<component> needs: GNU-patch Python-3.10 ...` | A tool is missing | `./build.sh deps` |
+| `<component> needs: ...` (for example `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | A tool that component, or one it needs, uses is missing or does not do what the scripts ask of it; nothing was built | `./build.sh doctor` says which; `./build.sh deps` installs it |
 | rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name as a whole word (not inside another word) | The log names the command that shows the lines. If the name is a common word (user, mac, admin), build from another account or change the computer's local hostname (System Settings > General > Sharing) |
 | `STOP: N compile commands for arch/nvalloc/unix/src/osapi.c in .../compile_cmds.sh, one expected` (nvrm, accel) | The RM's compile list is incomplete; the kexts take their -D flags from NVIDIA's own command for osapi.c and stop rather than take another file's | `./build.sh --force build rm` (build.sh rebuilds rm in a fresh folder and then everything built from it); by hand, run build_rm620.sh in a new work folder |
 | `STOP: make -n listed N compile commands, fewer than ...` | build_rm620.sh or build_kms620.sh would have replaced a complete list with a shorter one; it kept the old one | Use a new work folder |
@@ -416,7 +438,7 @@ report file: ~/nullmoth-build/reports/failure-fb-<time>.txt   (attach it to a bu
 
 The report file holds what is needed to reproduce the failure: the date, the step and its exit status, the command
 line, the macOS version and build, the Mac model and processor, the version of Xcode, the SDK, clang, ld, git, make,
-GNU patch, Python, meson, ninja, cmake, pkg-config, glslang, LLVM, SPIRV-LLVM-Translator, SPIRV-Tools, Rust, bindgen,
+patch, Python, meson, ninja, cmake, pkg-config, glslang, LLVM, SPIRV-LLVM-Translator, SPIRV-Tools, Rust, bindgen,
 cbindgen and Homebrew, the checkout's commit and branch, whether it has local changes and which files, the pins, the
 variables the build gives the scripts, and the last 80 lines of the step's log. Your home folder is written as `~`.
 Read it before you post it: the names of your changed files are in it.
@@ -433,11 +455,15 @@ real git against local repositories that stand in for the remotes, and a scratch
 component build script is replaced by a stand-in that records what it receives. It checks doctor on a Mac with
 nothing installed, deps with and without installing, fetch (and a tampered remote), offline, dry run, the build
 order, the variables every step gets, skipping and rebuilding, a failing step and its report, a failed script after
-an earlier good build, the account-name recheck, the step's python3, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
+an earlier good build, build_rm620.sh's exit 6, the step's python3, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
+which of two Homebrews is used, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
+dry runs and env write nothing (Homebrew's cache included) and print no home path,
 an interrupted run,
 two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `env`, this document against the script,
 and the pins against the scripts that use them; each part has at least one control that breaks `build.sh` (or its
 input) on purpose and shows the check then fails. It runs `build.sh` under `/bin/bash`, or the bash named by
 `BUILD_SH_BASH`, and says so when that is not bash 3.2, the `/bin/bash` of macOS; it has passed under GNU bash
-3.2.48 and 5.2 on Linux, and has not been run on a Mac. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
+3.2.48 and 5.2 on Linux, and has not been run on a Mac. `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
+build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
+folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check takes whole words. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
 the first run on a Mac will show.

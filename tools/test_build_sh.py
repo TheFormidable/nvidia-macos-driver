@@ -15,11 +15,15 @@ driver. None of that can happen here, so this runs the real build.sh against sta
     pin comparison still reads it. The stand-in can be told to fail or to wait.
   * the pins of the outside sources are rewritten, in the clone only, to the commits of the stand-in remotes.
 
-The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /opt/homebrew and /usr/local
-before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew").
+The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /usr/local and /opt/homebrew
+before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew";
+arm "whichbrew" moves those two places into the sandbox, in its clone of build.sh only).
 
 Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
-  doctor on a fresh Mac; no Homebrew of this machine is reached; deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
+  doctor on a fresh Mac; no Homebrew of this machine is reached; which of two Homebrews (Intel, Apple silicon,
+  Rosetta); what an Xcode-only Mac builds, tools tested for what they do, dependencies checked first ("needs");
+  doctor, dry runs and env write nothing ("readonly"); no home path in what a tester pastes ("nohome");
+  deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
   the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
   interrupted run; two runs at once and a stale lock; paths with a space; Apple silicon and an unsupported macOS;
   "env"; clean; docs/BUILDING.md and docs/BUILDING.es.md against the script; build/pins.sh against the scripts and
@@ -70,7 +74,7 @@ triple() { case "$(cat "$S/arch")" in arm64) echo aarch64-apple-darwin ;; *) ech
 formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
   local p=$SB/brew/opt/$1
   case "$1" in
-    gpatch) mkwrap "$p/bin/gpatch" ver "GNU patch 2.8" ;;
+    gpatch) mkwrap "$p/bin/gpatch" patch "GNU patch 2.8" ;;
     ninja) mkwrap "$p/bin/ninja" ver "1.13.1" ;;
     cmake) mkwrap "$p/bin/cmake" cmake "cmake version 4.1.2" ;;
     pkgconf) mkwrap "$p/bin/pkg-config" ver "2.5.1" ;;
@@ -85,6 +89,17 @@ formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
 }
 case "$role" in
   ver) case "${1:-}" in --version|-version|-v|version) cat "$self.version" ;; esac ;;
+  # a patch that works: build.sh's own test of a patch (a/f.txt in a temporary folder) is applied by the real patch of
+  # the machine running the test; the patch chains are not applied to the stand-in NVIDIA trees (accepted, as before).
+  # And one that does not take the options the scripts pass, as a patch older than macOS's might not
+  patch) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac
+         in=$(cat); case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
+  patchold) case "${1:-}" in --version) cat "$self.version" ;; esac
+            case " $* " in *" --no-backup-if-mismatch "*|*" --fuzz=0 "*) echo "patch: unrecognized option" >&2; exit 2 ;; esac
+            exec "$(cat "$LIB/realpatch")" "$@" ;;
+  patchnonew) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac   # changes files, cannot create one
+              in=$(cat); case "$in" in *"--- /dev/null"*) echo "patch: cannot create files" >&2; exit 1 ;; esac
+              case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
   uname)
     case "${1:-}" in
       -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
@@ -392,6 +407,7 @@ def build_template():
     LIB.mkdir(parents=True)
     (LIB / "fake.sh").write_text(FAKE_SH)
     (LIB / "steplib.sh").write_text(STEPLIB_SH)
+    (LIB / "realpatch").write_text(shutil.which("patch") or "/usr/bin/patch")
     commits, sums, ri = make_remotes(REMOTES)
     names = subprocess.run([GIT, "ls-files", "-z", "-c", "-o", "--exclude-standard"], cwd=ROOT, capture_output=True,
                            env=GENV).stdout.decode().split("\0")
@@ -477,7 +493,7 @@ class Sandbox:
         for name_ in PLAIN:
             self.wrap(self.bin / name_, "plain")
         self.wrap(self.bin / "python3", "py", "3.9.6")                  # macOS's own python3
-        self.wrap(self.bin / "patch", "ver", "patch 2.0-12u11-Apple")   # macOS's patch is not GNU patch
+        self.wrap(self.bin / "patch", "patch", "patch 2.0-12u11-Apple")   # macOS's patch: not GNU's, and it applies the chains
         self.wrap(self.bin / "make", "ver", "GNU Make 3.81")
         self.has_brew = brew
         if brew:
@@ -610,7 +626,7 @@ def want(name):
 # ------------------------------------------------------------------------------------------------- what is expected
 ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "vulkan",
          "plugin", "xlate", "nvencvt"]
-FRESH_MISSING = ["Xcode", "Homebrew", "GNU patch", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
+FRESH_MISSING = ["Xcode", "Homebrew", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
                  "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
 MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
                       r"|python[0-9.]* -m (venv|pip)|step |sudo|git (init|fetch|clone|checkout|archive|update-ref|tag|stash|config|sparse-checkout|symbolic-ref))")
@@ -796,7 +812,7 @@ def arm_whichbrew():
                                              '      *) if false; then MAC_ARCH=arm64;')))
 
 
-DEPS_WANT = ["gpatch", "ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
+DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
 
 
 def deps_problems(sb, rc, out, before):
@@ -925,7 +941,7 @@ def noinstall_problems(sb, args, extra=None):
 def arm_noinstall():
     sb = Sandbox("noinst")
     p, out = noinstall_problems(sb, ["deps", "--no-install", "-y"])
-    ok = not p and "not installing (--no-install)" in out and "gpatch" in out
+    ok = not p and "not installing (--no-install)" in out and "ninja" in out
     check("deps --no-install --yes: says what is missing, installs nothing, exits non-zero", ok, (p, out[-800:]))
     p, out = noinstall_problems(sb, ["deps", "-y"], extra={"NM_NO_INSTALL": "1"})
     check("NM_NO_INSTALL=1 in the environment does the same", not p, (p, out[-500:]))
@@ -937,6 +953,65 @@ def arm_noinstall():
     with sb.scratch():
         sb.break_script('if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"', 'if false; then say "not installing (--no-install)"')
         negative("deps that ignores --no-install", noinstall_problems(sb, ["deps", "--no-install", "-y"])[0])
+
+
+XCODE_ONLY = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "plugin", "nvencvt"]
+
+
+def needs_problems(sb, args, want_steps, want_stop=None):
+    """--no-install build <args> on a Mac with Xcode, macOS's patch and python3, and nothing from Homebrew"""
+    sb.clear()
+    rc, out = sb.run("--no-install", "build", *args)
+    keys = sb.step_keys()
+    p = []
+    if want_stop:
+        if rc == 0 or want_stop not in out:
+            p.append(f"build {' '.join(args)}: exit {rc}, expected a stop naming {want_stop!r}: {out[-300:]}")
+    elif rc != 0:
+        p.append(f"build {' '.join(args)}: exit {rc}: {out[-400:]}")
+    if keys != want_steps:
+        p.append(f"build {' '.join(args)} ran {keys}, expected {want_steps}")
+    return p
+
+
+def arm_needs():
+    sb = Sandbox("xonly")
+    rc, out = sb.run("fetch")
+    if rc != 0:
+        check("fetch for the Xcode-only Mac", False, out[-400:])
+        return
+    p = needs_problems(sb, XCODE_ONLY, XCODE_ONLY)
+    check("Xcode with macOS's patch and python3 builds rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj, airdis, dlss, osver, "
+          "plugin and nvencvt", not p, p)
+    for comp, need in (("vulkan", "cmake/ninja"), ("xlate", "Rust-"), ("nvk", "LLVM-")):
+        p = needs_problems(sb, [comp], [], want_stop=f"{comp} needs:")
+        check(f"{comp} stops before any step, naming what it needs ({need})", not p, p)
+    with sb.scratch():
+        sb.break_script("""    [ -n "$p" ] && [ -x "$p" ] || continue\n""",
+                        """    [ -n "$p" ] && [ -x "$p" ] || continue\n    case "$("$p" --version 2>/dev/null | first_line)" in *'GNU patch'*) ;; *) continue ;; esac\n""")
+        negative("a patch chosen by its name (GNU patch) instead of by what it does", needs_problems(sb, ["rm"], ["rm"]))
+    with sb.scratch():
+        sb.wrap(sb.bin / "patch", "patchold", "patch 2.5")
+        p = needs_problems(sb, ["kexts"], [], want_stop="rm needs: a-patch-that-applies-the-chains")
+        rc, out = sb.run("doctor")
+        if "MISSING  a patch that applies the patch chains" not in out:
+            p.append("doctor does not say that the patch found does not apply the chains")
+        check("a patch that does not take the scripts' options: build stops before rm, doctor says so", not p, p)
+    with sb.scratch():
+        sb.wrap(sb.bin / "patch", "patchnonew", "patch 2.0-12u11-Apple")
+        p = needs_problems(sb, ["--force", "rm", "nvrm"], ["rm", "kms", "nvrm"])
+        p += needs_problems(sb, ["nvk"], [], want_stop="a-patch-that-creates-files")
+        rc, out = sb.run("--no-install", "deps")
+        if "gpatch" not in out:
+            p.append("deps does not name gpatch for NVK")
+        check("a patch that changes files but cannot create one: the kexts build, nvk stops, deps names gpatch", not p, p)
+    with sb.scratch():
+        (sb.co / "build/pins.sh").write_text((sb.co / "build/pins.sh").read_text().replace("NM_PIN_TOOL_PYTHON_KEXT_MIN=3.8", "NM_PIN_TOOL_PYTHON_KEXT_MIN=99"))
+        p = needs_problems(sb, ["nvencvt"], [], want_stop="rm needs: python3-99")
+        check("build nvencvt checks rm, which it pulls in, before the first step (a Python too old for rm stops it)", not p, p)
+        sb.break_script("  for c in $(with_deps $list); do need_tools_for", "  for c in $list; do need_tools_for")
+        negative("a check of the named components only (rm, pulled in by nvencvt, built with what it lacks)",
+                 needs_problems(sb, ["nvencvt"], [], want_stop="rm needs: python3-99"))
 
 
 FETCH_WANT = [("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/620.70.06"),
@@ -2149,7 +2224,7 @@ def main():
     print(f"build.sh runs under {BASH} (bash {v})")
     if not v.startswith("3.2"):
         print(f"note: this is not bash 3.2, the /bin/bash of macOS; set BUILD_SH_BASH to a bash 3.2 to test what a Mac runs")
-    for t in ("git", "shasum", "perl", "tar"):
+    for t in ("git", "shasum", "perl", "tar", "patch"):
         if not shutil.which(t):
             print(f"SKIP: {t} is needed to imitate a Mac here")
             sys.exit(2)
@@ -2175,6 +2250,8 @@ def main():
             arm_readonly()
         if want("noinstall"):
             arm_noinstall()
+        if want("needs"):
+            arm_needs()
         if want("tamper"):
             arm_tamper()
         if want("space"):

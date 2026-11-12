@@ -29,8 +29,10 @@ comandos y opciones y la solución de problemas.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
-- Homebrew. Si falta, `./build.sh deps` explica cómo instalarlo y ofrece ejecutar su instalador oficial, pero solo
-  después de que escribas `yes` (`--yes` no cuenta para esto).
+- Homebrew, solo para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
+  airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
+  bastan; [tabla](BUILDING.md#tools-each-component-needs)). Si falta, `./build.sh deps` explica cómo instalarlo y
+  ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
 - Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
   que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
   mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas.
@@ -237,7 +239,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: another build.sh run (pid N) is using ...` | Dos ejecuciones sobre el mismo directorio de trabajo | Espera a que termine o detenla |
 | `offline, and ... is not in ... yet` | `--offline` antes de cualquier `fetch` | Ejecuta `./build.sh fetch` una vez con red |
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
-| `<componente> needs: GNU-patch Python-3.10 ...` | Falta una herramienta | `./build.sh deps` |
+| `<componente> needs: ...` (por ejemplo `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | Falta una herramienta que usa ese componente o uno que necesita, o no hace lo que le piden los scripts; no se compiló nada | `./build.sh doctor` dice cuál; `./build.sh deps` la instala |
 | rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo como palabra completa (no dentro de otra palabra) | El registro da la orden que muestra esas líneas. Si el nombre es una palabra común (user, mac, admin), compila desde otra cuenta o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
