@@ -7,6 +7,7 @@
 #include "nv-xnu.h"
 #include "nv_xnu_kcore.h"
 #include "nvrm_itree.h"
+#include "nv_xnu_slots.h"
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 #include <sys/kauth.h>
@@ -65,7 +66,14 @@ NvS32 NV_API_CALL os_snprintf(char *buf, NvU32 size, const char *fmt, ...)
 { NV_XNU_TRC;
     va_list ap; va_start(ap, fmt); int n = vsnprintf(buf, size, fmt, ap); va_end(ap); return n;
 }
-NvU32 NV_API_CALL os_get_cpu_count(void) { NV_XNU_TRC; return 4; }
+// The number of logical CPUs the kernel brought up. The RM sizes its per-CPU thread-state table by it (at least 32) and
+// reports it; it used to be a flat 4.
+extern unsigned int real_ncpus;   // osfmk/i386/mp.h; exported by com.apple.kpi.unsupported
+NvU32 NV_API_CALL os_get_cpu_count(void) { NV_XNU_TRC; const unsigned n = real_ncpus; return n ? n : 1; }
+// 0 on purpose, not cpu_number(). Its only user is the RM's lockless interrupt thread state: rm_isr files an entry under
+// the CPU number and looks it up again with the number of the moment, and asserts it did not change. On Linux that holds
+// because rm_isr runs in the hard interrupt; here it runs on a work-loop thread that can move to another CPU between the
+// two. One fixed number is collision-free because each GPU has one such thread and the table is per GPU as well.
 NvU32 NV_API_CALL os_get_cpu_number(void) { NV_XNU_TRC; return 0; }
 
 int NV_API_CALL nv_printf(NvU32 debuglevel, const char *printf_format, ...)
@@ -218,9 +226,33 @@ NV_STATUS NV_API_CALL os_release_semaphore(void *p) { NV_XNU_TRC; semaphore_sign
 // The RM's portSyncExSafeToSleep() and osIsRaisedIRQL() are this answer: where it is no, the RM takes its own
 // non-blocking branches. It used to be yes everywhere, also under the RM's spinlocks.
 NvBool NV_API_CALL os_semaphore_may_sleep(void) { NV_XNU_TRC; if (nvx_can_block()) return NV_TRUE; nvx_atomic_maysleep_false(); return NV_FALSE; }
-volatile thread_t nv_xnu_isr_thread = NULL;
+// Which threads are inside rm_isr right now: one slot per GPU, written only by that GPU's work-loop thread around its
+// rm_isr call (NVRM::interruptOccurred). The RM asks os_is_isr() to tell interrupt context from thread context (its
+// TLS keeps an entry on the interrupt's stack only while the answer is yes). With one global for all GPUs, the second
+// GPU's handler overwrote and then cleared the first one's mark while that one was still inside rm_isr, and its TLS
+// entry was left pointing into a stack frame that was gone. A thread only ever compares the slots with itself, so the
+// scan needs no lock: the thread inside rm_isr always finds its own slot and no other thread can match it.
+volatile thread_t nv_xnu_isr_threads[NV_XNU_ISR_SLOTS] __attribute__((aligned(64))) = {};
+static void *volatile nv_xnu_isr_owner[NV_XNU_ISR_SLOTS];   // the NVRM object that holds each slot
 volatile int nv_xnu_in_isr = 0;
-NvBool NV_API_CALL os_is_isr(void) { return (nv_xnu_isr_thread != NULL && nv_xnu_isr_thread == current_thread()) ? NV_TRUE : NV_FALSE; }
+// The slot of a starting GPU (the same one again if it already holds one), or -1 when all are taken.
+int nv_xnu_isr_slot_claim(void *owner)
+{
+    return nv_slot_claim(nv_xnu_isr_owner, NV_XNU_ISR_SLOTS, owner);
+}
+// At stop, once the GPU's interrupt source is gone. Does nothing for -1 or for a slot another GPU holds.
+void nv_xnu_isr_slot_release(int slot, void *owner)
+{
+    if (slot < 0 || slot >= NV_XNU_ISR_SLOTS || nv_xnu_isr_owner[slot] != owner) return;
+    nv_xnu_isr_threads[slot] = NULL;
+    nv_slot_release(nv_xnu_isr_owner, NV_XNU_ISR_SLOTS, slot, owner);
+}
+NvBool NV_API_CALL os_is_isr(void)
+{
+    const thread_t me = current_thread();
+    for (unsigned i = 0; i < NV_XNU_ISR_SLOTS; i++) if (nv_xnu_isr_threads[i] == me) return NV_TRUE;
+    return NV_FALSE;
+}
 NvBool NV_API_CALL os_is_administrator(void) { NV_XNU_TRC; return (kauth_getuid() == 0) ? NV_TRUE : NV_FALSE; }
 NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken) { NV_XNU_TRC; if (!pSecToken) return NV_ERR_INVALID_ARGUMENT; *pSecToken = (NvU32)kauth_getuid(); return NV_OK; }
 

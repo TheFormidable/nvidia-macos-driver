@@ -20,7 +20,8 @@ is right in one place only; what is asserted on the source text:
   channels; the owner word is never written by NVRM.cpp; a client that is freed without ever having been closed (its
   attach or start failed) hands its owner back in free(), after it has left the client table under the table's lock
   and before anything it owns is released, so that the table never points at freed memory;
-- the kick follows rm_isr in the interrupt action (whatever it answered) and rm_isr_bh in the bottom half, which both
+- the kick follows rm_isr in the interrupt action (whatever it answered), right after the line that clears the GPU's
+  interrupt-thread slot and before the action leaves the interrupt gate, and rm_isr_bh in the bottom half, which both
   bottom-half variants (own thread, inline on the work loop) run; never in the primary interrupt filter.
 
 Each arm has a negative control: the same check on the text with that one thing broken must fail.
@@ -237,8 +238,9 @@ def arms(src, header):
 
     io = body(code, "NVRM::interruptOccurred")
     arm("the interrupt action kicks the fence right after rm_isr, whatever it answered",
-        order(io, [r"\brm_isr\s*\(\s*NULL\s*,\s*&fNv\s*,\s*&needBottomHalf\s*\)\s*;", r"nv_xnu_isr_thread\s*=\s*NULL\s*;\s*nvrm_fence_kick\s*\(\s*\)\s*;",
-                   r"if\s*\(\s*handled\s*\)"]))
+        order(io, [r"\bnv_gate_enter\s*\(\s*&fIrqGate\s*\)", r"\brm_isr\s*\(\s*NULL\s*,\s*&fNv\s*,\s*&needBottomHalf\s*\)\s*;",
+                   r"nv_xnu_isr_threads\s*\[\s*fIsrSlot\s*\]\s*=\s*NULL\s*;\s*nvrm_fence_kick\s*\(\s*\)\s*;",
+                   r"if\s*\(\s*handled\s*\)", r"\bnv_gate_leave\s*\(\s*&fIrqGate\s*\)"]))
     bh = body(code, "nvrmRunBottomHalf")
     arm("the bottom half kicks the fence right after rm_isr_bh",
         re.search(r"\brm_isr_bh\s*\(\s*NULL\s*,\s*nv\s*\)\s*;\s*nvrm_fence_kick\s*\(\s*\)\s*;", bh) is not None)
@@ -332,7 +334,10 @@ CONTROLS = [
     ("inline bottom half bypasses the body", "both bottom-half variants",
      lambda s: broken(s, "        } else nvrmRunBottomHalf(&fNv);", "        } else rm_isr_bh(NULL, &fNv);")),
     ("a kick in the primary filter", "exactly two kicks",
-     lambda s: broken(s, "    unsigned long n = ++gNvIsrCount;", "    unsigned long n = ++gNvIsrCount;\n    nvrm_fence_kick();")),
+     lambda s: broken(s, "    ++gNvIsrCount;", "    ++gNvIsrCount;\n    nvrm_fence_kick();")),
+    ("interrupt kick after the action left the gate", "the interrupt action kicks",
+     lambda s: broken(broken(s, "    nvrm_fence_kick();\n    if (handled) gNvIsrHandled++;", "    if (handled) gNvIsrHandled++;"),
+                      "    nv_gate_leave(&fIrqGate);\n}", "    nv_gate_leave(&fIrqGate);\n    nvrm_fence_kick();\n}")),
 ]
 
 
