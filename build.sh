@@ -36,10 +36,12 @@ MARKER=.nullmoth-build-workdir
 LOCAL_HOST=nullmoth-local-build
 
 # ---------------------------------------------------------------------------------------------------------- messages
-say()  { printf '%s\n' "$*"; }
-note() { printf 'note: %s\n' "$*"; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-die()  { printf 'STOP: %s\n' "$*" >&2; exit 2; }
+# Everything build.sh prints writes the home folder as ~ (its path contains the account name, and testers paste this
+# output into bug reports); has_home keeps the common case, a line without it, free of a subprocess.
+say()  { if has_home "$*"; then printf '%s\n' "$*" | tilde; else printf '%s\n' "$*"; fi; }
+note() { say "note: $*"; }
+warn() { say "WARNING: $*" >&2; }
+die()  { say "STOP: $*" >&2; exit 2; }
 hr()   { say "---------------------------------------------------------------------------------------------------"; }
 q() {   # a value quoted for a shell
   case "$1" in
@@ -49,15 +51,40 @@ q() {   # a value quoted for a shell
   esac
 }
 qcmd() { local a out=""; for a in "$@"; do out="$out $(q "$a")"; done; printf '%s\n' "${out# }"; }
-tilde() {   # the home folder written as ~ (report files and summaries a tester may post)
-  # both spellings: $HOME as set, and the same folder with its symbolic links resolved, which is how the working
-  # directory is stored (a home under /var or /tmp is /private/var or /private/tmp once resolved)
-  local ph=""
-  if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
-    ph=$(cd "$HOME" 2>/dev/null && pwd -P) || ph=""
-    awk -v h="$HOME" -v p="$ph" 'function rep(s, x,   i, o) { o = ""; while ((i = index(s, x)) > 0) { o = o substr(s, 1, i - 1) "~"; s = substr(s, i + length(x)) } return o s }
-      { if (p != "" && p != "/" && p != h) $0 = rep($0, p); print rep($0, h) }'
-  else cat; fi
+# The home folder in both spellings: $HOME as set, and the same folder with its symbolic links resolved, which is how the
+# working directory is stored (a home under /var or /tmp is /private/var or /private/tmp once resolved).
+TILDE_H=""; TILDE_P=""
+if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
+  TILDE_H=$HOME
+  TILDE_P=$(cd "$HOME" 2>/dev/null && pwd -P) || TILDE_P=""
+  case "$TILDE_P" in /|"$TILDE_H") TILDE_P="" ;; esac
+fi
+has_home() {
+  [ -n "$TILDE_H" ] || return 1
+  case "$1" in *"$TILDE_H"*) return 0 ;; esac
+  if [ -n "$TILDE_P" ]; then case "$1" in *"$TILDE_P"*) return 0 ;; esac; fi
+  return 1
+}
+home_as() {   # <text>: stdin with the home folder written as <text>, where it is a whole path: /Users/ana/x and /Users/ana
+  # become ~/x and ~, /Users/anabel and /x/Users/ana stay as they are
+  [ -n "$TILDE_H" ] || { cat; return 0; }
+  awk -v h="$TILDE_H" -v p="$TILDE_P" -v t="$1" '
+    function rep(s, x,   i, o, a, b) {
+      o = ""
+      while ((i = index(s, x)) > 0) {
+        a = (i > 1) ? substr(s, i - 1, 1) : ""; b = substr(s, i + length(x), 1)
+        if (a !~ /[A-Za-z0-9._-]/ && b !~ /[A-Za-z0-9._-]/) o = o substr(s, 1, i - 1) t
+        else o = o substr(s, 1, i - 1 + length(x))
+        s = substr(s, i + length(x))
+      }
+      return o s
+    }
+    { if (p != "") $0 = rep($0, p); print rep($0, h) }'
+}
+tilde() { home_as "~"; }   # report files, summaries, everything a person reads
+qh() {   # a value quoted for a shell, with the home folder as "$HOME": an env line that works when pasted, without the account name
+  has_home "$1" || { q "$1"; return 0; }
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"$`]/\\&/g' | home_as '$HOME')"
 }
 
 # ---------------------------------------------------------------------------------------------------------- small tools
@@ -657,10 +684,6 @@ doctor() {   # prints; sets D_MISSING
   say "== sources (\"./build.sh fetch\")"
   source_status
   say "== things that can stop a build on another Mac"
-  x=$(id -un 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_note "your account name '$x' is short: build_rm620.sh and build_kms620.sh stop (exit 6) when it occurs inside any word of NVIDIA's archive; build.sh then looks again for it as a whole word and goes on when there is none (the log says so)"
-  x=$(hostname -s 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_note "the computer's short name '$x' is short: the same check looks for it, and build.sh looks again the same way (System Settings > General > Sharing > Local hostname)"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
   if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
@@ -670,7 +693,7 @@ doctor() {   # prints; sets D_MISSING
   [ "$NM_OFFLINE" = 1 ] && d_note "offline: NVK cannot be built (meson downloads six Rust crates into each fresh Mesa tree)"
   say ""
   if [ "$D_MISSING" = 0 ]; then say "doctor: everything required is present"
-  else say "doctor: $D_MISSING thing(s) missing or too old:"; printf '%s' "$D_LINES"; fi
+  else say "doctor: $D_MISSING thing(s) missing or too old:"; printf '%s' "$D_LINES" | tilde; fi
   return 0
 }
 
@@ -860,7 +883,7 @@ check_mesa_requirements() {
 ask() {   # <question>: yes with --yes; otherwise a y/N answer from the terminal; no terminal = no
   [ "$NM_ASSUME_YES" = 1 ] && { say "$1 [y/N] yes (--yes)"; return 0; }
   if [ -t 0 ] && [ -r /dev/tty ]; then
-    local a; printf '%s [y/N] ' "$1"; read -r a < /dev/tty || a=
+    local a; printf '%s [y/N] ' "$(printf '%s' "$1" | tilde)"; read -r a < /dev/tty || a=
     case "$a" in y|Y|yes|YES|Yes) return 0 ;; esac
   else say "$1 [y/N] no (no terminal; run with --yes to agree)"; fi
   return 1
@@ -1266,27 +1289,6 @@ source_rev() {   # the revision the git-archive based scripts build: HEAD, or th
     REV_NOTE="the working tree of $(git -C "$HERE" rev-parse --short HEAD) with its uncommitted changes (as commit object $REV; untracked files are not part of it)"
   fi
 }
-# build_rm620.sh and build_kms620.sh end by looking for the account name and the computer's short name anywhere in the
-# archive, as a substring, and exit 6 when they find one. A short account name is found inside ordinary words of
-# NVIDIA's own strings (an account "ana" in "banana"); it stopped every RM build on the owner's Mac, after the archive
-# was complete. personal_recheck <archive> looks for the two names as whole words (what a path, user@host or a name in
-# an identity string would be); only when there is none is the archive accepted, and the log says what the scripts
-# matched and why it was accepted.
-personal_recheck() {
-  local a=$1 u h re n
-  [ -f "$a" ] || { say "personal-string recheck: $a is missing" >> "$CUR_LOG"; return 1; }
-  u=$(id -un 2>/dev/null || true); h=$(hostname -s 2>/dev/null || true)
-  re="${u}${u:+${h:+|}}${h}"
-  [ -n "$re" ] || return 1
-  n=$(strings -a "$a" | grep -ciE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" || true)
-  if [ "${n:-0}" = 0 ]; then
-    say "personal strings: the script's substring match (exit 6) found '$re' only inside other words; as whole words: 0. Accepted." >> "$CUR_LOG"
-    return 0
-  fi
-  { say "personal strings: '$re' occurs $n time(s) as a whole word in $a, for example:"
-    strings -a "$a" | grep -iE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" | sed -n 1,3p; } >> "$CUR_LOG" 2>&1 || true
-  return 1
-}
 run_component() {
   local n=$1 m
   make_step_env
@@ -1294,16 +1296,15 @@ run_component() {
     rm)
       [ ! -e "$RMWORK" ] || { in_workdir "$RMWORK" || die "$RMWORK is outside the working directory; build.sh rebuilds it from scratch only inside"; safe_rm "$RMWORK"; }
       x mkdir -p "$RMWORK"
+      # exit 6: the archive names this account or computer as a whole word (the script says how to see where)
       m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_rm620.sh" "$RMWORK" "$PRISTINE" || m=$?
-      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" || return 6
-      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m"
+      [ "$m" = 0 ] || return "$m"
       # build_rm620.sh archives whatever objects exist and exits 0 when compiles fail; its "failed:" line says so
       [ "$NM_DRY_RUN" = 1 ] || grep -q '^failed: 0 of ' "$CUR_LOG" || { say "build_rm620.sh reported compile failures (it does not stop on them): see 'failed:' above" | tee -a "$CUR_LOG"; return 3; }
       ;;
     kms)
       m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_kms620.sh" "$RMWORK" || m=$?
-      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" || return 6
-      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m" ;;
+      [ "$m" = 0 ] || return "$m" ;;
     nvrm)
       lines_to_array < <(passthru KMS_ARCHIVE RE)
       x "${STEP_ENV[@]}" "NVRM_PRISTINE_OGKM=$PRISTINE" ${ARR[@]+"${ARR[@]}"} bash "$HERE/build/build_nvrm.sh" "$HERE/kexts/NVRM" "$OGKM620" "$O/kexts/nvrm" ;;
@@ -1521,49 +1522,49 @@ print_env() {
   say "# (each script also gets CC, CXX, CFLAGS, CPPFLAGS, LDFLAGS, NM_TAHOE removed; build.sh shows its exact"
   say "#  command lines with: ./build.sh --dry-run --force build <component>)"
   say "# -- settings"
-  for v in $OPTION_VARS; do eval "say \"export $v=\$(q \"\${$v:-}\")\""; done
+  for v in $OPTION_VARS; do eval "say \"export $v=\$(qh \"\${$v:-}\")\""; done
   say "# -- where the build keeps and finds things"
-  say "export NULLMOTH_BUILD_ROOT=$(q "$R")"
-  say "export NM_OGKM620_PRISTINE=$(q "$PRISTINE")"
-  say "export NM_OGKM620=$(q "$OGKM620")"
-  say "export OGKM=$(q "$OGKM620")"
-  say "export NVRM_PRISTINE_OGKM=$(q "$PRISTINE")"
-  say "export NM_OGKM610=$(q "$OGKM610")"
-  say "export NM_MESA_GIT=$(q "$MESA")"
-  say "export NM_KHRONOS_URL=$(q "${NM_KHRONOS_URL:-file://$KHRONOS}")"
-  say "export NULLMOTH_BUILD_HOST=$(q "$BUILD_HOST")"
+  say "export NULLMOTH_BUILD_ROOT=$(qh "$R")"
+  say "export NM_OGKM620_PRISTINE=$(qh "$PRISTINE")"
+  say "export NM_OGKM620=$(qh "$OGKM620")"
+  say "export OGKM=$(qh "$OGKM620")"
+  say "export NVRM_PRISTINE_OGKM=$(qh "$PRISTINE")"
+  say "export NM_OGKM610=$(qh "$OGKM610")"
+  say "export NM_MESA_GIT=$(qh "$MESA")"
+  say "export NM_KHRONOS_URL=$(qh "${NM_KHRONOS_URL:-file://$KHRONOS}")"
+  say "export NULLMOTH_BUILD_HOST=$(qh "$BUILD_HOST")"
   if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then
-    say "export NM_LOCAL_BUILD_HOST=$(q "$LOCAL_HOST")   # build/local_build_host.sh serves it; PATH starts with tools/host"
+    say "export NM_LOCAL_BUILD_HOST=$(qh "$LOCAL_HOST")   # build/local_build_host.sh serves it; PATH starts with tools/host"
     say "# NM_LOCAL_HOST_PATH: the PATH of a command run on that host (default /usr/bin:/bin:/usr/sbin:/sbin)"
   fi
   if [ "$NM_OFFLINE" = 1 ]; then say "export CARGO_NET_OFFLINE=true"; else say "# CARGO_NET_OFFLINE=true with --offline"; fi
-  say "export NULLMOTH_RUST_VERSION=$(q "${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}")"
-  say "export NULLMOTH_RUST_BIN=$(q "$RUST_BIN")"
-  say "export NULLMOTH_CARGO_HOME=$(q "${NULLMOTH_CARGO_HOME:-$CARGO_DIR}")"
-  say "export RUSTUP_HOME=$(q "$RUSTUP_DIR")"
-  say "export CARGO_HOME=$(q "$CARGO_DIR")"
-  say "export RUSTUP_TOOLCHAIN=$(q "$NM_PIN_RUST_VERSION")"
-  say "export NVK_PATH=$(q "${NVK_PATH:-$TBIN}")"
-  say "export PKG_CONFIG_PATH=$(q "$(nvk_pkg_config_path)")"
-  say "export LIBCLANG_PATH=$(q "${LIBCLANG_PATH:-$LIBCLANG_DIR}")"
-  say "export NVK_JOBS=$(q "${NVK_JOBS:-$NM_JOBS}")"
-  say "export JOBS=$(q "${JOBS:-$NM_JOBS}")"
-  say "export NV_VERSION=$(q "$NM_PIN_OGKM620_REF")"
-  say "export MACOSX_DEPLOYMENT_TARGET=$(q "${MACOSX_DEPLOYMENT_TARGET:-15.0}")"
+  say "export NULLMOTH_RUST_VERSION=$(qh "${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}")"
+  say "export NULLMOTH_RUST_BIN=$(qh "$RUST_BIN")"
+  say "export NULLMOTH_CARGO_HOME=$(qh "${NULLMOTH_CARGO_HOME:-$CARGO_DIR}")"
+  say "export RUSTUP_HOME=$(qh "$RUSTUP_DIR")"
+  say "export CARGO_HOME=$(qh "$CARGO_DIR")"
+  say "export RUSTUP_TOOLCHAIN=$(qh "$NM_PIN_RUST_VERSION")"
+  say "export NVK_PATH=$(qh "${NVK_PATH:-$TBIN}")"
+  say "export PKG_CONFIG_PATH=$(qh "$(nvk_pkg_config_path)")"
+  say "export LIBCLANG_PATH=$(qh "${LIBCLANG_PATH:-$LIBCLANG_DIR}")"
+  say "export NVK_JOBS=$(qh "${NVK_JOBS:-$NM_JOBS}")"
+  say "export JOBS=$(qh "${JOBS:-$NM_JOBS}")"
+  say "export NV_VERSION=$(qh "$NM_PIN_OGKM620_REF")"
+  say "export MACOSX_DEPLOYMENT_TARGET=$(qh "${MACOSX_DEPLOYMENT_TARGET:-15.0}")"
   say "export PYTHONDONTWRITEBYTECODE=1"
-  if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(q "$THOST:$STEP_PATH")"; else say "export PATH=$(q "$STEP_PATH")"; fi
+  if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(qh "$THOST:$STEP_PATH")"; else say "export PATH=$(qh "$STEP_PATH")"; fi
   say "# -- read by the build scripts; passed on only when you set them (empty = the script's own default)"
   for v in KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS DEVELOPER_DIR \
            NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK; do
-    eval "if [ -n \"\${$v+x}\" ]; then say \"export $v=\$(q \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
+    eval "if [ -n \"\${$v+x}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- package (build/package_local.sh)"
-  say "export NM_PACKAGE_NAME=$(q "$(package_name)")"
-  say "export NM_BUILD_INFO=$(q "$PKGDIR/build-info.txt")"
+  say "export NM_PACKAGE_NAME=$(qh "$(package_name)")"
+  say "export NM_BUILD_INFO=$(qh "$PKGDIR/build-info.txt")"
   say "# -- mirrors (empty = the URL in build/pins.sh)"
   for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL \
            NM_RUSTUP_URL RUSTUP_DIST_SERVER; do
-    eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(q \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
+    eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- not used by build.sh: STEPS and NM_REV (build_release_inputs.sh, which build.sh replaces), X and RELEASE"
   say "#    (build_xlate.sh and build_plugin.sh, the original author's development scripts for trees in ~/nvmtl-build)"

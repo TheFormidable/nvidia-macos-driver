@@ -12,6 +12,8 @@ libtool, strings, stat, md5 and for the account and computer names) and checks:
     touched, and a fresh work folder (what build.sh --force does), and accel_build.sh gets the same -D flags each time;
   * a list that lacks the osapi.c command, or whose command lacks the RM's defines, stops build/rm_defines.sh and
     accel_build.sh with a message, and nothing is compiled;
+  * neither the account nor the computer name reaches make-n.txt or the output, and the personal-string check takes
+    whole words only ("ike" inside "likely" is not the account "ike"), with the same verdict as build.sh.
 Negative controls: the scripts as they were at 19279ba (read with git show) must fail the same checks."""
 import os
 import shutil
@@ -268,6 +270,32 @@ def truncated_problems(base, old):
     return p
 
 
+def personal_problems(base, old, archive_text, want_stop):
+    """the personal-string check: whole words only; the names never printed; make-n.txt names neither"""
+    r = repo(base, old)
+    env = Env(base, extra=archive_text)
+    src = base / "pristine"
+    if not src.exists():
+        pristine(src)
+    work = base / f"work-personal-{abs(hash(archive_text)) % 10000}"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    rc, out = env.run(["bash", str(r / "build/build_rm620.sh"), str(work), str(src)])
+    p = []
+    if want_stop and rc != 6:
+        p.append(f"exit {rc} for {archive_text!r}, expected 6")
+    if not want_stop and rc != 0:
+        p.append(f"exit {rc} for {archive_text!r}: {out[-300:]}")
+    for name in (ACCOUNT, HOST):
+        if name in out.replace(archive_text, ""):
+            p.append(f"the output names {name!r}: {[l for l in out.splitlines() if name in l][:2]}")
+    mn = (work / "make-n.txt").read_text() if (work / "make-n.txt").exists() else ""
+    for name in (ACCOUNT, HOST):
+        if name in mn:
+            p.append(f"make-n.txt names {name!r}")
+    return p
+
+
 def main():
     for t in ("make", "patch", "git"):
         if not shutil.which(t):
@@ -285,6 +313,16 @@ def main():
         p = truncated_problems(base / "cut", old=False)
         check("a list without the osapi.c command or without its defines: rm_defines.sh and accel_build.sh stop with a message", not p, p)
         negative("accel_build.sh of " + OLD + " (head -1)", truncated_problems(base / "cut-old", old=True))
+        p = personal_problems(base / "pers", False, "Most likely the GPU stopped", want_stop=False)
+        check("the account name inside an ordinary word ('ike' in 'likely') does not stop build_rm620.sh", not p, p)
+        p = personal_problems(base / "pers", False, "/Users/ike/src/nv.c", want_stop=True)
+        check("the account name as a word (a home path) stops it (exit 6), without printing the name", not p, p)
+        p = personal_problems(base / "pers", False, "built by root@mybox", want_stop=True)
+        check("the computer's short name as a word stops it, without printing the name", not p, p)
+        p = personal_problems(base / "pers", False, "the GPU stopped", want_stop=False)
+        check("make-n.txt names neither the account nor the computer (NV_BUILD_USER, NV_BUILD_HOST)", not p, p)
+        negative("build_rm620.sh of " + OLD + " (substring match, names printed)",
+                 personal_problems(base / "pers-old", True, "Most likely the GPU stopped", want_stop=False))
     finally:
         if os.environ.get("NMT_KEEP"):
             print(f"kept: {base}")

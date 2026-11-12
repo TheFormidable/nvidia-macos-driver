@@ -288,9 +288,15 @@ What `build.sh` does around the existing scripts, so that they no longer need th
   scripts default to `~/ogkm610`, the wrong tree), the output folders, Rust and the crate cache in the working directory.
 - build_rm620.sh does not stop when compiles fail; `build.sh` reads its `failed: N of M` line and stops the step when
   N is not 0. Each time the `rm` step runs, its work tree is deleted first, so no old object or old patch set survives.
-- build_rm620.sh and build_kms620.sh end with exit 6 when the account name or the computer's short name occurs
-  anywhere in the archive, even inside a word (an account "ana" in "banana"). `build.sh` then searches again for whole words and
-  accepts the archive only when there are none; the step's log says what was matched.
+- build_rm620.sh and build_kms620.sh end with exit 6 when the account name or the computer's short name occurs in the
+  archive as a whole word (a path, `user@host`); inside another word (an account "ana" in "banana") it is not one. They
+  do not print the names, and they give NVIDIA's makefiles neutral values for the build user and host
+  (`NV_BUILD_USER=build NV_BUILD_HOST=localhost`), so that `make-n.txt` names neither. The archive itself never held
+  them: its identity string is replaced with fixed text before anything is compiled, and the compile lines carry no
+  absolute path and no debug information.
+- What `build.sh` prints (doctor, dry runs, progress, STOP lines, the summary, the failure report) writes your home
+  folder as `~`; `env` writes it as `"$HOME/..."`, which works when pasted. The step logs in `<workdir>/logs` keep full
+  paths.
 - Any command of a step that fails stops the step: an output an earlier build left behind is never stamped as new.
 - The plugin, translator and video library release scripts send their compile to a build Mac over ssh. `build.sh`
   sets `NULLMOTH_BUILD_HOST` to a name that `build/local_build_host.sh` serves: linked as `ssh`, `rsync` and `scp`
@@ -386,7 +392,7 @@ back as it was before the app's install.
 | `offline, and ... is not in ... yet` | `--offline` before any fetch | Run `./build.sh fetch` with the network once |
 | `offline: NVK needs the network` | See [What is not automated](#what-is-not-automated-and-why) | Build NVK with the network |
 | `<component> needs: GNU-patch Python-3.10 ...` | A tool is missing | `./build.sh deps` |
-| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name, even inside a word. `build.sh` looks again for whole words and goes on when there are none (the log says "Accepted."); exit 6 remains only when the name occurs as a whole word | Look at the lines the log shows. If the name is a common word (user, mac, admin), build from another account or change the computer's local hostname (System Settings > General > Sharing) |
+| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name as a whole word (not inside another word) | The log names the command that shows the lines. If the name is a common word (user, mac, admin), build from another account or change the computer's local hostname (System Settings > General > Sharing) |
 | `STOP: N compile commands for arch/nvalloc/unix/src/osapi.c in .../compile_cmds.sh, one expected` (nvrm, accel) | The RM's compile list is incomplete; the kexts take their -D flags from NVIDIA's own command for osapi.c and stop rather than take another file's | `./build.sh --force build rm` (build.sh rebuilds rm in a fresh folder and then everything built from it); by hand, run build_rm620.sh in a new work folder |
 | `STOP: make -n listed N compile commands, fewer than ...` | build_rm620.sh or build_kms620.sh would have replaced a complete list with a shorter one; it kept the old one | Use a new work folder |
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |

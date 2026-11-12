@@ -52,10 +52,11 @@ cd "$T/src/nvidia" || exit 2
 O=_out/Darwin_x86_64; mkdir -p "$O"
 # "make -n" lists only what is out of date: run again in a folder built before, it listed one command and compile_cmds.sh,
 # which the kext builds read their -D flags from, lost the rest. It is asked against an empty output folder, as on a
-# first build, and the built one is put back.
+# first build, and the built one is put back. NVIDIA's makefiles also record the building account and host (whoami,
+# hostname) for the identity string, which is replaced below: they are given neutral values, so make-n.txt names neither.
 [ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2   # left by an interrupted run
 [ -z "$(ls -A "$O")" ] || { mv "$O" "$O.nm-aside" && mkdir -p "$O"; } || exit 2
-make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 2>/dev/null > "$B/make-n.txt"
+make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 NV_BUILD_USER=build NV_BUILD_HOST=localhost 2>/dev/null > "$B/make-n.txt"
 [ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2
 # the generated version header and string file are make steps, not compiles: run those first
 grep -E "^echo .*version\.h" "$B/make-n.txt" > "$B/pre.sh"; bash "$B/pre.sh"
@@ -88,6 +89,10 @@ nf=$(grep -c FAIL "$B/fails.txt"); echo "failed: $nf of $n"
 rm -f "$O/libnvkernel.a"
 ls "$O"/*.o > "$B/objs.txt"; xcrun libtool -static -o "$O/libnvkernel.a" -filelist "$B/objs.txt" 2>"$B/libtool.err" || { tail -5 "$B/libtool.err"; exit 4; }
 echo "libnvkernel.a $(stat -f%z "$O/libnvkernel.a") B from $(wc -l < "$B/objs.txt") objects"
-left=$(strings -a "$O/libnvkernel.a" | grep -ciE "$(id -un)|$(hostname -s)" || true)   # the building account or host
-[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkernel.a"; strings -a "$O/libnvkernel.a" | grep -iE "$(id -un)|$(hostname -s)" | head -3; exit 6; }
+# the building account or the computer's short name, as a whole word (a path, user@host): a short name inside an ordinary
+# word ("ike" in "likely") is not one. The names themselves are not printed.
+re=$(for x in "$(id -un 2>/dev/null)" "$(hostname -s 2>/dev/null)"; do [ -z "$x" ] || printf '%s\n' "$x" | sed 's/[][\.*^$+?(){}|]/\\&/g'; done | paste -sd'|' -)
+if [ -z "$re" ]; then echo "personal strings in libnvkernel.a: not checked (no account or computer name)"; exit 0; fi
+left=$(strings -a "$O/libnvkernel.a" | grep -ciE "(^|[^[:alnum:]])($re)([^[:alnum:]]|$)" || true)
+[ "$left" = 0 ] || { echo "STOP: $left string(s) in libnvkernel.a name this account or computer as a word; see them with: strings -a $T/src/nvidia/$O/libnvkernel.a | grep -iw \"\$(id -un)\""; exit 6; }
 echo "personal strings in libnvkernel.a: 0"

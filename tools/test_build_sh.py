@@ -235,13 +235,13 @@ case $key in
   rm) mknew "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
   kms) mknew "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
 esac
-# the end of build_rm620.sh / build_kms620.sh when their substring search finds the account or host name: the archive is
+# the end of build_rm620.sh / build_kms620.sh when their whole-word search finds the account or host name: the archive is
 # written, then exit 6 (ctl/personal-<key> holds the archive's text)
 case $key in
   rm|kms) if [ -f "$SB/ctl/personal-$key" ]; then
             a=$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a
             [ $key = kms ] && a=$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a
-            cp "$SB/ctl/personal-$key" "$a"; echo "STOP: 1 personal string(s) in ${a##*/}"; exit 6
+            cp "$SB/ctl/personal-$key" "$a"; echo "STOP: 1 string(s) in ${a##*/} name this account or computer as a word"; exit 6
           fi ;;
 esac
 case $key in
@@ -1352,8 +1352,7 @@ def arm_failure(mac):
         mac.break_script('  CUR_STEP=""\n  exit 1\n}', '  CUR_STEP=""\n  return 0\n}')
         negative("a failed step that does not stop the run", failure_problems(mac, home=link)[0])
     with mac.scratch():
-        mac.break_script("tilde() {   # the home folder written as ~ (report files and summaries a tester may post)\n",
-                         "tilde() { cat; return 0\n")
+        mac.break_script('tilde() { home_as "~"; }', 'tilde() { cat; }')
         failure_problems(mac, home=link)
         negative("a report that keeps the home path", report_problems(mac, link))
 
@@ -1375,19 +1374,19 @@ def stale_problems(sb):
     return p, out
 
 
-def personal_problems(sb, text, accept):
-    """build_rm620.sh's exit 6 for the account or host name: accepted only when no whole word matches."""
+def personal_problems(sb, text):
+    """build_rm620.sh's exit 6 (the archive names the account or computer as a word; the script judges whole words
+    itself): the step stops, rm is not stamped, and nothing builds on the archive."""
     (sb.ctl / "personal-rm").write_text(text)
     sb.clear()
-    rc, out = sb.run("--force", "build", "rm")
+    rc, out = sb.run("--force", "build", "rm", "fb")
     (sb.ctl / "personal-rm").unlink()
-    log = (sb.work / "logs/rm.log").read_text() if (sb.work / "logs/rm.log").exists() else ""
     p = []
-    if accept and (rc != 0 or "Accepted." not in log or not (sb.work / "stamps/rm").exists()):
-        p.append(f"a name found only inside other words stopped the build (exit {rc})")
-    if not accept and (rc == 0 or (sb.work / "stamps/rm").exists() or "as a whole word" not in log):
-        p.append(f"a whole-word account name in the archive was accepted (exit {rc})")
-    return p, out + log[-600:]
+    if rc == 0 or (sb.work / "stamps/rm").exists() or "fb" in sb.step_keys():
+        p.append(f"build_rm620.sh's exit 6 was accepted (exit {rc}, steps {sb.step_keys()})")
+    if "name this account or computer" not in out:
+        p.append("the script's reason is not shown")
+    return p, out
 
 
 def python_problems(sb):
@@ -1441,16 +1440,12 @@ def arm_steps(mac):
     with mac.scratch():
         mac.break_script('  [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"\n}', '  return "$rc"\n}')
         negative("a step that goes on after its build script failed", stale_problems(mac)[0])
-    acct = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip() or "root"
     with mac.scratch():
-        p, out = personal_problems(mac, f"Most {acct}ly the GPU stopped\n", accept=True)
-        check("build_rm620.sh's exit 6 for the account name inside another word is checked again and accepted",
-              not p, (p, out[-900:]))
-        p, out = personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)
-        check("an account name as a whole word (a home path) still stops the build", not p, (p, out[-900:]))
+        p, out = personal_problems(mac, "/Users/someone/src/nv.c\n")
+        check("build_rm620.sh's exit 6 (a name as a whole word) stops the build", not p, (p, out[-900:]))
     with mac.scratch():
-        mac.break_script('  if [ "${n:-0}" = 0 ]; then', '  if true; then')
-        negative("a recheck that accepts a whole-word account name", personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)[0])
+        mac.break_script('      [ "$m" = 0 ] || return "$m"\n      # build_rm620.sh archives', '      [ "$m" = 0 ] || [ "$m" = 6 ] || return "$m"\n      # build_rm620.sh archives')
+        negative("a build that accepts build_rm620.sh's exit 6", personal_problems(mac, "/Users/someone/src/nv.c\n")[0])
     with mac.scratch():
         mac.clear()
         mac.run("--force", "build", "rm", "nvk")
@@ -1734,8 +1729,48 @@ def arm_env(mac):
     p = env_problems(mac, steps)
     check("env prints export lines bash can evaluate, with the values the steps receive", not p, p)
     with mac.scratch():
-        mac.break_script('say "export OGKM=$(q "$OGKM620")"', 'say "export OGKM=$(q "$PRISTINE")"')
+        mac.break_script('say "export OGKM=$(qh "$OGKM620")"', 'say "export OGKM=$(qh "$PRISTINE")"')
         negative("env that prints another OGKM than the build uses", env_problems(mac, steps))
+
+
+def nohome_problems(sb):
+    """what a tester pastes names no home folder (it contains the account name): doctor, dry runs, env, progress, the
+    summary, a STOP line and the report. Run with HOME spelled through a link, so that both spellings occur."""
+    link = sb.dir / "homelink"
+    if not link.exists():
+        os.symlink(sb.home, link)
+    spellings = {str(sb.home), os.path.realpath(sb.home), str(link)}
+    p = []
+    runs = [("doctor",), ("--dry-run", "all"), ("-n", "--force", "build", "fb"), ("-n", "deps"), ("env",), ("build",), ("--force", "build", "agdc")]
+    (sb.ctl / "fail-agdc").write_text("")
+    try:
+        for args in runs:
+            sb.clear()
+            rc, out = sb.run(*args, home=link)
+            hits = [l for l in out.splitlines() if any(h in l for h in spellings)]
+            if hits:
+                p.append(f"{' '.join(args)} prints the home folder: {hits[:2]}")
+            if args == ("env",):
+                if not re.search(r'^export NM_WORK="\$HOME/nullmoth-build"$', out, re.M):
+                    p.append(f"env does not write the working directory as \"$HOME/...\": {[l for l in out.splitlines() if 'NM_WORK=' in l]}")
+            if args == ("--force", "build", "agdc"):
+                reps = sorted((sb.work / "reports").glob("failure-agdc-*.txt"))
+                t = reps[-1].read_text() if reps else ""
+                if not t or any(h in t for h in spellings):
+                    p.append("the failure report is missing or names the home folder")
+    finally:
+        (sb.ctl / "fail-agdc").unlink()
+    return p
+
+
+def arm_nohome(mac):
+    with mac.scratch():
+        p = nohome_problems(mac)
+        check("doctor, dry runs, env, progress, summary, STOP lines and the report write the home folder as ~ (env: \"$HOME/...\")", not p, p)
+    with mac.scratch():
+        mac.break_script("""say()  { if has_home "$*"; then printf '%s\\n' "$*" | tilde; else printf '%s\\n' "$*"; fi; }""",
+                         """say()  { printf '%s\\n' "$*"; }""")
+        negative("output with the home folder written out (only the summary and the report used ~)", nohome_problems(mac))
 
 
 def arm_test_cmd(mac):
@@ -2151,7 +2186,7 @@ def main():
         if want("llvm23"):
             arm_llvm23()
         mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
-                    "test", "package", "clean"]
+                    "test", "package", "nohome", "clean"]
         if any(want(a) for a in mac_arms):
             mac = Sandbox("mac", formulas=("cmake",))
             arm_deps(mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
@@ -2161,7 +2196,7 @@ def main():
             arm_order(mac)
             for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
                              ("failure", arm_failure), ("steps", arm_steps), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
-                             ("test", arm_test_cmd), ("package", arm_package), ("clean", arm_clean)):
+                             ("test", arm_test_cmd), ("package", arm_package), ("nohome", arm_nohome), ("clean", arm_clean)):
                 if want(name):
                     fn(mac)
     finally:
