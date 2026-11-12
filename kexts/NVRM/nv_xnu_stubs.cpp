@@ -867,12 +867,6 @@ __attribute__((weak)) NV_STATUS NV_API_CALL os_alloc_wait_queue(os_wait_queue **
     return NV_ERR_NOT_SUPPORTED;
 }
 
-__attribute__((weak)) void NV_API_CALL os_bug_check(NvU32, const char *)
-{
-    NV_XNU_STUB_HIT("os_bug_check");
-
-}
-
 __attribute__((weak)) NV_STATUS NV_API_CALL os_call_vgpu_vfio(void *, NvU32)
 {
     NV_XNU_STUB_HIT("os_call_vgpu_vfio");
@@ -988,12 +982,6 @@ __attribute__((weak)) NV_STATUS NV_API_CALL os_device_vm_present(void)
 __attribute__((weak)) void NV_API_CALL os_disable_console_access(void)
 {
     NV_XNU_STUB_HIT("os_disable_console_access");
-
-}
-
-__attribute__((weak)) void NV_API_CALL os_dump_stack(void)
-{
-    NV_XNU_STUB_HIT("os_dump_stack");
 
 }
 
@@ -1435,12 +1423,6 @@ __attribute__((weak)) void NV_API_CALL os_nv_cap_destroy_entry(nv_cap_t *)
 
 }
 
-__attribute__((weak)) int NV_API_CALL os_nv_cap_validate_and_dup_fd(const nv_cap_t *, int)
-{
-    NV_XNU_STUB_HIT("os_nv_cap_validate_and_dup_fd");
-    return (int)0;
-}
-
 __attribute__((weak)) NV_STATUS NV_API_CALL os_offline_page_at_address(NvU64 address)
 {
     NV_XNU_STUB_HIT("os_offline_page_at_address");
@@ -1594,12 +1576,6 @@ __attribute__((weak)) char* NV_API_CALL os_string_copy(char *, const char *)
 __attribute__((weak)) NvU32 NV_API_CALL os_string_length(const char *)
 {
     NV_XNU_STUB_HIT("os_string_length");
-    return (NvU32)0;
-}
-
-__attribute__((weak)) NvU32 NV_API_CALL os_strtoul(const char *, char **, NvU32)
-{
-    NV_XNU_STUB_HIT("os_strtoul");
     return (NvU32)0;
 }
 

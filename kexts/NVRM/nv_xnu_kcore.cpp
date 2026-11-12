@@ -24,6 +24,7 @@
 #include "nvrm_workq_logic.h"
 #include "nvrm_atomic_pool.h"
 #include <IOKit/IOLocks.h>
+#include <libkern/OSDebug.h>
 #include <mach/kmod.h>
 #include <mach/semaphore.h>
 #include <kern/thread.h>
@@ -63,6 +64,8 @@ static int     nvx_atomic_mode;        // 1 the context answers are on, 0 switch
 static int64_t nvx_atomic_maysleep_n, nvx_atomic_alloc_n, nvx_atomic_alloc_miss, nvx_atomic_pool_peak,
                nvx_atomic_free_deferred, nvx_atomic_lock_try, nvx_atomic_lock_spun, nvx_atomic_lock_fallback;
 static int64_t nvx_site_count[NVX_SITE_MAX];
+static int64_t nvx_stub_hit_count, nvx_bugchecks, nvx_bugcheck_last = -1, nvx_rm_asserts;
+static char    nvx_stub_hits[2048];
 
 SYSCTL_INT(_debug, OID_AUTO, nvrm_wq_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_wq_mode, 0, "RM work queues: 1 serialized, 0 off (nvrmworkq=0), -1 could not start");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_wq_queued, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_wq_queued, "RM work items queued");
@@ -90,6 +93,11 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_atomic_lock_spun, CTLFLAG_RD | CTLFLAG_LOCKED
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_atomic_lock_fallback, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_atomic_lock_fallback, "of those, acquires that took the blocking call after 20 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_atomic_lockalloc, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_site_count[NVX_SITE_LOCKALLOC], "lock allocations where blocking is not allowed");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_atomic_blocking_entry, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_site_count[NVX_SITE_BLOCKING_ENTRY], "blocking OS-layer calls entered where blocking is not allowed");
+SYSCTL_STRING(_debug, OID_AUTO, nvrm_stub_hits, CTLFLAG_RD | CTLFLAG_LOCKED, nvx_stub_hits, 0, "OS-layer functions without a body that the RM called");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_stub_hit_count, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_stub_hit_count, "distinct OS-layer functions without a body that the RM called");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bugchecks, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_bugchecks, "bug checks the RM asked for");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bugcheck_last, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_bugcheck_last, "code of the last bug check the RM asked for, -1 none");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rm_asserts, CTLFLAG_RD | CTLFLAG_LOCKED, &nvx_rm_asserts, "RM assertions that failed");
 
 extern "C" void nv_xnu_kcore_sysctls_register(void)
 {
@@ -110,6 +118,9 @@ extern "C" void nv_xnu_kcore_sysctls_register(void)
     sysctl_register_oid(&sysctl__debug_nvrm_atomic_lock_try); sysctl_register_oid(&sysctl__debug_nvrm_atomic_lock_spun);
     sysctl_register_oid(&sysctl__debug_nvrm_atomic_lock_fallback); sysctl_register_oid(&sysctl__debug_nvrm_atomic_lockalloc);
     sysctl_register_oid(&sysctl__debug_nvrm_atomic_blocking_entry);
+    sysctl_register_oid(&sysctl__debug_nvrm_stub_hits); sysctl_register_oid(&sysctl__debug_nvrm_stub_hit_count);
+    sysctl_register_oid(&sysctl__debug_nvrm_bugchecks); sysctl_register_oid(&sysctl__debug_nvrm_bugcheck_last);
+    sysctl_register_oid(&sysctl__debug_nvrm_rm_asserts);
 }
 
 // ---- the context question ---------------------------------------------------------------------------------------------
@@ -530,6 +541,55 @@ extern "C" void nv_xnu_wq_gpu_down(struct os_work_queue *queue, unsigned cap_ms)
     IOLockUnlock(nvx_wq_admin);
     __atomic_fetch_sub(&nvx_wq_gpu_queues, 1, __ATOMIC_RELAXED);
     if (gave_up) KLOG("work queue %s given up on after %u ms; the teardown goes on", nvx_wq_names[q->index], cap_ms);
+}
+
+// ---- functions of the OS layer that were stubs ----------------------------------------------------------------------------
+extern "C" void nv_xnu_stub_note(const char *name)
+{
+    // Lock-free: a slot of the buffer is reserved with one atomic add, so this works in any context and before init.
+    static unsigned used;
+    if (!name) return;
+    unsigned n = 0;
+    while (name[n] && n < 96) n++;
+    const unsigned at = __atomic_fetch_add(&used, n + 1, __ATOMIC_RELAXED);
+    if ((size_t)at + n + 1 < sizeof nvx_stub_hits) {
+        for (unsigned i = 0; i < n; i++) nvx_stub_hits[at + i] = name[i];
+        nvx_stub_hits[at + n] = ' ';
+    }
+    nvx_inc(&nvx_stub_hit_count);
+}
+
+extern "C" NvU32 NV_API_CALL os_strtoul(const char *str, char **endp, NvU32 base)
+{
+    return (NvU32)strtoul(str, endp, (int)base);
+}
+
+extern "C" void NV_API_CALL os_bug_check(NvU32 code, const char *str)
+{
+    nvx_inc(&nvx_bugchecks);
+    __atomic_store_n(&nvx_bugcheck_last, (int64_t)code, __ATOMIC_RELAXED);
+    kprintf("NVRM: the GPU firmware requested a bug check %u (%s); the GPU may stop responding\n", code, str ? str : "?");
+    if (preemption_enabled())
+        IOLog("NVRM: the GPU firmware requested a bug check %u (%s); the GPU may stop responding\n", code, str ? str : "?");
+}
+
+extern "C" void NV_API_CALL os_dump_stack(void)
+{
+    const int64_t n = __atomic_add_fetch(&nvx_rm_asserts, 1, __ATOMIC_RELAXED);
+    if (n > 16 && (n % 1024) != 0) return;
+    void *bt[12];
+    const unsigned got = OSBacktrace(bt, 12);
+    char line[12 * 20 + 1];
+    unsigned at = 0;
+    line[0] = 0;
+    for (unsigned i = 1; i < got && at + 20 < sizeof line; i++)      // frame 0 is this function
+        at += (unsigned)snprintf(line + at, sizeof line - at, " 0x%lx", (unsigned long)nvx_kext_off(bt[i]));
+    kprintf("NVRM: RM assertion failed (#%lld), stack as NVRM offsets:%s\n", (long long)n, line);
+}
+
+extern "C" int NV_API_CALL os_nv_cap_validate_and_dup_fd(const nv_cap_t *, int)
+{
+    return -1;        // no capability files on macOS: nothing to validate, nothing to duplicate
 }
 
 // ---- start --------------------------------------------------------------------------------------------------------------

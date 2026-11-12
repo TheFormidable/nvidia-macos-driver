@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The serialized work queues and the answers by context (kexts/NVRM/nv_xnu_kcore.cpp) are wired the
+"""The serialized work queues, the answers by context and the stub bodies (kexts/NVRM/nv_xnu_kcore.cpp) are wired the
 way they have to be, read from the source text.
 
 The pure logic is tested on the host (test_nvrm_workq_logic.c, test_nvrm_atomic_pool.c, test_nvrm_itree.c). What can
 go wrong around it is the wiring: a GPU start that fails because it got no queue of its own, an adapter shut down while
 its items still run, a flush that a teardown waits on for ever, a log line or an allocation under a lock taken with
-interrupts off, a switch that is not on by default. Each arm below reads the
+interrupts off, a stub left in front of the real function, a switch that is not on by default. Each arm below reads the
 files as they are; the controls at the end change one thing in a copy and require the arm to fail.
 Usage: test_nvrm_kcore_wiring.py [driver checkout]"""
 import pathlib
@@ -125,6 +125,17 @@ def problems(src):
     if not fl or not re.search(r"if \(q->abandoned\) \{ wq_unlock\(q, s\); return NV_ERR_TIMEOUT; \}", fl) \
             or fl.find("q->abandoned) {") > fl.find("assert_wait_timeout("):
         out.append("a flush of an abandoned queue waits")
+    # stub bodies: real, and no weak stub in front of them
+    st = body(k, "NvU32 NV_API_CALL os_strtoul(")
+    if not st or "strtoul(str" not in st:
+        out.append("os_strtoul does not parse")
+    for fn in ("os_strtoul", "os_bug_check", "os_dump_stack", "os_nv_cap_validate_and_dup_fd"):
+        if re.search(r"\b%s\s*\([^;]*\)\s*\{" % fn, stubs):
+            out.append("nv_xnu_stubs.cpp still defines " + fn)
+        if not re.search(r"NV_API_CALL %s\s*\([^;]*\)\s*\{" % fn, k):
+            out.append("nv_xnu_kcore.cpp does not define " + fn)
+    if "nv_xnu_stub_note(name)" not in src["nv-xnu.h"]:
+        out.append("NV_XNU_STUB_HIT does not record the name")
     # the lifecycle
     go = body(nvrm, "IOReturn NVRM::go(")
     if not go:
@@ -167,7 +178,7 @@ def arm(name, ok, detail=""):
 def main():
     src = load(ROOT)
     found = problems(src)
-    arm("the work queues and the context answers are wired as they must be", not found, "; ".join(found))
+    arm("the work queues, the context answers and the stub bodies are wired as they must be", not found, "; ".join(found))
 
     def control(name, key, old, new, want):
         assert src[key].count(old) >= 1, (name, old)
@@ -199,6 +210,9 @@ def main():
             "boot-arg nvrmworkq is not read")
     control("a writable sysctl", "nv_xnu_kcore.cpp", "nvrm_wq_queued, CTLFLAG_RD", "nvrm_wq_queued, CTLFLAG_RW",
             "declares a writable sysctl")
+    control("the weak os_strtoul stub back", "nv_xnu_stubs.cpp", "extern \"C\" {\n",
+            "extern \"C\" {\n__attribute__((weak)) NvU32 NV_API_CALL os_strtoul(const char *, char **, NvU32)\n{\n    return 0;\n}\n",
+            "nv_xnu_stubs.cpp still defines os_strtoul")
     control("os_semaphore_may_sleep always yes", "os-xnu.cpp",
             "if (nvx_can_block()) return NV_TRUE; nvx_atomic_maysleep_false(); return NV_FALSE;", "return NV_TRUE;",
             "os_semaphore_may_sleep does not answer by context")
