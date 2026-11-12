@@ -8,7 +8,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 
 > **Written and tested without a Mac.** `./build.sh` has run on one Mac (Intel, macOS 26.7, Xcode 26.5) only in part:
 > `doctor`, `env`, `--dry-run` and `fetch` ran, and it built the plugin, the video library (and the RM on the way) and
-> the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked. It was written
+> the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked (the check now
+> asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). It was written
 > for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
 > Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
 > macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
