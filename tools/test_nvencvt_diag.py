@@ -6,7 +6,8 @@ libnvencvt is loaded into every app that decodes or encodes video. It used to te
 .anyfmt, .refs, .dpb and .barcode with access() and fopen(): any local user could create one and switch on, in another
 user's apps, a log, a statistics file, or a dump of the encoded stream and the first raw frames, written to a predictable
 /tmp name with fopen (which follows a link someone else planted). vendor/nvenc/vt/nvencvt_diag.h holds the rule; it is
-compiled and run here. The control is the library before the change (commit 406d9824)."""
+compiled and run here. The control is the library before the change (commit 406d9824 upstream, the parent of c1535ec
+here: the upstream hash is not an object of this repository)."""
 import os, pathlib, shutil, stat, subprocess, sys, tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
@@ -60,9 +61,13 @@ arm("no flag file is tested with access() or opened with fopen() any more", not 
 arm("no diagnostic output is opened with fopen()", "fopen(p, " not in src and 'fopen(sf ? sf' not in src)
 arm("all eight flag tests go through the rule", src.count('nvencvt_flag("/tmp/') + src.count('nvencvt_flag_open("/tmp/') == 8,
     src.count('nvencvt_flag("/tmp/') + src.count('nvencvt_flag_open("/tmp/'))
-old = subprocess.run(["git", "-C", str(R), "show", "406d9824:vendor/nvenc/vt/nvencvt.c"], capture_output=True, text=True)
+old = None
+for rev in ("406d9824", "c1535ec^"):
+    old = subprocess.run(["git", "-C", str(R), "show", rev + ":vendor/nvenc/vt/nvencvt.c"], capture_output=True, text=True)
+    if old.returncode == 0:
+        break
 if old.returncode == 0:
     arm("control: the library before this change tested /tmp flag files with access()", 'access("/tmp/nvencvt.dump", F_OK)' in old.stdout)
 else:
-    arm("control: the earlier library is readable", False, old.stderr)
+    arm("control: the earlier library is readable", False, "neither 406d9824 nor c1535ec^: " + old.stderr.strip())
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)
