@@ -65,6 +65,13 @@ public:
     // The driver's own page-off copies of this resource, numbered (nvaccel_pageoff_recheck.h): a page-off that waited
     // for the GPU without the accelerator lock reads it to see whether another thread has made its copy meanwhile.
     nvaccel_pageoff_copies fPoCopies = { 0, 0 };
+    // One plane of a two-plane surface (nvaccel_plane_range.h): where the plane's bytes are in the surface's memory, and
+    // the bit of the family's validity words this resource uses. Written once, by the first grant that names the range
+    // (NVRM_SS_PLANE_RANGED), with the accelerator lock held, and read with it held. fRangeLen 0: the resource is paged
+    // off as it always was (offset 0, bit 0).
+    unsigned long long fRangeOff = 0, fRangeLen = 0;
+    unsigned short fValidBit = 0;
+    unsigned short validBit() const { return fRangeLen ? fValidBit : (unsigned short)1; }
 };
 OSDefineMetaClassAndStructors(NVResource, IOAccelResource2)
 class NVSysMemory : public IOAccelSysMemory {

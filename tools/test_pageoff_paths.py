@@ -11,12 +11,16 @@ during which other threads act: another page-off of the same resource, the famil
 resource letting go of it, the accelerator's lock going away. The copy itself is the fixture's (two lines of pixels and
 the copy's number); where the real copy takes and leaves its number is asserted by tools/test_pageoff_hold.py.
 
+A resource that carries a plane's range (a two-plane surface) is run through the same head: it is never handed to the
+family's page-off (that one copies a whole surface from offset 0), and the check after the wait reads the plane's own
+validity bit.
+
 Each arm is one path and states what the family's caller finds afterwards: who holds the lock and how often it was taken
 and given back, the owner record, what was copied from where, what the page-off answered, the counters, the references.
 Negative controls: v2.9's page-off (7412cdd, with the unlocked wait switched on as its opt-in did) fails the arms about
 the lock that cannot be taken back, the resource everybody let go of, the copy another thread made, the family's bit
-and the driver's own lock, and passes the two about paths that did not change; ten altered copies of today's source
-each fail the arm about them.
+and the driver's own lock, and passes the two about paths that did not change; fourteen altered copies of today's
+source each fail the arm about them.
    python3 tools/test_pageoff_paths.py"""
 import pathlib, subprocess, sys, tempfile
 
@@ -65,6 +69,8 @@ ACCEL_LINES = [
     "nvaccel_owner_did_lock(&fLockOwner, current_thread()); }",
     "{ nvaccel_owner_will_unlock(&fLockOwner, current_thread()); IOGraphicsAccelerator2::acceleratorWillUnlock(f, l); }",
 ]
+# The resource's one-line method the fixture repeats (kexts/NVRM/accel/nvaccel_stubs.h).
+RES_LINES = ["unsigned short validBit() const { return fRangeLen ? fValidBit : (unsigned short)1; }"]
 
 FIXTURE = r'''
 #include <cstdint>
@@ -75,6 +81,7 @@ typedef int64_t SInt64; typedef int32_t SInt32; typedef uint32_t UInt32;
 #include "nvaccel_lock_owner.h"
 #include "nvaccel_pageoff_recheck.h"
 #include "nvrm_fence_abi.h"
+#include "nvrm_surfshare_abi.h"
 // ---- threads and the accelerator lock ---------------------------------------------------------------------------------
 static void *const T1 = (void *)0x1001, *const T2 = (void *)0x1002;
 static void *gThread = T1;
@@ -130,6 +137,9 @@ struct IOAccelResource2 : OSObject {
 struct NVResource : IOAccelResource2 {
     NVAccel *fAccel;
     nvaccel_pageoff_copies fPoCopies;
+    unsigned long long fRangeOff = 0, fRangeLen = 0;
+    unsigned short fValidBit = 0;
+    unsigned short validBit() const { return fRangeLen ? fValidBit : (unsigned short)1; }
     void pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3);
 };
 struct Surf { unsigned id; };
@@ -159,6 +169,8 @@ static SInt64 gCntPoUnlocked, gCntPoNotOwner, gCntPoPinned, gCntPoAlready, gCntP
 @@STANDDOWN@@
 @@LOCKS@@
 static int gFamilyPageoffs, gFamilyPageoffsUnlocked;
+static int gRangedFails, gRangedFailsUnlocked;            // a plane's page-off that copied nothing (never the family's)
+static void nvSVRangedFail(NVResource *, bool *out, unsigned, const char *) { gRangedFails++; if (!lockMine()) gRangedFailsUnlocked++; if (out) *out = false; }
 void IOAccelResource2::pageoff(IOAccelEvent *, bool, bool *out, unsigned long long) {
     gFamilyPageoffs++; if (!lockMine()) gFamilyPageoffsUnlocked++;
     if (out) *out = true;
@@ -171,7 +183,7 @@ static int gCopies, gCopiesUnlocked; static void *gCopySurf; static NVVidMemory 
     gCopySurf = surf; gCopyVm = vm;
     const unsigned long long modelNumber = nvaccel_pageoff_copy_begin(&fPoCopies);
     gSys = gGpu; gCpuWrites = 0;
-    { volatile unsigned short *modelValid = *(unsigned short *volatile *)(r + 0x30); if (modelValid) modelValid[0] |= 1; }
+    { volatile unsigned short *modelValid = *(unsigned short *volatile *)(r + 0x30); if (modelValid) modelValid[0] |= validBit(); }
     nvaccel_pageoff_copy_end(&fPoCopies, modelNumber);
     if (out) *out = true;
 }
@@ -190,7 +202,7 @@ static void setup() {
     gHandlesOk = true; gPending = false; gPendingAsked = 0; gWaits = gWaitsUnlocked = 0; gLastCap = 0;
     gPoUnlocked = 1; gPoUnlockedMaxUs = 0;
     gCntPoUnlocked = gCntPoNotOwner = gCntPoPinned = gCntPoAlready = gCntPoRecopied = gCntPoChanged = gCntPoStandDown = 0;
-    gFamilyPageoffs = gFamilyPageoffsUnlocked = 0; gGpu = 1; gSys = 0; gCpuWrites = 0; gCopies = gCopiesUnlocked = 0; gCopySurf = nullptr; gCopyVm = nullptr;
+    gFamilyPageoffs = gFamilyPageoffsUnlocked = 0; gRangedFails = gRangedFailsUnlocked = 0; gGpu = 1; gSys = 0; gCpuWrites = 0; gCopies = gCopiesUnlocked = 0; gCopySurf = nullptr; gCopyVm = nullptr;
 }
 struct Call { bool out, lockHeld; void *owner; int depth, pinned; };
 // The family's caller of a page-off on thread t: Apple's lock sequence with its two calls into the driver (or, for one
@@ -208,7 +220,8 @@ static Call familyPageoff(void *t, bool hooks = true) {
 // After a page-off that came back with the lock: everything is as the family's caller left it.
 static bool sane(const Call &c, void *t) {
     return !gBad && c.lockHeld && c.owner == t && c.depth == 1 && c.pinned == 0 && !L.holder && L.locks == L.unlocks
-        && A->busy == 0 && A->hooks == 0 && !A->fLockOwner.owner && gFreed == 0 && gFamilyPageoffsUnlocked == 0 && gCopiesUnlocked == 0 && A->rc == 3;
+        && A->busy == 0 && A->hooks == 0 && !A->fLockOwner.owner && gFreed == 0 && gFamilyPageoffsUnlocked == 0 && gCopiesUnlocked == 0
+        && gRangedFailsUnlocked == 0 && A->rc == 3;
 }
 // A second thread's page-off of the same resource; nothing is pending for it, so it copies what the GPU's memory holds now.
 static void otherPageoff() { const bool p = gPending; gPending = false; familyPageoff(T2); gPending = p; }
@@ -325,6 +338,30 @@ int main() {
         check("the unlocked wait is switched off for the boot while a page-off waits: that page-off still takes the lock back, copies, and leaves the owner record the caller's",
               sane(c, T1) && gWaitsUnlocked == 1 && L.locks == 2 && gCopies == 1 && c.out && RES->rc == 1);
     }
+    // ---- a plane of a two-plane surface (its resource carries the plane's range and bit) ----
+    {   setup(); RES->fRangeOff = 4096; RES->fRangeLen = 2048; RES->fValidBit = 2; raw<NVVidMemory *>(RES, 0x88) = nullptr;
+        Call c = familyPageoff(T1);
+        check("a plane's resource the driver cannot copy itself is never handed to the family's page-off: failure, the lock never let go",
+              sane(c, T1) && gFamilyPageoffs == 0 && gRangedFails == 1 && !c.out && gWaits == 0 && gCopies == 0 && L.locks == 1 && RES->rc == 1);
+    }
+    {   setup(); gPending = true; RES->fRangeOff = 4096; RES->fRangeLen = 2048; RES->fValidBit = 2;
+        gDuringWait = [] { VM.fRmHandle = nullptr; };
+        Call c = familyPageoff(T1);
+        check("a plane's resource the driver can no longer copy after the wait is not handed to the family's page-off either: failure, with the lock held",
+              sane(c, T1) && gFamilyPageoffs == 0 && gRangedFails == 1 && !c.out && gCopies == 0 && gCntPoUnlocked == 1 && RES->rc == 1);
+    }
+    {   setup(); gPending = true; RES->fRangeOff = 4096; RES->fRangeLen = 2048; RES->fValidBit = 2;
+        gDuringWait = [] { VALID[0] |= 2; };
+        Call c = familyPageoff(T1);
+        check("the family makes a plane's own bit current during the wait: the page-off reports done and copies nothing",
+              sane(c, T1) && gCopies == 0 && gFamilyPageoffs == 0 && gRangedFails == 0 && c.out && gCntPoAlready == 1 && RES->rc == 1);
+    }
+    {   setup(); gPending = true; RES->fRangeOff = 4096; RES->fRangeLen = 2048; RES->fValidBit = 2;
+        gDuringWait = [] { VALID[0] |= 1; };
+        Call c = familyPageoff(T1);
+        check("bit 0 set during the wait says nothing about a plane that uses bit 1: the page-off copies, and sets the plane's bit",
+              sane(c, T1) && gCopies == 1 && c.out && !gCntPoAlready && (VALID[0] & 2) && RES->rc == 1);
+    }
     // ---- what the unlocked wait must survive ----
     {   setup(); gPending = true;
         gDuringWait = [] { raw<IOLock *>(A, 0x88) = nullptr; };   // the accelerator is torn down: its lock is gone
@@ -388,6 +425,10 @@ UNLOCKED = "a pending surface and the family's caller owning the lock at one lev
 EARLY = "another thread copies the surface during the wait, before the GPU has finished"
 LATE = "another thread copies the surface after this wait has ended, and a CPU write follows"
 FAMILY_BIT = "the family makes system memory current during the wait"
+PLANE_NO_FAMILY = "a plane's resource the driver cannot copy itself"
+PLANE_NO_FAMILY_LATE = "a plane's resource the driver can no longer copy after the wait"
+PLANE_BIT = "the family makes a plane's own bit current during the wait"
+PLANE_BIT0 = "bit 0 set during the wait says nothing about a plane"
 NO_RELOCK = "the lock cannot be taken back"
 ORPHAN = "everybody else lets go of the resource during the wait"
 ACCEL_GONE = "everybody else lets go of the accelerator during the wait"
@@ -395,6 +436,9 @@ ACCEL_GONE = "everybody else lets go of the accelerator during the wait"
 src = (R / SRC).read_text()
 arm("the fixture's accelerator has the source's own lock-owner methods, word for word",
     all(src.count(l) == 1 for l in ACCEL_LINES), [l for l in ACCEL_LINES if src.count(l) != 1])
+stubs = (R / "kexts/NVRM/accel/nvaccel_stubs.h").read_text()
+arm("the fixture's resource has the source's own validity-bit method, word for word",
+    all(stubs.count(l) == 1 for l in RES_LINES), [l for l in RES_LINES if stubs.count(l) != 1])
 h, lk, sd = head(src), locks(src), standdown(src)
 arm("the page-off's head, nvFamLock, nvFamUnlock and nvPoStandDown are found in the source", bool(h and lk and sd))
 RELOCK = "            if (!nvFamLock(a, false)) {\n"
@@ -416,6 +460,15 @@ CONTROLS = [   # what, which piece, [(the text to alter, its replacement), ...],
     ("the driver's own lock not pinned", "locks", [("    if (gPoUnlocked) a->pinLock();\n", "")], PINNED),
     ("the wait made before the lock is let go", "head",
      [("            nvFamUnlock(a);\n" + WAIT, WAIT + "\n            nvFamUnlock(a);")], UNLOCKED),
+    ("a plane's resource handed to the family's page-off before the wait", "head",
+     [('        if (fRangeLen) { nvSVRangedFail(this, out, NVRM_SS_NO_VRAM, "no surface, VRAM or RM handles"); return; }', "")], PLANE_NO_FAMILY),
+    ("a plane's resource handed to the family's page-off after the wait", "head",
+     [('                if (fRangeLen) { nvSVRangedFail(this, out, NVRM_SS_NO_VRAM, "no surface, VRAM or RM handles after the wait"); return; }', "")],
+     PLANE_NO_FAMILY_LATE),
+    ("bit 0 read before and after the wait whatever the resource", "head",
+     [("(v0[0] & validBit())", "(v0[0] & 1u)"), ("(v1[0] & validBit())", "(v1[0] & 1u)")], PLANE_BIT),
+    ("bit 0 read after the wait whatever the resource (a copy skipped on another plane's bit)", "head",
+     [("(v1[0] & validBit())", "(v1[0] & 1u)")], PLANE_BIT0),
 ]
 with tempfile.TemporaryDirectory() as tmp:
     res, log = run_fixture(h, lk, sd, tmp, "real") if h and lk and sd else (None, "pieces of the source were not found")
@@ -423,7 +476,7 @@ with tempfile.TemporaryDirectory() as tmp:
         arm("the lifted page-off compiles and runs on the host", False, log)
         res = {}
     else:
-        arm("the lifted page-off compiles and runs on the host (18 paths)", len(res) == 18, log)
+        arm("the lifted page-off compiles and runs on the host (22 paths)", len(res) == 22, log)
         for n, ok in res.items():
             arm("path: " + n, ok, log)
     for what, piece, changes, target in CONTROLS:
