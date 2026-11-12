@@ -9,11 +9,12 @@ exactly as in 2.9.
 Two kinds of arms:
 - text arms on kexts/NVRM/accel/nvrm-accel.cpp (where each call sits, which bound each site passes, the counters);
 - behaviour arms: the wait functions are lifted from the source and run in a host program against a stand-in NVRM and
-  a fake clock: no fence = 2.9 to the nanosecond, the bounds of the locked and the unlocked page-off, a dead writer
-  counts as done, a refusing NVRM is asked again at most once a second, a page-off sees a hold the fence knows.
-Negative controls: v2.9's source (7412cdd) fails the text arms; three altered copies of the lifted code (a dead writer
-treated as a timeout, the mark wait given its own full bound after a fence wait, no rate limit on asking again) each
-fail the arm about them.
+  a fake clock: no fence = 2.9 to the nanosecond, the bounds of the locked and the unlocked page-off (also when NVRM
+  sleeps and then answers that it found nothing, or refuses), a dead writer counts as done, a refusing NVRM is asked
+  again at most once a second, a page-off sees a hold the fence knows.
+Negative controls: v2.9's source (7412cdd) fails the text arms; four altered copies of the lifted code (a dead writer
+treated as a timeout, the mark wait given its own full bound after a fence wait, the bound shared only with a fence
+wait that found a hold, no rate limit on asking again) each fail the arm about them.
    python3 tools/test_fence_wiring_accel.py"""
 import pathlib, re, subprocess, sys, tempfile
 
@@ -148,10 +149,12 @@ struct OSSymbol { static const OSSymbol *withCStringNoCopy(const char *) { stati
 static int gAsks; static IOReturn gAnswer = kIOReturnUnsupported;
 static unsigned gFenceStatus = NVRM_FENCE_ST_OK, gFenceResult = NVRM_FENCE_R_NONE, gFenceTakesMs, gLookPending;
 static unsigned gLastFlags, gLastTimeout, gFenceCalls;
+static unsigned gFenceForgets;   // the hold ended while the wait slept and NVRM kept no record of it: time spent, "nothing here"
 static unsigned fakeWait(struct NVRMFenceWait *w, unsigned flags) {
     gFenceCalls++; gLastFlags = flags; gLastTimeout = w->timeoutMs;
     if (flags & NVRM_FENCE_F_LOOK) { w->result = gLookPending ? NVRM_FENCE_R_PENDING : NVRM_FENCE_R_NONE; return gFenceStatus; }
     unsigned t = gFenceTakesMs, cap = w->timeoutMs < NVRM_FENCE_WAIT_MAX_MS ? w->timeoutMs : NVRM_FENCE_WAIT_MAX_MS;
+    if (gFenceForgets) { gClock += (uint64_t)(t < cap ? t : cap) * 1000000; w->result = NVRM_FENCE_R_NONE; return gFenceStatus; }
     if (gFenceResult != NVRM_FENCE_R_NONE && t >= cap) { gClock += (uint64_t)cap * 1000000; w->result = NVRM_FENCE_R_BUDGET; return gFenceStatus; }
     if (gFenceResult != NVRM_FENCE_R_NONE) gClock += (uint64_t)t * 1000000;
     w->result = gFenceResult; return gFenceStatus;
@@ -252,6 +255,19 @@ int main() {
         gFenceStatus = NVRM_FENCE_ST_OK;
         check("a wait NVRM does not serve is counted and the 2.9 mark wait runs", ok);
     }
+    // K: a caller's bound covers both waits whatever NVRM answers after it slept
+    {
+        bool ok = true;
+        gFenceForgets = 1; gFenceTakesMs = 70; nvSurfMark(20, true); uint64_t t = gClock;
+        ok &= !nvSurfWaitReadyFor(20, kSurfGpuWaitMs) && gClock - t == 100 * 1000000ull;     // nothing found after 70 ms: 30 ms left for the mark
+        gFenceForgets = 0; gFenceStatus = NVRM_FENCE_ST_OFF; gFenceResult = NVRM_FENCE_R_READY; gFenceTakesMs = 70;
+        nvSurfMark(21, true); t = gClock;
+        ok &= !nvSurfWaitReadyFor(21, kSurfGpuWaitMs) && gClock - t == 100 * 1000000ull;     // refused after 70 ms: the same
+        gFenceStatus = NVRM_FENCE_ST_OK;
+        gFenceResult = NVRM_FENCE_R_NONE; nvSurfMark(22, true); t = gClock;                  // nothing found at once: the mark keeps 2.9's 100 ms
+        ok &= !nvSurfWaitReadyFor(22, kSurfGpuWaitMs) && gClock - t == 100 * 1000000ull;
+        check("with the accelerator lock held both waits share 100 ms whatever NVRM answers after it slept (nothing found, refused)", ok);
+    }
     check("every lock taken was given back", gBad == 0 && gL.held == 0);
     return failed ? 1 : 0;
 }
@@ -299,6 +315,10 @@ CONTROLS = [
     ("the mark wait given its own full bound after a fence wait",
      "return nvSurfWaitLegacy(id, limit) && ready;", "return nvSurfWaitLegacy(id, 0) && ready;",
      "with the accelerator lock held the whole wait (fence, then mark) stays within 100 ms"),
+    ("the bound shared only with a fence wait that found a hold",
+     "        limit = end;   // whatever NVRM answered: the time its wait took comes off this caller's bound\n",
+     "        if (st == NVRM_FENCE_ST_OK && w.result != NVRM_FENCE_R_NONE) limit = end;\n",
+     "with the accelerator lock held both waits share 100 ms whatever NVRM answers after it slept (nothing found, refused)"),
     ("no rate limit on asking a refusing NVRM again",
      "    if (gFenceAskAgainAt && mach_absolute_time() < gFenceAskAgainAt) return nullptr;\n", "",
      "a refusing NVRM is asked again at most once a second, and not at all once it answered"),
@@ -308,7 +328,7 @@ with tempfile.TemporaryDirectory() as tmp:
     if res is None:
         arm("the lifted wait functions compile and run on the host", False, log)
     else:
-        arm("the lifted wait functions compile and run on the host", len(res) >= 11, log)
+        arm("the lifted wait functions compile and run on the host", len(res) >= 12, log)
         for n, ok in res.items():
             arm("behaviour: " + n, ok, log)
     for what, old_s, new_s, target in CONTROLS:

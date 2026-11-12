@@ -1742,7 +1742,7 @@ static void nvSurfMark(unsigned int id, bool pending)
     OSAddAtomic64(1, &gCntSurfMarks);
 }
 // 2.9's wait: sleeps on a mark until WindowServer clears it, at most kSurfGpuWaitMs, then deletes the mark and goes on.
-// `limit`, when not 0, is an earlier deadline: what is left of the bound of a caller whose fence wait already waited.
+// `limit`, when not 0, is an earlier deadline: the end of the bound of a caller that asked the fence first.
 static bool nvSurfWaitLegacy(unsigned int id, uint64_t limit)
 {
     IOLock *l = gSurfPendLock;
@@ -1818,6 +1818,9 @@ static NVRMFenceWaitFn nvFenceOps(void)
 // NVRM_FENCE_WAIT_MAX_MS, NVRM's clamp), then for 2.9's mark within what is left of capMs. A hold whose writer died
 // counts as done: nothing will ever complete it, and its pixels are as final as they will get. Returns false when a
 // bound ended a wait; the caller goes on either way, as in 2.9.
+// capMs bounds the two waits together whatever NVRM answers: its wait can sleep and then report nothing on the surface
+// (the hold ended and its record was already overwritten) or refuse (the fence stopped meanwhile), and the mark wait
+// must not start a bound of its own after that. One caller holds the accelerator lock and relies on it.
 static bool nvSurfWaitReadyFor(unsigned int id, unsigned capMs)
 {
     if (!id || !gSurfGpuOn) return true;   // the 2.9 switch still turns every wait off
@@ -1830,9 +1833,9 @@ static bool nvSurfWaitReadyFor(unsigned int id, unsigned capMs)
         w.seq = 0; w.waitedUs = 0; w.id = id; w.planes = 0; w.pid = 0; w.timeoutMs = capMs;
         w.result = NVRM_FENCE_R_NONE; w.ownerPid = 0; w.state = 0; w.blockers = 0;
         const unsigned st = fw(&w, NVRM_FENCE_F_COMPOSITOR);
+        limit = end;   // whatever NVRM answered: the time its wait took comes off this caller's bound
         if (st != NVRM_FENCE_ST_OK) OSAddAtomic64(1, &gCntFenceErrors);
         else if (w.result != NVRM_FENCE_R_NONE) {
-            limit = end;
             OSAddAtomic64(1, &gCntFenceWaits);
             if (w.result == NVRM_FENCE_R_READY) OSAddAtomic64(1, &gCntFenceReady);
             else if (w.result == NVRM_FENCE_R_DEAD) OSAddAtomic64(1, &gCntFenceDead);
