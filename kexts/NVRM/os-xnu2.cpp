@@ -5,6 +5,7 @@
  */
 
 #include "nv-xnu.h"
+#include "nv_xnu_kcore.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -65,12 +66,14 @@ NvBool NV_API_CALL os_check_access(RsAccessRight accessRight)
     return (accessRight == RS_ACCESS_PERFMON || accessRight == RS_ACCESS_NICE) ? os_is_administrator() : NV_FALSE;
 }
 NvU32  NV_API_CALL os_get_current_process_flags(void) { TRC; return 0; }
-NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *nv) { TRC; return NV_FALSE; }
 static NvU32 nv_xnu_dma_bits = 64;
+extern "C" unsigned nv_xnu_dma_bits_now(void) { return nv_xnu_dma_bits; }
+extern "C" int nvrm_dma_any_remap(void);
 void   NV_API_CALL nv_set_dma_address_size(nv_state_t *nv, NvU32 bits) { TRC; nv_xnu_dma_bits = bits; kprintf("NVRM-xnu:   dma address size %u bits\n", bits); }
 
 struct nv_xnu_alloc { IOBufferMemoryDescriptor *md; void *va; NvU64 page_size; NvU64 bytes; NvU32 page_count; NvBool contig; NvU32 cache;
-                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; int owner_pid; struct nv_xnu_alloc *prev, *next; };
+                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; int owner_pid; NvU32 kind; NvBool dma32; struct nv_xnu_alloc *prev, *next; };
+static const NvU32 kNvAllocKindRm = 0x4e584131u, kNvAllocKindUser = 0x4e585531u;
 static nv_xnu_alloc *nv_xnu_live[512]; static int nv_xnu_live_n = 0;
 extern "C" int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len);
 extern "C" bool nv_xnu_chat(void);
@@ -1105,11 +1108,15 @@ static void nv_pv_start(void)
 NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pageSize, NvBool contiguous, NvU32 cache_type,
                                      NvBool zeroed, NvBool unencrypted, NvS32 node_id, NvU64 *pte_array, void **priv_data)
 {
+    if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
     NvU64 bytes = (NvU64)page_count * PAGE_SIZE;
     if (nv_xnu_chat()) kprintf("NVRM-xnu: >nv_alloc_pages count=%u page_size=0x%llx contig=%u cache=%u zeroed=%u (%llu KB)\n",
             page_count, pageSize, contiguous, cache_type, zeroed, bytes >> 10);
     IOOptionBits opts = kIODirectionInOut | kIOMemoryKernelUserShared;
     if (contiguous || pageSize > PAGE_SIZE) opts |= kIOMemoryPhysicallyContiguous;
+    // With a DMA mapper IOKit reads "contiguous" as contiguous on the bus; the RM means contiguous in memory (it keeps
+    // one physical address for the whole allocation), which is the host-contiguous option.
+    if ((opts & kIOMemoryPhysicallyContiguous) && nvrm_dma_any_remap()) opts |= kIOMemoryHostPhysicallyContiguous;
     if (cache_type == NV_MEMORY_UNCACHED) opts |= kIOMapInhibitCache;
     else if (cache_type == NV_MEMORY_WRITECOMBINED) opts |= kIOMapWriteCombineCache;
     uint64_t mask = (nv_xnu_dma_bits >= 64) ? 0xFFFFFFFFFFFFF000ULL : ((1ULL << nv_xnu_dma_bits) - 1) & ~0xFFFULL;
@@ -1132,6 +1139,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     if (!a) { md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
     nvx2_memset(a, 0, sizeof *a);
     a->md = md; a->va = va; a->page_size = pageSize; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
+    a->kind = kNvAllocKindRm; a->dma32 = (nv && nv->force_dma32_alloc) ? NV_TRUE : NV_FALSE;
     a->owner_pid = proc_selfpid();  // the client whose escape triggered this allocation; 0 for a kernel-thread (RM-internal) allocation
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
@@ -1196,12 +1204,6 @@ void NV_API_CALL nv_free_kernel_mapping(nv_state_t *nv, void *pAllocPrivate, voi
     if (pPrivate) nv_pm_alias_drop(pPrivate);
 }
 
-NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *dev, NvU64 page_count, NvU64 *va_array, NvBool contig, NvBool cache_type, void **priv)
-{
-    kprintf("NVRM-xnu: >nv_dma_map_alloc pages=%llu contig=%u first=0x%llx (identity)\n", page_count, contig, va_array ? va_array[0] : 0);
-    *priv = NULL; return NV_OK;
-}
-NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count, NvU64 *va_array, void **priv) { TRC; return NV_OK; }
 
 // What we shipped, by name. The card verifies the signature on a GSP image itself, so this is not an
 // authorisation check; it is how the driver notices that the image on disk is not the one the package
@@ -1300,63 +1302,22 @@ NV_STATUS NV_API_CALL os_alloc_wait_queue(os_wait_queue **wq)
 void NV_API_CALL os_free_wait_queue(os_wait_queue *wq) { TRC; if (wq) { IOLockFree(wq->lock); kern_os_free(wq); } }
 void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq)
 {
-    TRC; IOLockLock(wq->lock);
+    TRC; if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    IOLockLock(wq->lock);
     while (!wq->done) IOLockSleep(wq->lock, wq, THREAD_UNINT);
     IOLockUnlock(wq->lock);
 }
 void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)
 {
-    TRC; IOLockLock(wq->lock);
+    TRC; if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    IOLockLock(wq->lock);
     while (!wq->done) if (IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE) != THREAD_AWAKENED) break;   // a signal ends the wait, as on Linux
     IOLockUnlock(wq->lock);
 }
 void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); wq->done = true; IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
 
-// Each work item runs on its own thread. rm_power_management() flushes the queue before suspend/resume
-// (nv_kthread_q_flush on Linux), so count the items still running and let os_flush_work_queue() wait for them.
-static IOLock *nv_xnu_work_lock;
-static int nv_xnu_work_running;
-static bool nv_xnu_work_flushing;
-static IOLock *nv_xnu_work_lock_get(void)
-{
-    if (!nv_xnu_work_lock) {
-        IOLock *l = IOLockAlloc();
-        if (l && !OSCompareAndSwapPtr(NULL, l, (void * volatile *)&nv_xnu_work_lock)) IOLockFree(l);
-    }
-    return nv_xnu_work_lock;
-}
-static void nv_xnu_work_thread(void *item, wait_result_t)
-{
-    kprintf("NVRM-xnu: work item %p running\n", item);
-    rm_execute_work_item(NULL, item);
-    IOLockLock(nv_xnu_work_lock);
-    if (--nv_xnu_work_running == 0) IOLockWakeup(nv_xnu_work_lock, &nv_xnu_work_running, false);
-    IOLockUnlock(nv_xnu_work_lock);
-    thread_terminate(current_thread());
-}
-NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item)
-{
-    TRC; thread_t t;
-    if (!nv_xnu_work_lock_get()) return NV_ERR_NO_MEMORY;
-    IOLockLock(nv_xnu_work_lock); nv_xnu_work_running++; IOLockUnlock(nv_xnu_work_lock);
-    if (kernel_thread_start(nv_xnu_work_thread, item, &t) != KERN_SUCCESS) {
-        IOLockLock(nv_xnu_work_lock); nv_xnu_work_running--; IOLockUnlock(nv_xnu_work_lock);
-        return NV_ERR_NO_MEMORY;
-    }
-    thread_deallocate(t); return NV_OK;
-}
-NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
-{
-    TRC;
-    if (!nv_xnu_work_lock) return NV_OK;
-    IOLockLock(nv_xnu_work_lock);
-    nv_xnu_work_flushing = true;
-    while (nv_xnu_work_running > 0) IOLockSleep(nv_xnu_work_lock, &nv_xnu_work_running, THREAD_UNINT);
-    nv_xnu_work_flushing = false;
-    IOLockUnlock(nv_xnu_work_lock);
-    return NV_OK;
-}
-NvBool NV_API_CALL os_is_queue_flush_ongoing(struct os_work_queue *queue) { return nv_xnu_work_flushing ? NV_TRUE : NV_FALSE; }
+// os_queue_work_item, os_flush_work_queue and os_is_queue_flush_ongoing are in nv_xnu_kcore.cpp (serialized work
+// queues, with the one-thread-per-item code kept there for nvrmworkq=0).
 
 // RM's "temporary file" (FBSR_TYPE_FILE). With PreserveVideoMemoryAllocations, rm_power_management(STANDBY) copies every
 // VRAM allocation out through a small pinned buffer and os_write_file, and RESUME reads it back with os_read_file - on
@@ -1391,10 +1352,15 @@ static NV_STATUS nv_xnu_tmpf_grow(nv_xnu_tmpfile *f, NvU64 need)
     f->chunk = chunk; f->pageable = pageable; f->cap = cap;
     return NV_OK;
 }
+// Bytes the RM has written into save files since boot. The suspend path reads it before and after STANDBY and logs the
+// difference: the VRAM this sleep preserved through the file (nothing when the RM preserved it another way).
+static volatile SInt64 nv_xnu_tmpf_written = 0;
+extern "C" uint64_t nv_xnu_tmpfile_written(void) { return (uint64_t)OSAddAtomic64(0, &nv_xnu_tmpf_written); }
 NV_STATUS NV_API_CALL os_write_file(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset)
 {
     nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)pFile;
     if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
+    if (size) OSAddAtomic64((SInt64)size, &nv_xnu_tmpf_written);
     while (size) {
         const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
         const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
@@ -1446,7 +1412,13 @@ void NV_API_CALL os_close_file(void *pFile)
     if (f->pageable) IOFree(f->pageable, (vm_size_t)(f->cap * sizeof(bool)));
     IOFree(f, sizeof *f);
 }
-NV_STATUS NV_API_CALL os_schedule(void) { IOSleep(1); return NV_OK; }
+// Where blocking is not allowed there is nothing to yield to: Linux answers NV_ERR_ILLEGAL_ACTION there, and every RM
+// caller ignores the result or only prints it. It used to spin 1 ms inside IOSleep.
+NV_STATUS NV_API_CALL os_schedule(void)
+{
+    if (!nvx_can_block()) { nvx_note(NVX_SITE_SCHEDULE, __builtin_return_address(0)); return NV_ERR_ILLEGAL_ACTION; }
+    IOSleep(1); return NV_OK;
+}
 
 NvU64 NV_API_CALL os_get_monotonic_tick_resolution_ns(void) { TRC; return 1; }
 NvU64 NV_API_CALL os_get_max_user_va(void) { TRC; return 0x00007FFFFFFFFFFFULL; }
@@ -1710,138 +1682,7 @@ void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 
 }
 NvU32 NV_API_CALL nv_get_dev_minor(nv_state_t *nv) { TRC; return 0; }
 
-struct nv_nano_timer { nv_state_t *nv; void *event; thread_call_t call; };
-static void nv_xnu_nano_fire(thread_call_param_t p0, thread_call_param_t p1)
-{
-    nv_nano_timer_t *t = (nv_nano_timer_t *)p0;
-    rm_run_nano_timer_callback(NULL, t->nv, t->event);
-}
-void NV_API_CALL nv_create_nano_timer(nv_state_t *nv, void *pTmrEvent, nv_nano_timer_t **pt)
-{
-    TRC; nv_nano_timer_t *t = (nv_nano_timer_t *)kern_os_malloc(sizeof *t);
-    if (!t) { *pt = NULL; return; }
-    t->nv = nv; t->event = pTmrEvent; t->call = thread_call_allocate(nv_xnu_nano_fire, t);
-    *pt = t;
-}
-void NV_API_CALL nv_start_nano_timer(nv_state_t *nv, nv_nano_timer_t *t, NvU64 timens)
-{
-    if (!t || !t->call) return;
-    uint64_t deadline; clock_interval_to_deadline((uint32_t)(timens / 1000ULL), kMicrosecondScale, &deadline);
-    thread_call_enter_delayed(t->call, deadline);
-}
-void NV_API_CALL nv_cancel_nano_timer(nv_state_t *nv, nv_nano_timer_t *t) { if (t && t->call) thread_call_cancel(t->call); }
-void NV_API_CALL nv_destroy_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
-{
-    TRC; if (!t) return; if (t->call) { thread_call_cancel(t->call); thread_call_free(t->call); } kern_os_free(t);
-}
-
-// ---- RC timer (boot-arg nvrmrctimer=1) -------------------------------------------------------------------------------
-// Linux (kernel-open/nvidia/nv.c): nv_start_rc_timer arms a 1 s kernel timer whose callback is rm_run_rc_callback, and
-// that runs the RM's 1 Hz callback list (osRun1HzCallbacksNow): the GSP firmware heartbeat check, the check that the GPU
-// still answers on the bus, the NVENC session statistics, and the channel watchdog once a client turns it on. Both
-// functions were stubs here, so that list never ran. With nvrmrctimer=1 a thread call does the timer's job; without the
-// boot-arg nothing below runs and nv->rc_timer_enabled stays 0, exactly as with the stubs.
-//   debug.nvrm_rc_ticks  RO  timer ticks (registered only with the boot-arg)
-//   debug.nvrm_rc_runs   RO  ticks on which rm_run_rc_callback returned NV_OK
-// Differences from Linux, both on purpose: the tick is re-armed whatever rm_run_rc_callback returns (Linux lets the
-// timer die on the first refusal, such as a tick that lands during a power transition), and the timer is paused across
-// system sleep by the driver (nv_xnu_rc_suspend / nv_xnu_rc_resume from NVRM.cpp) instead of being left to fire.
-#define NV_XNU_RC_SLOTS 4   // one per GPU; GPUs start one at a time, so the table needs no lock
-struct nv_xnu_rc { nv_state_t *nv; thread_call_t call; volatile SInt32 running; volatile SInt32 paused; volatile thread_t owner; };
-static nv_xnu_rc gNvRc[NV_XNU_RC_SLOTS];
-static volatile SInt64 gNvRcTicks = 0, gNvRcRuns = 0;
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_ticks, CTLFLAG_RD, (int64_t *)&gNvRcTicks, "RC timer ticks");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_runs, CTLFLAG_RD, (int64_t *)&gNvRcRuns, "RC timer ticks the RM accepted");
-static int nv_xnu_rc_on(void)
-{
-    static int on = -1;
-    if (on < 0) { uint32_t v = 0; on = (PE_parse_boot_argn("nvrmrctimer", &v, sizeof(v)) && v == 1) ? 1 : 0; }
-    return on;
-}
-static nv_xnu_rc *nv_xnu_rc_find(nv_state_t *nv)
-{
-    for (int i = 0; i < NV_XNU_RC_SLOTS; i++) if (gNvRc[i].nv == nv) return &gNvRc[i];
-    return NULL;
-}
-static void nv_xnu_rc_arm(nv_xnu_rc *rc)
-{
-    uint64_t deadline; clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
-    thread_call_enter_delayed(rc->call, deadline);
-}
-static void nv_xnu_rc_tick(thread_call_param_t p0, thread_call_param_t p1)
-{
-    nv_xnu_rc *rc = (nv_xnu_rc *)p0;
-    OSIncrementAtomic(&rc->running);
-    rc->owner = current_thread();
-    nv_state_t *nv = rc->nv;
-    if (nv && nv->rc_timer_enabled && !rc->paused) {
-        OSIncrementAtomic64(&gNvRcTicks);
-        // rm_run_rc_callback only tries the GPU lock (GPU_LOCK_FLAGS_COND_ACQUIRE): a busy RM costs this tick, not a wait.
-        if (rm_run_rc_callback(NULL, nv) == NV_OK) OSIncrementAtomic64(&gNvRcRuns);
-        if (nv->rc_timer_enabled && !rc->paused) nv_xnu_rc_arm(rc);
-    }
-    rc->owner = NULL;
-    OSDecrementAtomic(&rc->running);
-}
-// thread_call_cancel_wait is not exported to kexts (nvrm_power.cpp has the same pattern): cancel, wait for a tick that is
-// running, then cancel what that tick may have armed before it saw the flag the caller set.
-static void nv_xnu_rc_quiesce(nv_xnu_rc *rc)
-{
-    thread_call_cancel(rc->call);
-    if (rc->owner == current_thread()) return;   // asked from inside a 1 Hz callback: the tick sees the flag on its way out
-    for (int i = 0; i < 1000 && rc->running; i++) IOSleep(10);
-    thread_call_cancel(rc->call);
-}
-NvS32 NV_API_CALL nv_start_rc_timer(nv_state_t *nv)
-{
-    if (!nv || !nv_xnu_rc_on()) return 0;
-    if (nv->rc_timer_enabled) return -1;
-    nv_xnu_rc *rc = nv_xnu_rc_find(nv);
-    if (!rc) rc = nv_xnu_rc_find(NULL);
-    if (!rc) { kprintf("NVRM-xnu: RC timer: no free slot, the 1 Hz callbacks stay off for this GPU\n"); return -1; }
-    if (!rc->call) rc->call = thread_call_allocate(nv_xnu_rc_tick, rc);
-    if (!rc->call) { kprintf("NVRM-xnu: RC timer: no thread call\n"); return -1; }
-    {
-        static bool sysctlsUp;
-        if (!sysctlsUp) { sysctlsUp = true; sysctl_register_oid(&sysctl__debug_nvrm_rc_ticks); sysctl_register_oid(&sysctl__debug_nvrm_rc_runs); }
-    }
-    rc->paused = 0;
-    rc->nv = nv;
-    nv->rc_timer_enabled = 1;
-    nv_xnu_rc_arm(rc);
-    kprintf("NVRM-xnu: RC timer armed (nvrmrctimer=1): the RM's 1 Hz callbacks run\n");
-    return 0;
-}
-NvS32 NV_API_CALL nv_stop_rc_timer(nv_state_t *nv)
-{
-    if (!nv || !nv_xnu_rc_on()) return 0;
-    if (!nv->rc_timer_enabled) return -1;
-    nv->rc_timer_enabled = 0;
-    nv_xnu_rc *rc = nv_xnu_rc_find(nv);
-    if (!rc || !rc->call) return 0;
-    nv_xnu_rc_quiesce(rc);
-    if (rc->owner == current_thread()) return 0;   // cannot free a call from inside itself; the slot is reused by the next start
-    for (int i = 0; i < 100 && !thread_call_free(rc->call); i++) { IOSleep(10); thread_call_cancel(rc->call); }
-    rc->call = NULL;
-    rc->nv = NULL;
-    kprintf("NVRM-xnu: RC timer stopped\n");
-    return 0;
-}
-// System sleep and wake (NVRM::gpuSuspend, NVRM::gpuResume): no tick may reach a GPU that is in standby or powered off.
-extern "C" void nv_xnu_rc_suspend(nv_state_t *nv)
-{
-    nv_xnu_rc *rc = (nv && nv_xnu_rc_on()) ? nv_xnu_rc_find(nv) : NULL;
-    if (!rc || !rc->call) return;
-    rc->paused = 1;
-    nv_xnu_rc_quiesce(rc);
-}
-extern "C" void nv_xnu_rc_resume(nv_state_t *nv)
-{
-    nv_xnu_rc *rc = (nv && nv_xnu_rc_on()) ? nv_xnu_rc_find(nv) : NULL;
-    if (!rc || !rc->call) return;
-    rc->paused = 0;
-    if (nv->rc_timer_enabled) nv_xnu_rc_arm(rc);
-}
+// The nano timers and the RC timer (nv_*_nano_timer, nv_start_rc_timer, nv_stop_rc_timer) are in nv_xnu_timers.cpp.
 
 extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *isCtl);
 extern "C" void nv_xnu_put_client(void *priv);
@@ -1968,10 +1809,13 @@ NV_STATUS NV_API_CALL nv_register_user_pages(nv_state_t *nv, NvU64 page_count, N
         return NV_ERR_INVALID_ARGUMENT;
     }
     const uint64_t lim = (nv_xnu_dma_bits >= 64) ? ~0ULL : ((1ULL << nv_xnu_dma_bits) - 1);
+    // Behind a DMA mapper the GPU sees these pages through their own mapping (nv_dma_map_alloc), so where they sit in
+    // physical memory does not have to fit the GPU's address width.
+    const bool remap = nv_requires_dma_remap(nv);
     for (NvU64 i = 0; i < page_count; i++) {
         IOByteCount len = 0;
         const addr64_t ph = p->md->getPhysicalSegment((IOByteCount)(i * PAGE_SIZE), &len, kIOMemoryMapperNone);
-        if (!ph || (ph & PAGE_MASK) || ph + PAGE_SIZE - 1 > lim) {
+        if (!ph || (ph & PAGE_MASK) || (!remap && ph + PAGE_SIZE - 1 > lim)) {
             kprintf("NVRM-xnu: nv_register_user_pages page %llu/%llu phys 0x%llx refused (dma bits %u)\n", i, page_count,
                     (unsigned long long)ph, nv_xnu_dma_bits);
             return NV_ERR_INVALID_ADDRESS;
@@ -1982,6 +1826,7 @@ NV_STATUS NV_API_CALL nv_register_user_pages(nv_state_t *nv, NvU64 page_count, N
     if (!r) return NV_ERR_NO_MEMORY;
     nvx2_memset(r, 0, sizeof *r);
     r->a.bytes = page_count * PAGE_SIZE; r->a.page_count = (NvU32)page_count; r->a.page_size = PAGE_SIZE; r->a.cache = NV_MEMORY_CACHED;
+    r->a.kind = kNvAllocKindUser;
     r->pin = p; r->import_priv = import_priv;
     *priv_data = r;
     return NV_OK;
@@ -2009,6 +1854,23 @@ NV_STATUS NV_API_CALL os_unlock_user_pages(NvU64 page_count, void *page_array, N
     OSDecrementAtomic64(&nv_upin_live); OSAddAtomic64(-(SInt64)p->page_count, &nv_upin_pages);
     kern_os_free(p);
     return NV_OK;
+}
+
+// The memory behind an allocation's private data, for nvrm_dma.cpp: an RM allocation (listed, so the pointer is only
+// compared until it is known to be one) or registered user pages. Returned retained.
+IOMemoryDescriptor *nv_xnu_dma_source(void *priv, NvU64 *bytes, int *force32, int *user)
+{
+    nv_xnu_alloc *a = (nv_xnu_alloc *)priv; IOMemoryDescriptor *md = NULL; bool listed = false;
+    if (!a || !nv_pm_lock) return NULL;
+    IOSimpleLockLock(nv_pm_lock);
+    for (nv_xnu_alloc *x = nv_pm_head; x; x = x->next) if (x == a) { listed = true; break; }
+    if (listed && !a->freed && a->kind == kNvAllocKindRm && a->md) { md = a->md; md->retain(); *bytes = a->bytes; *force32 = a->dma32 ? 1 : 0; *user = 0; }
+    IOSimpleLockUnlock(nv_pm_lock);
+    if (md || listed) return md;
+    nv_xnu_ureg *r = (nv_xnu_ureg *)priv;
+    if (r->a.kind != kNvAllocKindUser || !r->pin || r->pin->magic != kNvUpinMagic || !r->pin->md) return NULL;
+    md = r->pin->md; md->retain(); *bytes = r->a.bytes; *force32 = 0; *user = 1;
+    return md;
 }
 
 }

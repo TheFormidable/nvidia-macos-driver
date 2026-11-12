@@ -13,6 +13,8 @@
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_aspm.h"
+#include "nv_xnu_kcore.h"
+#include "nv_xnu_quiesce.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -28,6 +30,7 @@ extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <mach/mach_time.h>
 #include <kern/sched_prim.h>
 #include <libkern/OSDebug.h>
+#include "nvrm_layout.h"
 
 extern "C" {
 #include <mach/mach_types.h>
@@ -84,13 +87,12 @@ static bool nvrmMultiGpu(void)
     return on == 1;
 }
 #include "nv_rtd3_policy.h"
+#include "nvrm_dma.h"   // attach in startGPU, detach in stop() and on a failed start, nvSurfDma
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
 extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
 extern "C" void nvrm_power_stop(void);
 extern "C" void nvrm_power_suspend(void);
 extern "C" void nvrm_power_resume(void);
-extern "C" void nv_xnu_rc_suspend(nv_state_t *nv);   // os-xnu2.cpp: the RM's 1 Hz timer (boot-arg nvrmrctimer=1), paused across sleep
-extern "C" void nv_xnu_rc_resume(nv_state_t *nv);
 extern "C" int  nv_rtd3_before_system_resume(void);
 extern "C" int  nv_rtd3_power_off(IOACPIPlatformDevice *acpi);
 extern "C" int  nv_rtd3_power_on(IOACPIPlatformDevice *acpi);
@@ -170,6 +172,19 @@ public:
     uint32_t        fHoldCapMs = 120000;   // boot-arg nvrmholdcap (seconds)
     uint32_t        fHoldWaitedMs = 0;     // how long the cap has waited past its first deadline
     thread_call_t   fHoldCapCall = nullptr;
+    uint64_t        fHoldStartNs = 0;      // when the hold was taken, for debug.nvrm_boot_hold_ms
+    // Two marks of the start-up, for two different moments. fStartReturned: startGPU has done everything start() does
+    // (joined power management, registered the service); its last statement writes it, and auto-go waits for it after
+    // the settle and before it touches the card. fStartDone: go() has brought the GPU up and started everything that
+    // hangs off it (work queue, interrupt path, power manager, surface fence); the last statement of go()'s successful
+    // path writes it, so whoever reads it may use all of that. auto-go never waits for fStartDone: only its own go(2)
+    // writes it.
+    volatile SInt32 fStartReturned = 0;
+    volatile SInt32 fStartDone = 0;
+    // -nvrmoldwaits: auto-go waits exactly as 2.9 did (1 s polls, full raster windows, no start gate, no shortcut when the
+    // accelerator declined, no firmware progress sample). Read once in startGPU.
+    bool            fOldWaits = false;
+    uint32_t peekBar0(uint32_t off);
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait,
                                          void *p1, void *p2, void *p3, void *p4) override;
     virtual IOReturn setPowerState(unsigned long ordinal, IOService *device) override;
@@ -221,34 +236,53 @@ private:
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
-    // Boot-arg nvrmbhthread=1: rm_isr_bh runs on a thread of its own, as Linux's threaded interrupt handler does, and the
-    // work loop thread stays free for the next rm_isr. Without the boot-arg fBhLock stays NULL and nothing changes.
+    // The interrupt gate: interruptOccurred enters the RM only through it. irqSettle() closes it and waits until no handler
+    // is inside any more and no bottom half is pending or running (sleep, shutdown, stop); irqOpen() opens it again, and
+    // comes before every fIntSrc->enable(). Zeroed it is open, so a path that never started has nothing to undo.
+    NvXnuGate    fIrqGate = {};
+    int          fIsrSlot = -1;   // this GPU's slot in nv_xnu_isr_threads (os_is_isr), from go() to stop()
+    void irqOpen();
+    void irqSettle(uint32_t waitMs);
+    // rm_isr_bh runs on a thread of its own, as Linux's threaded interrupt handler does, and the work loop thread stays
+    // free for the next rm_isr. On by default; boot-arg nvrmbhthread=0 (or no lock or thread to be had) leaves fBhLock
+    // NULL and the bottom half runs on the work loop right after rm_isr. fBhLock is a leaf: it protects fBh and
+    // fBhAskedAt only, and no RM call is made while it is held.
     IOLock      *fBhLock = NULL;
-    bool         fBhPending = false, fBhBusy = false, fBhQuit = false, fBhAlive = false;
+    NvXnuBh      fBh = {};
+    uint64_t     fBhAskedAt = 0;   // mach_absolute_time of the request the thread serves next
     static void bottomHalfThread(void *p0, wait_result_t w);
     void bottomHalfStart();
-    void bottomHalfDrain(uint32_t waitMs);
+    bool bottomHalfDrain(uint32_t waitMs);
     void bottomHalfStop();
+    // The GPU's own work queue is taken away (items queued from then on go to the global queue) and stopped; each of
+    // the two waits inside is bounded by capMs.
+    void workQueueDown(uint32_t capMs);
     void readBARs();
     void publishGpuProfile();
     bool placeLargeBar1();
     bool interruptFilter(IOFilterInterruptEventSource *src);
     void interruptOccurred(IOInterruptEventSource *src, int count);
 };
-extern "C" { extern volatile int nv_xnu_in_isr; extern volatile thread_t nv_xnu_isr_thread; void nv_xnu_dump_live_allocs(void); }
+extern "C" { void nv_xnu_dump_live_allocs(void); }
 static volatile unsigned long gNvIsrCount = 0, gNvIsrHandled = 0;
 // Read from a shell (also over SSH while the screen is frozen): do GPU interrupts still arrive and get handled?
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_count, CTLFLAG_RD, (int64_t *)&gNvIsrCount, "GPU MSIs taken");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_handled, CTLFLAG_RD, (int64_t *)&gNvIsrHandled, "GPU MSIs RM claimed");
 // Interrupt timing. On Linux rm_isr runs in the hard interrupt and rm_isr_bh on the interrupt's own thread, so a bottom
-// half that waits for the GPU lock never keeps the next top half (vblank, non-stall notifiers) waiting. Here both run on
-// the one work loop thread. These say whether that costs anything on this machine; all read-only, compare two readings:
+// half that waits for the GPU lock never keeps the next top half (vblank, non-stall notifiers) waiting. Here rm_isr runs
+// on the work loop thread and rm_isr_bh on a thread of its own (with nvrmbhthread=0 both on the work loop). These say
+// what that costs on this machine; all read-only, compare two readings:
 //   debug.nvrm_isr_latency_max_us  longest wait between an MSI and its rm_isr
 //   debug.nvrm_isr_late_1ms, _4ms  such waits longer than 1 ms and 4 ms
 //   debug.nvrm_isr_during_bh       MSIs that arrived while a bottom half was still running
 //   debug.nvrm_bh_runs             bottom halves run
 //   debug.nvrm_bh_max_us           longest bottom half, its wait for the GPU lock included
 //   debug.nvrm_bh_over_1ms, _4ms   bottom halves longer than 1 ms and 4 ms
+//   debug.nvrm_bh_thread           GPUs whose bottom half runs on its own thread
+//   debug.nvrm_bh_wake_max_us      longest wait between a bottom half's request and the start of its run on that thread
+//   debug.nvrm_bh_stuck            bottom-half threads that did not exit within 5 s of the GPU's stop (should stay 0)
+//   debug.nvrm_isr_skipped         interrupts that found the gate closed (sleep, shutdown, stop) and were not given to the RM
+//   debug.nvrm_irq_settle_timeouts waits for the interrupt path to go quiet that ran out (should stay 0)
 static volatile UInt64 gNvIsrFilterAt = 0;   // mach_absolute_time of the first MSI the work loop has not served yet
 static volatile SInt32 gNvBhActive = 0;
 static volatile SInt64 gNvIsrLatMaxUs = 0, gNvIsrLate1 = 0, gNvIsrLate4 = 0, gNvIsrDuringBh = 0;
@@ -261,6 +295,59 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_runs, CTLFLAG_RD, (int64_t *)&gNvBhRuns, "
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_max_us, CTLFLAG_RD, (int64_t *)&gNvBhMaxUs, "longest RM bottom half, microseconds");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_1ms, CTLFLAG_RD, (int64_t *)&gNvBhOver1, "RM bottom halves over 1 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_4ms, CTLFLAG_RD, (int64_t *)&gNvBhOver4, "RM bottom halves over 4 ms");
+static volatile SInt64 gNvBhThreads = 0, gNvBhWakeMaxUs = 0, gNvBhStuck = 0, gNvIsrSkipped = 0, gNvIrqSettleTimeouts = 0;
+// Runs of the interrupt action, for the cadence of its log line. 64 bits: a 32-bit count turns negative after 2^31
+// interrupts (days of uptime), and from then on every interrupt would pass the "first three" test and log.
+static volatile SInt64 gNvIsrServed = 0;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_thread, CTLFLAG_RD, (int64_t *)&gNvBhThreads, "GPUs whose RM bottom half runs on its own thread");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_wake_max_us, CTLFLAG_RD, (int64_t *)&gNvBhWakeMaxUs, "longest bottom-half request to run, microseconds");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_stuck, CTLFLAG_RD, (int64_t *)&gNvBhStuck, "bottom-half threads that did not exit at stop");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_skipped, CTLFLAG_RD, (int64_t *)&gNvIsrSkipped, "GPU interrupts not given to the RM: gate closed");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_irq_settle_timeouts, CTLFLAG_RD, (int64_t *)&gNvIrqSettleTimeouts, "interrupt path settle waits that ran out");
+// Start-up, phase by phase, as the auto-go thread of the last card to start went through it (milliseconds). Written by
+// that thread only, read by sysctl; the same line is the nvrm-boot-timing property of the NVRM service.
+//   debug.nvrm_boot_settle_ms     the settle before the card is touched (500 ms, 10 s on Turing, 100 s without BAR1 placed)
+//   debug.nvrm_boot_gate_ms       how long auto-go then waited for start() to have returned (0 normally; 5000 = never)
+//   debug.nvrm_boot_raster_ms     the boot raster measurement; _raster_idle: heads it left after 50 ms as not scanning
+//   debug.nvrm_boot_go_ms         go(2), the RM's bring-up of the GPU
+//   debug.nvrm_boot_heads_ms      the wait for the accelerator's heads; _heads_polls: its polls (above 20: 50 ms polls
+//                                 ran); _heads_why: why it ended (nvrm_startup_policy.h NvrmHeadsWhy: 1 enough heads,
+//                                 2 unchanged for 3 s, 3 every connected display, 4 no display anywhere, 5 the hybrid
+//                                 panel, 6 the accelerator declined, 7 the 20 s bound)
+//   debug.nvrm_boot_arm_ms        the tries of debug.nvaccelfb=1
+//   debug.nvrm_boot_hold_ms       how long the registry was held busy for the display
+// And what NVRM read from the other kexts' verdicts on Apple's class layouts (nvrm_layout.h): 0 none published, 1 ok,
+// 2 refused, 3 overridden by nvlayout=0, 4 nothing could be compared.
+//   debug.nvrm_layout_fb          NVRMFB's (nvrmfb-layout); refused: NVRM does not start the card
+//   debug.nvrm_layout_accel       NVAccel's (nvaccel-layout); refused: no acceleration, the display is not armed
+static unsigned gNvBootSettleMs, gNvBootGateMs, gNvBootRasterMs, gNvBootRasterIdle, gNvBootGoMs, gNvBootHeadsMs,
+                gNvBootHeadsPolls, gNvBootHeadsWhy, gNvBootArmMs, gNvBootHoldMs, gNvLayoutFb, gNvLayoutAccel;
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_settle_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootSettleMs, 0, "start-up: settle before the card is touched, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_gate_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootGateMs, 0, "start-up: wait for start() to have returned, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_raster_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootRasterMs, 0, "start-up: boot raster measurement, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_raster_idle, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootRasterIdle, 0, "start-up: heads left early as not scanning");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_go_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootGoMs, 0, "start-up: go(2), ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsMs, 0, "start-up: wait for the accelerator's heads, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_polls, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsPolls, 0, "start-up: polls of the heads wait");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_heads_why, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHeadsWhy, 0, "start-up: why the heads wait ended");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_arm_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootArmMs, 0, "start-up: tries to arm the accelerator, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_hold_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHoldMs, 0, "start-up: registry held busy for the display, ms");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_fb, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutFb, 0, "framebuffer layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
+SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_accel, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutAccel, 0, "accelerator layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
+static uint64_t nvrmNowNs(void) { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
+static unsigned nvrmMsSince(uint64_t ns0) { const uint64_t now = nvrmNowNs(); return now > ns0 ? (unsigned)((now - ns0) / 1000000ULL) : 0; }
+// The verdict another kext published on this card's PCI device about Apple's class layouts (nvrm_layout.h), and its
+// text for the log. No property, or one that is not such a verdict, is kNvLayoutNotRun: carry on as 2.9 did.
+static NvLayoutState nvrmPeerLayout(IORegistryEntry *dev, const char *key, char *text, size_t cap)
+{
+    if (text && cap) text[0] = 0;
+    OSObject *o = dev ? dev->copyProperty(key) : NULL;
+    OSString *s = OSDynamicCast(OSString, o);
+    const NvLayoutState st = s ? nvLayoutTextState(s->getCStringNoCopy()) : kNvLayoutNotRun;
+    if (s && text && cap) strlcpy(text, s->getCStringNoCopy(), cap);
+    OSSafeReleaseNULL(o);
+    return st;
+}
 static inline SInt64 nvrmUsSince(uint64_t t0)
 {
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
@@ -784,16 +871,53 @@ bool NVRM::startGPU(IOService *provider)
         return false;
     }
     if (!nvrm_kernel_supported()) return false;
+    // NVRMFB's verdict on the Apple framebuffer classes of this macOS (nvrm_layout.h). Every way the driver has of
+    // lighting this card's display is a subclass of them, so when the framebuffer refuses, starting the card only takes
+    // the firmware's picture away. Declined here, before the boot guard counts this start: the Mac still boots and can
+    // be reached over the network, and a refusal that is right is not counted as a failed boot that would switch the
+    // driver off or roll the install back. nvlayout=0 makes the framebuffer publish "overridden" instead, and both
+    // start as before.
+    // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
+    // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
+    // logs the same from its side. A verdict published later is read again just before go(2).
+    {
+        char text[200];
+        gNvLayoutFb = (unsigned)nvrmPeerLayout(provider, "nvrmfb-layout", text, sizeof text);
+        if (gNvLayoutFb == kNvLayoutNotRun)
+            LOG("framebuffer layout: no verdict on this device before NVRM starts (NVRMFB's claim has not probed it); "
+                "one published later is read again before go(2), and this start is counted by the boot guard either way");
+        else
+            LOG("framebuffer layout: %s (read before the boot guard counts this start: NVRMFB's claim probed the device first)", text);
+        if (gNvLayoutFb == kNvLayoutRefused) {
+            provider->setProperty("nvrm-layout", "declined: the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
+            LOG("NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS (its Apple classes differ from the ones it "
+                "was built for), so the firmware's picture stays. Not counted as a failed start. Boot-arg nvlayout=0 starts it anyway.");
+            return false;
+        }
+    }
+    // How this GPU's addresses reach the bus (nvrm_dma.h), decided before the RM is told anything about the card and
+    // before the boot guard counts this start. A GPU behind a DMA mapper the driver may not or cannot use is not
+    // started: its untranslated addresses would go out on a translated bus. That is a decline, not a failed boot, and
+    // nvrm-dma on the PCI device names the reason. Without a mapper nothing changes (the RM keeps physical addresses).
+    // A start that returns false gets no stop(), so every false return from here on detaches first.
+    if (!fNv.dma_dev) fNv.dma_dev = nvrm_dma_attach(&fNv, OSDynamicCast(IOPCIDevice, provider));
+    if (!fNv.dma_dev || nvrm_dma_mode_of(&fNv) == NVRM_DMA_REFUSE) {
+        LOG("NOT STARTING THE GPU: %s. Not counted as a failed start.", fNv.dma_dev ? nvrm_dma_why(&fNv) : "no memory to record how its DMA reaches the bus");
+        nvrm_dma_detach(&fNv);
+        return false;
+    }
     nvrm_guard_count_start();
-    if (!super::start(provider)) return false;
+    if (!super::start(provider)) { nvrm_dma_detach(&fNv); return false; }
     fPCI = OSDynamicCast(IOPCIDevice, provider);
-    if (!fPCI) return false;
+    if (!fPCI) { nvrm_dma_detach(&fNv); return false; }
     // An unavailable telemetry lock disables this optional interface, not the GPU.
     fUtilizationLock = IOLockAlloc();
     gNVRMTab.add(this, nvrmMultiGpu(), provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
-    if (!nv_xnu_maps_init()) { LOG("IOLockAlloc FAILED for the kernel mapping table"); return false; }
+    if (!nv_xnu_maps_init()) { LOG("IOSimpleLockAlloc FAILED for the kernel mapping index"); nvrm_dma_detach(&fNv); return false; }
+    // Before the RM is entered for the first time: the context answers and the global work queue (once per boot).
+    nv_xnu_kcore_init();
     // Say which build is running, first thing. A machine reported "2.3.2" from the app while the kernel collection still
     // held a kext from before 2.1.0 (its BAR1 line used wording that version had replaced), and nothing in the log said
     // so: the installed bundle and the loaded kext can differ, and only the loaded one knows what it is. The loader
@@ -810,6 +934,9 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_isr_late_1ms); sysctl_register_oid(&sysctl__debug_nvrm_isr_late_4ms);
             sysctl_register_oid(&sysctl__debug_nvrm_bh_runs); sysctl_register_oid(&sysctl__debug_nvrm_bh_max_us);
             sysctl_register_oid(&sysctl__debug_nvrm_bh_over_1ms); sysctl_register_oid(&sysctl__debug_nvrm_bh_over_4ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_thread); sysctl_register_oid(&sysctl__debug_nvrm_bh_wake_max_us);
+            sysctl_register_oid(&sysctl__debug_nvrm_bh_stuck); sysctl_register_oid(&sysctl__debug_nvrm_isr_skipped);
+            sysctl_register_oid(&sysctl__debug_nvrm_irq_settle_timeouts);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_posts); sysctl_register_oid(&sysctl__debug_nvrm_evt_waits);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_matched); sysctl_register_oid(&sysctl__debug_nvrm_evt_slept);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_woken); sysctl_register_oid(&sysctl__debug_nvrm_evt_timeouts);
@@ -817,6 +944,14 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_waits); sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_stuck);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_settle_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_gate_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_idle);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_go_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_polls); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_why);
+            sysctl_register_oid(&sysctl__debug_nvrm_boot_arm_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_hold_ms);
+            sysctl_register_oid(&sysctl__debug_nvrm_layout_fb); sysctl_register_oid(&sysctl__debug_nvrm_layout_accel);
+            nv_xnu_kcore_sysctls_register();
+            nv_xnu_timers_sysctls();
         }
     }
     UInt8 bus = fPCI->getBusNumber(), dev = fPCI->getDeviceNumber(), fn = fPCI->getFunctionNumber();
@@ -862,16 +997,19 @@ bool NVRM::startGPU(IOService *provider)
     LOG("armed on %02x:%02x.%d %04x:%04x", bus, dev, fn, nv->pci_info.vendor_id, nv->pci_info.device_id);
     fPCI->setProperty("nvrm-claimed", kOSBooleanTrue);
     if (!gNvClientsLock) gNvClientsLock = IOLockAlloc();
-    if (!gNvClientsLock) { LOG("IOLockAlloc FAILED"); return false; }
+    if (!gNvClientsLock) { LOG("IOLockAlloc FAILED"); nvrm_dma_detach(&fNv); return false; }
     {
         char nogo[8] = { 0 };
         thread_t th = THREAD_NULL;
         { uint32_t ms = 0; const bool haveArg = PE_parse_boot_argn("nvrmsettle", &ms, sizeof(ms));
           fAutoGoSettleMs = nvrmAutoGoSettleMs(bar1Placed, nvrmIsTuringDeviceId(nv->pci_info.device_id), haveArg, ms); }
+        { char ow[8] = { 0 }; fOldWaits = PE_parse_boot_argn("-nvrmoldwaits", ow, sizeof ow); }
+        if (fOldWaits) LOG("auto-go: -nvrmoldwaits: start-up waits as in 2.9 (1 s polls, full raster windows, no start gate)");
         if (PE_parse_boot_argn("-nvrmnogo", nogo, sizeof(nogo))) {
             setProperty("nvrm-autogo", "off (-nvrmnogo)"); LOG("auto-go OFF (-nvrmnogo): idle until `nvrmctl go <pass>`");
         } else {
             fBootHold = 1; adjustBusy(1); setProperty("nvrm-boot-hold", "holding");
+            fHoldStartNs = nvrmNowNs();
             { uint32_t sec = 0; if (PE_parse_boot_argn("nvrmholdcap", &sec, sizeof(sec)) && sec >= 40 && sec <= 600) fHoldCapMs = sec * 1000; }
             if (thread_call_t cap = thread_call_allocate(&NVRM::bootHoldCap, this)) {
                 // The BAR fallback settles for 100 s. A 40 s timer from start() expired before
@@ -927,6 +1065,9 @@ bool NVRM::startGPU(IOService *provider)
         }
     }
     registerService();
+    // auto-go, started above, waits for this mark after its settle before it touches the card: with nvrmsettle=0 it
+    // could otherwise reach go(2) before this service had joined power management and been registered.
+    OSCompareAndSwap(0, 1, &fStartReturned);
     return true;
 }
 
@@ -1023,6 +1164,7 @@ void NVRM::measureBootRaster()
     if (!map) { LOG("boot raster: BAR0 map failed — unknown"); if (md) md->release(); return; }
     volatile uint8_t *b = (volatile uint8_t *)map->getVirtualAddress();
     char out[256]; int o = 0; out[0] = 0;
+    unsigned idle = 0;
     for (unsigned h = 0; h < 4; h++) {
         const uint32_t rs = *(volatile uint32_t *)(b + 0x682064 + 0x8000 + h * 0x400);
         const uint32_t pc = *(volatile uint32_t *)(b + 0x68200c + 0x8000 + h * 0x400);
@@ -1037,6 +1179,9 @@ void NVRM::measureBootRaster()
             if (v > maxv) maxv = v;
             last = v;
             absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            // A head whose counter has not moved once in 50 ms is not scanning out (nvrm_startup_policy.h): the rest of
+            // its 250 ms window could not change the verdict.
+            if (!fOldWaits && nvrmRasterHeadIdle(ns, moves)) { idle++; break; }
         } while (ns < 250000000ull);
         uint64_t span = 0; if (wraps >= 2) absolutetime_to_nanoseconds(tLast - tFirst, &span);
         const uint32_t mhz = (wraps >= 2 && span) ? (uint32_t)((uint64_t)(wraps - 1) * 1000000000000ull / span) : 0;
@@ -1050,6 +1195,7 @@ void NVRM::measureBootRaster()
         if (ok && o < (int)sizeof(out) - 40) o += snprintf(out + o, sizeof(out) - (size_t)o, "%shead%u %u.%03uHz", o ? " " : "", h, mhz / 1000, mhz % 1000);
     }
     setProperty("nvrm-boot-raster", o ? out : "unknown");
+    gNvBootRasterIdle = idle;
     map->release(); md->release();
 }
 
@@ -1106,6 +1252,7 @@ void NVRM::headWatch(void *p0, wait_result_t)
 void NVRM::releaseBootHold(const char *why)
 {
     if (!OSCompareAndSwap(1, 0, &fBootHold) && !OSCompareAndSwap(2, 0, &fBootHold)) return;
+    if (fHoldStartNs) gNvBootHoldMs = nvrmMsSince(fHoldStartNs);
     adjustBusy(-1);
     setProperty("nvrm-boot-hold", why);
     LOG("boot hold RELEASED (%s) — WindowServer's IOKitWaitQuiet may return", why);
@@ -1126,6 +1273,7 @@ void NVRM::bootHoldCap(thread_call_param_t p0, thread_call_param_t)
         return;
     }
     if (OSCompareAndSwap(1, 0, &s->fBootHold)) {
+        if (s->fHoldStartNs) gNvBootHoldMs = nvrmMsSince(s->fHoldStartNs);
         s->adjustBusy(-1); s->setProperty("nvrm-boot-hold", "CAP: bring-up not finished in time, NOT arming");
         LOG("boot hold RELEASED by the settle + %u s cap — the bring-up will not arm with WindowServer up", 40 + s->fHoldWaitedMs / 1000);   // the cap is no longer fixed at 40 s
     }
@@ -1148,10 +1296,47 @@ static bool nvrmNoDisplayAnywhere()
     return nvrmNoDisplayOnAnyConnector(counts, n);
 }
 
+// One 32-bit register of BAR0, read through a one-page mapping made for it; 0xffffffff when BAR0 is not known or the
+// page cannot be mapped. For the few samples auto-go takes before the RM owns the card (measureBootRaster maps BAR0
+// the same way at the same moment).
+uint32_t NVRM::peekBar0(uint32_t off)
+{
+    const nv_state_t *nv = &fNv;
+    if (!nv->bars[0].cpu_address || nv->bars[0].size < (NvU64)off + 4) return 0xffffffffu;
+    IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress)(nv->bars[0].cpu_address + (off & ~0xfffu)),
+                                                                     0x1000, kIODirectionIn);
+    IOMemoryMap *map = md ? md->map(kIOMapInhibitCache) : NULL;
+    uint32_t v = 0xffffffffu;
+    if (map) { v = *(volatile uint32_t *)(map->getVirtualAddress() + (off & 0xfffu)); map->release(); }
+    if (md) md->release();
+    return v;
+}
+
+static const char *nvrmHeadsWhyName(unsigned why)
+{
+    static const char *const names[] = { "still waiting", "enough heads", "mask unchanged 3 s", "every connected display",
+                                         "no display anywhere", "hybrid panel", "accelerator declined", "20 s bound" };
+    return why < sizeof names / sizeof names[0] ? names[why] : "?";
+}
+// The phases of this start-up as one line, on the NVRM service (nvrm-boot-timing); the same numbers are the
+// debug.nvrm_boot_* sysctls. Phases auto-go did not reach read 0.
+static void nvrmBootTiming(IOService *s)
+{
+    char t[192];
+    snprintf(t, sizeof t, "settle %u gate %u raster %u go %u heads %u (%s) arm %u hold %u ms", gNvBootSettleMs, gNvBootGateMs,
+             gNvBootRasterMs, gNvBootGoMs, gNvBootHeadsMs, nvrmHeadsWhyName(gNvBootHeadsWhy), gNvBootArmMs, gNvBootHoldMs);
+    s->setProperty("nvrm-boot-timing", t);
+}
+
 void NVRM::autoGo(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
     char nb[8] = { 0 };
+    const bool old = s->fOldWaits;
+    // The firmware's boot progress register (GFW_BOOT_PROGRESS, which nv_xnu_dump_gsp_regs also names), before and after
+    // the settle: a card whose value still changes during the settle is evidence about what the settle waits for.
+    const uint32_t gfw0 = old ? 0xffffffffu : s->peekBar0(0x118234);
+    uint64_t t0 = nvrmNowNs();
     // A card whose BAR1 could not be placed outside the boot screen (Resizable BAR off: 256 MB) waits 100 s here with
     // the registry held busy, so the verbose screen showed only "busy timeout ... 'NVRM'" for two minutes and users
     // reset machines that were still starting (7 reports, RTX 2070 SUPER/3050/3060/3070, GTX 1660 SUPER, Quadro T2000,
@@ -1176,14 +1361,48 @@ void NVRM::autoGo(void *p0, wait_result_t)
     } else {
         IOSleep(s->fAutoGoSettleMs);
     }
+    gNvBootSettleMs = nvrmMsSince(t0);
+    if (!old) {
+        const uint32_t gfw1 = s->peekBar0(0x118234);
+        char g[40]; snprintf(g, sizeof g, "0x%08x -> 0x%08x", gfw0, gfw1);
+        s->setProperty("nvrm-gfw-boot", g);
+        // start() runs on, past the thread it started: power management and registerService come after it. Wait until
+        // it has returned before the card is touched (normally it has, long before the settle ends).
+        unsigned waited = 0;
+        while (!OSAddAtomic(0, &s->fStartReturned) && waited < kNvrmStartGateMaxMs) { IOSleep(kNvrmStartGateStepMs); waited += kNvrmStartGateStepMs; }
+        gNvBootGateMs = waited;
+        if (!OSAddAtomic(0, &s->fStartReturned))
+            LOG("auto-go: start() had still not returned %u ms after the settle - going on as before", waited);
+        else if (waited)
+            LOG("auto-go: waited %u ms after the settle for start() to return", waited);
+    }
+    t0 = nvrmNowNs();
     s->measureBootRaster();
+    gNvBootRasterMs = nvrmMsSince(t0);
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
+    // The framebuffer may have published its verdict after startGPU read it (kexts loaded on their own rather than
+    // from one collection). A refusal now still keeps the card as the firmware left it; this boot's start stays counted,
+    // and two such boots switch the driver off through the boot guard.
+    {
+        char text[200];
+        gNvLayoutFb = (unsigned)nvrmPeerLayout(s->fPCI, "nvrmfb-layout", text, sizeof text);
+        if (gNvLayoutFb == kNvLayoutRefused) {
+            LOG("auto-go: NOT STARTING THE GPU: the framebuffer refused this macOS's classes after NVRM had started (%s). "
+                "Boot-arg nvlayout=0 starts it anyway.", text);
+            s->fPCI->setProperty("nvrm-layout", "declined late (before go(2)): the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
+            s->setProperty("nvrm-autogo", "not started: framebuffer layout refused");
+            s->releaseBootHold("framebuffer layout refused - the card stays as the firmware left it");
+            nvrmBootTiming(s);
+            s->release(); thread_terminate(current_thread()); return;
+        }
+    }
     { uint64_t t; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &s->fBringUpStartNs); }
     s->fBringUp = 1;
     IOReturn r = s->go(2);
     // how long go(2) took, which says whether the cap was wide enough
     { uint64_t t, ns = 0; clock_get_uptime(&t); absolutetime_to_nanoseconds(t, &ns);
+      gNvBootGoMs = (unsigned)((ns - s->fBringUpStartNs) / 1000000ULL);
       LOG("auto-go: go(2) took %llu ms (hold cap settle + %u s)", (unsigned long long)((ns - s->fBringUpStartNs) / 1000000ULL), s->fHoldCapMs / 1000); }
     kprintf("NVRM-xnu: auto-go: go(2) -> 0x%x (fPassDone %u)\n", r, s->fPassDone);
     if (r != kIOReturnSuccess) {
@@ -1198,39 +1417,101 @@ void NVRM::autoGo(void *p0, wait_result_t)
         // so wait for it, bounded by the same 20 s as the NVIDIA heads.
         bool hyWait = false;
         { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hyWait = present && lv >= 1 && lv <= 4; }
-        int mask = 0, last = -1, still = 0, i;
-        for (i = 0; i < 20; i++) {
+        // The heads wait: the 2.9 exits and bound, polled every 50 ms (1 s with -nvrmoldwaits). The connector counts are
+        // read at most every 250 ms (each poll with -nvrmoldwaits, as 2.9 did); the registry walk only while no head is
+        // published, as in 2.9. A refusal by the accelerator ends it: no head will ever be published to it.
+        int mask = 0, i;
+        NvrmHeadsWait w; nvrmHeadsWaitInit(&w, old ? 1000u : (unsigned)kNvrmHeadsPollMs, want, hyWait);
+        NvrmHeadsWhy why = kNvrmHeadsKeepWaiting;
+        unsigned polls = 0, connected = 0, sinceRead = kNvrmHeadsRefreshMs, sinceWalk = kNvrmHeadsRefreshMs;
+        bool noDisplay = false;
+        if (hyWait) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
+        t0 = nvrmNowNs();
+        for (;;) {
             if (nvrmSysR("debug.nvaccel_heads_published", &mask) != 0) mask = 0;
-            if (hyWait) {
-                if (mask & 0x10) { LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %d s", i); break; }
-                if (i == 0) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
-                IOSleep(1000);
-                continue;
-            }
-            if ((int)nvrmPop((unsigned)mask) >= want) break;
-            still = (mask && mask == last) ? still + 1 : 0; last = mask;
-            if (still >= 3) break;
-            if (gDisplayNub0) {
-                OSNumber *cd = OSDynamicCast(OSNumber, gDisplayNub0->getProperty("connected-displays"));
-                if (cd && cd->unsigned32BitValue() > 0 && (int)nvrmPop((unsigned)mask) >= (int)cd->unsigned32BitValue()) break;
+            polls++;
+            if (!hyWait && (old || sinceRead >= kNvrmHeadsRefreshMs)) {
+                sinceRead = 0;
+                OSNumber *cd = gDisplayNub0 ? OSDynamicCast(OSNumber, gDisplayNub0->getProperty("connected-displays")) : NULL;
+                connected = cd ? cd->unsigned32BitValue() : 0;
             }
             // Every connector list is enumerated and none carries a display (a panel on the Intel or AMD GPU): no head
             // will ever publish, so waiting out the full twenty seconds only holds the registry for nothing.
-            if (!mask && nvrmNoDisplayAnywhere()) { LOG("auto-go: no display on any NVIDIA connector - not waiting for heads"); break; }
-            IOSleep(1000);
+            if (!hyWait && !mask && (old || sinceWalk >= kNvrmHeadsRefreshMs)) { sinceWalk = 0; noDisplay = nvrmNoDisplayAnywhere(); }
+            bool accelRefused = false;
+            if (!old) {
+                gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", NULL, 0);
+                accelRefused = gNvLayoutAccel == kNvLayoutRefused;
+            }
+            why = nvrmHeadsWaitPoll(&w, (unsigned)mask, connected, noDisplay, accelRefused);
+            if (why != kNvrmHeadsKeepWaiting) break;
+            IOSleep(w.stepMs);
+            sinceRead += w.stepMs; sinceWalk += w.stepMs;
+            if (!nvrmHeadsWaitSlept(&w)) { why = kNvrmHeadsTimeout; break; }
+            // The stepper counts sleeps. Twenty times more polls than 2.9 add twenty times its per-poll cost (a sysctl,
+            // a registry read, the timer slack of each sleep), so the clock bounds the wait as well: it never ends
+            // later than 2.9's twenty one-second sleeps did. -nvrmoldwaits keeps 2.9's count of polls exactly.
+            if (!old && nvrmMsSince(t0) >= kNvrmHeadsWaitMs) { why = kNvrmHeadsTimeout; break; }
         }
-        LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %d s", mask, nvrmPop((unsigned)mask), want, i);
+        gNvBootHeadsMs = nvrmMsSince(t0); gNvBootHeadsPolls = polls; gNvBootHeadsWhy = (unsigned)why;
+        if (why == kNvrmHeadsNoDisplay) LOG("auto-go: no display on any NVIDIA connector - not waiting for heads");
+        if (why == kNvrmHeadsHybridPanel) LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %u ms", w.elapsedMs);
+        LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %u ms, %u polls: %s", mask, nvrmPop((unsigned)mask),
+            want, w.elapsedMs, polls, nvrmHeadsWhyName(why));
+        { char ld[64]; gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", ld, sizeof ld);
+          if (gNvLayoutAccel != kNvLayoutNotRun) LOG("auto-go: accelerator layout: %s", ld); }
+        if (why == kNvrmHeadsNoAccel) {
+            // NVAccel stepped aside: no acceleration on this macOS, and nothing will arm. What the hold is for is the
+            // display path, which NVRMFB reports by clearing the boot guard. Wait for that, then let WindowServer start.
+            const unsigned cap = nvrmAccelRefusedWaitMs(w.elapsedMs);
+            unsigned waited = 0; int cleared = 0;
+            const uint64_t tw = nvrmNowNs();   // bounded by the clock, as the heads wait is
+            while (waited < cap && (nvrmSysR("debug.nvrmfb_guard_cleared", &cleared) != 0 || cleared != 1)) {
+                const unsigned left = cap - waited;
+                IOSleep(left < kNvrmHeadsPollMs ? left : kNvrmHeadsPollMs);
+                waited = nvrmMsSince(tw);
+            }
+            LOG("auto-go: the accelerator declined this macOS's classes: no arming; the framebuffer's display %s after %u ms",
+                cleared == 1 ? "is up" : "did not report up", waited);
+            s->fBringUp = 0;
+            s->setProperty("nvrm-display", "not armed: the accelerator declined this macOS (nvaccel-layout)");
+            s->releaseBootHold(cleared == 1 ? "accelerator declined; display up without acceleration"
+                                            : "accelerator declined; display not reported up");
+            nvrmBootTiming(s);
+            s->release(); thread_terminate(current_thread()); return;
+        }
         s->fBringUp = 0;   // the cap may fire from here on; the next line decides whether it got there first
         const bool earlyRelease = nvrmReleaseBeforeArming((unsigned)mask, nvrmNoDisplayAnywhere());
         if (!OSCompareAndSwap(1, 2, &s->fBootHold)) {
             LOG("auto-go: the hold was already released (cap) — NOT arming with WindowServer up; heads 0x%x", mask);
             s->setProperty("nvrm-display", "not armed: hold released by the cap first");
+            nvrmBootTiming(s);
             s->release(); thread_terminate(current_thread()); return;
         }
         if (earlyRelease) s->releaseBootHold("no NVIDIA display head can arm yet; arming continues for a later hotplug");
+        // Ten tries, 1 s apart as in 2.9. A try that failed while head 0 was not published yet is repeated as soon as
+        // it is (polled every 50 ms, at most the same second later); otherwise nothing says when to retry.
         int armed = 0;
-        for (i = 0; i < 10; i++) { nvrmSysW("debug.nvaccelfb", 1); nvrmSysR("debug.nvaccelfb", &armed); if (armed == 1) break; IOSleep(1000); }
+        t0 = nvrmNowNs();
+        for (i = 0; i < (int)kNvrmArmTries; i++) {
+            nvrmSysW("debug.nvaccelfb", 1); nvrmSysR("debug.nvaccelfb", &armed);
+            if (armed == 1) break;
+            int m = 0;
+            const bool readable = !old && nvrmSysR("debug.nvaccel_heads_published", &m) == 0;
+            if (nvrmArmRetryMayPoll(readable, (unsigned)m)) {
+                // At most the 1 s 2.9 slept, by the clock: twenty short sleeps and reads take longer than one long one.
+                const uint64_t ts = nvrmNowNs();
+                for (unsigned ms = 0; ms < kNvrmArmStepMs; ms = nvrmMsSince(ts)) {
+                    const unsigned left = kNvrmArmStepMs - ms;
+                    IOSleep(left < kNvrmHeadsPollMs ? left : kNvrmHeadsPollMs);
+                    if (nvrmSysR("debug.nvaccel_heads_published", &m) == 0 && (m & 1)) break;
+                }
+            } else {
+                IOSleep(kNvrmArmStepMs);
+            }
+        }
         if (armed == 1) nvrmSysW("debug.nvaccelfb", 4);
+        gNvBootArmMs = nvrmMsSince(t0);
         LOG("auto-go: accelerator level 1 %s after %d tr%s%s", armed == 1 ? "took" : "NEVER took", i + 1, i ? "ies" : "y",
             armed == 1 ? ", level 4 written" : " — not arming further");
         int k5 = -99, ag = -99, iop = -99;
@@ -1246,6 +1527,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
         s->setProperty("nvrm-display", sum);
         LOG("auto-go: display stack: %s", sum);
         if (!earlyRelease) s->releaseBootHold(armed == 1 && ag == 1 && iop == 1 ? "display armed" : "display PARTIAL");
+        nvrmBootTiming(s);
         if (armed == 1 && iop == 1 && !PE_parse_boot_argn("-nvrmnoflip", nb, sizeof(nb))) {
             // Zero-copy scan-out shows only what sits in this GPU's VRAM. One setup blacks the screen (cursor only) the
             // moment it starts, and every report was fixed by -nvrmnoflip: a second accelerated GPU (Intel/AMD iGPU;
@@ -1275,6 +1557,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
             s->setProperty("nvrm-flip", f == 1 ? "on" : "FAILED");
         }
     }
+    nvrmBootTiming(s);
     s->release();
     thread_terminate(current_thread());
 }
@@ -1939,6 +2222,31 @@ IOReturn NVRM::go(uint32_t pass)
                     regdw[sizeof regdw - 1] = 0;
                     rm_parse_option_string(NULL, regdw);
                     LOG("registry options from nvregdwords: %s", regdw);
+                    // Each key with the number the RM was given for it, read the way rm_parse_option_string reads
+                    // it: spaces dropped, entries split at ';', an entry is used only as name=value with neither part
+                    // empty and no second '=', and the value is os_strtoul(value, NULL, 0) cut to 32 bits. Until
+                    // os_strtoul had a body every value reached the RM as 0.
+                    static bool listed;
+                    if (!listed) {
+                        listed = true;
+                        char copy[sizeof regdw];
+                        unsigned n = 0;
+                        for (unsigned i = 0; regdw[i] && n < sizeof copy - 1; i++) if (regdw[i] != ' ') copy[n++] = regdw[i];
+                        copy[n] = 0;
+                        for (char *key = copy; key; ) {
+                            char *end = strchr(key, ';');
+                            if (end) *end = 0;
+                            char *eq = strchr(key, '=');
+                            if (eq && eq != key && eq[1] && !strchr(eq + 1, '=')) {
+                                *eq = 0;
+                                const NvU32 v = (NvU32)strtoul(eq + 1, NULL, 0);
+                                LOG("nvregdwords: %s = %u (0x%x)", key, (unsigned)v, (unsigned)v);
+                            } else if (*key) {
+                                LOG("nvregdwords: \"%s\" is not name=value and was ignored", key);
+                            }
+                            key = end ? end + 1 : NULL;
+                        }
+                    }
                 }
             }
             LOG("registry: RmMsg=\":\" ResmanDebugLevel=0 (verbose RM)");
@@ -1969,6 +2277,9 @@ IOReturn NVRM::go(uint32_t pass)
         fPassDone = 1;
     }
     if (pass >= 2 && fPassDone < 2) {
+        // The GPU's own serialized work queue, before anything can queue work for it (Linux makes it at the same point).
+        // NULL is not a failure: the GPU's items then go to the global queue, which is serialized too.
+        if (!fNv.queue) fNv.queue = nv_xnu_wq_gpu_start();
         nv->os_state = this;
         fPCI->setMemoryEnable(true);
         fPCI->setBusMasterEnable(true);
@@ -1981,12 +2292,16 @@ IOReturn NVRM::go(uint32_t pass)
             if (msi < 0 && (type & kIOInterruptTypePCIMessaged)) msi = i;
         }
         if (msi < 0) { LOG("no MSI source on the device — refusing (the RM needs message-signalled interrupts)"); return kIOReturnUnsupported; }
+        // os_is_isr() answers per GPU: this GPU's interrupt handler marks its thread in a slot of its own.
+        if (fIsrSlot < 0) fIsrSlot = nv_xnu_isr_slot_claim(this);
+        if (fIsrSlot < 0) { LOG("no free interrupt-thread slot (%d GPUs are started) - refusing", NV_XNU_ISR_SLOTS); return kIOReturnNoResources; }
         fWorkLoop = IOWorkLoop::workLoop();
         fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                     OSMemberFunctionCast(IOInterruptEventAction, this, &NVRM::interruptOccurred),
                     OSMemberFunctionCast(IOFilterInterruptAction, this, &NVRM::interruptFilter), fPCI, msi);
         if (!fWorkLoop || !fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess) { LOG("interrupt source setup FAILED"); return kIOReturnError; }
         bottomHalfStart();
+        irqOpen();
         fIntSrc->enable();
         nv->interrupt_line = (NvU32)msi;
         LOG("MSI %d armed; calling rm_init_adapter() — GSP boot from inside macOS", msi);
@@ -2020,21 +2335,30 @@ IOReturn NVRM::go(uint32_t pass)
         // register its channels with it. With boot-arg nvrmfence=0, or when it cannot allocate its table, it stays off
         // and every fence call made by this file does nothing.
         if (OSCompareAndSwap(0, 1, &fFenceStarted)) nvrm_fence_start();
+        // The GPU's start is complete, and everything above that hangs off it is running. Nothing may follow this line
+        // on the successful path (tools/test_lifecycle_order.py).
+        OSCompareAndSwap(0, 1, &fStartDone);
     }
     return kIOReturnSuccess;
 }
 
 bool NVRM::interruptFilter(IOFilterInterruptEventSource *src)
 {
-    unsigned long n = ++gNvIsrCount;
-    if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", n, gNvIsrHandled);
+    // Primary interrupt context: counters and a time stamp only (the log line of the first MSIs is in interruptOccurred).
+    ++gNvIsrCount;
     if (gNvBhActive) OSIncrementAtomic64(&gNvIsrDuringBh);
     OSCompareAndSwap64(0, mach_absolute_time(), &gNvIsrFilterAt);   // keeps the oldest unserved MSI's time
     return true;
 }
 void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
 {
-    NvU32 needBottomHalf = 0;
+    if (!nv_gate_enter(&fIrqGate)) {
+        // Quiesced (sleep, shutdown, stop): the RM is not entered. The source is disabled already or about to be; an
+        // MSI latched before that is dropped, as a disabled source drops it, and the RM raises again after its resume.
+        OSIncrementAtomic64(&gNvIsrSkipped);
+        gNvIsrFilterAt = 0;   // no latency measured across a sleep
+        return;
+    }
     {
         // Taken and cleared before rm_isr: an MSI that arrives from here on is served by the next call, and timed by it.
         const UInt64 at = gNvIsrFilterAt;
@@ -2044,88 +2368,177 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
             if (us > 4000) OSIncrementAtomic64(&gNvIsrLate4);
             if (us > gNvIsrLatMaxUs) gNvIsrLatMaxUs = us;
         }
+        const SInt64 n = OSIncrementAtomic64(&gNvIsrServed) + 1;
+        if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", gNvIsrCount, gNvIsrHandled);
     }
-    nv_xnu_isr_thread = current_thread();
+    NvU32 needBottomHalf = 0;
+    nv_xnu_isr_threads[fIsrSlot] = current_thread();
     NvBool handled = rm_isr(NULL, &fNv, &needBottomHalf);
-    nv_xnu_isr_thread = NULL;
+    nv_xnu_isr_threads[fIsrSlot] = NULL;
     // Whatever rm_isr answered: a channel's semaphore release is in memory before its interrupt is raised, so a fence
     // wait on it can be decided now. Two atomics, and a wakeup only when somebody waits.
     nvrm_fence_kick();
     if (handled) gNvIsrHandled++;
-    if (handled && needBottomHalf) {
+    // As on Linux, the request alone decides: when rm_isr asks for a bottom half it has handed the GPU lock over to it,
+    // and only rm_isr_bh gives it back. The request is made inside the gate, so a closed and idle gate means no request
+    // can still appear.
+    if (needBottomHalf) {
         if (fBhLock) {
             IOLockLock(fBhLock);
-            fBhPending = true;
-            IOLockWakeup(fBhLock, &fBhPending, true);
+            nv_bh_request(&fBh);
+            fBhAskedAt = mach_absolute_time();
+            IOLockWakeup(fBhLock, &fBh.pending, true);
             IOLockUnlock(fBhLock);
         } else nvrmRunBottomHalf(&fNv);
     }
+    nv_gate_leave(&fIrqGate);
 }
 
-// The bottom half's own thread (nvrmbhthread=1). One thread per GPU, so bottom halves stay serialized as they are on
-// Linux; a request that arrives while one runs is remembered in fBhPending and served by one more run.
+// The bottom half's own thread. One per GPU, so bottom halves stay serialized as they are on Linux; a request that
+// arrives while one runs is remembered and served by one more run. A pending request is always run before the thread
+// exits (nv_bh_next tests pending before quit): it carries the GPU lock rm_isr handed over.
 void NVRM::bottomHalfThread(void *p0, wait_result_t)
 {
     NVRM *s = (NVRM *)p0;
-    IOLockLock(s->fBhLock);
+    IOLock *lock = s->fBhLock;   // kept here: bottomHalfStop clears the member, and leaves the lock alive if this thread is stuck
+    IOLockLock(lock);
     for (;;) {
-        while (!s->fBhPending && !s->fBhQuit) IOLockSleep(s->fBhLock, &s->fBhPending, THREAD_UNINT);
-        if (s->fBhQuit) break;
-        s->fBhPending = false;
-        s->fBhBusy = true;
-        IOLockUnlock(s->fBhLock);
+        const int what = nv_bh_next(&s->fBh);
+        if (what == NV_BH_EXIT) break;
+        if (what == NV_BH_SLEEP) { IOLockSleep(lock, &s->fBh.pending, THREAD_UNINT); continue; }
+        const uint64_t asked = s->fBhAskedAt;
+        IOLockUnlock(lock);
+        if (asked) {
+            const SInt64 us = nvrmUsSince(asked);
+            if (us > gNvBhWakeMaxUs) gNvBhWakeMaxUs = us;
+        }
         nvrmRunBottomHalf(&s->fNv);
-        IOLockLock(s->fBhLock);
-        s->fBhBusy = false;
-        IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
+        IOLockLock(lock);
+        nv_bh_done(&s->fBh);
+        IOLockWakeup(lock, &s->fBh.busy, false);
     }
-    s->fBhAlive = false;
-    IOLockWakeup(s->fBhLock, &s->fBhBusy, false);
-    IOLockUnlock(s->fBhLock);   // bottomHalfStop frees the lock once it has seen fBhAlive false: nothing of s is touched after this
+    s->fBh.alive = 0;
+    IOLockWakeup(lock, &s->fBh.busy, false);
+    IOLockUnlock(lock);   // bottomHalfStop frees the lock once it has seen alive 0: the lock is not touched after this
+    s->release();         // the reference bottomHalfStart took for this thread
     thread_terminate(current_thread());
+}
+// Boot-arg nvrmbhthread=0 keeps the bottom half on the work loop; any other value, or none, is the default (its own
+// thread). Read once.
+static bool nvrmBhThreadOn(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 1; on = (PE_parse_boot_argn("nvrmbhthread", &v, sizeof v) && v == 0) ? 0 : 1; }
+    return on == 1;
 }
 void NVRM::bottomHalfStart()
 {
-    uint32_t on = 0;
-    if (fBhLock || !PE_parse_boot_argn("nvrmbhthread", &on, sizeof on) || on != 1) return;
-    IOLock *lock = IOLockAlloc();
-    if (!lock) { LOG("nvrmbhthread=1: no lock - the bottom half stays on the work loop"); return; }
-    fBhPending = false; fBhBusy = false; fBhQuit = false; fBhAlive = true;
-    fBhLock = lock;
-    thread_t th = THREAD_NULL;
-    if (kernel_thread_start(&NVRM::bottomHalfThread, this, &th) != KERN_SUCCESS) {
-        fBhAlive = false; fBhLock = NULL;
-        IOLockFree(lock);
-        LOG("nvrmbhthread=1: no thread - the bottom half stays on the work loop");
+    if (fBhLock) return;
+    if (!nvrmBhThreadOn()) {
+        setProperty("nvrm-bottom-half", "work loop (nvrmbhthread=0)");
+        LOG("nvrmbhthread=0: the RM bottom half runs on the work loop, after rm_isr");
         return;
     }
+    IOLock *lock = IOLockAlloc();
+    if (!lock) {
+        setProperty("nvrm-bottom-half", "work loop (no thread)");
+        LOG("no lock for the bottom-half thread - the bottom half runs on the work loop");
+        return;
+    }
+    fBh = {};
+    fBh.alive = 1;
+    fBhAskedAt = 0;
+    fBhLock = lock;
+    retain();
+    thread_t th = THREAD_NULL;
+    if (kernel_thread_start(&NVRM::bottomHalfThread, this, &th) != KERN_SUCCESS) {
+        release();
+        fBh.alive = 0;
+        fBhLock = NULL;
+        IOLockFree(lock);
+        setProperty("nvrm-bottom-half", "work loop (no thread)");
+        LOG("no bottom-half thread - the bottom half runs on the work loop");
+        return;
+    }
+    thread_set_thread_name(th, "NVRM bottom half");
     thread_deallocate(th);
-    setProperty("nvrm-bottom-half", "own thread (nvrmbhthread=1)");
-    LOG("nvrmbhthread=1: the RM bottom half runs on a thread of its own");
+    OSIncrementAtomic64(&gNvBhThreads);
+    setProperty("nvrm-bottom-half", "own thread");
+    LOG("the RM bottom half runs on a thread of its own (boot-arg nvrmbhthread=0 keeps it on the work loop)");
 }
-// After the interrupt source is disabled: wait for a requested or running bottom half, at most waitMs.
-void NVRM::bottomHalfDrain(uint32_t waitMs)
+// Once no new request can come (the interrupt gate is closed and idle): wait for a requested or running bottom half,
+// at most waitMs. Returns whether none is left. Nothing to wait for without the thread: there the bottom half runs
+// inside the handler, which the gate has already waited for.
+bool NVRM::bottomHalfDrain(uint32_t waitMs)
 {
-    if (!fBhLock) return;
+    if (!fBhLock) return true;
     uint64_t deadline; clock_interval_to_deadline(waitMs, kMillisecondScale, &deadline);
     IOLockLock(fBhLock);
-    while (fBhPending || fBhBusy)
-        if (IOLockSleepDeadline(fBhLock, &fBhBusy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
-    const bool left = fBhPending || fBhBusy;
+    while (!nv_bh_drained(&fBh))
+        if (IOLockSleepDeadline(fBhLock, &fBh.busy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const bool drained = nv_bh_drained(&fBh);
     IOLockUnlock(fBhLock);
-    if (left) LOG("a bottom half was still running after %u ms", waitMs);
+    return drained;
 }
-// After the interrupt source is removed from the work loop, so no one can request another run.
+// After the interrupt source is removed from the work loop, so no one can request another run. A request still
+// pending is run before the thread exits. Bounded: a bottom half stuck in the RM costs 5 s, is counted, and its thread
+// and lock are left alone (the thread holds a reference to this object, so nothing it uses goes away).
 void NVRM::bottomHalfStop()
 {
     if (!fBhLock) return;
-    IOLockLock(fBhLock);
-    fBhQuit = true;
-    IOLockWakeup(fBhLock, &fBhPending, false);
-    while (fBhAlive) IOLockSleep(fBhLock, &fBhBusy, THREAD_UNINT);
-    IOLockUnlock(fBhLock);
-    IOLockFree(fBhLock);
+    IOLock *lock = fBhLock;
+    uint64_t deadline; clock_interval_to_deadline(5000, kMillisecondScale, &deadline);
+    IOLockLock(lock);
+    fBh.quit = 1;
+    IOLockWakeup(lock, &fBh.pending, false);
+    while (fBh.alive)
+        if (IOLockSleepDeadline(lock, &fBh.busy, deadline, THREAD_UNINT) == THREAD_TIMED_OUT) break;
+    const bool gone = !fBh.alive;
+    IOLockUnlock(lock);
     fBhLock = NULL;
+    OSDecrementAtomic64(&gNvBhThreads);
+    if (gone) IOLockFree(lock);
+    else { OSIncrementAtomic64(&gNvBhStuck); LOG("the bottom-half thread did not exit within 5 s - left running"); }
+}
+void NVRM::irqOpen()
+{
+    gNvIsrFilterAt = 0;   // nothing waits since before the gate was opened
+    nv_gate_open(&fIrqGate);
+}
+// The interrupt path goes quiet: the gate is closed, so no handler enters the RM any more; then this waits until none
+// is inside and no bottom half is pending or running, at most waitMs in all. Callers disable the interrupt source
+// themselves, on the line before. Thread context (power management, stop, shutdown); still safe where it may not sleep,
+// as it then only spins, at most 20 ms, and skips the bottom-half wait. Whether it may sleep is asked of the kernel
+// itself (nv_quiesce_may_sleep, raw preemption_enabled()), never of nvx_can_block(): that one answers yes everywhere
+// when the OS layer's non-blocking branches are switched off, and a sleep with preemption off panics.
+void NVRM::irqSettle(uint32_t waitMs)
+{
+    nv_gate_close(&fIrqGate);
+    bool quiet = nv_gate_idle(&fIrqGate);
+    if (nv_quiesce_may_sleep()) {
+        const uint64_t t0 = mach_absolute_time();
+        uint64_t span = 0; nanoseconds_to_absolutetime((uint64_t)waitMs * 1000000ULL, &span);
+        while (!quiet && mach_absolute_time() - t0 < span) { IOSleep(1); quiet = nv_gate_idle(&fIrqGate); }
+        const SInt64 spentMs = nvrmUsSince(t0) / 1000;
+        const uint32_t left = spentMs < (SInt64)waitMs ? waitMs - (uint32_t)spentMs : 1;
+        if (quiet) quiet = bottomHalfDrain(left);
+        if (!quiet) {
+            OSIncrementAtomic64(&gNvIrqSettleTimeouts);
+            LOG("interrupt path did not settle within %u ms (handler inside: %s) - going on", waitMs, nv_gate_idle(&fIrqGate) ? "no" : "yes");
+        }
+        return;
+    }
+    for (unsigned us = 0; !quiet && us < 20000; us += 10) { IODelay(10); quiet = nv_gate_idle(&fIrqGate); }
+    if (!quiet) {
+        OSIncrementAtomic64(&gNvIrqSettleTimeouts);
+        kprintf("NVRM-xnu: interrupt path did not settle (may not sleep here) - going on\n");
+    }
+}
+void NVRM::workQueueDown(uint32_t capMs)
+{
+    struct os_work_queue *q = fNv.queue;
+    fNv.queue = NULL;
+    if (q) nv_xnu_wq_gpu_down(q, capMs);
 }
 
 void NVRM::stop(IOService *provider)
@@ -2157,11 +2570,35 @@ void NVRM::stop(IOService *provider)
         }
     }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
-    if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
+    // The adapter goes down in Linux's order (nv_shutdown_adapter): rm_disable_adapter, the interrupt off, then
+    // rm_shutdown_adapter. shutdownFull() uses the same order with shorter waits.
+    if (fAdapter) {
+        // What is queued for this GPU runs before its adapter goes (an unload flush: the RM drops the items that ask
+        // for it). At most 30 s; a queue that does not finish is given up on (abandoned: the RM's own flushes inside
+        // rm_disable_adapter then return at once) and the teardown goes on.
+        nv_xnu_wq_flush(fNv.queue, true, 30000);
+        // Stops the RC timer and masks the GPU's interrupts. Not for a GPU that stopped while suspended: its RM is in
+        // standby, GSP is unloaded and the slot may be without power.
+        if (OSAddAtomic(0, &fGpuPm) != kGpuPmSuspended) rm_disable_adapter(NULL, &fNv);
+        workQueueDown(30000);
+        if (fIntSrc) fIntSrc->disable();
+        irqSettle(2000);
+        rm_shutdown_adapter(NULL, &fNv); fAdapter = false;
+    }
+    // Whatever the start reached: no RC tick and no nano timer callback carries this GPU from here on (each does nothing
+    // when it never started).
+    nv_xnu_rc_detach(&fNv);
+    nv_xnu_nano_retire(&fNv);
+    workQueueDown(30000);   // a start that failed after its queue was made; nothing when it is already down
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
     bottomHalfStop();
+    nv_xnu_isr_slot_release(fIsrSlot, this); fIsrSlot = -1;
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
+    // Items queued for this GPU after its queue was taken away went to the global queue: none may still run when the
+    // RM's private state goes.
+    nv_xnu_wq_flush(NULL, false, 30000);
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
+    nvrm_dma_detach(&fNv);   // after the RM unmapped what it unmaps; nothing for a GPU never attached
     gNVRMTab.remove(this, nvrmMultiGpu());   // a no-op without nvmultigpu=1: the old pointer was never cleared
     super::stop(provider);
 }
@@ -2188,13 +2625,24 @@ void NVRM::shutdownFull(void *p0, wait_result_t)
     NVRM *s = (NVRM *)p0;
     // First, as in stop(): no RM call, and the processes still asleep in a fence wait return before they are killed.
     if (OSCompareAndSwap(1, 0, &s->fFenceStarted)) nvrm_fence_stop();
+    nv_xnu_rc_suspend(&s->fNv);   // no 1 Hz tick reaches the GPU while it goes down
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &s->fGpuPm);
     s->notifyFramebuffers(0);
     nvkms_xnu_suspend(s->fNv.gpu_id);
     const int busy = nv_xnu_pm_close(3000);
     if (busy) LOG("shutdown: %d RM call(s) still running after 3 s", busy);
     rm_stop_user_channels(NULL, &s->fNv);
-    if (s->fAdapter) { rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false; }
+    if (s->fAdapter) {
+        // As in stop(), within the 8 s systemWillShutdown() waits for all of this: 2 s for each wait.
+        nv_xnu_wq_flush(s->fNv.queue, true, 2000);
+        rm_disable_adapter(NULL, &s->fNv);
+        s->workQueueDown(2000);
+        if (s->fIntSrc) s->fIntSrc->disable();
+        s->irqSettle(2000);
+        rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;
+    }
+    nv_xnu_rc_detach(&s->fNv);
+    nv_xnu_nano_retire(&s->fNv);
     OSCompareAndSwap(0, 1, &s->fShutdownDone);
     s->release();
     thread_terminate(current_thread());
@@ -2223,8 +2671,10 @@ void NVRM::systemWillShutdown(IOOptionBits specifier)
                 LOG("shutdown: GPU %s after %u ms", OSAddAtomic(0, &fShutdownDone) ? (full ? "shut down" : "in standby") : "did not finish in time, going on", waited);
             } else { release(); LOG("shutdown: could not start the quiesce thread - going on"); }
         }
+        // Also when the wait above ran out and the shutdown thread is still inside the RM: from here no interrupt
+        // handler enters the RM, whatever that thread is doing.
         if (fIntSrc) fIntSrc->disable();
-        bottomHalfDrain(1000);
+        irqSettle(1000);
         NvrmStep plan[16];
         const unsigned n = nvrmBuildShutdownPlan(&fBarUndo, plan, 16);
         if (n) {
@@ -2346,6 +2796,7 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
 
 // Linux order (nvidia_suspend): NVKMS first, while the GPU still serves the core channel, then RM standby. RM saves
 // what it must keep from VRAM to system memory and unloads GSP-RM; the GPU then loses power with the slot.
+extern "C" uint64_t nv_xnu_tmpfile_written(void);   // os-xnu2.cpp: bytes written into the RM's save files since boot
 void NVRM::gpuSuspend()
 {
     uint64_t t0 = mach_absolute_time();
@@ -2368,12 +2819,20 @@ void NVRM::gpuSuspend()
     // while their memory is copied out, and restarted once it is back.
     NV_STATUS cst = rm_stop_user_channels(NULL, &fNv);
     pciSaveForSleep();
+    // The RM flushes the GPU's own queue itself; items it queued on the global queue (system work items) are flushed
+    // here, at most 5 s, because all of this runs inside the system's power change.
+    nv_xnu_wq_flush(NULL, false, 5000);
+    const uint64_t saved0 = nv_xnu_tmpfile_written();
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
+    // What the RM wrote into its save file during STANDBY is the VRAM it preserves that way. A RM that preserves VRAM by
+    // another method (or a second GPU suspending at the same moment) is not told apart here: the line says "save file".
+    const uint64_t saved = nv_xnu_tmpfile_written() - saved0;
     if (fIntSrc) fIntSrc->disable();
-    bottomHalfDrain(2000);
+    irqSettle(2000);
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-    LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms%s", fPmCycles,
-        (unsigned)cst, (unsigned)st, ns / 1000000ULL, st == NV_OK ? "" : " - resume will still be tried, as on Linux");
+    LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms, %llu MB of VRAM (%llu bytes) "
+        "written to the save file%s", fPmCycles, (unsigned)cst, (unsigned)st, ns / 1000000ULL, saved >> 20, saved,
+        st == NV_OK ? "" : " - resume will still be tried, as on Linux");
 }
 
 // The slot is powered again and IOPCIFamily restored the config space it shadowed. Put back what it does not know
@@ -2386,6 +2845,7 @@ void NVRM::gpuResume()
     nv_xnu_pm_take();
     bool ok = pciRestoreAfterWake() && gpuAnswers();
     if (ok) enableAspmL1();   // the link comes back with whatever IOPCIFamily restored
+    irqOpen();                // closed by gpuSuspend's irqSettle: interrupts must reach the RM for its resume
     if (fIntSrc) fIntSrc->enable();
     NV_STATUS st = ok ? rm_power_management(NULL, &fNv, NV_PM_ACTION_RESUME) : NV_ERR_GPU_IS_LOST;
     ok = st == NV_OK;
@@ -2653,6 +3113,12 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     // before the power-management admission below.
     if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))
         return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;
+    // The bus address of a shared surface (nvrm_dma.h). It touches no hardware and must not wake the GPU, so it too is
+    // answered before the power-management admission.
+    if (fn && fn->isEqualTo(NVRM_SS_FN_DMA)) {
+        if (!p1) return kIOReturnBadArgument;
+        return nvrm_dma_surf((struct NVRMSurfDma *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
+    }
     if (fn && p1) {
         const bool rmCall = fn->isEqualTo(NVRM_GPUVA_FN_ALLOC) || fn->isEqualTo(NVRM_GPUVA_FN_MAP) || fn->isEqualTo(NVRM_GPUVA_FN_FREE)
                          || fn->isEqualTo(NVRM_SS_FN_RM) || fn->isEqualTo(NVRM_SS_FN_PAGEOFF);
@@ -3044,7 +3510,7 @@ extern "C" void NV_API_CALL nv_post_event(nv_event_t *event, NvHandle hEvent, Nv
     if (c) { OSIncrementAtomic64(&gNvEvtMatched); OSIncrementAtomic((volatile SInt32 *)&c->fEvtSeq); thread_wakeup((event_t)&c->fEvtSeq); }
     if (k == 999 || k == 99999 || k == 999999)
         OSReportWithBacktrace("NVRM-xnu: post #%lld caller chain (nv_post_event at %p, isr-thread %d)", (long long)k + 1,
-                              (void *)&nv_post_event, current_thread() == nv_xnu_isr_thread);
+                              (void *)&nv_post_event, (int)os_is_isr());
     if (k < 4 || ((k + 1) & 0x3FFF) == 0)
         kprintf("NVRM-xnu: nv_post_event #%lld hEvent 0x%x index %u -> %s | matched %lld, waits %lld, slept %lld\n",
                 (long long)k + 1, hEvent, index, c ? "connection woken" : "no connection", (long long)gNvEvtMatched,

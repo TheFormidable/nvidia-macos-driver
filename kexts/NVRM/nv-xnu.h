@@ -32,7 +32,14 @@ enum UvmPmaGpuMemoryType_tag {};
 }
 #undef NVRM
 
-#define NV_XNU_STUB_HIT(name) do { static bool _hit = false; if (!_hit) { _hit = true; kprintf("NVRM-xnu: STUB %s\n", (name)); } } while (0)
+// The OS layer (os-xnu2.cpp) leaves the RM's DMA interface (nv_requires_dma_remap, nv_dma_map_alloc,
+// nv_dma_unmap_alloc) to nvrm_dma.cpp and provides it nv_xnu_dma_bits_now() and nv_xnu_dma_source().
+#define NV_XNU_DMA_LAYER 1
+
+// A function without a real body was called: one log line and, once per function, its name in debug.nvrm_stub_hits
+// (nv_xnu_kcore.cpp), so a report shows which ones the RM reached without a serial log.
+extern "C" void nv_xnu_stub_note(const char *name);
+#define NV_XNU_STUB_HIT(name) do { static bool _hit = false; if (!_hit) { _hit = true; kprintf("NVRM-xnu: STUB %s\n", (name)); nv_xnu_stub_note(name); } } while (0)
 
 struct nv_xnu_pci_slot {
     IOPCIDevice *pci;

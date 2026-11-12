@@ -85,12 +85,53 @@ void nv_xnu_wq_gpu_down(struct os_work_queue *q, unsigned cap_ms = 30000);
 // not already free.
 NV_STATUS nv_xnu_wq_flush(struct os_work_queue *q, bool unload, unsigned cap_ms);
 
-// A function of the OS layer that has no real body was called. Any context (a small lock with interrupts off; no
-// allocation). The name is copied into a fixed buffer that a read-only sysctl publishes; call it once per function,
-// from the once-only branch of the stub macro.
+// A function of the OS layer that has no real body was called. Any context (no lock: its place in the buffer is
+// reserved with one atomic add; no allocation). The name is copied into a fixed buffer that a read-only sysctl
+// publishes; call it once per function, from the once-only branch of the stub macro.
 void nv_xnu_stub_note(const char *name);
 
+// The non-blocking branches of the OS layer (os-xnu.cpp, os-xnu2.cpp). Any context; no IOLog, no heap call, no
+// IOLock. Each is used only where nvx_can_block() is false, except nvx_atomic_free(), which every free goes through
+// because a block from the pool has to go back to the pool whatever the context of its free.
+//
+// A zeroed block of `size` bytes from the kext's own fixed pool (256 KB, requests up to 64 KB), or NULL: the caller
+// then makes its older call, which is counted as a miss.
+void *nvx_atomic_alloc(NvU64 size);
+// 1: `p` has been dealt with (a pool block, freed at once; or, where the heap may not be called, a heap block handed
+// to a thread call that frees it); 0: free it the older way.
+int nvx_atomic_free(void *p);
+// Try to take a lock without blocking, again every 20 us, for at most 20 ms. 1: taken; 0: not taken, and the caller
+// makes its older, blocking call (what it always did). `kind` is an NVX_LOCK_* value.
+int nvx_atomic_lock(int kind, void *lock);
+// os_semaphore_may_sleep() answered no: a counter.
+void nvx_atomic_maysleep_false(void);
+
+// ---- os-xnu.cpp: which thread is inside rm_isr, one slot per GPU (what os_is_isr() answers from) ----
+#define NV_XNU_ISR_SLOTS 8   // NVRM_DEVTAB_MAX: a ninth card is not started
+// Written only by the owning GPU's interrupt handler: its own thread just before rm_isr, NULL right after.
+extern volatile thread_t nv_xnu_isr_threads[NV_XNU_ISR_SLOTS];
+// The slot of a starting GPU (`owner` is its NVRM object; the same slot again when it already holds one), or -1 when
+// all are taken. Thread context; no lock (compare-and-swap).
+int nv_xnu_isr_slot_claim(void *owner);
+// Gives the slot back, once the GPU's interrupt source is removed. Does nothing for -1 or a slot `owner` does not hold.
+void nv_xnu_isr_slot_release(int slot, void *owner);
+
+// ---- nv_xnu_timers.cpp: the RM's RC timer (1 Hz) and nano timers ----
+// The RC timer is on unless the boot-arg nvrmrctimer=0. These are for the kext's own paths; the RM starts and stops the
+// timer itself through nv_start_rc_timer / nv_stop_rc_timer. All thread context; each may wait for a tick that is
+// running, bounded (10 s, 2 s for a suspend), and does nothing for a GPU whose timer was never started.
+void nv_xnu_rc_suspend(nv_state_t *nv);   // before RM standby or shutdown: no tick runs from now on
+void nv_xnu_rc_resume(nv_state_t *nv);    // after a resume that worked: ticks again if the RM had started the timer
+void nv_xnu_rc_detach(nv_state_t *nv);    // after rm_shutdown_adapter: no tick will carry this nv again; idempotent
+// After rm_shutdown_adapter: every nano timer of this GPU that the RM did not destroy is stopped, counted and never
+// reused; no callback will carry this nv again. Thread context; at most 2 s in all.
+void nv_xnu_nano_retire(nv_state_t *nv);
+// Registers the timers' read-only sysctls. Thread context; once (a second call does nothing).
+void nv_xnu_timers_sysctls(void);
+
 }
+
+enum { NVX_LOCK_MUTEX, NVX_LOCK_RW_READ, NVX_LOCK_RW_WRITE, NVX_LOCK_SEMA };
 
 // Where nvx_note() is called from
 enum { NVX_SITE_ALLOC, NVX_SITE_FREE, NVX_SITE_DELAY, NVX_SITE_SCHEDULE, NVX_SITE_MUTEX, NVX_SITE_RWLOCK,
