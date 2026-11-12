@@ -1,5 +1,10 @@
 # NullMoth NVIDIA Driver for macOS
 
+> **Work in progress: do not install this branch yet.** `claude/all-improvements` is a branch of a fork. It changes a
+> large part of the driver and its review is not finished. It is published so that it can be compiled and its tests
+> run on real Macs (`./build.sh`, see [docs/BUILDING.md](docs/BUILDING.md)). Nothing built from it has run on a GPU.
+> This notice goes away when the branch is ready to be tried on hardware.
+
 A Metal driver for NVIDIA GeForce cards on macOS 15 Sequoia (Intel Macs and OpenCore PCs). It is open source; the
 kernel extensions, the Metal plugin and the shader translator are in this repository. The 1401 app that installs it
 (Mac and Windows) is its own project: [1401](https://github.com/nullmoth/1401).
