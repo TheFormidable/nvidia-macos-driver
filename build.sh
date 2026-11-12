@@ -62,6 +62,20 @@ tilde() {   # the home folder written as ~ (report files and summaries a tester 
 
 # ---------------------------------------------------------------------------------------------------------- small tools
 is_mac() { [ "$(uname -s)" = Darwin ]; }
+# mac_arch: the processor of this Mac, arm64 or x86_64; every choice that depends on it (which Homebrew, the Rust host,
+# the Intel notes) asks here. uname -m answers for this process: a shell running under Rosetta on Apple silicon says
+# x86_64. hw.optional.arm64 is 1 on Apple silicon whatever the process, and does not exist on an Intel Mac.
+MAC_ARCH=""
+mac_arch() {
+  if [ -z "$MAC_ARCH" ]; then
+    case "$(uname -m)" in
+      arm64|aarch64) MAC_ARCH=arm64 ;;
+      *) if is_mac && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then MAC_ARCH=arm64; else MAC_ARCH=x86_64; fi ;;
+    esac
+  fi
+  printf '%s' "$MAC_ARCH"
+}
+rosetta() { [ "$(mac_arch)" = arm64 ] && [ "$(uname -m)" = x86_64 ]; }   # this shell is an Intel process on Apple silicon
 # Xcode 26 (the macOS 26 SDK the plugin needs) does not run on a macOS older than NM_PIN_TOOL_MACOS_MIN
 mac_too_old() { is_mac && ! ver_ge "$(sw_vers -productVersion 2>/dev/null || echo 0)" "$NM_PIN_TOOL_MACOS_MIN"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -248,7 +262,7 @@ derive_paths() {
   SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator
   CARGO_DIR=$TOOLS/cargo
   BUILD_HOST=${NULLMOTH_BUILD_HOST:-$LOCAL_HOST}
-  case "$(uname -m)" in arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
+  case "$(mac_arch)" in arm64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
   RUST_BIN=${NULLMOTH_RUST_BIN:-$RUSTUP_DIR/toolchains/$NM_PIN_RUST_VERSION-$HOST_TRIPLE/bin}
   # the Python environment's own bin folder, not a link to its python3: Python finds its environment from the folder of
   # the path it was started by (pyvenv.cfg one level up), so a python3 linked from tools/bin is the bare interpreter
@@ -340,7 +354,7 @@ write_report() {   # <step> <exit status> <log or ''>
     say "settings:     flavour=$NM_FLAVOUR accel=$NM_ACCEL jobs=$NM_JOBS offline=$NM_OFFLINE workdir=$W"
     hr; say "machine"
     if is_mac; then
-      say "macOS $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null)), $(uname -m), $(sysctl -n hw.model 2>/dev/null)"
+      say "macOS $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null)), $(mac_arch)$(rosetta && echo ' (this shell under Rosetta)'), $(sysctl -n hw.model 2>/dev/null)"
       say "cpu: $(sysctl -n machdep.cpu.brand_string 2>/dev/null), $(ncpu) cores, memory $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 )) GB"
     else
       say "$(uname -srm)"
@@ -387,18 +401,24 @@ on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -f "$TMPF" "$TMPF".* 2>/dev/n
 on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during step $CUR_STEP}" >&2; release_lock; exit 130; }
 
 # ---------------------------------------------------------------------------------------------------------- tools
-BREW=""; BREW_PREFIX=""
+BREW=""; BREW_PREFIX=""; BREW_OTHER=""
+# The two places Homebrew installs itself to, the one of this Mac's processor first: /opt/homebrew on Apple silicon,
+# /usr/local on Intel. A Mac can carry both (an Intel Mac with a copy in /opt/homebrew, an Apple-silicon Mac with an
+# Intel Homebrew for Rosetta); the native one is the one whose formulas are built for this processor.
+brew_places() { if [ "$(mac_arch)" = arm64 ]; then echo "/opt/homebrew/bin/brew /usr/local/bin/brew"; else echo "/usr/local/bin/brew /opt/homebrew/bin/brew"; fi; }
 # NM_BREW, when set, is the only Homebrew considered: a setting that names a brew which is not there is not answered
 # with another one found elsewhere (the test suite relies on this to keep the Homebrew of the machine it runs on out
-# of its imitated Macs). Without it: the two places Homebrew installs itself to, then PATH.
+# of its imitated Macs). Without it: the two places above, then PATH; BREW_OTHER is a second one found (doctor names it).
 find_brew() {
-  BREW=""; BREW_PREFIX=""
+  BREW=""; BREW_PREFIX=""; BREW_OTHER=""
   local c
   if [ -n "${NM_BREW:-}" ]; then
     if [ -f "$NM_BREW" ] && [ -x "$NM_BREW" ]; then BREW=$NM_BREW; fi
   else
-    for c in /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null || true)"; do
-      [ -n "$c" ] && [ -x "$c" ] && { BREW=$c; break; }
+    for c in $(brew_places) "$(command -v brew 2>/dev/null || true)"; do
+      [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] || continue
+      if [ -z "$BREW" ]; then BREW=$c
+      elif [ -z "$BREW_OTHER" ] && [ "$c" != "$BREW" ]; then BREW_OTHER=$c; fi
     done
   fi
   [ -n "$BREW" ] && BREW_PREFIX=$(cd "$(dirname "$BREW")/.." && pwd -P)
@@ -528,9 +548,10 @@ doctor() {   # prints; sets D_MISSING
   say "== host"
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
-    d_ok "macOS $v ($(uname -m))"
+    d_ok "macOS $v ($(mac_arch))"
     ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later; deps, build and package refuse this Mac"
-    case "$(uname -m)" in
+    rosetta && d_note "this shell runs under Rosetta (uname -m says x86_64); build.sh takes the Mac's own processor, Apple silicon, for its choices"
+    case "$(mac_arch)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not"
               d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps compiles each missing formula here (LLVM: hours)" ;;
@@ -588,6 +609,7 @@ doctor() {   # prints; sets D_MISSING
   say "== build tools (\"./build.sh deps\" installs the missing ones)"
   find_tools
   if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"
+    [ -z "$BREW_OTHER" ] || d_note "a second Homebrew is at $BREW_OTHER; build.sh uses $BREW, the one of this Mac's processor ($(mac_arch)). NM_BREW=$BREW_OTHER makes it use the other"
   elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
   [ -n "$T_PATCH" ] && d_ok "GNU patch $T_PATCH" || d_missing "GNU patch (Homebrew gpatch): the scripts pass --no-backup-if-mismatch"
@@ -637,7 +659,7 @@ doctor() {   # prints; sets D_MISSING
   x=$(hostname -s 2>/dev/null || true)
   [ "${#x}" -ge 5 ] || d_note "the computer's short name '$x' is short: the same check looks for it, and build.sh looks again the same way (System Settings > General > Sharing > Local hostname)"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
-  if is_mac && [ "$(uname -m)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
+  if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
   fi
   if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs a release tarball (docs/BUILDING.md)"
@@ -868,7 +890,8 @@ cmd_deps() {
   if [ -z "$BREW" ]; then
     say "Homebrew is not installed. build.sh uses it for: $NM_PIN_BREW_FORMULAS."
     say "Its official installer is: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-    say "It asks for your password itself and installs into $([ "$(uname -m)" = arm64 ] && echo /opt/homebrew || echo /usr/local)."
+    # Homebrew's installer chooses its place by the architecture of the shell that runs it (uname -m), not the Mac's
+    say "It asks for your password itself and installs into $([ "$(uname -m)" = arm64 ] && echo /opt/homebrew || echo /usr/local)$(rosetta && echo ' (this shell runs under Rosetta: that is the Intel Homebrew; open a Terminal without Rosetta for the native one)')."
     if [ "$NM_DRY_RUN" = 1 ]; then
       say "    (dry run: build.sh would ask you to type yes, then run that installer)"; nobrew=1
     elif [ "$NM_NO_INSTALL" = 1 ] || [ "$NM_OFFLINE" = 1 ]; then die "Homebrew is missing (not installed: --no-install or --offline)"
@@ -903,7 +926,7 @@ cmd_deps() {
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs."
-    if [ "$(uname -m)" = x86_64 ]; then
+    if [ "$(mac_arch)" = x86_64 ]; then
       say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
       say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
       say "one to several hours and tens of gigabytes of free space while it builds. Keep the Mac awake and on power."
@@ -1127,7 +1150,7 @@ tree_hash() {   # contents of the checkout's files under the given paths (tracke
 TOOLS_ID=""
 tools_id() {   # what the compilers are: part of every stamp
   [ -n "$TOOLS_ID" ] && { printf '%s' "$TOOLS_ID"; return; }
-  TOOLS_ID="host $(uname -m)"
+  TOOLS_ID="host $(uname -m)"   # the process's architecture (not mac_arch): under Rosetta the compilers run as x86_64
   if is_mac; then
     TOOLS_ID="$TOOLS_ID; xcode $( { xcodebuild -version 2>/dev/null || true; } | tr '\n' ' '); sdk $(xcrun --show-sdk-version 2>/dev/null || true)"
     TOOLS_ID="$TOOLS_ID; clang $( { xcrun clang --version 2>/dev/null || true; } | first_line); ld $( { xcrun ld -v 2>&1 || true; } | first_line)"
@@ -1359,7 +1382,7 @@ write_build_info() {
     say "sources:    $REV_NOTE"
     say "flavour:    $NM_FLAVOUR (plugin $([ "$NM_FLAVOUR" = dev ] && echo 'with diagnostics' || echo 'as released'))"
     say "base:       $(basename "$NM_BASE_PACKAGE")"
-    say "host:       $(uname -m) $(is_mac && sw_vers -productVersion 2>/dev/null)"
+    say "host:       $(mac_arch) $(is_mac && sw_vers -productVersion 2>/dev/null)"
     say "tools:      $(tools_id)"
     say "pins:"; grep -E '^NM_PIN_[A-Z0-9_]*(_REF|_COMMIT|_SHA256)=' "$PINS_FILE" | sed 's/^/  /'
   } | tilde > "$PKGDIR/build-info.txt"
