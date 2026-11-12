@@ -396,6 +396,22 @@ static bool     gNvPmClosed;
 static thread_t gNvPmOwner;
 static SInt64   gNvPmWaited;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pm_waited, CTLFLAG_RD, &gNvPmWaited, "RM calls that waited for a GPU resume");
+// Which of the driver's boot arguments this boot carries beside the install line (nvrm_switch_report.h). The default
+// paths need none, so a machine that still has an opt-out or a test hook set behaves unlike every other one, and a
+// report from it should say so: `sysctl debug.nvrm_switches`. Built once at start, before the three sysctls are
+// registered, and never written again; nothing in the driver reads it back.
+#include "nvrm_switch_report.h"
+static struct nvrm_switch_report gNvSwitches;
+static int nvrmSwitchPresent(const char *name)
+{
+    char v[8] = { 0 };   // the buffer this file reads its flags into; only whether the name is there matters
+    return PE_parse_boot_argn(name, v, sizeof v) ? 1 : 0;
+}
+SYSCTL_STRING(_debug, OID_AUTO, nvrm_switches, CTLFLAG_RD, gNvSwitches.names, sizeof gNvSwitches.names,
+              "driver boot arguments set beside the install line; ! marks one an ordinary install does not need");
+SYSCTL_INT(_debug, OID_AUTO, nvrm_switches_set, CTLFLAG_RD, &gNvSwitches.set, 0, "driver boot arguments set beside the install line");
+SYSCTL_INT(_debug, OID_AUTO, nvrm_switches_nondefault, CTLFLAG_RD, &gNvSwitches.nondefault, 0,
+           "of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install)");
 extern "C" int nv_xnu_pm_enter(void)
 {
     if (!gNvPmGate || current_thread() == gNvPmOwner) return 0;
@@ -944,6 +960,12 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_waits); sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_stuck);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
+            nvrm_switch_report_build(&gNvSwitches, nvrm_switch_names, NVRM_SWITCH_COUNT, nvrmSwitchPresent);
+            sysctl_register_oid(&sysctl__debug_nvrm_switches); sysctl_register_oid(&sysctl__debug_nvrm_switches_set);
+            sysctl_register_oid(&sysctl__debug_nvrm_switches_nondefault);
+            if (gNvSwitches.set)
+                LOG("boot arguments beside the install line: %d (%s%s), %d not needed by an ordinary install",
+                    gNvSwitches.set, gNvSwitches.names, gNvSwitches.truncated ? " ..." : "", gNvSwitches.nondefault);
             sysctl_register_oid(&sysctl__debug_nvrm_boot_settle_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_gate_ms);
             sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_raster_idle);
             sysctl_register_oid(&sysctl__debug_nvrm_boot_go_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_ms);

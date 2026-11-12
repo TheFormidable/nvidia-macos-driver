@@ -124,7 +124,8 @@ class Finish(unittest.TestCase):
     def setUp(self):
         self.t = t = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, t)
         (t / "c.c").write_text("int NVEncVT_Register(int r){return r;} int NVEncVT_RegisterDecoders(int r){return r;} "
-                               "int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;}\n")
+                               "int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;} "
+                               "const int NVEncVT_BlackwellSelfTest = 1;\n")
         subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-o", str(t / "nvencvt.dylib"), str(t / "c.c")], check=True, capture_output=True)
         (t / "b.c").write_text("int main(void){return 0;}\n")
         subprocess.run(["clang", "-arch", "x86_64", "-o", str(t / "nvmtl-boost"), str(t / "b.c")], check=True, capture_output=True)

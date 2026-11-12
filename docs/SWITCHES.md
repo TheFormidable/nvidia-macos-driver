@@ -49,7 +49,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `nvrmnanowait` | on (nvrmnanowait=0: a cancel does not wait, as in 2.9) | 3.2 | Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does. |
 | bootarg | `nvrmrctimer` | on (nvrmrctimer=0: no timer, as in 2.9) | 3.2 | The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens. |
 | bootarg | `nvrmworkq` | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it. |
-| build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. |
+| build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT \<names> (NVK_SKIP_PATCHES)". |
 
 ## Test hooks
 
@@ -146,7 +146,7 @@ Each of these does nothing unless it is set.
 | `NVDEC_SYNC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt_dec.c |
 | `NVENCVT_AMPERE_ALL_DEC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt_dec.c |
 | `NVENCVT_AMPERE_ENC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
-| `NVENCVT_ANY_GPU` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
+| `NVENCVT_ANY_GPU` | dev | unset | 2.9 | - | Developer only (the video library's own override, in a process's environment or a line of the root-owned /usr/local/etc/nvencvt.conf): the library treats any card as an RTX 40, so on an RTX 50 it skips the decode self-test and registers every encoder and decoder untested on that card. Nothing sets it. | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_BFRAMES` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_BT` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_CONF` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
@@ -749,7 +749,7 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_surf_planes` | diag | read-only | 3.0 | - | 1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence` | diag | read-only | 3.0 | - | 1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_dead` | diag | read-only | 3.0 | - | fence waits that ended because the writer exited, its channel faulted or the GPU slept | kexts/NVRM/accel/nvrm-accel.cpp |
-| `debug.nvaccel_surface_fence_errors` | diag | read-only | 3.0 | - | fence waits NVRM did not serve (the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_errors` | diag | read-only | 3.0 | - | fence waits NVRM refused (the 2.9 marks only); 0 with this NVRM, which refuses none | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_pending` | diag | read-only | 3.0 | - | page-offs that found a fence hold on the surface | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_ready` | diag | read-only | 3.0 | - | fence waits that ended because the GPU work was done | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence_timeouts` | diag | read-only | 3.0 | - | fence waits that a bound ended with the work not done (the caller went on, as 2.9) | kexts/NVRM/accel/nvrm-accel.cpp |
@@ -942,9 +942,9 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_rm_asserts` | diag | read-only | 3.0 | - | RM assertions that failed | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_stub_hit_count` | diag | read-only | 3.0 | - | distinct OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_stub_hits` | diag | read-only | 3.0 | - | OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
-| `debug.nvrm_switches` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line; ! marks one an ordinary install does not need |  |
-| `debug.nvrm_switches_nondefault` | diag | read-only | 3.0 | - | of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install) |  |
-| `debug.nvrm_switches_set` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line |  |
+| `debug.nvrm_switches` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line; ! marks one an ordinary install does not need | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_switches_nondefault` | diag | read-only | 3.0 | - | of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_switches_set` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_tgp_ac` | diag | read-only | 2.9 | - | last power source: 1 mains, 0 battery, -1 unknown | kexts/NVRM/nvrm_power.cpp |
 | `debug.nvrm_tgp_applies` | diag | read-only | 2.9 | - | TGP mode controls sent | kexts/NVRM/nvrm_power.cpp |
 | `debug.nvrm_tgp_enable` | hardware | writable by root | 2.9 | - | 1 = TGP mode on while on mains power, 0 = hold the VBIOS default power limit | kexts/NVRM/nvrm_power.cpp |
@@ -1070,10 +1070,10 @@ Each of these does nothing unless it is set.
 
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
-| `NVK_EXTRA_PATCHES` | dev | unset | 2.9 | - | extra patch files from nvk/ applied after the chain when NVK is built | build/build_nvk.sh |
+| `NVK_EXTRA_PATCHES` | dev | unset | 2.9 | - | extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS \<names> (NVK_EXTRA_PATCHES)" | build/build_nvk.sh |
 | `NVK_JOBS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVK_PATH` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh, build/build_release_inputs.sh |
 | `NVK_REF_EXPORTS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
-| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. | build/build_nvk.sh |
+| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT \<names> (NVK_SKIP_PATCHES)". | build/build_nvk.sh |
 | `NVK_SYSROOT` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVRM_PRISTINE_OGKM` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvrm.sh |
