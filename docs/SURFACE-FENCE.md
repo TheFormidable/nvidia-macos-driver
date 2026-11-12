@@ -60,11 +60,20 @@ back to the system under it) and reads them through the kernel's map of physical
 is no kernel address that could fault when the process, or the RM, takes its own mapping away, and the pages stay
 wired until the registration ends: when NVK deletes it, when the proof below fails, or when the connection closes.
 
-That map covers the installed memory and the 4 GB above it, and nothing further. A page the process has mapped from a
-device, such as the GPU's own memory window (which this driver moves to 256 GB and up), has no address there, and
-reading it would stop the machine. So once a page is wired the kernel looks at where it is, and takes it only when the
-map reaches it; any other page is given back at once and the channel is not watched (`map_fail`). NVK's semaphore
-pages and notifiers are system memory, so this refuses nothing that NVK sends.
+A process can also hand in a page that it has mapped from a device, and such a page is wired as readily. So once a
+page is wired the kernel looks at where it is, and in two cases gives it back at once and does not watch the channel
+(`map_fail`):
+
+- The page is beyond the kernel's map of physical memory. That map covers the installed memory and the 4 GB above
+  it, and nothing further; a page beyond it has no address there, and reading it would stop the machine. The GPU's
+  large memory window is such a place on the machines where this driver moves it to 256 GB and up.
+- The page is inside one of the GPU's own memory windows, wherever they are: firmware also leaves them below 4 GB or
+  right above the installed memory, inside the map. NVRM maps these windows, the registers included, into the
+  processes the RM grants them to, and reading one would touch the GPU itself, also while it sleeps.
+
+NVK's semaphore pages and notifiers are system memory, so this refuses nothing that NVK sends. A page of some other
+device that lies inside the map cannot be told from system memory. The kernel only ever reads such a page, as the
+process that mapped it can, and the proof below drops it unless it behaves like memory.
 
 Before the kernel trusts such a view it has to prove itself twice:
 

@@ -37,6 +37,10 @@ extern "C" {
 extern "C" task_t current_task(void);
 extern "C" proc_t current_proc(void);
 extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+// The one question this file asks the rest of the driver (os-xnu2.cpp): is this physical range inside one of the GPU's
+// memory windows? It is the test that decides which mappings NVRM hands a process as device memory, and it only compares
+// against the window addresses recorded when the GPU started: no lock, no RM call, no hardware.
+extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size);
 
 // ---- state ---------------------------------------------------------------------------------------------------------
 
@@ -312,10 +316,19 @@ static void nvfUnpin(IOMemoryDescriptor *md)
 // The descriptor is not mapped into the kernel: the page is read through the physical map (nvfRead64), so no kernel
 // address exists that could fault when the process or the RM tears its side down. Direction "out" (memory to device)
 // asks for read access only, which also works on a page the process has mapped read-only.
-// IOKit wires device memory as readily as system memory, and the physical map covers only system memory and the 4 GB
-// above it: a page of the GPU's memory window that a process mapped and handed in would be read where the kernel has
-// no address and stop the machine. So the page's physical address is checked once here, while it is wired and cannot
-// move, and a page that is not where the map reaches is given back (nvf_phys_ok, gFPhysTop).
+// IOKit prepares device memory as readily as system memory, and a process can hand in a page of a device that it has
+// mapped. So the page's physical address is looked at once here, while the page is wired and cannot move, and the page
+// is given back when either is true:
+//   - it is not below the end of the physical map (nvf_phys_ok, gFPhysTop). The kernel checks every address it
+//     converts through that map and stops the machine on one beyond its end, and a GPU memory window can lie there
+//     (this driver moves the large one to 256 GB and up where the machine allows it);
+//   - it is inside one of the GPU's own memory windows, wherever they are: firmware also leaves them below 4 GB or
+//     right above installed memory, inside the map. NVRM maps those windows, the register file included, into the
+//     processes the RM grants them to; a read here would touch the GPU without a power reference, also while it
+//     sleeps, each time somebody waits on that process's surfaces.
+// A page of another device that lies inside the map cannot be told from system memory: nothing a kext may call says
+// which of the two a page is. Such a page is only ever read, 8 bytes at the offsets nvfRead names, as the process that
+// mapped it can read it itself; and unless it behaves like memory it fails the proof and is dropped.
 static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
 {
     IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());
@@ -323,7 +336,7 @@ static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
     if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }
     IOByteCount len = 0;
     const addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
-    if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }
+    if (!nvf_phys_ok(pa, len, gFPhysTop) || nv_pm_is_gpu(pa, NVF_PAGE)) { nvfUnpin(md); return NULL; }
     return md;
 }
 

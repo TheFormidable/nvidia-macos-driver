@@ -160,9 +160,11 @@ static inline int nvf_err_va_ok(unsigned long long errVA, unsigned errBase)
 
 /* Where a wired page may be read from. The kernel reads a channel's pages through its map of physical memory, and on
  * x86-64 that map covers installed memory plus 4 GB (for the hole below 4 GB) and nothing above. A process can also
- * hand in a page of device memory it has mapped, such as the GPU's memory window, which this driver moves to 256 GB
- * and up: a read there has no address in the map and stops the machine. So a page is taken only when it is one whole,
- * aligned page that ends at or below `limit` (installed memory + 4 GB); limit 0, not known, takes none. */
+ * hand in a page of device memory it has mapped, and a GPU memory window can lie above the map (this driver moves the
+ * large one to 256 GB and up where the machine allows it): a read there has no address in the map and stops the
+ * machine. So a page is taken only when it is one whole, aligned page that ends at or below `limit` (installed memory
+ * + 4 GB); limit 0, not known, takes none. A window that lies inside the map is the caller's to refuse: it knows where
+ * the GPU's windows are, this file does not. */
 static inline int nvf_phys_ok(unsigned long long pa, unsigned long long len, unsigned long long limit)
 {
     return pa != 0 && (pa & (NVF_PAGE - 1)) == 0 && len >= NVF_PAGE && pa < limit && limit - pa >= NVF_PAGE;
