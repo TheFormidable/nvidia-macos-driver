@@ -8,6 +8,7 @@
 #include "nv_xnu_kcore.h"
 #include "nvrm_itree.h"
 #include "nv_xnu_slots.h"
+#include "nvrm_chan_note_abi.h"
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 #include <sys/kauth.h>
@@ -101,6 +102,7 @@ NV_STATUS NV_API_CALL nv_log_error(nv_state_t *nv, NvU32 error_number, const cha
     char buf[512];
     vsnprintf(buf, sizeof buf, format, ap);
     buf[sizeof buf - 1] = 0;
+    nvrm_chan_note_xid(error_number);
     kprintf("NVRM: Xid %u: %s\n", error_number, buf);
     IOLog("NVRM: Xid %u: %s\n", error_number, buf);
     return NV_OK;

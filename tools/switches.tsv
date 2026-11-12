@@ -751,6 +751,14 @@ sysctl	debug.nvrm_boot_raster_ms	diag	read-only	3.0	-	start-up: boot raster meas
 sysctl	debug.nvrm_boot_settle_ms	diag	read-only	3.0	-	start-up: settle before the card is touched, ms
 sysctl	debug.nvrm_bugcheck_last	diag	read-only	3.0	-	code of the last bug check the RM asked for, -1 none
 sysctl	debug.nvrm_bugchecks	diag	read-only	3.0	-	bug checks the RM asked for
+sysctl	debug.nvrm_chan_dropped	diag	read-only	3.0	-	submissions those rebuilds did not run
+sysctl	debug.nvrm_chan_gave_up	diag	read-only	3.0	-	channel recoveries given up: that process lost its device
+sysctl	debug.nvrm_chan_injected	diag	read-only	3.0	-	faults made by NVK's test hook
+sysctl	debug.nvrm_chan_kicks	diag	read-only	3.0	-	stalled channels whose doorbell NVK rang again
+sysctl	debug.nvrm_chan_last_kind	diag	read-only	3.0	-	kind of loss of the last recovery given up (1 channel, 2 stall, 3 memory, 4 GSP, 5 bus, 6 wake, 7 unknown; -1 not understood)
+sysctl	debug.nvrm_chan_last_why	diag	read-only	3.0	-	why the last recovery was given up, as NVK numbers it (-1 not understood)
+sysctl	debug.nvrm_chan_last_xid	diag	read-only	3.0	-	Xid of the last channel event a process reported
+sysctl	debug.nvrm_chan_recovered	diag	read-only	3.0	-	channels NVK rebuilt after a fault or a stall
 sysctl	debug.nvrm_dma_bad_priv	diag	read-only	3.0	-	map or unmap calls with private data that is not this driver's
 sysctl	debug.nvrm_dma_budget_refused	diag	read-only	3.0	-	mappings refused to keep the mapper's space from filling
 sysctl	debug.nvrm_dma_fail	diag	read-only	3.0	-	mappings the mapper refused or could not serve
@@ -907,6 +915,8 @@ sysctl	debug.nvrm_wq_item_max_us	diag	read-only	3.0	-	longest RM work item, micr
 sysctl	debug.nvrm_wq_mode	diag	read-only	3.0	-	RM work queues: 1 serialized, 0 off (nvrmworkq=0), -1 could not start
 sysctl	debug.nvrm_wq_queued	diag	read-only	3.0	-	RM work items queued
 sysctl	debug.nvrm_wq_run	diag	read-only	3.0	-	RM work items run
+sysctl	debug.nvrm_xid_count	diag	read-only	3.0	-	Xids the RM logged since the kext loaded
+sysctl	debug.nvrm_xid_last	diag	read-only	3.0	-	the last Xid the RM logged
 sysctl	debug.nvrmfb_agdc	recovery	writable by root	2.9	-	write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, <0 failed step)
 sysctl	debug.nvrmfb_agdc_cmds	diag	read-only	2.9	-	AGDC vendor calls received
 sysctl	debug.nvrmfb_agdc_fbmap	diag	read-only	2.9	-	the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex
