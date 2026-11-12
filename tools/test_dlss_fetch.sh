@@ -6,7 +6,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SCRIPT=$ROOT/package/dlss_fetch.sh
 [ "$(id -u)" != 0 ] || { echo "run as a normal user"; exit 2; }
-W=$(mktemp -d /tmp/test-dlss-fetch.XXXXXX); trap 'rm -rf "$W"' EXIT
+W=$(mktemp -d "${TMPDIR:-/tmp}/test-dlss-fetch.XXXXXX") || exit 2; trap 'rm -rf "$W"' EXIT
 fails=0
 arm() { if [ "$2" = 0 ]; then echo "ok   $1"; else echo "FAIL $1${3:+ ($3)}"; fails=$((fails + 1)); fi; }
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }

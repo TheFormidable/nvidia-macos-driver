@@ -5,7 +5,7 @@
 #   bash tools/test_osver.sh          exit 0 when every arm holds
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/test_osver.XXXXXX") || exit 2; trap 'rm -rf "$T"' EXIT
 fails=0
 arm() {   # arm <name> <1 = holds> <what the program printed>
   if [ -z "$3" ]; then echo "FAIL  $1"; echo "      the program printed nothing - it did not run"; fails=$((fails + 1)); return; fi
