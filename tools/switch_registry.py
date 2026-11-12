@@ -56,8 +56,9 @@ Rules `check` enforces (each has a control in --selftest or in tools/test_switch
   2. no row has an empty default or purpose; rows a user may meet say what they do;
   3. a switch added after 2.9 is never an opt-in: a new row is an escape (on by default, with a review version the tree
      has not reached), a test hook, a read-only observer, a setting the settings tool offers, or internal. The tiers
-     dev, hardware, recovery and install are closed to new rows, and the number of rows that claim to date from 2.9
-     cannot rise, so a new switch cannot be filed as an old one;
+     dev, hardware, recovery and install are closed to new rows. A new switch cannot be filed as an old one either:
+     the number of rows that claim to date from 2.9 cannot rise, and where the clone has the 2.9 release (tag v2.9)
+     the test scans that tree and every such row has to name a switch it read;
   4. the number of dev rows per component, of test hooks, and of rows without a reviewed purpose stay at or under the
      ceilings in the registry header; a ceiling never rises (the test compares with the previous commit);
   5. no sysctl is writable unless it was at 2.9 and is a setting, hardware, recovery, diag or dev row; none is
@@ -71,6 +72,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -889,6 +891,28 @@ def bootstrap(root, base_root=None):
     reg.ceil[("unreviewed", "all")] = sum(1 for r in reg.rows.values() if r["purpose"].startswith(UNREVIEWED))
     reg.ceil[("base", "all")] = sum(1 for r in reg.rows.values() if not is_new(r))
     return reg.text()
+
+
+def release_switches(root, version=BASE):
+    """-> {(kind, name)} the tree of a release read, or None when this clone does not have that release (no tag)."""
+    tag = "v" + version
+    git = ["git", "-C", str(root)]
+    if subprocess.run(git + ["rev-parse", "-q", "--verify", tag + "^{commit}"], capture_output=True).returncode:
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        a = subprocess.run(git + ["archive", tag], capture_output=True)
+        if a.returncode or subprocess.run(["tar", "xf", "-", "-C", d], input=a.stdout).returncode:
+            return None
+        found, _ = scan(Path(d))
+    return {(k, n) for k in found for n in found[k]}
+
+
+def misdated(reg, base):
+    """Rows that claim to date from the base release and name a switch that release did not read: a new switch filed as
+    an old one, which would let it be an opt-in, a development switch or a writable sysctl."""
+    return [f"{REG}:{r['line']}: {k[0]} {k[1]} is dated {r['since']}, and the {BASE} release did not read it: it is new. "
+            f"Set its since to {NEXT}; rule 3 then says what it may be" for k, r in sorted(reg.rows.items())
+            if not is_new(r) and r["tier"] != "retired" and k not in base]
 
 
 def ceiling_rises(old_text, new_text):

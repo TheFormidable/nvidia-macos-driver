@@ -201,5 +201,22 @@ if old.returncode == 0:
     arm("no ceiling is higher than in the previous commit", not rises, "; ".join(rises))
 else:
     print("skip the ceiling comparison: the previous commit has no registry (the commit that adds it, or a shallow clone)")
+
+# a row dated 2.9 names a switch the 2.9 release read (needs the release in the clone; a clone without tags says so and
+# passes). The count of such rows cannot rise, but a count is kept by deleting one old row for every new one filed as
+# old; the release's own tree cannot be argued with.
+base = sr.release_switches(ROOT)
+if base is None:
+    print(f"skip the comparison with the {sr.BASE} release: tag v{sr.BASE} is not in this clone")
+else:
+    reg = sr.load(ROOT)
+    wrong = sr.misdated(reg, base)
+    arm(f"every row dated {sr.BASE} is a switch the {sr.BASE} release read", len(base) > 500 and not wrong, "; ".join(wrong[:5]))
+    reg.rows[("env", "NVMTL_FILED_AS_OLD")] = dict(tier="dev", default="off", since=sr.BASE, review="-", purpose="x", line=1)
+    reg.rows[("sysctl", "debug.nvrm_filed_as_old")] = dict(tier="setting", default="writable by root", since=sr.BASE, review="-", purpose="x", line=2)
+    wrong = sr.misdated(reg, base)
+    arm("control: a new opt-in and a new writable sysctl filed as old are each reported, with what to do",
+        len(wrong) == 2 and "env NVMTL_FILED_AS_OLD is dated 2.9" in wrong[0] and "sysctl debug.nvrm_filed_as_old" in wrong[1]
+        and f"Set its since to {sr.NEXT}" in wrong[0], "; ".join(wrong))
 print(f"{len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)
