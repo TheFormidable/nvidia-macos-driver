@@ -388,12 +388,19 @@ on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during ste
 
 # ---------------------------------------------------------------------------------------------------------- tools
 BREW=""; BREW_PREFIX=""
+# NM_BREW, when set, is the only Homebrew considered: a setting that names a brew which is not there is not answered
+# with another one found elsewhere (the test suite relies on this to keep the Homebrew of the machine it runs on out
+# of its imitated Macs). Without it: the two places Homebrew installs itself to, then PATH.
 find_brew() {
   BREW=""; BREW_PREFIX=""
   local c
-  for c in "${NM_BREW:-}" /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null || true)"; do
-    [ -n "$c" ] && [ -x "$c" ] && { BREW=$c; break; }
-  done
+  if [ -n "${NM_BREW:-}" ]; then
+    if [ -f "$NM_BREW" ] && [ -x "$NM_BREW" ]; then BREW=$NM_BREW; fi
+  else
+    for c in /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null || true)"; do
+      [ -n "$c" ] && [ -x "$c" ] && { BREW=$c; break; }
+    done
+  fi
   [ -n "$BREW" ] && BREW_PREFIX=$(cd "$(dirname "$BREW")/.." && pwd -P)
   return 0
 }
@@ -580,7 +587,9 @@ doctor() {   # prints; sets D_MISSING
   fi
   say "== build tools (\"./build.sh deps\" installs the missing ones)"
   find_tools
-  if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"; elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
+  if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"
+  elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
+  elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
   [ -n "$T_PATCH" ] && d_ok "GNU patch $T_PATCH" || d_missing "GNU patch (Homebrew gpatch): the scripts pass --no-backup-if-mismatch"
   if [ -n "$T_PYTHON" ]; then
     v=$("$T_PYTHON" --version 2>&1 | version_of)
@@ -853,6 +862,9 @@ cmd_deps() {
   xcode-select -p >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 || missing_xcode=1
   if [ "$missing_xcode" = 1 ]; then warn "Xcode is missing or not selected"; xcode_help; fi
   # Homebrew
+  if [ -z "$BREW" ] && [ -n "${NM_BREW:-}" ]; then
+    die "NM_BREW names $NM_BREW, which is not an executable brew: correct the setting, or remove it and build.sh looks in Homebrew's usual places"
+  fi
   if [ -z "$BREW" ]; then
     say "Homebrew is not installed. build.sh uses it for: $NM_PIN_BREW_FORMULAS."
     say "Its official installer is: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""

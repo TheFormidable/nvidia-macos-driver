@@ -152,7 +152,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_RUSTUP_URL` | static.rust-lang.org, rustup 1.29.3 | Where `rustup-init` is downloaded from (its SHA-256 is checked either way) |
 | `RUSTUP_DIST_SERVER` | rustup's | Where rustup downloads the toolchain from |
 | `DEVELOPER_DIR` | the selected Xcode | An Xcode other than the one `xcode-select` selects |
-| `NM_BREW` | found | The `brew` to use |
+| `NM_BREW` | found | The `brew` to use. When set, no other Homebrew is looked for |
 | `NM_PYTHON` | found | A Python 3.10 or newer to make the virtual environment with |
 | `NM_LLVM_PREFIX` | Homebrew's `llvm@22` or `llvm` | An LLVM 22.x with its clang libraries, when Homebrew has none |
 | `NM_OGKM620_PRISTINE` | fetched | An unpacked NVIDIA 620.70.06 tree to use instead of fetching (checked by its `version.mk`) |

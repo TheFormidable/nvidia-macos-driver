@@ -129,7 +129,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
-| `NM_BREW` | El `brew` que se usa |
+| `NM_BREW` | El `brew` que se usa. Si se indica, no se busca ningún otro Homebrew |
 | `NM_PYTHON` | Un Python 3.10 o posterior para el entorno virtual |
 | `NM_LLVM_PREFIX` | Un LLVM 22.x con sus bibliotecas de clang |
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
