@@ -1802,15 +1802,16 @@ static bool nvSurfWaitLegacy(unsigned int id, uint64_t limit)
 // bounded by the caller and by NVRM_FENCE_WAIT_MAX_MS, instead of giving up after 100 ms. The marks above stay: an
 // older plugin, a hold NVRM refused and an NVRM without the fence (an older kext, boot-arg nvrmfence=0, a fence that
 // did not start) all leave them, and then every wait is exactly the mark wait.
-// The table is NVRM's one function pointer, asked for once. An NVRM that refuses is asked again at most once a second
-// (its fence starts after the accelerator, on the GPU's start-up thread), and only an NVRM already found: a wait never
-// waits for matching. wait() takes NVRM's fence lock, a leaf, and sleeps uninterruptibly up to w->timeoutMs.
+// The table is NVRM's one function pointer, asked for once. An NVRM that refuses is asked again at most once a second,
+// and only an NVRM already found: a wait never waits for matching. One that answers that boot-arg nvrmfence=0 switched
+// its fence off is not asked again before the next boot. wait() takes NVRM's fence lock, a leaf, and sleeps uninterruptibly up to w->timeoutMs.
 // The pointer is used for the rest of the boot. It stays callable after NVRM's GPU has stopped (the fence then refuses
 // or finds nothing, by its contract), and NVRM.kext is kept loaded for it: see nvFenceAsk.
 static NVRMFenceWaitFn volatile gFenceWait;
 static uint64_t gFenceAskAgainAt;
 static int gFenceOn;
 static unsigned gFenceAskLogs;
+static volatile UInt32 gFenceOffForBoot;
 static SInt64 gCntFenceWaits, gCntFenceReady, gCntFenceDead, gCntFenceTimeouts, gCntFenceErrors, gCntFencePending;
 static int gFenceWaitMaxUs;
 static unsigned gFenceTimeoutLogs;
@@ -1820,12 +1821,25 @@ static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm)
     nvrm = nullptr;   // an AMD/Intel accelerator: no NVRM, no fence
 #endif
     if (NVRMFenceWaitFn have = __atomic_load_n(&gFenceWait, __ATOMIC_ACQUIRE)) return have;   // asked once: the start of a second accelerator does not ask again
+    if (gFenceOffForBoot) return nullptr;   // NVRM said nvrmfence=0: nothing to ask for until the next boot
     if (!nvrm) return nullptr;
     struct NVRMFenceKernelOps o;
     o.version = NVRM_FENCE_ABI_VERSION; o.size = sizeof o; o.wait = nullptr;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_FENCE_FN_OPS);
     const IOReturn r = sym ? nvrm->callPlatformFunction(sym, false, &o, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
+    // NVRM tells three refusals apart only by this code. kIOReturnOffline is the fence switched off by boot-arg
+    // nvrmfence=0, which no answer can change before the next boot: log it once, and from now on neither the waits
+    // (gFenceAskAgainAt never passes) nor a second accelerator's start ask again. Every other refusal keeps the
+    // once-a-second retry: kIOReturnUnsupported is both a fence of another version and an NVRM without the fence (an
+    // older kext does not handle the name; the provider chain answers it), and an older NVRM never answers
+    // kIOReturnOffline here (were one to, giving up on it would still be right: it has no fence to offer).
+    if (r == kIOReturnOffline) {
+        gFenceAskAgainAt = ~0ULL;
+        if (OSCompareAndSwap(0, 1, &gFenceOffForBoot))
+            ALOG("surface fence: off for this boot (boot-arg nvrmfence=0) -- waits use the 2.9 marks; NVRM is not asked again");
+        return nullptr;
+    }
     if (r != kIOReturnSuccess || !o.wait) {
         uint64_t next = 0; clock_interval_to_deadline(1, kSecondScale, &next);
         gFenceAskAgainAt = next;
