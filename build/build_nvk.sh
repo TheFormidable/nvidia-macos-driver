@@ -11,6 +11,12 @@
 #        ... nvk-warnings, nvk-unbound-stage (a read of an empty binding by an earlier stage is reported; the shipped outcome is kept,
 #        NVK_UNBOUND_STAGE_STRICT=1 refuses it)
 #        nvk-diag-nofollow (the opt-in diagnostic log is created without following a link, for its owner alone)
+#        then upstream Mesa commits newer than nvk/MESA_BASE, unchanged (each patch lists its commits in its header):
+#        nvk-mesa-26.3.0 (what the 26.3.0 release has over rc3 in the files NVK is built from; it holds the RTX 50 fix
+#        for a register read before its uniform Ldcg load finished), nvk-nak-fixes-main (four NAK fixes that are only on
+#        Mesa main: barrier handling, RTX 50 matrix-instruction latencies), nvk-nak-sched-main (four code generation
+#        changes that are only on Mesa main: instruction order before register allocation, fall-through branches,
+#        flattening of small ifs)
 #   2.8  the set the 2.8 / 2.8.1 package was built from: the same chain without hubfix, perf-boost-burst, rated-tdp and
 #        gps-maxpower, and with nvk/release-2.8/nvk-fixes-after-def16.patch (the copy-engine retry still logged to stderr)
 # The NAK changes (nvk/speed267) are already part of nvk-macos.patch; the scripts there are the history of how they
@@ -22,7 +28,12 @@
 #   PKG_CONFIG_PATH must reach LLVMSPIRVLib.pc (SPIRV-LLVM-Translator matching the LLVM) for the native mesa_clc build
 #   NVK_SYSROOT     x86_64 prefix holding lib/pkgconfig for zlib (and any other library the build needs)
 #   NVK_JOBS        parallel jobs (default 6)
-#   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last (e.g. nvk-upstream-nak)
+#   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last
+#   NVK_SKIP_PATCHES   space-separated names of upstream-fix patches to leave out of the chain: nvk-mesa-26.3.0,
+#                   nvk-nak-fixes-main, nvk-nak-sched-main. For finding which of them a rendering fault comes from
+#                   (start with nvk-nak-sched-main: it changes the code of every shader and is not a fix).
+#                   The summary line of a build made with either variable (also kept in <out dir>/BUILD.txt) ends with
+#                   "WITHOUT <names>" or "PLUS <names>"; unset both for a library that is meant to be used.
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
 # The Mesa git must contain the commit in nvk/MESA_BASE (2.9: 90a959eb, mesa-26.3.0-rc3) and, for 2.8, 17ca6174. The tree is exported with git archive, so no .git is
@@ -33,20 +44,55 @@ MESA_GIT=${1:?mesa git dir}; OGKM=${2:?open-gpu-kernel-modules 610.57.04 tree}; 
 HERE=$(cd "$(dirname "$0")/.." && pwd); NVK=$HERE/nvk
 BASE=$(cat "$NVK/MESA_BASE")
 JOBS=${NVK_JOBS:-6}
+UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the chain's patches that are upstream Mesa commits, unchanged
 [ -n "${NVK_PATH:-}" ] && export PATH="$NVK_PATH:$PATH"
 
 case $REL in
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main" ;;
   2.8) FIXES=$NVK/release-2.8/nvk-fixes-after-def16.patch
        BASE=17ca6174   # the 2.8 / 2.8.1 package was built on this Mesa; 2.9 moved to nvk/MESA_BASE (26.3)
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef" ;;
   *) echo "STOP: release must be 2.9 or 2.8"; exit 2 ;;
 esac
 
-# NVK_EXTRA_PATCHES="nvk-upstream-nak" appends patch files from nvk/ to the chain (upstream NAK/NVK fixes newer than
-# MESA_BASE; off by default until measured on the target card).
-CHAIN="$CHAIN ${NVK_EXTRA_PATCHES:-}"
+# NVK_EXTRA_PATCHES appends patch files from nvk/ to the chain. 2.9 had one such file, nvk-upstream-nak; its commits are
+# in the three upstream-fix patches of the chain now and the file is gone, so that name is dropped here with a note
+# instead of stopping the build of someone who still sets it.
+ADDED=
+for p in ${NVK_EXTRA_PATCHES:-}; do
+  if [ "$p" = nvk-upstream-nak ]; then
+    echo "note: NVK_EXTRA_PATCHES=nvk-upstream-nak is ignored: that file is gone, its upstream fixes are in the default 2.9 chain ($UPSTREAM_FIXES)"
+  else
+    CHAIN="$CHAIN $p"; ADDED="$ADDED $p"
+  fi
+done
+# NVK_SKIP_PATCHES leaves upstream-fix patches out. Only those can be named: they change compiler files that no later
+# patch of the chain touches, and none of the three needs another, so the rest of the chain applies whichever are
+# left out. Any other name stops the build: a misspelt name that was silently ignored would give a build that still has
+# the patch its owner believes is out.
+SKIP=" "
+for p in ${NVK_SKIP_PATCHES:-}; do
+  case " $UPSTREAM_FIXES " in
+    *" $p "*) SKIP="$SKIP$p " ;;
+    *) echo "STOP: NVK_SKIP_PATCHES can only name $UPSTREAM_FIXES (got: $p)"; exit 2 ;;
+  esac
+  case " $CHAIN " in
+    *" $p "*) ;;
+    *) echo "note: NVK_SKIP_PATCHES names $p, which the $REL chain does not have" ;;
+  esac
+done
+KEPT=; LEFT_OUT=
+for p in $CHAIN; do
+  case "$SKIP" in
+    *" $p "*) echo "skipped $p.patch (NVK_SKIP_PATCHES)"; LEFT_OUT="$LEFT_OUT $p" ;;
+    *) KEPT="$KEPT $p" ;;
+  esac
+done
+CHAIN=${KEPT# }
+echo "patch chain ($REL): $CHAIN"
+# A chain that is not the default one is named again in the summary line at the end, the one kept in BUILD.txt.
+OTHER_CHAIN="${LEFT_OUT:+  WITHOUT$LEFT_OUT (NVK_SKIP_PATCHES)}${ADDED:+  PLUS$ADDED (NVK_EXTRA_PATCHES)}"
 
 git -C "$MESA_GIT" cat-file -e "$BASE^{commit}" || { echo "STOP: $MESA_GIT has no commit $BASE"; exit 2; }
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
@@ -135,7 +181,10 @@ U=$(nm -m "$D" | grep '(undefined)' | grep -v weak | grep 'dynamically looked up
 cp "$D" "$OUT/libvulkan_nouveau.dylib"; strip -S "$OUT/libvulkan_nouveau.dylib"
 nm -gU "$OUT/libvulkan_nouveau.dylib" | awk '{print $3}' | sort > "$OUT/exports.txt"
 UUID=$(otool -l "$OUT/libvulkan_nouveau.dylib" | awk '/uuid/{print $2; exit}')
-echo "release $REL  sha256 $(shasum -a 256 "$OUT/libvulkan_nouveau.dylib" | cut -c1-8)  LC_UUID $UUID  exports $(wc -l < "$OUT/exports.txt")" | tee "$OUT/BUILD.txt"
+# BUILD.txt is all the release build (build_release_inputs.sh) shows and records of this script; the rest of what is
+# printed here goes to a log there. A library built with a patch left out or added (a variable still set from a fault
+# hunt is enough) must not look like the default one in that record, so the line ends with what differs.
+echo "release $REL  sha256 $(shasum -a 256 "$OUT/libvulkan_nouveau.dylib" | cut -c1-8)  LC_UUID $UUID  exports $(wc -l < "$OUT/exports.txt")$OTHER_CHAIN" | tee "$OUT/BUILD.txt"
 if [ -n "${NVK_REF_EXPORTS:-}" ]; then
   diff "$NVK_REF_EXPORTS" "$OUT/exports.txt" > "$OUT/exports.diff" && echo "exports: identical to reference" || { echo "exports differ from reference:"; cat "$OUT/exports.diff"; }
 fi
