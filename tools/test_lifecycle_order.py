@@ -4,7 +4,7 @@
 Several changes each add a step to these paths: a gate that keeps the interrupt handler out of the RM while the GPU
 is down (irqOpen / irqSettle), work queues with a bounded flush, rm_disable_adapter before rm_shutdown_adapter, the
 surface fence (start / stop / pm / owner_gone), the RC timer and the nano timers that must be let go, the DMA layer,
-the drain of event posts at client close, and the "start is done" mark the other kexts wait for. Each step is right
+the drain of event posts at client close, and the mark that says the GPU's start is complete. Each step is right
 in one place only, relative to the others. What a wrong place costs, for example: the interrupt source enabled before
 the gate is open drops every interrupt, and the GPU never finishes its start; a flush with a long bound inside the
 8 s the system allows a shutdown leaves the GPU half shut down for the next boot; the fence told about a dead process
@@ -320,7 +320,17 @@ def start_done_last(src):
         return "go() does not write fStartDone"
     end = body.find(";", writes[-1][0])
     rest = re.findall(r"[A-Za-z_]\w*", body[end + 1:]) if end >= 0 else ["(the statement does not end)"]
-    return "" if rest == ["return", "kIOReturnSuccess"] else "after the write of fStartDone go() still runs: " + " ".join(rest[:8])
+    if rest != ["return", "kIOReturnSuccess"]:
+        return "after the write of fStartDone go() still runs: " + " ".join(rest[:8])
+    # the thread that brings the GPU up by itself: whatever it does before it calls go() runs before the write above
+    auto = src.steps("NVRM::autoGo")
+    if auto is None:
+        return "NVRM::autoGo is not in the file"
+    calls_go = re.search(r"(?<![\w])go\s*\(", auto)
+    if re.search(r"\bfStartDone\b", auto[:calls_go.start()] if calls_go else auto):
+        return ("autoGo() looks at fStartDone before it calls go(), and go() is what writes it: a wait for it there can only run "
+                "out its bound, on every boot. The mark that start() has returned needs a name of its own")
+    return ""
 
 
 def enable_only_with_open_gate(src):
@@ -396,7 +406,9 @@ RULES = [
      lambda s: in_order(s, "NVRM::go", [call("nv_xnu_wq_gpu_start"), call("addEventSource"), call("bottomHalfStart"), call("irqOpen"), IRQ_ON,
                                         call("rm_init_adapter"), call("nvrm_power_start"), call("nvrm_fence_start")])),
     ("go(): fStartDone is written after everything else the start does, as the last statement before the successful "
-     "return (the other kexts wait for it and then use what the start set up)",
+     "return (it says the GPU's start is complete: whoever reads it may use all that the start set up). autoGo() does "
+     "not look at it before it calls go(), which is what writes it: the wait autoGo makes there, for start() to have "
+     "returned, has a mark of its own",
      start_done_last),
     ("everywhere: the interrupt source is enabled only with the gate open, irqOpen() before every fIntSrc->enable() "
      "(an interrupt that arrives at a closed gate is dropped, and the GPU's start then times out)",
@@ -431,6 +443,15 @@ IOReturn NVRM::go(uint32_t pass)
         fStartDone = 1;
     }
     return kIOReturnSuccess;
+}
+void NVRM::autoGo(void *p0, wait_result_t)
+{
+    NVRM *s = (NVRM *)p0;
+    IOSleep(s->fAutoGoSettleMs);
+    for (uint32_t ms = 0; !s->fStartReturned && ms < 5000; ms += 10) IOSleep(10);   // start() sets it as its last statement
+    s->measureBootRaster();
+    IOReturn r = s->go(2);
+    if (r != kIOReturnSuccess) s->releaseBootHold("go(2) failed");
 }
 void NVRM::irqOpen() { gNvIsrFilterAt = 0; nv_gate_open(&fIrqGate); }
 void NVRM::irqSettle(uint32_t waitMs) { nv_gate_close(&fIrqGate); bottomHalfDrain(waitMs); }
@@ -635,6 +656,12 @@ CONTROLS = [
      lambda m: swapped(m, "        nvrm_fence_start(); fFenceUp = true;\n", "        fStartDone = 1;\n")),
     ("go(): work after the start is marked done", [14], lambda m: changed(m, "        fStartDone = 1;\n", "        fStartDone = 1;\n        publishGpuProfile();\n")),
     ("go(): the start never marked done", [14], lambda m: changed(m, "        fStartDone = 1;\n", "")),
+    ("autoGo(): before it calls go() it waits for the mark that go() writes", [14],
+     lambda m: changed(m, "!s->fStartReturned && ms < 5000", "!s->fStartDone && ms < 5000")),
+    ("autoGo(): the same wait, made in a helper it calls before go()", [14],
+     lambda m: changed(m, "    for (uint32_t ms = 0; !s->fStartReturned && ms < 5000; ms += 10) IOSleep(10);   // start() sets it as its last statement\n",
+                       "    s->startGate();\n")
+     + "void NVRM::startGate() { for (uint32_t ms = 0; !fStartDone && ms < 5000; ms += 10) IOSleep(10); }\n"),
     ("an interrupt enable in one more function, with no gate opened", [15], lambda m: m + "void NVRM::rearm() { if (fIntSrc) fIntSrc->enable(); }\n"),
     ("an interrupt enable after the gate was closed again", [15],
      lambda m: m + "void NVRM::rearm() { irqOpen(); irqSettle(100); if (fIntSrc) fIntSrc->enable(); }\n"),
