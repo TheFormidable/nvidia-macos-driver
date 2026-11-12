@@ -22,8 +22,8 @@ gave the reader a half-drawn picture.
 
 The surface fence puts the missing knowledge into NVRM.kext: which connection is still drawing into which surface,
 on which GPU channel, and up to which point of that channel's work. A reader now sleeps in the kernel until that
-work is done and is woken by the GPU's interrupt. It stops waiting at once when the writer exits, when its channel
-faults or when the GPU goes to sleep.
+work is done and is woken by the GPU's interrupt. The kernel lets it go at once when the writer exits, when its
+channel faults or when the GPU goes to sleep.
 
 ## How it works
 
@@ -48,6 +48,15 @@ that existed when it arrived and for nothing opened later, so a surface that is 
 reader forever. The answer tells it how the wait ended: nothing was pending; ready; the writer is gone (exit, channel
 fault, GPU asleep); a hold was given up at its bound; the reader's own timeout ran out; a signal interrupted it.
 
+Only "ready" says that the surface is complete. On the other answers the reader goes on by its own rule. NVAccel
+goes on, as 2.9 did at its bound. A reader in the Metal plugin goes on when the kernel has kept it 10 ms or longer;
+one that was let go sooner does what 2.9 did, which is to poll the writer's busy tag for up to 10 ms, or not at all
+once the tag is 100 ms old. So no reader reads earlier than in 2.9 unless the hold ended as complete: the GPU
+reached its value, or the writer closed it.
+
+The kernel remembers how the last 64 holds ended. A reader that waited through more endings than that is told the
+worst of all of them, whoever's they were: "ready" only when every one was a completion.
+
 ## How the kernel sees the GPU work
 
 NVK registers each of its channels once. It gives the kernel two addresses in its own memory: the channel's
@@ -58,13 +67,23 @@ semaphore page, the number of the last submission it sent, before that submissio
 The kernel does not map these pages into its own address space. It wires them (they cannot be paged out or given
 back to the system under it) and reads them through the kernel's map of physical memory, 8 bytes at a time. So there
 is no kernel address that could fault when the process, or the RM, takes its own mapping away, and the pages stay
-wired until the registration ends: when NVK deletes it, when the proof below fails, or when the connection closes.
+wired until the registration ends: when NVK deletes it, when the proof below fails, when the connection closes or
+when its process exits.
 
-That map covers the installed memory and the 4 GB above it, and nothing further. A page the process has mapped from a
-device, such as the GPU's own memory window (which this driver moves to 256 GB and up), has no address there, and
-reading it would stop the machine. So once a page is wired the kernel looks at where it is, and takes it only when the
-map reaches it; any other page is given back at once and the channel is not watched (`map_fail`). NVK's semaphore
-pages and notifiers are system memory, so this refuses nothing that NVK sends.
+A process can also hand in a page that it has mapped from a device, and such a page is wired as readily. So once a
+page is wired the kernel looks at where it is, and in two cases gives it back at once and does not watch the channel
+(`map_fail`):
+
+- The page is beyond the kernel's map of physical memory. That map covers the installed memory and the 4 GB above
+  it, and nothing further; a page beyond it has no address there, and reading it would stop the machine. The GPU's
+  large memory window is such a place on the machines where this driver moves it to 256 GB and up.
+- The page is inside one of the GPU's own memory windows, wherever they are: firmware also leaves them below 4 GB or
+  right above the installed memory, inside the map. NVRM maps these windows, the registers included, into the
+  processes the RM grants them to, and reading one would touch the GPU itself, also while it sleeps.
+
+NVK's semaphore pages and notifiers are system memory, so this refuses nothing that NVK sends. A page of some other
+device that lies inside the map cannot be told from system memory. The kernel only ever reads such a page, as the
+process that mapped it can, and the proof below drops it unless it behaves like memory.
 
 Before the kernel trusts such a view it has to prove itself twice:
 
@@ -170,11 +189,13 @@ later.
 
 ### NVAccel
 
-NVAccel asks NVRM for the fence's wait function once (platform function `nvFenceOps`) when the accelerator starts;
-NVRM's fence starts a little later, on the GPU's start-up thread, so NVAccel asks again at most once a second until
-NVRM offers it (`debug.nvaccel_surface_fence` turns 1, one log line `surface fence: NVRM's fence v1`). The function
-is fetched once for all GPUs and used for the rest of the boot; NVAccel keeps one reference on the NVRM that answered
-so that NVRM.kext stays loaded under it. The accelerator built for AMD and Intel GPUs never looks for NVRM.
+NVAccel asks NVRM for the fence's wait function (platform function `nvFenceOps`) when the accelerator starts. NVRM
+hands it out as soon as it is asked, also before its own fence has started on the GPU's start-up thread: until then
+a wait finds nothing pending, without taking a lock. When NVAccel has not found NVRM yet, or NVRM refuses, its waits
+ask again, never more than once a second (for `nvrmfence=0` see "The one switch"). `debug.nvaccel_surface_fence`
+turns 1 when it has the function (one log line `surface fence: NVRM's fence v1`). The function is fetched once for
+all GPUs and used for the rest of the boot; NVAccel keeps one reference on the NVRM that answered so that NVRM.kext
+stays loaded under it. The accelerator built for AMD and Intel GPUs never looks for NVRM.
 From then on every wait for a surface WindowServer is drawing asks the fence first and then the 2.9 mark table:
 
 - the flip (on the asynchronous flip thread or WindowServer's), the copied frame and the hybrid paths wait as long
@@ -328,7 +349,7 @@ boot" unless it says "now".
 | `done_on_slice` | the same after a time slice: no interrupt told them | near 0; far below `done_on_irq` |
 | `expired_gpu` | holds given up after 2000 ms | 0 |
 | `expired_cpu` | holds given up after 100 ms with their writer's GPU idle | 0 (1 for each `kill -STOP` test) |
-| `expired_penalty` | holds given up after 20 ms in a penalty window | 0 |
+| `expired_penalty` | holds given up in a penalty window: after 20 ms, a compositor hold after 100 ms | 0 |
 | `strikes` | strikes against connections whose holds were given up | 0 |
 | `owners_distrusted` | connections refused after three strikes | 0 |
 | `close_gpu_agree` | armed holds closed with the kernel seeing their work complete | grows with application drawing |
@@ -338,6 +359,9 @@ boot" unless it says "now".
 | `seq_waits` | producer waits for its own channel | grows with uploads on the copy queue |
 | `seq_slept` | of those, slept in the kernel | those whose work was not done yet |
 | `seq_refused` | of those, told to poll: the channel raises no interrupt | 0 if copy-queue completions wake the kernel; see point 5 |
+
+A wait that outlasted more than 64 endings is counted under the worst of all of them (`wait_timeout` before
+`wait_dead` before `wait_ready`), also when the hold that was given up or lost was not one it waited for.
 
 "It works" is: `state` 1, `accel` 1, `auto` and `done_on_irq` grow with use, and `done_on_slice`, `chan_noirq`,
 `expired_*`, `map_*`, `strikes`, `owners_distrusted` and `close_gpu_behind` stay at or near 0.
@@ -422,10 +446,19 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
   behaviour, and eight such processes can switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.
-- A process that registers a channel and frees the page without deleting the registration keeps that page wired
-  until its connection closes. NVK deletes first.
+- A process that registers a channel and frees or unmaps the page without deleting the registration keeps that page
+  wired until its connection closes, and more than the page: macOS cannot take the freed memory apart while the
+  kernel's view of one page of it exists, and it waits for that on the one thread that reaps dead memory, so other
+  memory queued for that thread is not returned either until the registration ends. NVK deletes first, and at a
+  process's exit the views go before its memory does; a process that breaks the rule on purpose can hold memory
+  back this way for as long as it keeps its connection open, as it can with any driver that wires its pages.
 - A GPU that goes to sleep in the last moment of its start is not announced to the fence. Holds opened then end at
   their bounds, with a strike.
+- When every hold ends at once (the GPU goes to sleep, the last GPU stops, the layer switches itself off),
+  WindowServer's work in flight has neither a hold nor a 2.9 mark: no mark was sent for a surface the kernel held.
+  NVAccel's flip, copy or page-off of such a surface then goes on at once and can show a frame the GPU has not
+  finished, once, as 2.9 did when its 100 ms ran out. An application's surface still carries its busy tag, and its
+  readers fall back to that.
 
 ## What to look at on the card
 

@@ -37,6 +37,10 @@ extern "C" {
 extern "C" task_t current_task(void);
 extern "C" proc_t current_proc(void);
 extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
+// The one question this file asks the rest of the driver (os-xnu2.cpp): is this physical range inside one of the GPU's
+// memory windows? It is the test that decides which mappings NVRM hands a process as device memory, and it only compares
+// against the window addresses recorded when the GPU started: no lock, no RM call, no hardware.
+extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size);
 
 // ---- state ---------------------------------------------------------------------------------------------------------
 
@@ -61,9 +65,15 @@ static struct nvf_table gT;                  // under gFLock, except the two loc
 // The kernel's hold on one channel's two pages. Each descriptor is prepared, which wires the page and keeps it alive
 // whatever the process or the RM do with their own mappings, until complete(). The slot owns both. They are let go
 // (complete and release, after the lock) by CHAN_DEL, by a CHAN_VERIFY that fails, by CHAN_REBIND for the notifier
-// it replaces, by nvrm_fence_pid_gone for everything an exiting process has, and by nvrm_fence_owner_gone for everything
-// a connection still has; every connection ends there, so nothing stays pinned past its close. A producer that frees a page before its CHAN_DEL only delays the page's
-// return to the system until then.
+// it replaces, by nvrm_fence_pid_gone for everything an exiting process has, and by nvrm_fence_owner_gone for
+// everything a connection still has; every connection ends there, so nothing stays pinned past its close.
+// What a view costs while it is held: the page stays wired, and the memory object it belongs to cannot be taken apart.
+// When a producer frees or unmaps a registered page before its CHAN_DEL, the kernel waits for the view to go before it
+// destroys that object, and it waits on the one thread that reaps dead memory objects: the objects queued behind this
+// one (those that still had paging in flight when they died) are not freed either until the view goes. NVK deletes the
+// registration first, and when a process exits its connections close, and the views go, before its address space is
+// taken down. So this happens only to a live process that breaks the rule, and it ends with its connection at the
+// latest. Any driver that keeps user memory prepared has the same cost; it is the price of never mapping the page.
 struct NvfView {
     IOMemoryDescriptor *sem, *err;           // the semaphore page; the page that contains the error notifier
     UInt64 probe0;                           // the probe word as it read at CHAN_ADD: CHAN_VERIFY must read another
@@ -312,10 +322,19 @@ static void nvfUnpin(IOMemoryDescriptor *md)
 // The descriptor is not mapped into the kernel: the page is read through the physical map (nvfRead64), so no kernel
 // address exists that could fault when the process or the RM tears its side down. Direction "out" (memory to device)
 // asks for read access only, which also works on a page the process has mapped read-only.
-// IOKit wires device memory as readily as system memory, and the physical map covers only system memory and the 4 GB
-// above it: a page of the GPU's memory window that a process mapped and handed in would be read where the kernel has
-// no address and stop the machine. So the page's physical address is checked once here, while it is wired and cannot
-// move, and a page that is not where the map reaches is given back (nvf_phys_ok, gFPhysTop).
+// IOKit prepares device memory as readily as system memory, and a process can hand in a page of a device that it has
+// mapped. So the page's physical address is looked at once here, while the page is wired and cannot move, and the page
+// is given back when either is true:
+//   - it is not below the end of the physical map (nvf_phys_ok, gFPhysTop). The kernel checks every address it
+//     converts through that map and stops the machine on one beyond its end, and a GPU memory window can lie there
+//     (this driver moves the large one to 256 GB and up where the machine allows it);
+//   - it is inside one of the GPU's own memory windows, wherever they are: firmware also leaves them below 4 GB or
+//     right above installed memory, inside the map. NVRM maps those windows, the register file included, into the
+//     processes the RM grants them to; a read here would touch the GPU without a power reference, also while it
+//     sleeps, each time somebody waits on that process's surfaces.
+// A page of another device that lies inside the map cannot be told from system memory: nothing a kext may call says
+// which of the two a page is. Such a page is only ever read, 8 bytes at the offsets nvfRead names, as the process that
+// mapped it can read it itself; and unless it behaves like memory it fails the proof and is dropped.
 static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
 {
     IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());
@@ -323,7 +342,7 @@ static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
     if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }
     IOByteCount len = 0;
     const addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
-    if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }
+    if (!nvf_phys_ok(pa, len, gFPhysTop) || nv_pm_is_gpu(pa, NVF_PAGE)) { nvfUnpin(md); return NULL; }
     return md;
 }
 
