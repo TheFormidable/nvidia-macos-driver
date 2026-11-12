@@ -11,8 +11,8 @@ on the source text:
 - the escape goes through the existing escape switch of NVRMUserClient::esc (no new selector): the size is checked
   before the record is touched, the power state passed is the adapter's own, and the answer is kIOReturnSuccess;
 - the note checks version and request before it counts or writes anything, and reads each field of the record once;
-- the ten sysctls of the design, read-only, each declared and registered once, never unregistered, behind a once
-  guard, registered from NVRM's one-time sysctl block; their names are unique across the stream's three modules
+- the ten documented sysctls, read-only, each declared and registered once, never unregistered, behind a once
+  guard, registered from NVRM's one-time sysctl block; their names are unique across NVRM's three counter modules
   (fence, DMA, channel notes) and NVRM.cpp;
 - NVRM's power-state numbers are the ones the note's ABI promises.
 
@@ -25,7 +25,7 @@ import sys
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 
 LEX = re.compile(r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])'""", re.S)
-DESIGN_SYSCTLS = ["nvrm_xid_count", "nvrm_xid_last", "nvrm_chan_kicks", "nvrm_chan_recovered", "nvrm_chan_dropped",
+NOTE_SYSCTLS = ["nvrm_xid_count", "nvrm_xid_last", "nvrm_chan_kicks", "nvrm_chan_recovered", "nvrm_chan_dropped",
                   "nvrm_chan_gave_up", "nvrm_chan_injected", "nvrm_chan_last_xid", "nvrm_chan_last_kind",
                   "nvrm_chan_last_why"]
 # what nothing reachable from the Xid hook or the note may do
@@ -173,15 +173,15 @@ def arms(t):
     # ---- sysctls ----
     names = sysctl_names(cpp)
     decls = re.findall(r"\bSYSCTL_\w+\s*\(\s*_debug\s*,\s*\w+\s*,\s*\w+\s*,\s*([^,]+),", cpp)
-    arm("the ten sysctls of the design, each declared once, all read-only",
-        sorted(names) == sorted(DESIGN_SYSCTLS) and len(decls) == 10
+    arm("the ten documented sysctls, each declared once, all read-only",
+        sorted(names) == sorted(NOTE_SYSCTLS) and len(decls) == 10
         and all(re.fullmatch(r"\s*CTLFLAG_RD\s*\|\s*CTLFLAG_LOCKED\s*", d) for d in decls))
     sb = fc.get("nvrm_chan_note_sysctls", ("", ""))[1]
     st = [s for s in re.split(r";", squash(sb)) if s.strip()]
     regs = re.findall(r"sysctl_register_oid\s*\(\s*&\s*sysctl__debug_(\w+)\s*\)", sb)
     arm("the sysctls are registered once each, behind a once guard that is the first statement",
         st and re.fullmatch(r"if \(!OSCompareAndSwap\(0, 1, &gCnSysctls\)\) return", st[0].strip())
-        and sorted(regs) == sorted(DESIGN_SYSCTLS)
+        and sorted(regs) == sorted(NOTE_SYSCTLS)
         and len(re.findall(r"\bsysctl_register_oid\s*\(", cpp)) == 10)
     blk = re.search(r"if\s*\(\s*!\s*sysctlsUp\s*\)\s*\{", nvrm)
     once = block_after(nvrm, blk.start()) if blk else ""
@@ -191,9 +191,9 @@ def arms(t):
         and once.find("sysctlsUp = true") < once.find("nvrm_chan_note_sysctls"))
     mods = {p: code_only(t[p]) for p in MODULES + ["kexts/NVRM/NVRM.cpp"] if p in t}
     every = [n for p in mods for n in sysctl_names(mods[p])]
-    arm("the stream's three modules and NVRM.cpp: every debug sysctl name is declared once",
+    arm("the fence, DMA and channel-note modules and NVRM.cpp: every debug sysctl name is declared once",
         len(MODULES) == len([p for p in MODULES if p in t]) and len(every) == len(set(every)) and len(every) > 10)
-    arm("the stream's three modules: each of their sysctls is registered exactly once and none is ever unregistered",
+    arm("the fence, DMA and channel-note modules: each of their sysctls is registered exactly once and none is ever unregistered",
         all(len(re.findall(r"\bsysctl_register_oid\s*\(\s*&\s*sysctl__debug_" + n + r"\s*\)", mods[p])) == 1
             for p in MODULES for n in sysctl_names(mods[p]))
         and not any(re.search(r"\bsysctl_unregister_oid\s*\(", mods[p]) for p in mods))
@@ -250,7 +250,7 @@ CONTROLS = [
      lambda s: broken(s, "kGpuPmSuspended = 1, kGpuPmLost = 2", "kGpuPmSuspended = 2, kGpuPmLost = 1")),
     ("a writable sysctl", "all read-only", CPP,
      lambda s: broken(s, "nvrm_chan_kicks, CTLFLAG_RD | CTLFLAG_LOCKED", "nvrm_chan_kicks, CTLFLAG_RW | CTLFLAG_LOCKED")),
-    ("a sysctl the design does not name", "the ten sysctls of the design", CPP,
+    ("a sysctl outside the documented ten", "the ten documented sysctls", CPP,
      lambda s: broken(s, "nvrm_chan_injected, CTLFLAG_RD", "nvrm_chan_injects, CTLFLAG_RD")),
     ("a sysctl registered twice", "registered once each", CPP,
      lambda s: broken(s, "    sysctl_register_oid(&sysctl__debug_nvrm_chan_kicks);\n",
