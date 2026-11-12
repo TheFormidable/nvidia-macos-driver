@@ -106,6 +106,29 @@ int nvx_atomic_lock(int kind, void *lock);
 // os_semaphore_may_sleep() answered no: a counter.
 void nvx_atomic_maysleep_false(void);
 
+// ---- os-xnu.cpp: which thread is inside rm_isr, one slot per GPU (what os_is_isr() answers from) ----
+#define NV_XNU_ISR_SLOTS 8   // NVRM_DEVTAB_MAX: a ninth card is not started
+// Written only by the owning GPU's interrupt handler: its own thread just before rm_isr, NULL right after.
+extern volatile thread_t nv_xnu_isr_threads[NV_XNU_ISR_SLOTS];
+// The slot of a starting GPU (`owner` is its NVRM object; the same slot again when it already holds one), or -1 when
+// all are taken. Thread context; no lock (compare-and-swap).
+int nv_xnu_isr_slot_claim(void *owner);
+// Gives the slot back, once the GPU's interrupt source is removed. Does nothing for -1 or a slot `owner` does not hold.
+void nv_xnu_isr_slot_release(int slot, void *owner);
+
+// ---- nv_xnu_timers.cpp: the RM's RC timer (1 Hz) and nano timers ----
+// The RC timer is on unless the boot-arg nvrmrctimer=0. These are for the kext's own paths; the RM starts and stops the
+// timer itself through nv_start_rc_timer / nv_stop_rc_timer. All thread context; each may wait for a tick that is
+// running, bounded (10 s, 2 s for a suspend), and does nothing for a GPU whose timer was never started.
+void nv_xnu_rc_suspend(nv_state_t *nv);   // before RM standby or shutdown: no tick runs from now on
+void nv_xnu_rc_resume(nv_state_t *nv);    // after a resume that worked: ticks again if the RM had started the timer
+void nv_xnu_rc_detach(nv_state_t *nv);    // after rm_shutdown_adapter: no tick will carry this nv again; idempotent
+// After rm_shutdown_adapter: every nano timer of this GPU that the RM did not destroy is stopped, counted and never
+// reused; no callback will carry this nv again. Thread context; at most 2 s in all.
+void nv_xnu_nano_retire(nv_state_t *nv);
+// Registers the timers' read-only sysctls. Thread context; once (a second call does nothing).
+void nv_xnu_timers_sysctls(void);
+
 }
 
 enum { NVX_LOCK_MUTEX, NVX_LOCK_RW_READ, NVX_LOCK_RW_WRITE, NVX_LOCK_SEMA };
