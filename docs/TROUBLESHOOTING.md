@@ -136,8 +136,9 @@ line on a Mac whose display works is worth a report with the macOS build.
   NVAccel.kext, or the two are of different releases. `nvrmfence=0` does not turn off the event wait or the unlocked
   page-off; they have their own ways back (`NVRM_EVENT_WAIT=0`, `nvaccel_pageoff_locked=1`).
 - `NVRM-xnu: fence: pid N: ... - this channel is not watched` in the log: the kernel could not wire a page of that
-  process's GPU channel, or its view of the page did not follow what the process wrote. That process uses 2.9's marks
-  and tags; everything else is unaffected. Send the line: which of the two it was decides the fix.
+  process's GPU channel, or the page is not system memory (it lies in one of the GPU's own memory windows, or beyond
+  installed memory + 4 GB), or its view of the page did not follow what the process wrote. That process uses 2.9's
+  marks and tags; everything else is unaffected. Send the line: which of them it was decides the fix.
 - In the plugin's log (`nvmtl.log`): `surface fences: off (NVK or the kext answered 0x80000002 ...)` means the kext's
   fence is off (`nvrmfence=0`, or the kext or NVK is older than the plugin) and the plugin uses the 2.9 busy tags and
   pending marks; nothing to do unless the fence was expected to be on. Many `surface fences: hold refused
