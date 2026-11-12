@@ -443,8 +443,14 @@ with tempfile.TemporaryDirectory() as d:
     arm("on a made-up tree: a declaration in a kind of file the walk does not read is refused, prose about a sysctl is not",
         any(p.startswith("kexts/NVNew/table.def: a sysctl declaration in a kind of file") for p in made_up.problems)
         and not any("notes.md" in p or "nv_outside" in p for p in made_up.problems))
-    arm("on a made-up tree: a listed name that no sysctl declares writable any more is reported as stale",
-        any(p.startswith("nvaccel_pageoff_unlocked_wait is on the reviewed list but") for p in made_up.stale))
+    # No name of the list is spelled here: an arm that named one would fail on the day that sysctl turns read-only
+    # and leaves the list, which is the very change the stale check asks for.
+    arm("on a made-up tree: every listed name that no sysctl there declares writable is reported as stale",
+        bool(WRITABLE) and [p.split(" ", 1)[0] for p in made_up.stale] == sorted(WRITABLE), "; ".join(made_up.stale)[:300])
+    listed = sorted(WRITABLE)[0]
+    (d / "kexts/NVNew/listed.cpp").write_text(RW.replace("nv_new_knob", listed))
+    arm("control: a listed name that the tree does declare writable is not reported",
+        [p.split(" ", 1)[0] for p in review(d).stale] == sorted(WRITABLE - {listed}))
 if FAILS:
     print("\nwhat failed:")
     for name, detail in FAILS:

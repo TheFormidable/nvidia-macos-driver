@@ -136,7 +136,7 @@ arm("control: the same for the diff -ruN spelling, which nvk-macos.patch uses",
     created_file(before + as_new_file(there, sample, "ruN") + after, there) == (sample, ""))
 arm("control: a file without a final newline comes back without one",
     created_file(as_new_file(there, sample[:-1]), there) == (sample[:-1], "") and sample.endswith(b"\n"))
-changed = sample.replace(b"NVRM_EVW_SEL_NOTE", b"NVRM_EVW_SEL_NOTE ", 1)
+changed = sample.replace(b"#define", b"#define ", 1)     # any header has one; no name of the interface is spelled here
 got = created_file(as_new_file(there, changed), there)[0]
 arm("control: one added space in the copy is a difference, and the line is named",
     changed != sample and got is not None and got != sample and first_difference(sample, got).startswith("line "))
