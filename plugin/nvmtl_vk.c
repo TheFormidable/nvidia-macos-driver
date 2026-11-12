@@ -325,70 +325,111 @@ static void nvmtl_buffer_grace_reap(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
-// NVMTL_IMAGE_GRACE=1 (default off): a dead image's view, image and memory are released only once every submit that was
-// in flight when it died has completed, instead of at once. A command buffer still executing can hold a descriptor it
-// read before the slot was rewritten, or an address it computed earlier, to an image the app has already released; with
-// the memory gone that read is a page fault that takes the channel, with it still mapped it is a stale read of a dead
-// texture and nothing more. The held images are reaped as submits finish (one in-order queue), so the cost is the few
-// frames of memory a release burst occupies. The census counts what is held. Off, every path is exactly as before.
+// The image grace (on unless NVMTL_IMAGE_GRACE=0): a dead image's view, image and memory are released only once no
+// command buffer that could still read it is open or in flight, instead of at once. A command buffer still executing,
+// or begun before the death and submitted after it, can hold a descriptor it read before the slot was rewritten, or an
+// address it computed earlier, to an image the app has already released; with the memory gone that read is a page fault
+// that takes the channel, with it still mapped it is a stale read of a dead texture and nothing more. Which command
+// buffers a dead image waits for is decided in nvmtl_cmd_life.h; the held images are reaped as submits finish (one
+// in-order queue) and when an unsubmitted command buffer is dropped, so the cost is the memory a release burst occupies
+// for as long as the command buffers open at the burst take to be submitted and completed. "vk: image grace:" lines
+// count what is held. NVMTL_IMAGE_GRACE=0 (the environment or nvrm610.conf) releases at once, as in 2.9 by default.
 static int nvmtl_image_grace_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_GRACE"); on = e && e[0] == '1';
-        if (on) nvlog("vk: dead images are released only after the submits in flight at their death complete (NVMTL_IMAGE_GRACE=1)"); }
+    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_GRACE"); on = !(e && e[0] == '0');
+        nvlog("vk: dead images are released only once no command buffer that could read them is open or in flight (NVMTL_IMAGE_GRACE=%d)", on); }
     return on;
 }
-typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; uint64_t seq; struct nvmtl_grace_img *next; } nvmtl_grace_img;
+typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; nvmtl_cl_mark mark; struct nvmtl_grace_img *next; } nvmtl_grace_img;
 static pthread_mutex_t g_grace_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, g_grace_reaped, g_cmd_finished_seq;
+static nvmtl_grace_img *g_grace_unsettled;   // the oldest held entry whose mark is not settled; every one before it is
+static nvmtl_cl_state g_cl;   // the open command buffers by cohort and the queue sequence (nvmtl_cmd_life.h); under g_grace_lock
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
-/* The lifetime horizon and all changes to its counts share g_grace_lock.
-   Diagnostic readers may read the atomic counts without that lock. Queue sequence
-   allocation additionally remains inside the queue submission critical section. */
-static uint64_t nvmtl_life_begin(void)
+/* A command buffer's life is counted in three places and nowhere else: nvmtl_vk_cmd_begin counts the begin, the queue
+   submit counts the end of the command buffer and of those that ride in the same vkQueueSubmit (the pre-submit prologue,
+   the counter reset), and nvmtl_cmd_retire - which every other way out goes through: abandon, a submit that fails
+   before the queue, a prologue with nothing in it - counts the end of one that never reached the queue. Every counted
+   begin is followed by exactly one of those ends on every path; the tag in the record (nvk_cmdbuf.life) makes a second
+   end, or the end of a record that was never counted, count nothing. Sequence numbers are handed out under the queue
+   submission mutex as well, so they follow the order of the real submits. The atomics mirror the state for readers that
+   do not take the lock (g_cmd_abandoned = ended without a submit of their own: dropped or riding). */
+static void nvmtl_life_mirror_locked(void)
+{
+    g_cmd_begun = g_cl.begun; g_cmd_submitted = g_cl.submitted; g_cmd_abandoned = g_cl.rode + g_cl.dropped;
+}
+static uint64_t nvmtl_life_begin(nvk_cmdbuf *c)
 {
     pthread_mutex_lock(&g_grace_lock);
-    uint64_t id = ++g_cmd_begun;
+    const uint64_t id = nvmtl_cl_begin(&g_cl, &c->life);
+    nvmtl_life_mirror_locked();
     pthread_mutex_unlock(&g_grace_lock);
     return id;
 }
-static void nvmtl_life_abandon(void)
-{
-    pthread_mutex_lock(&g_grace_lock); ++g_cmd_abandoned; pthread_mutex_unlock(&g_grace_lock);
-}
-static uint64_t nvmtl_life_submit(void)
+static uint64_t nvmtl_life_submit(nvk_cmdbuf *c, nvk_cmdbuf *rider1, nvk_cmdbuf *rider2)
 {
     pthread_mutex_lock(&g_grace_lock);
-    uint64_t id = ++g_cmd_submitted;
+    if (rider1) nvmtl_cl_ride(&g_cl, &rider1->life);
+    if (rider2) nvmtl_cl_ride(&g_cl, &rider2->life);
+    const uint64_t id = nvmtl_cl_submit(&g_cl, &c->life);
+    nvmtl_life_mirror_locked();
     pthread_mutex_unlock(&g_grace_lock);
     return id;
 }
-
-// The submit a dead resource must outlive: every submit in flight at its death AND every command buffer already begun
-// but not yet submitted - a command buffer records the handle, is committed after the app released the resource, and
-// only then reads the slot. Pending command buffers submit after the ones in flight, so the bound is the count begun
-// less the abandoned ones; a bound too high only holds the release a little longer.
-static uint64_t nvmtl_grace_seq_locked(void)
+static void nvmtl_life_end(nvk_cmdbuf *c)
 {
-    const uint64_t pending = g_cmd_begun > g_cmd_submitted + g_cmd_abandoned ? g_cmd_begun - g_cmd_submitted - g_cmd_abandoned : 0;
-    return g_cmd_submitted + pending;
+    if (!c->life.open) return;   // a record is used by one thread at a time; its tag changes only under the lock
+    pthread_mutex_lock(&g_grace_lock);
+    nvmtl_cl_drop(&g_cl, &c->life);
+    nvmtl_life_mirror_locked();
+    pthread_mutex_unlock(&g_grace_lock);
+}
+/* Puts a dead image, view or texel view on the grace list: 1. Returns 0 and keeps nothing when nothing can read it any
+   more - no command buffer was open at its death and every submit then in flight has completed - and the caller
+   releases it at once, as without the grace. That is also what keeps an idle application from holding its last
+   releases until a submit that never comes. */
+static int nvmtl_grace_hold(nvmtl_grace_img *e)
+{
+    pthread_mutex_lock(&g_grace_lock);
+    nvmtl_cl_death(&g_cl, &e->mark);
+    const int keep = !nvmtl_cl_due(&g_cl, &e->mark, g_cmd_finished_seq);
+    static uint64_t peak = 255;
+    uint64_t held = 0, open = 0;
+    if (keep) { if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e; g_grace_tail = e; g_grace_n++;
+                if (!e->mark.resolved && !g_grace_unsettled) g_grace_unsettled = e;
+                if (g_grace_n > peak && !(g_grace_n & (g_grace_n - 1))) { peak = g_grace_n; held = g_grace_n; open = nvmtl_cl_open(&g_cl); } }
+    pthread_mutex_unlock(&g_grace_lock);
+    if (held) nvlog("vk: image grace: %llu dead images held at once (most so far; %llu command buffers open) in %s", (unsigned long long)held, (unsigned long long)open, getprogname());
+    return keep;
 }
 static void nvmtl_vk_texel_view_destroy_now(void *alias, void *view);
 static void nvmtl_image_grace_reap(void)
 {
     nvmtl_grace_img *due = NULL, **tail = &due; uint64_t n = 0;
     pthread_mutex_lock(&g_grace_lock);
-    while (g_grace_head && g_grace_head->seq <= g_cmd_finished_seq) {
+    const uint64_t forced0 = g_cl.forced;
+    // Every held mark that can be settled is settled now, not when it reaches the front: settled later, it would wait
+    // for a submit made after its predecessor went, and a steady rate of deaths would never be caught up with.
+    while (g_grace_unsettled && nvmtl_cl_settle(&g_cl, &g_grace_unsettled->mark, g_cmd_finished_seq)) g_grace_unsettled = g_grace_unsettled->next;
+    while (g_grace_head && nvmtl_cl_due(&g_cl, &g_grace_head->mark, g_cmd_finished_seq)) {
         nvmtl_grace_img *e = g_grace_head; g_grace_head = e->next; if (!g_grace_head) g_grace_tail = NULL;
+        if (g_grace_unsettled == e) g_grace_unsettled = e->next;
         e->next = NULL; *tail = e; tail = &e->next; g_grace_n--; g_grace_reaped++; n++;
     }
+    const uint64_t forced = g_cl.forced, reaped = g_grace_reaped, held = g_grace_n, open = nvmtl_cl_open(&g_cl);
     pthread_mutex_unlock(&g_grace_lock);
+    // A command buffer open since before these deaths was neither submitted nor dropped while the queue completed
+    // NVMTL_CL_PATIENCE submits: the images it held are released as without the grace (nvmtl_cmd_life.h).
+    if (forced != forced0 && (forced0 == 0 || (forced >> 8) != (forced0 >> 8)))
+        nvlog("vk: image grace: %llu dead images released %u submits after their death with a command buffer from before it still open (%llu open now) in %s",
+              (unsigned long long)forced, NVMTL_CL_PATIENCE, (unsigned long long)open, getprogname());
     while (due) { nvmtl_grace_img *e = due; due = e->next;
                   if (e->bufview || e->alias) nvmtl_vk_texel_view_destroy_now(e->alias, e->bufview);
                   else nvmtl_vk_image_destroy_now(&e->img);
                   free(e); }
-    if (n && (g_grace_reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)g_grace_reaped, (unsigned long long)g_grace_n);
+    if (n && (reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)reaped, (unsigned long long)held);
 }
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
 {
@@ -7724,7 +7765,7 @@ int nvmtl_vk_cmd_begin(nvk_queue *q, nvk_cmdbuf *out)
             pvkCmdWriteTimestamp(out->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timing, 0);
         }
     }
-    out->begin_id = (uint32_t)nvmtl_life_begin();
+    out->begin_id = (uint32_t)nvmtl_life_begin(out);
     t_fx_cb = out->cb; t_fx_ord = 0;
     nvmtl_perf_note(NVP_BEGIN, b0, 0);
     return 0;
@@ -8597,6 +8638,7 @@ int nvmtl_vk_fill_buffer(nvk_queue *q, nvk_buffer *b, size_t offset, size_t size
 static int nvmtl_counter_flush(nvk_cmdbuf *c);
 static void nvmtl_counter_retire(nvk_cmdbuf *c);
 static int nvmtl_counter_reset_finish(nvk_cmdbuf *c, VkCommandBuffer *reset);
+static nvk_cmdbuf *nvmtl_counter_reset_record(nvk_cmdbuf *c);
 static int g_pt_left; static uint64_t g_pt_seq;
 void nvmtl_vk_pt_note(nvk_cmdbuf *c, uint32_t fs)
 {
@@ -8620,6 +8662,7 @@ void nvmtl_vk_cmd_end_render(nvk_cmdbuf *c) {
 
 static void nvmtl_cmd_retire(nvk_cmdbuf *c)
 {
+    nvmtl_life_end(c);   // dropped without reaching the queue; nothing when its submit already counted the end
     nvmtl_fcopy_release(c);
     nvmtl_counter_retire(c);
     nvmtl_vk_cmd_retire_occlusion(c);
@@ -8677,9 +8720,9 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
 int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
 {
     if (g_state != 1 || !c || !c->cb) return 0;
-    nvmtl_life_abandon();
     nvmtl_hz_forget((VkCommandBuffer)c->cb);
     nvmtl_cmd_retire(c);
+    nvmtl_image_grace_reap();   // a dead image may have been waiting for this command buffer alone
     return 0;
 }
 
@@ -8809,9 +8852,9 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     uint64_t *const pt = f->pt;
     if (c && c->dead) return -3;   // made after the loss: nothing was recorded, nothing is in flight
     if (g_state != 1 || !c || !c->cb) return -2;
-    if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); return -1; }
+    if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); nvmtl_image_grace_reap(); return -1; }
     VkCommandBuffer counter_reset = VK_NULL_HANDLE;
-    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvmtl_cmd_retire(c); return -1; }
+    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvmtl_cmd_retire(c); nvmtl_image_grace_reap(); return -1; }
     c->timing.clock = nvmtl_clock_snapshot();
     c->timing.host_before_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (c->timing_pool && !c->in_rp)
@@ -8824,11 +8867,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     const uint32_t wseq = nvmtl_keep_on() ? nvmtl_wit_record(c) : 0;
     VkResult result = pvkEndCommandBuffer(c->cb);
     const uint64_t sB = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); nvmtl_image_grace_reap(); return -1; }
     VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence fence;
     result = pvkCreateFence(g_dev, &fci, NULL, &fence);
     const uint64_t sC = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); nvmtl_image_grace_reap(); return -1; }
     nvmtl_prologue *const pre = &f->pre;
     pthread_mutex_lock(&nvmtl_submit_mutex);
     if (pro && nvmtl_pre_submit_hook) {
@@ -8860,8 +8903,9 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     if (pt[0]) { pt[1] = pt[0] + (sA - pt[0]) + (sD - sC); pt[2] = pt[1] + (sB - sA) + (sE - sD); pt[3] = pt[2] + (sC - sB); }
     result = g_state == 1 ? pvkQueueSubmit(g_queue, 1, &si, fence) : VK_ERROR_DEVICE_LOST;
     /* Keep the software sequence in the same order as actual queue submissions.
-       A later submit must never acquire an earlier lifetime sequence. */
-    c->fx_seq = nvmtl_life_submit();
+       A later submit must never acquire an earlier lifetime sequence. The prologue and the counter reset went to the
+       queue inside this submit: they end here too, under its sequence. */
+    c->fx_seq = nvmtl_life_submit(c, pre->begun ? &pre->cb : NULL, counter_reset ? nvmtl_counter_reset_record(c) : NULL);
     pthread_mutex_unlock(&nvmtl_submit_mutex);
     pt[4] = nvmtl_perf_now();
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
@@ -9130,13 +9174,9 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     if (nvmtl_image_grace_on()) {
         nvmtl_grace_img *e = calloc(1, sizeof *e);
         if (e) {
-            e->img = *i; memset(i, 0, sizeof *i);
-            pthread_mutex_lock(&g_grace_lock);
-            e->seq = nvmtl_grace_seq_locked();   // the last submit that can still read it (in flight or begun)
-            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
-            g_grace_tail = e; g_grace_n++;
-            pthread_mutex_unlock(&g_grace_lock);
-            return;
+            e->img = *i;
+            if (nvmtl_grace_hold(e)) { memset(i, 0, sizeof *i); return; }
+            free(e);   // nothing can read it any more: released at once below
         }
     }
     nvmtl_vk_image_destroy_now(i);
@@ -10443,12 +10483,8 @@ void nvmtl_vk_image_view_destroy(void *view)
         nvmtl_grace_img *e = calloc(1, sizeof *e);
         if (e) {
             e->img.view = view;   // img NULL: a view-only entry, nvmtl_vk_image_destroy_now destroys the view alone
-            pthread_mutex_lock(&g_grace_lock);
-            e->seq = nvmtl_grace_seq_locked();
-            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
-            g_grace_tail = e; g_grace_n++;
-            pthread_mutex_unlock(&g_grace_lock);
-            return;
+            if (nvmtl_grace_hold(e)) return;
+            free(e);
         }
     }
     pvkDestroyImageView(g_dev, (VkImageView)view, NULL);
@@ -10492,12 +10528,8 @@ void nvmtl_vk_texel_view_destroy(void *alias, void *view)
         nvmtl_grace_img *e = calloc(1, sizeof *e);
         if (e) {
             e->bufview = view; e->alias = alias;
-            pthread_mutex_lock(&g_grace_lock);
-            e->seq = nvmtl_grace_seq_locked();
-            if (g_grace_tail) g_grace_tail->next = e; else g_grace_head = e;
-            g_grace_tail = e; g_grace_n++;
-            pthread_mutex_unlock(&g_grace_lock);
-            return;
+            if (nvmtl_grace_hold(e)) return;
+            free(e);
         }
     }
     nvmtl_vk_texel_view_destroy_now(alias, view);
@@ -11024,6 +11056,11 @@ static void nvmtl_counter_retire(nvk_cmdbuf *c)
         pvkDestroyQueryPool(g_dev, p->pool, NULL); free(p); p = next;
     }
     free(r->pending); free(r); c->counter_recording = NULL;
+}
+static nvk_cmdbuf *nvmtl_counter_reset_record(nvk_cmdbuf *c)
+{
+    nvmtl_counter_recording *r = c->counter_recording;
+    return r ? &r->reset : NULL;
 }
 void *nvmtl_vk_ts_pool_create(uint32_t count)
 {

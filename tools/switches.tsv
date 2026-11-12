@@ -10,10 +10,10 @@
 #ceiling dev dlss 13
 #ceiling dev nvencvt 50
 #ceiling dev nvk 77
-#ceiling dev plugin 230
+#ceiling dev plugin 229
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 495
+#ceiling unreviewed all 494
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -254,7 +254,7 @@ env	NVMTL_I64_HALVES	dev	unset	2.9	-	unreviewed
 env	NVMTL_ICB_INDEX_CAP	dev	unset	2.9	-	unreviewed
 env	NVMTL_ICD_LIB	dev	unset	2.9	-	unreviewed
 env	NVMTL_IDXCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
-env	NVMTL_IMAGE_GRACE	dev	unset	2.9	-	unreviewed
+env	NVMTL_IMAGE_GRACE	escape	on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9)	2.9	3.2	A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault.
 env	NVMTL_IMAGE_LAYOUT_GENERAL	dev	unset	2.9	-	unreviewed
 env	NVMTL_IMAGE_POOL	dev	unset	2.9	-	unreviewed
 env	NVMTL_INDIRECT_WITNESS	dev	unset	2.9	-	unreviewed

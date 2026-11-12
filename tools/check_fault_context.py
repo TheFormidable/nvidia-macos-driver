@@ -19,14 +19,14 @@ vk = read("nvmtl_vk.c"); objc = read("NVMTLObjects.m"); hdr = read("nvmtl_fault_
 hooks = [
     ("nvmtl_vk.c", r"nvmtl_fx_note_dispatch\(c, p\);\n\s*pvkCmdDispatch(Indirect)?\(", 4),   # threads, indirect tg, groups, indirect
     ("nvmtl_vk.c", r"nvmtl_image_grace_reap\(\);", 1),                                       # NVMTL_IMAGE_GRACE: dead images reaped as submits finish
-    ("nvmtl_vk.c", r"c->fx_seq = g_cmd_submitted;", 1),
+    ("nvmtl_vk.c", r"c->fx_seq = nvmtl_life_submit\(c, ", 1),
     ("nvmtl_vk.c", r"fault context: this command buffer's address page", 1),   # the binding-table pages by GPU address at device loss
     ("NVMTLObjects.m", r"nvmtl_vk_dispatch_key\(", 2),                        # both compute dispatch paths carry the kernel hash
     ("NVMTLDevice.m", r"nvlog_every\(\"pipeline key:", 1),                      # never throttled
     ("nvmtl_vk.c", r"nvmtl_heap_binding_refused\(", 4),
     ("nvmtl_vk.c", r"VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL \}", 1),   # a dropped slot's storage descriptor goes back to the dummy                        # definition + compute + vertex + fragment: a module indexing a heap binding the heap lacks never runs
     ("nvmtl_vk.c", r"nvmtl_fx_bind_storage\(&c->fx", 1),
-    ("nvmtl_vk.c", r"nvmtl_fx_submit\(&g_fx, g_cmd_submitted", 1),
+    ("nvmtl_vk.c", r"nvmtl_fx_submit\(&g_fx, c->fx_seq, c->cb, &c->fx\)", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_image_gone\(&g_fx, g_cmd_submitted", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_slot_gone\(&g_fx, g_cmd_submitted", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_dump\(\"", 3),                                              # queue submit failed, fence wait failed, a dropped command buffer
@@ -65,7 +65,7 @@ hooks = [
     ("nvmtl_vk.c", r"holds handle 0x%016llx: bit 62", 1),                                # the full gpuResourceID the kernel masked
     ("nvmtl_vk.c", r"nvmtl_dwit_mark\(c, c->fx.total\);", 4),                           # a witness word after every compute dispatch form
     ("nvmtl_vk.c", r"nvmtl_dwit_mark\(c, 0x8000u", 1),                                   # and at every render pass end
-    ("nvmtl_vk.c", r"out->begin_id = \(uint32_t\)g_cmd_begun;", 1),
+    ("nvmtl_vk.c", r"out->begin_id = \(uint32_t\)nvmtl_life_begin\(out\);", 1),
     ("nvmtl_vk.c", r"nvmtl_dwit_last\(c\)", 1),                                        # the faulting dispatch singled out at loss
     ("nvmtl_vk.c", r"nvmtl_sl_write\(&g_sl, k, 2, nvmtl_heap_storage_dummy\(\), 0\)", 1),   # the prefill is recorded (the heap's storage dummy)
     ("NVMTLObjects.m", r"nvmtl_vk_image_parked\(img\)", 2),                            # both parks
