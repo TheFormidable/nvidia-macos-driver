@@ -65,9 +65,15 @@ static struct nvf_table gT;                  // under gFLock, except the two loc
 // The kernel's hold on one channel's two pages. Each descriptor is prepared, which wires the page and keeps it alive
 // whatever the process or the RM do with their own mappings, until complete(). The slot owns both. They are let go
 // (complete and release, after the lock) by CHAN_DEL, by a CHAN_VERIFY that fails, by CHAN_REBIND for the notifier
-// it replaces, by nvrm_fence_pid_gone for everything an exiting process has, and by nvrm_fence_owner_gone for everything
-// a connection still has; every connection ends there, so nothing stays pinned past its close. A producer that frees a page before its CHAN_DEL only delays the page's
-// return to the system until then.
+// it replaces, by nvrm_fence_pid_gone for everything an exiting process has, and by nvrm_fence_owner_gone for
+// everything a connection still has; every connection ends there, so nothing stays pinned past its close.
+// What a view costs while it is held: the page stays wired, and the memory object it belongs to cannot be taken apart.
+// When a producer frees or unmaps a registered page before its CHAN_DEL, the kernel waits for the view to go before it
+// destroys that object, and it waits on the one thread that reaps dead memory objects: the objects queued behind this
+// one (those that still had paging in flight when they died) are not freed either until the view goes. NVK deletes the
+// registration first, and when a process exits its connections close, and the views go, before its address space is
+// taken down. So this happens only to a live process that breaks the rule, and it ends with its connection at the
+// latest. Any driver that keeps user memory prepared has the same cost; it is the price of never mapping the page.
 struct NvfView {
     IOMemoryDescriptor *sem, *err;           // the semaphore page; the page that contains the error notifier
     UInt64 probe0;                           // the probe word as it read at CHAN_ADD: CHAN_VERIFY must read another
