@@ -9,12 +9,17 @@ had it got that far. This checks, without a GPU:
     older layout as the control: it must NOT give the picture back;
   * which layout a plane gets from the NVDEC class and its element size;
   * the class table (control: the revision before this change has no Blackwell class);
-  * the card kind from the PCI device ID;
+  * the card kind from the PCI device ID, asked of the card's display function only: the scan of the I/O registry is
+    compiled out of the source and run on made-up registries (control: the audio function of an RTX 5050, whose ID
+    lies in the GA10x block, is taken for a GA10x card once it is given a display class);
+  * that on Blackwell nothing registers before the H.264 decode self-test has passed in the process: the two entry
+    points, compiled out of the source and run on a table of card kinds and verdicts (controls: the same card with a
+    passing self-test registers; every other kind registers without being asked);
   * that a channel which stopped fetching cannot make the library write past its push buffer (control: the function
     as it was before does).
 
 usage: test_nvencvt_blackwell.py [repo root]"""
-import pathlib, platform, random, shutil, subprocess, sys, tempfile
+import os, pathlib, platform, random, re, shutil, subprocess, sys, tempfile
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 V = root / 'vendor/nvenc'
@@ -165,19 +170,111 @@ else:
 vt = (V / 'vt/nvencvt.c').read_text()
 kind = function(vt, 'static int gpu_kind_for_device(')
 check('the card kind is a function of the PCI device ID', kind is not None)
-if kind and have_cc:
+cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+if not cc:
+    print('SKIP the card kind tables need a C compiler')
+if kind and cc:
     enum = vt[vt.index('enum { GPU_NONE'):vt.index('\n', vt.index('enum { GPU_NONE'))]
     src = ('#include <stdio.h>\n' + enum + '\n' + kind +
            'int main(void) { unsigned ids[] = { 0x2d05, 0x2b85, 0x2f04, 0x2684, 0x2484, 0x1f82, 0x1f08, 0x1e84, 0x2184, 0x1c03, 0x3000 };\n'
            '  for (int i = 0; i < 11; i++) printf("%d ", gpu_kind_for_device(ids[i])); return 0; }\n')
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d); (d / 'k.c').write_text(src)
-        r = subprocess.run(['clang', '-o', str(d / 'k'), str(d / 'k.c')], capture_output=True, text=True)
+        r = subprocess.run([cc, '-o', str(d / 'k'), str(d / 'k.c')], capture_output=True, text=True)
         got = subprocess.run([str(d / 'k')], capture_output=True, text=True).stdout.split() if r.returncode == 0 else [r.stderr[-200:]]
         # RTX 5060, 5090, 5070 -> Blackwell 4; RTX 4090 -> Ada 1; RTX 3070 -> Ampere 3; GTX 1650 -> TU117 2;
         # RTX 2060, 2080, GTX 1660 -> Turing 5; GTX 1060 (Pascal) and an ID past Blackwell -> none
         check('RTX 50 is Blackwell, RTX 20 and GTX 1660 are Turing, the kinds known before are unchanged, Pascal is none',
               got == ['4', '4', '4', '1', '3', '2', '5', '5', '5', '0', '0'], ' '.join(got))
+
+# The device ID is asked of the GPU and of nothing else. The audio function of an RTX 40 card, of most RTX 50 cards and
+# of the smaller RTX 30 cards has an ID (0x228b-0x22ec) inside the GA10x block, and the registry does not promise to
+# list a card's functions in order. The scan is compiled out of the source and run on made-up registries.
+REGISTRY = r'''
+#include <stdio.h>
+#include <string.h>
+/* stand-ins for the I/O registry: PCI functions in the order the registry hands them out, every property four bytes,
+   as IOPCIFamily publishes vendor-id, device-id and class-code */
+typedef unsigned io_iterator_t, io_object_t, CFTypeID;
+typedef unsigned char UInt8;
+typedef long CFIndex;
+typedef const void *CFTypeRef, *CFStringRef;
+typedef struct { CFIndex location, length; } CFRange;
+static CFRange CFRangeMake(CFIndex l, CFIndex n) { CFRange r = { l, n }; return r; }
+enum { KERN_SUCCESS = 0, kIOMainPortDefault = 0 };
+#define CFSTR(s) (s)
+typedef struct { unsigned vendor, device, cls; } Fn;
+static const Fn *reg;
+static unsigned nreg, at, named, held;   /* named: the function the card's name was read from; held: properties not released */
+static const char *IOServiceMatching(const char *name) { return name; }
+static int IOServiceGetMatchingServices(int port, const char *match, io_iterator_t *it) { (void)port; (void)match; at = 0; *it = 1; return KERN_SUCCESS; }
+static io_object_t IOIteratorNext(io_iterator_t it) { (void)it; return at < nreg ? ++at : 0; }
+static void IOObjectRelease(unsigned o) { (void)o; }
+static CFTypeRef IORegistryEntryCreateCFProperty(io_object_t d, CFStringRef key, void *alloc, unsigned opts)
+{
+    const Fn *f = &reg[d - 1]; (void)alloc; (void)opts;
+    const unsigned *p = !strcmp(key, "vendor-id") ? &f->vendor : !strcmp(key, "device-id") ? &f->device
+                      : !strcmp(key, "class-code") ? &f->cls : NULL;
+    if (p) held++;
+    return p;
+}
+static CFTypeID CFDataGetTypeID(void) { return 20; }
+static CFTypeID CFGetTypeID(CFTypeRef p) { (void)p; return 20; }
+static CFIndex CFDataGetLength(CFTypeRef p) { (void)p; return 4; }
+static void CFDataGetBytes(CFTypeRef p, CFRange r, UInt8 *out) { memcpy(out, (const UInt8 *)p + r.location, (size_t)r.length); }
+static void CFRelease(CFTypeRef p) { (void)p; held--; }
+static void card_name_from(io_object_t d) { named = d; }
+%(enum)s
+%(kind)s
+%(function)s
+%(scan)s
+#define RUN(...) do { static const Fn r[] = { __VA_ARGS__ }; reg = r; nreg = sizeof r / sizeof r[0]; named = 0; \
+                      const int k = pci_gpu_kind(); printf("%%d %%u %%u\n", k, named, held); } while (0)
+enum { NV = 0x10de, VGA = 0x030000, THREE_D = 0x030200, AUDIO = 0x040300, USB = 0x0c0330, SERIAL = 0x0c8000 };
+int main(void)
+{
+    printf("%%d\n", gpu_kind_for_device(0x22ec));
+    RUN({ NV, 0x2d83, VGA }, { NV, 0x22ec, AUDIO });                             /* an RTX 5050, then its audio function */
+    RUN({ NV, 0x22ec, AUDIO }, { NV, 0x2d83, VGA });                             /* the same card, the audio function first */
+    RUN({ NV, 0x22ba, AUDIO }, { NV, 0x2684, VGA });                             /* an RTX 4090, audio first */
+    RUN({ NV, 0x228b, AUDIO }, { NV, 0x2484, VGA });                             /* an RTX 3070, audio first */
+    RUN({ NV, 0x22ec, AUDIO });                                                  /* no display function at all */
+    RUN({ 0x1002, 0x2684, VGA }, { NV, 0x2d83, THREE_D });                       /* another vendor's GPU with an ID of ours, then a 3D controller */
+    RUN({ NV, 0x1c03, VGA }, { NV, 0x10f1, AUDIO });                             /* a GTX 1060 */
+    RUN({ NV, 0x1c03, VGA }, { NV, 0x2d83, VGA });                               /* a GTX 1060, then an RTX 5050 */
+    RUN({ NV, 0x2684, VGA }, { NV, 0x2d83, VGA });                               /* an RTX 4090, then an RTX 5050 */
+    RUN({ NV, 0x1ad8, USB }, { NV, 0x1ad9, SERIAL }, { NV, 0x10f8, AUDIO }, { NV, 0x1e87, VGA });   /* an RTX 2080's four functions, the GPU last */
+    RUN({ NV, 0x22ec, VGA }, { NV, 0x2d83, VGA });                               /* control: that ID with a display class */
+    reg = NULL; nreg = 0; named = 0;
+    printf("%%d %%u %%u\n", pci_gpu_kind(), named, held);                         /* an empty registry */
+    return 0;
+}
+'''
+scan = function(vt, 'static int pci_gpu_kind(')
+perfn = function(vt, 'static int gpu_kind_for_function(')
+check('the registry scan asks each function for its class as well as its ID',
+      scan is not None and perfn is not None and 'gpu_kind_for_function(' in scan and 'gpu_kind_for_device(' not in scan
+      and 'CFSTR("class-code")' in scan)
+if kind and scan and perfn and cc:
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        (d / 'r.c').write_text(REGISTRY % {'enum': enum, 'kind': kind, 'function': perfn, 'scan': scan})
+        r = subprocess.run([cc, '-Wall', '-Werror', '-Wno-unused-function', '-o', str(d / 'r'), str(d / 'r.c')], capture_output=True, text=True)
+        check('the registry scan compiles on its own', r.returncode == 0, r.stderr.strip()[-400:])
+        if r.returncode == 0:
+            out = subprocess.run([str(d / 'r')], capture_output=True, text=True).stdout.split('\n')
+            alone, rows = out[0].strip(), [tuple(map(int, l.split())) for l in out[1:] if l.strip()]
+            # a row: the kind found (-1: no NVIDIA display function, the library then asks RM), the function the card's
+            # name was read from (counted from 1, 0: none), registry properties still held
+            check('a card is its display function: the audio function\'s ID decides nothing, wherever the registry lists it',
+                  rows[:4] == [(4, 1, 0), (4, 2, 0), (1, 2, 0), (3, 2, 0)], str(rows[:4]))
+            check('without an NVIDIA display function there is no card to name', rows[4] == (-1, 0, 0) and rows[11] == (-1, 0, 0), str(rows[4:5] + rows[11:]))
+            check('a 3D controller is a display function, and another vendor\'s GPU is not ours whatever its ID', rows[5] == (4, 2, 0), str(rows[5]))
+            check('a GPU of no known kind is still the card (0, not -1), unless a known one follows; the first known one stays',
+                  rows[6:10] == [(0, 0, 0), (4, 2, 0), (1, 1, 0), (5, 4, 0)], str(rows[6:10]))
+            check('control: by its ID alone that audio function is a GA10x card, and the scan would say so had it a display class',
+                  alone == '3' and rows[10] == (3, 1, 0), f'{alone} {rows[10]}')
+            check('every property the scan reads is released', all(r[2] == 0 for r in rows))
 dec = (V / 'vt/nvencvt_dec.c').read_text()
 reg = function(dec, 'OSStatus NVDecVT_Register(')
 check('Blackwell registers the H.264 decoder alone',
@@ -188,6 +285,106 @@ check('no encoder registers on Blackwell or on the Turing chips without an encod
 h264 = (V / 'src/dec.c').read_text()
 check('the H.264 decoder reads its planes in the card\'s layout, cropped pictures included',
       'nvenc_in_untile_plane' not in h264 and 'nvenc_in_offset' not in h264 and h264.count('gob_offset(d->gob') == 4)
+
+# ---- the decode self-test gate ----
+GATE = 'if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;'
+proven = function(vt, 'static bool blackwell_decode_proven(')
+regdec = function(vt, '__attribute__((visibility("default"))) OSStatus NVEncVT_RegisterDecoders(')
+before = lambda fn, *later: fn is not None and GATE in fn and all(fn.index(GATE) < fn.index(l) for l in later)
+check('both entry points ask for the Blackwell self-test before anything registers',
+      before(regenc, 'NVDecVT_Register', 'register_one(') and before(regdec, 'NVDecVT_Register'))
+CALL = 'NVDecVT_Register(rating)'
+# every mention of the registering function, whatever its argument: its definition, and the two entry points
+named = lambda text: len(re.findall(r'\bNVDecVT_Register\b', text))
+elsewhere = sum(named(f.read_text(errors='ignore')) for f in sorted(V.rglob('*'))
+                if f.suffix in ('.c', '.h', '.m') and f.name not in ('nvencvt.c', 'nvencvt_dec.c'))
+check('and no third place registers a decoder: the two entry points hold every call, behind the gate',
+      regenc is not None and regdec is not None and reg is not None
+      and vt.count(CALL) == regenc.count(CALL) + regdec.count(CALL) == 3 and CALL not in dec
+      and named(vt) == named(regenc) + named(regdec) and named(dec) == 1 and elsewhere == 0
+      and all(f.index(GATE) < f.index(CALL) for f in (regenc, regdec) if GATE in f)
+      and dec.count('VTRegisterVideoDecoderWithInfo') == reg.count('VTRegisterVideoDecoderWithInfo') > 0)
+check('nor an encoder: the one function that registers encoders is called from the entry point alone',
+      regenc is not None and vt.count('register_one(') == regenc.count('register_one(') + 1
+      and vt.count('VTRegisterVideoEncoderWithInfo(') == 2 and 'VTRegisterVideoEncoderWithInfo' not in dec)
+check('the self-test is the one of src/h264kat.c, asked once per process',
+      proven is not None and 'h264kat_proven("Blackwell"' in proven and '#include "h264kat.h"' in vt)
+kat = (V / 'src/h264kat.c').read_text() if (V / 'src/h264kat.c').exists() else ''
+check('it decodes with the entry points a VideoToolbox session uses',
+      all(f in kat for f in ('h264dec_open(', 'h264dec_nal(', 'h264dec_flush(', 'h264dec_pop(', 'h264dec_read_nv12(',
+                             'h264dec_release(', 'h264dec_close(')))
+check('it reports the layout a plane would have been right in and never changes how the decoder reads',
+      'gob_untile_plane(' in kat and not re.search(r'gob[YC]\s*=[^=]', kat))
+# The plugin asks for the library on Blackwell by default (in the decode service), which is only right beside a build
+# that has the gate above. The build says so with one exported marker, and the plugin refuses a library without it on
+# Blackwell (tools/test_nvencvt_selection.py holds the plugin's side).
+MARKER = '__attribute__((visibility("default"))) const int NVEncVT_BlackwellSelfTest = 1;'
+exported = sorted('_' + m for f in sorted(V.rglob('*.c'))
+                  for m in re.findall(r'(?m)^__attribute__\(\(visibility\("default"\)\)\)[^;{(=]*?(\w+)\s*[(=]', f.read_text(errors='ignore')))
+build = (root / 'build/build_nvencvt.sh').read_text()
+want = re.search(r'(?m)^want="([^"]*)"', build)
+check('a build with the gate says so: it exports a marker for the plugin to look up',
+      vt.count(MARKER) == 1 and proven is not None and vt.index(proven) < vt.index(MARKER) < vt.index(regenc or MARKER))
+check('the build holds the library to exactly the symbols the source exports, the marker among them',
+      want is not None and want.group(1).split() == exported and '_NVEncVT_BlackwellSelfTest' in exported and len(exported) == 5,
+      ' '.join(exported))
+TABLE = r'''
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+typedef int OSStatus;
+enum { kVTCouldNotFindVideoDecoderErr = -12906, kVTCouldNotFindVideoEncoderErr = -12908, H264KAT_LINE = 800 };
+%(enum)s
+#define LOG(...) do { } while (0)
+static int kind, verdict, asked, registered;   /* the card, the self-test's answer, and what was called */
+static bool h264kat_proven(const char *card, char *line, size_t n, bool *first)
+{
+    snprintf(line, n, "%%s", card); *first = !asked++;
+    return verdict;
+}
+static int pci_gpu_kind(void) { return kind; }
+static int gpu_nvenc_kind(void) { return kind; }
+int gNvencvtGpu;
+OSStatus NVDecVT_Register(int rating) { (void)rating; registered++; return 0; }
+%(proven)s
+%(regdec)s
+%(regenc)s
+    return 1000;   /* the rest of the function: it got past the check */
+}
+int main(void)
+{
+    for (kind = 1; kind <= 5; kind++) for (verdict = 0; verdict < 2; verdict++) {
+        asked = registered = 0;
+        const int a = NVEncVT_RegisterDecoders(1100), ra = registered, b = NVEncVT_Register(1100);
+        printf("%%d %%d %%d %%d %%d %%d\n", kind, verdict, a, ra, b, asked);
+    }
+    return 0;
+}
+'''
+cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+if proven and before(regenc) and before(regdec) and cc:
+    enum = vt[vt.index('enum { GPU_NONE'):vt.index('\n', vt.index('enum { GPU_NONE'))]
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        (d / 'g.c').write_text(TABLE % {'enum': enum, 'proven': proven, 'regdec': regdec,
+                                        'regenc': regenc[:regenc.index(GATE) + len(GATE)]})
+        r = subprocess.run([cc, '-Wall', '-Werror', '-o', str(d / 'g'), str(d / 'g.c')], capture_output=True, text=True)
+        check('the entry points up to the check compile on their own', r.returncode == 0, r.stderr.strip()[-400:])
+        if r.returncode == 0:
+            env = {k: v for k, v in os.environ.items() if k != 'NVENCVT_ANY_GPU'}
+            rows = [tuple(map(int, l.split())) for l in subprocess.run([str(d / 'g')], capture_output=True, text=True, env=env).stdout.split('\n') if l.strip()]
+            got = {(k, v): rest for k, v, *rest in rows}
+            # kinds: 1 Ada, 2 TU117, 3 Ampere, 4 Blackwell, 5 Turing; rest: RegisterDecoders' status, decoders registered by
+            # it, Register's status (1000: past the check), times the self-test was asked for
+            check('Blackwell with a failed self-test: both entry points return the decoder error and nothing registers',
+                  got.get((4, 0)) == [-12906, 0, -12906, 2])
+            check('control: Blackwell with a passed self-test registers the decoders and goes on',
+                  got.get((4, 1)) == [0, 1, 1000, 2])
+            check('every other kind registers as before and the self-test is never asked for',
+                  all(got.get((k, v)) == [0, 1, 1000, 0] for k in (1, 2, 3, 5) for v in (0, 1)))
+elif not cc:
+    print('SKIP the table of entry points needs a C compiler')
 
 # ---- the push buffer ----
 STUB = r'''
