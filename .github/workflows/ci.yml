@@ -42,7 +42,14 @@ jobs:
       - name: Compile every kext source and check its imports on both kernels
         run: bash build/kext_check.sh
       - name: Switch registry and the tests of this job's own tools
-        run: python3 tools/run_all_tests.py test_switch_registry test_switch_report test_kext_check test_ci_workflow test_sysctl_allowlist
+        # The runner exits 0 when a test it was asked for was skipped or could not be built, so the last line is held
+        # to "all five ran and passed". Without the 2.9 release in the clone the registry test passes without comparing
+        # the rows dated 2.9 with what that release read: say so where it is seen.
+        run: |
+          set -o pipefail
+          python3 tools/run_all_tests.py test_switch_registry test_switch_report test_kext_check test_ci_workflow test_sysctl_allowlist | tee "$RUNNER_TEMP/tests.txt"
+          grep -qx '5 passed, 0 failed, 0 skipped, 0 not run, of 5' "$RUNNER_TEMP/tests.txt"
+          git rev-parse -q --verify refs/tags/v2.9 >/dev/null || echo "::warning::tag v2.9 is not in this repository, so the switch registry was not compared with the 2.9 release (push the tag to turn that on)"
       - name: Translator environment registry
         run: cargo test --manifest-path translator/translator/Cargo.toml --test env_registry
   host-tests:

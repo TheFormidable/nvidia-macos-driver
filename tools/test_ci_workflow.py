@@ -54,6 +54,11 @@ def problems(y, root):
         for t in m.group(1).split():
             if not list((root / "tools").glob(t + ".*")):
                 out.append(f"{t}: named by the workflow and not in tools/ (the runner would skip it without a word)")
+        # the runner exits 0 when a named test was skipped or not run: the step has to hold its last line to the count
+        n = len(m.group(1).split())
+        if f"grep -qx '{n} passed, 0 failed, 0 skipped, 0 not run, of {n}'" not in code[m.end():m.end() + 400]:
+            out.append(f"the step that names {n} tests does not hold the runner to '{n} passed, 0 failed, 0 skipped, 0 not run, of {n}' "
+                       f"(a named test that was skipped or not run would pass unseen)")
     j = jobs(code)
     for g in GATES:
         if g not in j:
@@ -113,6 +118,8 @@ control("an upload is caught", "      - name: Host tests\n", "      - uses: acti
 control("pull_request_target is caught", "  pull_request:\n", "  pull_request_target:\n", "pull_request_target")
 control("a script that does not exist is caught", "bash build/kext_check.sh", "bash build/kext_chekc.sh", "not in the tree")
 control("a test that does not exist is caught", " test_switch_registry ", " test_switch_registy ", "not in tools/")
+control("a test added to the list without the count that holds the runner to it is caught", " test_switch_registry ", " test_switch_registry test_ci_workflow ", "does not hold the runner")
+control("the count check dropped is caught", "          grep -qx '5 passed, 0 failed, 0 skipped, 0 not run, of 5' \"$RUNNER_TEMP/tests.txt\"\n", "", "does not hold the runner")
 control("a shallow clone for the host tests is caught", "fetch-depth: 0          # negative controls", "fetch-depth: 1          # negative controls", "every test from a full clone")
 control("a shallow clone for the registry test is caught", "fetch-depth: 0          # the registry test", "fetch-depth: 2          # the registry test", "kexts-linux has no full clone")
 control("the Linux job made non-gating is caught", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    continue-on-error: true\n", "kexts-linux no longer gates")
