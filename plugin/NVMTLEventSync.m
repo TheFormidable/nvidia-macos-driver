@@ -117,7 +117,7 @@ static BOOL nvmtl_ws_surface_wait(void) {
 }
 // What one WindowServer command buffer holds: the surfaces it marked pending in the kernel, and the textures whose shared
 // VRAM its commit marked newest. early is fixed at commit (nvmtl_ws_surface_wait): the marks are released part by part.
-@interface NVMTLSurfaceHolds : NSObject { @public NSMutableSet *ids; NSSet *dirtied; BOOL early; } @end
+@interface NVMTLSurfaceHolds : NSObject { @public NSMutableSet *ids; NSSet *dirtied; BOOL early; uint64_t fence; } @end
 @implementation NVMTLSurfaceHolds @end
 // A texture whose part has landed while its surface is still held, published by the holder that releases it last.
 // dirtied: the commit marked its VRAM newest, so publication is bookkeeping only (nvmtlSurfaceOutDirtied:).
@@ -157,6 +157,7 @@ static void nvmtl_ws_release(NVMTLSurfaceHolds *holds, uint32_t sid, NSMutableAr
     NSNumber *n = @(sid);
     @synchronized (nvmtl_ws_lock()) {
         if (![holds->ids containsObject:n]) return;
+        nvmtl_vk_fence_close(holds->fence, sid);
         [holds->ids removeObject:n];
         [nvmtl_ws_pending_holds removeObject:n];
         if ([nvmtl_ws_pending_holds countForObject:n]) return;
@@ -175,6 +176,16 @@ static BOOL nvmtl_ws_publish_settled(NSArray *settled, NVMTLCommandBuffer *cb) {
         else nvlog("WindowServer surface %u: publication after its last write refused", (unsigned)IOSurfaceGetID(d->texture->_surf));
     }
     return ok;
+}
+// The surfaces this command buffer writes and the last part that writes each: what the kernel fence holds
+// (nvmtl_fence.h). The same walk as nvmtl_ws_mark_pending and nvmtl_busy_mark_commit.
+static void nvmtl_fence_collect(NVMTLCommandBuffer *cb) {
+    nvmtl_fence_hold_reset(&cb->_fence);
+    for (NSUInteger i = 0; i < cb->_parts.count; i++) {
+        NVMTLSubmissionPart *part = cb->_parts[i];
+        if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf) nvmtl_fence_hold_note(&cb->_fence, (uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane, (uint32_t)i);
+    }
 }
 // Commit, OUTSIDE the command-buffer class lock and before the pending-write records are stamped: the surfaces this
 // command buffer writes are marked pending in the kernel before commit returns, so WindowServer's swap that follows finds
@@ -215,6 +226,10 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
         }
         holds->dirtied = dirtied;
     }
+    // the kernel fence's holds, after the VRAM marks and before the pending marks, which leave it the surfaces it took
+    nvmtl_fence_collect(cb);
+    nvmtl_vk_fence_open(&cb->_fence, NVMTL_FENCE_F_COMPOSITOR | (holds->early ? NVMTL_FENCE_F_AUTO : 0));
+    holds->fence = cb->_fence.cookie;
     @synchronized (nvmtl_ws_lock()) {
         if (!nvmtl_ws_pending_holds) nvmtl_ws_pending_holds = [NSCountedSet new];
         for (NSNumber *n in ids) { [nvmtl_ws_pending_holds addObject:n]; nvmtl_ws_mark(n.unsignedIntValue, YES); }
@@ -282,6 +297,9 @@ static BOOL nvmtl_busy_marks_on(void) {
 }
 static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
     if (!nvmtl_busy_marks_on()) return;
+    // the kernel fence's holds first, then the tags, which say which of their writes the kernel holds
+    nvmtl_fence_collect(cb);
+    nvmtl_vk_fence_open(&cb->_fence, 0);
     NSMutableDictionary *marks = nil;
     for (NVMTLSubmissionPart *part in cb->_parts) {
         if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
@@ -302,6 +320,7 @@ static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
     cb->_busyMarks = marks;
 }
 static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
+    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error
     NSDictionary *marks = cb->_busyMarks;
     if (!marks) return;
     cb->_busyMarks = nil;
@@ -674,6 +693,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
             return NO;
         }
         part->inflight = f;
+        nvmtl_vk_fence_arm(&self->_fence, (uint32_t)(_nextSubmit - 1), f);
         nvmtl_evfold_promise_part(part);
         const unsigned long long n = atomic_fetch_add(&gsub_inflight, 1) + 1;
         if (n > atomic_load(&gsub_peak)) atomic_store(&gsub_peak, n);
@@ -744,6 +764,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
             else {
                 result = nvmtl_vk_submit_begin(&part->commands, f);
                 if (!result) {
+                    nvmtl_vk_fence_arm(&self->_fence, (uint32_t)_nextPart, f);
                     @synchronized ([NVMTLCommandBuffer class]) {
                         if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
                         nvmtl_evfold_promise_part(part);
