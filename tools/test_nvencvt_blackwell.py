@@ -10,11 +10,14 @@ had it got that far. This checks, without a GPU:
   * which layout a plane gets from the NVDEC class and its element size;
   * the class table (control: the revision before this change has no Blackwell class);
   * the card kind from the PCI device ID;
+  * that on Blackwell nothing registers before the H.264 decode self-test has passed in the process: the two entry
+    points, compiled out of the source and run on a table of card kinds and verdicts (controls: the same card with a
+    passing self-test registers; every other kind registers without being asked);
   * that a channel which stopped fetching cannot make the library write past its push buffer (control: the function
     as it was before does).
 
 usage: test_nvencvt_blackwell.py [repo root]"""
-import pathlib, platform, random, shutil, subprocess, sys, tempfile
+import os, pathlib, platform, random, re, shutil, subprocess, sys, tempfile
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 V = root / 'vendor/nvenc'
@@ -188,6 +191,85 @@ check('no encoder registers on Blackwell or on the Turing chips without an encod
 h264 = (V / 'src/dec.c').read_text()
 check('the H.264 decoder reads its planes in the card\'s layout, cropped pictures included',
       'nvenc_in_untile_plane' not in h264 and 'nvenc_in_offset' not in h264 and h264.count('gob_offset(d->gob') == 4)
+
+# ---- the decode self-test gate ----
+GATE = 'if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;'
+proven = function(vt, 'static bool blackwell_decode_proven(')
+regdec = function(vt, '__attribute__((visibility("default"))) OSStatus NVEncVT_RegisterDecoders(')
+before = lambda fn, *later: fn is not None and GATE in fn and all(fn.index(GATE) < fn.index(l) for l in later)
+check('both entry points ask for the Blackwell self-test before anything registers',
+      before(regenc, 'NVDecVT_Register', 'register_one(') and before(regdec, 'NVDecVT_Register'))
+CALL = 'NVDecVT_Register(rating)'
+check('and no third place registers a decoder: the two entry points hold every call, behind the gate',
+      regenc is not None and regdec is not None and reg is not None
+      and vt.count(CALL) == regenc.count(CALL) + regdec.count(CALL) == 3 and CALL not in dec
+      and all(f.index(GATE) < f.index(CALL) for f in (regenc, regdec) if GATE in f)
+      and dec.count('VTRegisterVideoDecoderWithInfo') == reg.count('VTRegisterVideoDecoderWithInfo') > 0)
+check('the self-test is the one of src/h264kat.c, asked once per process',
+      proven is not None and 'h264kat_proven("Blackwell"' in proven and '#include "h264kat.h"' in vt)
+kat = (V / 'src/h264kat.c').read_text() if (V / 'src/h264kat.c').exists() else ''
+check('it decodes with the entry points a VideoToolbox session uses',
+      all(f in kat for f in ('h264dec_open(', 'h264dec_nal(', 'h264dec_flush(', 'h264dec_pop(', 'h264dec_read_nv12(',
+                             'h264dec_release(', 'h264dec_close(')))
+check('it reports the layout a plane would have been right in and never changes how the decoder reads',
+      'gob_untile_plane(' in kat and not re.search(r'gob[YC]\s*=[^=]', kat))
+TABLE = r'''
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+typedef int OSStatus;
+enum { kVTCouldNotFindVideoDecoderErr = -12906, kVTCouldNotFindVideoEncoderErr = -12908, H264KAT_LINE = 800 };
+%(enum)s
+#define LOG(...) do { } while (0)
+static int kind, verdict, asked, registered;   /* the card, the self-test's answer, and what was called */
+static bool h264kat_proven(const char *card, char *line, size_t n, bool *first)
+{
+    snprintf(line, n, "%%s", card); *first = !asked++;
+    return verdict;
+}
+static int pci_gpu_kind(void) { return kind; }
+static int gpu_nvenc_kind(void) { return kind; }
+int gNvencvtGpu;
+OSStatus NVDecVT_Register(int rating) { (void)rating; registered++; return 0; }
+%(proven)s
+%(regdec)s
+%(regenc)s
+    return 1000;   /* the rest of the function: it got past the check */
+}
+int main(void)
+{
+    for (kind = 1; kind <= 5; kind++) for (verdict = 0; verdict < 2; verdict++) {
+        asked = registered = 0;
+        const int a = NVEncVT_RegisterDecoders(1100), ra = registered, b = NVEncVT_Register(1100);
+        printf("%%d %%d %%d %%d %%d %%d\n", kind, verdict, a, ra, b, asked);
+    }
+    return 0;
+}
+'''
+cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+if proven and before(regenc) and before(regdec) and cc:
+    enum = vt[vt.index('enum { GPU_NONE'):vt.index('\n', vt.index('enum { GPU_NONE'))]
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        (d / 'g.c').write_text(TABLE % {'enum': enum, 'proven': proven, 'regdec': regdec,
+                                        'regenc': regenc[:regenc.index(GATE) + len(GATE)]})
+        r = subprocess.run([cc, '-Wall', '-Werror', '-o', str(d / 'g'), str(d / 'g.c')], capture_output=True, text=True)
+        check('the entry points up to the check compile on their own', r.returncode == 0, r.stderr.strip()[-400:])
+        if r.returncode == 0:
+            env = {k: v for k, v in os.environ.items() if k != 'NVENCVT_ANY_GPU'}
+            rows = [tuple(map(int, l.split())) for l in subprocess.run([str(d / 'g')], capture_output=True, text=True, env=env).stdout.split('\n') if l.strip()]
+            got = {(k, v): rest for k, v, *rest in rows}
+            # kinds: 1 Ada, 2 TU117, 3 Ampere, 4 Blackwell, 5 Turing; rest: RegisterDecoders' status, decoders registered by
+            # it, Register's status (1000: past the check), times the self-test was asked for
+            check('Blackwell with a failed self-test: both entry points return the decoder error and nothing registers',
+                  got.get((4, 0)) == [-12906, 0, -12906, 2])
+            check('control: Blackwell with a passed self-test registers the decoders and goes on',
+                  got.get((4, 1)) == [0, 1, 1000, 2])
+            check('every other kind registers as before and the self-test is never asked for',
+                  all(got.get((k, v)) == [0, 1, 1000, 0] for k in (1, 2, 3, 5) for v in (0, 1)))
+elif not cc:
+    print('SKIP the table of entry points needs a C compiler')
 
 # ---- the push buffer ----
 STUB = r'''

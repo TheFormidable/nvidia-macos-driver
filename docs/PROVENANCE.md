@@ -77,13 +77,17 @@ Two providers register with VideoToolbox: NullMoth's own libraries (carried bina
 | Turing TU116, TU10x: GTX 1660, RTX 20 (c4b7 / c4b0) | own `_t2d`; nvencvt opt-in (new) | own; nvencvt opt-in (new) | VP9 nvencvt opt-in (new) | nvencvt opt-in (new) | own `_tu10x` only | none in hardware |
 | Ampere GA10x (c7b7 / c7b0) | own `_t2d`; nvencvt with `NVENCVT_AMPERE_ALL_DEC=1` | own; nvencvt with the same switch | nvencvt auto | nvencvt with the same switch | own `_ga10x`; nvencvt with `NVENCVT_AMPERE_ENC=1`, untried | none in hardware |
 | Ada (c9b7 / c9b0) | nvencvt auto (own `_t2d` registers below it) | nvencvt auto (own below it) | nvencvt auto | nvencvt auto | nvencvt auto (own: none) | nvencvt auto |
-| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt opt-in (new, not yet run on a card) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
+| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt auto in the decode service once its self-test has passed on the card, opt-in in other processes behind the same test (new, not yet run on a card) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
 
 What each carried library is still needed for, and what is missing before `libnvencvt` can replace it:
 
-* `libnvdec_h264.dylib`: Blackwell H.264 decode. Replaced once the new opt-in path has decoded correctly on an RTX 50
-  card (the classes, the plane layout and the picture setup are public; no public header lists class 0xcfb0's methods,
-  so whether Ada's method list is enough is a question for the card).
+* `libnvdec_h264.dylib`: Blackwell H.264 decode, in app processes and wherever `libnvencvt`'s self-test has not
+  passed. The classes, the plane layout and the picture setup are public; no public header lists class 0xcfb0's
+  methods, so whether Ada's method list is enough is a question for the card, and the library now puts it to the card:
+  before it registers anything on Blackwell it decodes two built-in test streams and compares every frame bit for bit
+  (one line in the system log, `Blackwell H.264 decode self-test: PASS ...` or `FAIL at <step> ...`). With a pass the
+  decode service (Safari, QuickTime, FaceTime) gets `libnvencvt`'s decoder by default; without one nothing changes.
+  The carried library can go once that has held with real content and the app processes have been moved over as well.
 * `libnvdec_h264_t2d.dylib`: H.264 decode on Turing and Ampere by default. `libnvencvt` decodes there only by switch:
   upstream ran its H.264 decoder on TU117 and Ada, not on GA10x.
 * `libnvdec_hevc.dylib`: HEVC decode on Turing, Ampere and Blackwell. Blackwell is the hard one: `libnvencvt`'s HEVC
@@ -94,7 +98,8 @@ What each carried library is still needed for, and what is missing before `libnv
 * `libnvenc_h264_tu10x.dylib`, `libnvenc_hevc_tu10x.dylib`: encode on TU10x and TU116 (class 0xc4b7; upstream has
   0xb4b7 only). TU117 alone could move to `libnvencvt`.
 
-So none of the nine can leave the package yet, and no default changed in this pass. Two facts for the owner's decision
+So none of the nine can leave the package yet. The one default that differs from 2.9 is the H.264 decoder of
+Blackwell's decode service, and only in a process where the self-test has passed. Two facts for the owner's decision
 on "our own libraries or `libnvencvt`":
 
 1. `libnvencvt`'s encoders are not free of NVIDIA's closed driver either. Their per-picture control blocks
@@ -107,6 +112,13 @@ on "our own libraries or `libnvencvt`":
    chosen and tuned here. That is new work that needs each generation's card to verify; it was not attempted blind.
 
 The vendored library's own changes are listed in `vendor/nvenc/SOURCE`.
+
+The test streams inside `libnvencvt` (`vendor/nvenc/src/h264kat_vectors.h`, 27 kB of H.264) are made here, by
+`tools/gen_h264_kat.py`: ffmpeg's synthetic sources `testsrc2` and `gradients`, encoded with libx264, with the SEI
+units (the encoder's banner and settings) and access unit delimiters removed. They hold no third-party picture or
+sound and no text. The header records the command lines and the encoder version, and
+`tools/test_h264_kat_vectors.py` rebuilds it and compares; the expected frame hashes are ffmpeg's decode of the same
+bytes, so they do not depend on this library or on any NVIDIA software.
 
 ## 3. GPL and PolyForm in the dependency list
 
@@ -208,6 +220,7 @@ bytes in the repository (done).
 
 * `kexts/NVRM/accel/re/*.h` do not claim disassembly: they say sizes came from the registry (see P5).
 * `translator/` mentions of "disassemble" are the SPIR-V text printer in its own tests.
-* `vendor/nvenc` is MIT with credit; the build fetches only MIT/BSD headers.
+* `vendor/nvenc` is MIT with credit; the build fetches only MIT/BSD headers. The test streams built into it are
+  generated here from synthetic sources (end of section 2a).
 * The firmware, the DLSS runtimes and the NGX core are never modified by the package.
 * `dlss/zstd` and `dlss/blake3` are the upstream files without edits beyond those listed in their READMEs.
