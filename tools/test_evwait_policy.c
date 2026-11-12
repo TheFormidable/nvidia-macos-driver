@@ -12,6 +12,27 @@ static int fails;
 static int v29(int on, uint64_t waited_ns) { return on && waited_ns >= 20000; }
 /* for the control: a ladder that is not 2.9's */
 static int not29(int on, uint64_t waited_ns) { return on && waited_ns >= 30000; }
+/* A thread in the adaptive mode whose waits all take wait_ns: each round polls one step of step_ns or, when the rules say
+   so, sleeps until the work is done or for 2 ms. Returns how many of waits 200..n-1 slept right after the spin (before
+   1 ms) and in *first the first wait that did, -1 none. length_sample: the control, whose mean samples the whole wait
+   instead of the time into it at which its last round began. */
+static int steady(uint64_t wait_ns, int n, int length_sample, int *first)
+{
+    struct nvrm_evw_thread t; int early = 0; const uint64_t step_ns = 5000;
+    memset(&t, 0, sizeof t); t.seq_fd = -1; *first = -1;
+    for (int w = 0; w < n; w++) {
+        uint64_t x = 0; int asleep = 0;
+        while (x < wait_ns) {
+            (void)nvrm_evw_begin(&t, x);
+            if (!nvrm_evw_should_sleep(NVRM_EVW_ADAPT, x, t.avg_ns, UINT64_MAX, 0)) { x += step_ns; continue; }
+            if (!asleep && x < NVRM_EVW_YIELD_NS) { if (*first < 0) *first = w; if (w >= 200) early++; }
+            asleep = 1;
+            x += wait_ns - x < NVRM_EVW_MAX_SLEEP_US * 1000ull ? wait_ns - x : NVRM_EVW_MAX_SLEEP_US * 1000ull;
+        }
+        if (length_sample) t.last_waited_ns = wait_ns;
+    }
+    return early;
+}
 
 int main(void)
 {
@@ -84,6 +105,48 @@ int main(void)
         if (i % 15 == 14) fb |= nvrm_evw_account(&t, NVRM_EVW_R_WOKEN, 0, 2000, &missed);
     }
     T("control: 64 missed wakes with a delivered one after every 15 never fall back", !fb);
+    /* a moved count (MOVED: the kext did not sleep, the count had already moved) is a late event: it ends the run too */
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 5; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    T("a moved count ends a run of missed wakes, and is not a miss itself",
+      !fb && t.misses == 5 && !nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 0, 2000, &missed) && t.misses == 0 && !missed);
+    T("a moved count ends the run whatever `done` says (it is only looked at after a timeout)",
+      (t.misses = 7, !nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 1, 2000, &missed)) && t.misses == 0 && !missed);
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 15; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    fb |= nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 0, 2000, &missed);
+    for (int i = 0; i < 15; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    T("15 missed wakes, a moved count, 15 more: no fallback", !fb && t.misses == 15);
+    T("and the next one in a row falls back", nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed) && missed && t.misses == 16);
+    memset(&t, 0, sizeof t); fb = 0; int at = 0;
+    for (int i = 1; i <= 16 && !at; i++) if (nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed)) at = i;
+    T("16 with nothing in between: fallback at exactly the sixteenth", at == (int)NVRM_EVW_MISS_LIMIT);
+    /* control: only an answer that shows the count moved ends the run; every other answer leaves it as it is */
+    static const unsigned keep[] = { NVRM_EVW_R_LEGACY, NVRM_EVW_R_COUNT, NVRM_EVW_R_CAPPED, NVRM_EVW_R_ABORTED, NVRM_EVW_R_SPURIOUS, 99 };
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 15; i++) {
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+        for (unsigned k = 0; k < sizeof keep / sizeof keep[0]; k++) fb |= nvrm_evw_account(&t, keep[k], 1, 2000, &missed);
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 0, 2000, &missed);    /* a timeout with the work still running */
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 700, &missed);     /* a sleep cut short by the deadline */
+    }
+    T("control: 15 missed wakes with every other answer in between keep the run, and the sixteenth falls back",
+      !fb && t.misses == 15 && nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed));
+    /* who sleeps when, for steady waits: the numbers the comment above nvrm_evw_begin gives */
+    int first = 0, e = 0;
+    e = steady(900000, 2000, 0, &first);
+    T("steady waits under 1 ms are polled, every one", e == 0 && first == -1);
+    int rare = 1;
+    for (uint64_t l = 1100000; l <= 2000000; l += 300000) { e = steady(l, 2000, 0, &first); if (e < 1800 / 60 || e > 1800 / 20 || first < 30 || first > 70) rare = 0; }
+    T("steady waits of 1 to 2 ms: polled for the first millisecond, but one in forty or so sleeps after the spin", rare);
+    e = steady(2100000, 2000, 0, &first);
+    T("steady waits a little over one spin and one sleep: after some fifty waits, all sleep after the spin", e == 1800 && first >= 30 && first <= 70);
+    e = steady(2900000, 2000, 0, &first);
+    T("steady waits just under 3 ms: the same", e == 1800 && first >= 30 && first <= 70);
+    e = steady(3100000, 2000, 0, &first);
+    T("steady waits longer than 3 ms: all sleep after the spin from the third", e == 1800 && first == 2);
+    e = steady(1500000, 2000, 1, &first);
+    T("control: a mean of whole wait lengths would make 1.5 ms waits sleep after the spin every time", e == 1800 && first >= 0 && first < 10);
     t.misses = 0; fb = 0;
     for (int i = 0; i < 100; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 0, 2000, &missed);
     T("a timeout while the GPU is still working is not a miss", !fb && t.misses == 0);
