@@ -91,6 +91,15 @@ int main(void)
     T("a pointer outside the pool is refused", nvap_free(&p, mem + POOL) == -1 && nvap_free(&p, (void *)&p) == -1);
     T("a pointer inside a block but not its start is refused", nvap_free(&p, (unsigned char *)b + 16) == -1
       && nvap_free(&p, (unsigned char *)b + 1) == -1 && nvap_free(&p, mem) == -1);
+    /* The 16 bytes before a pointer into the middle of a live block are the caller's own data, and data can read as a
+       header. Only the block boundary tells the two apart: write a perfect header 8 bytes into c's payload and free the
+       pointer that would belong to it. */
+    {
+        struct nvap_free *forged = (struct nvap_free *)(void *)((unsigned char *)c + 8);
+        forged->size = 32; forged->magic = NVAP_MAGIC_USED; forged->next = 0;
+        T("a pointer off the block boundary is refused even when the bytes before it read as a live header",
+          nvap_free(&p, (unsigned char *)c + 24) == -1 && p.live == 3 && p.used == 32 + 32 + 64);
+    }
     T("a live block frees once", nvap_free(&p, b) == 0 && p.live == 2);
     T("the same pointer a second time is refused and changes nothing", nvap_free(&p, b) == -1 && p.live == 2 && p.used == 32 + 64);
     T("first fit gives the freed hole back to a request that fits", nvap_alloc(&p, 8) == b);
