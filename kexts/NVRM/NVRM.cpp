@@ -223,6 +223,7 @@ private:
     void gpuSuspend();
     void gpuResume();
     void rtd3Arm();   // opt-in D3cold (nvrtd3=1): kexts/NVRM/nv_rtd3.cpp
+    void rtd3Detach();
     void pciSaveForSleep();
     bool pciRestoreAfterWake();
     bool gpuAnswers();
@@ -2588,6 +2589,10 @@ void NVRM::stop(IOService *provider)
         if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);
         nvrm_fence_stop();
     }
+    // Still before anything is torn down: the idle power-down monitor (nvrtd3=1) loses this GPU. Its polls call
+    // gpuSuspend() and gpuResume(), and neither may run against what follows. Nothing happens here for a GPU the
+    // monitor does not have.
+    rtd3Detach();
     // Keep the lock until free(): another service can retain this object and
     // call its platform interface after stop(), when it must answer NotReady.
     if (fUtilizationLock) {
@@ -2902,6 +2907,30 @@ void NVRM::gpuResume()
 }
 
 // Opt-in D3cold. The driver's own system-sleep and wake paths do the suspend and resume; nv_rtd3.cpp decides when.
+//
+// Its monitor is one thread call for the whole boot, armed by the first GPU that comes up with nvrtd3=1 and never
+// stopped: every second it asks whether that GPU is idle and, after a minute of that, runs the GPU's suspend path, and
+// later its resume path. It used to be handed the GPU object itself, and stop() did not tell it. After a stop (the
+// card unplugged, the driver terminated) the next poll walked the clients of the stopped object and a minute later
+// gpuSuspend() ran on it; a poll that was inside gpuSuspend() or gpuResume() while stop() ran worked against the
+// teardown (gpuResume() opens the interrupt gate and enables the source stop() is about to release). So the monitor
+// is not given the object: each of its calls comes through this gate to the GPU that armed it. stop() closes the
+// gate, waits until no call is inside and takes the GPU away, right after it has stopped the surface fence and
+// before it tears anything down; from then on every call answers that there is nothing to do. The monitor is not
+// handed another GPU afterwards: it keeps the first set of calls it was given, and what it remembers about the power
+// resource belongs to the GPU that is gone.
+static NvXnuGate gNvRtd3Gate = { 1, 0 };   // closed until a GPU arms the monitor, and again once that GPU stops
+static NVRM *volatile gNvRtd3Gpu;          // the monitor's GPU: read inside the gate, taken away by its stop()
+extern "C" int nv_rtd3_reachable(void);    // nv_rtd3.cpp: 1 while the power resource is on
+// The monitor's GPU with the gate entered (the caller leaves it), or NULL when it has none.
+static NVRM *rtd3Enter(void)
+{
+    if (!nv_gate_enter(&gNvRtd3Gate)) return NULL;
+    NVRM *n = __atomic_load_n(&gNvRtd3Gpu, __ATOMIC_SEQ_CST);
+    if (!n) nv_gate_leave(&gNvRtd3Gate);
+    return n;
+}
+static void rtd3Leave(void) { nv_gate_leave(&gNvRtd3Gate); }
 static IOACPIPlatformDevice *rtd3Acpi(NVRM *n)
 {
     IOService *s = n; IOACPIPlatformDevice *a = NULL;
@@ -2909,6 +2938,8 @@ static IOACPIPlatformDevice *rtd3Acpi(NVRM *n)
     return a;
 }
 static int rtd3Heads(void *) {
+    if (!rtd3Enter()) return 0;   // no GPU: nothing is lit (rtd3Clients says the rest)
+    rtd3Leave();
     // Every framebuffer: this GPU's own heads, and (hybrid switch on) another GPU's panel published as a head of ours.
     int hy = 0; { int lv = 0; const int present = PE_parse_boot_argn("nmhybrid", &lv, sizeof(lv)); hy = present && lv >= 1 && lv <= 4; }
     OSDictionary *m = IOService::serviceMatching("IOFramebuffer"); if (!m) return 1;   // cannot look: treat as lit
@@ -2924,9 +2955,14 @@ static int rtd3Heads(void *) {
     }
     return nv_rtd3_heads_lit(own, foreign, hy);
 }
-static int rtd3Clients(void *ctx) {
-    IOService *n = (IOService *)ctx; int rm = 0, accel = 0;
+static int rtd3Clients(void *) {
+    // No GPU: a client while the power resource is on (never idle, so it is never switched off), none while it is off
+    // (nothing asks for it back). With the answer of rtd3Heads the monitor then makes no other call.
+    NVRM *n = rtd3Enter();
+    if (!n) return nv_rtd3_reachable() ? 1 : 0;
+    int rm = 0, accel = 0;
     if (OSIterator *it = n->getClientIterator()) { while (OSObject *o = it->getNextObject()) if (OSDynamicCast(IOUserClient, o)) rm++; it->release(); }
+    rtd3Leave();
     // Metal applications attach to the accelerator, not to NVRM
     if (OSDictionary *m = IOService::serviceMatching("IOAccelerator")) {
         if (OSIterator *it = IOService::getMatchingServices(m)) {
@@ -2943,14 +2979,36 @@ static int rtd3Clients(void *ctx) {
 }
 void NVRM::rtd3Arm()
 {
+    static volatile SInt32 armed;
+    if (!OSCompareAndSwap(0, 1, &armed)) return;   // the first GPU only: nv_rtd3_arm() keeps the first calls it is given
+    __atomic_store_n(&gNvRtd3Gpu, this, __ATOMIC_SEQ_CST);
+    nv_gate_open(&gNvRtd3Gate);
     const struct nv_rtd3_ops ops = {
-        this, rtd3Heads, rtd3Clients,
-        [](void *c) { ((NVRM *)c)->gpuSuspend(); },
-        [](void *c) { ((NVRM *)c)->gpuResume(); },
-        [](void *c) { return nv_rtd3_power_off(rtd3Acpi((NVRM *)c)); },
-        [](void *c) { return nv_rtd3_power_on(rtd3Acpi((NVRM *)c)); },
+        NULL, rtd3Heads, rtd3Clients,
+        [](void *) { if (NVRM *n = rtd3Enter()) { n->gpuSuspend(); rtd3Leave(); } },
+        [](void *) { if (NVRM *n = rtd3Enter()) { n->gpuResume(); rtd3Leave(); } },
+        [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { ok = nv_rtd3_power_off(rtd3Acpi(n)); rtd3Leave(); } return ok; },
+        [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { ok = nv_rtd3_power_on(rtd3Acpi(n)); rtd3Leave(); } return ok; },
     };
     nv_rtd3_arm(&ops);
+}
+// stop(): the monitor loses this GPU, if this is the one it has. A call that is inside can be in gpuSuspend() or
+// gpuResume(), which take seconds, so the wait is the 30 s of the other waits of stop(); like them it asks the kernel
+// itself whether it may sleep.
+void NVRM::rtd3Detach()
+{
+    if (__atomic_load_n(&gNvRtd3Gpu, __ATOMIC_SEQ_CST) != this) return;
+    nv_gate_close(&gNvRtd3Gate);
+    bool out = nv_gate_idle(&gNvRtd3Gate);
+    if (nv_quiesce_may_sleep())
+        for (unsigned ms = 0; !out && ms < 30000; ms += 10) { IOSleep(10); out = nv_gate_idle(&gNvRtd3Gate); }
+    if (!out) {
+        // Still in this GPU's suspend or resume path, which uses the object for as long as it runs: one reference that
+        // is never given back keeps the object's memory. The teardown goes on, as after every other wait of stop().
+        retain();
+        LOG("the idle power-down monitor was still inside this GPU's suspend or resume after 30 s - going on");
+    }
+    __atomic_store_n(&gNvRtd3Gpu, (NVRM *)NULL, __ATOMIC_SEQ_CST);
 }
 
 void NVRM::pciSaveForSleep()
