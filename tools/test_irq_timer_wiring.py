@@ -6,7 +6,7 @@ None of it can run without the card, so what must hold is asserted on the source
   nvrmnanowait switches each off (an old "=1" spelling still means the default);
 - interruptOccurred enters the interrupt gate before rm_isr, turns away what finds it closed without calling the RM,
   and requests the bottom half (on the request alone) before it leaves the gate; it marks its thread in its own GPU's
-  slot around rm_isr; the primary filter neither logs nor kicks anything;
+  slot around rm_isr; the count that paces its log line is 64 bits; the primary filter neither logs nor kicks anything;
 - the bottom-half thread asks nv_bh_next() what to do, so a pending run is served before it exits;
 - every fIntSrc->enable() has irqOpen() before it; gpuSuspend, systemWillShutdown, stop and shutdownFull disable the
   source and then irqSettle();
@@ -113,6 +113,9 @@ def arms(src, others):
     arm("interruptOccurred: its thread is marked in its own GPU's slot around rm_isr",
         order(io, [r"nv_xnu_isr_threads\s*\[\s*fIsrSlot\s*\]\s*=\s*current_thread\s*\(\s*\)\s*;",
                    r"\brm_isr\s*\(", r"nv_xnu_isr_threads\s*\[\s*fIsrSlot\s*\]\s*=\s*NULL\s*;"]))
+    arm("interruptOccurred: the count behind its log cadence is 64 bits (a 32-bit one turns negative and logs every interrupt)",
+        re.search(r"static\s+volatile\s+SInt64\s+gNvIsrServed\b", n)
+        and re.search(r"const\s+SInt64\s+n\s*=\s*OSIncrementAtomic64\s*\(\s*&gNvIsrServed\s*\)", io))
     filt = body(n, "NVRM::interruptFilter")
     arm("interruptFilter (primary interrupt context): no log line, no kick, no RM call",
         filt and not re.search(r"\b(kprintf|IOLog|LOG|nvrm_fence_kick|rm_\w+)\s*\(", filt))
@@ -218,6 +221,9 @@ CONTROLS = [
      lambda s: broken(broken(s, "nvrm", "    nv_gate_leave(&fIrqGate);\n}", "}"), "nvrm", "    if (needBottomHalf) {", "    nv_gate_leave(&fIrqGate);\n    if (needBottomHalf) {")),
     ("the slot not cleared after rm_isr", "interruptOccurred: its thread is marked",
      lambda s: broken(s, "nvrm", "    nv_xnu_isr_threads[fIsrSlot] = NULL;\n", "")),
+    ("a 32-bit interrupt log count", "interruptOccurred: the count behind its log cadence",
+     lambda s: broken(broken(s, "nvrm", "static volatile SInt64 gNvIsrServed", "static volatile SInt32 gNvIsrServed"),
+                      "nvrm", "const SInt64 n = OSIncrementAtomic64(&gNvIsrServed)", "const SInt32 n = OSIncrementAtomic(&gNvIsrServed)")),
     ("a log line in the filter", "interruptFilter (primary",
      lambda s: broken(s, "nvrm", "    ++gNvIsrCount;", "    ++gNvIsrCount; kprintf(\"x\");")),
     ("the bottom-half thread tests quit itself", "the bottom-half thread asks",

@@ -282,7 +282,9 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_max_us, CTLFLAG_RD, (int64_t *)&gNvBhMaxUs
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_1ms, CTLFLAG_RD, (int64_t *)&gNvBhOver1, "RM bottom halves over 1 ms");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_over_4ms, CTLFLAG_RD, (int64_t *)&gNvBhOver4, "RM bottom halves over 4 ms");
 static volatile SInt64 gNvBhThreads = 0, gNvBhWakeMaxUs = 0, gNvBhStuck = 0, gNvIsrSkipped = 0, gNvIrqSettleTimeouts = 0;
-static volatile SInt32 gNvIsrServed = 0;
+// Runs of the interrupt action, for the cadence of its log line. 64 bits: a 32-bit count turns negative after 2^31
+// interrupts (days of uptime), and from then on every interrupt would pass the "first three" test and log.
+static volatile SInt64 gNvIsrServed = 0;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_thread, CTLFLAG_RD, (int64_t *)&gNvBhThreads, "GPUs whose RM bottom half runs on its own thread");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_wake_max_us, CTLFLAG_RD, (int64_t *)&gNvBhWakeMaxUs, "longest bottom-half request to run, microseconds");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_bh_stuck, CTLFLAG_RD, (int64_t *)&gNvBhStuck, "bottom-half threads that did not exit at stop");
@@ -2116,7 +2118,7 @@ void NVRM::interruptOccurred(IOInterruptEventSource *src, int count)
             if (us > 4000) OSIncrementAtomic64(&gNvIsrLate4);
             if (us > gNvIsrLatMaxUs) gNvIsrLatMaxUs = us;
         }
-        const SInt32 n = OSIncrementAtomic(&gNvIsrServed) + 1;
+        const SInt64 n = OSIncrementAtomic64(&gNvIsrServed) + 1;
         if (n <= 3 || (n % 1000) == 0) kprintf("NVRM-xnu: MSI #%lu -> work loop (handled so far %lu)\n", gNvIsrCount, gNvIsrHandled);
     }
     NvU32 needBottomHalf = 0;
