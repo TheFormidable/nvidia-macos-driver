@@ -81,6 +81,26 @@ All read-only. In mode 0 every one of them except `nvrm_dma_mode` stays 0.
 
 `nvrm_dma_live` must read the same before and after a sleep with nothing else running.
 
+## The accelerator's copies (`sysctl debug | grep nvaccel_dma`)
+
+NVAccel asks NVRM once, at its first page-off, how the GPU's addresses reach the bus (`debug.nvaccel_dma_mode`: -1
+until then, then the same numbers as above). Without a mapper it copies as 2.9 did and every other `nvaccel_dma_*`
+counter stays 0. With a mapper its copies of GPU memory to the CPU go through a staging buffer that NVRM mapped for the
+GPU, instead of raw physical addresses that the mapper would send elsewhere.
+
+| Name | Meaning | Healthy |
+|---|---|---|
+| `nvaccel_dma_mode` | -1 before the first page-off; then 0 no mapper, 1 system mapper, 2 device mapper, 3 a mapper the driver may not use | 0 without VT-d |
+| `nvaccel_dma_staged` | copies through the mapped staging buffer | grows with screenshots, with VT-d on |
+| `nvaccel_dma_maps`, `nvaccel_dma_map_fail`, `nvaccel_dma_unmaps` | staging buffers mapped, mappings that failed, mappings given back | `maps` small and stable; `map_fail` 0 |
+| `nvaccel_dma_abandoned` | buffers left mapped after a copy-engine timeout | 0 |
+| `nvaccel_dma_refused` | page-offs NVRM refused as unmapped | 0 |
+| `nvaccel_dma_family`, `nvaccel_dma_hybrid` | page-offs and hybrid frames left to the older path because the GPU is translated | 0 or small |
+
+When an accelerator stops, the staging buffer mapped through its GPU's NVRM is unmapped and freed at once (after any
+copy still using it; `nvaccel_dma_unmaps` grows by one), so `debug.nvrm_dma_leaked` does not count it when that GPU
+stops later.
+
 ## The boot-arg `nvrmdma=0`
 
 It is read when each GPU starts (the boot arguments cannot change while the machine runs, so every GPU gets the same
