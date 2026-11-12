@@ -112,6 +112,7 @@ static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeall
 static void nvaccelInstallSysctl(void);
 static void nvPoReadOptOut(void);
 static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provider, const char *kext);   // nvaccel_layout.h
+static void nvSVStageDrop(IOService *nvrm);
 static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
@@ -1136,6 +1137,7 @@ public:
         gAccelTab.remove(this, nvaccelMultiGpu());   // a no-op without nvmultigpu=1
         gAccel = gAccelTab.primary();
         publishPrimary();
+        nvSVStageDrop(fNVRM);   // a staging buffer mapped through this GPU's NVRM is given back while NVRM still answers
         IOGraphicsAccelerator2::stop(provider);
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
@@ -2459,6 +2461,18 @@ static void nvSVStageAbandon(void)
     }
     gNVSVStageBuf = nullptr;
 }
+// An accelerator stops: a staging buffer mapped through its NVRM is unmapped and freed now, while that NVRM still
+// answers, instead of staying mapped (and NVRM held) until a later page-off replaces it or NVRM drops the mapping when
+// its GPU stops (which NVRM counts as leaked). A page-off that is using the buffer holds the staging lock, so this waits
+// for its copy to end. No mapping (mode 0, every machine without a mapper): the lock is not even taken.
+static void nvSVStageDrop(IOService *nvrm)
+{
+    IOLock *const lk = gNVSVStageLock;
+    if (!nvrm || !lk || !gNVSVStageTok) return;
+    IOLockLock(lk);
+    if (gNVSVStageTok && gNVSVStageNvrm == nvrm) nvSVStageFree();
+    IOLockUnlock(lk);
+}
 // The staging buffer for a page-off of len bytes (gNVSVStageLock held). dmaMode and nvrm: the GPU's (nvAccelDmaMode,
 // and the NVRM the page-off goes to). The buffer in hand serves if it is long enough and addressed the way this GPU
 // needs: physically (mode 0, no mapping) or through a mapping made by the same NVRM.
@@ -2657,6 +2671,8 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             if (sym) sym->release();
             st = q.status; usec = q.usec; ok = st == 0;
             if (st == 0x65u) mayUnwire = false;
+            // a GPU this accelerator took for untranslated is translated after all: ask for the mode again next time
+            else if (st == NVRM_SS_NO_DMA) { OSAddAtomic64(1, &gCntDmaRefused); nvAccelDmaForget(fAccel); }
         }
         IOFree(pa, pages * sizeof *pa);
     }
