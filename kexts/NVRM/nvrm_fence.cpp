@@ -237,7 +237,7 @@ static void nvfLog(const struct nvf_event *ev)
               (unsigned)ev->strikes);
         break;
     case NVF_EV_DISTRUST:
-        IOLog("NVRM-xnu: fence: pid %d: %u holds given up - this connection's holds are refused from now on (it keeps the older surface sync)\n",
+        IOLog("NVRM-xnu: fence: pid %d: %u holds given up - this connection's new holds are refused from now on (it keeps the older surface sync)\n",
               (int)ev->pid, (unsigned)ev->strikes);
         break;
     case NVF_EV_FUSE:
