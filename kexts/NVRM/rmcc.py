@@ -18,6 +18,17 @@ for i, t in enumerate(toks):
 if os.uname().machine == "arm64" and "-arch" not in toks:
     toks[1:1] = ["-arch", "x86_64"]
 toks[1:1] = ["-mmacosx-version-min=15.0", "-g0", "-ffile-prefix-map="+os.path.dirname(src)+"=driver", "-ffile-prefix-map="+os.environ["OGKM"]+"=nvidia", "-ffile-prefix-map="+os.path.expanduser("~")+"=/build", "-fdebug-prefix-map="+os.path.expanduser("~")+"=/build"]
+# build/kext_check.sh on a host without Apple's clang: NM_RMCC_CC ("clang -target x86_64-apple-macos15.0") replaces the
+# recorded compiler; -arch and the flags only gcc knows (the line was recorded where cc is gcc) are dropped. Unset, as in
+# every real build, nothing changes.
+if os.environ.get("NM_RMCC_CC"):
+    drop, kept, skip = {"-mindirect-branch-register", "-mindirect-branch=thunk-extern"}, [], False
+    for t in toks[1:]:
+        if skip: skip = False; continue
+        if t == "-arch": skip = True; continue
+        if t in drop or t.startswith("-mmacosx-version-min="): continue
+        kept.append(t)
+    toks = shlex.split(os.environ["NM_RMCC_CC"]) + kept
 r = subprocess.run(toks, cwd=rm, capture_output=True, text=True)
 sys.stderr.write(r.stderr[-6000:])
 sys.exit(r.returncode)
