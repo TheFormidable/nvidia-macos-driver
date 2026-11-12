@@ -34,6 +34,9 @@
 #include "nvaccel_lock_owner.h"
 #include "../nvrm_devtab.h"
 #include "../nvrm_utilization_abi.h"
+#include "../nvrm_fence_abi.h"   // the surface fence NVRM keeps (nvFenceOps); plain C, no include
+typedef unsigned (*NVRMFenceWaitFn)(struct NVRMFenceWait *w, unsigned flags);   // NVRMFenceKernelOps.wait
+static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm);
 class NVMemoryMap;
 class NVAccel;
 static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
@@ -853,6 +856,9 @@ public:
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
             // its pixels landed, so the plugin keeps marking them after the GPU finishes.
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
+            // Ask NVRM for its surface fence now, so the plugin learns early that this accelerator's waits read it.
+            // Refused here when NVRM's GPU start has not reached the fence yet: the waits ask again later.
+            nvFenceAsk(locateNVRM());
             // Properties an Apple accelerator publishes that programs read when they walk the registry for the GPU in use
             // (game engines list IOAccelerator services to pick the primary GPU, and the OpenGL renderer id ties a
             // display GPU to a CGL renderer). Only added when nothing else has set them.
@@ -1735,12 +1741,15 @@ static void nvSurfMark(unsigned int id, bool pending)
     IOLockUnlock(l);
     OSAddAtomic64(1, &gCntSurfMarks);
 }
-static bool nvSurfWaitReady(unsigned int id)
+// 2.9's wait: sleeps on a mark until WindowServer clears it, at most kSurfGpuWaitMs, then deletes the mark and goes on.
+// `limit`, when not 0, is an earlier deadline: what is left of the bound of a caller whose fence wait already waited.
+static bool nvSurfWaitLegacy(unsigned int id, uint64_t limit)
 {
     IOLock *l = gSurfPendLock;
     if (!l || !id || !gSurfGpuOn) return true;   // switched off: marks left from before never hold a swap
     uint64_t start = mach_absolute_time(), deadline = 0;
     clock_interval_to_deadline(kSurfGpuWaitMs, kMillisecondScale, &deadline);
+    if (limit && limit < deadline) deadline = limit;
     bool waited = false, ready = true;
     IOLockLock(l);
     for (;;) {
@@ -1759,11 +1768,105 @@ static bool nvSurfWaitReady(unsigned int id)
     }
     return ready;
 }
-// True when a GPU write to this surface is still marked pending (no wait).
+// The surface fence in NVRM.kext. WindowServer's plugin takes a hold on each surface a command buffer writes; NVRM sees
+// the GPU reach the hold's value on the completion interrupt and ends it, and ends it at once when the writer's process
+// exits, its channel faults or the GPU goes to sleep. A wait here therefore lasts as long as the GPU really needs,
+// bounded by the caller and by NVRM_FENCE_WAIT_MAX_MS, instead of giving up after 100 ms. The marks above stay: an
+// older plugin, a hold NVRM refused and an NVRM without the fence (an older kext, boot-arg nvrmfence=0, a fence that
+// did not start) all leave them, and then every wait is exactly the mark wait.
+// The table is NVRM's one function pointer, asked for once. An NVRM that refuses is asked again at most once a second
+// (its fence starts after the accelerator, on the GPU's start-up thread), and only an NVRM already found: a wait never
+// waits for matching. wait() takes NVRM's fence lock, a leaf, and sleeps uninterruptibly up to w->timeoutMs.
+static NVRMFenceWaitFn volatile gFenceWait;
+static uint64_t gFenceAskAgainAt;
+static int gFenceOn;
+static unsigned gFenceAskLogs;
+static SInt64 gCntFenceWaits, gCntFenceReady, gCntFenceDead, gCntFenceTimeouts, gCntFenceErrors, gCntFencePending;
+static int gFenceWaitMaxUs;
+static unsigned gFenceTimeoutLogs;
+static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm)
+{
+#ifdef NMX_ACCEL
+    nvrm = nullptr;   // an AMD/Intel accelerator: no NVRM, no fence
+#endif
+    if (!nvrm) return nullptr;
+    struct NVRMFenceKernelOps o;
+    o.version = NVRM_FENCE_ABI_VERSION; o.size = sizeof o; o.wait = nullptr;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_FENCE_FN_OPS);
+    const IOReturn r = sym ? nvrm->callPlatformFunction(sym, false, &o, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+    if (sym) sym->release();
+    if (r != kIOReturnSuccess || !o.wait) {
+        uint64_t next = 0; clock_interval_to_deadline(1, kSecondScale, &next);
+        gFenceAskAgainAt = next;
+        if (gFenceAskLogs < 2) { gFenceAskLogs++;
+            ALOG("surface fence: not offered by NVRM (yet) (0x%x) -- waits use the 2.9 marks; asked again at most once a second", (unsigned)r); }
+        return nullptr;
+    }
+    __atomic_store_n(&gFenceWait, (NVRMFenceWaitFn)o.wait, __ATOMIC_RELEASE);
+    if (!gFenceOn) { gFenceOn = 1; ALOG("surface fence: NVRM's fence v%u -- flips, copies and page-offs wait for the GPU through it", NVRM_FENCE_ABI_VERSION); }
+    return (NVRMFenceWaitFn)o.wait;
+}
+static NVRMFenceWaitFn nvFenceOps(void)
+{
+    NVRMFenceWaitFn fn = __atomic_load_n(&gFenceWait, __ATOMIC_ACQUIRE);
+    if (fn) return fn;
+    if (gFenceAskAgainAt && mach_absolute_time() < gFenceAskAgainAt) return nullptr;
+    NVAccel *a = NVAccel::resolve(nullptr);
+    return nvFenceAsk(a ? a->fNVRM : nullptr);
+}
+// Waits until the GPU work WindowServer has in flight on surface `id` is done, at most capMs (and at most
+// NVRM_FENCE_WAIT_MAX_MS, NVRM's clamp), then for 2.9's mark within what is left of capMs. A hold whose writer died
+// counts as done: nothing will ever complete it, and its pixels are as final as they will get. Returns false when a
+// bound ended a wait; the caller goes on either way, as in 2.9.
+static bool nvSurfWaitReadyFor(unsigned int id, unsigned capMs)
+{
+    if (!id || !gSurfGpuOn) return true;   // the 2.9 switch still turns every wait off
+    bool ready = true;
+    uint64_t limit = 0;
+    if (NVRMFenceWaitFn fw = nvFenceOps()) {
+        uint64_t end = 0; clock_interval_to_deadline(capMs, kMillisecondScale, &end);
+        const uint64_t t0 = mach_absolute_time();
+        struct NVRMFenceWait w;
+        w.seq = 0; w.waitedUs = 0; w.id = id; w.planes = 0; w.pid = 0; w.timeoutMs = capMs;
+        w.result = NVRM_FENCE_R_NONE; w.ownerPid = 0; w.state = 0; w.blockers = 0;
+        const unsigned st = fw(&w, NVRM_FENCE_F_COMPOSITOR);
+        if (st != NVRM_FENCE_ST_OK) OSAddAtomic64(1, &gCntFenceErrors);
+        else if (w.result != NVRM_FENCE_R_NONE) {
+            limit = end;
+            OSAddAtomic64(1, &gCntFenceWaits);
+            if (w.result == NVRM_FENCE_R_READY) OSAddAtomic64(1, &gCntFenceReady);
+            else if (w.result == NVRM_FENCE_R_DEAD) OSAddAtomic64(1, &gCntFenceDead);
+            else {
+                ready = false;
+                const SInt64 n = OSAddAtomic64(1, &gCntFenceTimeouts);
+                if (gFenceTimeoutLogs < 8 || (n & 255) == 0) { if (gFenceTimeoutLogs < 8) gFenceTimeoutLogs++;
+                    ALOG("surface fence: surface 0x%x not done after %u ms (result %u, writer pid %u, state %u) -- going on, as 2.9 did",
+                         id, capMs, w.result, w.ownerPid, w.state); }
+            }
+            uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            if ((int)(ns / 1000) > gFenceWaitMaxUs) gFenceWaitMaxUs = (int)(ns / 1000);
+        }
+    }
+    return nvSurfWaitLegacy(id, limit) && ready;   // marks of an older plugin, or of a hold the kernel refused
+}
+// The flip, the copied frame and the hybrid paths: neither a lock of this driver nor the accelerator lock is held while
+// they wait, so they wait as long as the GPU needs, up to NVRM's maximum.
+static bool nvSurfWaitReady(unsigned int id) { return nvSurfWaitReadyFor(id, NVRM_FENCE_WAIT_MAX_MS); }
+// True when a GPU write to this surface is still pending (no wait): a hold NVRM knows, or a 2.9 mark.
 static bool nvSurfIsPending(unsigned int id)
 {
+    if (!id || !gSurfGpuOn) return false;
+    if (NVRMFenceWaitFn fw = nvFenceOps()) {
+        struct NVRMFenceWait w;
+        w.seq = 0; w.waitedUs = 0; w.id = id; w.planes = 0; w.pid = 0; w.timeoutMs = 0;
+        w.result = NVRM_FENCE_R_NONE; w.ownerPid = 0; w.state = 0; w.blockers = 0;
+        if (fw(&w, NVRM_FENCE_F_COMPOSITOR | NVRM_FENCE_F_LOOK) == NVRM_FENCE_ST_OK && w.result == NVRM_FENCE_R_PENDING) {
+            OSAddAtomic64(1, &gCntFencePending);
+            return true;
+        }
+    }
     IOLock *l = gSurfPendLock;
-    if (!l || !id || !gSurfGpuOn) return false;
+    if (!l) return false;
     bool p = false;
     IOLockLock(l);
     for (unsigned i = 0; i < 32 && !p; i++) p = gSurfPend[i].id == id;
@@ -1774,8 +1877,10 @@ static bool nvSurfIsPending(unsigned int id)
 // NVResource::pageoff, which the family calls with the accelerator lock held; that wait held the lock and every RM call
 // that needs it (VRAM imports, allocations, dirty marks) queued behind it. The page-off lets go of the lock while it
 // waits, only when the current thread owns it at one level and the driver's own code did not take it (pin), and takes it
-// back before it goes on. Nothing here depends on how long the wait lasts or how often it runs: whatever bounds
-// nvSurfWaitReady is the only bound, and every check after the wait is made with the lock held again.
+// back before it goes on. Nothing here depends on how long the wait lasts or how often it runs: with NVRM's surface fence
+// the wait lasts as long as the GPU needs (NVRM_FENCE_WAIT_MAX_MS at most, then the 2.9 mark within the same bound), and
+// it runs for every surface with a hold NVRM knows as well as for a marked one. Every check after the wait is made with
+// the lock held again, and the references taken before it keep the resource and the accelerator alive however long it is.
 // On by default. A page-off falls back to the locked wait for one call when those conditions do not hold, and for the
 // rest of the boot when something unexpected is seen (nvPoStandDown). Boot-arg nvaccel_pageoff_locked=1, read once
 // before the first accelerator starts, is the way back to the locked wait for the whole boot; the sysctl only reports.
@@ -1815,6 +1920,14 @@ NVACCEL_CNT(nvaccel_surface_gpu_marks,    gCntSurfMarks,    "pending/ready marks
 NVACCEL_CNT(nvaccel_surface_gpu_waits,    gCntSurfWaits,    "swaps that waited here for their composite to finish");
 NVACCEL_CNT(nvaccel_surface_gpu_timeouts, gCntSurfTimeouts, "swaps whose composite did not finish within 100 ms");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfWaitMaxUs, 0, "longest swap wait for a composite, us");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_fence, CTLFLAG_RD | CTLFLAG_LOCKED, &gFenceOn, 0, "1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only)");
+NVACCEL_CNT(nvaccel_surface_fence_waits,    gCntFenceWaits,    "waits that found a fence hold on the surface");
+NVACCEL_CNT(nvaccel_surface_fence_ready,    gCntFenceReady,    "fence waits that ended because the GPU work was done");
+NVACCEL_CNT(nvaccel_surface_fence_dead,     gCntFenceDead,     "fence waits that ended because the writer exited, its channel faulted or the GPU slept");
+NVACCEL_CNT(nvaccel_surface_fence_timeouts, gCntFenceTimeouts, "fence waits that a bound ended with the work not done (the caller went on, as 2.9)");
+NVACCEL_CNT(nvaccel_surface_fence_errors,   gCntFenceErrors,   "fence waits NVRM did not serve (the 2.9 marks only)");
+NVACCEL_CNT(nvaccel_surface_fence_pending,  gCntFencePending,  "page-offs that found a fence hold on the surface");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_fence_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFenceWaitMaxUs, 0, "longest fence wait, us");
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
 NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
@@ -1864,6 +1977,10 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_on);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_marks); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_gpu_wait_max_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence);    sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_waits);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_ready); sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_dead);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_timeouts); sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_errors);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_pending); sysctl_register_oid(&sysctl__debug_nvaccel_surface_fence_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_wait); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_waits);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_locked_not_owner); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_locked_pinned);
@@ -2250,7 +2367,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             retain(); holdRes.o = this;
             a->retain(); holdAccel.o = a;
             nvFamUnlock(a);
-            nvSurfWaitReady(sid);
+            nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);   // no lock of this driver held: as long as the GPU needs, 2 s at most
             if (!nvFamLock(a, false)) {
                 // The accelerator's lock is gone (it is being torn down). Nothing below may run without the lock, and
                 // the family's caller will find it does not hold it: say so once and wait locked from now on.
@@ -2275,7 +2392,9 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
         } else {
             if (gPoUnlocked && a && nvSurfIsPending(sid)) OSAddAtomic64(1, a->lockPinned() ? &gCntPoPinned : &gCntPoNotOwner);
-            nvSurfWaitReady(sid);
+            // The accelerator lock is held here, and the producer's next step may need it: 2.9's 100 ms, fence and marks
+            // together.
+            nvSurfWaitReadyFor(sid, kSurfGpuWaitMs);
         }
     }
     IOMemoryDescriptor *md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
