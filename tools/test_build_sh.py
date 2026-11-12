@@ -15,8 +15,11 @@ driver. None of that can happen here, so this runs the real build.sh against sta
     pin comparison still reads it. The stand-in can be told to fail or to wait.
   * the pins of the outside sources are rewritten, in the clone only, to the commits of the stand-in remotes.
 
+The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /opt/homebrew and /usr/local
+before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew").
+
 Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
-  doctor on a fresh Mac; deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
+  doctor on a fresh Mac; no Homebrew of this machine is reached; deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
   the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
   interrupted run; two runs at once and a stale lock; paths with a space; Apple silicon and an unsupported macOS;
   "env"; clean; docs/BUILDING.md and docs/BUILDING.es.md against the script; build/pins.sh against the scripts and
@@ -31,6 +34,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
 fails = 0
 ONLY = sys.argv[1:]
+
+
+# A Homebrew of the machine this test runs on, in the two places build.sh looks at before PATH. An imitated Mac must
+# never reach it: "deps --yes" would install formulas on the tester's own Mac.
+HOST_BREW = [b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if os.path.exists(b)]
 
 
 def check(name, ok, detail=""):
@@ -470,6 +478,12 @@ class Sandbox:
         e = {"HOME": str(home or self.home), "PATH": ":".join(path), "TMPDIR": str(self.dir / "tmp"), "LANG": "C",
              "USER": "tester", "LOGNAME": "tester", "NMT_SB": str(self.dir), "NMT_LIB": str(LIB),
              "GIT_CONFIG_GLOBAL": str(self.dir / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        # NM_BREW is the only Homebrew build.sh considers when it is set. Without it build.sh on a tester's Mac would
+        # find the real one in /opt/homebrew or /usr/local before the stand-in on PATH, and install into it.
+        if self.has_brew:
+            e["NM_BREW"] = str(self.dir / "brew/bin/brew")
+        elif HOST_BREW:
+            raise RuntimeError(f"an imitated Mac without Homebrew cannot run here: build.sh would find {HOST_BREW[0]}")
         e.update(extra or {})
         return e
 
@@ -588,8 +602,8 @@ def under(path, roots):
 # ------------------------------------------------------------------------------------------------- arms
 def arm_fresh():
     """doctor on a Mac with nothing installed: names exactly what is missing, exits 1, changes nothing."""
-    if os.path.exists("/opt/homebrew/bin/brew") or os.path.exists("/usr/local/bin/brew"):
-        print("skip fresh-machine arm: this host has Homebrew in a fixed place build.sh always looks at")
+    if HOST_BREW:
+        print(f"skip fresh-machine arm: this machine has {HOST_BREW[0]}, which build.sh finds when NM_BREW is not set")
         return
     sb = Sandbox("fresh", xcode=None, brew=False)
 
@@ -625,6 +639,70 @@ def arm_fresh():
     rc, out = sb.run("--dry-run", "all")
     check("fresh Mac: a dry run of everything ends without error and installs nothing", rc == 0 and not mutating(sb.jlines()),
           f"exit {rc} {mutating(sb.jlines())[:3]} {out[-600:]}")
+
+
+def arm_hostbrew():
+    """No run of the imitated Mac reaches a Homebrew of the machine the test runs on.
+
+    A second stand-in Homebrew plays the tester's own: in the clone only, the two places build.sh looks at before PATH
+    (/opt/homebrew, /usr/local) are replaced by it. It records every call, and a call to it is the failure."""
+    sb = Sandbox("hostbrew")
+    host = sb.dir / "hostbrew/bin/brew"
+    calls = sb.dir / "hostbrew.calls"
+    host.parent.mkdir(parents=True)
+    host.write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{calls}"\n'
+                    f'case "${{1:-}}" in --version) echo "Homebrew 4.6.3" ;; --prefix) echo "{sb.dir}/hostbrew" ;; *) exit 1 ;; esac\n')
+    host.chmod(0o755)
+    sb.break_script("    for c in /opt/homebrew/bin/brew /usr/local/bin/brew ", f'    for c in "{host}" "{host}" ')
+    standin = str(sb.dir / "brew/bin/brew")
+
+    def reached():
+        return calls.read_text().splitlines() if calls.exists() else []
+
+    def problems(extra=None):
+        """doctor and deps on this Mac: which Homebrew answers?"""
+        if calls.exists():
+            calls.unlink()
+        sb.clear()
+        p = []
+        rc, out = sb.run("doctor", extra=extra)
+        if f"Homebrew {standin}" not in out:
+            p.append(f"doctor does not name the stand-in Homebrew: {[l for l in out.splitlines() if 'Homebrew' in l][:3]}")
+        rc, out = sb.run("deps", "--no-install", "-y", extra=extra)
+        if not [l for l in sb.jlines() if l.startswith("brew ")]:
+            p.append("deps did not ask the stand-in Homebrew anything")
+        if reached():
+            p.append(f"the machine's own Homebrew was called: {reached()[:4]}")
+        return p
+
+    p = problems()
+    check("every run names its stand-in Homebrew (NM_BREW): the machine's own is never called", not p, p)
+    negative("a run without NM_BREW (build.sh then finds the machine's own Homebrew first)", problems(extra={"NM_BREW": ""}))
+
+    def missing_problems():
+        """NM_BREW names a brew that is not there: no Homebrew, and no other one is looked for."""
+        if calls.exists():
+            calls.unlink()
+        sb.clear()
+        p = []
+        gone = {"NM_BREW": str(sb.dir / "no-such/bin/brew")}
+        rc, out = sb.run("doctor", extra=gone)
+        items = doctor_items(out)
+        if rc != 1 or not [i for i in items if i.startswith("Homebrew: NM_BREW names")]:
+            p.append(f"doctor: exit {rc}, Homebrew lines {[i for i in items if 'Homebrew' in i][:2]}")
+        rc, out = sb.run("deps", "-y", extra=gone)
+        if rc == 0 or "NM_BREW names" not in out:
+            p.append(f"deps: exit {rc}: {out[-200:]}")
+        if mutating(sb.jlines()):
+            p.append(f"deps went on to install: {mutating(sb.jlines())[:3]}")
+        if reached():
+            p.append(f"the machine's own Homebrew was called: {reached()[:4]}")
+        return p
+
+    p = missing_problems()
+    check("NM_BREW that names no brew: doctor and deps say so, nothing is installed, no other Homebrew is looked for", not p, p)
+    sb.break_script('  if [ -n "${NM_BREW:-}" ]; then\n    if [ -f "$NM_BREW" ]', '  if false; then\n    if [ -f "$NM_BREW" ]')
+    negative("a build.sh that falls back to the usual places when NM_BREW names no brew", missing_problems())
 
 
 DEPS_WANT = ["gpatch", "ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
@@ -1797,6 +1875,8 @@ def main():
             arm_pins_script()
         if want("fresh"):
             arm_fresh()
+        if want("hostbrew"):
+            arm_hostbrew()
         if want("noinstall"):
             arm_noinstall()
         if want("tamper"):

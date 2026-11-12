@@ -51,6 +51,7 @@
 # --- tools and trees you already have -----------------------------------------------------------------------------
 # an Xcode other than the selected one
 #DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+# the brew to use; when set, no other Homebrew is looked for
 #NM_BREW=/opt/homebrew/bin/brew
 #NM_PYTHON=/opt/homebrew/bin/python3.14
 # LLVM 22 with its clang libraries, when Homebrew has none
