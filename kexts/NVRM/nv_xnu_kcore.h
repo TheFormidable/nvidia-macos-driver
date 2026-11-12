@@ -1,0 +1,94 @@
+/*
+ * NullMoth NVIDIA driver for macOS
+ * Copyright (c) 2026 NullMoth Systems.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
+// nv_xnu_kcore.h: what the rest of NVRM.kext calls in nv_xnu_kcore.cpp: the answer to "may this context block?", the
+// serialized work queues that replace one thread per RM work item, and two small note helpers.
+//
+// The RM calls its OS layer from contexts that must not sleep (under its spinlocks, with preemption off). On Linux
+// every OS-layer function asks the kernel which kind of context it is in and takes a non-blocking branch when it has
+// to. nvx_can_block() is that question here. The work queues give the RM what a Linux kthread queue gives it: one
+// worker per queue, items run in the order they were queued, and a flush that returns when everything queued before
+// it has run.
+//
+// Lock order, complete: RM locks (API lock, GPU locks, RM spinlocks) -> a queue's own simple lock (interrupts off;
+// only assert_wait and thread_wakeup happen inside). The queue administration lock (slot allocation, start, stop) is
+// an IOLock taken in thread context only and never while a queue's simple lock is held.
+
+#pragma once
+#include "nv-xnu.h"
+
+extern "C" {
+
+// Once, in thread context, from the first start of the kext, before the RM is entered for the first time. Reads the
+// boot-args nvrmatomic and nvrmworkq (only the value 0 switches a feature off), tests the context predicate against a
+// lock it takes itself, allocates what the features need and starts the global work queue. Each thing that cannot be
+// had switches only its own feature back to the older behaviour; there is nothing to check and nothing to undo. A
+// second call does nothing.
+void nv_xnu_kcore_init(void);
+
+// Registers this file's read-only sysctls. Thread context; call it once, from the block that registers the kext's
+// other sysctls.
+void nv_xnu_kcore_sysctls_register(void);
+
+// May the calling context block: sleep, wait for an IOLock, allocate with waiting? Any context; no lock.
+// It is the kernel's own answer (preemption and interrupts enabled) EXCEPT when the non-blocking branches are switched
+// off, by the boot-arg nvrmatomic=0 or because the start-up test of the predicate failed: then it is true in every
+// context, so that every OS-layer function runs its older body. Use it for exactly that choice, between the older
+// body and the non-blocking branch of a function the RM calls.
+// Do NOT use it to decide whether a wait this driver adds may sleep (a cancel that waits for a callback, a quiesce):
+// with the branches switched off it says yes with preemption off, and sleeping there panics. Such code asks
+// preemption_enabled() itself; nv_xnu_quiesce.h has the helper.
+bool nvx_can_block(void);
+
+// One of the OS-layer functions was entered in a context that cannot block. Any context: a counter per site and, on
+// the first hit of a site, one kprintf line with the caller as an offset into the kext. No IOLog, no allocation, no
+// lock. `site` is an NVX_SITE_* value (others are ignored), `ra` the return address of the OS-layer function.
+void nvx_note(unsigned site, void *ra);
+
+// A queue of its own for one GPU. Thread context (takes the administration lock, starts a thread). Call it while
+// starting a GPU, before the adapter is initialised, and store the result in nv->queue.
+// Returns NULL when there is no free slot, the worker could not be started, or the queues are switched off
+// (nvrmworkq=0): that is NOT a failure. With nv->queue NULL the GPU's items go to the global queue, which is
+// serialized too (or, with the queues off, run as they did before). Never fail a start because of it.
+// Every non-NULL result is handed to nv_xnu_wq_gpu_down() exactly once.
+struct os_work_queue *nv_xnu_wq_gpu_start(void);
+
+// Stop a GPU's own queue: flush it, tell the worker to exit, wait for it, release the slot. Thread context, and never
+// from a work item (a call from the queue's own worker is refused and logged). Set nv->queue to NULL BEFORE calling,
+// so that items queued from then on go to the global queue. Every wait inside is capped; when a cap runs out, or the
+// queue was already abandoned by a capped flush, the slot is marked abandoned and never used again, the worker is left
+// alone and the function returns: the teardown goes on, as it always did before there were queues. NULL does nothing.
+void nv_xnu_wq_gpu_down(struct os_work_queue *q);
+
+// Wait until every item that was queued before the call has run. q NULL is the global queue. `unload` marks the flush
+// that belongs to a GPU's teardown (the RM's is_unload): while it runs, os_is_queue_flush_ongoing() answers true for
+// that queue. cap_ms 0 waits without a bound, as the RM's own flushes do (each 5 s of waiting logs the item that is
+// running); the kext's teardown, sleep and shutdown paths always pass a cap. With the queues switched off
+// (nvrmworkq=0, or the global worker could not be started) this is the older flush, which waits for the per-item
+// threads.
+//   NV_OK                    everything queued before the call has run. Also: the caller is the queue's own worker
+//                            (waiting for itself cannot end; returns at once, counted).
+//   NV_ERR_ILLEGAL_ACTION    the caller cannot block (nvx_can_block() is false). Nothing was waited for; counted.
+//   NV_ERR_TIMEOUT           only with a cap: it ran out with work still queued or running. If q is a GPU's own
+//                            queue it is now ABANDONED: every later flush of it, capped or not, returns
+//                            NV_ERR_TIMEOUT at once without waiting. Without this rule the RM's own unbounded
+//                            flushes during the adapter teardown would hang on the queue the caller has just given
+//                            up on. The global queue is never abandoned: its next flush waits again.
+// On every result the caller carries on with what it was doing; a teardown must not stop half-way because work is
+// stuck. After NV_ERR_TIMEOUT an item may still be running: free nothing it could use that the normal order would
+// not already free.
+NV_STATUS nv_xnu_wq_flush(struct os_work_queue *q, bool unload, unsigned cap_ms);
+
+// A function of the OS layer that has no real body was called. Any context (a small lock with interrupts off; no
+// allocation). The name is copied into a fixed buffer that a read-only sysctl publishes; call it once per function,
+// from the once-only branch of the stub macro.
+void nv_xnu_stub_note(const char *name);
+
+}
+
+// Where nvx_note() is called from
+enum { NVX_SITE_ALLOC, NVX_SITE_FREE, NVX_SITE_DELAY, NVX_SITE_SCHEDULE, NVX_SITE_MUTEX, NVX_SITE_RWLOCK,
+       NVX_SITE_SEMA, NVX_SITE_LOCKALLOC, NVX_SITE_BLOCKING_ENTRY, NVX_SITE_FLUSH, NVX_SITE_MAX };
