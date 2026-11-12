@@ -1,0 +1,95 @@
+# build.conf.example: settings for ./build.sh. Copy it to ~/.config/nullmoth/build.conf (read when it exists) or pass
+# --config FILE. One NAME=value per line; the file is read, never run, and an unknown name stops build.sh.
+# A value may be quoted; ~/ at its start means your home folder. The environment wins over this file, and an option on
+# the command line wins over both. Every line here is commented out: each shows the default or an example.
+
+# --- options ------------------------------------------------------------------------------------------------------
+# where everything build.sh makes goes (sources, tools, outputs, logs): outside the checkout, no spaces
+#NM_WORK=~/nullmoth-build
+# parallel compile jobs (default: the number of cores)
+#NM_JOBS=4
+# 1 = answer yes to build.sh's questions (installing Homebrew formulas and Rust). Homebrew itself is never installed
+# without a typed yes.
+#NM_ASSUME_YES=0
+# 1 = install nothing; report what is missing and stop
+#NM_NO_INSTALL=0
+# 1 = no network: use only what an earlier fetch left in the working directory (NVK cannot be built offline)
+#NM_OFFLINE=0
+# 1 = print the commands, change nothing
+#NM_DRY_RUN=0
+# release = the plugin as released; dev = the plugin with its diagnostics compiled in (for finding a fault)
+#NM_FLAVOUR=release
+# NVAccel.kext for macOS 15, 26 or both (a package needs both)
+#NM_ACCEL=both
+# 1 = show every step's output, not only its log
+#NM_VERBOSE=0
+# 1 = rebuild even what is up to date
+#NM_FORCE=0
+
+# --- package ------------------------------------------------------------------------------------------------------
+# a release package the result is based on (needed by "./build.sh package"; docs/BUILDING.md says why)
+#NM_BASE_PACKAGE=~/Downloads/nullmoth-nvidia-2.9.tar.gz
+# its SHA-256 from the release page, checked before use
+#NM_BASE_PACKAGE_SHA256=
+# written to the package's VERSION (digits and dots)
+#NM_PACKAGE_VERSION=
+
+# --- mirrors (default: the URLs in build/pins.sh; the commit ids and SHA-256 are checked either way) ---------------
+#NM_OGKM_URL=https://github.com/NVIDIA/open-gpu-kernel-modules.git
+#NM_MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
+# a folder that holds Vulkan-Headers and Vulkan-Loader (a URL prefix, e.g. file:///path/to/mirrors)
+#NM_KHRONOS_URL=https://github.com/KhronosGroup
+#NM_OPEN_GPU_DOC_URL=https://github.com/NVIDIA/open-gpu-doc.git
+#NM_RYZENADJ_URL=https://github.com/FlyGoat/RyzenAdj.git
+# the folder that holds CMBaseObjectSPI.h and VTVideoDecoderSPI.h
+#NM_WEBKIT_SPI_URL=
+#NM_RUSTUP_URL=https://static.rust-lang.org/rustup/archive/1.29.3
+#RUSTUP_DIST_SERVER=https://static.rust-lang.org
+
+# --- tools and trees you already have -----------------------------------------------------------------------------
+# an Xcode other than the selected one
+#DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+#NM_BREW=/opt/homebrew/bin/brew
+#NM_PYTHON=/opt/homebrew/bin/python3.14
+# LLVM 22 with its clang libraries, when Homebrew has none
+#NM_LLVM_PREFIX=/opt/homebrew/opt/llvm@22
+# NVIDIA 620.70.06 unpacked (checked by its version.mk)
+#NM_OGKM620_PRISTINE=
+# a 620.70.06 tree whose RM and modeset archives are built already (the rm and kms steps are then skipped)
+#NM_OGKM620=
+#NM_OGKM610=
+# a Mesa clone that holds commit 90a959eb (mesa-26.3.0-rc3)
+#NM_MESA_GIT=
+#NM_VULKAN_INCLUDE=
+# the optional kexts nmkbl and nmhda
+#NM_LILU_DEBUG_KEXT=
+#NM_VIRTUALSMC_SRC=
+#NM_MACKERNELSDK=
+
+# --- the release scripts' build Mac (default: this Mac, served by build/local_build_host.sh) -----------------------
+#NULLMOTH_BUILD_HOST=
+#NULLMOTH_BUILD_ROOT=
+#NM_LOCAL_HOST_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# --- read by the build scripts and passed on unchanged (empty = the script's own default) --------------------------
+#NV_VERSION=620.70.06
+#KMS_ARCHIVE=
+#RE=
+#MINVER=
+#FB_DEFS=
+#KHDR=
+#KLIB=
+#MACOSX_DEPLOYMENT_TARGET=15.0
+#NVK_PATH=
+#NVK_SYSROOT=
+#NVK_JOBS=
+#NVK_EXTRA_PATCHES=
+#NVK_SKIP_PATCHES=
+#NVK_REF_EXPORTS=
+#PKG_CONFIG_PATH=
+#LIBCLANG_PATH=
+#JOBS=
+# (OGKM and NVRM_PRISTINE_OGKM are set by build.sh from NM_OGKM620 and NM_OGKM620_PRISTINE above)
+#NULLMOTH_RUST_VERSION=1.98.1
+#NULLMOTH_RUST_BIN=
+#NULLMOTH_CARGO_HOME=
