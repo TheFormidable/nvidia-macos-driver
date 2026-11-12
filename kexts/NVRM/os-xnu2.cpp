@@ -1352,10 +1352,15 @@ static NV_STATUS nv_xnu_tmpf_grow(nv_xnu_tmpfile *f, NvU64 need)
     f->chunk = chunk; f->pageable = pageable; f->cap = cap;
     return NV_OK;
 }
+// Bytes the RM has written into save files since boot. The suspend path reads it before and after STANDBY and logs the
+// difference: the VRAM this sleep preserved through the file (nothing when the RM preserved it another way).
+static volatile SInt64 nv_xnu_tmpf_written = 0;
+extern "C" uint64_t nv_xnu_tmpfile_written(void) { return (uint64_t)OSAddAtomic64(0, &nv_xnu_tmpf_written); }
 NV_STATUS NV_API_CALL os_write_file(void *pFile, NvU8 *buf, NvU64 size, NvU64 offset)
 {
     nv_xnu_tmpfile *f = (nv_xnu_tmpfile *)pFile;
     if (!f || (!buf && size)) return NV_ERR_INVALID_ARGUMENT;
+    if (size) OSAddAtomic64((SInt64)size, &nv_xnu_tmpf_written);
     while (size) {
         const NvU64 idx = offset / NV_XNU_TMPF_CHUNK, in = offset % NV_XNU_TMPF_CHUNK;
         const NvU64 n = (size < NV_XNU_TMPF_CHUNK - in) ? size : NV_XNU_TMPF_CHUNK - in;
