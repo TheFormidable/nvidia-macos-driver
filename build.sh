@@ -603,9 +603,9 @@ doctor() {   # prints; sets D_MISSING
   source_status
   say "== things that can stop a build on another Mac"
   x=$(id -un 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_warn "your account name '$x' is short: build_rm620.sh and build_kms620.sh stop (exit 6) if it appears anywhere in NVIDIA's archive, case-insensitive"
+  [ "${#x}" -ge 5 ] || d_note "your account name '$x' is short: build_rm620.sh and build_kms620.sh stop (exit 6) when it occurs inside any word of NVIDIA's archive; build.sh then looks again for it as a whole word and goes on when there is none (the log says so)"
   x=$(hostname -s 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_warn "the computer's short name '$x' is short: the same check also looks for it (System Settings > General > Sharing > Local hostname)"
+  [ "${#x}" -ge 5 ] || d_note "the computer's short name '$x' is short: the same check looks for it, and build.sh looks again the same way (System Settings > General > Sharing > Local hostname)"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
   if is_mac && [ "$(uname -m)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
@@ -1137,6 +1137,26 @@ source_rev() {   # the revision the git-archive based scripts build: HEAD, or th
     REV_NOTE="the working tree of $(git -C "$HERE" rev-parse --short HEAD) with its uncommitted changes (as commit object $REV; untracked files are not part of it)"
   fi
 }
+# build_rm620.sh and build_kms620.sh end by looking for the account name and the computer's short name anywhere in the
+# archive, as a substring, and exit 6 when they find one. A short account name is found inside ordinary words of
+# NVIDIA's own strings (an account "ana" in "banana" on the owner's Mac), after the archive is complete. personal_recheck <archive>
+# looks for the two names as whole words (what a path, user@host or a name in an identity string would be); only
+# when there is none is the archive accepted, and the log says what the scripts matched and why it was accepted.
+personal_recheck() {
+  local a=$1 u h re n
+  [ -f "$a" ] || { say "personal-string recheck: $a is missing" >> "$CUR_LOG"; return 1; }
+  u=$(id -un 2>/dev/null || true); h=$(hostname -s 2>/dev/null || true)
+  re="${u}${u:+${h:+|}}${h}"
+  [ -n "$re" ] || return 1
+  n=$(strings -a "$a" | grep -ciE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" || true)
+  if [ "${n:-0}" = 0 ]; then
+    say "personal strings: the script's substring match (exit 6) found '$re' only inside other words; as whole words: 0. Accepted." >> "$CUR_LOG"
+    return 0
+  fi
+  { say "personal strings: '$re' occurs $n time(s) as a whole word in $a, for example:"
+    strings -a "$a" | grep -iE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" | sed -n 1,3p; } >> "$CUR_LOG" 2>&1 || true
+  return 1
+}
 run_component() {
   local n=$1 m
   make_step_env
@@ -1144,11 +1164,16 @@ run_component() {
     rm)
       [ ! -e "$RMWORK" ] || { in_workdir "$RMWORK" || die "$RMWORK is outside the working directory; build.sh rebuilds it from scratch only inside"; safe_rm "$RMWORK"; }
       x mkdir -p "$RMWORK"
-      x "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_rm620.sh" "$RMWORK" "$PRISTINE"
+      m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_rm620.sh" "$RMWORK" "$PRISTINE" || m=$?
+      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" || return 6
+      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m"
       # build_rm620.sh archives whatever objects exist and exits 0 when compiles fail; its "failed:" line says so
       [ "$NM_DRY_RUN" = 1 ] || grep -q '^failed: 0 of ' "$CUR_LOG" || { say "build_rm620.sh reported compile failures (it does not stop on them): see 'failed:' above" | tee -a "$CUR_LOG"; return 3; }
       ;;
-    kms)  x "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_kms620.sh" "$RMWORK" ;;
+    kms)
+      m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_kms620.sh" "$RMWORK" || m=$?
+      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" || return 6
+      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m" ;;
     nvrm)
       lines_to_array < <(passthru KMS_ARCHIVE RE)
       x "${STEP_ENV[@]}" "NVRM_PRISTINE_OGKM=$PRISTINE" ${ARR[@]+"${ARR[@]}"} bash "$HERE/build/build_nvrm.sh" "$HERE/kexts/NVRM" "$OGKM620" "$O/kexts/nvrm" ;;
