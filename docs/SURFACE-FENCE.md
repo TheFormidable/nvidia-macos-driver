@@ -22,8 +22,8 @@ gave the reader a half-drawn picture.
 
 The surface fence puts the missing knowledge into NVRM.kext: which connection is still drawing into which surface,
 on which GPU channel, and up to which point of that channel's work. A reader now sleeps in the kernel until that
-work is done and is woken by the GPU's interrupt. It stops waiting at once when the writer exits, when its channel
-faults or when the GPU goes to sleep.
+work is done and is woken by the GPU's interrupt. The kernel lets it go at once when the writer exits, when its
+channel faults or when the GPU goes to sleep.
 
 ## How it works
 
@@ -47,6 +47,15 @@ buffer writes, at commit. A hold is in one of three states:
 that existed when it arrived and for nothing opened later, so a surface that is redrawn back to back cannot keep a
 reader forever. The answer tells it how the wait ended: nothing was pending; ready; the writer is gone (exit, channel
 fault, GPU asleep); a hold was given up at its bound; the reader's own timeout ran out; a signal interrupted it.
+
+Only "ready" says that the surface is complete. On the other answers the reader goes on by its own rule. NVAccel
+goes on, as 2.9 did at its bound. A reader in the Metal plugin goes on when the kernel has kept it 10 ms or longer;
+one that was let go sooner does what 2.9 did, which is to poll the writer's busy tag for up to 10 ms, or not at all
+once the tag is 100 ms old. So no reader reads earlier than in 2.9 unless the hold ended as complete: the GPU
+reached its value, or the writer closed it.
+
+The kernel remembers how the last 64 holds ended. A reader that waited through more endings than that is told the
+worst of all of them, whoever's they were: "ready" only when every one was a completion.
 
 ## How the kernel sees the GPU work
 
@@ -309,6 +318,9 @@ boot" unless it says "now".
 | `seq_slept` | of those, slept in the kernel | those whose work was not done yet |
 | `seq_refused` | of those, told to poll: the channel raises no interrupt | 0 if copy-queue completions wake the kernel; see point 5 |
 
+A wait that outlasted more than 64 endings is counted under the worst of all of them (`wait_timeout` before
+`wait_dead` before `wait_ready`), also when the hold that was given up or lost was not one it waited for.
+
 "It works" is: `state` 1, `accel` 1, `auto` and `done_on_irq` grow with use, and `done_on_slice`, `chan_noirq`,
 `expired_*`, `map_*`, `strikes`, `owners_distrusted` and `close_gpu_behind` stay at or near 0.
 
@@ -332,9 +344,10 @@ from a channel or from the process.
 
 ## Sleep, wake, shutdown, a process that dies, a channel that faults
 
-- **Sleep.** Before the user channels stop, every hold ends (readers leave at once) and new holds are refused until
-  the wake. The kernel's views of the channel pages are system memory and survive. After a resume that failed the
-  layer stays off until the next boot (`state` 3).
+- **Sleep.** Before the user channels stop, every hold ends and new holds are refused until the wake. The kernel
+  lets every reader go at once; a reader in the plugin that had waited less than 10 ms then polls the writer's busy
+  tag, as in 2.9, before it reads. The kernel's views of the channel pages are system memory and survive. After a
+  resume that failed the layer stays off until the next boot (`state` 3).
   Not covered: a hold armed on a channel whose work the RM preempts at sleep ends as if it were done, so a reader that
   reads the surface during the sleep or right after the wake can see a frame the GPU never finished, as after a wait
   that reached its bound. Holds are not kept across the sleep, even those on channels the kernel has verified; see
@@ -346,9 +359,10 @@ from a channel or from the process.
   connection every hold ends and every sleeper is woken; the readers that were waiting are told "given up". From
   then on every request is answered "off", NVAccel is told that nothing is pending and is on 2.9's marks, and the
   kick returns at once.
-  Not covered: work that was in flight at that moment has neither a hold nor a 2.9 mark (none was sent for a surface
-  the kernel held), so its readers go on at once and can see an unfinished frame, as after a wait that reached its
-  bound.
+  Not covered: WindowServer's work that was in flight at that moment has neither a hold nor a 2.9 mark (none was
+  sent for a surface the kernel held), so NVAccel's flips, copies and page-offs go on at once and can see an
+  unfinished frame, as after a wait that reached its bound. An application's surface still carries its busy tag,
+  and a reader in the plugin falls back to it.
 - **A process exits or is killed.** Each connection, when it closes, ends its own holds and lets its own pages go
   before the RM frees what that connection owns. NVK keeps its fence calls on a connection of their own and its
   channels on another, and macOS closes a dying process's connections in no set order, so for the holds to end
@@ -357,8 +371,10 @@ from a channel or from the process.
   connection's process is exiting (`pid_gone` counts it); and from the moment a process is exiting the fence refuses
   it new holds and channels. Without that call (an NVRM.kext built before it), a hold armed on a channel of the
   process can outlive the channel until the fence connection closes, or until its bound if a reader looks first.
-  With it, readers of the process's surfaces go on at once, where 2.9 waited 10 ms or 100 ms for a tag or mark
-  nobody would clear.
+  With it, the kernel lets the readers of the process's surfaces go at once. NVAccel's waits (when the process
+  was WindowServer) then go on, where 2.9 waited 100 ms for a mark nobody would clear. A reader in the plugin falls
+  back to the dead writer's busy tag, which costs it what 2.9 did: at most 10 ms per read until the tag is 100 ms
+  old.
 - **A channel faults.** The RM writes the fault into the channel's notifier in the bottom half, the kick follows,
   and holds armed on that channel end. If NVK rebuilds the channel, later holds are watched again.
 - **Two GPUs** (`nvmultigpu=1`). There is one table for all. While one GPU is suspended, new holds are refused for
@@ -418,8 +434,10 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
    some channels (the copy-engine queue is the open question). It still works, in 250 us looks; report which
    processes (the log line names the pid and says `(copy engine)` for such a channel).
 6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` and `pid_gone` grow, no stall in WindowServer.
-   `pid_gone` growing needs the NVRM.kext with the `nvrm_fence_pid_gone` call; with an older one only `end_owner`
-   moves, and a wait of up to 2 s on that application's surfaces is possible.
+   What is left is 2.9's: for the first 100 ms a composite of that application's surfaces can take up to 10 ms
+   longer, on the busy tag the dead writer left. `pid_gone` growing needs the NVRM.kext with the
+   `nvrm_fence_pid_gone` call; with an older one only `end_owner` moves, and a wait of up to 2 s on that
+   application's surfaces is possible.
    **Stop one** (`kill -STOP`, then `-CONT`): one `expired_cpu` and one `strikes`, a single hitch of at most
    100 ms, nothing after.
 7. **Sleep and wake.** `end_pm` grows by the holds that were in flight; `state` is 1 afterwards and `opens` grows
