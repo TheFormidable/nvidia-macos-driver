@@ -19,6 +19,7 @@ int nvrm_kapi_dev_handles(const void *dev, unsigned int *c, unsigned int *d, uns
 }
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+#include "nvrm_dma.h"
 
 static inline void ssZero(void *p, unsigned long n) { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
 
@@ -61,6 +62,10 @@ extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *p, void *nv)
         sysctl_register_oid(&sysctl__debug_nvrm_pageoff_runs); sysctl_register_oid(&sysctl__debug_nvrm_pageoff_pages);
         sysctl_register_oid(&sysctl__debug_nvrm_pageoff_coalesced); sysctl_register_oid(&sysctl__debug_nvrm_pageoff_perpage);
     }
+    // The copy engine writes to these addresses. With a DMA mapper they must be bus addresses of a buffer mapped
+    // through it ("nvSurfDma"); a raw physical list would land wherever the mapper sends it. Without a mapper this is
+    // always yes and the copy runs as before. Every caller of the page-off copy comes through here.
+    if (!nvrm_dma_pages_ok((nv_state_t *)nv, (const NvU64 *)p->pages, p->pageCount)) { p->status = NVRM_SS_NO_DMA; return 0; }
     NvU64 us = 0;
     p->status = nvrm_ce_copy_to_pages(nv, c, m, (const NvU64 *)p->pages, p->pageCount, p->length, &us);
     p->usec = us;
