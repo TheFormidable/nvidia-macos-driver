@@ -11,14 +11,16 @@ the program name), so what runs here is the production text. What is proven:
     compositor); a refusal of the second gives back what the first took (one CLOSE), a refusal of the first needs none;
   - after any refusal the thread's record is empty, so every busy tag and every pending mark goes out as before;
   - ARM names only the surfaces whose last writer is the part, with that part's fence; CLOSE of everything happens once;
-  - a reader's wait passes the surface, the plane bit, the writer's pid and the 2 s budget, and only the answers that
-    settle the question end it; WindowServer never waits for compositor holds;
+  - a reader's wait passes the surface, the plane bit, the writer's pid and the 2 s budget; READY ends it, the answers
+    with which the kernel lets go (NONE, DEAD, TIMEOUT, BUDGET) end it only after the kernel kept the reader as long
+    as the older poll lasts, and everything else leaves it to that poll; WindowServer never waits for compositor holds;
   - surface 0 always reaches the kernel; a pending mark the open covers is not sent and its clear is not either; a
     mark the kernel took is cleared, a refused one is not; without NVK's entry every mark and clear goes out unrouted;
   - an answer of off from any request switches the fence off until the next probe.
 Negative controls: the same program built from a copy with one line of the production text changed must fail (the
 thread's record not cleared before a refusal; the partial refusal's CLOSE left out; a covered pending mark sent; a
-refused mark remembered as taken; the marks of an NVK without the entry routed).
+refused mark remembered as taken; the marks of an NVK without the entry routed; a reader's wait judged without the
+time the kernel kept it).
 """
 import os, pathlib, re, subprocess, sys, tempfile
 
@@ -72,7 +74,7 @@ static call calls[256]; static unsigned ncalls;
 static uint32_t q_status = 0, q_active = 1, q_accel = 1;      /* QUERY */
 static uint32_t open_answer[4]; static unsigned nopen;        /* OPEN, one per request in order; past the end OK */
 static uint32_t other_status;                                  /* ARM, CLOSE, WAIT */
-static uint32_t wait_result = NVMTL_FENCE_R_READY;
+static uint32_t wait_result = NVMTL_FENCE_R_READY, wait_us = 1234;   /* WAIT: the answer and how long the kernel kept the reader */
 static uint32_t nvk(VkDevice d, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids,
                     const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6])
 {
@@ -85,7 +87,7 @@ static uint32_t nvk(VkDevice d, uint32_t op, uint32_t flags, uint64_t cookie, ui
     if (op == NVMTL_FENCE_OP_WAIT && planes) c->planes[0] = planes[0];
     if (op == NVMTL_FENCE_OP_QUERY) { if (!q_status) { out[0] = q_active; out[1] = q_accel; } return q_status; }
     if (op == NVMTL_FENCE_OP_OPEN) return nopen < 4 ? open_answer[nopen++] : 0;
-    if (op == NVMTL_FENCE_OP_WAIT && !other_status) { out[0] = wait_result; out[1] = 1234; out[2] = pid; }
+    if (op == NVMTL_FENCE_OP_WAIT && !other_status) { out[0] = wait_result; out[1] = wait_us; out[2] = pid; }
     return other_status;
 }
 static uint32_t marks[64][2]; static unsigned nmarks; static uint32_t mark_answer;
@@ -251,10 +253,18 @@ int main(int argc, char **argv)
     T("wait: READY ends it", nvmtl_vk_fence_wait(900, 4, 321) == 1);
     T("wait: surface, plane bit, writer's pid, 2 s budget, no flags", calls[0].op == NVMTL_FENCE_OP_WAIT && calls[0].ids[0] == 900 &&
       calls[0].planes[0] == 4 && calls[0].pid == 321 && calls[0].timeout == NVMTL_FENCE_WAIT_MS && calls[0].flags == 0);
-    wait_result = NVMTL_FENCE_R_NONE; T("wait: NONE ends it", nvmtl_vk_fence_wait(900, 1, 321) == 1);
-    wait_result = NVMTL_FENCE_R_TIMEOUT; logs = 0; T("wait: TIMEOUT ends it, logged", nvmtl_vk_fence_wait(900, 1, 321) == 1 && logs == 1);
-    wait_result = NVMTL_FENCE_R_ABORTED; T("wait: ABORTED falls through to the poll", nvmtl_vk_fence_wait(900, 1, 321) == 0);
+    wait_us = 0; T("wait: READY ends it even when the kernel did not have to sleep", nvmtl_vk_fence_wait(900, 4, 321) == 1);
+    wait_result = NVMTL_FENCE_R_NONE; T("wait: NONE (the kernel holds nothing) leaves it to the tag", nvmtl_vk_fence_wait(900, 1, 321) == 0);
+    wait_result = NVMTL_FENCE_R_DEAD; wait_us = 2000; T("wait: DEAD after 2 ms falls through to the poll", nvmtl_vk_fence_wait(900, 1, 321) == 0);
+    wait_us = NVMTL_FENCE_POLL_US - 1; T("wait: DEAD one microsecond short of the poll's time still does", nvmtl_vk_fence_wait(900, 1, 321) == 0);
+    wait_us = NVMTL_FENCE_POLL_US; T("wait: DEAD after the poll's time ends it", nvmtl_vk_fence_wait(900, 1, 321) == 1);
+    wait_result = NVMTL_FENCE_R_TIMEOUT; wait_us = 20000; logs = 0;
+    T("wait: TIMEOUT after 20 ms ends it, logged", nvmtl_vk_fence_wait(900, 1, 321) == 1 && logs == 1);
+    wait_us = 300; T("wait: TIMEOUT for a reader that came at the bound falls through, logged too", nvmtl_vk_fence_wait(900, 1, 321) == 0 && logs == 2);
+    wait_result = NVMTL_FENCE_R_BUDGET; wait_us = NVMTL_FENCE_WAIT_MS * 1000u; T("wait: BUDGET (two seconds) ends it", nvmtl_vk_fence_wait(900, 1, 321) == 1);
+    wait_result = NVMTL_FENCE_R_ABORTED; T("wait: ABORTED falls through to the poll, whatever the time", nvmtl_vk_fence_wait(900, 1, 321) == 0);
     wait_result = NVMTL_FENCE_R_PENDING; T("wait: PENDING falls through", nvmtl_vk_fence_wait(900, 1, 321) == 0);
+    wait_us = 1234;
     other_status = 0x80000003u; T("wait: an error falls through", nvmtl_vk_fence_wait(900, 1, 321) == 0);
     T("wait: surface 0 is not asked", (reset_calls(), nvmtl_vk_fence_wait(0, 1, 321) == 0 && ncalls == 0));
     reset_calls(); nvmtl_vk_fence_wait_compositor(910);
@@ -297,6 +307,7 @@ with tempfile.TemporaryDirectory() as d:
         ('a pending mark the kernel hold covers is sent anyway', 'if (!send) return 0;', '(void)send;'),
         ('a clear is sent for a mark the kernel refused', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, st);', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, 0);'),
         ('the marks of an NVK without the fence entry are routed', 'if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);', ''),
+        ('a reader\'s wait is judged without the time the kernel kept it', 'return nvmtl_fence_wait_handled(st, out[0], out[1]);', 'return nvmtl_fence_wait_handled(st, out[0], ~0u);'),
     ]
     for what, line, replacement in controls:
         assert block.count(line) == 1, 'control anchor not found once: ' + line
