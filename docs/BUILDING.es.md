@@ -53,6 +53,12 @@ Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio 
 `~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`.
 
+`doctor`, `env`, `help` y cualquier comando con `--dry-run` no escriben nada: no ejecutan `brew info` ni
+`brew install`, leen el clon sin actualizar su índice y no guardan cambios locales con `git stash create`. `deps`
+escribe en la carpeta de Homebrew y en su caché (`~/Library/Caches/Homebrew`) al instalar, pero sus preguntas
+`brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache`. La tabla completa está en
+[BUILDING.md](BUILDING.md#what-each-command-writes).
+
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
 los ponía en `<directorio de trabajo>/build/build/...`; esa carpeta ya no se usa y `./build.sh clean` la borra. Detalles en
