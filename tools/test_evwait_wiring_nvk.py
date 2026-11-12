@@ -17,6 +17,8 @@ header by tools/test_shared_headers.py. This test reads the patch and holds what
   the kext      selector 6 is read whole (count and reason) through the header's selector number; the 2.9 call still
                 returns the count alone for the synchronous flush, whose sleep is not touched; selector 9 carries the
                 notes; an old kext's answer that came back at once with nothing posted is not taken as a sleep
+  no sleep      asked to sleep, a kext that says why and answers "count read", "moved" or "woken" with the count it
+                was given did not sleep and saw no event: the round polls one step instead of asking again at once
   the counters  seven slots appended after the eight of 2.9 (the plugin reads the first nine by position), one per
                 NVRM_EVW_S_*, each mapped to its own slot, and printed with the others
 
@@ -63,6 +65,16 @@ def body(src, name):
     first '}' alone on a line."""
     m = re.search(r"(?ms)^" + re.escape(name) + r"\(.*?^\}$", src)
     return m.group(0) if m else ""
+
+
+def order(text, *parts):
+    """Every part occurs in text, each after the one before it."""
+    at = -1
+    for p in parts:
+        at = text.find(p, at + 1)
+        if at < 0:
+            return False
+    return True
 
 
 # --- the checks, each a function of the patch text so that the controls can run them on a damaged copy ----------------
@@ -119,6 +131,21 @@ def chk_kext(t):
             and "*out = nvrm_evw_pack(seen, NVRM_EVW_R_SPURIOUS);" in w)
 
 
+NO_SLEEP = ("} else if (timeout_us != 0 && nvrm_evw_seq(*out) == seen &&\n"
+            "              (why == NVRM_EVW_R_COUNT || why == NVRM_EVW_R_MOVED || why == NVRM_EVW_R_WOKEN)) {")
+
+
+def chk_nosleep(t):
+    ctx = sections(t).get(DIR + "nvkmd_nvrm_ctx.c", ("", ""))[0]
+    w = body(ctx, "nvrm_evw_nvk_wait")
+    # three answers are rewritten to "a wake without an event" (the header then polls one step), in this order: a reason
+    # this file does not know, a named reason that is neither a sleep nor a new event, an old kext's immediate answer
+    return (order(w, "if (why > NVRM_EVW_R_SPURIOUS) {", "NVRM_EVW_R_SPURIOUS);", NO_SLEEP,
+                  "*out = nvrm_evw_pack(seen, NVRM_EVW_R_SPURIOUS);", "} else if (why == NVRM_EVW_R_LEGACY &&",
+                  "*out = nvrm_evw_pack(seen, NVRM_EVW_R_SPURIOUS);", "return 0;")
+            and w.count("NVRM_EVW_R_SPURIOUS);") == 3 and w.count("return 0;") == 1)
+
+
 GS = ["SLEEPS", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FALLBACK", "CHAN_SLEEP"]
 EVW = ["SLEEP", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FELL_BACK", "CHAN_SLEEP"]
 
@@ -166,11 +193,20 @@ CHECKS = [
      'nvmtl_cfg_getenv("NVRM_EVENT_WAIT")', 'getenv("NVRM_EVENT_WAIT")'),
     ("selector 6 is read whole and selector 9 carries the notes; the flush keeps the 2.9 call; an old kext's immediate "
      "answer polls, outside WindowServer", chk_kext, "c->mode == NVRM_EVW_ADAPT", "c->mode != NVRM_EVW_POLL"),
+    ("no sleep: an answer to a request to sleep that names neither a sleep nor a new event polls one step", chk_nosleep,
+     "(why == NVRM_EVW_R_COUNT || why == NVRM_EVW_R_MOVED || why == NVRM_EVW_R_WOKEN)", "(why == NVRM_EVW_R_COUNT)"),
+    # a second control of the same check: the rule is only for a request to sleep whose count came back unchanged
+    ("no sleep, for any count: a rule that also rewrites a count read or a moved count", chk_nosleep,
+     "} else if (timeout_us != 0 && nvrm_evw_seq(*out) == seen &&\n+              (why == NVRM_EVW_R_COUNT",
+     "} else if (\n+              (why == NVRM_EVW_R_COUNT"),
     ("seven counters after the eight of 2.9, one per NVRM_EVW_S_*, each in its own slot, all printed", chk_counters,
      "[NVRM_EVW_S_MISSED] = NVRM_GS_EVW_MISSED", "[NVRM_EVW_S_MISSED] = NVRM_GS_EVW_TIMEOUT"),
 ]
+checked = set()
 for name, fn, good, broken in CHECKS:
-    arm(name, fn(patch))
+    if fn not in checked:      # a check with two controls is run on the patch itself once, under its first name
+        arm(name, fn(patch))
+        checked.add(fn)
     damaged = patch.replace(good, broken)
     arm("control: " + name.split(":")[0].split(";")[0] + " - a damaged copy fails",
         damaged != patch and not fn(damaged), "the damage did not apply" if damaged == patch else "")

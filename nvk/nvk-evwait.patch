@@ -39,7 +39,7 @@ index 6c9cf32..2a61354 100644
  int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);
  bool nvkmd_nvrm_defer(struct nvkmd_dev *dev, void (*fn)(void *), void *arg);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 27f936c..d69f12c 100644
+index 27f936c..8684165 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -5,6 +5,7 @@
@@ -50,7 +50,7 @@ index 27f936c..d69f12c 100644
  #include <stdlib.h>
  #include "ctrl/ctrl0080/ctrl0080fifo.h" // NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES
  #include "ctrl/ctrl2080/ctrl2080gr.h" // NV2080_CTRL_CMD_GR_{GET_CTXSW_MODES,SET_CTXSW_PREEMPTION_MODE}
-@@ -197,12 +198,28 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
+@@ -197,12 +198,29 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
     usleep(200);
  }
  
@@ -81,11 +81,12 @@ index 27f936c..d69f12c 100644
 + * BOUNDED: at most 2 ms per sleep, so a missing event costs latency, never a hang. With a kext that says why a sleep
 + * ended, sixteen full-length sleeps in a row that end on their timeout although the work had completed (the event did
 + * not come) put the process back on polling for good, with one line on stderr and a count in the kext; a kext that
-+ * cannot wait at all does the same at its first refusal. Copy-engine-only channels raise no event: they poll. */
++ * cannot wait at all does the same at its first refusal. A channel that raises no event (copy engine only) is not slept
++ * on through the event: what its wait does instead is the first branch of the wait callback (nvrm_evw_nvk_wait). */
  static bool
  nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want, int *fd)
  {
-@@ -218,42 +235,144 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
+@@ -218,42 +236,151 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
           *fd = nvkmd_nvrm_dev(s->dev)->osEvent;   /* b73: the device's one GRAPHICS event */
     }
     pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
@@ -178,6 +179,13 @@ index 27f936c..d69f12c 100644
 +      /* a reason newer than this file: count it as a return that did not sleep, so the round polls one step instead
 +       * of going straight back into the kernel */
 +      *out = nvrm_evw_pack(nvrm_evw_seq(*out), NVRM_EVW_R_SPURIOUS);
++   } else if (timeout_us != 0 && nvrm_evw_seq(*out) == seen &&
++              (why == NVRM_EVW_R_COUNT || why == NVRM_EVW_R_MOVED || why == NVRM_EVW_R_WOKEN)) {
++      /* Asked to sleep, the kext says it only read the count, or that an event moved it, and the count is still the
++       * one it was given: it did not sleep and nothing was posted. nvrm_evwait.h's kext never answers that; one that
++       * did would be asked again at once, round after round, for as long as the wait lasts. Taken as a wake without
++       * an event, so the round polls one step. */
++      *out = nvrm_evw_pack(seen, NVRM_EVW_R_SPURIOUS);
 +   } else if (why == NVRM_EVW_R_LEGACY && timeout_us != 0 && c->mode == NVRM_EVW_ADAPT &&
 +              nvrm_evw_seq(*out) == seen && os_time_get_nano() - t0 < (int64_t)timeout_us * 500) {
 +      /* A kext that does not say why answers at its sleeper ceiling, or after an interruption, with the count
@@ -259,7 +267,7 @@ index 27f936c..d69f12c 100644
  }
  
  /* b73 (patch_evflush.py): the synchronous flush's sleep. true = slept on the device's graphics completion event, or
-@@ -558,10 +677,15 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -558,10 +685,15 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
        uint64_t st[1 + NVRM_GS_N];
        nvkmd_nvrm_gsub_stats(st, 1 + NVRM_GS_N);
