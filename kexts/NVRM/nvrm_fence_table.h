@@ -928,6 +928,11 @@ static inline void nvf_wait_count(struct nvf_table *T, unsigned result, int slep
  * q->sid, planes, pid, flags and zeroes q->snap. Returns NVRM_FENCE_ST_OK, or NVRM_FENCE_ST_FULL when the sleep was
  * refused (too many sleepers); the answer is w->result.
  *
+ * w->waitedUs is the time from the caller's arrival to its answer, whatever the answer. It is not only for the log: a
+ * reader in the Metal plugin that is let go without completion (NONE, DEAD, TIMEOUT, BUDGET) goes on only when this
+ * says the kernel kept it as long as its older poll would have, and polls otherwise. Reporting less sends every such
+ * reader to the poll; reporting more lets it read early.
+ *
  * Why no wake is lost: both generations are read BEFORE the look, and the sleep refuses to block when either has moved
  * since. A completion that lands after the look raises an interrupt, the interrupt moves the kick generation, and the
  * sleep sees it. Where no interrupt comes the slice ends the sleep, so the worst case is one slice late. */
