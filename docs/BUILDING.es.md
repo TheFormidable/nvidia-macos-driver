@@ -37,8 +37,12 @@ comandos y opciones y la solución de problemas.
 
 ## Inicio rápido
 
+Clona el repositorio y la rama de los que viene este archivo, con su propietario y el nombre de la rama en lugar de
+`<owner>` y `<branch>`. El repositorio del proyecto original no tiene `build.sh`; un clon de él da un árbol sin el
+script.
+
 ```bash
-git clone https://github.com/nullmoth/nvidia-macos-driver.git
+git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
 cd nvidia-macos-driver
 ./build.sh doctor
 ./build.sh
