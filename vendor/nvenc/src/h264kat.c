@@ -140,6 +140,7 @@ int h264dec_selftest_streams(Rm *rm, const KatVector *v, unsigned n, unsigned li
     r->used_y = r->used_uv = r->fits_y = r->fits_uv = KAT_LAYOUT_UNTRIED;
     r->nvdec = rm_class(rm, RM_CLS_NVDEC); r->channel = rm_class(rm, RM_CLS_CHANNEL);
     if (!r->nvdec || !r->channel || !rm_class(rm, RM_CLS_USERMODE)) kat_fail(r, KAT_NO_CLASS, 0);
+    else if (!v || !n) kat_fail(r, KAT_BAD_VECTOR, 0);           // no stream decoded is no proof: never a pass
     else if (!rm->vaspace && rm_va_init(rm)) kat_fail(r, KAT_NO_VASPACE, 0);
     else
         for (unsigned i = 0; i < n && r->step == KAT_PASS; i++) {
