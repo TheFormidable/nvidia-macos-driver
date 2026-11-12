@@ -90,13 +90,19 @@ go on (their answer says "given up"), and the connection that owns it gets a str
 |---|---|
 | armed (waiting for the GPU) | 2000 ms since it was first armed |
 | open or gpu-done (waiting for its writer's CPU) | 100 ms; 2000 ms while that connection still has GPU work in flight |
-| any hold of a connection in a penalty window | 20 ms |
+| an application hold of a connection in a penalty window | 20 ms |
+| a compositor hold of a connection in a penalty window | 100 ms |
 
 - A strike opens a penalty window for that connection: 10 s after the first strike, 20 s after the second, doubling.
-  Inside it every hold of the connection has the 20 ms bound, and holds given up there are not strikes. So a writer
-  that is stopped in a debugger costs its readers one 100 ms wait and then 20 ms each, about what 2.9 cost.
+  Inside it every hold of the connection has the shorter bound, and holds given up there are not strikes. For a
+  compositor hold that bound is 100 ms, never less: NVAccel's page-off under the accelerator lock waits at most
+  100 ms and 2.9 gave a WindowServer frame that long, so a WindowServer in a penalty window gets no less time for a
+  frame than 2.9 gave it. An application that is stopped in a debugger costs its readers one 100 ms wait and then
+  20 ms each; a stopped WindowServer costs 100 ms each, as in 2.9.
 - One strike is forgiven for every 10 minutes without one.
-- At the third strike the connection is distrusted: its holds stop delaying anybody and its new holds are refused.
+- At the third strike the connection is distrusted: its new holds are refused. The holds it already has stay, because
+  their surfaces were taken out of the older mechanism when they were opened; each ends by completion, its close or
+  the penalty bound the strike set.
   That process is back on 2.9's marks and tags until it is restarted. Three stalls that were each recovered (for
   example three channel rebuilds after injected faults within those 10 minutes) are enough, so
   `owners_distrusted` above 0 after such a test is expected and not a second problem.
@@ -113,8 +119,8 @@ wait returns at its timeout plus what the system's timer adds to any timed sleep
 
 ## What wakes a waiter
 
-- **The GPU's interrupt.** After every handled interrupt and after every bottom half NVRM calls the fence's kick. The
-  kick takes no lock; it moves a counter and wakes the sleepers only when there are any. A woken reader reads the
+- **The GPU's interrupt.** After every interrupt the work loop serves, whatever the RM answered, and after every
+  bottom half, NVRM calls the fence's kick. The kick takes no lock; it moves a counter and wakes the sleepers only when there are any. A woken reader reads the
   completion values again.
 - **A change of the table.** A hold was closed, ended or given up.
 - **Its own time slice**, in case neither came: 2 ms, doubling to 32 ms.
@@ -138,8 +144,11 @@ the same connection returns. This is why user space keeps all its fence calls on
 nothing else and never closes. NVAccel asks NVRM once for the fence's wait function (platform function `nvFenceOps`).
 The fence starts with each GPU once the adapter is up, stops right after the notebook power manager when the GPU
 stops, and first when the machine shuts down; it is told about sleep before the user channels stop and about the
-wake after the GPU is back. When a process exits, its surface holds end before the RM frees its channels. After
-every handled interrupt and every bottom half the fence is kicked so that waits on finished work end at once.
+wake after the GPU is back. When a connection closes, the holds and channels it registered end before the RM frees
+what that connection owns. When a process exits, all its holds and channels end at the first of its connections to
+close, before the RM frees anything of it, but only with the call to `nvrm_fence_pid_gone` in NVRM.kext's
+`clientClose` (see "A process exits" below). After every interrupt the work loop serves, whatever the RM answered,
+and after every bottom half, the fence is kicked so that waits on finished work end at once.
 
 **NVK** registers every channel it submits on with the kernel when the channel is created: it gives the kernel the
 address of the channel's semaphore page and of its error notifier, writes a probe value, and asks the kernel to
@@ -204,8 +213,21 @@ counter says so.
 Boot-arg `nvrmfence=0`, read once when the first GPU starts (or when NVAccel asks first). With it
 `debug.nvrm_fence_state` is 0, every request on selector 12 is answered "off" before a page of the process is
 touched, NVAccel is refused the wait function, and the kick returns at once. The plugin, NVK and NVAccel take their
-2.9 paths. There is no opt-in, no environment name and no writable sysctl. It is the first thing to try if anything
-about frames looks worse than in 2.9.
+2.9 paths for surface sync. There is no opt-in, no environment name and no writable sysctl. It is the first thing to
+try if anything about frames looks worse than in 2.9. `nvrm_fence_off_by_bootarg()` tells NVRM.kext's other parts
+that the fence is off for the whole boot, as opposed to not started yet.
+
+It switches the surface fence off, not everything this release changed next to it. With `nvrmfence=0` these still
+differ from 2.9:
+
+- NVAccel writes its two `surface fence: not offered by NVRM (yet)` log lines and asks NVRM again at most once a
+  second while the accelerator runs.
+- Every process that uses the GPU through NVK still opens its fence connection (one idle control connection per
+  process) and asks once; the answer is "off" and nothing more is sent on it.
+- NVK still writes two words of each channel's semaphore page, at 0xFF0 and 0xFF8, before each submission. Nothing
+  reads them.
+- NVK's wait for a completion event and NVAccel's page-off without the accelerator lock are not part of the fence and
+  have their own ways back: environment `NVRM_EVENT_WAIT=0` and boot-arg `nvaccel_pageoff_locked=1`.
 
 ## The counters
 
@@ -224,14 +246,15 @@ boot" unless it says "now".
 | Counter (`debug.nvrm_fence_` + name) | Meaning | What to expect |
 |---|---|---|
 | `accel` | 1 once NVAccel fetched the wait function | 1 within a second or two of the start |
-| `kicks` | handled interrupts plus bottom-half runs seen while on | grows whenever the GPU works. It is not the number of interrupts: compare with `debug.nvrm_isr_count` + `debug.nvrm_bh_runs` if at all |
+| `kicks` | interrupts the work loop served (whatever the RM answered) plus bottom-half runs, while on | grows whenever the GPU works. It is not the number of interrupts: several MSIs can be served by one run of the work loop, so it stays at or below `debug.nvrm_isr_count` + `debug.nvrm_bh_runs` |
 | `opens` | holds opened | grows with drawing |
 | `arms` | holds given a GPU target | grows with `opens` |
 | `arm_done` | of those, already complete when armed | any value |
 | `closes` | holds closed by their writer | grows with `opens` |
 | `close_gone` | closes that found no hold | grows in normal use: WindowServer's holds end in the kernel before its close arrives |
 | `auto` | compositor holds ended by the kernel at GPU completion | grows with every WindowServer frame |
-| `end_owner` | holds ended because their writer's connection closed | grows when a process that was drawing exits or is killed |
+| `end_owner` | holds ended because their writer's connection closed or its process exited | grows when a process that was drawing exits or is killed |
+| `pid_gone` | connections emptied because their process was exiting, at its first connection to close | grows when a GPU process exits; stays 0 while NVRM.kext does not make the call (see "A process exits") |
 | `end_chan_err` | holds ended by a channel fault | 0 unless a channel faulted (an Xid in the log) |
 | `end_chan_del` | holds ended because their channel was deleted first | 0 or small |
 | `end_pm` | holds ended by GPU sleep | grows by the holds in flight at each sleep |
@@ -289,7 +312,7 @@ All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then ev
 | Line | Meaning |
 |---|---|
 | `surface 0x.. writer pid N state S for M ms - given up (...), strike K` | a hold outlived its bound; S is `open`, `armed` or `gpu-done`, which tells where the writer was stuck |
-| `pid N: K holds given up - this connection's holds are refused from now on (it keeps the older surface sync)` | third strike: that process is on 2.9's marks and tags until it restarts |
+| `pid N: K holds given up - this connection's new holds are refused from now on (it keeps the older surface sync)` | third strike: that process is on 2.9's marks and tags until it restarts; the holds it already had end on their own (completion, close, or the penalty bound) |
 | `8 connections refused since boot - the surface fence is off until the next boot (debug.nvrm_fence_state 2)` | the layer switched itself off |
 | `channel C of pid N completes without an interrupt - it is polled every 250 us instead` | see `chan_noirq` |
 | `pid N: ... - this channel is not watched (its surfaces keep the older surface sync)` | a channel's page could not be wired, or the kernel's view of it failed its proof; the text says which |
@@ -302,9 +325,27 @@ from a channel or from the process.
 - **Sleep.** Before the user channels stop, every hold ends (readers leave at once) and new holds are refused until
   the wake. The kernel's views of the channel pages are system memory and survive. After a resume that failed the
   layer stays off until the next boot (`state` 3).
-- **Shutdown, or the GPU stops.** Every hold ends and every sleeper is woken before the adapter goes down.
-- **A process exits or is killed.** Its holds end, and its pages are let go, before the RM frees its channels.
-  Readers of its surfaces go on at once, where 2.9 waited 10 ms or 100 ms for a tag or mark nobody would clear.
+  Not covered: a hold armed on a channel whose work the RM preempts at sleep ends as if it were done, so a reader that
+  reads the surface during the sleep or right after the wake can see a frame the GPU never finished, as after a wait
+  that reached its bound. Holds are not kept across the sleep, even those on channels the kernel has verified; see
+  "What is deliberately not done".
+- **Shutdown, or the last GPU stops.** Every hold ends and every sleeper is woken before the adapter goes down.
+  Not covered: the channels stay registered, and their pages stay wired, until the connections that registered them
+  close; the kernel stops reading them, since no hold is armed on them and new ones are refused.
+- **The layer switches itself off** (`state` 2, eight distrusted connections). New holds are refused at once.
+  Not covered: the holds that already exist are not ended. NVAccel stops asking the fence at once and is on 2.9's
+  marks; a plugin reader that already waits on such a hold stays until it completes, is closed or reaches its bound,
+  and is woken only by a change of the table or its own time slice, because the kick returns at once from then on.
+- **A process exits or is killed.** Each connection, when it closes, ends its own holds and lets its own pages go
+  before the RM frees what that connection owns. NVK keeps its fence calls on a connection of their own and its
+  channels on another, and macOS closes a dying process's connections in no set order, so for the holds to end
+  before the RM frees the channels they are armed on, the first connection of the process to close must end all of
+  them. NVRM.kext does that by calling `nvrm_fence_pid_gone` in `clientClose`, before the RM's cleanup, when the
+  connection's process is exiting (`pid_gone` counts it); and from the moment a process is exiting the fence refuses
+  it new holds and channels. Without that call (an NVRM.kext built before it), a hold armed on a channel of the
+  process can outlive the channel until the fence connection closes, or until its bound if a reader looks first.
+  With it, readers of the process's surfaces go on at once, where 2.9 waited 10 ms or 100 ms for a tag or mark
+  nobody would clear.
 - **A channel faults.** The RM writes the fault into the channel's notifier in the bottom half, the kick follows,
   and holds armed on that channel end. If NVK rebuilds the channel, later holds are watched again.
 - **Two GPUs** (`nvmultigpu=1`). There is one table for all. While one GPU is suspended, new holds are refused for
@@ -317,6 +358,11 @@ from a channel or from the process.
   export stay unimplemented in NVK.
 - A wait inside the GPU (one channel's work waiting for another process's semaphore). The reader's CPU thread waits.
 - NVAccel waiting for application holds. 2.9 did not either.
+- Keeping holds across sleep. Every hold ends before the user channels stop, also an armed one on a channel the
+  kernel has verified. Keeping those would mean pausing without ending them, ending them only on a failed resume,
+  and giving them the 2000 ms bound across the sleep; but the RM preempts the user channels before the interrupts
+  stop, a channel may never complete after the wake, and NVAccel's waits cannot be interrupted, so a flip or page-off
+  could sit out a full bound on a GPU that is asleep.
 - Showing the previous picture when a flip reaches its bound. The flip goes on, as in 2.9.
 - A check that the process that opens a hold can see the surface. A hold names a surface by its id.
 - Freeing the table, the lock or the sysctls at unload. NVRM.kext is not unloaded while the system runs.
@@ -354,7 +400,9 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
 5. **`chan_noirq` above 0, `done_on_slice` growing fast, or `seq_refused` growing.** Interrupts do not arrive for
    some channels (the copy-engine queue is the open question). It still works, in 250 us looks; report which
    processes (the log line names the pid and says `(copy engine)` for such a channel).
-6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` grows, no stall in WindowServer.
+6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` and `pid_gone` grow, no stall in WindowServer.
+   `pid_gone` growing needs the NVRM.kext with the `nvrm_fence_pid_gone` call; with an older one only `end_owner`
+   moves, and a wait of up to 2 s on that application's surfaces is possible.
    **Stop one** (`kill -STOP`, then `-CONT`): one `expired_cpu` and one `strikes`, a single hitch of at most
    100 ms, nothing after.
 7. **Sleep and wake.** `end_pm` grows by the holds that were in flight; `state` is 1 afterwards and `opens` grows
@@ -363,5 +411,7 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
    names the surface, the pid and the state the hold was stuck in. The driver is on 2.9's behaviour for that process
    (or entirely, with `state` 2) until it restarts (or the machine does).
 9. **Way back.** Boot once with `nvrmfence=0`: `state` 0, 2.9's counters move again, behaviour is 2.9.
-10. **Cost.** `debug.nvrm_isr_latency_max_us` before and after: the kick adds one test, one atomic add and one more
-    test to the interrupt path.
+10. **Cost.** The kick is one test, one atomic add and one more test, plus a wakeup when a reader sleeps; no counter
+    shows it apart. `debug.nvrm_isr_latency_max_us` does not include it (it ends where the RM's handler starts).
+    `debug.nvrm_bh_max_us` and `debug.nvrm_bh_over_1ms` do include the kick after each bottom half: compare them over
+    the same use with and without `nvrmfence=0`; a difference beyond noise is worth reporting.

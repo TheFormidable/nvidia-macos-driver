@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 4 | 1 | 54 | 411 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 346 |  |  |  | 367 |
+| sysctl |  | 5 | 4 | 12 |  |  | 347 |  |  |  | 368 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -881,6 +881,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_fence_map_mismatch` | diag | read-only | 3.0 | - | channels whose page did not show what the process wrote | kexts/NVRM/nvrm_fence.cpp |
 | `debug.nvrm_fence_opens` | diag | read-only | 3.0 | - | holds opened | kexts/NVRM/nvrm_fence.cpp |
 | `debug.nvrm_fence_owners_distrusted` | diag | read-only | 3.0 | - | connections refused after three strikes | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_pid_gone` | diag | read-only | 3.0 | - | connections whose holds and channels ended because their process was exiting, before the RM freed anything of it | kexts/NVRM/nvrm_fence.cpp |
 | `debug.nvrm_fence_reclaimed` | diag | read-only | 3.0 | - | slots of given-up or forgotten holds taken back for new ones | kexts/NVRM/nvrm_fence.cpp |
 | `debug.nvrm_fence_refused_denied` | diag | read-only | 3.0 | - | compositor holds asked for by a process that is not WindowServer | kexts/NVRM/nvrm_fence.cpp |
 | `debug.nvrm_fence_refused_distrust` | diag | read-only | 3.0 | - | holds refused to a distrusted connection | kexts/NVRM/nvrm_fence.cpp |

@@ -12,8 +12,8 @@
  * or for an application becomes GPU_DONE, when its channel's completion value reaches a number) or GPU_DONE (the GPU
  * is finished, the application has not published yet). A reader waits for the holds that existed when it first looked
  * and for nothing opened later. Every hold is bounded: past its bound it is flagged, delays nobody any more, and its
- * owner gets a strike; three strikes and the owner is refused (its process keeps the older mechanism), eight such
- * owners since boot and the whole layer switches itself off.
+ * owner gets a strike; three strikes and the owner's new holds are refused (its process keeps the older mechanism;
+ * the holds it has end on their own), eight such owners since boot and the whole layer switches itself off.
  *
  * Rules of this file: plain C that is also C++17 without RTTI and exceptions; no include but the ABI header, nothing
  * from a system header; nothing allocates; every function is static inline; the caller holds the one lock around every
@@ -33,6 +33,7 @@
 #define NVF_CAP_GPU_MS      2000u    /* a hold whose completion depends on the GPU */
 #define NVF_CAP_CPU_MS       100u    /* a hold whose completion depends only on its writer's CPU (2.9 abandoned a busy tag after 100 ms) */
 #define NVF_CAP_PEN_MS        20u    /* any hold of an owner in a penalty window (2.9 waited 10 ms) */
+#define NVF_CAP_PEN_COMP_MS  100u    /* the same for a compositor hold: NVAccel's flips and page-offs (2.9 waited 100 ms) */
 #define NVF_PENALTY_MS     10000u    /* first penalty window; doubles with each strike */
 #define NVF_STRIKES            3u    /* strikes that distrust an owner */
 #define NVF_FORGIVE_MS    600000u    /* one strike is forgiven per 10 minutes without one */
@@ -63,7 +64,7 @@ enum { NVF_EV_STRIKE = 0, NVF_EV_DISTRUST, NVF_EV_FUSE, NVF_EV_NOIRQ, NVF_EV_KIN
  * CHAN_NOIRQ are levels, WAIT_MAX_US is a maximum, the rest only grow. */
 enum {
     NVF_STAT_OPENS = 0, NVF_STAT_ARMS, NVF_STAT_ARM_DONE, NVF_STAT_CLOSES, NVF_STAT_CLOSE_GONE, NVF_STAT_AUTO,
-    NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM,
+    NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM, NVF_STAT_PID_GONE,
     NVF_STAT_REFUSED_FULL, NVF_STAT_REFUSED_DENIED, NVF_STAT_REFUSED_STALE, NVF_STAT_REFUSED_DISTRUST,
     NVF_STAT_CHANS, NVF_STAT_CHAN_ADDS, NVF_STAT_CHAN_NOIRQ, NVF_STAT_CHAN_REBINDS, NVF_STAT_MAP_FAIL, NVF_STAT_MAP_MISMATCH,
     NVF_STAT_LIVE, NVF_STAT_LIVE_MAX, NVF_STAT_RECLAIMED,
@@ -97,6 +98,7 @@ struct nvf_owner {
     unsigned pid, entries, chans;
     unsigned short head;                 /* its first hold, NVF_NIL = none */
     unsigned char strikes, distrusted;
+    unsigned char closed;                /* emptied because its process is exiting (nvf_pid_gone): refuses new state */
 };
 struct nvf_recent { unsigned long long serial; unsigned sid, pid; unsigned char why, flags, planes; };
 struct nvf_event  { unsigned kind, sid, pid, ms; unsigned char state, bound, strikes, pad; };
@@ -134,6 +136,7 @@ struct nvf_wait_ops {
 NVRM_FENCE_SASSERT(sizeof(struct nvf_entry) == 64, nvf_entry_size);
 NVRM_FENCE_SASSERT(NVF_CHANS <= (1u << NVF_CHAN_INDEX_BITS), nvf_chan_index_fits);
 NVRM_FENCE_SASSERT(NVF_ENTRIES < NVF_NIL && NVF_OWNERS < NVF_NIL, nvf_links_fit);
+NVRM_FENCE_SASSERT(NVF_CAP_PEN_COMP_MS >= NVF_CAP_CPU_MS && NVF_CAP_PEN_COMP_MS < NVF_CAP_GPU_MS, nvf_compositor_penalty);
 /* nvf_result_from_recent takes the largest: the precedence TIMEOUT > DEAD > READY > NONE is their numeric order */
 NVRM_FENCE_SASSERT(NVRM_FENCE_R_NONE < NVRM_FENCE_R_READY && NVRM_FENCE_R_READY < NVRM_FENCE_R_DEAD &&
                    NVRM_FENCE_R_DEAD < NVRM_FENCE_R_TIMEOUT, nvf_result_order);
@@ -238,7 +241,7 @@ static inline int nvf_owner_get(struct nvf_table *T, unsigned long long owner, u
     o = &T->o[spare];
     o->owner = owner; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
     o->pid = pid; o->entries = 0; o->chans = 0;
-    o->head = (unsigned short)NVF_NIL; o->strikes = 0; o->distrusted = 0;
+    o->head = (unsigned short)NVF_NIL; o->strikes = 0; o->distrusted = 0; o->closed = 0;
     return spare;
 }
 
@@ -400,6 +403,7 @@ static inline unsigned nvf_chan_add(struct nvf_table *T, unsigned long long owne
     if (!nvf_ready(T) || T->off) return NVRM_FENCE_ST_OFF;
     if (!owner) return NVRM_FENCE_ST_BAD_ARG;
     oi = nvf_owner_get(T, owner, pid);
+    if (oi >= 0 && T->o[oi].closed) return NVRM_FENCE_ST_OFF;
     if (oi < 0 || T->o[oi].chans >= NVF_OWNER_CHANS) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
     for (i = 0; i < NVF_CHANS && T->c[i].used; i++) { }
     if (i >= NVF_CHANS) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
@@ -493,12 +497,18 @@ static inline int nvf_owner_gpu_busy(struct nvf_table *T, unsigned oi, nvf_read_
     return 0;
 }
 
-/* The longest the hold may stay in its state, in ms, and which rule gave it. */
+/* The longest the hold may stay in its state, in ms, and which rule gave it. In a penalty window every hold of the
+ * owner gets the penalty bound, whatever its state; a compositor hold's is never below the CPU bound, because NVAccel
+ * waits on it before a flip or a page-off, where 2.9 waited up to 100 ms on the mark the plugin no longer sends for a
+ * surface the kernel holds: a shorter bound would flip WindowServer's composites unfinished for the whole window. */
 static inline unsigned nvf_bound_ms(struct nvf_table *T, const struct nvf_entry *e, unsigned long long now,
                                     nvf_read_fn read, void *ctx, unsigned *kind)
 {
     const unsigned long long age = now > e->sinceNs ? now - e->sinceNs : 0;
-    if (now < T->o[e->oidx].penaltyUntilNs) { *kind = NVF_BOUND_PENALTY; return NVF_CAP_PEN_MS; }
+    if (now < T->o[e->oidx].penaltyUntilNs) {
+        *kind = NVF_BOUND_PENALTY;
+        return (e->flags & NVRM_FENCE_F_COMPOSITOR) ? NVF_CAP_PEN_COMP_MS : NVF_CAP_PEN_MS;
+    }
     if (e->state == NVRM_FENCE_E_ARMED) { *kind = NVF_BOUND_GPU; return NVF_CAP_GPU_MS; }
     if (age >= NVF_CAP_CPU_MS * NVF_NS_PER_MS && nvf_owner_gpu_busy(T, e->oidx, read, ctx)) {
         *kind = NVF_BOUND_GPU;
@@ -511,12 +521,15 @@ static inline unsigned nvf_bound_ms(struct nvf_table *T, const struct nvf_entry 
 /* A hold of this owner outlived a bound that was its own fault. One strike is forgiven for every NVF_FORGIVE_MS since
  * the last one; each strike opens a penalty window (10 s, then 20 s) in which every hold of the owner has the short
  * penalty bound and expiries do not count, so strikes are at least that far apart. Returns 0, 1 when the owner is now
- * distrusted (its holds were flagged), 2 when that was the owner that switches the layer off (the caller ends
- * everything). */
+ * distrusted, 2 when that was the owner that switches the layer off (the caller ends everything).
+ * Distrust refuses the owner's NEW holds (nvf_open) and nothing else: the holds it already has stay, and each ends by
+ * its CLOSE, its GPU work, its connection closing or the penalty bound the strike just set. They are work in flight
+ * whose surfaces the producer took out of the older mechanism (no mark was sent for them), so flagging them here
+ * would let their readers go ahead at once while the GPU still writes. */
 static inline int nvf_strike(struct nvf_table *T, unsigned oi, unsigned long long now)
 {
     struct nvf_owner *o = &T->o[oi];
-    unsigned ei, doublings;
+    unsigned doublings;
     if (o->strikes && now > o->lastStrikeNs) {
         const unsigned long long forgiven = (now - o->lastStrikeNs) / (NVF_FORGIVE_MS * NVF_NS_PER_MS);
         o->strikes = forgiven >= o->strikes ? 0 : (unsigned char)(o->strikes - forgiven);
@@ -530,7 +543,6 @@ static inline int nvf_strike(struct nvf_table *T, unsigned oi, unsigned long lon
     o->distrusted = 1;
     T->distrustedOwners++;
     T->stat[NVF_STAT_OWNERS_DISTRUSTED]++;
-    for (ei = o->head; ei != NVF_NIL; ei = T->e[ei].onext) nvf_flag(T, ei, NVF_END_DISTRUST);
     if (T->distrustedOwners < NVF_FUSE_OWNERS) return 1;
     T->fused = 1;
     T->off = 1;
@@ -577,6 +589,7 @@ static inline unsigned nvf_open(struct nvf_table *T, unsigned long long owner, u
     oi = nvf_owner_get(T, owner, pid);
     if (oi < 0) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
     o = &T->o[oi];
+    if (o->closed) return NVRM_FENCE_ST_OFF;
     if (o->distrusted) { T->stat[NVF_STAT_REFUSED_DISTRUST]++; return NVRM_FENCE_ST_DISTRUST; }
     for (i = 0; i < n; i++) {
         for (j = 0; j < i && ids[j] != ids[i]; j++) { }
@@ -713,26 +726,61 @@ static inline unsigned nvf_chan_del(struct nvf_table *T, unsigned long long owne
     return NVRM_FENCE_ST_OK;
 }
 
+/* Every hold of owner record `oi` ends (readers see DEAD, nobody gets a strike) and up to `max` of its channels are
+ * freed, their indexes written to freeIndex. Returns how many channels; the record itself stays. */
+static inline unsigned nvf_owner_empty(struct nvf_table *T, unsigned oi, unsigned *freeIndex, unsigned max)
+{
+    unsigned i, n = 0;
+    while (T->o[oi].head != NVF_NIL) nvf_end(T, T->o[oi].head, NVF_END_OWNER);
+    for (i = 0; i < T->chanHigh && n < max; i++) {
+        if (!T->c[i].used || T->c[i].oidx != oi) continue;
+        nvf_chan_free(T, i);
+        freeIndex[n++] = i;
+    }
+    return n;
+}
+
 /* The connection is closing: every hold of it ends, its channels are freed and, once none is left, its record. Writes
  * up to `max` channel indexes whose pages the caller lets go of after the lock and returns how many; a return of `max`
- * means "call again". */
+ * means "call again". A record that nvf_pid_gone emptied and marked closed is freed here, at its own connection's
+ * close, like any other. */
 static inline unsigned nvf_owner_gone(struct nvf_table *T, unsigned long long owner, unsigned *freeIndex, unsigned max)
 {
     const int oi = nvf_owner_find(T, owner);
     struct nvf_owner *o;
-    unsigned i, n = 0;
+    unsigned n;
     if (oi < 0) return 0;
     o = &T->o[oi];
-    while (o->head != NVF_NIL) nvf_end(T, o->head, NVF_END_OWNER);
-    for (i = 0; i < T->chanHigh && n < max; i++) {
-        if (!T->c[i].used || T->c[i].oidx != (unsigned)oi) continue;
-        nvf_chan_free(T, i);
-        freeIndex[n++] = i;
-    }
+    n = nvf_owner_empty(T, (unsigned)oi, freeIndex, max);
     if (n < max || !o->chans) {
         o->owner = 0; o->pid = 0; o->entries = 0; o->chans = 0;
-        o->strikes = 0; o->distrusted = 0; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
+        o->strikes = 0; o->distrusted = 0; o->closed = 0; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
     }
+    return n;
+}
+
+/* Process `pid` is exiting. One process holds its fence state on more than one connection (NVK sends its fence
+ * requests on a connection of their own, and the RM objects behind its channels live on another), and the connections
+ * of a dying process close in no set order: so whichever closes first ends the fence state of all of them, before the
+ * RM frees anything. Every owner record of `pid` is emptied as nvf_owner_gone would (its holds end with DEAD for their
+ * readers and no strike; its channels are freed) but is kept, marked closed, until its own connection's
+ * nvf_owner_gone: until then OPEN and CHAN_ADD on it are refused (OFF), and everything else finds nothing (ARM, the
+ * channel requests: STALE; CLOSE: nothing found). The record is per connection, never per pid, so a later process that
+ * gets the same pid makes records of its own and is not refused. Writes up to `max` channel indexes and returns how
+ * many; a return of `max` means "call again", and calling again is harmless. pid 0 does nothing. */
+static inline unsigned nvf_pid_gone(struct nvf_table *T, unsigned pid, unsigned *freeIndex, unsigned max)
+{
+    unsigned i, n = 0;
+    if (!pid) return 0;
+    for (i = 0; i < NVF_OWNERS; i++) {                   /* every hold first, so that no batch leaves one behind */
+        struct nvf_owner *o = &T->o[i];
+        if (!o->owner || o->pid != pid) continue;
+        if (!o->closed) { o->closed = 1; T->stat[NVF_STAT_PID_GONE]++; }
+        (void)nvf_owner_empty(T, i, freeIndex, 0);
+    }
+    for (i = 0; i < NVF_OWNERS && n < max; i++)
+        if (T->o[i].owner && T->o[i].pid == pid) n += nvf_owner_empty(T, i, freeIndex + n, max - n);
+    if (n) T->changes++;     /* a producer asleep in WAIT_SEQ on a channel freed here looks again at once */
     return n;
 }
 
@@ -744,54 +792,46 @@ static inline unsigned nvf_owner_gone(struct nvf_table *T, unsigned long long ow
 static inline unsigned nvf_eval(struct nvf_table *T, struct nvf_query *q, unsigned long long now, int why,
                                 nvf_read_fn read, void *ctx, struct nvf_view *v)
 {
-    int again;
-    if (!nvf_ready(T)) {
-        v->blockers = 0; v->firstPid = 0; v->firstState = 0; v->deadlineNs = ~0ull; v->fast = 0;
-        return 0;
-    }
+    unsigned ei, next;
+    v->blockers = 0; v->firstPid = 0; v->firstState = 0; v->deadlineNs = ~0ull; v->fast = 0;
+    if (!nvf_ready(T)) return 0;
     if (!q->snap) { q->snap = T->serial; q->recent0 = T->recentSeq; }
     T->pass++;
-    do {
-        unsigned ei, next;
-        again = 0;
-        v->blockers = 0; v->firstPid = 0; v->firstState = 0; v->deadlineNs = ~0ull; v->fast = 0;
-        for (ei = T->bucket[nvf_bucket(q->sid)]; ei != NVF_NIL && !again; ei = next) {
-            struct nvf_entry *e = &T->e[ei];
-            unsigned long long age, boundNs;
-            unsigned kind = 0, boundMs;
-            next = e->next;
-            if (e->expired || !nvf_matches(q, e->sid, e->serial, e->planes, e->pid, e->flags)) continue;
-            if (e->state == NVRM_FENCE_E_ARMED && !nvf_armed_step(T, ei, now, why, read, ctx) && !e->state) continue;
-            boundMs = nvf_bound_ms(T, e, now, read, ctx, &kind);
-            boundNs = boundMs * NVF_NS_PER_MS;
-            age = now > e->sinceNs ? now - e->sinceNs : 0;
-            if (age >= boundNs) {
-                const unsigned oi = e->oidx;
-                int struck;
-                nvf_flag(T, ei, NVF_END_EXPIRED);
-                if (kind == NVF_BOUND_PENALTY) { T->stat[NVF_STAT_EXPIRED_PENALTY]++; continue; }
-                T->stat[kind == NVF_BOUND_GPU ? NVF_STAT_EXPIRED_GPU : NVF_STAT_EXPIRED_CPU]++;
-                struck = nvf_strike(T, oi, now);
-                nvf_event(T, NVF_EV_STRIKE, e->sid, e->pid, (unsigned)(age / NVF_NS_PER_MS), e->state, kind, T->o[oi].strikes);
-                if (struck) nvf_event(T, NVF_EV_DISTRUST, 0, T->o[oi].pid, 0, 0, 0, T->o[oi].strikes);
-                if (struck == 2) {                       /* the layer switched itself off: nothing is in anyone's way */
-                    nvf_event(T, NVF_EV_FUSE, 0, T->o[oi].pid, 0, 0, 0, 0);
-                    nvf_end_all(T, NVF_END_DISTRUST);
-                    v->blockers = 0; v->firstPid = 0; v->firstState = 0; v->deadlineNs = ~0ull; v->fast = 0;
-                    return 0;
-                }
-                if (struck == 1) again = 1;              /* holds counted above may have been flagged: count afresh */
-                continue;
+    for (ei = T->bucket[nvf_bucket(q->sid)]; ei != NVF_NIL; ei = next) {
+        struct nvf_entry *e = &T->e[ei];
+        unsigned long long age, boundNs;
+        unsigned kind = 0, boundMs;
+        next = e->next;
+        if (e->expired || !nvf_matches(q, e->sid, e->serial, e->planes, e->pid, e->flags)) continue;
+        if (e->state == NVRM_FENCE_E_ARMED && !nvf_armed_step(T, ei, now, why, read, ctx) && !e->state) continue;
+        boundMs = nvf_bound_ms(T, e, now, read, ctx, &kind);
+        boundNs = boundMs * NVF_NS_PER_MS;
+        age = now > e->sinceNs ? now - e->sinceNs : 0;
+        if (age >= boundNs) {
+            const unsigned oi = e->oidx;
+            int struck;
+            nvf_flag(T, ei, NVF_END_EXPIRED);
+            if (kind == NVF_BOUND_PENALTY) { T->stat[NVF_STAT_EXPIRED_PENALTY]++; continue; }
+            T->stat[kind == NVF_BOUND_GPU ? NVF_STAT_EXPIRED_GPU : NVF_STAT_EXPIRED_CPU]++;
+            struck = nvf_strike(T, oi, now);
+            nvf_event(T, NVF_EV_STRIKE, e->sid, e->pid, (unsigned)(age / NVF_NS_PER_MS), e->state, kind, T->o[oi].strikes);
+            if (struck) nvf_event(T, NVF_EV_DISTRUST, 0, T->o[oi].pid, 0, 0, 0, T->o[oi].strikes);
+            if (struck == 2) {                           /* the layer switched itself off: nothing is in anyone's way */
+                nvf_event(T, NVF_EV_FUSE, 0, T->o[oi].pid, 0, 0, 0, 0);
+                nvf_end_all(T, NVF_END_DISTRUST);
+                v->blockers = 0; v->firstPid = 0; v->firstState = 0; v->deadlineNs = ~0ull; v->fast = 0;
+                return 0;
             }
-            if (!v->blockers) { v->firstPid = e->pid; v->firstState = e->state; }
-            v->blockers++;
-            if (e->sinceNs + boundNs < v->deadlineNs) v->deadlineNs = e->sinceNs + boundNs;
-            if (e->state == NVRM_FENCE_E_ARMED) {
-                const int ci = nvf_chan_find(T, e->owner, e->chan);
-                if (ci >= 0 && !nvf_chan_trusted(&T->c[ci])) v->fast = 1;
-            }
+            continue;
         }
-    } while (again);
+        if (!v->blockers) { v->firstPid = e->pid; v->firstState = e->state; }
+        v->blockers++;
+        if (e->sinceNs + boundNs < v->deadlineNs) v->deadlineNs = e->sinceNs + boundNs;
+        if (e->state == NVRM_FENCE_E_ARMED) {
+            const int ci = nvf_chan_find(T, e->owner, e->chan);
+            if (ci >= 0 && !nvf_chan_trusted(&T->c[ci])) v->fast = 1;
+        }
+    }
     return v->blockers;
 }
 

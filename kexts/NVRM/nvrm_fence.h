@@ -74,12 +74,37 @@ void nvrm_fence_user(volatile UInt64 *ownerId, const volatile SInt32 *closing, s
  * fence) does nothing. */
 void nvrm_fence_owner_gone(UInt64 ownerId);
 
+/* A connection of process `pid` is closing and that process is exiting. One process keeps its fence state on more than
+ * one connection (NVK sends its fence requests on a connection of their own; the RM objects behind its channels live
+ * on another), and the connections of a dying process close in no set order, so nvrm_fence_owner_gone() of the closing
+ * connection alone may come after the RM has freed the channels its holds wait on. This ends, at once, the holds and
+ * the channels of EVERY connection whose fence requests came from `pid`: readers see DEAD (no strike), and the kernel's
+ * views of the channels' pages are let go after the fence lock. Each such connection keeps an empty record, marked
+ * closed, until its own nvrm_fence_owner_gone(): until then its CHAN_ADD and OPEN are answered OFF and its other
+ * requests find nothing (STALE, or CLOSE finds no hold). CHAN_ADD and OPEN from a thread of an exiting process are
+ * answered OFF as well, so a request still in flight on another connection of it adds nothing after this call.
+ * Call it from the close of ANY connection of the process, once the caller has decided that the process is exiting,
+ * after nvrm_fence_owner_gone() of that connection and BEFORE the RM frees that connection's objects. Never for the
+ * close of a connection by a live process: NVK opens and closes connections all the time, and this would end its live
+ * holds and drop its channel registrations. Calling it again for the same process, or for a pid that has nothing, does
+ * nothing. pid <= 0 does nothing. One table serves every GPU, so one call covers a process that uses two. Thread
+ * context; the caller may hold the client's gate. Safe before the first start and after the last stop. */
+void nvrm_fence_pid_gone(int pid);
+
 /* The platform function NVRM_FENCE_FN_OPS: fill the table NVAccel keeps. Thread context, no RM call, no power
  * reference needed. Returns true with o->wait set when o->version and o->size match and the fence is not switched off
  * by its boot-arg; false otherwise (answer kIOReturnUnsupported: NVAccel then keeps its own waits). The pointer stays
  * valid until NVRM.kext unloads, which cannot happen while NVAccel is matched on it. o->wait() takes only the fence
  * lock, cannot be interrupted, is never refused for the number of sleepers, and may sleep up to w->timeoutMs. */
 bool nvrm_fence_kernel_ops(struct NVRMFenceKernelOps *o);
+
+/* True when the boot-arg nvrmfence=0 switched the fence off for this boot. False when the fence is on, whether or
+ * not a GPU has started it yet, and also when it is stopped or switched itself off later in the boot: those can
+ * change, this cannot. A caller that finds the fence not working (a refused request, an OFF answer) can ask this to
+ * tell "off for the whole boot, stop asking" from "not started yet, ask again later". It reads the boot-arg itself
+ * when no start has, as nvrm_fence_kernel_ops() does, so the answer is the same before and after the first start.
+ * Thread context, no lock, no RM call. */
+bool nvrm_fence_off_by_bootarg(void);
 
 #ifdef __cplusplus
 }
