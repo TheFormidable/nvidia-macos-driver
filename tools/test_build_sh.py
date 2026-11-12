@@ -137,13 +137,13 @@ case "$role" in
       info)
         # like Homebrew: the formula list is downloaded into its cache, ~/Library/Caches/Homebrew unless HOMEBREW_CACHE is set
         c=${HOMEBREW_CACHE:-$HOME/Library/Caches/Homebrew}/api; mkdir -p "$c" && echo "{}" > "$c/formula.jws.json"
-        rec brew-info "HOMEBREW_CACHE=${HOMEBREW_CACHE:-}"
+        rec brew-info "HOMEBREW_CACHE=${HOMEBREW_CACHE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         f=${3:-}
         case "$f" in llvm) v=$(cat "$S/brew-llvm") ;; llvm@22) [ -f "$S/brew-llvm22" ] || exit 1; v=22.1.3 ;;
           gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
         printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
       install)
-        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}"
+        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
         echo "==> Pouring $2" ;;
@@ -287,7 +287,7 @@ echo "stand-in for $key: done"
 REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "ls", "ln",
               "chmod", "date", "mktemp", "dirname", "basename", "wc", "paste", "cmp", "diff", "tee", "env", "kill", "sleep",
               "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
-              "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more"]
+              "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more", "readlink"]
 STANDINS = {"uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
             "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo",
             "strings": "strings"}
@@ -760,10 +760,14 @@ def arm_hostbrew():
     negative("a build.sh that falls back to the usual places when NM_BREW names no brew", missing_problems())
 
 
-def whichbrew_problems(arch, cpu, places, want_brew, want_other, nm_brew="", script_edit=None):
+def whichbrew_problems(arch, cpu, places, want_brew, want_other, nm_brew="", script_edit=None, path_brew=None):
     """doctor without NM_BREW on a Mac whose Homebrew(s) sit at <places>: which one does build.sh take, and does it name
-    the other? In the clone only, build.sh's two fixed places are moved under the sandbox, to recording stand-ins."""
-    sb = Sandbox(f"which-{arch}-{cpu}-{len(places)}" + ("-nm" if nm_brew else "") + ("-x" if script_edit else ""), arch=arch, cpu=cpu)
+    the other? In the clone only, build.sh's two fixed places are moved under the sandbox, to recording stand-ins.
+    want_brew is the brew (relative to the sandbox) doctor must use, or None when none of this processor is present and
+    doctor must report Homebrew missing. path_brew puts a brew only on PATH (not at a fixed place): ("wrapper",) a plain
+    script in no Homebrew prefix, ("other",) a symlink that resolves into the other architecture's prefix."""
+    sb = Sandbox(f"which-{arch}-{cpu}-{len(places)}" + ("-nm" if nm_brew else "") + ("-x" if script_edit else "")
+                 + ("-" + path_brew[0] if path_brew else ""), arch=arch, cpu=cpu)
     (sb.dir / "brew/bin/brew").unlink()   # the usual stand-in on PATH: not here, so PATH offers no third Homebrew
     bs = sb.co / "build.sh"
     t = bs.read_text()
@@ -778,12 +782,29 @@ def whichbrew_problems(arch, cpu, places, want_brew, want_other, nm_brew="", scr
     bs.write_text(t)
     for pl in places:
         sb.wrap(sb.dir / pl.lstrip("/"), "brew")
+    if path_brew:
+        onpath = sb.bin / "brew"   # sb.bin is first on PATH, so this is what "command -v brew" finds
+        if path_brew[0] == "wrapper":
+            onpath.write_text('#!/bin/bash\necho "stand-in wrapper brew: was run" >&2\nexit 3\n')   # a run of it is a failure
+            onpath.chmod(0o755)
+        elif path_brew[0] == "other":
+            other_prefix = "/opt/homebrew" if arch == "x86_64" else "/usr/local"   # the prefix of the OTHER architecture
+            target = sb.dir / other_prefix.lstrip("/") / "Homebrew/bin/brew"       # a real brew deep in that prefix, not at its bin/brew
+            sb.wrap(target, "brew")
+            onpath.symlink_to(target)
     extra = {"NM_BREW": str(sb.dir) + nm_brew if nm_brew else ""}
     rc, out = sb.run("doctor", extra=extra)
     p = []
-    want = f"ok       Homebrew {sb.dir}{want_brew}"
-    if want not in out:
-        p.append(f"doctor: {[l.strip() for l in out.splitlines() if 'Homebrew' in l][:3]}, expected {want_brew}")
+    items = doctor_items(out)
+    if want_brew is None:
+        if re.search(r"\bok\s+Homebrew ", out):
+            p.append(f"doctor took a Homebrew where none of this processor is present: {[l.strip() for l in out.splitlines() if 'Homebrew' in l][:3]}")
+        if not [i for i in items if "Homebrew" in i]:
+            p.append(f"doctor does not report Homebrew as missing: {items}")
+    else:
+        want = f"ok       Homebrew {sb.dir}{want_brew}"
+        if want not in out:
+            p.append(f"doctor: {[l.strip() for l in out.splitlines() if 'Homebrew' in l][:3]}, expected {want_brew}")
     note = [l for l in out.splitlines() if "a second Homebrew" in l]
     if want_other and not (note and f"{sb.dir}{want_other}" in note[0] and f"NM_BREW={sb.dir}{want_other}" in note[0]):
         p.append(f"doctor does not name the other Homebrew {want_other} and NM_BREW: {note}")
@@ -797,19 +818,61 @@ def arm_whichbrew():
     for arch, cpu, places, use, other, what in (
             ("x86_64", "x86_64", both, "/usr/local/bin/brew", "/opt/homebrew/bin/brew", "an Intel Mac with both: /usr/local"),
             ("arm64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew", "Apple silicon with both: /opt/homebrew"),
-            ("x86_64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew", "Apple silicon, shell under Rosetta: /opt/homebrew"),
-            ("x86_64", "x86_64", ["/opt/homebrew/bin/brew"], "/opt/homebrew/bin/brew", None, "an Intel Mac with only /opt/homebrew: that one")):
+            ("x86_64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew", "Apple silicon, shell under Rosetta: /opt/homebrew")):
         p = whichbrew_problems(arch, cpu, places, use, other)
         check(f"Homebrew of the Mac's processor first, the other named with NM_BREW: {what}", not p, p)
+    # The other architecture's Homebrew alone is NOT a Homebrew this build can use: it is reported missing and named.
+    p = whichbrew_problems("x86_64", "x86_64", ["/opt/homebrew/bin/brew"], None, "/opt/homebrew/bin/brew")
+    check("an Intel Mac with only an Apple-silicon Homebrew: none is used on its own, doctor names it and NM_BREW", not p, p)
+    p = whichbrew_problems("arm64", "arm64", ["/usr/local/bin/brew"], None, "/usr/local/bin/brew")
+    check("Apple silicon with only an Intel Homebrew: none is used on its own, doctor names it and NM_BREW", not p, p)
     p = whichbrew_problems("x86_64", "x86_64", both, "/opt/homebrew/bin/brew", None, nm_brew="/opt/homebrew/bin/brew")
     check("NM_BREW names the other one: only that one is used", not p, p)
-    negative("the Homebrew of /opt/homebrew first on every Mac (as before)",
-             whichbrew_problems("x86_64", "x86_64", both, "/usr/local/bin/brew", "/opt/homebrew/bin/brew",
-                                script_edit=(BREW_PLACES_LINE, 'brew_places() { echo "/opt/homebrew/bin/brew /usr/local/bin/brew"; }')))
+    # A brew reachable only through PATH: taken only when it resolves into this processor's own prefix.
+    p = whichbrew_problems("x86_64", "x86_64", [], None, None, path_brew=("wrapper",))
+    check("a brew on PATH that is a wrapper in no Homebrew prefix is not taken", not p, p)
+    p = whichbrew_problems("x86_64", "x86_64", [], None, "/bin/brew", path_brew=("other",))
+    check("a brew on PATH that resolves into the other architecture's prefix is not used on its own, but is named", not p, p)
+    negative("the other architecture's Homebrew used when the processor's own place is empty (the old fallback)",
+             whichbrew_problems("x86_64", "x86_64", ["/opt/homebrew/bin/brew"], None, "/opt/homebrew/bin/brew",
+                                script_edit=('    [ -f "$native" ] && [ -x "$native" ] && BREW=$native',
+                                             '    [ -f "$native" ] && [ -x "$native" ] && BREW=$native\n    [ -n "$BREW" ] || { [ -f "$other" ] && [ -x "$other" ] && BREW=$other; }')))
+    negative("a PATH brew taken wherever it resolves (no prefix rule)",
+             whichbrew_problems("x86_64", "x86_64", [], None, None, path_brew=("wrapper",),
+                                script_edit=('        case "$r" in\n          "${native%/bin/brew}"/*) BREW=$c ;;',
+                                             '        case "x$r" in\n          x*) BREW=$c ;;\n          "${native%/bin/brew}"/*) BREW=$c ;;')))
     negative("the processor taken from uname -m only (a shell under Rosetta counts as Intel)",
              whichbrew_problems("x86_64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew",
                                 script_edit=('      *) if is_mac && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then MAC_ARCH=arm64;',
                                              '      *) if false; then MAC_ARCH=arm64;')))
+
+
+def arm_brewenv():
+    """Every call build.sh makes to Homebrew drops HOMEBREW_PREFIX, HOMEBREW_CELLAR and HOMEBREW_REPOSITORY, whatever
+    the caller exported: a tester's login shell exports them for a Homebrew of the other architecture, and inherited
+    they would send the chosen brew at the wrong installation. The stand-in brew records the three; a non-empty one fails."""
+    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
+    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY")
+
+    def problems(sb):
+        sb.clear()
+        sb.run("deps", "-y", extra=dict(poison))
+        calls = [l for l in sb.jlines() if l.startswith("brew-info") or l.startswith("brew-env")]
+        p = []
+        if not calls:
+            p.append("no brew call was recorded at all (the arm proves nothing)")
+        for l in calls:
+            for tok in l.split():
+                k, _, v = tok.partition("=")
+                if k in keys and v:
+                    p.append(f"{tok} reached brew (in {l.split()[0]})")
+        return p
+
+    sb = Sandbox("brewenv")
+    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY, whatever the caller exported", not (p := problems(sb)), p)
+    neg = Sandbox("brewenv-neg")
+    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
+    negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
 
 
 DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
@@ -2246,6 +2309,8 @@ def main():
             arm_hostbrew()
         if want("whichbrew"):
             arm_whichbrew()
+        if want("brewenv"):
+            arm_brewenv()
         if want("readonly"):
             arm_readonly()
         if want("noinstall"):
