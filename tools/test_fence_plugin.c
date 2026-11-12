@@ -1,6 +1,7 @@
 /* test_fence_plugin.c - the plugin's side of the kernel surface fence (plugin/nvmtl_fence.h), on the host: the numbers
    it repeats from the kext, one command buffer's record of holds, when the fence is usable and when to ask again, which
-   of the older pending marks still go to the kernel, and which answers of a kernel wait end a reader's wait.
+   of the older pending marks still go to the kernel, and which answers of a kernel wait end a reader's wait (and after
+   how long a wait).
    Build and run anywhere:
      cc -std=c11 -Wall -Wextra -Werror -I kexts/NVRM -I plugin tools/test_fence_plugin.c -o /tmp/test_fence_plugin && /tmp/test_fence_plugin */
 #include <stdio.h>
@@ -60,6 +61,37 @@ static struct world run_world(route_fn route, unsigned surfaces, unsigned refuse
     }
     for (uint32_t s = 1; s <= surfaces; s++) w.left += kmark[s];
     return w;
+}
+
+/* ---- which answers of a kernel wait end a reader's wait ---- */
+typedef int (*handled_fn)(uint32_t, uint32_t, uint32_t);
+static const uint32_t let_go[4] = { NVMTL_FENCE_R_NONE, NVMTL_FENCE_R_DEAD, NVMTL_FENCE_R_TIMEOUT, NVMTL_FENCE_R_BUDGET };
+/* How many of (the four answers) x (three waits shorter than the older poll) the rule lets end the wait: must be 0. */
+static int wait_rule_short(handled_fn f)
+{
+    static const uint32_t us[3] = { 0, 1234, NVMTL_FENCE_POLL_US - 1 };
+    int n = 0;
+    for (unsigned i = 0; i < 4; i++) for (unsigned k = 0; k < 3; k++) n += f(NVMTL_FENCE_ST_OK, let_go[i], us[k]) ? 1 : 0;
+    return n;
+}
+/* The same for three waits at least as long as the older poll: must be all 12. */
+static int wait_rule_long(handled_fn f)
+{
+    static const uint32_t us[3] = { NVMTL_FENCE_POLL_US, 100000u, ~0u };
+    int n = 0;
+    for (unsigned i = 0; i < 4; i++) for (unsigned k = 0; k < 3; k++) n += f(NVMTL_FENCE_ST_OK, let_go[i], us[k]) ? 1 : 0;
+    return n;
+}
+/* for the controls: the rule as it was first written (the time is not looked at), and one that trusts READY alone */
+static int handled_without_time(uint32_t status, uint32_t result, uint32_t waited_us)
+{
+    (void)waited_us;
+    return nvmtl_fence_wait_handled(status, result, ~0u);
+}
+static int handled_ready_only(uint32_t status, uint32_t result, uint32_t waited_us)
+{
+    (void)waited_us;
+    return nvmtl_fence_wait_handled(status, result, 0);
 }
 
 int main(void)
@@ -188,20 +220,37 @@ int main(void)
     T("control: without an overflow the two routings agree", w.left == 0 && w.sent_clears == 20);
 
     /* a kernel wait's answer */
-    T("NONE, READY, DEAD, TIMEOUT and BUDGET end the reader's wait", nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_NONE)
-      && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_READY) && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_DEAD)
-      && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_TIMEOUT) && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_BUDGET));
-    T("ABORTED and PENDING fall through to the older wait", !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_ABORTED)
-      && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_PENDING));
-    T("a result this plugin does not know falls through", !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, 7) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, ~0u));
+    T("READY ends the reader's wait, however short the wait was", nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_READY, 0)
+      && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_READY, 1) && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_READY, ~0u));
+    T("NONE, DEAD, TIMEOUT and BUDGET after less than the older poll's time leave the tag to decide", wait_rule_short(nvmtl_fence_wait_handled) == 0);
+    T("... and end the wait once the kernel kept the reader that long", wait_rule_long(nvmtl_fence_wait_handled) == 4 * 3);
+    T("the boundary is the older poll's 10 ms, to the microsecond", NVMTL_FENCE_POLL_US == 10000u
+      && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_DEAD, NVMTL_FENCE_POLL_US - 1)
+      && nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_DEAD, NVMTL_FENCE_POLL_US));
+    T("a reader the kernel lets go at once after a writer died, a sleep or a stop polls the tag (DEAD, NONE at 0 us)",
+      !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_DEAD, 0) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_NONE, 0));
+    T("a hold given up in a 20 ms penalty window ends the wait of a reader that sat it out, not of one that came at its end",
+      nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_TIMEOUT, 20000) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_TIMEOUT, 300));
+    T("the reader's own two seconds end it", nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_BUDGET, NVMTL_FENCE_WAIT_MS * 1000u));
+    T("ABORTED and PENDING fall through to the older wait, whatever the time", !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_ABORTED, 0)
+      && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_PENDING, 0) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_ABORTED, ~0u)
+      && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, NVMTL_FENCE_R_PENDING, ~0u));
+    T("a result this plugin does not know falls through", !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, 7, 0) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, ~0u, 0)
+      && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, 7, ~0u) && !nvmtl_fence_wait_handled(NVMTL_FENCE_ST_OK, ~0u, ~0u));
     {
         static const uint32_t bad[] = { NVRM_FENCE_ST_BAD_VERSION, NVRM_FENCE_ST_OFF, NVRM_FENCE_ST_BAD_ARG, NVRM_FENCE_ST_FULL,
                                         NVRM_FENCE_ST_DENIED, NVRM_FENCE_ST_STALE, NVRM_FENCE_ST_MAP, NVRM_FENCE_ST_DISTRUST, 0xe00002c2u, 1u };
+        static const uint32_t us[] = { 0, NVMTL_FENCE_POLL_US, 2000000u, ~0u };
         int any = 0;
         for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++)
-            for (uint32_t r = 0; r <= 7; r++) any |= nvmtl_fence_wait_handled(bad[i], r);
-        T("every error status falls through, whatever the result word", !any);
+            for (uint32_t r = 0; r <= 7; r++)
+                for (unsigned k = 0; k < sizeof us / sizeof us[0]; k++) any |= nvmtl_fence_wait_handled(bad[i], r, us[k]);
+        T("every error status falls through, whatever the result word and the time", !any);
     }
+    T("control: the rule that let these four end the wait at once is told apart (it lets a reader go before the tag is asked)",
+      wait_rule_short(handled_without_time) == 4 * 3 && wait_rule_long(handled_without_time) == 4 * 3);
+    T("control: a rule that trusts READY alone is told apart too (it sends a reader that already waited its 10 ms back to the tag)",
+      wait_rule_short(handled_ready_only) == 0 && wait_rule_long(handled_ready_only) == 0);
 
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails ? 1 : 0;
