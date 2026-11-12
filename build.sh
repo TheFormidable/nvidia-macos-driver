@@ -969,18 +969,19 @@ make_tool_links() {
 ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost vulkan plugin xlate nvencvt"
 EXTRA_COMPONENTS="selector nmkbl nmhda"
 # comp_info <name>: C_DEPS (components), C_SRC (checkout paths whose contents it is built from, scripts included),
-# C_VARS (variables it reads), C_OUT (a file that exists when it was built), C_TOOLS (tool groups), C_DESC
+# C_VARS (variables it reads), C_PINS (the build/pins.sh entries it is built from, by name prefix), C_OUT (a file that
+# exists when it was built), C_TOOLS (tool groups), C_DESC
 comp_info() {
-  C_DEPS=""; C_SRC=""; C_VARS=""; C_OUT=""; C_TOOLS="xcode"; C_DESC=""
+  C_DEPS=""; C_SRC=""; C_VARS=""; C_PINS=""; C_OUT=""; C_TOOLS="xcode"; C_DESC=""
   case "$1" in
     rm)    C_DESC="NVIDIA's RM core for macOS (libnvkernel.a), patched with kexts/NVRM/patches"
-           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_TOOLS="xcode patch python"
+           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode patch python"
            C_OUT="$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" ;;
     kms)   C_DESC="NVIDIA's modeset core for macOS (libnvkms.a)"; C_DEPS="rm"
            C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode python"
            C_OUT="$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
     nvrm)  C_DESC="NVRM.kext"; C_DEPS="rm kms"
-           C_SRC="build/build_nvrm.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_TOOLS="xcode python patch"
+           C_SRC="build/build_nvrm.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_PINS="OGKM620_"; C_TOOLS="xcode python patch"
            C_OUT="$O/kexts/nvrm/NVRM.kext/Contents/MacOS/NVRM" ;;
     fb)    C_DESC="NVRMFB.kext"; C_DEPS="rm"
            C_SRC="build/fb_build.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRMFB"; C_VARS="MINVER FB_DEFS"
@@ -992,24 +993,25 @@ comp_info() {
            C_OUT="$O/kexts/agdc/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" ;;
     nmsmn) C_DESC="NMSMN.kext (carried in the package)"; C_SRC="kexts/NMSMN build/warn_ceiling.sh build/warnings.txt"
            C_OUT="$O/kexts/nmsmn/NMSMN.kext/Contents/MacOS/NMSMN" ;;
-    ryzenadj) C_DESC="ryzenadj (carried in the package)"; C_SRC="tools/ryzenadj-macos"; C_OUT="$O/ryzenadj/ryzenadj" ;;
+    ryzenadj) C_DESC="ryzenadj (carried in the package)"; C_SRC="tools/ryzenadj-macos"; C_PINS="RYZENADJ_"; C_OUT="$O/ryzenadj/ryzenadj" ;;
     airdis) C_DESC="nvmtl-air-dis (the plugin's AIR decoder)"; C_SRC="build/build_air_dis.sh plugin/air_dis.c"; C_OUT="$O/userland/nvmtl-air-dis" ;;
     dlss)  C_DESC="dlss_cache and nm_unzstd"; C_SRC="build/build_dlss_cache.sh dlss package/dlss_fetch.sh"; C_OUT="$O/dlss-pkg/dlss/nm_unzstd" ;;
     osver) C_DESC="libnvmtl_osver.dylib"; C_SRC="build/build_osver.sh plugin"; C_OUT="$O/osver/libnvmtl_osver.dylib" ;;
     nvk)   C_DESC="NVK, the Vulkan driver (libvulkan_nouveau.dylib)"
            C_SRC="build/build_nvk.sh build/gen_nvk_rust_crates.py nvk licenses/nvk-rust-crates.txt"
            C_VARS="NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS NVK_JOBS NVK_PATH PKG_CONFIG_PATH LIBCLANG_PATH NM_MESA_GIT NM_OGKM610"
+           C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR="
            C_TOOLS="xcode patch python nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
-    vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_TOOLS="xcode cmake"
+    vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
            C_OUT="$O/vulkan-loader/libvulkan.1.dylib" ;;
     plugin) C_DESC="the Metal plugin (NVMTLDriver, $NM_FLAVOUR)"; C_SRC="build/build_plugin_release.sh build/build_plugin_dev.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt plugin"
-           C_VARS="NM_FLAVOUR NULLMOTH_BUILD_HOST NM_VULKAN_INCLUDE NM_MESA_GIT"; C_OUT="$O/plugin/NVMTLDriver" ;;
+           C_VARS="NM_FLAVOUR NULLMOTH_BUILD_HOST NM_VULKAN_INCLUDE NM_MESA_GIT"; C_PINS="MESA_"; C_OUT="$O/plugin/NVMTLDriver" ;;
     xlate) C_DESC="the shader translator (libnvmtl_translate.dylib)"; C_SRC="build/build_xlate_release.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt translator"
-           C_VARS="NULLMOTH_BUILD_HOST NULLMOTH_RUST_VERSION NULLMOTH_RUST_BIN NULLMOTH_CARGO_HOME"; C_TOOLS="xcode rust"; C_OUT="$O/xlate/libnvmtl_translate.dylib" ;;
+           C_VARS="NULLMOTH_BUILD_HOST NULLMOTH_RUST_VERSION NULLMOTH_RUST_BIN NULLMOTH_CARGO_HOME"; C_PINS="RUST_VERSION="; C_TOOLS="xcode rust"; C_OUT="$O/xlate/libnvmtl_translate.dylib" ;;
     nvencvt) C_DESC="libnvencvt.dylib (video)"; C_DEPS="rm"
            C_SRC="build/build_nvencvt.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt vendor/nvenc tools/nvencvt_header_abi.py tools/nvk_header_abi.py"
-           C_VARS="NULLMOTH_BUILD_HOST"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
+           C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
     nmkbl) C_DESC="NMKbdBacklight.kext (optional; needs Lilu, VirtualSMC, MacKernelSDK)"; C_SRC="kexts/NMKbdBacklight build/check_kext_libraries.sh"
@@ -1048,7 +1050,8 @@ recipe() {   # <component>: everything its output depends on, as text
   comp_info "$n"
   say "component $n"
   say "build.sh $(sha256_file "$SELF")"
-  say "pins $(sha256_file "$PINS_FILE")"
+  # only the pins of the sources this component is built from: another pin, or a comment, changes nothing here
+  local pre; for pre in $C_PINS; do grep -E "^NM_PIN_$pre" "$PINS_FILE" | sed 's/^/pin /' || true; done
   say "tools $(tools_id)"
   case " $C_TOOLS " in *" nvk "*)
     say "llvm $([ -n "$T_LLVMCONFIG" ] && "$T_LLVMCONFIG" --version 2>/dev/null) spirv-llvm $(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc" 2>/dev/null) spirv-tools $(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc" 2>/dev/null)"
