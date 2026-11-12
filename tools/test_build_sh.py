@@ -1774,6 +1774,32 @@ def arm_scan():
     check("control: bash -n rejects a broken script", r.returncode != 0)
 
 
+def frameworks(text):
+    return set(re.findall(r"-framework\s+(\w+)", text))
+
+
+def plugin_link_problems(texts):
+    """build/build_plugin.sh links the plugin with every framework the release and development scripts link it with:
+    without IOKit and CoreFoundation its link stops on 13 undefined IOKit symbols (seen with Xcode 26.5)."""
+    have = frameworks(texts["build/build_plugin.sh"])
+    p = []
+    for other in ("build/build_plugin_release.sh", "build/build_plugin_dev.sh"):
+        miss = frameworks(texts[other]) - have
+        if miss:
+            p.append(f"build/build_plugin.sh lacks {sorted(miss)}, which {other} links")
+    return p
+
+
+def arm_plugin_link():
+    names = ("build/build_plugin.sh", "build/build_plugin_release.sh", "build/build_plugin_dev.sh")
+    texts = {n: (ROOT / n).read_text() for n in names}
+    p = plugin_link_problems(texts)
+    check("build/build_plugin.sh links IOKit and CoreFoundation like the release and development scripts", not p, p)
+    old = dict(texts)
+    old["build/build_plugin.sh"] = texts["build/build_plugin.sh"].replace(" -framework IOKit -framework CoreFoundation", "")
+    negative("the link line of v2.9 (no -framework IOKit)", plugin_link_problems(old))
+
+
 # ------------------------------------------------------------------------------------------------- documents
 def script_names(text):
     """The commands, options and settable variables build.sh defines (from its text)."""
@@ -1870,6 +1896,8 @@ def main():
             arm_scan()
         if want("docs"):
             arm_docs()
+        if want("plugin"):
+            arm_plugin_link()
         commits = build_template()
         if want("pins"):
             arm_pins_script()
