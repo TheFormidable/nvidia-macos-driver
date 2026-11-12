@@ -11,7 +11,9 @@ Each line is present exactly once, in its function, at the place its order matte
     so every command buffer closes its holds on every path;
   - a part's holds are armed right after its submission and before anything waits for it, on both submit paths;
   - the reader's kernel wait follows the first early return of nvmtl_busy_wait (a process never waits for itself) and
-    precedes the older poll, which stays;
+    precedes the older wait, which stays whole: the test that passes a tag older than 100 ms at once, then the poll.
+    An answer of the kernel that does not end the reader's wait lands there, and the time after which such an answer
+    does end it (NVMTL_FENCE_POLL_US in nvmtl_fence.h) is that poll's own length (NVMTL_BUSY_WAIT_NS in NVMTLDevice.m);
   - the compositor wait in nvmtlSurfaceIn follows the busy-tag check and the early return for an unchanged surface.
 And: the older mechanisms are all still there; surface 0, and every mark when NVK has no fence entry, is forwarded
 before the mark routing; NVK's entry is looked up
@@ -107,6 +109,13 @@ def check(f):
     assert wait.index(early) < wait.index(ROW[11]) < wait.index('usleep(NVMTL_BUSY_POLL_US);'), \
         'row 11: the kernel wait is not between the first early return and the older poll'
     assert re.search(re.escape(early) + r'\n(\s*//[^\n]*\n)?\s*' + re.escape(ROW[11]), wait), 'row 11 does not follow the first early return'
+    stale = 'if (t.stamp_ns <= t0 && t0 - t.stamp_ns > NVMTL_BUSY_STALE_NS) return;'
+    assert re.search(re.escape(ROW[11]) + r'\n\s*const uint64_t t0 = clock_gettime_nsec_np\(CLOCK_MONOTONIC_RAW\);\n\s*' + re.escape(stale) + r'\n\s*for \(;;\) \{\n\s*usleep\(NVMTL_BUSY_POLL_US\);', wait), \
+        'row 11 is not followed by the older wait as it was: the clock, the test for a tag older than 100 ms, the poll'
+    ns = re.search(r'^#define NVMTL_BUSY_WAIT_NS\s+\((\d+)ull \* 1000 \* 1000\)$', dev, re.M)
+    us = re.search(r'^#define NVMTL_FENCE_POLL_US\s+(\d+)u\b', fh, re.M)
+    assert ns and us and int(ns.group(1)) * 1000 == int(us.group(1)), \
+        'NVMTL_FENCE_POLL_US (nvmtl_fence.h) is not the length of the older poll, NVMTL_BUSY_WAIT_NS (NVMTLDevice.m)'
 
     sin = body(obj, '- (void)nvmtlSurfaceIn {')
     unchanged = 'if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;'
@@ -192,6 +201,9 @@ controls = [
                                               'nvmtl_busy_tag t;\n    // the writer\'s kernel fence')),
     ('row 12 twice', mutate('NVMTLObjects.m', ROW[12], ROW[12] + '\n    ' + ROW[12])),
     ('the older poll removed', mutate('NVMTLDevice.m', 'usleep(NVMTL_BUSY_POLL_US);', 'usleep(1);')),
+    ('the test for an old tag removed from the older wait', mutate('NVMTLDevice.m', '    if (t.stamp_ns <= t0 && t0 - t.stamp_ns > NVMTL_BUSY_STALE_NS) return;\n', '')),
+    ('the older poll made longer than the time the reader rule knows', mutate('NVMTLDevice.m', '#define NVMTL_BUSY_WAIT_NS  (10ull * 1000 * 1000)', '#define NVMTL_BUSY_WAIT_NS  (20ull * 1000 * 1000)')),
+    ('the reader rule\'s time not the older poll\'s', mutate('nvmtl_fence.h', '#define NVMTL_FENCE_POLL_US     10000u', '#define NVMTL_FENCE_POLL_US     1000u')),
     ('the older clear removed', mutate('NVMTLEventSync.m', 'nvmtl_ws_mark(sid, NO);', '')),
     ('surface 0 routed', mutate('nvmtl_vk.c', '    if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);\n', '')),
     ('an older NVK\'s marks routed', mutate('nvmtl_vk.c', '    if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);\n', '')),
