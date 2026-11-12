@@ -12,12 +12,20 @@ moved on. This runs each one, prints the failures with the end of their output, 
 
 Not run here, and listed at the end with the reason: tests that need a built library or an outside source tree. They are
 run at the build step, where those exist. Needs a Mac with the Xcode command line tools (the tests compile Objective-C
-and x86_64 code). Run it from a full clone: negative controls read older revisions of the source."""
+and x86_64 code). Run it from a full clone: negative controls read older revisions of the source.
+
+Each test gets a temporary folder of its own as TMPDIR, deleted when it ends, so that what a test leaves behind in its
+temporary files does not pile up in the system's; and no test writes Python bytecode into the checkout. Each test runs
+in a session of its own with no terminal and nothing on its standard input, so nothing it starts can ask for a password
+or an answer there; at its time limit, or when the run is interrupted, the test is stopped with everything it started."""
 import concurrent.futures
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
+import threading
 import sys
 import tempfile
 from pathlib import Path
@@ -33,6 +41,44 @@ NEEDS_INPUT = {
 }
 BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+\S+")
 TIMEOUT = 600
+RUNNING = set()          # the tests' process groups, stopped when the run is interrupted
+RUNNING_LOCK = threading.Lock()
+
+
+class Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def stop(p):
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run(argv, cwd, env):
+    """subprocess.run, but the program is a session of its own (no controlling terminal) with /dev/null as its input, and
+    at the limit it is stopped with everything it started: killing only the test would leave its children running, still
+    writing into the temporary folder that is deleted next."""
+    p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, start_new_session=True)
+    with RUNNING_LOCK:
+        RUNNING.add(p)
+    try:
+        out, err = p.communicate(timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        stop(p)
+        try:
+            p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:   # something that left the session still holds the output open
+            p.kill()
+        raise
+    finally:
+        with RUNNING_LOCK:
+            RUNNING.discard(p)
+    stop(p)   # what it left running in the background after it ended
+    return Result(p.returncode, out, err)
 
 
 def c_command(path, out):
@@ -57,24 +103,29 @@ def run_one(path):
     name = path.name
     if name in NEEDS_INPUT:
         return name, "norun", NEEDS_INPUT[name]
+    tmp = tempfile.mkdtemp(prefix="nmtest-")
+    env = dict(os.environ, TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")
     try:
         if path.suffix == ".py":
-            r = subprocess.run([sys.executable, str(path)], cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+            r = run([sys.executable, str(path)], ROOT, env)
         elif path.suffix == ".sh":
-            r = subprocess.run(["/bin/bash", str(path)], cwd=TOOLS, capture_output=True, text=True, timeout=TIMEOUT)
+            r = run(["/bin/bash", str(path)], TOOLS, env)
         else:
-            with tempfile.TemporaryDirectory(prefix="nmtest-") as t:
-                cmd = c_command(path, Path(t) / "t")
-                if cmd == "placeholder":
-                    return name, "norun", "its build line needs a path filled in (see its header)"
-                if not cmd:
-                    return name, "norun", "its header names no build line"
-                b = subprocess.run(cmd[0], cwd=cmd[1], capture_output=True, text=True, timeout=TIMEOUT)
-                if b.returncode:
-                    return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
-                r = subprocess.run([str(Path(t) / "t")], cwd=cmd[1], capture_output=True, text=True, timeout=TIMEOUT)
+            t = Path(tmp) / "build"
+            t.mkdir()
+            cmd = c_command(path, t / "t")
+            if cmd == "placeholder":
+                return name, "norun", "its build line needs a path filled in (see its header)"
+            if not cmd:
+                return name, "norun", "its header names no build line"
+            b = run(cmd[0], cmd[1], env)
+            if b.returncode:
+                return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
+            r = run([str(t / "t")], cmd[1], env)
     except subprocess.TimeoutExpired:
         return name, "FAIL", f"no result after {TIMEOUT} s"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     out = (r.stdout + r.stderr)
     if r.returncode == 0:
         return name, "ok", ""
@@ -92,8 +143,21 @@ def main(argv):
         tests = [p for p in tests if p.name in argv or p.stem in argv]
     if not tests:
         print("no test matched"); return 1
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    # the tests are sessions of their own, so a Ctrl-C at the terminal reaches only this runner: it stops them
+    def interrupted(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    try:
         results = list(pool.map(run_one, tests))
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        with RUNNING_LOCK:
+            for p in list(RUNNING):
+                stop(p)
+        print("interrupted: the running tests were stopped", file=sys.stderr)
+        return 130
+    pool.shutdown()
     by = {s: [(n, d) for n, st, d in results if st == s] for s in ("ok", "FAIL", "skip", "norun")}
     for n, d in by["FAIL"]:
         print(f"FAIL {n}: {d}\n")
