@@ -38,6 +38,80 @@ static inline unsigned nvrmAutoGoSettleMs(bool bar1Placed, bool turing, bool hav
     return ms;
 }
 
+// ---- The waits of auto-go between the settle and the release of the boot hold ----
+// Each one is the 2.9 wait with an earlier exit that needs the very condition 2.9 exited on, and 2.9's upper bound:
+// a condition that never comes true ends the wait when 2.9's did, never later, and no wait is without a bound. 2.9
+// polled in 1 s steps, so the desktop came up to a second after it could have. -nvrmoldwaits (NVRM reads it once at
+// start) passes a step of 1000 ms, and the stepper below is then 2.9's loop poll for poll (tools/test_startup_policy.py
+// compares the two).
+enum : unsigned {
+    kNvrmHeadsWaitMs     = 20000,   // how long auto-go waits for the accelerator's heads: twenty 1 s polls in 2.9
+    kNvrmHeadsPollMs     = 50,
+    kNvrmHeadsStableMs   = 3000,    // "the published mask has not changed": three 1 s polls in a row in 2.9
+    kNvrmHeadsRefreshMs  = 250,     // the connector counts (a registry walk) are read again at most this often
+    kNvrmStartGateMaxMs  = 5000,    // the longest auto-go waits for start() to have returned (a wait 2.9 did not make)
+    kNvrmStartGateStepMs = 10,
+    kNvrmArmTries        = 10,      // tries of debug.nvaccelfb=1, 1 s apart in 2.9
+    kNvrmArmStepMs       = 1000,
+};
+// Why the heads wait ended (debug.nvrm_boot_heads_why). The order of the checks is 2.9's.
+enum NvrmHeadsWhy { kNvrmHeadsKeepWaiting = 0, kNvrmHeadsEnough = 1, kNvrmHeadsStable = 2, kNvrmHeadsAllConnected = 3,
+                    kNvrmHeadsNoDisplay = 4, kNvrmHeadsHybridPanel = 5, kNvrmHeadsNoAccel = 6, kNvrmHeadsTimeout = 7 };
+struct NvrmHeadsWait { unsigned stepMs, elapsedMs, stableMs; int last, want; bool hybrid; };
+
+static inline unsigned nvrmPopCount(unsigned m) { unsigned c = 0; for (; m; m &= m - 1) c++; return c; }
+static inline void nvrmHeadsWaitInit(NvrmHeadsWait *w, unsigned stepMs, int want, bool hybrid)
+{
+    w->stepMs = stepMs ? stepMs : 1000u; w->elapsedMs = 0; w->stableMs = 0; w->last = -1; w->want = want; w->hybrid = hybrid;
+}
+// One poll. mask = debug.nvaccel_heads_published (0 when it cannot be read), connected = connected-displays of display
+// nub 0 (0 when unknown), noDisplayAnywhere = every connector list is enumerated and none carries a display (only
+// looked at while the mask is 0, as in 2.9), accelRefused = the accelerator declined this macOS's class layout, so no
+// head will ever be published to it. KeepWaiting: the caller sleeps w->stepMs and then calls nvrmHeadsWaitSlept().
+static inline NvrmHeadsWhy nvrmHeadsWaitPoll(NvrmHeadsWait *w, unsigned mask, unsigned connected, bool noDisplayAnywhere,
+                                             bool accelRefused)
+{
+    if (accelRefused) return kNvrmHeadsNoAccel;
+    if (w->hybrid) return (mask & 0x10u) ? kNvrmHeadsHybridPanel : kNvrmHeadsKeepWaiting;   // the other GPU's panel is head 4
+    const unsigned heads = nvrmPopCount(mask);
+    if ((int)heads >= w->want) return kNvrmHeadsEnough;
+    w->stableMs = (mask && (int)mask == w->last) ? w->stableMs + w->stepMs : 0;
+    w->last = (int)mask;
+    if (w->stableMs >= kNvrmHeadsStableMs) return kNvrmHeadsStable;
+    if (connected > 0 && heads >= connected) return kNvrmHeadsAllConnected;
+    if (!mask && noDisplayAnywhere) return kNvrmHeadsNoDisplay;
+    return kNvrmHeadsKeepWaiting;
+}
+// After the caller's sleep of w->stepMs: false once the wait has lasted kNvrmHeadsWaitMs (2.9: after the twentieth sleep).
+static inline bool nvrmHeadsWaitSlept(NvrmHeadsWait *w)
+{
+    w->elapsedMs += w->stepMs;
+    return w->elapsedMs < kNvrmHeadsWaitMs;
+}
+// The boot raster measurement watches each head's line counter for 250 ms. A head that is scanning out at any rate the
+// measurement can accept (20 Hz or more, more than 100 counter changes) changes it hundreds of times in 50 ms, so a
+// counter that has not moved once in the first 50 ms proves "not running" as well as the full window does.
+static inline bool nvrmRasterHeadIdle(unsigned long long elapsedNs, unsigned moves)
+{
+    return moves == 0 && elapsedNs >= 50000000ull;
+}
+// Between two tries of debug.nvaccelfb=1: a write that failed while head 0 was not published yet can only succeed once
+// it is, so the retry may come as soon as bit 0 of the mask appears (polled, at most kNvrmArmStepMs later). With head
+// 0 already there, or the mask unreadable, nothing readable says when to retry: the full step, as in 2.9.
+static inline bool nvrmArmRetryMayPoll(bool maskReadable, unsigned mask)
+{
+    return maskReadable && !(mask & 1u);
+}
+// The accelerator declined the macOS class layout: no head will be published and no arm can succeed, so auto-go waits
+// for what the boot hold is there for, the framebuffer's display path being up. 2.9 spent at most the heads wait plus
+// its ten arm tries before it released the hold; this wait ends no later than that, and lasts at most 20 s itself.
+static inline unsigned nvrmAccelRefusedWaitMs(unsigned headsElapsedMs)
+{
+    const unsigned total = kNvrmHeadsWaitMs + kNvrmArmTries * kNvrmArmStepMs;
+    const unsigned left = headsElapsedMs < total ? total - headsElapsedMs : 0;
+    return left < kNvrmHeadsWaitMs ? left : kNvrmHeadsWaitMs;
+}
+
 // A firmware that sizes BAR1 above 8 GB (16 GB on an RTX 4060 Ti 16 GB, 32 GB on the largest cards) leaves a window
 // the bring-up has not run on: an RTX 3060 and an RTX 5080 resized to 16 GB both stopped during bring-up, and 8 GB is
 // the size proven on hardware. Returns the size to resize to (8 GB), or 0 to leave BAR1 as it is: already 8 GB or

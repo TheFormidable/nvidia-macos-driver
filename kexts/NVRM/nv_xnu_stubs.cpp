@@ -201,10 +201,13 @@ __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_import_sgt(nv_dma_device_t *,
     return NV_ERR_NOT_SUPPORTED;
 }
 
-__attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *, NvU64, NvU64 *, NvBool, NvBool, void **)
+// The RM's DMA interface lives in nvrm_dma.cpp. This and nv_dma_unmap_alloc and nv_requires_dma_remap below answer
+// for a kext without it, as 2.9 did: no GPU needs its addresses remapped, so the RM uses physical addresses.
+__attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *, NvU64, NvU64 *, NvBool, NvBool, void **priv)
 {
     NV_XNU_STUB_HIT("nv_dma_map_alloc");
-    return NV_ERR_NOT_SUPPORTED;
+    if (priv) *priv = NULL;
+    return NV_OK;
 }
 
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_mmio(nv_dma_device_t *, NvU64, NvU64 *)
@@ -240,7 +243,7 @@ __attribute__((weak)) void NV_API_CALL nv_dma_release_sgt(struct sg_table *, str
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *, NvU64, NvU64 *, void **)
 {
     NV_XNU_STUB_HIT("nv_dma_unmap_alloc");
-    return NV_ERR_NOT_SUPPORTED;
+    return NV_OK;
 }
 
 __attribute__((weak)) void NV_API_CALL nv_dma_unmap_mmio(nv_dma_device_t *, NvU64, NvU64)
@@ -587,8 +590,7 @@ __attribute__((weak)) void NV_API_CALL nv_release_mmap_lock(nv_state_t *)
 
 __attribute__((weak)) NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *)
 {
-    NV_XNU_STUB_HIT("nv_requires_dma_remap");
-    return NV_FALSE;
+    return NV_FALSE;      // asked on every allocation: the 2.9 answer, not a missing function (see nv_dma_map_alloc)
 }
 
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_revoke_gpu_mappings(nv_state_t *)
@@ -867,12 +869,6 @@ __attribute__((weak)) NV_STATUS NV_API_CALL os_alloc_wait_queue(os_wait_queue **
     return NV_ERR_NOT_SUPPORTED;
 }
 
-__attribute__((weak)) void NV_API_CALL os_bug_check(NvU32, const char *)
-{
-    NV_XNU_STUB_HIT("os_bug_check");
-
-}
-
 __attribute__((weak)) NV_STATUS NV_API_CALL os_call_vgpu_vfio(void *, NvU32)
 {
     NV_XNU_STUB_HIT("os_call_vgpu_vfio");
@@ -988,12 +984,6 @@ __attribute__((weak)) NV_STATUS NV_API_CALL os_device_vm_present(void)
 __attribute__((weak)) void NV_API_CALL os_disable_console_access(void)
 {
     NV_XNU_STUB_HIT("os_disable_console_access");
-
-}
-
-__attribute__((weak)) void NV_API_CALL os_dump_stack(void)
-{
-    NV_XNU_STUB_HIT("os_dump_stack");
 
 }
 
@@ -1435,12 +1425,6 @@ __attribute__((weak)) void NV_API_CALL os_nv_cap_destroy_entry(nv_cap_t *)
 
 }
 
-__attribute__((weak)) int NV_API_CALL os_nv_cap_validate_and_dup_fd(const nv_cap_t *, int)
-{
-    NV_XNU_STUB_HIT("os_nv_cap_validate_and_dup_fd");
-    return (int)0;
-}
-
 __attribute__((weak)) NV_STATUS NV_API_CALL os_offline_page_at_address(NvU64 address)
 {
     NV_XNU_STUB_HIT("os_offline_page_at_address");
@@ -1594,12 +1578,6 @@ __attribute__((weak)) char* NV_API_CALL os_string_copy(char *, const char *)
 __attribute__((weak)) NvU32 NV_API_CALL os_string_length(const char *)
 {
     NV_XNU_STUB_HIT("os_string_length");
-    return (NvU32)0;
-}
-
-__attribute__((weak)) NvU32 NV_API_CALL os_strtoul(const char *, char **, NvU32)
-{
-    NV_XNU_STUB_HIT("os_strtoul");
     return (NvU32)0;
 }
 

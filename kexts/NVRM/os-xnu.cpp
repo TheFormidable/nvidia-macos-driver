@@ -5,6 +5,9 @@
  */
 
 #include "nv-xnu.h"
+#include "nv_xnu_kcore.h"
+#include "nvrm_itree.h"
+#include "nv_xnu_slots.h"
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 #include <sys/kauth.h>
@@ -17,6 +20,7 @@ extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_
 #include <sys/random.h>
 #include <mach/vm_param.h>
 #include <kern/locks.h>
+#include <sys/sysctl.h>
 
 #define NV_XNU_TRC do { static bool _t = false; if (!_t) { _t = true; kprintf("NVRM-xnu: >%s\n", __func__); } } while (0)
 
@@ -29,14 +33,21 @@ NvU64 os_page_size     = PAGE_SIZE;
 NvU64 os_page_mask     = ~(NvU64)(PAGE_SIZE - 1);
 NvU8  os_page_shift    = PAGE_SHIFT;
 NvU64 os_max_page_size = PAGE_SIZE;
+// Where blocking is not allowed (under the RM's spinlocks) the kernel heap may not be called: the block comes from the
+// kext's own pool (nv_xnu_kcore.cpp). A request the pool cannot serve takes the older call, as it always did, and is
+// counted. Every free goes through nvx_atomic_free() first, because a pool block goes back to the pool.
 NV_STATUS NV_API_CALL os_alloc_mem(void **address, NvU64 size)
 { NV_XNU_TRC;
+    if (!nvx_can_block()) {
+        nvx_note(NVX_SITE_ALLOC, __builtin_return_address(0));
+        if ((*address = nvx_atomic_alloc(size)) != NULL) return NV_OK;
+    }
     *address = kern_os_malloc((size_t)size);
     if (*address == NULL) return NV_ERR_NO_MEMORY;
     nvx_memset(*address, 0, (size_t)size);
     return NV_OK;
 }
-void  NV_API_CALL os_free_mem(void *address) { NV_XNU_TRC; if (address) kern_os_free(address); }
+void  NV_API_CALL os_free_mem(void *address) { NV_XNU_TRC; if (address && !nvx_atomic_free(address)) kern_os_free(address); }
 void *NV_API_CALL os_mem_copy(void *dst, const void *src, NvU32 length) { static unsigned long n = 0; if (++n <= 4 || (n % 1000000) == 0) kprintf("NVRM-xnu: >os_mem_copy #%lu len=%u\n", n, length); nvx_memcpy(dst, src, length); return dst; }
 NV_STATUS NV_API_CALL os_memcpy_from_user(void *dst, const void *src, NvU32 length) { NV_XNU_TRC; return copyin((user_addr_t)(uintptr_t)src, dst, length) ? NV_ERR_INVALID_ADDRESS : NV_OK; }
 NV_STATUS NV_API_CALL os_memcpy_to_user(void *dst, const void *src, NvU32 length) { NV_XNU_TRC; return copyout(src, (user_addr_t)(uintptr_t)dst, length) ? NV_ERR_INVALID_ADDRESS : NV_OK; }
@@ -55,7 +66,14 @@ NvS32 NV_API_CALL os_snprintf(char *buf, NvU32 size, const char *fmt, ...)
 { NV_XNU_TRC;
     va_list ap; va_start(ap, fmt); int n = vsnprintf(buf, size, fmt, ap); va_end(ap); return n;
 }
-NvU32 NV_API_CALL os_get_cpu_count(void) { NV_XNU_TRC; return 4; }
+// The number of logical CPUs the kernel brought up. The RM sizes its per-CPU thread-state table by it (at least 32) and
+// reports it; it used to be a flat 4.
+extern unsigned int real_ncpus;   // osfmk/i386/mp.h; exported by com.apple.kpi.unsupported
+NvU32 NV_API_CALL os_get_cpu_count(void) { NV_XNU_TRC; const unsigned n = real_ncpus; return n ? n : 1; }
+// 0 on purpose, not cpu_number(). Its only user is the RM's lockless interrupt thread state: rm_isr files an entry under
+// the CPU number and looks it up again with the number of the moment, and asserts it did not change. On Linux that holds
+// because rm_isr runs in the hard interrupt; here it runs on a work-loop thread that can move to another CPU between the
+// two. One fixed number is collision-free because each GPU has one such thread and the table is per GPU as well.
 NvU32 NV_API_CALL os_get_cpu_number(void) { NV_XNU_TRC; return 0; }
 
 int NV_API_CALL nv_printf(NvU32 debuglevel, const char *printf_format, ...)
@@ -138,9 +156,13 @@ void NV_API_CALL os_dbg_init(void) { NV_XNU_TRC;}
 void NV_API_CALL os_dbg_set_level(NvU32 level) { NV_XNU_TRC;}
 void NV_API_CALL os_dbg_breakpoint(void) { NV_XNU_TRC; kprintf("NVRM-xnu: os_dbg_breakpoint\n"); }
 
-NV_STATUS NV_API_CALL os_alloc_mutex(void **pp) { NV_XNU_TRC; *pp = IOLockAlloc(); return *pp ? NV_OK : NV_ERR_NO_MEMORY; }
+// Where blocking is not allowed a lock is first tried, then tried again every 20 us for up to 20 ms
+// (nvx_atomic_lock); only if it is still held does the older, blocking call follow. Allocating a lock there is
+// counted and left as it was.
+#define NVX_ATOMIC_LOCKALLOC() do { if (!nvx_can_block()) nvx_note(NVX_SITE_LOCKALLOC, __builtin_return_address(0)); } while (0)
+NV_STATUS NV_API_CALL os_alloc_mutex(void **pp) { NV_XNU_TRC; NVX_ATOMIC_LOCKALLOC(); *pp = IOLockAlloc(); return *pp ? NV_OK : NV_ERR_NO_MEMORY; }
 void      NV_API_CALL os_free_mutex(void *p) { NV_XNU_TRC; if (p) IOLockFree((IOLock *)p); }
-NV_STATUS NV_API_CALL os_acquire_mutex(void *p) { NV_XNU_TRC; IOLockLock((IOLock *)p); return NV_OK; }
+NV_STATUS NV_API_CALL os_acquire_mutex(void *p) { NV_XNU_TRC; if (nvx_can_block() || !nvx_atomic_lock(NVX_LOCK_MUTEX, p)) IOLockLock((IOLock *)p); return NV_OK; }
 NV_STATUS NV_API_CALL os_cond_acquire_mutex(void *p) { NV_XNU_TRC; return IOLockTryLock((IOLock *)p) ? NV_OK : NV_ERR_TIMEOUT_RETRY; }
 void      NV_API_CALL os_release_mutex(void *p) { NV_XNU_TRC; IOLockUnlock((IOLock *)p); }
 
@@ -169,7 +191,7 @@ void      NV_API_CALL os_release_mutex(void *p) { NV_XNU_TRC; IOLockUnlock((IOLo
 // immutable once created and there is nothing for a late writer to corrupt.
 struct nv_xnu_spin { IOSimpleLock *l; };
 NV_STATUS NV_API_CALL os_alloc_spinlock(void **pp)
-{ NV_XNU_TRC;
+{ NV_XNU_TRC; NVX_ATOMIC_LOCKALLOC();
     nv_xnu_spin *sp = (nv_xnu_spin *)kern_os_malloc(sizeof *sp);
     if (!sp) return NV_ERR_NO_MEMORY;
     sp->l = IOSimpleLockAlloc();
@@ -180,31 +202,57 @@ void  NV_API_CALL os_free_spinlock(void *p) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_
 NvU64 NV_API_CALL os_acquire_spinlock(void *p) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; return (NvU64)IOSimpleLockLockDisableInterrupt(sp->l); }
 void  NV_API_CALL os_release_spinlock(void *p, NvU64 old) { NV_XNU_TRC; nv_xnu_spin *sp = (nv_xnu_spin *)p; IOSimpleLockUnlockEnableInterrupt(sp->l, (IOInterruptState)old); }
 
-void     *NV_API_CALL os_alloc_rwlock(void) { NV_XNU_TRC; return IORWLockAlloc(); }
+void     *NV_API_CALL os_alloc_rwlock(void) { NV_XNU_TRC; NVX_ATOMIC_LOCKALLOC(); return IORWLockAlloc(); }
 void      NV_API_CALL os_free_rwlock(void *p) { NV_XNU_TRC; if (p) IORWLockFree((IORWLock *)p); }
-NV_STATUS NV_API_CALL os_acquire_rwlock_read(void *p) { NV_XNU_TRC; IORWLockRead((IORWLock *)p); return NV_OK; }
-NV_STATUS NV_API_CALL os_acquire_rwlock_write(void *p) { NV_XNU_TRC; IORWLockWrite((IORWLock *)p); return NV_OK; }
+NV_STATUS NV_API_CALL os_acquire_rwlock_read(void *p) { NV_XNU_TRC; if (nvx_can_block() || !nvx_atomic_lock(NVX_LOCK_RW_READ, p)) IORWLockRead((IORWLock *)p); return NV_OK; }
+NV_STATUS NV_API_CALL os_acquire_rwlock_write(void *p) { NV_XNU_TRC; if (nvx_can_block() || !nvx_atomic_lock(NVX_LOCK_RW_WRITE, p)) IORWLockWrite((IORWLock *)p); return NV_OK; }
 NV_STATUS NV_API_CALL os_cond_acquire_rwlock_read(void *p) { NV_XNU_TRC; return lck_rw_try_lock(IORWLockGetMachLock((IORWLock *)p), LCK_RW_TYPE_SHARED) ? NV_OK : NV_ERR_TIMEOUT_RETRY; }
 NV_STATUS NV_API_CALL os_cond_acquire_rwlock_write(void *p) { NV_XNU_TRC; return lck_rw_try_lock(IORWLockGetMachLock((IORWLock *)p), LCK_RW_TYPE_EXCLUSIVE) ? NV_OK : NV_ERR_TIMEOUT_RETRY; }
 void      NV_API_CALL os_release_rwlock_read(void *p) { NV_XNU_TRC; IORWLockUnlock((IORWLock *)p); }
 void      NV_API_CALL os_release_rwlock_write(void *p) { NV_XNU_TRC; IORWLockUnlock((IORWLock *)p); }
 
 void *NV_API_CALL os_alloc_semaphore(NvU32 initial)
-{ NV_XNU_TRC;
+{ NV_XNU_TRC; NVX_ATOMIC_LOCKALLOC();
     semaphore_t *s = (semaphore_t *)kern_os_malloc(sizeof *s);
     if (!s) return NULL;
     if (semaphore_create(kernel_task, s, SYNC_POLICY_FIFO, (int)initial) != KERN_SUCCESS) { kern_os_free(s); return NULL; }
     return s;
 }
 void      NV_API_CALL os_free_semaphore(void *p) { NV_XNU_TRC; semaphore_t *s = (semaphore_t *)p; if (s) { semaphore_destroy(kernel_task, *s); kern_os_free(s); } }
-NV_STATUS NV_API_CALL os_acquire_semaphore(void *p) { NV_XNU_TRC; return semaphore_wait(*(semaphore_t *)p) == KERN_SUCCESS ? NV_OK : NV_ERR_GENERIC; }
+NV_STATUS NV_API_CALL os_acquire_semaphore(void *p) { NV_XNU_TRC; if (!nvx_can_block() && nvx_atomic_lock(NVX_LOCK_SEMA, p)) return NV_OK; return semaphore_wait(*(semaphore_t *)p) == KERN_SUCCESS ? NV_OK : NV_ERR_GENERIC; }
 NV_STATUS NV_API_CALL os_cond_acquire_semaphore(void *p) { NV_XNU_TRC; return semaphore_wait_noblock(*(semaphore_t *)p) == KERN_SUCCESS ? NV_OK : NV_ERR_TIMEOUT_RETRY; }
 NV_STATUS NV_API_CALL os_release_semaphore(void *p) { NV_XNU_TRC; semaphore_signal(*(semaphore_t *)p); return NV_OK; }
 
-NvBool NV_API_CALL os_semaphore_may_sleep(void) { NV_XNU_TRC; return NV_TRUE; }
-volatile thread_t nv_xnu_isr_thread = NULL;
+// The RM's portSyncExSafeToSleep() and osIsRaisedIRQL() are this answer: where it is no, the RM takes its own
+// non-blocking branches. It used to be yes everywhere, also under the RM's spinlocks.
+NvBool NV_API_CALL os_semaphore_may_sleep(void) { NV_XNU_TRC; if (nvx_can_block()) return NV_TRUE; nvx_atomic_maysleep_false(); return NV_FALSE; }
+// Which threads are inside rm_isr right now: one slot per GPU, written only by that GPU's work-loop thread around its
+// rm_isr call (NVRM::interruptOccurred). The RM asks os_is_isr() to tell interrupt context from thread context (its
+// TLS keeps an entry on the interrupt's stack only while the answer is yes). With one global for all GPUs, the second
+// GPU's handler overwrote and then cleared the first one's mark while that one was still inside rm_isr, and its TLS
+// entry was left pointing into a stack frame that was gone. A thread only ever compares the slots with itself, so the
+// scan needs no lock: the thread inside rm_isr always finds its own slot and no other thread can match it.
+volatile thread_t nv_xnu_isr_threads[NV_XNU_ISR_SLOTS] __attribute__((aligned(64))) = {};
+static void *volatile nv_xnu_isr_owner[NV_XNU_ISR_SLOTS];   // the NVRM object that holds each slot
 volatile int nv_xnu_in_isr = 0;
-NvBool NV_API_CALL os_is_isr(void) { return (nv_xnu_isr_thread != NULL && nv_xnu_isr_thread == current_thread()) ? NV_TRUE : NV_FALSE; }
+// The slot of a starting GPU (the same one again if it already holds one), or -1 when all are taken.
+int nv_xnu_isr_slot_claim(void *owner)
+{
+    return nv_slot_claim(nv_xnu_isr_owner, NV_XNU_ISR_SLOTS, owner);
+}
+// At stop, once the GPU's interrupt source is gone. Does nothing for -1 or for a slot another GPU holds.
+void nv_xnu_isr_slot_release(int slot, void *owner)
+{
+    if (slot < 0 || slot >= NV_XNU_ISR_SLOTS || nv_xnu_isr_owner[slot] != owner) return;
+    nv_xnu_isr_threads[slot] = NULL;
+    nv_slot_release(nv_xnu_isr_owner, NV_XNU_ISR_SLOTS, slot, owner);
+}
+NvBool NV_API_CALL os_is_isr(void)
+{
+    const thread_t me = current_thread();
+    for (unsigned i = 0; i < NV_XNU_ISR_SLOTS; i++) if (nv_xnu_isr_threads[i] == me) return NV_TRUE;
+    return NV_FALSE;
+}
 NvBool NV_API_CALL os_is_administrator(void) { NV_XNU_TRC; return (kauth_getuid() == 0) ? NV_TRUE : NV_FALSE; }
 NV_STATUS NV_API_CALL os_get_euid(NvU32 *pSecToken) { NV_XNU_TRC; if (!pSecToken) return NV_ERR_INVALID_ARGUMENT; *pSecToken = (NvU32)kauth_getuid(); return NV_OK; }
 
@@ -224,7 +272,9 @@ NvBool NV_API_CALL nv_acpi_is_battery_present(void) { NV_XNU_TRC; bool ac, bat; 
 NvBool NV_API_CALL nv_platform_supports_s0ix(void)  { NV_XNU_TRC; return NV_FALSE; }
 NvBool NV_API_CALL os_is_nvswitch_present(void)     { NV_XNU_TRC; return NV_FALSE; }
 
-NV_STATUS NV_API_CALL os_delay(NvU32 ms) { NV_XNU_TRC; IOSleep(ms); return NV_OK; }
+// IOSleep already spins instead of sleeping when preemption is off, so the call is the same in every context; where
+// blocking is not allowed it is counted.
+NV_STATUS NV_API_CALL os_delay(NvU32 ms) { NV_XNU_TRC; if (!nvx_can_block()) nvx_note(NVX_SITE_DELAY, __builtin_return_address(0)); IOSleep(ms); return NV_OK; }
 NV_STATUS NV_API_CALL os_delay_us(NvU32 us) { NV_XNU_TRC; IODelay(us); return NV_OK; }
 NvU64 NV_API_CALL os_get_cpu_frequency(void) { NV_XNU_TRC; return 0; }
 NvU32 NV_API_CALL os_get_current_process(void) { NV_XNU_TRC; return (NvU32)proc_selfpid(); }
@@ -327,48 +377,80 @@ NV_STATUS NV_API_CALL os_pci_write_byte(void *h, NvU32 off, NvU8 v)   { NV_XNU_T
 NV_STATUS NV_API_CALL os_pci_write_word(void *h, NvU32 off, NvU16 v)  { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite16(off, v); return NV_OK; }
 NV_STATUS NV_API_CALL os_pci_write_dword(void *h, NvU32 off, NvU32 v) { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite32(off, v); return NV_OK; }
 
-struct nv_xnu_map { IOMemoryDescriptor *md; IOMemoryMap *map; void *va; NvU64 phys; NvU64 size; void *alias; };
 extern "C" { void *nv_pm_alias(NvU64, NvU64, void **); void nv_pm_alias_drop(void *); bool nv_pm_is_gpu(NvU64, NvU64);
              void nv_pm_foreign(NvU64, NvU64, NvU32, void *); }
 // Every kernel mapping RM makes is tracked here (VA -> physical for the framebuffer's overlap and aperture checks).
-// WAS 1024: a resizable BAR1 has a 4 GB surface budget and the accelerator maps each allocation, so an RTX 3050 and
-// an RTX 5070 filled the table after ~20 minutes; every later surface then had no physical address and was refused.
-#define NV_XNU_MAX_MAPS 8192
-static nv_xnu_map nv_xnu_maps[NV_XNU_MAX_MAPS];
-static unsigned nv_xnu_maps_high;
-// Two writers used to be able to pick the same free slot, and a release could clear an entry while a lookup
-// was reading it, which is a double release of the same map or a lookup over a freed one. The writers
-// (os_map_kernel_space, os_unmap_kernel_space) are the only paths that allocate or clear a slot and both run
-// in thread context, so a mutex serialises them. The lookups, by contrast, are also reached from the
-// framebuffer's interrupt path, where a mutex is not allowed, so they stay lock-free and are made safe by
-// ordering instead: a slot's va is published LAST with a release store and cleared FIRST on teardown, so a
-// lookup that sees a va sees the rest of that entry fully written, and never reads an entry being freed.
-static IOLock *nv_xnu_maps_lock;
+// This was a fixed array searched from the start. At 1024 entries a resizable BAR1 filled it in about 20 minutes; at
+// 8192 it could still fill, and a mapping that did not fit was handed out untracked and never released. Freeing an
+// allocation of S pieces with N mappings live also cost S x N steps, because each piece scanned the whole table.
+//
+// Now each mapping is an entry of its own, in two interval trees (nvrm_itree.h): by kernel VA, and by physical
+// address for the real mappings (an alias of RAM is not a mapping of the GPU and was never in the overlap check). There
+// is no capacity: an entry is allocated before anything is mapped, and when there is no memory for it nothing is
+// mapped. Lookups and changes take one simple lock with interrupts off, a leaf lock: nothing is allocated, logged or
+// called into IOKit under it. So the lookups are safe from any context, the framebuffer's interrupt path included, and
+// a release can never run beside a lookup of the same entry. tools/test_nvrm_itree.c checks that the trees answer
+// exactly what the array answered.
+struct nv_xnu_map {
+    struct nvit_node va_node;    // [va, va + size); every entry
+    struct nvit_node pa_node;    // [phys, phys + size); real mappings only
+    IOMemoryDescriptor *md; IOMemoryMap *map; void *alias;
+    NvU64 phys, size; void *va;
+};
+static inline nv_xnu_map *nv_xnu_map_of_va(struct nvit_node *n) { return (nv_xnu_map *)(void *)n; }   // va_node comes first
+static struct nvit_tree nv_xnu_map_by_va, nv_xnu_map_by_pa;
+static IOSimpleLock *nv_xnu_maps_slock;
+static int64_t nv_xnu_kmap_live, nv_xnu_kmap_peak, nv_xnu_kmap_lookups, nv_xnu_kmap_unmap_miss, nv_xnu_kmap_nomem;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_live, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_live, "kernel mappings of the RM tracked now");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_peak, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_peak, "most kernel mappings of the RM tracked at once");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_lookups, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_lookups, "kernel VA to physical lookups");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_unmap_miss, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_unmap_miss, "unmaps of an address that is not mapped");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_nomem, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_nomem, "mappings refused for want of memory for their entry");
 extern "C" bool nv_xnu_maps_init(void)
 {
-    if (!nv_xnu_maps_lock) nv_xnu_maps_lock = IOLockAlloc();
-    return nv_xnu_maps_lock != NULL;
+    if (!nv_xnu_maps_slock) {
+        nv_xnu_maps_slock = IOSimpleLockAlloc();
+        if (nv_xnu_maps_slock) {
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_live); sysctl_register_oid(&sysctl__debug_nvrm_kmap_peak);
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_lookups); sysctl_register_oid(&sysctl__debug_nvrm_kmap_unmap_miss);
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_nomem);
+        }
+    }
+    return nv_xnu_maps_slock != NULL;
 }
-static inline void nv_xnu_map_publish(nv_xnu_map *m, IOMemoryDescriptor *md, IOMemoryMap *map,
-                                      void *va, NvU64 phys, NvU64 size, void *alias)
+// Fills `m` and puts it in the trees; returns how many entries are live.
+static unsigned nv_xnu_map_insert(nv_xnu_map *m, IOMemoryDescriptor *md, IOMemoryMap *map,
+                                  void *va, NvU64 phys, NvU64 size, void *alias)
 {
-    m->md = md; m->map = map; m->phys = phys; m->size = size; m->alias = alias;
-    __atomic_store_n(&m->va, va, __ATOMIC_RELEASE);
+    m->md = md; m->map = map; m->va = va; m->phys = phys; m->size = size; m->alias = alias;
+    m->va_node.lo = (NvU64)(uintptr_t)va; m->va_node.end = (NvU64)(uintptr_t)va + size;
+    m->pa_node.lo = phys; m->pa_node.end = phys + size;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    nvit_insert(&nv_xnu_map_by_va, &m->va_node);
+    if (!alias) nvit_insert(&nv_xnu_map_by_pa, &m->pa_node);
+    const unsigned live = nv_xnu_map_by_va.count;
+    if ((int64_t)live > nv_xnu_kmap_peak) nv_xnu_kmap_peak = live;
+    nv_xnu_kmap_live = live;
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return live;
 }
 void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
 {
     IOOptionBits cache = (mode == NV_MEMORY_CACHED) ? kIOMapDefaultCache : (mode == NV_MEMORY_WRITECOMBINED ? kIOMapWriteCombineCache : kIOMapInhibitCache);
     kprintf("NVRM-xnu: >os_map_kernel_space start=0x%llx size=0x%llx mode=%u\n", start, size, mode);
+    if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    if (!nv_xnu_maps_slock) return NULL;
+    // The entry first: without memory for it nothing is mapped, so nothing can be handed out untracked.
+    nv_xnu_map *m = (nv_xnu_map *)kern_os_malloc(sizeof *m);
+    if (!m) {
+        __atomic_fetch_add(&nv_xnu_kmap_nomem, 1, __ATOMIC_RELAXED);
+        kprintf("NVRM-xnu:   no memory for the mapping's entry: 0x%llx (+0x%llx) not mapped\n", start, size);
+        return NULL;
+    }
     if (!nv_pm_is_gpu(start, size)) {
         void *cookie = NULL; void *ava = nv_pm_alias(start, size, &cookie);
         if (ava) {
-            IOLockLock(nv_xnu_maps_lock);
-            for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-                nv_xnu_map_publish(&nv_xnu_maps[i], NULL, NULL, ava, start, size, cookie);
-                if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
-                break;
-            }
-            IOLockUnlock(nv_xnu_maps_lock);
+            nv_xnu_map_insert(m, NULL, NULL, ava, start, size, cookie);
             return ava;
         }
         nv_pm_foreign(start, size, mode, __builtin_return_address(0));
@@ -378,63 +460,57 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
     IOMemoryMap *map = md ? md->map(cache) : NULL;
     if (md && !map) { kprintf("NVRM-xnu:   md->map(cache=0x%x) FAILED\n", (unsigned)cache); md->release(); md = NULL; }
     void *va = map ? (void *)map->getVirtualAddress() : NULL;
-    if (!va) return NULL;
-    IOLockLock(nv_xnu_maps_lock);
-    for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-        nv_xnu_map_publish(&nv_xnu_maps[i], md, map, va, start, size, NULL);
-        if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
-        const unsigned high = nv_xnu_maps_high;
-        IOLockUnlock(nv_xnu_maps_lock);
-        kprintf("NVRM-xnu:   mapped -> 0x%llx (slot %d, high water %u/%u)\n",
-                (unsigned long long)(uintptr_t)va, i, high, (unsigned)NV_XNU_MAX_MAPS);
-        return va;
-    }
-    IOLockUnlock(nv_xnu_maps_lock);
-    {
-        static bool warned;
-        if (!warned) { warned = true;
-            kprintf("NVRM-xnu: *** nv_xnu_maps FULL at %u entries -- leaking bookkeeping for "
-                    "0x%llx (+0x%llx). The mapping is still VALID and returned; raise "
-                    "NV_XNU_MAX_MAPS. ***\n", (unsigned)NV_XNU_MAX_MAPS,
-                    (unsigned long long)start, (unsigned long long)size); }
-    }
+    if (!va) { kern_os_free(m); return NULL; }
+    const unsigned live = nv_xnu_map_insert(m, md, map, va, start, size, NULL);
+    kprintf("NVRM-xnu:   mapped -> 0x%llx (%u kernel mappings live)\n", (unsigned long long)(uintptr_t)va, live);
     return va;
 }
 NvU64 nv_xnu_phys_for_kernel_va(const void *va)
 {
-    // Lookups stop at the high-water mark (every slot ever filled is below it), so a larger table costs nothing
-    // until it is actually used.
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
-        const char *base = (const char *)__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE);
-        if (base && (const char *)va >= base && (const char *)va < base + nv_xnu_maps[i].size)
-            return nv_xnu_maps[i].phys + (NvU64)((const char *)va - base);
-    }
-    return 0;
+    if (!nv_xnu_maps_slock) return 0;
+    __atomic_fetch_add(&nv_xnu_kmap_lookups, 1, __ATOMIC_RELAXED);
+    NvU64 phys = 0;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    struct nvit_node *n = nvit_stab(&nv_xnu_map_by_va, (NvU64)(uintptr_t)va);
+    if (n) phys = nv_xnu_map_of_va(n)->phys + ((NvU64)(uintptr_t)va - n->lo);
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return phys;
 }
 void NV_API_CALL os_unmap_kernel_space(void *va, NvU64 size)
 { NV_XNU_TRC;
-    IOLockLock(nv_xnu_maps_lock);
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va == va) {
-        // The va goes first, so a lookup running beside this never walks into an entry being torn down.
-        __atomic_store_n(&nv_xnu_maps[i].va, (void *)NULL, __ATOMIC_RELEASE);
-        IOMemoryDescriptor *md = nv_xnu_maps[i].md; IOMemoryMap *map = nv_xnu_maps[i].map;
-        void *alias = nv_xnu_maps[i].alias;
-        nv_xnu_maps[i].md = NULL; nv_xnu_maps[i].map = NULL; nv_xnu_maps[i].alias = NULL;
-        nv_xnu_maps[i].phys = 0; nv_xnu_maps[i].size = 0;
-        IOLockUnlock(nv_xnu_maps_lock);
-        if (alias) nv_pm_alias_drop(alias);
-        else { if (map) map->release(); if (md) md->release(); }
+    if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    if (!nv_xnu_maps_slock) return;
+    // Two aliases of the same RAM can share a VA: the one of this size goes, else the first that was mapped.
+    const NvU64 lo = (NvU64)(uintptr_t)va;
+    nv_xnu_map *m = NULL;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    struct nvit_node *first = nvit_first_lo(&nv_xnu_map_by_va, lo), *pick = NULL;
+    for (struct nvit_node *n = first; n && n->lo == lo; n = nvit_next(n))
+        if (nv_xnu_map_of_va(n)->size == size) { pick = n; break; }
+    if (!pick) pick = first;
+    if (pick) {
+        m = nv_xnu_map_of_va(pick);
+        nvit_remove(&nv_xnu_map_by_va, &m->va_node);
+        if (!m->alias) nvit_remove(&nv_xnu_map_by_pa, &m->pa_node);
+        nv_xnu_kmap_live = nv_xnu_map_by_va.count;
+    }
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    if (!m) {
+        if (__atomic_fetch_add(&nv_xnu_kmap_unmap_miss, 1, __ATOMIC_RELAXED) < 4)
+            kprintf("NVRM-xnu: unmap of 0x%llx (+0x%llx), which is not mapped\n", (unsigned long long)lo, size);
         return;
     }
-    IOLockUnlock(nv_xnu_maps_lock);
+    if (m->alias) nv_pm_alias_drop(m->alias);
+    else { if (m->map) m->map->release(); if (m->md) m->md->release(); }
+    kern_os_free(m);
 }
 int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len)
 {
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
-        if (!__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE) || nv_xnu_maps[i].alias) continue;
-        if (phys < nv_xnu_maps[i].phys + nv_xnu_maps[i].size && nv_xnu_maps[i].phys < phys + len) return 1;
-    }
-    return 0;
+    if (!nv_xnu_maps_slock) return 0;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    const int hit = nvit_overlap(&nv_xnu_map_by_pa, phys, phys + len) != NULL;
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return hit;
 }
 void  NV_API_CALL os_io_write_byte(NvU32 addr, NvU8 v)   { NV_XNU_TRC; __asm__ __volatile__("outb %0, %1" :: "a"(v), "d"((NvU16)addr)); }
 void  NV_API_CALL os_io_write_word(NvU32 addr, NvU16 v)  { NV_XNU_TRC; __asm__ __volatile__("outw %0, %1" :: "a"(v), "d"((NvU16)addr)); }
