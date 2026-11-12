@@ -2995,9 +2995,12 @@ int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
 }
 void nvmtl_vk_fence_wait_compositor(uint32_t sid)
 {
-    static int ws = -1;   /* WindowServer never waits for its own holds: its frames are ordered by its own queue */
-    if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
-    if (ws || !sid || !nvmtl_vk_fence_ready(1)) return;
+    /* WindowServer never waits for its own holds: its frames are ordered by its own queue. Read once; atomic because
+       surface imports on several threads call this at the same time. */
+    static int ws = -1;
+    int in_ws = __atomic_load_n(&ws, __ATOMIC_RELAXED);
+    if (in_ws < 0) { const char *me = getprogname(); in_ws = me && !strcmp(me, "WindowServer"); __atomic_store_n(&ws, in_ws, __ATOMIC_RELAXED); }
+    if (in_ws || !sid || !nvmtl_vk_fence_ready(1)) return;
     uint32_t out[6];
     (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_WAIT, NVMTL_FENCE_F_COMPOSITOR, 0, 1, &sid, NULL, VK_NULL_HANDLE, 0, NVMTL_FENCE_WAIT_MS, out);
 }
@@ -3005,11 +3008,13 @@ uint32_t nvmtl_vk_fence_tag_word(uint32_t sid) { return nvmtl_fence_thread_has(&
 // WindowServer completion mark (NVAccel nvSurfGpuEscape), on NVK's surface escape: 0 = the kernel took it. Surface 0 is
 // the once-a-second probe and always reaches the kernel. A pending mark of a surface the kernel fence holds for this
 // command buffer (the open just before, on this thread) is not sent; a clear is sent only for a mark the kernel took.
+// An NVK without the fence entry can hold nothing, so there every mark and every clear goes out unrouted, as before.
 uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)
 {
     if (!pnvk_surface_dirty || !g_dev) return 0x80000002u;
     const uint32_t mark = 0x80000000u | (pending ? 1u : 0u);
     if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);
+    if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);
     pthread_mutex_lock(&g_fence_lock);
     const int send = nvmtl_fence_mark_route(&g_fence_legacy, &t_fence, surfaceID, pending);
     pthread_mutex_unlock(&g_fence_lock);
