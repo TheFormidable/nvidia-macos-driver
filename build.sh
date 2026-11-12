@@ -619,11 +619,20 @@ doctor() {   # prints; sets D_MISSING
 # ---------------------------------------------------------------------------------------------------------- run helpers
 TMPF=""
 tmpfile() { [ -n "$TMPF" ] || die "internal: no temporary file"; printf '%s' "$TMPF"; }   # made once in main; removed on exit
-# x <command...>: run one command of a step; its output goes to the step's log (and the terminal with --verbose).
-x() {
+# x_status <command...>: run one command of a step; its output goes to the step's log (and the terminal with
+# --verbose); returns the command's exit status.
+x_status() {
   if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi
   printf '+ %s\n' "$(qcmd "$@")" >> "$CUR_LOG"
   if [ "$NM_VERBOSE" = 1 ]; then "$@" 2>&1 | tee -a "$CUR_LOG"; else "$@" >> "$CUR_LOG" 2>&1; fi
+}
+# x <command...>: the same, and a failure stops the step there. run_component runs as "run_component || rc=$?", where
+# bash switches errexit off for everything inside it: without this, a failed build script was followed by the step's
+# next commands, and a copy of the previous build's output could then be stamped as built from the new sources.
+x() {
+  local rc=0
+  x_status "$@" || rc=$?
+  [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"
 }
 # The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables.
 step_env() {
