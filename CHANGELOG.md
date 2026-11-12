@@ -1,5 +1,252 @@
 # Changelog
 
+## 3.0
+
+**Not released.** This section describes the branch being prepared as 3.0. Nothing in it has run on an NVIDIA card
+yet. Its kernel extensions (NVRM, NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC) and its Metal plugin were compiled
+and linked with Apple's own toolchain on one Mac (Intel, macOS 26.7, Xcode 26.5), and none of them was loaded there;
+NVK and the shader translator have not yet been built on a Mac. The check list for a first run on a card is
+[docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
+
+Nothing new in this release has to be switched on: every change below is active as installed. Each one that changes
+how the driver runs has exactly one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
+a line of `/Library/GPUBundles/nvmtl/nvrm610.conf` when a process starts). They are listed under "The ways back" below
+and in [docs/SWITCHES.md](docs/SWITCHES.md). They are there to tell whether a new path is behind a problem, not to be
+left set.
+
+### Fixes and changes
+
+#### Desktop, windows and screen capture
+- The kernel now knows which process is still drawing into which surface, on which GPU channel and up to which point
+  (the surface fence, selector 12 of NVRM's user client). A reader of a surface (WindowServer compositing a window, a
+  capture, NVAccel flipping or copying a frame) sleeps until the GPU has really finished the writer's work and is
+  woken by the GPU's interrupt, instead of polling a mark that gave up after 10 ms or 100 ms. It stops waiting when
+  the writer exits, when its channel faults or when the GPU goes to sleep. Every wait is bounded (2 s for GPU work,
+  100 ms for a writer that is stuck on its CPU), and a process whose holds are given up three times goes back to
+  2.9's marks and tags. A process that exits or is killed releases the surfaces it was drawing before the driver
+  frees its channels. `sysctl debug | grep nvrm_fence` shows what it does. Way back: boot argument `nvrmfence=0`.
+  See [docs/SURFACE-FENCE.md](docs/SURFACE-FENCE.md).
+- Metal plugin: IOSurface synchronisation between processes goes through that fence: a command buffer that writes a
+  surface holds it in NVRM until its work is done, and a reader in another process sleeps until then instead of
+  polling a tag for at most 10 ms (and reading a half-drawn frame when the GPU needed longer). WindowServer's swap
+  waits for the same holds. A process whose kernel, NVK or channel cannot take part keeps the 2.9 behaviour, per
+  command buffer, and a reader that the kernel sends away before the write is known to be complete still gives the
+  writer the 10 ms that 2.9 gave it.
+- NVK registers its channels with the surface fence and gives the Metal plugin the calls to open, arm, close and wait
+  for surface holds. With an older kext, or with `nvrmfence=0`, nothing changes. Waits on the copy-engine (upload)
+  queue can sleep in the kernel instead of polling.
+- The accelerator waits for WindowServer's GPU work through the surface fence: a flip, a copied frame or a screenshot
+  of a window now waits until the GPU has really finished it (up to 2 s, instead of giving up after 100 ms and showing
+  a half-drawn frame), and stops waiting at once when the drawing process exits. A wait made while holding the
+  accelerator lock keeps the old 100 ms bound. With `nvrmfence=0` the 2.9 behaviour is back.
+- A screenshot, a screen recording or any CPU read of a window that WindowServer's GPU is still drawing no longer
+  holds the accelerator lock while it waits for the GPU, so the rest of WindowServer keeps running meanwhile. This
+  existed in 2.9 behind `debug.nvaccel_pageoff_unlocked_wait=1` (that sysctl is now read-only and reads 1); its
+  defects were fixed first: when another thread copied the same surface while this one waited, the copy is not made
+  a second time over what was written since, and a copy that came before the GPU had finished is made again instead
+  of being taken for the result; a failure to take the lock back is handled; a reference that turns out to be the
+  last one is kept instead of freed under the caller, and nothing is read through such an object; a page-off reached
+  from the driver's own locked code keeps the lock. If anything unexpected is seen the path turns itself off for the
+  rest of the boot (`debug.nvaccel_pageoff_unlocked_standdown` = 1, one log line `page-off: unlocked wait OFF for
+  this boot (...)`). Way back: boot argument `nvaccel_pageoff_locked=1`.
+- Two-plane (NV12) surfaces, such as screen-capture and video frames, can now live in VRAM one plane at a time: the
+  accelerator pages each plane back into its own place in the surface. The plugin uses this only after a round trip
+  on a private surface came back right on the card, once per process. Way back: boot argument
+  `nvaccel_surf_planes=0`.
+- The accelerator now checks, before it attaches, that the accelerator family classes it builds on have the size
+  (and, where it can be read safely, the number of virtual functions) this driver was built for. If a macOS update
+  changed one, the accelerator does not attach and the desktop runs without acceleration instead of crashing; the
+  kernel log names the class (`NVAccel: Apple class layout refused: ...`).
+- NVRMFB and NVRMAGDC compare the Apple classes they are built on with the running macOS before they start. NVRMFB
+  compares the size of IOFramebuffer, IOGraphicsDevice and IODisplayParameterHandler; NVRMAGDC the size of
+  AppleGraphicsDeviceControl. On a different size the kext does not start (NVRMFB) or does not create its
+  device-control object (NVRMAGDC, `debug.nvrmfb_agdc` = -6) and says which class differs, instead of running on a
+  misplaced base. When NVRMFB refuses, NVRM does not start the card and the firmware's picture stays; that is not
+  counted as a failed start. The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout` and
+  `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler have
+  in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for all
+  three checks: boot argument `nvlayout=0`.
+
+#### Applications and games
+- Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
+  event, as WindowServer already did, and a thread whose waits run longer than about 2 ms sleeps almost at once;
+  waits shorter than 1 ms are unchanged. A process whose wake-ups do not arrive goes back to polling by itself; an
+  event that merely arrives late (the GPU shows a completion just before its event) no longer counts towards that, so
+  a game or compositor that waits at a steady cadence keeps sleeping. Way back: `NVRM_EVENT_WAIT=0` in
+  `nvrm610.conf`. Like 2.9's `0`, it makes every process poll, WindowServer included, which costs WindowServer more
+  CPU than both 2.9's default and this release's. See [docs/EVENT-WAIT.md](docs/EVENT-WAIT.md).
+- A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
+  ends only that channel, or makes no progress for 5 s, NVK builds a new channel, sends the channel-wide state again,
+  replays the submissions that had not started and drops the one that was running; a stalled channel's doorbell is
+  rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, a
+  fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. Way back: `NVK_CHANNEL_RECOVER=0` in
+  `nvrm610.conf`. See [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
+- After such a recovery the Metal command buffer whose work was dropped completes with an error instead of as success,
+  and the process keeps its device; the plugin no longer waits for, and counts, the completion record such a command
+  buffer can never write (eight of those used to switch command-pool reuse off for the process). A device loss that
+  is not recovered now names its kind (firmware, bus, failed wake, ECC) in the log. Way back for the error report:
+  `NVMTL_DROP_REPORT=0` in `nvrm610.conf` (the command buffer is reported as completed).
+- The Metal plugin's fence wait (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) no
+  longer counts time asleep, so a frame that was pending at sleep is not declared lost at wake.
+- A texture the application releases while the GPU may still use it is now freed only once no command buffer that
+  could still read it is open or in flight (the image grace, before only in the Cyberpunk 2077 profile). A late read
+  is then a stale read of a dead texture instead of a GPU fault that takes the channel down. Way back:
+  `NVMTL_IMAGE_GRACE=0` in `nvrm610.conf` (released textures are freed at once, as 2.9 did by default).
+- Fixed: with the image grace on (the Cyberpunk 2077 profile turned it on), released textures were never freed and
+  memory grew for the whole session. The grace counted some command buffers as begun and never as finished (the
+  managed-upload prologue, the counter reset, submits that failed early), so the point it waited for moved further
+  away every frame. It also could free a texture too early when a command buffer begun later was submitted before one
+  that was open when the texture died. Both are gone: each command buffer is counted as finished exactly once, and a
+  texture waits exactly for the command buffers open when it died.
+- NVK shader compiler: the fixes Mesa made after 26.3.0-rc3 are built in. Mesa 26.3.0's fix for RTX 50 (a register
+  could be read before its uniform load had finished) and its NIR fixes, plus eight NAK commits from Mesa main:
+  barrier handling, RTX 50 matrix-instruction latencies, instruction scheduling, and flattening of small branches.
+  2.9 kept them behind `NVK_EXTRA_PATCHES=nvk-upstream-nak`, a build option that did not build. Shaders are compiled
+  again once after the update. When building from source, `NVK_SKIP_PATCHES` leaves one of the three patches out to
+  find the cause of a rendering fault (see [docs/NVK-BASE-AND-HEADERS.md](docs/NVK-BASE-AND-HEADERS.md)).
+
+#### Video
+- RTX 50: H.264 video in Safari, QuickTime and FaceTime (green picture). The decoder from the vendored codec library is
+  now used in the system decode service by default, after the card has decoded two built-in test streams bit for bit;
+  if that test fails or cannot run, nothing changes and one line in the system log says why. The plugin loads on
+  RTX 50 only a build of the library that carries this test; an older build is refused there. 2.9 listed this under
+  "Experimental" (opt-in). Way back: `NVMTL_NVENCVT=0` in `nvrm610.conf`. Not yet confirmed on a card.
+- Codec library: the card's generation is now read from the GPU itself. The library took the first NVIDIA PCI function
+  with a device ID it knew, and the HDMI audio function of an RTX 40 and of most RTX 50 cards has an ID in the RTX 30
+  range; where the system listed that function before the GPU, an RTX 40 could lose the library's encoders and its
+  H.264 and HEVC decoders, and an RTX 50 could be treated as an RTX 30. Found by reading the code; nobody has reported
+  the symptom.
+- The codec library's build compares the NVIDIA structures it uses with the kernel module's version and stops on a
+  difference.
+
+#### Kernel (NVRM)
+- The RM's background work runs on one worker per GPU, in order, as on Linux, instead of one thread per item.
+  Stopping the driver, shutting down and going to sleep wait for that work with a time limit. RM work items marked to
+  be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on Linux; before,
+  they were also dropped while the GPU was waking up, so some work the RM queued around a wake never ran. Way back:
+  boot argument `nvrmworkq=0`.
+- The driver tells the RM the truth when it calls in from a context that must not sleep: the RM then takes its own
+  non-blocking branches, small allocations come from a pool, and locks are tried before the blocking call. Way back:
+  boot argument `nvrmatomic=0`.
+- The RM's bottom half runs on a thread of its own per GPU, as on Linux, so a bottom half that waits for the GPU lock
+  no longer delays the next interrupt. A requested bottom half is always run, also when the GPU stops at the same
+  moment. Way back: boot argument `nvrmbhthread=0`.
+- The RM's 1 Hz timer runs (bus presence check, NVENC session statistics). It pauses around sleep, RTD3 and shutdown,
+  and is stopped and let go before the GPU's state is freed. Way back: boot argument `nvrmrctimer=0`.
+- RM nano timers can no longer run their callback after the timer was destroyed (use after free), and timers longer
+  than 71 minutes no longer fire early. Way back for the new wait only: boot argument `nvrmnanowait=0`.
+- Sleep, shutdown and unload close the interrupt path and wait, bounded, until it is quiet. Unload and the full
+  shutdown (`nvrmshutdown=full`) take the adapter down in Linux's order, `rm_disable_adapter` first; every wait at
+  shutdown is 2 s at most, and when the system's 8 s run out the interrupt path is closed anyway.
+- Two GPUs no longer corrupt each other's interrupt-context mark in the RM. The RM sees the real number of CPUs.
+- The start-up waits for the displays, the arming of the accelerator and the boot raster measurement end as soon as
+  what they wait for is there, instead of at the next whole second, and never later than before. Each phase is in
+  `debug.nvrm_boot_*` and in the `nvrm-boot-timing` property. With `nvrmsettle=0` the bring-up can no longer begin
+  before the driver's start has finished (it waits at most 5 s). Way back: boot argument `-nvrmoldwaits`.
+- With Intel VT-d active (AppleVTD), the GPU is given bus addresses mapped through the DMA mapper, as the Linux driver
+  does with an IOMMU, instead of physical addresses that the mapper translates to the wrong place. Every mapping is
+  read back from the mapper before the GPU sees it, and the GPU is not started at all if a two-page self-test does not
+  read back (that is not counted as a failed start). The accelerator's copies of GPU memory to the CPU go through a
+  buffer mapped the same way. Without VT-d nothing changes. `sysctl debug.nvrm_dma_mode` and the `nvrm-dma` property
+  show which case a machine is in; `nvrmdma=0` refuses to start the GPU behind a mapper (diagnostic). Never run with
+  a mapper on real hardware yet: see [docs/DMA-IOMMU.md](docs/DMA-IOMMU.md).
+- The event wait reports why each wait returned and counts it (`debug.nvrm_evt_*`); a thread turned away because 256
+  threads already sleep is told so instead of looking woken. Closing a process no longer races an RM event post into
+  the freed connection: the close waits for a post in flight (as the Linux driver does) and keeps the connection
+  rather than freeing it if the post never finishes.
+- A user client that was never opened completely (its attach or start failed) no longer leaves a stale entry in
+  NVRM's table of clients; later lookups read that entry after the client's memory had been freed.
+- The table of the driver's kernel mappings has no size limit any more (it could fill on cards with a large BAR1,
+  after which mappings were never released); lookups no longer scan it.
+- `nvregdwords=` values reach the RM as written. Before, the function that converts them had no body and every value
+  arrived as 0. The log lists each key with the value the RM received, once per boot; an entry with a second `=`
+  (which the RM skips) is logged as ignored, and an empty entry (`;;`) no longer ends the list.
+- Firmware bug checks and RM assertion failures are logged and counted (`debug.nvrm_bugchecks`,
+  `debug.nvrm_rm_asserts`) instead of being ignored; neither stops the machine.
+- NVRM counts every Xid the RM logs (`debug.nvrm_xid_count`, `debug.nvrm_xid_last`) and what NVK did about faulted or
+  stalled channels (`debug.nvrm_chan_*`). The kext only counts and answers the GPU's power state; no new switch.
+- The sleep line says how much VRAM the RM wrote to its save file during standby.
+
+#### Switches and reports
+- `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a
+  `!` the ones an ordinary install does not need (an opt-out, a test hook, a development switch, a name this version
+  no longer reads). `sysctl debug.nvrm_switches_nondefault` is 0 on an ordinary install. A Mac that behaves unlike
+  others with the same card often still carries a switch from an earlier test; this shows it. Settings in
+  `nvrm610.conf` are not part of this list.
+- [docs/SWITCHES.md](docs/SWITCHES.md) lists every switch the driver reads (environment names, boot arguments,
+  sysctls, flag files), what each does, and what is in effect when it is not set.
+
+### The ways back
+
+One per change; each restores the 2.9 behaviour of that change only. Boot arguments go on the `boot-args` line and
+need a restart. `nvrm610.conf` lines go into your own block at the end of `/Library/GPUBundles/nvmtl/nvrm610.conf`
+(between `# --- my settings, kept on update ---` and `# --- end my settings ---`) and take effect when a process
+starts: restart the application, or log out and in for WindowServer. Each is reviewed at 3.2: removed if the new path
+has proven itself, renewed with a reason otherwise.
+
+| Change | Way back | Kind |
+|---|---|---|
+| Surface fence (kernel, NVAccel, NVK, plugin) | `nvrmfence=0` | boot argument |
+| Page-off wait without the accelerator lock | `nvaccel_pageoff_locked=1` | boot argument |
+| Two-plane surfaces in VRAM | `nvaccel_surf_planes=0` | boot argument |
+| Apple class layout checks (NVRMFB, NVRMAGDC, NVAccel) | `nvlayout=0` | boot argument |
+| Start-up waits and start gate | `-nvrmoldwaits` | boot argument |
+| RM work queues | `nvrmworkq=0` | boot argument |
+| Answers by context (atomic context) | `nvrmatomic=0` | boot argument |
+| Bottom-half thread | `nvrmbhthread=0` | boot argument |
+| RC timer | `nvrmrctimer=0` | boot argument |
+| Nano timer cancel wait | `nvrmnanowait=0` | boot argument |
+| DMA through VT-d | `nvrmdma=0` (with a mapper: the GPU is not started; without one: nothing changes) | boot argument |
+| Event wait in every process | `NVRM_EVENT_WAIT=0` (every process polls, WindowServer included) | `nvrm610.conf` |
+| Channel recovery | `NVK_CHANNEL_RECOVER=0` | `nvrm610.conf` |
+| Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
+| Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
+| H.264 decode on RTX 50 in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
+
+`sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.
+
+### Not turned on in this release, and why
+- `NVMTL_MISALIGNED_BUFFER_COPY` stays off. It binds a copy taken when the command is encoded, so it reads stale bytes
+  when an earlier command in the same command buffer, or GPU work still running, wrote that buffer; its write-back on
+  completion can overwrite newer data in the same bytes; it costs up to a 4 MB copy per unaligned binding. A stale
+  index read where 2.9 read zeros can turn into an out-of-range GPU access. It fixes one read-only case (Photoshop's
+  duplicate-layer kernel) and is not safe everywhere.
+- `NVMTL_ARGBUF_SAMPLERS` stays off. It changes the code the translator generates for samplers read from argument
+  buffers; on by default it changed 3 of 12,446 shaders of the translator's test corpus, and those three have not been
+  examined yet.
+
+### Known limits of what is on
+- Image grace: a released texture is not freed early when an application reaches its VRAM limit (no release and no
+  wait at the memory limit yet). An application that keeps a Metal command buffer uncommitted holds every texture
+  released after it until it commits or drops that command buffer, or until 1024 submits have completed (then the
+  textures are freed as without the grace, and the log says so). The bindless slot of a released texture still
+  follows the older rule (it waits for the submits in flight, not for the command buffers open when it died).
+- Event wait: there is no setting that restores exactly 2.9's default (WindowServer sleeping, applications polling).
+  To test one application without the event wait, launch it with `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` in its own
+  environment.
+- With `nvrmfence=0` the driver's surface sync is 2.9's, but the other changes of this release stay on, and NVK still
+  opens its idle fence connection in every process (see [docs/SURFACE-FENCE.md](docs/SURFACE-FENCE.md), "The one
+  switch").
+
+### For developers
+- `./build.sh` builds the whole driver on a Mac with one command: it checks Xcode and the tools, installs what is
+  missing after asking (Homebrew formulas only, never an upgrade; Python and Rust inside its own working directory),
+  fetches every outside source at a pinned commit or checksum (`build/pins.sh`), builds each component as a logged,
+  skippable step, and can stage a package from a release package. It never uses `sudo` and never installs the driver.
+  Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
+  so the first runs may stop on something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
+- `tools/switches.tsv` is the registry of every switch, and `tools/test_switch_registry.py` fails when the source
+  reads a name it does not have. A switch added from now on cannot be an opt-in or a writable sysctl: the test says
+  what it may be instead (an opt-out of a default path with a review release, a test hook that does nothing unset, a
+  read-only counter).
+- `build/kext_check.sh` compiles every kext source without linking, on a Mac or on Linux, and checks every kernel
+  symbol the kexts import against the export lists of macOS 15 and macOS 26. A symbol only Apple's own kexts may link,
+  or one only one of the two systems exports, fails the check instead of failing to load on a user's Mac.
+- `.github/workflows/ci.yml` runs that check, the host tests and the Mac builds on every push once Actions are enabled
+  for the repository.
+- `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
+  cause of a rendering fault; such a library says so in its build summary.
+
 ## 2.9
 
 2.9 is the last 2.x release for macOS 15 Sequoia and macOS 26 Tahoe. It carries every fix we had for both systems, on GTX 16 and RTX 20, 30, 40, and 50 cards, plus a large set of new features. New features that have not been proven on enough hardware are **off by default** and listed under "Experimental" below: you switch them on one at a time from the 1401 Mac app.

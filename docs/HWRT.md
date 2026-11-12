@@ -62,7 +62,8 @@ is supported and rewrites the structure's own address (`mode 1` of `encode_ttu.c
 NVK patch order (appended to the chain in `docs/HOW-IT-WORKS.md` section 7, applied by `build/build_nvk.sh` for 2.9):
 `nvk-macos`, `nvk-fixes-after-def16`, `nvk-620-kernel`, `nvk-recycle`, `nvk-slab`, `nvk-slabdef`, `nvk-hubfix`,
 `nvk-perf-boost-burst`, `nvk-rated-tdp`, `nvk-gps-maxpower`, `nvk-metal-wsi`, `nvk-card-select`, **`hwrt/ttu-nak`**,
-**`hwrt/ttu-rq`**, then the two shared headers are copied in and `nvk/dlss/patch_dlss_cache.py` runs.
+**`hwrt/ttu-rq`**, and the patches after them listed in `build/build_nvk.sh`; then the two shared headers are copied
+in and `nvk/dlss/patch_dlss_cache.py` runs.
 
 ## Structure of an acceleration structure with the hardware part
 
