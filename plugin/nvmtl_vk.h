@@ -18,6 +18,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_fault_context.h"
 #include "nvmtl_page_life.h"
+#include "nvmtl_cmd_life.h"
 #include "nvmtl_live.h"
 #include "nvmtl_slots.h"
 #include "nvmtl_fence.h"
@@ -127,6 +128,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                  uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
+                 nvmtl_cl_tag life; /* counted as begun and not yet ended (nvmtl_cmd_life.h): an end is counted once, and only for a counted begin */
                  /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
                     dynamic state is bound, since binding a pipeline without them leaves that state undefined */
                  uint8_t db_on; float db_lo, db_hi;

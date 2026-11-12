@@ -9,7 +9,8 @@ nvmtl_vk_texel_view_destroy) and the grace reaper itself. This check reads every
 vkDestroyBufferView call in nvmtl_vk.c, names the function it sits in, and fails when one is outside the allowed set:
 the two deferring routines (each must consult nvmtl_image_grace_on), the reaper's own destroy paths, image creation
 failure, the per-command-buffer attachment-view retire (attachment views never take a heap slot), the swizzle probe view
-(destroyed before anything can index it), image migration's failure path, and the grave-reaped backing release.
+(destroyed before anything can index it), image migration's failure path, the grave-reaped backing release, and the
+views DLSS keeps of an image, which die with that image inside the reaper's destroy (and must be called from nowhere else).
 
     python3 tools/check_view_grace.py              # exit 1 on a raw destroy outside the grace, or a routine without it
     python3 tools/check_view_grace.py <nvmtl_vk.c> # over another copy (the source before the texel grace must fail)
@@ -25,7 +26,9 @@ ALLOWED = {
     "nvmtl_cmd_retire", "nvmtl_vk_cmd_retire_view",                        # attachment views, never heap slots
     "nvmtl_vk_image_view_create_range_swz",                                # a probe view destroyed at once
     "nvmtl_vk_image_migrate", "nvmtl_vk_image_free_backing",               # failure path / grave-reaped backing
+    "nvmtl_dlss_views_drop",                                                # DLSS's views of an image: only from the reaper's destroy
 }
+ONLY_FROM = {"nvmtl_dlss_views_drop": "nvmtl_vk_image_destroy_now"}
 MUST_DEFER = ("nvmtl_vk_image_view_destroy", "nvmtl_vk_texel_view_destroy")
 func_re = re.compile(r"^(?:static\s+)?(?:inline\s+)?[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\([^;]*$")
 current = None; bodies = {}; bad = []
@@ -36,6 +39,9 @@ for n, line in enumerate(src, 1):
     if current: bodies[current].append(line)
     if re.search(r"\bpvkDestroy(ImageView|BufferView)\s*\(", line) and not line.strip().startswith("//"):
         if current not in ALLOWED: bad.append((n, current, line.strip()[:100]))
+    for f, caller in ONLY_FROM.items():   # a helper allowed above may only be called from the reaper's destroy
+        if re.search(r"\b%s\s*\(" % f, line) and not line.lstrip().startswith(("static", "*", "//", "/*")) and current not in (f, caller):
+            bad.append((n, current, "calls %s outside %s: %s" % (f, caller, line.strip()[:60])))
 missing = [f for f in MUST_DEFER if f not in bodies or not any("nvmtl_image_grace_on()" in l for l in bodies[f])]
 print("raw view destroys outside the allowed routines: %d; deferring routines without the grace: %d" % (len(bad), len(missing)))
 for n, f, l in bad: print("RAW DESTROY line %d in %s: %s" % (n, f, l))

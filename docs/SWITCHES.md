@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 4 | 1 | 54 | 411 | 12 |  | 488 |
+| env |  | 6 |  |  | 5 | 1 | 54 | 410 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
 | sysctl |  | 5 | 4 | 12 |  |  | 347 |  |  |  | 368 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -36,6 +36,7 @@ Each of these turns one change that is on by default back off. None is needed on
 |---|---|---|---|---|
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
+| env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
 | env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: the waits of 2.9) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
@@ -303,7 +304,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_ICB_INDEX_CAP` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_ICD_LIB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_IDXCACHE_OFF` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
-| `NVMTL_IMAGE_GRACE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
+| `NVMTL_IMAGE_GRACE` | escape | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 2.9 | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
 | `NVMTL_IMAGE_LAYOUT_GENERAL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_IMAGE_POOL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
 | `NVMTL_INDIRECT_WITNESS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
