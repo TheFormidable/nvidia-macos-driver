@@ -1596,6 +1596,68 @@ static int nvmtl_ic_put(nvk_buffer *b)
     if (r) memset(b, 0, sizeof *b);
     return r != 0;
 }
+// Two-plane surfaces in their planes' own VRAM (nvmtl_plane_alias.h). A surface's layout as IOSurface's getters give it.
+static void nvmtl_pa_read(IOSurfaceRef surf, nvmtl_pa_surface *s)
+{
+    memset(s, 0, sizeof *s);
+    s->planes = nvmtl_pa_u32(IOSurfaceGetPlaneCount(surf));
+    s->alloc = IOSurfaceGetAllocSize(surf);
+    const uintptr_t base = (uintptr_t)IOSurfaceGetBaseAddress(surf);
+    for (size_t i = 0; i < 2 && i < s->planes; i++)
+        nvmtl_pa_set_plane(&s->p[i], base, (uintptr_t)IOSurfaceGetBaseAddressOfPlane(surf, i), IOSurfaceGetBytesPerRowOfPlane(surf, i),
+                           IOSurfaceGetWidthOfPlane(surf, i), IOSurfaceGetHeightOfPlane(surf, i), IOSurfaceGetBytesPerElementOfPlane(surf, i),
+                           IOSurfaceGetElementWidthOfPlane(surf, i), IOSurfaceGetElementHeightOfPlane(surf, i));
+}
+// The self-test's CPU lock of its surface: the surface's base address while locked, NULL when the lock failed.
+static uint8_t *nvmtl_pa_lock(void *ctx, int read_only)
+{
+    IOSurfaceRef surf = (IOSurfaceRef)ctx;
+    const IOSurfaceLockOptions o = read_only ? kIOSurfaceLockReadOnly : 0;
+    if (IOSurfaceLock(surf, o, NULL) != kIOReturnSuccess) return NULL;
+    uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(surf);
+    if (!base) IOSurfaceUnlock(surf, o, NULL);
+    return base;
+}
+static void nvmtl_pa_unlock(void *ctx, int read_only)
+{
+    IOSurfaceUnlock((IOSurfaceRef)ctx, read_only ? kIOSurfaceLockReadOnly : 0, NULL);
+}
+// The round trip on a private 128 x 64 NV12 surface (nvmtl_vk_plane_selftest), once per process, off every caller's thread.
+// Its verdict decides for the life of the process; any failure keeps two-plane surfaces on private images.
+static void nvmtl_plane_selftest(void)
+{
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    nvmtl_pa_result r; memset(&r, 0, sizeof r); r.at = -1;
+    nvmtl_pa_surface want; nvmtl_pa_test_layout(&want);
+    NSMutableArray *planes = [NSMutableArray array];
+    for (int i = 0; i < 2; i++) {
+        const nvmtl_pa_plane *p = &want.p[i];
+        [planes addObject:@{ (__bridge NSString *)kIOSurfacePlaneWidth: @(p->w), (__bridge NSString *)kIOSurfacePlaneHeight: @(p->h),
+                             (__bridge NSString *)kIOSurfacePlaneBytesPerRow: @(p->row), (__bridge NSString *)kIOSurfacePlaneBytesPerElement: @(p->bpe),
+                             (__bridge NSString *)kIOSurfacePlaneElementWidth: @(p->ew), (__bridge NSString *)kIOSurfacePlaneElementHeight: @(p->eh),
+                             (__bridge NSString *)kIOSurfacePlaneOffset: @(p->off), (__bridge NSString *)kIOSurfacePlaneSize: @(nvmtl_pa_len(p)) }];
+    }
+    NSDictionary *props = @{ (__bridge NSString *)kIOSurfaceWidth: @(NVMTL_PA_TEST_W), (__bridge NSString *)kIOSurfaceHeight: @(NVMTL_PA_TEST_H),
+                             (__bridge NSString *)kIOSurfacePixelFormat: @(NVMTL_PA_TEST_FORMAT), (__bridge NSString *)kIOSurfaceAllocSize: @(want.alloc),
+                             (__bridge NSString *)kIOSurfacePlaneInfo: planes };
+    IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+    if (!surf) nvmtl_pa_fail(&r, 1, "IOSurfaceCreate refused the private NV12 surface", -1, 0, 0);
+    else {
+        nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
+        const nvmtl_pa_host hst = { (void *)surf, nvmtl_pa_lock, nvmtl_pa_unlock };
+        nvmtl_vk_plane_selftest((uint32_t)IOSurfaceGetID(surf), &s, &hst, &r);
+        CFRelease(surf);
+    }
+    nvmtl_vk_plane_vram_verdict(&r, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+}
+// Whether a two-plane surface may take its planes' VRAM now. The first caller in a process starts the self-test and,
+// like every caller until its verdict, hears no: that surface stays a private image.
+static int nvmtl_plane_vram_ready(void)
+{
+    const int st = nvmtl_vk_plane_vram_state();
+    if (st < 0) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ nvmtl_plane_selftest(); });
+    return st > 0;
+}
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
@@ -1618,6 +1680,27 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             }
         }
     }
+    const char *pwhy = NULL;
+    if (surf && IOSurfaceGetPlaneCount(surf) == 2 && nvmtl_vk_surface_share_on()) {
+        nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
+        const int why = nvmtl_pa_eligible(&s, (uint32_t)plane, w, h, bpp);
+        if (why) pwhy = nvmtl_pa_reason(why);
+        else if (!nvmtl_plane_vram_ready()) pwhy = "the planar self-test has not passed in this process";
+        else {
+            nvk_buffer vb; memset(&vb, 0, sizeof vb);
+            if (!nvmtl_vk_plane_image_create((uint32_t)IOSurfaceGetID(surf), &s, (uint32_t)plane, w, h, vkf, bpp, a8, stex, &vb, &t->_i)) {
+                t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
+                uint32_t seed = IOSurfaceGetSeed(surf);
+                int current = nvmtl_vram_tag_current(surf, plane, seed);
+                if (current) { t->_surfSeed = seed; t->_surfSynced = YES; }
+                static unsigned n; if (n++ < 8 || n % 2000 == 0)
+                    nvlog("item 7: surface %u plane %lu %ux%u pitch %u -> the plane's own VRAM (planar)%s (vram %llu, private %llu)", (unsigned)IOSurfaceGetID(surf),
+                          (unsigned long)plane, w, h, s.p[plane].row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
+                return 0;
+            }
+            pwhy = "the plane's VRAM could not be used";
+        }
+    }
     g_surf_private++;
     // A private image stands for the whole surface: wrappers that read it and wrappers that write it must share ONE image
     // (nvmtlNewSurfaceTexture caches it), or what one writes the other never sees. So it is made writable whenever the
@@ -1627,7 +1710,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         const size_t prow = IOSurfaceGetBytesPerRow(surf), pplanes = IOSurfaceGetPlaneCount(surf);
         nvlog("item 7: surface %u %ux%u plane %lu -> a private image, copied in and out (%s; row %zu bytes, %zu plane(s))",
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
-              (plane != 0 || pplanes > 1) ? "more than one plane" : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
+              (plane != 0 || pplanes > 1) ? (pwhy ? pwhy : "more than one plane") : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
               : (prow % 32) ? "the row is not a multiple of 32 bytes" : "the family VRAM could not be used", prow, pplanes);
     }
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
