@@ -15,9 +15,12 @@ mapper the driver may not use). What this checks:
         goes to, reused only for that NVRM, given back (UNMAP) before it is completed and released, never while the
         stand-in's copy is on it; a failed MAP frees it and backs off; after a timeout the mapping is abandoned with
         the buffer (no UNMAP); a mapped buffer is never reused in mode 0; every NVRM reference is given back;
+      * an accelerator's stop gives back the mapping made through its own NVRM (UNMAP, then the buffer is freed) under
+        the staging lock, leaves another NVRM's alone, and without a mapping does not take the lock;
   - on the source text: the order of the edits in NVResource::pageoff (after the waits, the mode read before any page
     is wired or any copy counted; mode 3 to the family; the staged copy under the staging lock with the bus address;
-    the per-page path in mode 0 only), the timeout and refusal branches, the hybrid frame in mode 0 only, the status
+    the per-page path in mode 0 only), the timeout and refusal branches (a refused per-page copy asks for the mode
+    again), the stop of an accelerator, the hybrid frame in mode 0 only, the status
     values (NVRM_SS_NO_DMA is 0x80000008 and not NVRM_SS_BAD_RANGE), and read-only counters registered once.
 Each group has negative controls on changed copies of the source.
    python3 tools/test_dma_wiring_accel.py"""
@@ -89,8 +92,10 @@ static void tr(const char *f, ...) __attribute__((format(printf, 1, 2)));
 static void tr(const char *f, ...) { char b[300]; va_list ap; va_start(ap, f); vsnprintf(b, sizeof b, f, ap); va_end(ap); T.push_back(b); }
 #define ALOG(fmt, ...) tr("log " fmt, ##__VA_ARGS__)
 static SInt64 OSAddAtomic64(SInt64 v, volatile SInt64 *p) { SInt64 o = *p; *p += v; return o; }
-struct IOLock { int x; };
+struct IOLock { int held; int takes; };
 static IOLock *IOLockAlloc() { return new IOLock(); }
+static void IOLockLock(IOLock *l) { assert(!l->held); l->held = 1; l->takes++; }
+static void IOLockUnlock(IOLock *l) { assert(l->held); l->held = 0; }
 static void IOLockFree(IOLock *l) { delete l; }
 static bool OSCompareAndSwapPtr(void *o, void *n, void *volatile *p) { if (*p != o) return false; *p = n; return true; }
 static void nvSVZero(void *p, unsigned long n) { memset(p, 0, n); }
@@ -255,6 +260,20 @@ int main(int argc, char **argv)
         assert(nvSVStage(4000, 1, &A) && A.live.size() == 1);
         nvSVStageFree();
         assert(A.rc == 1 && B.rc == 1 && OSSymbol::live == 0);
+        // an accelerator stops: the buffer mapped through its NVRM is given back and freed under the staging lock;
+        // another NVRM's stop leaves it alone; with no mapping (mode 0) the lock is not even taken
+        IOLock *lk = nvSVStageLock();
+        IOBufferMemoryDescriptor *b6 = nvSVStage(4000, 1, &A);
+        assert(b6 && A.live.size() == 1 && A.rc == 2);
+        nvSVStageDrop(&B);
+        assert(gNVSVStageBuf == b6 && A.live.size() == 1 && A.rc == 2);
+        const int takes = lk->takes;
+        nvSVStageDrop(&A);
+        assert(!gNVSVStageBuf && !gNVSVStageTok && !gNVSVStageNvrm && A.live.empty() && A.rc == 1 && b6->dead && lk->takes == takes + 1 && !lk->held);
+        IOBufferMemoryDescriptor *b7 = nvSVStage(4000, 0, nullptr);
+        nvSVStageDrop(&A); nvSVStageDrop(nullptr);
+        assert(gNVSVStageBuf == b7 && !b7->dead && lk->takes == takes + 1);
+        nvSVStageFree();
         puts("modes ok");
     }
 #endif
@@ -321,6 +340,22 @@ def pageoff_problems(src):
         out.append("the per-page path (the surface's own physical pages) is not reserved to mode 0")
     if po.count("kIOMemoryMapperNone") != 2:
         out.append("a physical address is read somewhere else in the page-off")
+    return out
+
+
+def stop_problems(src):
+    out = []
+    s = strip_comments(src)
+    stop = func(s, "    virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE {", "\n    }\n")
+    drop = stop.find("nvSVStageDrop(fNVRM);")
+    base = stop.find("IOGraphicsAccelerator2::stop(provider);")
+    if not (0 <= drop < base) or stop.count("nvSVStageDrop(") != 1:
+        out.append("an accelerator's stop does not give back the staging mapping made through its NVRM before the family's stop")
+    po = strip_comments(pageoff(src))
+    per = po.find("unsigned long long *pa = (!staged && pages)")
+    tail = po[per:] if per >= 0 else ""
+    if "else if (st == NVRM_SS_NO_DMA) { OSAddAtomic64(1, &gCntDmaRefused); nvAccelDmaForget(fAccel); }" not in tail:
+        out.append("a per-page copy refused for unmapped pages does not ask for the mode again")
     return out
 
 
@@ -401,6 +436,8 @@ def main():
         not pr, "; ".join(pr))
     pr = hybrid_problems(src)
     arm("the hybrid copy-engine frame runs in mode 0 only", not pr, "; ".join(pr))
+    pr = stop_problems(src)
+    arm("an accelerator's stop gives back its NVRM's staging mapping; a refused per-page copy asks for the mode again", not pr, "; ".join(pr))
     pr = status_problems(src, abi)
     arm("NVRM_SS_NO_DMA is 0x80000008, distinct from NVRM_SS_BAD_RANGE, and named, not written as a number", not pr, "; ".join(pr))
     pr = sysctl_problems(src)
@@ -424,6 +461,10 @@ def main():
         src.replace("                nvSVStageAbandon();\n            } else if (st == NVRM_SS_NO_DMA) {", "                gNVSVStageBuf = nullptr;\n            } else if (st == NVRM_SS_NO_DMA) {"))))
     arm("control: a refusal that keeps the stale mapping is caught", any("refusal" in x for x in pageoff_problems(
         src.replace("                nvAccelDmaForget(fAccel);\n                nvSVStageFree();\n", ""))))
+    arm("control: a stop that keeps the staging mapping is caught", any("stop" in x for x in stop_problems(
+        src.replace("        nvSVStageDrop(fNVRM);", "", 1))))
+    arm("control: a per-page refusal that keeps the cached mode is caught", any("per-page" in x for x in stop_problems(
+        src.replace("            else if (st == NVRM_SS_NO_DMA) { OSAddAtomic64(1, &gCntDmaRefused); nvAccelDmaForget(fAccel); }\n", "", 1))))
     arm("control: the hybrid frame in every mode is caught", any("mode 0 only" in x for x in hybrid_problems(
         src.replace("    if (nvAccelDmaMode(x.accel) != NVRM_DMA_NONE) { OSAddAtomic64(1, &gCntDmaHybrid); return false; }\n", ""))))
     arm("control: the refusal's number written out is caught", any("instead of" in x for x in status_problems(
@@ -486,6 +527,10 @@ def main():
         ok, det = changed("h", "    if (b && dmaMode && !nvSVDmaMap(nvrm, b, want, &tok, &bus)) { b->complete(); b->release(); b = nullptr; }\n",
                           "    if (b && dmaMode && !nvSVDmaMap(nvrm, b, want, &tok, &bus)) { b = nullptr; }\n")
         arm("control: a buffer kept wired after a failed MAP fails the host program", ok, det)
+        ok, det = changed("j", "    if (gNVSVStageTok && gNVSVStageNvrm == nvrm) nvSVStageFree();\n", "    if (gNVSVStageTok) nvSVStageFree();\n")
+        arm("control: a stop that frees another NVRM's mapping fails the host program", ok, det)
+        ok, det = changed("k", "    if (!nvrm || !lk || !gNVSVStageTok) return;\n", "    if (!nvrm || !lk) return;\n")
+        arm("control: a stop that takes the staging lock without a mapping fails the host program", ok, det)
         ok, det = changed_mode0("i", "    nvSVStageFree();\n    gNVSVStageBuf = b;\n", "    gNVSVStageBuf = b;\n")
         arm("control: a replaced mode-0 buffer that is not freed fails the mode-0 comparison", ok, det)
 
