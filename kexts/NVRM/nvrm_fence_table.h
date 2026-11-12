@@ -107,6 +107,8 @@ struct nvf_table {
     struct nvf_chan  c[NVF_CHANS];   unsigned chanHigh, chanGen, pass;
     struct nvf_owner o[NVF_OWNERS];
     struct nvf_recent recent[NVF_RECENT]; unsigned long long recentSeq;   /* how the last holds ended */
+    unsigned long long deadSeq, timeoutSeq;   /* recentSeq after the last ending that tells readers DEAD, and after the
+                                                 last that tells them TIMEOUT; 0 = none yet. They outlive the ring. */
     unsigned long long serial;           /* ++ at every open; never 0 after nvf_init */
     unsigned live, liveCompositor, liveMax;   /* holds that still delay someone (not flagged) */
     unsigned used, flagged;              /* slots taken; of those, flagged */
@@ -160,9 +162,11 @@ static inline int nvf_err_va_ok(unsigned long long errVA, unsigned errBase)
 
 /* Where a wired page may be read from. The kernel reads a channel's pages through its map of physical memory, and on
  * x86-64 that map covers installed memory plus 4 GB (for the hole below 4 GB) and nothing above. A process can also
- * hand in a page of device memory it has mapped, such as the GPU's memory window, which this driver moves to 256 GB
- * and up: a read there has no address in the map and stops the machine. So a page is taken only when it is one whole,
- * aligned page that ends at or below `limit` (installed memory + 4 GB); limit 0, not known, takes none. */
+ * hand in a page of device memory it has mapped, and a GPU memory window can lie above the map (this driver moves the
+ * large one to 256 GB and up where the machine allows it): a read there has no address in the map and stops the
+ * machine. So a page is taken only when it is one whole, aligned page that ends at or below `limit` (installed memory
+ * + 4 GB); limit 0, not known, takes none. A window that lies inside the map is the caller's to refuse: it knows where
+ * the GPU's windows are, this file does not. */
 static inline int nvf_phys_ok(unsigned long long pa, unsigned long long len, unsigned long long limit)
 {
     return pa != 0 && (pa & (NVF_PAGE - 1)) == 0 && len >= NVF_PAGE && pa < limit && limit - pa >= NVF_PAGE;
@@ -257,12 +261,23 @@ static inline int nvf_matches(const struct nvf_query *q, unsigned sid, unsigned 
     return 1;
 }
 
+/* What the readers of a hold are told when it ends with `why`: complete, given up, or gone without completing. */
+static inline unsigned nvf_end_result(unsigned why)
+{
+    if (why == NVF_END_CLOSE || why == NVF_END_GPU) return NVRM_FENCE_R_READY;
+    if (why == NVF_END_EXPIRED || why == NVF_END_DISTRUST) return NVRM_FENCE_R_TIMEOUT;
+    return NVRM_FENCE_R_DEAD;
+}
+
 static inline void nvf_note_end(struct nvf_table *T, const struct nvf_entry *e, unsigned why)
 {
     struct nvf_recent *r = &T->recent[T->recentSeq % NVF_RECENT];
+    const unsigned res = nvf_end_result(why);
     r->serial = e->serial; r->sid = e->sid; r->pid = e->pid;
     r->why = (unsigned char)why; r->flags = e->flags; r->planes = e->planes;
     T->recentSeq++;
+    if (res == NVRM_FENCE_R_TIMEOUT) T->timeoutSeq = T->recentSeq;     /* for the readers the ring will have forgotten */
+    else if (res == NVRM_FENCE_R_DEAD) T->deadSeq = T->recentSeq;
 }
 
 static inline void nvf_live_drop(struct nvf_table *T, const struct nvf_entry *e)
@@ -325,6 +340,9 @@ static inline int nvf_find(const struct nvf_table *T, unsigned oi, unsigned long
     return -1;
 }
 
+/* Everything ends at once: the GPU goes to sleep, the last GPU stops, or the layer switches itself off. This can be
+ * more endings than the ring of recent ones holds; the readers that were waiting still learn how it ended
+ * (nvf_result_from_recent). */
 static inline void nvf_end_all(struct nvf_table *T, unsigned why)
 {
     unsigned i;
@@ -835,19 +853,31 @@ static inline unsigned nvf_eval(struct nvf_table *T, struct nvf_query *q, unsign
     return v->blockers;
 }
 
-/* What became of the holds this reader was (or would have been) waiting for: the worst of how they ended. */
+/* What became of the holds this reader was (or would have been) waiting for: the worst of how they ended.
+ * The ring remembers the last NVF_RECENT endings. When more have ended since the reader first looked, which of them
+ * were its own is no longer known, and the answer is the worst of ALL endings since that look, whoever's they were:
+ * READY only when every one of them was a completion. Endings come by the hundred at a sleep, at the last stop, at
+ * the switch-off, when a process with many holds exits and when a fault or a bound ends many holds of one surface in
+ * one look, and those are the endings after which the work is NOT done: a reader told READY there would take an
+ * unfinished surface for a finished one. The price is a reader that is told DEAD or TIMEOUT although its own holds
+ * completed, because somebody else's did not in the same time. To every caller those two answers mean "go on, the
+ * surface is not known to be complete", which costs it nothing when the surface is complete. (A reader only gets
+ * here with more than NVF_RECENT endings behind it when it had something in front of it: after a sleep, or in the
+ * one look that itself ended that many holds, its own or, at the switch-off, everybody's.) */
 static inline unsigned nvf_result_from_recent(const struct nvf_table *T, const struct nvf_query *q, int saw)
 {
     unsigned long long s;
     unsigned res = saw ? NVRM_FENCE_R_READY : NVRM_FENCE_R_NONE;
-    if (T->recentSeq - q->recent0 > NVF_RECENT) return NVRM_FENCE_R_READY;     /* more ended than the ring remembers */
+    if (T->recentSeq - q->recent0 > NVF_RECENT) {                              /* more ended than the ring remembers */
+        if (T->timeoutSeq > q->recent0) return NVRM_FENCE_R_TIMEOUT;
+        if (T->deadSeq > q->recent0) return NVRM_FENCE_R_DEAD;
+        return NVRM_FENCE_R_READY;
+    }
     for (s = q->recent0; s != T->recentSeq; s++) {
         const struct nvf_recent *r = &T->recent[s % NVF_RECENT];
         unsigned one;
         if (!nvf_matches(q, r->sid, r->serial, r->planes, r->pid, r->flags)) continue;
-        if (r->why == NVF_END_CLOSE || r->why == NVF_END_GPU) one = NVRM_FENCE_R_READY;
-        else if (r->why == NVF_END_EXPIRED || r->why == NVF_END_DISTRUST) one = NVRM_FENCE_R_TIMEOUT;
-        else one = NVRM_FENCE_R_DEAD;
+        one = nvf_end_result(r->why);
         if (one > res) res = one;
     }
     return res;
@@ -897,6 +927,11 @@ static inline void nvf_wait_count(struct nvf_table *T, unsigned result, int slep
  * timeoutMs (clamped to NVRM_FENCE_WAIT_MAX_MS). `look`: do not sleep, answer NONE or PENDING. The caller sets
  * q->sid, planes, pid, flags and zeroes q->snap. Returns NVRM_FENCE_ST_OK, or NVRM_FENCE_ST_FULL when the sleep was
  * refused (too many sleepers); the answer is w->result.
+ *
+ * w->waitedUs is the time from the caller's arrival to its answer, whatever the answer. It is not only for the log: a
+ * reader in the Metal plugin that is let go without completion (NONE, DEAD, TIMEOUT, BUDGET) goes on only when this
+ * says the kernel kept it as long as its older poll would have, and polls otherwise. Reporting less sends every such
+ * reader to the poll; reporting more lets it read early.
  *
  * Why no wake is lost: both generations are read BEFORE the look, and the sleep refuses to block when either has moved
  * since. A completion that lands after the look raises an interrupt, the interrupt moves the kick generation, and the

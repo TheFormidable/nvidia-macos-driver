@@ -14,6 +14,7 @@
 //   nvx_wq_admin (IOLock)                thread context only; slot allocation, worker start, slot release. Never held
 //                                        while flushing, waiting for a worker or calling the RM, and never taken with
 //                                        a simple lock held.
+//     -> a work queue's simple lock      in wq_start_slot() only, around the run state of the slot being started
 // No two of the simple locks are ever held together. Nothing that can block, allocate or log runs under any of them.
 //
 // Opt-outs, each read once by nv_xnu_kcore_init(): nvrmworkq=0 (the work items run as before, each on a thread of its
@@ -244,7 +245,8 @@ struct os_work_queue {
 };
 #define NV_XNU_WQ_GPUS 4
 // [0] is the global queue (queue NULL), [1..] one per GPU. Slots are never freed, so a stale pointer in a late call
-// always lands on a queue that refuses the item.
+// always lands on a queue: a stopped one, which refuses the item, or, when the slot has been started again since, the
+// queue of the GPU that has it now.
 static os_work_queue nvx_wq[1 + NV_XNU_WQ_GPUS];
 static IOLock *nvx_wq_admin;
 static bool nvx_wq_on;                // written once by nv_xnu_kcore_init()
@@ -462,22 +464,38 @@ extern "C" NvBool NV_API_CALL os_is_queue_flush_ongoing(struct os_work_queue *qu
     return __atomic_load_n(&wq_of(queue)->core.unload_flushers, __ATOMIC_RELAXED) ? NV_TRUE : NV_FALSE;
 }
 
-// Thread context, nvx_wq_admin held. Sets the slot running with a new worker; false when the worker cannot start.
+// Thread context, nvx_wq_admin held (the global queue: the one call from nv_xnu_kcore_init()). Sets the slot running
+// with a new worker; false when the worker cannot start.
+// A slot's bookkeeping is initialised once, before the slot has a lock and so before anybody else can be at it. A
+// GPU's slot that is started again, for the next GPU, keeps its sequence numbers and its flusher counts; only its run
+// state is set, under the queue's lock. The reason is a flush of the previous owner made on another thread (the RM's
+// own in a power transition, for one): woken by the last completion and not yet running, it is still inside
+// nv_xnu_wq_flush() when the slot changes hands, and once it has the lock it compares and uncounts against whatever
+// this core holds (nvwq_restart() in nvrm_workq_logic.h has the details). An abandoned slot never comes here.
 static bool wq_start_slot(os_work_queue *q, unsigned index)
 {
-    if (!q->lock) q->lock = IOSimpleLockAlloc();
-    if (!q->lock) return false;
-    nvwq_core_init(&q->core);
-    q->index = index;
-    q->running = NULL;
-    q->idle = false;
-    q->abandoned = false;
-    q->core.state = NVWQ_RUN;
-    q->alive = true;
+    if (!q->lock) {
+        IOSimpleLock *l = IOSimpleLockAlloc();
+        if (!l) return false;
+        nvwq_core_init(&q->core);
+        q->index = index;
+        q->lock = l;
+    }
+    IOInterruptState s = wq_lock(q);
+    const bool ok = !q->alive && nvwq_restart(&q->core) == 0;        // never a second worker on one queue
+    if (ok) {
+        q->running = NULL;
+        q->idle = false;
+        q->alive = true;
+    }
+    wq_unlock(q, s);
+    if (!ok) return false;
     thread_t th = NULL;
     if (kernel_thread_start(wq_worker, q, &th) != KERN_SUCCESS) {
+        s = wq_lock(q);
         q->core.state = NVWQ_OFF;
         q->alive = false;
+        wq_unlock(q, s);
         return false;
     }
     q->thread = th;
