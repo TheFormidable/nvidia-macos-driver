@@ -2784,6 +2784,7 @@ IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
 
 // Linux order (nvidia_suspend): NVKMS first, while the GPU still serves the core channel, then RM standby. RM saves
 // what it must keep from VRAM to system memory and unloads GSP-RM; the GPU then loses power with the slot.
+extern "C" uint64_t nv_xnu_tmpfile_written(void);   // os-xnu2.cpp: bytes written into the RM's save files since boot
 void NVRM::gpuSuspend()
 {
     uint64_t t0 = mach_absolute_time();
@@ -2809,12 +2810,17 @@ void NVRM::gpuSuspend()
     // The RM flushes the GPU's own queue itself; items it queued on the global queue (system work items) are flushed
     // here, at most 5 s, because all of this runs inside the system's power change.
     nv_xnu_wq_flush(NULL, false, 5000);
+    const uint64_t saved0 = nv_xnu_tmpfile_written();
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
+    // What the RM wrote into its save file during STANDBY is the VRAM it preserves that way. A RM that preserves VRAM by
+    // another method (or a second GPU suspending at the same moment) is not told apart here: the line says "save file".
+    const uint64_t saved = nv_xnu_tmpfile_written() - saved0;
     if (fIntSrc) fIntSrc->disable();
     irqSettle(2000);
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-    LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms%s", fPmCycles,
-        (unsigned)cst, (unsigned)st, ns / 1000000ULL, st == NV_OK ? "" : " - resume will still be tried, as on Linux");
+    LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms, %llu MB of VRAM (%llu bytes) "
+        "written to the save file%s", fPmCycles, (unsigned)cst, (unsigned)st, ns / 1000000ULL, saved >> 20, saved,
+        st == NV_OK ? "" : " - resume will still be tried, as on Linux");
 }
 
 // The slot is powered again and IOPCIFamily restored the config space it shadowed. Put back what it does not know
