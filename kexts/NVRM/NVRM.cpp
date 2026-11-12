@@ -3233,6 +3233,26 @@ bool NVRMUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
     return true;
 }
 nv_state_t *NVRMUserClient::nvState() { return fIsCtl ? nv_get_ctl_state() : &fOwner->fNv; }
+extern "C" proc_t current_proc(void);
+// Is the process that opened a connection (fPid) exiting, or already gone? Asked by clientClose, to tell the close of a
+// dying process's connection from an ordinary close: NVK opens and closes connections all the time while it runs.
+// At exit the kernel marks the process exiting (P_LEXIT) and hides it from proc_find, both before it terminates the
+// task, whose port rights then go one by one and close each connection in the exiting thread. So: when this thread
+// belongs to that process, its own exiting flag says it (current_proc needs no reference; proc_self would fail for
+// an exiting process). When another thread closes the connection, the process is exiting if proc_find no longer
+// finds it, or finds it exiting. proc_find can only find another process under that pid once this one has been reaped;
+// such a process is not exiting, so its state is left alone. An exec is not an exit: the image that is replaced
+// closes its connections with the same pid, and proc_find then finds the new image, which is not exiting.
+static bool nvrmClientProcExiting(int pid)
+{
+    if (pid <= 0) return false;
+    if (proc_selfpid() == pid) return proc_exiting(current_proc()) != 0;
+    proc_t p = proc_find(pid);
+    if (!p) return true;
+    const bool exiting = proc_exiting(p) != 0;
+    proc_rele(p);
+    return exiting;
+}
 IOReturn NVRMUserClient::clientClose(void)
 {
     // One winner only: this was a plain bool test-and-set, so two closes could both run the teardown.
@@ -3242,7 +3262,11 @@ IOReturn NVRMUserClient::clientClose(void)
         // Before the RM frees this process's channels, which can take seconds: its surface holds end now and whoever
         // waits on them (WindowServer) is released at once instead of waiting out a bound. fCleaned is already set, and
         // the fence re-reads it under its own lock, so a fence request racing this close cannot add anything after it.
+        // A process keeps its holds on a connection of their own and its channels on another, and a dying process's
+        // connections close in no set order: so when the process is exiting, the first of its connections to close
+        // ends the fence state of all of them, before this RM cleanup frees anything. A live process's close does not.
         nvrm_fence_owner_gone(fFenceOwner);
+        if (nvrmClientProcExiting(fPid)) nvrm_fence_pid_gone(fPid);
         if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
         // The RM posts an event outside its event lock, holding only event_posting_refcount on this nvfp (os.c,
         // referenceEventForPost / postEvent). The events are freed now, so no new post can start, but one that had
