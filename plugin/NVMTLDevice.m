@@ -1469,7 +1469,7 @@ static int nvmtl_busy_read(IOSurfaceRef surf, NSUInteger plane, nvmtl_busy_tag *
 }
 static void nvmtl_busy_write(IOSurfaceRef surf, NSUInteger plane, uint64_t seq, int done)
 {
-    nvmtl_busy_tag t = { NVMTL_BUSY_MAGIC, (uint32_t)done, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), seq, getpid(), 0 };
+    nvmtl_busy_tag t = { NVMTL_BUSY_MAGIC, (uint32_t)done, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), seq, getpid(), done ? 0 : nvmtl_vk_fence_tag_word((uint32_t)IOSurfaceGetID(surf)) };
     CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_busy_key(plane);
     IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
 }
@@ -1482,6 +1482,8 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
 {
     nvmtl_busy_tag t;
     if (!nvmtl_busy_read(surf, plane, &t) || t.done || t.pid == getpid()) return;
+    // the writer's kernel fence holds this write: sleep in the kernel until it ends (or the poll below, if it cannot say)
+    if (t.pad == NVMTL_BUSY_KFENCE && nvmtl_vk_fence_wait((uint32_t)IOSurfaceGetID(surf), (uint32_t)1 << (plane & 7), (uint32_t)t.pid)) return;
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (t.stamp_ns <= t0 && t0 - t.stamp_ns > NVMTL_BUSY_STALE_NS) return;
     for (;;) {
