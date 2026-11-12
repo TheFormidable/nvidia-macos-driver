@@ -58,7 +58,8 @@ semaphore page, the number of the last submission it sent, before that submissio
 The kernel does not map these pages into its own address space. It wires them (they cannot be paged out or given
 back to the system under it) and reads them through the kernel's map of physical memory, 8 bytes at a time. So there
 is no kernel address that could fault when the process, or the RM, takes its own mapping away, and the pages stay
-wired until the registration ends: when NVK deletes it, when the proof below fails, or when the connection closes.
+wired until the registration ends: when NVK deletes it, when the proof below fails, when the connection closes or
+when its process exits.
 
 A process can also hand in a page that it has mapped from a device, and such a page is wired as readily. So once a
 page is wired the kernel looks at where it is, and in two cases gives it back at once and does not watch the channel
@@ -384,8 +385,12 @@ from a channel or from the process.
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
   behaviour, and eight such processes can switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.
-- A process that registers a channel and frees the page without deleting the registration keeps that page wired
-  until its connection closes. NVK deletes first.
+- A process that registers a channel and frees or unmaps the page without deleting the registration keeps that page
+  wired until its connection closes, and more than the page: macOS cannot take the freed memory apart while the
+  kernel's view of one page of it exists, and it waits for that on the one thread that reaps dead memory, so other
+  memory queued for that thread is not returned either until the registration ends. NVK deletes first, and at a
+  process's exit the views go before its memory does; a process that breaks the rule on purpose can hold memory
+  back this way for as long as it keeps its connection open, as it can with any driver that wires its pages.
 - A GPU that goes to sleep in the last moment of its start is not announced to the fence. Holds opened then end at
   their bounds, with a strike.
 
