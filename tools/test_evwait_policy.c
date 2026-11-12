@@ -84,6 +84,33 @@ int main(void)
         if (i % 15 == 14) fb |= nvrm_evw_account(&t, NVRM_EVW_R_WOKEN, 0, 2000, &missed);
     }
     T("control: 64 missed wakes with a delivered one after every 15 never fall back", !fb);
+    /* a moved count (MOVED: the kext did not sleep, the count had already moved) is a late event: it ends the run too */
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 5; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    T("a moved count ends a run of missed wakes, and is not a miss itself",
+      !fb && t.misses == 5 && !nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 0, 2000, &missed) && t.misses == 0 && !missed);
+    T("a moved count ends the run whatever `done` says (it is only looked at after a timeout)",
+      (t.misses = 7, !nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 1, 2000, &missed)) && t.misses == 0 && !missed);
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 15; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    fb |= nvrm_evw_account(&t, NVRM_EVW_R_MOVED, 0, 2000, &missed);
+    for (int i = 0; i < 15; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+    T("15 missed wakes, a moved count, 15 more: no fallback", !fb && t.misses == 15);
+    T("and the next one in a row falls back", nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed) && missed && t.misses == 16);
+    memset(&t, 0, sizeof t); fb = 0; int at = 0;
+    for (int i = 1; i <= 16 && !at; i++) if (nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed)) at = i;
+    T("16 with nothing in between: fallback at exactly the sixteenth", at == (int)NVRM_EVW_MISS_LIMIT);
+    /* control: only an answer that shows the count moved ends the run; every other answer leaves it as it is */
+    static const unsigned keep[] = { NVRM_EVW_R_LEGACY, NVRM_EVW_R_COUNT, NVRM_EVW_R_CAPPED, NVRM_EVW_R_ABORTED, NVRM_EVW_R_SPURIOUS, 99 };
+    memset(&t, 0, sizeof t); fb = 0;
+    for (int i = 0; i < 15; i++) {
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed);
+        for (unsigned k = 0; k < sizeof keep / sizeof keep[0]; k++) fb |= nvrm_evw_account(&t, keep[k], 1, 2000, &missed);
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 0, 2000, &missed);    /* a timeout with the work still running */
+        fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 700, &missed);     /* a sleep cut short by the deadline */
+    }
+    T("control: 15 missed wakes with every other answer in between keep the run, and the sixteenth falls back",
+      !fb && t.misses == 15 && nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 1, 2000, &missed));
     t.misses = 0; fb = 0;
     for (int i = 0; i < 100; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_TIMEOUT, 0, 2000, &missed);
     T("a timeout while the GPU is still working is not a miss", !fb && t.misses == 0);

@@ -64,10 +64,10 @@ enum nvrm_evw_mode {
 #define NVRM_EVW_EAGER_SPIN_NS   20000ull      /* 2.9: `waited_ns < 20000` polls */
 #define NVRM_EVW_SPIN_NS         50000ull      /* the pause-spin phase of nvkmd_nvrm_wait_backoff */
 #define NVRM_EVW_YIELD_NS        1000000ull    /* the sched_yield phase ends here; 2.9 goes on with usleep(50) */
-#define NVRM_EVW_LONG_NS         1000000ull    /* a thread whose waits average this or more skips the yield phase */
+#define NVRM_EVW_LONG_NS         1000000ull    /* avg_ns at or above this: skip the yield phase (avg_ns says what it samples) */
 #define NVRM_EVW_MAX_SLEEP_US    2000u         /* 2.9's bound: a missing event costs latency, never a hang */
 #define NVRM_EVW_MIN_SLEEP_NS    100000ull     /* less time than this left before the caller's deadline: poll */
-#define NVRM_EVW_MISS_LIMIT      16u           /* this many missed wakes in a row, with none delivered: polling for good */
+#define NVRM_EVW_MISS_LIMIT      16u           /* this many missed wakes in a row, the count never moving: polling for good */
 
 /* NVRM_EVENT_WAIT: unset or empty -> the default for the process; "0" poll; "2" adaptive; anything else eager (2.9: `e[0] != '0'`). */
 static inline int nvrm_evw_mode_parse(const char *env, int is_window_server)
@@ -81,13 +81,20 @@ static inline int nvrm_evw_mode_parse(const char *env, int is_window_server)
 /* What one thread remembers between calls. Zero-initialised is the right start. */
 struct nvrm_evw_thread {
     uint64_t last_waited_ns;   /* waited_ns of the previous call: a smaller value now means a new wait began */
-    uint64_t avg_ns;           /* running mean (1/4 weight) of how long this thread's finished waits took */
+    uint64_t avg_ns;           /* running mean (1/4 weight), over this thread's finished waits, of the time into each wait
+                                  at which its last round began: not the wait's length (see nvrm_evw_begin) */
     uint32_t seq;              /* the count the kernel returned last time, for the next sleep */
     int      seq_fd;           /* the event it belongs to, -1 none */
     int      seq_valid;
     unsigned misses;           /* missed wakes in a row on this thread */
 };
-/* Call first in every wait round. Returns 1 when a new wait began (the previous one is folded into the mean). */
+/* Call first in every wait round. Returns 1 when a new wait began (the previous one is folded into the mean).
+   The sample is last_waited_ns, the time into the previous wait at which its last round began. It falls short of the
+   wait's length by what that round took, up to a whole sleep: a wait polled for its first millisecond that then sleeps
+   until the GPU is done is a sample of about 1 ms however long it took, and once the mean is up a wait that ends in its
+   first sleep is a sample of 50 us. What follows in the adaptive mode: a thread whose waits run about 3 ms or more
+   (longer than the polled millisecond and one 2 ms sleep) reaches a mean of NVRM_EVW_LONG_NS and sleeps right after
+   the 50 us spin; shorter waits are polled for their first millisecond and then sleep. */
 static inline int nvrm_evw_begin(struct nvrm_evw_thread *t, uint64_t waited_ns)
 {
     int fresh = 0;
@@ -121,14 +128,21 @@ static inline uint32_t nvrm_evw_seen(const struct nvrm_evw_thread *t, int fd, in
 static inline void nvrm_evw_remember(struct nvrm_evw_thread *t, int fd, uint32_t seq) { t->seq = seq; t->seq_fd = fd; t->seq_valid = 1; }
 static inline void nvrm_evw_forget(struct nvrm_evw_thread *t) { t->seq_valid = 0; }
 
-/* After a sleep. done: the work this thread waited for was complete when the sleep returned.
+/* After a sleep (WOKEN, TIMEOUT), and after an answer that did not sleep because the count had moved (MOVED).
+   done: after a TIMEOUT, the work this thread waited for was complete when the sleep returned; not looked at otherwise.
    Returns 1 when the process must fall back to polling; *missed says whether this sleep was a missed wake.
-   A missed wake is a full-length sleep that ended on its timeout although the work had finished: the event did not
-   arrive. A delivered wake (WOKEN) ends the run, so a card whose events work never reaches the limit. */
+   A missed wake is a full-length sleep that ended on its timeout, with the count where it was, although the work had
+   finished. One alone proves nothing: the GPU makes a completion visible first (the semaphore release user space
+   reads) and raises the event after it (the kext posts it only once the interrupt is serviced and RM has run), so a
+   sleep that runs out between the two is a missed wake although its event is on the way. That event shows at the
+   thread's next call as a moved count: WOKEN when it comes during a sleep, MOVED when it came before the call. Either
+   proves that events arrive, so either ends the run. What proves a dead event is NVRM_EVW_MISS_LIMIT missed wakes in a
+   row with the count standing still all the while. Any other answer leaves the run as it is; a kext that gives no
+   reason (2.9) never counts a miss. */
 static inline int nvrm_evw_account(struct nvrm_evw_thread *t, unsigned reason, int done, uint32_t slept_us, int *missed)
 {
     *missed = 0;
-    if (reason == NVRM_EVW_R_WOKEN) { t->misses = 0; return 0; }
+    if (reason == NVRM_EVW_R_WOKEN || reason == NVRM_EVW_R_MOVED) { t->misses = 0; return 0; }
     if (reason == NVRM_EVW_R_TIMEOUT && done && slept_us >= NVRM_EVW_MAX_SLEEP_US) { *missed = 1; return ++t->misses >= NVRM_EVW_MISS_LIMIT; }
     return 0;
 }
@@ -201,7 +215,9 @@ static inline void nvrm_evw_round(struct nvrm_evw_thread *t, int mode, uint64_t 
     if (why == NVRM_EVW_R_WOKEN) ops->stat(ctx, NVRM_EVW_S_WOKEN);
     if (why == NVRM_EVW_R_TIMEOUT) ops->stat(ctx, NVRM_EVW_S_TIMEOUT);
     if (why == NVRM_EVW_R_CAPPED) ops->stat(ctx, NVRM_EVW_S_CAPPED);
-    if (why == NVRM_EVW_R_TIMEOUT || why == NVRM_EVW_R_WOKEN) {
+    /* MOVED is not a sleep and takes no polling step, but a moved count is the late event of an earlier missed wake
+       (or a newer one): nvrm_evw_account ends the run of missed wakes on it as on WOKEN. */
+    if (why == NVRM_EVW_R_TIMEOUT || why == NVRM_EVW_R_WOKEN || why == NVRM_EVW_R_MOVED) {
         int missed = 0;
         const int done = why == NVRM_EVW_R_TIMEOUT ? !ops->pending(ctx, &fd2) : 0;
         const int give_up = nvrm_evw_account(t, why, done, us, &missed);
