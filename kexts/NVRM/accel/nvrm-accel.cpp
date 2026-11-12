@@ -111,6 +111,7 @@ static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeall
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
 static void nvaccelInstallSysctl(void);
 static void nvPoReadOptOut(void);
+static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provider, const char *kext);   // nvaccel_layout.h
 static int gNvAccelArmed = 0;
 // 1 once the headless check restored the plugin name without arming (no NVIDIA display head). The Metal plugin reads it:
 // a headless GPU hands frames to another GPU's WindowServer through system memory, so IOSurfaces must be copied out.
@@ -438,8 +439,10 @@ public:
     // display on any of this card's connectors, and another GPU's framebuffer already shows the desktop. A desktop whose
     // monitor is slow to wake has no other GPU's framebuffer and still waits for the deadline.
     static constexpr uint32_t kHeadlessDeadlineSec = 60;   // chosen: NVRMFB heads publish within ~20 s of auto-go's bring-up (#76 log)
-    // base wait counted from the end of auto-go's settle delay, not from this accelerator's start
-    uint32_t fHeadlessDeadlineSec = kHeadlessDeadlineSec;
+    // base wait counted from the end of auto-go's settle delay, not from this accelerator's start; armHeadlessCheck sets
+    // it before the check can run. Its initializer is 0 like every other field's: the constructor runs before probe's
+    // layout check, and if Apple's base had grown, these fields would lie on Apple's, which must still read zero then.
+    uint32_t fHeadlessDeadlineSec = 0;
     static constexpr uint32_t kHeadlessPollSec = 2;        // chosen: a small fraction of the ~7 s NVKMS takes to enumerate
     struct thread_call *fHeadlessCall = nullptr;
     uint32_t fHeadlessWaited = 0;
@@ -800,6 +803,12 @@ public:
             }
             ALOG("%s display device %04x:%04x class %02x.%02x - claiming", kind, ven, dev, cls, sub);
         }
+        // Before anything reads or calls Apple's part of this instance: are the family's classes laid out as built?
+#ifdef NMX_ACCEL
+        if (!nvaccelLayoutAllows(this, provider, "NMXAccel")) return NULL;
+#else
+        if (!nvaccelLayoutAllows(this, provider, "NVAccel")) return NULL;
+#endif
         return IOGraphicsAccelerator2::probe(provider, score);
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
@@ -1134,6 +1143,7 @@ NvrmDevTab<NVAccel> NVAccel::gAccelTab;
 NvrmStartGate NVAccel::gAccelGate;
 NvrmWaitQueue<IOService> NVAccel::gAccelWait;
 NVAccelStartScope::~NVAccelStartScope() { nvrm_gate_leave(&NVAccel::gAccelGate, multi, started); if (multi) NVAccel::reofferNext(); }
+#include "nvaccel_layout.h"   // the Apple class layout check NVAccel::probe makes
 
 IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
@@ -1966,6 +1976,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nmxaccel_headless);
     gSysctlInstalled = true;
 #else
+    nvaccelLayoutSysctls();
     sysctl_register_oid(&sysctl__debug_nvaccelfb);
     sysctl_register_oid(&sysctl__debug_nvaccel_headless);
     sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc);       sysctl_register_oid(&sysctl__debug_nvaccel_vm_alloc_bytes);
