@@ -14,11 +14,11 @@ the program name), so what runs here is the production text. What is proven:
   - a reader's wait passes the surface, the plane bit, the writer's pid and the 2 s budget, and only the answers that
     settle the question end it; WindowServer never waits for compositor holds;
   - surface 0 always reaches the kernel; a pending mark the open covers is not sent and its clear is not either; a
-    mark the kernel took is cleared, a refused one is not;
+    mark the kernel took is cleared, a refused one is not; without NVK's entry every mark and clear goes out unrouted;
   - an answer of off from any request switches the fence off until the next probe.
 Negative controls: the same program built from a copy with one line of the production text changed must fail (the
 thread's record not cleared before a refusal; the partial refusal's CLOSE left out; a covered pending mark sent; a
-refused mark remembered as taken).
+refused mark remembered as taken; the marks of an NVK without the entry routed).
 """
 import os, pathlib, re, subprocess, sys, tempfile
 
@@ -122,6 +122,9 @@ int main(int argc, char **argv)
     T("older NVK: a pending mark goes out", nvmtl_vk_surface_gpu_mark(10, 1) == 0 && nmarks == 1 && marks[0][1] == 0x80000001u);
     T("older NVK: and so does its clear", nvmtl_vk_surface_gpu_mark(10, 0) == 0 && nmarks == 2 && marks[1][1] == 0x80000000u);
     T("older NVK: a wait is not asked (the 2.9 poll runs)", nvmtl_vk_fence_wait(10, 1, 99) == 0 && ncalls == 0);
+    mark_answer = 0x80000002u; nvmtl_vk_surface_gpu_mark(11, 1); nvmtl_vk_surface_gpu_mark(11, 0); mark_answer = 0;
+    T("older NVK: the clear of a refused mark goes out too, unrouted (exactly 2.9)", nmarks == 4 && marks[3][0] == 11 && marks[3][1] == 0x80000000u);
+    T("older NVK: nothing was remembered for the routing", g_fence_legacy.n == 0);
     pnvk_fence = nvk;
 
     /* 2. a kext without the fence: QUERY answers off */
@@ -293,6 +296,7 @@ with tempfile.TemporaryDirectory() as d:
         ('a partial refusal does not give back the first chunk', 'if (opened) (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_CLOSE', '(void)opened;'),
         ('a pending mark the kernel hold covers is sent anyway', 'if (!send) return 0;', '(void)send;'),
         ('a clear is sent for a mark the kernel refused', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, st);', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, 0);'),
+        ('the marks of an NVK without the fence entry are routed', 'if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);', ''),
     ]
     for what, line, replacement in controls:
         assert block.count(line) == 1, 'control anchor not found once: ' + line

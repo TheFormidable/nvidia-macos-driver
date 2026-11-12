@@ -13,7 +13,8 @@ Each line is present exactly once, in its function, at the place its order matte
   - the reader's kernel wait follows the first early return of nvmtl_busy_wait (a process never waits for itself) and
     precedes the older poll, which stays;
   - the compositor wait in nvmtlSurfaceIn follows the busy-tag check and the early return for an unchanged surface.
-And: the older mechanisms are all still there; surface 0 is forwarded before the mark routing; NVK's entry is looked up
+And: the older mechanisms are all still there; surface 0, and every mark when NVK has no fence entry, is forwarded
+before the mark routing; NVK's entry is looked up
 once under its published name and called through its published prototype, which is the one NVK's patch exports (that arm
 needs nvk/nvk-fence.patch, from the NVK side of this change); no NVMTL_FENCE_* number is defined twice.
 Negative controls: each check is run again on a copy of the source with its line moved or removed, and must fail.
@@ -123,6 +124,8 @@ def check(f):
     gm = body(vk, 'uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)')
     assert gm.index('if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);') < gm.index('nvmtl_fence_mark_route('), \
         'nvmtl_vk_surface_gpu_mark does not forward surface 0 before it consults the routing'
+    assert gm.index('if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);') < gm.index('nvmtl_fence_mark_route('), \
+        'nvmtl_vk_surface_gpu_mark routes the marks of an NVK without the fence entry'
     assert vk.count('dlsym(g_lib, "nvmtl_nvk_fence_v1")') == 1, 'NVK\'s fence entry is not looked up exactly once'
     td = re.search(r'^typedef uint32_t nvmtl_nvk_fence_v1_fn(\(.*?\));$', vk, re.M)
     assert td and 'uint32_t nvmtl_nvk_fence_v1' + td.group(1) == PUBLISHED, 'the plugin\'s prototype of nvmtl_nvk_fence_v1 is not the published one'
@@ -191,6 +194,7 @@ controls = [
     ('the older poll removed', mutate('NVMTLDevice.m', 'usleep(NVMTL_BUSY_POLL_US);', 'usleep(1);')),
     ('the older clear removed', mutate('NVMTLEventSync.m', 'nvmtl_ws_mark(sid, NO);', '')),
     ('surface 0 routed', mutate('nvmtl_vk.c', '    if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);\n', '')),
+    ('an older NVK\'s marks routed', mutate('nvmtl_vk.c', '    if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);\n', '')),
     ('a prototype that differs from the published one', mutate('nvmtl_vk.c', 'uint32_t timeout_ms, uint32_t out[6]);', 'uint32_t timeout, uint32_t out[6]);')),
     ('a fence number repeated in nvmtl_vk.c', mutate('nvmtl_vk.c', '/* ---- the kernel surface fence', '#define NVMTL_FENCE_WAIT_MS 100u\n/* ---- the kernel surface fence')),
     ('nvmtl_fence.h not included', mutate('nvmtl_vk.h', '#include "nvmtl_fence.h"\n', '')),
