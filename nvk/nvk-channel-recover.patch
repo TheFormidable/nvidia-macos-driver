@@ -279,7 +279,7 @@ index 36e74e5..94502ab 100644
  VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
                                   struct vk_object_base *log_obj);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 63e9929..3513d59 100644
+index 63e9929..da57638 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -674,7 +674,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
@@ -615,11 +615,13 @@ index 63e9929..3513d59 100644
  
     ctx->wSeq++;
     /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
-@@ -1602,7 +1725,12 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1602,7 +1725,14 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        .addr = ctx->cmdBuf->va->addr + 4 * (uint64_t)(ctx->segStart - (uint32_t *)ctx->cmdBuf->map),
        .size_B = 4 * (uint32_t)(ctx->push.end - ctx->segStart),
     };
-+   if (inject == NVRM_REC_INJ_MMU) {   /* test hook: one entry at an unmapped VA ahead of the flush (a real MMU fault) */
++   /* test hook: one entry at an unmapped VA ahead of the flush (a real MMU fault); the reserve above promised room
++    * for one entry only, so the extra one is written only when a second fits */
++   if (inject == NVRM_REC_INJ_MMU && (ctx->gpPut + 2) % 0x8000 != ctx->gpGet) {
 +      const struct nvkmd_ctx_exec bad = { .addr = 0x1000, .size_B = 4 };
 +      write_gp_fifo_entry(ctx, &bad);
 +   }
@@ -628,7 +630,7 @@ index 63e9929..3513d59 100644
     userD->GPPut = ctx->gpPut;
     // batch 56: USERD and host-visible VRAM are write-combined; drain the fill buffers before the doorbell
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-@@ -1614,19 +1742,30 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1614,19 +1744,30 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
     (void)*(volatile NvU32 *)&userD->GPPut;
     volatile NvU32 *doorbell = (void*)((NvU8*)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
     *doorbell = submitTokenNotifier->info32;
@@ -661,7 +663,7 @@ index 63e9929..3513d59 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1663,7 +1802,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
+@@ -1663,7 +1804,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
           continue;
        }
        nvkmd_nvrm_gsub_count(NVRM_GS_CPUWAIT);
@@ -672,7 +674,7 @@ index 63e9929..3513d59 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1735,10 +1877,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
+@@ -1735,10 +1879,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
        nvkmd_mem_unref(ctx->userD);
     if (ctx->notifier != NULL)
        nvkmd_mem_unref(ctx->notifier);
@@ -689,7 +691,7 @@ index 63e9929..3513d59 100644
  static VkResult
  nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj,
-@@ -1747,16 +1895,36 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
+@@ -1747,16 +1897,36 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
  
@@ -729,7 +731,7 @@ index 63e9929..3513d59 100644
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
     struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
     struct NvRmApi rm;
-@@ -1890,17 +2058,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
+@@ -1890,17 +2060,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                              const struct nvkmd_ctx_exec *execs)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -754,7 +756,7 @@ index 63e9929..3513d59 100644
  }
  
  static VkResult
-@@ -1910,10 +2082,14 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
+@@ -1910,10 +2084,14 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
                                const struct vk_sync_signal *signals)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -770,7 +772,7 @@ index 63e9929..3513d59 100644
     return r;
  }
  
-@@ -1922,10 +2098,14 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
+@@ -1922,10 +2100,14 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -787,7 +789,7 @@ index 63e9929..3513d59 100644
     return r;
  }
  
-@@ -1936,6 +2116,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
+@@ -1936,6 +2118,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
     .signal = nvkmd_nvrm_exec_ctx_signal,
     .flush = nvkmd_nvrm_exec_ctx_flush,
     .sync = nvkmd_nvrm_exec_ctx_sync,
@@ -795,7 +797,7 @@ index 63e9929..3513d59 100644
  };
  
  static VkResult
-@@ -2070,8 +2251,31 @@ static struct {
+@@ -2070,8 +2253,31 @@ static struct {
     NvU32 level;
     NvU64 slice;
     bool have;
@@ -827,7 +829,15 @@ index 63e9929..3513d59 100644
  __attribute__((visibility("default"))) int nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us);
  __attribute__((visibility("default"))) int
  nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
-@@ -2124,8 +2328,11 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2115,6 +2321,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+             ts.timesliceUs = 0;
+          nvmtl_tsg_saved[i].level = cur;
+          nvmtl_tsg_saved[i].slice = ts.timesliceUs;
++         nvmtl_tsg_saved[i].curSlice = 0;   /* nothing set on this group yet */
+          nvmtl_tsg_saved[i].have = true;
+       }
+       NvU32 lv = (NvU32)interleave_level;
+@@ -2124,8 +2331,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
           ts.timesliceUs = timeslice_us;
           b = nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts);
        }
@@ -835,14 +845,15 @@ index 63e9929..3513d59 100644
 +      if (a == NV_OK && b == NV_OK) {
           changed++;
 +         nvmtl_tsg_saved[i].curLevel = lv;
-+         nvmtl_tsg_saved[i].curSlice = timeslice_us;
++         if (timeslice_us)   /* 0 leaves the slice alone: keep the one set before for a rebuilt group */
++            nvmtl_tsg_saved[i].curSlice = timeslice_us;
 +      }
     }
     pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..48dc3be
+index 0000000..6e60a3a
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 @@ -0,0 +1,976 @@
@@ -1113,8 +1124,8 @@ index 0000000..48dc3be
 +nvkmd_nvrm_set_reinit(struct nvkmd_ctx *_ctx, enum nvkmd_reinit which, const uint32_t *dw, uint32_t dw_count)
 +{
 +   struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
-+   if ((unsigned)which >= NVKMD_REINIT_COUNT)
-+      return;
++   if ((unsigned)which >= NVKMD_REINIT_COUNT || !rec_owner_applies(ctx))
++      return;   /* never rebuilt: nothing to keep */
 +   if (nvrm_rec_enter(ctx, NULL) != VK_SUCCESS) {
 +      ctx->reinitBroken = true;   /* not kept: this context is never rebuilt */
 +      return;
