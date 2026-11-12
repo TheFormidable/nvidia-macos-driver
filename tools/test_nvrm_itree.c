@@ -160,7 +160,14 @@ static void op_map(void)
 
 static void op_unmap(void)
 {
-    if (!nlive) { u64 va = pick_addr(); if (old_unmap(va) != new_unmap(va, 0)) mismatches++; return; }
+    if (!nlive || rnd(8) == 0) {
+        /* An address no range starts at: a random one, or the last byte, the end or the byte before the start of a
+           live range. Neither table may remove anything. */
+        u64 va = pick_addr();
+        for (unsigned i = 0; i < nlive; i++) if (live[i].va == va) return;
+        if (old_unmap(va) != 0 || new_unmap(va, 0) != 0) mismatches++;
+        return;
+    }
     unsigned k = rnd(nlive);
     struct rec r = live[k];
     /* 2.9 removed the first slot with that va; the new one prefers the entry of that size. Entries that share a va in

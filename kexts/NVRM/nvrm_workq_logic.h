@@ -58,6 +58,22 @@ static inline void nvwq_core_init(struct nvwq_core *c)
     c->state = NVWQ_OFF;
 }
 
+/* A queue whose worker has left (state OFF) gets a new worker: state RUN, and nothing else changes. Returns 0, or -1
+ * without changing anything when the queue is not OFF (a second worker must never be put on a queue).
+ *
+ * This, and not nvwq_core_init(), is what starts a queue that has been used before. A flush that began before the
+ * queue stopped can still be on its way out: the last completion woke it, it holds a target taken from enq_seq and
+ * it has counted itself in flush_waiters (and in unload_flushers), but it has not run yet. When it gets the lock back
+ * it compares its target with done_seq and takes itself out of the counts. With the numbers kept, the target is
+ * reached and the counts return to what they were. Had they been set to 0 in between, the flush would wait for items
+ * nobody will queue, flush_waiters would wrap, and unload_flushers would stay non-zero for good. */
+static inline int nvwq_restart(struct nvwq_core *c)
+{
+    if (c->state != NVWQ_OFF) return -1;
+    c->state = NVWQ_RUN;
+    return 0;
+}
+
 /* Queue `item` at the tail.
  *   0  queued (a static node, or `spare` when none was left: then *spare_used is 1 and the node is the queue's until
  *      nvwq_complete() hands it back)

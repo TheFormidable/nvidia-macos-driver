@@ -15,7 +15,9 @@
 //
 // Lock order, complete: RM locks (API lock, GPU locks, RM spinlocks) -> a queue's own simple lock (interrupts off;
 // only assert_wait and thread_wakeup happen inside). The queue administration lock (slot allocation, start, stop) is
-// an IOLock taken in thread context only and never while a queue's simple lock is held.
+// an IOLock taken in thread context only and never while a queue's simple lock is held. The other way round happens
+// in one place: the start of a slot takes that slot's simple lock, for its run state, with the administration lock
+// held.
 
 #pragma once
 #include "nv-xnu.h"
