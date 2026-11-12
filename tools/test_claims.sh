@@ -1,7 +1,10 @@
 #!/bin/bash
 # test_claims.sh [out dir]: the claim invariant, gated (all arms pass) and ungated (the GCN arm must fail).
 set -u
-H=$(cd "$(dirname "$0")" && pwd); O=${1:-$(mktemp -d)}; CC=${CC:-cc}
+H=$(cd "$(dirname "$0")" && pwd); O=${1:-}; CC=${CC:-cc}
+# the folder is named under $TMPDIR: a bare "mktemp -d" on macOS takes the per-user temporary folder from the system and
+# ignores the TMPDIR it was given. Only a folder this script made is removed.
+if [ -z "$O" ]; then O=$(mktemp -d "${TMPDIR:-/tmp}/test_claims.XXXXXX") || exit 2; trap 'rm -rf "$O"' EXIT; fi
 $CC -std=c11 -Wall -o "$O/claims" "$H/test_claims.c" || { echo "BUILD FAILED"; exit 2; }
 $CC -std=c11 -Wall -DNVMTL_CLAIMS_UNGATED -o "$O/claims_ungated" "$H/test_claims.c" || { echo "BUILD FAILED (ungated)"; exit 2; }
 "$O/claims"; a=$?
