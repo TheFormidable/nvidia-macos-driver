@@ -3135,8 +3135,20 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
     }
     // NVAccel fetches the fence's wait function once. No RM call and nothing that needs the GPU awake, so it is answered
     // before the power-management admission below.
-    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))
-        return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;
+    // Three answers, so that NVAccel can tell when asking again is pointless:
+    // - success: the table is filled. The fence need not have started yet (the GPU's start-up thread starts it, often
+    //   after the accelerator asked); its wait finds nothing until then, which is what NVAccel's waits expect.
+    // - kIOReturnOffline: boot-arg nvrmfence=0 switched the fence off for this boot. No later answer can differ, so
+    //   NVAccel logs that once and stops asking.
+    // - kIOReturnUnsupported: anything else the fence refused (a table of another version or size). It must stay the
+    //   answer that means "maybe later", because it is also what NVAccel gets from an NVRM without the fence: there
+    //   the name is not handled, IOService passes it up the provider chain, and the chain answers kIOReturnUnsupported
+    //   for a name it does not know.
+    //   No NVRM before this one answers kIOReturnOffline here, so that answer cannot be mistaken for an older kext.
+    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS)) {
+        if (nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1)) return kIOReturnSuccess;
+        return nvrm_fence_off_by_bootarg() ? kIOReturnOffline : kIOReturnUnsupported;
+    }
     // The bus address of a shared surface (nvrm_dma.h). It touches no hardware and must not wake the GPU, so it too is
     // answered before the power-management admission.
     if (fn && fn->isEqualTo(NVRM_SS_FN_DMA)) {

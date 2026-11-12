@@ -9,7 +9,9 @@ is right in one place only; what is asserted on the source text:
 - row 12 is the fence selector with the exact request size in and out, rows 0..8 are 2.9's; its body never takes the
   client's gate (a wait in it sleeps up to 2 s), refuses a request of another size or one in a descriptor, checks the
   version before the fence sees the request, and hands the fence the client's owner word and its "closing" word;
-- "nvFenceOps" is answered before the power-management admission of callPlatformFunction, from the fence's table;
+- "nvFenceOps" is answered before the power-management admission of callPlatformFunction, from the fence's table; a
+  refusal is kIOReturnOffline only when boot-arg nvrmfence=0 switched the fence off (NVAccel then stops asking for the
+  boot) and kIOReturnUnsupported otherwise, the answer NVAccel also gets from an NVRM without the fence;
 - go() starts the fence once per GPU, after the adapter is up and after the power manager; stop() and shutdownFull()
   stop it as their first step after the power manager, only for a GPU whose start reached it, once;
 - gpuSuspend tells it right after the power manager, before the user channels stop; gpuResume tells it after the
@@ -177,9 +179,15 @@ def arms(src, header):
         and len(re.findall(r"\bnvrm_fence_user\s*\(", code)) == 1)
 
     cpf = body(code, "NVRM::callPlatformFunction")
-    ops = at(cpf, r"if\s*\(\s*fn\s*&&\s*p1\s*&&\s*fn\s*->\s*isEqualTo\s*\(\s*NVRM_FENCE_FN_OPS\s*\)\s*\)\s*return\s+nvrm_fence_kernel_ops\s*\(\s*\(\s*struct\s+NVRMFenceKernelOps\s*\*\s*\)\s*p1\s*\)\s*\?\s*kIOReturnSuccess\s*:\s*kIOReturnUnsupported\s*;")
+    opsm = re.search(r"if\s*\(\s*fn\s*&&\s*p1\s*&&\s*fn\s*->\s*isEqualTo\s*\(\s*NVRM_FENCE_FN_OPS\s*\)\s*\)\s*\{"
+                     r"\s*if\s*\(\s*nvrm_fence_kernel_ops\s*\(\s*\(\s*struct\s+NVRMFenceKernelOps\s*\*\s*\)\s*p1\s*\)\s*\)\s*return\s+kIOReturnSuccess\s*;"
+                     r"\s*return\s+([^;]*);\s*\}", cpf)
+    ops = opsm.start() if opsm else -1
     guard = at(cpf, r"\bNvXnuPmUse\b\s+pmUse\s*\(\s*rmCall\s*\)")
     arm("nvFenceOps is answered from the fence's table, before the power-management admission", ops >= 0 and guard >= 0 and ops < guard)
+    arm("nvFenceOps: a refusal is kIOReturnOffline only when nvrmfence=0 switched the fence off, kIOReturnUnsupported otherwise (as an NVRM without the fence)",
+        opsm is not None and squash(opsm.group(1)) == "nvrm_fence_off_by_bootarg() ? kIOReturnOffline : kIOReturnUnsupported"
+        and len(re.findall(r"\bkIOReturnOffline\b", cpf)) == 1 and len(re.findall(r"\bnvrm_fence_off_by_bootarg\s*\(", code)) == 1)
 
     go = body(code, "NVRM::go")
     arm("go() starts the fence once per GPU, after rm_init_adapter and the power manager, guarded by the per-GPU flag",
@@ -272,8 +280,10 @@ def broken(src, old, new):
 
 
 ROW12 = "        { sFence, 0, sizeof(struct NVRMFenceReq), 0, sizeof(struct NVRMFenceReq) },"
-OPS = ("    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))\n"
-       "        return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;\n")
+OPS_REFUSE = "        return nvrm_fence_off_by_bootarg() ? kIOReturnOffline : kIOReturnUnsupported;\n"
+OPS = ("    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS)) {\n"
+       "        if (nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1)) return kIOReturnSuccess;\n"
+       + OPS_REFUSE + "    }\n")
 START = "        if (OSCompareAndSwap(0, 1, &fFenceStarted)) nvrm_fence_start();\n"
 STOP_IF = "    if (OSCompareAndSwap(1, 0, &fFenceStarted)) {\n"
 STOP_ANSWER = "        if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);\n"
@@ -302,6 +312,12 @@ CONTROLS = [
     ("nvFenceOps behind the power admission", "nvFenceOps is answered",
      lambda s: broken(broken(s, OPS, ""), "            return nvrm_gpuva_alloc(g) ? kIOReturnIOError : kIOReturnSuccess;\n",
                       "            return nvrm_gpuva_alloc(g) ? kIOReturnIOError : kIOReturnSuccess;\n" + OPS)),
+    ("nvFenceOps answers every refusal alike, so NVAccel asks a switched-off fence for ever", "nvFenceOps: a refusal",
+     lambda s: broken(s, OPS_REFUSE, "        return kIOReturnUnsupported;\n")),
+    ("nvFenceOps calls every refusal final, also a wrong version", "nvFenceOps: a refusal",
+     lambda s: broken(s, OPS_REFUSE, "        return kIOReturnOffline;\n")),
+    ("nvFenceOps says 'off' with the test the wrong way round", "nvFenceOps: a refusal",
+     lambda s: broken(s, OPS_REFUSE, "        return nvrm_fence_off_by_bootarg() ? kIOReturnUnsupported : kIOReturnOffline;\n")),
     ("fence started before the adapter is up", "go() starts the fence",
      lambda s: broken(broken(s, START, ""), "        bottomHalfStart();\n", "        bottomHalfStart();\n" + START)),
     ("fence started without the flag", "go() starts the fence", lambda s: broken(s, START, "        nvrm_fence_start();\n")),
