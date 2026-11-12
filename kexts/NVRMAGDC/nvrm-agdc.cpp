@@ -19,6 +19,7 @@ extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS;
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
 #include "AppleGraphicsDeviceControl_re.h"
 #include "nvrm-agdc-k5.h"
+#include "nvrm_layout.h"
 #pragma pack(push, 1)
 struct NVAGDCVendorInfo {
     uint32_t version;
@@ -170,6 +171,12 @@ IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned 
 }
 
 static int gAgdcState = 0; static NVDADeviceControl *gAgdc = nullptr; static thread_call_t gAgdcCall = nullptr; static int gAgdcWant = 0;
+// AppleGraphicsDeviceControl's size as this macOS registered it, against the hand-reconstructed header this kext's
+// subclass is built on (0x110 bytes, read on 15.7.9). A different size puts fPci and fFB on Apple's fields, so the
+// object is not created at all: state -6, and the display is armed without it. Evaluated once; boot-arg nvlayout=0
+// creates it anyway. gAgdcLayout is the NvLayoutState (0 = not evaluated yet).
+static int gAgdcLayout = 0;
+static NvLayoutRun gAgdcLayoutRun;
 static IOService *gAgdcFBRef = nullptr;
 static void nvdaAgdcDropTable(void)
 {
@@ -241,6 +248,16 @@ static void nvdaAgdcWorkBody(void)
     if (gAgdcWant == 1 && !gAgdc) {
         IOService *pci = nullptr, *fb = nullptr; nvdaAgdcTargets(&pci, &fb);
         if (!pci || !fb) { gAgdcState = -1; FBLOG("AGDC: no PCI device or no framebuffer yet (pci %p fb %p)", pci, fb); return; }
+        if (!gAgdcLayout) {
+            const NvLayoutRow rows[] = { NVL_ROW(AppleGraphicsDeviceControl, IOService) };
+            nvLayoutEvaluate(&gAgdcLayoutRun, "NVRM-agdc", rows, 1, nullptr, 0, nullptr, 0);
+            pci->setProperty("nvagdc-layout", gAgdcLayoutRun.text);
+            gAgdcLayout = (int)gAgdcLayoutRun.state;
+        }
+        if (gAgdcLayout == kNvLayoutRefused) {
+            gAgdcState = -6; FBLOG("AGDC: not created: the Apple class layout differs from this build (nvagdc-layout)");
+            nvdaAgdcDropFB(); return;
+        }
         nvdaAgdcScan(pci);
         NVDADeviceControl *d = OSTypeAlloc(NVDADeviceControl);
         if (!d) { gAgdcState = -2; FBLOG("AGDC: alloc failed"); nvdaAgdcDropFB(); return; }
@@ -268,6 +285,7 @@ static int nvrmfb_agdc_sysctl SYSCTL_HANDLER_ARGS
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_agdc, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0, nvrmfb_agdc_sysctl, "I",
             "write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, <0 failed step)");
+SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_layout, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcLayout, 0, "AppleGraphicsDeviceControl layout: 0 not compared yet, 1 ok, 2 refused (state -6), 3 overridden (nvlayout=0), 4 unknown");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_agdc_cmds,    CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcCmds,        "AGDC vendor calls received");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_agdc_refused, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcUnsupported, "AGDC vendor calls answered Unsupported");
 SYSCTL_INT (_debug, OID_AUTO, nvrmfb_agdc_last_refused, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcLastRefused, 0, "last AGDC command refused");
@@ -292,6 +310,7 @@ static void nvdaAgdcRemoveSysctl(void)
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_rescans);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_asked); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_link_mask);
     sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_caps_mask); sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_k5_last_refused_idx);
+    sysctl_unregister_oid(&sysctl__debug_nvrmfb_agdc_layout);
 }
 static void nvdaAgdcInstallSysctl(void)
 {
@@ -303,6 +322,7 @@ static void nvdaAgdcInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_rescans);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_asked); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_link_mask);
     sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_caps_mask); sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_k5_last_refused_idx);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_agdc_layout);
 }
 
 class NVDAGDCLoader : public IOService {
