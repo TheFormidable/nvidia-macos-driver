@@ -35,6 +35,7 @@ extern "C" {
 #include "nvrm_fence_table.h"
 
 extern "C" task_t current_task(void);
+extern "C" proc_t current_proc(void);
 extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
 
 // ---- state ---------------------------------------------------------------------------------------------------------
@@ -60,8 +61,8 @@ static struct nvf_table gT;                  // under gFLock, except the two loc
 // The kernel's hold on one channel's two pages. Each descriptor is prepared, which wires the page and keeps it alive
 // whatever the process or the RM do with their own mappings, until complete(). The slot owns both. They are let go
 // (complete and release, after the lock) by CHAN_DEL, by a CHAN_VERIFY that fails, by CHAN_REBIND for the notifier
-// it replaces, and by nvrm_fence_owner_gone for everything a connection still has; every connection ends there, so
-// nothing stays pinned past its close. A producer that frees a page before its CHAN_DEL only delays the page's
+// it replaces, by nvrm_fence_pid_gone for everything an exiting process has, and by nvrm_fence_owner_gone for everything
+// a connection still has; every connection ends there, so nothing stays pinned past its close. A producer that frees a page before its CHAN_DEL only delays the page's
 // return to the system until then.
 struct NvfView {
     IOMemoryDescriptor *sem, *err;           // the semaphore page; the page that contains the error notifier
@@ -104,6 +105,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_end_owner, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_end_chan_err, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(END_CHAN_ERR), "holds ended by a channel fault");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_end_chan_del, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(END_CHAN_DEL), "holds ended because their channel was deleted first");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_end_pm, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(END_PM), "holds ended by GPU sleep");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_pid_gone, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(PID_GONE), "connections whose holds and channels ended because their process was exiting, before the RM freed anything of it");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_refused_full, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(REFUSED_FULL), "requests refused for room: table or quota");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_refused_denied, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(REFUSED_DENIED), "compositor holds asked for by a process that is not WindowServer");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_refused_stale, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(REFUSED_STALE), "requests naming an unknown hold or channel");
@@ -166,6 +168,7 @@ static void nvfSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvrm_fence_end_chan_err);
     sysctl_register_oid(&sysctl__debug_nvrm_fence_end_chan_del);
     sysctl_register_oid(&sysctl__debug_nvrm_fence_end_pm);
+    sysctl_register_oid(&sysctl__debug_nvrm_fence_pid_gone);
     sysctl_register_oid(&sysctl__debug_nvrm_fence_refused_full);
     sysctl_register_oid(&sysctl__debug_nvrm_fence_refused_denied);
     sysctl_register_oid(&sysctl__debug_nvrm_fence_refused_stale);
@@ -429,6 +432,18 @@ static bool nvfCallerIsWindowServer(void)
     return true;
 }
 
+// Is the calling thread's process exiting? Asked under the lock by the two requests that add state. The exit sets the
+// flag (P_LEXIT, under the process lock) before it closes any of the process's connections, and nvrm_fence_pid_gone
+// runs from such a close and takes the fence lock: so a request that takes the lock after it sees the flag and adds
+// nothing, and one that took the lock before it added state that nvrm_fence_pid_gone then finds and ends. Without
+// this, a thread of the dying process still inside a request when its RM connection closed could open a hold that
+// nothing ends until its fence connection closes. proc_exiting only reads a word of the process's own structure,
+// which cannot go away while one of its threads runs here: no lock, no sleep.
+static bool nvfCallerExiting(void)
+{
+    return proc_exiting(current_proc()) != 0;
+}
+
 // CHAN_ADD. The two pages are pinned and the first proof is made before the lock: the probe word the process says it
 // stored must be what the kernel reads through its own view. Any failure costs this channel only: it is never
 // registered, so nothing is ever armed on it and the process's surfaces keep the older mechanism.
@@ -455,11 +470,12 @@ static void nvfChanAdd(volatile UInt64 *ownerId, const volatile SInt32 *closing,
         return;
     }
     // The id is given before the lock, so that a close racing this request either finds the id (and removes what is
-    // added below) or has already set `closing` (and nothing is added).
+    // added below) or has already set `closing` (and nothing is added). The same for the exit of this process
+    // (nvfCallerExiting).
     const UInt64 owner = nvfOwner(ownerId);
     unsigned handle = 0, st;
     nvfLock();
-    st = *closing ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);
+    st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);
     if (st == NVRM_FENCE_ST_OK) {
         NvfView *m = &gFMap[handle & ((1u << NVF_CHAN_INDEX_BITS) - 1u)];
         m->sem = sem; m->err = err; m->probe0 = seen;
@@ -551,7 +567,7 @@ static void nvfOpen(volatile UInt64 *ownerId, const volatile SInt32 *closing, st
     const unsigned pid = (unsigned)proc_selfpid();
     const unsigned long long now = nvfNowNs();
     nvfLock();
-    r->status = *closing ? NVRM_FENCE_ST_OFF : nvf_open(&gT, owner, pid, h->cookie, h->count, h->ids, h->planes, flags, now);
+    r->status = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_open(&gT, owner, pid, h->cookie, h->count, h->ids, h->planes, flags, now);
     nvfUnlock();
 }
 
@@ -637,19 +653,31 @@ void nvrm_fence_kick(void)
     if (gFSleepers > 0) thread_wakeup((event_t)&gFKick);
 }
 
-void nvrm_fence_owner_gone(UInt64 ownerId)
+// One connection (ownerId) or every connection of one process (pid) gives its fence state back: its holds end and
+// its channels leave the table under the lock, a batch at a time, and their pages are let go after it.
+static void nvfGiveBack(UInt64 ownerId, unsigned pid)
 {
-    if (!ownerId || !gFLock) return;
+    if (!gFLock) return;
     for (;;) {
         IOMemoryDescriptor *gone[2 * NVF_OWNER_CHANS];
         unsigned idx[NVF_OWNER_CHANS];
         nvfLock();
-        const unsigned n = nvf_owner_gone(&gT, ownerId, idx, NVF_OWNER_CHANS);
+        const unsigned n = ownerId ? nvf_owner_gone(&gT, ownerId, idx, NVF_OWNER_CHANS) : nvf_pid_gone(&gT, pid, idx, NVF_OWNER_CHANS);
         for (unsigned i = 0; i < n; i++) nvfTake(idx[i], &gone[2 * i], &gone[2 * i + 1]);
         nvfUnlock();
         for (unsigned i = 0; i < 2 * n; i++) nvfUnpin(gone[i]);
         if (n < NVF_OWNER_CHANS) break;                  // a full batch means there may be more
     }
+}
+
+void nvrm_fence_owner_gone(UInt64 ownerId)
+{
+    if (ownerId) nvfGiveBack(ownerId, 0);
+}
+
+void nvrm_fence_pid_gone(int pid)
+{
+    if (pid > 0) nvfGiveBack(0, (unsigned)pid);
 }
 
 void nvrm_fence_start(void)

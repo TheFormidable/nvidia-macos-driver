@@ -23,6 +23,8 @@ panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted 
   hold is WindowServer's; a request racing the close of its connection adds nothing;
 - user waits can be interrupted; NVAccel's cannot, look at compositor holds only, and take no lock when there is none;
 - start, stop, sleep, wake and a closing connection are safe in any order; the lock and the table are never freed;
+- an exiting process gives back the fence state of all its connections through the same path as one closing
+  connection, and a request from a thread of an exiting process adds nothing (asked under the lock);
 - the lock order is written down where the lock is declared; every log line is rate-limited and says "fence";
 - the table header includes nothing but the ABI header and defines only static inline functions.
 
@@ -36,7 +38,7 @@ root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__)
 
 LEX = re.compile(r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])'""", re.S)
 PROTOTYPES = ["nvrm_fence_start", "nvrm_fence_stop", "nvrm_fence_kick", "nvrm_fence_pm", "nvrm_fence_user",
-              "nvrm_fence_owner_gone", "nvrm_fence_kernel_ops"]
+              "nvrm_fence_owner_gone", "nvrm_fence_pid_gone", "nvrm_fence_kernel_ops"]
 # what may not happen between nvfLock() and nvfUnlock()
 UNDER_LOCK = (r"\bIOLog\s*\(|->\s*release\s*\(|->\s*complete\s*\(|->\s*prepare\s*\(|\bwithAddressRange\s*\(|\bnvfPin\s*\(|"
               r"\bnvfUnpin\s*\(|\bnvfMapFailed\s*\(|\bnvfCount\s*\(|\bnvfLog\s*\(|\bIOLockAlloc\s*\(|\bIOMalloc\w*\s*\(|"
@@ -278,9 +280,9 @@ def arms(src, header, table):
                     r"\bnvfPin\s*\(\s*c->semVA\s*\)", r"\bnvfPin\s*\(\s*c->errVA\s*&\s*~\s*\(\s*NVF_PAGE\s*-\s*1\s*\)\s*\)",
                     r"if\s*\(\s*!\s*nvfRead64\s*\(\s*sem\s*,\s*NVRM_FENCE_SEM_PROBE_OFF\s*,\s*&seen\s*\)\s*\|\|\s*seen\s*!=\s*c->probe\s*\)\s*\{",
                     r"r->status\s*=\s*NVRM_FENCE_ST_MAP\s*;\s*return\s*;", r"\bnvfLock\s*\(\s*\)\s*;"]))
-    arm("CHAN_ADD: the owner is named before the lock, a closing connection adds nothing, a refused channel's pages are let go after it",
+    arm("CHAN_ADD: the owner is named before the lock, a closing connection or an exiting process adds nothing, a refused channel's pages are let go after it",
         order(add, [r"\bowner\s*=\s*nvfOwner\s*\(\s*ownerId\s*\)\s*;", r"\bnvfLock\s*\(\s*\)\s*;",
-                    r"st\s*=\s*\*closing\s*\?\s*NVRM_FENCE_ST_OFF\s*:\s*nvf_chan_add\s*\(", r"if\s*\(\s*st\s*==\s*NVRM_FENCE_ST_OK\s*\)\s*\{",
+                    r"st\s*=\s*\(\s*\*closing\s*\|\|\s*nvfCallerExiting\s*\(\s*\)\s*\)\s*\?\s*NVRM_FENCE_ST_OFF\s*:\s*nvf_chan_add\s*\(", r"if\s*\(\s*st\s*==\s*NVRM_FENCE_ST_OK\s*\)\s*\{",
                     r"m->probe0\s*=\s*seen\s*;", r"sem\s*=\s*NULL\s*;\s*err\s*=\s*NULL\s*;", r"\bnvfUnlock\s*\(\s*\)\s*;",
                     r"\bnvfUnpin\s*\(\s*sem\s*\)\s*;\s*nvfUnpin\s*\(\s*err\s*\)\s*;"]))
     ver = b("nvfChanVerify")
@@ -318,12 +320,16 @@ def arms(src, header, table):
         and all(re.search(h, user[gate.end():]) and not re.search(h, user[:gate.start()]) for h in handlers)
         and all(count(code, h) == 2 for h in handlers[:6]) and not re.search(r"\bnvfLock\b|\bnvfPin\b", user[:gate.start()].replace("nvfChanDel", "")))
     opn = b("nvfOpen")
-    arm("OPEN: a compositor hold is WindowServer's, AUTO needs COMPOSITOR, and a closing connection opens nothing",
+    arm("OPEN: a compositor hold is WindowServer's, AUTO needs COMPOSITOR, and a closing connection or an exiting process opens nothing",
         order(opn, [r"\bflags\s*=\s*r->flags\s*&\s*\(\s*NVRM_FENCE_F_COMPOSITOR\s*\|\s*NVRM_FENCE_F_AUTO\s*\)\s*;", r"\|\|\s*flags\s*==\s*NVRM_FENCE_F_AUTO\s*\)\s*\{\s*r->status\s*=\s*NVRM_FENCE_ST_BAD_ARG\s*;",
                     r"if\s*\(\s*\(\s*flags\s*&\s*NVRM_FENCE_F_COMPOSITOR\s*\)\s*&&\s*!\s*nvfCallerIsWindowServer\s*\(\s*\)\s*\)\s*\{", r"r->status\s*=\s*NVRM_FENCE_ST_DENIED\s*;\s*return\s*;",
                     r"\bowner\s*=\s*nvfOwner\s*\(\s*ownerId\s*\)\s*;", r"\bnvfLock\s*\(\s*\)\s*;",
-                    r"r->status\s*=\s*\*closing\s*\?\s*NVRM_FENCE_ST_OFF\s*:\s*nvf_open\s*\(\s*&gT\s*,\s*owner\s*,\s*pid\s*,\s*h->cookie\s*,\s*h->count\s*,\s*h->ids\s*,\s*h->planes\s*,\s*flags\s*,\s*now\s*\)\s*;",
+                    r"r->status\s*=\s*\(\s*\*closing\s*\|\|\s*nvfCallerExiting\s*\(\s*\)\s*\)\s*\?\s*NVRM_FENCE_ST_OFF\s*:\s*nvf_open\s*\(\s*&gT\s*,\s*owner\s*,\s*pid\s*,\s*h->cookie\s*,\s*h->count\s*,\s*h->ids\s*,\s*h->planes\s*,\s*flags\s*,\s*now\s*\)\s*;",
                     r"\bnvfUnlock\s*\(\s*\)\s*;"]))
+    arm("the exit test reads the calling process's own flag, takes no reference and no lock, and only the two requests that add state ask it",
+        statements(b("nvfCallerExiting")) == ["return proc_exiting(current_proc()) != 0;"]
+        and sorted(n for n, x in fn.items() if re.search(r"\bnvfCallerExiting\s*\(", x)) == ["nvfChanAdd", "nvfOpen"]
+        and not re.search(r"\bproc_find\s*\(|\bproc_self\s*\(|\bproc_rele\s*\(", code))
     arm("only CHAN_ADD and OPEN give a connection its owner number, and nothing else writes the client's word",
         sorted(n for n, x in fn.items() if re.search(r"\bnvfOwner\s*\(", x)) == ["nvfChanAdd", "nvfOpen"]
         and count(code, r"\bOSCompareAndSwap64\s*\(\s*0\s*,\s*id\s*,\s*ownerId\s*\)") == 1 and not re.search(r"\*\s*ownerId\s*(?:=(?!=)|\+\+|--)", code))
@@ -339,10 +345,14 @@ def arms(src, header, table):
         and "nvfLock" not in kw)
 
     # ---- start, stop, sleep, wake, a closing connection -------------------------------------------------------------
-    stop, pm, gone = b("nvrm_fence_stop"), b("nvrm_fence_pm"), b("nvrm_fence_owner_gone")
-    arm("before the first start nothing here touches the lock: stop, sleep and wake, and a closing connection return at once",
+    stop, pm, gone = b("nvrm_fence_stop"), b("nvrm_fence_pm"), b("nvfGiveBack")
+    arm("before the first start nothing here touches the lock: stop, sleep and wake, a closing connection and an exiting process return at once",
         statements(stop)[:1] == ["if (!gFLock) return;"] and statements(pm)[:1] == ["if (!gFLock) return;"]
-        and statements(gone)[:1] == ["if (!ownerId || !gFLock) return;"])
+        and statements(gone)[:1] == ["if (!gFLock) return;"])
+    arm("a closing connection and an exiting process take the same path; owner 0 and pid 0 or below do nothing",
+        statements(b("nvrm_fence_owner_gone")) == ["if (ownerId) nvfGiveBack(ownerId, 0);"]
+        and statements(b("nvrm_fence_pid_gone")) == ["if (pid > 0) nvfGiveBack(0, (unsigned)pid);"]
+        and count(code, r"\bnvfGiveBack\s*\(") == 3)
     arm("the lock is made once, by whichever start comes first, and neither it nor the table is ever freed",
         order(start, [r"if\s*\(\s*!\s*gFLock\s*\)\s*\{", r"\block\s*=\s*IOLockAlloc\s*\(\s*\)\s*;", r"if\s*\(\s*!\s*lock\s*\)\s*return\s*;",
                       r"if\s*\(\s*!\s*OSCompareAndSwapPtr\s*\(\s*NULL\s*,\s*lock\s*,\s*\(\s*void\s*\*\s*volatile\s*\*\s*\)\s*&gFLock\s*\)\s*\)\s*IOLockFree\s*\(\s*lock\s*\)\s*;",
@@ -362,7 +372,9 @@ def arms(src, header, table):
                    r"gFLost\s*=\s*true\s*;", r"gT\.off\s*=\s*1\s*;", r"nvf_end_all\s*\(\s*&gT\s*,\s*NVF_END_SHUTDOWN\s*\)\s*;"])
         and count(code, r"\bgFLost\s*=(?!=)") == 1 and count(code, r"\bgT\.paused\s*=\s*0\s*;") == 2)
     arm("a closing connection: its holds and channels end under the lock, its pages are let go after it, in every state",
-        order(gone, [r"\bnvfLock\s*\(\s*\)\s*;", r"\bn\s*=\s*nvf_owner_gone\s*\(\s*&gT\s*,\s*ownerId\s*,\s*idx\s*,\s*NVF_OWNER_CHANS\s*\)\s*;", r"\bnvfTake\s*\(\s*idx\[i\]",
+        order(gone, [r"\bnvfLock\s*\(\s*\)\s*;",
+                     r"\bn\s*=\s*ownerId\s*\?\s*nvf_owner_gone\s*\(\s*&gT\s*,\s*ownerId\s*,\s*idx\s*,\s*NVF_OWNER_CHANS\s*\)\s*:\s*nvf_pid_gone\s*\(\s*&gT\s*,\s*pid\s*,\s*idx\s*,\s*NVF_OWNER_CHANS\s*\)\s*;",
+                     r"\bnvfTake\s*\(\s*idx\[i\]",
                      r"\bnvfUnlock\s*\(\s*\)\s*;", r"\bnvfUnpin\s*\(\s*gone\[i\]\s*\)\s*;", r"if\s*\(\s*n\s*<\s*NVF_OWNER_CHANS\s*\)\s*break\s*;"])
         and "gFState" not in gone)
 
@@ -407,7 +419,7 @@ WAKE = "    if (changed) {\n        OSIncrementAtomic(&gFGen);\n        if (gFSl
 LOGS = "    for (unsigned i = 0; i < n; i++) nvfLog(&ev[i]);\n"
 PREPARE = "    if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }\n"
 PROBE1 = "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen) || seen != c->probe) {\n"
-ADD = "    st = *closing ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);\n"
+ADD = "    st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);\n"
 ADD_OWNER = "    const UInt64 owner = nvfOwner(ownerId);\n    unsigned handle = 0, st;\n    nvfLock();\n"
 ADD_TAIL = "    nvfUnlock();\n    nvfUnpin(sem); nvfUnpin(err);\n    c->chan = handle;\n"
 PROBE2 = " &&\n                  seen != gFMap[ci].probe0;\n"
@@ -418,7 +430,7 @@ DEL_TAIL = "    if (freed != NVF_NIL) nvfTake(freed, &sem, &err);\n    nvfUnlock
 GATE = "    if (gFState != 1) { r->status = NVRM_FENCE_ST_OFF; return; }\n"
 CASE_ADD = "    case NVRM_FENCE_OP_CHAN_ADD:    nvfChanAdd(ownerId, closing, r); break;\n"
 DENIED = "    if ((flags & NVRM_FENCE_F_COMPOSITOR) && !nvfCallerIsWindowServer()) {\n"
-OPEN = "    r->status = *closing ? NVRM_FENCE_ST_OFF : nvf_open(&gT, owner, pid, h->cookie, h->count, h->ids, h->planes, flags, now);\n"
+OPEN = "    r->status = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_open(&gT, owner, pid, h->cookie, h->count, h->ids, h->planes, flags, now);\n"
 SHORTCUT = "    if (gFState != 1 || !gT.liveCompositor || !w->id) return NVRM_FENCE_ST_OK;\n"
 KWAIT = "    return nvf_wait(&gT, &gFOps, NULL, &q, w->timeoutMs, (flags & NVRM_FENCE_F_LOOK) != 0, 0, w);\n"
 OPS_CHECK = "    if (!o || o->version != NVRM_FENCE_ABI_VERSION || o->size != sizeof(*o)) return false;\n"
@@ -504,7 +516,16 @@ CONTROLS = [
     ("a channel registered without the probe", "CHAN_ADD: addresses checked", "cpp", lambda s: broken(s, PROBE1, "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen)) {\n")),
     ("a channel's pages pinned under the lock", "CHAN_ADD: addresses checked", "cpp",
      lambda s: broken(broken(s, "    IOMemoryDescriptor *sem = nvfPin(c->semVA);\n", "    IOMemoryDescriptor *sem = NULL;\n"), ADD_OWNER, ADD_OWNER + "    sem = nvfPin(c->semVA);\n")),
-    ("CHAN_ADD does not look at the closing word", "CHAN_ADD: the owner is named", "cpp", lambda s: broken(s, "st = *closing ? NVRM_FENCE_ST_OFF : nvf_chan_add(", "st = nvf_chan_add(")),
+    ("CHAN_ADD does not look at the closing word", "CHAN_ADD: the owner is named", "cpp", lambda s: broken(s, "st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(", "st = nvfCallerExiting() ? NVRM_FENCE_ST_OFF : nvf_chan_add(")),
+    ("CHAN_ADD does not ask whether its process is exiting", "CHAN_ADD: the owner is named", "cpp", lambda s: broken(s, "st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(", "st = *closing ? NVRM_FENCE_ST_OFF : nvf_chan_add(")),
+    ("the exit is asked before the lock", "CHAN_ADD: the owner is named", "cpp",
+     lambda s: broken(broken(s, ADD, ADD.replace("(*closing || nvfCallerExiting())", "(*closing || exiting)")), ADD_OWNER, "    const bool exiting = nvfCallerExiting();\n" + ADD_OWNER)),
+    ("the exit test takes a reference that an exiting process no longer gives", "the exit test reads", "cpp",
+     lambda s: broken(s, "    return proc_exiting(current_proc()) != 0;\n", "    proc_t p = proc_self();\n    const bool out = !p || proc_exiting(p);\n    if (p) proc_rele(p);\n    return out;\n")),
+    ("an exiting process gives back only the closing connection", "a closing connection and an exiting process take the same path", "cpp",
+     lambda s: broken(s, "    if (pid > 0) nvfGiveBack(0, (unsigned)pid);\n", "    (void)pid;\n")),
+    ("an exiting process's state given back by another path", "a closing connection: its holds", "cpp",
+     lambda s: broken(s, ": nvf_pid_gone(&gT, pid, idx, NVF_OWNER_CHANS);", ": 0;")),
     ("CHAN_ADD names the owner under the lock", "CHAN_ADD: the owner is named", "cpp",
      lambda s: broken(s, ADD_OWNER, "    unsigned handle = 0, st;\n    nvfLock();\n    const UInt64 owner = nvfOwner(ownerId);\n")),
     ("CHAN_VERIFY accepts the value of the registration", "CHAN_VERIFY: the view must show", "cpp", lambda s: broken(s, PROBE2, ";\n")),
@@ -521,7 +542,8 @@ CONTROLS = [
     ("CHAN_ADD is served before the layer is asked", "a request is answered \"off\"", "cpp",
      lambda s: broken(broken(s, CASE_ADD, ""), GATE, "    if (r->op == NVRM_FENCE_OP_CHAN_ADD) { nvfChanAdd(ownerId, closing, r); return; }\n" + GATE)),
     ("any process may take a compositor hold", "OPEN: a compositor hold", "cpp", lambda s: broken(s, DENIED, "    if (0) {\n")),
-    ("OPEN does not look at the closing word", "OPEN: a compositor hold", "cpp", lambda s: broken(s, OPEN, OPEN.replace("*closing ? NVRM_FENCE_ST_OFF : ", ""))),
+    ("OPEN does not look at the closing word", "OPEN: a compositor hold", "cpp", lambda s: broken(s, OPEN, OPEN.replace("(*closing || nvfCallerExiting())", "nvfCallerExiting()"))),
+    ("OPEN does not ask whether its process is exiting", "OPEN: a compositor hold", "cpp", lambda s: broken(s, OPEN, OPEN.replace("(*closing || nvfCallerExiting())", "*closing"))),
     ("a wait gives a connection an owner number", "only CHAN_ADD and OPEN", "cpp", lambda s: broken(s, "nvf_wait_seq(&gT, &gFOps, NULL, *ownerId,", "nvf_wait_seq(&gT, &gFOps, NULL, nvfOwner(ownerId),")),
     ("NVAccel's wait can be interrupted", "user waits can be interrupted", "cpp", lambda s: broken(s, KWAIT, KWAIT.replace("!= 0, 0, w)", "!= 0, 1, w)"))),
     ("a user wait cannot be interrupted", "user waits can be interrupted", "cpp", lambda s: broken(s, "w->timeoutMs, 1, w);\n        break;\n    }\n    default", "w->timeoutMs, 0, w);\n        break;\n    }\n    default")),
@@ -537,7 +559,7 @@ CONTROLS = [
     ("a closing connection's pages are let go under the lock", "a closing connection: its holds", "cpp",
      lambda s: broken(s, GONE_TAIL, "        for (unsigned i = 0; i < 2 * n; i++) nvfUnpin(gone[i]);\n        nvfUnlock();\n")),
     ("a closing connection is ignored when the layer is off", "a closing connection: its holds", "cpp",
-     lambda s: broken(s, "    if (!ownerId || !gFLock) return;\n", "    if (!ownerId || !gFLock) return;\n    if (gFState != 1) return;\n")),
+     lambda s: broken(s, "static void nvfGiveBack(UInt64 ownerId, unsigned pid)\n{\n    if (!gFLock) return;\n", "static void nvfGiveBack(UInt64 ownerId, unsigned pid)\n{\n    if (!gFLock) return;\n    if (gFState != 1) return;\n")),
     ("the lock order is not written down", "the lock order is written down", "cpp", lambda s: broken(s, ORDER_NOTE, "")),
     ("a log line that is not rate-limited", "every log line names the fence", "cpp", lambda s: broken(s, PM_LOST, PM_LOST + '                IOLog("NVRM-xnu: fence: the GPU did not come back\\n");\n')),
     ("a log line that does not say where it comes from", "every log line names the fence", "cpp", lambda s: broken(s, '"NVRM-xnu: fence: pid %d: %s - this channel', '"NVRM-xnu: pid %d: %s - this channel')),

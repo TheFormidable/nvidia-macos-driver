@@ -64,7 +64,7 @@ enum { NVF_EV_STRIKE = 0, NVF_EV_DISTRUST, NVF_EV_FUSE, NVF_EV_NOIRQ, NVF_EV_KIN
  * CHAN_NOIRQ are levels, WAIT_MAX_US is a maximum, the rest only grow. */
 enum {
     NVF_STAT_OPENS = 0, NVF_STAT_ARMS, NVF_STAT_ARM_DONE, NVF_STAT_CLOSES, NVF_STAT_CLOSE_GONE, NVF_STAT_AUTO,
-    NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM,
+    NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM, NVF_STAT_PID_GONE,
     NVF_STAT_REFUSED_FULL, NVF_STAT_REFUSED_DENIED, NVF_STAT_REFUSED_STALE, NVF_STAT_REFUSED_DISTRUST,
     NVF_STAT_CHANS, NVF_STAT_CHAN_ADDS, NVF_STAT_CHAN_NOIRQ, NVF_STAT_CHAN_REBINDS, NVF_STAT_MAP_FAIL, NVF_STAT_MAP_MISMATCH,
     NVF_STAT_LIVE, NVF_STAT_LIVE_MAX, NVF_STAT_RECLAIMED,
@@ -98,6 +98,7 @@ struct nvf_owner {
     unsigned pid, entries, chans;
     unsigned short head;                 /* its first hold, NVF_NIL = none */
     unsigned char strikes, distrusted;
+    unsigned char closed;                /* emptied because its process is exiting (nvf_pid_gone): refuses new state */
 };
 struct nvf_recent { unsigned long long serial; unsigned sid, pid; unsigned char why, flags, planes; };
 struct nvf_event  { unsigned kind, sid, pid, ms; unsigned char state, bound, strikes, pad; };
@@ -240,7 +241,7 @@ static inline int nvf_owner_get(struct nvf_table *T, unsigned long long owner, u
     o = &T->o[spare];
     o->owner = owner; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
     o->pid = pid; o->entries = 0; o->chans = 0;
-    o->head = (unsigned short)NVF_NIL; o->strikes = 0; o->distrusted = 0;
+    o->head = (unsigned short)NVF_NIL; o->strikes = 0; o->distrusted = 0; o->closed = 0;
     return spare;
 }
 
@@ -402,6 +403,7 @@ static inline unsigned nvf_chan_add(struct nvf_table *T, unsigned long long owne
     if (!nvf_ready(T) || T->off) return NVRM_FENCE_ST_OFF;
     if (!owner) return NVRM_FENCE_ST_BAD_ARG;
     oi = nvf_owner_get(T, owner, pid);
+    if (oi >= 0 && T->o[oi].closed) return NVRM_FENCE_ST_OFF;
     if (oi < 0 || T->o[oi].chans >= NVF_OWNER_CHANS) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
     for (i = 0; i < NVF_CHANS && T->c[i].used; i++) { }
     if (i >= NVF_CHANS) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
@@ -587,6 +589,7 @@ static inline unsigned nvf_open(struct nvf_table *T, unsigned long long owner, u
     oi = nvf_owner_get(T, owner, pid);
     if (oi < 0) { T->stat[NVF_STAT_REFUSED_FULL]++; return NVRM_FENCE_ST_FULL; }
     o = &T->o[oi];
+    if (o->closed) return NVRM_FENCE_ST_OFF;
     if (o->distrusted) { T->stat[NVF_STAT_REFUSED_DISTRUST]++; return NVRM_FENCE_ST_DISTRUST; }
     for (i = 0; i < n; i++) {
         for (j = 0; j < i && ids[j] != ids[i]; j++) { }
@@ -723,26 +726,61 @@ static inline unsigned nvf_chan_del(struct nvf_table *T, unsigned long long owne
     return NVRM_FENCE_ST_OK;
 }
 
+/* Every hold of owner record `oi` ends (readers see DEAD, nobody gets a strike) and up to `max` of its channels are
+ * freed, their indexes written to freeIndex. Returns how many channels; the record itself stays. */
+static inline unsigned nvf_owner_empty(struct nvf_table *T, unsigned oi, unsigned *freeIndex, unsigned max)
+{
+    unsigned i, n = 0;
+    while (T->o[oi].head != NVF_NIL) nvf_end(T, T->o[oi].head, NVF_END_OWNER);
+    for (i = 0; i < T->chanHigh && n < max; i++) {
+        if (!T->c[i].used || T->c[i].oidx != oi) continue;
+        nvf_chan_free(T, i);
+        freeIndex[n++] = i;
+    }
+    return n;
+}
+
 /* The connection is closing: every hold of it ends, its channels are freed and, once none is left, its record. Writes
  * up to `max` channel indexes whose pages the caller lets go of after the lock and returns how many; a return of `max`
- * means "call again". */
+ * means "call again". A record that nvf_pid_gone emptied and marked closed is freed here, at its own connection's
+ * close, like any other. */
 static inline unsigned nvf_owner_gone(struct nvf_table *T, unsigned long long owner, unsigned *freeIndex, unsigned max)
 {
     const int oi = nvf_owner_find(T, owner);
     struct nvf_owner *o;
-    unsigned i, n = 0;
+    unsigned n;
     if (oi < 0) return 0;
     o = &T->o[oi];
-    while (o->head != NVF_NIL) nvf_end(T, o->head, NVF_END_OWNER);
-    for (i = 0; i < T->chanHigh && n < max; i++) {
-        if (!T->c[i].used || T->c[i].oidx != (unsigned)oi) continue;
-        nvf_chan_free(T, i);
-        freeIndex[n++] = i;
-    }
+    n = nvf_owner_empty(T, (unsigned)oi, freeIndex, max);
     if (n < max || !o->chans) {
         o->owner = 0; o->pid = 0; o->entries = 0; o->chans = 0;
-        o->strikes = 0; o->distrusted = 0; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
+        o->strikes = 0; o->distrusted = 0; o->closed = 0; o->penaltyUntilNs = 0; o->lastStrikeNs = 0;
     }
+    return n;
+}
+
+/* Process `pid` is exiting. One process holds its fence state on more than one connection (NVK sends its fence
+ * requests on a connection of their own, and the RM objects behind its channels live on another), and the connections
+ * of a dying process close in no set order: so whichever closes first ends the fence state of all of them, before the
+ * RM frees anything. Every owner record of `pid` is emptied as nvf_owner_gone would (its holds end with DEAD for their
+ * readers and no strike; its channels are freed) but is kept, marked closed, until its own connection's
+ * nvf_owner_gone: until then OPEN and CHAN_ADD on it are refused (OFF), and everything else finds nothing (ARM, the
+ * channel requests: STALE; CLOSE: nothing found). The record is per connection, never per pid, so a later process that
+ * gets the same pid makes records of its own and is not refused. Writes up to `max` channel indexes and returns how
+ * many; a return of `max` means "call again", and calling again is harmless. pid 0 does nothing. */
+static inline unsigned nvf_pid_gone(struct nvf_table *T, unsigned pid, unsigned *freeIndex, unsigned max)
+{
+    unsigned i, n = 0;
+    if (!pid) return 0;
+    for (i = 0; i < NVF_OWNERS; i++) {                   /* every hold first, so that no batch leaves one behind */
+        struct nvf_owner *o = &T->o[i];
+        if (!o->owner || o->pid != pid) continue;
+        if (!o->closed) { o->closed = 1; T->stat[NVF_STAT_PID_GONE]++; }
+        (void)nvf_owner_empty(T, i, freeIndex, 0);
+    }
+    for (i = 0; i < NVF_OWNERS && n < max; i++)
+        if (T->o[i].owner && T->o[i].pid == pid) n += nvf_owner_empty(T, i, freeIndex + n, max - n);
+    if (n) T->changes++;     /* a producer asleep in WAIT_SEQ on a channel freed here looks again at once */
     return n;
 }
 
