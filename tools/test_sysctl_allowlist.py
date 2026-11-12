@@ -45,8 +45,6 @@ WRITABLE = {"nvaccel_igpu", "nvaccel_iop", "nvaccelfb", "nvaccel_vm_sticky", "nv
             # handler rejects any value outside the enumerated bpc / format / range sets and -100..100 for vibrance
             # (EINVAL), and all five are root-only.
             "nvrmfb_flip_latch_auto", "nvrmfb_color_bpc", "nvrmfb_color_format", "nvrmfb_color_range", "nvrmfb_color_vibrance",
-            # Reviewed 2.9: the opt-in unlocked page-off wait, an on/off integer read only as zero/non-zero; root-only.
-            "nvaccel_pageoff_unlocked_wait",
             # Both older than this review and outside the eight files the list read until it walked the tree. The notebook
             # power-budget rollback is an on/off integer the power code reads as zero/non-zero (nvrm_power.cpp). The Intel
             # display firmware upload is write-only, and its handler parses and checks the blob before any of it is
