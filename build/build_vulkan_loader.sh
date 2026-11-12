@@ -4,13 +4,14 @@
 # The commit is checked after the clone, so a moved tag stops the build instead of changing what ships.
 #
 # Needs: git, cmake, ninja, Xcode command line tools, network access to github.com.
+# NM_KHRONOS_URL replaces https://github.com/KhronosGroup (for example a folder of local clones that hold the tag).
 set -euo pipefail
 OUT=${1:?output directory}
 TAG=v1.4.367
 LOADER_SHA=aa6dee8385afe4b2cc0152d086af2184743e16fd
 HEADERS_SHA=9fbc2a782ee3f8a4db64e7d991e23da75e893f44
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-clone() { git clone -q --depth 1 --branch "$TAG" "https://github.com/KhronosGroup/$1" "$W/$1"
+clone() { git clone -q --depth 1 --branch "$TAG" "${NM_KHRONOS_URL:-https://github.com/KhronosGroup}/$1" "$W/$1"
           [ "$(git -C "$W/$1" rev-parse HEAD)" = "$2" ] || { echo "STOP: $1 $TAG is not commit $2"; exit 2; }; }
 clone Vulkan-Headers "$HEADERS_SHA"
 clone Vulkan-Loader "$LOADER_SHA"
