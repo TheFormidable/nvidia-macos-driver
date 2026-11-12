@@ -14,9 +14,13 @@ This test holds:
                whichever of them is left out
   the switches NVK_SKIP_PATCHES leaves out exactly the named upstream-fix patches and refuses any other name;
                NVK_EXTRA_PATCHES=nvk-upstream-nak (an old setting) is dropped with one note and the build goes on
+  the record   the one line the script keeps in BUILD.txt, which is all the release build shows of it, names what
+               was left out or added; for the default chain it is the 2.9 line
 
 The switches are tested on the real script: it is run with a Mesa path that does not exist, so it selects its chain,
-prints it, and stops at its first check before it writes anything."""
+prints it, and stops at its first check before it writes anything. The record line is printed after the build, which
+cannot run here: its text is checked, and the lines of the script that select the chain are evaluated alone for what
+they put at its end."""
 import os, pathlib, re, subprocess, sys, tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
@@ -185,4 +189,42 @@ rc, out, chain, wrote = run("2.8", NVK_SKIP_PATCHES="nvk-nak-sched-main")
 arm("the 2.8 chain has none of the three, and a skip there says so",
     chain == "nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef".split()
     and any("which the 2.8 chain does not have" in l for l in out), out)
+
+# --- the record of a build whose chain is not the default one --------------------------------------------------------
+RECORD = r'(?m)^echo "release \$REL  sha256 [^\n]*  exports \$\(wc -l < "\$OUT/exports\.txt"\)\$OTHER_CHAIN" \| tee "\$OUT/BUILD\.txt"$'
+writers = [l for l in bld.splitlines() if re.search(r'(tee|>>?) *"?\$OUT/BUILD\.txt', l)]
+arm("the one line that writes BUILD.txt ends with what the chain differs by",
+    len(writers) == 1 and re.search(RECORD, writers[0]) is not None, writers)
+arm("control: the 2.9 line, which ended after the export count, is not taken for it",
+    not re.search(RECORD, bld.replace('$OTHER_CHAIN" | tee', '" | tee')))
+
+
+def record_end(rel="2.9", **env):
+    """What the script puts at the end of its BUILD.txt line: its lines from UPSTREAM_FIXES= to OTHER_CHAIN=, alone."""
+    m = re.search(r"(?ms)^UPSTREAM_FIXES=.*?^OTHER_CHAIN=[^\n]*$", bld)
+    if not m:
+        return None
+    e = {k: v for k, v in os.environ.items() if not k.startswith("NVK_")}
+    e.update(env)
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; REL=$1; NVK=$2; BASE=; eval "$3" >/dev/null; printf "%s" "$OTHER_CHAIN"',
+                        "_", rel, str(NVK), m.group(0)], capture_output=True, text=True, env=e)
+    return r.stdout if r.returncode == 0 else None
+
+
+arm("the default chain adds nothing to the record line", record_end() == "", record_end())
+arm("a patch left out is named in the record",
+    record_end(NVK_SKIP_PATCHES="nvk-nak-sched-main") == "  WITHOUT nvk-nak-sched-main (NVK_SKIP_PATCHES)",
+    record_end(NVK_SKIP_PATCHES="nvk-nak-sched-main"))
+arm("all three left out are named, in chain order",
+    record_end(NVK_SKIP_PATCHES="nvk-nak-sched-main nvk-mesa-26.3.0 nvk-nak-fixes-main")
+    == "  WITHOUT " + " ".join(FIXES) + " (NVK_SKIP_PATCHES)")
+arm("an added patch is named in the record, and the dropped old name is not",
+    record_end(NVK_EXTRA_PATCHES="one nvk-upstream-nak two") == "  PLUS one two (NVK_EXTRA_PATCHES)"
+    and record_end(NVK_EXTRA_PATCHES="nvk-upstream-nak") == "")
+arm("left out and added together are both named",
+    record_end(NVK_SKIP_PATCHES="nvk-mesa-26.3.0", NVK_EXTRA_PATCHES="one")
+    == "  WITHOUT nvk-mesa-26.3.0 (NVK_SKIP_PATCHES)  PLUS one (NVK_EXTRA_PATCHES)")
+arm("a skip that leaves nothing out (2.8 has none of the three) adds nothing",
+    record_end("2.8", NVK_SKIP_PATCHES="nvk-nak-sched-main") == "")
+arm("control: a refused name gives no record at all", record_end(NVK_SKIP_PATCHES="nvk-macos") is None)
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)
