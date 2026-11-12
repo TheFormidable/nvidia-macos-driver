@@ -30,7 +30,9 @@ def arm(name, ok, detail=""):
 
 chk = (ROOT / "build/kext_check.sh").read_text()
 imp = (ROOT / "tools/kext_imports.py").read_text()
-FLAG = re.compile(r"(?<![\w-])(-(?:f[a-z][a-z-]+|mkernel|mno-[a-z-]+|std=[\w+]+|nostdinc|D[A-Za-z_]\w*))(?![\w-])")
+# what decides which code is compiled, what it warns about and what it imports: -f, -D, -U, -std, the kernel mode, the
+# warning set (-Werror in a build script and not in the check: the Mac build stops where the check passed) and -O
+FLAG = re.compile(r"(?<![\w-])(-(?:f[a-z][a-z-]+|mkernel|mno-[a-z-]+|std=[\w+]+|nostdinc|[DU][A-Za-z_]\w*|W[a-z][a-z0-9=+-]*|O[0-3sz]?))(?![\w-])")
 # flags that only change paths recorded in the object (reproducible builds): no effect on what compiles
 PATH_ONLY = {"-fdebug-prefix-map", "-ffile-prefix-map"}
 CHECKED = ["build/build_nvrm.sh", "build/accel_build.sh", "build/fb_build.sh", "build/build_agdc.sh", "build/build_primary_selector.sh",
@@ -48,6 +50,8 @@ for rel in CHECKED:
     arm(f"every compile flag of {rel} is in the check", not m, " ".join(m))
 arm("control: a flag the check does not have is caught", missing('clang++ -fapple-kext -DNEW_THING -c x.cpp', chk) == ["-DNEW_THING"])
 arm("control: a flag in a comment is not a flag", missing('# clang++ -DNEW_THING\nclang++ -fapple-kext -c x.cpp', chk) == [])
+arm("control: a warning flag, an -U and an optimisation level the check does not have are caught",
+    missing('clang++ -Wall -Wshadow -UNEW_THING -Oz -O2 -c x.cpp', chk) == ["-Oz", "-UNEW_THING", "-Wshadow"])
 
 # every kext with a build script is either compiled by the check or named as not checked
 built = {p.parent.name for p in (ROOT / "kexts").glob("*/build.sh")} | {"NVRM", "NVAccel", "NVRMFB", "NVRMAGDC", "NVPrimarySelector"}
@@ -105,6 +109,20 @@ arm("control: a listed source that is gone is caught", rc != 0 and "os-xnu.cpp i
 rc, out = sources(lambda d: ((d / "kexts/NVRM/nvrm_new_thing.cpp").write_text(""),
                              bn_edit("for s in nv_rtd3.cpp nvrm_ddc.cpp; do", "for s in nv_rtd3.cpp nvrm_ddc.cpp nvrm_new_thing.cpp; do")(d)))
 arm("a source added to the when-present list is listed", rc == 0, out[-300:])
+
+
+def one_line_and_older_tree(d):
+    """The list written on one line, in a tree that has not got the two when-present sources."""
+    p = d / "build/build_nvrm.sh"; s = p.read_text()
+    joined = re.sub(r"(?m)^CXX_SOURCES=\([^)]*\)", lambda m: " ".join(m.group(0).split()), s, count=1)
+    assert joined != s and re.search(r"(?m)^CXX_SOURCES=\( .*\)$", joined)
+    p.write_text(joined)
+    for n in ("nv_rtd3.cpp", "nvrm_ddc.cpp"):
+        (d / "kexts/NVRM" / n).unlink()
+
+
+rc, out = sources(one_line_and_older_tree)
+arm("the always-compiled list ends at its own ')': written on one line it does not take in the when-present sources of the next", rc == 0, out[-300:])
 
 arm("the check asks build_rm620.sh for the patched tree and stops it before the compile",
     "NM_PREPARE_ONLY=1 bash" in chk and "NM_PREPARE_ONLY" in (ROOT / "build/build_rm620.sh").read_text())
