@@ -2799,7 +2799,8 @@ void NVRMUserClient::free(void)
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
     // nv_post_event must never write into freed memory. If a post is still in flight after the drain, this object's
     // memory is kept for good (one object, counted in debug.nvrm_evt_post_drain_stuck): everything it owns is released
-    // above, and the post touches only fEvtMagic and fEvtSeq.
+    // above, and what such a post still does in it stays inside the object: nv_post_event reads fEvtMagic and counts
+    // in fEvtSeq, and when it returns the RM lowers its own count of posts in flight, which lives in fNvfp.
     if (!evtDrainPosts()) {
         OSIncrementAtomic64(&gNvEvtDrainStuck);
         kprintf("NVRM-xnu: client fd %d: an event post never finished - the connection is kept, not freed\n", fFd);
@@ -3102,6 +3103,11 @@ IOReturn NVRMUserClient::sEvtNote(OSObject *target, void *reference, IOExternalM
 }
 // Selector 12: the surface fence (nvrm_fence_abi.h, body in nvrm_fence.cpp). Deliberately not under fGate: a wait in it
 // may sleep up to NVRM_FENCE_WAIT_MAX_MS, and this process's other RM calls on the connection must not queue behind it.
+// What still waits for it is what IOKit itself keeps apart from every external method of a connection: a close of
+// this connection, and a memory map or unmap through it (the kernel sources of macOS 15 and 26 take the connection's
+// own lock shared for a method and exclusively for those, for a client that asks for no locking of its own). User
+// space therefore keeps its fence calls on a connection it uses for nothing else and never closes, and the fence's
+// user waits have to stay interruptible, so that a dying process leaves the wait before IOKit closes its connection.
 // The request is copied into the kernel and its size and version checked before anything in it is used; the whole of
 // it goes back, the answer in r.status. A kext without this row answers kIOReturnBadArgument, which user space takes
 // as "no fence".
