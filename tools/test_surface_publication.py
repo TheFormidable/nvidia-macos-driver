@@ -70,6 +70,9 @@ static void nvmtl_vk_host_pages_key(uint32_t surface, uint64_t cookie) { (void)s
 static int busyForeign=0, busyWaits=0;
 static int nvmtl_busy_foreign(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; return busyForeign; }
 static void nvmtl_busy_wait(IOSurfaceRef s, NSUInteger p) { (void)s; (void)p; busyWaits++; }
+// the kernel surface fence: a reader's wait for a surface WindowServer may still be drawing (nvmtl_vk.c), counted
+static int compositorWaits=0;
+static void nvmtl_vk_fence_wait_compositor(uint32_t sid) { (void)sid; compositorWaits++; }
 static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w, unsigned h) {}
 #define nvlog(...) ((void)0)
 // helpers the capture path calls (NVMTLEventSync.m); WindowServer kernel marks are off here
@@ -154,15 +157,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     // a surface another process is still drawing (PR #398): this process waits for that write before it imports, and
     // remembers the surface as client-written so every later import waits too; its own writes never wait
     Surface cs={.seed=3}; NVMTLTexture *c=[NVMTLTexture new]; c->_surf=&cs; c->_i=(Image){.w=1,.h=1,.bpp=4};
-    busyWaits=0; busyForeign=0; [c nvmtlSurfaceIn];
+    busyWaits=0; busyForeign=0; compositorWaits=0; [c nvmtlSurfaceIn];
     assert(busyWaits==0 && !c->_clientWritten);
+    // a surface no other application wrote may be one WindowServer is drawing: its kernel holds are waited for, once
+    // per import, and not when the surface has not changed
+    assert(compositorWaits==1);
+    [c nvmtlSurfaceIn]; assert(compositorWaits==1);
     cs.seed++; busyForeign=1; [c nvmtlSurfaceIn];
     assert(busyWaits==1 && c->_clientWritten);
     busyForeign=0; cs.seed++; [c nvmtlSurfaceIn];
     assert(busyWaits==2);
+    assert(compositorWaits==1);   // an application's surface is waited for through its busy tag, not as WindowServer's
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
-         "write is waited for before import");
+         "write is waited for before import, a surface no application wrote waits for WindowServer's kernel holds");
 } return 0; }
 '''
 with tempfile.TemporaryDirectory() as directory:
