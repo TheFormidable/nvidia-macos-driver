@@ -125,6 +125,21 @@ def problems(src):
     if not fl or not re.search(r"if \(q->abandoned\) \{ wq_unlock\(q, s\); return NV_ERR_TIMEOUT; \}", fl) \
             or fl.find("q->abandoned) {") > fl.find("assert_wait_timeout("):
         out.append("a flush of an abandoned queue waits")
+    # a slot that is started again keeps its numbers and its flusher counts: a flush of its previous owner may still
+    # be on its way out. The bookkeeping is initialised only where the slot gets its lock, and the run state changes
+    # only under that lock
+    ss = body(k, "static bool wq_start_slot(")
+    first = body(ss, "if (!q->lock)") if ss else None
+    if not first or "nvwq_core_init(&q->core)" not in first or k.count("nvwq_core_init(") != 1:
+        out.append("a work queue slot is initialised again when it is started again")
+    held = locked_regions(ss or "", "= wq_lock(q)", "wq_unlock(q, s)")
+    if not any("nvwq_restart(&q->core)" in r for r in held):
+        out.append("a work queue is not started through nvwq_restart() under its lock")
+    rest = ss or ""
+    for r in held:
+        rest = rest.replace(r, "")
+    if re.search(r"q->(core\.state|alive|idle|running) =[^=]", rest):
+        out.append("wq_start_slot changes a queue's run state without its lock")
     # stub bodies: real, and no weak stub in front of them
     st = body(k, "NvU32 NV_API_CALL os_strtoul(")
     if not st or "strtoul(str" not in st:
@@ -211,6 +226,17 @@ def main():
             "nv_xnu_wq_flush(NULL, false, 30000);", "gpuSuspend() does not flush")
     control("a flush that waits on an abandoned queue", "nv_xnu_kcore.cpp",
             "    if (q->abandoned) { wq_unlock(q, s); return NV_ERR_TIMEOUT; }\n", "", "a flush of an abandoned queue waits")
+    control("a slot initialised again each time it is started", "nv_xnu_kcore.cpp",
+            "    IOInterruptState s = wq_lock(q);\n    const bool ok = !q->alive && nvwq_restart(&q->core) == 0;",
+            "    nvwq_core_init(&q->core);\n    IOInterruptState s = wq_lock(q);\n"
+            "    const bool ok = !q->alive && nvwq_restart(&q->core) == 0;",
+            "a work queue slot is initialised again when it is started again")
+    control("a queue started without nvwq_restart()", "nv_xnu_kcore.cpp",
+            "const bool ok = !q->alive && nvwq_restart(&q->core) == 0;",
+            "const bool ok = !q->alive; q->core.state = NVWQ_RUN;", "not started through nvwq_restart() under its lock")
+    control("a failed start that resets the run state without the lock", "nv_xnu_kcore.cpp",
+            "        s = wq_lock(q);\n        q->core.state = NVWQ_OFF;\n        q->alive = false;\n        wq_unlock(q, s);\n",
+            "        q->core.state = NVWQ_OFF;\n        q->alive = false;\n", "changes a queue's run state without its lock")
     control("the atomic answers on with nvrmatomic=0", "nv_xnu_kcore.cpp", "if (atomic_arg == 0)", "if (atomic_arg == 2)",
             "boot-arg nvrmatomic is not read")
     control("the work queue switched off by default", "nv_xnu_kcore.cpp", "workq_arg = 1;", "workq_arg = 0;",

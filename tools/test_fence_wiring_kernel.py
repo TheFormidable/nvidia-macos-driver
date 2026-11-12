@@ -6,7 +6,9 @@ tools/test_fence_model.c. This file is about the kernel code around them, which 
 sleep and the wakeup, the pages of another process, the boot-arg and the counters. A mistake in any of these is a
 panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted on the source text:
 
-- every function nvrm_fence.h declares is defined with the declared parameters; the file makes no RM call;
+- every function nvrm_fence.h declares is defined with the declared parameters; the file makes no RM call and asks
+  the rest of the driver one thing only, where a page is pinned: whether it lies in the GPU's memory windows; the
+  function it asks (os-xnu2.cpp) is defined with the parameters the fence declares and only compares addresses;
 - one opt-out (nvrmfence=0), read once, and nothing that switches the layer on; off means no lock and no page;
 - every debug.nvrm_fence_* sysctl is read-only, registered once, and every counter of the table has one;
 - the kick is three statements: test, move the generation, wake only when somebody sleeps; no lock, no log line;
@@ -15,7 +17,8 @@ panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted 
 - one unlock: it moves the change generation and wakes the sleepers after the lock is released, and logs after that;
 - between the lock and the unlock: no log line, no allocation, no wakeup, no page pinned or let go, no return;
 - a page of another process is pinned (wired) before the lock and let go after it, is never mapped into the kernel,
-  and is read only through the one function that zeroes its buffer first;
+  and is read only through the one function that zeroes its buffer first; a wired page is kept only when the physical
+  map reaches it and it is not inside a GPU memory window;
 - a channel is registered only after the kernel read the probe word the process stored, and verified only after it
   read a different one later; a rebuilt channel's new notifier is pinned before the lock, swapped under it only when
   the table agreed, and the old one is let go after it;
@@ -75,6 +78,19 @@ def functions(code):
                 if m:
                     out[m.group(1)] = code[start + 1:i]
     return out
+
+
+def body_at(code, brace):
+    """The text between the brace at `brace` and the one that closes it ('' when none does)."""
+    depth = 0
+    for i in range(brace, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[brace + 1:i]
+    return ""
 
 
 def statements(b):
@@ -137,7 +153,7 @@ def definitions(code):
             for m in re.finditer(r"^(void|bool)\s+(nvrm_fence_\w+)\s*\(([^)]*)\)\s*\{", code, re.M)}
 
 
-def arms(src, header, table):
+def arms(src, header, table, mem):
     code = code_only(src)
     fn = functions(code)
     out = []
@@ -152,9 +168,25 @@ def arms(src, header, table):
     want, have = prototypes(code_only(header)), definitions(code)
     arm("every function nvrm_fence.h declares is defined here with the declared parameters, and no other is exported",
         sorted(want) == sorted(PROTOTYPES) and want == have)
-    arm("the fence makes no RM call, takes no client gate and reaches into no other part of the driver",
-        not re.search(r"\b(?:rm|nv|os|nvkms|nvrm_power|nvrm_dma|nvrm_chan)_\w+\s*\(|\bfGate\b|\bGate\s+\w+\s*\(|IOCommandGate|IOAccel|IOSurface", code)
+    # The one exception is nv_pm_is_gpu (os-xnu2.cpp): its declaration, and its one call where a page is pinned.
+    arm("the fence makes no RM call, takes no client gate and asks the rest of the driver one thing only: is a page inside the GPU's memory windows",
+        re.findall(r"\b((?:rm|nv|os|nvkms|nvrm_power|nvrm_dma|nvrm_chan)_\w+)\s*\(", code) == ["nv_pm_is_gpu", "nv_pm_is_gpu"]
+        and count(code, r'(?m)^extern\s+"."\s+bool\s+nv_pm_is_gpu\s*\(\s*NvU64\s+start\s*,\s*NvU64\s+size\s*\)\s*;') == 1
+        and count(b("nvfPin"), r"\bnv_pm_is_gpu\s*\(") == 1
+        and not re.search(r"\bfGate\b|\bGate\s+\w+\s*\(|IOCommandGate|IOAccel|IOSurface", code)
         and re.findall(r'#include\s+"([^"]+)"', src) == ["nv-xnu.h", "nvrm_fence.h", "nvrm_fence_table.h"])
+    # The fence declares that function itself, as its other callers do (there is no header for it), and C linkage does
+    # not compare the two: a changed parameter would link and pass garbage. It is called before the fence lock, on a
+    # thread that holds a wired page, and the fence promises its own callers "no RM call, no hardware": so the body
+    # may only look up the GPU's record and compare.
+    mem_code = code_only(mem)
+    defs = [m for m in re.finditer(r'(?m)^extern\s+"."\s+bool\s+nv_pm_is_gpu\s*\(([^)]*)\)\s*\{', mem_code)]
+    body = body_at(mem_code, defs[0].end() - 1) if len(defs) == 1 else ""
+    arm("the function it asks is defined once in os-xnu2.cpp with the parameters the fence declares, and only compares addresses",
+        len(defs) == 1 and squash(defs[0].group(1)) == "NvU64 start, NvU64 size"
+        and count(mem_code, r"\bnv_pm_is_gpu\s*\([^)]*\)\s*\{") == 1
+        and body.strip() and set(re.findall(r"\b(\w+)\s*\(", body)) <= {"for", "if", "nv_xnu_gpu_state", "nv_xnu_gpu_state_at"}
+        and not re.search(r"\bwhile\b|\bgoto\b|=\s*[^=]*->\s*\w+\s*=[^=]|\+\+\s*\w+\s*->|->\s*\w+\s*(\+\+|--|[-+|&^]?=[^=])", body))
 
     # ---- the opt-out ------------------------------------------------------------------------------------------------
     boot = b("nvfBoot")
@@ -248,12 +280,15 @@ def arms(src, header, table):
         statements(b("nvfPin")) == ["IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());",
                                     "if (!md) return NULL;", "if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }",
                                     "IOByteCount len = 0;", "const addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);",
-                                    "if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }", "return md;"]
+                                    "if (!nvf_phys_ok(pa, len, gFPhysTop) || nv_pm_is_gpu(pa, NVF_PAGE)) { nvfUnpin(md); return NULL; }", "return md;"]
         and count(code, r"\bwithAddressRange\s*\(") == 1 and count(code, r"->\s*prepare\s*\(") == 1)
-    # A process can hand in a page of device memory it mapped (the GPU's memory window is at 256 GB and up); the physical
-    # map that nvfRead64 reads through ends at installed memory + 4 GB, and a read beyond it stops the machine.
-    arm("a wired page is kept only when the physical map reaches it, and that end is installed memory + 4 GB, learnt once",
+    # A process can hand in a page of device memory it mapped. The physical map that nvfRead64 reads through ends at
+    # installed memory + 4 GB, and a read beyond it stops the machine; a GPU memory window can lie beyond that end or
+    # inside the map, and a read of it would touch the GPU: the page itself, all of it, is asked about, in the one test
+    # that gives a wired page back.
+    arm("a wired page is kept only when the physical map reaches it and it is not in a GPU memory window; the map's end is installed memory + 4 GB, learnt once",
         count(code, r"\bnvf_phys_ok\s*\(") == 1 and count(code, r"\bgetPhysicalSegment\s*\(") == 1
+        and count(code, r"!\s*nvf_phys_ok\s*\(\s*pa\s*,\s*len\s*,\s*gFPhysTop\s*\)\s*\|\|\s*nv_pm_is_gpu\s*\(\s*pa\s*,\s*NVF_PAGE\s*\)\s*\)\s*\{\s*nvfUnpin\s*\(\s*md\s*\)\s*;\s*return\s+NULL\s*;") == 1
         and re.search(r"^static\s+UInt64\s+gFPhysTop\s*;", code, re.M) is not None
         and len(re.findall(r"\bgFPhysTop\s*=[^=]", code)) == 1
         and count(src, r'\bsysctlbyname\s*\(\s*"hw\.memsize"\s*,') == 1 and count(code, r"\bsysctlbyname\s*\(\s*\"") == 1
@@ -421,6 +456,8 @@ UNLOCK = "    IOLockUnlock(gFLock);\n"
 WAKE = "    if (changed) {\n        OSIncrementAtomic(&gFGen);\n        if (gFSleepers > 0) thread_wakeup((event_t)&gFKick);\n    }\n"
 LOGS = "    for (unsigned i = 0; i < n; i++) nvfLog(&ev[i]);\n"
 PREPARE = "    if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }\n"
+PHYS = "    if (!nvf_phys_ok(pa, len, gFPhysTop) || nv_pm_is_gpu(pa, NVF_PAGE)) { nvfUnpin(md); return NULL; }\n"
+ISGPU = 'extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size)\n{\n    nv_state_t *nv = nv_xnu_gpu_state(); if (!nv) return false;\n'
 PROBE1 = "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen) || seen != c->probe) {\n"
 ADD = "    st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);\n"
 ADD_OWNER = "    const UInt64 owner = nvfOwner(ownerId);\n    unsigned handle = 0, st;\n    nvfLock();\n"
@@ -457,6 +494,8 @@ CONTROLS = [
     ("a declared function that is not defined", "every function nvrm_fence.h declares", "cpp",
      lambda s: broken(s, "void nvrm_fence_kick(void)\n{", "static void nvrmFenceKick(void)\n{")),
     ("an RM call in the fence", "makes no RM call", "cpp", lambda s: broken(s, GATE, GATE + "    rm_isr(NULL, NULL, NULL);\n")),
+    ("a second question to the rest of the driver", "makes no RM call", "cpp", lambda s: broken(s, GATE, GATE + "    (void)nv_pm_is_gpu(0, 0);\n")),
+    ("another function of the driver's memory code is called", "makes no RM call", "cpp", lambda s: broken(s, PHYS, PHYS.replace("nv_pm_is_gpu(pa", "nv_pm_is_gpu_fb(pa"))),
     ("a second boot-arg", "one opt-out", "cpp",
      lambda s: broken(s, START_OFF, START_OFF + '    UInt32 on = 0; if (PE_parse_boot_argn("nvrmfenceon", &on, sizeof(on)) && !on) return;\n')),
     ("the boot-arg as an opt-in", "one opt-out", "cpp", lambda s: broken(s, "&& v == 0) ? 2 : 1;", "&& v == 1) ? 1 : 2;")),
@@ -514,8 +553,15 @@ CONTROLS = [
     ("the read buffer is not zeroed", "a pinned page is read in one place", "cpp", lambda s: broken(s, "    *out = 0;\n    return md->readBytes", "    return md->readBytes")),
     ("the flush value read before the completion value", "the table's view of a channel", "cpp",
      lambda s: moved(s, "    if (!nvfRead64(m->sem, 0, &d)) return 0;\n", "    if (flushed && !nvfRead64(m->sem, NVRM_FENCE_SEM_FLUSHED_OFF, &f)) return 0;\n")),
-    ("a wired page kept without a look at where it is", "a wired page is kept only when", "cpp",
-     lambda s: broken(s, "    if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }\n", "    (void)pa;\n")),
+    ("a wired page kept without a look at where it is", "a wired page is kept only when", "cpp", lambda s: broken(s, PHYS, "    (void)pa;\n")),
+    ("a page of a GPU memory window inside the physical map is kept", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, PHYS, PHYS.replace(" || nv_pm_is_gpu(pa, NVF_PAGE)", ""))),
+    ("a page beyond the physical map is kept when it is no GPU window", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, PHYS, PHYS.replace("!nvf_phys_ok(pa, len, gFPhysTop) || ", ""))),
+    ("the window test asks about the address in the process, not the page", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, PHYS, PHYS.replace("nv_pm_is_gpu(pa, NVF_PAGE)", "nv_pm_is_gpu(pageVA, NVF_PAGE)"))),
+    ("the window test asks about less than the page", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, PHYS, PHYS.replace("nv_pm_is_gpu(pa, NVF_PAGE)", "nv_pm_is_gpu(pa, 8)"))),
     ("the end of the physical map taken without the 4 GB above memory", "a wired page is kept only when", "cpp",
      lambda s: broken(s, "gFPhysTop = mem + (4ull << 30);", "gFPhysTop = mem + (64ull << 30);")),
     ("a channel registered without the probe", "CHAN_ADD: addresses checked", "cpp", lambda s: broken(s, PROBE1, "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen)) {\n")),
@@ -571,6 +617,16 @@ CONTROLS = [
     ("the table header takes a system header", "the table header includes only", "table", lambda s: broken(s, '#include "nvrm_fence_abi.h"\n', '#include "nvrm_fence_abi.h"\n#include <string.h>\n')),
     ("a function of the table header that is not inline", "the table header includes only", "table",
      lambda s: broken(s, "static inline unsigned nvf_bucket(unsigned sid)", "unsigned nvf_bucket(unsigned sid)")),
+    ("the window test gets a third parameter", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU.replace("NvU64 start, NvU64 size)", "NvU64 start, NvU64 size, int index)"))),
+    ("the window test's parameters change places", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU.replace("NvU64 start, NvU64 size)", "NvU64 size, NvU64 start)"))),
+    ("the window test takes a lock", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    IOSimpleLockLock(nv_pm_lock); IOSimpleLockUnlock(nv_pm_lock);\n")),
+    ("the window test asks the RM", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    if (!rm_is_device_present()) return false;\n")),
+    ("the window test counts in the GPU's record", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    nv->flags |= 1;\n")),
 ]
 
 
@@ -578,13 +634,15 @@ def main():
     src = (root / "kexts/NVRM/nvrm_fence.cpp").read_text()
     header = (root / "kexts/NVRM/nvrm_fence.h").read_text()
     table = (root / "kexts/NVRM/nvrm_fence_table.h").read_text()
+    mem = (root / "kexts/NVRM/os-xnu2.cpp").read_text()
     fails = 0
-    for name, ok in arms(src, header, table):
+    for name, ok in arms(src, header, table, mem):
         print(("ok   " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
     for name, arm_piece, which, mutate in CONTROLS:
         try:
-            res = arms(mutate(src), header, table) if which == "cpp" else arms(src, header, mutate(table))
+            res = (arms(mutate(src), header, table, mem) if which == "cpp" else
+                   arms(src, header, mutate(table), mem) if which == "table" else arms(src, header, table, mutate(mem)))
         except AssertionError as e:
             print("FAIL control '%s': %s" % (name, e))
             fails += 1
