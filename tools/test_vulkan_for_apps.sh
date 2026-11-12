@@ -1,7 +1,7 @@
 #!/bin/bash
 # Host test for package/vulkan-for-apps.sh in a scratch prefix. Every arm is a sentence; exit 0 only when all hold.
 S=$(cd "$(dirname "$0")/.." && pwd)/package/vulkan-for-apps.sh
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/test_vulkan_for_apps.XXXXXX") || exit 2; trap 'rm -rf "$T"' EXIT
 export NULLMOTH_VK_PREFIX=$T/prefix NULLMOTH_VK_LIBDIR=$T/lib
 fail=0
 arm() { if "${@:2}"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
