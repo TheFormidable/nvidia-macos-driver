@@ -9,6 +9,7 @@
 #include "enc.h"
 #include "av1hdr.h"
 #include "rm.h"
+#include "h264kat.h"
 #include "ctrl/ctrl0080/ctrl0080gpu.h"
 #include "clc9b7.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -1002,20 +1003,35 @@ static int gpu_kind_for_device(unsigned id)
          : (id >= 0x1e00 && id <= 0x1f7f) || (id >= 0x2180 && id <= 0x21ff) ? GPU_TURING : GPU_NONE;
 }
 
+// One PCI function's kind: -1 when it is not an NVIDIA display function, else the kind of its device ID (GPU_NONE for
+// a GPU this library does not know). A device ID alone does not name a GPU: an RTX card also has an audio function,
+// and NVIDIA numbers most of those 0x228b-0x22ec (GA104 to GB207; 0x22ec on an RTX 5050), inside the consumer Ampere
+// block. Taken for the card, it made an RTX 50 or an RTX 40 a GA10x whenever the registry listed the audio function
+// before the GPU: no decode self-test and the VP9 decoder registered on Blackwell, no encoders on Ada.
+// classCode: the registry's "class-code", base class in bits 23:16 (0x030000 VGA, 0x030200 3D, 0x040300 audio).
+static int gpu_kind_for_function(unsigned vendor, unsigned device, unsigned classCode)
+{
+    return vendor == 0x10de && (classCode >> 16 & 0xff) == 0x03 ? gpu_kind_for_device(device) : -1;
+}
+
 static int pci_gpu_kind(void)
 {
     io_iterator_t it = 0; io_object_t d; int found = -1;
     if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPCIDevice"), &it) != KERN_SUCCESS) return -1;
     while ((d = IOIteratorNext(it))) {
         CFTypeRef ven = IORegistryEntryCreateCFProperty(d, CFSTR("vendor-id"), NULL, 0), dev = IORegistryEntryCreateCFProperty(d, CFSTR("device-id"), NULL, 0);
-        unsigned v = 0, id = 0;
+        CFTypeRef cls = IORegistryEntryCreateCFProperty(d, CFSTR("class-code"), NULL, 0);
+        unsigned v = 0, id = 0, cc = 0;
         if (ven && CFGetTypeID(ven) == CFDataGetTypeID() && CFDataGetLength(ven) >= 2) CFDataGetBytes(ven, CFRangeMake(0, 2), (UInt8 *)&v);
         if (dev && CFGetTypeID(dev) == CFDataGetTypeID() && CFDataGetLength(dev) >= 2) CFDataGetBytes(dev, CFRangeMake(0, 2), (UInt8 *)&id);
+        if (cls && CFGetTypeID(cls) == CFDataGetTypeID() && CFDataGetLength(cls) >= 3) CFDataGetBytes(cls, CFRangeMake(0, 3), (UInt8 *)&cc);
         if (ven) CFRelease(ven);
         if (dev) CFRelease(dev);
-        if (v == 0x10de && found < 1) {
-            found = gpu_kind_for_device(id);
-            if (found > 0) card_name_from(d);
+        if (cls) CFRelease(cls);
+        const int kind = found < 1 ? gpu_kind_for_function(v, id, cc) : -1;   // the first GPU of a known kind stays
+        if (kind >= 0) {
+            found = kind;
+            if (kind > 0) card_name_from(d);
         }
         IOObjectRelease(d);
     }
@@ -1108,6 +1124,23 @@ static void rename_encoders(const char *const ids[], const char *const names[], 
     LOG("rename: %d of %d encoder names set", done, n);
 }
 
+// Blackwell (RTX 50): the decoder drives an NVDEC class no public header describes, with Ada's methods and a plane
+// layout taken from Mesa, and VideoToolbox does not fall back once it has picked a decoder. So nothing registers on
+// Blackwell until the card has decoded the embedded test streams bit for bit in this process (src/h264kat.h: run once
+// per process, one line in the system log either way). Where it has not, the process keeps the decoders it had.
+static bool blackwell_decode_proven(void)
+{
+    char line[H264KAT_LINE]; bool first = false;
+    const bool ok = h264kat_proven("Blackwell", line, sizeof line, &first);
+    if (first) LOG("%s", line);
+    return ok;
+}
+// How the driver plugin tells this build from an older one before it asks for the library on Blackwell: it looks this
+// symbol up. A build that has it registers nothing there before the self-test has passed; the library as first
+// vendored registered the Blackwell decoder untested, and beside a plugin that asks for it by default that would be
+// the unproven decoder in Safari. The value counts the tests a card must pass (1: H.264 decode).
+__attribute__((visibility("default"))) const int NVEncVT_BlackwellSelfTest = 1;
+
 // registers the H.264 (avc1) and HEVC (hvc1) encoders; returns the H.264 registration's status
 __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
 {
@@ -1118,6 +1151,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
         return kVTCouldNotFindVideoEncoderErr;
     }
     gNvencvtGpu = gpu;
+    if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;
     // Not when the driver plugin was loaded from inside VTCompressionSessionCreate: VideoToolbox enumerates the Metal devices
     // while it creates a session, which loads the plugin (and so registers us) in processes without a Metal device of their
     // own (command-line tools). That session already has Apple's encoder and the next one would get ours: ffmpeg opens one
@@ -1181,6 +1215,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_RegisterDecoders(int rat
         return kVTCouldNotFindVideoDecoderErr;
     }
     gNvencvtGpu = gpu;
+    if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;
     extern OSStatus NVDecVT_Register(int rating);
     return NVDecVT_Register(rating);
 }
