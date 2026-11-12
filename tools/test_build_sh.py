@@ -1,0 +1,1625 @@
+#!/usr/bin/env python3
+"""./build.sh, the one-command build, run for real in a sandbox that imitates a Mac.
+
+build.sh is written for a tester's Mac, where it installs tools, downloads sources and runs every build script of the
+driver. None of that can happen here, so this runs the real build.sh against stand-ins and checks what it does:
+
+  * a sandbox home folder, a scratch git clone of this tree inside it, and a PATH that holds only stand-ins and the
+    basic tools (no /usr/bin): sw_vers, uname, sysctl, xcode-select, xcodebuild, xcrun, brew, python3, patch, make,
+    curl, sudo, otool, codesign, ... Each stand-in appends its arguments (and the variables that matter) to a journal.
+    git is the real one, behind a wrapper that journals; the remotes are local bare repositories reached through git's
+    url.<base>.insteadOf, so build.sh asks for the real URLs and gets the stand-ins. The stand-in Homebrew "installs" a
+    formula by creating its folder, rustup-init and cargo create toolchains, pip fills the virtual environment.
+  * in the clone, every component build script build.sh runs is replaced by a stand-in that records its arguments and
+    environment and creates the file build.sh expects; the original text stays below the stand-in's first lines, so the
+    pin comparison still reads it. The stand-in can be told to fail or to wait.
+  * the pins of the outside sources are rewritten, in the clone only, to the commits of the stand-in remotes.
+
+Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
+  doctor on a fresh Mac; deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
+  the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
+  interrupted run; two runs at once and a stale lock; paths with a space; Apple silicon and an unsupported macOS;
+  "env"; clean; docs/BUILDING.md and docs/BUILDING.es.md against the script; build/pins.sh against the scripts and
+  patch chain that consume the same sources; a static scan of build.sh for what bash 3.2 and BSD tools lack.
+
+The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
+for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
+NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
+import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
+fails = 0
+ONLY = sys.argv[1:]
+
+
+def check(name, ok, detail=""):
+    global fails
+    print(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""), flush=True)
+    fails += 0 if ok else 1
+    return ok
+
+
+def negative(name, problems):
+    """A negative control: the broken script must make the arm's check report something."""
+    return check(f"control: {name}", bool(problems), "the check found nothing wrong with the broken script")
+
+
+# ------------------------------------------------------------------------------------------------- stand-in library
+FAKE_SH = r'''#!/bin/bash
+# fake.sh <role> <path called> <args...>: the stand-in tools of tools/test_build_sh.py
+role=$1; self=$2; shift 2
+LIB=${0%/*}; SB=$NMT_SB; S=$SB/state; J=$SB/journal
+name=${self##*/}
+rec() { { printf '%s' "$1"; shift; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$J"; }
+rec "$name" "$@"
+mkwrap() {   # <path> <role> [version text]
+  mkdir -p "${1%/*}"
+  printf '#!/bin/bash\nNMT_SB=%q exec /bin/bash %q %q "$0" "$@"\n' "$SB" "$LIB/fake.sh" "$2" > "$1"; chmod 755 "$1"
+  if [ $# -ge 3 ]; then printf '%s\n' "$3" > "$1.version"; fi
+}
+triple() { case "$(cat "$S/arch")" in arm64) echo aarch64-apple-darwin ;; *) echo x86_64-apple-darwin ;; esac; }
+formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
+  local p=$SB/brew/opt/$1
+  case "$1" in
+    gpatch) mkwrap "$p/bin/gpatch" ver "GNU patch 2.8" ;;
+    ninja) mkwrap "$p/bin/ninja" ver "1.13.1" ;;
+    cmake) mkwrap "$p/bin/cmake" ver "cmake version 4.1.2" ;;
+    pkgconf) mkwrap "$p/bin/pkg-config" ver "2.5.1" ;;
+    glslang) mkwrap "$p/bin/glslangValidator" ver "Glslang Version: 11:16.0.0" ;;
+    spirv-tools) mkdir -p "$p/lib/pkgconfig"; printf 'Name: SPIRV-Tools\nVersion: 2025.4\n' > "$p/lib/pkgconfig/SPIRV-Tools.pc" ;;
+    spirv-llvm-translator) mkdir -p "$p/lib/pkgconfig"; printf 'Name: LLVMSPIRVLib\nVersion: 22.1.0\n' > "$p/lib/pkgconfig/LLVMSPIRVLib.pc"
+                           mkwrap "$p/bin/llvm-spirv" ver "LLVM version 22.1.0" ;;
+    llvm|llvm@22) mkwrap "$p/bin/llvm-config" ver "22.1.3"; mkdir -p "$p/lib"; : > "$p/lib/libclang.dylib" ;;
+    python@3.14) mkwrap "$p/bin/python3.14" py "3.14.0" ;;
+    *) return 1 ;;
+  esac
+}
+case "$role" in
+  ver) case "${1:-}" in --version|-version|-v|version) cat "$self.version" ;; esac ;;
+  uname)
+    case "${1:-}" in
+      -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
+      *) echo "Darwin 24.6.0 $(cat "$S/arch")" ;;
+    esac ;;
+  sw_vers)
+    case "${1:-}" in -productVersion) cat "$S/macos" ;; -buildVersion) echo 24G90 ;; *) printf 'ProductName:\tmacOS\nProductVersion:\t%s\n' "$(cat "$S/macos")" ;; esac ;;
+  sysctl)
+    [ "${1:-}" = -n ] && shift
+    case "${1:-}" in
+      hw.ncpu) echo 8 ;; hw.model) echo MacPro7,1 ;; hw.memsize) echo 34359738368 ;;
+      machdep.cpu.brand_string) echo "Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz" ;; *) exit 1 ;;
+    esac ;;
+  xcode-select)
+    [ -f "$S/xcode" ] || { echo "xcode-select: error: unable to get active developer directory" >&2; exit 2; }
+    case "${1:-}" in -p|--print-path) echo /Applications/Xcode.app/Contents/Developer ;; *) exit 1 ;; esac ;;
+  xcodebuild)
+    [ -f "$S/xcode" ] || { echo "xcode-select: error: tool 'xcodebuild' requires Xcode" >&2; exit 1; }
+    case "${1:-}" in -version) printf 'Xcode %s\nBuild version 17A400\n' "$(cat "$S/xcode")" ;; *) exit 1 ;; esac ;;
+  xcrun)
+    [ -f "$S/xcode" ] || { echo "xcrun: error: invalid active developer path" >&2; exit 1; }
+    case "${1:-}" in
+      --show-sdk-path) echo "$SB/sdk" ;;
+      --show-sdk-version) cat "$S/sdk" ;;
+      -f|--find) echo "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/$2" ;;
+      clang|clang++) echo "Apple clang version 17.0.0 (clang-1700.4.4.1)" ;;
+      ld) echo "@(#)PROGRAM:ld PROJECT:ld-1221.4" >&2 ;;
+      *) exit 0 ;;
+    esac ;;
+  brew)
+    case "${1:-}" in
+      --version) echo "Homebrew 4.6.3" ;;
+      --prefix) echo "$SB/brew" ;;
+      info)
+        f=${3:-}
+        case "$f" in llvm) v=$(cat "$S/brew-llvm") ;; llvm@22) [ -f "$S/brew-llvm22" ] || exit 1; v=22.1.3 ;;
+          gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
+        printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
+      install)
+        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}"
+        [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
+        formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
+        echo "==> Pouring $2" ;;
+      *) echo "stand-in brew: '$1' is not something build.sh may do" >&2; exit 1 ;;
+    esac ;;
+  py)
+    case "${1:-}" in
+      --version|-V) echo "Python $(cat "$self.version")" ;;
+      -m)
+        case "${2:-}" in
+          venv) d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
+          pip) [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
+               mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
+          *) exit 1 ;;
+        esac ;;
+      *run_all_tests.py) if [ -f "$SB/ctl/tests-fail" ]; then echo "269 passed, 1 failed, 0 skipped, 0 not run, of 270"; exit 1; fi
+                         echo "270 passed, 0 failed, 0 skipped, 0 not run, of 270" ;;
+      *) exit 0 ;;
+    esac ;;
+  pyvenv) exec /bin/bash "$LIB/fake.sh" py "$self" "$@" ;;
+  curl)
+    out=""; url=""
+    while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; *://*) url=$1 ;; esac; shift; done
+    case "$url" in file://*) src=${url#file://} ;; https://*) src=$SB/www/${url#https://} ;; *) exit 2 ;; esac
+    [ -f "$src" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+    if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi ;;
+  rustup-init)
+    case " $* " in *" --no-modify-path "*) ;; *) echo 'source "$HOME/.cargo/env"' >> "$HOME/.profile" ;; esac
+    ch=${CARGO_HOME:-$HOME/.cargo}; mkdir -p "${RUSTUP_HOME:-$HOME/.rustup}"
+    mkwrap "$ch/bin/rustup" rustup; mkwrap "$ch/bin/cargo" cargo ;;
+  rustup)
+    rh=${RUSTUP_HOME:-$HOME/.rustup}
+    case "$1 $2" in
+      "toolchain install") t=$rh/toolchains/$3-$(triple); mkwrap "$t/bin/rustc" rustc; mkwrap "$t/bin/cargo" cargo; mkdir -p "$t/lib/rustlib/$(triple)/lib" ;;
+      "target add") mkdir -p "$rh/toolchains/$4-$(triple)/lib/rustlib/$5/lib" ;;
+      *) exit 1 ;;
+    esac ;;
+  rustc)
+    t=${self%/bin/rustc}; v=${t##*/}; v=${v%%-*}
+    case "$1" in --version) echo "rustc $v (stand-in 2026-10-01)" ;; --print) echo "$t/lib/rustlib/$4/lib" ;; esac ;;
+  cargo)
+    case "${1:-}" in
+      install) root=""; ver=""; what=""
+        shift; while [ $# -gt 0 ]; do case "$1" in --root) root=$2; shift ;; --version) ver=$2; shift ;; --locked) ;; *) what=$1 ;; esac; shift; done
+        [ -n "$root" ] || root=${CARGO_HOME:-$HOME/.cargo}
+        case "$what" in bindgen-cli) mkwrap "$root/bin/bindgen" ver "bindgen $ver" ;; *) mkwrap "$root/bin/$what" ver "$what $ver" ;; esac ;;
+      fetch|--version) : ;;
+      *) exit 1 ;;
+    esac ;;
+  otool) printf '%s:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n' "${2:-x}"; cat "$S/otool-extra" 2>/dev/null ;;
+  sudo) echo "stand-in sudo: build.sh must never call sudo" >&2; exit 1 ;;
+  plain) : ;;
+  *) echo "fake.sh: unknown role $role" >&2; exit 1 ;;
+esac
+'''
+
+# The component scripts build.sh runs, with the key the stand-in uses.
+STEP_SCRIPTS = {
+    "build/build_rm620.sh": "rm", "build/build_kms620.sh": "kms", "build/build_nvrm.sh": "nvrm", "build/fb_build.sh": "fb",
+    "build/accel_build_all.sh": "accel", "build/accel_build.sh": "accel1", "build/build_agdc.sh": "agdc",
+    "kexts/NMSMN/build.sh": "nmsmn", "tools/ryzenadj-macos/build.sh": "ryzenadj", "build/build_air_dis.sh": "airdis",
+    "build/build_dlss_cache.sh": "dlss", "build/build_osver.sh": "osver", "build/build_nvk.sh": "nvk",
+    "tools/nvmtl-boost/build.sh": "boost", "build/build_vulkan_loader.sh": "vulkan", "build/build_plugin_release.sh": "plugin",
+    "build/build_plugin_dev.sh": "plugindev", "build/build_xlate_release.sh": "xlate", "build/build_nvencvt.sh": "nvencvt",
+    "build/build_primary_selector.sh": "selector", "build/package_local.sh": "package",
+}
+STEPLIB_SH = r'''#!/bin/bash
+# steplib.sh <key> <script> <args...>: a component build script's stand-in (tools/test_build_sh.py)
+key=$1; shift 2
+SB=$NMT_SB; J=$SB/journal
+mkdir -p "$SB/steps"
+n=$(ls "$SB/steps" | wc -l); n=$((n / 2 + 1)); f=$(printf '%s/steps/%03d-%s' "$SB" "$n" "$key")
+env > "$f.env"
+printf '%s\n' "$@" > "$f.args"
+{ printf 'step %s' "$key"; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$J"
+echo "stand-in for $key: started"
+if [ -f "$SB/ctl/block-$key" ]; then : > "$SB/ctl/started-$key"; while [ ! -f "$SB/ctl/release-$key" ]; do sleep 0.05; done; fi
+if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
+mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
+case $key in
+  rm) mk "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
+  kms) mk "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
+  nvrm) mk "$3/NVRM.kext/Contents/MacOS/NVRM" ;;
+  fb) mk "$2/NVRMFB.kext/Contents/MacOS/NVRMFB" ;;
+  accel) mk "$2/15/NVAccel.kext/Contents/MacOS/NVAccel"; mk "$2/26/NVAccel.kext/Contents/MacOS/NVAccel" ;;
+  accel1) mk "$2/NVAccel.kext/Contents/MacOS/NVAccel" ;;
+  agdc) mk "$2/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" ;;
+  nmsmn) mk "$1/NMSMN.kext/Contents/MacOS/NMSMN" ;;
+  ryzenadj) mk "$2/ryzenadj" ;;
+  airdis) mk "$1/nvmtl-air-dis" ;;
+  dlss) mk "$1/dlss/nm_unzstd" ;;
+  osver) mk "$1/libnvmtl_osver.dylib" ;;
+  nvk) mk "$3/libvulkan_nouveau.dylib"; mk "$3/BUILD.txt"; mkdir -p "$3/mesa" ;;
+  boost) mk "$2" ;;
+  vulkan) mk "$1/libvulkan.1.dylib" ;;
+  plugin) mk "$2/NVMTLDriver" ;;
+  plugindev) mk "$1/NVMTLDriver" ;;
+  xlate) mk "$2/libnvmtl_translate.dylib" ;;
+  nvencvt) mk "$2/libnvencvt.dylib" ;;
+  selector) mk "$1/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
+  package) mk "$3/pkgroot/SHA256SUMS" ;;
+esac
+echo "stand-in for $key: done"
+'''
+
+# Real tools the sandbox PATH offers besides the stand-ins (a Mac has each of them in /usr/bin or /bin).
+REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "ls", "ln",
+              "chmod", "date", "mktemp", "dirname", "basename", "wc", "paste", "cmp", "diff", "tee", "env", "kill", "sleep",
+              "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
+              "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more"]
+STANDINS = {"uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
+            "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo"}
+PLAIN = ["codesign", "plutil", "ditto", "md5", "xattr", "strings", "lipo", "vtool", "nm", "dwarfdump", "kmutil", "clang",
+         "clang++", "cc", "install_name_tool", "libtool", "strip", "ssh", "rsync", "scp"]
+
+TMP = pathlib.Path(os.path.realpath(tempfile.mkdtemp(prefix="nmbuildsh-")))
+LIB = TMP / "lib"
+REMOTES = TMP / "remotes"
+TPL = TMP / "template"
+GIT = shutil.which("git")
+REALPATH = {t: shutil.which(t) for t in REAL_TOOLS}
+GENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(TMP), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+
+
+def git(*args, cwd=None, check_rc=True):
+    r = subprocess.run([GIT, *map(str, args)], cwd=cwd, env=GENV, capture_output=True, text=True)
+    if check_rc and r.returncode:
+        raise RuntimeError(f"git {args}: {r.stderr}")
+    return r.stdout.strip()
+
+
+def make_repo(path, files, tags=(), bare_at=None):
+    """A git repository with one commit of <files>; returns (bare path, commit)."""
+    work = TMP / "repo-work" / path.name
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    git("init", "-q", "-b", "main", work)
+    for rel, text in files.items():
+        p = work / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    git("add", "-A", cwd=work)
+    git("commit", "-qm", f"stand-in for {path.name}", cwd=work)
+    for t in tags:
+        git("tag", "-a", "-m", t, t, cwd=work)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(path, ignore_errors=True)
+    git("clone", "-q", "--bare", work, path)
+    return path, git("rev-parse", "HEAD", cwd=work)
+
+
+MESON_BUILD = """project('mesa')
+python_version_req = '>= 3.10'
+if meson.version().version_compare('< 1.7.0')
+_glslang_preamble_version = '12.2'
+bad_bindgen = ['0.72.0', '0.73.0', '0.73.1']
+"""
+
+
+def make_remotes(root, tamper=False):
+    """Stand-ins for every remote build.sh fetches from, laid out by URL; returns {pin id: commit} and the file hashes."""
+    gh = root / "github.com"
+    commits = {}
+    salt = "tampered\n" if tamper else ""
+    # one repository holds both NVIDIA tags, as upstream does
+    work = TMP / "repo-work" / ("ogkm-t" if tamper else "ogkm")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    git("init", "-q", "-b", "main", work)
+    for ver in ("610.57.04", "620.70.06"):
+        (work / "version.mk").write_text(f"NVIDIA_VERSION = {ver}\n{salt}")
+        for d in ("src/common/sdk/nvidia/inc", "src/nvidia/arch/nvalloc/unix/include"):
+            (work / d).mkdir(parents=True, exist_ok=True)
+            (work / d / "nvos.h").write_text(f"/* {ver} */\n")
+        git("add", "-A", cwd=work)
+        git("commit", "-qm", ver, cwd=work)
+        git("tag", "-a", "-m", ver, ver, cwd=work)
+        commits["OGKM" + ver.split(".")[0]] = git("rev-parse", "HEAD", cwd=work)
+    p = gh / "NVIDIA/open-gpu-kernel-modules.git"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(p, ignore_errors=True)
+    git("clone", "-q", "--bare", work, p)
+    _, commits["MESA"] = make_repo(root / "gitlab.freedesktop.org/mesa/mesa.git",
+                                   {"meson.build": MESON_BUILD + salt, "include/vulkan/vulkan_core.h": "#define VK_HEADER_VERSION 363\n"},
+                                   tags=["mesa-26.3.0-rc3"])
+    _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.367"])
+    _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.367"])
+    _, commits["OPENGPUDOC"] = make_repo(gh / "NVIDIA/open-gpu-doc.git", {"classes/video/clc9b0.h": "/* doc */\n" + salt})
+    _, commits["RYZENADJ"] = make_repo(gh / "FlyGoat/RyzenAdj.git", {"main.c": "int main(void){return 0;}\n" + salt}, tags=["v0.19.0"])
+    www = root / "www/raw.githubusercontent.com/WebKit/WebKit"
+    sums = {}
+    for f, key in (("CMBaseObjectSPI.h", "WEBKIT_CMBASE"), ("VTVideoDecoderSPI.h", "WEBKIT_VTDEC")):
+        d = www / "3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f).write_text(f"/* {f} */\n" + salt)
+        sums[key] = hashlib.sha256((d / f).read_bytes()).hexdigest()
+    ri = {}
+    for triple in ("x86_64-apple-darwin", "aarch64-apple-darwin"):
+        d = root / "www/static.rust-lang.org/rustup/archive/1.29.3" / triple
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "rustup-init").write_text(f'#!/bin/bash\nexec /bin/bash "$NMT_LIB/fake.sh" rustup-init "$0" "$@"\n# {triple}\n')
+        ri[triple] = hashlib.sha256((d / "rustup-init").read_bytes()).hexdigest()
+    return commits, sums, ri
+
+
+def pin_value(text, name):
+    m = re.search(rf"^{name}=(.*)$", text, re.M)
+    return m.group(1).strip('"') if m else None
+
+
+def build_template():
+    """A scratch copy of this tree: component scripts replaced by stand-ins, pins pointed at the stand-in remotes."""
+    LIB.mkdir(parents=True)
+    (LIB / "fake.sh").write_text(FAKE_SH)
+    (LIB / "steplib.sh").write_text(STEPLIB_SH)
+    commits, sums, ri = make_remotes(REMOTES)
+    names = subprocess.run([GIT, "ls-files", "-z", "-c", "-o", "--exclude-standard"], cwd=ROOT, capture_output=True,
+                           env=GENV).stdout.decode().split("\0")
+    for n in names:
+        src = ROOT / n
+        if not n or not src.is_file() or n.startswith("tools/test_build_sh"):
+            continue
+        dst = TPL / n
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst, follow_symlinks=False)
+    pins = (TPL / "build/pins.sh").read_text()
+    replace = {}
+    for pid in ("OGKM620", "OGKM610", "MESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ"):
+        replace[pin_value(pins, f"NM_PIN_{pid}_COMMIT")] = commits[pid]
+    for pid in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
+        replace[pin_value(pins, f"NM_PIN_{pid}_SHA256")] = sums[pid]
+    replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_X86_64")] = ri["x86_64-apple-darwin"]
+    replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_AARCH64")] = ri["aarch64-apple-darwin"]
+    for rel in ["build/pins.sh", "nvk/MESA_BASE", *STEP_SCRIPTS]:
+        p = TPL / rel
+        t = p.read_text()
+        for old, new in replace.items():
+            t = t.replace(old, new)
+        if rel == "nvk/MESA_BASE":
+            t = commits["MESA"][:8] + "\n"
+        p.write_text(t)
+    for rel, key in STEP_SCRIPTS.items():
+        p = TPL / rel
+        p.write_text(f'#!/bin/bash\n# stand-in written by tools/test_build_sh.py; the original text below never runs\n'
+                     f'exec /bin/bash "$NMT_LIB/steplib.sh" {key} "$0" "$@"\n' + p.read_text())
+    git("init", "-q", "-b", "main", TPL)
+    git("add", "-A", cwd=TPL)
+    git("commit", "-qm", "scratch copy", cwd=TPL)
+    return commits
+
+
+class Sandbox:
+    """One imitated Mac: <dir>/home (HOME, with the checkout in home/src), <dir>/bin (PATH), <dir>/brew (Homebrew)."""
+
+    def __init__(self, name, arch="x86_64", macos="15.7.1", xcode="26.1", brew=True, formulas=(), checkout_dir="src/nvidia-macos-driver",
+                 remotes=None):
+        self.dir = TMP / "sb" / name
+        shutil.rmtree(self.dir, ignore_errors=True)
+        self.home = self.dir / "home"
+        self.bin = self.dir / "bin"
+        self.state = self.dir / "state"
+        self.journal = self.dir / "journal"
+        self.ctl = self.dir / "ctl"
+        for d in (self.home, self.bin, self.state, self.ctl, self.dir / "tmp", self.dir / "steps"):
+            d.mkdir(parents=True)
+        self.work = self.home / "nullmoth-build"
+        self.co = self.home / checkout_dir
+        self.co.parent.mkdir(parents=True, exist_ok=True)
+        git("clone", "-q", TPL, self.co)
+        (self.state / "arch").write_text(arch + "\n")
+        (self.state / "macos").write_text(macos + "\n")
+        (self.state / "sdk").write_text("26.1\n")
+        (self.state / "brew-llvm").write_text("22.1.3\n")
+        if xcode:
+            (self.state / "xcode").write_text(xcode + "\n")
+        sdk = self.dir / "sdk"
+        for f in ("System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h", "usr/lib/libkmod.a",
+                  "System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h"):
+            (sdk / f).parent.mkdir(parents=True, exist_ok=True)
+            (sdk / f).write_text("")
+        # git reaches the stand-in remotes through the real URLs
+        rem = remotes or REMOTES
+        (self.dir / "gitconfig").write_text(
+            f'[url "file://{rem}/github.com/"]\n\tinsteadOf = https://github.com/\n'
+            f'[url "file://{rem}/gitlab.freedesktop.org/"]\n\tinsteadOf = https://gitlab.freedesktop.org/\n'
+            '[user]\n\tname = tester\n\temail = tester@example.com\n[advice]\n\tdetachedHead = false\n')
+        os.symlink(rem / "www", self.dir / "www")
+        for t, p in REALPATH.items():
+            if p:
+                os.symlink(p, self.bin / t)
+        os.symlink(BASH, self.bin / "bash")
+        (self.bin / "git").write_text(f'#!/bin/bash\n{{ printf git; for a in "$@"; do printf " %q" "$a"; done; echo; }} >> {self.journal}\n'
+                                      f'exec {GIT} "$@"\n')
+        (self.bin / "git").chmod(0o755)
+        for name_, role in STANDINS.items():
+            self.wrap(self.bin / name_, role)
+        for name_ in PLAIN:
+            self.wrap(self.bin / name_, "plain")
+        self.wrap(self.bin / "python3", "py", "3.9.6")                  # macOS's own python3
+        self.wrap(self.bin / "patch", "ver", "patch 2.0-12u11-Apple")   # macOS's patch is not GNU patch
+        self.wrap(self.bin / "make", "ver", "GNU Make 3.81")
+        self.has_brew = brew
+        if brew:
+            self.wrap(self.dir / "brew/bin/brew", "brew")
+            for f in formulas:
+                self.run_tool(self.dir / "brew/bin/brew", "install", f)
+        self.journal.write_text("")
+
+    def wrap(self, path, role, version=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/bash\nNMT_SB={self.dir} exec /bin/bash {LIB}/fake.sh {role} "$0" "$@"\n')
+        path.chmod(0o755)
+        if version:
+            pathlib.Path(str(path) + ".version").write_text(version + "\n")
+
+    def run_tool(self, *argv):
+        subprocess.run([str(a) for a in argv], env=self.env(), capture_output=True, check=True)
+
+    def env(self, extra=None, home=None):
+        path = [str(self.bin)] + ([str(self.dir / "brew/bin")] if self.has_brew else [])
+        e = {"HOME": str(home or self.home), "PATH": ":".join(path), "TMPDIR": str(self.dir / "tmp"), "LANG": "C",
+             "USER": "tester", "LOGNAME": "tester", "NMT_SB": str(self.dir), "NMT_LIB": str(LIB),
+             "GIT_CONFIG_GLOBAL": str(self.dir / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        e.update(extra or {})
+        return e
+
+    def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
+        """./build.sh <args> from the checkout; returns (exit status, stdout+stderr)."""
+        argv = [BASH, script or "./build.sh", *args]
+        r = subprocess.run(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, capture_output=True, text=True,
+                           timeout=timeout)
+        return r.returncode, r.stdout + r.stderr
+
+    def popen(self, *args, extra=None):
+        return subprocess.Popen([BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+
+    def jlines(self):
+        return self.journal.read_text().splitlines() if self.journal.exists() else []
+
+    def clear(self):
+        self.journal.write_text("")
+        for p in (self.dir / "steps").iterdir():
+            p.unlink()
+
+    def steps(self):
+        """[(key, args, env)] of the component stand-ins that ran, in order."""
+        out = []
+        for p in sorted((self.dir / "steps").glob("*.env")):
+            key = p.stem.split("-", 1)[1]
+            env = dict(l.split("=", 1) for l in p.read_text().splitlines() if "=" in l)
+            args = pathlib.Path(str(p)[:-4] + ".args").read_text().splitlines()
+            out.append((key, args, env))
+        return out
+
+    def step_keys(self):
+        return [k for k, _, _ in self.steps()]
+
+    def break_script(self, old, new, count=1):
+        p = self.co / "build.sh"
+        t = p.read_text()
+        assert t.count(old) >= 1, f"broken-script control: text not found: {old}"
+        p.write_text(t.replace(old, new, count))
+
+    def listing(self, root=None, skip=()):
+        """Every path under root with its size and content hash (folders too)."""
+        root = pathlib.Path(root or self.home)
+        out = {}
+        for dp, dns, fns in os.walk(root):
+            rel = os.path.relpath(dp, root)
+            if any(rel == s or rel.startswith(s + "/") for s in skip):
+                dns[:] = []
+                continue
+            out[rel + "/"] = "dir"
+            for f in fns:
+                p = os.path.join(dp, f)
+                r = os.path.relpath(p, root)
+                if os.path.islink(p):
+                    out[r] = "link " + os.readlink(p)
+                else:
+                    out[r] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+        return out
+
+    class _Scratch:
+        def __init__(self, sb):
+            self.sb = sb
+
+        def __enter__(self):
+            self.bak = pathlib.Path(str(self.sb.dir) + ".bak")
+            shutil.rmtree(self.bak, ignore_errors=True)
+            shutil.copytree(self.sb.dir, self.bak, symlinks=True)
+            return self.sb
+
+        def __exit__(self, *a):
+            shutil.rmtree(self.sb.dir)
+            os.rename(self.bak, self.sb.dir)
+            return False
+
+    def scratch(self):
+        """with sb.scratch(): ... runs in the sandbox and puts it back as it was afterwards (for negative controls)."""
+        return Sandbox._Scratch(self)
+
+
+def diff_listing(a, b):
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def want(name):
+    return not ONLY or name in ONLY
+
+
+# ------------------------------------------------------------------------------------------------- what is expected
+ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "vulkan",
+         "plugin", "xlate", "nvencvt"]
+FRESH_MISSING = ["Xcode", "Homebrew", "GNU patch", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
+                 "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
+MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
+                      r"|python[0-9.]* -m (venv|pip)|step |sudo|git (init|fetch|clone|checkout|archive|update-ref|tag|stash|config|sparse-checkout|symbolic-ref))")
+# variables the build scripts read that name a place; they must point into the working directory (or the checkout)
+PLACE_VARS = ["OGKM", "NVRM_PRISTINE_OGKM", "NULLMOTH_BUILD_ROOT", "NM_OGKM620", "NM_OGKM620_PRISTINE", "NVK_PATH", "NVK_SYSROOT",
+              "PKG_CONFIG_PATH", "LIBCLANG_PATH", "RUSTUP_HOME", "CARGO_HOME", "NULLMOTH_RUST_BIN", "NULLMOTH_CARGO_HOME",
+              "NM_KHRONOS_URL", "NM_VULKAN_INCLUDE", "KMS_ARCHIVE", "RE", "KHDR", "KLIB", "PATH", "NM_BUILD_INFO", "MINVER"]
+SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+
+
+def doctor_items(out):
+    m = re.search(r"^doctor: \d+ thing\(s\) missing or too old:\n((?:  - .*\n?)*)", out, re.M)
+    return [l[4:] for l in m.group(1).splitlines()] if m else []
+
+
+def mutating(lines):
+    return [l for l in lines if MUTATING.match(l)]
+
+
+def under(path, roots):
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+# ------------------------------------------------------------------------------------------------- arms
+def arm_fresh():
+    """doctor on a Mac with nothing installed: names exactly what is missing, exits 1, changes nothing."""
+    if os.path.exists("/opt/homebrew/bin/brew") or os.path.exists("/usr/local/bin/brew"):
+        print("skip fresh-machine arm: this host has Homebrew in a fixed place build.sh always looks at")
+        return
+    sb = Sandbox("fresh", xcode=None, brew=False)
+
+    def problems(script_note=""):
+        before = sb.listing(sb.dir, skip=("tmp",))
+        sb.clear()
+        rc, out = sb.run("doctor")
+        p = []
+        if rc != 1:
+            p.append(f"exit {rc}, not 1")
+        items = doctor_items(out)
+        for k in FRESH_MISSING:
+            n = sum(1 for i in items if re.match(re.escape(k) + r"\b", i))
+            if n != 1:
+                p.append(f"'{k}' named {n} times in the missing list")
+        if len(items) != len(FRESH_MISSING):
+            p.append(f"{len(items)} items missing, expected {len(FRESH_MISSING)}: {items}")
+        if mutating(sb.jlines()):
+            p.append(f"doctor ran more than probes: {mutating(sb.jlines())}")
+        after = sb.listing(sb.dir, skip=("tmp",))
+        d = [x for x in diff_listing(before, after) if x not in ("journal",)]
+        if d:
+            p.append(f"doctor changed files: {d[:5]}")
+        if any(l.split()[0] in ("brew",) for l in sb.jlines()):
+            p.append("doctor ran brew")
+        return p, out
+
+    p, out = problems()
+    check("fresh Mac: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
+    with sb.scratch():
+        sb.break_script('  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR', '  else d_note "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR')
+        negative("doctor that forgets one missing tool", problems()[0])
+    rc, out = sb.run("--dry-run", "all")
+    check("fresh Mac: a dry run of everything ends without error and installs nothing", rc == 0 and not mutating(sb.jlines()),
+          f"exit {rc} {mutating(sb.jlines())[:3]} {out[-600:]}")
+
+
+DEPS_WANT = ["gpatch", "ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
+
+
+def deps_problems(sb, rc, out, before):
+    p = []
+    if rc != 0:
+        p.append(f"exit {rc}")
+    j = sb.jlines()
+    inst = [l.split()[2] for l in j if l.startswith("brew install ")]
+    if sorted(inst) != sorted(DEPS_WANT):
+        p.append(f"brew was asked for {inst}, expected exactly {DEPS_WANT}")
+    other = [l for l in j if l.startswith("brew ") and l.split()[1] not in ("--version", "info", "install", "--prefix")]
+    if other:
+        p.append(f"brew was asked for something else: {other}")
+    env = [l for l in j if l.startswith("brew-env")]
+    if not env or any("HOMEBREW_NO_AUTO_UPDATE=1" not in l or "HOMEBREW_NO_INSTALL_UPGRADE=1" not in l for l in env):
+        p.append(f"brew install ran without HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1: {env}")
+    if any(re.search(r"(^|\s)sudo(\s|$)", l) for l in j):
+        p.append("a journal entry contains sudo")
+    after = sb.listing(sb.home)
+    outside = [x for x in diff_listing(before, after) if not x.startswith("nullmoth-build/") and x != "nullmoth-build/"]
+    if outside:
+        p.append(f"written outside the working directory: {outside[:8]}")
+    for f in (".cargo", ".rustup", ".profile", ".zshrc", ".bash_profile", ".zprofile"):
+        if (sb.home / f).exists():
+            p.append(f"~/{f} was written")
+    if not (sb.work / "tools/rustup/toolchains/1.98.1-x86_64-apple-darwin/bin/rustc").exists():
+        p.append("Rust 1.98.1 is not in the working directory")
+    if not (sb.work / "tools/venv/bin/meson").exists():
+        p.append("the Python environment has no meson")
+    if not [l for l in j if l.startswith("python3 -m pip install") and "--require-hashes" in l]:
+        p.append("pip did not install with --require-hashes")
+    return p
+
+
+def arm_deps(sb):
+    before = sb.listing(sb.home)
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    p = deps_problems(sb, rc, out, before)
+    check("deps --yes installs exactly the missing formulas, Python and Rust in the working directory, no sudo, nothing outside", not p,
+          (p, out[-1500:]))
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    again = mutating(sb.jlines())
+    check("deps a second time installs nothing", rc == 0 and not again, (rc, again, out[-500:]))
+    rc, out = sb.run("doctor")
+    check("doctor after deps: everything required is present (exit 0)", rc == 0 and "doctor: everything required is present" in out,
+          out[-1500:])
+
+
+def arm_deps_control():
+    sb = Sandbox("deps-neg", formulas=("cmake",))
+    sb.break_script('[ -n "$T_CMAKE" ] || want+=( cmake )', 'want+=( cmake )')
+    before = sb.listing(sb.home)
+    rc, out = sb.run("deps", "-y")
+    negative("deps that asks Homebrew for a formula already installed", deps_problems(sb, rc, out, before))
+
+
+def noinstall_problems(sb, args, extra=None):
+    sb.clear()
+    rc, out = sb.run(*args, extra=extra)
+    p = []
+    if rc == 0:
+        p.append("exit 0")
+    m = mutating(sb.jlines())
+    if m:
+        p.append(f"installed or fetched: {m[:4]}")
+    return p, out
+
+
+def arm_noinstall():
+    sb = Sandbox("noinst")
+    p, out = noinstall_problems(sb, ["deps", "--no-install", "-y"])
+    ok = not p and "not installing (--no-install)" in out and "gpatch" in out
+    check("deps --no-install --yes: says what is missing, installs nothing, exits non-zero", ok, (p, out[-800:]))
+    p, out = noinstall_problems(sb, ["deps", "-y"], extra={"NM_NO_INSTALL": "1"})
+    check("NM_NO_INSTALL=1 in the environment does the same", not p, (p, out[-500:]))
+    (sb.dir / "nm.conf").write_text("# test\nNM_NO_INSTALL=1\n")
+    p, out = noinstall_problems(sb, ["--config", str(sb.dir / "nm.conf"), "deps", "-y"])
+    check("NM_NO_INSTALL=1 in a configuration file does the same", not p, (p, out[-500:]))
+    p, out = noinstall_problems(sb, ["--no-install", "all"])
+    check("all --no-install stops after doctor, fetches and builds nothing", not p and "--no-install was given" in out, (p, out[-500:]))
+    with sb.scratch():
+        sb.break_script('if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"', 'if false; then say "not installing (--no-install)"')
+        negative("deps that ignores --no-install", noinstall_problems(sb, ["deps", "--no-install", "-y"])[0])
+
+
+FETCH_WANT = [("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/620.70.06"),
+              ("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/610.57.04"),
+              ("https://gitlab.freedesktop.org/mesa/mesa.git", "refs/tags/mesa-26.3.0-rc3"),
+              ("https://github.com/KhronosGroup/Vulkan-Headers", "refs/tags/v1.4.367"),
+              ("https://github.com/KhronosGroup/Vulkan-Loader", "refs/tags/v1.4.367"),
+              ("https://github.com/NVIDIA/open-gpu-doc.git", "@OPENGPUDOC"),
+              ("https://github.com/FlyGoat/RyzenAdj.git", "refs/tags/v0.19.0")]
+
+
+def fetch_problems(sb, commits):
+    sb.clear()
+    rc, out = sb.run("fetch")
+    j = sb.jlines()
+    fetches = [l for l in j if l.startswith("git ") and " fetch " in l]
+    p = []
+    if rc != 0:
+        p.append(f"exit {rc}")
+    for url, ref in FETCH_WANT:
+        ref = commits["OPENGPUDOC"] if ref == "@OPENGPUDOC" else ref
+        if not any(url in l and ref in l for l in fetches):
+            p.append(f"no fetch of {ref} from {url}")
+    curls = [l for l in j if l.startswith("curl ")]
+    for f in ("CMBaseObjectSPI.h", "VTVideoDecoderSPI.h"):
+        if not any(f"raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/" in l and f in l for l in curls):
+            p.append(f"{f} not downloaded from the pinned URL")
+    pristine = sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06/version.mk"
+    if not pristine.exists() or "620.70.06" not in pristine.read_text():
+        p.append("the 620.70.06 tree was not exported")
+    mesa = sb.work / "build/build/gpu-src/mesa"
+    if not mesa.is_dir() or git("rev-parse", "HEAD", cwd=mesa, check_rc=False) != commits["MESA"]:
+        p.append("the Mesa clone is not at the pinned commit")
+    if not any(l.startswith("cargo fetch --locked") for l in j):
+        p.append("the translator's crates were not fetched (cargo fetch --locked)")
+    return p, out
+
+
+def arm_fetch(sb, commits):
+    with sb.scratch():
+        sb.break_script('fetch -q --depth 1 "$url" "+refs/tags/$ref:refs/tags/$ref"', 'fetch -q --depth 1 "$url" "+refs/heads/main:refs/tags/$ref"')
+        negative("fetch that asks for a branch instead of the pinned tag", fetch_problems(sb, commits)[0])
+    p, out = fetch_problems(sb, commits)
+    check("fetch asks for every pinned ref at its pinned URL, verifies and lays out the sources", not p, (p, out[-1200:]))
+    sb.clear()
+    rc, out = sb.run("fetch")
+    again = [l for l in sb.jlines() if (l.startswith("git ") and " fetch " in l) or l.startswith("curl ")]
+    check("fetch a second time downloads nothing", rc == 0 and not again, (rc, again[:3], out[-400:]))
+
+
+def tamper_problems(sb, extra=None, what="620.70.06"):
+    sb.clear()
+    rc, out = sb.run("fetch", extra=extra)
+    p = []
+    if rc == 0:
+        p.append("a tampered source was accepted (exit 0)")
+    if "the pin is" not in out:
+        p.append("no message naming the pin")
+    if what == "620.70.06" and (sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06").exists():
+        p.append("the tampered tree was exported anyway")
+    if what == "webkit" and (sb.work / "src/webkit-spi/CMBaseObjectSPI.h").exists():
+        p.append("the tampered header was kept")
+    return p, out
+
+
+def arm_tamper():
+    rt = TMP / "remotes-tampered"
+    make_remotes(rt, tamper=True)
+    sb = Sandbox("tamper", remotes=rt)
+    p, out = tamper_problems(sb)
+    check("fetch refuses a remote whose tag points at another commit", not p, (p, out[-600:]))
+    bare = sb.work / "src/git/open-gpu-kernel-modules.git"
+    left = git("-C", bare, "tag", "-l", check_rc=False) if bare.exists() else ""
+    check("the refused tag is not left in the local repository", "620.70.06" not in left, left)
+    sb2 = Sandbox("tamperweb")
+    p, out = tamper_problems(sb2, extra={"NM_WEBKIT_SPI_URL": f"file://{rt}/www/raw.githubusercontent.com/WebKit/WebKit/"
+                                         "3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit"},
+                             what="webkit")
+    check("fetch refuses a downloaded file whose SHA-256 is not the pin", not p, (p, out[-600:]))
+    sb3 = Sandbox("tamper-neg", remotes=rt)
+    sb3.break_script('  if [ "$got" != "$commit" ]; then', '  if false; then')
+    negative("fetch that does not compare the commit", tamper_problems(sb3)[0])
+
+
+def offline_problems(sb):
+    sb.clear()
+    rc, out = sb.run("--offline", "fetch")
+    p = []
+    if rc == 0:
+        p.append("exit 0 with nothing fetched yet")
+    if "offline" not in out:
+        p.append("the message does not say offline")
+    net = [l for l in sb.jlines() if (l.startswith("git ") and " fetch " in l) or l.startswith("curl ")]
+    if net:
+        p.append(f"went to the network: {net[:2]}")
+    return p, out
+
+
+def arm_offline(mac):
+    sb = Sandbox("offline")
+    p, out = offline_problems(sb)
+    check("--offline fetch on an empty working directory: fetches nothing, says what is missing, exits non-zero", not p, (p, out[-500:]))
+    mac.clear()
+    rc, out = mac.run("fetch", extra={"NM_OFFLINE": "1"})
+    net = [l for l in mac.jlines() if (l.startswith("git ") and " fetch " in l) or l.startswith("curl ") or l.startswith("cargo fetch")]
+    check("NM_OFFLINE=1 fetch after a fetch: verifies what is there, no network", rc == 0 and not net, (rc, net, out[-500:]))
+    mac.clear()
+    rc, out = mac.run("--offline", "build", "nvk")
+    check("--offline build nvk stops with the reason (meson downloads NVK's crates)",
+          rc != 0 and "NVK needs the network" in out and "nvk" not in mac.step_keys(), (rc, mac.step_keys(), out[-600:]))
+    sb.break_script('[ "$NM_OFFLINE" = 0 ] || die "offline, and $(pin', 'true || die "offline, and $(pin')
+    negative("fetch that ignores --offline", offline_problems(sb)[0])
+
+
+def dry_problems(sb, args):
+    before = sb.listing(sb.dir, skip=("journal",))
+    sb.journal.write_text("")
+    rc, out = sb.run(*args)
+    after = sb.listing(sb.dir, skip=("journal",))
+    p = []
+    if rc != 0:
+        p.append(f"exit {rc}")
+    d = [x for x in diff_listing(before, after) if x != "journal"]
+    if d:
+        p.append(f"files changed: {d[:6]}")
+    if mutating(sb.jlines()):
+        p.append(f"ran: {mutating(sb.jlines())[:4]}")
+    return p, out
+
+
+def arm_dryrun(mac):
+    sb = Sandbox("dry")
+    p, out = dry_problems(sb, ["--dry-run", "all"])
+    ok = not p and "rm -rf" not in out and "build_rm620.sh" in out and "brew install" in out and "git fetch" in out
+    check("--dry-run all on a Mac with nothing installed: prints the installs, fetches and builds, changes nothing", ok, (p, out[-800:]))
+    p, out = dry_problems(mac, ["-n", "--force", "build"])
+    check("-n --force build after a build: prints every step, runs none, stamps untouched", not p and "build_nvk.sh" in out, (p, out[-500:]))
+    p, out = dry_problems(mac, ["--dry-run", "-y", "clean", "all"])
+    check("--dry-run clean all deletes nothing", not p, (p, out[-300:]))
+    with mac.scratch():
+        mac.break_script('  if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi\n', '')
+        negative("a dry run that runs the commands", dry_problems(mac, ["-n", "--force", "build", "fb"])[0])
+
+
+def order_problems(sb, args, expect):
+    sb.clear()
+    rc, out = sb.run(*args)
+    keys = sb.step_keys()
+    p = []
+    if rc != 0:
+        p.append(f"exit {rc}: {out[-400:]}")
+    if keys != expect:
+        p.append(f"steps {keys}, expected {expect}")
+    return p, out
+
+
+def arm_order(mac):
+    with mac.scratch():
+        p, out = order_problems(mac, ["build", "fb"], ["rm", "fb"])
+        check("build fb builds what it needs first (rm) and nothing else", not p, p)
+    with mac.scratch():
+        mac.break_script('    kms)   C_DESC="NVIDIA\'s modeset core for macOS (libnvkms.a)"; C_DEPS="rm"',
+                         '    kms)   C_DESC="NVIDIA\'s modeset core for macOS (libnvkms.a)"; C_DEPS=""')
+        mac.break_script('ALL_COMPONENTS="rm kms ', 'ALL_COMPONENTS="kms rm ')
+        negative("a build order with kms before rm", order_problems(mac, ["build"], ORDER)[0])
+    # the real full build, kept for the arms that follow; CC and CFLAGS from the user's shell must not reach a step
+    p, out = order_problems(mac, ["build"], ORDER)
+    check("build: every component once, in the documented order", not p, (p, out[-800:]))
+    return out
+
+
+def vars_problems(sb, extra_ok=()):
+    p = []
+    w = str(sb.work)
+    co = str(sb.co)
+    brew = str(sb.dir / "brew")
+    steps = sb.steps()
+    if not steps:
+        return ["no step ran"]
+    for key, args, env in steps:
+        for v in ("CC", "CXX", "CFLAGS", "CPPFLAGS", "LDFLAGS", "OBJC"):
+            if v in env:
+                p.append(f"{key}: {v} reached the step")
+        for v in PLACE_VARS:
+            if v not in env:
+                continue
+            for part in (env[v].split(":") if v in ("PATH", "PKG_CONFIG_PATH") else [env[v]]):
+                part = part[len("file://"):] if part.startswith("file://") else part
+                if not part.startswith("/"):
+                    continue
+                roots = [w, co] + (SYSTEM_DIRS if v == "PATH" else []) + ([brew] if v in ("PKG_CONFIG_PATH", "LIBCLANG_PATH") else [])
+                if not under(part, roots):
+                    p.append(f"{key}: {v} names {part}, outside the working directory")
+        for v, val in env.items():
+            if "nvmtl-build" in val or "ogkm610" in val:
+                p.append(f"{key}: {v}={val} names the original author's folders")
+        for a in args:
+            if a.startswith("/") and not under(a, [w, co]):
+                p.append(f"{key}: argument {a} is outside the working directory and the checkout")
+    need = {"fb": ["OGKM"], "accel": ["OGKM"], "nvrm": ["NVRM_PRISTINE_OGKM"], "nvk": ["NVK_PATH", "RUSTUP_HOME", "CARGO_HOME"],
+            "xlate": ["NULLMOTH_RUST_BIN", "NULLMOTH_CARGO_HOME", "NULLMOTH_BUILD_ROOT", "NULLMOTH_BUILD_HOST"],
+            "vulkan": ["NM_KHRONOS_URL"], "nvencvt": ["NM_OGKM620", "NM_OGKM620_PRISTINE"], "rm": ["NV_VERSION"]}
+    for key, args, env in steps:
+        for v in need.get(key, []):
+            if not env.get(v):
+                p.append(f"{key}: {v} is not set")
+    return p
+
+
+def arm_vars(mac):
+    p = vars_problems(mac)
+    check("every place an existing script reads points into the working directory or the checkout, never ~/nvmtl-build",
+          not p, p[:10])
+    with mac.scratch():
+        mac.break_script("  CARGO_DIR=$TOOLS/cargo", "  CARGO_DIR=$HOME/.cargo")
+        mac.clear()
+        mac.run("build", extra={"CC": "/usr/local/bin/gcc-14"})
+        negative("CARGO_HOME pointed at ~/.cargo", vars_problems(mac))
+    with mac.scratch():
+        mac.break_script("env -u CC -u CXX", "env -u CXX")
+        mac.clear()
+        mac.run("build", "fb", extra={"CC": "/usr/local/bin/gcc-14"})
+        negative("a CC from the user's shell left in the step's environment", vars_problems(mac))
+
+
+def rebuilt(sb, *args, extra=None, edit=None):
+    if edit:
+        p = sb.co / edit[0]
+        p.write_text(p.read_text() + edit[1])
+    sb.clear()
+    rc, out = sb.run("build", *args, extra=extra)
+    return rc, sb.step_keys(), out
+
+
+def arm_stamps(mac):
+    with mac.scratch():
+        rc, keys, out = rebuilt(mac)
+        check("a second build skips every finished step", rc == 0 and keys == [] and out.count(": up to date") == len(ORDER),
+              (rc, keys, out[-400:]))
+        rc, keys, _ = rebuilt(mac, edit=("build/fb_build.sh", "# changed\n"))
+        check("a changed component script re-runs exactly that step", keys == ["fb"], keys)
+        rc, keys, _ = rebuilt(mac, edit=("kexts/NVRMFB/nvrm_layout.h", "/* changed */\n"))
+        check("a changed source file re-runs exactly its component", keys == ["fb"], keys)
+        rc, keys, _ = rebuilt(mac, extra={"FB_DEFS": "-DNM_TEST=1"})
+        check("a changed variable (FB_DEFS) re-runs exactly the step that reads it", keys == ["fb"], keys)
+        rc, keys, _ = rebuilt(mac, extra={"FB_DEFS": "-DNM_TEST=1"})
+        check("the same variable again re-runs nothing", keys == [], keys)
+        rc, keys, _ = rebuilt(mac)
+        check("the variable removed again re-runs that step", keys == ["fb"], keys)
+        pins = mac.co / "build/pins.sh"
+        t = pins.read_text()
+        pins.write_text(t.replace("NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.367\"",
+                                  "NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.367 (renamed)\""))
+        rc, keys, out = rebuilt(mac)
+        check("a changed pin re-runs exactly the steps that use that source", keys == ["vulkan"], (keys, out[-300:]))
+        pins.write_text(pins.read_text() + "# a comment\n")
+        rc, keys, _ = rebuilt(mac)
+        check("a comment added to build/pins.sh re-runs nothing", keys == [], keys)
+        rc, keys, _ = rebuilt(mac, edit=("kexts/NVRM/patches/620-color-range.patch", "\n"))
+        check("a changed NVRM patch re-runs the RM and everything built from it",
+              keys == ["rm", "kms", "nvrm", "fb", "accel", "nvencvt"], keys)
+        (mac.work / "out/osver/libnvmtl_osver.dylib").unlink()
+        rc, keys, _ = rebuilt(mac)
+        check("a missing output re-runs its step", keys == ["osver"], keys)
+        rc, keys, _ = rebuilt(mac, "--force", "agdc")
+        check("--force re-runs the named step even when it is up to date", keys == ["agdc"], keys)
+    with mac.scratch():
+        mac.break_script("""  for v in $C_VARS; do eval "say \\"var $v=\\${$v:-}\\""; done\n""", "")
+        rebuilt(mac)
+        rc, keys, _ = rebuilt(mac, extra={"FB_DEFS": "-DNM_TEST=1"})
+        negative("stamps that do not record the variables", [] if keys == ["fb"] else ["FB_DEFS change not rebuilt"])
+
+
+def failure_problems(sb, home=None):
+    (sb.ctl / "fail-agdc").write_text("")
+    sb.clear()
+    rc, out = sb.run("--force", "build", home=home)
+    (sb.ctl / "fail-agdc").unlink()
+    keys = sb.step_keys()
+    p = []
+    if rc == 0:
+        p.append("exit 0")
+    if keys != ORDER[:ORDER.index("agdc") + 1]:
+        p.append(f"steps {keys}: later steps started, or earlier ones did not run")
+    for t in ("step 'agdc' failed", "error: the compiler stopped in agdc", "full log:    ~/nullmoth-build/logs/agdc.log",
+              "report file: ~/nullmoth-build/reports/failure-agdc-"):
+        if t not in out:
+            p.append(f"the message lacks: {t}")
+    if (sb.work / "stamps/agdc").exists():
+        p.append("agdc has a stamp")
+    if (sb.work / "build.lock").exists():
+        p.append("the lock was not released")
+    return p, out
+
+
+def report_problems(sb, home_link):
+    reps = sorted((sb.work / "reports").glob("failure-agdc-*.txt"))
+    if not reps:
+        return ["no report file"]
+    t = reps[-1].read_text()
+    p = []
+    head = git("rev-parse", "HEAD", cwd=sb.co)
+    for want_ in ("step:         agdc (exit status 7)", "macOS 15.7.1", "x86_64", "xcodebuild:   Xcode 26.1", "clang:        Apple clang",
+                  f"commit: {head}", "local changes:", "NM_PIN_OGKM620_COMMIT=", "NM_PIN_RUST_VERSION=1.98.1",
+                  "error: the compiler stopped in agdc", "git version", "python:"):
+        if want_ not in t:
+            p.append(f"the report lacks: {want_}")
+    for home_ in {str(sb.home), os.path.realpath(sb.home), str(home_link)}:
+        if home_ in t:
+            p.append(f"the report names the home folder {home_}")
+    if "tester" in t:
+        p.append("the report names the account")
+    return p
+
+
+def arm_failure(mac):
+    link = mac.dir / "homelink"
+    if not link.exists():
+        os.symlink(mac.home, link)
+    with mac.scratch():
+        p, out = failure_problems(mac, home=link)
+        check("a failing step stops the run: later steps do not start, the message names the step, its log and the report", not p,
+              (p, out[-1200:]))
+        p = report_problems(mac, link)
+        check("the report file has machine, tools, commit, changes, pins, step and log tail, and no home path or account", not p, p)
+        (mac.co / "kexts/NVRMFB/nvrm_layout.h").write_text("/* local change */\n")
+        failure_problems(mac, home=link)
+        reps = sorted((mac.work / "reports").glob("failure-agdc-*.txt"))
+        t = reps[-1].read_text() if reps else ""
+        check("the report lists the checkout's local changes", "local changes: 1 file(s)" in t and "kexts/NVRMFB/nvrm_layout.h" in t,
+              t[-400:])
+    with mac.scratch():
+        mac.break_script('  CUR_STEP=""\n  exit 1\n}', '  CUR_STEP=""\n  return 0\n}')
+        negative("a failed step that does not stop the run", failure_problems(mac, home=link)[0])
+    with mac.scratch():
+        mac.break_script("tilde() {   # the home folder written as ~ (report files and summaries a tester may post)\n",
+                         "tilde() { cat; return 0\n")
+        failure_problems(mac, home=link)
+        negative("a report that keeps the home path", report_problems(mac, link))
+
+
+def wait_for(path, timeout=60):
+    t0 = time.time()
+    while not path.exists():
+        if time.time() - t0 > timeout:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def interrupt_problems(sb):
+    (sb.ctl / "block-fb").write_text("")
+    sb.clear()
+    pr = sb.popen("--force", "build", "fb")
+    p = []
+    if not wait_for(sb.ctl / "started-fb"):
+        pr.kill()
+        return ["the fb step never started"], ""
+    os.killpg(pr.pid, signal.SIGINT)
+    try:
+        out, _ = pr.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        os.killpg(pr.pid, signal.SIGKILL)
+        return ["build.sh did not stop after Ctrl-C"], ""
+    for f in ("block-fb", "started-fb"):
+        (sb.ctl / f).unlink()
+    if pr.returncode == 0:
+        p.append("exit 0 after an interrupt")
+    if (sb.work / "stamps/fb").exists():
+        p.append("the interrupted step has a stamp")
+    if (sb.work / "build.lock").exists():
+        p.append("the lock is still there")
+    if "interrupted" not in out:
+        p.append("no message that it was interrupted")
+    return p, out
+
+
+def arm_interrupt(mac):
+    with mac.scratch():
+        p, out = interrupt_problems(mac)
+        check("Ctrl-C in a step: non-zero exit, no stamp for that step, lock released", not p, (p, out[-600:]))
+        mac.clear()
+        rc, out = mac.run("build", "fb")
+        check("the next run builds the interrupted step again", rc == 0 and mac.step_keys() == ["fb"], (rc, mac.step_keys()))
+    with mac.scratch():
+        mac.break_script("release_lock() {\n", "release_lock() { return 0\n")
+        negative("an interrupt that leaves the lock", interrupt_problems(mac)[0])
+
+
+def concurrent_problems(sb):
+    (sb.ctl / "block-nmsmn").write_text("")
+    sb.clear()
+    a = sb.popen("--force", "build", "nmsmn")
+    p = []
+    if not wait_for(sb.ctl / "started-nmsmn"):
+        a.kill()
+        return ["the first run never started its step"]
+    rc, out = sb.run("--force", "build", "airdis")
+    (sb.ctl / "release-nmsmn").write_text("")
+    a_out, _ = a.communicate(timeout=120)
+    for f in ("block-nmsmn", "started-nmsmn", "release-nmsmn"):
+        (sb.ctl / f).unlink()
+    if rc == 0:
+        p.append("the second run went ahead")
+    if "another build.sh run (pid" not in out:
+        p.append("the second run does not name the first")
+    if "airdis" in sb.step_keys():
+        p.append("the second run started a step")
+    if a.returncode != 0:
+        p.append(f"the first run failed: {a_out[-300:]}")
+    return p
+
+
+def arm_concurrent(mac):
+    with mac.scratch():
+        p = concurrent_problems(mac)
+        check("two runs at once: the second stops at the lock and names the first; the first finishes", not p, p)
+        lock = mac.work / "build.lock"
+        lock.mkdir()
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (lock / "owner").write_text(f"pid={dead.pid}\nstarted=x\ncommand=build\n")
+        rc, out = mac.run("build", "airdis")
+        check("a lock left by a run that is gone is taken over with a note", rc == 0 and "taking over the lock" in out
+              and not lock.exists(), (rc, out[-400:]))
+    with mac.scratch():
+        mac.break_script('while ! mkdir "$l" 2>/dev/null; do', 'while ! mkdir -p "$l" 2>/dev/null; do')
+        mac.run("build")
+        negative("a lock that does not exclude", concurrent_problems(mac))
+
+
+def space_problems(sb, args, extra=None, created=None):
+    sb.clear()
+    rc, out = sb.run(*args, extra=extra)
+    p = []
+    if rc != 2:
+        p.append(f"exit {rc}, not 2")
+    if "space" not in out:
+        p.append("the message does not say why (space)")
+    if created and os.path.exists(created):
+        p.append(f"{created} was created")
+    if sb.step_keys() or mutating(sb.jlines()):
+        p.append("something ran")
+    return p, out
+
+
+def arm_space():
+    sb = Sandbox("space")
+    wd = str(sb.home / "my build")
+    p, out = space_problems(sb, ["--workdir", wd, "fetch"], created=wd)
+    check("a working directory with a space is refused at the start, nothing created", not p, (p, out[-400:]))
+    p, out = space_problems(sb, ["--dry-run", "build"], extra={"NM_WORK": wd})
+    check("the same through NM_WORK, also for a dry run", not p, (p, out[-400:]))
+    rc, out = sb.run("--workdir", wd, "doctor")
+    check("doctor reports it as REFUSED and exits 1", rc == 1 and "REFUSED" in out and "space" in out, out[-400:])
+    sb2 = Sandbox("space-co", checkout_dir="my src/nvidia-macos-driver")
+    p, out = space_problems(sb2, ["fetch"], created=str(sb2.work))
+    check("a checkout path with a space is refused at the start", not p and "checkout path" in out, (p, out[-400:]))
+    sb.break_script('  case "$NM_WORK" in *[$ws]*) path_problem', '  case "$NM_WORK" in *[@]*) path_problem')
+    negative("a working directory with a space accepted", space_problems(sb, ["--dry-run", "build"], extra={"NM_WORK": wd})[0])
+
+
+def arm_deps_ok(sb, rc):
+    j = sb.jlines()
+    return rc == 0 and any("aarch64-apple-darwin/rustup-init" in l for l in j if l.startswith("curl ")) and \
+        (sb.work / "tools/rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc").exists()
+
+
+def arm_hosts(commits):
+    sb = Sandbox("arm", arch="arm64", formulas=DEPS_WANT + ["cmake"])
+    with sb.scratch():
+        sb.break_script("arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin", "arm64|aarch64) HOST_TRIPLE=x86_64-apple-darwin")
+        sb.clear()
+        rc, out = sb.run("deps", "-y")
+        negative("an Apple-silicon Mac taken for an Intel one", [] if arm_deps_ok(sb, rc) else ["no aarch64 rustup"])
+    rc, out = sb.run("doctor")
+    check("Apple silicon: doctor says it is supported", "Apple silicon: supported" in out, out[:600])
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    check("Apple silicon: deps installs the aarch64 rustup and toolchain", arm_deps_ok(sb, rc), (rc, out[-500:]))
+    sb.run("fetch")
+    sb.clear()
+    rc, out = sb.run("build", "xlate")
+    st = {k: e for k, _, e in sb.steps()}
+    check("Apple silicon: the translator build gets the aarch64-hosted 1.98.1 toolchain (it cross-builds x86_64)",
+          rc == 0 and st.get("xlate", {}).get("NULLMOTH_RUST_BIN", "").endswith("toolchains/1.98.1-aarch64-apple-darwin/bin"),
+          (rc, st.get("xlate", {}).get("NULLMOTH_RUST_BIN"), out[-400:]))
+
+    def old_problems(s):
+        p = []
+        rc, out = s.run("doctor")
+        if rc != 1 or "macOS 14.7.1" not in out or "15.6" not in out:
+            p.append(f"doctor: exit {rc}, {out[:300]}")
+        for args in (["build"], ["deps", "-y"], ["all"]):
+            s.clear()
+            rc, out = s.run(*args)
+            if rc != 2 or "macOS 14.7.1" not in out:
+                p.append(f"{args}: exit {rc}: {out[-200:]}")
+            if s.step_keys() or mutating(s.jlines()):
+                p.append(f"{args}: something ran")
+        return p
+
+    old = Sandbox("old", macos="14.7.1")
+    p = old_problems(old)
+    check("macOS older than 15.6 (Xcode 26 cannot run): doctor exits 1, build, deps and all stop at the start with the reason", not p, p)
+    old.break_script('  if mac_too_old; then', '  if false; then')
+    negative("an old macOS accepted", old_problems(old))
+    lx = Sandbox("linux")
+    (lx.state / "os").write_text("Linux\n")
+    rc, out = lx.run("build")
+    check("not a Mac: build stops at the start and says what works there", rc == 2 and "building needs a Mac" in out, out[-300:])
+    lx.break_script('is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac', 'true || die "building needs a Mac')
+    rc, out = lx.run("build")
+    negative("a build that goes ahead on another system", [] if rc == 2 and "building needs a Mac" in out else ["went ahead"])
+
+
+ENV_COMPARE = {"fb": ["OGKM", "NULLMOTH_BUILD_ROOT", "MACOSX_DEPLOYMENT_TARGET", "JOBS", "PYTHONDONTWRITEBYTECODE"],
+               "nvrm": ["NVRM_PRISTINE_OGKM"], "rm": ["NV_VERSION"],
+               "nvk": ["NVK_PATH", "PKG_CONFIG_PATH", "LIBCLANG_PATH", "NVK_JOBS", "RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"],
+               "xlate": ["NULLMOTH_RUST_VERSION", "NULLMOTH_RUST_BIN", "NULLMOTH_CARGO_HOME", "NULLMOTH_BUILD_HOST", "PATH"],
+               "vulkan": ["NM_KHRONOS_URL"], "nvencvt": ["NM_OGKM620", "NM_OGKM620_PRISTINE"]}
+
+
+def env_problems(sb, steps):
+    rc, out = sb.run("env")
+    p = []
+    if rc != 0:
+        return [f"env: exit {rc}"]
+    f = sb.dir / "env.out"
+    f.write_text(out)
+    names = sorted(set(re.findall(r"^export ([A-Za-z_][A-Za-z0-9_]*)=", out, re.M)))
+    script = "set -eu\n. " + str(f) + "\n" + "".join(f'printf "%s=%s\\n" {n} "${n}"\n' for n in names)
+    r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "HOME": str(sb.home)})
+    if r.returncode:
+        return [f"bash cannot evaluate the env output: {r.stderr[-300:]}"]
+    got = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+    for key, vs in ENV_COMPARE.items():
+        env = steps.get(key)
+        if env is None:
+            p.append(f"no {key} step to compare with")
+            continue
+        for v in vs:
+            if got.get(v) != env.get(v):
+                p.append(f"{v}: env prints {got.get(v)!r}, the {key} step got {env.get(v)!r}")
+    return p
+
+
+def arm_env(mac):
+    steps = {k: e for k, _, e in mac.steps()}
+    p = env_problems(mac, steps)
+    check("env prints export lines bash can evaluate, with the values the steps receive", not p, p)
+    with mac.scratch():
+        mac.break_script('say "export OGKM=$(q "$OGKM620")"', 'say "export OGKM=$(q "$PRISTINE")"')
+        negative("env that prints another OGKM than the build uses", env_problems(mac, steps))
+
+
+def arm_test_cmd(mac):
+    def problems(s):
+        (s.ctl / "tests-fail").write_text("")
+        s.clear()
+        rc, out = s.run("test")
+        (s.ctl / "tests-fail").unlink()
+        return [] if rc != 0 and "1 failed" in out else [f"exit {rc} with a failing test"]
+    rc, out = mac.run("test")
+    check("test runs the pin check and the host tests with the venv's Python", rc == 0 and "pin ok" in out and
+          any("tools/run_all_tests.py" in l and l.startswith("python3") for l in mac.jlines()), (rc, out[-400:]))
+    check("test exits non-zero when a host test fails", not problems(mac), out[-300:])
+    with mac.scratch():
+        mac.break_script('  case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac\n', "")
+        mac.break_script('| tee "$CUR_LOG" || rc=$?', '| tee "$CUR_LOG" || true')
+        negative("test that ignores a failing host test", problems(mac))
+
+
+def arm_package(mac):
+    def problems(s):
+        p = []
+        s.clear()
+        rc, out = s.run("--accel", "15", "--base-package", str(s.dir), "package")
+        if rc == 0 or "package" in s.step_keys():
+            p.append("a package without both NVAccel builds was staged")
+        return p
+    rc, out = mac.run("package")
+    check("package without a base package stops and says why", rc == 2 and "base" in out and "nullmoth-runtime-check" in out, out[-300:])
+    check("package with only one NVAccel flavour is refused", not problems(mac))
+    with mac.scratch():
+        mac.clear()
+        rc, out = mac.run("--base-package", str(mac.dir / "brew"), "package")
+        st = [(k, a) for k, a, _ in mac.steps()]
+        ok = rc == 0 and st and st[-1][0] == "package" and st[-1][1][1:] == [str(mac.work / "out"), str(mac.work / "package")]
+        ok = ok and "sudo env CHECK=1 ./install.sh" in out and not any(l.startswith("sudo") for l in mac.jlines())
+        check("package stages from a base package and prints the install command without running it", ok, (rc, st[-1:], out[-600:]))
+    with mac.scratch():
+        mac.break_script('[ "$NM_ACCEL" = both ] || die', 'true || die')
+        negative("a package with one NVAccel flavour", problems(mac))
+
+
+def arm_clean(mac):
+    def outside_problems(s):
+        keep = s.dir / "elsewhere/build/rm620"
+        keep.mkdir(parents=True, exist_ok=True)
+        (keep / "x").write_text("x")
+        s.run("clean", extra={"NULLMOTH_BUILD_ROOT": str(s.dir / "elsewhere")})
+        return [] if (keep / "x").exists() else ["a folder outside the working directory was deleted"]
+    with mac.scratch():
+        rc, out = mac.run("clean")
+        w = mac.work
+        ok = rc == 0 and not (w / "out").exists() and not (w / "stamps").exists() and (w / "src").exists() and (w / "tools/venv").exists()
+        check("clean removes outputs, stamps and logs and keeps sources and tools", ok, (rc, out[-300:]))
+        rc, out = mac.run("clean", "all")
+        check("clean all without --yes and without a terminal deletes nothing", "nothing deleted" in out and (w / "src").exists(), out[-300:])
+        rc, out = mac.run("-y", "clean", "all")
+        left = sorted(os.listdir(w))
+        check("clean all --yes leaves only the marker", rc == 0 and left == [".nullmoth-build-workdir"], left)
+        p = outside_problems(mac)
+        check("clean never deletes outside the working directory (NULLMOTH_BUILD_ROOT elsewhere)", not p, p)
+        other = mac.home / "notours"
+        other.mkdir()
+        (other / "keep").write_text("x")
+        rc, out = mac.run("--workdir", str(other), "clean")
+        check("clean refuses a folder build.sh did not make", rc != 0 and (other / "keep").exists() and ".nullmoth-build-workdir" in out, out[-300:])
+    with mac.scratch():
+        mac.break_script('    in_workdir "$p" || die "refusing to delete $p', '    true || die "refusing to delete $p')
+        negative("clean that deletes outside the working directory", outside_problems(mac))
+
+
+# ------------------------------------------------------------------------------------------------- pins against their consumers
+def read_pins(text):
+    return {m.group(1): m.group(2).strip('"') for m in re.finditer(r"^(NM_PIN_[A-Z0-9_]+)=(.*)$", text, re.M)}
+
+
+def pin_expectations(pins):
+    """(pin, file, text the file must contain): every place in the repository that states the same number."""
+    p = pins
+    c8 = p["NM_PIN_MESA_COMMIT"][:8]
+    wk = f"https://raw.githubusercontent.com/WebKit/WebKit/{p['NM_PIN_WEBKIT_COMMIT']}/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit/"
+    return [
+        ("NM_PIN_OGKM620_REF", "build/build_rm620.sh", "V=${NV_VERSION:-%s}" % p["NM_PIN_OGKM620_REF"]),
+        ("NM_PIN_OGKM620_REF", "build/build_kms620.sh", "V=${NV_VERSION:-%s}" % p["NM_PIN_OGKM620_REF"]),
+        ("NM_PIN_OGKM620_REF", "build/build_nvrm.sh", "NVRM_PRISTINE_OGKM=<pristine %s tree>" % p["NM_PIN_OGKM620_REF"]),
+        ("NM_PIN_OGKM620_REF", "tools/test_patch_chain.sh", "open-gpu-kernel-modules %s tree" % p["NM_PIN_OGKM620_REF"]),
+        ("NM_PIN_OGKM610_REF", "build/build_nvk.sh", "<open-gpu-kernel-modules %s tree>" % p["NM_PIN_OGKM610_REF"]),
+        ("NM_PIN_OGKM610_REF", "build/build_nvencvt.sh", "open-gpu-kernel-modules.git %s " % p["NM_PIN_OGKM610_REF"]),
+        ("NM_PIN_OGKM610_REF", "vendor/nvenc/SOURCE", "open-gpu-kernel-modules %s" % p["NM_PIN_OGKM610_REF"]),
+        ("NM_PIN_OGKM620_URL", "build/build_nvencvt.sh", p["NM_PIN_OGKM620_URL"]),
+        ("NM_PIN_MESA_COMMIT", "nvk/MESA_BASE", c8),
+        ("NM_PIN_MESA_COMMIT", "build/build_nvk.sh", f"2.9: {c8}, {p['NM_PIN_MESA_REF']}"),
+        ("NM_PIN_MESA_COMMIT", "nvk/nvk-mesa-26.3.0.patch", f"{p['NM_PIN_MESA_REF'].replace('mesa-', '')} (nvk/MESA_BASE, {c8})"),
+        ("NM_PIN_VKLOADER_REF", "build/build_vulkan_loader.sh", "TAG=" + p["NM_PIN_VKLOADER_REF"]),
+        ("NM_PIN_VKHEADERS_REF", "build/build_vulkan_loader.sh", "TAG=" + p["NM_PIN_VKHEADERS_REF"]),
+        ("NM_PIN_VKLOADER_COMMIT", "build/build_vulkan_loader.sh", "LOADER_SHA=" + p["NM_PIN_VKLOADER_COMMIT"]),
+        ("NM_PIN_VKHEADERS_COMMIT", "build/build_vulkan_loader.sh", "HEADERS_SHA=" + p["NM_PIN_VKHEADERS_COMMIT"]),
+        ("NM_PIN_VKLOADER_URL", "build/build_vulkan_loader.sh", p["NM_PIN_VKLOADER_URL"].rsplit("/", 1)[0]),
+        ("NM_PIN_OPENGPUDOC_COMMIT", "build/build_nvencvt.sh", f"{p['NM_PIN_OPENGPUDOC_URL']} {p['NM_PIN_OPENGPUDOC_COMMIT']} "),
+        ("NM_PIN_OPENGPUDOC_COMMIT", "vendor/nvenc/SOURCE", "open-gpu-doc " + p["NM_PIN_OPENGPUDOC_COMMIT"]),
+        ("NM_PIN_WEBKIT_COMMIT", "build/build_nvencvt.sh", wk),
+        ("NM_PIN_WEBKIT_COMMIT", "vendor/nvenc/SOURCE", "at " + p["NM_PIN_WEBKIT_COMMIT"]),
+        ("NM_PIN_RYZENADJ_REF", "tools/ryzenadj-macos/build.sh", "TAG=" + p["NM_PIN_RYZENADJ_REF"]),
+        ("NM_PIN_RYZENADJ_COMMIT", "tools/ryzenadj-macos/build.sh", "COMMIT=" + p["NM_PIN_RYZENADJ_COMMIT"]),
+        ("NM_PIN_RUST_VERSION", "build/build_xlate_release.sh", "RV=${NULLMOTH_RUST_VERSION:-%s}" % p["NM_PIN_RUST_VERSION"]),
+        ("NM_PIN_TOOL_LLVM_MAJOR", "build/build_nvk.sh", "(LLVM %s.1.x)" % p["NM_PIN_TOOL_LLVM_MAJOR"]),
+    ]
+
+
+def pin_problems(pins, read):
+    p = []
+    for name, rel, text in pin_expectations(pins):
+        if text not in read(rel):
+            p.append(f"{name}={pins[name]}: {rel} does not say {text!r}")
+    for key in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
+        url = pins[f"NM_PIN_{key}_URL"]
+        if not url.startswith(f"https://raw.githubusercontent.com/WebKit/WebKit/{pins['NM_PIN_WEBKIT_COMMIT']}/"):
+            p.append(f"NM_PIN_{key}_URL does not name the pinned WebKit commit")
+    for pid in pins["NM_PIN_SOURCES"].split():
+        for part in ("NAME", "URL", "MIRROR"):
+            if f"NM_PIN_{pid}_{part}" not in pins:
+                p.append(f"source {pid} has no {part}")
+        if not (f"NM_PIN_{pid}_COMMIT" in pins or f"NM_PIN_{pid}_SHA256" in pins):
+            p.append(f"source {pid} has neither a commit nor a SHA-256 to verify")
+        v = pins.get(f"NM_PIN_{pid}_COMMIT") or pins.get(f"NM_PIN_{pid}_SHA256")
+        if v and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v):
+            p.append(f"source {pid}: {v} is not a full commit id or SHA-256")
+    return p
+
+
+def arm_pins():
+    text = (ROOT / "build/pins.sh").read_text()
+    pins = read_pins(text)
+    cache = {}
+
+    def read(rel):
+        if rel not in cache:
+            cache[rel] = (ROOT / rel).read_text(errors="replace")
+        return cache[rel]
+    p = pin_problems(pins, read)
+    check("every pin in build/pins.sh equals what the scripts, the patch chain and vendor/nvenc/SOURCE that use it state", not p, p)
+    caught = 0
+    exps = pin_expectations(pins)
+    for name in sorted({e[0] for e in exps}):
+        bad = dict(pins)
+        v = bad[name]
+        i = min(3, len(v) - 1)
+        bad[name] = v[:i] + ("x" if v[i] != "x" else "y") + v[i + 1:]
+        if pin_problems(bad, read):
+            caught += 1
+        else:
+            check(f"control: a changed {name} is caught", False)
+    check(f"control: each of the {len({e[0] for e in exps})} compared pins, changed by one character, is caught",
+          caught == len({e[0] for e in exps}))
+    bad = dict(cache)
+    bad["build/build_xlate_release.sh"] = read("build/build_xlate_release.sh").replace(
+        "RV=${NULLMOTH_RUST_VERSION:-%s}" % pins["NM_PIN_RUST_VERSION"], "RV=${NULLMOTH_RUST_VERSION:-1.99.0}")
+    negative("a consuming script that moved to another Rust", pin_problems(pins, lambda r: bad.get(r) or read(r)))
+
+
+def arm_pins_script():
+    """build.sh's own comparison (doctor) reports a pin that its consumer contradicts."""
+    sb = Sandbox("pins")
+    rc, out = sb.run("doctor")
+    check("doctor compares the pins and finds them in agreement", "pin FAIL" not in out and out.count("pin ok") >= 13, out[:1500])
+    p = sb.co / "build/build_vulkan_loader.sh"
+    t = p.read_text()
+    p.write_text(re.sub(r"LOADER_SHA=[0-9a-f]{40}", "LOADER_SHA=" + "0" * 40, t))
+    rc, out = sb.run("doctor")
+    rc2, out2 = sb.run("--dry-run", "build", "vulkan")
+    check("a script that disagrees with its pin: doctor says pin FAIL and exits 1, build stops before any step",
+          rc == 1 and "pin FAIL  Vulkan-Loader commit" in out and rc2 != 0 and "disagree" in out2, (rc, rc2, out2[-300:]))
+    p.write_text(t)
+    sb.break_script('  pin_agree "Vulkan-Loader commit"', '  : pin_agree "Vulkan-Loader commit"')
+    p.write_text(re.sub(r"LOADER_SHA=[0-9a-f]{40}", "LOADER_SHA=" + "0" * 40, t))
+    rc, out = sb.run("doctor")
+    negative("a pin check that skips the loader commit", ["doctor did not say pin FAIL"] if "pin FAIL" not in out else [])
+
+
+# ------------------------------------------------------------------------------------------------- static scan
+# (pattern, what, a line that must be caught)
+SCAN = [
+    (r"\b(declare|local|typeset)\s+-[a-zA-Z]*A", "associative arrays (bash 4)", "declare -A map"),
+    (r"\b(declare|local|typeset)\s+-[a-zA-Z]*n\b", "name references (bash 4.3)", "local -n ref=x"),
+    (r"\b(declare|typeset)\s+-[a-zA-Z]*g", "declare -g (bash 4.2)", "declare -g X=1"),
+    (r"\b(mapfile|readarray)\b", "mapfile/readarray (bash 4)", "mapfile -t lines < f"),
+    (r"\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(,,?|\^\^?)\}", "case conversion (bash 4)", 'y=${x,,}'),
+    (r"\$\{[A-Za-z_][A-Za-z0-9_]*@[QEPAaKkUuL]\}", "${x@Q} (bash 4.4)", 'echo ${x@Q}'),
+    (r"\$\{[A-Za-z_][A-Za-z0-9_]*\[-[0-9]+\]\}", "negative array index (bash 4.3)", 'echo ${a[-1]}'),
+    (r"&>>", "&>> (bash 4)", "cmd &>> log"),
+    (r"\|&", "|& (bash 4)", "cmd |& tee x"),
+    (r"\bcoproc\b", "coproc (bash 4)", "coproc cat"),
+    (r";;&|;&\s*$", "case fall-through (bash 4)", "  a) x ;&"),
+    (r"\{[A-Za-z_][A-Za-z0-9_]*\}[<>]", "{fd}> allocation (bash 4.1)", "exec {fd}>file"),
+    (r"\$EPOCH(SECONDS|REALTIME)|\bwait -n\b|printf[^|]*%\([^)]*\)T|\bshopt -s globstar", "bash 4/5 builtins", "wait -n"),
+    (r"\[\[ -v ", "[[ -v (bash 4.2)", "[[ -v X ]]"),
+    (r"\bsed\s+(-[a-zA-Z]*\s+)*-i(\s+[^'\"]|\s*$)", "sed -i without a suffix argument (BSD sed needs one)", "sed -i s/a/b/ f"),
+    (r"\bsed\s+(-[a-zA-Z]*\s+)*-r\b", "sed -r (BSD: -E)", "sed -r 's/a+//'"),
+    (r"\breadlink\s+-[a-zA-Z]*f", "readlink -f (BSD lacks it)", "readlink -f x"),
+    (r"\b(sha256sum|md5sum|sha1sum)\b", "GNU checksum tools (macOS: shasum)", "sha256sum f"),
+    (r"\bnproc\b", "nproc (macOS: sysctl -n hw.ncpu)", "n=$(nproc)"),
+    (r"(^|[\s;|&(])timeout\s+[0-9]", "timeout (not on macOS)", "timeout 5 cmd"),
+    (r"\bgrep\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*P", "grep -P (BSD lacks it)", "grep -P '\\d' f"),
+    (r"\bxargs\s+(-[a-zA-Z0-9]*\s+)*-[a-zA-Z]*r", "xargs -r (BSD lacks it)", "xargs -r rm"),
+    (r"\bstat\s+(-[a-zA-Z]*\s+)*-c\b|\bstat\s+--", "GNU stat -c", "stat -c %s f"),
+    (r"\bdate\s+(-[a-zA-Z]*\s+)*-d\b|\bdate\s+--date", "GNU date -d", "date -d yesterday"),
+    (r"\bsort\s+(-[a-zA-Z]*\s+)*-[a-zA-Z]*V", "sort -V", "sort -V list"),
+    (r"\bfind\b[^|]*-printf", "find -printf", "find . -printf '%p'"),
+    (r"\b(cp|mv|ln|rm|mkdir|tar|grep|sed|head|tail|mktemp|cut)\s+--[a-z]", "GNU long options of core tools", "cp --parents a b"),
+    (r"\bhead\s+-n\s*-[0-9]|\btail\s+-n\s*\+0", "head -n -N", "head -n -2 f"),
+    (r"\bdu\s+(-[a-zA-Z]*\s+)*-b\b", "du -b", "du -b x"),
+    (r"\becho\s+-e\b", "echo -e (not portable)", "echo -e 'a\\n'"),
+]
+
+
+def scan_problems(files):
+    p = []
+    for f, text in files.items():
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            code = re.sub(r"\s#\s.*$", "", line)
+            for rx, what, _ in SCAN:
+                if re.search(rx, code):
+                    p.append(f"{f}:{n}: {what}: {line.strip()[:120]}")
+    return p
+
+
+def arm_scan():
+    names = ["build.sh", "build/pins.sh", "build/local_build_host.sh", "build/package_local.sh", "build/build_plugin_dev.sh"]
+    bs = (ROOT / "build.sh").read_text()
+    sourced = re.findall(r"^\s*(?:source|\.)\s+(\S+)", bs, re.M)
+    check("build.sh sources no other file (build/pins.sh and the configuration file are read as data)", not sourced, sourced)
+    files = {n: (ROOT / n).read_text() for n in names}
+    p = scan_problems(files)
+    check("build.sh and its helpers use nothing that bash 3.2 or the BSD tools of macOS lack", not p, p)
+    for rx, what, sample in SCAN:
+        if not scan_problems({"control": sample}):
+            check(f"control: the scan catches {what}", False, sample)
+    check(f"control: each of the {len(SCAN)} scan patterns catches its example", all(scan_problems({"c": s}) for _, _, s in SCAN))
+    for n in names:
+        r = subprocess.run([BASH, "-n", str(ROOT / n)], capture_output=True, text=True)
+        check(f"{BASH} -n {n}", r.returncode == 0, r.stderr)
+    bad = TMP / "broken.sh"
+    bad.write_text("if true; then\n  echo x\nfi fi\n")
+    r = subprocess.run([BASH, "-n", str(bad)], capture_output=True, text=True)
+    check("control: bash -n rejects a broken script", r.returncode != 0)
+
+
+# ------------------------------------------------------------------------------------------------- documents
+def script_names(text):
+    """The commands, options and settable variables build.sh defines (from its text)."""
+    cmds = set(re.search(r'case "\$CMD" in ([a-z|]+)\) ;;', text).group(1).split("|"))
+    main = text[text.index("main() {"):]
+    loop = main[main.index("while [ $# -gt 0 ]"):main.index("  done")]
+    opts = set()
+    for lab in re.findall(r"^\s*([-\w|=*\[\]0-9]+)\)", loop, re.M):
+        for o in lab.split("|"):
+            o = o.split("=")[0].rstrip("*")
+            if re.fullmatch(r"-{1,2}[a-z][a-z-]*", o):
+                opts.add(o)
+    vars_ = set()
+    for name in ("OPTION_VARS", "LOCATION_VARS", "SCRIPT_VARS"):
+        vars_ |= set(re.search(rf'^{name}="([^"]*)"', text, re.M).group(1).split())
+    vars_.add("NM_CONFIG")
+    # and what "./build.sh env" exports besides them (set by build.sh for the scripts)
+    env = text[text.index("print_env() {"):text.index("# ------", text.index("print_env() {"))]
+    vars_ |= set(re.findall(r'say "export ([A-Z_][A-Z0-9_]*)=', env))
+    comps = set(re.search(r'^ALL_COMPONENTS="([^"]*)"', text, re.M).group(1).split())
+    comps |= set(re.search(r'^EXTRA_COMPONENTS="([^"]*)"', text, re.M).group(1).split())
+    return cmds, opts, vars_, comps
+
+
+def doc_names(text):
+    """The commands, options and variables a document lists in its reference tables (sections marked <!-- reference -->)."""
+    cmds, opts, vars_, comps = set(), set(), set(), set()
+    for block in re.findall(r"<!-- reference: (\w+) -->(.*?)<!-- end -->", text, re.S):
+        kind, body = block
+        for row in re.findall(r"^\|(.*)\|\s*$", body, re.M):
+            cells = re.split(r"(?<!\\)\|", row)   # a cell may hold an escaped \|
+            first = re.findall(r"`([^`]+)`", cells[0])
+            second = re.findall(r"`([^`]+)`", cells[1]) if len(cells) > 1 else []
+            if kind == "commands":
+                cmds |= {t.split()[0] for t in first}
+            elif kind == "components":
+                comps |= {t for t in first}
+            elif kind == "options":
+                for t in first:
+                    for o in re.findall(r"(?<![\w-])(-{1,2}[a-z][a-z-]*)", t):
+                        opts.add(o)
+                vars_ |= {t for t in second if re.fullmatch(r"[A-Z][A-Z0-9_]+", t)}
+            elif kind == "variables":
+                vars_ |= {t for t in first if re.fullmatch(r"[A-Z][A-Z0-9_]+", t)}
+    return cmds, opts, vars_, comps
+
+
+def docs_problems(script_text, docs):
+    want = script_names(script_text)
+    p = []
+    for name, text in docs.items():
+        got = doc_names(text)
+        for what, w, g in zip(("command", "option", "variable", "component"), want, got):
+            for x in sorted(w - g):
+                p.append(f"{name} does not list the {what} {x}")
+            for x in sorted(g - w):
+                p.append(f"{name} lists the {what} {x}, which build.sh does not have")
+    return p
+
+
+def arm_docs():
+    script = (ROOT / "build.sh").read_text()
+    docs = {}
+    for n in ("docs/BUILDING.md", "docs/BUILDING.es.md"):
+        f = ROOT / n
+        docs[n] = f.read_text() if f.exists() else ""
+    p = docs_problems(script, docs)
+    check("docs/BUILDING.md and docs/BUILDING.es.md list exactly build.sh's commands, options, variables and components", not p, p[:20])
+    en = docs["docs/BUILDING.md"]
+    for t in ("## When a build fails", "## Installing the result and going back"):
+        check(f"docs/BUILDING.md has the section build.sh's messages point to: {t}", t in en)
+    neg = script.replace('      --offline) setlist="$setlist NM_OFFLINE" ;;\n',
+                         '      --offline) setlist="$setlist NM_OFFLINE" ;;\n      --turbo) setlist="$setlist NM_TURBO" ;;\n')
+    neg = neg.replace('OPTION_VARS="NM_WORK ', 'OPTION_VARS="NM_TURBO NM_WORK ')
+    negative("an option and a variable added to build.sh but not to the documents", docs_problems(neg, docs))
+    neg_docs = {k: v.replace("`--offline`", "`--offline`, `--online`") for k, v in docs.items()}
+    negative("a document that lists an option build.sh does not have", docs_problems(script, neg_docs))
+
+
+# ------------------------------------------------------------------------------------------------- main
+def main():
+    v = subprocess.run([BASH, "-c", 'echo "$BASH_VERSION"'], capture_output=True, text=True).stdout.strip()
+    print(f"build.sh runs under {BASH} (bash {v})")
+    if not v.startswith("3.2"):
+        print(f"note: this is not bash 3.2, the /bin/bash of macOS; set BUILD_SH_BASH to a bash 3.2 to test what a Mac runs")
+    for t in ("git", "shasum", "perl", "tar"):
+        if not shutil.which(t):
+            print(f"SKIP: {t} is needed to imitate a Mac here")
+            sys.exit(2)
+    try:
+        if want("pins"):
+            arm_pins()
+        if want("scan"):
+            arm_scan()
+        if want("docs"):
+            arm_docs()
+        commits = build_template()
+        if want("pins"):
+            arm_pins_script()
+        if want("fresh"):
+            arm_fresh()
+        if want("noinstall"):
+            arm_noinstall()
+        if want("tamper"):
+            arm_tamper()
+        if want("space"):
+            arm_space()
+        if want("hosts"):
+            arm_hosts(commits)
+        if want("deps"):
+            arm_deps_control()
+        mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "interrupt", "concurrent",
+                    "test", "package", "clean"]
+        if any(want(a) for a in mac_arms):
+            mac = Sandbox("mac", formulas=("cmake",))
+            arm_deps(mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
+            arm_fetch(mac, commits)
+            if want("offline"):
+                arm_offline(mac)
+            arm_order(mac)
+            for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
+                             ("failure", arm_failure), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
+                             ("test", arm_test_cmd), ("package", arm_package), ("clean", arm_clean)):
+                if want(name):
+                    fn(mac)
+    finally:
+        if os.environ.get("NMT_KEEP"):
+            print(f"sandbox kept: {TMP}")
+        else:
+            shutil.rmtree(TMP, ignore_errors=True)
+    print(f"{fails} failed" if fails else "all passed")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
