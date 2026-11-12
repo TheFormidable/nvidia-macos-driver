@@ -790,7 +790,7 @@ static VkResult nvmtl_opaque_AllocateCommandBuffers(VkDevice dev, const VkComman
 typedef struct { uint32_t version, surfaceID, plane, pad; uint64_t size_B; } nvmtl_vram_rec;
 static void (*pnvk_stage_import)(const nvmtl_vram_rec *);
 static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
-/* NVK's surface fence entry (CONTRACT: the name and the signature never change; a new one gets a new name). NULL in an
+/* NVK's surface fence entry (its name and signature never change: a new signature gets a new name). NULL in an
    older NVK, which leaves every nvmtl_vk_fence_* a no-op and the busy tags and pending marks exactly as before. */
 typedef uint32_t nvmtl_nvk_fence_v1_fn(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6]);
 static nvmtl_nvk_fence_v1_fn *pnvk_fence;
