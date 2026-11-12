@@ -5,6 +5,7 @@
  */
 
 #include "nv-xnu.h"
+#include "nv_xnu_kcore.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -1105,6 +1106,7 @@ static void nv_pv_start(void)
 NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pageSize, NvBool contiguous, NvU32 cache_type,
                                      NvBool zeroed, NvBool unencrypted, NvS32 node_id, NvU64 *pte_array, void **priv_data)
 {
+    if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
     NvU64 bytes = (NvU64)page_count * PAGE_SIZE;
     if (nv_xnu_chat()) kprintf("NVRM-xnu: >nv_alloc_pages count=%u page_size=0x%llx contig=%u cache=%u zeroed=%u (%llu KB)\n",
             page_count, pageSize, contiguous, cache_type, zeroed, bytes >> 10);
@@ -1300,63 +1302,22 @@ NV_STATUS NV_API_CALL os_alloc_wait_queue(os_wait_queue **wq)
 void NV_API_CALL os_free_wait_queue(os_wait_queue *wq) { TRC; if (wq) { IOLockFree(wq->lock); kern_os_free(wq); } }
 void NV_API_CALL os_wait_uninterruptible(os_wait_queue *wq)
 {
-    TRC; IOLockLock(wq->lock);
+    TRC; if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    IOLockLock(wq->lock);
     while (!wq->done) IOLockSleep(wq->lock, wq, THREAD_UNINT);
     IOLockUnlock(wq->lock);
 }
 void NV_API_CALL os_wait_interruptible(os_wait_queue *wq)
 {
-    TRC; IOLockLock(wq->lock);
+    TRC; if (!nvx_can_block()) nvx_note(NVX_SITE_BLOCKING_ENTRY, __builtin_return_address(0));
+    IOLockLock(wq->lock);
     while (!wq->done) if (IOLockSleep(wq->lock, wq, THREAD_INTERRUPTIBLE) != THREAD_AWAKENED) break;   // a signal ends the wait, as on Linux
     IOLockUnlock(wq->lock);
 }
 void NV_API_CALL os_wake_up(os_wait_queue *wq)              { TRC; IOLockLock(wq->lock); wq->done = true; IOLockWakeup(wq->lock, wq, false); IOLockUnlock(wq->lock); }
 
-// Each work item runs on its own thread. rm_power_management() flushes the queue before suspend/resume
-// (nv_kthread_q_flush on Linux), so count the items still running and let os_flush_work_queue() wait for them.
-static IOLock *nv_xnu_work_lock;
-static int nv_xnu_work_running;
-static bool nv_xnu_work_flushing;
-static IOLock *nv_xnu_work_lock_get(void)
-{
-    if (!nv_xnu_work_lock) {
-        IOLock *l = IOLockAlloc();
-        if (l && !OSCompareAndSwapPtr(NULL, l, (void * volatile *)&nv_xnu_work_lock)) IOLockFree(l);
-    }
-    return nv_xnu_work_lock;
-}
-static void nv_xnu_work_thread(void *item, wait_result_t)
-{
-    kprintf("NVRM-xnu: work item %p running\n", item);
-    rm_execute_work_item(NULL, item);
-    IOLockLock(nv_xnu_work_lock);
-    if (--nv_xnu_work_running == 0) IOLockWakeup(nv_xnu_work_lock, &nv_xnu_work_running, false);
-    IOLockUnlock(nv_xnu_work_lock);
-    thread_terminate(current_thread());
-}
-NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *queue, void *item)
-{
-    TRC; thread_t t;
-    if (!nv_xnu_work_lock_get()) return NV_ERR_NO_MEMORY;
-    IOLockLock(nv_xnu_work_lock); nv_xnu_work_running++; IOLockUnlock(nv_xnu_work_lock);
-    if (kernel_thread_start(nv_xnu_work_thread, item, &t) != KERN_SUCCESS) {
-        IOLockLock(nv_xnu_work_lock); nv_xnu_work_running--; IOLockUnlock(nv_xnu_work_lock);
-        return NV_ERR_NO_MEMORY;
-    }
-    thread_deallocate(t); return NV_OK;
-}
-NV_STATUS NV_API_CALL os_flush_work_queue(struct os_work_queue *queue, NvBool is_unload)
-{
-    TRC;
-    if (!nv_xnu_work_lock) return NV_OK;
-    IOLockLock(nv_xnu_work_lock);
-    nv_xnu_work_flushing = true;
-    while (nv_xnu_work_running > 0) IOLockSleep(nv_xnu_work_lock, &nv_xnu_work_running, THREAD_UNINT);
-    nv_xnu_work_flushing = false;
-    IOLockUnlock(nv_xnu_work_lock);
-    return NV_OK;
-}
-NvBool NV_API_CALL os_is_queue_flush_ongoing(struct os_work_queue *queue) { return nv_xnu_work_flushing ? NV_TRUE : NV_FALSE; }
+// os_queue_work_item, os_flush_work_queue and os_is_queue_flush_ongoing are in nv_xnu_kcore.cpp (serialized work
+// queues, with the one-thread-per-item code kept there for nvrmworkq=0).
 
 // RM's "temporary file" (FBSR_TYPE_FILE). With PreserveVideoMemoryAllocations, rm_power_management(STANDBY) copies every
 // VRAM allocation out through a small pinned buffer and os_write_file, and RESUME reads it back with os_read_file - on
@@ -1446,7 +1407,13 @@ void NV_API_CALL os_close_file(void *pFile)
     if (f->pageable) IOFree(f->pageable, (vm_size_t)(f->cap * sizeof(bool)));
     IOFree(f, sizeof *f);
 }
-NV_STATUS NV_API_CALL os_schedule(void) { IOSleep(1); return NV_OK; }
+// Where blocking is not allowed there is nothing to yield to: Linux answers NV_ERR_ILLEGAL_ACTION there, and every RM
+// caller ignores the result or only prints it. It used to spin 1 ms inside IOSleep.
+NV_STATUS NV_API_CALL os_schedule(void)
+{
+    if (!nvx_can_block()) { nvx_note(NVX_SITE_SCHEDULE, __builtin_return_address(0)); return NV_ERR_ILLEGAL_ACTION; }
+    IOSleep(1); return NV_OK;
+}
 
 NvU64 NV_API_CALL os_get_monotonic_tick_resolution_ns(void) { TRC; return 1; }
 NvU64 NV_API_CALL os_get_max_user_va(void) { TRC; return 0x00007FFFFFFFFFFFULL; }

@@ -13,6 +13,7 @@
 #include "nvrm_bar_recover.h"
 #include "nvrm_shutdown_plan.h"
 #include "nvrm_aspm.h"
+#include "nv_xnu_kcore.h"
 
 extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <IOKit/IOService.h>
@@ -229,6 +230,9 @@ private:
     void bottomHalfStart();
     void bottomHalfDrain(uint32_t waitMs);
     void bottomHalfStop();
+    // The GPU's own work queue is taken away (items queued from then on go to the global queue) and stopped; each of
+    // the two waits inside is bounded by capMs.
+    void workQueueDown(uint32_t capMs);
     void readBARs();
     void publishGpuProfile();
     bool placeLargeBar1();
@@ -793,7 +797,9 @@ bool NVRM::startGPU(IOService *provider)
     gNVRMTab.add(this, nvrmMultiGpu(), provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue);
     nv_xnu_log_init();
     // The kernel mapping table is serialised, so its lock has to exist before RM maps anything.
-    if (!nv_xnu_maps_init()) { LOG("IOLockAlloc FAILED for the kernel mapping table"); return false; }
+    if (!nv_xnu_maps_init()) { LOG("IOSimpleLockAlloc FAILED for the kernel mapping index"); return false; }
+    // Before the RM is entered for the first time: the context answers and the global work queue (once per boot).
+    nv_xnu_kcore_init();
     // Say which build is running, first thing. A machine reported "2.3.2" from the app while the kernel collection still
     // held a kext from before 2.1.0 (its BAR1 line used wording that version had replaced), and nothing in the log said
     // so: the installed bundle and the loaded kext can differ, and only the loaded one knows what it is. The loader
@@ -817,6 +823,7 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_waits); sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_stuck);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
+            nv_xnu_kcore_sysctls_register();
         }
     }
     UInt8 bus = fPCI->getBusNumber(), dev = fPCI->getDeviceNumber(), fn = fPCI->getFunctionNumber();
@@ -1969,6 +1976,9 @@ IOReturn NVRM::go(uint32_t pass)
         fPassDone = 1;
     }
     if (pass >= 2 && fPassDone < 2) {
+        // The GPU's own serialized work queue, before anything can queue work for it (Linux makes it at the same point).
+        // NULL is not a failure: the GPU's items then go to the global queue, which is serialized too.
+        if (!fNv.queue) fNv.queue = nv_xnu_wq_gpu_start();
         nv->os_state = this;
         fPCI->setMemoryEnable(true);
         fPCI->setBusMasterEnable(true);
@@ -2127,6 +2137,12 @@ void NVRM::bottomHalfStop()
     IOLockFree(fBhLock);
     fBhLock = NULL;
 }
+void NVRM::workQueueDown(uint32_t capMs)
+{
+    struct os_work_queue *q = fNv.queue;
+    fNv.queue = NULL;
+    if (q) nv_xnu_wq_gpu_down(q, capMs);
+}
 
 void NVRM::stop(IOService *provider)
 {
@@ -2157,10 +2173,20 @@ void NVRM::stop(IOService *provider)
         }
     }
     if (fPmJoined) { PMstop(); fPmJoined = false; }
-    if (fAdapter) { rm_shutdown_adapter(NULL, &fNv); fAdapter = false; }
+    if (fAdapter) {
+        // What is queued for this GPU runs before its adapter goes (an unload flush: the RM drops the items that ask
+        // for it). At most 30 s; a queue that does not finish is given up on and the teardown goes on.
+        nv_xnu_wq_flush(fNv.queue, true, 30000);
+        workQueueDown(30000);
+        rm_shutdown_adapter(NULL, &fNv); fAdapter = false;
+    }
+    workQueueDown(30000);   // a start that failed after its queue was made; nothing when it is already down
     if (fIntSrc) { fIntSrc->disable(); if (fWorkLoop) fWorkLoop->removeEventSource(fIntSrc); fIntSrc->release(); fIntSrc = NULL; }
     bottomHalfStop();
     if (fWorkLoop) { fWorkLoop->release(); fWorkLoop = NULL; }
+    // Items queued for this GPU after its queue was taken away went to the global queue: none may still run when the
+    // RM's private state goes.
+    nv_xnu_wq_flush(NULL, false, 30000);
     if (fPrivateState) { rm_free_private_state(NULL, &fNv); fPrivateState = false; }
     gNVRMTab.remove(this, nvrmMultiGpu());   // a no-op without nvmultigpu=1: the old pointer was never cleared
     super::stop(provider);
@@ -2194,7 +2220,12 @@ void NVRM::shutdownFull(void *p0, wait_result_t)
     const int busy = nv_xnu_pm_close(3000);
     if (busy) LOG("shutdown: %d RM call(s) still running after 3 s", busy);
     rm_stop_user_channels(NULL, &s->fNv);
-    if (s->fAdapter) { rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false; }
+    if (s->fAdapter) {
+        // As in stop(), within the 8 s systemWillShutdown() waits for all of this: 2 s for each wait.
+        nv_xnu_wq_flush(s->fNv.queue, true, 2000);
+        s->workQueueDown(2000);
+        rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;
+    }
     OSCompareAndSwap(0, 1, &s->fShutdownDone);
     s->release();
     thread_terminate(current_thread());
@@ -2368,6 +2399,9 @@ void NVRM::gpuSuspend()
     // while their memory is copied out, and restarted once it is back.
     NV_STATUS cst = rm_stop_user_channels(NULL, &fNv);
     pciSaveForSleep();
+    // The RM flushes the GPU's own queue itself; items it queued on the global queue (system work items) are flushed
+    // here, at most 5 s, because all of this runs inside the system's power change.
+    nv_xnu_wq_flush(NULL, false, 5000);
     NV_STATUS st = rm_power_management(NULL, &fNv, NV_PM_ACTION_STANDBY);
     if (fIntSrc) fIntSrc->disable();
     bottomHalfDrain(2000);

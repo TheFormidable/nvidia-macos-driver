@@ -90,7 +90,25 @@ NV_STATUS nv_xnu_wq_flush(struct os_work_queue *q, bool unload, unsigned cap_ms)
 // from the once-only branch of the stub macro.
 void nv_xnu_stub_note(const char *name);
 
+// The non-blocking branches of the OS layer (os-xnu.cpp, os-xnu2.cpp). Any context; no IOLog, no heap call, no
+// IOLock. Each is used only where nvx_can_block() is false, except nvx_atomic_free(), which every free goes through
+// because a block from the pool has to go back to the pool whatever the context of its free.
+//
+// A zeroed block of `size` bytes from the kext's own fixed pool (256 KB, requests up to 64 KB), or NULL: the caller
+// then makes its older call, which is counted as a miss.
+void *nvx_atomic_alloc(NvU64 size);
+// 1: `p` has been dealt with (a pool block, freed at once; or, where the heap may not be called, a heap block handed
+// to a thread call that frees it); 0: free it the older way.
+int nvx_atomic_free(void *p);
+// Try to take a lock without blocking, again every 20 us, for at most 20 ms. 1: taken; 0: not taken, and the caller
+// makes its older, blocking call (what it always did). `kind` is an NVX_LOCK_* value.
+int nvx_atomic_lock(int kind, void *lock);
+// os_semaphore_may_sleep() answered no: a counter.
+void nvx_atomic_maysleep_false(void);
+
 }
+
+enum { NVX_LOCK_MUTEX, NVX_LOCK_RW_READ, NVX_LOCK_RW_WRITE, NVX_LOCK_SEMA };
 
 // Where nvx_note() is called from
 enum { NVX_SITE_ALLOC, NVX_SITE_FREE, NVX_SITE_DELAY, NVX_SITE_SCHEDULE, NVX_SITE_MUTEX, NVX_SITE_RWLOCK,
