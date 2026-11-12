@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 4 | 1 | 54 | 411 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 139 | 1 |  |  | 161 |
+| sysctl |  | 5 | 4 | 12 |  |  | 336 |  |  |  | 357 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -176,7 +176,7 @@ Each of these does nothing unless it is set.
 | `NVENCVT_TWOPASS` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVK_ACCEL_ID` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-card-select.patch, plugin/NVMTLDevice.m |
 | `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |  |
+| `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. | nvk/nvk-channel-recover.patch |
 | `NVK_CMDMEM_CENSUS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
 | `NVK_CMDMEM_LIVE_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
 | `NVK_CMDMEM_RECYCLE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
@@ -190,7 +190,7 @@ Each of these does nothing unless it is set.
 | `NVK_DIAG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_DUMP_QMD` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_DUMP_SHADER_DIR` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_FAULT_INJECT` | test | off (unset: nothing is injected) | 3.0 | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. |  |
+| `NVK_FAULT_INJECT` | test | off (unset: nothing is injected) | 3.0 | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. | nvk/nvk-channel-recover.patch |
 | `NVK_HOST_IMPORT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_HWRT_QUERY` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/ttu-rq.patch, plugin/nvmtl_app_profile.h |
 | `NVK_HWRT_WIDE` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/wide.patch |
@@ -573,7 +573,7 @@ Each of these does nothing unless it is set.
 | `-nvrmnogo` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp |
 | `-nvrmnopm` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp |
 | `-nvrmnoshutdown` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp |
-| `-nvrmoldwaits` | escape | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.0 | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |  |
+| `-nvrmoldwaits` | escape | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.0 | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. | kexts/NVRM/NVRM.cpp |
 | `-nvrmsmallbar` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp |
 | `-v` | internal | unset | 2.9 | - | not a switch of this driver; read to adapt to it | kexts/NVRM/NVRM.cpp |
 | `gfxrst` | internal | unset | 2.9 | - | not a switch of this driver; read to adapt to it | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -594,8 +594,8 @@ Each of these does nothing unless it is set.
 | `nmsmn` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NMSMN/nmsmn.cpp |
 | `nmxvt` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `nvaccel` | install | absent: the accelerator does not start (boot-loop guard) | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRM/accel/nvrm-accel.cpp |
-| `nvaccel_pageoff_locked` | escape | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.0 | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |  |
-| `nvaccel_surf_planes` | escape | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.0 | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |  |
+| `nvaccel_pageoff_locked` | escape | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.0 | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. | kexts/NVRM/accel/nvrm-accel.cpp |
+| `nvaccel_surf_planes` | escape | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.0 | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. | kexts/NVRM/accel/nvrm-accel.cpp |
 | `nvagdcheads` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `nvcursor` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfb` | install | absent: the framebuffer kext does not start (boot-loop guard) | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -632,22 +632,22 @@ Each of these does nothing unless it is set.
 | `nvregdwords` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/NVRM.cpp |
 | `nvrmacpibl` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-xnu2.cpp |
 | `nvrmaspm` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/NVRM.cpp |
-| `nvrmatomic` | escape | on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9) | 3.0 | 3.2 | The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool. |  |
+| `nvrmatomic` | escape | on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9) | 3.0 | 3.2 | The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool. | kexts/NVRM/nv_xnu_kcore.cpp |
 | `nvrmbhthread` | escape | on (nvrmbhthread=0: the bottom half runs on the interrupt's work loop, as in 2.9) | 3.0 | 3.2 | The RM's interrupt bottom half runs on its own thread, so a long one no longer holds back the next GPU interrupt. | kexts/NVRM/NVRM.cpp |
 | `nvrmdiag` | diag | unset | 2.9 | - | observes only | kexts/NVRM/os-xnu2.cpp |
-| `nvrmdma` | escape | on (nvrmdma=0: no IOMMU mapper -> the 2.9 path; mapper present -> the GPU is not started) | 3.0 | 3.2 | With an IOMMU (VT-d) translating for the GPU, the GPU is given the mapper's bus addresses instead of physical ones; without a mapper nothing changes. On a machine with a mapper nvrmdma=0 is not a way back to 2.9, whose untranslated addresses are wrong there: the GPU is left unstarted and the log says why. |  |
+| `nvrmdma` | escape | on (nvrmdma=0: no IOMMU mapper -> the 2.9 path; mapper present -> the GPU is not started) | 3.0 | 3.2 | With an IOMMU (VT-d) translating for the GPU, the GPU is given the mapper's bus addresses instead of physical ones; without a mapper nothing changes. On a machine with a mapper nvrmdma=0 is not a way back to 2.9, whose untranslated addresses are wrong there: the GPU is left unstarted and the log says why. | kexts/NVRM/nvrm_dma.cpp |
 | `nvrmfbddc` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nvrm_ddc.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `nvrmfence` | escape | on (nvrmfence=0: readers use the surface marks of 2.9) | 3.0 | 3.2 | A process that reads a surface another process is still drawing waits in the kernel for that GPU work and is woken when it completes, instead of polling a mark. |  |
+| `nvrmfence` | escape | on (nvrmfence=0: readers use the surface marks of 2.9) | 3.0 | 3.2 | A process that reads a surface another process is still drawing waits in the kernel for that GPU work and is woken when it completes, instead of polling a mark. | kexts/NVRM/nvrm_fence.cpp |
 | `nvrmgps` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-xnu2.cpp |
 | `nvrmholdcap` | dev | unset | 2.9 | - | unreviewed | kexts/NVRM/NVRM.cpp |
 | `nvrmmapowner` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/os-xnu2.cpp |
-| `nvrmnanowait` | escape | on (nvrmnanowait=0: a cancel does not wait, as in 2.9) | 3.0 | 3.2 | Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does. |  |
+| `nvrmnanowait` | escape | on (nvrmnanowait=0: a cancel does not wait, as in 2.9) | 3.0 | 3.2 | Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does. | kexts/NVRM/nv_xnu_timers.cpp |
 | `nvrmnvpcf` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-xnu2.cpp |
-| `nvrmrctimer` | escape | on (nvrmrctimer=0: no timer, as in 2.9) | 3.0 | 3.2 | The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens. | kexts/NVRM/os-xnu2.cpp |
+| `nvrmrctimer` | escape | on (nvrmrctimer=0: no timer, as in 2.9) | 3.0 | 3.2 | The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens. | kexts/NVRM/nv_xnu_timers.cpp |
 | `nvrmsettle` | dev | unset | 2.9 | - | unreviewed | kexts/NVRM/NVRM.cpp |
 | `nvrmshutdown` | dev | unset | 2.9 | - | unreviewed | kexts/NVRM/NVRM.cpp |
 | `nvrmtgp` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nvrm_power.cpp, kexts/NVRM/os-xnu2.cpp |
-| `nvrmworkq` | escape | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.0 | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it. |  |
+| `nvrmworkq` | escape | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.0 | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it. | kexts/NVRM/nv_xnu_kcore.cpp |
 | `nvrtd3` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nv_rtd3.cpp |
 | `nvrtd3res` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nv_rtd3.cpp |
 | `nvselector` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVPrimarySelector/NVPrimarySelector.cpp, kexts/NVRM/NVRM.cpp, kexts/NVRM/accel/nvrm-accel.cpp |
@@ -676,6 +676,15 @@ Each of these does nothing unless it is set.
 | `debug.nmxaccel_headless` | diag | read-only | 2.9 | - | 1 = AMD/Intel Metal device for apps; frames are copied to the framebuffer WindowServer draws | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_crc` | diag | read-only | 2.9 | - | b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_crc_head` | diag | writable by root | 2.9 | - | b85k-crc: which head debug.nvaccel_crc reads | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_abandoned` | diag | read-only | 3.0 | - | staging buffer mappings left in place after a copy-engine timeout (the GPU may still write) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_family` | diag | read-only | 3.0 | - | page-offs left to the accelerator family because the GPU is translated and no mapped staging buffer was at hand | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_hybrid` | diag | read-only | 3.0 | - | hybrid frames copied the old way because the GPU is translated | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_map_fail` | diag | read-only | 3.0 | - | staging buffers NVRM could not map (the buffer is freed; the family copies) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_maps` | diag | read-only | 3.0 | - | staging buffers mapped for the GPU through NVRM | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_mode` | diag | read-only | 3.0 | - | how the GPU's addresses reach the bus, as NVRM last answered: -1 not asked yet, 0 no mapper (or an NVRM without the question), 1 system mapper, 2 device mapper, 3 a mapper the driver may not use | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_refused` | diag | read-only | 3.0 | - | page-offs NVRM refused because the pages were not mapped for the GPU (the mapping is made again) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_staged` | diag | read-only | 3.0 | - | page-offs copied into the staging buffer through its bus mapping (DMA mode 1 or 2) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_dma_unmaps` | diag | read-only | 3.0 | - | staging buffer mappings given back to NVRM when the buffer was replaced, refused or its accelerator stopped | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_headless` | diag | read-only | 2.9 | - | 1 = no NVIDIA display: Metal device for apps only, WindowServer on the GPU that owns the display | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_heads_piped` | diag | read-only | 2.9 | - | bit i = head i has a display pipe that drives ITS OWN framebuffer (pipe+0x98 read back) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_heads_published` | diag | read-only | 2.9 | - | bit i = head i's framebuffer has published to the accelerator | kexts/NVRM/accel/nvrm-accel.cpp |
@@ -713,21 +722,51 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_iop_ok_h4` | diag | read-only | 2.9 | - | frames copied to head 4 (an Intel built-in panel, NMIntelFB) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_iop_src_res` | diag | read-only | 2.9 | - | K3: frames sourced from our VRAM resource | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_iop_src_surf` | diag | read-only | 2.9 | - | K3: frames sourced from the IOSurface memory | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_layout` | diag | read-only | 3.0 | - | Apple class layout seen by NVAccel: 0 not run, 1 ok, 2 refused, 3 overridden (nvlayout=0), 4 unknown | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_bad` | diag | read-only | 3.0 | - | differences that refuse: class sizes plus vtables that read shorter | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_classes` | diag | read-only | 3.0 | - | accelerator family classes NVAccel compared by size | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_pure` | diag | read-only | 3.0 | - | functions the accelerator base leaves pure that NVAccel does not implement (expected 0; counted only) | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_vtables` | diag | read-only | 3.0 | - | accelerator family vtables NVAccel read by length (0: not compared on this kernel) | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_vtlong` | diag | read-only | 3.0 | - | vtables that read longer than this build; reported, never a reason to refuse | kexts/NVRM/accel/nvaccel_layout.h |
 | `debug.nvaccel_map_commit` | diag | read-only | 2.9 | - | GPU page-table commits (MAP_MEMORY_DMA ok) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_free` | diag | read-only | 2.9 | - | GPU VA ranges freed (nvAccelGpuVaFree) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_release` | diag | read-only | 2.9 | - | GPU page-table releases (UNMAP_ONLY) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_locked_not_owner` | diag | read-only | 2.9 | - | page-offs with a pending surface that waited locked because the thread was not the lock's owner at one level | kexts/NVRM/accel/nvrm-accel.cpp |
-| `debug.nvaccel_pageoff_unlocked_wait` | dev | writable by root | 2.9 | - | 1 = a page-off waits for the GPU without the accelerator lock | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_locked_pinned` | diag | read-only | 3.0 | - | page-offs with a pending surface that waited locked because the driver's own code held the lock | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_ranged` | diag | read-only | 3.0 | - | plane-ranged page-offs that copied the plane into its range | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_ranged_fail` | diag | read-only | 3.0 | - | plane-ranged page-offs that copied nothing (never left to the family's whole-surface copy) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_ranged_temp` | diag | read-only | 3.0 | - | plane-ranged page-offs that staged through a buffer of their own because the shared one could not serve | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_unlocked_already` | diag | read-only | 3.0 | - | unlocked page-offs that found system memory already current after the wait and copied nothing | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_unlocked_changed` | diag | read-only | 3.0 | - | unlocked page-offs whose resource pointed at another surface or VRAM allocation after the wait | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_unlocked_recopied` | diag | read-only | 3.0 | - | unlocked page-offs that copied although another page-off of the resource finished during the wait (that one may have read the GPU's memory too early) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_unlocked_standdown` | diag | read-only | 3.0 | - | times the unlocked page-off wait turned itself off for this boot (0 or 1) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_unlocked_wait` | diag | read-only | 2.9 | - | 1 = a page-off waits for the GPU without the accelerator lock (0: boot-arg nvaccel_pageoff_locked=1, or it stood down for this boot) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_unlocked_wait_max_us` | diag | read-only | 2.9 | - | longest unlocked page-off wait, us | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_unlocked_waits` | diag | read-only | 2.9 | - | page-offs that waited for the GPU without the accelerator lock | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_res_free` | diag | read-only | 2.9 | - | NVResource objects freed | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_res_new` | diag | read-only | 2.9 | - | NVResource objects created | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_plane_validbits` | diag | read-only | 3.0 | - | OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_planes` | diag | read-only | 3.0 | - | 1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence` | diag | read-only | 3.0 | - | 1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_dead` | diag | read-only | 3.0 | - | fence waits that ended because the writer exited, its channel faulted or the GPU slept | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_errors` | diag | read-only | 3.0 | - | fence waits NVRM did not serve (the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_pending` | diag | read-only | 3.0 | - | page-offs that found a fence hold on the surface | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_ready` | diag | read-only | 3.0 | - | fence waits that ended because the GPU work was done | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_timeouts` | diag | read-only | 3.0 | - | fence waits that a bound ended with the work not done (the caller went on, as 2.9) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_wait_max_us` | diag | read-only | 3.0 | - | longest fence wait, us | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surface_fence_waits` | diag | read-only | 3.0 | - | waits that found a fence hold on the surface | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu` | diag | read-only | 2.9 | - | 1 = WindowServer swaps wait for GPU completion here (same value as nvaccel_surface_gpu_on) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu_marks` | diag | read-only | 2.9 | - | pending/ready marks from WindowServer | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu_on` | recovery | writable by root | 2.9 | - | 0 = WindowServer waits for its own composites again (the plugin re-asks every second) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu_timeouts` | diag | read-only | 2.9 | - | swaps whose composite did not finish within 100 ms | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu_wait_max_us` | diag | read-only | 2.9 | - | longest swap wait for a composite, us | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_gpu_waits` | diag | read-only | 2.9 | - | swaps that waited here for their composite to finish | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged` | diag | read-only | 3.0 | - | plane-ranged VRAM grants that passed every check | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged_off` | diag | read-only | 3.0 | - | plane-ranged grants refused because the feature is off, the page-off waits locked, or the GPU is translated and no staging buffer is mapped | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged_range` | diag | read-only | 3.0 | - | plane-ranged grants refused because the range leaves the surface or differs from the one already recorded (or was recorded for another surface) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged_shared` | diag | read-only | 3.0 | - | plane-ranged grants refused because plane 0 and this plane share a resource, VRAM or validity words | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged_small` | diag | read-only | 3.0 | - | plane-ranged grants refused because the plane is empty or larger than its VRAM | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surfvram_ranged_validbit` | diag | read-only | 3.0 | - | plane-ranged grants refused because the resource's validity words are not understood | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_svdiag` | diag | writable by root | 2.9 | - | log the next N surface dirty marks and page-offs | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_vm_alloc` | diag | read-only | 2.9 | - | NVVidMemory::allocPhysical successes | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_vm_alloc_bytes` | diag | read-only | 2.9 | - | bytes of VRAM granted to NVVidMemory | kexts/NVRM/accel/nvrm-accel.cpp |
@@ -739,21 +778,153 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_vm_sticky` | recovery | writable by root | 2.9 | - | 1 = a surface keeps its VRAM across the family's dealloc/alloc (the memory the plugin draws into) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_vm_unparked` | diag | read-only | 2.9 | - | allocations answered with the surface's kept VRAM | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccelfb` | recovery | writable by root | 2.9 | - | register the NVIDIA framebuffer with the accelerator display machine (1 = found_framebuffer, 2 = family sweep) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvrm_atomic_alloc` | diag | read-only | 3.0 | - | RM allocations served by the pool | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_alloc_miss` | diag | read-only | 3.0 | - | RM allocations where blocking is not allowed that the pool could not serve | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_blocking_entry` | diag | read-only | 3.0 | - | blocking OS-layer calls entered where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_delay` | diag | read-only | 3.0 | - | os_delay where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_free_deferred` | diag | read-only | 3.0 | - | heap frees handed to a thread call | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_lock_fallback` | diag | read-only | 3.0 | - | of those, acquires that took the blocking call after 20 ms | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_lock_spun` | diag | read-only | 3.0 | - | of those, acquires that had to retry | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_lock_try` | diag | read-only | 3.0 | - | lock acquires where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_lockalloc` | diag | read-only | 3.0 | - | lock allocations where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_maysleep_false` | diag | read-only | 3.0 | - | os_semaphore_may_sleep answered no | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_mode` | diag | read-only | 3.0 | - | OS-layer answers by context: 1 on, 0 off (nvrmatomic=0), -1 self-test failed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_pool_peak` | diag | read-only | 3.0 | - | most pool bytes in use | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_atomic_schedule` | diag | read-only | 3.0 | - | os_schedule where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_bh_max_us` | diag | read-only | 3.0 | - | longest RM bottom half, microseconds | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_over_1ms` | diag | read-only | 3.0 | - | RM bottom halves over 1 ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_over_4ms` | diag | read-only | 3.0 | - | RM bottom halves over 4 ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_runs` | diag | read-only | 3.0 | - | RM bottom halves run | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_bh_stuck` | diag | read-only | 3.0 | - | bottom-half threads that did not exit at stop | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_bh_thread` | diag | read-only | 3.0 | - | GPUs whose RM bottom half runs on its own thread | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_bh_wake_max_us` | diag | read-only | 3.0 | - | longest bottom-half request to run, microseconds | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_arm_ms` | diag | read-only | 3.0 | - | start-up: tries to arm the accelerator, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_gate_ms` | diag | read-only | 3.0 | - | start-up: wait for start() to have returned, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_go_ms` | diag | read-only | 3.0 | - | start-up: go(2), ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_heads_ms` | diag | read-only | 3.0 | - | start-up: wait for the accelerator's heads, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_heads_polls` | diag | read-only | 3.0 | - | start-up: polls of the heads wait | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_heads_why` | diag | read-only | 3.0 | - | start-up: why the heads wait ended | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_hold_ms` | diag | read-only | 3.0 | - | start-up: registry held busy for the display, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_raster_idle` | diag | read-only | 3.0 | - | start-up: heads left early as not scanning | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_raster_ms` | diag | read-only | 3.0 | - | start-up: boot raster measurement, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boot_settle_ms` | diag | read-only | 3.0 | - | start-up: settle before the card is touched, ms | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_bugcheck_last` | diag | read-only | 3.0 | - | code of the last bug check the RM asked for, -1 none | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_bugchecks` | diag | read-only | 3.0 | - | bug checks the RM asked for | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_dma_bad_priv` | diag | read-only | 3.0 | - | map or unmap calls with private data that is not this driver's | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_budget_refused` | diag | read-only | 3.0 | - | mappings refused to keep the mapper's space from filling | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_fail` | diag | read-only | 3.0 | - | mappings the mapper refused or could not serve | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_hi` | diag | read-only | 3.0 | - | highest bus address handed out through the mapper | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_leaked` | diag | read-only | 3.0 | - | mappings still live when their GPU stopped | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_live` | diag | read-only | 3.0 | - | DMA mappings live now | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_live_bytes` | diag | read-only | 3.0 | - | bytes mapped now | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_lo` | diag | read-only | 3.0 | - | lowest bus address handed out through the mapper | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_maps` | diag | read-only | 3.0 | - | allocations mapped through the DMA mapper | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_max_us` | diag | read-only | 3.0 | - | slowest mapping call, microseconds | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_mode` | diag | read-only | 3.0 | - | GPU DMA: 0 untranslated (as 2.9), 1 system mapper, 2 device mapper, 3 a GPU was refused (highest of the GPUs) | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_not_contig` | diag | read-only | 3.0 | - | contiguous allocations the mapper split (must stay 0) | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_pageoff_refused` | diag | read-only | 3.0 | - | page-off copies refused: pages not mapped through the mapper | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_peak_bytes` | diag | read-only | 3.0 | - | most bytes mapped at once | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_refused` | diag | read-only | 3.0 | - | peer and MMIO mappings refused (no such mapping on macOS) | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_surf_maps` | diag | read-only | 3.0 | - | mappings made for the accelerator's page-off buffers | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_unaddressable` | diag | read-only | 3.0 | - | mappings above the GPU's address width (must stay 0) | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_unmaps` | diag | read-only | 3.0 | - | DMA mappings released | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_user_maps` | diag | read-only | 3.0 | - | mappings of a process's pinned pages | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_verified` | diag | read-only | 3.0 | - | pages read back from the mapper's tables | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_dma_verify_bad` | diag | read-only | 3.0 | - | pages whose bus address did not lead back to the page (must stay 0) | kexts/NVRM/nvrm_dma.cpp |
+| `debug.nvrm_evt_capped` | diag | read-only | 3.0 | - | event waits turned away at the sleeper ceiling | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_clients` | diag | read-only | 3.0 | - | connections that slept on the event at least once | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_matched` | diag | read-only | 3.0 | - | RM events that found their connection | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_post_drain_stuck` | diag | read-only | 3.0 | - | connections kept, not freed, because an event post never finished | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_post_drain_waits` | diag | read-only | 3.0 | - | client closes that waited for an event post in flight | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_posts` | diag | read-only | 2.9 | - | RM events posted to user clients | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_slept` | diag | read-only | 3.0 | - | event waits that slept | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_timeouts` | diag | read-only | 3.0 | - | event sleeps that ran to their timeout | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_user_fallbacks` | diag | read-only | 3.0 | - | user space: processes that went back to polling after missed wakes | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_user_missed` | diag | read-only | 3.0 | - | user space: sleeps that ran to their timeout although the GPU work was done | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_waits` | diag | read-only | 2.9 | - | user event waits | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_woken` | diag | read-only | 3.0 | - | event sleeps ended by an event | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_fence_accel` | diag | read-only | 3.0 | - | 1 = NVAccel's waits read the fence table | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_arm_done` | diag | read-only | 3.0 | - | of those, already complete when armed | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_arms` | diag | read-only | 3.0 | - | holds given a GPU target | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_auto` | diag | read-only | 3.0 | - | compositor holds ended by the kernel at GPU completion | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_chan_adds` | diag | read-only | 3.0 | - | channels registered since boot | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_chan_noirq` | diag | read-only | 3.0 | - | channels whose completions arrive without an interrupt, now | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_chan_rebinds` | diag | read-only | 3.0 | - | rebuilt channels given a new error notifier | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_chans` | diag | read-only | 3.0 | - | channels watched now | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_close_gone` | diag | read-only | 3.0 | - | CLOSE calls that found no hold | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_close_gpu_agree` | diag | read-only | 3.0 | - | armed holds closed with the kernel seeing their work complete | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_close_gpu_behind` | diag | read-only | 3.0 | - | armed holds closed before the kernel saw their work complete | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_closes` | diag | read-only | 3.0 | - | holds closed by their writer | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_done_on_irq` | diag | read-only | 3.0 | - | waits that found their surface free after an interrupt | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_done_on_slice` | diag | read-only | 3.0 | - | the same after a time slice: no interrupt told them | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_done_on_state` | diag | read-only | 3.0 | - | the same after a change of the table | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_end_chan_del` | diag | read-only | 3.0 | - | holds ended because their channel was deleted first | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_end_chan_err` | diag | read-only | 3.0 | - | holds ended by a channel fault | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_end_owner` | diag | read-only | 3.0 | - | holds ended because their writer's connection closed | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_end_pm` | diag | read-only | 3.0 | - | holds ended by GPU sleep | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_expired_cpu` | diag | read-only | 3.0 | - | holds given up after 100 ms with their writer's GPU idle | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_expired_gpu` | diag | read-only | 3.0 | - | holds given up after 2000 ms | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_expired_penalty` | diag | read-only | 3.0 | - | holds given up after 20 ms in a penalty window | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_kicks` | diag | read-only | 3.0 | - | handled interrupts plus bottom-half runs seen while on | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_live` | diag | read-only | 3.0 | - | holds that delay readers now | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_live_max` | diag | read-only | 3.0 | - | most such holds at once | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_look_pending` | diag | read-only | 3.0 | - | looks that found something pending | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_map_fail` | diag | read-only | 3.0 | - | channel pages that could not be pinned, or that are not system memory | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_map_mismatch` | diag | read-only | 3.0 | - | channels whose page did not show what the process wrote | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_opens` | diag | read-only | 3.0 | - | holds opened | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_owners_distrusted` | diag | read-only | 3.0 | - | connections refused after three strikes | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_reclaimed` | diag | read-only | 3.0 | - | slots of given-up or forgotten holds taken back for new ones | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_refused_denied` | diag | read-only | 3.0 | - | compositor holds asked for by a process that is not WindowServer | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_refused_distrust` | diag | read-only | 3.0 | - | holds refused to a distrusted connection | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_refused_full` | diag | read-only | 3.0 | - | requests refused for room: table or quota | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_refused_stale` | diag | read-only | 3.0 | - | requests naming an unknown hold or channel | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_seq_refused` | diag | read-only | 3.0 | - | of those, told to poll: the channel raises no interrupt | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_seq_slept` | diag | read-only | 3.0 | - | of those, slept in the kernel | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_seq_waits` | diag | read-only | 3.0 | - | producer waits for its own channel | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_state` | diag | read-only | 3.0 | - | surface fence: 0 off by nvrmfence=0, 1 on, 2 switched itself off, 3 stopped or not started | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_strikes` | diag | read-only | 3.0 | - | strikes against connections whose holds were given up | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_aborted` | diag | read-only | 3.0 | - | waits ended by a signal | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_budget` | diag | read-only | 3.0 | - | waits ended by the caller's own timeout | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_dead` | diag | read-only | 3.0 | - | waits ended by writer exit, channel fault or GPU sleep | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_full` | diag | read-only | 3.0 | - | waits refused because too many threads sleep | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_ge100ms` | diag | read-only | 3.0 | - | waits that slept 100 ms or more | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_lt100ms` | diag | read-only | 3.0 | - | waits that slept 10 to 100 ms | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_lt10ms` | diag | read-only | 3.0 | - | waits that slept 1 to 10 ms | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_lt1ms` | diag | read-only | 3.0 | - | waits that slept under 1 ms | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_max_us` | diag | read-only | 3.0 | - | longest wait that slept, microseconds | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_none` | diag | read-only | 3.0 | - | waits and looks that found nothing pending | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_ready` | diag | read-only | 3.0 | - | waits ended by completion | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wait_timeout` | diag | read-only | 3.0 | - | waits ended because a hold was given up | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_waits` | diag | read-only | 3.0 | - | waits that found something pending | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wake_irq` | diag | read-only | 3.0 | - | sleeps ended by an interrupt | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wake_slice` | diag | read-only | 3.0 | - | sleeps ended by their own time slice | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_fence_wake_state` | diag | read-only | 3.0 | - | sleeps ended by a change of the table | kexts/NVRM/nvrm_fence.cpp |
+| `debug.nvrm_irq_settle_timeouts` | diag | read-only | 3.0 | - | interrupt path settle waits that ran out | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_count` | diag | read-only | 2.9 | - | GPU MSIs taken | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_during_bh` | diag | read-only | 3.0 | - | GPU MSIs that arrived while a bottom half ran | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_handled` | diag | read-only | 2.9 | - | GPU MSIs RM claimed | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_late_1ms` | diag | read-only | 3.0 | - | MSI to rm_isr waits over 1 ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_late_4ms` | diag | read-only | 3.0 | - | MSI to rm_isr waits over 4 ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_isr_latency_max_us` | diag | read-only | 3.0 | - | longest MSI to rm_isr wait, microseconds | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_isr_skipped` | diag | read-only | 3.0 | - | GPU interrupts not given to the RM: gate closed | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_kmap_live` | diag | read-only | 3.0 | - | kernel mappings of the RM tracked now | kexts/NVRM/os-xnu.cpp |
+| `debug.nvrm_kmap_lookups` | diag | read-only | 3.0 | - | kernel VA to physical lookups | kexts/NVRM/os-xnu.cpp |
+| `debug.nvrm_kmap_nomem` | diag | read-only | 3.0 | - | mappings refused for want of memory for their entry | kexts/NVRM/os-xnu.cpp |
+| `debug.nvrm_kmap_peak` | diag | read-only | 3.0 | - | most kernel mappings of the RM tracked at once | kexts/NVRM/os-xnu.cpp |
+| `debug.nvrm_kmap_unmap_miss` | diag | read-only | 3.0 | - | unmaps of an address that is not mapped | kexts/NVRM/os-xnu.cpp |
 | `debug.nvrm_kms_timer_depth` | diag | read-only | 2.9 | - | queued NVKMS timers | kexts/NVRM/os-nvkms-xnu.cpp |
 | `debug.nvrm_kms_timer_executed` | diag | read-only | 2.9 | - | completed NVKMS timer callbacks | kexts/NVRM/os-nvkms-xnu.cpp |
 | `debug.nvrm_kms_timer_max_depth` | diag | read-only | 2.9 | - | peak queued NVKMS timers | kexts/NVRM/os-nvkms-xnu.cpp |
+| `debug.nvrm_layout_accel` | diag | read-only | 3.0 | - | accelerator layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_layout_fb` | diag | read-only | 3.0 | - | framebuffer layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_nano_bad_handle` | diag | read-only | 3.0 | - | nano timer calls with a handle not in use | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_fires` | diag | read-only | 3.0 | - | nano timer callbacks run | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_leaked` | diag | read-only | 3.0 | - | nano timers left when their GPU stopped | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_live` | diag | read-only | 3.0 | - | nano timers in use | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_slots` | diag | read-only | 3.0 | - | nano timer slots made | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_stale` | diag | read-only | 3.0 | - | late nano timer callbacks turned away | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_wait_timeouts` | diag | read-only | 3.0 | - | nano timer waits that ran out | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_waits` | diag | read-only | 3.0 | - | nano timer cancels that waited for a callback | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_pageoff_coalesced` | diag | read-only | 2.9 | - | page-offs copied per run | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_pages` | diag | read-only | 2.9 | - | pages in the last page-off | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_perpage` | diag | read-only | 2.9 | - | page-offs copied per 4 KB page | kexts/NVRM/nvrm_surfshare.cpp |
@@ -762,8 +933,15 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_pm_waited` | diag | read-only | 2.9 | - | RM calls that waited for a GPU resume | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_pvchain` | diag | read-only | 2.9 | - | batch 59b: do live RM buffers have a second pv mapper chained on qlink (read-only) | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_pvsentinel` | diag | read-only | 2.9 | - | batch 48: pv_head_table / pmap_phys_attributes corruption — detected and located (read-only) | kexts/NVRM/os-xnu2.cpp |
-| `debug.nvrm_rc_runs` | diag | read-only | 3.0 | - | RC timer ticks the RM accepted | kexts/NVRM/os-xnu2.cpp |
-| `debug.nvrm_rc_ticks` | diag | read-only | 3.0 | - | RC timer ticks | kexts/NVRM/os-xnu2.cpp |
+| `debug.nvrm_rc_armed` | diag | read-only | 3.0 | - | GPUs whose RC timer runs | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rc_refused` | diag | read-only | 3.0 | - | RC timer ticks the RM refused | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rc_runs` | diag | read-only | 3.0 | - | RC timer ticks the RM accepted | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rc_stale` | diag | read-only | 3.0 | - | late RC timer ticks turned away | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rc_ticks` | diag | read-only | 3.0 | - | RC timer ticks | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rc_wait_timeouts` | diag | read-only | 3.0 | - | waits for a running RC tick that ran out | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_rm_asserts` | diag | read-only | 3.0 | - | RM assertions that failed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_stub_hit_count` | diag | read-only | 3.0 | - | distinct OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_stub_hits` | diag | read-only | 3.0 | - | OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_switches` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line; ! marks one an ordinary install does not need |  |
 | `debug.nvrm_switches_nondefault` | diag | read-only | 3.0 | - | of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install) |  |
 | `debug.nvrm_switches_set` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line |  |
@@ -775,6 +953,19 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_watchpage` | diag | read-only | 2.9 | - | RM allocations/frees that covered the 2026-09-23 panic page (phys == 0x132b000 mod 1 GB) | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_winraw` | diag | read-only | 2.9 | - | batch 54: the panic window's bytes, read through the physical aperture (read-only) | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_winwhy` | diag | read-only | 2.9 | - | batch 54: which _vm_page_free_prepare_object branch the panic window trips (read-only) | kexts/NVRM/os-xnu2.cpp |
+| `debug.nvrm_wq_abandoned` | diag | read-only | 3.0 | - | per-GPU work queues given up on after a bounded wait ran out | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_depth_max` | diag | read-only | 3.0 | - | most RM work items pending or running on one queue | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_enq_atomic` | diag | read-only | 3.0 | - | RM work items queued where blocking is not allowed | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_enq_fail` | diag | read-only | 3.0 | - | RM work items refused (queue stopping, or no node where blocking is not allowed) | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_flush_atomic` | diag | read-only | 3.0 | - | flushes refused because the caller could not block | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_flush_self` | diag | read-only | 3.0 | - | flushes asked for by a queue's own worker (answered at once) | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_flush_slow` | diag | read-only | 3.0 | - | 5 s periods a flush waited | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_flushes` | diag | read-only | 3.0 | - | work queue flushes | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_gpu_queues` | diag | read-only | 3.0 | - | per-GPU work queues running | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_item_max_us` | diag | read-only | 3.0 | - | longest RM work item, microseconds | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_mode` | diag | read-only | 3.0 | - | RM work queues: 1 serialized, 0 off (nvrmworkq=0), -1 could not start | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_queued` | diag | read-only | 3.0 | - | RM work items queued | kexts/NVRM/nv_xnu_kcore.cpp |
+| `debug.nvrm_wq_run` | diag | read-only | 3.0 | - | RM work items run | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrmfb_agdc` | recovery | writable by root | 2.9 | - | write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, \<0 failed step) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_cmds` | diag | read-only | 2.9 | - | AGDC vendor calls received | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_fbmap` | diag | read-only | 2.9 | - | the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex | kexts/NVRMAGDC/nvrm-agdc.cpp |
@@ -787,6 +978,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_agdc_k5_link_mask` | diag | read-only | 2.9 | - | bit i = kAGDCLinkConfig answered for index i | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_k5_why` | diag | read-only | 2.9 | - | K5: why the last K5 query was not answered | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_last_refused` | diag | read-only | 2.9 | - | last AGDC command refused | kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_layout` | diag | read-only | 3.0 | - | AppleGraphicsDeviceControl layout: 0 not compared yet, 1 ok, 2 refused (state -6), 3 overridden (nvlayout=0), 4 unknown | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_maxfb` | diag | read-only | 2.9 | - | maxFramebuffers in our last 0x980 reply (0 = never asked) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_refused` | diag | read-only | 2.9 | - | AGDC vendor calls answered Unsupported | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_rescans` | diag | read-only | 2.9 | - | slot-table rescans done while answering 0x980 (a framebuffer that started after boot) | kexts/NVRMAGDC/nvrm-agdc.cpp |
@@ -807,6 +999,10 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_flip_us_max` | diag | read-only | 2.9 | - | the slowest pure flip, us | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_us_sum` | diag | read-only | 2.9 | - | microseconds spent in pure-flip applyModeSetConfig | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_guard_cleared` | diag | read-only | 2.9 | - | 1 once the boot guard was cleared this boot | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_layout` | diag | read-only | 3.0 | - | Apple class layout seen by NVRMFB: 0 not run, 1 ok, 2 refused, 3 overridden (nvlayout=0), 4 unknown | kexts/NVRMFB/fb/nvrmfb_layout.h |
+| `debug.nvrmfb_layout_classes` | diag | read-only | 3.0 | - | Apple classes NVRMFB compared by size | kexts/NVRMFB/fb/nvrmfb_layout.h |
+| `debug.nvrmfb_layout_vtables` | diag | read-only | 3.0 | - | Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
+| `debug.nvrmfb_layout_vtdiff` | diag | read-only | 3.0 | - | Apple vtables whose length differs from this build; reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
 | `debug.nvrmfb_vram_budget_bytes` | diag | read-only | 2.9 | - | the BAR1 grant budget in force | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_aware` | recovery | writable by root | 2.9 | - | 1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_bytes` | diag | read-only | 2.9 | - | scanout+cursor the framebuffer itself maps into BAR1 | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -865,7 +1061,7 @@ Each of these does nothing unless it is set.
 | `Google Chrome` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/nvmtl_schedule_policy.h |
 | `Microsoft Edge` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m, plugin/nvmtl_schedule_policy.h |
 | `VTDecoderXPCService` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
-| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-macos.patch, plugin/NVMTLDevice.m and 4 more |
+| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-evwait.patch, nvk/nvk-macos.patch and 5 more |
 | `mtlprobe` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtlrender` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtltest` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
