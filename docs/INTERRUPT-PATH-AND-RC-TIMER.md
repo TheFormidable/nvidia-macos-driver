@@ -1,4 +1,4 @@
-# Interrupt path, RC timer and nano timers: what differs from Linux, and the switches
+# Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
 Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **None of it has run on a
 GPU yet.** The code compiles for macOS 15 and 26 and its locking logic is tested on the host
@@ -11,6 +11,8 @@ still accepted and mean the default.
 | `nvrmbhthread=0` | the bottom-half thread: `rm_isr_bh` runs on the work loop right after `rm_isr`, as in 2.9 | a hang with `debug.nvrm_bh_runs` frozen, or RM messages about lock ownership |
 | `nvrmrctimer=0` | the RC timer: the RM's 1 Hz list never runs, as in 2.9 | a "GPU has fallen off the bus" (Xid 79) that does not happen with it |
 | `nvrmnanowait=0` | the wait of a nano timer cancel or destroy for a callback that is running | `debug.nvrm_nano_wait_timeouts` grows |
+| `nvrmworkq=0` | the RM work queues: every RM work item gets a thread of its own and a flush waits for all of them, as in 2.9 | a hang with `debug.nvrm_wq_flush_slow` growing, or `debug.nvrm_wq_abandoned` above 0 |
+| `nvrmatomic=0` | the answers by context: every OS-layer function answers as in 2.9, whatever the context | a hang or panic in an RM call made with interrupts off, or `debug.nvrm_atomic_mode` -1 |
 
 All of them are read once, at the first use. All the counters below are read-only sysctls (`sysctl debug | grep nvrm_`),
 readable over SSH while the screen is frozen.
@@ -26,6 +28,14 @@ control from another process, then no longer delays the next `rm_isr`.
 When `rm_isr` asks for a bottom half, it has handed the GPU lock over to it: only `rm_isr_bh` gives it back. So the
 request alone decides (as on Linux), and a requested bottom half is always run, also when the GPU stops at the same
 moment: the thread runs what is pending before it exits.
+
+**The surface fence's kick.** After every interrupt the work loop serves (whatever `rm_isr` answered) and after every
+bottom half, the driver kicks the surface fence ([SURFACE-FENCE.md](SURFACE-FENCE.md)): one test whether the fence is
+on, one atomic add, and a wakeup only when a thread sleeps in a fence wait. It takes no lock and never runs in the
+primary interrupt filter. A channel's semaphore release is in memory before its non-stall interrupt is raised, and a
+channel error reaches its notifier in the bottom half, so these two places are where a fence wait can be decided.
+`debug.nvrm_fence_kicks` counts them while the fence is on; it is at most `debug.nvrm_isr_count` +
+`debug.nvrm_bh_runs` and equal to neither, because one run of the work loop can serve several MSIs.
 
 **The interrupt gate.** `interruptOccurred` enters the RM only through a gate. Sleep, RTD3, shutdown and stop disable
 the interrupt source and then close the gate and wait, bounded, until no handler is inside and no bottom half is
@@ -122,6 +132,57 @@ Now:
 | `debug.nvrm_nano_wait_timeouts` | sysctl | Such waits that ran out. Should stay 0; `nvrmnanowait=0` removes the wait |
 | `debug.nvrm_nano_leaked` | sysctl | Timers the RM had not destroyed when its GPU stopped |
 | `debug.nvrm_nano_bad_handle` | sysctl | Calls with a timer that was not in use (a second destroy, for example); each is a no-op |
+
+## RM work items
+
+The RM hands work to the OS layer (`os_queue_work_item`) and later waits for it (`os_flush_work_queue`), as it does on
+Linux with one kthread queue per GPU plus a global one. On macOS each item used to get a thread of its own, so items
+of one GPU ran in any order and at the same time, and a flush waited for every item of every GPU. Now there is a
+global queue and, from the second start pass on, one queue per GPU, each with one worker thread (`nvrm-wq0` for the
+global queue, `nvrm-wq1`.. for GPUs): items run one at a time in the order they were queued, and a flush returns once
+everything queued before it has run. The RM's own flushes wait as long as they need to (each 5 s of waiting logs the
+item that is running); the driver's own waits are bounded: 30 s per step when the kext stops, 2 s per step at system
+shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
+on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
+per boot at most, or no thread) its items go to the global queue; that is never a reason to fail its start. Items the
+RM marks to be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on
+Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item.
+
+| Name | Kind | Meaning |
+|---|---|---|
+| `debug.nvrm_wq_mode` | sysctl | 1 serialized, 0 `nvrmworkq=0`, -1 the worker could not start |
+| `debug.nvrm_wq_queued`, `debug.nvrm_wq_run` | sysctl | RM work items queued, and run |
+| `debug.nvrm_wq_depth_max`, `debug.nvrm_wq_item_max_us` | sysctl | Most items pending or running on one queue; longest item, microseconds |
+| `debug.nvrm_wq_enq_atomic`, `debug.nvrm_wq_enq_fail` | sysctl | Items queued where blocking is not allowed; items refused (queue stopping, or no node where blocking is not allowed) |
+| `debug.nvrm_wq_flushes`, `debug.nvrm_wq_flush_slow` | sysctl | Flushes; 5 s periods a flush waited |
+| `debug.nvrm_wq_flush_self`, `debug.nvrm_wq_flush_atomic` | sysctl | Flushes asked for by a queue's own worker (answered at once); flushes refused because the caller could not block |
+| `debug.nvrm_wq_gpu_queues`, `debug.nvrm_wq_abandoned` | sysctl | Per-GPU queues running; per-GPU queues given up on after a bounded wait ran out. Should stay 0 |
+
+## Calls the RM makes where blocking is not allowed
+
+The RM calls its OS layer under its own spinlocks, with interrupts or preemption off. Each OS-layer function now asks
+the kernel which kind of context it is in (`preemption_enabled()`, checked at start-up against a lock taken with
+interrupts off) and, where it may not block: `os_semaphore_may_sleep()` answers no, so the RM takes its own
+non-blocking branches; allocations come from a 256 KB pool in the kext (requests up to 64 KB; anything else takes the
+heap call it always took, and is counted); frees of heap blocks are handed to a thread call; a lock is tried, then
+tried again every 20 us for up to 20 ms, and only then is the blocking call made that was always made there;
+`os_schedule()` returns at once. Everywhere else every function does exactly what it did. `nvrmatomic=0` makes every
+answer the old one.
+
+| Name | Kind | Meaning |
+|---|---|---|
+| `debug.nvrm_atomic_mode` | sysctl | 1 on, 0 `nvrmatomic=0`, -1 the start-up self-test failed (then every answer is the old one) |
+| `debug.nvrm_atomic_maysleep_false` | sysctl | Times `os_semaphore_may_sleep` answered no |
+| `debug.nvrm_atomic_alloc`, `debug.nvrm_atomic_alloc_miss`, `debug.nvrm_atomic_pool_peak` | sysctl | Allocations the pool served; allocations where blocking is not allowed that it could not serve; most pool bytes in use |
+| `debug.nvrm_atomic_free_deferred` | sysctl | Heap frees handed to a thread call |
+| `debug.nvrm_atomic_delay`, `debug.nvrm_atomic_schedule` | sysctl | `os_delay` and `os_schedule` where blocking is not allowed |
+| `debug.nvrm_atomic_lock_try`, `debug.nvrm_atomic_lock_spun`, `debug.nvrm_atomic_lock_fallback` | sysctl | Lock acquires where blocking is not allowed; of those, acquires that had to retry; that took the blocking call after 20 ms |
+| `debug.nvrm_atomic_lockalloc`, `debug.nvrm_atomic_blocking_entry` | sysctl | Lock allocations, and blocking OS-layer calls entered, where blocking is not allowed |
+
+Two more facts the RM now reports instead of having them ignored: `debug.nvrm_bugchecks` and
+`debug.nvrm_bugcheck_last` (bug checks the firmware or the RM asked for; -1 none) and `debug.nvrm_rm_asserts` (RM
+assertions that failed); neither stops the machine. `debug.nvrm_stub_hits` names the OS-layer functions without a body
+that the RM called (`debug.nvrm_stub_hit_count` counts them).
 
 ## CPU facts
 

@@ -66,6 +66,14 @@ implements Metal's device, queues, command buffers, encoders, resources, argumen
 pipelines on top of Vulkan (`nvmtl_vk.c`), with contract notes for Apple-specific behavior (sample positions, sampler
 descriptors, read-only metadata, physical bounds) in `plugin/nvmtl_*.h`.
 
+**Surfaces shared between processes.** A window's picture is an IOSurface that one process draws into and another
+reads. Since release 3.0 the kernel tracks, per surface, which process still has GPU work in flight
+([SURFACE-FENCE.md](SURFACE-FENCE.md)), and a reader sleeps until that work is done; 2.9's pending marks and busy tags
+remain as the fallback. Two-plane video surfaces (NV12: decoded video, screen-capture and camera frames) can now live
+in VRAM, each plane in its own, as single-plane surfaces always could; a process tries it only after a self-test on a
+private 128 x 64 surface has passed in that process, and until then, or for good if it fails, two-plane surfaces stay
+private images copied in and out as in 2.9 ([STUDIO-475-476.md](STUDIO-475-476.md)).
+
 **Shader translation** (`libnvmtl_translate.dylib`, `translator/`) converts Apple AIR, the bitcode Metal shaders compile
 to, into SPIR-V that NVK can compile. It is based on metal2vulkan (LGPL-3.0).
 
@@ -151,16 +159,16 @@ Nothing is sent; you can upload the file on the site yourself.
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `620.70.06`; NVK needs
 Mesa `90a959eb` (the mesa-26.3.0-rc3 tag; 2.8 and 2.8.1 used `17ca6174`) with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch`,
 `nvk/nvk-recycle.patch`, `nvk/nvk-slab.patch`, `nvk/nvk-slabdef.patch`, `nvk/nvk-hubfix.patch`, `nvk/nvk-perf-boost-burst.patch`,
-`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch`, `nvk/nvk-metal-wsi.patch`, `nvk/nvk-card-select.patch`, `nvk/hwrt/ttu-nak.patch`, `nvk/hwrt/ttu-rq.patch`, `nvk/curves/curves.patch`, `nvk/hwrt/wide.patch` and `nvk/nvk-warnings.patch` (`patch -p1` from the Mesa root; the last two are the ray-query part for the RT cores, off unless `NVK_HWRT_QUERY=1`, see `docs/HWRT.md`; `nvk/hwrt/nvk_hwrt.h` and `nvk_hwrt_layout.h` are copied into `src/nouveau/vulkan` after them), then
+`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch`, `nvk/nvk-metal-wsi.patch`, `nvk/nvk-card-select.patch`, `nvk/hwrt/ttu-nak.patch`, `nvk/hwrt/ttu-rq.patch`, `nvk/curves/curves.patch`, `nvk/hwrt/wide.patch`, `nvk/nvk-warnings.patch`, `nvk/nvk-unbound-stage.patch`, `nvk/nvk-diag-nofollow.patch`, the three patches of upstream Mesa commits newer than the base (`nvk/nvk-mesa-26.3.0.patch`, `nvk/nvk-nak-fixes-main.patch`, `nvk/nvk-nak-sched-main.patch`; see [NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)), then NullMoth's own `nvk/nvk-evwait.patch` (waits sleep on the GPU's completion event in every process, [EVENT-WAIT.md](EVENT-WAIT.md)), `nvk/nvk-fence.patch` (channels registered with the kext's surface fence, and the plugin's calls into it, [SURFACE-FENCE.md](SURFACE-FENCE.md)) and `nvk/nvk-channel-recover.patch` (a faulted channel rebuilt instead of the device lost, [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md)) (`patch -p1` from the Mesa root; the two `hwrt` patches are the ray-query part for the RT cores, off unless `NVK_HWRT_QUERY=1`, see `docs/HWRT.md`; `nvk/hwrt/nvk_hwrt.h` and `nvk_hwrt_layout.h` are copied into `src/nouveau/vulkan` after the chain), then
 `nvk/dlss/patch_dlss_cache.py <mesa tree>`. NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` and `nvk/ogkm-warnings.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
 
-`nvk/nvk-metal-wsi.patch` turns on `VK_EXT_metal_surface`: it adds the extension to NVK's instance table, counts the Metal platform as a window system, and runs Mesa's Metal swapchain in its software mode (a linear host-visible image copied into the `CAMetalLayer` drawable by Mesa's layer helper, because the hardware mode needs a driver that can bind a Metal texture to a `VkImage`). `nvk/nvk-card-select.patch` (last in the chain) makes the RM connection honour `NVK_ACCEL_ID`, the registry entry id of one accelerator, so a process bound to one of several cards opens that card (unset, the first accelerator, as before). The build uses `-Dplatforms=macos` for the NVK build and still `-Dplatforms=` for the native `mesa_clc` tool build.
+`nvk/nvk-metal-wsi.patch` turns on `VK_EXT_metal_surface`: it adds the extension to NVK's instance table, counts the Metal platform as a window system, and runs Mesa's Metal swapchain in its software mode (a linear host-visible image copied into the `CAMetalLayer` drawable by Mesa's layer helper, because the hardware mode needs a driver that can bind a Metal texture to a `VkImage`). `nvk/nvk-card-select.patch` makes the RM connection honour `NVK_ACCEL_ID`, the registry entry id of one accelerator, so a process bound to one of several cards opens that card (unset, the first accelerator, as before). The build uses `-Dplatforms=macos` for the NVK build and still `-Dplatforms=` for the native `mesa_clc` tool build.
 
 `build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `90a959eb` (26.3.0-rc3; `2.8` exports `17ca6174`) with `git archive`,
 applies the header patch and the chain above (and copies the two hwrt headers), builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
 revision deserialize NVK's internal shaders as garbage), cross-builds `libvulkan_nouveau.dylib` for x86_64 and prints its
-LC_UUID and export count. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
+LC_UUID and export count, and what was left out of or added to the chain, if anything. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
 or gps-maxpower patches; `nvk/release-2.8/nvk-fixes-after-def16.patch`). Rebuilding 2.8 gives the shipped library byte for byte
 except the 16 LC_UUID bytes: the linker derives the UUID from the unstripped file, which records the absolute path of every
 object, so a different build directory gives a different UUID. `build/nvk_compare.py` states exactly which bytes differ.
@@ -169,7 +177,15 @@ The NAK changes under `nvk/speed267` are already contained in `nvk-macos.patch`;
 The video codecs in `libnvencvt.dylib` are built from `vendor/nvenc` (mickys/nvenc, MIT) by `build/build_nvencvt.sh`. The
 package puts the library beside the plugin in `NVMTLDriver.bundle/Contents/MacOS/`; the plugin loads it only when it and
 its folder are root-owned. `NVMTL_NVENCVT` in `nvrm610.conf` decides where it registers: unset is automatic on Ada and
-Ampere, `0` is never, `1` is every process on any card the library accepts, and a list of process names limits it to those.
+Ampere, and on RTX 50 in the decode service only; `0` is never; `1` is every process on any card the library accepts;
+a list of process names limits it to those. On RTX 50 the library registers nothing, whatever the value, until the
+card has decoded its two built-in H.264 test streams bit for bit in that process (one line in the system log,
+`Blackwell H.264 decode self-test: PASS` or `FAIL at <step>`); a process where that fails keeps the decoders it had.
+The plugin asks the library whether it has that test before it uses it on RTX 50 (the library exports
+`NVEncVT_BlackwellSelfTest`), so an older build of the library beside a newer plugin is refused there instead of
+registering an untested decoder. `build/build_nvencvt.sh` also compares every struct and constant the library takes
+from NVIDIA's 610.57.04 headers with the 620.70.06 tree the kernel module is built from
+(`tools/nvencvt_header_abi.py`) and stops on a difference.
 The GPU's boost policy is `NVRM_610_BOOST`: unset is a short lease renewed while work is submitted, `hold` keeps one boost
 for the device's life, `0` never boosts.
 `NVRM_610_MAXPOWER_MW=<mW>` (off unless set) asks the GPU performance-scaling code for that maximum power through the public root-client GPS control and reads it back.
