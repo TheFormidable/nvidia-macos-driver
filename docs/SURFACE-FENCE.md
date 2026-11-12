@@ -298,7 +298,7 @@ boot" unless it says "now".
 | `done_on_slice` | the same after a time slice: no interrupt told them | near 0; far below `done_on_irq` |
 | `expired_gpu` | holds given up after 2000 ms | 0 |
 | `expired_cpu` | holds given up after 100 ms with their writer's GPU idle | 0 (1 for each `kill -STOP` test) |
-| `expired_penalty` | holds given up after 20 ms in a penalty window | 0 |
+| `expired_penalty` | holds given up in a penalty window: after 20 ms, a compositor hold after 100 ms | 0 |
 | `strikes` | strikes against connections whose holds were given up | 0 |
 | `owners_distrusted` | connections refused after three strikes | 0 |
 | `close_gpu_agree` | armed holds closed with the kernel seeing their work complete | grows with application drawing |
@@ -342,10 +342,13 @@ from a channel or from the process.
 - **Shutdown, or the last GPU stops.** Every hold ends and every sleeper is woken before the adapter goes down.
   Not covered: the channels stay registered, and their pages stay wired, until the connections that registered them
   close; the kernel stops reading them, since no hold is armed on them and new ones are refused.
-- **The layer switches itself off** (`state` 2, eight distrusted connections). New holds are refused at once.
-  Not covered: the holds that already exist are not ended. NVAccel stops asking the fence at once and is on 2.9's
-  marks; a plugin reader that already waits on such a hold stays until it completes, is closed or reaches its bound,
-  and is woken only by a change of the table or its own time slice, because the kick returns at once from then on.
+- **The layer switches itself off** (`state` 2, eight distrusted connections). In the look that distrusts the eighth
+  connection every hold ends and every sleeper is woken; the readers that were waiting are told "given up". From
+  then on every request is answered "off", NVAccel is told that nothing is pending and is on 2.9's marks, and the
+  kick returns at once.
+  Not covered: work that was in flight at that moment has neither a hold nor a 2.9 mark (none was sent for a surface
+  the kernel held), so its readers go on at once and can see an unfinished frame, as after a wait that reached its
+  bound.
 - **A process exits or is killed.** Each connection, when it closes, ends its own holds and lets its own pages go
   before the RM frees what that connection owns. NVK keeps its fence calls on a connection of their own and its
   channels on another, and macOS closes a dying process's connections in no set order, so for the holds to end
