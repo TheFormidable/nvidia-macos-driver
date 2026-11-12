@@ -2373,7 +2373,9 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     struct NVHold { OSObject *o = nullptr; ~NVHold() { if (!o) return; if (o->getRetainCount() <= 1) { nvPoStandDown("the page-off held the last reference"); return; } o->release(); } } holdRes, holdAccel;
     {   const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
         NVAccel *a = NVAccel::resolve(fAccel);
-        if (gPoUnlocked && a && nvSurfIsPending(sid) && a->mayRelease()) {
+        // Asked once: the question takes NVRM's fence lock, and a yes is counted (nvaccel_surface_fence_pending).
+        const bool pending = gPoUnlocked && a && nvSurfIsPending(sid);
+        if (pending && a->mayRelease()) {
             const uint64_t t0 = mach_absolute_time();
             // What the copy below would act on, as it stood with the lock held, so the state after the wait can be
             // compared with it. valid[0] bit 0 = the system-memory copy holds the newest pixels (set by a page-off).
@@ -2407,7 +2409,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
                 if (!wasCurrent && v1 && (v1[0] & 1u)) { OSAddAtomic64(1, &gCntPoAlready); if (out) *out = true; return; } }
             if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
         } else {
-            if (gPoUnlocked && a && nvSurfIsPending(sid)) OSAddAtomic64(1, a->lockPinned() ? &gCntPoPinned : &gCntPoNotOwner);
+            if (pending) OSAddAtomic64(1, a->lockPinned() ? &gCntPoPinned : &gCntPoNotOwner);
             // The accelerator lock is held here, and the producer's next step may need it: 2.9's 100 ms, fence and marks
             // together.
             nvSurfWaitReadyFor(sid, kSurfGpuWaitMs);

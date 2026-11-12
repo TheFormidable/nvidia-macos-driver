@@ -102,6 +102,9 @@ def text_arms(src):
         and "static const unsigned kSurfGpuWaitMs = 100;" in src)
     out["no page-off wait goes around the fence (no nvSurfWaitReady or nvSurfWaitLegacy in pageoff)"] = (
         po != "" and "nvSurfWaitReady(" not in po and "nvSurfWaitLegacy(" not in po)
+    out["a page-off asks once whether its surface is pending (one look at the fence, one count)"] = (
+        po.count("nvSurfIsPending(") == 1 and "const bool pending = gPoUnlocked && a && nvSurfIsPending(sid);" in po[:u if u > 0 else 0]
+        and "if (pending && a->mayRelease()) {" in po[:u if u > 0 else 0] and "if (pending) OSAddAtomic64(1, a->lockPinned()" in locked)
     ip = func(src, "static bool nvSurfIsPending(unsigned int id)\n{")
     out["a hold the fence knows makes a surface pending (a look, no sleep), and so does a 2.9 mark"] = (
         "fw(&w, NVRM_FENCE_F_COMPOSITOR | NVRM_FENCE_F_LOOK) == NVRM_FENCE_ST_OK && w.result == NVRM_FENCE_R_PENDING" in ip
