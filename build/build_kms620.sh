@@ -7,15 +7,24 @@ B=$(cd "${1:?work dir}" && pwd); JOBS=${JOBS:-6}; V=${NV_VERSION:-620.70.06}
 [ -f "$B/ogkm-$V/.nm-patches" ] || { echo "STOP: $B/ogkm-$V has no record of the patches applied to it; run build_rm620.sh in a new work dir"; exit 2; }
 cd "$B/ogkm-$V/src/nvidia-modeset" || exit 2
 O=_out/Darwin_x86_64; mkdir -p "$O"
+# against an empty output folder, so that the list is complete when it was built before (see build_rm620.sh)
+[ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2
+[ -z "$(ls -A "$O")" ] || { mv "$O" "$O.nm-aside" && mkdir -p "$O"; } || exit 2
 make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 2>/dev/null > "$B/kms-make-n.txt"
+[ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2
 grep " -c " "$B/kms-make-n.txt" | python3 -c '
 import sys
 for l in sys.stdin:
     l = l.rstrip("\n")
     cc, rest = l.split(" ", 1)
     tool = {"cc": "clang", "c++": "clang++"}[cc]   # the DisplayPort library is C++
-    print(tool + " -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + rest.replace(" -mcmodel=kernel", "").replace(" -fno-pic", ""))' > "$O/compile_cmds.sh"
-n=$(wc -l < "$O/compile_cmds.sh" | tr -d " "); echo "modeset compile commands: $n"
+    print(tool + " -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + rest.replace(" -mcmodel=kernel", "").replace(" -fno-pic", ""))' > "$O/compile_cmds.sh.new"
+n=$(wc -l < "$O/compile_cmds.sh.new" | tr -d " ")
+if [ -f "$O/compile_cmds.sh" ] && [ "$n" -lt "$(wc -l < "$O/compile_cmds.sh")" ]; then
+  echo "STOP: make -n listed $n modeset compile commands, fewer than the list there; kept that list. Run build_rm620.sh in a new work dir"
+  rm -f "$O/compile_cmds.sh.new"; exit 2
+fi
+mv "$O/compile_cmds.sh.new" "$O/compile_cmds.sh"; echo "modeset compile commands: $n"
 # the identity string is a make step (user@host and the date); write the shipped wording instead
 printf '%s\n' 'const char  NV_KMS_ID[] = "nvidia id: NVIDIA UNIX Open Kernel Mode Setting Driver for x86_64 '"$V"' Release Build (NullMoth Systems)";' \
   'const char *const pNV_KMS_ID =  NV_KMS_ID + 11;' > "$O/g_nvid_string.c"

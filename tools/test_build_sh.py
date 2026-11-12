@@ -229,9 +229,11 @@ if [ -f "$SB/ctl/block-$key" ]; then
 fi
 if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
 mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
+# like NVIDIA's archives (libtool records each member's time): a rebuild of rm or kms is never byte-identical
+mknew() { mk "$1"; printf 'build %s-%s\n' "$$" "$RANDOM" >> "$1"; }
 case $key in
-  rm) mk "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
-  kms) mk "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
+  rm) mknew "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
+  kms) mknew "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
 esac
 # the end of build_rm620.sh / build_kms620.sh when their substring search finds the account or host name: the archive is
 # written, then exit 6 (ctl/personal-<key> holds the archive's text)
@@ -1233,6 +1235,15 @@ def rebuilt(sb, *args, extra=None, edit=None):
     return rc, sb.step_keys(), out
 
 
+def rm_again_problems(sb):
+    rc, keys, out = rebuilt(sb, "--force", "rm")
+    if keys != ["rm"]:
+        return [f"--force build rm ran {keys}"]
+    rc, keys, out = rebuilt(sb)
+    want = ["kms", "nvrm", "fb", "accel", "nvencvt"]
+    return [] if keys == want else [f"after rm was built again, build ran {keys}, expected {want}"]
+
+
 def arm_stamps(mac):
     with mac.scratch():
         rc, keys, out = rebuilt(mac)
@@ -1265,6 +1276,13 @@ def arm_stamps(mac):
         check("a missing output re-runs its step", keys == ["osver"], keys)
         rc, keys, _ = rebuilt(mac, "--force", "agdc")
         check("--force re-runs the named step even when it is up to date", keys == ["agdc"], keys)
+        p = rm_again_problems(mac)
+        check("rm built again (--force build rm): the next build re-runs everything that reads its flags or links its archive", not p, p)
+    with mac.scratch():
+        mac.break_script('$(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"',
+                         '$(sha256_file "$STAMPS/$d" 2>/dev/null || echo none)"')
+        rebuilt(mac)
+        negative("stamps that follow only the dependency's recipe, not its new archive", rm_again_problems(mac))
     with mac.scratch():
         mac.break_script("""  for v in $C_VARS; do eval "say \\"var $v=\\${$v:-}\\""; done\n""", "")
         rebuilt(mac)
