@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The accelerator's waits for WindowServer's GPU work go through NVRM's surface fence, and fall back to the 2.9 marks.
 
-NVAccel asks NVRM once for the fence's wait function (platform function nvFenceOps) and keeps the pointer. Every wait
+NVAccel asks NVRM once for the fence's wait function (platform function nvFenceOps) and keeps the pointer, with a
+reference on the NVRM that answered so that the kext the pointer leads into never unloads. Every wait
 for a surface (the flip, the copied frame, the hybrid paths, the page-off) asks the fence first and then the 2.9 mark
 table; with no fence (an older NVRM, boot-arg nvrmfence=0, a fence that did not start) the mark wait is the whole wait,
 exactly as in 2.9.
@@ -12,9 +13,10 @@ Two kinds of arms:
   a fake clock: no fence = 2.9 to the nanosecond, the bounds of the locked and the unlocked page-off (also when NVRM
   sleeps and then answers that it found nothing, or refuses), a dead writer counts as done, a refusing NVRM is asked
   again at most once a second, a page-off sees a hold the fence knows.
-Negative controls: v2.9's source (7412cdd) fails the text arms; four altered copies of the lifted code (a dead writer
+Negative controls: v2.9's source (7412cdd) fails the text arms; six altered copies of the lifted code (a dead writer
 treated as a timeout, the mark wait given its own full bound after a fence wait, the bound shared only with a fence
-wait that found a hold, no rate limit on asking again) each fail the arm about them.
+wait that found a hold, no rate limit on asking again, NVRM not held, NVRM asked again by a second start) each fail
+the arm about them.
    python3 tools/test_fence_wiring_accel.py"""
 import pathlib, re, subprocess, sys, tempfile
 
@@ -54,6 +56,11 @@ def text_arms(src):
         and "nvrm->callPlatformFunction(sym, false, &o," in ask and "if (r != kIOReturnSuccess || !o.wait) {" in ask
         and "__atomic_store_n(&gFenceWait, (NVRMFenceWaitFn)o.wait, __ATOMIC_RELEASE);" in ask
         and ask.find("if (r != kIOReturnSuccess || !o.wait) {") < ask.find("__atomic_store_n(&gFenceWait"))
+    hv, rt = ask.find("if (NVRMFenceWaitFn have = __atomic_load_n(&gFenceWait, __ATOMIC_ACQUIRE)) return have;"), ask.find("nvrm->retain();")
+    out["the pointer is fetched once, and the NVRM that answered is held (once, for good) before the pointer is published"] = (
+        0 <= hv < ask.find("nvrm->callPlatformFunction(sym, false, &o,")
+        and "if (OSCompareAndSwap(0, 1, &held)) nvrm->retain();" in ask and "release()" not in ask.replace("sym->release()", "")
+        and ask.find("if (r != kIOReturnSuccess || !o.wait) {") < rt < ask.find("__atomic_store_n(&gFenceWait"))
     ops = func(src, "static NVRMFenceWaitFn nvFenceOps(void)\n{")
     out["a wait never waits for NVRM to match: it asks only an NVRM already found, at most once a second"] = (
         "a ? a->fNVRM : nullptr" in ops and "locateNVRM" not in ops and "waitForMatchingService" not in ops
@@ -132,6 +139,7 @@ static SInt64 OSAddAtomic64(SInt64 v, SInt64 *p) { SInt64 o = *p; *p += v; retur
 struct IOLock { int held; }; static IOLock gL;
 static IOLock *IOLockAlloc() { return &gL; } static void IOLockFree(IOLock *) {}
 static bool OSCompareAndSwapPtr(void *o, void *n, void *volatile *p) { if (*p != o) return false; *p = n; return true; }
+static bool OSCompareAndSwap(UInt32 o, UInt32 n, volatile UInt32 *p) { if (*p != o) return false; *p = n; return true; }
 static int gBad;
 static void IOLockLock(IOLock *l) { if (l->held) gBad++; l->held = 1; } static void IOLockUnlock(IOLock *l) { if (!l->held) gBad++; l->held = 0; }
 static void IOLockWakeup(IOLock *, void *, bool) {}
@@ -159,7 +167,8 @@ static unsigned fakeWait(struct NVRMFenceWait *w, unsigned flags) {
     if (gFenceResult != NVRM_FENCE_R_NONE) gClock += (uint64_t)t * 1000000;
     w->result = gFenceResult; return gFenceStatus;
 }
-struct IOService { IOReturn callPlatformFunction(const OSSymbol *, bool, void *p1, void *, void *, void *) {
+struct IOService { int retains = 0; void retain() { retains++; }
+  IOReturn callPlatformFunction(const OSSymbol *, bool, void *p1, void *, void *, void *) {
     gAsks++; struct NVRMFenceKernelOps *o = (struct NVRMFenceKernelOps *)p1;
     if (gAnswer == kIOReturnSuccess && o->version == NVRM_FENCE_ABI_VERSION && o->size == sizeof *o) o->wait = fakeWait;
     return gAnswer; } };
@@ -196,6 +205,14 @@ int main() {
         gClock += 600ull * 1000000; gAnswer = kIOReturnSuccess; nvSurfWaitReady(9); ok &= gAsks == 2 && gFenceOn == 1;
         gClock += 5000ull * 1000000; nvSurfWaitReady(9); nvSurfIsPending(9); ok &= gAsks == 2;
         check("a refusing NVRM is asked again at most once a second, and not at all once it answered", ok);
+    }
+    // B2: the pointer leads into NVRM.kext for the rest of the boot: the NVRM that answered is held, once, and a
+    // second accelerator's start (which calls nvFenceAsk directly) neither asks nor holds again
+    {
+        bool ok = gNVRM.retains == 1;
+        ok &= nvFenceAsk(&gNVRM) == fakeWait && gAsks == 2 && gNVRM.retains == 1;
+        ok &= nvFenceAsk(nullptr) == fakeWait;
+        check("the NVRM that answered is held once, and a second start neither asks nor holds again", ok);
     }
     // C: READY after 40 ms: compositor holds, the caller's bound
     {
@@ -322,13 +339,19 @@ CONTROLS = [
     ("no rate limit on asking a refusing NVRM again",
      "    if (gFenceAskAgainAt && mach_absolute_time() < gFenceAskAgainAt) return nullptr;\n", "",
      "a refusing NVRM is asked again at most once a second, and not at all once it answered"),
+    ("the NVRM that answered is not held",
+     "    if (OSCompareAndSwap(0, 1, &held)) nvrm->retain();\n", "",
+     "the NVRM that answered is held once, and a second start neither asks nor holds again"),
+    ("a second accelerator's start asks NVRM again",
+     "    if (NVRMFenceWaitFn have = __atomic_load_n(&gFenceWait, __ATOMIC_ACQUIRE)) return have;   // asked once: the start of a second accelerator does not ask again\n", "",
+     "the NVRM that answered is held once, and a second start neither asks nor holds again"),
 ]
 with tempfile.TemporaryDirectory() as tmp:
     res, log = run_fixture(region, tmp, "real") if region else (None, "the wait functions were not found")
     if res is None:
         arm("the lifted wait functions compile and run on the host", False, log)
     else:
-        arm("the lifted wait functions compile and run on the host", len(res) >= 12, log)
+        arm("the lifted wait functions compile and run on the host", len(res) >= 13, log)
         for n, ok in res.items():
             arm("behaviour: " + n, ok, log)
     for what, old_s, new_s, target in CONTROLS:
