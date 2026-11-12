@@ -15,6 +15,7 @@ class NVAccel;
 #include "IOAccel2DContext2.h"
 #include "IOAccelCLContext2.h"
 #include "IOAccelVideoContext2.h"
+#include "nvaccel_pageoff_recheck.h"
 class NVResource : public IOAccelResource2 {
     OSDeclareDefaultStructors(NVResource)
     NM_TAHOE_FWD(NVResource)
@@ -61,6 +62,9 @@ public:
     // before trusting the family bit, so VRAM re-allocated under the same resource counts as unwritten again (a parked
     // allocation that comes back keeps its cookie, and so its record). 0 = never written.
     unsigned long long fPluginWroteCookie = 0;
+    // The driver's own page-off copies of this resource, numbered (nvaccel_pageoff_recheck.h): a page-off that waited
+    // for the GPU without the accelerator lock reads it to see whether another thread has made its copy meanwhile.
+    nvaccel_pageoff_copies fPoCopies = { 0, 0 };
 };
 OSDefineMetaClassAndStructors(NVResource, IOAccelResource2)
 class NVSysMemory : public IOAccelSysMemory {
