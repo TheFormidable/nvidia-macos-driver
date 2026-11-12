@@ -147,6 +147,8 @@ def problems(src):
         line = go[go.rfind("\n", 0, i) + 1:go.find("\n", i)] if i >= 0 else ""
         if "return" in line or re.search(r"if \(!fNv\.queue\)[^;\n]*return", go):
             out.append("go() fails when the GPU gets no queue of its own")
+        if "nvregdwords: %s = %lu" not in go:
+            out.append("go() does not log each nvregdwords key with its value")
     for fn, flush, cap in (("void NVRM::stop(", "nv_xnu_wq_flush(fNv.queue, true, 30000)", "workQueueDown(30000)"),
                            ("void NVRM::shutdownFull(", "nv_xnu_wq_flush(s->fNv.queue, true, 2000)", "workQueueDown(2000)")):
         b = body(nvrm, fn)

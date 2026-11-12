@@ -1946,6 +1946,29 @@ IOReturn NVRM::go(uint32_t pass)
                     regdw[sizeof regdw - 1] = 0;
                     rm_parse_option_string(NULL, regdw);
                     LOG("registry options from nvregdwords: %s", regdw);
+                    // Each key with the number the RM was given for it, read the way the RM reads it (os_strtoul,
+                    // base 0, spaces dropped). Until os_strtoul had a body every value reached the RM as 0.
+                    static bool listed;
+                    if (!listed) {
+                        listed = true;
+                        char copy[sizeof regdw];
+                        unsigned n = 0;
+                        for (unsigned i = 0; regdw[i] && n < sizeof copy - 1; i++) if (regdw[i] != ' ') copy[n++] = regdw[i];
+                        copy[n] = 0;
+                        for (char *key = copy; key && *key; ) {
+                            char *end = strchr(key, ';');
+                            if (end) *end = 0;
+                            char *eq = strchr(key, '=');
+                            if (eq && eq != key && eq[1]) {
+                                *eq = 0;
+                                const unsigned long v = strtoul(eq + 1, NULL, 0);
+                                LOG("nvregdwords: %s = %lu (0x%lx)", key, v, v);
+                            } else if (*key) {
+                                LOG("nvregdwords: \"%s\" has no value and was ignored", key);
+                            }
+                            key = end ? end + 1 : NULL;
+                        }
+                    }
                 }
             }
             LOG("registry: RmMsg=\":\" ResmanDebugLevel=0 (verbose RM)");
