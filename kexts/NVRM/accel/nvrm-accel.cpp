@@ -2397,6 +2397,11 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
             if ((int)(ns / 1000) > gPoUnlockedMaxUs) gPoUnlockedMaxUs = (int)(ns / 1000);
             OSAddAtomic64(1, &gCntPoUnlocked);
+            // Everybody else let go of the resource while the lock was free. What it points at (its device cache and
+            // the surface behind it) is not held by this function and may have gone with them, so nothing is read
+            // through it any more. The hold above is the last reference: it is kept, and the unlocked wait stands
+            // down, when this function returns (NVHold).
+            if (getRetainCount() <= 1) { if (out) *out = false; return; }
             // while the lock was free the family may have changed the resource: read everything again
             cache = *(void *volatile *)(r + 0xe0);
             vm = nvres_vidmem(this);

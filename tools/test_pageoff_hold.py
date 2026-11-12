@@ -10,6 +10,7 @@ of NVResource::pageoff and its helpers, with v2.9 (7412cdd) as the control that 
 - the result of taking the lock back is tested, and nothing below runs without it;
 - after the lock is back, a resource whose system memory became current while the lock was free is not copied over;
 - a hold that is the last reference when the function returns is kept, and the unlocked wait stands down for the boot;
+  when it already is the last one as the lock comes back, nothing is read through the resource any more;
 - a lock the driver took itself (nvFamLock) is pinned, so a page-off reached from under it never lets go of it.
 The switch is on by default, the sysctl only reports, and boot-arg nvaccel_pageoff_locked is read once before the
 family starts."""
@@ -98,6 +99,16 @@ def last_ref_kept(src):
     return k >= 0 and s > k and r > s and d.rfind("o->release();") > r
 
 
+def orphan_not_read(src):
+    """With the lock back, a resource that only this function still holds is left alone: the check stands after the
+    relock and before the first read of what the resource points at (its device cache, the surface, the valid bits)."""
+    b = unlocked_block(src)
+    rl = b.find("if (!nvFamLock(a, false))")
+    k = b.find("if (getRetainCount() <= 1) { if (out) *out = false; return; }", rl)
+    reads = [b.find(t, rl) for t in ("*(void *volatile *)(r + 0xe0)", "nvres_vidmem(this)", "*(unsigned short *volatile *)(r + 0x30)")]
+    return 0 <= rl < k and all(x > k for x in reads)
+
+
 def pinned(src, hdr):
     lock = func(src, "static bool nvFamLock(NVAccel *a, bool tryOnly)")
     unlock = func(src, "static void nvFamUnlock(NVAccel *a)")
@@ -146,6 +157,7 @@ else:
 arm("the result of taking the lock back is tested; a failure stands down and returns", relock_tested(src))
 arm("after the relock, a resource whose system memory became current is reported done and not copied over", revalidated(src))
 arm("a hold that is the last reference is kept and the unlocked wait stands down", last_ref_kept(src))
+arm("with the lock back, a resource that only the page-off still holds is not read through", orphan_not_read(src))
 arm("the driver's own locks are pinned (nvFamLock / nvFamUnlock), the relock unpins, a pinned owner may not let go",
     pinned(src, hdr))
 arm("on by default; the sysctl is read-only; boot-arg nvaccel_pageoff_locked is read once before the family starts",
@@ -157,6 +169,7 @@ if v29 is not None and v29h is not None:
     arm("control: v2.9 ignores the relock result", not relock_tested(v29))
     arm("control: v2.9 copies after the relock without looking at valid[0]", not revalidated(v29))
     arm("control: v2.9 releases the last reference", not last_ref_kept(v29))
+    arm("control: v2.9 reads through the resource whoever still holds it", not orphan_not_read(v29))
     arm("control: v2.9 lets go of a lock its own code took", not pinned(v29, v29h))
     arm("control: v2.9 is off by default with a writable switch", not default_on(v29))
 else:
