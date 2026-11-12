@@ -11,7 +11,7 @@ the program name), so what runs here is the production text. What is proven:
     compositor); a refusal of the second gives back what the first took (one CLOSE), a refusal of the first needs none;
   - after any refusal the thread's record is empty, so every busy tag and every pending mark goes out as before;
   - ARM names only the surfaces whose last writer is the part, with that part's fence; CLOSE of everything happens once;
-  - a reader's wait passes the surface, the plane bit, the writer's pid and the 2 s budget; READY ends it, the answers
+  - a reader's wait passes the surface, the plane bit, the writer's pid (never 0) and the 2 s budget; READY ends it, the answers
     with which the kernel lets go (NONE, DEAD, TIMEOUT, BUDGET) end it only after the kernel kept the reader as long
     as the older poll lasts, and everything else leaves it to that poll; WindowServer never waits for compositor holds;
   - surface 0 always reaches the kernel; a pending mark the open covers is not sent and its clear is not either; a
@@ -20,7 +20,7 @@ the program name), so what runs here is the production text. What is proven:
 Negative controls: the same program built from a copy with one line of the production text changed must fail (the
 thread's record not cleared before a refusal; the partial refusal's CLOSE left out; a covered pending mark sent; a
 refused mark remembered as taken; the marks of an NVK without the entry routed; a reader's wait judged without the
-time the kernel kept it).
+time the kernel kept it; a wait asked for a tag that names no writer).
 """
 import os, pathlib, re, subprocess, sys, tempfile
 
@@ -267,6 +267,7 @@ int main(int argc, char **argv)
     wait_us = 1234;
     other_status = 0x80000003u; T("wait: an error falls through", nvmtl_vk_fence_wait(900, 1, 321) == 0);
     T("wait: surface 0 is not asked", (reset_calls(), nvmtl_vk_fence_wait(0, 1, 321) == 0 && ncalls == 0));
+    T("wait: a tag that names no writer is not asked (pid 0 would mean any process, this one too)", (reset_calls(), nvmtl_vk_fence_wait(900, 1, 0) == 0 && ncalls == 0));
     reset_calls(); nvmtl_vk_fence_wait_compositor(910);
     T("compositor wait: flag, any plane, no pid", ncalls == 1 && calls[0].flags == NVMTL_FENCE_F_COMPOSITOR && calls[0].planesNull && calls[0].pid == 0 && calls[0].ids[0] == 910);
     reset_calls(); other_status = NVMTL_FENCE_ST_OFF;
@@ -308,6 +309,7 @@ with tempfile.TemporaryDirectory() as d:
         ('a clear is sent for a mark the kernel refused', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, st);', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, 0);'),
         ('the marks of an NVK without the fence entry are routed', 'if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);', ''),
         ('a reader\'s wait is judged without the time the kernel kept it', 'return nvmtl_fence_wait_handled(st, out[0], out[1]);', 'return nvmtl_fence_wait_handled(st, out[0], ~0u);'),
+        ('a wait is asked for a tag that names no writer', 'if (!sid || !pid || !nvmtl_vk_fence_ready(0)) return 0;', 'if (!sid || !nvmtl_vk_fence_ready(0)) return 0;'),
     ]
     for what, line, replacement in controls:
         assert block.count(line) == 1, 'control anchor not found once: ' + line
