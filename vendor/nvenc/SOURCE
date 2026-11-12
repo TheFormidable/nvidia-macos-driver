@@ -40,6 +40,9 @@ input layout in blocklinear.h was measured from a working client's surface. That
 not disassembly, but it is the same kind of source as NullMoth's own encoder libraries.
 
 Build inputs (fetched at build time by build/build_nvencvt.sh, not vendored):
-  NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT
+  NVIDIA open-gpu-kernel-modules 610.57.04   RM API headers, MIT. The kernel module's RM is 620.70.06: the build compares
+                 every struct and constant the library takes from these headers with the tree the kernel module is built
+                 from (tools/nvencvt_header_abi.py) and stops on a difference. The one it lets pass, with its reason, is
+                 in that file: 620 no longer reports a mapping's caching type in NVOS33's flags.
   NVIDIA open-gpu-doc 9fdf5c4062007929d9f4e6cbad9c9771fe61b880   video class headers, MIT
   WebKit CMBaseObjectSPI.h and VTVideoDecoderSPI.h at 3bfbc200370710495ffa440abdd31b943c83ad7a, BSD
