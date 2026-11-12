@@ -1,0 +1,823 @@
+# switches.tsv: every switch the driver reads. Columns (tab separated): kind, name, tier, default, since, review, purpose.
+# tools/switch_registry.py explains the columns and the rules; tools/test_switch_registry.py holds the tree to them.
+# After merging work that adds or removes switches: python3 tools/switch_registry.py finalize
+# A '#ceiling' only goes down. A '#pending' line marks a row written before its code was merged; finalize removes it.
+#ceiling base all 765
+#ceiling dev NVAccel 1
+#ceiling dev NVRM 3
+#ceiling dev NVRMFB 1
+#ceiling dev build 1
+#ceiling dev dlss 13
+#ceiling dev nvencvt 50
+#ceiling dev nvk 77
+#ceiling dev plugin 230
+#ceiling dev translator 53
+#ceiling test all 1
+#ceiling unreviewed all 496
+#pending env NVK_CHANNEL_RECOVER
+#pending env NVK_FAULT_INJECT
+#pending env NVMTL_DROP_REPORT
+#pending bootarg -nvrmoldwaits
+#pending bootarg nvaccel_pageoff_locked
+#pending bootarg nvaccel_surf_planes
+#pending bootarg nvrmatomic
+#pending bootarg nvrmdma
+#pending bootarg nvrmfence
+#pending bootarg nvrmnanowait
+#pending bootarg nvrmworkq
+#pending sysctl debug.nvrm_switches
+#pending sysctl debug.nvrm_switches_nondefault
+#pending sysctl debug.nvrm_switches_set
+env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
+env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
+env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
+env	DLSS_TRACE	diag	unset	2.9	-	unreviewed
+env	DYLD_INSERT_LIBRARIES	dev	unset	2.9	-	unreviewed
+env	ELFHOST_PATH	dev	unset	2.9	-	unreviewed
+env	ELFHOST_TRACE	diag	unset	2.9	-	unreviewed
+env	ENC_AV1_LOG	diag	unset	2.9	-	unreviewed
+env	ENC_AV1_TILE_ROWS_LOG2	diag	unset	2.9	-	unreviewed
+env	ENC_DUMP_SETUP	diag	unset	2.9	-	unreviewed
+env	ENC_H264_RT_QTABLE	dev	unset	2.9	-	unreviewed
+env	ENC_HEVC_MD	dev	unset	2.9	-	unreviewed
+env	ENC_HEVC_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	ENC_MP_HINT	dev	unset	2.9	-	unreviewed
+env	ENC_MP_NOHINT	dev	unset	2.9	-	unreviewed
+env	ENC_PROBE_APPID	diag	unset	2.9	-	unreviewed
+env	ENC_RCINIT	dev	unset	2.9	-	unreviewed
+env	FG_FEATURE	dev	unset	2.9	-	unreviewed
+env	FG_MULTI	dev	unset	2.9	-	unreviewed
+env	FG_SHIFT	dev	unset	2.9	-	unreviewed
+env	FG_SIZE	dev	unset	2.9	-	unreviewed
+env	HOME	internal	unset	2.9	-	a standard variable the driver reads
+env	MESA_SHADER_CACHE_DIR	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_CONVERGE_INLOOP	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_DBG_RAWBYTE	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_EXIT_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_FLM_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_LLVM_DIS	internal	unset (the Homebrew folders, then PATH)	2.9	-	a host path: where the translator finds llvm-dis when one of its diagnostics runs it. The name is built from the tool's name
+env	METAL2VULKAN_NEST	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_NO_BYTE_WORDS	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_LATCH_TRAMPOLINE_FOLD	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_LEAF_MEMCPY	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_LOAD_HOIST	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_POINTER_REMAT	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_RRM_IDENTITY	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_WIDEN_SHL	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_NO_WIDE_HALF_LOAD	dev	unset (the path is on)	2.9	-	unreviewed
+env	METAL2VULKAN_OWNED_DUMP	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_PARAM_POINTEE_DBG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_PASS_CONTRACT	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_PHASE_DUMP	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_POINTEE_DBG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_PTR_NETWORK_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_REINTERP_REAL	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_RELOOPER_MAX_BLOCKS	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_RELOOP_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_REPRO_DIR	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_RETRY_DEBUG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_RETRY_DUMP	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_RQ_DEBUG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_SPIRV_AS	internal	unset (the Homebrew folders, then PATH)	2.9	-	a host path: where the translator finds spirv-as when one of its diagnostics runs it. The name is built from the tool's name
+env	METAL2VULKAN_SPIRV_VAL	internal	unset (the Homebrew folders, then PATH)	2.9	-	a host path: where the translator finds spirv-val when one of its diagnostics runs it. The name is built from the tool's name
+env	METAL2VULKAN_SPI_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_STORAGE_DBG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_STRADDLE_ADMIT	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_SWITCH_TAIL_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_TEX_DBG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_TIER_CENSUS	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_TIR_DBG	diag	unset	2.9	-	unreviewed
+env	METAL2VULKAN_TIR_ONLY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_UNMODELED_WHY	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_VAL_PAR	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_WHOLE_PART	dev	unset	2.9	-	unreviewed
+env	METAL2VULKAN_WHY	dev	unset	2.9	-	unreviewed
+env	MPEG2_NO_EOS	dev	unset (the path is on)	2.9	-	unreviewed
+env	MPEG4_TRY_H263	dev	unset	2.9	-	unreviewed
+env	NAK_B83_ARRAYS	dev	unset	2.9	-	unreviewed
+env	NAK_NO_LICM	dev	unset (the path is on)	2.9	-	unreviewed
+env	NAK_NO_PIN_ADDR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NAK_QMD_NO_PREFETCH	dev	unset (the path is on)	2.9	-	unreviewed
+env	NAK_SMEM_TARGET_CAP_KB	dev	unset	2.9	-	unreviewed
+env	NAK_TEX_UHANDLE	dev	unset	2.9	-	unreviewed
+env	NAK_TEX_UHANDLE_WHY	dev	unset	2.9	-	unreviewed
+env	NMXVT	dev	unset	2.9	-	unreviewed
+env	NVDEC_GOB	dev	unset	2.9	-	unreviewed
+env	NVDEC_KEEPSIZE	dev	unset	2.9	-	unreviewed
+env	NVDEC_NOCOLOUR	dev	unset	2.9	-	unreviewed
+env	NVDEC_NOMETAL	dev	unset	2.9	-	unreviewed
+env	NVDEC_NOOWNPOOL	dev	unset	2.9	-	unreviewed
+env	NVDEC_OWNATTRS	dev	unset	2.9	-	unreviewed
+env	NVDEC_SYNC	dev	unset	2.9	-	unreviewed
+env	NVENCVT_AMPERE_ALL_DEC	dev	unset	2.9	-	unreviewed
+env	NVENCVT_AMPERE_ENC	dev	unset	2.9	-	unreviewed
+env	NVENCVT_ANY_GPU	dev	unset	2.9	-	unreviewed
+env	NVENCVT_BFRAMES	dev	unset	2.9	-	unreviewed
+env	NVENCVT_BT	dev	unset	2.9	-	unreviewed
+env	NVENCVT_CONF	dev	unset	2.9	-	unreviewed
+env	NVENCVT_DEPTH	dev	unset	2.9	-	unreviewed
+env	NVENCVT_DPB_EXTRA	dev	unset	2.9	-	unreviewed
+env	NVENCVT_ENGINE	dev	unset	2.9	-	unreviewed
+env	NVENCVT_FAST	dev	unset	2.9	-	unreviewed
+env	NVENCVT_LATE	dev	unset	2.9	-	unreviewed
+env	NVENCVT_LOG	diag	unset	2.9	-	unreviewed
+env	NVENCVT_NO_AV1	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_AV1DEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_DEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_HEV1	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_HEVC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_HEVCDEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_MPEG2DEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_MPEG4DEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_REGISTER	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_RENAME	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_VP9DEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_NO_VP9SUPP	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVENCVT_QUALITY	dev	unset	2.9	-	unreviewed
+env	NVENCVT_RATING	dev	unset	2.9	-	unreviewed
+env	NVENCVT_REFS	dev	unset	2.9	-	unreviewed
+env	NVENCVT_STATS	diag	unset	2.9	-	unreviewed
+env	NVENCVT_SYNC	dev	unset	2.9	-	unreviewed
+env	NVENCVT_TWOPASS	dev	unset	2.9	-	unreviewed
+env	NVK_ACCEL_ID	dev	unset	2.9	-	unreviewed
+env	NVK_BAR_VRAM	dev	unset	2.9	-	unreviewed
+env	NVK_CHANNEL_RECOVER	escape	on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9)	3.0	3.2	After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device.
+env	NVK_CMDMEM_CENSUS	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_LIVE_MAX	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_RECYCLE	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_SLAB_IDLE_MS	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_SLAB_KB	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_SLAB_KEEP	dev	unset	2.9	-	unreviewed
+env	NVK_CMDMEM_SLAB_SPARE	dev	unset	2.9	-	unreviewed
+env	NVK_CMDPOOL_GPU_UNCACHED	dev	unset	2.9	-	unreviewed
+env	NVK_CURVES	dev	unset	2.9	-	unreviewed
+env	NVK_DESC_QUARANTINE	dev	unset	2.9	-	unreviewed
+env	NVK_DIAG	diag	unset	2.9	-	unreviewed
+env	NVK_DUMP_QMD	diag	unset	2.9	-	unreviewed
+env	NVK_DUMP_SHADER_DIR	diag	unset	2.9	-	unreviewed
+env	NVK_FAULT_INJECT	test	off (unset: nothing is injected)	3.0	-	Test hook for the channel recovery: NVK_FAULT_INJECT=<mode>:<n>[:<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment.
+env	NVK_HOST_IMPORT	dev	unset	2.9	-	unreviewed
+env	NVK_HWRT_QUERY	dev	unset	2.9	-	unreviewed
+env	NVK_HWRT_WIDE	dev	unset	2.9	-	unreviewed
+env	NVK_L2_TAIL	dev	unset	2.9	-	unreviewed
+env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop).
+env	NVK_NO_BIGPAGE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVK_NO_NONCONTIG	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVK_PREEMPT_LOG	diag	unset	2.9	-	unreviewed
+env	NVK_QUEUE_COUNT	dev	unset	2.9	-	unreviewed
+env	NVK_STRONG_GLOBAL_LOADS	dev	unset	2.9	-	unreviewed
+env	NVK_SYSMEM_GPU_UNCACHED	dev	unset	2.9	-	unreviewed
+env	NVK_UNBOUND_STAGE_STRICT	dev	unset	2.9	-	unreviewed
+env	NVMTL_AIRCACHE	dev	unset	2.9	-	unreviewed
+env	NVMTL_AIR_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_ANGLE_METAL	dev	unset	2.9	-	unreviewed
+env	NVMTL_APPLE_FAMILY	dev	unset	2.9	-	unreviewed
+env	NVMTL_APPLE_PIPELINE	dev	unset	2.9	-	unreviewed
+env	NVMTL_APP_PROFILE	setting	unset	2.9	-	Built-in per-application profiles: On by default; off turns every shipped per-application profile off.
+env	NVMTL_ARGBUF_SAMPLERS	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNC_COMMIT	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNC_SURFACE_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNC_TEX_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_B78_DEBUG	diag	unset	2.9	-	unreviewed
+env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
+env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
+env	NVMTL_BUFFER_GRACE	dev	unset	2.9	-	unreviewed
+env	NVMTL_BUF_GUARD	dev	unset	2.9	-	unreviewed
+env	NVMTL_CACHE_SYNC_IO	dev	unset	2.9	-	unreviewed
+env	NVMTL_CANONICAL_POINTERS	dev	unset	2.9	-	unreviewed
+env	NVMTL_CARD	setting	unset	2.9	-	Card for an application: With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0).
+env	NVMTL_CB_TIME	dev	unset	2.9	-	unreviewed
+env	NVMTL_CL_REFL_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_COMMIT_AHEAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_COMPUTE_ROBUST	dev	unset	2.9	-	unreviewed
+env	NVMTL_CONF_SET	dev	unset	2.9	-	unreviewed
+env	NVMTL_COPY_EXACT_FORMAT	dev	unset	2.9	-	unreviewed
+env	NVMTL_DEBUG_WAIT_EACH	diag	unset	2.9	-	unreviewed
+env	NVMTL_DESC_BATCH	dev	unset	2.9	-	unreviewed
+env	NVMTL_DESC_MASK	dev	unset	2.9	-	unreviewed
+env	NVMTL_DEVHANDLE_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_DIRECT_SASS	dev	unset	2.9	-	unreviewed
+env	NVMTL_DISPATCH_TIME	dev	unset	2.9	-	unreviewed
+env	NVMTL_DISPATCH_WITNESS	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_FG	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_FG_FEATURE	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_PRESET	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_RR	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_RR_FEATURE	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_RR_PRESET	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_RR_TRANSPOSE	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_SKIP	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_DONTCARE_CLEARS	dev	unset	2.9	-	unreviewed
+env	NVMTL_DROP_REPORT	escape	on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9)	3.0	3.2	A command buffer that was dropped while its channel was rebuilt is reported to the application as an error.
+env	NVMTL_DUMP_FAILED_DIR	diag	unset	2.9	-	unreviewed
+env	NVMTL_DUMP_GROUP	diag	unset	2.9	-	unreviewed
+env	NVMTL_DUMP_PSO	diag	unset	2.9	-	unreviewed
+env	NVMTL_DUMP_RETRY_LL	diag	unset	2.9	-	unreviewed
+env	NVMTL_EAGER_LINK_PROBE	diag	unset	2.9	-	unreviewed
+env	NVMTL_EMBEDDED_MANAGED	dev	unset	2.9	-	unreviewed
+env	NVMTL_ENABLE	dev	unset	2.9	-	unreviewed
+env	NVMTL_ENC78_CENSUS	dev	unset	2.9	-	unreviewed
+env	NVMTL_ENC78_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_ENCODER_LLRC	dev	unset	2.9	-	unreviewed
+env	NVMTL_EVFOLD	dev	unset	2.9	-	unreviewed
+env	NVMTL_FBFETCH_WS	dev	unset	2.9	-	unreviewed
+env	NVMTL_FCCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_FCWARM_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_FC_DUMP_ALL	diag	unset	2.9	-	unreviewed
+env	NVMTL_FC_FAIL_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_FC_SPEC	dev	unset	2.9	-	unreviewed
+env	NVMTL_FETCH_COPY	dev	unset	2.9	-	unreviewed
+env	NVMTL_FETCH_SPLIT_MAX	dev	unset	2.9	-	unreviewed
+env	NVMTL_FETCH_UNORDERED	dev	unset	2.9	-	unreviewed
+env	NVMTL_FORMAT_TWIN	dev	unset	2.9	-	unreviewed
+env	NVMTL_FPS_LIMIT	setting	unset	2.9	-	Frame-rate limit: One number for every application (60) or a list per application (Game=60,*=0). 10 to 1000; 0 is unlimited. Never applies to WindowServer.
+env	NVMTL_FRESH_ZERO	dev	unset	2.9	-	unreviewed
+env	NVMTL_G79_CENSUS	dev	unset	2.9	-	unreviewed
+env	NVMTL_G79_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_GAME_BACKGROUND_TIMESLICE_US	dev	unset	2.9	-	unreviewed
+env	NVMTL_GAME_GPU_PRIORITY	dev	unset	2.9	-	unreviewed
+env	NVMTL_GAME_LOWER_BACKGROUND	dev	unset	2.9	-	unreviewed
+env	NVMTL_GAME_TIMESLICE_US	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_DQ	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_INVFULL	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_MEMBAR	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_NOINV	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_PCAS	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_RES	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_RESCAP	dev	unset	2.9	-	unreviewed
+env	NVMTL_GDQ_STATS	diag	unset	2.9	-	unreviewed
+env	NVMTL_GPU_ICB	dev	unset	2.9	-	unreviewed
+env	NVMTL_GSUB_HOSTPTR_LIFT	dev	unset	2.9	-	unreviewed
+env	NVMTL_GSUB_INFLIGHT	setting	unset	2.9	-	Low-latency mode (GPU work queued ahead): How many parts of GPU work may be queued ahead, 1 to 32 (default 16). A low number cuts input lag and can cost frame rate. 
+env	NVMTL_HAZARD	dev	unset	2.9	-	unreviewed
+env	NVMTL_HAZARD_DISPATCH	dev	unset	2.9	-	unreviewed
+env	NVMTL_HAZARD_HEAPS	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_LAZY	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_PIN_KEEP_MS	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_PIN_LEGACY	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_PREFILL	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_WRITE_FENCE	dev	unset	2.9	-	unreviewed
+env	NVMTL_HEAP_ZERO	dev	unset	2.9	-	unreviewed
+env	NVMTL_HOST_PAGES_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_HOST_PAGES_SHARE	dev	unset	2.9	-	unreviewed
+env	NVMTL_HWPOOL	dev	unset	2.9	-	unreviewed
+env	NVMTL_HWRT	dev	unset	2.9	-	unreviewed
+env	NVMTL_I64_HALVES	dev	unset	2.9	-	unreviewed
+env	NVMTL_ICB_INDEX_CAP	dev	unset	2.9	-	unreviewed
+env	NVMTL_ICD_LIB	dev	unset	2.9	-	unreviewed
+env	NVMTL_IDXCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_IMAGE_GRACE	dev	unset	2.9	-	unreviewed
+env	NVMTL_IMAGE_LAYOUT_GENERAL	dev	unset	2.9	-	unreviewed
+env	NVMTL_IMAGE_POOL	dev	unset	2.9	-	unreviewed
+env	NVMTL_INDIRECT_WITNESS	dev	unset	2.9	-	unreviewed
+env	NVMTL_KEEP_POOLS	dev	unset	2.9	-	unreviewed
+env	NVMTL_KEEP_WITNESS_CONTROL	dev	unset	2.9	-	unreviewed
+env	NVMTL_LIBMEMO_NOCTIME_TEST	dev	unset	2.9	-	unreviewed
+env	NVMTL_LIBMEMO_WEAK_TEST	dev	unset	2.9	-	unreviewed
+env	NVMTL_LINKCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_LINK_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_LOG_PATH	diag	unset	2.9	-	unreviewed
+env	NVMTL_LOSS_RECORDS	dev	unset	2.9	-	unreviewed
+env	NVMTL_M4_NOTE_FAST	dev	unset	2.9	-	unreviewed
+env	NVMTL_MANAGED_EAGER_ZERO	dev	unset	2.9	-	unreviewed
+env	NVMTL_MANAGED_OWNED_VRAM	dev	unset	2.9	-	unreviewed
+env	NVMTL_MANAGED_SYSMEM	dev	unset	2.9	-	unreviewed
+env	NVMTL_MANAGED_VRAM_MIN	dev	unset	2.9	-	unreviewed
+env	NVMTL_MATRIX8_CMLOAD_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_MATRIX8_CMPHI_NEG	dev	unset	2.9	-	unreviewed
+env	NVMTL_MATRIX8_CMPHI_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_CARRY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_CMLOAD	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_CMPHI	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_DIRECT	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_EXIT_CARRY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_NO_FUSE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_MATRIX8_SHUFFLE	dev	unset	2.9	-	unreviewed
+env	NVMTL_MAXT	dev	unset	2.9	-	unreviewed
+env	NVMTL_MESH_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_METAL4	dev	unset	2.9	-	unreviewed
+env	NVMTL_METALFX_NATIVE_PROFILE	dev	unset	2.9	-	unreviewed
+env	NVMTL_MISALIGNED_BUFFER_COPY	dev	unset	2.9	-	unreviewed
+env	NVMTL_MULTIGPU	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_ARR_SCRATCH	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_LOOPCONT	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_NOIMMCSE	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_NOIMMHOIST	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_NO_LDSINK	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PEEP	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PIN_WHOLE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PREDLOAD	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PREPASS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PUNROLL	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_PUNROLL2	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_SINKINC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_NO_U2FMAGIC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NAK_PIN_WHOLE_MIN	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_PREDLOAD_MAX	dev	unset	2.9	-	unreviewed
+env	NVMTL_NAK_PREPASS_PICK	dev	unset	2.9	-	unreviewed
+env	NVMTL_NO_AIR_ALIGN	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_AIR_UNROLL	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_ALIGN_GUARD	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_ARGBUF_SAMPLERS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_B78_DW3D	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_B78_READONLY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_BGR10_REMAP	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_BINDLESS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_BINDLESS_ALL	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_BUFREUSE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_BUFTEX_RECYCLE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_CONST_NONWRITABLE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_DIRTYONLY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_FAILED_AIR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_FBFETCH	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_FPS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_GL_BRIDGE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_GL_VBLANK_FIX	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_HALF_WORDS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_HEAPTEX_PLACE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_HEAPTEX_RECYCLE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_HEAP_ALIAS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_HEAP_STORAGE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_KERNEL_STAGE_IN	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_LAZYAIR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_LIBMEMO	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_MESA_CACHE_DIR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_NOCOPY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_NVDEC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_NVDEC_HEVC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_NVENC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_NVENC_HEVC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_ORDER_BARRIER	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PARFAST	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PASS_TRANSITION	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PIXEL_HW_FILTER	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_POOL_REUSE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PSO_SKIP	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PTR_PHI_LOAD	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_PURGE_RECLAIM	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_RAW_TUNING	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_RES2	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_RES2_EVICT	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_ROBUST	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SAMPKEY	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SAMPLER_CONTRACT	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SAMPLER_RESTORE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SAMPVAR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SIZEQUERY_CACHE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SMALL_ARRAYS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SPARSE_BUF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_STATIC_SAMPLERS	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SURFACE_PAGEOFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SURFACE_SHARE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_SV_MEMO	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_TEXBUF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_TG_LINEARIZE	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_TIER2_FIXED	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_TWINMEMO	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_TWINURL	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_WG_NARROW	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NO_WIDE_WORD_LOAD	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_NVCONV	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVCONV_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_NVCONV_MMA	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVCONV_SHUFFLE	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVCONV_TIMED	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVDEC_MAX_PIXEL_RATE	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVENCVT	escape	on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test)	2.9	3.2	Hardware video decode and encode through the driver's own VideoToolbox service.
+env	NVMTL_NVENCVT_RATING	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVENC_HEVC_444	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVENC_MAX_PIXEL_RATE	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVK_DYLIB	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVK_MESSAGES	dev	unset	2.9	-	unreviewed
+env	NVMTL_NVK_NO_LCONST16	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_OSVER_TEST_REAL	dev	unset	2.9	-	unreviewed
+env	NVMTL_OS_VERSION	dev	unset	2.9	-	unreviewed
+env	NVMTL_PAR_SIGCACHE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PERF_LOG	diag	unset	2.9	-	unreviewed
+env	NVMTL_PIPELINE_THREADS	dev	unset	2.9	-	unreviewed
+env	NVMTL_PLANE_SEED	dev	unset	2.9	-	unreviewed
+env	NVMTL_POOL_COST_LIB	dev	unset	2.9	-	unreviewed
+env	NVMTL_POOL_REUSE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRESENT_INLINE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRESUBMIT_PROLOGUE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRETRANSLATE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRETRANSLATE_THREADS	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRIVATE_CAPTURE_DIR	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRIVATE_CAPTURE_REQUEST	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRIVATE_POOL	dev	unset	2.9	-	unreviewed
+env	NVMTL_PROCESS_ENV	dev	unset	2.9	-	unreviewed
+env	NVMTL_PSTAT	dev	unset	2.9	-	unreviewed
+env	NVMTL_RAW_MATCH_LOG	diag	unset	2.9	-	unreviewed
+env	NVMTL_RAW_MAX_GPRS	dev	unset	2.9	-	unreviewed
+env	NVMTL_RAW_PRESSURE	dev	unset	2.9	-	unreviewed
+env	NVMTL_RAW_SHADER_MATCH	dev	unset	2.9	-	unreviewed
+env	NVMTL_RAW_SOURCE_BLAKE3	dev	unset	2.9	-	unreviewed
+env	NVMTL_RAW_SOURCE_BLAKE3_LIST	dev	unset	2.9	-	unreviewed
+env	NVMTL_REFLCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_REFLECT	dev	unset	2.9	-	unreviewed
+env	NVMTL_RES2_COLD	dev	unset	2.9	-	unreviewed
+env	NVMTL_RES2_HOT	dev	unset	2.9	-	unreviewed
+env	NVMTL_RES2_MARGIN_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_RES2_WS	dev	unset	2.9	-	unreviewed
+env	NVMTL_RT_ADDR_TRACE	diag	unset	2.9	-	unreviewed
+env	NVMTL_SASS_CACHE	dev	unset	2.9	-	unreviewed
+env	NVMTL_SASS_TABLELOG	dev	unset	2.9	-	unreviewed
+env	NVMTL_SASS_TEST_CODE	dev	unset	2.9	-	unreviewed
+env	NVMTL_SASS_TEST_RECORD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SASS_UPLOADLOG	dev	unset	2.9	-	unreviewed
+env	NVMTL_SCHEDULE_AFTER_SURFACE_WRITES	dev	unset	2.9	-	unreviewed
+env	NVMTL_SHARED_POOL_VRAM	dev	unset	2.9	-	unreviewed
+env	NVMTL_SHARED_VRAM	dev	unset	2.9	-	unreviewed
+env	NVMTL_SHARED_VRAM_BUDGET_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_SHARED_VRAM_MAX	dev	unset	2.9	-	unreviewed
+env	NVMTL_SHARED_VRAM_MIN	dev	unset	2.9	-	unreviewed
+env	NVMTL_SKIP_EMPTY	dev	unset	2.9	-	unreviewed
+env	NVMTL_SKIP_FS	dev	unset	2.9	-	unreviewed
+env	NVMTL_SKIP_GROUP	dev	unset	2.9	-	unreviewed
+env	NVMTL_SPARSE_TEXTURES	dev	unset	2.9	-	unreviewed
+env	NVMTL_SPVCACHE_KEEP_STALE	dev	unset	2.9	-	unreviewed
+env	NVMTL_SPVCACHE_MAX_MB	setting	unset	2.9	-	Shader cache size limit (MB): Size at which the shader cache is trimmed (default 2048). 0 turns trimming off.
+env	NVMTL_SPVCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVMTL_SPVCACHE_REARM_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFOUT_READBACK	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURF_IMPORT_CACHE	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURF_IMPORT_CACHE_IDLE_MS	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURF_IMPORT_CACHE_MAX_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_TABLE_SHADOW	dev	unset	2.9	-	unreviewed
+env	NVMTL_TABLE_SSBO	dev	unset	2.9	-	unreviewed
+env	NVMTL_TESS_ORDER_FLIP	dev	unset	2.9	-	unreviewed
+env	NVMTL_TEW	dev	unset	2.9	-	unreviewed
+env	NVMTL_TG_RESHAPE	dev	unset	2.9	-	unreviewed
+env	NVMTL_TILE_SHADING	dev	unset	2.9	-	unreviewed
+env	NVMTL_TSPOOL_KEEP	dev	unset	2.9	-	unreviewed
+env	NVMTL_TWINURL_NOGUARD_TEST	dev	unset	2.9	-	unreviewed
+env	NVMTL_TYPED_DUMMIES	dev	unset	2.9	-	unreviewed
+env	NVMTL_UNIFORM_CBUF	dev	unset	2.9	-	unreviewed
+env	NVMTL_UNIFORM_CBUF_STATS	diag	unset	2.9	-	unreviewed
+env	NVMTL_VENDOR_COMPILER	dev	unset	2.9	-	unreviewed
+env	NVMTL_VENDOR_PLUGIN_PATH	dev	unset	2.9	-	unreviewed
+env	NVMTL_VERTEX_AMPLIFICATION	dev	unset	2.9	-	unreviewed
+env	NVMTL_VRAM_HEADROOM_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_VRAM_WS_NONIMAGE_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_WG_ZERO	dev	unset	2.9	-	unreviewed
+env	NVMTL_WG_ZERO_ALL	dev	unset	2.9	-	unreviewed
+env	NVMTL_WG_ZERO_NEG	dev	unset	2.9	-	unreviewed
+env	NVMTL_WIT_SKIP_EVERY	dev	unset	2.9	-	unreviewed
+env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_FULL	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_WAIT_COMPLETION	dev	unset	2.9	-	unreviewed
+env	NVMTL_XLATE_TRIG_FLUSH	dev	unset	2.9	-	unreviewed
+env	NVMTL_YUV422	dev	unset	2.9	-	unreviewed
+env	NVMTL_ZERO_FILL	dev	unset	2.9	-	unreviewed
+env	NVMTL_ZPROBE	diag	unset	2.9	-	unreviewed
+env	NVRM_610_BOOST	dev	unset	2.9	-	unreviewed
+env	NVRM_610_CECHAN	dev	unset	2.9	-	unreviewed
+env	NVRM_610_LGPROMO	dev	unset	2.9	-	unreviewed
+env	NVRM_610_MAXPOWER_MW	dev	unset	2.9	-	unreviewed
+env	NVRM_610_PREEMPT	dev	unset	2.9	-	unreviewed
+env	NVRM_610_RATEDTDP	dev	unset	2.9	-	unreviewed
+env	NVRM_610_TSG	dev	unset	2.9	-	unreviewed
+env	NVRM_610_USERMODE	dev	unset	2.9	-	unreviewed
+env	NVRM_610_ZCULL	dev	unset	2.9	-	unreviewed
+env	NVRM_ASYNC	dev	unset	2.9	-	unreviewed
+env	NVRM_EVENT_WAIT	escape	on (NVRM_EVENT_WAIT=0 in the settings file: the waits of 2.9)	2.9	3.2	A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it.
+env	NVRM_FLUSH_TIMEOUT_MS	dev	unset	2.9	-	unreviewed
+env	NVRM_GSUB_LOG	diag	unset	2.9	-	unreviewed
+env	NVRM_ONE_CONN_PER_MAP	dev	unset	2.9	-	unreviewed
+env	NVRM_TSG_Q0_HIGH	dev	unset	2.9	-	unreviewed
+env	NVRM_TSG_TIMESLICE_US	dev	unset	2.9	-	unreviewed
+env	NVRM_XNU_HUBS	dev	unset	2.9	-	unreviewed
+env	NVRM_XNU_NO_WC	dev	unset (the path is on)	2.9	-	unreviewed
+env	NVRM_XNU_TRACE	diag	unset	2.9	-	unreviewed
+env	NVRM_XNU_WC_LOG	diag	unset	2.9	-	unreviewed
+env	RM_FORCE_WC	dev	unset	2.9	-	unreviewed
+env	RM_MAP_CACHE	dev	unset	2.9	-	unreviewed
+env	RM_SHOW_CACHING	dev	unset	2.9	-	unreviewed
+env	RR_FEATURE	dev	unset	2.9	-	unreviewed
+env	RR_FLAGS	dev	unset	2.9	-	unreviewed
+env	RR_IN	dev	unset	2.9	-	unreviewed
+env	RR_NO_HIT	dev	unset (the path is on)	2.9	-	unreviewed
+env	RR_OUT	dev	unset	2.9	-	unreviewed
+env	RR_PRESET	dev	unset	2.9	-	unreviewed
+env	RR_Q	dev	unset	2.9	-	unreviewed
+env	TMPDIR	internal	unset	2.9	-	a standard variable the driver reads
+env	VK_ICD_FILENAMES	internal	unset	2.9	-	a standard variable the driver reads
+env	VK_INSTANCE_LAYERS	internal	unset	2.9	-	a standard variable the driver reads
+env	VK_LOADER_LAYERS_ALLOW	internal	unset	2.9	-	a standard variable the driver reads
+env	VK_LOADER_LAYERS_DISABLE	internal	unset (the path is on)	2.9	-	a standard variable the driver reads
+env	VK_LOADER_LAYERS_ENABLE	internal	unset	2.9	-	a standard variable the driver reads
+env	XDG_CACHE_HOME	internal	unset	2.9	-	a standard variable the driver reads
+bootarg	-nmdrmoff	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nmgopfboff	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nmintelfboff	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvaccelnoheadless	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvaccelverbose	diag	unset	2.9	-	observes only
+bootarg	-nvfbsurvey	diag	unset	2.9	-	observes only
+bootarg	-nvkmsnosmooth	install	absent: the firmware picture is carried through the first mode set	2.9	-	part of the install line in README.md; set by the installer's instructions
+bootarg	-nvoff	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmkeepbar1	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnoaspm	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnobootscreen	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnodpms	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnoflip	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnogamma	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnogo	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnopm	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnoshutdown	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmoldwaits	escape	on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9)	3.0	3.2	Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times.
+bootarg	-nvrmsmallbar	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-v	internal	unset	2.9	-	not a switch of this driver; read to adapt to it
+bootarg	gfxrst	internal	unset	2.9	-	not a switch of this driver; read to adapt to it
+bootarg	nmflatskip	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmgopid	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhdavol	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybrid	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybrid20	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybriddelay	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybriddmc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybridext	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybridp2p	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybridresume	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmhybridtc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmkbl	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmkblforce	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmkblhid	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmsmn	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nmxvt	dev	unset	2.9	-	unreviewed
+bootarg	nvaccel	install	absent: the accelerator does not start (boot-loop guard)	2.9	-	part of the install line in README.md; set by the installer's instructions
+bootarg	nvaccel_pageoff_locked	escape	on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9)	3.0	3.2	A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it.
+bootarg	nvaccel_surf_planes	escape	on (nvaccel_surf_planes=0: planes are not offered, as in 2.9)	3.0	3.2	Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed.
+bootarg	nvagdcheads	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvcursor	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvfb	install	absent: the framebuffer kext does not start (boot-loop guard)	2.9	-	part of the install line in README.md; set by the installer's instructions
+bootarg	nvfb10bit	setting	unset	2.9	-	10-bit colour: Scan out 30-bit surfaces on mode changes.
+bootarg	nvfbbootretry	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvfbbpc	setting	unset	2.9	-	Output colour depth: Bits per colour channel on the link; default lets the driver pick.
+bootarg	nvfbdsr	setting	unset	2.9	-	Dynamic super resolution (render above the panel's resolution): Offer desktops larger than the panel and scale them down. Reserves scanout memory.
+bootarg	nvfbedpbl	setting	unset	2.9	-	Laptop panel brightness over the display link: On by default; off disables brightness control through the panel's AUX channel.
+bootarg	nvfbformat	setting	unset	2.9	-	Output colour format: Pixel format on the link; default lets the driver pick.
+bootarg	nvfbhdr	setting	unset	2.9	-	HDR10: Advertise HDR10 to displays that list PQ in their EDID.
+bootarg	nvfbheads	install	1 head	2.9	-	part of the install line in README.md; set by the installer's instructions
+bootarg	nvfbhidpi	setting	unset	2.9	-	HiDPI 'looks like' modes: Back scaled modes with a desktop up to twice the panel raster.
+bootarg	nvfbhotplugpoll	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvfbigpu	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvfbigpucache	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvfbkeepfront	dev	unset	2.9	-	unreviewed
+bootarg	nvfblog	diag	unset	2.9	-	observes only
+bootarg	nvfbrange	setting	unset	2.9	-	Output dynamic range: Full or limited RGB range; default lets the driver pick.
+bootarg	nvfbrotscale	setting	unset	2.9	-	Scaled modes on rotated displays: Offer extra resolutions on a rotated head.
+bootarg	nvfbsample	diag	unset	2.9	-	observes only
+bootarg	nvfbscalerprobe	diag	unset	2.9	-	observes only
+bootarg	nvfbsmall	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvfbsurround	setting	unset	2.9	-	Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off.
+bootarg	nvfbtrace	diag	unset	2.9	-	observes only
+bootarg	nvfbvib	setting	unset	2.9	-	Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone.
+bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it.
+bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
+bootarg	nvhud	diag	unset	2.9	-	observes only
+bootarg	nvhwvbl	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvlayout	escape	on (nvlayout=0: a difference is logged and the kext starts anyway, as 2.9 did without looking)	3.0	3.2	Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update.
+bootarg	nvmaxbpc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvmultigpu	setting	unset	2.9	-	More than one NVIDIA card (experimental): Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below.
+bootarg	nvoffbar	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvregdwords	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmacpibl	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmaspm	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmatomic	escape	on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9)	3.0	3.2	The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool.
+bootarg	nvrmbhthread	escape	on (nvrmbhthread=0: the bottom half runs on the interrupt's work loop, as in 2.9)	3.0	3.2	The RM's interrupt bottom half runs on its own thread, so a long one no longer holds back the next GPU interrupt.
+bootarg	nvrmdiag	diag	unset	2.9	-	observes only
+bootarg	nvrmdma	escape	on (nvrmdma=0: no IOMMU mapper -> the 2.9 path; mapper present -> the GPU is not started)	3.0	3.2	With an IOMMU (VT-d) translating for the GPU, the GPU is given the mapper's bus addresses instead of physical ones; without a mapper nothing changes. On a machine with a mapper nvrmdma=0 is not a way back to 2.9, whose untranslated addresses are wrong there: the GPU is left unstarted and the log says why.
+bootarg	nvrmfbddc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmfence	escape	on (nvrmfence=0: readers use the surface marks of 2.9)	3.0	3.2	A process that reads a surface another process is still drawing waits in the kernel for that GPU work and is woken when it completes, instead of polling a mark.
+bootarg	nvrmgps	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmholdcap	dev	unset	2.9	-	unreviewed
+bootarg	nvrmmapowner	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvrmnanowait	escape	on (nvrmnanowait=0: a cancel does not wait, as in 2.9)	3.0	3.2	Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does.
+bootarg	nvrmnvpcf	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmrctimer	escape	on (nvrmrctimer=0: no timer, as in 2.9)	3.0	3.2	The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens.
+bootarg	nvrmsettle	dev	unset	2.9	-	unreviewed
+bootarg	nvrmshutdown	dev	unset	2.9	-	unreviewed
+bootarg	nvrmtgp	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrmworkq	escape	on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9)	3.0	3.2	The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it.
+bootarg	nvrtd3	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvrtd3res	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvselector	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+sysctl	debug.nmflat_held	diag	read-only	2.9	-	frames of one flat colour held back from the flip (nmflatskip)
+sysctl	debug.nmhda	diag	read-only	2.9	-	NVIDIA HD Audio table patch
+sysctl	debug.nmhybrid	diag	read-only	2.9	-	hybrid laptop path: 0 off, 1 copy changed pixels to the other GPU's panel, 2 scan out the composited surface in place
+sysctl	debug.nmhybrid_dma	diag	read-only	2.9	-	hybrid: frames the copy engine wrote straight into the panel driver's buffers
+sysctl	debug.nmhybrid_dma_timeouts	diag	read-only	2.9	-	hybrid: copy-engine frames that timed out (buffer quarantined)
+sysctl	debug.nmhybrid_flips	diag	read-only	2.9	-	hybrid: frames scanned out in place (zero copy)
+sysctl	debug.nmhybrid_frames	diag	read-only	2.9	-	hybrid: frames presented by copy to another GPU's panel
+sysctl	debug.nmhybrid_import_fail	diag	read-only	2.9	-	hybrid: surfaces that could not be scanned out in place (copied instead)
+sysctl	debug.nmhybrid_owned	diag	read-only	2.9	-	hybrid: frames written into the panel driver's own buffers and flipped to
+sysctl	debug.nmhybrid_p2p	diag	read-only	2.9	-	hybrid: frames scanned out of the NVIDIA GPU's memory through BAR1 (nmhybridp2p)
+sysctl	debug.nmhybrid_words	diag	read-only	2.9	-	hybrid: pixels stored to the other GPU's scan-out
+sysctl	debug.nmhybrid_words_skipped	diag	read-only	2.9	-	hybrid: pixels not stored because they had not changed
+sysctl	debug.nmintelfb_attach	hardware	writable by root	2.9	-	1 = attach the virtual panel under the NVIDIA display device (test build)
+sysctl	debug.nmintelfb_dmc	hardware	writable by root	2.9	-	Intel display firmware for the panel driver (root only; parsed and checked before use)
+sysctl	debug.nmintelfb_dmc_want	diag	read-only	2.9	-	name of the Intel display firmware file this GPU needs, or none
+sysctl	debug.nmintelfb_sample	diag	read-only	2.9	-	64 pixels of the virtual panel: non-black and varied counts
+sysctl	debug.nmintelfb_step	diag	read-only	2.9	-	last step the Intel panel driver reached (nmhybrid)
+sysctl	debug.nmxaccel_headless	diag	read-only	2.9	-	1 = AMD/Intel Metal device for apps; frames are copied to the framebuffer WindowServer draws
+sysctl	debug.nvaccel_crc	diag	read-only	2.9	-	b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)
+sysctl	debug.nvaccel_crc_head	diag	writable by root	2.9	-	b85k-crc: which head debug.nvaccel_crc reads
+sysctl	debug.nvaccel_headless	diag	read-only	2.9	-	1 = no NVIDIA display: Metal device for apps only, WindowServer on the GPU that owns the display
+sysctl	debug.nvaccel_heads_piped	diag	read-only	2.9	-	bit i = head i has a display pipe that drives ITS OWN framebuffer (pipe+0x98 read back)
+sysctl	debug.nvaccel_heads_published	diag	read-only	2.9	-	bit i = head i's framebuffer has published to the accelerator
+sysctl	debug.nvaccel_heads_registered	diag	read-only	2.9	-	bit i = head i's framebuffer was handed to the display machine (found_framebuffer)
+sysctl	debug.nvaccel_igpu	hardware	writable by root	2.9	-	1 = give an Intel built-in panel (NMIntelFB, head 4) a display pipe on this accelerator
+sysctl	debug.nvaccel_iop	recovery	writable by root	2.9	-	K3: 1 = publish IOAccelDisplayPipeCapabilities and perform display-pipe transactions, 0 = behave as the base class (default)
+sysctl	debug.nvaccel_iop_30bit	diag	read-only	2.9	-	frames written to a 30-bit scanout
+sysctl	debug.nvaccel_iop_async	recovery	writable by root	2.9	-	1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip
+sysctl	debug.nvaccel_iop_async_drop	diag	read-only	2.9	-	frames dropped because a flip was still in flight past a refresh period
+sysctl	debug.nvaccel_iop_async_flips	diag	read-only	2.9	-	swaps completed asynchronously
+sysctl	debug.nvaccel_iop_async_refused	diag	read-only	2.9	-	async swaps NVKMS refused (that frame stayed off the panel)
+sysctl	debug.nvaccel_iop_blank	diag	read-only	2.9	-	K6: frames copied whose 64 samples were all ONE colour (a blank frame)
+sysctl	debug.nvaccel_iop_copy_skip	diag	read-only	2.9	-	frames kept on the panel because the surface's newest pixels were not yet in system memory
+sysctl	debug.nvaccel_iop_copy_unwritten	diag	read-only	2.9	-	copied frames that skipped the page-off because the plugin never wrote the VRAM copy
+sysctl	debug.nvaccel_iop_empty	diag	read-only	2.9	-	K3: transactions with no plane (gamma/options only)
+sysctl	debug.nvaccel_iop_fail	diag	read-only	2.9	-	K3: transactions refused (see the capped iop: log lines)
+sysctl	debug.nvaccel_iop_flip	recovery	writable by root	2.9	-	1 = scan the composited IOSurface out of its own VRAM (no copy)
+sysctl	debug.nvaccel_iop_flip_hit	diag	read-only	2.9	-	swaps resolved from the cache (no accelerator lock)
+sysctl	debug.nvaccel_iop_flip_home	diag	read-only	2.9	-	flips back to the boot scanout before a copied frame
+sysctl	debug.nvaccel_iop_flip_lock	diag	read-only	2.9	-	copied because the accelerator lock was busy
+sysctl	debug.nvaccel_iop_flip_miss	diag	read-only	2.9	-	swaps that resolved under the accelerator lock
+sysctl	debug.nvaccel_iop_flip_novram	diag	read-only	2.9	-	copied because the surface has no RM VRAM
+sysctl	debug.nvaccel_iop_flip_refused	diag	read-only	2.9	-	copied because the framebuffer refused the flip
+sysctl	debug.nvaccel_iop_flip_stale	diag	read-only	2.9	-	copied because system memory holds the newest copy
+sysctl	debug.nvaccel_iop_flip_unwritten	diag	read-only	2.9	-	copied because the family marked VRAM newest on a copy the plugin never wrote
+sysctl	debug.nvaccel_iop_flips	diag	read-only	2.9	-	frames scanned out of the surface's own VRAM (zero copy)
+sysctl	debug.nvaccel_iop_half	diag	read-only	2.9	-	frames converted from half-float RGhA
+sysctl	debug.nvaccel_iop_l10r	diag	read-only	2.9	-	frames narrowed from 10-bit l10r to the 8-bit scanout
+sysctl	debug.nvaccel_iop_late	diag	read-only	2.9	-	frames kept on the panel because the previous flip had not reached it yet (framebuffer answered busy)
+sysctl	debug.nvaccel_iop_ok	diag	read-only	2.9	-	K3: display-pipe transactions copied to the panel
+sysctl	debug.nvaccel_iop_ok_h0	diag	read-only	2.9	-	frames copied to head 0's panel
+sysctl	debug.nvaccel_iop_ok_h1	diag	read-only	2.9	-	frames copied to head 1's panel
+sysctl	debug.nvaccel_iop_ok_h2	diag	read-only	2.9	-	frames copied to head 2's panel
+sysctl	debug.nvaccel_iop_ok_h3	diag	read-only	2.9	-	frames copied to head 3's panel
+sysctl	debug.nvaccel_iop_ok_h4	diag	read-only	2.9	-	frames copied to head 4 (an Intel built-in panel, NMIntelFB)
+sysctl	debug.nvaccel_iop_src_res	diag	read-only	2.9	-	K3: frames sourced from our VRAM resource
+sysctl	debug.nvaccel_iop_src_surf	diag	read-only	2.9	-	K3: frames sourced from the IOSurface memory
+sysctl	debug.nvaccel_map_commit	diag	read-only	2.9	-	GPU page-table commits (MAP_MEMORY_DMA ok)
+sysctl	debug.nvaccel_map_free	diag	read-only	2.9	-	GPU VA ranges freed (nvAccelGpuVaFree)
+sysctl	debug.nvaccel_map_release	diag	read-only	2.9	-	GPU page-table releases (UNMAP_ONLY)
+sysctl	debug.nvaccel_pageoff_locked_not_owner	diag	read-only	2.9	-	page-offs with a pending surface that waited locked because the thread was not the lock's owner at one level
+sysctl	debug.nvaccel_pageoff_unlocked_wait	dev	writable by root	2.9	-	1 = a page-off waits for the GPU without the accelerator lock
+sysctl	debug.nvaccel_pageoff_unlocked_wait_max_us	diag	read-only	2.9	-	longest unlocked page-off wait, us
+sysctl	debug.nvaccel_pageoff_unlocked_waits	diag	read-only	2.9	-	page-offs that waited for the GPU without the accelerator lock
+sysctl	debug.nvaccel_res_free	diag	read-only	2.9	-	NVResource objects freed
+sysctl	debug.nvaccel_res_new	diag	read-only	2.9	-	NVResource objects created
+sysctl	debug.nvaccel_surface_gpu	diag	read-only	2.9	-	1 = WindowServer swaps wait for GPU completion here (same value as nvaccel_surface_gpu_on)
+sysctl	debug.nvaccel_surface_gpu_marks	diag	read-only	2.9	-	pending/ready marks from WindowServer
+sysctl	debug.nvaccel_surface_gpu_on	recovery	writable by root	2.9	-	0 = WindowServer waits for its own composites again (the plugin re-asks every second)
+sysctl	debug.nvaccel_surface_gpu_timeouts	diag	read-only	2.9	-	swaps whose composite did not finish within 100 ms
+sysctl	debug.nvaccel_surface_gpu_wait_max_us	diag	read-only	2.9	-	longest swap wait for a composite, us
+sysctl	debug.nvaccel_surface_gpu_waits	diag	read-only	2.9	-	swaps that waited here for their composite to finish
+sysctl	debug.nvaccel_svdiag	diag	writable by root	2.9	-	log the next N surface dirty marks and page-offs
+sysctl	debug.nvaccel_vm_alloc	diag	read-only	2.9	-	NVVidMemory::allocPhysical successes
+sysctl	debug.nvaccel_vm_alloc_bytes	diag	read-only	2.9	-	bytes of VRAM granted to NVVidMemory
+sysctl	debug.nvaccel_vm_dealloc	diag	read-only	2.9	-	NVVidMemory::deallocPhysical calls with a handle
+sysctl	debug.nvaccel_vm_dealloc_bytes	diag	read-only	2.9	-	bytes of VRAM given back by NVVidMemory
+sysctl	debug.nvaccel_vm_park_released	diag	read-only	2.9	-	kept VRAM released (resource freed or grown)
+sysctl	debug.nvaccel_vm_parked	diag	read-only	2.9	-	VRAM kept when the family freed a surface's VRAM
+sysctl	debug.nvaccel_vm_refused	diag	read-only	2.9	-	allocPhysical refused by the framebuffer
+sysctl	debug.nvaccel_vm_sticky	recovery	writable by root	2.9	-	1 = a surface keeps its VRAM across the family's dealloc/alloc (the memory the plugin draws into)
+sysctl	debug.nvaccel_vm_unparked	diag	read-only	2.9	-	allocations answered with the surface's kept VRAM
+sysctl	debug.nvaccelfb	recovery	writable by root	2.9	-	register the NVIDIA framebuffer with the accelerator display machine (1 = found_framebuffer, 2 = family sweep)
+sysctl	debug.nvrm_bh_max_us	diag	read-only	3.0	-	longest RM bottom half, microseconds
+sysctl	debug.nvrm_bh_over_1ms	diag	read-only	3.0	-	RM bottom halves over 1 ms
+sysctl	debug.nvrm_bh_over_4ms	diag	read-only	3.0	-	RM bottom halves over 4 ms
+sysctl	debug.nvrm_bh_runs	diag	read-only	3.0	-	RM bottom halves run
+sysctl	debug.nvrm_evt_posts	diag	read-only	2.9	-	RM events posted to user clients
+sysctl	debug.nvrm_evt_waits	diag	read-only	2.9	-	user event waits
+sysctl	debug.nvrm_isr_count	diag	read-only	2.9	-	GPU MSIs taken
+sysctl	debug.nvrm_isr_during_bh	diag	read-only	3.0	-	GPU MSIs that arrived while a bottom half ran
+sysctl	debug.nvrm_isr_handled	diag	read-only	2.9	-	GPU MSIs RM claimed
+sysctl	debug.nvrm_isr_late_1ms	diag	read-only	3.0	-	MSI to rm_isr waits over 1 ms
+sysctl	debug.nvrm_isr_late_4ms	diag	read-only	3.0	-	MSI to rm_isr waits over 4 ms
+sysctl	debug.nvrm_isr_latency_max_us	diag	read-only	3.0	-	longest MSI to rm_isr wait, microseconds
+sysctl	debug.nvrm_kms_timer_depth	diag	read-only	2.9	-	queued NVKMS timers
+sysctl	debug.nvrm_kms_timer_executed	diag	read-only	2.9	-	completed NVKMS timer callbacks
+sysctl	debug.nvrm_kms_timer_max_depth	diag	read-only	2.9	-	peak queued NVKMS timers
+sysctl	debug.nvrm_pageoff_coalesced	diag	read-only	2.9	-	page-offs copied per run
+sysctl	debug.nvrm_pageoff_pages	diag	read-only	2.9	-	pages in the last page-off
+sysctl	debug.nvrm_pageoff_perpage	diag	read-only	2.9	-	page-offs copied per 4 KB page
+sysctl	debug.nvrm_pageoff_runs	diag	read-only	2.9	-	runs in the last page-off
+sysctl	debug.nvrm_physmap	diag	read-only	2.9	-	batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused
+sysctl	debug.nvrm_pm_waited	diag	read-only	2.9	-	RM calls that waited for a GPU resume
+sysctl	debug.nvrm_pvchain	diag	read-only	2.9	-	batch 59b: do live RM buffers have a second pv mapper chained on qlink (read-only)
+sysctl	debug.nvrm_pvsentinel	diag	read-only	2.9	-	batch 48: pv_head_table / pmap_phys_attributes corruption — detected and located (read-only)
+sysctl	debug.nvrm_rc_runs	diag	read-only	3.0	-	RC timer ticks the RM accepted
+sysctl	debug.nvrm_rc_ticks	diag	read-only	3.0	-	RC timer ticks
+sysctl	debug.nvrm_switches	diag	read-only	3.0	-	driver boot arguments set beside the install line; ! marks one an ordinary install does not need
+sysctl	debug.nvrm_switches_nondefault	diag	read-only	3.0	-	of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install)
+sysctl	debug.nvrm_switches_set	diag	read-only	3.0	-	driver boot arguments set beside the install line
+sysctl	debug.nvrm_tgp_ac	diag	read-only	2.9	-	last power source: 1 mains, 0 battery, -1 unknown
+sysctl	debug.nvrm_tgp_applies	diag	read-only	2.9	-	TGP mode controls sent
+sysctl	debug.nvrm_tgp_enable	hardware	writable by root	2.9	-	1 = TGP mode on while on mains power, 0 = hold the VBIOS default power limit
+sysctl	debug.nvrm_tgp_last_status	diag	read-only	2.9	-	NV_STATUS of the last TGP control
+sysctl	debug.nvrm_tgp_state	diag	read-only	2.9	-	TGP mode last sent: 1 on, 0 off, -1 none
+sysctl	debug.nvrm_watchpage	diag	read-only	2.9	-	RM allocations/frees that covered the 2026-09-23 panic page (phys == 0x132b000 mod 1 GB)
+sysctl	debug.nvrm_winraw	diag	read-only	2.9	-	batch 54: the panic window's bytes, read through the physical aperture (read-only)
+sysctl	debug.nvrm_winwhy	diag	read-only	2.9	-	batch 54: which _vm_page_free_prepare_object branch the panic window trips (read-only)
+sysctl	debug.nvrmfb_agdc	recovery	writable by root	2.9	-	write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, <0 failed step)
+sysctl	debug.nvrmfb_agdc_cmds	diag	read-only	2.9	-	AGDC vendor calls received
+sysctl	debug.nvrmfb_agdc_fbmap	diag	read-only	2.9	-	the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex
+sysctl	debug.nvrmfb_agdc_k5	recovery	writable by root	2.9	-	K5: 1 = answer kAGDCLinkConfig + plane-scaler capabilities (0 after every boot)
+sysctl	debug.nvrmfb_agdc_k5_asked	diag	read-only	2.9	-	bit i = a 0x921/0x711 named index i
+sysctl	debug.nvrmfb_agdc_k5_caps	diag	read-only	2.9	-	K5: plane-scaler capability queries answered
+sysctl	debug.nvrmfb_agdc_k5_caps_mask	diag	read-only	2.9	-	bit i = the plane-scaler capability answered for index i
+sysctl	debug.nvrmfb_agdc_k5_last_refused_idx	diag	read-only	2.9	-	the index the last BADARG/NOTFOUND refusal named (-1 none); an Unsupported 0x711 type shows in k5_asked only
+sysctl	debug.nvrmfb_agdc_k5_link	diag	read-only	2.9	-	K5: kAGDCLinkConfig queries answered
+sysctl	debug.nvrmfb_agdc_k5_link_mask	diag	read-only	2.9	-	bit i = kAGDCLinkConfig answered for index i
+sysctl	debug.nvrmfb_agdc_k5_why	diag	read-only	2.9	-	K5: why the last K5 query was not answered
+sysctl	debug.nvrmfb_agdc_last_refused	diag	read-only	2.9	-	last AGDC command refused
+sysctl	debug.nvrmfb_agdc_maxfb	diag	read-only	2.9	-	maxFramebuffers in our last 0x980 reply (0 = never asked)
+sysctl	debug.nvrmfb_agdc_refused	diag	read-only	2.9	-	AGDC vendor calls answered Unsupported
+sysctl	debug.nvrmfb_agdc_rescans	diag	read-only	2.9	-	slot-table rescans done while answering 0x980 (a framebuffer that started after boot)
+sysctl	debug.nvrmfb_color_bpc	setting	writable by root	2.9	-	output bits per channel: 0 automatic, 6, 8, 10, 12
+sysctl	debug.nvrmfb_color_format	setting	writable by root	2.9	-	output colour format: 0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4, 3 automatic
+sysctl	debug.nvrmfb_color_range	setting	writable by root	2.9	-	output range: 0 automatic, 1 full, 2 limited
+sysctl	debug.nvrmfb_color_vibrance	setting	writable by root	2.9	-	saturation gain in percent, -100 (grey) to 100 (double); 0 off
+sysctl	debug.nvrmfb_flip_interval	recovery	writable by root	2.9	-	minPresentInterval of the pure (zero-copy) flip; tearing stays off
+sysctl	debug.nvrmfb_flip_latch	recovery	writable by root	2.9	-	1 = a committed flip waits for its completion before a surface retires (0 = debug bypass, 2 = deferred: the next submit verifies it)
+sysctl	debug.nvrmfb_flip_latch_auto	setting	writable by root	2.9	-	1 = at 357 Hz and above latch mode 1 runs as 2 (deferred); 0 = always wait
+sysctl	debug.nvrmfb_flip_latch_deferred	diag	read-only	2.9	-	flips verified by the next submit instead of waited for
+sysctl	debug.nvrmfb_flip_latch_late	diag	read-only	2.9	-	presents skipped because the previous flip was still on its way to the panel
+sysctl	debug.nvrmfb_flip_latch_max_us	diag	read-only	2.9	-	longest submit-to-completion wait (us)
+sysctl	debug.nvrmfb_flip_latch_timeouts	diag	read-only	2.9	-	flips not on the panel within a refresh period and a quarter of their submit (waited on to the stuck limit)
+sysctl	debug.nvrmfb_flip_latch_waits	diag	read-only	2.9	-	flips that waited for completion
+sysctl	debug.nvrmfb_flip_lean	recovery	writable by root	2.9	-	1 = lean pure flip (surface only)
+sysctl	debug.nvrmfb_flip_n	diag	read-only	2.9	-	pure flips timed
+sysctl	debug.nvrmfb_flip_us_max	diag	read-only	2.9	-	the slowest pure flip, us
+sysctl	debug.nvrmfb_flip_us_sum	diag	read-only	2.9	-	microseconds spent in pure-flip applyModeSetConfig
+sysctl	debug.nvrmfb_guard_cleared	diag	read-only	2.9	-	1 once the boot guard was cleared this boot
+sysctl	debug.nvrmfb_vram_budget_bytes	diag	read-only	2.9	-	the BAR1 grant budget in force
+sysctl	debug.nvrmfb_vram_display_aware	recovery	writable by root	2.9	-	1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction
+sysctl	debug.nvrmfb_vram_display_bytes	diag	read-only	2.9	-	scanout+cursor the framebuffer itself maps into BAR1
+sysctl	debug.nvrmfb_vram_grant_bytes	diag	read-only	2.9	-	bytes granted
+sysctl	debug.nvrmfb_vram_grants	diag	read-only	2.9	-	vramGrant successes
+sysctl	debug.nvrmfb_vram_mapped_bytes	diag	read-only	2.9	-	the BAR1 budget counter, live
+sysctl	debug.nvrmfb_vram_release_bytes	diag	read-only	2.9	-	bytes released
+sysctl	debug.nvrmfb_vram_releases	diag	read-only	2.9	-	vramRelease calls
+sysctl	debug.nvrmfb_vramtest	diag	writable by root	2.9	-	grant N x 8 MB of VRAM through vramGrant (0 = release all)
+sysctl	debug.nvrmfb_vramtest_mode	diag	writable by root	2.9	-	1 = release without the kernel unmap
+file	/Library/GPUBundles/nvmtl-allow.txt	install	absent	2.9	-	process names the plugin loads into, written by the installer
+file	/Library/GPUBundles/nvmtl-gpu-policy.txt	setting	absent	2.9	-	per-application card choice on a machine with two NVIDIA cards
+file	/Library/GPUBundles/nvmtl-gpupass-probe	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/Library/GPUBundles/nvmtl/no-failed-air	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/Library/GPUBundles/nvmtl/nvrm610.conf	install	absent	2.9	-	the settings file the installer writes; the user block is kept on update
+file	/Library/NullMoth/gamemode-active	internal	absent	2.9	-	written by the game-priority helper while a game runs
+file	/Library/NullMoth/nvfb-small	recovery	absent	2.9	-	the same as boot-arg nvfbsmall=1 without a restart into recovery
+file	/private/tmp/nvmtl-off.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt-%d.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt-barcode.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt-dump-%d.es	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt-dump-%d.nv12	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt-stats.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.anyfmt	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.barcode	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.dpb	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.dump	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.refs	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvencvt.stats	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-dump-request	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-noseed	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-passtime-request	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-trace-%d.txt	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-trace-big	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-trace-huge	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-trace-long	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl-trace-request	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/tmp/nvmtl.log	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+file	/usr/local/etc/nvencvt.conf	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
+procname	Brave	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Chrome	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Chromium	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Discord	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Electron	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Google Chrome	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	Microsoft Edge	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	VTDecoderXPCService	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
+build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built
+build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
+build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
+build	NVK_REF_EXPORTS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
+build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it.
+build	NVK_SYSROOT	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
+build	NVRM_PRISTINE_OGKM	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver

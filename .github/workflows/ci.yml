@@ -1,0 +1,103 @@
+# Continuous integration for this fork: everything that needs no NVIDIA hardware.
+#
+#   kexts-linux   every kext source compiled to a Mach-O object with clang on Linux, the warning ceilings, and every
+#                 symbol the objects import checked against the export lists of the macOS 15 and the macOS 26 kernel
+#                 (build/kext_check.sh); the switch registry; the translator's own registry test. A few minutes; it
+#                 gates every push. Each command of this job was run on a Linux machine before the file was committed.
+#   host-tests    tools/run_all_tests.py on a Mac (the tests compile Objective-C and read older revisions, so the
+#                 clone is a full one). It gates: a failing host test must not go unnoticed.
+#   kexts-mac     the real kext builds with Xcode: NVIDIA's RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26),
+#                 NVRMAGDC and NMSMN linked. Catches what a compile cannot: a duplicate or missing definition at link.
+#   plugin        the release compile of the Metal plugin (build/ci_plugin.sh). Needs the macOS 26 SDK.
+#
+# None of the three Mac jobs could be run where this file was written. kexts-mac and plugin are marked
+# continue-on-error until each has been seen green once on GitHub's runners: delete that line from a job to make it
+# gate. If host-tests fails on its first run for a reason of the runner and not of the tree, that is the place to look.
+# Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
+# Vulkan-Headers) are pinned in the scripts that fetch them; none is copied into the repository or into an artifact.
+# The token can read the repository and nothing else; no job uses a secret or uploads anything.
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  kexts-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          fetch-depth: 0          # the registry test reads the previous commit and the 2.9 release (tag v2.9)
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9      # v6.1.0
+        with:
+          path: build-out/kext-check/src
+          key: kext-check-src-${{ hashFiles('build/kext_check.sh', 'tools/kext_imports.py') }}
+      - name: Compile every kext source and check its imports on both kernels
+        run: bash build/kext_check.sh
+      - name: Switch registry and the tests of this job's own tools
+        # The runner exits 0 when a test it was asked for was skipped or could not be built, so the last line is held
+        # to "all five ran and passed". Without the 2.9 release in the clone the registry test passes without comparing
+        # the rows dated 2.9 with what that release read: say so where it is seen.
+        run: |
+          set -o pipefail
+          python3 tools/run_all_tests.py test_switch_registry test_switch_report test_kext_check test_ci_workflow test_sysctl_allowlist | tee "$RUNNER_TEMP/tests.txt"
+          grep -qx '5 passed, 0 failed, 0 skipped, 0 not run, of 5' "$RUNNER_TEMP/tests.txt"
+          git rev-parse -q --verify refs/tags/v2.9 >/dev/null || echo "::warning::tag v2.9 is not in this repository, so the switch registry was not compared with the 2.9 release (push the tag to turn that on)"
+      - name: Translator environment registry
+        run: cargo test --manifest-path translator/translator/Cargo.toml --test env_registry
+  host-tests:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          fetch-depth: 0          # negative controls read older revisions and tags
+          persist-credentials: false
+      - name: Host tests
+        run: python3 tools/run_all_tests.py -j 4
+  kexts-mac:
+    runs-on: macos-15
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9      # v6.1.0
+        with:
+          path: build-out/kext-check/src
+          key: kext-check-src-${{ hashFiles('build/kext_check.sh', 'tools/kext_imports.py') }}
+      - name: Compile check with Xcode's kernel headers (also fetches the pinned NVIDIA tree)
+        run: bash build/kext_check.sh
+      - name: NVIDIA RM core and NVKMS for macOS
+        run: |
+          W="$RUNNER_TEMP/rm620"; mkdir -p "$W"
+          P="$PWD/build-out/kext-check/src/open-gpu-kernel-modules-620.70.06"
+          JOBS=$(sysctl -n hw.ncpu) bash build/build_rm620.sh "$W" "$P"
+          JOBS=$(sysctl -n hw.ncpu) bash build/build_kms620.sh "$W"
+      - name: Link the kexts
+        run: |
+          W="$RUNNER_TEMP/rm620/ogkm-620.70.06"; O="$RUNNER_TEMP/kexts"
+          P="$PWD/build-out/kext-check/src/open-gpu-kernel-modules-620.70.06"
+          NVRM_PRISTINE_OGKM="$P" bash build/build_nvrm.sh kexts/NVRM "$W" "$O/nvrm"
+          OGKM="$W" bash build/fb_build.sh kexts "$O/fb"
+          OGKM="$W" bash build/accel_build_all.sh kexts/NVRM "$O/accel-all"
+          bash build/build_agdc.sh kexts/NVRMAGDC "$O/agdc"
+          bash kexts/NMSMN/build.sh "$O/nmsmn" 15.0
+  plugin:
+    runs-on: macos-26
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release compile of the Metal plugin
+        run: bash build/ci_plugin.sh
