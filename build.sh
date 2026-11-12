@@ -1297,15 +1297,23 @@ cmd_test() {
   py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(command -v python3 || true)}; }
   [ -n "$py" ] || die "no python3"
   say "== pins"; check_pins
-  say "== host tests: $(qcmd "$py" tools/run_all_tests.py -j "$NM_JOBS")$([ -f "$PRISTINE/version.mk" ] && echo " (NVRM_PRISTINE_OGKM=$PRISTINE: the patch-chain test runs for real)")"
+  say "== host tests: $(qcmd "$py" tools/run_all_tests.py -j "$NM_JOBS")"
   if [ "$NM_DRY_RUN" = 1 ]; then return 0; fi
   CUR_LOG=$LOGS/test.log
-  local e=( "PYTHONDONTWRITEBYTECODE=1" )
-  [ -f "$PRISTINE/version.mk" ] && e+=( "NVRM_PRISTINE_OGKM=$PRISTINE" )
-  ( cd "$HERE" && env "${e[@]}" "$py" tools/run_all_tests.py -j "$NM_JOBS" ) 2>&1 | tee "$CUR_LOG" || rc=$?
-  last=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$CUR_LOG" | tail -n 1)
-  say ""; say "tests: ${last:-no summary line}   (log: $(printf '%s' "$CUR_LOG" | tilde))"
+  mkdir -p "$LOGS"
+  ( cd "$HERE" && env PYTHONDONTWRITEBYTECODE=1 "$py" tools/run_all_tests.py -j "$NM_JOBS" ) 2>&1 | tee "$CUR_LOG" || rc=$?
+  last=$(grep -E '^[0-9]+ passed, [0-9]+ failed' "$CUR_LOG" | tail -n 1 || true)
   case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac
+  # the runner leaves this one to build_nvrm.sh; with the fetched pristine tree it can run here
+  local pc="not run (no pristine $NM_PIN_OGKM620_REF tree yet: ./build.sh fetch)"
+  if [ -f "$PRISTINE/version.mk" ]; then
+    say "== the kexts/NVRM patch chain against $PRISTINE"
+    if ( cd "$HERE" && env "PATH=$TBIN:$PATH" bash tools/test_patch_chain.sh "$PRISTINE" ) > "$LOGS/test-patch-chain.log" 2>&1; then
+      pc="every patch applies with --fuzz=0"
+    else pc="FAILED (see $(printf '%s' "$LOGS/test-patch-chain.log" | tilde))"; rc=1; fi
+  fi
+  say ""; say "tests: ${last:-no summary line}   (log: $(printf '%s' "$CUR_LOG" | tilde))"
+  say "patch chain: $pc"
   [ "$PIN_PROBLEMS" = 0 ] || rc=1
   if is_mac; then :; else note "on $(uname -s) many tests fail or skip for lack of macOS tools (codesign, plutil, xcrun, cc -arch); run them on the Mac"; fi
   return "$rc"
