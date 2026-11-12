@@ -433,6 +433,15 @@ static void arm_endings(void)
       nvf_chan_rebind(&Tb, 1, h, &one) == NVRM_FENCE_ST_STALE && nvf_chan_verify(&Tb, 1, h, 1, &one) == NVRM_FENCE_ST_STALE);
     n = chan_new(1, 11);
     T("the slot is used again under a new handle", n && IDX(n) == IDX(h) && n != h && arm1(1, 4, 6, h, 1, 0) == NVRM_FENCE_ST_STALE && arm1(1, 4, 6, n, 1, 0) == OK);
+    {   /* a handle's generation is 20 bits; a handle of generation 0 would name no channel (and index 0 would be handle 0) */
+        unsigned last, first;
+        Tb.chanGen = NVF_CHAN_GEN_MAX - 1;
+        last = chan_new(1, 11);
+        first = chan_new(1, 11);
+        T("after its largest value a handle's generation is 1 again, never 0, and both handles name their channels",
+          last && first && (last >> NVF_CHAN_INDEX_BITS) == NVF_CHAN_GEN_MAX && (first >> NVF_CHAN_INDEX_BITS) == 1 &&
+          nvf_chan_find(&Tb, 1, last) == (int)IDX(last) && nvf_chan_find(&Tb, 1, first) == (int)IDX(first) && IDX(last) != IDX(first));
+    }
     T("the lists agree", structure(&Tb) == NULL);
 
     fresh();
