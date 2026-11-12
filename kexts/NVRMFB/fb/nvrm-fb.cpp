@@ -868,16 +868,27 @@ static void advanceFlipEpoch()
     }
 }
 
+#include "nvrmfb_layout.h"
+
 class NVRMFBClaim : public IOService
 {
     OSDeclareDefaultStructors(NVRMFBClaim)
 public:
+    // The claim is the first of this kext's classes to see the PCI device, before NVRM starts on it: it compares the
+    // Apple framebuffer classes with this build and publishes the verdict there. When they differ every framebuffer of
+    // this kext would run on a misplaced base, so the claim steps aside too and leaves the category to Apple's own.
+    IOService *probe(IOService *provider, SInt32 *score) override
+    {
+        if (!nvrmfbLayoutAllows(provider, "NVRMFBClaim")) return NULL;
+        return IOService::probe(provider, score);
+    }
     bool start(IOService *provider) override
     {
         // With the driver off, leave the slot to IONDRVFramebuffer so the firmware's display stays lit while the
         // removal runs. WAS: the claim held it anyway and the screen stayed dark until the second restart.
         if (nvrm_driver_off()) return false;
         if (!IOService::start(provider)) return false;
+        nvrmfbLayoutSysctls();
         IOLog("NVRMFB: NVRMFBClaim holds the IOFramebuffer match category on %s - IONDRVFramebuffer blocked\n",
               provider ? provider->getName() : "?");
         return true;
@@ -899,6 +910,7 @@ public:
     IOService *probe(IOService *provider, SInt32 *score) override
     {
         if (!nvrm_driver_off() || !provider) return NULL;
+        if (!nvrmfbLayoutAllows(provider, "NVRMBootFB")) return NULL;
         PE_Video v; nvu_zero(&v, sizeof v);
         if (!getPlatform() || getPlatform()->getConsoleInfo(&v) != kIOReturnSuccess) return NULL;
         if (!v.v_baseAddr || !v.v_rowBytes || !v.v_width || !v.v_height || v.v_depth != 32) return NULL;
@@ -3042,6 +3054,7 @@ static void nvrmDiscoverBar1(IOService *provider, NvU64 *length, NvU64 *base)
 bool NVRMNVDAFramebuffer::start(IOService *provider)
 {
     { if (nvrm_driver_off()) return false; }
+    if (!nvrmfbLayoutAllows(provider, "NVRMNVDAFramebuffer")) return false;
     {
         int gate = 0;
         if (!PE_parse_boot_argn("nvfb", &gate, sizeof gate) || !gate) {
@@ -4538,6 +4551,7 @@ static void fbGuardCleared(const char *why)
 {
     static volatile SInt32 once;
     if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_guard_cleared);
+    nvrmfbLayoutSysctls();      // the same lifetime argument: registered once, by code that stays
     nvrm_guard_display_up(why);
     gGuardCleared = 1;
 }
