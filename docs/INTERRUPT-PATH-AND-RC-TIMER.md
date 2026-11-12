@@ -144,8 +144,9 @@ everything queued before it has run. The RM's own flushes wait as long as they n
 item that is running); the driver's own waits are bounded: 30 s per step when the kext stops, 2 s per step at system
 shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
 on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
-per boot at most, or no thread) its items go to the global queue; that is never a reason to fail its start. Items the
-RM marks to be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on
+at a time, less one for each queue that was given up on; or no thread) its items go to the global queue; that is never
+a reason to fail its start. The queue of a GPU that stopped cleanly is used again by the next GPU that starts. Items
+the RM marks to be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on
 Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item.
 
 | Name | Kind | Meaning |
