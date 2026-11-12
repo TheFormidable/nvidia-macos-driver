@@ -842,10 +842,10 @@ index 63e9929..3513d59 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..137b682
+index 0000000..48dc3be
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -0,0 +1,974 @@
+@@ -0,0 +1,976 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1556,7 +1556,9 @@ index 0000000..137b682
 +      return VK_SUCCESS;   /* unregistered, so it was idled: the caller looks again (2.9) */
 +   }
 +   rec_views_locked(x, now, v);
-+   const uint32_t R = trig == NVRM_TRIG_FAULT ? slot : nvrm_rec_root(v, NVRM_CTX_MAX, slot);
++   uint32_t R = trig == NVRM_TRIG_FAULT ? slot : nvrm_rec_root(v, NVRM_CTX_MAX, slot);
++   if (R != slot && v[R].sem >= v[R].flushed)
++      R = slot;   /* the channel waited on is idle: what does not move is the waiter's own channel */
 +   struct nvkmd_nvrm_slot *r = &nvkmd_nvrm_slots[R];
 +   enum nvrm_rec_why why = NVRM_WHY_OK;
 +   if (r->dying) {
