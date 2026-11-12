@@ -146,7 +146,7 @@ Each of these does nothing unless it is set.
 | `NVDEC_SYNC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt_dec.c |
 | `NVENCVT_AMPERE_ALL_DEC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt_dec.c |
 | `NVENCVT_AMPERE_ENC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
-| `NVENCVT_ANY_GPU` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
+| `NVENCVT_ANY_GPU` | dev | unset | 2.9 | - | Developer only (the video library's own override, in a process's environment or a line of the root-owned /usr/local/etc/nvencvt.conf): the library treats any card as an RTX 40, so on an RTX 50 it skips the decode self-test and registers every encoder and decoder untested on that card. Nothing sets it. | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_BFRAMES` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_BT` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_CONF` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
