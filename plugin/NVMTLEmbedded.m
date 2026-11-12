@@ -183,7 +183,7 @@ static NSArray<NSArray *> *nvmtl_static_samplers(NVMTLFunction *fn)
             if (![slot isKindOfClass:[NSNumber class]] || ![st isKindOfClass:[NSDictionary class]]) continue;
             id<MTLSamplerState> s = nvmtl_static_sampler_from(st, [fn device]);
             if (s) [out addObject:@[slot, s]];
-            else nvlog("static sampler: %s slot %@ NOT created - it keeps the dummy sampler", fn->_fname.UTF8String, slot);
+            else nvlog("static sampler: %s slot %s NOT created - it keeps the dummy sampler", fn->_fname.UTF8String, slot.description.UTF8String);
         }
         if (out.count) nvlog("static sampler: %s binds %lu constexpr sampler(s) with their own state", fn->_fname.UTF8String, (unsigned long)out.count);
         objc_setAssociatedObject(fn, NVMTL_SSAMP_KEY, out, OBJC_ASSOCIATION_RETAIN);
@@ -294,7 +294,7 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         NVMTLSamplerState *s = pair[1];
         nvmtl_retain_resource(cb, s);
         if (nvmtl_vk_bind_parked_sampler(&cb->_c, set, [pair[0] unsignedIntValue], &s->_s))
-            nvlog("static sampler slot %@: bind FAILED", pair[0]);
+            nvlog("static sampler slot %s: bind FAILED", [pair[0] description].UTF8String);
     }
     if (!embedded.count) return;
     extern int nvmtl_vk_emb_same(nvk_cmdbuf *, uint32_t, const void *, const uint64_t *, uint32_t);
