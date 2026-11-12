@@ -822,6 +822,7 @@ sysctl	debug.nvrm_fence_map_fail	diag	read-only	3.0	-	channel pages that could n
 sysctl	debug.nvrm_fence_map_mismatch	diag	read-only	3.0	-	channels whose page did not show what the process wrote
 sysctl	debug.nvrm_fence_opens	diag	read-only	3.0	-	holds opened
 sysctl	debug.nvrm_fence_owners_distrusted	diag	read-only	3.0	-	connections refused after three strikes
+sysctl	debug.nvrm_fence_pid_gone	diag	read-only	3.0	-	connections whose holds and channels ended because their process was exiting, before the RM freed anything of it
 sysctl	debug.nvrm_fence_reclaimed	diag	read-only	3.0	-	slots of given-up or forgotten holds taken back for new ones
 sysctl	debug.nvrm_fence_refused_denied	diag	read-only	3.0	-	compositor holds asked for by a process that is not WindowServer
 sysctl	debug.nvrm_fence_refused_distrust	diag	read-only	3.0	-	holds refused to a distrusted connection
