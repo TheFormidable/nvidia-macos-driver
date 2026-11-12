@@ -756,6 +756,11 @@ static unsigned nvfKernelWait(struct NVRMFenceWait *w, unsigned flags)
     return nvf_wait(&gT, &gFOps, NULL, &q, w->timeoutMs, (flags & NVRM_FENCE_F_LOOK) != 0, 0, w);
 }
 
+bool nvrm_fence_off_by_bootarg(void)
+{
+    return nvfBoot() == 2;
+}
+
 bool nvrm_fence_kernel_ops(struct NVRMFenceKernelOps *o)
 {
     if (!o || o->version != NVRM_FENCE_ABI_VERSION || o->size != sizeof(*o)) return false;

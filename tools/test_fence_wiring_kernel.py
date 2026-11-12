@@ -38,7 +38,7 @@ root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__)
 
 LEX = re.compile(r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])'""", re.S)
 PROTOTYPES = ["nvrm_fence_start", "nvrm_fence_stop", "nvrm_fence_kick", "nvrm_fence_pm", "nvrm_fence_user",
-              "nvrm_fence_owner_gone", "nvrm_fence_pid_gone", "nvrm_fence_kernel_ops"]
+              "nvrm_fence_owner_gone", "nvrm_fence_pid_gone", "nvrm_fence_kernel_ops", "nvrm_fence_off_by_bootarg"]
 # what may not happen between nvfLock() and nvfUnlock()
 UNDER_LOCK = (r"\bIOLog\s*\(|->\s*release\s*\(|->\s*complete\s*\(|->\s*prepare\s*\(|\bwithAddressRange\s*\(|\bnvfPin\s*\(|"
               r"\bnvfUnpin\s*\(|\bnvfMapFailed\s*\(|\bnvfCount\s*\(|\bnvfLog\s*\(|\bIOLockAlloc\s*\(|\bIOMalloc\w*\s*\(|"
@@ -170,6 +170,9 @@ def arms(src, header, table):
     arm("NVAccel is handed the wait only when version and size match and the layer is not switched off",
         statements(ops) == ["if (!o || o->version != NVRM_FENCE_ABI_VERSION || o->size != sizeof(*o)) return false;",
                             "if (nvfBoot() == 2) return false;", "o->wait = nvfKernelWait;", "gFAccel = 1;", "return true;"])
+
+    arm("whether the boot-arg switched the layer off is the boot-arg's own answer, the same before and after the first start",
+        statements(b("nvrm_fence_off_by_bootarg")) == ["return nvfBoot() == 2;"])
 
     # ---- the counters -----------------------------------------------------------------------------------------------
     decl = re.findall(r"\bSYSCTL_(\w+)\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*([^,]+),\s*([^,]+),", code)
@@ -459,6 +462,8 @@ CONTROLS = [
     ("the boot-arg as an opt-in", "one opt-out", "cpp", lambda s: broken(s, "&& v == 0) ? 2 : 1;", "&& v == 1) ? 1 : 2;")),
     ("switched off, the start still makes the lock", "switched off: the start", "cpp", lambda s: broken(s, START_OFF, "")),
     ("NVAccel gets the wait although the layer is switched off", "NVAccel is handed the wait", "cpp", lambda s: broken(s, OPS_OFF, "")),
+    ("the boot-arg answer read from the state, which is also 0 before the first start", "whether the boot-arg switched the layer off", "cpp",
+     lambda s: broken(s, "    return nvfBoot() == 2;\n", "    return gFState == 0;\n")),
     ("the wait is written before version and size are checked", "NVAccel is handed the wait", "cpp",
      lambda s: broken(broken(s, OPS_CHECK, ""), "    o->wait = nvfKernelWait;\n", "    o->wait = nvfKernelWait;\n" + OPS_CHECK)),
     ("a writable sysctl", "every sysctl is a plain read-only declaration", "cpp",

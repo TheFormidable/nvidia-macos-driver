@@ -98,6 +98,14 @@ void nvrm_fence_pid_gone(int pid);
  * lock, cannot be interrupted, is never refused for the number of sleepers, and may sleep up to w->timeoutMs. */
 bool nvrm_fence_kernel_ops(struct NVRMFenceKernelOps *o);
 
+/* True when the boot-arg nvrmfence=0 switched the fence off for this boot. False when the fence is on, whether or
+ * not a GPU has started it yet, and also when it is stopped or switched itself off later in the boot: those can
+ * change, this cannot. A caller that finds the fence not working (a refused request, an OFF answer) can ask this to
+ * tell "off for the whole boot, stop asking" from "not started yet, ask again later". It reads the boot-arg itself
+ * when no start has, as nvrm_fence_kernel_ops() does, so the answer is the same before and after the first start.
+ * Thread context, no lock, no RM call. */
+bool nvrm_fence_off_by_bootarg(void);
+
 #ifdef __cplusplus
 }
 #endif
