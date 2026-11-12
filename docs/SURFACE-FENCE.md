@@ -346,10 +346,10 @@ from a channel or from the process.
 
 ## Sleep, wake, shutdown, a process that dies, a channel that faults
 
-- **Sleep.** Before the user channels stop, every hold ends and new holds are refused until the wake. The kernel
-  lets every reader go at once; a reader in the plugin that had waited less than 10 ms then polls the writer's busy
-  tag, as in 2.9, before it reads. The kernel's views of the channel pages are system memory and survive. After a
-  resume that failed the layer stays off until the next boot (`state` 3).
+- **Sleep.** Before the user channels stop, every hold ends (NVAccel's waits leave at once; a plugin reader that
+  leaves this way polls the writer's busy tag for up to 10 ms, as in 2.9, before it reads) and new holds are refused
+  until the wake. The kernel's views of the channel pages are system memory and survive. After a resume that failed the
+  layer stays off until the next boot (`state` 3).
   Not covered: a hold armed on a channel whose work the RM preempts at sleep ends as if it were done, so a reader that
   reads the surface during the sleep or right after the wake can see a frame the GPU never finished, as after a wait
   that reached its bound. Holds are not kept across the sleep, even those on channels the kernel has verified; see
@@ -357,14 +357,13 @@ from a channel or from the process.
 - **Shutdown, or the last GPU stops.** Every hold ends and every sleeper is woken before the adapter goes down.
   Not covered: the channels stay registered, and their pages stay wired, until the connections that registered them
   close; the kernel stops reading them, since no hold is armed on them and new ones are refused.
-- **The layer switches itself off** (`state` 2, eight distrusted connections). In the look that distrusts the eighth
-  connection every hold ends and every sleeper is woken; the readers that were waiting are told "given up". From
-  then on every request is answered "off", NVAccel is told that nothing is pending and is on 2.9's marks, and the
-  kick returns at once.
-  Not covered: WindowServer's work that was in flight at that moment has neither a hold nor a 2.9 mark (none was
-  sent for a surface the kernel held), so NVAccel's flips, copies and page-offs go on at once and can see an
-  unfinished frame, as after a wait that reached its bound. An application's surface still carries its busy tag,
-  and a reader in the plugin falls back to it.
+- **The layer switches itself off** (`state` 2, eight distrusted connections). New holds are refused at once, and
+  every hold that still exists ends at that moment: the readers waiting on them are told the hold was given up.
+  NVAccel stops asking the fence and is on 2.9's marks; a plugin reader that was told so polls the writer's busy tag
+  as 2.9 did (unless the kernel had already kept it 10 ms), and later readers are answered "off" and use the tag.
+  Not covered: work those holds stood for may still be running on the GPU, so a reader can then see an unfinished
+  frame, as after a wait that reached its bound. (A single distrusted connection is different: its existing holds stay
+  and end on their own, see "Nobody waits forever".)
 - **A process exits or is killed.** Each connection, when it closes, ends its own holds and lets its own pages go
   before the RM frees what that connection owns. NVK keeps its fence calls on a connection of their own and its
   channels on another, and macOS closes a dying process's connections in no set order, so for the holds to end
@@ -373,10 +372,9 @@ from a channel or from the process.
   connection's process is exiting (`pid_gone` counts it); and from the moment a process is exiting the fence refuses
   it new holds and channels. Without that call (an NVRM.kext built before it), a hold armed on a channel of the
   process can outlive the channel until the fence connection closes, or until its bound if a reader looks first.
-  With it, the kernel lets the readers of the process's surfaces go at once. NVAccel's waits (when the process
-  was WindowServer) then go on, where 2.9 waited 100 ms for a mark nobody would clear. A reader in the plugin falls
-  back to the dead writer's busy tag, which costs it what 2.9 did: at most 10 ms per read until the tag is 100 ms
-  old.
+  With it, NVAccel's waits on the process's surfaces end at once, where 2.9 waited 100 ms for a mark nobody would
+  clear; a plugin reader falls back to the busy tag, which costs it what 2.9 did (at most 10 ms per read for the
+  first 100 ms).
 - **A channel faults.** The RM writes the fault into the channel's notifier in the bottom half, the kick follows,
   and holds armed on that channel end. If NVK rebuilds the channel, later holds are watched again.
 - **Two GPUs** (`nvmultigpu=1`). There is one table for all. While one GPU is suspended, new holds are refused for
@@ -436,10 +434,10 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
    some channels (the copy-engine queue is the open question). It still works, in 250 us looks; report which
    processes (the log line names the pid and says `(copy engine)` for such a channel).
 6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` and `pid_gone` grow, no stall in WindowServer.
-   What is left is 2.9's: for the first 100 ms a composite of that application's surfaces can take up to 10 ms
-   longer, on the busy tag the dead writer left. `pid_gone` growing needs the NVRM.kext with the
-   `nvrm_fence_pid_gone` call; with an older one only `end_owner` moves, and a wait of up to 2 s on that
-   application's surfaces is possible.
+   Expect up to 10 ms per composite of that application's surfaces for 100 ms, as in 2.9 (the plugin reader polls
+   the dead writer's busy tag): not a stall, but not zero.
+   `pid_gone` growing needs the NVRM.kext with the `nvrm_fence_pid_gone` call; with an older one only `end_owner`
+   moves, and a wait of up to 2 s on that application's surfaces is possible.
    **Stop one** (`kill -STOP`, then `-CONT`): one `expired_cpu` and one `strikes`, a single hitch of at most
    100 ms, nothing after.
 7. **Sleep and wake.** `end_pm` grows by the holds that were in flight; `state` is 1 afterwards and `opens` grows
