@@ -10,7 +10,7 @@ test existed is refused on Blackwell: the plugin looks up the marker a tested bu
 compiled out of the plugin source and run on a table; the decode service's wiring is checked in the text around it.
 
 usage: test_nvencvt_selection.py [repo root]"""
-import pathlib, shutil, subprocess, sys, tempfile
+import pathlib, re, shutil, subprocess, sys, tempfile
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 src = (root / 'plugin/NVMTLDevice.m').read_text()
@@ -83,6 +83,17 @@ check('on Blackwell the registrar refuses a library without the decode self-test
       reg is not None and 'dlsym(h, "NVEncVT_BlackwellSelfTest")' in reg and 'nvmtl_gen_is(gen, "Blackwell")' in reg
       and reg.index('dlopen(path') < reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")') < reg.index('dlsym(h, entry)')
       and 'REFUSED' in reg[reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")'):reg.index('dlsym(h, entry)')])
+# A driver that publishes no generation still reaches the registrar through NVMTL_NVENCVT=1 or a process list: the
+# marker is then asked for whenever the video layout or the device name says Blackwell, not skipped.
+def marker_guard(text):
+    if text is None or 'dlsym(h, "NVEncVT_BlackwellSelfTest")' not in text: return None
+    cut = text[:text.index('dlsym(h, "NVEncVT_BlackwellSelfTest")')]
+    return cut[cut.rindex('if ('):]
+def marker_without_gen_ok(guard):
+    return guard is not None and 'nvmtl_video_is_blackwell()' in guard and not re.search(r'\bhaveGen\s*&&', guard)
+check('without a published generation the marker is still asked for on Blackwell', marker_without_gen_ok(marker_guard(reg)))
+check('control: a guard that skips the marker when no generation is published is refused',
+      not marker_without_gen_ok('if (haveGen && nvmtl_gen_is(gen, "Blackwell") && !'))
 check('the decode service asks for libnvencvt after the built-in decoders',
       svc is not None and 'nvmtl_nvencvt_register(true)' in svc
       and svc.index('nvmtl_nvdec_hevc_register()') < svc.index('nvmtl_nvencvt_register(true)'))

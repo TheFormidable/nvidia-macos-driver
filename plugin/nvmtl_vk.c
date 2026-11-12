@@ -800,6 +800,17 @@ static int (*pnvk_sparse)(void);
 // this process's existing channel groups (level -1 restores what they had). The decision is nvmtl_live_decide; this keeps
 // the caller's memory ("applied") and re-runs it each time com.nullmoth.gamemode.active changes. Off unless a switch is on.
 static int (*pnvk_reprio)(int, unsigned long);
+// NVK's channel recovery: after a GPU fault it can rebuild the faulted channel instead of losing the device, and then
+// signals the fence of the work it did not run from the CPU. These two say which fences that was and what NVK counted.
+// Both NULL in an older NVK: no command buffer is ever taken for dropped, as before.
+static int (*pnvk_fence_dropped)(VkDevice, VkFence);
+static unsigned (*pnvk_rec_stats)(uint64_t *, unsigned);
+static int nvmtl_drop_report_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = nvmtl_drop_report_parse(getenv("NVMTL_DROP_REPORT"));
+    return on;
+}
 static struct {
     pthread_mutex_t mu; int applied; int started; int pinned; int is_game;
     const char *raise_sw, *lower_sw; int token;
@@ -1145,6 +1156,8 @@ static int nvmtl_vk_initialize(void)
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
             pnvk_reprio = (int (*)(int, unsigned long))dlsym(g_lib, "nvmtl_nvk_tsg_reprioritise_v1");
+            pnvk_fence_dropped = (int (*)(VkDevice, VkFence))dlsym(g_lib, "nvmtl_nvk_fence_dropped_v1");
+            pnvk_rec_stats = (unsigned (*)(uint64_t *, unsigned))dlsym(g_lib, "nvmtl_nvk_recover_stats_v1");
         }
         else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
     } else {
@@ -1662,6 +1675,11 @@ static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
     char cause[512];
     nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
     nvlog("vk: %s", cause);
+    if (pnvk_rec_stats) {   // what NVK called this loss (a firmware crash, the bus, a failed wake...) and why it did not rebuild
+        uint64_t st[NVMTL_REC_N] = { 0 };
+        const unsigned n = pnvk_rec_stats(st, NVMTL_REC_N);
+        if (nvmtl_loss_recovery_line(cause, sizeof cause, st, n)) nvlog("vk: %s", cause);
+    }
     nvlog("vk: every command buffer made in %s from now on records nothing and completes with a device-removed error; objects made before the loss stay inert", getprogname());
     nvmtl_vk_stub_recording();
 }
@@ -3041,14 +3059,18 @@ int nvmtl_vk_accel_surface_wait(void)
     IOObjectRelease(s);
     return on == 1;
 }
-int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
+/* The family's VRAM for one plane of a surface, granted by the kernel through NVK's import, as a buffer of `need` bytes.
+   planeWord and sizeWord are the grant's words as the kernel reads them: the plane alone and the bytes needed, or a
+   ranged grant's (nvmtl_plane_alias.h). */
+static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, uint64_t sizeWord, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
     if (!nvmtl_vk_surface_share_on() || !need) return -1;
+    const uint32_t plane = planeWord & ~NVMTL_PA_PLANE_RANGED;
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) return -1;
-    nvmtl_vram_rec r = { 3, surfaceID, plane, 0, (uint64_t)need };
+    nvmtl_vram_rec r = { 3, surfaceID, planeWord, 0, sizeWord };
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
                                     open("/dev/null", O_RDONLY | O_CLOEXEC) };
     if (imp.fd < 0) return -1;
@@ -3060,7 +3082,8 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     if (vr != VK_SUCCESS) {
         close(imp.fd);
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
-            nvlog("item 7: surface %u plane %u: family VRAM import refused (%d) - private image + copies (%u so far)", surfaceID, plane, (int)vr, n);
+            nvlog("item 7: surface %u plane %u%s: family VRAM import refused (%d) - private image + copies (%u so far)", surfaceID, plane,
+                  plane != planeWord ? " (its byte range)" : "", (int)vr, n);
         return -1;
     }
     VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, need,
@@ -3075,6 +3098,175 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     out->buf = b; out->mem = m; out->size = need; out->alloc = 0; out->imported = 1;
     g_buf_made++;
     return 0;
+}
+int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
+{
+    return nvmtl_vk_surface_vram_words(surfaceID, plane, (uint64_t)need, need, out);
+}
+/* ---- two-plane surfaces whose planes live in their own VRAM (nvmtl_plane_alias.h) ----
+   The grant names the plane's byte range in the surface's memory, so that the kernel copies the plane's VRAM back there
+   and nowhere else. A kernel without ranged grants refuses it (it sees a plane above 15), and so does one switched off,
+   one whose page-off waits with the accelerator lock held, or one that finds the range wrong: NVK then fails the import
+   and the caller keeps the private image. */
+int nvmtl_vk_surface_vram_ranged(uint32_t surfaceID, uint32_t plane, uint64_t off, uint64_t len, nvk_buffer *out)
+{
+    memset(out, 0, sizeof *out);
+    if (plane > 1 || off > 0xffffffffull || !len || len > 0xffffffffull || len > SIZE_MAX) return -1;
+    return nvmtl_vk_surface_vram_words(surfaceID, nvmtl_pa_plane_word(plane), nvmtl_pa_size_word(off, len), (size_t)len, out);
+}
+/* Whether the kernel lets this process try (nvmtl_pa_kernel_says): NVAccelSurfPlanes on the accelerator this process
+   uses, and the unlocked page-off wait. NULL = it does. */
+const char *nvmtl_vk_plane_vram_gate(void)
+{
+    io_service_t s = nvmtl_card_registry_id ? IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(nvmtl_card_registry_id))
+                                            : IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("NVAccel"));
+    int planes = 0;
+    if (s) {
+        CFTypeRef v = IORegistryEntryCreateCFProperty(s, CFSTR("NVAccelSurfPlanes"), kCFAllocatorDefault, 0);
+        if (v && CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)v, kCFNumberIntType, &planes);
+        if (v) CFRelease(v);
+        IOObjectRelease(s);
+    }
+    int unlocked = 0; size_t n = sizeof unlocked;
+    if (sysctlbyname("debug.nvaccel_pageoff_unlocked_wait", &unlocked, &n, NULL, 0) != 0) unlocked = 0;
+    return nvmtl_pa_kernel_says(planes, unlocked);
+}
+/* The process's self-test state (NVMTL_PA_*). Only PASSED lets a real two-plane surface take its planes' VRAM. */
+static _Atomic int g_pa_state;
+/* 1: passed. 0: not now (untested and the kernel says no, running, or failed). -1: the caller must start the self-test
+   now; exactly one caller in the process is ever told so, and until its verdict every other caller hears 0. */
+int nvmtl_vk_plane_vram_state(void)
+{
+    int st = atomic_load(&g_pa_state);
+    if (st != NVMTL_PA_UNTESTED) return st == NVMTL_PA_PASSED;
+    const char *no = nvmtl_vk_plane_vram_gate();
+    int expect = NVMTL_PA_UNTESTED;
+    if (!atomic_compare_exchange_strong(&g_pa_state, &expect, no ? NVMTL_PA_FAILED : NVMTL_PA_RUNNING)) return expect == NVMTL_PA_PASSED;
+    if (no) { nvlog("planar surfaces: not tried in %s - %s; two-plane surfaces stay private images", getprogname(), no); return 0; }
+    return -1;
+}
+/* The self-test's verdict, once: PASSED or FAILED for the life of the process, and one line saying which. */
+void nvmtl_vk_plane_vram_verdict(const nvmtl_pa_result *r, uint64_t ns)
+{
+    int expect = NVMTL_PA_RUNNING;
+    if (!atomic_compare_exchange_strong(&g_pa_state, &expect, r && !r->step ? NVMTL_PA_PASSED : NVMTL_PA_FAILED)) return;
+    const unsigned long long ms = (unsigned long long)(ns / 1000000ull);
+    if (r && !r->step) { nvlog("planar surfaces: self-test PASSED in %llu ms in %s - two-plane surfaces live in their planes' own VRAM", ms, getprogname()); return; }
+    if (r && r->at >= 0)
+        nvlog("planar surfaces: self-test FAILED at step %d (%s; byte %lld is 0x%02x, expected 0x%02x) after %llu ms in %s - two-plane surfaces stay private images",
+              r->step, r->what ? r->what : "?", (long long)r->at, r->got, r->want, ms, getprogname());
+    else
+        nvlog("planar surfaces: self-test FAILED at step %d (%s) after %llu ms in %s - two-plane surfaces stay private images",
+              r ? r->step : 1, r && r->what ? r->what : "it could not run", ms, getprogname());
+}
+/* Plane `plane` of an eligible surface `s`, w x h, as a texture over the plane's own VRAM: the ranged grant, then a linear
+   image at offset 0 with the plane's row pitch, exactly as plane 0 of a single-plane surface. 0: *vb and *img are made,
+   and the caller owns both (the image first, then the buffer). Otherwise both are left empty and nothing is held. */
+int nvmtl_vk_plane_image_create(uint32_t surfaceID, const nvmtl_pa_surface *s, uint32_t plane, uint32_t w, uint32_t h, uint32_t vkf,
+                                uint32_t bpp, int a8, int storage, nvk_buffer *vb, nvk_image *img)
+{
+    memset(vb, 0, sizeof *vb); memset(img, 0, sizeof *img);
+    if (nvmtl_pa_eligible(s, plane, w, h, bpp)) return -1;
+    const nvmtl_pa_plane *p = &s->p[plane];
+    if (nvmtl_vk_surface_vram_ranged(surfaceID, plane, p->off, nvmtl_pa_len(p), vb)) return -1;
+    if (nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, storage, 1, vb, 0, p->row, img)) {
+        nvmtl_vk_buffer_destroy(vb); memset(vb, 0, sizeof *vb);
+        return -1;
+    }
+    return 0;
+}
+/* The self-test's generations: A the CPU's first fill, B C D GPU writes, E a CPU write after them. */
+enum { NVMTL_PA_GEN_A = 1, NVMTL_PA_GEN_B, NVMTL_PA_GEN_C, NVMTL_PA_GEN_D, NVMTL_PA_GEN_E };
+/* A CPU lock of the self-test's surface and a check of the whole allocation: plane i holds generation want[i] and every
+   other byte generation A. 0 = it does; otherwise the failure is in *r. */
+static int nvmtl_pa_look(const nvmtl_pa_host *hst, const nvmtl_pa_surface *s, uint32_t want0, uint32_t want1, int step,
+                         const char *what, nvmtl_pa_result *r)
+{
+    const uint8_t *base = hst->lock(hst->ctx, 1);
+    if (!base) { nvmtl_pa_fail(r, step, "a read-only lock of the surface failed", -1, 0, 0); return -1; }
+    const uint32_t want[2] = { want0, want1 };
+    uint8_t got = 0, exp = 0;
+    const int64_t at = nvmtl_pa_verify(base, s, want, NVMTL_PA_GEN_A, &got, &exp);
+    hst->unlock(hst->ctx, 1);
+    if (at >= 0) { nvmtl_pa_fail(r, step, what, at, got, exp); return -1; }
+    return 0;
+}
+/* A GPU write of generation `gen` to the whole of plane `p`'s texture, finished before it returns. */
+static int nvmtl_pa_gpu_write(nvk_image *img, const nvmtl_pa_plane *p, uint32_t gen, uint8_t *scratch)
+{
+    nvmtl_pa_plane_image(p, gen, scratch);
+    if (nvmtl_vk_image_write(NULL, img, scratch, (size_t)p->w * p->bpe)) return -1;
+    nvmtl_vk_image_upload_barrier(img);
+    return 0;
+}
+/* The round trip a process runs once on a private two-plane surface before any real one takes its planes' VRAM
+   (nvmtl_plane_alias.h). It proves on this card, this kernel and this accelerator family what the code cannot:
+     1  the surface IOSurface made is eligible as R8 and RG8 textures at the planes' sizes, and the CPU fills its whole
+        allocation (generation A);
+     2  both planes' VRAM is granted with their ranges, and a texture is placed over each;
+     3  the GPU writes B to both and marks plane 0, then plane 1, newest;
+     4  a read-only CPU lock sees B in both planes and A in every other byte: the family pages off both planes, each
+        into its own range, and writes nothing else;
+     5  C to plane 1 alone, then D to plane 0 alone, each followed by a lock: a mark on one plane neither loses nor
+        rewrites the other, in both orders;
+     6  the CPU writes E to both planes; E goes to plane 0's texture alone and is read back; plane 0 is marked: a lock
+        sees E in both, so a plane whose VRAM is older (plane 1 still holds C there) is not paged over newer CPU pixels;
+     7  everything is let go, and the whole took less than 2 s.
+   Returns r->step: 0 passed, else the step that failed. Never on a caller's thread: it waits for the GPU and the kernel. */
+int nvmtl_vk_plane_selftest(uint32_t surfaceID, const nvmtl_pa_surface *s, const nvmtl_pa_host *hst, nvmtl_pa_result *r)
+{
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    memset(r, 0, sizeof *r); r->at = -1;
+    nvk_buffer vb[2]; nvk_image img[2];
+    memset(vb, 0, sizeof vb); memset(img, 0, sizeof img);
+    uint8_t *scratch = NULL;
+    if (!s || !hst || !hst->lock || !hst->unlock || !surfaceID ||
+        nvmtl_pa_eligible(s, 0, s->p[0].w, s->p[0].h, 1) || nvmtl_pa_eligible(s, 1, s->p[1].w, s->p[1].h, 2)) {
+        nvmtl_pa_fail(r, 1, "the private surface is not an eligible two-plane surface", -1, 0, 0); goto done;
+    }
+    scratch = malloc((size_t)(nvmtl_pa_len(&s->p[0]) > nvmtl_pa_len(&s->p[1]) ? nvmtl_pa_len(&s->p[0]) : nvmtl_pa_len(&s->p[1])));
+    if (!scratch) { nvmtl_pa_fail(r, 1, "out of memory", -1, 0, 0); goto done; }
+    { uint8_t *base = hst->lock(hst->ctx, 0);
+      if (!base) { nvmtl_pa_fail(r, 1, "a read-write lock of the surface failed", -1, 0, 0); goto done; }
+      nvmtl_pa_fill(base, 0, s->alloc, NVMTL_PA_GEN_A);
+      hst->unlock(hst->ctx, 0); }
+    static const uint32_t fmt[2] = { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM };
+    for (uint32_t p = 0; p < 2; p++)
+        if (nvmtl_vk_plane_image_create(surfaceID, s, p, s->p[p].w, s->p[p].h, fmt[p], p + 1, 0, 0, &vb[p], &img[p])) {
+            nvmtl_pa_fail(r, 2, p ? "plane 1's VRAM or its texture was refused (the kernel log says why)"
+                                  : "plane 0's VRAM or its texture was refused (the kernel log says why)", -1, 0, 0);
+            goto done;
+        }
+    for (uint32_t p = 0; p < 2; p++)
+        if (nvmtl_pa_gpu_write(&img[p], &s->p[p], NVMTL_PA_GEN_B, scratch)) { nvmtl_pa_fail(r, 3, "a GPU write failed", -1, 0, 0); goto done; }
+    for (uint32_t p = 0; p < 2; p++)
+        if (nvmtl_vk_surface_dirty(surfaceID, p)) { nvmtl_pa_fail(r, 3, p ? "the kernel refused plane 1's mark" : "the kernel refused plane 0's mark", -1, 0, 0); goto done; }
+    if (nvmtl_pa_look(hst, s, NVMTL_PA_GEN_B, NVMTL_PA_GEN_B, 4, "both planes written by the GPU and paged off", r)) goto done;
+    if (nvmtl_pa_gpu_write(&img[1], &s->p[1], NVMTL_PA_GEN_C, scratch) || nvmtl_vk_surface_dirty(surfaceID, 1)) {
+        nvmtl_pa_fail(r, 5, "plane 1's second write or mark failed", -1, 0, 0); goto done;
+    }
+    if (nvmtl_pa_look(hst, s, NVMTL_PA_GEN_B, NVMTL_PA_GEN_C, 5, "plane 1 written again alone", r)) goto done;
+    if (nvmtl_pa_gpu_write(&img[0], &s->p[0], NVMTL_PA_GEN_D, scratch) || nvmtl_vk_surface_dirty(surfaceID, 0)) {
+        nvmtl_pa_fail(r, 5, "plane 0's second write or mark failed", -1, 0, 0); goto done;
+    }
+    if (nvmtl_pa_look(hst, s, NVMTL_PA_GEN_D, NVMTL_PA_GEN_C, 5, "plane 0 written again alone", r)) goto done;
+    { uint8_t *base = hst->lock(hst->ctx, 0);
+      if (!base) { nvmtl_pa_fail(r, 6, "a read-write lock of the surface failed", -1, 0, 0); goto done; }
+      nvmtl_pa_plane_fill(base, &s->p[0], NVMTL_PA_GEN_E); nvmtl_pa_plane_fill(base, &s->p[1], NVMTL_PA_GEN_E);
+      hst->unlock(hst->ctx, 0); }
+    if (nvmtl_pa_gpu_write(&img[0], &s->p[0], NVMTL_PA_GEN_E, scratch)) { nvmtl_pa_fail(r, 6, "plane 0's third write failed", -1, 0, 0); goto done; }
+    memset(scratch, 0, (size_t)nvmtl_pa_len(&s->p[0]));
+    if (nvmtl_vk_image_read(NULL, &img[0], scratch, (size_t)s->p[0].w * s->p[0].bpe)) { nvmtl_pa_fail(r, 6, "plane 0's texture could not be read back", -1, 0, 0); goto done; }
+    { uint8_t got = 0, exp = 0; const int64_t at = nvmtl_pa_image_check(scratch, &s->p[0], NVMTL_PA_GEN_E, &got, &exp);
+      if (at >= 0) { nvmtl_pa_fail(r, 6, "plane 0's texture read back other bytes than were written (offset in the texture)", at, got, exp); goto done; } }
+    if (nvmtl_vk_surface_dirty(surfaceID, 0)) { nvmtl_pa_fail(r, 6, "the kernel refused plane 0's third mark", -1, 0, 0); goto done; }
+    if (nvmtl_pa_look(hst, s, NVMTL_PA_GEN_E, NVMTL_PA_GEN_E, 6, "CPU pixels newer than plane 1's VRAM", r)) goto done;
+done:
+    for (int p = 1; p >= 0; p--) { if (img[p].img) nvmtl_vk_image_destroy(&img[p]); if (vb[p].buf) nvmtl_vk_buffer_destroy(&vb[p]); }
+    free(scratch);
+    const uint64_t took = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+    if (!r->step && took > 2000000000ull) nvmtl_pa_fail(r, 7, "the round trip took more than 2 s", -1, 0, 0);
+    return r->step;
 }
 int nvmtl_vk_image_create_fmt(uint32_t w, uint32_t h, int bgra, nvk_image *out) { return nvmtl_vk_image_create_mips(w, h, bgra, 1, out); }
 
@@ -8680,12 +8872,28 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     f->fence = fence;
     return 0;
 }
+/* A submission NVK dropped in a channel rebuild: counted, logged (the first and every 256th), and on the first one the
+   fault-context rings are written out so that the work that faulted is on record. Not the device-loss file and not
+   nvmtl_vk_note_loss: the device is up. */
+static void nvmtl_vk_note_dropped(long waited_ms)
+{
+    static _Atomic unsigned long long dropped;
+    const unsigned long long n = atomic_fetch_add(&dropped, 1) + 1;
+    if (!nvmtl_drop_log_due(n)) return;
+    uint64_t st[NVMTL_REC_N] = { 0 };
+    const unsigned k = pnvk_rec_stats ? pnvk_rec_stats(st, NVMTL_REC_N) : 0;
+    char line[400];
+    nvmtl_drop_line(line, sizeof line, n, waited_ms, getprogname(), nvmtl_drop_report_on(), st, k);
+    nvlog_every("vk: %s", line);
+    if (n == 1) nvmtl_fx_dump("a channel rebuild dropped this command buffer");
+}
 int nvmtl_vk_submit_finish(nvmtl_inflight *f)
 {
     nvk_cmdbuf *const c = f->c; const VkFence fence = f->fence; uint64_t *const pt = f->pt;
     nvmtl_prologue *const pre = &f->pre;
     const long budget_ms = nvmtl_gpu_wait_budget_ms();
-    const uint64_t w0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    // Awake time, not wall time: a fence pending when the machine went to sleep is not given up as lost at wake.
+    const uint64_t w0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     VkResult wr; long waited_ms = 0, said_ms = 0;
     // A fence that is late is a GPU that is busy, not a GPU that is gone. Giving up at the budget used to disable the
     // backend for the rest of the process; in WindowServer every later command buffer was then refused and CoreDisplay
@@ -8698,7 +8906,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     for (;;) {
         const long slice_ms = budget_ms < 250 ? 500 : budget_ms * 2;
         wr = pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, (uint64_t)slice_ms * 1000 * 1000);
-        waited_ms = (long)((clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0) / 1000000ull);
+        waited_ms = (long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0) / 1000000ull);
         if (wr != VK_TIMEOUT) break;
         if (g_state != 1) break;
         if (waited_ms >= give_up_ms) {
@@ -8711,7 +8919,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         }
     }
     pt[5] = nvmtl_perf_now();
-    atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0);
+    atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - w0);
     atomic_fetch_add(&g_submit_waits, 1);
     if (waited_ms > g_slow_submit_ms) {
         g_slow_submit_ms = waited_ms;
@@ -8741,6 +8949,12 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         }
         return -2;
     }
+    // NVK rebuilt this queue's channel after a GPU fault and did not run this submission: it signalled the fence from the
+    // CPU. The command buffer is finished, not lost, and no completion witness will ever land for it, so do not wait for
+    // one or count it missing (a few of those would switch pool reuse off for the process); retire destroys its pool and
+    // pages, and the prologue that rode with it inherits the same below.
+    const int dropped = pnvk_fence_dropped && nvmtl_drop_seen(pnvk_fence_dropped(g_dev, fence));
+    if (dropped) { c->wseq = NVMTL_WSEQ_BLIND; nvmtl_vk_note_dropped(waited_ms); }
     // Every submit up to this one has completed (one in-order queue): dead images whose last possible reader was
     // among them can go now (NVMTL_IMAGE_GRACE).
     if (c->fx_seq) { pthread_mutex_lock(&g_grace_lock); if (c->fx_seq > g_cmd_finished_seq) __atomic_store_n(&g_cmd_finished_seq, c->fx_seq, __ATOMIC_RELEASE); pthread_mutex_unlock(&g_grace_lock);
@@ -8806,7 +9020,9 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     nvmtl_cmd_retire(c);
     pt[7] = nvmtl_perf_now();
     nvmtl_perf_submit(perf_sets, pt);
-    return 0;
+    // -1 is "retired with an error": Metal completes the command buffer with an error and nothing is quarantined, and an
+    // upload that was dropped is not taken as done. Never -2: the device is up and the next command buffer runs.
+    return nvmtl_drop_result(dropped, nvmtl_drop_report_on());
 }
 
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b);
@@ -9607,7 +9823,7 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
-typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; } nvmtl_asyncup;
+typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic; } nvmtl_asyncup;
 static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
 static uint64_t nvmtl_asyncup_take(nvk_image *img)
@@ -9628,18 +9844,40 @@ static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
     img->up_token = s.infl;
     pthread_mutex_unlock(&g_asyncup_mutex);
 }
-// Finish (fence-wait) and free a handle taken from an image. Called OUTSIDE the lock so one image's wait
-// never blocks uploads to another; a no-op on 0 (which is every call on the synchronous path).
-static void nvmtl_asyncup_finish(uint64_t token)
+// The copy of an async upload was dropped by a channel rebuild after a GPU fault (nvmtl_vk_submit_finish answered -1).
+// The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
+// the staging buffer, which still holds the bytes, and wait. The layouts are named explicitly rather than through
+// img_to: draws queued after the dropped copy may have sampled the image, and this copy must wait for them.
+static void nvmtl_asyncup_redo(nvk_image *img, nvmtl_asyncup *au)
+{
+    nvk_cmdbuf c;
+    if (nvmtl_vk_cmd_begin(NULL, &c)) { nvlog("vk: tex upload async: the copy a channel rebuild dropped cannot be made again (no command buffer) - the image keeps what it held"); return; }
+    const VkImageSubresourceRange r = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)au->stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &au->bic);
+    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const int rc = nvmtl_vk_submit_wait_at(&c, "tex upload async (made again)");
+    nvlog("vk: tex upload async: the copy a channel rebuild dropped was made again -> %d%s", rc, rc ? " - the image keeps what it held" : "");
+}
+// Finish (fence-wait) and free a handle taken from `img`. Called OUTSIDE the lock so one image's wait never blocks
+// uploads to another; a no-op on 0 (which is every call on the synchronous path).
+static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
 {
     if (!token) return;
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
-    nvmtl_vk_submit_finish(&au->infl);
+    if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
 }
 // Public guard for the consumers (readback, surface-out, migration, destroy): finish a pending upload first.
-void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(nvmtl_asyncup_take(img)); }
+void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img)); }
 
 int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
@@ -9665,7 +9903,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     nvk_cmdbuf local_cb, *c;
     if (mode == NVMTL_UP_SUBMIT_ASYNC) {
         // a prior async upload to THIS image must land before we overwrite the texture or its staging
-        if (finish_first) nvmtl_asyncup_finish(nvmtl_asyncup_take(img));
+        if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));
         au = (nvmtl_asyncup *)calloc(1, sizeof *au);
         if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
     }
@@ -9686,6 +9924,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     if (au) {
         // submit without waiting; queue order + the SHADER_READ barrier above order the copy before any later
         // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
+        au->bic = bic;   // kept so that a copy a channel rebuild drops can be made again (nvmtl_asyncup_redo)
         if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
         nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);
         return 0;
