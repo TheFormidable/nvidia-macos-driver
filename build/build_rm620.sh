@@ -65,6 +65,9 @@ for l in sys.stdin:
     l = l.replace(" -mcmodel=kernel", "").replace(" -fno-pic", "")
     print(l)' > "$O/compile_cmds.sh"
 n=$(wc -l < "$O/compile_cmds.sh"); echo "compile commands: $n"
+# NM_PREPARE_ONLY=1 stops here: the patched tree and the RM's compile line are all build/kext_check.sh needs, and
+# everything up to this point runs on any host with make, patch and python3 (no Xcode).
+[ -z "${NM_PREPARE_ONLY:-}" ] || { echo "prepared $T: $n compile commands, nothing compiled (NM_PREPARE_ONLY)"; exit 0; }
 rm -rf "$O/.err"; mkdir -p "$O/.err"
 rm -rf "$B/cmds"; mkdir -p "$B/cmds"; awk -v d="$B/cmds" '{ f = d "/" NR ".sh"; print > f; close(f) }' "$O/compile_cmds.sh"
 seq 1 "$n" | xargs -P "$JOBS" -I{} bash -c 'bash "'"$B"'/cmds/{}.sh" 2> "'"$O"'/.err/{}.txt" || echo "FAIL {}"' > "$B/fails.txt"
