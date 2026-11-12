@@ -112,7 +112,7 @@ index 2a61354..36e74e5 100644
  
  /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 8684165..01d35ad 100644
+index 71cd898..7845cbd 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -6,6 +6,7 @@
@@ -365,7 +365,7 @@ index 8684165..01d35ad 100644
  /* b73 SLEEP ON THE GPU'S COMPLETION EVENT. NVK ends every submission with NON_STALL_INTERRUPT after its semaphore
   * release; RM's event for it reaches the device's osEvent connection (one per VkDevice, and GPU-wide: every graphics
   * completion posts it), and the kext's selector 6 sleeps until that event's count moves.
-@@ -291,10 +527,10 @@ static int
+@@ -293,10 +529,10 @@ static int
  nvrm_evw_nvk_wait(void *p, int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out)
  {
     struct nvrm_evw_nvk *c = p;
@@ -379,7 +379,7 @@ index 8684165..01d35ad 100644
     const int64_t t0 = timeout_us != 0 ? os_time_get_nano() : 0;
     if (nvrm_xnu_wait_event2(fd, seen, timeout_us, out) != 0) {
        c->refused = true;
-@@ -638,8 +874,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -641,8 +877,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        return;
     volatile uint64_t *sem = ctx->sem->map;
     *sem = 0;   // compared >= seq now: it must start below the first seq (the old == never needed it)
@@ -391,7 +391,7 @@ index 8684165..01d35ad 100644
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
        struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
-@@ -650,8 +889,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -653,8 +892,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        s->semVA = ctx->sem->va->addr;
        s->dev = ctx->base.dev;
        s->flushed = 0;
@@ -403,7 +403,7 @@ index 8684165..01d35ad 100644
        ctx->slot1 = i + 1;
        break;
     }
-@@ -660,6 +901,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -663,6 +904,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        fprintf(stderr, "nvrm: G-SUB: all %d channel slots in use - this channel stays SYNCHRONOUS\n", NVRM_CTX_MAX);
        return;
     }
@@ -412,7 +412,7 @@ index 8684165..01d35ad 100644
     ctx->gsub = true;
     ctx->curSlot = 0;
     nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
-@@ -679,7 +922,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -682,7 +925,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     s->ctx = NULL;
     s->sem = NULL;
     s->gen++;
@@ -424,7 +424,7 @@ index 8684165..01d35ad 100644
     ctx->slot1 = 0;
     ctx->gsub = false;
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
-@@ -698,6 +945,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -701,6 +948,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     nvkmd_nvrm_reap_deferred();
  }
  
@@ -583,7 +583,7 @@ index 8684165..01d35ad 100644
  
  static void
  write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
-@@ -1174,6 +1573,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1177,6 +1576,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        return r;
  
     ctx->wSeq++;
@@ -592,7 +592,7 @@ index 8684165..01d35ad 100644
     write_l2_sysmem_tail(&ctx->push);
     write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
     const struct nvkmd_ctx_exec seg = {
-@@ -1352,6 +1753,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1355,6 +1756,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
        return nvrm_gsub_submit(ctx, log_obj);
  
     ctx->wSeq++;
