@@ -1066,6 +1066,22 @@ static void arm_addresses(void)
     T("refused: not 16-aligned, in page zero, in the kernel's half", !nvf_err_va_ok(0x100000008ull, 0) && !nvf_err_va_ok(0x100000FF8ull, 0) &&
       !nvf_err_va_ok(0x10, 0) && !nvf_err_va_ok(0, 0) && !nvf_err_va_ok(0x0000800000000000ull, 0) && !nvf_err_va_ok(0xFFFFFFFFFFFFFFF0ull, 0));
     T("refused: a registration status that is not 16 bits", !nvf_err_va_ok(0x100000000ull, 0x10000));
+    {
+        /* where a wired page may be read: below installed memory + 4 GB. 32 GB of memory here: the limit is 36 GB. */
+        const unsigned long long G = 1ull << 30, top = 36 * G;
+        T("a page of system memory is read, up to the last whole page below the end of the physical map",
+          nvf_phys_ok(0x1000, NVF_PAGE, top) && nvf_phys_ok(20 * G, NVF_PAGE, top) && nvf_phys_ok(top - NVF_PAGE, NVF_PAGE, top) &&
+          nvf_phys_ok(0x7FFFF000ull, 2 * NVF_PAGE, top));
+        T("refused: the GPU's memory window at 256 GB and up, a page that crosses the end, a page past it",
+          !nvf_phys_ok(256 * G, NVF_PAGE, top) && !nvf_phys_ok(0x3FFA0000000ull, NVF_PAGE, top) &&
+          !nvf_phys_ok(top, NVF_PAGE, top) && !nvf_phys_ok(top - 0x800, NVF_PAGE, top) && !nvf_phys_ok(top + NVF_PAGE, NVF_PAGE, top));
+        T("refused: no address, an address not on a page boundary, a segment shorter than the page",
+          !nvf_phys_ok(0, NVF_PAGE, top) && !nvf_phys_ok(20 * G + 8, NVF_PAGE, top) && !nvf_phys_ok(20 * G, NVF_PAGE - 1, top) &&
+          !nvf_phys_ok(20 * G, 0, top));
+        T("refused: every page while the end of the map is not known, and no wrap at the top of the address space",
+          !nvf_phys_ok(0x1000, NVF_PAGE, 0) && !nvf_phys_ok(0xFFFFFFFFFFFFF000ull, NVF_PAGE, ~0ull - 0x800) &&
+          !nvf_phys_ok(0x1000, NVF_PAGE, NVF_PAGE));
+    }
 }
 
 static void arm_off(void)

@@ -35,6 +35,7 @@ extern "C" {
 #include "nvrm_fence_table.h"
 
 extern "C" task_t current_task(void);
+extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
 
 // ---- state ---------------------------------------------------------------------------------------------------------
 
@@ -82,6 +83,8 @@ static volatile SInt64 gFNextOwner;          // owner ids handed out
 static unsigned gFChangesSeen;               // under gFLock: gT.changes at the last unlock
 static unsigned gFCards, gFSuspended;        // under gFLock: GPUs started; of those, GPUs between SUSPENDING and RESUMED
 static bool gFInited, gFLost;                // under gFLock: the table was initialised; a resume failed (off until reboot)
+static UInt64 gFPhysTop;                     // installed memory + 4 GB: where the physical map ends; 0 = not known,
+                                             // no page is taken. Written once by the first start, before the layer is on
 
 static const SInt32 kNvfMaxSleepers = 256;   // user-space waits beyond this are refused (FULL); NVAccel's never are
 
@@ -109,7 +112,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_chans, CTLFLAG_RD | CTLFLAG_LOCKED, NVF
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_chan_adds, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(CHAN_ADDS), "channels registered since boot");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_chan_noirq, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(CHAN_NOIRQ), "channels whose completions arrive without an interrupt, now");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_chan_rebinds, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(CHAN_REBINDS), "rebuilt channels given a new error notifier");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_map_fail, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(MAP_FAIL), "channel pages that could not be pinned");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_map_fail, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(MAP_FAIL), "channel pages that could not be pinned, or that are not system memory");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_map_mismatch, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(MAP_MISMATCH), "channels whose page did not show what the process wrote");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_live, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(LIVE), "holds that delay readers now");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_live_max, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(LIVE_MAX), "most such holds at once");
@@ -294,23 +297,31 @@ static SInt32 nvfBoot(void)
 
 // ---- a channel's pages ---------------------------------------------------------------------------------------------
 
-// One page of the calling process, wired, for the kernel to read. Called in that process's context, without the lock.
-// The descriptor is not mapped into the kernel: the page is read through the physical map (nvfRead64), so no kernel
-// address exists that could fault when the process or the RM tears its side down. Direction "out" (memory to device)
-// asks for read access only, which also works on a page the process has mapped read-only.
-static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
-{
-    IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());
-    if (!md) return NULL;
-    if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }
-    return md;
-}
 // Never under the lock.
 static void nvfUnpin(IOMemoryDescriptor *md)
 {
     if (!md) return;
     md->complete();
     md->release();
+}
+
+// One page of the calling process, wired, for the kernel to read. Called in that process's context, without the lock.
+// The descriptor is not mapped into the kernel: the page is read through the physical map (nvfRead64), so no kernel
+// address exists that could fault when the process or the RM tears its side down. Direction "out" (memory to device)
+// asks for read access only, which also works on a page the process has mapped read-only.
+// IOKit wires device memory as readily as system memory, and the physical map covers only system memory and the 4 GB
+// above it: a page of the GPU's memory window that a process mapped and handed in would be read where the kernel has
+// no address and stop the machine. So the page's physical address is checked once here, while it is wired and cannot
+// move, and a page that is not where the map reaches is given back (nvf_phys_ok, gFPhysTop).
+static IOMemoryDescriptor *nvfPin(UInt64 pageVA)
+{
+    IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());
+    if (!md) return NULL;
+    if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }
+    IOByteCount len = 0;
+    const addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
+    if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }
+    return md;
 }
 
 // 8 bytes of a pinned page; `off` is 8-aligned and inside the page. One 64-bit load from the physical map, so a value
@@ -431,7 +442,7 @@ static void nvfChanAdd(volatile UInt64 *ownerId, const volatile SInt32 *closing,
     if (!sem || !err) {
         nvfUnpin(sem);
         nvfCount(NVF_STAT_MAP_FAIL);
-        nvfMapFailed("a channel page could not be pinned");
+        nvfMapFailed("a channel page could not be pinned, or is not system memory");
         r->status = NVRM_FENCE_ST_MAP;
         return;
     }
@@ -509,7 +520,7 @@ static void nvfChanRebind(UInt64 owner, struct NVRMFenceReq *r)
     IOMemoryDescriptor *err = nvfPin(c->errVA & ~(NVF_PAGE - 1));
     if (!err) {
         nvfCount(NVF_STAT_MAP_FAIL);
-        nvfMapFailed("the new error notifier of a rebuilt channel could not be pinned");
+        nvfMapFailed("the new error notifier of a rebuilt channel could not be pinned, or is not system memory");
         r->status = NVRM_FENCE_ST_MAP;
         return;
     }
@@ -646,6 +657,13 @@ void nvrm_fence_start(void)
     const SInt32 boot = nvfBoot();
     nvfSysctls();
     if (boot == 2) return;
+    if (!gFPhysTop) {
+        // The physical map of x86-64 macOS covers the memory the booter reported plus 4 GB; hw.memsize is that memory
+        // or less (boot-arg maxmem), so this end is never beyond the map's.
+        UInt64 mem = 0;
+        size_t l = sizeof(mem);
+        if (sysctlbyname("hw.memsize", &mem, &l, NULL, 0) == 0 && mem && mem < (1ull << 46)) gFPhysTop = mem + (4ull << 30);
+    }
     if (!gFLock) {
         IOLock *lock = IOLockAlloc();
         if (!lock) return;                               // stays "not started": every request is refused, nothing to undo
