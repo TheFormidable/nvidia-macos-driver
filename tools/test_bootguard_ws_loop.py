@@ -9,6 +9,8 @@ nvram, stat, sleep and shutdown. The negative control is the job as 2.8.1 shippe
 WindowServer good."""
 import os
 import pathlib
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -81,17 +83,41 @@ def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None):
     os.utime(old, (time.time() - 86400, time.time() - 86400))
     if prior_loop is not None:
         (t / "nv.nullmoth-ws-loop").write_text(prior_loop + "\n")
-    text = job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"PATH={fake}:/usr/bin:/bin:/usr/sbin:/sbin")
-    text = text.replace("LOG=/Library/NullMoth/bootguard.log", f"LOG={t}/bootguard.log")
-    text = text.replace("DR=/Library/Logs/DiagnosticReports", f"DR={dr}")
+    text = redirect(job, fake, t, dr)
     script = t / "bootguard.sh"
     script.write_text(text)
     env = dict(os.environ, T=str(t), WS_PIDS=" ".join(map(str, pids)), ARMED=armed or "", CRASHES=str(crashes),
                CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120))
-    p = subprocess.run(["/bin/bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
-    log = (t / "bootguard.log").read_text() if (t / "bootguard.log").exists() else ""
-    calls = (t / "calls").read_text() if (t / "calls").exists() else ""
+    try:
+        p = subprocess.run(["/bin/bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
+        log = (t / "bootguard.log").read_text() if (t / "bootguard.log").exists() else ""
+        calls = (t / "calls").read_text() if (t / "calls").exists() else ""
+    finally:
+        shutil.rmtree(t, ignore_errors=True)
     return p, log, calls
+
+
+class Unredirected(Exception):
+    pass
+
+
+def redirect(job, fake, t, dr):
+    """The job with its PATH, log and report folder pointed at the test's. The job runs nvram and shutdown -r now: when
+    a line moved and the fakes would not come first, nothing runs (the real ones would reach this Mac's NVRAM and restart
+    it when the tests run as root)."""
+    text = job
+    for old, new in (("PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"PATH={fake}:/usr/bin:/bin:/usr/sbin:/sbin"),
+                     ("LOG=/Library/NullMoth/bootguard.log", f"LOG={t}/bootguard.log"),
+                     ("DR=/Library/Logs/DiagnosticReports", f"DR={dr}")):
+        if text.count(old) != 1:
+            if old.startswith("DR=") and text.count("DiagnosticReports") == 0:
+                continue   # 2.8.1's job reads no reports
+            raise Unredirected(f"{old!r} occurs {text.count(old)} times in the job")
+        text = text.replace(old, new)
+    for prog in FAKES:
+        if re.search(rf"(^|[^\w.-])/(usr/)?s?bin/{prog}\b", text):
+            raise Unredirected(f"the job names /…/{prog} by its full path, past the fakes")
+    return text
 
 
 src = (ROOT / "package/install.sh").read_text()
@@ -131,6 +157,15 @@ arm("two crashes at boot and then a steady WindowServer still counts as good", "
 
 p, log, calls = run(job, pids=loop, crashes=0)
 arm("a WindowServer seen as four processes counts as a loop even with no reports", "nv-starts=%02" in calls, log + calls)
+
+# a job whose PATH line moved, or that names nvram by its full path, is not run at all
+for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
+                  ("it calls /usr/sbin/nvram", job.replace("nvram -d", "/usr/sbin/nvram -d", 1))):
+    try:
+        redirect(bad, pathlib.Path("/nonexistent/bin"), pathlib.Path("/nonexistent"), pathlib.Path("/nonexistent/dr"))
+        arm(f"control: a job that would reach the real nvram and shutdown is refused ({what})", False, "it would have run")
+    except Unredirected:
+        arm(f"control: a job that would reach the real nvram and shutdown is refused ({what})", True)
 
 # negative control: the job as 2.8.1 shipped it (tag v2.8.1) calls the looping WindowServer good
 base = subprocess.run(["git", "-C", str(ROOT), "show", "v2.8.1:package/install.sh"], capture_output=True, text=True)
