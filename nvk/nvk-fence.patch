@@ -1,0 +1,853 @@
+The surface fence, NVK's half. NullMoth's own change (not an upstream Mesa commit).
+NVRM.kext keeps, per IOSurface, the holds of the command buffers still drawing into it and reads their completion
+from the writing channel's own semaphore page (user client selector 12). This patch registers each channel with the
+kernel and deletes it before its pages are freed, publishes the value of each flush beside the completion value,
+exports nvmtl_nvk_fence_v1 for the Metal plugin (QUERY, OPEN, ARM, CLOSE, WAIT), lets a wait on a channel without
+an event sleep in the kernel on that channel's semaphore, and provides the call that re-points a rebuilt channel.
+The numbers and structs are in nvkmd/nvrm/nvrm_fence_abi.h, a byte-for-byte copy of kexts/NVRM/nvrm_fence_abi.h
+(tools/test_shared_headers.py compares them; tools/test_fence_wiring_nvk.py holds the wiring).
+A kext without the fence, or booted with nvrmfence=0, leaves every process on the 2.9 surface marks.
+
+diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
+index 537e791..f87935f 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.c
++++ b/src/nouveau/vulkan/nvk_device_memory.c
+@@ -9,6 +9,8 @@
+ #include "nvk_image.h"
+ #include "nvk_physical_device.h"
+ #include "nvkmd/nvkmd.h"
++#include "nvkmd/nvrm/nvrm_fence_abi.h"
++#include "vk_fence.h"
+ 
+ #include "util/u_atomic.h"
+ 
+@@ -106,6 +108,26 @@ nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID, uint32_t plane)
+    return nvkmd_nvrm_surface_dirty(dev->nvkmd, surfaceID, plane);
+ }
+ 
++/* The surface fence: see nvkmd_nvrm_fence. The plugin finds this by name and calls it through its own prototype, so the
++ * signature never changes; a new one gets a new name. */
++__attribute__((visibility("default"))) uint32_t   /* exported: plugin dlsym */
++nvmtl_nvk_fence_v1(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids,
++                   const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6])
++{
++   VK_FROM_HANDLE(nvk_device, dev, device);
++   if (dev == NULL || dev->nvkmd == NULL) {
++      if (out != NULL)
++         memset(out, 0, 6 * sizeof(out[0]));
++      return NVRM_FENCE_ST_OFF;
++   }
++   struct vk_sync *sync = NULL;
++   if (op == NVRM_FENCE_OP_ARM && fence != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(vk_fence, f, fence);
++      sync = vk_fence_get_active_sync(f);
++   }
++   return nvkmd_nvrm_fence(dev->nvkmd, op, flags, cookie, count, ids, planes, sync, pid, timeout_ms, out);
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ nvk_GetMemoryFdPropertiesKHR(VkDevice device,
+                              VkExternalMemoryHandleTypeFlagBits handleType,
+diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
+index e1e860c..115034e 100644
+--- a/src/nouveau/vulkan/nvkmd/nvkmd.h
++++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
+@@ -508,6 +508,17 @@ void nvmtl_nvk_stage_import(const struct nvmtl_nvk_share *in);   /* exported: pl
+  * a CPU lock then pages the VRAM off on the copy engine). 0 = the kernel took it (the plugin may skip its copy-out). */
+ uint32_t nvkmd_nvrm_surface_dirty(struct nvkmd_dev *dev, uint32_t surfaceID, uint32_t plane);
+ uint32_t nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID, uint32_t plane);   /* exported: plugin dlsym */
++/* The surface fence (NVRM.kext selector 12, nvkmd/nvrm/nvrm_fence_abi.h): one request of the plugin. op is QUERY, OPEN,
++ * ARM, CLOSE or WAIT; ARM names the work by sync (the VkFence's payload), WAIT the surface by ids[0] and planes[0].
++ * Returns NVRM_FENCE_ST_*, NVRM_FENCE_ST_OFF when this process has no fence. out: QUERY { active, accel, capGpuMs,
++ * capCpuMs, state, 0 }, WAIT { result, waitedUs, ownerPid, state, blockers, 0 }, zeros otherwise. */
++struct vk_sync;
++uint32_t nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count,
++                          const uint32_t *ids, const uint8_t *planes, struct vk_sync *sync, uint32_t pid,
++                          uint32_t timeout_ms, uint32_t out[6]);
++uint32_t nvmtl_nvk_fence_v1(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count,
++                            const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid,
++                            uint32_t timeout_ms, uint32_t out[6]);   /* exported: plugin dlsym */
+ 
+ /* b72 host-pointer import.
+  * 26.3: out of line in nvkmd.c, like upstream's nvkmd_dev_import_dma_buf, so the mem joins dev->mems. nvkmd_mem_unref
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+index 2a61354..36e74e5 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+@@ -161,6 +161,12 @@ struct nvkmd_nvrm_slot {
+    unsigned errBase;                     // error notifier status when the channel registered
+    bool faulted;                         // sticky: the error notifier changed, the channel is dead
+    uint64_t acqVA, acqSeq, acqCount;     // r3-diag: the last SEM_ACQUIRE this channel emitted (VA, value), how many
++   /* The surface fence (nvrm_fence_abi.h). kchan: the kernel's handle for this channel, set only once CHAN_ADD and
++    * CHAN_VERIFY both succeeded, 0 = the kernel does not watch it. The kernel maps the semaphore page and the error
++    * notifier page while kchan is set: whoever clears it sends CHAN_DEL, and the pages are freed only after that.
++    * kseqQuiet: os_time_get_nano before which a wait does not ask the kernel to sleep on this channel again. */
++   uint32_t kchan;
++   int64_t kseqQuiet;
+ };
+ extern struct nvkmd_nvrm_slot nvkmd_nvrm_slots[NVRM_CTX_MAX];
+ extern pthread_mutex_t nvkmd_nvrm_gsub_mtx;
+@@ -205,6 +211,14 @@ struct nvkmd_nvrm_exec_ctx {
+ 
+ NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
+ 
++/* The surface fence: after a channel was rebuilt in place (same semaphore page, new error notifier), point the kernel's
++ * registration at the new notifier (NVRM_FENCE_OP_CHAN_REBIND). Call it once ctx->notifier is the new notifier and the
++ * slot's errBase holds its status, while the old notifier is still mapped, with nvkmd_nvrm_gsub_mtx NOT held (it takes
++ * it, and makes a kernel call outside it), and while nothing destroys ctx. true: the kernel follows the new notifier,
++ * or the channel was not registered. false: the kernel refused; the channel was deleted from the fence (CHAN_DEL) and
++ * its kchan is 0, so its surfaces use the 2.9 marks from now on. Either way the channel itself is unaffected. */
++bool nvkmd_nvrm_fence_chan_rebind(struct nvkmd_nvrm_exec_ctx *ctx);
++
+ struct nvkmd_nvrm_bind_ctx {
+    struct nvkmd_ctx base;
+ };
+@@ -293,6 +307,8 @@ int nvkmd_nvrm_sync_gpu_target(struct vk_sync *sync, uint64_t wait_value, uint32
+                                struct nvkmd_dev *dev, uint64_t *sem_va, uint64_t *seq);
+ VkResult nvkmd_nvrm_sync_cpu_wait(struct vk_sync *sync, uint64_t wait_value,
+                                   struct vk_object_base *log_obj);
++int nvkmd_nvrm_sync_fence_target(struct vk_sync *sync, uint32_t *slot, uint32_t *gen,
++                                 uint64_t *seq);   /* caller holds the mutex */
+ 
+ 
+ /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+index 71cd898..63e9929 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -6,6 +6,7 @@
+ #include <sched.h>
+ #include "nvkmd_nvrm.h"
+ #include "nvrm_evwait.h"
++#include "nvrm_fence_abi.h"
+ #include <stdlib.h>
+ #include "ctrl/ctrl0080/ctrl0080fifo.h" // NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES
+ #include "ctrl/ctrl2080/ctrl2080gr.h" // NV2080_CTRL_CMD_GR_{GET_CTXSW_MODES,SET_CTXSW_PREEMPTION_MODE}
+@@ -198,6 +199,249 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
+    usleep(200);
+ }
+ 
++/* ═══ THE SURFACE FENCE (nvrm_fence_abi.h, kext selector 12) ═══════════════════════════════════════════════════════
++ * 2.9 told the reader of an IOSurface that its writer had finished with marks and tags that only a clock could end:
++ * a reader polled for up to 10 ms, NVAccel waited for up to 100 ms, and a writer that died left its mark to time out.
++ * NVRM.kext now keeps those holds itself, per surface, and reads their completion from the writing channel's own
++ * semaphore page, so a reader sleeps exactly until the work is done or its writer is gone. NVK's part:
++ *   - register each channel's semaphore page and error notifier with the kernel (CHAN_ADD, then CHAN_VERIFY: the kernel
++ *     proves that its view of the page follows later writes before any wait trusts it), and delete the registration
++ *     (CHAN_DEL) before either page is freed;
++ *   - store the value of each flush at NVRM_FENCE_SEM_FLUSHED_OFF before the GPU can see the work, so that the kernel
++ *     can tell "the writer's GPU work is still running" from "the writer is stuck";
++ *   - carry the plugin's requests (nvmtl_nvk_fence_v1) and turn a VkFence into (channel, value) for ARM;
++ *   - give the event wait a kernel sleep for a channel that raises no event of its own (WAIT_SEQ).
++ * ONE CONNECTION FOR THE PROCESS. The kernel names the owner of channels and holds by the connection a request arrives
++ * on, and arms a hold only on a channel of the same owner. So every request of the process goes through one control
++ * connection, opened for this alone at the first request and never closed: a device's own connection is closed with its
++ * device and may then be pooled and handed to a later open, which would strand the channels registered under it. When
++ * the process exits the connection closes and the kernel ends everything it owned.
++ * EVERY FAILURE COSTS ONLY THE FENCE. A kext without selector 12 (2.9) fails the first request: the fence is absent for
++ * the life of the process, nothing more is asked and nothing is printed (NVK_DIAG=1 says it). A kext whose fence is off
++ * (nvrmfence=0) answers NVRM_FENCE_ST_OFF.
++ * A channel the kernel will not watch keeps kchan 0 and runs as before; while such a channel exists OPEN answers
++ * NVRM_FENCE_ST_MAP, and the plugin covers the process's surfaces with the 2.9 marks and tags (a hold whose completion
++ * the kernel cannot see would run into its time bound and count against the process). */
++static int nvrm_fence_fd = -1;    /* the fence connection; written once, before nvrm_fence_have becomes 1 */
++static int nvrm_fence_have;       /* 0 not asked yet, 1 the kext answers selector 12, -1 it does not (for good) */
++static pthread_mutex_t nvrm_fence_open_mtx = PTHREAD_MUTEX_INITIALIZER;   /* opening the connection, nothing else */
++/* After a WAIT_SEQ that did not sleep, that channel is polled for this long before the kernel is asked again: a channel
++ * whose interrupts the kernel does not trust yet is answered PENDING at once, and asking at every polling step would
++ * add a system call to each. */
++#define NVRM_FENCE_SEQ_QUIET_NS 50000000LL
++
++static void
++nvrm_fence_req(struct NVRMFenceReq *r, uint32_t op, uint32_t flags)
++{
++   memset(r, 0, sizeof(*r));   /* every field the op does not read is zero */
++   r->version = NVRM_FENCE_ABI_VERSION;
++   r->op = op;
++   r->flags = flags;
++}
++
++/* One line per process, for the first thing that keeps the fence from a channel or from the process when the kext
++ * has a fence. */
++static void
++nvrm_fence_say(const char *what, unsigned status)
++{
++   static int said;
++   if (__atomic_exchange_n(&said, 1, __ATOMIC_RELAXED) == 0)
++      fprintf(stderr, "nvrm: surface fence: %s (status 0x%x) - surfaces use the 2.9 marks where it applies\n",
++              what, status);
++}
++
++/* Sends r on the fence connection, opening it at the first request. true: the kext answered, r->status is its answer,
++ * and the op's output fields may be read when that is NVRM_FENCE_ST_OK. false: there is no fence in this process;
++ * r->status is NVRM_FENCE_ST_OFF. */
++static bool
++nvrm_fence_call(struct NVRMFenceReq *r)
++{
++   int have = __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE);
++   if (have == 0) {
++      pthread_mutex_lock(&nvrm_fence_open_mtx);
++      have = __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE);   /* another thread may have opened it, or lost it */
++      if (have == 0) {
++         struct NVRMFenceReq q;
++         nvrm_fence_req(&q, NVRM_FENCE_OP_QUERY, 0);
++         const int fd = NVRM_OPEN(NVRM_CTL_NODE_NAME);
++         if (fd >= 0 && nvrm_xnu_fence(fd, &q) == 0) {
++            __atomic_store_n(&nvrm_fence_fd, fd, __ATOMIC_RELAXED);
++            have = 1;
++         } else {
++            if (fd >= 0)
++               NVRM_CLOSE(fd);
++            have = -1;
++            /* A kext older than the fence (2.9, still loaded after an update until the restart) is not a fault, and
++             * a program on a healthy GPU prints nothing: that case is said only when the diagnostics are on. */
++            if (fd < 0)
++               nvrm_fence_say("no connection to the kext", 0);
++            else if (nvkmd_nvrm_diag_on())
++               nvrm_fence_say("the kext has none", 0);
++         }
++         __atomic_store_n(&nvrm_fence_have, have, __ATOMIC_RELEASE);
++      }
++      pthread_mutex_unlock(&nvrm_fence_open_mtx);
++   }
++   if (have > 0 && nvrm_xnu_fence(__atomic_load_n(&nvrm_fence_fd, __ATOMIC_RELAXED), r) == 0)
++      return true;
++   if (have > 0) {   /* the method answered before and now does not: stop asking */
++      __atomic_store_n(&nvrm_fence_have, -1, __ATOMIC_RELEASE);
++      nvrm_fence_say("the kext stopped answering", 0);
++   }
++   r->status = NVRM_FENCE_ST_OFF;
++   return false;
++}
++
++/* CHAN_DEL. Sent even after the fence was found gone: a handle exists only because the method answered, and the kernel
++ * keeps both pages mapped until the channel is deleted or the process exits. */
++static void
++nvrm_fence_chan_del(uint32_t handle)
++{
++   const int fd = __atomic_load_n(&nvrm_fence_fd, __ATOMIC_RELAXED);
++   if (handle == 0 || fd < 0)
++      return;
++   struct NVRMFenceReq r;
++   nvrm_fence_req(&r, NVRM_FENCE_OP_CHAN_DEL, 0);
++   r.u.chan.chan = handle;
++   (void)nvrm_xnu_fence(fd, &r);
++}
++
++/* The kernel handle of a slot's channel, cleared there: the caller sends CHAN_DEL for it after unlocking. This is the
++ * only way a handle leaves a slot, so exactly one CHAN_DEL is sent per registration. Caller holds nvkmd_nvrm_gsub_mtx. */
++static uint32_t
++nvrm_fence_chan_take(struct nvkmd_nvrm_slot *s)
++{
++   const uint32_t handle = s->kchan;
++   s->kchan = 0;
++   return handle;
++}
++
++static bool
++nvrm_fence_notifier_ok(uintptr_t errVA)
++{
++   return (errVA & 0xf) == 0 && (errVA & 0xfff) <= 0x1000 - 16;   /* 16 bytes, 16-aligned, inside one page */
++}
++
++/* Registers a channel that has just taken its slot (nvrm_gsub_register): on success the slot's kchan is the kernel's
++ * handle; on any failure kchan stays 0 and nothing stays registered (a refused CHAN_VERIFY is followed by CHAN_DEL).
++ * The channel itself is not affected either way. */
++static void
++nvrm_fence_chan_add(struct nvkmd_nvrm_exec_ctx *ctx, const NvNotification *errN, unsigned errBase)
++{
++   volatile uint64_t *page = ctx->sem->map;
++   const uintptr_t semVA = (uintptr_t)ctx->sem->map, errVA = (uintptr_t)errN;
++   if (__atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) < 0)
++      return;
++   if ((semVA & 0xfff) != 0 || !nvrm_fence_notifier_ok(errVA)) {
++      nvrm_fence_say("a channel's pages are not laid out as the kernel needs", 0);
++      return;
++   }
++   /* never 0, and its complement (what CHAN_VERIFY looks for) is neither 0 nor the probe itself */
++   static uint32_t serial;
++   const uint64_t probe = (uint64_t)(uint32_t)getpid() << 32 | (__atomic_add_fetch(&serial, 1, __ATOMIC_RELAXED) | 1u);
++   __atomic_store_n(&page[NVRM_FENCE_SEM_PROBE_OFF / 8], probe, __ATOMIC_SEQ_CST);
++   struct NVRMFenceReq r;
++   nvrm_fence_req(&r, NVRM_FENCE_OP_CHAN_ADD, ctx->ceOnly ? NVRM_FENCE_F_CHAN_CE : 0);
++   r.u.chan.semVA = semVA;
++   r.u.chan.errVA = errVA;
++   r.u.chan.probe = probe;
++   r.u.chan.errBase = errBase;
++   if (!nvrm_fence_call(&r))
++      return;
++   if (r.status != NVRM_FENCE_ST_OK || r.u.chan.chan == 0) {
++      if (r.status != NVRM_FENCE_ST_OFF)   /* off on purpose (nvrmfence=0) is not worth a line */
++         nvrm_fence_say("the kernel would not watch a channel", r.status);
++      return;
++   }
++   const uint32_t handle = r.u.chan.chan;
++   /* a new value: the kernel reads it through the mapping CHAN_ADD made, which shows that mapping follows later writes */
++   __atomic_store_n(&page[NVRM_FENCE_SEM_PROBE_OFF / 8], ~probe, __ATOMIC_SEQ_CST);
++   nvrm_fence_req(&r, NVRM_FENCE_OP_CHAN_VERIFY, 0);
++   r.u.chan.chan = handle;
++   r.u.chan.probe = ~probe;
++   if (!nvrm_fence_call(&r) || r.status != NVRM_FENCE_ST_OK) {
++      nvrm_fence_chan_del(handle);
++      nvrm_fence_say("the kernel's view of a channel's semaphore page did not follow it", r.status);
++      return;
++   }
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[ctx->slot1 - 1];
++   const bool mine = s->ctx == ctx;
++   if (mine) {
++      s->kchan = handle;
++      s->kseqQuiet = 0;
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (!mine)
++      nvrm_fence_chan_del(handle);
++}
++
++/* The event wait's seam for a channel that raises no event of its own, such as a copy-engine channel (the `wait` of
++ * struct nvrm_evw_ops with fd < 0, nvrm_evwait.h). The kernel sleeps on that channel's semaphore (WAIT_SEQ) until it
++ * reaches the value waited for; the first channel of the wait that is short of its value and that the kernel watches is
++ * the one slept on, and the caller checks every channel again afterwards. timeout_us is the longest the round allows
++ * (2 ms, or what is left before an application's deadline, in every mode: nvrm_evw_nvk_left_us). The kernel counts in
++ * milliseconds, so it is given the whole milliseconds of that, never more; a round with less than one millisecond left
++ * is polled.
++ * Returns 0 with WOKEN (the value was reached) or TIMEOUT (the kernel slept the whole time); -1 when the kernel did not
++ * sleep: no watched channel is pending, the kernel will not sleep on that channel (it has not seen its interrupts arrive
++ * yet: PENDING), the channel faulted or is gone (DEAD: the caller's own health check then reports the fault), the sleep
++ * was interrupted, the fence is off, or the answer does not hold up (a value the semaphore has not reached, a "slept"
++ * shorter than half the time). The round then takes one step of the 2.9 polling, and that channel is polled, not asked,
++ * for NVRM_FENCE_SEQ_QUIET_NS. So every 0 is a real sleep or a real completion, and the loop cannot spin in the kernel. */
++static int
++nvrm_fence_wait_first(unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want,
++                      uint32_t timeout_us, uint64_t *out)
++{
++   const uint32_t whole_ms = timeout_us / 1000;   /* rounded down: the sleep must end inside the round's time */
++   const uint32_t timeout_ms = whole_ms > NVRM_FENCE_SEQ_MAX_MS ? NVRM_FENCE_SEQ_MAX_MS : whole_ms;
++   if (timeout_ms == 0 || __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) <= 0)
++      return -1;
++   const int64_t now = os_time_get_nano();
++   uint32_t handle = 0, at = 0, g = 0;
++   uint64_t seq = 0;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   for (unsigned h = 0; h < n && handle == 0; h++) {
++      const struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[slot[h]];
++      if (s->ctx == NULL || s->gen != gen[h] || __atomic_load_n(s->sem, __ATOMIC_ACQUIRE) >= want[h])
++         continue;
++      if (s->kchan != 0 && now >= s->kseqQuiet) {
++         handle = s->kchan;
++         seq = want[h];
++         at = slot[h];
++         g = gen[h];
++      }
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (handle == 0)
++      return -1;
++   struct NVRMFenceReq r;
++   nvrm_fence_req(&r, NVRM_FENCE_OP_WAIT_SEQ, 0);
++   r.u.wait.id = handle;
++   r.u.wait.seq = seq;
++   r.u.wait.timeoutMs = timeout_ms;
++   const bool answered = nvrm_fence_call(&r) && r.status == NVRM_FENCE_ST_OK;
++   const int64_t took = os_time_get_nano() - now;
++   int ret = -1;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[at];
++   const bool live = s->ctx != NULL && s->gen == g;   /* not retired meanwhile (retiring idles the channel first) */
++   if (answered && (r.u.wait.result == NVRM_FENCE_R_READY || r.u.wait.result == NVRM_FENCE_R_NONE)) {
++      /* reached: believed only when the semaphore says so too */
++      if (!live || __atomic_load_n(s->sem, __ATOMIC_ACQUIRE) >= seq) {
++         *out = nvrm_evw_pack(0, NVRM_EVW_R_WOKEN);
++         ret = 0;
++      }
++   } else if (answered && r.u.wait.result == NVRM_FENCE_R_BUDGET && took >= (int64_t)timeout_ms * 500000) {
++      *out = nvrm_evw_pack(0, NVRM_EVW_R_TIMEOUT);
++      ret = 0;
++   }
++   if (ret != 0 && live && s->kchan == handle)
++      s->kseqQuiet = os_time_get_nano() + NVRM_FENCE_SEQ_QUIET_NS;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   return ret;
++}
++
+ /* b73 SLEEP ON THE GPU'S COMPLETION EVENT. NVK ends every submission with NON_STALL_INTERRUPT after its semaphore
+  * release; RM's event for it reaches the device's osEvent connection (one per VkDevice, and GPU-wide: every graphics
+  * completion posts it), and the kext's selector 6 sleeps until that event's count moves.
+@@ -289,14 +533,24 @@ nvrm_evw_nvk_pending(void *p, int *fd)
+    return pending;
+ }
+ 
++/* The longest a wait of a channel's own may sleep in this round: the round's timeout, cut to the time the caller's
++ * deadline leaves. The eager mode's timeout is 2 ms whatever the deadline, because that is how 2.9 slept on the event;
++ * but 2.9 polled a channel without an event in every mode, and polling returned at the deadline. */
++static uint32_t
++nvrm_evw_nvk_left_us(const struct nvrm_evw_nvk *c, uint32_t timeout_us)
++{
++   const uint64_t left_us = c->remain_ns / 1000;
++   return left_us < timeout_us ? (uint32_t)left_us : timeout_us;
++}
++
+ static int
+ nvrm_evw_nvk_wait(void *p, int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out)
+ {
+    struct nvrm_evw_nvk *c = p;
+-   /* No event for the channel still running (copy engine only). This is the place for a kernel wait of that
+-    * channel's own; there is none here, so the round takes a step of the polling backoff, as 2.9 did. */
++   /* No event for the channel still running (copy engine only): the surface fence's kernel wait on that channel's
++    * own semaphore, when the kernel watches it; otherwise the round takes a step of the polling backoff, as 2.9 did. */
+    if (fd < 0)
+-      return -1;
++      return nvrm_fence_wait_first(c->n, c->slot, c->gen, c->want, nvrm_evw_nvk_left_us(c, timeout_us), out);
+    const int64_t t0 = timeout_us != 0 ? os_time_get_nano() : 0;
+    if (nvrm_xnu_wait_event2(fd, seen, timeout_us, out) != 0) {
+       c->refused = true;
+@@ -641,8 +895,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+       return;
+    volatile uint64_t *sem = ctx->sem->map;
+    *sem = 0;   // compared >= seq now: it must start below the first seq (the old == never needed it)
++   sem[NVRM_FENCE_SEM_FLUSHED_OFF / 8] = 0;   // surface fence: nothing flushed yet, and no mapping probe
++   sem[NVRM_FENCE_SEM_PROBE_OFF / 8] = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    NvNotification *errN = &((NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
++   const unsigned errBase = (unsigned)errN->status;
+    pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
+    for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
+       struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
+@@ -653,8 +910,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+       s->semVA = ctx->sem->va->addr;
+       s->dev = ctx->base.dev;
+       s->flushed = 0;
+-      s->errBase = (unsigned)errN->status;
++      s->errBase = errBase;
+       s->faulted = false;
++      s->kchan = 0;
++      s->kseqQuiet = 0;
+       ctx->slot1 = i + 1;
+       break;
+    }
+@@ -663,6 +922,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+       fprintf(stderr, "nvrm: G-SUB: all %d channel slots in use - this channel stays SYNCHRONOUS\n", NVRM_CTX_MAX);
+       return;
+    }
++   /* the kernel watches the channel from here; any failure leaves only this channel unwatched */
++   nvrm_fence_chan_add(ctx, errN, errBase);
+    ctx->gsub = true;
+    ctx->curSlot = 0;
+    nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
+@@ -682,7 +943,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+    s->ctx = NULL;
+    s->sem = NULL;
+    s->gen++;
++   const uint32_t kchan = nvrm_fence_chan_take(s);
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   /* surface fence: the kernel reads the completion value once more and lets the pages go. The caller frees the
++    * semaphore page and the notifier only after this returns. */
++   nvrm_fence_chan_del(kchan);
+    ctx->slot1 = 0;
+    ctx->gsub = false;
+    if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
+@@ -701,6 +966,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+    nvkmd_nvrm_reap_deferred();
+ }
+ 
++/* Surface fence: see nvkmd_nvrm.h. The rebuilt channel keeps its semaphore page and its kernel handle; only the error
++ * notifier the kernel reads faults from changes. Refused, or a notifier the kernel cannot take: the registration goes
++ * (CHAN_DEL, kchan 0), which makes OPEN answer NVRM_FENCE_ST_MAP while the channel lives, i.e. the 2.9 marks. */
++bool
++nvkmd_nvrm_fence_chan_rebind(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (ctx->slot1 == 0)
++      return true;
++   struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[ctx->slot1 - 1];
++   const uintptr_t errVA =
++      (uintptr_t)&((NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   const uint32_t handle = s->ctx == ctx ? s->kchan : 0;
++   const unsigned errBase = s->errBase;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (handle == 0)
++      return true;
++   struct NVRMFenceReq r;
++   nvrm_fence_req(&r, NVRM_FENCE_OP_CHAN_REBIND, 0);
++   r.u.chan.errVA = errVA;
++   r.u.chan.errBase = errBase;
++   r.u.chan.chan = handle;
++   const bool placed = nvrm_fence_notifier_ok(errVA);
++   const bool ok = placed && nvrm_fence_call(&r) && r.status == NVRM_FENCE_ST_OK;
++   uint32_t gone = 0;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   if (s->ctx == ctx && s->kchan == handle) {
++      if (ok)
++         s->kseqQuiet = 0;   /* the kernel forgot the old fault: it may sleep on this channel again */
++      else
++         gone = nvrm_fence_chan_take(s);
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (ok)
++      return true;
++   nvrm_fence_chan_del(gone);
++   nvrm_fence_say("the kernel would not follow a rebuilt channel's new error notifier", placed ? r.status : 0);
++   return false;
++}
++
++/* True when the process has a registered channel and the kernel watches every one: the condition for OPEN. */
++static bool
++nvrm_fence_all_watched(void)
++{
++   unsigned live = 0;
++   bool all = true;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
++      if (nvkmd_nvrm_slots[i].ctx == NULL)
++         continue;
++      live++;
++      all = all && nvkmd_nvrm_slots[i].kchan != 0;
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   return live != 0 && all;
++}
++
++/* The plugin's requests (nvmtl_nvk_fence_v1, nvkmd.h). Only QUERY, OPEN, ARM, CLOSE and WAIT are accepted: the channel
++ * ops are NVK's own. Each request is built from nvrm_fence_abi.h alone, every field it does not use zero, and the
++ * kernel's output is read only after NVRM_FENCE_ST_OK. No NVK lock is held while the kernel answers (a WAIT may sleep
++ * up to NVRM_FENCE_WAIT_MAX_MS). */
++uint32_t
++nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count,
++                 const uint32_t *ids, const uint8_t *planes, struct vk_sync *sync, uint32_t pid,
++                 uint32_t timeout_ms, uint32_t out[6])
++{
++   (void)dev;   /* every request of the process goes through its one fence connection */
++   if (out != NULL)
++      memset(out, 0, 6 * sizeof(out[0]));
++   if (op != NVRM_FENCE_OP_QUERY && __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) < 0)
++      return NVRM_FENCE_ST_OFF;
++   struct NVRMFenceReq r;
++   switch (op) {
++   case NVRM_FENCE_OP_QUERY:
++      nvrm_fence_req(&r, op, 0);
++      if (nvrm_fence_call(&r) && r.status == NVRM_FENCE_ST_OK && out != NULL) {
++         /* without asynchronous submission no channel is registered, so this process can take no hold */
++         out[0] = r.u.query.active && nvkmd_nvrm_async_on() ? 1 : 0;
++         out[1] = r.u.query.accel;
++         out[2] = r.u.query.capGpuMs;
++         out[3] = r.u.query.capCpuMs;
++         out[4] = r.u.query.state;
++      }
++      return r.status;
++   case NVRM_FENCE_OP_OPEN:
++   case NVRM_FENCE_OP_ARM:
++   case NVRM_FENCE_OP_CLOSE: {
++      if (count > NVRM_FENCE_MAX_IDS || (count == 0 && op != NVRM_FENCE_OP_CLOSE) || (count != 0 && ids == NULL))
++         return NVRM_FENCE_ST_BAD_ARG;
++      uint32_t armFlags = 0, handle = 0;
++      uint64_t seq = 0;
++      if (op == NVRM_FENCE_OP_OPEN && !nvrm_fence_all_watched())
++         return NVRM_FENCE_ST_MAP;   /* a channel the kernel does not watch: this process keeps the 2.9 marks */
++      if (op == NVRM_FENCE_OP_ARM) {
++         /* the fence's one pending submission and its channel's handle, or already complete; anything else is not
++          * armed, and the hold ends at its CLOSE (the 2.9 timing) */
++         int k = -1;
++         if (sync != NULL && nvkmd_nvrm_async_on()) {
++            uint32_t slot = 0, gen = 0;
++            pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++            k = nvkmd_nvrm_sync_fence_target(sync, &slot, &gen, &seq);
++            if (k == 1) {
++               const struct nvkmd_nvrm_slot *s = slot < NVRM_CTX_MAX ? &nvkmd_nvrm_slots[slot] : NULL;
++               handle = s != NULL && s->ctx != NULL && s->gen == gen ? s->kchan : 0;
++               if (handle == 0)
++                  k = -1;
++            }
++            pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++         }
++         if (k < 0)
++            return NVRM_FENCE_ST_STALE;
++         if (k == 0) {
++            armFlags = NVRM_FENCE_F_ARM_DONE;
++            seq = 0;
++         }
++      }
++      nvrm_fence_req(&r, op, op == NVRM_FENCE_OP_OPEN ? flags & (NVRM_FENCE_F_COMPOSITOR | NVRM_FENCE_F_AUTO) : armFlags);
++      r.u.hold.cookie = cookie;
++      r.u.hold.count = count;
++      for (uint32_t i = 0; i < count; i++) {
++         r.u.hold.ids[i] = ids[i];
++         if (op == NVRM_FENCE_OP_OPEN && planes != NULL)
++            r.u.hold.planes[i] = planes[i];
++      }
++      if (op == NVRM_FENCE_OP_ARM) {
++         r.u.hold.chan = handle;
++         r.u.hold.seq = seq;
++      }
++      (void)nvrm_fence_call(&r);
++      return r.status;
++   }
++   case NVRM_FENCE_OP_WAIT:
++      if (ids == NULL)
++         return NVRM_FENCE_ST_BAD_ARG;
++      nvrm_fence_req(&r, op, flags & (NVRM_FENCE_F_COMPOSITOR | NVRM_FENCE_F_LOOK));
++      r.u.wait.id = ids[0];
++      r.u.wait.planes = planes != NULL ? planes[0] : 0;
++      r.u.wait.pid = pid;
++      r.u.wait.timeoutMs = timeout_ms;
++      if (nvrm_fence_call(&r) && r.status == NVRM_FENCE_ST_OK && out != NULL) {
++         out[0] = r.u.wait.result;
++         out[1] = r.u.wait.waitedUs > UINT32_MAX ? UINT32_MAX : (uint32_t)r.u.wait.waitedUs;
++         out[2] = r.u.wait.ownerPid;
++         out[3] = r.u.wait.state;
++         out[4] = r.u.wait.blockers;
++      }
++      return r.status;
++   default:
++      return NVRM_FENCE_ST_BAD_ARG;
++   }
++}
++
+ 
+ static void
+ write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
+@@ -1177,6 +1594,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+       return r;
+ 
+    ctx->wSeq++;
++   /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
++   __atomic_store_n(&((uint64_t *)ctx->sem->map)[NVRM_FENCE_SEM_FLUSHED_OFF / 8], ctx->wSeq, __ATOMIC_RELEASE);
+    write_l2_sysmem_tail(&ctx->push);
+    write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
+    const struct nvkmd_ctx_exec seg = {
+@@ -1355,6 +1774,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+       return nvrm_gsub_submit(ctx, log_obj);
+ 
+    ctx->wSeq++;
++   /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
++   __atomic_store_n(&semAdr[NVRM_FENCE_SEM_FLUSHED_OFF / 8], ctx->wSeq, __ATOMIC_RELEASE);
+ 
+    write_l2_sysmem_tail(&ctx->push);
+    write_semaphore_release(&ctx->push, semAdrGpu, ctx->wSeq, true);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
+index b466cb7..61b65ab 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
+@@ -448,6 +448,27 @@ nvkmd_nvrm_sync_cpu_wait(struct vk_sync *vs, uint64_t wait_value, struct vk_obje
+    return nvrm_gsub_wait(1, &w, VK_SYNC_WAIT_COMPLETE, UINT64_MAX, log_obj);
+ }
+ 
++/* The surface fence's ARM (nvkmd_nvrm_fence): the one GPU completion a binary sync (a VkFence's payload) stands for.
++ * 0 = complete: nothing pending and signalled (a channel that was idled and retired counts, the reap sees to it);
++ * 1 = exactly one submission pending, the channel's (*slot, *gen) and the value *seq its semaphore will reach;
++ * -1 = anything else (a timeline, a foreign sync type, not submitted yet, several entries): no target. */
++int
++nvkmd_nvrm_sync_fence_target(struct vk_sync *vs, uint32_t *slot, uint32_t *gen, uint64_t *seq)
++{
++   struct nvkmd_nvrm_sync *s = vk_sync_as_nvkmd_nvrm_sync(vs);
++   if (s == NULL || !nvrm_gsub_is_binary(s))
++      return -1;
++   nvrm_gsub_reap(s);
++   if (s->npend == 0)
++      return s->value >= 1 ? 0 : -1;
++   if (s->npend != 1)
++      return -1;
++   *slot = s->pend[0].slot;
++   *gen = s->pend[0].gen;
++   *seq = s->pend[0].seq;
++   return 1;
++}
++
+ /* 0 = nothing to wait for (reached, or signalled earlier on my own channel); 1 = acquire (*sem_va, *seq);
+  * -1 = no GPU signal on this device reaches it yet: wait on the CPU. */
+ int
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h
+new file mode 100644
+index 0000000..6c78324
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h
+@@ -0,0 +1,145 @@
++/*
++ * NullMoth NVIDIA driver for macOS
++ * Copyright (c) 2026 NullMoth Systems.
++ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
++ */
++
++/* nvrm_fence_abi.h - the surface fence: who is still drawing into which IOSurface, kept in NVRM.kext.
++ *
++ * A producer (NVK, for the Metal plugin) registers its channel once, opens a hold on the surfaces a command buffer
++ * writes, arms the hold with the channel's completion value when the work is flushed, and closes it when the
++ * application is done. A reader (another process, or NVAccel before a flip or a page-off) waits in the kernel until
++ * the holds in front of it have ended. The kernel reads the completion value from the producer's own semaphore page.
++ *
++ * Shared by three builds, so it is plain C with no include: the kext (C++), NVK (C, a byte-identical copy that its
++ * patch adds as nvkmd/nvrm/nvrm_fence_abi.h; tools/test_shared_headers.py compares the two) and the host tests. The
++ * plugin does not see the structs: NVK builds the request, and plugin/nvmtl_fence.h mirrors only the numbers. */
++#ifndef NVRM_FENCE_ABI_H
++#define NVRM_FENCE_ABI_H
++
++#define NVRM_FENCE_ABI_VERSION      1u
++#define NVRM_FENCE_SELECTOR         12u     /* NVRMUserClient external method; struct NVRMFenceReq in and out. 9 is the
++                                               event-wait note, 10 and 11 answer kIOReturnUnsupported. */
++#define NVRM_FENCE_MAX_IDS          8u
++#define NVRM_FENCE_WAIT_MAX_MS      2000u   /* a WAIT's timeoutMs is clamped to this */
++#define NVRM_FENCE_SEQ_MAX_MS       100u    /* a WAIT_SEQ's timeoutMs is clamped to this */
++/* The channel's semaphore page (4096 bytes, page-aligned, the producer's own memory):
++ *   +0x000  64-bit completion value, written by the GPU
++ *   +0xFF0  64-bit value of the last flush, written by the producer BEFORE the work is visible to the GPU
++ *   +0xFF8  64-bit mapping probe, written by the producer around CHAN_ADD / CHAN_VERIFY                       */
++#define NVRM_FENCE_SEM_FLUSHED_OFF  0xFF0u
++#define NVRM_FENCE_SEM_PROBE_OFF    0xFF8u
++
++#define NVRM_FENCE_OP_QUERY         0u
++#define NVRM_FENCE_OP_CHAN_ADD      1u
++#define NVRM_FENCE_OP_CHAN_VERIFY   2u
++#define NVRM_FENCE_OP_CHAN_DEL      3u
++#define NVRM_FENCE_OP_OPEN          4u
++#define NVRM_FENCE_OP_ARM           5u
++#define NVRM_FENCE_OP_CLOSE         6u
++#define NVRM_FENCE_OP_WAIT          7u
++#define NVRM_FENCE_OP_WAIT_SEQ      8u
++/* The producer rebuilt a faulted channel: same semaphore page, new error notifier. u.chan carries the handle CHAN_ADD
++ * gave (chan), and the address (errVA) and registration status (errBase) of the NEW notifier; semVA and probe are not
++ * read. The kernel maps the new page, reads faults from it from then on and forgets the old fault; the holds and the
++ * verified state stay as they are. Without this call the kernel keeps reading the dead notifier and the channel stays
++ * faulted for the life of the process. On any status but OK the channel is as it was before the call: the producer
++ * then deletes it (CHAN_DEL) and goes on without the fence. */
++#define NVRM_FENCE_OP_CHAN_REBIND   9u
++
++#define NVRM_FENCE_F_COMPOSITOR     0x01u   /* OPEN: compositor-class hold. WAIT: look at compositor-class holds only */
++#define NVRM_FENCE_F_AUTO           0x02u   /* OPEN, with COMPOSITOR only: the hold ends when its armed value is reached */
++#define NVRM_FENCE_F_ARM_DONE       0x04u   /* ARM: the work is already complete */
++#define NVRM_FENCE_F_LOOK           0x08u   /* WAIT: do not sleep; answer NONE or PENDING */
++#define NVRM_FENCE_F_CHAN_CE        0x10u   /* CHAN_ADD: copy-engine-only channel (a label for the counters) */
++
++#define NVRM_FENCE_ST_OK            0u
++#define NVRM_FENCE_ST_BAD_VERSION   0x80000001u
++#define NVRM_FENCE_ST_OFF           0x80000002u   /* boot-arg, fused, stopped, suspended, or the client is closing */
++#define NVRM_FENCE_ST_BAD_ARG       0x80000003u
++#define NVRM_FENCE_ST_FULL          0x80000004u   /* table, quota, or sleeper ceiling */
++#define NVRM_FENCE_ST_DENIED        0x80000005u   /* COMPOSITOR from a process that is not WindowServer */
++#define NVRM_FENCE_ST_STALE         0x80000006u   /* unknown, foreign or unverified channel; unknown cookie */
++#define NVRM_FENCE_ST_MAP           0x80000007u   /* the page could not be mapped, or the probe did not match */
++#define NVRM_FENCE_ST_DISTRUST      0x80000008u   /* this owner's holds timed out too often; it keeps the 2.9 mechanism */
++
++#define NVRM_FENCE_R_NONE           0u   /* nothing was pending for this reader */
++#define NVRM_FENCE_R_READY          1u   /* something was pending and completed */
++#define NVRM_FENCE_R_DEAD           2u   /* what was pending ended because its writer exited, its channel faulted, or the GPU went away */
++#define NVRM_FENCE_R_TIMEOUT        3u   /* a hold's safety bound ended it; counted and logged by the kext */
++#define NVRM_FENCE_R_BUDGET         4u   /* the caller's own timeoutMs ran out; the holds are untouched */
++#define NVRM_FENCE_R_ABORTED        5u   /* the calling thread was interrupted */
++#define NVRM_FENCE_R_PENDING        6u   /* LOOK: something is pending. WAIT_SEQ: not reached and the kernel will not sleep on this channel */
++
++#define NVRM_FENCE_E_OPEN           1u   /* no GPU target yet */
++#define NVRM_FENCE_E_ARMED          2u   /* target known, not reached */
++#define NVRM_FENCE_E_GPU_DONE       3u   /* target reached, application hold not closed yet */
++
++struct NVRMFenceQuery {              /* 24 bytes, out */
++    unsigned active;                 /* 1 = holds are taken and waits are served */
++    unsigned accel;                  /* 1 = NVAccel's waits read this table (compositor holds are honoured by the flip) */
++    unsigned capGpuMs, capCpuMs;     /* 2000, 100 */
++    unsigned state;                  /* debug.nvrm_fence_state */
++    unsigned pad;
++};
++struct NVRMFenceChan {               /* 32 bytes */
++    unsigned long long semVA;        /* in  ADD: page-aligned address, in the caller, of the semaphore page */
++    unsigned long long errVA;        /* in  ADD, REBIND: address, in the caller, of the channel's error NvNotification (16 bytes, 16-aligned) */
++    unsigned long long probe;        /* in  ADD: the value now at semVA + 0xFF8 (non-zero); VERIFY: the new value there */
++    unsigned errBase;                /* in  ADD, REBIND: NvNotification.status at registration */
++    unsigned chan;                   /* out ADD; in VERIFY, DEL, REBIND: channel handle, never 0 */
++};
++struct NVRMFenceHold {               /* 72 bytes */
++    unsigned long long cookie;       /* in: the producer's name for one command buffer's holds; non-zero */
++    unsigned long long seq;          /* in  ARM: the completion value that means "done" */
++    unsigned chan;                   /* in  ARM */
++    unsigned count;                  /* in: ids used, 1..8; CLOSE with 0 = every hold of this cookie */
++    unsigned ids[8];                 /* in: IOSurface ids, non-zero */
++    unsigned char planes[8];         /* in  OPEN: plane bit mask per id, 0 = all planes */
++    unsigned okMask;                 /* out ARM, CLOSE: bit i = ids[i] was found */
++    unsigned pad;
++};
++struct NVRMFenceWait {               /* 48 bytes */
++    unsigned long long seq;          /* in  WAIT_SEQ */
++    unsigned long long waitedUs;     /* out */
++    unsigned id;                     /* in: IOSurface id (WAIT) or channel handle (WAIT_SEQ) */
++    unsigned planes;                 /* in  WAIT: plane bit mask, 0 = any */
++    unsigned pid;                    /* in  WAIT: 0 = any writer, else only that process's holds */
++    unsigned timeoutMs;              /* in */
++    unsigned result;                 /* out: NVRM_FENCE_R_* */
++    unsigned ownerPid;               /* out: pid of the first writer waited for, 0 = none */
++    unsigned state;                  /* out: NVRM_FENCE_E_* of that writer's hold when last seen */
++    unsigned blockers;               /* out: most holds this wait had in front of it at once */
++};
++struct NVRMFenceReq {                /* 96 bytes; the same struct in and out */
++    unsigned version, op, status, flags;
++    union { struct NVRMFenceQuery query; struct NVRMFenceChan chan; struct NVRMFenceHold hold;
++            struct NVRMFenceWait wait; unsigned long long raw[10]; } u;
++};
++/* Kernel to kernel. NVAccel calls NVRM's callPlatformFunction(NVRM_FENCE_FN_OPS, p1 = struct NVRMFenceKernelOps *) once
++ * and keeps the pointer. wait() takes the fence lock only (a leaf) and may sleep up to w->timeoutMs. */
++#define NVRM_FENCE_FN_OPS "nvFenceOps"
++struct NVRMFenceKernelOps {
++    unsigned version;                /* in: NVRM_FENCE_ABI_VERSION */
++    unsigned size;                   /* in: sizeof(struct NVRMFenceKernelOps) */
++    unsigned (*wait)(struct NVRMFenceWait *w, unsigned flags);   /* out; returns NVRM_FENCE_ST_* */
++};
++
++#ifdef __cplusplus
++#define NVRM_FENCE_SASSERT(c, n) static_assert(c, #n)
++#else
++#define NVRM_FENCE_SASSERT(c, n) _Static_assert(c, #n)
++#endif
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceQuery) == 24, fence_query_size);
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceChan) == 32, fence_chan_size);
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceHold) == 72, fence_hold_size);
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceWait) == 48, fence_wait_size);
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceReq) == 96, fence_req_size);
++NVRM_FENCE_SASSERT(sizeof(struct NVRMFenceKernelOps) == 16, fence_kernel_ops_size);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceReq, u) == 16, fence_req_union);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceHold, ids) == 24, fence_hold_ids);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceHold, okMask) == 64, fence_hold_ok);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceWait, id) == 16, fence_wait_id);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceWait, result) == 32, fence_wait_result);
++NVRM_FENCE_SASSERT(__builtin_offsetof(struct NVRMFenceChan, errBase) == 24, fence_chan_errbase);
++#endif
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+index 324154f..da92d6a 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.c
+@@ -1,6 +1,7 @@
+ #include "../../nvmtl_cfg.h"
+ #include "nvrm_xnu.h"
+ #include "nvrm_evwait.h"
++#include "nvrm_fence_abi.h"
+ #include <IOKit/IOKitLib.h>
+ #include <mach/mach.h>
+ #include <sys/mman.h>
+@@ -204,6 +205,19 @@ void nvrm_xnu_evt_note(int fd, unsigned what)
+     uint64_t in = what;
+     (void)IOConnectCallScalarMethod(conn, NVRM_EVW_SEL_NOTE, &in, 1, NULL, NULL);
+ }
++/* The surface fence (nvrm_fence_abi.h): one request through selector 12, the same struct in and out. Returns 0 when the
++ * kext took the struct and gave all of it back (its answer is then r->status), -1 when there is no connection or the
++ * kext has no such method (a 2.9 kext answers kIOReturnBadArgument); r is then left as the caller built it. */
++int nvrm_xnu_fence(int fd, struct NVRMFenceReq *r)
++{
++    io_connect_t conn = conn_of(fd); if (!conn) return -1;
++    struct NVRMFenceReq out; size_t outSize = sizeof out;
++    memset(&out, 0, sizeof out);
++    kern_return_t kr = IOConnectCallStructMethod(conn, NVRM_FENCE_SELECTOR, r, sizeof *r, &out, &outSize);
++    if (kr != KERN_SUCCESS || outSize != sizeof out) return -1;
++    *r = out;
++    return 0;
++}
+ int nvrm_xnu_ioctl(int fd, uint32_t cmd, void *data, uint32_t size)
+ {
+     io_connect_t conn = conn_of(fd); if (!conn) return EBADF;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+index ed332a4..f5f75d9 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_xnu.h
+@@ -18,6 +18,8 @@ int   nvrm_xnu_close(int fd);
+ int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);   /* b73: kext selector 6; -1 = no such selector */
+ int   nvrm_xnu_wait_event2(int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out);   /* selector 6, whole answer; 0 ok, -1 failed */
+ void  nvrm_xnu_evt_note(int fd, unsigned what);   /* selector 9 (NVRM_EVW_NOTE_*); the result is ignored */
++struct NVRMFenceReq;
++int   nvrm_xnu_fence(int fd, struct NVRMFenceReq *r);   /* selector 12 (nvrm_fence_abi.h); 0 answered (r->status), -1 no such method */
+ void  nvrm_xnu_live(int64_t *conns, int64_t *maps);   /* connections open, CPU mappings alive (census) */
+ /* hub connections (many mappings per connection; kext selector 7 bit0): begin returns a hub fd with its lock held or -1 */
+ int   nvrm_xnu_hub_begin(const char *node);
