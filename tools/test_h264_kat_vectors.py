@@ -10,7 +10,9 @@ working decoder off for good, and an answer nobody can reproduce would be a numb
   * every frame ffmpeg decodes from each stream is one of the embedded answers, each exactly once, through the same
     hash and matching code the self-test uses (tools/test_h264_kat.c);
   * the streams hold no encoder banner or other text, only parameter sets and slices;
-  * when this machine's ffmpeg and x264 are the versions the header records, encoding again gives the same bytes.
+  * when this machine's ffmpeg and x264 are the versions the header records, encoding again gives the same bytes, and
+    the pictures x264 itself reconstructed while encoding (its dump-yuv output: an encoder's, not a decoder's) are the
+    embedded answers as well, so the answers do not rest on one decoder alone.
 
 Without ffmpeg the test says so and exits 2 (not a pass).
 
@@ -99,6 +101,39 @@ with tempfile.TemporaryDirectory(prefix='nmkatv-') as d:
         print(f'not compared: the streams were made with "{recorded[0][12:] if recorded else "?"}", this machine has "{here[0][12:] if here else "?"}"')
     else:
         check('encoding again with the recorded encoder gives the same header', fresh == text)
+        # A second opinion on the answers, from something that is not a decoder. x264 predicts every picture from its own
+        # reconstruction of the pictures before it, which by the standard is what a decoder must output, and writes
+        # those reconstructions to a file when asked (dump-yuv, frames in display order). It can only be asked while
+        # it encodes, so this is comparable where the encode above gave the embedded bytes.
+        recorded_cmds = re.findall(r'(?m)^// (\w+) \((\d+)x(\d+)\): ffmpeg (.*)$', text)
+        files, why = [], '' if (d / 't').exists() else 'the C test was not built'
+        for name, w, h, args in recorded_cmds if not why else []:
+            w, h, a, yuv = int(w), int(h), args.split(), d / f'{name}-x264.yuv'
+            if '-x264-params' not in a:
+                why = f'{name}: the recorded command line has no -x264-params'
+                break
+            a[a.index('-x264-params') + 1] += f':dump-yuv={yuv}'
+            e = subprocess.run(['ffmpeg', '-v', 'error', *a, '-'], capture_output=True)
+            raw, fs = yuv.read_bytes() if yuv.exists() else b'', w * h * 3 // 2
+            if e.returncode or not raw or len(raw) % fs:
+                why = f'{name}: this x264 wrote no reconstruction ({len(raw)} bytes)'
+                break
+            check(f'{name}: the encode that wrote its reconstruction gave the embedded stream', e.stdout == streams.get(name))
+            nv12 = bytearray()
+            for o in range(0, len(raw), fs):                     # planar 4:2:0 as x264 writes it -> NV12
+                uv = bytearray(w * h // 2)
+                uv[0::2], uv[1::2] = raw[o + w * h:o + w * h * 5 // 4], raw[o + w * h * 5 // 4:o + fs]
+                nv12 += raw[o:o + w * h] + uv
+            (d / f'{name}-x264.nv12').write_bytes(nv12)
+            files.append(str(d / f'{name}-x264.nv12'))
+        if why or [n for n, *_ in recorded_cmds] != names:
+            print('not compared: the encoder\'s own reconstruction (' + (why or 'the recorded command lines are not the table\'s streams') + ')')
+        else:
+            t = subprocess.run([str(d / 't'), *files], capture_output=True, text=True)
+            lines = [l for l in t.stdout.split('\n') if 'the other decoder' in l or 'control: that decoder' in l]
+            check('the encoder\'s own reconstruction of every frame is an embedded answer too, each once (x264, not a decoder)',
+                  t.returncode == 0 and len(lines) == 2 * len(names) and all(l.startswith('ok') for l in lines),
+                  '' if t.returncode == 0 else t.stdout.strip()[-300:])
 
 print(f'{fails} failed' if fails else 'all passed')
 sys.exit(1 if fails else 0)
