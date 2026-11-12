@@ -154,6 +154,61 @@ with tempfile.TemporaryDirectory(prefix="nmsw-") as tmp:
         arm(f"control: {name} fails the check, and the message names it and the remedy", rc == 1 and all(w in out for w in want),
             f"wanted {want}; got: {out[-700:]}")
         undo()
+    # the spellings a name can hide behind besides the ones above: each is either listed (and then refused as a new
+    # switch) or refused as unreadable, never passed over
+    for name, edits, want in (
+        ("a foreign name read through a local variable given a literal", [("plugin/a.m", 'static int n(void) { const char *k = "ZZ_LOCAL"; return getenv(k) != 0; }\n')],
+         ("env ZZ_LOCAL is read at plugin/a.m:5",)),
+        ("getenv of a name computed at run time", [("plugin/a.m", 'static int n(void) { return getenv(pick()) != 0; }\n')], ("not a string literal (pick())",)),
+        ("a foreign name passed to a reader of its own parameter", [("plugin/a.m", 'static int rd(const char *k) { return getenv(k) != 0; }\nstatic int n(void) { return rd("ZZ_VIA_PARAM"); }\n')],
+         ("env ZZ_VIA_PARAM is read at plugin/a.m:6",)),
+        ("getenv through a macro", [("plugin/a.m", '#define ZZ_GET(n) getenv(n)\nstatic int n(void) { return ZZ_GET("ZZ_MACRO") != 0; }\n')], ("not a string literal (n)",)),
+        ("a driver name glued in a macro", [("plugin/a.m", '#define ZZ_GET(n) getenv("NVMTL_" n)\n')], ("put together at run time",)),
+        ("the process environment read as a dictionary", [("plugin/a.m", 'static id n(void) { return [[NSProcessInfo processInfo] environment][@"ZZ_OBJC"]; }\n')],
+         ("env ZZ_OBJC is read at plugin/a.m:5",)),
+        ("a boot flag compared next to kern.bootargs in user space", [("plugin/a.m", 'static int n(void) { char b[512]; size_t l = sizeof b; sysctlbyname("kern.bootargs", b, &l, 0, 0); return strstr(b, "-nvzzflag") != 0; }\n')],
+         ("bootarg -nvzzflag is read at plugin/a.m:5",)),
+        ("a Rust walk of the whole environment", [("translator/src/a.rs", 'fn g() { for (k, v) in std::env::vars() { let _ = (k, v); } }\n')], ("walks the whole environment",)),
+        ("a Rust read by a name that is not a literal", [("translator/src/a.rs", 'fn g(n: &str) -> bool { std::env::var(n).is_ok() }\n')], ("env::var with a name that is not a string literal",)),
+        ("a Rust name put together with format!", [("translator/src/a.rs", 'fn g(s: &str) -> bool { std::env::var(format!("METAL2VULKAN_{}", s)).is_ok() }\n')], ("put together at run time",)),
+        ("a tool path override for a new tool", [("translator/src/a.rs", 'pub fn tool_path_override(cmd: &str) -> Option<String> { std::env::var(format!("METAL2VULKAN_{}", cmd)).ok() }\n'
+                                                   'fn h() { let _ = run("zz-tool", &[]); }\n')], ("env METAL2VULKAN_ZZ_TOOL is read at translator/src/a.rs:3",)),
+        ("the boot line read whole in a kext", [("kexts/X/x.cpp", 'static void n(void) { char b[256]; size_t l = sizeof b; sysctlbyname("kern.bootargs", b, &l, 0, 0); }\n')],
+         ("the boot line read as one string",)),
+        ("a boot argument whose name begins with '_'", [("kexts/X/x.cpp", 'static bool n(void) { int v; return PE_parse_boot_argn("_nvzz", &v, sizeof v); }\n')], ("begins with '_'",)),
+        ("a sysctl registered through a pointer", [("kexts/X/x.cpp", 'static void n(struct sysctl_oid *o) { sysctl_register_oid(o); }\n')], ("a sysctl is registered through o",)),
+        ("a sysctl declared through SYSCTL_##kind", [("kexts/X/x.cpp", '#define NVX_ANY(kind, nm) SYSCTL_##kind(_debug, OID_AUTO, nm, CTLFLAG_RW, &g, 0, "x")\nNVX_ANY(INT, nvx_kind_knob);\n'
+                                                       'static void r(void) { sysctl_register_oid(&sysctl__debug_nvx_kind_knob); }\n')],
+         ("sysctl__debug_nvx_kind_knob is used here and the registry read no declaration",)),
+        ("a sysctl whose flags are numbers", [("kexts/X/x.cpp", 'SYSCTL_INT(_debug, OID_AUTO, nvx_num, 0x40000000 | 0x80000000, &g, 0, "n");\n')], ("not spelled out (0x40000000",)),
+        ("a sysctl whose flags name no access", [("kexts/X/x.cpp", 'SYSCTL_INT(_debug, OID_AUTO, nvx_noacc, CTLFLAG_LOCKED, &g, 0, "n");\n')], ("name neither CTLFLAG_RD",)),
+        ("a sysctl macro defined through another macro", [("kexts/X/x.cpp", '#define NVX_A(nm, v) SYSCTL_INT(_debug, OID_AUTO, nm, CTLFLAG_RW, &v, 0, "a")\n#define NVX_B(nm) NVX_A(nm, gB)\nNVX_B(nvx_twolevel);\n')],
+         ("the registry reads one level of macro",)),
+        ("a writable sysctl declared through a macro of a header", [("kexts/X/m.h", '#define NVX_HK(nm, v) SYSCTL_INT(_debug, OID_AUTO, nm, CTLFLAG_RW, &v, 0, "h")\n'),
+                                                                     ("kexts/X/x.cpp", 'NVX_HK(nvx_hdr_knob, gC);\n')], ("sysctl debug.nvx_hdr_knob is declared writable",)),
+        ("one sysctl macro name defined two ways", [("kexts/X/m.h", '#define NVX_HK(nm, v) SYSCTL_INT(_debug, OID_AUTO, nm, CTLFLAG_RD, &v, 0, "h")\n'),
+                                                    ("kexts/X/n.h", '#define NVX_HK(nm, v) SYSCTL_INT(_debug, OID_AUTO, nm, CTLFLAG_RW, &v, 0, "h")\n'),
+                                                    ("kexts/X/x.cpp", 'NVX_HK(nvx_hdr_knob, gC);\n')], ("two files define it differently",)),
+        ("a new variable in a kext's own build script", [("kexts/X/build.sh", 'cc ${NVRM_ZZ_OPT:+-DZZ} x.cpp\n')], ("build NVRM_ZZ_OPT is read at kexts/X/build.sh:1",)),
+        ("a renamed switch", [("plugin/a.m", None)], ("env NVMTL_PLAIN2 is read at plugin/a.m:1", "env NVMTL_PLAIN is read nowhere")),
+        ("a deleted boot argument", [("kexts/X/x.cpp", None)], ("bootarg nvxarg is read nowhere",)),
+    ):
+        undos = []
+        for rel, text in edits:
+            p = t / rel
+            if text is None:                                        # the two edits that change a line instead of adding one
+                old = p.read_text()
+                p.write_text(old.replace('getenv("NVMTL_PLAIN")', 'getenv("NVMTL_PLAIN2")') if rel.endswith(".m")
+                             else old.replace('static bool a(void) { int v; return PE_parse_boot_argn("nvxarg", &v, sizeof v); }\n', ''))
+                undos.append(lambda p=p, old=old: p.write_text(old))
+            elif p.exists():
+                undos.append(edit(t, rel, text))
+            else:
+                p.write_text(text); undos.append(p.unlink)
+        rc, out = check(t)
+        arm(f"control: {name} fails the check, and the message names it", rc == 1 and all(w in out for w in want), f"wanted {want}; got: {out[-700:]}")
+        for u in reversed(undos):
+            u()
     (t / "kexts/X/new.c").write_text('SYSCTL_PROC(_debug, OID_AUTO, nvx_new_blob, CTLTYPE_OPAQUE | CTLFLAG_WR, 0, 0, h, "-", "blob");\n')
     rc, out = check(t)
     arm("control: a write-only sysctl in a new file under kexts/ fails the check (the files are found by walking the tree, not from a list)",
@@ -194,18 +249,26 @@ with tempfile.TemporaryDirectory(prefix="nmsw-") as tmp:
     arm("control: when the tree reaches the review version of an escape the check fails until it is promoted or renewed",
         rc == 1 and "nvxlater was due for review at 3.2 and the tree is 3.2" in out and "promote it" in out, out[-600:])
 
-# a ceiling may not rise from one commit to the next (needs history; a shallow clone says so and passes)
-old = subprocess.run(["git", "-C", str(ROOT), "show", f"HEAD~1:{sr.REG}"], capture_output=True, text=True)
-if old.returncode == 0:
-    rises = sr.ceiling_rises(old.stdout, (ROOT / sr.REG).read_text())
-    arm("no ceiling is higher than in the previous commit", not rises, "; ".join(rises))
-else:
-    print("skip the ceiling comparison: the previous commit has no registry (the commit that adds it, or a shallow clone)")
-
 # a row dated 2.9 names a switch the 2.9 release read (needs the release in the clone; a clone without tags says so and
 # passes). The count of such rows cannot rise, but a count is kept by deleting one old row for every new one filed as
 # old; the release's own tree cannot be argued with.
 base = sr.release_switches(ROOT)
+
+# a ceiling may not rise from one commit to the next (needs history; a shallow clone says so and passes). One exception:
+# the count of rows dated 2.9 rises when the scanner learns to read a spelling it missed, and then each added row is a
+# switch the release itself read. That is shown only by the release's tree, so without tag v2.9 the rise is refused.
+old = subprocess.run(["git", "-C", str(ROOT), "show", f"HEAD~1:{sr.REG}"], capture_output=True, text=True)
+if old.returncode == 0:
+    rises = sr.ceiling_rises(old.stdout, (ROOT / sr.REG).read_text())
+    proven = base is not None and not sr.misdated(sr.load(ROOT), base)
+    excused = [x for x in rises if x.startswith("ceiling base all ") and proven]
+    for x in excused:
+        print(f"note: {x}; every row dated {sr.BASE} is a switch the {sr.BASE} release read, so the scanner found more of that release")
+    rises = [x for x in rises if x not in excused]
+    arm("no ceiling is higher than in the previous commit", not rises, "; ".join(rises))
+else:
+    print("skip the ceiling comparison: the previous commit has no registry (the commit that adds it, or a shallow clone)")
+
 if base is None:
     print(f"skip the comparison with the {sr.BASE} release: tag v{sr.BASE} is not in this clone")
 else:

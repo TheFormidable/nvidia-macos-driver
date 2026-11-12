@@ -60,7 +60,9 @@ Rules `check` enforces (each has a control in --selftest or in tools/test_switch
      the number of rows that claim to date from 2.9 cannot rise, and where the clone has the 2.9 release (tag v2.9)
      the test scans that tree and every such row has to name a switch it read;
   4. the number of dev rows per component, of test hooks, and of rows without a reviewed purpose stay at or under the
-     ceilings in the registry header; a ceiling never rises (the test compares with the previous commit);
+     ceilings in the registry header; a ceiling never rises (the test compares with the previous commit), except the
+     count of rows dated 2.9 when the scanner learns a spelling it missed and the 2.9 release's own tree shows that
+     every such row is a switch it read;
   5. no sysctl is writable unless it was at 2.9 and is a setting, hardware, recovery, diag or dev row; none is
      CTLFLAG_ANYBODY; a declaration whose access flags are not spelled out is refused, because it cannot be judged;
   6. a boot argument is read with a literal name: PE_parse_boot_argn(variable, ...) is followed to the function that
@@ -99,7 +101,23 @@ PREFIX = r"(?:NVMTL_|NVK_|NAK_|NVRM_|METAL2VULKAN_|M2V_|ELFHOST_)"
 ENV_LIT = re.compile(r"@?\"(" + PREFIX + r"[A-Z0-9_]*[A-Z0-9])\"")
 ENV_READ = re.compile(r"\b(?:getenv|secure_getenv|os_get_option|debug_get_option|debug_get_bool_option|debug_get_num_option)\s*\(\s*\"([A-Za-z0-9_]+)\"")
 ENV_READ_RS = re.compile(r"\b(?:env::var|env::var_os|present)\s*\(\s*\"([A-Za-z0-9_]+)\"")
+ENV_READ_OBJC = re.compile(r"\benvironment\]\s*(?:\[|objectForKey:)\s*@\"([A-Za-z0-9_]+)\"")
+ENV_CALL = re.compile(r"\b(getenv|secure_getenv|os_get_option|debug_get_option|debug_get_bool_option|debug_get_num_option)\s*\(")
 ENV_SET = re.compile(r"(?:un)?setenv\s*\(\s*$")
+# The functions that read names the source does not spell. Each reads names that are listed some other way; a new
+# function that reads the environment by a name it computes is a decision to take here, not something to find later.
+ENV_DYNAMIC = {
+    "nvmtl_conf_read_file": "the keys of the settings file, which it takes only with a driver prefix (rule 7 holds the offered ones to the settings tool)",
+    "nvmtl_conf_forget_inherited": "the names NVMTL_CONF_SET records, which are the keys the settings file set in the parent process",
+    "nvmtl_conf_settle": "the keys of the application profiles (nvmtl_app_profiles.h), each a literal with a driver prefix",
+}
+# The translator looks for each external tool it runs under <prefix><TOOL> first: env_vars.rs builds that name. The
+# tools are the literal first arguments of run() / run_with_timeout(), so the names can still be listed.
+RS_GLUE = re.compile(r"\"(" + PREFIX + r")[A-Z0-9_]*\{[^\"]*\"")      # "METAL2VULKAN_{}": the placeholder is part of the name
+RS_TOOL_NAME = "tool_path_override"
+RS_TOOL_RUN = re.compile(r"\brun(?:_with_timeout)?\s*\(\s*\"([a-z][a-z0-9-]*)\"")
+RS_ENV_VAR = re.compile(r"\benv::(vars|vars_os|var|var_os)\s*\(\s*([^\"\s)]?)")
+RS_READERS = ("present", RS_TOOL_NAME)      # the two functions of env_vars.rs that pass a name on to env::var_os
 # a name put together at run time ("NVMTL_" + something) cannot be listed; a prefix used to recognise names can
 ENV_GLUE = re.compile(r"@?\"(" + PREFIX + r")(?:%[-0-9.]*[a-zA-Z@])?\"")
 ENV_GLUE_OK = re.compile(r"(?:strncmp|strncasecmp|memcmp|starts_with|strip_prefix|hasPrefix|strstr)\s*[(:][^;{}]*$")
@@ -107,6 +125,14 @@ NVRM610 = re.compile(r"\bnvrm610_(?:on|value)\s*\(\s*\"([A-Z0-9_]+)\"")
 BOOT_CALL = re.compile(r"\bPE_parse_boot_argn\s*\(")
 BOOT_WHOLE = re.compile(r"\b(PE_boot_args|PE_parse_boot_arg|PE_parse_boot_arg_str)\s*\(")
 BOOT_USER = re.compile(r"\"((?:-?n[vm][a-z0-9_]+)=[0-9a-z]+)\"")
+# a flag has no "=value": it is looked for next to where the boot line is read, in a compare or a search
+BOOT_USER_NEAR = re.compile(r"\b(?:strcmp|strncmp|strstr|strcasecmp|isEqualToString|containsString)\b[^;{}\"]{0,80}\"(-?n[vm][a-z0-9_]+)\"")
+BOOT_USER_REACH = 800       # characters after "kern.bootargs" in which such a compare is this boot line's
+BOOT_POINTER = re.compile(r"\bPE_parse_boot_argn\b(?!\s*\()")
+BOOT_LINE = re.compile(r"\"(boot-args|kern\.bootargs)\"")
+SYSCTL_ID = re.compile(r"\bsysctl__\w+\b")
+SYSCTL_REG = re.compile(r"\bsysctl_(?:un)?register_oid\s*\(\s*([^()]*)\)")
+ACCESS = ("CTLFLAG_RD", "CTLFLAG_RW", "CTLFLAG_WR")
 DRIVER_BOOT = re.compile(r"-?n[vm]")
 SYSCTL = re.compile(r"\bSYSCTL_([A-Z0-9]+)\s*\(")
 SYSCTL_NOT_DECL = ("DECL", "IN", "OUT")
@@ -209,7 +235,7 @@ def blank_strings(t):
 
 
 def enclosing_function(t, pos):
-    """The function whose body holds t[pos]: (name, parameter names), or None."""
+    """The function whose body holds t[pos]: (name, parameter names, where it starts, whether it is static), or None."""
     best = None
     for m in FUNC_HEAD.finditer(t, max(0, pos - 40000), pos):
         if m.group(1) in NOT_FUNC:
@@ -231,7 +257,8 @@ def enclosing_function(t, pos):
     if not best:
         return None
     params = [(re.findall(r"[A-Za-z_]\w*", p) or [""])[-1] for p in best.group(2).split(",")]
-    return best.group(1), params
+    static = bool(re.search(r"\bstatic\b[^;{}]*$", t[max(0, best.start() - 200):best.start()]))
+    return best.group(1), params, best.start(), static
 
 
 def tracked(root, sub, exts):
@@ -277,24 +304,8 @@ def built_kext_sources(root):
     return [p for p in tracked(root, "kexts", C_EXT) if not str(p.relative_to(root)).startswith(UNBUILT)]
 
 
-def sysctl_decls(t):
-    """Every sysctl a file declares, directly or through a macro of its own -> [(pos, name, access, description)],
-    plus the problems (a declaration the scanner cannot read is a problem, never a silent miss)."""
-    out, problems = [], []
-
-    def one(pos, args, bind=None):
-        bind = bind or {}
-        def sub(x):
-            return "".join(bind.get(piece.strip(), piece.strip()) for piece in x.split("##")).strip()
-        parent, name = args[0].strip().lstrip("_"), sub(args[2])
-        access = " ".join(bind.get(w, w) for w in re.findall(r"[A-Za-z_]\w*", args[3]))
-        last = args[-1].strip()
-        desc = strings_of(bind.get(last, last))
-        if not re.fullmatch(r"\w+", parent) or not re.fullmatch(r"\w+", name):
-            problems.append((pos, f"a sysctl is declared with a name the registry cannot read ({args[2].strip()}): spell the name out"))
-            return
-        out.append((pos, parent.replace("_", ".") + "." + name, access, desc))
-
+def sysctl_macros(t):
+    """The macros of a text that stand for one sysctl declaration: {name: (parameters, the SYSCTL_ arguments)}."""
     macros = {}
     for m in DEFINE.finditer(t):
         inner = SYSCTL.search(m.group(3))
@@ -303,7 +314,38 @@ def sysctl_decls(t):
         args, _ = call_args(m.group(3), inner.end() - 1)
         if args and len(args) >= 5 and args[0].strip().startswith("_"):
             macros[m.group(1)] = ([p.strip() for p in m.group(2).split(",")], args)
+    return macros
+
+
+def sysctl_decls(t, shared=None, unclear=()):
+    """Every sysctl a file declares, directly or through a macro (its own, or one of `shared`: the macros of the other
+    files, for one a header defines) -> [(pos, name, access, description)], plus the problems (a declaration the
+    scanner cannot read is a problem, never a silent miss)."""
+    out, problems = [], []
+
+    def one(pos, args, bind=None):
+        bind = bind or {}
+        def sub(x):
+            return "".join(bind.get(piece.strip(), piece.strip()) for piece in x.split("##")).strip()
+        parent, name = args[0].strip().lstrip("_"), sub(args[2])
+        # a number among the flags is kept as a word, so that it is reported: 0x40000000 is CTLFLAG_WR
+        access = " ".join(bind.get(w, w) for w in re.findall(r"[A-Za-z_]\w*|\d\w*", args[3]))
+        last = args[-1].strip()
+        desc = strings_of(bind.get(last, last))
+        if not re.fullmatch(r"\w+", parent) or not re.fullmatch(r"\w+", name):
+            problems.append((pos, f"a sysctl is declared with a name the registry cannot read ({args[2].strip()}): spell the name out"))
+            return
+        out.append((pos, parent.replace("_", ".") + "." + name, access, desc))
+
+    own = {m.group(1) for m in DEFINE.finditer(t)}                     # a file's own macro of a name hides another file's
+    macros = {k: v for k, v in (shared or {}).items() if k not in own}
+    macros.update(sysctl_macros(t))
+    for name in sorted(set(unclear) - own):
+        for m in re.finditer(r"\b%s\s*\(" % re.escape(name), t):
+            problems.append((m.start(), f"{name}(...) declares a sysctl and two files define it differently: the registry cannot tell which one "
+                                        f"this use means. Give the two macros different names"))
     defines = [(m.start(), m.end()) for m in DEFINE.finditer(t)]
+    bodies = [(m.group(1), m.start(3), m.end(3)) for m in DEFINE.finditer(t)]
     in_define = lambda pos: any(a <= pos < b for a, b in defines)
     for m in SYSCTL.finditer(t):
         if m.group(1) in SYSCTL_NOT_DECL or in_define(m.start()):
@@ -313,6 +355,11 @@ def sysctl_decls(t):
             one(m.start(), args)
     for name, (params, inner) in macros.items():
         for m in re.finditer(r"\b%s\s*\(" % re.escape(name), t):
+            outer = [d for d, a, b in bodies if a <= m.start() < b and d != name]
+            if outer:
+                problems.append((m.start(), f"{outer[0]} is defined through {name}, which declares a sysctl: the registry reads one level of macro. "
+                                            f"Write the SYSCTL_ declaration in {outer[0]} itself"))
+                continue
             if in_define(m.start()):
                 continue
             args, _ = call_args(t, m.end() - 1)
@@ -336,6 +383,8 @@ def scan(root):
     def env_in(t, r, owner, rs=False):
         for m in (ENV_READ_RS if rs else ENV_READ).finditer(t):
             add("env", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
+        for m in () if rs else ENV_READ_OBJC.finditer(t):
+            add("env", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
         for m in ENV_LIT.finditer(t):
             add("env", m.group(1), f"{r}:{lineno(t, m.start())}", owner, read=rs or not ENV_SET.search(t[max(0, m.start() - 12):m.start()]))
         for m in ENV_GLUE.finditer(t):
@@ -343,10 +392,56 @@ def scan(root):
                 problems.append(f"{r}:{lineno(t, m.start())}: a switch name is put together at run time from \"{m.group(1)}\": the registry cannot "
                                 f"list a name it cannot read. Spell every name out as one string literal")
 
+    # A reader that is handed a variable. The name is still listed when the variable is the function's own parameter
+    # (the function is then a reader itself, and its callers are held to the same) or a local that is given a string
+    # literal; anything else cannot be listed and is a problem, the functions of ENV_DYNAMIC apart.
+    c_texts, env_wrappers, env_queue = {}, {}, []
+
+    def env_by_variable(r, t, owner, pos, arg, what):
+        fn, site = enclosing_function(t, pos), f"{r}:{lineno(t, pos)}"
+        if fn and arg in fn[1]:
+            key = (r if fn[3] else None, fn[0])
+            if key not in env_wrappers:
+                env_wrappers[key] = fn[1].index(arg); env_queue.append(key)
+            return
+        given = re.findall(r"(?<![\w.>])%s\s*=\s*\"([A-Za-z0-9_]+)\"" % re.escape(arg), t[fn[2]:pos]) if fn and re.fullmatch(r"\w+", arg) else []
+        for name in given:
+            add("env", name, site, owner)
+        if not given and not (fn and fn[0] in ENV_DYNAMIC):
+            problems.append(f"{site}: {what} reads the environment by a name that is not a string literal ({arg}): the registry cannot list a name it "
+                            f"cannot read. Pass the name as a string literal, or through a function parameter that every caller gives a literal")
+
+    def env_variables():
+        for r, (t, owner) in c_texts.items():
+            for m in ENV_CALL.finditer(t):
+                line = t[t.rfind("\n", 0, m.start()) + 1:m.start()].replace('\\"', "")
+                args, _ = call_args(t, m.end() - 1)
+                if line.count('"') % 2 or not args or literal(args[0]) is not None or not args[0].strip():
+                    continue                                    # inside a string, or a literal name (read above)
+                if not re.search(r"\b(?:const\s+)?char\b", args[0]):   # its own declaration
+                    env_by_variable(r, t, owner, m.start(), args[0].strip(), m.group(1) + "()")
+        while env_queue:
+            scope, w = key = env_queue.pop()
+            for r, (t, owner) in c_texts.items():
+                if scope and r != scope or w not in t:
+                    continue
+                for m in re.finditer(r"\b%s\s*\(" % re.escape(w), t):
+                    line = t[t.rfind("\n", 0, m.start()) + 1:m.start()].replace('\\"', "")
+                    args, _ = call_args(t, m.end() - 1)
+                    if line.count('"') % 2 or not args or env_wrappers[key] >= len(args):
+                        continue
+                    lit, arg = literal(args[env_wrappers[key]]), args[env_wrappers[key]].strip()
+                    if lit is not None:
+                        if re.fullmatch(r"[A-Za-z0-9_]+", lit):
+                            add("env", lit, f"{r}:{lineno(t, m.start())}", owner)
+                    elif not re.search(r"\b(?:char|NSString)\b", arg):     # not its own declaration or definition
+                        env_by_variable(r, t, owner, m.start(), arg, w + "()")
+
     # --- environment: C and Objective-C (plugin, DLSS host, vendor libraries)
     for sub, owner in (("plugin", "plugin"), ("dlss", "dlss"), ("vendor", "nvencvt")):
         for p in tracked(root, sub, C_EXT):
             r = str(p.relative_to(root)); t = strip_comments(p.read_text(errors="replace"))
+            c_texts[r] = (t, owner)
             env_in(t, r, owner)
             for m in FILE_LIT.finditer(t):
                 add("file", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
@@ -356,12 +451,37 @@ def scan(root):
             if "kern.bootargs" in t:
                 for m in BOOT_USER.finditer(t):
                     add("bootarg", m.group(1).split("=")[0], f"{r}:{lineno(t, m.start())}", owner)
+                for b in re.finditer(r"kern\.bootargs", t):
+                    for m in BOOT_USER_NEAR.finditer(t, b.end(), b.end() + BOOT_USER_REACH):
+                        add("bootarg", m.group(1), f"{r}:{lineno(t, m.start(1))}", owner)
     # --- environment: the translator (Rust)
+    rs_texts, tool_prefixes = {}, set()
     for p in tracked(root, "translator", (".rs",)):
         r = str(p.relative_to(root))
         if "/tests/" in r or "/target/" in r or r.endswith("build.rs"):
             continue
-        env_in(strip_comments(p.read_text(errors="replace"), rust=True), r, "translator", rs=True)
+        t = rs_texts[r] = strip_comments(p.read_text(errors="replace"), rust=True)
+        env_in(t, r, "translator", rs=True)
+        within = lambda pos: (re.findall(r"\bfn\s+(\w+)", t[:pos]) or [""])[-1]
+        for m in RS_GLUE.finditer(t):
+            if within(m.start()) == RS_TOOL_NAME:
+                tool_prefixes.add(m.group(1))
+            else:
+                problems.append(f"{r}:{lineno(t, m.start())}: a switch name is put together at run time from \"{m.group(1)}\": the registry cannot "
+                                f"list a name it cannot read. Spell every name out as one string literal")
+        for m in RS_ENV_VAR.finditer(t):
+            if m.group(1).startswith("vars"):
+                problems.append(f"{r}:{lineno(t, m.start())}: env::{m.group(1)}() walks the whole environment: the registry cannot list the names "
+                                f"looked for. Read each one by its literal name")
+            elif m.group(2) and within(m.start()) not in RS_READERS:
+                problems.append(f"{r}:{lineno(t, m.start())}: env::{m.group(1)} with a name that is not a string literal, in {within(m.start()) or 'no function'}: "
+                                f"the registry cannot list a name it cannot read. Pass the name as a string literal")
+        for m in re.finditer(r"(?<!fn )\bpresent\s*\(\s*[^\"\s)]", t):
+            problems.append(f"{r}:{lineno(t, m.start())}: present() reads the environment and is called with a name that is not a string literal")
+    for prefix in sorted(tool_prefixes):
+        for r, t in rs_texts.items():
+            for m in RS_TOOL_RUN.finditer(t):
+                add("env", prefix + m.group(1).replace("-", "_").upper(), f"{r}:{lineno(t, m.start())}", "translator")
     # --- environment: the NVK patch chain. Names a patch adds and no later patch of the chain takes away again.
     chain, copied, chain_problems = nvk_chain(root)
     problems += chain_problems
@@ -376,6 +496,7 @@ def scan(root):
             if re.match(r"\s*(//|/\*|\*( |/|$))", body):
                 continue
             names = {m.group(1) for m in ENV_LIT.finditer(body)} | {m.group(1) for m in ENV_READ_RS.finditer(body)}
+            names |= {m.group(1) for m in ENV_READ.finditer(body)}      # a name without a driver prefix, read by a known reader
             names |= {"NVRM_610_" + m.group(1) for m in NVRM610.finditer(body)}
             names |= {m.group(1) for m in PROC_CMP.finditer(body)} if "getprogname" in body or "pn," in body else set()
             for nme in names:
@@ -392,17 +513,32 @@ def scan(root):
             for s in where[nme][:2]:
                 add(kind, nme, s, "nvk")
     for p in copied:
-        env_in(strip_comments(p.read_text(errors="replace")), str(p.relative_to(root)), "nvk")
+        r = str(p.relative_to(root)); t = strip_comments(p.read_text(errors="replace"))
+        c_texts[r] = (t, "nvk")
+        env_in(t, r, "nvk")
+    env_variables()
     # --- kexts: boot arguments, sysctls, flag files, process names
     texts = {}
     for p in built_kext_sources(root):
-        r = str(p.relative_to(root)); t = strip_comments(p.read_text(errors="replace"))
-        owner = "NVAccel" if r.startswith("kexts/NVRM/accel/") else r.split("/")[1]
-        texts[r] = (t, owner)
+        r = str(p.relative_to(root))
+        texts[r] = (strip_comments(p.read_text(errors="replace")), "NVAccel" if r.startswith("kexts/NVRM/accel/") else r.split("/")[1])
+    shared, unclear = {}, set()             # a macro that declares a sysctl may live in a header and be used in another file
+    for r, (t, owner) in texts.items():
+        for name, mac in sysctl_macros(t).items():
+            if shared.setdefault(name, mac) != mac:
+                unclear.add(name)
+    blank = {r: blank_strings(t) for r, (t, owner) in texts.items()}
+    for r, (t, owner) in texts.items():
         for m in BOOT_WHOLE.finditer(t):
             problems.append(f"{r}:{lineno(t, m.start())}: {m.group(1)} reads the boot arguments in a way the registry cannot list (and PE_boot_args is not "
                             f"exported to kexts on macOS 15): read each one with PE_parse_boot_argn(\"literal\", ...)")
-        decls, bad = sysctl_decls(t)
+        for m in BOOT_POINTER.finditer(blank[r]):
+            problems.append(f"{r}:{lineno(t, m.start())}: PE_parse_boot_argn is used here without a call (its address is taken, or it is renamed), so the "
+                            f"names it will be asked about cannot be listed: call it with a literal name")
+        for m in BOOT_LINE.finditer(t):
+            problems.append(f"{r}:{lineno(t, m.start())}: \"{m.group(1)}\" in a kext: the boot line read as one string hides which arguments are looked "
+                            f"for. Read each one with PE_parse_boot_argn(\"literal\", ...)")
+        decls, bad = sysctl_decls(t, {k: v for k, v in shared.items() if k not in unclear}, unclear)
         problems += [f"{r}:{lineno(t, pos)}: {msg}" for pos, msg in bad]
         for pos, name, access, desc in decls:
             e = found["sysctl"][name]
@@ -415,14 +551,37 @@ def scan(root):
             if odd:
                 problems.append(f"{r}:{lineno(t, pos)}: sysctl {name}: its access flags are not spelled out ({' '.join(odd)}), so the registry cannot tell "
                                 f"whether it is writable: write the CTLFLAG_ names in the declaration")
+            elif not set(words) & set(ACCESS):
+                problems.append(f"{r}:{lineno(t, pos)}: sysctl {name}: its flags ({access or 'none'}) name neither CTLFLAG_RD nor CTLFLAG_RW / CTLFLAG_WR, so "
+                                f"the registry cannot tell whether it is writable: write CTLFLAG_RD in the declaration")
         if PROC_SRC.search(t):
             for m in PROC_CMP.finditer(t):
                 add("procname", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
         for m in FILE_LIT.finditer(t):
             add("file", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
+    # A sysctl exists once it is registered, and a kext registers each one by the identifier its declaration makes.
+    # Whatever spelling the scan above did not read (a macro that takes the parent as a parameter, SYSCTL_##kind, a
+    # struct written out by hand) still has to be registered, so the registrations are held to what was read.
+    known = {"sysctl__" + n.replace(".", "_") for n in found["sysctl"]}
+    for r, (t, owner) in texts.items():
+        for name in sorted({m.group(0) for m in SYSCTL_ID.finditer(blank[r])} - known):
+            if not name.endswith("_children"):
+                at = lineno(t, re.search(r"\b%s\b" % name, blank[r]).start())
+                problems.append(f"{r}:{at}: {name} is used here and the registry read no declaration of it: the sysctl is declared in a way the scanner "
+                                f"cannot read, so it cannot be judged. Declare it with a plain SYSCTL_<type>(_parent, OID_AUTO, name, CTLFLAG_RD, ...)")
+        for m in SYSCTL_REG.finditer(blank[r]):
+            if not re.fullmatch(r"&\s*sysctl__\w+", m.group(1).strip()):
+                problems.append(f"{r}:{lineno(t, m.start())}: a sysctl is registered through {m.group(1).strip() or 'nothing'}, not through the "
+                                f"&sysctl__<parent>_<name> its declaration makes: the registry cannot tell which sysctl that is")
     # boot arguments: a literal name, or a function that passes its own parameter on (then its callers are held to it)
+    def boot(name, site, owner):
+        add("bootarg", name, site, owner)
+        if name.startswith("_"):
+            problems.append(f"{site}: boot argument {name}: the kernel copies up to 16 characters of an argument whose name begins with '_' into the "
+                            f"reader's buffer, whatever size the reader gives (pexpert/gen/bootargs.c), so a flag read into an int is overrun. "
+                            f"Choose a name that does not begin with '_'")
+
     wrappers, queue = {}, []
-    blank = {r: blank_strings(t) for r, (t, owner) in texts.items()}
     for r, (t, owner) in texts.items():
         for m in BOOT_CALL.finditer(blank[r]):
             args, _ = call_args(t, m.end() - 1)
@@ -430,7 +589,7 @@ def scan(root):
                 continue
             lit = literal(args[0])
             if lit is not None:
-                add("bootarg", lit, f"{r}:{lineno(t, m.start())}", owner); continue
+                boot(lit, f"{r}:{lineno(t, m.start())}", owner); continue
             fn = enclosing_function(t, m.start())
             arg = args[0].strip()
             if fn and arg in fn[1]:
@@ -454,7 +613,7 @@ def scan(root):
                     continue
                 lit, arg = literal(args[idx]), args[idx].strip()
                 if lit is not None:
-                    add("bootarg", lit, f"{r}:{lineno(t, m.start())}", owner)
+                    boot(lit, f"{r}:{lineno(t, m.start())}", owner)
                 elif re.search(r"\bchar\b", arg):
                     continue                                    # its own declaration or definition
                 else:
@@ -466,7 +625,7 @@ def scan(root):
                         problems.append(f"{r}:{lineno(t, m.start())}: {w}() reads a boot argument and is called with a name that is not a literal ({arg}): "
                                         f"pass the name as a string literal")
     # --- build scripts: a variable with a driver prefix decides what goes into the shipped driver, or where it is built
-    for p in sorted((root / "build").glob("*.sh")) if (root / "build").is_dir() else []:
+    for p in sorted(list((root / "build").glob("*.sh")) + list((root / "kexts").glob("*/build.sh"))):
         r = str(p.relative_to(root))
         for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
             if line.lstrip().startswith("#"):

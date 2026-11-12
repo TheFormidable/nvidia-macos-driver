@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 4 | 1 | 54 | 411 | 8 |  | 484 |
+| env |  | 6 |  |  | 4 | 1 | 54 | 411 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
 | sysctl |  | 5 | 4 | 12 |  |  | 139 | 1 |  |  | 161 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -63,6 +63,7 @@ Each of these does nothing unless it is set.
 
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
+| `ANGLE_FEATURE_OVERRIDES_DISABLED` | internal | unset | 2.9 | - | a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone | plugin/NVMTLDevice.m |
 | `DLSS_DUMP` | diag | unset | 2.9 | - | unreviewed | dlss/dlss_fg.c, dlss/dlss_rr.c |
 | `DLSS_MAXL` | dev | unset | 2.9 | - | unreviewed | dlss/dlss_fg.c, dlss/dlss_rr.c |
 | `DLSS_TRACE` | diag | unset | 2.9 | - | unreviewed | dlss/dlss_fg.c, dlss/dlss_rr.c |
@@ -89,6 +90,7 @@ Each of these does nothing unless it is set.
 | `METAL2VULKAN_DBG_RAWBYTE` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_EXIT_WHY` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_FLM_WHY` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
+| `METAL2VULKAN_LLVM_DIS` | internal | unset (the Homebrew folders, then PATH) | 2.9 | - | a host path: where the translator finds llvm-dis when one of its diagnostics runs it. The name is built from the tool's name | translator/translator/src/tools.rs |
 | `METAL2VULKAN_NEST` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_NO_BYTE_WORDS` | dev | unset (the path is on) | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_NO_LATCH_TRAMPOLINE_FOLD` | dev | unset (the path is on) | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
@@ -111,6 +113,8 @@ Each of these does nothing unless it is set.
 | `METAL2VULKAN_RETRY_DEBUG` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_RETRY_DUMP` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_RQ_DEBUG` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
+| `METAL2VULKAN_SPIRV_AS` | internal | unset (the Homebrew folders, then PATH) | 2.9 | - | a host path: where the translator finds spirv-as when one of its diagnostics runs it. The name is built from the tool's name | translator/translator/src/passthrough.rs |
+| `METAL2VULKAN_SPIRV_VAL` | internal | unset (the Homebrew folders, then PATH) | 2.9 | - | a host path: where the translator finds spirv-val when one of its diagnostics runs it. The name is built from the tool's name | translator/translator/src/tools.rs |
 | `METAL2VULKAN_SPI_WHY` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_STORAGE_DBG` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `METAL2VULKAN_STRADDLE_ADMIT` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
