@@ -27,7 +27,9 @@ build the new channel or to free the old one. The usual lines are printed, follo
 
     nvrm: channel slot <n> not rebuilt: loss kind <kind> (Xid <x>), <reason>
 
-A rebuild prints one line on stderr and one in `nvmtl.log` (`nvk-reason:`):
+A rebuild prints one line on stderr and one in `nvmtl.log` (`nvk-reason:`). An installed (release) plugin writes
+`nvmtl.log` only for a process started with `NVMTL_PROCESS_ENV=1`; what reaches the system log otherwise is in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md), "The new paths of release 3.0". The line:
 
     nvrm: channel slot <n> rebuilt after a <kind> loss (Xid <x>): <d> flush(es) dropped, <r> replayed (<level>), <t> us
 
