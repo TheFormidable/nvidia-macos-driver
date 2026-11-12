@@ -120,6 +120,16 @@ submission_fixture = r"""
 #include <time.h>
 typedef struct { void *cb; } Commands;
 typedef struct { int unused; } nvmtl_inflight;
+#include "nvmtl_fence.h"
+// the kernel surface fence (nvmtl_vk.c): an open takes its holds whenever there is a surface (cookie 7); every ARM is
+// logged in events as "a<surface>:<part>" for the surfaces it names, every CLOSE of one surface as "c<surface>"
+static void nvmtl_vk_fence_open(nvmtl_fence_hold *h, uint32_t flags) { (void)flags; h->cookie = h->n && !h->overflow ? 7 : 0; }
+static void nvmtl_vk_fence_arm(const nvmtl_fence_hold *h, uint32_t part, const nvmtl_inflight *f) {
+    if (!h->cookie || !f) return;
+    uint32_t ids[NVMTL_FENCE_HOLD_MAX]; const unsigned k = nvmtl_fence_hold_last(h, part, ids);
+    for (unsigned i = 0; i < k; i++) if (events) [events addObject:[NSString stringWithFormat:@"a%u:%u", ids[i], part]];
+}
+static void nvmtl_vk_fence_close(uint64_t cookie, uint32_t sid) { if (cookie && events) [events addObject:[NSString stringWithFormat:@"c%u", sid]]; }
 @interface NVMTLSubmissionPart : NSObject { @public
     Commands commands; NSSet *resources; NSArray *surfaces, *scratch, *signals;
     id waitEvent, signalEvent; uint64_t value;
@@ -141,6 +151,7 @@ typedef struct { int unused; } nvmtl_inflight;
 @interface NVMTLCommandBuffer : NSObject { @public
     BOOL _executionDone, _committed, _commitMarking, _partsRetiring; NSError *_cbError;
     NSUInteger _nextSubmit, _nextPart; NSMutableArray *_parts; double _legacyKernelStart;
+    nvmtl_fence_hold _fence;
 }
 - (BOOL)nvmtlSubmitAhead;
 - (BOOL)nvmtlAdvancePart;
@@ -197,6 +208,8 @@ static NSUInteger lastAt(NSString *e) { NSUInteger i=[events indexOfObjectWithOp
 static BOOL seen(NSString *e) { return [events containsObject:e]; }
 static NSUInteger times(NSString *e) { NSUInteger n=0; for (NSString *o in events) n+=[o isEqual:e]; return n; }
 static NSString *mark(IOSurfaceRef s,int pending) { return [NSString stringWithFormat:@"m%u:%d",IOSurfaceGetID(s),pending]; }
+static NSString *armed(IOSurfaceRef s,unsigned part) { return [NSString stringWithFormat:@"a%u:%u",IOSurfaceGetID(s),part]; }
+static NSString *closed(IOSurfaceRef s) { return [NSString stringWithFormat:@"c%u",IOSurfaceGetID(s)]; }
 static NVMTLTexture *tex(IOSurfaceRef s,int tag,BOOL vram) { NVMTLTexture *t=[NVMTLTexture new]; t->_surf=s; t->_tag=tag; t->_vramOn=vram; return t; }
 // a committed command buffer with one part per entry, through the production commit order (nvmtlSubmitWithEvents):
 // the VRAM marks, then the pending marks
@@ -302,6 +315,10 @@ int main(void) { @autoreleasepool {
     if (half) assert(at(mark(shared,0)) < at(@"o1:1") && times(@"o1:1")==1);
     else assert(at(mark(shared,0)) > lastAt(@"o1:0") && at(mark(other,0)) > lastAt(@"o1:0"));
     assert(dirtyCalls==(half?3:0));   // publication never asked the kernel again
+    // the kernel fence: each surface's hold is armed once, with the fence of the last part that writes it (the swap
+    // surface by part 1, not part 0), and closed once, after that
+    assert(times(armed(shared,1))==1 && !seen(armed(shared,0)) && times(armed(other,0))==1 && !seen(armed(other,1)));
+    assert(times(closed(shared))==1 && times(closed(other))==1 && at(armed(shared,1)) < at(closed(shared)));
     // 2. Two command buffers in flight write the same surface; the older one finishes first.
     [events removeAllObjects];
     NVMTLTexture *older=tex(shared,3,YES), *newer=tex(shared,4,YES);
@@ -345,6 +362,14 @@ int main(void) { @autoreleasepool {
     if (half) assert(at(mark(shared,0)) < at(@"o10:0") && at(@"o10:0") < at(@"o9:1") && times(@"o9:1")==1);
     else assert(at(@"o9:0") < at(@"o10:0") && at(@"o10:0") < lastAt(@"o9:0") && lastAt(@"o9:0") < at(mark(shared,0)));
     assert(!nvmtl_ws_deferred.count && ![nvmtl_ws_pending_holds countForObject:@(IOSurfaceGetID(shared))]);
+    // 6a. Parts submitted ahead (the G-SUB lane) arm their holds as they are submitted, each surface with its last
+    // writer, and finishing them arms nothing again.
+    [events removeAllObjects];
+    cb=commitParts(@[@[swap],@[overlay]]);
+    assert([cb nvmtlSubmitAhead] && cb->_nextSubmit==2);
+    assert(times(armed(shared,0))==1 && times(armed(other,1))==1 && !seen(armed(shared,1)) && !seen(armed(other,0)));
+    assert([cb nvmtlAdvancePart] && [cb nvmtlAdvancePart] && cb->_executionDone && !cb->_cbError);
+    assert(times(armed(shared,0))==1 && times(armed(other,1))==1 && times(closed(shared))==1 && times(closed(other))==1);
     // 6. With the marks off (any process but WindowServer, or an accelerator that does not take them) nothing is
     // marked, and every part publishes its surfaces as it lands.
     wsKernelWaits=NO; [events removeAllObjects]; dirtyCalls=0;
