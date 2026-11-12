@@ -29,6 +29,9 @@
 #   NVK_SYSROOT     x86_64 prefix holding lib/pkgconfig for zlib (and any other library the build needs)
 #   NVK_JOBS        parallel jobs (default 6)
 #   NVK_EXTRA_PATCHES  space-separated names of extra patches in nvk/ applied last
+#   NVK_SKIP_PATCHES   space-separated names of upstream-fix patches to leave out of the chain: nvk-mesa-26.3.0,
+#                   nvk-nak-fixes-main, nvk-nak-sched-main. For finding which of them a rendering fault comes from
+#                   (start with nvk-nak-sched-main: it changes the code of every shader and is not a fix).
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
 #
 # The Mesa git must contain the commit in nvk/MESA_BASE (2.9: 90a959eb, mesa-26.3.0-rc3) and, for 2.8, 17ca6174. The tree is exported with git archive, so no .git is
@@ -61,6 +64,29 @@ for p in ${NVK_EXTRA_PATCHES:-}; do
     CHAIN="$CHAIN $p"
   fi
 done
+# NVK_SKIP_PATCHES leaves upstream-fix patches out. Only those can be named: they change compiler files that no later
+# patch of the chain touches, and none of the three needs another, so the rest of the chain applies whichever are
+# left out. Any other name stops the build: a misspelt name that was silently ignored would give a build that still has
+# the patch its owner believes is out.
+SKIP=" "
+for p in ${NVK_SKIP_PATCHES:-}; do
+  case " $UPSTREAM_FIXES " in
+    *" $p "*) SKIP="$SKIP$p " ;;
+    *) echo "STOP: NVK_SKIP_PATCHES can only name $UPSTREAM_FIXES (got: $p)"; exit 2 ;;
+  esac
+  case " $CHAIN " in
+    *" $p "*) ;;
+    *) echo "note: NVK_SKIP_PATCHES names $p, which the $REL chain does not have" ;;
+  esac
+done
+KEPT=
+for p in $CHAIN; do
+  case "$SKIP" in
+    *" $p "*) echo "skipped $p.patch (NVK_SKIP_PATCHES)" ;;
+    *) KEPT="$KEPT $p" ;;
+  esac
+done
+CHAIN=${KEPT# }
 echo "patch chain ($REL): $CHAIN"
 
 git -C "$MESA_GIT" cat-file -e "$BASE^{commit}" || { echo "STOP: $MESA_GIT has no commit $BASE"; exit 2; }
