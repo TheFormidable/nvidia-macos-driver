@@ -9649,7 +9649,7 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
-typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; } nvmtl_asyncup;
+typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic; } nvmtl_asyncup;
 static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
 static uint64_t nvmtl_asyncup_take(nvk_image *img)
@@ -9670,18 +9670,40 @@ static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
     img->up_token = s.infl;
     pthread_mutex_unlock(&g_asyncup_mutex);
 }
-// Finish (fence-wait) and free a handle taken from an image. Called OUTSIDE the lock so one image's wait
-// never blocks uploads to another; a no-op on 0 (which is every call on the synchronous path).
-static void nvmtl_asyncup_finish(uint64_t token)
+// The copy of an async upload was dropped by a channel rebuild after a GPU fault (nvmtl_vk_submit_finish answered -1).
+// The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
+// the staging buffer, which still holds the bytes, and wait. The layouts are named explicitly rather than through
+// img_to: draws queued after the dropped copy may have sampled the image, and this copy must wait for them.
+static void nvmtl_asyncup_redo(nvk_image *img, nvmtl_asyncup *au)
+{
+    nvk_cmdbuf c;
+    if (nvmtl_vk_cmd_begin(NULL, &c)) { nvlog("vk: tex upload async: the copy a channel rebuild dropped cannot be made again (no command buffer) - the image keeps what it held"); return; }
+    const VkImageSubresourceRange r = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
+    VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT, (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)au->stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &au->bic);
+    VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, r };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const int rc = nvmtl_vk_submit_wait_at(&c, "tex upload async (made again)");
+    nvlog("vk: tex upload async: the copy a channel rebuild dropped was made again -> %d%s", rc, rc ? " - the image keeps what it held" : "");
+}
+// Finish (fence-wait) and free a handle taken from `img`. Called OUTSIDE the lock so one image's wait never blocks
+// uploads to another; a no-op on 0 (which is every call on the synchronous path).
+static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
 {
     if (!token) return;
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
-    nvmtl_vk_submit_finish(&au->infl);
+    if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
 }
 // Public guard for the consumers (readback, surface-out, migration, destroy): finish a pending upload first.
-void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(nvmtl_asyncup_take(img)); }
+void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img)); }
 
 int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
@@ -9707,7 +9729,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     nvk_cmdbuf local_cb, *c;
     if (mode == NVMTL_UP_SUBMIT_ASYNC) {
         // a prior async upload to THIS image must land before we overwrite the texture or its staging
-        if (finish_first) nvmtl_asyncup_finish(nvmtl_asyncup_take(img));
+        if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));
         au = (nvmtl_asyncup *)calloc(1, sizeof *au);
         if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
     }
@@ -9728,6 +9750,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     if (au) {
         // submit without waiting; queue order + the SHADER_READ barrier above order the copy before any later
         // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
+        au->bic = bic;   // kept so that a copy a channel rebuild drops can be made again (nvmtl_asyncup_redo)
         if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
         nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);
         return 0;
