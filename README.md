@@ -5,6 +5,15 @@
 > run on real Macs (`./build.sh`, see [docs/BUILDING.md](docs/BUILDING.md)). Nothing built from it has run on a GPU.
 > This notice goes away when the branch is ready to be tried on hardware.
 
+**What this branch is.** Release 2.9 of the driver with the changes being prepared as 3.0: the kernel knows which
+process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
+through long GPU waits instead of polling; a GPU fault on one channel costs the frames in flight instead of the
+application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime and FaceTime once a short self-test
+has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed, and each one that
+changes how the driver runs has exactly one way back to the 2.9 behaviour. None of it has run on an NVIDIA card yet.
+Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card once the notice above is gone:
+[docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
+
 A Metal driver for NVIDIA GeForce cards on macOS 15 Sequoia (Intel Macs and OpenCore PCs). It is open source; the
 kernel extensions, the Metal plugin and the shader translator are in this repository. The 1401 app that installs it
 (Mac and Windows) is its own project: [1401](https://github.com/nullmoth/1401).
@@ -17,6 +26,7 @@ testing is done on an RTX 5060, so other cards may have problems that haven't be
 - Problems: [troubleshooting](docs/TROUBLESHOOTING.md), then Send logs from the 1401 app
 - Installing macOS from Windows: [1401](https://github.com/nullmoth/1401)
 - How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
+- Every switch and what it does: [docs/SWITCHES.md](docs/SWITCHES.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 If your PC doesn't boot macOS with OpenCore yet, set that up first with the
@@ -113,6 +123,17 @@ Optional boot arguments, for troubleshooting:
 | `-nvrmnobootscreen` | do not snapshot the boot screen. |
 | `-nvrmnopm` | turns off system sleep support: NVRM stays out of the power tree, as before it had one. A Mac that sleeps then comes back without the GPU. See [docs/SLEEP-WAKE.md](docs/SLEEP-WAKE.md). |
 
+None of these is needed on a Mac that works. Every boot argument, environment name and sysctl the driver reads is
+listed in [docs/SWITCHES.md](docs/SWITCHES.md), with what is in effect when it is not set. To see what a Mac has set
+beside the `boot-args` line above:
+
+```bash
+sysctl debug.nvrm_switches debug.nvrm_switches_nondefault
+```
+
+The first lists the names; a `!` marks one an ordinary install does not need (an opt-out of a default path, a test
+hook, a development switch, a name this version no longer reads). The second is 0 on an ordinary install.
+
 Add every key you set to `NVRAM → Delete` as well, so the values are rewritten each boot.
 
 | Setting | Value | Why |
@@ -157,22 +178,64 @@ sudo ./uninstall.sh && sudo shutdown -r now
 
 ## Build from source
 
-Requires Xcode 16, Rust (stable), Meson/Ninja, and NVIDIA's `open-gpu-kernel-modules` at tag `620.70.06`.
+On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools), from a
+git clone of the repository and branch that carry `build.sh`, with its owner and branch name in place of `<owner>`
+and `<branch>` (the original project's repository does not have `build.sh`):
 
 ```bash
-build/build_xlate.sh
-RELEASE=1 build/build_plugin.sh
-build/build263.sh
-build/accel_build.sh <src> <out>
-build/accel_build_all.sh kexts/NVRM <out>
+git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
+cd nvidia-macos-driver
+./build.sh doctor
+./build.sh
 ```
 
-In order: the translator (`libnvmtl_translate.dylib`); the plugin (`NVMTLDriver.bundle`; `RELEASE=1` strips every
-diagnostic); NVK (`build/build_nvk.sh`: the patch chain on Mesa `90a959eb`, 26.3.0-rc3); the kexts; and NVAccel for macOS 15 and 26
-(`NM_TAHOE=1`), written to `<out>/15` and `<out>/26`.
+`./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac, offers to install
+the missing Homebrew formulas (only those; nothing is upgraded), makes a Python environment and a Rust toolchain
+inside its working directory (`~/nullmoth-build` by default, never inside the checkout), downloads NVIDIA's
+`open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
+checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the plugin, the
+translator, the video library and the tools. Each part is a step with its own log; a step whose inputs did not change
+is skipped the next time. It never calls `sudo` and never installs the driver: at the end it prints the `install.sh`
+command to run yourself.
+
+On an Intel Mac the first `./build.sh` takes hours: Homebrew has no ready-made builds for Intel Macs any more, so it
+compiles each missing formula (LLVM 22 above all) on the Mac. On Apple silicon it installs ready-made ones.
+
+To make an installable package, give it a release package as the base (some carried files have no source in this
+repository, so a package is the release's with every part this checkout builds replaced):
+
+```bash
+./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
+```
+
+`./build.sh help` lists the commands, components and options; `./build.sh env` prints every variable the build
+scripts read, to run one of them by hand. [docs/BUILDING.md](docs/BUILDING.md) explains everything, including what
+to do when a step fails ([en español](docs/BUILDING.es.md)).
+
+`build.sh` was written and tested without a Mac, against stand-ins for Xcode, Homebrew and the build scripts, and has
+so far run on one Mac only in part ([docs/BUILDING.md](docs/BUILDING.md) says how far); the first runs on a Mac may
+stop on something the stand-ins did not imitate. When a step stops, the message names it and gives a report file to
+attach to an issue.
 
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
-older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black.
+older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black. `./build.sh` does this by
+itself (the accel step's inputs include kexts/NVRM).
+
+Two checks need no NVIDIA hardware and no built RM archive:
+
+```bash
+bash build/kext_check.sh
+python3 tools/run_all_tests.py
+```
+
+The first compiles every kext source without linking and checks every kernel symbol the kexts import against the
+export lists of macOS 15 and macOS 26; it runs on a Mac or on Linux (clang, llvm-nm, python3, git, make, patch) and
+downloads its pinned inputs into `build-out/` on the first run. The second runs the host tests (on a Mac; on Linux
+the tests that compile Objective-C fail). `.github/workflows/ci.yml` runs both, and the kext and plugin builds, on
+every push once Actions are enabled for the repository.
+
+A change that adds a switch (an environment name, a boot argument, a sysctl) needs a row in `tools/switches.tsv`;
+`python3 tools/switch_registry.py check` says which, and what a new switch may be.
 
 ## License
 
