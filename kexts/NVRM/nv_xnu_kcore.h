@@ -85,9 +85,9 @@ void nv_xnu_wq_gpu_down(struct os_work_queue *q, unsigned cap_ms = 30000);
 // not already free.
 NV_STATUS nv_xnu_wq_flush(struct os_work_queue *q, bool unload, unsigned cap_ms);
 
-// A function of the OS layer that has no real body was called. Any context (a small lock with interrupts off; no
-// allocation). The name is copied into a fixed buffer that a read-only sysctl publishes; call it once per function,
-// from the once-only branch of the stub macro.
+// A function of the OS layer that has no real body was called. Any context (no lock: its place in the buffer is
+// reserved with one atomic add; no allocation). The name is copied into a fixed buffer that a read-only sysctl
+// publishes; call it once per function, from the once-only branch of the stub macro.
 void nv_xnu_stub_note(const char *name);
 
 // The non-blocking branches of the OS layer (os-xnu.cpp, os-xnu2.cpp). Any context; no IOLog, no heap call, no
