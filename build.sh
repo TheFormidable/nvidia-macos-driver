@@ -1371,7 +1371,7 @@ need_tools_for() {   # stop early, naming what a component needs and does not ha
   case " $C_TOOLS " in *" rust "*) [ -x "$RUST_BIN/rustc" ] || miss="$miss Rust-$NM_PIN_RUST_VERSION" ;; esac
   case " $C_TOOLS " in *" nvk "*)
     [ -x "$VENV/bin/meson" ] || miss="$miss meson(venv)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
-    [ -n "$PC_SPIRV_LLVM" ] || miss="$miss SPIRV-LLVM-Translator"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
+    spirv_llvm_ok || miss="$miss SPIRV-LLVM-Translator-$NM_PIN_TOOL_LLVM_MAJOR"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
     [ -n "$T_GLSLANG" ] || miss="$miss glslang"; [ -x "$CARGO_DIR/bin/bindgen" ] || miss="$miss bindgen"; [ -x "$CARGO_DIR/bin/cbindgen" ] || miss="$miss cbindgen" ;;
   esac
   [ -z "$miss" ] || die "$n needs:$miss (./build.sh doctor shows details; ./build.sh deps installs them)"
