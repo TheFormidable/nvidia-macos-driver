@@ -173,10 +173,10 @@ IOReturn NVDADeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned 
 static int gAgdcState = 0; static NVDADeviceControl *gAgdc = nullptr; static thread_call_t gAgdcCall = nullptr; static int gAgdcWant = 0;
 // AppleGraphicsDeviceControl's size as this macOS registered it, against the hand-reconstructed header this kext's
 // subclass is built on (0x110 bytes, read on 15.7.9). A different size puts fPci and fFB on Apple's fields, so the
-// object is not created at all: state -6, and the display is armed without it. Evaluated once; boot-arg nvlayout=0
-// creates it anyway. gAgdcLayout is the NvLayoutState (0 = not evaluated yet).
+// object is not created at all: state -6, and the display is armed without it. Evaluated until there is a verdict
+// (once, unless two runs of the worker overlap); boot-arg nvlayout=0 creates it anyway. gAgdcLayout is the
+// NvLayoutState (0 = not evaluated yet).
 static int gAgdcLayout = 0;
-static NvLayoutRun gAgdcLayoutRun;
 static IOService *gAgdcFBRef = nullptr;
 static void nvdaAgdcDropTable(void)
 {
@@ -249,10 +249,14 @@ static void nvdaAgdcWorkBody(void)
         IOService *pci = nullptr, *fb = nullptr; nvdaAgdcTargets(&pci, &fb);
         if (!pci || !fb) { gAgdcState = -1; FBLOG("AGDC: no PCI device or no framebuffer yet (pci %p fb %p)", pci, fb); return; }
         if (!gAgdcLayout) {
+            // Into a local: the sysctl can queue this worker again while it runs, and two runs filling one shared
+            // result would read each other's half-written counts (a verdict taken from those can come out "unknown"
+            // where the size differs). Each run compares for itself; the results are the same.
+            NvLayoutRun run;
             const NvLayoutRow rows[] = { NVL_ROW(AppleGraphicsDeviceControl, IOService) };
-            nvLayoutEvaluate(&gAgdcLayoutRun, "NVRM-agdc", rows, 1, nullptr, 0, nullptr, 0);
-            pci->setProperty("nvagdc-layout", gAgdcLayoutRun.text);
-            gAgdcLayout = (int)gAgdcLayoutRun.state;
+            nvLayoutEvaluate(&run, "NVRM-agdc", rows, 1, nullptr, 0, nullptr, 0);
+            pci->setProperty("nvagdc-layout", run.text);
+            gAgdcLayout = (int)run.state;
         }
         if (gAgdcLayout == kNvLayoutRefused) {
             gAgdcState = -6; FBLOG("AGDC: not created: the Apple class layout differs from this build (nvagdc-layout)");
