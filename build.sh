@@ -816,7 +816,7 @@ brew_installed() { [ -d "$BREW_PREFIX/opt/$1" ]; }
 cmd_deps() {
   is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
   find_tools
-  local missing_xcode=0 f want=() llvmf
+  local missing_xcode=0 f want=() llvmf nobrew=0
   xcode-select -p >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 || missing_xcode=1
   if [ "$missing_xcode" = 1 ]; then warn "Xcode is missing or not selected"; xcode_help; fi
   # Homebrew
@@ -824,8 +824,10 @@ cmd_deps() {
     say "Homebrew is not installed. build.sh uses it for: $NM_PIN_BREW_FORMULAS."
     say "Its official installer is: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
     say "It asks for your password itself and installs into $([ "$(uname -m)" = arm64 ] && echo /opt/homebrew || echo /usr/local)."
-    if [ "$NM_NO_INSTALL" = 1 ] || [ "$NM_DRY_RUN" = 1 ] || [ "$NM_OFFLINE" = 1 ]; then die "Homebrew is missing (not installed: --no-install, --dry-run or --offline)"; fi
-    if [ -t 0 ] && [ -r /dev/tty ]; then
+    if [ "$NM_DRY_RUN" = 1 ]; then
+      say "    (dry run: build.sh would ask you to type yes, then run that installer)"; nobrew=1
+    elif [ "$NM_NO_INSTALL" = 1 ] || [ "$NM_OFFLINE" = 1 ]; then die "Homebrew is missing (not installed: --no-install or --offline)"
+    elif [ -t 0 ] && [ -r /dev/tty ]; then
       local a; printf 'Type yes to run Homebrew'"'"'s official installer now (--yes does not count for this): '; read -r a < /dev/tty || a=
       [ "$a" = yes ] || die "Homebrew is needed; install it from https://brew.sh and run ./build.sh deps again"
       /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || die "Homebrew's installer failed"
@@ -840,14 +842,16 @@ cmd_deps() {
   [ -n "$T_GLSLANG" ] || want+=( glslang )
   [ -n "$PC_SPIRV_TOOLS" ] || want+=( spirv-tools )
   [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of | { read -r v; ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"; } || want+=( "$NM_PIN_TOOL_PYTHON_FORMULA" )
-  if [ -z "$LLVM_PREFIX" ]; then
+  if [ -z "$LLVM_PREFIX" ] && [ "$nobrew" = 1 ]; then want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
+  elif [ -z "$LLVM_PREFIX" ]; then
     llvmf=""
     if brew_formula_exists "llvm@$NM_PIN_TOOL_LLVM_MAJOR"; then llvmf=llvm@$NM_PIN_TOOL_LLVM_MAJOR
     elif brew_llvm_is_pinned; then llvmf=llvm
     else warn "Homebrew has no LLVM $NM_PIN_TOOL_LLVM_MAJOR formula today: install LLVM $NM_PIN_TOOL_LLVM_MAJOR.x yourself (with its clang libraries) and set NM_LLVM_PREFIX to it"; fi
     [ -z "$llvmf" ] || want+=( "$llvmf" )
   fi
-  if [ -z "$PC_SPIRV_LLVM" ]; then
+  if [ -z "$PC_SPIRV_LLVM" ] && [ "$nobrew" = 1 ]; then want+=( spirv-llvm-translator )
+  elif [ -z "$PC_SPIRV_LLVM" ]; then
     # Homebrew builds spirv-llvm-translator against its current llvm; only then is it the matching version
     if brew_llvm_is_pinned; then want+=( spirv-llvm-translator )
     else warn "Homebrew's spirv-llvm-translator follows its current llvm, which is not $NM_PIN_TOOL_LLVM_MAJOR: build SPIRV-LLVM-Translator (branch llvm_release_${NM_PIN_TOOL_LLVM_MAJOR}0) against LLVM $NM_PIN_TOOL_LLVM_MAJOR and set PKG_CONFIG_PATH to its lib/pkgconfig"; fi
@@ -869,7 +873,8 @@ cmd_deps() {
   fi
   deps_python
   deps_rust
-  [ "$NM_DRY_RUN" = 1 ] || make_tool_links
+  if [ "$NM_DRY_RUN" = 1 ]; then say "deps: dry run; the commands above would run, nothing was installed"; return 0; fi
+  make_tool_links
   say ""
   doctor >/dev/null 2>&1 || true
   if [ "$missing_xcode" = 1 ]; then die "Xcode is still missing (see above)"; fi
@@ -888,6 +893,9 @@ deps_python() {
   local py want_new=0
   if [ -x "$VENV/bin/python3" ] && [ -x "$VENV/bin/meson" ] && [ "$(cat "$VENV/.nm-requirements" 2>/dev/null)" = "$(write_requirements | sha256_stdin)" ]; then
     say "Python environment: $VENV (up to date)"; return 0
+  fi
+  if [ -z "$T_PYTHON" ] && [ "$NM_DRY_RUN" = 1 ]; then
+    say "    <Python from Homebrew $NM_PIN_TOOL_PYTHON_FORMULA> -m venv $(q "$VENV"); pip install --require-hashes --no-deps -r <requirements>"; return 0
   fi
   [ -n "$T_PYTHON" ] || { warn "no Python $NM_PIN_TOOL_PYTHON_MIN or later: the Python environment cannot be made yet"; return 0; }
   if [ "$NM_NO_INSTALL" = 1 ]; then say "not creating $VENV (--no-install)"; return 0; fi
@@ -1426,7 +1434,8 @@ cmd_all() {
   say "== doctor"
   doctor
   if [ "$D_MISSING" != 0 ]; then
-    if [ "$NM_DRY_RUN" = 1 ]; then note "dry run: going on although something is missing"
+    if [ "$NM_DRY_RUN" = 1 ]; then
+      if is_mac && ! mac_too_old; then hr; say "== deps"; cmd_deps; else note "dry run: going on although something is missing"; fi
     elif [ "$NM_NO_INSTALL" = 1 ]; then die "something required is missing (above) and --no-install was given"
     else hr; say "== deps"; cmd_deps; fi
   fi
