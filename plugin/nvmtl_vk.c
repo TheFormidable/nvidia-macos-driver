@@ -325,20 +325,20 @@ static void nvmtl_buffer_grace_reap(void);
 static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, uint32_t where);
 static __thread const char *t_fx_dying;   // the label the next image death on this thread is recorded under
 void nvmtl_vk_image_dying_label(const char *label) { t_fx_dying = label; }
-// NVMTL_IMAGE_GRACE=1 (default off): a dead image's view, image and memory are released only once no command buffer
-// that could still read it is open or in flight, instead of at once. A command buffer still executing,
+// The image grace (on unless NVMTL_IMAGE_GRACE=0): a dead image's view, image and memory are released only once no
+// command buffer that could still read it is open or in flight, instead of at once. A command buffer still executing,
 // or begun before the death and submitted after it, can hold a descriptor it read before the slot was rewritten, or an
 // address it computed earlier, to an image the app has already released; with the memory gone that read is a page fault
 // that takes the channel, with it still mapped it is a stale read of a dead texture and nothing more. Which command
 // buffers a dead image waits for is decided in nvmtl_cmd_life.h; the held images are reaped as submits finish (one
 // in-order queue) and when an unsubmitted command buffer is dropped, so the cost is the memory a release burst occupies
 // for as long as the command buffers open at the burst take to be submitted and completed. "vk: image grace:" lines
-// count what is held. Off, every path is exactly as before.
+// count what is held. NVMTL_IMAGE_GRACE=0 (the environment or nvrm610.conf) releases at once, as in 2.9 by default.
 static int nvmtl_image_grace_on(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_GRACE"); on = e && e[0] == '1';
-        if (on) nvlog("vk: dead images are released only once no command buffer that could read them is open or in flight (NVMTL_IMAGE_GRACE=1)"); }
+    if (on < 0) { const char *e = getenv("NVMTL_IMAGE_GRACE"); on = !(e && e[0] == '0');
+        nvlog("vk: dead images are released only once no command buffer that could read them is open or in flight (NVMTL_IMAGE_GRACE=%d)", on); }
     return on;
 }
 typedef struct nvmtl_grace_img { nvk_image img; void *bufview, *alias; nvmtl_cl_mark mark; struct nvmtl_grace_img *next; } nvmtl_grace_img;

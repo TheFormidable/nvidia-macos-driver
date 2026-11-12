@@ -68,7 +68,8 @@ static const nvmtl_app_knob nvmtl_cp2077_knobs[] = {
     /* Small private buffers and optimal images share VRAM blocks instead of one allocation each. */
     { "NVMTL_PRIVATE_POOL", "1" },
     { "NVMTL_IMAGE_POOL", "1" },
-    /* A released image is freed only after the submissions in flight when it died complete. */
+    /* A released image is freed only once no command buffer that could read it is open or in flight. That is the
+       default now; the line stays so this game keeps it where a shipped line of the settings file turns it off. */
     { "NVMTL_IMAGE_GRACE", "1" },
     /* No residency eviction and no sparse buffers: the game manages its own working set. */
     { "NVMTL_NO_RES2", "1" },
