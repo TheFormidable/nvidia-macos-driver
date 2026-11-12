@@ -3,7 +3,8 @@
 
 A GPU fault names an address and a semaphore number. The rings turn that into a kernel name, the storage views it had
 bound, and the resources that died just before, but only if every entry point records: each dispatch path, the storage
-bind, the submit, the image death, the heap-slot death, the texture's label, and both device-loss sites dump. This
+bind, the submit, the image death, the heap-slot death, the texture's label; both device-loss sites dump, and so does
+the first command buffer a channel rebuild dropped (the device stays up, but the work that faulted is on record). This
 lists them with the least count each needs and fails on any short.
 
     python3 tools/check_fault_context.py [plugin-dir]
@@ -28,7 +29,8 @@ hooks = [
     ("nvmtl_vk.c", r"nvmtl_fx_submit\(&g_fx, g_cmd_submitted", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_image_gone\(&g_fx, g_cmd_submitted", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_slot_gone\(&g_fx, g_cmd_submitted", 1),
-    ("nvmtl_vk.c", r"nvmtl_fx_dump\(\"", 2),                                              # queue submit failed, fence wait failed
+    ("nvmtl_vk.c", r"nvmtl_fx_dump\(\"", 3),                                              # queue submit failed, fence wait failed, a dropped command buffer
+    ("nvmtl_vk.c", r"static void nvmtl_vk_note_dropped\(long waited_ms\)\n\{(?:(?!\n\}\n)[\s\S])*if \(n == 1\) nvmtl_fx_dump\(\"a channel rebuild dropped", 1),   # the first command buffer a channel rebuild dropped
     ("NVMTLObjects.m", r"nvmtl_vk_image_dying_label\(_label\.UTF8String\)", 1),
     ("nvmtl_vk.h", r"nvmtl_fx_cb fx;", 1),
     ("nvmtl_vk.c", r"nvmtl_fx_note_buffer_gone\(b, ", 2),                              # every buffer death (destroy + park free) with its GPU range

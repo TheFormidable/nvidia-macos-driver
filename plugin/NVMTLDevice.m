@@ -411,8 +411,11 @@ static void nvmtl_nvenc_register(void)
 // beside ours and lets VTRating decide which one an app gets. It is the only hardware encoder on Ada, which
 // nvmtl_nvenc_register above turns away, and the only VP9 and AV1 decoder on Ada and consumer Ampere. It reports H.264
 // encoding at about 5 ms where the library we ship takes about 12.
-// NVMTL_NVENCVT, from nvrm610.conf or the environment: unset = automatic on Ada and Ampere, 0 = never, 1 = every
-// process and any card the library accepts (GTX 16 included), a list of process names = only those.
+// NVMTL_NVENCVT, from nvrm610.conf or the environment: unset = automatic on Ada and Ampere, and on Blackwell (RTX 50)
+// in the decode service only; 0 = never; 1 = every process and any card the library accepts (GTX 16 included); a list
+// of process names = only those. On Blackwell, whatever the value, the library registers nothing (an H.264 decoder is
+// all it has there) until the card has decoded the library's test streams bit for bit in that process; a process
+// where it has not keeps the decoders it had.
 // This loads code into every app that encodes, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
@@ -430,11 +433,16 @@ static bool nvmtl_loadable_root_only(const char *path)
     return ds.st_uid == 0 && !(ds.st_mode & (S_IWGRP | S_IWOTH));
 }
 // Whether libnvencvt registers in the process `me` on a card of generation `gen` (the profile's string, NULL when the
-// driver publishes none) under the selector `sel`. Automatic is limited to the generations the library was measured on.
+// driver publishes none) under the selector `sel`. Automatic is limited to the generations the library was measured on,
+// and to the decode service on Blackwell: there our own H.264 decoder's picture comes out green in Safari, QuickTime
+// and FaceTime, and the library proves its decoder on the card before it registers (vendor/nvenc/src/h264kat.h). App
+// processes on Blackwell keep our decoder, which is not known to be wrong there.
 static bool nvmtl_nvencvt_selected(const char *sel, const char *me, const char *gen)
 {
     if (sel && !strcmp(sel, "0")) return false;
-    if (!sel || !*sel) return gen && (nvmtl_gen_is(gen, "Ada") || nvmtl_gen_is(gen, "Ampere"));
+    if (!sel || !*sel)
+        return gen && (nvmtl_gen_is(gen, "Ada") || nvmtl_gen_is(gen, "Ampere") ||
+                       (nvmtl_gen_is(gen, "Blackwell") && nvmtl_is_decode_service(me)));
     if (!strcmp(sel, "1")) return true;
     char list[512]; strlcpy(list, sel, sizeof list);   // a process list, so one app can be moved over at a time
     for (char *t = strtok(list, ", :"); t; t = strtok(NULL, ", :")) if (!strcmp(t, me)) return true;
@@ -494,6 +502,14 @@ static void nvmtl_nvencvt_register(bool decodersOnly)
         }
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvencvt: dlopen %s FAILED: %s", path, dlerror()); return; }
+        // Blackwell: only a build of the library that decodes its test streams on the card before it registers. Such a
+        // build exports this marker (vendor/nvenc/vt/nvencvt.c); an older one registered its Blackwell decoder untested,
+        // and VideoToolbox does not fall back once it has picked a decoder. A driver that publishes no generation (an older
+        // NVRM, reached with NVMTL_NVENCVT=1 or a process list) is told apart by the video layout or the device name.
+        if ((haveGen ? nvmtl_gen_is(gen, "Blackwell") : nvmtl_video_is_blackwell()) && !dlsym(h, "NVEncVT_BlackwellSelfTest")) {
+            nvlog("nvencvt: %s is a build without the Blackwell decode self-test - REFUSED on this card", path);
+            return;
+        }
         typedef int32_t (*RegFn)(int);
         const char *entry = decodersOnly ? "NVEncVT_RegisterDecoders" : "NVEncVT_Register";
         RegFn r = (RegFn)dlsym(h, entry);
@@ -1581,6 +1597,68 @@ static int nvmtl_ic_put(nvk_buffer *b)
     if (r) memset(b, 0, sizeof *b);
     return r != 0;
 }
+// Two-plane surfaces in their planes' own VRAM (nvmtl_plane_alias.h). A surface's layout as IOSurface's getters give it.
+static void nvmtl_pa_read(IOSurfaceRef surf, nvmtl_pa_surface *s)
+{
+    memset(s, 0, sizeof *s);
+    s->planes = nvmtl_pa_u32(IOSurfaceGetPlaneCount(surf));
+    s->alloc = IOSurfaceGetAllocSize(surf);
+    const uintptr_t base = (uintptr_t)IOSurfaceGetBaseAddress(surf);
+    for (size_t i = 0; i < 2 && i < s->planes; i++)
+        nvmtl_pa_set_plane(&s->p[i], base, (uintptr_t)IOSurfaceGetBaseAddressOfPlane(surf, i), IOSurfaceGetBytesPerRowOfPlane(surf, i),
+                           IOSurfaceGetWidthOfPlane(surf, i), IOSurfaceGetHeightOfPlane(surf, i), IOSurfaceGetBytesPerElementOfPlane(surf, i),
+                           IOSurfaceGetElementWidthOfPlane(surf, i), IOSurfaceGetElementHeightOfPlane(surf, i));
+}
+// The self-test's CPU lock of its surface: the surface's base address while locked, NULL when the lock failed.
+static uint8_t *nvmtl_pa_lock(void *ctx, int read_only)
+{
+    IOSurfaceRef surf = (IOSurfaceRef)ctx;
+    const IOSurfaceLockOptions o = read_only ? kIOSurfaceLockReadOnly : 0;
+    if (IOSurfaceLock(surf, o, NULL) != kIOReturnSuccess) return NULL;
+    uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(surf);
+    if (!base) IOSurfaceUnlock(surf, o, NULL);
+    return base;
+}
+static void nvmtl_pa_unlock(void *ctx, int read_only)
+{
+    IOSurfaceUnlock((IOSurfaceRef)ctx, read_only ? kIOSurfaceLockReadOnly : 0, NULL);
+}
+// The round trip on a private 128 x 64 NV12 surface (nvmtl_vk_plane_selftest), once per process, off every caller's thread.
+// Its verdict decides for the life of the process; any failure keeps two-plane surfaces on private images.
+static void nvmtl_plane_selftest(void)
+{
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    nvmtl_pa_result r; memset(&r, 0, sizeof r); r.at = -1;
+    nvmtl_pa_surface want; nvmtl_pa_test_layout(&want);
+    NSMutableArray *planes = [NSMutableArray array];
+    for (int i = 0; i < 2; i++) {
+        const nvmtl_pa_plane *p = &want.p[i];
+        [planes addObject:@{ (__bridge NSString *)kIOSurfacePlaneWidth: @(p->w), (__bridge NSString *)kIOSurfacePlaneHeight: @(p->h),
+                             (__bridge NSString *)kIOSurfacePlaneBytesPerRow: @(p->row), (__bridge NSString *)kIOSurfacePlaneBytesPerElement: @(p->bpe),
+                             (__bridge NSString *)kIOSurfacePlaneElementWidth: @(p->ew), (__bridge NSString *)kIOSurfacePlaneElementHeight: @(p->eh),
+                             (__bridge NSString *)kIOSurfacePlaneOffset: @(p->off), (__bridge NSString *)kIOSurfacePlaneSize: @(nvmtl_pa_len(p)) }];
+    }
+    NSDictionary *props = @{ (__bridge NSString *)kIOSurfaceWidth: @(NVMTL_PA_TEST_W), (__bridge NSString *)kIOSurfaceHeight: @(NVMTL_PA_TEST_H),
+                             (__bridge NSString *)kIOSurfacePixelFormat: @(NVMTL_PA_TEST_FORMAT), (__bridge NSString *)kIOSurfaceAllocSize: @(want.alloc),
+                             (__bridge NSString *)kIOSurfacePlaneInfo: planes };
+    IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+    if (!surf) nvmtl_pa_fail(&r, 1, "IOSurfaceCreate refused the private NV12 surface", -1, 0, 0);
+    else {
+        nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
+        const nvmtl_pa_host hst = { (void *)surf, nvmtl_pa_lock, nvmtl_pa_unlock };
+        nvmtl_vk_plane_selftest((uint32_t)IOSurfaceGetID(surf), &s, &hst, &r);
+        CFRelease(surf);
+    }
+    nvmtl_vk_plane_vram_verdict(&r, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+}
+// Whether a two-plane surface may take its planes' VRAM now. The first caller in a process starts the self-test and,
+// like every caller until its verdict, hears no: that surface stays a private image.
+static int nvmtl_plane_vram_ready(void)
+{
+    const int st = nvmtl_vk_plane_vram_state();
+    if (st < 0) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ nvmtl_plane_selftest(); });
+    return st > 0;
+}
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
@@ -1603,6 +1681,27 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             }
         }
     }
+    const char *pwhy = NULL;
+    if (surf && IOSurfaceGetPlaneCount(surf) == 2 && nvmtl_vk_surface_share_on()) {
+        nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
+        const int why = nvmtl_pa_eligible(&s, (uint32_t)plane, w, h, bpp);
+        if (why) pwhy = nvmtl_pa_reason(why);
+        else if (!nvmtl_plane_vram_ready()) pwhy = "the planar self-test has not passed in this process";
+        else {
+            nvk_buffer vb; memset(&vb, 0, sizeof vb);
+            if (!nvmtl_vk_plane_image_create((uint32_t)IOSurfaceGetID(surf), &s, (uint32_t)plane, w, h, vkf, bpp, a8, stex, &vb, &t->_i)) {
+                t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
+                uint32_t seed = IOSurfaceGetSeed(surf);
+                int current = nvmtl_vram_tag_current(surf, plane, seed);
+                if (current) { t->_surfSeed = seed; t->_surfSynced = YES; }
+                static unsigned n; if (n++ < 8 || n % 2000 == 0)
+                    nvlog("item 7: surface %u plane %lu %ux%u pitch %u -> the plane's own VRAM (planar)%s (vram %llu, private %llu)", (unsigned)IOSurfaceGetID(surf),
+                          (unsigned long)plane, w, h, s.p[plane].row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
+                return 0;
+            }
+            pwhy = "the plane's VRAM could not be used";
+        }
+    }
     g_surf_private++;
     // A private image stands for the whole surface: wrappers that read it and wrappers that write it must share ONE image
     // (nvmtlNewSurfaceTexture caches it), or what one writes the other never sees. So it is made writable whenever the
@@ -1612,7 +1711,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         const size_t prow = IOSurfaceGetBytesPerRow(surf), pplanes = IOSurfaceGetPlaneCount(surf);
         nvlog("item 7: surface %u %ux%u plane %lu -> a private image, copied in and out (%s; row %zu bytes, %zu plane(s))",
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
-              (plane != 0 || pplanes > 1) ? "more than one plane" : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
+              (plane != 0 || pplanes > 1) ? (pwhy ? pwhy : "more than one plane") : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
               : (prow % 32) ? "the row is not a multiple of 32 bytes" : "the family VRAM could not be used", prow, pplanes);
     }
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
