@@ -575,6 +575,30 @@ static void arm_bounds(void)
     now += MS(100);
     T("another connection's work, or a faulted channel, does not extend it", look(7, 0, 0, 0, NULL) == 0 && Tb.stat[NVF_STAT_EXPIRED_CPU] == 1);
 
+    /* a penalty window does not shorten a compositor hold below the CPU bound: NVAccel's flips and page-offs wait on
+       those, and 2.9 waited 100 ms on the mark there */
+    fresh();
+    h = chan_new(1, 11);
+    (void)open1(1, 11, 1, 7, 0);
+    now += MS(100);
+    (void)look(7, 0, 0, 0, NULL);                    /* the first strike: a 10 s penalty window */
+    (void)close1(1, 1, 7);
+    {
+        const unsigned long long t0 = now;
+        struct nvf_view v;
+        (void)open1(1, 11, 2, 7, COMP); (void)arm1(1, 2, 7, h, 10, 0);
+        (void)open1(1, 11, 3, 8, 0); (void)arm1(1, 3, 8, h, 10, 0);
+        T("in a penalty window a compositor hold is told the 100 ms bound", look(7, 0, 0, COMP, &v) == 1 && v.deadlineNs == t0 + MS(100));
+        now += MS(20);
+        T("the application hold of the same connection is given up at 20 ms", look(8, 0, 0, 0, NULL) == 0 && Tb.stat[NVF_STAT_EXPIRED_PENALTY] == 1);
+        T("the compositor hold is still in the way at 20 ms", look(7, 0, 0, COMP, NULL) == 1);
+        now += MS(79);
+        T("and at 99 ms", look(7, 0, 0, 0, NULL) == 1);
+        now += MS(1);
+        T("it is given up at 100 ms as a penalty expiry: no strike", look(7, 0, 0, COMP, NULL) == 0 && Tb.stat[NVF_STAT_EXPIRED_PENALTY] == 2 &&
+          Tb.stat[NVF_STAT_STRIKES] == 1 && Tb.stat[NVF_STAT_EXPIRED_GPU] == 0);
+    }
+
     /* the sleep deadline a reader is given */
     fresh();
     h = chan_new(1, 11);
@@ -1118,7 +1142,8 @@ static struct mrec { unsigned long long serial; unsigned sid, pid; int why, flag
 static unsigned long long mserial, mrecent;
 static int m_live, m_liveC, m_used, m_flagged, m_off, m_paused, m_fused, m_distrusted, m_noirq;
 static unsigned long long m_stat[NVF_STAT_N];
-static int m_bug;                                    /* a control: 1 = an armed hold is given up 1 ms early, 2 = no snapshot */
+static int m_bug;                                    /* a control: 1 = an armed hold is given up 1 ms early, 2 = no snapshot,
+                                                        3 = a compositor hold has the 20 ms penalty bound */
 
 static void m_reset(void) { memset(mh, 0, sizeof(mh)); mhN = 0; memset(mc, 0, sizeof(mc)); memset(mo, 0, sizeof(mo)); mserial = 1; mrecent = 0;
     m_live = m_liveC = m_used = m_flagged = m_off = m_paused = m_fused = m_distrusted = m_noirq = 0; memset(m_stat, 0, sizeof(m_stat)); }
@@ -1253,7 +1278,8 @@ static unsigned m_eval(struct mq *q, int why, struct nvf_view *v)
             if (h->state == (int)E_ARMED && !m_step(h, why) && !h->used) continue;
             o = mo_find(h->owner);
             age = now > h->since ? now - h->since : 0;
-            if (now < o->penaltyUntil) { kind = NVF_BOUND_PENALTY; bound = MS(NVF_CAP_PEN_MS); }
+            if (now < o->penaltyUntil) {                /* a compositor hold's penalty bound is the CPU bound (m_bug 3: as it was) */
+                kind = NVF_BOUND_PENALTY; bound = MS((h->flags & (int)COMP) && m_bug != 3 ? NVF_CAP_CPU_MS : NVF_CAP_PEN_MS); }
             else if (h->state == (int)E_ARMED) { kind = NVF_BOUND_GPU; bound = MS(NVF_CAP_GPU_MS) - (m_bug == 1 ? MS(1) : 0); }
             else if (age >= MS(NVF_CAP_CPU_MS) && m_busy(h->owner)) { kind = NVF_BOUND_GPU; bound = MS(NVF_CAP_GPU_MS); }
             else { kind = NVF_BOUND_CPU; bound = MS(NVF_CAP_CPU_MS); }
@@ -1463,7 +1489,8 @@ static unsigned long differential(const struct profile *P, unsigned long ops, un
                 for (int tries = 0; tries < 16 && !edgeSid; tries++) {
                     const struct mhold *h = &mh[rnd((unsigned)mhN)];
                     const struct mowner *o = h->used ? mo_find(h->owner) : NULL;
-                    const unsigned edge = (o && now < o->penaltyUntil) ? NVF_CAP_PEN_MS : h->state == (int)E_ARMED ? NVF_CAP_GPU_MS :
+                    const unsigned edge = (o && now < o->penaltyUntil) ? ((h->flags & (int)COMP) ? NVF_CAP_CPU_MS : NVF_CAP_PEN_MS) :
+                                          h->state == (int)E_ARMED ? NVF_CAP_GPU_MS :
                                           rnd(4) ? NVF_CAP_CPU_MS : NVF_CAP_GPU_MS;
                     const unsigned long long at = h->since + MS(edge) - rnd(2);
                     if (h->used && !h->expired && at > now) { now = at; edgeSid = h->sid; covEdges++; }
@@ -1625,6 +1652,8 @@ static void arm_controls(void)
     T("control: a second implementation that gives an armed hold up 1 ms early is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
     m_bug = 2;
     T("control: one that forgets the snapshot rule is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
+    m_bug = 3;
+    T("control: one that gives a compositor hold the 20 ms penalty bound is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
     m_bug = 0;
 
     fresh();
