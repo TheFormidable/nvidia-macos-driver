@@ -7,7 +7,8 @@ sleep and the wakeup, the pages of another process, the boot-arg and the counter
 panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted on the source text:
 
 - every function nvrm_fence.h declares is defined with the declared parameters; the file makes no RM call and asks
-  the rest of the driver one thing only, where a page is pinned: whether it lies in the GPU's memory windows;
+  the rest of the driver one thing only, where a page is pinned: whether it lies in the GPU's memory windows; the
+  function it asks (os-xnu2.cpp) is defined with the parameters the fence declares and only compares addresses;
 - one opt-out (nvrmfence=0), read once, and nothing that switches the layer on; off means no lock and no page;
 - every debug.nvrm_fence_* sysctl is read-only, registered once, and every counter of the table has one;
 - the kick is three statements: test, move the generation, wake only when somebody sleeps; no lock, no log line;
@@ -79,6 +80,19 @@ def functions(code):
     return out
 
 
+def body_at(code, brace):
+    """The text between the brace at `brace` and the one that closes it ('' when none does)."""
+    depth = 0
+    for i in range(brace, len(code)):
+        if code[i] == "{":
+            depth += 1
+        elif code[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[brace + 1:i]
+    return ""
+
+
 def statements(b):
     """The top-level statements of a function body, squashed (a braced block counts as part of its statement)."""
     out, depth, start = [], 0, 0
@@ -139,7 +153,7 @@ def definitions(code):
             for m in re.finditer(r"^(void|bool)\s+(nvrm_fence_\w+)\s*\(([^)]*)\)\s*\{", code, re.M)}
 
 
-def arms(src, header, table):
+def arms(src, header, table, mem):
     code = code_only(src)
     fn = functions(code)
     out = []
@@ -161,6 +175,18 @@ def arms(src, header, table):
         and count(b("nvfPin"), r"\bnv_pm_is_gpu\s*\(") == 1
         and not re.search(r"\bfGate\b|\bGate\s+\w+\s*\(|IOCommandGate|IOAccel|IOSurface", code)
         and re.findall(r'#include\s+"([^"]+)"', src) == ["nv-xnu.h", "nvrm_fence.h", "nvrm_fence_table.h"])
+    # The fence declares that function itself, as its other callers do (there is no header for it), and C linkage does
+    # not compare the two: a changed parameter would link and pass garbage. It is called before the fence lock, on a
+    # thread that holds a wired page, and the fence promises its own callers "no RM call, no hardware": so the body
+    # may only look up the GPU's record and compare.
+    mem_code = code_only(mem)
+    defs = [m for m in re.finditer(r'(?m)^extern\s+"."\s+bool\s+nv_pm_is_gpu\s*\(([^)]*)\)\s*\{', mem_code)]
+    body = body_at(mem_code, defs[0].end() - 1) if len(defs) == 1 else ""
+    arm("the function it asks is defined once in os-xnu2.cpp with the parameters the fence declares, and only compares addresses",
+        len(defs) == 1 and squash(defs[0].group(1)) == "NvU64 start, NvU64 size"
+        and count(mem_code, r"\bnv_pm_is_gpu\s*\([^)]*\)\s*\{") == 1
+        and body.strip() and set(re.findall(r"\b(\w+)\s*\(", body)) <= {"for", "if", "nv_xnu_gpu_state", "nv_xnu_gpu_state_at"}
+        and not re.search(r"\bwhile\b|\bgoto\b|=\s*[^=]*->\s*\w+\s*=[^=]|\+\+\s*\w+\s*->|->\s*\w+\s*(\+\+|--|[-+|&^]?=[^=])", body))
 
     # ---- the opt-out ------------------------------------------------------------------------------------------------
     boot = b("nvfBoot")
@@ -431,6 +457,7 @@ WAKE = "    if (changed) {\n        OSIncrementAtomic(&gFGen);\n        if (gFSl
 LOGS = "    for (unsigned i = 0; i < n; i++) nvfLog(&ev[i]);\n"
 PREPARE = "    if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }\n"
 PHYS = "    if (!nvf_phys_ok(pa, len, gFPhysTop) || nv_pm_is_gpu(pa, NVF_PAGE)) { nvfUnpin(md); return NULL; }\n"
+ISGPU = 'extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size)\n{\n    nv_state_t *nv = nv_xnu_gpu_state(); if (!nv) return false;\n'
 PROBE1 = "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen) || seen != c->probe) {\n"
 ADD = "    st = (*closing || nvfCallerExiting()) ? NVRM_FENCE_ST_OFF : nvf_chan_add(&gT, owner, (unsigned)proc_selfpid(), r->flags, &handle);\n"
 ADD_OWNER = "    const UInt64 owner = nvfOwner(ownerId);\n    unsigned handle = 0, st;\n    nvfLock();\n"
@@ -590,6 +617,16 @@ CONTROLS = [
     ("the table header takes a system header", "the table header includes only", "table", lambda s: broken(s, '#include "nvrm_fence_abi.h"\n', '#include "nvrm_fence_abi.h"\n#include <string.h>\n')),
     ("a function of the table header that is not inline", "the table header includes only", "table",
      lambda s: broken(s, "static inline unsigned nvf_bucket(unsigned sid)", "unsigned nvf_bucket(unsigned sid)")),
+    ("the window test gets a third parameter", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU.replace("NvU64 start, NvU64 size)", "NvU64 start, NvU64 size, int index)"))),
+    ("the window test's parameters change places", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU.replace("NvU64 start, NvU64 size)", "NvU64 size, NvU64 start)"))),
+    ("the window test takes a lock", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    IOSimpleLockLock(nv_pm_lock); IOSimpleLockUnlock(nv_pm_lock);\n")),
+    ("the window test asks the RM", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    if (!rm_is_device_present()) return false;\n")),
+    ("the window test counts in the GPU's record", "the function it asks is defined once", "mem",
+     lambda s: broken(s, ISGPU, ISGPU + "    nv->flags |= 1;\n")),
 ]
 
 
@@ -597,13 +634,15 @@ def main():
     src = (root / "kexts/NVRM/nvrm_fence.cpp").read_text()
     header = (root / "kexts/NVRM/nvrm_fence.h").read_text()
     table = (root / "kexts/NVRM/nvrm_fence_table.h").read_text()
+    mem = (root / "kexts/NVRM/os-xnu2.cpp").read_text()
     fails = 0
-    for name, ok in arms(src, header, table):
+    for name, ok in arms(src, header, table, mem):
         print(("ok   " if ok else "FAIL ") + name)
         fails += 0 if ok else 1
     for name, arm_piece, which, mutate in CONTROLS:
         try:
-            res = arms(mutate(src), header, table) if which == "cpp" else arms(src, header, mutate(table))
+            res = (arms(mutate(src), header, table, mem) if which == "cpp" else
+                   arms(src, header, mutate(table), mem) if which == "table" else arms(src, header, table, mutate(mem)))
         except AssertionError as e:
             print("FAIL control '%s': %s" % (name, e))
             fails += 1
