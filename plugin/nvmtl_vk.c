@@ -790,6 +790,10 @@ static VkResult nvmtl_opaque_AllocateCommandBuffers(VkDevice dev, const VkComman
 typedef struct { uint32_t version, surfaceID, plane, pad; uint64_t size_B; } nvmtl_vram_rec;
 static void (*pnvk_stage_import)(const nvmtl_vram_rec *);
 static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
+/* NVK's surface fence entry (its name and signature never change: a new signature gets a new name). NULL in an
+   older NVK, which leaves every nvmtl_vk_fence_* a no-op and the busy tags and pending marks exactly as before. */
+typedef uint32_t nvmtl_nvk_fence_v1_fn(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6]);
+static nvmtl_nvk_fence_v1_fn *pnvk_fence;
 static int (*pnvk_sparse)(void);
 
 // Game Mode, live: NVK's nvmtl_nvk_tsg_reprioritise_v1(level, timeslice_us) re-applies the interleave level and timeslice on
@@ -1136,6 +1140,7 @@ static int nvmtl_vk_initialize(void)
               if (rb <= 0) nvlog("vk: owned handle fallback missing: _open not rebound in %s (%d)", NVMTL_ICD_LIB, rb); }
             pnvk_stage_import = (void (*)(const nvmtl_vram_rec *))dlsym(g_lib, "nvmtl_nvk_stage_import");
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
+            pnvk_fence = (nvmtl_nvk_fence_v1_fn *)dlsym(g_lib, "nvmtl_nvk_fence_v1");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
@@ -2861,11 +2866,166 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane) { return nvmtl_vk
 /* the same mark, given up instead of waiting when the accelerator lock is taken (NVRM_SS_PLANE_TRYLOCK; only an NVAccel
    that publishes NVAccelSurfaceWait is asked): 0 marked, 1 the lock was taken, -1 refused */
 int nvmtl_vk_surface_dirty_try(uint32_t surfaceID, uint32_t plane) { return nvmtl_vk_surface_mark_newest(surfaceID, plane, 0x40000000u); }
-// WindowServer completion mark (NVAccel nvSurfGpuEscape), on NVK's surface escape: 0 = the kernel took it
+/* ---- the kernel surface fence (nvmtl_fence.h) ----
+   A command buffer that writes IOSurfaces opens one kernel hold per surface when it commits, arms each with the fence of
+   the last part that writes it, and closes them when it has finished; a reader in another process sleeps in the kernel
+   until the holds it found there have ended, where the older mechanisms poll a tag in the surface (an application's
+   write, at most 10 ms) or leave the wait to NVAccel's pending mark (WindowServer's). Which of the two covers a command
+   buffer is decided once, by its open, and exactly one of them always does: a hold the kernel refuses, an older kext,
+   an older NVK, nvrmfence=0 all leave that command buffer's tags and marks as they were.
+   g_fence_lock guards the shared state and the list of older marks. It is a leaf: it is never held across a call into
+   NVK, so a kernel wait, or a mark escape that waits for the accelerator lock, cannot hold up another thread here. */
+static pthread_mutex_t g_fence_lock = PTHREAD_MUTEX_INITIALIZER;
+static nvmtl_fence_state g_fence_state;          /* under g_fence_lock */
+static nvmtl_fence_legacy g_fence_legacy;        /* under g_fence_lock: surfaces whose older pending mark the kernel took */
+static int g_fence_said;                         /* under g_fence_lock: the first answer has been logged */
+static __thread nvmtl_fence_thread t_fence;      /* what the last open on this thread put in the kernel */
+static uint64_t g_fence_cookie;                  /* atomic: the last cookie handed out */
+static unsigned g_fence_refused, g_fence_bound;  /* atomic: holds the kernel refused; reader waits it ended at a bound */
+static void nvmtl_vk_fence_log(const nvmtl_fence_state *s, const char *why)
+{
+    if (s->active) nvlog("surface fences: kernel (NVRM fence v1%s)", s->accel ? ", compositor" : "; NVAccel does not read it, so WindowServer keeps its pending marks");
+    else nvlog("surface fences: off (%s)", why);
+}
+/* A call answered NVMTL_FENCE_ST_OFF: NVK has no fence for this process (any more), or the kext switched it off. Off,
+   and every later command buffer uses the older tags and marks, until a probe finds it on again. */
+static void nvmtl_vk_fence_off(uint32_t op)
+{
+    pthread_mutex_lock(&g_fence_lock);
+    const int changed = nvmtl_fence_probe_set(&g_fence_state, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), NVMTL_FENCE_ST_OFF, 0, 0) || !g_fence_said;
+    const nvmtl_fence_state seen = g_fence_state;
+    g_fence_said = 1;
+    pthread_mutex_unlock(&g_fence_lock);
+    if (changed) { char why[64]; snprintf(why, sizeof why, "request %u answered off", op); nvmtl_vk_fence_log(&seen, why); }
+}
+/* Every request goes through here: NVK's entry exists and a device is open (the callers check), and an answer of OFF
+   switches the fence off whatever the request was. */
+static uint32_t nvmtl_vk_fence_call(uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count, const uint32_t *ids,
+                                    const uint8_t *planes, VkFence fence, uint32_t pid, uint32_t timeout_ms, uint32_t out[6])
+{
+    const uint32_t st = pnvk_fence(g_dev, op, flags, cookie, count, ids, planes, fence, pid, timeout_ms, out);
+    if (st == NVMTL_FENCE_ST_OFF) nvmtl_vk_fence_off(op);
+    return st;
+}
+/* 1 when a hold or a wait of this class can go to the kernel now. While it cannot, one thread asks the kernel again
+   (QUERY) at most once a second, so a fence that comes back, or an NVAccel that fetched the kernel's table late, is
+   found; the other threads go on without waiting for that answer. */
+static int nvmtl_vk_fence_ready(int compositor)
+{
+    if (!pnvk_fence || !g_dev) return 0;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    pthread_mutex_lock(&g_fence_lock);
+    int ok = nvmtl_fence_usable(&g_fence_state, compositor);
+    const int due = !ok && nvmtl_fence_probe_due(&g_fence_state, compositor, now);
+    if (due) g_fence_state.next_probe_ns = now + NVMTL_FENCE_PROBE_NS;
+    pthread_mutex_unlock(&g_fence_lock);
+    if (!due) return ok;
+    uint32_t out[6] = { 0, 0, 0, 0, 0, 0 };
+    const uint32_t st = pnvk_fence(g_dev, NVMTL_FENCE_OP_QUERY, 0, 0, 0, NULL, NULL, VK_NULL_HANDLE, 0, 0, out);
+    pthread_mutex_lock(&g_fence_lock);
+    const int changed = nvmtl_fence_probe_set(&g_fence_state, now, st, out[0], out[1]) || !g_fence_said;
+    const nvmtl_fence_state seen = g_fence_state;
+    g_fence_said = 1;
+    ok = nvmtl_fence_usable(&g_fence_state, compositor);
+    pthread_mutex_unlock(&g_fence_lock);
+    if (changed) {
+        char why[96];
+        if (st != NVMTL_FENCE_ST_OK) snprintf(why, sizeof why, "NVK or the kext answered %#x: no fence there", st);
+        else snprintf(why, sizeof why, "the kext's fence is not on for this process: state %u", out[4]);
+        nvmtl_vk_fence_log(&seen, why);
+    }
+    return ok;
+}
+void nvmtl_vk_fence_open(nvmtl_fence_hold *h, uint32_t flags)
+{
+    t_fence.n = 0;   /* first and always: a refusal below must leave nothing on this thread for the marks and tags to skip */
+    if (!h) return;
+    __atomic_store_n(&h->cookie, 0, __ATOMIC_RELEASE);
+    const int compositor = (flags & NVMTL_FENCE_F_COMPOSITOR) != 0;
+    if (!h->n || h->overflow || !nvmtl_vk_fence_ready(compositor)) return;
+    uint64_t cookie;
+    do cookie = __atomic_add_fetch(&g_fence_cookie, 1, __ATOMIC_RELAXED); while (!cookie);
+    const uint32_t n = h->n < NVMTL_FENCE_HOLD_MAX ? h->n : NVMTL_FENCE_HOLD_MAX;
+    int opened = 0;
+    for (uint32_t i = 0; i < n; i += NVMTL_FENCE_MAX_IDS) {
+        const uint32_t k = n - i < NVMTL_FENCE_MAX_IDS ? n - i : NVMTL_FENCE_MAX_IDS;
+        uint8_t planes[NVMTL_FENCE_MAX_IDS] = { 0 };   /* a compositor hold covers the whole surface: 0 = every plane */
+        if (!compositor) for (uint32_t j = 0; j < k; j++) planes[j] = h->planes[i + j];
+        uint32_t out[6];
+        const uint32_t st = nvmtl_vk_fence_call(NVMTL_FENCE_OP_OPEN, flags, cookie, k, &h->sid[i], planes, VK_NULL_HANDLE, 0, 0, out);
+        if (st == NVMTL_FENCE_ST_OK) { opened = 1; continue; }
+        /* Refused (no room, a channel the kernel does not watch, a distrusted process, ...): this command buffer keeps
+           the older tags and marks whole. What an earlier chunk took is given back now; a cookie that took nothing has
+           nothing in the kernel and needs no CLOSE. */
+        if (opened) (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_CLOSE, 0, cookie, 0, NULL, NULL, VK_NULL_HANDLE, 0, 0, out);
+        const unsigned r = __atomic_add_fetch(&g_fence_refused, 1, __ATOMIC_RELAXED);
+        if (st != NVMTL_FENCE_ST_OFF && (r <= 8 || r % 2000 == 0))
+            nvlog("surface fences: hold refused (%#x) - that command buffer keeps the older tags and marks (%u so far)", st, r);
+        return;
+    }
+    for (uint32_t i = 0; i < n; i++) t_fence.sid[i] = h->sid[i];
+    t_fence.n = n;
+    __atomic_store_n(&h->cookie, cookie, __ATOMIC_RELEASE);
+}
+void nvmtl_vk_fence_close(uint64_t cookie, uint32_t sid)
+{
+    if (!cookie || !sid || !pnvk_fence || !g_dev) return;
+    uint32_t out[6];
+    (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_CLOSE, 0, cookie, 1, &sid, NULL, VK_NULL_HANDLE, 0, 0, out);
+}
+void nvmtl_vk_fence_close_all(nvmtl_fence_hold *h)
+{
+    const uint64_t cookie = h ? __atomic_exchange_n(&h->cookie, 0, __ATOMIC_ACQ_REL) : 0;
+    if (!cookie || !pnvk_fence || !g_dev) return;
+    uint32_t out[6];
+    (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_CLOSE, 0, cookie, 0, NULL, NULL, VK_NULL_HANDLE, 0, 0, out);
+}
+int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
+{
+    if (!sid || !nvmtl_vk_fence_ready(0)) return 0;
+    const uint8_t mask = (uint8_t)planes;
+    uint32_t out[6] = { 0, 0, 0, 0, 0, 0 };
+    const uint32_t st = nvmtl_vk_fence_call(NVMTL_FENCE_OP_WAIT, 0, 0, 1, &sid, &mask, VK_NULL_HANDLE, pid, NVMTL_FENCE_WAIT_MS, out);
+    if (st == NVMTL_FENCE_ST_OK && out[0] == NVMTL_FENCE_R_TIMEOUT) {
+        const unsigned b = __atomic_add_fetch(&g_fence_bound, 1, __ATOMIC_RELAXED);
+        if (b <= 8 || b % 2000 == 0)
+            nvlog("surface fences: surface %u - the kernel gave up pid %u's hold at its bound after %u us (%u so far)", sid, out[2], out[1], b);
+    }
+    return nvmtl_fence_wait_handled(st, out[0]);
+}
+void nvmtl_vk_fence_wait_compositor(uint32_t sid)
+{
+    /* WindowServer never waits for its own holds: its frames are ordered by its own queue. Read once; atomic because
+       surface imports on several threads call this at the same time. */
+    static int ws = -1;
+    int in_ws = __atomic_load_n(&ws, __ATOMIC_RELAXED);
+    if (in_ws < 0) { const char *me = getprogname(); in_ws = me && !strcmp(me, "WindowServer"); __atomic_store_n(&ws, in_ws, __ATOMIC_RELAXED); }
+    if (in_ws || !sid || !nvmtl_vk_fence_ready(1)) return;
+    uint32_t out[6];
+    (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_WAIT, NVMTL_FENCE_F_COMPOSITOR, 0, 1, &sid, NULL, VK_NULL_HANDLE, 0, NVMTL_FENCE_WAIT_MS, out);
+}
+uint32_t nvmtl_vk_fence_tag_word(uint32_t sid) { return nvmtl_fence_thread_has(&t_fence, sid) ? NVMTL_BUSY_KFENCE : 0u; }
+// WindowServer completion mark (NVAccel nvSurfGpuEscape), on NVK's surface escape: 0 = the kernel took it. Surface 0 is
+// the once-a-second probe and always reaches the kernel. A pending mark of a surface the kernel fence holds for this
+// command buffer (the open just before, on this thread) is not sent; a clear is sent only for a mark the kernel took.
+// An NVK without the fence entry can hold nothing, so there every mark and every clear goes out unrouted, as before.
 uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending)
 {
     if (!pnvk_surface_dirty || !g_dev) return 0x80000002u;
-    return pnvk_surface_dirty(g_dev, surfaceID, 0x80000000u | (pending ? 1u : 0u));
+    const uint32_t mark = 0x80000000u | (pending ? 1u : 0u);
+    if (!surfaceID) return pnvk_surface_dirty(g_dev, surfaceID, mark);
+    if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);
+    pthread_mutex_lock(&g_fence_lock);
+    const int send = nvmtl_fence_mark_route(&g_fence_legacy, &t_fence, surfaceID, pending);
+    pthread_mutex_unlock(&g_fence_lock);
+    if (!send) return 0;
+    const uint32_t st = pnvk_surface_dirty(g_dev, surfaceID, mark);
+    if (pending) {
+        pthread_mutex_lock(&g_fence_lock);
+        nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, st);
+        pthread_mutex_unlock(&g_fence_lock);
+    }
+    return st;
 }
 /* 1 when NVAccel publishes NVAccelSurfaceWait: its page-off waits for a surface WindowServer's GPU is still writing */
 int nvmtl_vk_accel_surface_wait(void)
@@ -8392,6 +8552,20 @@ static void nvmtl_pre_drop(nvmtl_prologue *p)
 struct nvmtl_inflight { nvk_cmdbuf *c; VkFence fence; nvmtl_prologue pre; uint64_t pt[8]; };
 nvmtl_inflight *nvmtl_vk_inflight_new(void) { return calloc(1, sizeof(nvmtl_inflight)); }
 void nvmtl_vk_inflight_free(nvmtl_inflight *f) { free(f); }
+/* After the part's submission, before anything waits for it: the holds whose last writer is this part get its fence. The
+   answer is not looked at: a hold that cannot be armed (the fence is not on a channel the kernel watches) ends at its
+   CLOSE, which is the older timing. */
+void nvmtl_vk_fence_arm(const nvmtl_fence_hold *h, uint32_t part, const nvmtl_inflight *f)
+{
+    const uint64_t cookie = h ? __atomic_load_n(&h->cookie, __ATOMIC_ACQUIRE) : 0;
+    if (!cookie || !f || f->fence == VK_NULL_HANDLE || !pnvk_fence || !g_dev) return;
+    uint32_t ids[NVMTL_FENCE_HOLD_MAX];
+    const unsigned k = nvmtl_fence_hold_last(h, part, ids);
+    for (unsigned i = 0; i < k; i += NVMTL_FENCE_MAX_IDS) {
+        uint32_t out[6];
+        (void)nvmtl_vk_fence_call(NVMTL_FENCE_OP_ARM, 0, cookie, k - i < NVMTL_FENCE_MAX_IDS ? k - i : NVMTL_FENCE_MAX_IDS, &ids[i], NULL, f->fence, 0, 0, out);
+    }
+}
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n)
 {
     static void (*fn)(uint64_t *, unsigned); static int looked;

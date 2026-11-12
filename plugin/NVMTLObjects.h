@@ -355,7 +355,7 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 typedef struct { nvk_image img; uint32_t key[12]; NSUInteger off, len; } nvmtl_park_t;
 @interface NVMTLTexture () { @public BOOL _subPlaced, _parkable; uint32_t _pkey[12]; NSUInteger _pkLen; } @end
 @interface NVMTLTexture () { @public BOOL _clientWritten; } @end
-@interface NVMTLCommandBuffer () { @public NSDictionary *_busyMarks; } @end
+@interface NVMTLCommandBuffer () { @public NSDictionary *_busyMarks; nvmtl_fence_hold _fence; } @end
 @interface NVMTLHeap () { @public nvmtl_park_t *_pk; uint32_t _npk; } @end
 // Lazy backing: _lzc = slot size (0 = the heap owns one _hm of its full size). _lzo[slot] = 1 + index into _lzm/_lzb (0 = no
 // memory yet); one backing may cover several slots (a resource larger than a slot gets one backing for all of them).
