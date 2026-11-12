@@ -147,8 +147,11 @@ def problems(src):
         line = go[go.rfind("\n", 0, i) + 1:go.find("\n", i)] if i >= 0 else ""
         if "return" in line or re.search(r"if \(!fNv\.queue\)[^;\n]*return", go):
             out.append("go() fails when the GPU gets no queue of its own")
-        if "nvregdwords: %s = %lu" not in go:
+        if "nvregdwords: %s = %u" not in go:
             out.append("go() does not log each nvregdwords key with its value")
+        # the log says what the RM did: a second '=' makes the RM skip the entry, and the RM keeps 32 bits
+        if "(NvU32)strtoul(eq + 1, NULL, 0)" not in go or "!strchr(eq + 1, '=')" not in go:
+            out.append("the nvregdwords log does not read the entries the way rm_parse_option_string does")
     for fn, flush, cap in (("void NVRM::stop(", "nv_xnu_wq_flush(fNv.queue, true, 30000)", "workQueueDown(30000)"),
                            ("void NVRM::shutdownFull(", "nv_xnu_wq_flush(s->fNv.queue, true, 2000)", "workQueueDown(2000)")):
         b = body(nvrm, fn)
@@ -214,6 +217,9 @@ def main():
             "boot-arg nvrmworkq is not read")
     control("a writable sysctl", "nv_xnu_kcore.cpp", "nvrm_wq_queued, CTLFLAG_RD", "nvrm_wq_queued, CTLFLAG_RW",
             "declares a writable sysctl")
+    control("the nvregdwords log counts an entry with a second '=' that the RM skips", "NVRM.cpp",
+            "if (eq && eq != key && eq[1] && !strchr(eq + 1, '='))", "if (eq && eq != key && eq[1])",
+            "the nvregdwords log does not read the entries the way rm_parse_option_string does")
     control("the weak os_strtoul stub back", "nv_xnu_stubs.cpp", "extern \"C\" {\n",
             "extern \"C\" {\n__attribute__((weak)) NvU32 NV_API_CALL os_strtoul(const char *, char **, NvU32)\n{\n    return 0;\n}\n",
             "nv_xnu_stubs.cpp still defines os_strtoul")

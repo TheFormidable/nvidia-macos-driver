@@ -1973,8 +1973,10 @@ IOReturn NVRM::go(uint32_t pass)
                     regdw[sizeof regdw - 1] = 0;
                     rm_parse_option_string(NULL, regdw);
                     LOG("registry options from nvregdwords: %s", regdw);
-                    // Each key with the number the RM was given for it, read the way the RM reads it (os_strtoul,
-                    // base 0, spaces dropped). Until os_strtoul had a body every value reached the RM as 0.
+                    // Each key with the number the RM was given for it, read the way rm_parse_option_string reads
+                    // it: spaces dropped, entries split at ';', an entry is used only as name=value with neither part
+                    // empty and no second '=', and the value is os_strtoul(value, NULL, 0) cut to 32 bits. Until
+                    // os_strtoul had a body every value reached the RM as 0.
                     static bool listed;
                     if (!listed) {
                         listed = true;
@@ -1982,16 +1984,16 @@ IOReturn NVRM::go(uint32_t pass)
                         unsigned n = 0;
                         for (unsigned i = 0; regdw[i] && n < sizeof copy - 1; i++) if (regdw[i] != ' ') copy[n++] = regdw[i];
                         copy[n] = 0;
-                        for (char *key = copy; key && *key; ) {
+                        for (char *key = copy; key; ) {
                             char *end = strchr(key, ';');
                             if (end) *end = 0;
                             char *eq = strchr(key, '=');
-                            if (eq && eq != key && eq[1]) {
+                            if (eq && eq != key && eq[1] && !strchr(eq + 1, '=')) {
                                 *eq = 0;
-                                const unsigned long v = strtoul(eq + 1, NULL, 0);
-                                LOG("nvregdwords: %s = %lu (0x%lx)", key, v, v);
+                                const NvU32 v = (NvU32)strtoul(eq + 1, NULL, 0);
+                                LOG("nvregdwords: %s = %u (0x%x)", key, (unsigned)v, (unsigned)v);
                             } else if (*key) {
-                                LOG("nvregdwords: \"%s\" has no value and was ignored", key);
+                                LOG("nvregdwords: \"%s\" is not name=value and was ignored", key);
                             }
                             key = end ? end + 1 : NULL;
                         }
