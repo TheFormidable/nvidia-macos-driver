@@ -13,7 +13,7 @@
 #ceiling dev plugin 230
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 496
+#ceiling unreviewed all 495
 #pending env NVMTL_DROP_REPORT
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
@@ -98,7 +98,7 @@ env	NVDEC_OWNATTRS	dev	unset	2.9	-	unreviewed
 env	NVDEC_SYNC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_AMPERE_ALL_DEC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_AMPERE_ENC	dev	unset	2.9	-	unreviewed
-env	NVENCVT_ANY_GPU	dev	unset	2.9	-	unreviewed
+env	NVENCVT_ANY_GPU	dev	unset	2.9	-	Developer only (the video library's own override, in a process's environment or a line of the root-owned /usr/local/etc/nvencvt.conf): the library treats any card as an RTX 40, so on an RTX 50 it skips the decode self-test and registers every encoder and decoder untested on that card. Nothing sets it.
 env	NVENCVT_BFRAMES	dev	unset	2.9	-	unreviewed
 env	NVENCVT_BT	dev	unset	2.9	-	unreviewed
 env	NVENCVT_CONF	dev	unset	2.9	-	unreviewed
