@@ -53,6 +53,23 @@ elif name=='kmutil':
 else:sys.exit(99)
 '''
 
+# The mocks reach install.sh only through its PATH line, and the system folders it writes or reads only through these
+# prefixes: /var/db holds macOS's kext approval database, which install.sh reads and updates with /usr/bin/sqlite3.
+PATH_LINE='PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH'
+SYSTEM_PREFIXES=['/Library/','/System/','/Users/Shared/','/var/db/']
+
+def private_source(source,root,bin_dir,prefixes=SYSTEM_PREFIXES):
+    """install.sh with its PATH starting at the mocks and every system path moved under root. A PATH line that is
+    not there (changed in install.sh) is an error: the real kmutil, nvram and launchctl would run instead."""
+    if source.count(PATH_LINE)!=1:raise AssertionError('install.sh no longer has the line '+PATH_LINE+' exactly once; update the fixture')
+    source=source.replace(PATH_LINE,'PATH='+str(bin_dir)+':/usr/bin:/bin:/usr/sbin:/sbin; export PATH')
+    for prefix in ['Library/','Users/Shared/']:
+        source=source.replace('$HERE/'+prefix,'$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__')
+    for prefix in prefixes:source=source.replace(prefix,str(root)+prefix)
+    for prefix in ['Library/','Users/Shared/']:
+        source=source.replace('$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__','$HERE/'+prefix)
+    return source.replace('require_install_directory /Library\n','require_install_directory '+str(root/'Library')+'\n')
+
 class Install(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -99,14 +116,8 @@ class Install(unittest.TestCase):
         self.bin=self.root/'bin';self.bin.mkdir()
         for name in ['id','uname','sw_vers','ioreg','nvram','chown','mktemp','kmutil','stat','sudo','launchctl','shutdown']:
             p=self.bin/name;p.write_text('#!'+sys.executable+'\n'+MOCK);p.chmod(0o755)
-        source=(REPO/'package/install.sh').read_text().replace('PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH', 'PATH='+str(self.bin)+':/usr/bin:/bin:/usr/sbin:/sbin; export PATH')
         # Every installed path points into the private fixture. Real kmutil/ioreg/id are shadowed.
-        for prefix in ['Library/','Users/Shared/']:
-            source=source.replace('$HERE/'+prefix,'$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__')
-        for prefix in ['/Library/','/System/','/Users/Shared/']:source=source.replace(prefix,str(self.root)+prefix)
-        for prefix in ['Library/','Users/Shared/']:
-            source=source.replace('$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__','$HERE/'+prefix)
-        source=source.replace('require_install_directory /Library\n','require_install_directory '+str(self.root/'Library')+'\n')
+        source=private_source((REPO/'package/install.sh').read_text(),self.root,self.bin)
         self.script=self.payload/'install.sh';self.script.write_text(source)
         with open(self.payload/'SHA256SUMS','a') as fh: fh.write(hashlib.sha256(source.encode()).hexdigest()+'  install.sh\n')   # the installer is a package file too
         self.env=dict(os.environ,FIXTURE_ROOT=str(self.root),PATH=str(self.bin)+':/usr/bin:/bin:/usr/sbin:/sbin')

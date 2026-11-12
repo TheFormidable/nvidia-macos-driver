@@ -215,7 +215,15 @@ env > "$f.env"
 printf '%s\n' "$@" > "$f.args"
 { printf 'step %s' "$key"; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$J"
 echo "stand-in for $key: started"
-if [ -f "$SB/ctl/block-$key" ]; then : > "$SB/ctl/started-$key"; while [ ! -f "$SB/ctl/release-$key" ]; do sleep 0.05; done; fi
+# told to wait: until released, until the test takes the block away (or its sandbox is gone), at most two minutes;
+# a stand-in that outlives its run must not wait for ever
+if [ -f "$SB/ctl/block-$key" ]; then
+  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0
+  while [ ! -f "$SB/ctl/release-$key" ] && [ -f "$SB/ctl/block-$key" ]; do
+    w=$((w + 1)); [ "$w" -le 2400 ] || { echo "stand-in for $key: never released"; exit 9; }
+    sleep 0.05
+  done
+fi
 if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
 mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
 case $key in
@@ -274,6 +282,14 @@ GIT = shutil.which("git")
 REALPATH = {t: shutil.which(t) for t in REAL_TOOLS}
 GENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
         "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(TMP), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+
+
+def stop(pr):
+    """Kill a build.sh run started in its own session, and everything it started."""
+    try:
+        os.killpg(pr.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def git(*args, cwd=None, check_rc=True):
@@ -492,13 +508,25 @@ class Sandbox:
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
         """./build.sh <args> from the checkout; returns (exit status, stdout+stderr)."""
         argv = [BASH, script or "./build.sh", *args]
-        r = subprocess.run(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, capture_output=True, text=True,
-                           timeout=timeout)
-        return r.returncode, r.stdout + r.stderr
+        # its own session, so that a run that never ends is stopped with everything it started (a step stand-in left
+        # behind would keep running after the test)
+        pr = subprocess.Popen(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = pr.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop(pr)
+            out, err = pr.communicate()
+            return 124, f"{out}{err}\n[test: no result after {timeout} s; the run and what it started were stopped]"
+        return pr.returncode, out + err
 
-    def popen(self, *args, extra=None):
+    def popen(self, *args, extra=None, default_sigint=True):
+        # Ctrl-C reaches build.sh even when this test was started with SIGINT ignored (nohup, "&" in a script), which
+        # build.sh would inherit and could not trap
+        pre = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if default_sigint else None
         return subprocess.Popen([BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+                                preexec_fn=pre)
 
     def jlines(self):
         return self.journal.read_text().splitlines() if self.journal.exists() else []
@@ -1036,6 +1064,10 @@ def dry_problems(sb, args):
         p.append(f"files changed: {d[:6]}")
     if mutating(sb.jlines()):
         p.append(f"ran: {mutating(sb.jlines())[:4]}")
+    # "brew info" can download Homebrew's formula list into its cache, outside the working directory
+    asked = [l for l in sb.jlines() if l.startswith("brew ") and l not in ("brew --version", "brew --prefix")]
+    if asked:
+        p.append(f"asked Homebrew: {asked[:3]}")
     return p, out
 
 
@@ -1051,6 +1083,9 @@ def arm_dryrun(mac):
     with mac.scratch():
         mac.break_script('  if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi\n', '')
         negative("a dry run that runs the commands", dry_problems(mac, ["-n", "--force", "build", "fb"])[0])
+    with sb.scratch():
+        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then', 'elif false; then')
+        negative("a dry run that asks Homebrew for its LLVM formulas", dry_problems(sb, ["--dry-run", "all"])[0])
 
 
 def order_problems(sb, args, expect):
@@ -1366,22 +1401,43 @@ def wait_for(path, timeout=60):
     return True
 
 
-def interrupt_problems(sb):
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def interrupt_problems(sb, wait=60, default_sigint=True):
     (sb.ctl / "block-fb").write_text("")
     sb.clear()
-    pr = sb.popen("--force", "build", "fb")
+    pr = sb.popen("--force", "build", "fb", default_sigint=default_sigint)
     p = []
-    if not wait_for(sb.ctl / "started-fb"):
-        pr.kill()
-        return ["the fb step never started"], ""
-    os.killpg(pr.pid, signal.SIGINT)
     try:
-        out, _ = pr.communicate(timeout=60)
-    except subprocess.TimeoutExpired:
-        os.killpg(pr.pid, signal.SIGKILL)
-        return ["build.sh did not stop after Ctrl-C"], ""
-    for f in ("block-fb", "started-fb"):
-        (sb.ctl / f).unlink()
+        if not wait_for(sb.ctl / "started-fb"):
+            stop(pr)
+            pr.communicate()
+            return ["the fb step never started"], ""
+        os.killpg(pr.pid, signal.SIGINT)
+        try:
+            out, _ = pr.communicate(timeout=wait)
+        except subprocess.TimeoutExpired:
+            stop(pr)
+            pr.communicate()
+            return ["build.sh did not stop after Ctrl-C"], ""
+        pid = int((sb.ctl / "pid-fb").read_text())
+        t0 = time.time()
+        while alive(pid) and time.time() - t0 < 5:
+            time.sleep(0.05)
+        if alive(pid):
+            p.append(f"the step's stand-in (pid {pid}) outlived the interrupted run")
+    finally:
+        # the stand-in waits while the block is there: never leave it for the arms that follow
+        for f in ("block-fb", "started-fb", "pid-fb"):
+            (sb.ctl / f).unlink(missing_ok=True)
     if pr.returncode == 0:
         p.append("exit 0 after an interrupt")
     if (sb.work / "stamps/fb").exists():
@@ -1403,6 +1459,17 @@ def arm_interrupt(mac):
     with mac.scratch():
         mac.break_script("release_lock() {\n", "release_lock() { return 0\n")
         negative("an interrupt that leaves the lock", interrupt_problems(mac)[0])
+    # started from "nohup ... &" or a script's "&", this test and everything it starts inherit an ignored SIGINT, which
+    # build.sh cannot trap: the Ctrl-C must still reach it, or the arm waits a minute and its step is left running
+    old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        with mac.scratch():
+            p, out = interrupt_problems(mac)
+            check("the same when this test itself was started with SIGINT ignored", not p, (p, out[-600:]))
+        with mac.scratch():
+            negative("a run that keeps the ignored SIGINT", interrupt_problems(mac, wait=5, default_sigint=False)[0])
+    finally:
+        signal.signal(signal.SIGINT, old)
 
 
 def concurrent_problems(sb):
@@ -1410,14 +1477,22 @@ def concurrent_problems(sb):
     sb.clear()
     a = sb.popen("--force", "build", "nmsmn")
     p = []
-    if not wait_for(sb.ctl / "started-nmsmn"):
-        a.kill()
-        return ["the first run never started its step"]
-    rc, out = sb.run("--force", "build", "airdis")
-    (sb.ctl / "release-nmsmn").write_text("")
-    a_out, _ = a.communicate(timeout=120)
-    for f in ("block-nmsmn", "started-nmsmn", "release-nmsmn"):
-        (sb.ctl / f).unlink()
+    try:
+        if not wait_for(sb.ctl / "started-nmsmn"):
+            stop(a)
+            a.communicate()
+            return ["the first run never started its step"]
+        rc, out = sb.run("--force", "build", "airdis")
+        (sb.ctl / "release-nmsmn").write_text("")
+        try:
+            a_out, _ = a.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            stop(a)
+            a.communicate()
+            return ["the first run did not finish after its step was released"]
+    finally:
+        for f in ("block-nmsmn", "started-nmsmn", "release-nmsmn"):
+            (sb.ctl / f).unlink(missing_ok=True)
     if rc == 0:
         p.append("the second run went ahead")
     if "another build.sh run (pid" not in out:
