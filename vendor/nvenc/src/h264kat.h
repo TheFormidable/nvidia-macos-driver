@@ -19,7 +19,8 @@
 // log, the decoder goes on reading as it did.
 int h264dec_selftest(Rm *rm, KatResult *r);
 // The same for a caller's n streams and time limit; h264dec_selftest is this with the embedded streams and five
-// seconds. tools/test_h264_kat_selftest.py runs it against an engine it plays itself.
+// seconds. No stream at all (n == 0) is a failure, as a stream without frames is: a run that decoded nothing has
+// shown nothing. tools/test_h264_kat_selftest.py runs it against an engine it plays itself.
 int h264dec_selftest_streams(Rm *rm, const KatVector *v, unsigned n, unsigned limit_ms, KatResult *r);
 
 // The verdict for this process: the first call opens its own RM client, runs the self-test, logs one line through

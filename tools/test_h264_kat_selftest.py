@@ -407,7 +407,26 @@ static void scenarios(bool real)
     blackwell(); r = run_table(t2, NVEC, 5000);
     ARM("and so is a stream without its parameter sets", r.step == KAT_BAD_VECTOR && seen.chan == 0);
     blackwell(); r = run_table(tab, 0, 5000);
-    ARM("no stream at all is not a pass with frames", r.streams == 0 && r.frames == 0);
+    printf("     %s\n", line_of(&r));
+    ARM("no stream at all is a failure, not a pass of nothing, and nothing is opened for it", r.step == KAT_BAD_VECTOR && !r.streams && !r.frames &&
+        !r.stream && seen.va == 0 && seen.chan == 0 && seen.bufs == 0 && has(line_of(&r), "FAIL at test vector") && !has(line_of(&r), "PASS"));
+    memcpy(t2, tab, sizeof t2); t2[0].nframes = 0;
+    blackwell(); r = run_table(t2, 1, 5000);
+    ARM("nor is a stream that is said to decode to no frame", r.step == KAT_BAD_VECTOR && !r.streams && seen.chan == 0);
+    // a stream whose pictures change size on the way: the large stream with the small one behind it, under the large size
+    if (NVEC >= 2 && tab[1].w > tab[0].w && tab[1].h > tab[0].h && tab[1].nframes + na <= KAT_MAX_FRAMES) {
+        static KatFrame mf[KAT_MAX_FRAMES]; KatVector mv = tab[1]; const unsigned nb = tab[1].nframes;
+        uint8_t *mb = malloc(tab[1].len + tab[0].len);
+        memcpy(mb, tab[1].bytes, tab[1].len); memcpy(mb + tab[1].len, tab[0].bytes, tab[0].len);
+        memcpy(mf, tab[1].frames, nb * sizeof mf[0]); memcpy(mf + nb, tab[0].frames, na * sizeof mf[0]);
+        mv.bytes = mb; mv.len = tab[1].len + tab[0].len; mv.frames = mf; mv.nframes = nb + na;
+        blackwell(); r = run_table(&mv, 1, 5000);
+        printf("     %s\n", line_of(&r));
+        ARM("frames of another size than the table's are not read: the run fails at the first, with the size it had",
+            r.step == KAT_SIZE && r.picture == nb + 1 && r.got_w == tab[0].w && r.got_h == tab[0].h && r.frames == nb &&
+            r.pictures == nb + na && !r.mismatched && r.streams == 0 && clean());
+        free(mb);
+    }
     (void)real;
 }
 
