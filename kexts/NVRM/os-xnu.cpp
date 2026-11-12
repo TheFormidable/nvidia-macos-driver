@@ -5,6 +5,7 @@
  */
 
 #include "nv-xnu.h"
+#include "nvrm_itree.h"
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
 #include <sys/kauth.h>
@@ -17,6 +18,7 @@ extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_
 #include <sys/random.h>
 #include <mach/vm_param.h>
 #include <kern/locks.h>
+#include <sys/sysctl.h>
 
 #define NV_XNU_TRC do { static bool _t = false; if (!_t) { _t = true; kprintf("NVRM-xnu: >%s\n", __func__); } } while (0)
 
@@ -327,48 +329,79 @@ NV_STATUS NV_API_CALL os_pci_write_byte(void *h, NvU32 off, NvU8 v)   { NV_XNU_T
 NV_STATUS NV_API_CALL os_pci_write_word(void *h, NvU32 off, NvU16 v)  { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite16(off, v); return NV_OK; }
 NV_STATUS NV_API_CALL os_pci_write_dword(void *h, NvU32 off, NvU32 v) { NV_XNU_TRC; NV_PCI_H(h); ((nv_xnu_pci_slot *)h)->pci->configWrite32(off, v); return NV_OK; }
 
-struct nv_xnu_map { IOMemoryDescriptor *md; IOMemoryMap *map; void *va; NvU64 phys; NvU64 size; void *alias; };
 extern "C" { void *nv_pm_alias(NvU64, NvU64, void **); void nv_pm_alias_drop(void *); bool nv_pm_is_gpu(NvU64, NvU64);
              void nv_pm_foreign(NvU64, NvU64, NvU32, void *); }
 // Every kernel mapping RM makes is tracked here (VA -> physical for the framebuffer's overlap and aperture checks).
-// WAS 1024: a resizable BAR1 has a 4 GB surface budget and the accelerator maps each allocation, so an RTX 3050 and
-// an RTX 5070 filled the table after ~20 minutes; every later surface then had no physical address and was refused.
-#define NV_XNU_MAX_MAPS 8192
-static nv_xnu_map nv_xnu_maps[NV_XNU_MAX_MAPS];
-static unsigned nv_xnu_maps_high;
-// Two writers used to be able to pick the same free slot, and a release could clear an entry while a lookup
-// was reading it, which is a double release of the same map or a lookup over a freed one. The writers
-// (os_map_kernel_space, os_unmap_kernel_space) are the only paths that allocate or clear a slot and both run
-// in thread context, so a mutex serialises them. The lookups, by contrast, are also reached from the
-// framebuffer's interrupt path, where a mutex is not allowed, so they stay lock-free and are made safe by
-// ordering instead: a slot's va is published LAST with a release store and cleared FIRST on teardown, so a
-// lookup that sees a va sees the rest of that entry fully written, and never reads an entry being freed.
-static IOLock *nv_xnu_maps_lock;
+// This was a fixed array searched from the start. At 1024 entries a resizable BAR1 filled it in about 20 minutes; at
+// 8192 it could still fill, and a mapping that did not fit was handed out untracked and never released. Freeing an
+// allocation of S pieces with N mappings live also cost S x N steps, because each piece scanned the whole table.
+//
+// Now each mapping is an entry of its own, in two interval trees (nvrm_itree.h): by kernel VA, and by physical
+// address for the real mappings (an alias of RAM is not a mapping of the GPU and was never in the overlap check). There
+// is no capacity: an entry is allocated before anything is mapped, and when there is no memory for it nothing is
+// mapped. Lookups and changes take one simple lock with interrupts off, a leaf lock: nothing is allocated, logged or
+// called into IOKit under it. So the lookups are safe from any context, the framebuffer's interrupt path included, and
+// a release can never run beside a lookup of the same entry. tools/test_nvrm_itree.c checks that the trees answer
+// exactly what the array answered.
+struct nv_xnu_map {
+    struct nvit_node va_node;    // [va, va + size); every entry
+    struct nvit_node pa_node;    // [phys, phys + size); real mappings only
+    IOMemoryDescriptor *md; IOMemoryMap *map; void *alias;
+    NvU64 phys, size; void *va;
+};
+static inline nv_xnu_map *nv_xnu_map_of_va(struct nvit_node *n) { return (nv_xnu_map *)(void *)n; }   // va_node comes first
+static struct nvit_tree nv_xnu_map_by_va, nv_xnu_map_by_pa;
+static IOSimpleLock *nv_xnu_maps_slock;
+static int64_t nv_xnu_kmap_live, nv_xnu_kmap_peak, nv_xnu_kmap_lookups, nv_xnu_kmap_unmap_miss, nv_xnu_kmap_nomem;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_live, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_live, "kernel mappings of the RM tracked now");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_peak, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_peak, "most kernel mappings of the RM tracked at once");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_lookups, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_lookups, "kernel VA to physical lookups");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_unmap_miss, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_unmap_miss, "unmaps of an address that is not mapped");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_kmap_nomem, CTLFLAG_RD | CTLFLAG_LOCKED, &nv_xnu_kmap_nomem, "mappings refused for want of memory for their entry");
 extern "C" bool nv_xnu_maps_init(void)
 {
-    if (!nv_xnu_maps_lock) nv_xnu_maps_lock = IOLockAlloc();
-    return nv_xnu_maps_lock != NULL;
+    if (!nv_xnu_maps_slock) {
+        nv_xnu_maps_slock = IOSimpleLockAlloc();
+        if (nv_xnu_maps_slock) {
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_live); sysctl_register_oid(&sysctl__debug_nvrm_kmap_peak);
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_lookups); sysctl_register_oid(&sysctl__debug_nvrm_kmap_unmap_miss);
+            sysctl_register_oid(&sysctl__debug_nvrm_kmap_nomem);
+        }
+    }
+    return nv_xnu_maps_slock != NULL;
 }
-static inline void nv_xnu_map_publish(nv_xnu_map *m, IOMemoryDescriptor *md, IOMemoryMap *map,
-                                      void *va, NvU64 phys, NvU64 size, void *alias)
+// Fills `m` and puts it in the trees; returns how many entries are live.
+static unsigned nv_xnu_map_insert(nv_xnu_map *m, IOMemoryDescriptor *md, IOMemoryMap *map,
+                                  void *va, NvU64 phys, NvU64 size, void *alias)
 {
-    m->md = md; m->map = map; m->phys = phys; m->size = size; m->alias = alias;
-    __atomic_store_n(&m->va, va, __ATOMIC_RELEASE);
+    m->md = md; m->map = map; m->va = va; m->phys = phys; m->size = size; m->alias = alias;
+    m->va_node.lo = (NvU64)(uintptr_t)va; m->va_node.end = (NvU64)(uintptr_t)va + size;
+    m->pa_node.lo = phys; m->pa_node.end = phys + size;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    nvit_insert(&nv_xnu_map_by_va, &m->va_node);
+    if (!alias) nvit_insert(&nv_xnu_map_by_pa, &m->pa_node);
+    const unsigned live = nv_xnu_map_by_va.count;
+    if ((int64_t)live > nv_xnu_kmap_peak) nv_xnu_kmap_peak = live;
+    nv_xnu_kmap_live = live;
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return live;
 }
 void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
 {
     IOOptionBits cache = (mode == NV_MEMORY_CACHED) ? kIOMapDefaultCache : (mode == NV_MEMORY_WRITECOMBINED ? kIOMapWriteCombineCache : kIOMapInhibitCache);
     kprintf("NVRM-xnu: >os_map_kernel_space start=0x%llx size=0x%llx mode=%u\n", start, size, mode);
+    if (!nv_xnu_maps_slock) return NULL;
+    // The entry first: without memory for it nothing is mapped, so nothing can be handed out untracked.
+    nv_xnu_map *m = (nv_xnu_map *)kern_os_malloc(sizeof *m);
+    if (!m) {
+        __atomic_fetch_add(&nv_xnu_kmap_nomem, 1, __ATOMIC_RELAXED);
+        kprintf("NVRM-xnu:   no memory for the mapping's entry: 0x%llx (+0x%llx) not mapped\n", start, size);
+        return NULL;
+    }
     if (!nv_pm_is_gpu(start, size)) {
         void *cookie = NULL; void *ava = nv_pm_alias(start, size, &cookie);
         if (ava) {
-            IOLockLock(nv_xnu_maps_lock);
-            for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-                nv_xnu_map_publish(&nv_xnu_maps[i], NULL, NULL, ava, start, size, cookie);
-                if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
-                break;
-            }
-            IOLockUnlock(nv_xnu_maps_lock);
+            nv_xnu_map_insert(m, NULL, NULL, ava, start, size, cookie);
             return ava;
         }
         nv_pm_foreign(start, size, mode, __builtin_return_address(0));
@@ -378,63 +411,56 @@ void *NV_API_CALL os_map_kernel_space(NvU64 start, NvU64 size, NvU32 mode)
     IOMemoryMap *map = md ? md->map(cache) : NULL;
     if (md && !map) { kprintf("NVRM-xnu:   md->map(cache=0x%x) FAILED\n", (unsigned)cache); md->release(); md = NULL; }
     void *va = map ? (void *)map->getVirtualAddress() : NULL;
-    if (!va) return NULL;
-    IOLockLock(nv_xnu_maps_lock);
-    for (int i = 0; i < NV_XNU_MAX_MAPS; i++) if (nv_xnu_maps[i].va == NULL) {
-        nv_xnu_map_publish(&nv_xnu_maps[i], md, map, va, start, size, NULL);
-        if ((unsigned)i + 1 > nv_xnu_maps_high) nv_xnu_maps_high = (unsigned)i + 1;
-        const unsigned high = nv_xnu_maps_high;
-        IOLockUnlock(nv_xnu_maps_lock);
-        kprintf("NVRM-xnu:   mapped -> 0x%llx (slot %d, high water %u/%u)\n",
-                (unsigned long long)(uintptr_t)va, i, high, (unsigned)NV_XNU_MAX_MAPS);
-        return va;
-    }
-    IOLockUnlock(nv_xnu_maps_lock);
-    {
-        static bool warned;
-        if (!warned) { warned = true;
-            kprintf("NVRM-xnu: *** nv_xnu_maps FULL at %u entries -- leaking bookkeeping for "
-                    "0x%llx (+0x%llx). The mapping is still VALID and returned; raise "
-                    "NV_XNU_MAX_MAPS. ***\n", (unsigned)NV_XNU_MAX_MAPS,
-                    (unsigned long long)start, (unsigned long long)size); }
-    }
+    if (!va) { kern_os_free(m); return NULL; }
+    const unsigned live = nv_xnu_map_insert(m, md, map, va, start, size, NULL);
+    kprintf("NVRM-xnu:   mapped -> 0x%llx (%u kernel mappings live)\n", (unsigned long long)(uintptr_t)va, live);
     return va;
 }
 NvU64 nv_xnu_phys_for_kernel_va(const void *va)
 {
-    // Lookups stop at the high-water mark (every slot ever filled is below it), so a larger table costs nothing
-    // until it is actually used.
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
-        const char *base = (const char *)__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE);
-        if (base && (const char *)va >= base && (const char *)va < base + nv_xnu_maps[i].size)
-            return nv_xnu_maps[i].phys + (NvU64)((const char *)va - base);
-    }
-    return 0;
+    if (!nv_xnu_maps_slock) return 0;
+    __atomic_fetch_add(&nv_xnu_kmap_lookups, 1, __ATOMIC_RELAXED);
+    NvU64 phys = 0;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    struct nvit_node *n = nvit_stab(&nv_xnu_map_by_va, (NvU64)(uintptr_t)va);
+    if (n) phys = nv_xnu_map_of_va(n)->phys + ((NvU64)(uintptr_t)va - n->lo);
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return phys;
 }
 void NV_API_CALL os_unmap_kernel_space(void *va, NvU64 size)
 { NV_XNU_TRC;
-    IOLockLock(nv_xnu_maps_lock);
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) if (nv_xnu_maps[i].va == va) {
-        // The va goes first, so a lookup running beside this never walks into an entry being torn down.
-        __atomic_store_n(&nv_xnu_maps[i].va, (void *)NULL, __ATOMIC_RELEASE);
-        IOMemoryDescriptor *md = nv_xnu_maps[i].md; IOMemoryMap *map = nv_xnu_maps[i].map;
-        void *alias = nv_xnu_maps[i].alias;
-        nv_xnu_maps[i].md = NULL; nv_xnu_maps[i].map = NULL; nv_xnu_maps[i].alias = NULL;
-        nv_xnu_maps[i].phys = 0; nv_xnu_maps[i].size = 0;
-        IOLockUnlock(nv_xnu_maps_lock);
-        if (alias) nv_pm_alias_drop(alias);
-        else { if (map) map->release(); if (md) md->release(); }
+    if (!nv_xnu_maps_slock) return;
+    // Two aliases of the same RAM can share a VA: the one of this size goes, else the first that was mapped.
+    const NvU64 lo = (NvU64)(uintptr_t)va;
+    nv_xnu_map *m = NULL;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    struct nvit_node *first = nvit_first_lo(&nv_xnu_map_by_va, lo), *pick = NULL;
+    for (struct nvit_node *n = first; n && n->lo == lo; n = nvit_next(n))
+        if (nv_xnu_map_of_va(n)->size == size) { pick = n; break; }
+    if (!pick) pick = first;
+    if (pick) {
+        m = nv_xnu_map_of_va(pick);
+        nvit_remove(&nv_xnu_map_by_va, &m->va_node);
+        if (!m->alias) nvit_remove(&nv_xnu_map_by_pa, &m->pa_node);
+        nv_xnu_kmap_live = nv_xnu_map_by_va.count;
+    }
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    if (!m) {
+        if (__atomic_fetch_add(&nv_xnu_kmap_unmap_miss, 1, __ATOMIC_RELAXED) < 4)
+            kprintf("NVRM-xnu: unmap of 0x%llx (+0x%llx), which is not mapped\n", (unsigned long long)lo, size);
         return;
     }
-    IOLockUnlock(nv_xnu_maps_lock);
+    if (m->alias) nv_pm_alias_drop(m->alias);
+    else { if (m->map) m->map->release(); if (m->md) m->md->release(); }
+    kern_os_free(m);
 }
 int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len)
 {
-    for (unsigned i = 0; i < nv_xnu_maps_high; i++) {
-        if (!__atomic_load_n(&nv_xnu_maps[i].va, __ATOMIC_ACQUIRE) || nv_xnu_maps[i].alias) continue;
-        if (phys < nv_xnu_maps[i].phys + nv_xnu_maps[i].size && nv_xnu_maps[i].phys < phys + len) return 1;
-    }
-    return 0;
+    if (!nv_xnu_maps_slock) return 0;
+    IOInterruptState s = IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock);
+    const int hit = nvit_overlap(&nv_xnu_map_by_pa, phys, phys + len) != NULL;
+    IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock, s);
+    return hit;
 }
 void  NV_API_CALL os_io_write_byte(NvU32 addr, NvU8 v)   { NV_XNU_TRC; __asm__ __volatile__("outb %0, %1" :: "a"(v), "d"((NvU16)addr)); }
 void  NV_API_CALL os_io_write_word(NvU32 addr, NvU16 v)  { NV_XNU_TRC; __asm__ __volatile__("outw %0, %1" :: "a"(v), "d"((NvU16)addr)); }
