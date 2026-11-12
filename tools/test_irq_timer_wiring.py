@@ -14,6 +14,9 @@ None of it can run without the card, so what must hold is asserted on the source
   back after the event source is gone;
 - a second try of go()'s second pass is refused while the first try's interrupt source is there, and neither the
   source nor the work loop is ever made over an existing one (the first stayed registered, with nothing to remove it);
+- the idle power-down monitor (nvrtd3=1), a thread call that is never stopped, is not handed the GPU object: each of
+  its calls enters a gate first, and stop() closes that gate, waits until no call is inside and takes the GPU away
+  before it tears anything down (right after the fence stop, which keeps its place);
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
   kernel's real_ncpus (at least 1) and os_get_cpu_number() stays 0;
 - no source names thread_call_cancel_wait (not exported to kexts); nv_destroy_nano_timer frees nothing (the slots are
@@ -158,6 +161,22 @@ def arms(src, others):
         order(stop, [r"rm_disable_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)", r"rm_shutdown_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)",
                      r"nv_xnu_rc_detach\s*\(\s*&fNv\s*\)", r"nv_xnu_nano_retire\s*\(\s*&fNv\s*\)", r"rm_free_private_state\s*\("]))
 
+    rarm, rdet = body(n, "NVRM::rtd3Arm"), body(n, "NVRM::rtd3Detach")
+    rcalls = rarm + body(n, "rtd3Clients") + body(n, "rtd3Heads")
+    arm("the idle power-down monitor reaches the GPU only through a gate; stop() closes it, waits it out and takes the GPU away before any teardown",
+        re.search(r"nv_rtd3_ops\s+ops\s*=\s*\{\s*NULL\s*,", rarm)
+        and not re.search(r"\(\s*(?:NVRM|IOService)\s*\*\s*\)\s*(?:c|ctx)\b", rcalls) and not re.search(r"\bthis\s*,\s*rtd3Heads\b", rarm)
+        and len(re.findall(r"=\s*rtd3Enter\s*\(\s*\)", rarm)) == 4
+        and re.search(r"\brtd3Enter\s*\(\s*\)", body(n, "rtd3Clients")) and re.search(r"\brtd3Enter\s*\(\s*\)", body(n, "rtd3Heads"))
+        and re.search(r"if\s*\(\s*!\s*nv_gate_enter\s*\(\s*&gNvRtd3Gate\s*\)\s*\)\s*return\s+NULL\s*;", body(n, "rtd3Enter"))
+        and re.search(r"NvXnuGate\s+gNvRtd3Gate\s*=\s*\{\s*1\s*,\s*0\s*\}\s*;", n)
+        and order(rdet, [r"gNvRtd3Gpu\b[^;]*!=\s*this\s*\)\s*return\s*;", r"nv_gate_close\s*\(\s*&gNvRtd3Gate\s*\)",
+                         r"nv_quiesce_may_sleep\s*\(", r"nv_gate_idle\s*\(\s*&gNvRtd3Gate\s*\)",
+                         r"__atomic_store_n\s*\(\s*&gNvRtd3Gpu\s*,\s*\(\s*NVRM\s*\*\s*\)\s*NULL"])
+        and "nvx_can_block" not in rdet
+        and order(stop, [r"nvrm_fence_stop\s*\(\s*\)\s*;", r"\brtd3Detach\s*\(\s*\)\s*;", r"\bfUtilizationLock\b"])
+        and order(stop, [r"\brtd3Detach\s*\(\s*\)\s*;", r"\bPMstop\s*\(", r"\bnv_xnu_wq_flush\s*\("]))
+
     isr = body(os_, "os_is_isr")
     arm("os_is_isr() answers from the per-GPU slots, and the single global is gone from every kext source",
         re.search(r"nv_xnu_isr_threads\s*\[\s*i\s*\]\s*==\s*me", isr)
@@ -262,6 +281,21 @@ CONTROLS = [
      lambda s: broken(s, "nvrm", "rm_disable_adapter(NULL, &fNv);", ";")),
     ("stop() lets the timers go after the private state", "stop(): rm_disable_adapter",
      lambda s: broken(broken(s, "nvrm", "    nv_xnu_nano_retire(&fNv);\n", ""), "nvrm", "    nvrm_dma_detach(&fNv);", "    nv_xnu_nano_retire(&fNv);\n    nvrm_dma_detach(&fNv);")),
+    ("stop() that leaves the GPU with the idle power-down monitor", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    rtd3Detach();\n", "")),
+    ("the GPU taken from the monitor only after the driver left power management", "the idle power-down monitor reaches",
+     lambda s: broken(broken(s, "nvrm", "    rtd3Detach();\n", ""), "nvrm", "    if (fPmJoined) { PMstop(); fPmJoined = false; }\n",
+                      "    rtd3Detach();\n    if (fPmJoined) { PMstop(); fPmJoined = false; }\n")),
+    ("the monitor handed the GPU object again", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "        NULL, rtd3Heads, rtd3Clients,", "        this, rtd3Heads, rtd3Clients,")),
+    ("a monitor call that does not enter the gate", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    if (!nv_gate_enter(&gNvRtd3Gate)) return NULL;\n", "")),
+    ("a monitor gate that starts open", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "static NvXnuGate gNvRtd3Gate = { 1, 0 };", "static NvXnuGate gNvRtd3Gate = {};")),
+    ("stop() that takes the GPU away without closing the monitor's gate", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    nv_gate_close(&gNvRtd3Gate);\n", "")),
+    ("stop() that does not wait for the monitor", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "{ IOSleep(10); out = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
     ("os_is_isr on one global again", "os_is_isr() answers",
      lambda s: broken(s, "os", "if (nv_xnu_isr_threads[i] == me)", "if (nv_xnu_isr_thread == me)")),
     ("a CPU count of 4 again", "os_get_cpu_count() is real_ncpus",

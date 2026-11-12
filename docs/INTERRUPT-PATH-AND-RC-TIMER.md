@@ -202,6 +202,13 @@ the RC timer and the nano timers let go. A GPU that stops while it is suspended 
 in standby. When the system's 8 s bound for the shutdown runs out, the interrupt source is turned off and the gate
 closed anyway, whatever the shutdown thread is doing.
 
+Before any of that, right after the surface fence is stopped, `stop()` takes the GPU away from the idle power-down
+monitor (`nvrtd3=1`). That monitor is a timer that is never stopped; when the GPU has been idle for a minute it runs
+the GPU's suspend path, and later its resume path, which opens the interrupt gate again. Its calls reach the GPU only
+through a gate of their own: `stop()` closes it and waits until no call is inside (30 s at most; a call that is still
+inside then keeps the GPU object alive and is logged). From then on the monitor has no GPU for the rest of the boot,
+also when another card is started later.
+
 ## The wait queue
 
 `os_wait_queue` remembers a wake, as the Linux completion behind it does. Only the RM's NVLink fabric code uses it, so
