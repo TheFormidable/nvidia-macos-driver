@@ -1777,6 +1777,8 @@ static bool nvSurfWaitLegacy(unsigned int id, uint64_t limit)
 // The table is NVRM's one function pointer, asked for once. An NVRM that refuses is asked again at most once a second
 // (its fence starts after the accelerator, on the GPU's start-up thread), and only an NVRM already found: a wait never
 // waits for matching. wait() takes NVRM's fence lock, a leaf, and sleeps uninterruptibly up to w->timeoutMs.
+// The pointer is used for the rest of the boot. It stays callable after NVRM's GPU has stopped (the fence then refuses
+// or finds nothing, by its contract), and NVRM.kext is kept loaded for it: see nvFenceAsk.
 static NVRMFenceWaitFn volatile gFenceWait;
 static uint64_t gFenceAskAgainAt;
 static int gFenceOn;
@@ -1789,6 +1791,7 @@ static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm)
 #ifdef NMX_ACCEL
     nvrm = nullptr;   // an AMD/Intel accelerator: no NVRM, no fence
 #endif
+    if (NVRMFenceWaitFn have = __atomic_load_n(&gFenceWait, __ATOMIC_ACQUIRE)) return have;   // asked once: the start of a second accelerator does not ask again
     if (!nvrm) return nullptr;
     struct NVRMFenceKernelOps o;
     o.version = NVRM_FENCE_ABI_VERSION; o.size = sizeof o; o.wait = nullptr;
@@ -1802,6 +1805,12 @@ static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm)
             ALOG("surface fence: not offered by NVRM (yet) (0x%x) -- waits use the 2.9 marks; asked again at most once a second", (unsigned)r); }
         return nullptr;
     }
+    // The pointer points into NVRM.kext and is never dropped, so that kext must never unload. A kext cannot unload
+    // while one of its objects exists: one reference on the service that answered is taken here and never given back.
+    // (locateNVRM() already holds the NVRM it finds by matching that way; the one it finds among the PCI device's
+    // clients with nvmultigpu=1 it does not hold at all.)
+    static volatile UInt32 held;
+    if (OSCompareAndSwap(0, 1, &held)) nvrm->retain();
     __atomic_store_n(&gFenceWait, (NVRMFenceWaitFn)o.wait, __ATOMIC_RELEASE);
     if (!gFenceOn) { gFenceOn = 1; ALOG("surface fence: NVRM's fence v%u -- flips, copies and page-offs wait for the GPU through it", NVRM_FENCE_ABI_VERSION); }
     return (NVRMFenceWaitFn)o.wait;
