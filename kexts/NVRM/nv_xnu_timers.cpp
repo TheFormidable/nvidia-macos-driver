@@ -9,8 +9,10 @@
 // Nano timers (nv_create_nano_timer and friends): one-shot timers with a nanosecond deadline, used by the RM's timer
 // service (tmrEventScheduleRel). On Linux they are hrtimers; here each is a thread call.
 // RC timer (nv_start_rc_timer, nv_stop_rc_timer): one per GPU, 1 Hz, whose callback rm_run_rc_callback runs the RM's
-// 1 Hz list (osRun1HzCallbacksNow): the GSP heartbeat check, the check that the GPU still answers on the bus, the NVENC
-// session statistics, and the channel watchdog once a client turns it on.
+// 1 Hz list (osRun1HzCallbacksNow): the check that the GPU still answers on the bus, the NVENC session statistics, the
+// GSP log poll, and the channel watchdog once a client turns it on. The GSP periodic health check is NOT on it: the RM
+// registers that one only with the registry key RmGspPeriodicHealthcheck=1, which NVIDIA ships off and this driver
+// does not set.
 //
 // The problem both share: a thread call that has already been taken off its queue by a thread-call thread cannot be
 // stopped, and thread_call_cancel_wait is not exported to kexts. So a callback can start after the cancel returned. It
