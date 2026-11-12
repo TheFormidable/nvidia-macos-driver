@@ -128,7 +128,13 @@ arm("downloads are pinned to a commit", bool(re.search(r"^OGKM_SHA=[0-9a-f]{40}\
 arm("nothing the check needs is written for a newer bash than a Mac has", not re.search(r"\bdeclare -A\b|\bmapfile\b|\breadarray\b|\$\{\w+,,\}|\$\{\w+\^\^\}|&>>|\|&", chk))
 r = subprocess.run([sys.executable, "-B", str(ROOT / "tools/kext_imports.py"), "--selftest"], capture_output=True, text=True)
 arm("the import classifier fires (kext_imports.py --selftest)", r.returncode == 0 and "0 failed" in r.stdout, r.stdout[-300:])
-for want in ("thread_call_cancel_wait", "only the Private KPI exports", "PE_boot_args resolves on macOS 26 alone", "checked against both kernels the same object fails"):
+for want in ("thread_call_cancel_wait", "only the Private KPI exports", "PE_boot_args resolves on macOS 26 alone", "checked against both kernels the same object fails",
+             "a function they do not define is not excused: floor()", "a declaration, an extern variable, a static function, a call, a macro and a comment define nothing",
+             "is not the family's because a family class is among its parameters"):
     arm(f"its self-test covers: {want}", want in r.stdout)
+# what the classifier is given: a mention of a name in NVIDIA's sources proves nothing (they mention free and floor),
+# and a static function of one object does not resolve a call from another
+arm("the NVIDIA class goes by definitions and the kext's own symbols by what is external",
+    "nvidia_defined(Path(a.ogkm))" in imp and 'nm(a.nm, p, "-gU")' in imp and "nvidia_words" not in imp and 'nm(a.nm, p, "-U")' not in imp)
 print(f"{len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)
