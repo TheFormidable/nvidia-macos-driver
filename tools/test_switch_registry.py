@@ -230,6 +230,16 @@ with tempfile.TemporaryDirectory(prefix="nmsw-") as tmp:
     reg = sr.load(t); reg.pending.add(("bootarg", "nvxlater")); (t / sr.REG).write_text(reg.text())
     rc, out = check(t)
     arm("the same row marked #pending passes: it was written before its code", rc == 0, out[-600:])
+    soon = "bootarg\tnvxsoon\tescape\ton (nvxsoon=0 restores the old path)\t3.0\t3.2\tA change that is merged first.\n"
+    reg = sr.load(t); reg_text = (t / sr.REG).read_text()
+    (t / sr.REG).write_text(reg_text + soon); reg = sr.load(t); reg.pending.add(("bootarg", "nvxsoon")); (t / sr.REG).write_text(reg.text())
+    undo = edit(t, "kexts/X/x.cpp", 'static bool soon(void) { int v = 1; PE_parse_boot_argn("nvxsoon", &v, sizeof v); return v != 0; }\n')
+    rc, out = quiet(sr.cmd_sync, t, False)
+    reg = sr.load(t)
+    arm("sync after a merge takes the mark off a row whose code arrived and leaves the marks of rows still waiting",
+        rc == 0 and ("bootarg", "nvxsoon") not in reg.pending and ("bootarg", "nvxlater") in reg.pending
+        and "removed the #pending mark of bootarg nvxsoon" in out and check(t)[0] == 0, out[-600:])
+    undo(); (t / sr.REG).write_text(reg_text); quiet(sr.cmd_gen, t)
     rc, out = quiet(sr.cmd_sync, t, True)
     arm("finalize removes the mark, so the row with no code is an error again, and says so",
         rc == 1 and "#pending" not in (t / sr.REG).read_text() and "bootarg nvxlater is read nowhere" in out and "removed 1 #pending mark" in out, out[-900:])
