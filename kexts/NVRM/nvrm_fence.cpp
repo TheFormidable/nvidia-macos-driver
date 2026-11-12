@@ -94,7 +94,7 @@ static const SInt32 kNvfMaxSleepers = 256;   // user-space waits beyond this are
 #define NVF_STAT(x) ((long long *)&gT.stat[NVF_STAT_##x])
 SYSCTL_INT(_debug, OID_AUTO, nvrm_fence_state, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gFState, 0, "surface fence: 0 off by nvrmfence=0, 1 on, 2 switched itself off, 3 stopped or not started");
 SYSCTL_INT(_debug, OID_AUTO, nvrm_fence_accel, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gFAccel, 0, "1 = NVAccel's waits read the fence table");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_kicks, CTLFLAG_RD | CTLFLAG_LOCKED, (long long *)&gFKick, "handled interrupts plus bottom-half runs seen while on");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_kicks, CTLFLAG_RD | CTLFLAG_LOCKED, (long long *)&gFKick, "interrupts the work loop served (whatever the RM answered) plus bottom-half runs, while on");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_opens, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(OPENS), "holds opened");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_arms, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(ARMS), "holds given a GPU target");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_arm_done, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(ARM_DONE), "of those, already complete when armed");
