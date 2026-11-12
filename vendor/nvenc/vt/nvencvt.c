@@ -9,6 +9,7 @@
 #include "enc.h"
 #include "av1hdr.h"
 #include "rm.h"
+#include "h264kat.h"
 #include "ctrl/ctrl0080/ctrl0080gpu.h"
 #include "clc9b7.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -1108,6 +1109,18 @@ static void rename_encoders(const char *const ids[], const char *const names[], 
     LOG("rename: %d of %d encoder names set", done, n);
 }
 
+// Blackwell (RTX 50): the decoder drives an NVDEC class no public header describes, with Ada's methods and a plane
+// layout taken from Mesa, and VideoToolbox does not fall back once it has picked a decoder. So nothing registers on
+// Blackwell until the card has decoded the embedded test streams bit for bit in this process (src/h264kat.h: run once
+// per process, one line in the system log either way). Where it has not, the process keeps the decoders it had.
+static bool blackwell_decode_proven(void)
+{
+    char line[H264KAT_LINE]; bool first = false;
+    const bool ok = h264kat_proven("Blackwell", line, sizeof line, &first);
+    if (first) LOG("%s", line);
+    return ok;
+}
+
 // registers the H.264 (avc1) and HEVC (hvc1) encoders; returns the H.264 registration's status
 __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
 {
@@ -1118,6 +1131,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_Register(int rating)
         return kVTCouldNotFindVideoEncoderErr;
     }
     gNvencvtGpu = gpu;
+    if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;
     // Not when the driver plugin was loaded from inside VTCompressionSessionCreate: VideoToolbox enumerates the Metal devices
     // while it creates a session, which loads the plugin (and so registers us) in processes without a Metal device of their
     // own (command-line tools). That session already has Apple's encoder and the next one would get ours: ffmpeg opens one
@@ -1181,6 +1195,7 @@ __attribute__((visibility("default"))) OSStatus NVEncVT_RegisterDecoders(int rat
         return kVTCouldNotFindVideoDecoderErr;
     }
     gNvencvtGpu = gpu;
+    if (gpu == GPU_BLACKWELL && !blackwell_decode_proven()) return kVTCouldNotFindVideoDecoderErr;
     extern OSStatus NVDecVT_Register(int rating);
     return NVDecVT_Register(rating);
 }
