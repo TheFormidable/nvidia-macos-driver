@@ -187,7 +187,7 @@ def chk_pages_ok_rule(dma):
 
 def chk_token_is_serial(dma):
     b = body(strip_comments(dma), "nvrm_dma_surf")
-    return "q->token = (void *)(uintptr_t)m->serial;" in b and "dmaTake(NULL, serial, NULL, 1u << kKindSurf)" in b \
+    return "q->token = (void *)(uintptr_t)m->serial;" in b and "dmaTake(NULL, serial, d, 1u << kKindSurf)" in b \
         and "q->token = m;" not in b
 
 
@@ -223,7 +223,8 @@ arm("the self-test mapping runs only when a mapper will be used, between the dec
     chk_selftest_only_with_mapper(dma))
 arm("a mapping holds its own reference and wire count, given back after the mapping (pages stay alive)", chk_own_reference(dma))
 arm("a mapping is released only after it was taken off the list (exactly one release)", chk_unlink_before_release(dma))
-arm("the accelerator's token is a serial number, never a pointer to a mapping", chk_token_is_serial(dma))
+arm("the accelerator's token is a serial number, never a pointer, and unmaps only a mapping of the same GPU",
+    chk_token_is_serial(dma))
 arm("a GPU's stop shuts new mappings out, waits a bounded time, drains its mappings and never frees a record",
     chk_detach_drains(dma))
 arm("the RM's DMA interface: the three remapping calls only with the OS layer's consent, peer and MMIO refused",
@@ -276,6 +277,8 @@ control("a mapping that borrows the descriptor's reference", not chk_own_referen
 control("a release without an unlink", not chk_unlink_before_release(dma + "\nstatic void bad(nv_xnu_dmamap *m)\n{\n    dmaUnmap(m);\n}\n"))
 control("a pointer handed out as the token", not chk_token_is_serial(dma.replace(
     "q->token = (void *)(uintptr_t)m->serial;", "q->token = m;")))
+control("an UNMAP that takes another GPU's mapping", not chk_token_is_serial(dma.replace(
+    "dmaTake(NULL, serial, d, 1u << kKindSurf)", "dmaTake(NULL, serial, NULL, 1u << kKindSurf)")))
 control("a stop that frees the record", not chk_detach_drains(dma.replace("    if (mp) mp->release();", "    if (mp) mp->release();\n    IOFree(d, sizeof *d);")))
 control("the remapping calls defined without the OS layer's consent", not chk_rm_interface(dma.replace("#if DMA_RM_ROUTED\n", "#if 1\n", 1)))
 control("both define the interface (no link)", not chk_one_definition(

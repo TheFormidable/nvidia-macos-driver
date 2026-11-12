@@ -96,8 +96,8 @@ static IOLock *gDmaLock;                           // created by the first attac
 static nv_dma_device gDmaDevs[kDmaMaxDev];
 static nv_xnu_dmamap *gDmaHead;
 static UInt64 gDmaSerial;                          // under gDmaLock; never 0 for a live mapping
-static volatile SInt32 gDmaSysctl, gDmaOptRead, gDmaEverRefused;
-static int gDmaOptOut, gDmaMode;
+static volatile SInt32 gDmaSysctl, gDmaEverRefused;
+static int gDmaMode;
 static volatile SInt64 gDmaMaps, gDmaUnmaps, gDmaLive, gDmaLiveBytes, gDmaPeakBytes, gDmaFail, gDmaVerifyBad, gDmaVerified,
                        gDmaUnaddressable, gDmaNotContig, gDmaBudget, gDmaBadPriv, gDmaRefused, gDmaUserMaps, gDmaSurfMaps,
                        gDmaPageoffRefused, gDmaMaxUs, gDmaLo, gDmaHi, gDmaLeaked;
@@ -366,10 +366,11 @@ extern "C" struct nv_dma_device *nvrm_dma_attach(nv_state_t *nv, IOPCIDevice *pc
         if (!OSCompareAndSwapPtr(NULL, l, (void *volatile *)&gDmaLock)) IOLockFree(l);
     }
     dmaSysctls();
-    if (OSCompareAndSwap(0, 1, &gDmaOptRead)) {
-        uint32_t v = 1;
-        gDmaOptOut = (PE_parse_boot_argn("nvrmdma", &v, sizeof v) && v == 0) ? 1 : 0;
-    }
+    // Read on every attach, not once into a global: two GPUs start on their own threads, and a "read once" flag lets
+    // the second one decide before the first has stored the value (with a mapper that would map instead of refusing).
+    // The boot arguments do not change while the machine runs, so every GPU gets the same answer.
+    uint32_t optArg = 1;
+    const int optOut = (PE_parse_boot_argn("nvrmdma", &optArg, sizeof optArg) && optArg == 0) ? 1 : 0;
     nv_dma_device *d = NULL;
     IOLockLock(gDmaLock);
     for (int i = 0; i < kDmaMaxDev && !d; i++) if (gDmaDevs[i].state == kDevFree) { d = &gDmaDevs[i]; d->state = kDevBusy; }
@@ -386,7 +387,7 @@ extern "C" struct nv_dma_device *nvrm_dma_attach(nv_state_t *nv, IOPCIDevice *pc
     bool bypass = false;
     if (pci) if (OSNumber *n = OSDynamicCast(OSNumber, pci->getProperty(kIOMemoryDescriptorOptionsKey)))
         bypass = (n->unsigned32BitValue() & kIOMemoryMapperNone) != 0;
-    enum nvrm_dma_mode mode = nvrm_dma_decide(gDmaOptOut, dev != NULL, IOMapper::gSystem != NULL, bypass);
+    enum nvrm_dma_mode mode = nvrm_dma_decide(optOut, dev != NULL, IOMapper::gSystem != NULL, bypass);
     if (mode == NVRM_DMA_DEVICE) d->mapper = dev; else if (dev) dev->release();
     d->mode = mode;
     // Modes 0 and 3 stop here. Modes 1 and 2 need the RM's calls to reach this file and a mapping that reads back.
@@ -564,8 +565,10 @@ int nvrm_dma_surf(struct NVRMSurfDma *q, nv_state_t *nv)
     q->status = NVRM_SS_OFF;
     if (q->op == NVRM_SS_DMA_QUERY) { q->status = 0; return 0; }
     if (q->op == NVRM_SS_DMA_UNMAP) {
+        // Only a mapping this GPU made: a token handed to another GPU's NVRM (or made up) unmaps nothing. A GPU that
+        // has stopped has no mappings left (its stop removed them), so there is nothing to look for then.
         const UInt64 serial = (UInt64)(uintptr_t)q->token;
-        nv_xnu_dmamap *m = serial ? dmaTake(NULL, serial, NULL, 1u << kKindSurf) : NULL;
+        nv_xnu_dmamap *m = (serial && d) ? dmaTake(NULL, serial, d, 1u << kKindSurf) : NULL;
         if (m) { dmaUnmap(m); q->status = 0; }
         q->token = NULL;
         return 0;
@@ -575,7 +578,9 @@ int nvrm_dma_surf(struct NVRMSurfDma *q, nv_state_t *nv)
     if (!md) return 0;
     const NvU64 bytes = (q->length + PAGE_MASK) & ~(NvU64)PAGE_MASK;
     if (bytes < q->length || bytes > md->getLength()) { q->status = NVRM_SS_TOO_SMALL; return 0; }
-    if (!(d = dmaGet(d))) return 0;                                   // the GPU is stopping: NVRM_SS_OFF
+    // The GPU is stopping: nothing mapped. NVRM_SS_NO_DMA, not NVRM_SS_OFF, because OFF tells the accelerator that
+    // physical addresses are the bus addresses, which is false with a mapper.
+    if (!(d = dmaGet(d))) { q->status = NVRM_SS_NO_DMA; return 0; }
     NvU64 base = 0; nv_xnu_dmamap *m = NULL;
     // One run on the bus: the caller gets the base and adds page offsets itself.
     const NV_STATUS st = dmaMap(d, md, bytes, nvrm_dma_bits(dmaBitsNow(), 0), true, &base, bytes >> PAGE_SHIFT, kKindSurf, &m);
