@@ -1856,8 +1856,11 @@ static NVRMFenceWaitFn nvFenceOps(void)
 // counts as done: nothing will ever complete it, and its pixels are as final as they will get. Returns false when a
 // bound ended a wait; the caller goes on either way, as in 2.9.
 // capMs bounds the two waits together whatever NVRM answers: its wait can sleep and then report nothing on the surface
-// (the hold ended and its record was already overwritten) or refuse (the fence stopped meanwhile), and the mark wait
-// must not start a bound of its own after that. One caller holds the accelerator lock and relies on it.
+// (the hold ended and its record was already overwritten, or the fence was paused for sleep or stopped meanwhile: both
+// answer OK with no result), and the mark wait must not start a bound of its own after that. NVRM's wait refuses only
+// a request it is not handed, and its sleep here cannot be interrupted, so nothing this function sends is refused:
+// the error count stays 0 with the NVRM of this release and would move only if a later one learned to refuse.
+// One caller holds the accelerator lock and relies on it.
 static bool nvSurfWaitReadyFor(unsigned int id, unsigned capMs)
 {
     if (!id || !gSurfGpuOn) return true;   // the 2.9 switch still turns every wait off
@@ -2013,7 +2016,7 @@ NVACCEL_CNT(nvaccel_surface_fence_waits,    gCntFenceWaits,    "waits that found
 NVACCEL_CNT(nvaccel_surface_fence_ready,    gCntFenceReady,    "fence waits that ended because the GPU work was done");
 NVACCEL_CNT(nvaccel_surface_fence_dead,     gCntFenceDead,     "fence waits that ended because the writer exited, its channel faulted or the GPU slept");
 NVACCEL_CNT(nvaccel_surface_fence_timeouts, gCntFenceTimeouts, "fence waits that a bound ended with the work not done (the caller went on, as 2.9)");
-NVACCEL_CNT(nvaccel_surface_fence_errors,   gCntFenceErrors,   "fence waits NVRM did not serve (the 2.9 marks only)");
+NVACCEL_CNT(nvaccel_surface_fence_errors,   gCntFenceErrors,   "fence waits NVRM refused (the 2.9 marks only); 0 with this NVRM, which refuses none");
 NVACCEL_CNT(nvaccel_surface_fence_pending,  gCntFencePending,  "page-offs that found a fence hold on the surface");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_fence_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gFenceWaitMaxUs, 0, "longest fence wait, us");
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;

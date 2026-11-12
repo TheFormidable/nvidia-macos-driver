@@ -691,7 +691,7 @@ sysctl	debug.nvaccel_surf_plane_validbits	diag	read-only	3.0	-	OR of the validit
 sysctl	debug.nvaccel_surf_planes	diag	read-only	3.0	-	1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0)
 sysctl	debug.nvaccel_surface_fence	diag	read-only	3.0	-	1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only)
 sysctl	debug.nvaccel_surface_fence_dead	diag	read-only	3.0	-	fence waits that ended because the writer exited, its channel faulted or the GPU slept
-sysctl	debug.nvaccel_surface_fence_errors	diag	read-only	3.0	-	fence waits NVRM did not serve (the 2.9 marks only)
+sysctl	debug.nvaccel_surface_fence_errors	diag	read-only	3.0	-	fence waits NVRM refused (the 2.9 marks only); 0 with this NVRM, which refuses none
 sysctl	debug.nvaccel_surface_fence_pending	diag	read-only	3.0	-	page-offs that found a fence hold on the surface
 sysctl	debug.nvaccel_surface_fence_ready	diag	read-only	3.0	-	fence waits that ended because the GPU work was done
 sysctl	debug.nvaccel_surface_fence_timeouts	diag	read-only	3.0	-	fence waits that a bound ended with the work not done (the caller went on, as 2.9)
