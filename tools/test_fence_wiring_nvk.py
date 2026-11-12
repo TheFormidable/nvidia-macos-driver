@@ -10,7 +10,9 @@ This test reads the patch and holds what only NVK's glue can get wrong:
                  changes, to a WAIT_SEQ on that channel's own semaphore, and only a real sleep or a real completion
                  is reported as one (anything else is a polling step and quiets that channel for a while); the kernel
                  is given the whole milliseconds of the round's time, rounded down, and is not asked for less than
-                 one, so the sleep cannot run past the round (an application's deadline)
+                 one, so the sleep cannot run past the round; and the round's time is cut to what the caller's
+                 deadline leaves in every mode, the eager one included (its sleep on the event ignores the deadline
+                 as 2.9 did, but 2.9 polled a channel without an event, and polling returned at the deadline)
   registration   every channel that takes a slot is registered: CHAN_ADD, a new probe value, CHAN_VERIFY, and the slot
                  gets its handle only after both; a refused CHAN_VERIFY is followed by CHAN_DEL; a failure leaves the
                  channel running
@@ -113,6 +115,7 @@ def chk_seam(t):
     add, rem = ctx_of(t)
     w = fhunks(t, DIR + "nvkmd_nvrm_ctx.c", "nvrm_evw_nvk_wait")
     first = body(add, "nvrm_fence_wait_first")
+    left = body(add, "nvrm_evw_nvk_left_us")
     # the loop and the waits that call it are not edited: the only ctx.c lines removed are the old branch with its
     # comment, and the line of the registration that now takes the notifier status from a local
     removed = [l.strip() for l in rem.splitlines() if l.strip()]
@@ -123,8 +126,13 @@ def chk_seam(t):
                           ("nvkmd_nvrm_ctx.c", "nvkmd_nvrm_wait_block_until"), ("nvkmd_nvrm_ctx.c", "nvkmd_nvrm_wait_block"),
                           ("nvkmd_nvrm_ctx.c", "nvrm_gsub_wait_seq"), ("nvkmd_nvrm_sync.c", "nvrm_gsub_wait"))))
     return (loop_untouched
-            and order(w, "if (fd < 0)\n      return nvrm_fence_wait_first(c->n, c->slot, c->gen, c->want, timeout_us, out);",
-                      "nvrm_xnu_wait_event2(fd,")
+            and order(w, "if (fd < 0)\n      return nvrm_fence_wait_first(c->n, c->slot, c->gen, c->want, "
+                         "nvrm_evw_nvk_left_us(c, timeout_us), out);", "nvrm_xnu_wait_event2(fd,")
+            and add.count("nvrm_fence_wait_first(c->n,") == 1
+            # the time it may sleep: the round's timeout, cut to what the caller's deadline leaves
+            and order(left, "const uint64_t left_us = c->remain_ns / 1000;",
+                      "return left_us < timeout_us ? (uint32_t)left_us : timeout_us;")
+            and left.count("return ") == 1
             and order(first, "nvrm_fence_req(&r, NVRM_FENCE_OP_WAIT_SEQ, 0);", "r.u.wait.id = handle;",
                       "r.u.wait.seq = seq;", "r.u.wait.timeoutMs = timeout_ms;")
             # whole milliseconds of the round's time, rounded down and capped; less than one: no request, no lock
@@ -289,6 +297,10 @@ CHECKS = [
      "const uint32_t whole_ms = timeout_us / 1000;", "const uint32_t whole_ms = (timeout_us + 999) / 1000;"),
     ("the seam: a request for less than a millisecond, stretched to one, is refused", chk_seam,
      "if (timeout_ms == 0 || __atomic_load_n(&nvrm_fence_have,", "if (__atomic_load_n(&nvrm_fence_have,"),
+    ("the seam: a sleep that is not told the caller's deadline is refused", chk_seam,
+     "c->want, nvrm_evw_nvk_left_us(c, timeout_us), out);", "c->want, timeout_us, out);"),
+    ("the seam: a cut that keeps the round's timeout whatever the deadline leaves is refused", chk_seam,
+     "return left_us < timeout_us ? (uint32_t)left_us : timeout_us;", "return timeout_us;"),
     ("registration: CHAN_ADD, a new probe, CHAN_VERIFY, then the handle; CHAN_DEL after a refused verify", chk_register,
      "+      nvrm_fence_chan_del(handle);\n+      nvrm_fence_say(", "+      nvrm_fence_say("),
     ("teardown: the handle leaves the slot in one helper, CHAN_DEL after unlocking, before the pages go", chk_teardown,
