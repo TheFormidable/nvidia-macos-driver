@@ -27,18 +27,26 @@ stop() { say "STOP: $*"; exit 2; }
 
 # ---- question 2: the sources build_nvrm.sh compiles are the sources that are there
 sources() {
-  local bn=$HERE/build/build_nvrm.sh src=$HERE/kexts/NVRM code always listed f s bad=0
+  local bn=$HERE/build/build_nvrm.sh src=$HERE/kexts/NVRM code a b listed f s bad=0
   code=$(grep -v '^[[:space:]]*#' "$bn") || { say "FAIL build/build_nvrm.sh cannot be read"; return 1; }
-  # CXX_SOURCES=( ... ) names what is always compiled; a line with CXX_SOURCES+=( names what is compiled when present
-  # (the list ends at the first ')' at or after its first line: written on one line it is still only the list)
-  always=$(say "$code" | awk '/^CXX_SOURCES=\(/ { on = 1 } on { print } on && /\)/ { exit }' | tr -s ' ();' '\n' | grep '^[A-Za-z0-9_.+-]*\.cpp$' | tr '\n' ' ')
-  listed=" $always$(say "$code" | sed -n '/CXX_SOURCES+=(/p' | tr -s ' ();' '\n' | grep '^[A-Za-z0-9_.+-]*\.cpp$' | tr '\n' ' ')"
-  [ -n "$always" ] || { say "FAIL build/build_nvrm.sh has no CXX_SOURCES=( ... ) list this check can read"; bad=1; }
+  # CXX_SOURCES is what the script's own lines make of it. They are run, from "CXX_SOURCES=(" to the line before the
+  # first xcrun call, with SRC set to kexts/NVRM and exit made a no-op (the script's own completeness check would stop
+  # on what this one reports): so the list on one line or several, a name in a comment, and the sources it adds only
+  # when they exist (a loop of [ -f "$SRC/$s" ] && CXX_SOURCES+=) count exactly as they count in the build.
+  a=$(grep -n -m1 -E '^[[:space:]]*CXX_SOURCES=\(' "$bn" | cut -d: -f1)
+  b=$([ -n "$a" ] && awk -v a="$a" 'NR > a && /xcrun/ { print NR; exit }' "$bn")
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    say "FAIL build/build_nvrm.sh has no CXX_SOURCES=( ... ) list followed by an xcrun call that this check can read"; return 1
+  fi
+  listed=" $(SRC=$src bash -c 'exit() { :; }; CXX_SOURCES=()
+    eval "$(sed -n "$1,$2p" "$3")" >/dev/null 2>&1
+    printf "%s " ${CXX_SOURCES[@]+"${CXX_SOURCES[@]}"}' _ "$a" "$((b - 1))" "$bn" 2>/dev/null)"
+  case "$listed" in *.cpp*) ;; *) say "FAIL build/build_nvrm.sh: its CXX_SOURCES lines name no source when run"; return 1;; esac
   for f in "$src"/*.cpp; do
     [ -f "$f" ] || continue; s=$(basename "$f")
     case "$listed" in *" $s "*) ;; *) say "FAIL NVRM/$s is not in CXX_SOURCES of build/build_nvrm.sh (the kext would be built without it): add it to the list"; bad=1;; esac
   done
-  for s in $always; do
+  for s in $listed; do
     [ -f "$src/$s" ] || { say "FAIL NVRM/$s is in CXX_SOURCES of build/build_nvrm.sh and not in kexts/NVRM (the build would stop)"; bad=1; }
   done
   for f in "$src"/*.c; do

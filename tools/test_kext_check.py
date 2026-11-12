@@ -107,8 +107,22 @@ arm("control: a name in a comment of build_nvrm.sh does not count as listed", rc
 rc, out = sources(lambda d: (d / "kexts/NVRM/os-xnu.cpp").unlink())
 arm("control: a listed source that is gone is caught", rc != 0 and "os-xnu.cpp is in CXX_SOURCES" in out, out[-300:])
 rc, out = sources(lambda d: ((d / "kexts/NVRM/nvrm_new_thing.cpp").write_text(""),
-                             bn_edit("for s in nv_rtd3.cpp nvrm_ddc.cpp; do", "for s in nv_rtd3.cpp nvrm_ddc.cpp nvrm_new_thing.cpp; do")(d)))
+                             bn_edit("for s in nv_rtd3.cpp nvrm_ddc.cpp ", "for s in nv_rtd3.cpp nvrm_ddc.cpp nvrm_new_thing.cpp ")(d)))
 arm("a source added to the when-present list is listed", rc == 0, out[-300:])
+
+
+def present_loop_split(d):
+    """The when-present loop with its body on the next line (the list and the test of each name apart)."""
+    p = d / "build/build_nvrm.sh"; s = p.read_text()
+    m = re.search(r'(?m)^(for s in [^;\n]*nv_rtd3\.cpp[^;\n]*; do)[ \t]*\n?[ \t]*(\[ -f "\$SRC/\$s" \] && CXX_SOURCES\+=\( "\$s" \))[ \t]*;?[ \t]*\n?[ \t]*done', s)
+    assert m, "the when-present loop of build_nvrm.sh"
+    p.write_text(s[:m.start()] + m.group(1) + "\n    " + m.group(2) + "\ndone" + s[m.end():])
+
+
+rc, out = sources(present_loop_split)
+arm("the when-present loop is read however its lines are broken (it is run, not parsed)", rc == 0, out[-300:])
+rc, out = sources(lambda d: (present_loop_split(d), (d / "kexts/NVRM/nvrm_new_thing.cpp").write_text("")))
+arm("control: with the loop split, a .cpp it does not name is still caught", rc != 0 and "nvrm_new_thing.cpp is not in CXX_SOURCES" in out, out[-300:])
 
 
 def one_line_and_older_tree(d):
