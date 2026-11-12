@@ -561,7 +561,7 @@ Each of these does nothing unless it is set.
 | `-nmintelfboff` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NMIntelFB/intelfb.cpp |
 | `-nvaccelnoheadless` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/accel/nvrm-accel.cpp |
 | `-nvaccelverbose` | diag | unset | 2.9 | - | observes only | kexts/NVRM/accel/nvrm-accel.cpp |
-| `-nvfbsurvey` | diag | unset | 2.9 | - | observes only | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `-nvfbsurvey` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `-nvkmsnosmooth` | install | absent: the firmware picture is carried through the first mode set | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRM/NVRM.cpp |
 | `-nvoff` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NMIntelFB/intelfb.cpp, kexts/NVRM/nvrm_off.h, kexts/NVRMAGDC/nvrm_off.h and 1 more |
 | `-nvrmkeepbar1` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp |
@@ -597,8 +597,8 @@ Each of these does nothing unless it is set.
 | `nvaccel_pageoff_locked` | escape | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.0 | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |  |
 | `nvaccel_surf_planes` | escape | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.0 | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |  |
 | `nvagdcheads` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `nvcursor` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `nvfb` | install | absent: the framebuffer kext does not start (boot-loop guard) | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvcursor` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvfb` | install | absent: the framebuffer kext does not start (boot-loop guard) | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfb10bit` | setting | unset | 2.9 | - | 10-bit colour: Scan out 30-bit surfaces on mode changes. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbbootretry` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbbpc` | setting | unset | 2.9 | - | Output colour depth: Bits per colour channel on the link; default lets the driver pick. | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -615,7 +615,7 @@ Each of these does nothing unless it is set.
 | `nvfblog` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbrange` | setting | unset | 2.9 | - | Output dynamic range: Full or limited RGB range; default lets the driver pick. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbrotscale` | setting | unset | 2.9 | - | Scaled modes on rotated displays: Offer extra resolutions on a rotated head. | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `nvfbsample` | diag | unset | 2.9 | - | observes only | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvfbsample` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbscalerprobe` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbsmall` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbsurround` | setting | unset | 2.9 | - | Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off. | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -623,9 +623,9 @@ Each of these does nothing unless it is set.
 | `nvfbvib` | setting | unset | 2.9 | - | Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbvrr` | setting | unset | 2.9 | - | Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfetchcopy` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `nvhud` | diag | unset | 2.9 | - | observes only | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvhud` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvhwvbl` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `nvlayout` | escape | on (nvlayout=0: a difference is logged and the kext starts anyway, as 2.9 did without looking) | 3.0 | 3.2 | Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update. |  |
+| `nvlayout` | escape | on (nvlayout=0: a difference is logged and the kext starts anyway, as 2.9 did without looking) | 3.0 | 3.2 | Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update. | kexts/NVRM/nvrm_layout.h, kexts/NVRMAGDC/nvrm_layout.h, kexts/NVRMFB/nvrm_layout.h |
 | `nvmaxbpc` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-nvkms-xnu.cpp |
 | `nvmultigpu` | setting | unset | 2.9 | - | More than one NVIDIA card (experimental): Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below. | kexts/NVRM/NVRM.cpp, kexts/NVRM/accel/nvrm-accel.cpp, plugin/NVMTLDevice.m |
 | `nvoffbar` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -775,26 +775,26 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_watchpage` | diag | read-only | 2.9 | - | RM allocations/frees that covered the 2026-09-23 panic page (phys == 0x132b000 mod 1 GB) | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_winraw` | diag | read-only | 2.9 | - | batch 54: the panic window's bytes, read through the physical aperture (read-only) | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_winwhy` | diag | read-only | 2.9 | - | batch 54: which _vm_page_free_prepare_object branch the panic window trips (read-only) | kexts/NVRM/os-xnu2.cpp |
-| `debug.nvrmfb_agdc` | recovery | writable by root | 2.9 | - | write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, \<0 failed step) | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_cmds` | diag | read-only | 2.9 | - | AGDC vendor calls received | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc` | recovery | writable by root | 2.9 | - | write 1 = create our AppleGraphicsDeviceControl object, 0 = terminate it; reads the state (1 UP, \<0 failed step) | kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_cmds` | diag | read-only | 2.9 | - | AGDC vendor calls received | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_fbmap` | diag | read-only | 2.9 | - | the slot table our 0x980 reports: n, then [i]id per IOFBDependentIndex | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_k5` | recovery | writable by root | 2.9 | - | K5: 1 = answer kAGDCLinkConfig + plane-scaler capabilities (0 after every boot) | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_k5` | recovery | writable by root | 2.9 | - | K5: 1 = answer kAGDCLinkConfig + plane-scaler capabilities (0 after every boot) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_k5_asked` | diag | read-only | 2.9 | - | bit i = a 0x921/0x711 named index i | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_k5_caps` | diag | read-only | 2.9 | - | K5: plane-scaler capability queries answered | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_k5_caps` | diag | read-only | 2.9 | - | K5: plane-scaler capability queries answered | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_k5_caps_mask` | diag | read-only | 2.9 | - | bit i = the plane-scaler capability answered for index i | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_k5_last_refused_idx` | diag | read-only | 2.9 | - | the index the last BADARG/NOTFOUND refusal named (-1 none); an Unsupported 0x711 type shows in k5_asked only | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_k5_link` | diag | read-only | 2.9 | - | K5: kAGDCLinkConfig queries answered | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_k5_link` | diag | read-only | 2.9 | - | K5: kAGDCLinkConfig queries answered | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_k5_link_mask` | diag | read-only | 2.9 | - | bit i = kAGDCLinkConfig answered for index i | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_k5_why` | diag | read-only | 2.9 | - | K5: why the last K5 query was not answered | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_last_refused` | diag | read-only | 2.9 | - | last AGDC command refused | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_k5_why` | diag | read-only | 2.9 | - | K5: why the last K5 query was not answered | kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_last_refused` | diag | read-only | 2.9 | - | last AGDC command refused | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_maxfb` | diag | read-only | 2.9 | - | maxFramebuffers in our last 0x980 reply (0 = never asked) | kexts/NVRMAGDC/nvrm-agdc.cpp |
-| `debug.nvrmfb_agdc_refused` | diag | read-only | 2.9 | - | AGDC vendor calls answered Unsupported | kexts/NVRM/agdc/nvrm-agdc.cpp, kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_agdc_refused` | diag | read-only | 2.9 | - | AGDC vendor calls answered Unsupported | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_rescans` | diag | read-only | 2.9 | - | slot-table rescans done while answering 0x980 (a framebuffer that started after boot) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_color_bpc` | setting | writable by root | 2.9 | - | output bits per channel: 0 automatic, 6, 8, 10, 12 | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_format` | setting | writable by root | 2.9 | - | output colour format: 0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4, 3 automatic | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_range` | setting | writable by root | 2.9 | - | output range: 0 automatic, 1 full, 2 limited | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_vibrance` | setting | writable by root | 2.9 | - | saturation gain in percent, -100 (grey) to 100 (double); 0 off | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_flip_interval` | recovery | writable by root | 2.9 | - | minPresentInterval of the pure (zero-copy) flip; tearing stays off | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_flip_interval` | recovery | writable by root | 2.9 | - | minPresentInterval of the pure (zero-copy) flip; tearing stays off | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_latch` | recovery | writable by root | 2.9 | - | 1 = a committed flip waits for its completion before a surface retires (0 = debug bypass, 2 = deferred: the next submit verifies it) | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_latch_auto` | setting | writable by root | 2.9 | - | 1 = at 357 Hz and above latch mode 1 runs as 2 (deferred); 0 = always wait | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_latch_deferred` | diag | read-only | 2.9 | - | flips verified by the next submit instead of waited for | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -802,21 +802,21 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_flip_latch_max_us` | diag | read-only | 2.9 | - | longest submit-to-completion wait (us) | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_latch_timeouts` | diag | read-only | 2.9 | - | flips not on the panel within a refresh period and a quarter of their submit (waited on to the stuck limit) | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_flip_latch_waits` | diag | read-only | 2.9 | - | flips that waited for completion | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_flip_lean` | recovery | writable by root | 2.9 | - | 1 = lean pure flip (surface only) | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_flip_n` | diag | read-only | 2.9 | - | pure flips timed | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_flip_us_max` | diag | read-only | 2.9 | - | the slowest pure flip, us | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_flip_us_sum` | diag | read-only | 2.9 | - | microseconds spent in pure-flip applyModeSetConfig | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_flip_lean` | recovery | writable by root | 2.9 | - | 1 = lean pure flip (surface only) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_flip_n` | diag | read-only | 2.9 | - | pure flips timed | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_flip_us_max` | diag | read-only | 2.9 | - | the slowest pure flip, us | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_flip_us_sum` | diag | read-only | 2.9 | - | microseconds spent in pure-flip applyModeSetConfig | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_guard_cleared` | diag | read-only | 2.9 | - | 1 once the boot guard was cleared this boot | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_budget_bytes` | diag | read-only | 2.9 | - | the BAR1 grant budget in force | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_budget_bytes` | diag | read-only | 2.9 | - | the BAR1 grant budget in force | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_aware` | recovery | writable by root | 2.9 | - | 1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_bytes` | diag | read-only | 2.9 | - | scanout+cursor the framebuffer itself maps into BAR1 | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_grant_bytes` | diag | read-only | 2.9 | - | bytes granted | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_grants` | diag | read-only | 2.9 | - | vramGrant successes | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_mapped_bytes` | diag | read-only | 2.9 | - | the BAR1 budget counter, live | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_release_bytes` | diag | read-only | 2.9 | - | bytes released | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vram_releases` | diag | read-only | 2.9 | - | vramRelease calls | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vramtest` | diag | writable by root | 2.9 | - | grant N x 8 MB of VRAM through vramGrant (0 = release all) | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `debug.nvrmfb_vramtest_mode` | diag | writable by root | 2.9 | - | 1 = release without the kernel unmap | kexts/NVRM/fb/nvrm-fb.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_grant_bytes` | diag | read-only | 2.9 | - | bytes granted | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_grants` | diag | read-only | 2.9 | - | vramGrant successes | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_mapped_bytes` | diag | read-only | 2.9 | - | the BAR1 budget counter, live | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_release_bytes` | diag | read-only | 2.9 | - | bytes released | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_releases` | diag | read-only | 2.9 | - | vramRelease calls | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vramtest` | diag | writable by root | 2.9 | - | grant N x 8 MB of VRAM through vramGrant (0 = release all) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vramtest_mode` | diag | writable by root | 2.9 | - | 1 = release without the kernel unmap | kexts/NVRMFB/fb/nvrm-fb.cpp |
 
 ## file
 
@@ -878,6 +878,6 @@ Each of these does nothing unless it is set.
 | `NVK_JOBS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVK_PATH` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh, build/build_release_inputs.sh |
 | `NVK_REF_EXPORTS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
-| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. |  |
+| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. | build/build_nvk.sh |
 | `NVK_SYSROOT` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVRM_PRISTINE_OGKM` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvrm.sh |
