@@ -12,6 +12,8 @@ None of it can run without the card, so what must hold is asserted on the source
   source and then irqSettle();
 - go() claims the GPU's interrupt-thread slot before the event source exists and refuses without one; stop() gives it
   back after the event source is gone;
+- a second try of go()'s second pass is refused while the first try's interrupt source is there, and neither the
+  source nor the work loop is ever made over an existing one (the first stayed registered, with nothing to remove it);
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
   kernel's real_ncpus (at least 1) and os_get_cpu_number() stays 0;
 - no source names thread_call_cancel_wait (not exported to kexts); nv_destroy_nano_timer frees nothing (the slots are
@@ -146,6 +148,12 @@ def arms(src, others):
         order(go, [r"fIsrSlot\s*=\s*nv_xnu_isr_slot_claim\s*\(\s*this\s*\)", r"if\s*\(\s*fIsrSlot\s*<\s*0\s*\)\s*\{[^}]*return\s+kIOReturnNoResources",
                    r"addEventSource\s*\("])
         and order(stop, [r"removeEventSource\s*\(", r"bottomHalfStop\s*\(", r"nv_xnu_isr_slot_release\s*\(\s*fIsrSlot\s*,\s*this\s*\)"]))
+    arm("go(): a second try of pass 2 is refused while the first try's interrupt source is there; no source or work loop is made over one",
+        order(go, [r"if\s*\(\s*fIntSrc\s*\)\s*\{[^}]*return\s+kIOReturnError\s*;", r"nv_xnu_wq_gpu_start\s*\(",
+                   r"if\s*\(\s*!\s*fWorkLoop\s*\)\s*fWorkLoop\s*=\s*IOWorkLoop::workLoop\s*\(\s*\)\s*;",
+                   r"fIntSrc\s*=\s*IOFilterInterruptEventSource::filterInterruptEventSource\s*\("])
+        and len(re.findall(r"\bfIntSrc\s*=\s*IOFilterInterruptEventSource\b", n)) == 1
+        and len(re.findall(r"\bfWorkLoop\s*=\s*IOWorkLoop::workLoop\b", n)) == 1)
     arm("stop(): rm_disable_adapter before rm_shutdown_adapter; the timers let go before the private state is freed",
         order(stop, [r"rm_disable_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)", r"rm_shutdown_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)",
                      r"nv_xnu_rc_detach\s*\(\s*&fNv\s*\)", r"nv_xnu_nano_retire\s*\(\s*&fNv\s*\)", r"rm_free_private_state\s*\("]))
@@ -246,6 +254,10 @@ CONTROLS = [
      lambda s: broken(s, "nvrm", "return kIOReturnNoResources; }", "}")),
     ("stop() keeps the slot", "go() claims the interrupt-thread slot",
      lambda s: broken(s, "nvrm", "    nv_xnu_isr_slot_release(fIsrSlot, this); fIsrSlot = -1;\n", "")),
+    ("go() making a second interrupt source over the first", "go(): a second try of pass 2",
+     lambda s: broken(s, "nvrm", "        if (fIntSrc) {\n            LOG(\"pass 2 failed before", "        if (0) {\n            LOG(\"pass 2 failed before")),
+    ("go() making a second work loop over the first", "go(): a second try of pass 2",
+     lambda s: broken(s, "nvrm", "        if (!fWorkLoop) fWorkLoop = IOWorkLoop::workLoop();", "        fWorkLoop = IOWorkLoop::workLoop();")),
     ("stop() without rm_disable_adapter", "stop(): rm_disable_adapter",
      lambda s: broken(s, "nvrm", "rm_disable_adapter(NULL, &fNv);", ";")),
     ("stop() lets the timers go after the private state", "stop(): rm_disable_adapter",
