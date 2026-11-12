@@ -32,6 +32,10 @@ enum UvmPmaGpuMemoryType_tag {};
 }
 #undef NVRM
 
+// The OS layer (os-xnu2.cpp) leaves the RM's DMA interface (nv_requires_dma_remap, nv_dma_map_alloc,
+// nv_dma_unmap_alloc) to nvrm_dma.cpp and provides it nv_xnu_dma_bits_now() and nv_xnu_dma_source().
+#define NV_XNU_DMA_LAYER 1
+
 // A function without a real body was called: one log line and, once per function, its name in debug.nvrm_stub_hits
 // (nv_xnu_kcore.cpp), so a report shows which ones the RM reached without a serial log.
 extern "C" void nv_xnu_stub_note(const char *name);

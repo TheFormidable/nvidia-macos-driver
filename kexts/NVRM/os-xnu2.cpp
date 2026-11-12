@@ -66,12 +66,14 @@ NvBool NV_API_CALL os_check_access(RsAccessRight accessRight)
     return (accessRight == RS_ACCESS_PERFMON || accessRight == RS_ACCESS_NICE) ? os_is_administrator() : NV_FALSE;
 }
 NvU32  NV_API_CALL os_get_current_process_flags(void) { TRC; return 0; }
-NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *nv) { TRC; return NV_FALSE; }
 static NvU32 nv_xnu_dma_bits = 64;
+extern "C" unsigned nv_xnu_dma_bits_now(void) { return nv_xnu_dma_bits; }
+extern "C" int nvrm_dma_any_remap(void);
 void   NV_API_CALL nv_set_dma_address_size(nv_state_t *nv, NvU32 bits) { TRC; nv_xnu_dma_bits = bits; kprintf("NVRM-xnu:   dma address size %u bits\n", bits); }
 
 struct nv_xnu_alloc { IOBufferMemoryDescriptor *md; void *va; NvU64 page_size; NvU64 bytes; NvU32 page_count; NvBool contig; NvU32 cache;
-                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; int owner_pid; struct nv_xnu_alloc *prev, *next; };
+                      NvU64 *ptes; NvU32 nptes; SInt32 kmaps; NvBool freed, pinned; int owner_pid; NvU32 kind; NvBool dma32; struct nv_xnu_alloc *prev, *next; };
+static const NvU32 kNvAllocKindRm = 0x4e584131u, kNvAllocKindUser = 0x4e585531u;
 static nv_xnu_alloc *nv_xnu_live[512]; static int nv_xnu_live_n = 0;
 extern "C" int nv_xnu_kmap_overlap(NvU64 phys, NvU64 len);
 extern "C" bool nv_xnu_chat(void);
@@ -1112,6 +1114,9 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
             page_count, pageSize, contiguous, cache_type, zeroed, bytes >> 10);
     IOOptionBits opts = kIODirectionInOut | kIOMemoryKernelUserShared;
     if (contiguous || pageSize > PAGE_SIZE) opts |= kIOMemoryPhysicallyContiguous;
+    // With a DMA mapper IOKit reads "contiguous" as contiguous on the bus; the RM means contiguous in memory (it keeps
+    // one physical address for the whole allocation), which is the host-contiguous option.
+    if ((opts & kIOMemoryPhysicallyContiguous) && nvrm_dma_any_remap()) opts |= kIOMemoryHostPhysicallyContiguous;
     if (cache_type == NV_MEMORY_UNCACHED) opts |= kIOMapInhibitCache;
     else if (cache_type == NV_MEMORY_WRITECOMBINED) opts |= kIOMapWriteCombineCache;
     uint64_t mask = (nv_xnu_dma_bits >= 64) ? 0xFFFFFFFFFFFFF000ULL : ((1ULL << nv_xnu_dma_bits) - 1) & ~0xFFFULL;
@@ -1134,6 +1139,7 @@ NV_STATUS NV_API_CALL nv_alloc_pages(nv_state_t *nv, NvU32 page_count, NvU64 pag
     if (!a) { md->complete(); md->release(); return NV_ERR_NO_MEMORY; }
     nvx2_memset(a, 0, sizeof *a);
     a->md = md; a->va = va; a->page_size = pageSize; a->bytes = bytes; a->page_count = page_count; a->contig = contiguous; a->cache = cache_type;
+    a->kind = kNvAllocKindRm; a->dma32 = (nv && nv->force_dma32_alloc) ? NV_TRUE : NV_FALSE;
     a->owner_pid = proc_selfpid();  // the client whose escape triggered this allocation; 0 for a kernel-thread (RM-internal) allocation
     a->ptes = (NvU64 *)kern_os_malloc((size_t)n * sizeof(NvU64));
     if (a->ptes) { for (NvU32 i = 0; i < n; i++) a->ptes[i] = pte_array[i]; a->nptes = n; }
@@ -1198,12 +1204,6 @@ void NV_API_CALL nv_free_kernel_mapping(nv_state_t *nv, void *pAllocPrivate, voi
     if (pPrivate) nv_pm_alias_drop(pPrivate);
 }
 
-NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *dev, NvU64 page_count, NvU64 *va_array, NvBool contig, NvBool cache_type, void **priv)
-{
-    kprintf("NVRM-xnu: >nv_dma_map_alloc pages=%llu contig=%u first=0x%llx (identity)\n", page_count, contig, va_array ? va_array[0] : 0);
-    *priv = NULL; return NV_OK;
-}
-NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *dev, NvU64 page_count, NvU64 *va_array, void **priv) { TRC; return NV_OK; }
 
 // What we shipped, by name. The card verifies the signature on a GSP image itself, so this is not an
 // authorisation check; it is how the driver notices that the image on disk is not the one the package
@@ -1804,10 +1804,13 @@ NV_STATUS NV_API_CALL nv_register_user_pages(nv_state_t *nv, NvU64 page_count, N
         return NV_ERR_INVALID_ARGUMENT;
     }
     const uint64_t lim = (nv_xnu_dma_bits >= 64) ? ~0ULL : ((1ULL << nv_xnu_dma_bits) - 1);
+    // Behind a DMA mapper the GPU sees these pages through their own mapping (nv_dma_map_alloc), so where they sit in
+    // physical memory does not have to fit the GPU's address width.
+    const bool remap = nv_requires_dma_remap(nv);
     for (NvU64 i = 0; i < page_count; i++) {
         IOByteCount len = 0;
         const addr64_t ph = p->md->getPhysicalSegment((IOByteCount)(i * PAGE_SIZE), &len, kIOMemoryMapperNone);
-        if (!ph || (ph & PAGE_MASK) || ph + PAGE_SIZE - 1 > lim) {
+        if (!ph || (ph & PAGE_MASK) || (!remap && ph + PAGE_SIZE - 1 > lim)) {
             kprintf("NVRM-xnu: nv_register_user_pages page %llu/%llu phys 0x%llx refused (dma bits %u)\n", i, page_count,
                     (unsigned long long)ph, nv_xnu_dma_bits);
             return NV_ERR_INVALID_ADDRESS;
@@ -1818,6 +1821,7 @@ NV_STATUS NV_API_CALL nv_register_user_pages(nv_state_t *nv, NvU64 page_count, N
     if (!r) return NV_ERR_NO_MEMORY;
     nvx2_memset(r, 0, sizeof *r);
     r->a.bytes = page_count * PAGE_SIZE; r->a.page_count = (NvU32)page_count; r->a.page_size = PAGE_SIZE; r->a.cache = NV_MEMORY_CACHED;
+    r->a.kind = kNvAllocKindUser;
     r->pin = p; r->import_priv = import_priv;
     *priv_data = r;
     return NV_OK;
@@ -1845,6 +1849,23 @@ NV_STATUS NV_API_CALL os_unlock_user_pages(NvU64 page_count, void *page_array, N
     OSDecrementAtomic64(&nv_upin_live); OSAddAtomic64(-(SInt64)p->page_count, &nv_upin_pages);
     kern_os_free(p);
     return NV_OK;
+}
+
+// The memory behind an allocation's private data, for nvrm_dma.cpp: an RM allocation (listed, so the pointer is only
+// compared until it is known to be one) or registered user pages. Returned retained.
+IOMemoryDescriptor *nv_xnu_dma_source(void *priv, NvU64 *bytes, int *force32, int *user)
+{
+    nv_xnu_alloc *a = (nv_xnu_alloc *)priv; IOMemoryDescriptor *md = NULL; bool listed = false;
+    if (!a || !nv_pm_lock) return NULL;
+    IOSimpleLockLock(nv_pm_lock);
+    for (nv_xnu_alloc *x = nv_pm_head; x; x = x->next) if (x == a) { listed = true; break; }
+    if (listed && !a->freed && a->kind == kNvAllocKindRm && a->md) { md = a->md; md->retain(); *bytes = a->bytes; *force32 = a->dma32 ? 1 : 0; *user = 0; }
+    IOSimpleLockUnlock(nv_pm_lock);
+    if (md || listed) return md;
+    nv_xnu_ureg *r = (nv_xnu_ureg *)priv;
+    if (r->a.kind != kNvAllocKindUser || !r->pin || r->pin->magic != kNvUpinMagic || !r->pin->md) return NULL;
+    md = r->pin->md; md->retain(); *bytes = r->a.bytes; *force32 = 0; *user = 1;
+    return md;
 }
 
 }

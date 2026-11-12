@@ -201,10 +201,13 @@ __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_import_sgt(nv_dma_device_t *,
     return NV_ERR_NOT_SUPPORTED;
 }
 
-__attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *, NvU64, NvU64 *, NvBool, NvBool, void **)
+// The RM's DMA interface lives in nvrm_dma.cpp. This and nv_dma_unmap_alloc and nv_requires_dma_remap below answer
+// for a kext without it, as 2.9 did: no GPU needs its addresses remapped, so the RM uses physical addresses.
+__attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_alloc(nv_dma_device_t *, NvU64, NvU64 *, NvBool, NvBool, void **priv)
 {
     NV_XNU_STUB_HIT("nv_dma_map_alloc");
-    return NV_ERR_NOT_SUPPORTED;
+    if (priv) *priv = NULL;
+    return NV_OK;
 }
 
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_map_mmio(nv_dma_device_t *, NvU64, NvU64 *)
@@ -240,7 +243,7 @@ __attribute__((weak)) void NV_API_CALL nv_dma_release_sgt(struct sg_table *, str
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_dma_unmap_alloc(nv_dma_device_t *, NvU64, NvU64 *, void **)
 {
     NV_XNU_STUB_HIT("nv_dma_unmap_alloc");
-    return NV_ERR_NOT_SUPPORTED;
+    return NV_OK;
 }
 
 __attribute__((weak)) void NV_API_CALL nv_dma_unmap_mmio(nv_dma_device_t *, NvU64, NvU64)
@@ -587,8 +590,7 @@ __attribute__((weak)) void NV_API_CALL nv_release_mmap_lock(nv_state_t *)
 
 __attribute__((weak)) NvBool NV_API_CALL nv_requires_dma_remap(nv_state_t *)
 {
-    NV_XNU_STUB_HIT("nv_requires_dma_remap");
-    return NV_FALSE;
+    return NV_FALSE;      // asked on every allocation: the 2.9 answer, not a missing function (see nv_dma_map_alloc)
 }
 
 __attribute__((weak)) NV_STATUS NV_API_CALL nv_revoke_gpu_mappings(nv_state_t *)
