@@ -245,7 +245,10 @@ derive_paths() {
   BUILD_HOST=${NULLMOTH_BUILD_HOST:-$LOCAL_HOST}
   case "$(uname -m)" in arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
   RUST_BIN=${NULLMOTH_RUST_BIN:-$RUSTUP_DIR/toolchains/$NM_PIN_RUST_VERSION-$HOST_TRIPLE/bin}
-  STEP_PATH="$TBIN:/usr/bin:/bin:/usr/sbin:/sbin"
+  # the Python environment's own bin folder, not a link to its python3: Python finds its environment from the folder of
+  # the path it was started by (pyvenv.cfg one level up), so a python3 linked from tools/bin is the bare interpreter
+  # without mako and PyYAML, and Mesa's meson.build refuses it
+  STEP_PATH="$TBIN:$VENV/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 # Refusals that hold for every command that builds or writes (doctor reports them instead of stopping).
@@ -964,10 +967,7 @@ make_tool_links() {
   [ -n "$T_GLSLANG" ] && ln -s "$T_GLSLANG" "$TBIN/glslangValidator"
   [ -n "$T_LLVMCONFIG" ] && ln -s "$T_LLVMCONFIG" "$TBIN/llvm-config"
   [ -n "$T_LLVMSPIRV" ] && ln -s "$T_LLVMSPIRV" "$TBIN/llvm-spirv"
-  if [ -x "$VENV/bin/python3" ]; then
-    ln -s "$VENV/bin/python3" "$TBIN/python3"
-    for l in meson mako-render; do [ -x "$VENV/bin/$l" ] && ln -s "$VENV/bin/$l" "$TBIN/$l"; done
-  fi
+  # python3, meson and mako-render: from $VENV/bin, the second folder on every step's PATH (see derive_paths)
   for l in rustc cargo rustdoc; do [ -x "$RUST_BIN/$l" ] && ln -s "$RUST_BIN/$l" "$TBIN/$l"; done
   for l in bindgen cbindgen; do [ -x "$CARGO_DIR/bin/$l" ] && ln -s "$CARGO_DIR/bin/$l" "$TBIN/$l"; done
   for l in ssh rsync scp; do ln -sfn "$HERE/build/local_build_host.sh" "$THOST/$l"; done
