@@ -603,7 +603,7 @@ doctor() {   # prints; sets D_MISSING
 
 # ---------------------------------------------------------------------------------------------------------- run helpers
 TMPF=""
-tmpfile() { TMPF=${TMPF:-$(mktemp "${TMPDIR:-/tmp}/nullmoth-build.XXXXXX")}; printf '%s' "$TMPF"; }
+tmpfile() { [ -n "$TMPF" ] || die "internal: no temporary file"; printf '%s' "$TMPF"; }   # made once in main; removed on exit
 # x <command...>: run one command of a step; its output goes to the step's log (and the terminal with --verbose).
 x() {
   if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi
@@ -1491,6 +1491,7 @@ main() {
   trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
   trap on_exit EXIT
   trap on_signal INT TERM
+  TMPF=$(mktemp "${TMPDIR:-/tmp}/nullmoth-build.XXXXXX")
   case "$CMD" in
     help) cmd_help; return 0 ;;
     env) check_paths; print_env; return 0 ;;
