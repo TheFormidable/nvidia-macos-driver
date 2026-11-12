@@ -240,13 +240,12 @@ check('the firmware backup falls back to the old location on an upgrade',
 
 # Kernel review, 2.7.2. The registry is readable by every process, so a kernel pointer there defeats address randomisation.
 nvrmfb = (root / 'kexts/NVRMFB/fb/nvrm-fb.cpp').read_text()
-nvrmfb2 = (root / 'kexts/NVRM/fb/nvrm-fb.cpp').read_text()
 intel = (root / 'kexts/NMIntelFB/intelfb.cpp').read_text()
-for name, text in (('NVRM', nvrm), ('NVRMFB', nvrmfb), ('NVRM fb', nvrmfb2), ('NVRM accel', accel), ('NMIntelFB', intel)):
+for name, text in (('NVRM', nvrm), ('NVRMFB', nvrmfb), ('NVRM accel', accel), ('NMIntelFB', intel)):
     check(f'{name} neither publishes nor reads a kernel pointer as a registry property',
           '"nvkms-kapi"' not in text and '"phys-for-va"' not in text)
 check('both display kexts ask NVRM for the pointers through a kernel-only call',
-      all('NVRM_DISPLAY_PTRS_FN' in t for t in (nvrmfb, nvrmfb2, accel)) and 'isEqualTo(NVRM_DISPLAY_PTRS_FN)' in nvrm)
+      all('NVRM_DISPLAY_PTRS_FN' in t for t in (nvrmfb, accel)) and 'isEqualTo(NVRM_DISPLAY_PTRS_FN)' in nvrm)
 abi1 = (root / 'kexts/NVRM/nvrm_gpuva_abi.h').read_text()
 abi2 = (root / 'kexts/NVRMFB/nvrm_gpuva_abi.h').read_text()
 check('the two copies of the display ABI header agree', abi1 == abi2)

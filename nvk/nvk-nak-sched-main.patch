@@ -1,0 +1,168 @@
+Four NAK code generation changes from Mesa main that are in no Mesa release yet. Upstream text (MIT licence),
+unchanged, oldest first:
+  commit 5e4bcb1c nak,nvk: Increase nir_opt_peephole limit
+  commit b6b973d0 nak: Fix ready_cycle calculation in prepass sched
+  commit a79e3fc7 nak: Move FutureReadyInstr::new into postpass.rs
+  commit cb0e7868 nak: Always apply opt_fall_through
+None is specific to one GPU generation and none fixes wrong output: they change the code generated for every shader.
+Peephole limit: NIR turns an if into selects when its sides hold up to 8 cheap ALU instructions (was: moves only), for
+every stage; the chain already did that for compute shaders.
+Ready cycle: the scheduler that orders instructions before register allocation took every instruction's ready cycle
+as 0 (it read a field this pass never updates), so latencies played no part in the order; it now uses the value it
+tracks. The dependency graph is unchanged: the new order is another legal order of the same graph. The commit after
+it moves the old helper to the only pass that still uses it.
+Fall-through: a branch to the next block is removed also when jump threading changed nothing.
+This is the patch to leave out first when a rendering fault has to be narrowed down:
+NVK_SKIP_PATCHES=nvk-nak-sched-main for build/build_nvk.sh.
+
+diff --git a/src/nouveau/compiler/nak/opt_instr_sched_common.rs b/src/nouveau/compiler/nak/opt_instr_sched_common.rs
+index 152c6e4..b151975 100644
+--- a/src/nouveau/compiler/nak/opt_instr_sched_common.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_common.rs
+@@ -418,19 +418,6 @@ pub struct FutureReadyInstr {
+     pub index: usize,
+ }
+ 
+-impl FutureReadyInstr {
+-    pub fn new<E>(g: &graph::Graph<NodeLabel, E>, i: usize) -> Self {
+-        let label = &g.nodes[i].label;
+-        // NodeLabel::ready_cycle is the earliest beginning cycle for the
+-        // instruction, but we need the earliest end cycle for the instruction.
+-        let ready_cycle = label.ready_cycle.saturating_sub(label.exec_latency);
+-        FutureReadyInstr {
+-            ready_cycle: Reverse(ready_cycle),
+-            index: i,
+-        }
+-    }
+-}
+-
+ #[allow(dead_code)]
+ pub fn save_graphviz(
+     instrs: &[Box<Instr>],
+diff --git a/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs b/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs
+index 8f5ce6b..c7736ed 100644
+--- a/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_postpass.rs
+@@ -137,6 +137,20 @@ fn generate_dep_graph(sm: &ShaderModelInfo, instrs: &[Instr]) -> DepGraph {
+     g
+ }
+ 
++fn new_future_ready_instr<E>(
++    g: &graph::Graph<NodeLabel, E>,
++    i: usize,
++) -> FutureReadyInstr {
++    let label = &g.nodes[i].label;
++    // NodeLabel::ready_cycle is the earliest beginning cycle for the
++    // instruction, but we need the earliest end cycle for the instruction.
++    let ready_cycle = label.ready_cycle.saturating_sub(label.exec_latency);
++    FutureReadyInstr {
++        ready_cycle: Reverse(ready_cycle),
++        index: i,
++    }
++}
++
+ fn generate_order(
+     g: &mut DepGraph,
+     init_ready_list: Vec<usize>,
+@@ -144,7 +158,7 @@ fn generate_order(
+     let mut ready_instrs: BinaryHeap<ReadyInstr> = BinaryHeap::new();
+     let mut future_ready_instrs: BinaryHeap<FutureReadyInstr> = init_ready_list
+         .into_iter()
+-        .map(|i| FutureReadyInstr::new(g, i))
++        .map(|i| new_future_ready_instr(g, i))
+         .collect();
+ 
+     let mut current_cycle = 0u32;
+@@ -192,7 +206,7 @@ fn generate_order(
+             dep_instr.num_uses -= 1;
+             if dep_instr.num_uses == 0 {
+                 future_ready_instrs
+-                    .push(FutureReadyInstr::new(g, edge.head_idx));
++                    .push(new_future_ready_instr(g, edge.head_idx));
+             }
+         }
+     }
+diff --git a/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs b/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
+index e4fd451..689d772 100644
+--- a/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
+@@ -579,8 +579,17 @@ impl<'a> GenerateOrder<'a> {
+                 );
+                 dep_instr.num_uses -= 1;
+                 if dep_instr.num_uses <= 0 {
+-                    future_ready_instrs
+-                        .insert(FutureReadyInstr::new(g, edge.head_idx));
++                    let label = &g.nodes[edge.head_idx].label;
++                    // dep_instr.ready_cycle is the earliest beginning cycle for the
++                    // instruction, but we need the earliest end cycle for the instruction.
++                    let ready_cycle = dep_instr
++                        .ready_cycle
++                        .saturating_sub(label.exec_latency);
++
++                    future_ready_instrs.insert(FutureReadyInstr {
++                        ready_cycle: Reverse(ready_cycle),
++                        index: edge.head_idx,
++                    });
+                 }
+             }
+ 
+diff --git a/src/nouveau/compiler/nak/opt_jump_thread.rs b/src/nouveau/compiler/nak/opt_jump_thread.rs
+index b484fde..522e990 100644
+--- a/src/nouveau/compiler/nak/opt_jump_thread.rs
++++ b/src/nouveau/compiler/nak/opt_jump_thread.rs
+@@ -17,7 +17,7 @@ fn clone_branch(op: &Op) -> Op {
+     }
+ }
+ 
+-fn jump_thread(func: &mut Function) -> bool {
++fn jump_thread(func: &mut Function) {
+     // Let's call a basic block "trivial" if its only instruction is an
+     // unconditional branch. If a block is trivial, we can update all of its
+     // predecessors to jump to its sucessor.
+@@ -105,8 +105,6 @@ fn jump_thread(func: &mut Function) -> bool {
+         // We don't update the CFG above, so rewrite it if we made progress
+         rewrite_cfg(func);
+     }
+-
+-    progress
+ }
+ 
+ fn rewrite_cfg(func: &mut Function) {
+@@ -157,9 +155,8 @@ fn opt_fall_through(func: &mut Function) {
+ 
+ impl Function {
+     pub fn opt_jump_thread(&mut self) {
+-        if jump_thread(self) {
+-            opt_fall_through(self);
+-        }
++        jump_thread(self);
++        opt_fall_through(self);
+     }
+ }
+ 
+diff --git a/src/nouveau/compiler/nak_nir.c b/src/nouveau/compiler/nak_nir.c
+index f4a8abd..0422dca 100644
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -270,7 +270,7 @@ nak_optimize_nir(nir_shader *nir, const struct nak_compiler *nak)
+       LOOP_OPT(nir, nir_opt_cse);
+ 
+       nir_opt_peephole_select_options peephole_select_options = {
+-         .limit = 0,
++         .limit = 8,
+          .discard_ok = true,
+       };
+       LOOP_OPT_NOT_IDEMPOTENT(nir, nir_opt_peephole_select,
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index 97555bd..195dc27 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -1304,7 +1304,7 @@ nir_opts(nir_shader *nir, void *data)
+ 
+       NIR_PASS(progress, nir, nir_opt_peephole_select,
+                &(nir_opt_peephole_select_options){
+-                  .limit = 0,
++                  .limit = 8,
+                   .discard_ok = true,
+                });
+ 
