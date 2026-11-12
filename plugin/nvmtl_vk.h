@@ -20,6 +20,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_page_life.h"
 #include "nvmtl_live.h"
 #include "nvmtl_slots.h"
+#include "nvmtl_fence.h"
 #include "nvmtl_nvk_layout.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
@@ -563,4 +564,17 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane);
 int nvmtl_vk_surface_dirty_try(uint32_t surfaceID, uint32_t plane);
 uint32_t nvmtl_vk_surface_gpu_mark(uint32_t surfaceID, int pending);
+/* The kernel surface fence (nvmtl_fence.h; NVRM.kext through NVK's nvmtl_nvk_fence_v1). Each is a no-op, and the
+   older busy tags and pending marks stay in charge, when NVK or the kext has no fence or the kernel refuses the hold.
+   open: one command buffer's holds at commit (clears the calling thread's record first, always); arm: the holds whose
+   last writer is `part`, with that part's fence; close: one surface of a hold; close_all: what is left of it (every
+   command buffer, every path); wait: a reader of an application surface whose tag says the kernel holds it, 1 = done
+   waiting; wait_compositor: a reader of a surface WindowServer may still be drawing; tag_word: the busy tag's pad. */
+void     nvmtl_vk_fence_open(nvmtl_fence_hold *h, uint32_t flags);
+void     nvmtl_vk_fence_arm(const nvmtl_fence_hold *h, uint32_t part, const nvmtl_inflight *f);
+void     nvmtl_vk_fence_close(uint64_t cookie, uint32_t sid);
+void     nvmtl_vk_fence_close_all(nvmtl_fence_hold *h);
+int      nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid);
+void     nvmtl_vk_fence_wait_compositor(uint32_t sid);
+uint32_t nvmtl_vk_fence_tag_word(uint32_t sid);
 int nvmtl_vk_accel_surface_wait(void);
