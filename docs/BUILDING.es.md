@@ -91,7 +91,7 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
 | `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM |
-| `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts |
+| `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
 | `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`; `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
 <!-- end -->
@@ -238,7 +238,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `offline, and ... is not in ... yet` | `--offline` antes de cualquier `fetch` | Ejecuta `./build.sh fetch` una vez con red |
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
 | `<componente> needs: GNU-patch Python-3.10 ...` | Falta una herramienta | `./build.sh deps` |
-| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo, aunque sea dentro de una palabra. `build.sh` vuelve a buscarlo como palabra completa y sigue si no aparece (el registro dice "Accepted."); el código 6 queda solo si aparece como palabra completa | Mira las líneas que muestra el registro. Si el nombre es una palabra común (user, mac, admin), compila desde otra cuenta o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
+| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo como palabra completa (no dentro de otra palabra) | El registro da la orden que muestra esas líneas. Si el nombre es una palabra común (user, mac, admin), compila desde otra cuenta o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |
