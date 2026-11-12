@@ -1001,6 +1001,10 @@ def dry_problems(sb, args):
         p.append(f"files changed: {d[:6]}")
     if mutating(sb.jlines()):
         p.append(f"ran: {mutating(sb.jlines())[:4]}")
+    # "brew info" can download Homebrew's formula list into its cache, outside the working directory
+    asked = [l for l in sb.jlines() if l.startswith("brew ") and l not in ("brew --version", "brew --prefix")]
+    if asked:
+        p.append(f"asked Homebrew: {asked[:3]}")
     return p, out
 
 
@@ -1016,6 +1020,9 @@ def arm_dryrun(mac):
     with mac.scratch():
         mac.break_script('  if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi\n', '')
         negative("a dry run that runs the commands", dry_problems(mac, ["-n", "--force", "build", "fb"])[0])
+    with sb.scratch():
+        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then', 'elif false; then')
+        negative("a dry run that asks Homebrew for its LLVM formulas", dry_problems(sb, ["--dry-run", "all"])[0])
 
 
 def order_problems(sb, args, expect):

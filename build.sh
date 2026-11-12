@@ -887,7 +887,12 @@ cmd_deps() {
   [ -n "$T_GLSLANG" ] || want+=( glslang )
   [ -n "$PC_SPIRV_TOOLS" ] || want+=( spirv-tools )
   [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of | { read -r v; ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"; } || want+=( "$NM_PIN_TOOL_PYTHON_FORMULA" )
+  # a dry run does not ask Homebrew which LLVM formula it has: "brew info" may download Homebrew's formula list into
+  # its cache, outside the working directory, and a dry run changes nothing
   if [ -z "$LLVM_PREFIX" ] && [ "$nobrew" = 1 ]; then want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
+  elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then
+    want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
+    say "    (dry run: Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
   elif [ -z "$LLVM_PREFIX" ]; then
     llvmf=""
     if brew_formula_exists "llvm@$NM_PIN_TOOL_LLVM_MAJOR"; then llvmf=llvm@$NM_PIN_TOOL_LLVM_MAJOR
@@ -897,7 +902,7 @@ cmd_deps() {
   fi
   # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22. Otherwise
   # deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
-  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
+  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && [ "$NM_DRY_RUN" = 0 ] && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
     want+=( spirv-llvm-translator )
   fi
   if [ ${#want[@]} -gt 0 ]; then
