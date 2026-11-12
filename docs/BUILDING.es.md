@@ -9,7 +9,7 @@ comandos y opciones y la solución de problemas.
 > **Escrito y probado sin un Mac.** `./build.sh` se ha ejecutado en un solo Mac (Intel, macOS 26.7, Xcode 26.5), y solo
 > en parte: funcionaron `doctor`, `env`, `--dry-run` y `fetch`, y compiló el plugin, la biblioteca de vídeo (y el RM por
 > el camino) y las herramientas pequeñas; los kexts se detuvieron en su comprobación de GNU patch y Python 3.10, que ese
-> Mac no tenía. Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
+> Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
 > sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
 > (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
 > `--dry-run`. `deps` no ha instalado nada real, no ha compilado NVK ni el traductor y no ha preparado ningún paquete.
