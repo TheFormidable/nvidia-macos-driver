@@ -15,6 +15,7 @@ fixture=r'''
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include "nvmtl_fence.h"
 // the process is WindowServer; the kernel's answer to the marks is markAnswer (-1 = an accelerator without them, the
 // default for the first arms; 0 = taken), and every mark is logged as "id:pending"
 static const char *test_progname(void){return "WindowServer";}
@@ -30,6 +31,12 @@ struct __IOSurface {unsigned id,seed;};
 static int dirtyBumpsSeed, dirtyCalls; static struct __IOSurface *dirtySurface;
 static int nvmtl_vk_surface_dirty(uint32_t s,uint32_t p){(void)p;dirtyCalls++;if(dirtyBumpsSeed&&dirtySurface&&dirtySurface->id==s)dirtySurface->seed++;return 0;}
 static void nvtrace(const char *f,...){(void)f;}
+// the kernel surface fence (nvmtl_vk.c): every open is counted with its flags and takes nothing, so the marks below are
+// exactly the older mechanism's; tools/test_fence_vk_calls.py proves what a taken hold changes
+static unsigned fenceOpens; static uint32_t fenceFlags;
+static void nvmtl_vk_fence_open(nvmtl_fence_hold *h,uint32_t flags){fenceOpens++;fenceFlags=flags;h->cookie=0;}
+static void nvmtl_vk_fence_close(uint64_t cookie,uint32_t sid){(void)cookie;(void)sid;}
+static void nvmtl_vk_fence_close_all(nvmtl_fence_hold *h){h->cookie=0;}
 // cross-process busy marks (PR #398) are off in WindowServer, which this test runs as; the consumer side is covered
 // by test_surface_publication.py
 static int busyWrites;
@@ -42,7 +49,7 @@ static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 - (BOOL)nvmtlSurfaceOut{return YES;}
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{(void)dirtied;return YES;}
 @end
-@interface NVMTLCommandBuffer:NSObject{@public id _queue;NSArray *_parts;NSDictionary *_busyMarks;}@end
+@interface NVMTLCommandBuffer:NSObject{@public id _queue;NSArray *_parts;NSDictionary *_busyMarks;nvmtl_fence_hold _fence;}@end
 @implementation NVMTLCommandBuffer @end
 @interface NVMTLSubmissionPart:NSObject{@public NSSet *surfaces;}@end
 @implementation NVMTLSubmissionPart @end
@@ -85,6 +92,9 @@ int main(void){@autoreleasepool{
  unsigned seed0=surface.seed;
  COMMIT(w1);
  assert([markLog containsObject:@"4:1"]);        // pending in the kernel either way
+ // the commit asks the kernel fence for a compositor hold of the surface it writes, ended by the GPU itself only with the
+ // early ordering
+ assert(fenceOpens==1&&fenceFlags==(NVMTL_FENCE_F_COMPOSITOR|(half?NVMTL_FENCE_F_AUTO:0u))&&w1->_fence.n==1&&w1->_fence.sid[0]==4);
  if(half){
   // the capture fix: device-current at commit, which moves the seed, and the record must be stamped after that move,
   // or the next command buffer reads the surface as if its write had landed and imports the CPU copy over the GPU's
@@ -143,6 +153,6 @@ assert pend.index('nvmtl_vk_surface_dirty(')<pend.index('nvmtl_ws_mark(n.unsigne
 print('PASS: production commit order: kernel marks outside the class lock, VRAM marks before pending marks, records after both')
 with tempfile.TemporaryDirectory() as d:
  p=pathlib.Path(d);(p/'test.m').write_text(fixture+helpers+checks)
- subprocess.run(['clang','-fobjc-arc','-framework','Foundation',str(p/'test.m'),'-o',str(p/'test')],check=True)
+ subprocess.run(['clang','-fobjc-arc','-I',str(root/'plugin'),'-framework','Foundation',str(p/'test.m'),'-o',str(p/'test')],check=True)
  import os
  for half in ('1','0'): subprocess.run([str(p/'test')],check=True,env=dict(os.environ,KERNEL_HALF=half))
