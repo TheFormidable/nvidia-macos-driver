@@ -3,11 +3,14 @@
 
 Ada had no hardware encoder and no VP9 or AV1 decoder because the library registered only when a user switched it on in
 nvrm610.conf; and Safari, QuickTime and FaceTime, which decode inside VTDecoderXPCService, never saw it because that
-process registered only the built-in decoders. The selection function is compiled out of the plugin source and run
-on a table; the decode service's wiring is checked in the text around it.
+process registered only the built-in decoders. On Blackwell (RTX 50) the library is asked for in that one process and
+nowhere else: there the built-in H.264 decoder's picture comes out green, and the library registers its own only after
+the card has decoded its test streams (tools/test_nvencvt_blackwell.py holds that part). A library built before that
+test existed is refused on Blackwell: the plugin looks up the marker a tested build exports. The selection function is
+compiled out of the plugin source and run on a table; the decode service's wiring is checked in the text around it.
 
 usage: test_nvencvt_selection.py [repo root]"""
-import pathlib, platform, shutil, subprocess, sys, tempfile
+import pathlib, shutil, subprocess, sys, tempfile
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 src = (root / 'plugin/NVMTLDevice.m').read_text()
@@ -29,10 +32,20 @@ def function(signature):
 
 sel = function('static bool nvmtl_nvencvt_selected(')
 gen = function('static bool nvmtl_gen_is(')
+dsv = function('static bool nvmtl_is_decode_service(')
 check('the plugin has a selection function for libnvencvt', sel is not None)
 
-if sel and shutil.which('clang') and platform.system() == 'Darwin':
-    harness = ('#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n' + gen + sel +
+cc = shutil.which('clang') or shutil.which('cc') or shutil.which('gcc')
+if sel and not cc:
+    print('not run: the selection table needs a C compiler')
+if sel and cc:
+    # the function is plain C over libc; strlcpy is the one call a C library other than Apple's may not have
+    harness = ('#include <stdbool.h>\n#include <stdio.h>\n#include <string.h>\n'
+               '#ifndef __APPLE__\n'
+               'static size_t test_strlcpy(char *d, const char *s, size_t n)\n'
+               '{ size_t l = strlen(s); if (n) { size_t c = l < n - 1 ? l : n - 1; memcpy(d, s, c); d[c] = 0; } return l; }\n'
+               '#define strlcpy test_strlcpy\n'
+               '#endif\n' + (gen or '') + (dsv or '') + sel +
                'int main(void) {\n'
                '  const char *sels[] = { NULL, "", "0", "1", "obs,Parsec", "VTDecoderXPCService" };\n'
                '  const char *gens[] = { "Ada", "Ampere", "Blackwell", "Turing GTX 16", "Turing", NULL };\n'
@@ -43,7 +56,7 @@ if sel and shutil.which('clang') and platform.system() == 'Darwin':
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         (d / 'h.c').write_text(harness)
-        r = subprocess.run(['clang', '-o', str(d / 'h'), str(d / 'h.c')], capture_output=True, text=True)
+        r = subprocess.run([cc, '-o', str(d / 'h'), str(d / 'h.c')], capture_output=True, text=True)
         check('the selection function compiles on its own', r.returncode == 0, r.stderr.strip()[-300:])
         if r.returncode == 0:
             out = subprocess.run([str(d / 'h')], capture_output=True, text=True).stdout.split('\n')
@@ -52,9 +65,11 @@ if sel and shutil.which('clang') and platform.system() == 'Darwin':
             # gens: 0 Ada, 1 Ampere, 2 Blackwell, 3 Turing GTX 16, 4 Turing, 5 none published
             # procs: 0 Parsec, 1 VTDecoderXPCService, 2 Safari
             check('unset: Ada and Ampere get the codecs in every process', all(got[(0, g, p)] for g in (0, 1) for p in range(3)))
-            check('unset: Blackwell, Turing and an unknown card get nothing', not any(got[(0, g, p)] for g in (2, 3, 4, 5) for p in range(3)))
+            check('unset: Blackwell gets the library in the decode service and in no other process',
+                  got[(0, 2, 1)] and not got[(0, 2, 0)] and not got[(0, 2, 2)])
+            check('unset: Turing and an unknown card get nothing', not any(got[(0, g, p)] for g in (3, 4, 5) for p in range(3)))
             check('an empty value is the same as unset', all(got[(1, g, p)] == got[(0, g, p)] for g in range(6) for p in range(3)))
-            check('0 turns it off everywhere, Ada included', not any(got[(2, g, p)] for g in range(6) for p in range(3)))
+            check('0 turns it off everywhere, Ada and Blackwell\'s decode service included', not any(got[(2, g, p)] for g in range(6) for p in range(3)))
             check('1 turns it on for every card and process, GTX 16 included', all(got[(3, g, p)] for g in range(6) for p in range(3)))
             check('a list registers only in the processes it names', got[(4, 0, 0)] and not got[(4, 0, 1)] and not got[(4, 0, 2)])
             check('naming the decode service registers there and nowhere else', got[(5, 5, 1)] and not got[(5, 0, 0)])
@@ -62,6 +77,12 @@ if sel and shutil.which('clang') and platform.system() == 'Darwin':
 reg = function('static void nvmtl_nvencvt_register(')
 svc = function('static void nvmtl_nvdec_in_decode_service(')
 check('the registrar can register decoders alone', reg is not None and 'NVEncVT_RegisterDecoders' in reg)
+# On Blackwell the library is asked for by default, which is only right beside a build that tests its decoder on the
+# card before it registers; an older libnvencvt.dylib registered it untested. Such a build exports no marker.
+check('on Blackwell the registrar refuses a library without the decode self-test, before it looks up an entry point',
+      reg is not None and 'dlsym(h, "NVEncVT_BlackwellSelfTest")' in reg and 'nvmtl_gen_is(gen, "Blackwell")' in reg
+      and reg.index('dlopen(path') < reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")') < reg.index('dlsym(h, entry)')
+      and 'REFUSED' in reg[reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")'):reg.index('dlsym(h, entry)')])
 check('the decode service asks for libnvencvt after the built-in decoders',
       svc is not None and 'nvmtl_nvencvt_register(true)' in svc
       and svc.index('nvmtl_nvdec_hevc_register()') < svc.index('nvmtl_nvencvt_register(true)'))

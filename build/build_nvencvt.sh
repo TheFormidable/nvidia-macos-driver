@@ -4,6 +4,10 @@
 # NVMTLDriver.bundle/Contents/MacOS/, root-owned; the plugin refuses it otherwise.
 # The headers it needs are fetched once into $NULLMOTH_BUILD_ROOT/build/nvencvt-headers at the pinned revisions
 # listed in vendor/nvenc/SOURCE.
+# Those headers are 610.57.04 and the kernel module's RM is 620.70.06, so before compiling, every name the library
+# takes from them is compared with the tree the kernel module is built from (tools/nvencvt_header_abi.py): on the
+# build Mac $NM_OGKM620, else $NM_OGKM620_PRISTINE, with the defaults of build_release_inputs.sh. A difference stops
+# the build (exit 3). With neither tree there the build goes on and says that the comparison was skipped.
 set -euo pipefail
 REV=${1:?git revision}; OUT=${2:?output directory}
 H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
@@ -15,7 +19,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" vendor/nvenc | tar x -C "$TMP"
 VER=$(git -C "$HERE" describe --tags --always "$REV" 2>/dev/null || git -C "$HERE" rev-parse --short "$REV")
-ssh "$H" "rm -rf $R/src $R/out && mkdir -p $R/src $R/out $HDR"
+ssh "$H" "rm -rf $R/src $R/out $R/tools && mkdir -p $R/src $R/out $R/tools $HDR"
 rsync -a "$TMP/vendor/nvenc/" "$H:$R/src/"
 ssh "$H" "set -e; cd $HDR
   fetch() {   # fetch <dir> <url> <rev> <sparse paths...>
@@ -29,6 +33,22 @@ ssh "$H" "set -e; cd $HDR
   for f in CMBaseObjectSPI.h VTVideoDecoderSPI.h; do
     [ -s webkit-spi/\$f ] || curl -fsSL -o webkit-spi/\$f https://raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit/\$f
   done"
+# A struct or a constant that differs between the two header versions changes what the library sends to RM, and
+# neither side's compiler can see it.
+K620=${NM_OGKM620:-$BASE/build/rm620/ogkm-620.70.06}
+K620P=${NM_OGKM620_PRISTINE:-$BASE/build/ogkm620/open-gpu-kernel-modules-620.70.06}
+if git -C "$HERE" cat-file -e "$REV:tools/nvencvt_header_abi.py" 2>/dev/null; then
+  git -C "$HERE" archive "$REV" tools/nvencvt_header_abi.py tools/nvk_header_abi.py | tar x -C "$TMP"
+  rsync -a "$TMP/tools/" "$H:$R/tools/"
+  rc=0
+  ssh "$H" "for t in $K620 $K620P; do
+      [ -d \$t/src/common/sdk/nvidia/inc ] && exec python3 $R/tools/nvencvt_header_abi.py --source $R/src $HDR/ogkm \$t
+    done
+    echo 'header comparison SKIPPED: no open-gpu-kernel-modules 620.70.06 tree at $K620 or $K620P'" || rc=$?
+  [ "$rc" = 0 ] || { echo "STOP: the header comparison failed (exit $rc: 1 = a name libnvencvt uses differs, see above; other = it could not run)"; exit 3; }
+else
+  echo "header comparison SKIPPED: $REV has no tools/nvencvt_header_abi.py"
+fi
 ssh "$H" "cd $R/src && xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -Wall -fvisibility=hidden -dynamiclib -DNVENC_VERSION='\"$VER\"' \
   -o ../out/libnvencvt.dylib vt/nvencvt.c vt/nvencvt_dec.c src/*.c -I src -I $HDR/webkit-spi \
   -I $HDR/ogkm/src/common/sdk/nvidia/inc -I $HDR/ogkm/src/nvidia/arch/nvalloc/unix/include -I $HDR/ogd/classes/video \
@@ -41,8 +61,9 @@ scp -q "$H:$R/out/libnvencvt.dylib" "$H:$R/out/build.err" "$OUT/"
 bash "$HERE/build/warn_ceiling.sh" nvencvt "$(grep -c ': warning:' "$OUT/build.err" || true)" "$OUT/build.err" || exit 4
 minos=$(vtool -show-build "$OUT/libnvencvt.dylib" | awk '/minos/{print $2; exit}')
 [ "$minos" = 15.0 ] || { echo "STOP: minos $minos, not 15.0"; exit 1; }
-# only the four entry points leave the library: the plugin looks up two, VideoToolbox is handed the other two
-want="_NVDecVT_CreateInstance _NVEncVT_CreateInstance _NVEncVT_Register _NVEncVT_RegisterDecoders"
+# only the four entry points and one marker leave the library: the plugin looks up two entry points, VideoToolbox is
+# handed the other two, and the marker tells the plugin that this build tests its Blackwell decoder before it registers
+want="_NVDecVT_CreateInstance _NVEncVT_BlackwellSelfTest _NVEncVT_CreateInstance _NVEncVT_Register _NVEncVT_RegisterDecoders"
 have=$(nm -gU "$OUT/libnvencvt.dylib" | awk '{print $3}' | sort | tr '\n' ' ' | sed 's/ $//')
 [ "$have" = "$want" ] || { echo "STOP: exports are [$have], want [$want]"; exit 1; }
 echo "libnvencvt $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$OUT/libnvencvt.dylib" | cut -c1-8) minos $minos warnings $(grep -c ': warning:' "$OUT/build.err" || true)"
