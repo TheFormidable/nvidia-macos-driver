@@ -233,10 +233,12 @@ set_defaults() {
   fi
 }
 
-# Paths everything else uses. NULLMOTH_BUILD_ROOT is the folder the existing scripts default their trees under.
+# Paths everything else uses. NULLMOTH_BUILD_ROOT is the folder the existing scripts default their trees under: they
+# put them in its subfolder "build" (build/rm620, build/ogkm620, build/gpu-src, build/nvencvt-headers, build/plugin-*,
+# build/xlate-release), so it is the working directory itself and the trees land in <work>/build/..., not deeper.
 derive_paths() {
   W=$NM_WORK
-  R=${NULLMOTH_BUILD_ROOT:-$W/build}
+  R=${NULLMOTH_BUILD_ROOT:-$W}
   O=$W/out
   SRC=$W/src
   TOOLS=$W/tools
@@ -1544,13 +1546,18 @@ print_env() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- clean
+# Before NULLMOTH_BUILD_ROOT defaulted to the working directory, the trees were in <work>/build/build; nothing uses
+# that folder now.
+old_layout_rm() { [ -n "${NULLMOTH_BUILD_ROOT:-}" ] || [ ! -e "$W/build/build" ] || safe_rm "$W/build/build"; }
 cmd_clean() {
   local what=${1:-outputs}
   [ -d "$W" ] || { say "nothing to clean: $W does not exist"; return 0; }
   [ -f "$W/$MARKER" ] || die "$W has no $MARKER marker; build.sh deletes nothing there"
   case "$what" in
-    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt" ;;
-    sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS" ;;
+    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt"
+             old_layout_rm ;;
+    sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS"
+             old_layout_rm ;;
     tools)   safe_rm "$TOOLS" "$STAMPS" ;;
     all)     ask "Delete everything in $W (sources, tools, outputs)?" || { say "nothing deleted"; return 0; }
              local p; for p in "$W"/* "$W"/.[!.]*; do [ -e "$p" ] || continue; [ "$p" = "$W/$MARKER" ] || [ "$p" = "$W/build.lock" ] || safe_rm "$p"; done ;;

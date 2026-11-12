@@ -73,10 +73,29 @@ folder that carries that mark.
 | Rust 1.98.1 with the x86_64-apple-darwin target, bindgen-cli 0.73.2, cbindgen 0.29.4 (rustup-init 1.29.3, SHA-256 checked, run with `--no-modify-path`) | `<workdir>/tools/rustup` (RUSTUP_HOME), `<workdir>/tools/cargo` (CARGO_HOME) |
 | Links to exactly the tools the build may use; the first folder on every step's PATH, followed by the Python environment's `bin` (Homebrew's `bin` never is on it) | `<workdir>/tools/bin` |
 | `ssh`, `rsync`, `scp` that act on this Mac (see [Components](#components-and-their-order)) | `<workdir>/tools/host` |
-| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers | `<workdir>/src`, and `<workdir>/build/build/...` in the layout the build scripts already expect under `NULLMOTH_BUILD_ROOT` |
+| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers | `<workdir>/src`, and `<workdir>/build/...` in the layout the build scripts already expect (see below) |
 | Outputs | `<workdir>/out` (kexts in `out/kexts`, NVK in `out/nvk`, and so on) |
 | One log per step, one stamp per step, failure reports | `<workdir>/logs`, `<workdir>/stamps`, `<workdir>/reports` |
 | The staged package and its tarball | `<workdir>/package/pkgroot`, `<workdir>/package/nullmoth-nvidia-local-<commit>.tar.gz` |
+
+### The working directory's layout
+
+`build.sh` gives the build scripts `NULLMOTH_BUILD_ROOT=<workdir>`. The scripts that came with 2.9 put their trees in
+a folder `build` under it, with names they fix themselves:
+
+| Folder | What | Named by |
+|---|---|---|
+| `<workdir>/build/ogkm620/open-gpu-kernel-modules-620.70.06` | NVIDIA's 620.70.06 tree as fetched, never changed | build_release_inputs.sh |
+| `<workdir>/build/ogkm620/open-gpu-kernel-modules-610.57.04` | NVIDIA's **610.57.04** tree (for NVK). It sits in a folder called `ogkm620` because build_release_inputs.sh puts it there; the name is kept so that the scripts and `build.sh` agree | build_release_inputs.sh |
+| `<workdir>/build/rm620/ogkm-620.70.06` | The patched 620.70.06 copy in which RM and modeset are built | build_release_inputs.sh, build_nvencvt.sh |
+| `<workdir>/build/gpu-src/mesa` | The Mesa clone | build_release_inputs.sh, build_plugin_*.sh |
+| `<workdir>/build/nvencvt-headers`, `<workdir>/build/nvencvt` | NVENC headers and the libnvencvt build | build_nvencvt.sh |
+| `<workdir>/build/plugin-release`, `plugin-dev`, `xlate-release` | Copies of the plugin and translator sources and their builds | build_plugin_*.sh, build_xlate_release.sh |
+
+An earlier `build.sh` gave the scripts `NULLMOTH_BUILD_ROOT=<workdir>/build`, so these folders were in
+`<workdir>/build/build/...`. Nothing uses that folder now: `./build.sh clean` (or `clean sources`) deletes it, and the
+next `fetch` lays the sources out again (the downloads in `<workdir>/src` are reused). A `NULLMOTH_BUILD_ROOT` you set
+yourself is used as it is.
 
 `build.sh` itself writes nothing to your shell start files, `~/.cargo`, `~/.rustup`, `/Library` or `/usr/local`
 (on an Intel Mac, `/usr/local` is Homebrew's prefix, so the formulas Homebrew installs land there). A `RUSTUP_HOME` or
@@ -156,7 +175,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_PYTHON` | found | A Python 3.10 or newer to make the virtual environment with |
 | `NM_LLVM_PREFIX` | Homebrew's `llvm@22` or `llvm` | An LLVM 22.x with its clang libraries, when Homebrew has none |
 | `NM_OGKM620_PRISTINE` | fetched | An unpacked NVIDIA 620.70.06 tree to use instead of fetching (checked by its `version.mk`) |
-| `NM_OGKM620` | `<workdir>/build/build/rm620/ogkm-620.70.06` | A 620.70.06 tree whose RM and modeset archives are already built: the `rm` and `kms` steps are then skipped |
+| `NM_OGKM620` | `<workdir>/build/rm620/ogkm-620.70.06` | A 620.70.06 tree whose RM and modeset archives are already built: the `rm` and `kms` steps are then skipped |
 | `NM_OGKM610` | fetched | An unpacked NVIDIA 610.57.04 tree to use instead of fetching |
 | `NM_MESA_GIT` | fetched | A Mesa clone that holds commit 90a959eb (mesa-26.3.0-rc3). The release plugin takes its Vulkan headers from that clone's work tree |
 | `NM_VULKAN_INCLUDE` | Mesa's `include` | Vulkan headers for the development plugin |
