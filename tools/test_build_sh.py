@@ -166,6 +166,7 @@ case "$role" in
       fetch|--version) : ;;
       *) exit 1 ;;
     esac ;;
+  strings) cat "${@: -1}" ;;   # the stand-in archives are text
   otool) printf '%s:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n' "${2:-x}"; cat "$S/otool-extra" 2>/dev/null ;;
   sudo) echo "stand-in sudo: build.sh must never call sudo" >&2; exit 1 ;;
   plain) : ;;
@@ -199,6 +200,17 @@ mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"
 case $key in
   rm) mk "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
   kms) mk "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
+esac
+# the end of build_rm620.sh / build_kms620.sh when their substring search finds the account or host name: the archive is
+# written, then exit 6 (ctl/personal-<key> holds the archive's text)
+case $key in
+  rm|kms) if [ -f "$SB/ctl/personal-$key" ]; then
+            a=$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a
+            [ $key = kms ] && a=$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a
+            cp "$SB/ctl/personal-$key" "$a"; echo "STOP: 1 personal string(s) in ${a##*/}"; exit 6
+          fi ;;
+esac
+case $key in
   nvrm) mk "$3/NVRM.kext/Contents/MacOS/NVRM" ;;
   fb) mk "$2/NVRMFB.kext/Contents/MacOS/NVRMFB" ;;
   accel) mk "$2/15/NVAccel.kext/Contents/MacOS/NVAccel"; mk "$2/26/NVAccel.kext/Contents/MacOS/NVAccel" ;;
@@ -228,8 +240,9 @@ REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", 
               "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
               "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more"]
 STANDINS = {"uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
-            "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo"}
-PLAIN = ["codesign", "plutil", "ditto", "md5", "xattr", "strings", "lipo", "vtool", "nm", "dwarfdump", "kmutil", "clang",
+            "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo",
+            "strings": "strings"}
+PLAIN = ["codesign", "plutil", "ditto", "md5", "xattr", "lipo", "vtool", "nm", "dwarfdump", "kmutil", "clang",
          "clang++", "cc", "install_name_tool", "libtool", "strip", "ssh", "rsync", "scp"]
 
 TMP = pathlib.Path(os.path.realpath(tempfile.mkdtemp(prefix="nmbuildsh-")))
@@ -1025,6 +1038,90 @@ def arm_failure(mac):
         negative("a report that keeps the home path", report_problems(mac, link))
 
 
+def stale_problems(sb):
+    """build_nvk.sh fails after an earlier good build left its library: the step must fail and keep no stamp."""
+    (sb.co / "build/build_nvk.sh").write_text((sb.co / "build/build_nvk.sh").read_text() + "# changed\n")
+    (sb.ctl / "fail-nvk").write_text("")
+    sb.clear()
+    rc, out = sb.run("build", "nvk")
+    (sb.ctl / "fail-nvk").unlink()
+    p = []
+    if rc == 0:
+        p.append("exit 0 although build_nvk.sh failed")
+    if "step 'nvk' failed" not in out:
+        p.append("no message naming the failed step")
+    if (sb.work / "stamps/nvk").exists():
+        p.append("nvk was stamped as built from the changed script, with the previous build's library")
+    return p, out
+
+
+def personal_problems(sb, text, accept):
+    """build_rm620.sh's exit 6 for the account or host name: accepted only when no whole word matches."""
+    (sb.ctl / "personal-rm").write_text(text)
+    sb.clear()
+    rc, out = sb.run("--force", "build", "rm")
+    (sb.ctl / "personal-rm").unlink()
+    log = (sb.work / "logs/rm.log").read_text() if (sb.work / "logs/rm.log").exists() else ""
+    p = []
+    if accept and (rc != 0 or "Accepted." not in log or not (sb.work / "stamps/rm").exists()):
+        p.append(f"a name found only inside other words stopped the build (exit {rc})")
+    if not accept and (rc == 0 or (sb.work / "stamps/rm").exists() or "as a whole word" not in log):
+        p.append(f"a whole-word account name in the archive was accepted (exit {rc})")
+    return p, out + log[-600:]
+
+
+def python_problems(sb):
+    """the python3 a step finds on its PATH must be the virtual environment's: Python looks for pyvenv.cfg next to the
+    folder of the path it was started by, without resolving links."""
+    p = []
+    steps = [s for s in sb.steps() if s[0] in ("nvk", "rm")]
+    if not steps:
+        return ["no nvk or rm step ran"]
+    for key, _, env in steps:
+        found = None
+        for d in env.get("PATH", "").split(":"):
+            c = pathlib.Path(d) / "python3"
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                found = c
+                break
+        if not found:
+            p.append(f"{key}: no python3 on the step's PATH")
+        elif not (found.parent.parent / "pyvenv.cfg").exists():
+            p.append(f"{key}: python3 on PATH is {found}, which Python does not run as the environment (no pyvenv.cfg one level up)")
+    return p
+
+
+def arm_steps(mac):
+    with mac.scratch():
+        p, out = stale_problems(mac)
+        check("a build script that fails stops its step, even when a previous build left an output behind", not p, (p, out[-700:]))
+    with mac.scratch():
+        mac.break_script('  [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"\n}', '  return "$rc"\n}')
+        negative("a step that goes on after its build script failed", stale_problems(mac)[0])
+    acct = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip() or "root"
+    with mac.scratch():
+        p, out = personal_problems(mac, f"Most {acct}ly the GPU stopped\n", accept=True)
+        check("build_rm620.sh's exit 6 for the account name inside another word is checked again and accepted",
+              not p, (p, out[-900:]))
+        p, out = personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)
+        check("an account name as a whole word (a home path) still stops the build", not p, (p, out[-900:]))
+    with mac.scratch():
+        mac.break_script('  if [ "${n:-0}" = 0 ]; then', '  if true; then')
+        negative("a recheck that accepts a whole-word account name", personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)[0])
+    with mac.scratch():
+        mac.clear()
+        mac.run("--force", "build", "rm", "nvk")
+        p = python_problems(mac)
+        check("the python3 every step finds is the virtual environment's (mako, PyYAML for Mesa)", not p, p)
+    with mac.scratch():
+        mac.break_script('  STEP_PATH="$TBIN:$VENV/bin:', '  STEP_PATH="$TBIN:')
+        mac.break_script('  # python3, meson and mako-render: from $VENV/bin',
+                         '  ln -s "$VENV/bin/python3" "$TBIN/python3"\n  #')
+        mac.clear()
+        mac.run("--force", "build", "rm", "nvk")
+        negative("python3 linked into tools/bin (the bare interpreter, not the environment)", python_problems(mac))
+
+
 def wait_for(path, timeout=60):
     t0 = time.time()
     while not path.exists():
@@ -1598,7 +1695,7 @@ def main():
             arm_hosts(commits)
         if want("deps"):
             arm_deps_control()
-        mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "interrupt", "concurrent",
+        mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
                     "test", "package", "clean"]
         if any(want(a) for a in mac_arms):
             mac = Sandbox("mac", formulas=("cmake",))
@@ -1608,7 +1705,7 @@ def main():
                 arm_offline(mac)
             arm_order(mac)
             for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
-                             ("failure", arm_failure), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
+                             ("failure", arm_failure), ("steps", arm_steps), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
                              ("test", arm_test_cmd), ("package", arm_package), ("clean", arm_clean)):
                 if want(name):
                     fn(mac)
