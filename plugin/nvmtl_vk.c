@@ -2982,10 +2982,12 @@ void nvmtl_vk_fence_close_all(nvmtl_fence_hold *h)
 }
 /* A reader of another process's write whose tag says the kernel holds it: 1 = go on, 0 = the older wait on the tag
    decides (nvmtl_fence_wait_handled: only an answer that the write is complete, or a wait that already lasted as long
-   as the older poll, ends it here). */
+   as the older poll, ends it here). `pid` is the writer the tag names: the kernel then looks at that process's holds
+   only, so never at the caller's own. A tag that names no writer is not asked, because the kernel reads pid 0 as "any
+   process", the caller included. */
 int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
 {
-    if (!sid || !nvmtl_vk_fence_ready(0)) return 0;
+    if (!sid || !pid || !nvmtl_vk_fence_ready(0)) return 0;
     const uint8_t mask = (uint8_t)planes;
     uint32_t out[6] = { 0, 0, 0, 0, 0, 0 };
     const uint32_t st = nvmtl_vk_fence_call(NVMTL_FENCE_OP_WAIT, 0, 0, 1, &sid, &mask, VK_NULL_HANDLE, pid, NVMTL_FENCE_WAIT_MS, out);
