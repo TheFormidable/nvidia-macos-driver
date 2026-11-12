@@ -30,6 +30,11 @@ Changes made here, in this order of importance:
                    the mapping when a channel stopped fetching); the buffer is reused after a completion the decoder saw,
                    because clc96f.h documents no GPGet word;
                  - vt/: card kinds for Blackwell (H.264 decoder only) and TU10x / TU116 (decoders only), by PCI device ID.
+                   The ID is asked of the card's display function only (PCI base class 3). Upstream took the first NVIDIA
+                   function whose ID is in a known block, and the audio functions of RTX 40 cards, of most RTX 50 cards and
+                   of the RTX 30 cards below the 3080 have IDs in the GA10x block (0x228b-0x22ec). Listed before the GPU,
+                   one made an RTX 50 a GA10x card, which skipped the self-test below and registered the VP9 decoder, and
+                   took the encoders from an RTX 40 (to be sent upstream).
                  Not run on a card yet. On TU10x / TU116 nothing registers unless NVMTL_NVENCVT names the process or is 1.
                  On Blackwell the plugin asks for the library in the decode service (and where NVMTL_NVENCVT says so), and
                  the library registers nothing there until the self-test below has passed in that process.
