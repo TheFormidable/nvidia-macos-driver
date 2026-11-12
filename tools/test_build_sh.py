@@ -64,7 +64,7 @@ formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
   case "$1" in
     gpatch) mkwrap "$p/bin/gpatch" ver "GNU patch 2.8" ;;
     ninja) mkwrap "$p/bin/ninja" ver "1.13.1" ;;
-    cmake) mkwrap "$p/bin/cmake" ver "cmake version 4.1.2" ;;
+    cmake) mkwrap "$p/bin/cmake" cmake "cmake version 4.1.2" ;;
     pkgconf) mkwrap "$p/bin/pkg-config" ver "2.5.1" ;;
     glslang) mkwrap "$p/bin/glslangValidator" ver "Glslang Version: 11:16.0.0" ;;
     spirv-tools) mkdir -p "$p/lib/pkgconfig"; printf 'Name: SPIRV-Tools\nVersion: 2025.4\n' > "$p/lib/pkgconfig/SPIRV-Tools.pc" ;;
@@ -164,6 +164,18 @@ case "$role" in
         [ -n "$root" ] || root=${CARGO_HOME:-$HOME/.cargo}
         case "$what" in bindgen-cli) mkwrap "$root/bin/bindgen" ver "bindgen $ver" ;; *) mkwrap "$root/bin/$what" ver "$what $ver" ;; esac ;;
       fetch|--version) : ;;
+      *) exit 1 ;;
+    esac ;;
+  cmake)   # configure records the install prefix; --install lays out what SPIRV-LLVM-Translator installs
+    case "${1:-}" in
+      --version) cat "$self.version" ;;
+      -S) b=""; pre=""; prev=""
+          for a in "$@"; do [ "$prev" = -B ] && b=$a; case "$a" in -DCMAKE_INSTALL_PREFIX=*) pre=${a#*=} ;; esac; prev=$a; done
+          [ -f "$2/spirv-headers-tag.conf" ] || { echo "stand-in cmake: $2 is not SPIRV-LLVM-Translator" >&2; exit 1; }
+          mkdir -p "$b"; printf '%s\n' "$pre" > "$b/.prefix" ;;
+      --build) [ -f "$2/.prefix" ] || exit 1 ;;
+      --install) pre=$(cat "$2/.prefix"); mkdir -p "$pre/lib/pkgconfig"
+                 printf 'Name: LLVMSPIRVLib\nVersion: 22.1.0.0\n' > "$pre/lib/pkgconfig/LLVMSPIRVLib.pc"; mkwrap "$pre/bin/llvm-spirv" ver "LLVM version 22.1.0" ;;
       *) exit 1 ;;
     esac ;;
   strings) cat "${@: -1}" ;;   # the stand-in archives are text
@@ -319,6 +331,10 @@ def make_remotes(root, tamper=False):
     _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.367"])
     _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.367"])
     _, commits["OPENGPUDOC"] = make_repo(gh / "NVIDIA/open-gpu-doc.git", {"classes/video/clc9b0.h": "/* doc */\n" + salt})
+    _, commits["SPIRVHEADERS"] = make_repo(gh / "KhronosGroup/SPIRV-Headers.git", {"include/spirv/unified1/spirv.hpp": "// headers\n" + salt})
+    _, commits["SPIRVLLVM"] = make_repo(gh / "KhronosGroup/SPIRV-LLVM-Translator.git",
+                                        {"spirv-headers-tag.conf": commits["SPIRVHEADERS"] + "\n", "CMakeLists.txt": "# stand-in\n" + salt},
+                                        tags=["v22.1.8"])
     _, commits["RYZENADJ"] = make_repo(gh / "FlyGoat/RyzenAdj.git", {"main.c": "int main(void){return 0;}\n" + salt}, tags=["v0.19.0"])
     www = root / "www/raw.githubusercontent.com/WebKit/WebKit"
     sums = {}
@@ -358,7 +374,7 @@ def build_template():
         shutil.copy2(src, dst, follow_symlinks=False)
     pins = (TPL / "build/pins.sh").read_text()
     replace = {}
-    for pid in ("OGKM620", "OGKM610", "MESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ"):
+    for pid in ("OGKM620", "OGKM610", "MESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ", "SPIRVLLVM", "SPIRVHEADERS"):
         replace[pin_value(pins, f"NM_PIN_{pid}_COMMIT")] = commits[pid]
     for pid in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
         replace[pin_value(pins, f"NM_PIN_{pid}_SHA256")] = sums[pid]
@@ -668,6 +684,61 @@ def arm_deps_control():
     before = sb.listing(sb.home)
     rc, out = sb.run("deps", "-y")
     negative("deps that asks Homebrew for a formula already installed", deps_problems(sb, rc, out, before))
+
+
+def llvm23_problems(sb, rc, out):
+    """Homebrew's llvm is 23 (as homebrew-core is today): deps installs llvm@22, not Homebrew's spirv-llvm-translator,
+    and builds the pinned SPIRV-LLVM-Translator v22 against llvm@22 into the working directory."""
+    p = []
+    j = sb.jlines()
+    inst = [l.split()[2] for l in j if l.startswith("brew install ")]
+    if "spirv-llvm-translator" in inst:
+        p.append("Homebrew's spirv-llvm-translator (built for its LLVM 23) was installed")
+    if "llvm@22" not in inst:
+        p.append(f"llvm@22 was not installed: {inst}")
+    if not any(l.startswith("git ") and " fetch " in l and "KhronosGroup/SPIRV-LLVM-Translator.git" in l and "refs/tags/v22.1.8" in l for l in j):
+        p.append("SPIRV-LLVM-Translator v22.1.8 was not fetched from its pinned URL")
+    conf = [l for l in j if l.startswith("cmake -S ")]
+    llvm22 = str(sb.dir / "brew/opt/llvm@22/lib/cmake/llvm")
+    if not conf or llvm22 not in conf[0] or "-DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=" not in conf[0]:
+        p.append(f"the translator was not configured against llvm@22 and the pinned headers: {conf[:1]}")
+    elif str(sb.work) not in conf[0].split("-DCMAKE_INSTALL_PREFIX=")[1].split()[0]:
+        p.append("the translator is not installed into the working directory")
+    if rc != 0:
+        p.append(f"deps exit {rc}")
+    return p
+
+
+def arm_llvm23():
+    sb = Sandbox("llvm23", formulas=("cmake",))
+    (sb.state / "brew-llvm").write_text("23.1.5\n")
+    (sb.state / "brew-llvm22").write_text("")
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    p = llvm23_problems(sb, rc, out)
+    check("Homebrew's LLVM is 23: deps installs llvm@22 and builds SPIRV-LLVM-Translator v22 into the working directory", not p,
+          (p, out[-1500:]))
+    rc, out = sb.run("doctor")
+    check("doctor then finds SPIRV-LLVM-Translator 22.1 matching LLVM 22 and everything else (exit 0)",
+          rc == 0 and "ok       SPIRV-LLVM-Translator 22.1.0.0" in out, out[-1200:])
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    check("deps a second time does not build the translator again", not [l for l in sb.jlines() if l.startswith("cmake -S")], out[-400:])
+    bad = Sandbox("llvm23-pin", formulas=("cmake",))
+    (bad.state / "brew-llvm").write_text("23.1.5\n")
+    (bad.state / "brew-llvm22").write_text("")
+    pins = bad.co / "build/pins.sh"
+    pins.write_text(re.sub(r"NM_PIN_SPIRVHEADERS_COMMIT=[0-9a-f]{40}", "NM_PIN_SPIRVHEADERS_COMMIT=" + "1" * 40, pins.read_text()))
+    rc, out = bad.run("deps", "-y")
+    check("a SPIRV-Headers pin that the translator's spirv-headers-tag.conf contradicts stops deps before any build",
+          rc != 0 and "spirv-headers-tag.conf" in out and not [l for l in bad.jlines() if l.startswith("cmake -S")], (rc, out[-600:]))
+    neg = Sandbox("llvm23-neg", formulas=("cmake",))
+    (neg.state / "brew-llvm").write_text("23.1.5\n")
+    (neg.state / "brew-llvm22").write_text("")
+    neg.break_script("  deps_spirv_llvm\n  deps_python\n", "  deps_python\n")
+    neg.clear()
+    rc, out = neg.run("deps", "-y")
+    negative("deps that leaves SPIRV-LLVM-Translator to the user", llvm23_problems(neg, rc, out))
 
 
 def noinstall_problems(sb, args, extra=None):
@@ -1695,6 +1766,8 @@ def main():
             arm_hosts(commits)
         if want("deps"):
             arm_deps_control()
+        if want("llvm23"):
+            arm_llvm23()
         mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
                     "test", "package", "clean"]
         if any(want(a) for a in mac_arms):

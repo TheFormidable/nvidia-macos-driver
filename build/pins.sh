@@ -9,7 +9,7 @@
 # a file:// path), REF (tag; empty when only a commit is pinned), COMMIT (verified after the fetch: a mismatch stops
 # the build) or SHA256 (for a single file).
 
-NM_PIN_SOURCES="OGKM620 OGKM610 MESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBKIT_CMBASE WEBKIT_VTDEC"
+NM_PIN_SOURCES="OGKM620 OGKM610 MESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBKIT_CMBASE WEBKIT_VTDEC SPIRVLLVM SPIRVHEADERS"
 
 # NVIDIA open-gpu-kernel-modules 620.70.06, the RM core and NVKMS the kexts link. build/build_rm620.sh:8 and
 # build/build_kms620.sh:6 (NV_VERSION default), README.md (Build from source), NOTICE. The commit is the tag's peeled
@@ -77,6 +77,23 @@ NM_PIN_WEBKIT_VTDEC_URL=https://raw.githubusercontent.com/WebKit/WebKit/3bfbc200
 NM_PIN_WEBKIT_VTDEC_MIRROR=NM_WEBKIT_SPI_URL
 NM_PIN_WEBKIT_VTDEC_REF=
 NM_PIN_WEBKIT_VTDEC_SHA256=3d3f58450ba71ec689a50dfab37d3d84e3d7e686c20b01d5892300866030092f
+
+# SPIRV-LLVM-Translator for LLVM 22, which Mesa's native mesa_clc links (Mesa meson.build:2066-2082: LLVMSPIRVLib of the
+# same major.minor as the LLVM it uses). Homebrew has no versioned formula of it: homebrew-core's spirv-llvm-translator
+# (23.1.3 on 2026-11-12) depends on "llvm", which is 23.1.5 there, while llvm@22 is 22.1.8. So "./build.sh deps"
+# builds v22.1.8, the newest v22 tag, with the Homebrew formula's own cmake recipe into <workdir>/tools. Its .pc says
+# 22.1.0.0 (CMakeLists.txt: BASE_LLVM_VERSION 22.1.0). The tag is lightweight; the commit is from git ls-remote.
+NM_PIN_SPIRVLLVM_NAME="Khronos SPIRV-LLVM-Translator v22.1.8 (for LLVM 22; built by deps)"
+NM_PIN_SPIRVLLVM_URL=https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git
+NM_PIN_SPIRVLLVM_MIRROR=NM_SPIRV_LLVM_URL
+NM_PIN_SPIRVLLVM_REF=v22.1.8
+NM_PIN_SPIRVLLVM_COMMIT=a2c6155836cfb24e4d6a3fe704fb60122422e5b4
+# SPIRV-Headers at the commit v22.1.8's spirv-headers-tag.conf names (build.sh compares the two after the fetch).
+NM_PIN_SPIRVHEADERS_NAME="Khronos SPIRV-Headers (for SPIRV-LLVM-Translator)"
+NM_PIN_SPIRVHEADERS_URL=https://github.com/KhronosGroup/SPIRV-Headers.git
+NM_PIN_SPIRVHEADERS_MIRROR=NM_SPIRV_HEADERS_URL
+NM_PIN_SPIRVHEADERS_REF=
+NM_PIN_SPIRVHEADERS_COMMIT=cb42dec3830d3ac67fa449ecdc0c0f73d5e74498
 
 # Not fetched by build.sh, listed so that every download of a build is named somewhere:
 #   Mesa's six Rust crates for NAK (paste 1.0.14, proc-macro2 1.0.86, quote 1.0.35, rustc-hash 2.1.1, syn 2.0.87,
@@ -146,5 +163,6 @@ NM_PIN_TOOL_SPIRV_TOOLS_MIN=2024.1
 NM_PIN_TOOL_GLSLANG_MIN=12.2
 # rustc: Mesa meson.build:950 (1.85); the pinned toolchain above is newer.
 NM_PIN_TOOL_RUSTC_MIN=1.85
-# Homebrew formulas build.sh installs when the tool is missing (only missing ones; never an upgrade).
-NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools spirv-llvm-translator llvm@22 python@3.14"
+# Homebrew formulas build.sh installs when the tool is missing (only missing ones; never an upgrade). llvm@22 is "llvm"
+# while Homebrew's current LLVM is 22, and so is spirv-llvm-translator; otherwise the translator is built (above).
+NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 python@3.14"
