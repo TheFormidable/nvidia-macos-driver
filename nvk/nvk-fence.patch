@@ -112,7 +112,7 @@ index 2a61354..36e74e5 100644
  
  /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 8684165..6a5b426 100644
+index 8684165..01d35ad 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -6,6 +6,7 @@
@@ -123,7 +123,7 @@ index 8684165..6a5b426 100644
  #include <stdlib.h>
  #include "ctrl/ctrl0080/ctrl0080fifo.h" // NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES
  #include "ctrl/ctrl2080/ctrl2080gr.h" // NV2080_CTRL_CMD_GR_{GET_CTXSW_MODES,SET_CTXSW_PREEMPTION_MODE}
-@@ -198,6 +199,239 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
+@@ -198,6 +199,241 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
     usleep(200);
  }
  
@@ -185,7 +185,7 @@ index 8684165..6a5b426 100644
 +   int have = __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE);
 +   if (have == 0) {
 +      pthread_mutex_lock(&nvrm_fence_open_mtx);
-+      have = nvrm_fence_have;
++      have = __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE);   /* another thread may have opened it, or lost it */
 +      if (have == 0) {
 +         struct NVRMFenceReq q;
 +         nvrm_fence_req(&q, NVRM_FENCE_OP_QUERY, 0);
@@ -299,8 +299,10 @@ index 8684165..6a5b426 100644
 +
 +/* The event wait's seam for a channel that raises no event of its own, such as a copy-engine channel (the `wait` of
 + * struct nvrm_evw_ops with fd < 0, nvrm_evwait.h). The kernel sleeps on that channel's semaphore (WAIT_SEQ) until it
-+ * reaches the value waited for, for at most the round's timeout; the first channel of the wait that is short of its
-+ * value and that the kernel watches is the one slept on, and the caller checks every channel again afterwards.
++ * reaches the value waited for; the first channel of the wait that is short of its value and that the kernel watches is
++ * the one slept on, and the caller checks every channel again afterwards. timeout_us is the longest the round allows
++ * (2 ms, or what is left before an application's deadline). The kernel counts in milliseconds, so it is given the whole
++ * milliseconds of that, never more; a round with less than one millisecond left is polled.
 + * Returns 0 with WOKEN (the value was reached) or TIMEOUT (the kernel slept the whole time); -1 when the kernel did not
 + * sleep: no watched channel is pending, the kernel will not sleep on that channel (it has not seen its interrupts arrive
 + * yet: PENDING), the channel faulted or is gone (DEAD: the caller's own health check then reports the fault), the sleep
@@ -311,7 +313,9 @@ index 8684165..6a5b426 100644
 +nvrm_fence_wait_first(unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want,
 +                      uint32_t timeout_us, uint64_t *out)
 +{
-+   if (__atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) <= 0)
++   const uint32_t whole_ms = timeout_us / 1000;   /* rounded down: the sleep must end inside the round's time */
++   const uint32_t timeout_ms = whole_ms > NVRM_FENCE_SEQ_MAX_MS ? NVRM_FENCE_SEQ_MAX_MS : whole_ms;
++   if (timeout_ms == 0 || __atomic_load_n(&nvrm_fence_have, __ATOMIC_ACQUIRE) <= 0)
 +      return -1;
 +   const int64_t now = os_time_get_nano();
 +   uint32_t handle = 0, at = 0, g = 0;
@@ -331,8 +335,6 @@ index 8684165..6a5b426 100644
 +   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
 +   if (handle == 0)
 +      return -1;
-+   const uint64_t ms = ((uint64_t)timeout_us + 999) / 1000;
-+   const uint32_t timeout_ms = ms < 1 ? 1 : ms > NVRM_FENCE_SEQ_MAX_MS ? NVRM_FENCE_SEQ_MAX_MS : (uint32_t)ms;
 +   struct NVRMFenceReq r;
 +   nvrm_fence_req(&r, NVRM_FENCE_OP_WAIT_SEQ, 0);
 +   r.u.wait.id = handle;
@@ -363,7 +365,7 @@ index 8684165..6a5b426 100644
  /* b73 SLEEP ON THE GPU'S COMPLETION EVENT. NVK ends every submission with NON_STALL_INTERRUPT after its semaphore
   * release; RM's event for it reaches the device's osEvent connection (one per VkDevice, and GPU-wide: every graphics
   * completion posts it), and the kext's selector 6 sleeps until that event's count moves.
-@@ -291,10 +525,10 @@ static int
+@@ -291,10 +527,10 @@ static int
  nvrm_evw_nvk_wait(void *p, int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out)
  {
     struct nvrm_evw_nvk *c = p;
@@ -377,7 +379,7 @@ index 8684165..6a5b426 100644
     const int64_t t0 = timeout_us != 0 ? os_time_get_nano() : 0;
     if (nvrm_xnu_wait_event2(fd, seen, timeout_us, out) != 0) {
        c->refused = true;
-@@ -638,8 +872,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -638,8 +874,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        return;
     volatile uint64_t *sem = ctx->sem->map;
     *sem = 0;   // compared >= seq now: it must start below the first seq (the old == never needed it)
@@ -389,7 +391,7 @@ index 8684165..6a5b426 100644
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
        struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
-@@ -650,8 +887,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -650,8 +889,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        s->semVA = ctx->sem->va->addr;
        s->dev = ctx->base.dev;
        s->flushed = 0;
@@ -401,7 +403,7 @@ index 8684165..6a5b426 100644
        ctx->slot1 = i + 1;
        break;
     }
-@@ -660,6 +899,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -660,6 +901,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        fprintf(stderr, "nvrm: G-SUB: all %d channel slots in use - this channel stays SYNCHRONOUS\n", NVRM_CTX_MAX);
        return;
     }
@@ -410,7 +412,7 @@ index 8684165..6a5b426 100644
     ctx->gsub = true;
     ctx->curSlot = 0;
     nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
-@@ -679,7 +920,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -679,7 +922,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     s->ctx = NULL;
     s->sem = NULL;
     s->gen++;
@@ -422,7 +424,7 @@ index 8684165..6a5b426 100644
     ctx->slot1 = 0;
     ctx->gsub = false;
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
-@@ -698,6 +943,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -698,6 +945,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     nvkmd_nvrm_reap_deferred();
  }
  
@@ -581,7 +583,7 @@ index 8684165..6a5b426 100644
  
  static void
  write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
-@@ -1174,6 +1571,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1174,6 +1573,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        return r;
  
     ctx->wSeq++;
@@ -590,7 +592,7 @@ index 8684165..6a5b426 100644
     write_l2_sysmem_tail(&ctx->push);
     write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
     const struct nvkmd_ctx_exec seg = {
-@@ -1352,6 +1751,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1352,6 +1753,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
        return nvrm_gsub_submit(ctx, log_obj);
  
     ctx->wSeq++;
