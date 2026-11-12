@@ -15,6 +15,8 @@ comandos y opciones y la solución de problemas.
 > del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un paso se detiene, el mensaje dice
 > cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver [Cuando falla la compilación](#cuando-falla-la-compilación)).
 > Un paso que falla nunca queda marcado como terminado, así que, una vez corregido, la siguiente ejecución sigue desde ese paso.
+> Los scripts de los componentes sí se ejecutaron a mano en el Mac Intel del propietario (macOS 26.7, Xcode 26.5) para
+> los kexts y el RM; lo que eso mostró sobre un nombre de cuenta corto ya está resuelto (fila `rm` de la tabla de problemas).
 
 ## Requisitos
 
@@ -29,6 +31,9 @@ comandos y opciones y la solución de problemas.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
 - Homebrew. Si falta, `./build.sh deps` explica cómo instalarlo y ofrece ejecutar su instalador oficial, pero solo
   después de que escribas `yes` (`--yes` no cuenta para esto).
+- Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
+  que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
+  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas.
 
 ## Inicio rápido
 
@@ -70,7 +75,7 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 |---|---|
 | `all` | Por defecto. doctor, deps si falta algo (salvo con `--no-install`), fetch, compilar todo, el paquete si hay paquete base, y un resumen |
 | `doctor` | Solo examina; no cambia nada. Código 1 si falta algo necesario o es demasiado antiguo |
-| `deps` | Instala lo que falta: fórmulas de Homebrew (después de un sí, o `--yes`), el entorno de Python y Rust (en el directorio de trabajo) |
+| `deps` | Instala lo que falta: fórmulas de Homebrew (después de un sí, o `--yes`), SPIRV-LLVM-Translator para LLVM 22, el entorno de Python y Rust (estos tres en el directorio de trabajo) |
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256 |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
@@ -119,6 +124,8 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_OPEN_GPU_DOC_URL` | Réplica de open-gpu-doc |
 | `NM_RYZENADJ_URL` | Réplica de RyzenAdj |
 | `NM_WEBKIT_SPI_URL` | Carpeta (URL) con las dos cabeceras de WebKit |
+| `NM_SPIRV_LLVM_URL` | Réplica de SPIRV-LLVM-Translator (deps lo compila para LLVM 22) |
+| `NM_SPIRV_HEADERS_URL` | Réplica de SPIRV-Headers |
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
@@ -169,7 +176,7 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 | `NM_LOCAL_BUILD_HOST` | el nombre que atiende `build/local_build_host.sh` |
 | `CARGO_NET_OFFLINE` | `true` con `--offline` |
 | `PYTHONDONTWRITEBYTECODE` | `1` |
-| `PATH` | `<workdir>/tools/host`, `<workdir>/tools/bin`, `/usr/bin:/bin:/usr/sbin:/sbin` |
+| `PATH` | `<workdir>/tools/host`, `<workdir>/tools/bin`, `<workdir>/tools/venv/bin`, `/usr/bin:/bin:/usr/sbin:/sbin` |
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | nombre del paquete y descripción de la compilación |
 <!-- end -->
 
@@ -211,15 +218,16 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: this Mac runs macOS 14...` | Xcode 26 necesita macOS 15.6 o posterior | Actualiza macOS o compila en otro Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` apunta a las herramientas de línea de comandos | Instala Xcode 26 y ejecuta `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
 | doctor: `MISSING Metal/MTL4CommandQueue.h` | El Xcode seleccionado tiene un SDK anterior | Selecciona Xcode 26 o define `DEVELOPER_DIR` |
-| `Homebrew has no LLVM 22 formula today` | Homebrew ya no ofrece LLVM 22 | Instala LLVM 22.x con sus bibliotecas de clang y define `NM_LLVM_PREFIX`; compila SPIRV-LLVM-Translator para él y añade su `lib/pkgconfig` a `PKG_CONFIG_PATH` |
-| `SPIRV-LLVM-Translator ... does not match LLVM` | Su versión debe coincidir con la de LLVM | Igual que la fila anterior |
+| `Homebrew has no LLVM 22 formula today` | Homebrew retiró `llvm@22` | Instala LLVM 22.x con sus bibliotecas de clang, define `NM_LLVM_PREFIX` y ejecuta otra vez `./build.sh deps` (compila SPIRV-LLVM-Translator para él) |
+| `SPIRV-LLVM-Translator ... does not match LLVM` | Su versión debe coincidir con la de LLVM | `./build.sh deps` compila uno que coincide |
+| `STOP: step 'spirv-llvm-translator' failed` | Falló la compilación de SPIRV-LLVM-Translator v22.1.8 con LLVM 22 | Repórtalo con el archivo de informe; el registro completo es `logs/spirv-llvm-translator.log` |
 | `STOP: the pins and the scripts disagree` | build/pins.sh y un script piden versiones distintas | Ejecuta `./build.sh doctor`; cambia ambos a la vez |
 | `... gave commit X for ..., the pin is Y` o `... has SHA-256 ..., the pin is ...` | Una réplica o descarga no es la fuente fijada | Revisa la variable de réplica; no se usó nada de ella |
 | `STOP: another build.sh run (pid N) is using ...` | Dos ejecuciones sobre el mismo directorio de trabajo | Espera a que termine o detenla |
 | `offline, and ... is not in ... yet` | `--offline` antes de cualquier `fetch` | Ejecuta `./build.sh fetch` una vez con red |
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
 | `<componente> needs: GNU-patch Python-3.10 ...` | Falta una herramienta | `./build.sh deps` |
-| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo (sin distinguir mayúsculas); un nombre corto o común (user, mac, admin) aparece por casualidad. doctor avisa si alguno tiene menos de 5 letras | Compila desde una cuenta con un nombre más largo, o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
+| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo, aunque sea dentro de una palabra. `build.sh` vuelve a buscarlo como palabra completa y sigue si no aparece (el registro dice "Accepted."); el código 6 queda solo si aparece como palabra completa | Mira las líneas que muestra el registro. Si el nombre es una palabra común (user, mac, admin), compila desde otra cuenta o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |

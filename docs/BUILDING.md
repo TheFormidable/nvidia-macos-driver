@@ -14,7 +14,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > imitated (an Xcode or Homebrew detail, a formula name, a compiler warning). Run `./build.sh doctor` first, then
 > `./build.sh`; when a step stops, the message names it and gives a report file to attach to an issue
 > (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a half-built result behind as
-> finished, so after the fix the next run continues from that step.
+> finished, so after the fix the next run continues from that step. The component scripts themselves have been run by
+> hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts and the RM; what that showed about a short
+> account name is handled (see the `rm` row of [Troubleshooting](#troubleshooting)).
 
 ## Requirements
 
@@ -31,6 +33,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   but only after you type `yes` (`--yes` does not count for this).
 - Free disk space: not measured on a Mac yet. The NVIDIA trees, Mesa, LLVM from Homebrew and the NVK build together
   take several gigabytes.
+- Time, on an **Intel Mac**: Homebrew no longer has ready-made builds (bottles) of these formulas for Intel Macs, so
+  `deps` has Homebrew compile each missing one here. LLVM 22 alone takes hours and tens of gigabytes while it builds.
+  `deps` says so before it asks. On Apple silicon Homebrew installs ready-made builds.
 
 ## Quick start
 
@@ -62,10 +67,11 @@ folder that carries that mark.
 
 | What | Where |
 |---|---|
-| Homebrew formulas, only the missing ones: `gpatch`, `ninja`, `cmake`, `pkgconf`, `glslang`, `spirv-tools`, `spirv-llvm-translator`, `llvm@22` (or `llvm` while Homebrew's is 22), `python@3.14` | Homebrew's own prefix (`/opt/homebrew` on Apple silicon, `/usr/local` on Intel). Nothing you already have is upgraded or removed by `build.sh`; Homebrew itself may upgrade an outdated dependency of a formula it installs, and the prompt says so |
+| Homebrew formulas, only the missing ones: `gpatch`, `ninja`, `cmake`, `pkgconf`, `glslang`, `spirv-tools`, `llvm@22` (or `llvm` while Homebrew's is 22), `python@3.14`, and `spirv-llvm-translator` only while Homebrew's `llvm` is 22 | Homebrew's own prefix (`/opt/homebrew` on Apple silicon, `/usr/local` on Intel). Nothing you already have is upgraded or removed by `build.sh`; Homebrew itself may upgrade an outdated dependency of a formula it installs, and the prompt says so |
+| SPIRV-LLVM-Translator v22.1.8 for LLVM 22, built from source when no matching one is found (Homebrew's follows its current LLVM, 23 today) | `<workdir>/tools/spirv-llvm-translator`; its sources in `<workdir>/src`, its log `<workdir>/logs/spirv-llvm-translator.log` |
 | Python packages for Mesa (meson 1.12.1, mako, MarkupSafe, PyYAML, packaging), each checked against its SHA-256 | `<workdir>/tools/venv` |
 | Rust 1.98.1 with the x86_64-apple-darwin target, bindgen-cli 0.73.2, cbindgen 0.29.4 (rustup-init 1.29.3, SHA-256 checked, run with `--no-modify-path`) | `<workdir>/tools/rustup` (RUSTUP_HOME), `<workdir>/tools/cargo` (CARGO_HOME) |
-| Links to exactly the tools the build may use; the first folder on every step's PATH (Homebrew's `bin` never is) | `<workdir>/tools/bin` |
+| Links to exactly the tools the build may use; the first folder on every step's PATH, followed by the Python environment's `bin` (Homebrew's `bin` never is on it) | `<workdir>/tools/bin` |
 | `ssh`, `rsync`, `scp` that act on this Mac (see [Components](#components-and-their-order)) | `<workdir>/tools/host` |
 | Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers | `<workdir>/src`, and `<workdir>/build/build/...` in the layout the build scripts already expect under `NULLMOTH_BUILD_ROOT` |
 | Outputs | `<workdir>/out` (kexts in `out/kexts`, NVK in `out/nvk`, and so on) |
@@ -89,7 +95,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 |---|---|
 | `all` | The default when no command is given. doctor, then deps when something is missing (unless `--no-install`), fetch, build every component, package when a base package is given, and a summary |
 | `doctor` | Examines only: the Mac, Xcode and its SDK, every tool and its version, the pins against the scripts, the sources fetched so far, and things that stop a build on some Macs. Changes nothing. Exit 1 when something required is missing or too old |
-| `deps` | Installs what is missing: Homebrew formulas (after a yes, or `--yes`), the Python environment and Rust (in the working directory). Explains how to install Xcode, which no script can do |
+| `deps` | Installs what is missing: Homebrew formulas (after a yes, or `--yes`), SPIRV-LLVM-Translator for LLVM 22, the Python environment and Rust (the last three in the working directory). Explains how to install Xcode, which no script can do |
 | `fetch` | Downloads the pinned sources into the working directory and verifies each commit id or SHA-256. Also fetches the translator's crates (`cargo fetch --locked`) once Rust is there, so that its build runs offline |
 | `build [component...]` | Builds the named components and what they need, or all of them. Names and groups: [Components](#components-and-their-order) |
 | `package` | Builds what is not up to date, then stages a package from a release package (`--base-package`) with every part this checkout builds replaced. Needs `--accel both` |
@@ -141,6 +147,8 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_OPEN_GPU_DOC_URL` | the URL in build/pins.sh | A mirror of NVIDIA's open-gpu-doc |
 | `NM_RYZENADJ_URL` | the URL in build/pins.sh | A mirror of RyzenAdj |
 | `NM_WEBKIT_SPI_URL` | the URL in build/pins.sh | A folder (URL) holding `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` |
+| `NM_SPIRV_LLVM_URL` | the URL in build/pins.sh | A mirror of SPIRV-LLVM-Translator (deps builds it for LLVM 22) |
+| `NM_SPIRV_HEADERS_URL` | the URL in build/pins.sh | A mirror of SPIRV-Headers |
 | `NM_RUSTUP_URL` | static.rust-lang.org, rustup 1.29.3 | Where `rustup-init` is downloaded from (its SHA-256 is checked either way) |
 | `RUSTUP_DIST_SERVER` | rustup's | Where rustup downloads the toolchain from |
 | `DEVELOPER_DIR` | the selected Xcode | An Xcode other than the one `xcode-select` selects |
@@ -193,7 +201,7 @@ These are not settings: `build.sh` derives them, gives them to the build scripts
 | `NM_LOCAL_BUILD_HOST` | the host name `build/local_build_host.sh` serves |
 | `CARGO_NET_OFFLINE` | `true` with `--offline` |
 | `PYTHONDONTWRITEBYTECODE` | `1`, so that no `__pycache__` is written into the checkout |
-| `PATH` | `<workdir>/tools/host` (only for the release scripts), `<workdir>/tools/bin`, then `/usr/bin:/bin:/usr/sbin:/sbin` |
+| `PATH` | `<workdir>/tools/host` (only for the release scripts), `<workdir>/tools/bin`, `<workdir>/tools/venv/bin` (Python finds its environment only when started from there), then `/usr/bin:/bin:/usr/sbin:/sbin` |
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | the tarball name and the build description `build/package_local.sh` puts in the package |
 <!-- end -->
 
@@ -250,6 +258,10 @@ What `build.sh` does around the existing scripts, so that they no longer need th
   scripts default to `~/ogkm610`, the wrong tree), the output folders, Rust and the crate cache in the working directory.
 - build_rm620.sh does not stop when compiles fail; `build.sh` reads its `failed: N of M` line and stops the step when
   N is not 0. Each time the `rm` step runs, its work tree is deleted first, so no old object or old patch set survives.
+- build_rm620.sh and build_kms620.sh end with exit 6 when the account name or the computer's short name occurs
+  anywhere in the archive, even inside a word (an account "ana" in "banana"). `build.sh` then searches again for whole words and
+  accepts the archive only when there are none; the step's log says what was matched.
+- Any command of a step that fails stops the step: an output an earlier build left behind is never stamped as new.
 - The plugin, translator and video library release scripts send their compile to a build Mac over ssh. `build.sh`
   sets `NULLMOTH_BUILD_HOST` to a name that `build/local_build_host.sh` serves: linked as `ssh`, `rsync` and `scp`
   first on those scripts' PATH, it runs their commands on this Mac (no Remote Login needed) and refuses any other host.
@@ -335,15 +347,16 @@ back as it was before the app's install.
 | `STOP: this Mac runs macOS 14...` | Xcode 26 needs macOS 15.6 or later | Update macOS, or build on another Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` points at the command line tools | Install Xcode 26, then `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
 | doctor: `MISSING Metal/MTL4CommandQueue.h` | The selected Xcode has an older SDK | Select Xcode 26, or set `DEVELOPER_DIR` |
-| `Homebrew has no LLVM 22 formula today` | Homebrew moved on from LLVM 22 | Install LLVM 22.x with its clang libraries and set `NM_LLVM_PREFIX`; build SPIRV-LLVM-Translator for it and add its `lib/pkgconfig` to `PKG_CONFIG_PATH` |
-| `SPIRV-LLVM-Translator ... does not match LLVM` | Its version must have LLVM's major.minor | As above |
+| `Homebrew has no LLVM 22 formula today` | Homebrew dropped `llvm@22` | Install LLVM 22.x with its clang libraries, set `NM_LLVM_PREFIX` to it and run `./build.sh deps` again (it builds SPIRV-LLVM-Translator against it) |
+| `SPIRV-LLVM-Translator ... does not match LLVM` | Its version must have LLVM's major.minor | `./build.sh deps` builds one that matches |
+| `STOP: step 'spirv-llvm-translator' failed` | Building SPIRV-LLVM-Translator v22.1.8 against LLVM 22 failed | Report it with the report file; the full log is `logs/spirv-llvm-translator.log` |
 | `STOP: the pins and the scripts disagree` | build/pins.sh and a build script name different versions | Run `./build.sh doctor`; change both together |
 | `... gave commit X for ..., the pin is Y` or `... has SHA-256 ..., the pin is ...` | A mirror or download is not the pinned source | Check the mirror variable; nothing of it was used |
 | `STOP: another build.sh run (pid N) is using ...` | Two runs on one working directory | Wait for it or stop it; a lock of a run that is gone is taken over |
 | `offline, and ... is not in ... yet` | `--offline` before any fetch | Run `./build.sh fetch` with the network once |
 | `offline: NVK needs the network` | See [What is not automated](#what-is-not-automated-and-why) | Build NVK with the network |
 | `<component> needs: GNU-patch Python-3.10 ...` | A tool is missing | `./build.sh deps` |
-| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name (case does not matter); a short or common name (user, mac, admin) is likely to be found by chance. doctor warns when either is shorter than 5 letters | Build from an account with a longer name, or change the computer's local hostname (System Settings > General > Sharing) |
+| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name, even inside a word. `build.sh` looks again for whole words and goes on when there are none (the log says "Accepted."); exit 6 remains only when the name occurs as a whole word | Look at the lines the log shows. If the name is a common word (user, mac, admin), build from another account or change the computer's local hostname (System Settings > General > Sharing) |
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |
 | a step stops at a warning ceiling (`warn_ceiling`) | The ceilings in build/warnings.txt are 0: a compiler or linker other than the release's may print a new warning | Report it with the report file and your Xcode version |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | A Homebrew library (often libelf in /usr/local on Intel) was linked | Report it with the report file |
@@ -381,7 +394,9 @@ skipped and the failed one runs again. `-v` shows a step's output while it runs.
 real git against local repositories that stand in for the remotes, and a scratch copy of this tree in which every
 component build script is replaced by a stand-in that records what it receives. It checks doctor on a Mac with
 nothing installed, deps with and without installing, fetch (and a tampered remote), offline, dry run, the build
-order, the variables every step gets, skipping and rebuilding, a failing step and its report, an interrupted run,
+order, the variables every step gets, skipping and rebuilding, a failing step and its report, a failed script after
+an earlier good build, the account-name recheck, the step's python3, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
+an interrupted run,
 two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `env`, this document against the script,
 and the pins against the scripts that use them; each part has at least one control that breaks `build.sh` (or its
 input) on purpose and shows the check then fails. It runs `build.sh` under `/bin/bash`, or the bash named by
