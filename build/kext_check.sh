@@ -30,7 +30,8 @@ sources() {
   local bn=$HERE/build/build_nvrm.sh src=$HERE/kexts/NVRM code always listed f s bad=0
   code=$(grep -v '^[[:space:]]*#' "$bn") || { say "FAIL build/build_nvrm.sh cannot be read"; return 1; }
   # CXX_SOURCES=( ... ) names what is always compiled; a line with CXX_SOURCES+=( names what is compiled when present
-  always=$(say "$code" | sed -n '/^CXX_SOURCES=(/,/)/p' | tr -s ' ();' '\n' | grep '^[A-Za-z0-9_.+-]*\.cpp$' | tr '\n' ' ')
+  # (the list ends at the first ')' at or after its first line: written on one line it is still only the list)
+  always=$(say "$code" | awk '/^CXX_SOURCES=\(/ { on = 1 } on { print } on && /\)/ { exit }' | tr -s ' ();' '\n' | grep '^[A-Za-z0-9_.+-]*\.cpp$' | tr '\n' ' ')
   listed=" $always$(say "$code" | sed -n '/CXX_SOURCES+=(/p' | tr -s ' ();' '\n' | grep '^[A-Za-z0-9_.+-]*\.cpp$' | tr '\n' ' ')"
   [ -n "$always" ] || { say "FAIL build/build_nvrm.sh has no CXX_SOURCES=( ... ) list this check can read"; bad=1; }
   for f in "$src"/*.cpp; do
@@ -59,7 +60,10 @@ MKSDK_SHA=3f750085caa17ec3a7880f11c11bf4f48cd6a164         # MacKernelSDK master
 XNU_TAGS=( xnu-11215.1.10 xnu-12377.1.9 )                  # macOS 15.0 (the deployment target) and macOS 26.0
 fetch() {   # fetch <url> <ref> <dest> [sha]: a shallow clone of one tag or commit, verified
   local url=$1 ref=$2 dest=$3 sha=${4:-}
-  [ -d "$dest" ] && return 0
+  if [ -d "$dest" ]; then   # an earlier run's clone, or one a cache restored: it is used only while it is still the pinned commit
+    [ -z "$sha" ] || [ ! -e "$dest/.git" ] || [ "$(git -C "$dest" rev-parse HEAD 2>/dev/null)" = "$sha" ] || stop "$dest is not commit $sha of $url: remove it and run again"
+    return 0
+  fi
   [ "${NM_CHECK_OFFLINE:-0}" = 1 ] && stop "$dest is missing and NM_CHECK_OFFLINE=1"
   rm -rf "$dest.part"; git init -q "$dest.part" && git -C "$dest.part" remote add origin "$url" \
     && git -C "$dest.part" fetch -q --depth 1 origin "$ref" && git -C "$dest.part" checkout -q FETCH_HEAD || stop "cannot fetch $ref from $url"
@@ -69,7 +73,7 @@ fetch() {   # fetch <url> <ref> <dest> [sha]: a shallow clone of one tag or comm
 MAC=0; [ "$(uname -s)" = Darwin ] && MAC=1
 # ---- inputs
 PRISTINE=${NM_OGKM620_PRISTINE:-$WORK/src/open-gpu-kernel-modules-$V}
-[ -d "$PRISTINE/src/nvidia" ] || fetch https://github.com/NVIDIA/open-gpu-kernel-modules "$V" "$PRISTINE" "$OGKM_SHA"
+[ -n "${NM_OGKM620_PRISTINE:-}" ] || fetch https://github.com/NVIDIA/open-gpu-kernel-modules "$V" "$PRISTINE" "$OGKM_SHA"
 [ -d "$PRISTINE/src/nvidia" ] || stop "no NVIDIA open-gpu-kernel-modules $V tree at $PRISTINE"
 if [ -n "${NM_KERNEL_HEADERS:-}" ]; then KHDR=$NM_KERNEL_HEADERS
 elif [ $MAC = 1 ]; then KHDR="$(xcrun --show-sdk-path)/System/Library/Frameworks/Kernel.framework/Headers"

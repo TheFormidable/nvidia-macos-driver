@@ -392,6 +392,10 @@ def main():
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 if not fetch_exports(dest, tag):
                     return 2
+            elif tag in XNU_SHA and (dest / ".git").exists():   # an earlier run's copy, or one a cache restored
+                head = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+                if head != XNU_SHA[tag]:
+                    print(f"STOP: {dest} is commit {head or '?'}, not the pinned {XNU_SHA[tag]} of {tag}: remove it and run again"); return 2
             kernels.append(Exports.load(dest / "config", tag))
     allow = set()
     ap_ = repo / "build/kext_imports_allow.txt"
