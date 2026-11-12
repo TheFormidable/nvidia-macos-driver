@@ -6,17 +6,19 @@ an installable package. It never uses `sudo` and never installs the driver; at t
 
 En español: [BUILDING.es.md](BUILDING.es.md).
 
-> **Written and tested without a Mac.** Nobody has run `./build.sh` on a Mac yet. It was written for macOS's
-> `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode, Homebrew,
-> rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than macOS
-> only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. No component has been compiled by it, `deps` has not installed anything real, and no
-> package has been staged with it. What that means for the first run: expect a step to stop on something no stand-in
-> imitated (an Xcode or Homebrew detail, a formula name, a compiler warning). Run `./build.sh doctor` first, then
-> `./build.sh`; when a step stops, the message names it and gives a report file to attach to an issue
-> (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a half-built result behind as
-> finished, so after the fix the next run continues from that step. The component scripts themselves have been run by
-> hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts and the RM; what that showed about a short
-> account name is handled (see the `rm` row of [Troubleshooting](#troubleshooting)).
+> **Written and tested without a Mac.** `./build.sh` has run on one Mac (Intel, macOS 26.7, Xcode 26.5) only in part:
+> `doctor`, `env`, `--dry-run` and `fetch` ran, and it built the plugin, the video library (and the RM on the way) and
+> the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked. It was written
+> for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
+> Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
+> macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
+> translator have not been built by it, and no package has been staged with it. What that means for the first run:
+> expect a step to stop on something no stand-in imitated (an Xcode or Homebrew detail, a formula name, a compiler
+> warning). Run `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report
+> file to attach to an issue (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a
+> half-built result behind as finished, so after the fix the next run continues from that step. The component scripts
+> themselves have been run by hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts and the RM; what that
+> showed about a short account name is handled (see the `rm` row of [Troubleshooting](#troubleshooting)).
 
 ## Requirements
 

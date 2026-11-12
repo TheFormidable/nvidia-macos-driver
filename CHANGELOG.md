@@ -3,10 +3,9 @@
 ## 3.0
 
 **Not released.** This section describes the branch being prepared as 3.0. Nothing in it has run on an NVIDIA card
-yet. The kernel extensions and the Metal plugin of an earlier state of the branch (the per-surface fence, the event
-wait and the unlocked page-off wait) were compiled and linked with Apple's own toolchain on the owner's Mac (macOS
-26.7, Xcode 26.5); everything added after that state has been compiled only with the cross-compilers used for
-development, and NVK has not yet been built on a Mac. The check list for a first run on a card is
+yet. Its kernel extensions (NVRM, NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC) and its Metal plugin were compiled
+and linked with Apple's own toolchain on one Mac (Intel, macOS 26.7, Xcode 26.5), and none of them was loaded there;
+NVK and the shader translator have not yet been built on a Mac. The check list for a first run on a card is
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each one that changes
@@ -234,8 +233,8 @@ has proven itself, renewed with a reason otherwise.
   missing after asking (Homebrew formulas only, never an upgrade; Python and Rust inside its own working directory),
   fetches every outside source at a pinned commit or checksum (`build/pins.sh`), builds each component as a logged,
   skippable step, and can stage a package from a release package. It never uses `sudo` and never installs the driver.
-  Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac, so the first runs on one may stop on
-  something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
+  Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
+  so the first runs may stop on something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
 - `tools/switches.tsv` is the registry of every switch, and `tools/test_switch_registry.py` fails when the source
   reads a name it does not have. A switch added from now on cannot be an opt-in or a writable sysctl: the test says
   what it may be instead (an opt-out of a default path with a review release, a test hook that does nothing unset, a
