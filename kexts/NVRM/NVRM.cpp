@@ -43,6 +43,7 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+#include "nvrm_evwait.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
 extern "C" task_t current_task(void);
@@ -272,6 +273,21 @@ static void nvrmRunBottomHalf(nv_state_t *nv)
 static volatile SInt64 gNvEvtPosts = 0, gNvEvtMatched = 0, gNvEvtWaits = 0, gNvEvtSlept = 0;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_posts, CTLFLAG_RD, (int64_t *)&gNvEvtPosts, "RM events posted to user clients");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_waits, CTLFLAG_RD, (int64_t *)&gNvEvtWaits, "user event waits");
+// Every process sleeps on the event during long waits, so these say whether that works: slept = woken + timeouts (plus
+// the few that were interrupted or woke with nothing posted); clients = connections (one per process and card) that
+// slept at least once; the two user_ counters are what user space reported through selector 9.
+static volatile SInt64 gNvEvtWoken = 0, gNvEvtTimeouts = 0, gNvEvtCapped = 0, gNvEvtClients = 0;
+static volatile SInt64 gNvEvtDrainWaits = 0, gNvEvtDrainStuck = 0, gNvEvtUserMissed = 0, gNvEvtUserFellBack = 0;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_matched, CTLFLAG_RD, (int64_t *)&gNvEvtMatched, "RM events that found their connection");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_slept, CTLFLAG_RD, (int64_t *)&gNvEvtSlept, "event waits that slept");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_woken, CTLFLAG_RD, (int64_t *)&gNvEvtWoken, "event sleeps ended by an event");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_timeouts, CTLFLAG_RD, (int64_t *)&gNvEvtTimeouts, "event sleeps that ran to their timeout");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_capped, CTLFLAG_RD, (int64_t *)&gNvEvtCapped, "event waits turned away at the sleeper ceiling");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_clients, CTLFLAG_RD, (int64_t *)&gNvEvtClients, "connections that slept on the event at least once");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_post_drain_waits, CTLFLAG_RD, (int64_t *)&gNvEvtDrainWaits, "client closes that waited for an event post in flight");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_post_drain_stuck, CTLFLAG_RD, (int64_t *)&gNvEvtDrainStuck, "connections kept, not freed, because an event post never finished");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_user_missed, CTLFLAG_RD, (int64_t *)&gNvEvtUserMissed, "user space: sleeps that ran to their timeout although the GPU work was done");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_user_fallbacks, CTLFLAG_RD, (int64_t *)&gNvEvtUserFellBack, "user space: processes that went back to polling after missed wakes");
 
 // System sleep gate, the nv_system_pm_lock of kernel-open/nvidia/nv.c. Linux freezes user space before suspend and
 // still takes that lock in every ioctl; macOS freezes nothing, so on wake WindowServer and Metal apps called into RM
@@ -471,6 +487,9 @@ private:
     static IOReturn sWaitEvent(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sEvtNote(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    SInt32 fEvtEverSlept = 0;   // 0 -> 1 once, for debug.nvrm_evt_clients
+    bool evtDrainPosts();
 public:
     volatile UInt32 fEvtSeq = 0;
     UInt32 fEvtMagic = 0x4e564556u;
@@ -778,6 +797,11 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_bh_runs); sysctl_register_oid(&sysctl__debug_nvrm_bh_max_us);
             sysctl_register_oid(&sysctl__debug_nvrm_bh_over_1ms); sysctl_register_oid(&sysctl__debug_nvrm_bh_over_4ms);
             sysctl_register_oid(&sysctl__debug_nvrm_evt_posts); sysctl_register_oid(&sysctl__debug_nvrm_evt_waits);
+            sysctl_register_oid(&sysctl__debug_nvrm_evt_matched); sysctl_register_oid(&sysctl__debug_nvrm_evt_slept);
+            sysctl_register_oid(&sysctl__debug_nvrm_evt_woken); sysctl_register_oid(&sysctl__debug_nvrm_evt_timeouts);
+            sysctl_register_oid(&sysctl__debug_nvrm_evt_capped); sysctl_register_oid(&sysctl__debug_nvrm_evt_clients);
+            sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_waits); sysctl_register_oid(&sysctl__debug_nvrm_evt_post_drain_stuck);
+            sysctl_register_oid(&sysctl__debug_nvrm_evt_user_missed); sysctl_register_oid(&sysctl__debug_nvrm_evt_user_fallbacks);
             sysctl_register_oid(&sysctl__debug_nvrm_pm_waited);
         }
     }
@@ -2686,6 +2710,11 @@ IOReturn NVRMUserClient::clientClose(void)
         Gate g(fGate);
         if (gNvClientsLock && fFd >= 0) { IOLockLock(gNvClientsLock); gNvClients[fFd] = NULL; nv_pm_close(fPm); IOLockUnlock(gNvClientsLock); }
         if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }
+        // The RM posts an event outside its event lock, holding only event_posting_refcount on this nvfp (os.c,
+        // referenceEventForPost / postEvent). The events are freed now, so no new post can start, but one that had
+        // already started may still be inside nv_post_event with a pointer into this object. Wait for it, as Linux's
+        // nv_free_file_private does; this sleeps only when a post is really in flight.
+        if (!evtDrainPosts()) kprintf("NVRM-xnu: client fd %d: an event post is still in flight after 200 ms\n", fFd);
         // The ranges are NOT freed here. clientClose can run while another thread is inside
         // clientMemoryForType, which reads this array and hands its entries to
         // IOMemoryDescriptor::withPhysicalAddress - so freeing it here let a process map whatever
@@ -2711,7 +2740,25 @@ void NVRMUserClient::free(void)
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
+    // nv_post_event must never write into freed memory. If a post is still in flight after the drain, this object's
+    // memory is kept for good (one object, counted in debug.nvrm_evt_post_drain_stuck): everything it owns is released
+    // above, and the post touches only fEvtMagic and fEvtSeq.
+    if (!evtDrainPosts()) {
+        OSIncrementAtomic64(&gNvEvtDrainStuck);
+        kprintf("NVRM-xnu: client fd %d: an event post never finished - the connection is kept, not freed\n", fFd);
+        return;
+    }
+    fEvtMagic = 0;
     super::free();
+}
+// True when no event post holds this connection any more. A post runs from the interrupt path and takes microseconds,
+// so the loop below normally never runs; it gives a post that is in flight 200 ms.
+bool NVRMUserClient::evtDrainPosts()
+{
+    if (nv_event_posting_refcount_read(&fNvfp) == 0) return true;
+    OSIncrementAtomic64(&gNvEvtDrainWaits);
+    for (unsigned i = 0; i < 200 && nv_event_posting_refcount_read(&fNvfp) != 0; i++) IOSleep(1);
+    return nv_event_posting_refcount_read(&fNvfp) == 0;
 }
 // Token mappings - many CPU mappings on one connection.
 // Type 0 is the original contract: map whatever context is pending, and leave it pending (the userland driver opens
@@ -2853,11 +2900,12 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     *memory = md;
     return kIOReturnSuccess;
 }
-// Selector 7: what this kext supports. bit0 = token mappings (clientMemoryForType above).
+// Selector 7: what this kext supports. bit0 = token mappings (clientMemoryForType above) and selector 6; bit1 = selector 6
+// says why it returned, and selector 9 exists (nvrm_evwait.h). User space of 2.9 tests bit 0 only.
 IOReturn NVRMUserClient::sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args)
 {
     if (!OSDynamicCast(NVRMUserClient, target)) return kIOReturnNotAttached;
-    args->scalarOutput[0] = 1;
+    args->scalarOutput[0] = NVRM_EVW_CAP_WAIT | NVRM_EVW_CAP_REASON;
     return kIOReturnSuccess;
 }
 // Selector 8: forget a token after its mapping is unmapped; drops the descriptor. An unknown token is not an error.
@@ -2889,6 +2937,9 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sWaitEvent, 2, 0, 1, 0 },
         { sCaps, 0, 0, 1, 0 },
         { sForgetToken, 1, 0, 0, 0 },
+        { sEvtNote, 1, 0, 0, 0 },                     // 9: NVRM_EVW_SEL_NOTE
+        { sRetired, 0, 0, 0, 0 },                     // 10 and 11: placeholders that answer an error
+        { sRetired, 0, 0, 0, 0 },
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];
@@ -2947,22 +2998,48 @@ IOReturn NVRMUserClient::sWaitEvent(OSObject *target, void *reference, IOExterna
     const UInt32 seen = (UInt32)args->scalarInput[0];
     uint64_t us = args->scalarInput[1]; if (us > 100000) us = 100000;
     OSIncrementAtomic64(&gNvEvtWaits);
+    int slept = 0, wr = NVRM_EVW_WR_AWAKENED;
+    bool capped = false;
     if (us && me->fEvtSeq == seen) {
         // OSIncrementAtomic returns the value before the increment.
         if (OSIncrementAtomic(&gNvEvtSleepers) >= kNvEvtMaxSleepers) {
-            // At the ceiling: return the current sequence without parking. This
-            // is the same answer a timeout gives, so no caller can observe a
-            // result it could not already have seen.
+            // At the ceiling: return the current sequence without parking, and say so (NVRM_EVW_R_CAPPED), so that the
+            // caller takes a polling step instead of coming straight back. To a caller that does not read the reason
+            // this is the answer a timeout gives, as before.
             OSDecrementAtomic(&gNvEvtSleepers);
+            OSIncrementAtomic64(&gNvEvtCapped);
+            capped = true;
         } else {
+            if (OSCompareAndSwap(0, 1, &me->fEvtEverSlept)) OSIncrementAtomic64(&gNvEvtClients);
             assert_wait_timeout((event_t)&me->fEvtSeq, THREAD_ABORTSAFE, (uint32_t)us, NSEC_PER_USEC);
             if (me->fEvtSeq != seen) thread_wakeup((event_t)&me->fEvtSeq);
             OSIncrementAtomic64(&gNvEvtSlept);
-            (void)thread_block(THREAD_CONTINUE_NULL);
+            const wait_result_t r = thread_block(THREAD_CONTINUE_NULL);
             OSDecrementAtomic(&gNvEvtSleepers);
+            slept = 1;
+            wr = r == THREAD_TIMED_OUT ? NVRM_EVW_WR_TIMED_OUT : r == THREAD_AWAKENED ? NVRM_EVW_WR_AWAKENED : NVRM_EVW_WR_INTERRUPTED;
         }
     }
-    args->scalarOutput[0] = me->fEvtSeq;
+    // Bits 0..31 are the count, as in 2.9 (whose user space reads only those); bits 32..39 say why the call returned.
+    const UInt32 now = me->fEvtSeq;
+    const unsigned why = capped ? (unsigned)NVRM_EVW_R_CAPPED : nvrm_evw_classify(slept, wr, seen, now);
+    if (why == NVRM_EVW_R_WOKEN) OSIncrementAtomic64(&gNvEvtWoken);
+    else if (why == NVRM_EVW_R_TIMEOUT) OSIncrementAtomic64(&gNvEvtTimeouts);
+    args->scalarOutput[0] = nvrm_evw_pack(now, why);
+    return kIOReturnSuccess;
+}
+// Selector 9: user space reports what its event waits saw (nvrm_evwait.h). Counters only; any process can call it, so
+// the log is bounded and nothing else depends on the numbers.
+IOReturn NVRMUserClient::sEvtNote(OSObject *target, void *reference, IOExternalMethodArguments *args)
+{
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me) return kIOReturnNotAttached;
+    const uint64_t what = args->scalarInput[0];
+    if (what == NVRM_EVW_NOTE_MISSED) OSIncrementAtomic64(&gNvEvtUserMissed);
+    else if (what == NVRM_EVW_NOTE_FELL_BACK) {
+        if (OSIncrementAtomic64(&gNvEvtUserFellBack) < 8)
+            kprintf("NVRM-xnu: pid %d went back to polling: its event wakes did not arrive (fd %d)\n", me->fPid, me->fFd);
+    } else return kIOReturnBadArgument;
     return kIOReturnSuccess;
 }
 IOReturn NVRMUserClient::sBindFd(OSObject *target, void *reference, IOExternalMethodArguments *args)
