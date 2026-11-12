@@ -396,10 +396,13 @@ pick() {   # <min version or ''> <version command arg> <candidates...>: the firs
   done
   return 0
 }
+# glslangValidator --version says "Glslang Version: 11:16.0.0": 11 is its SPIR-V generator number and the release
+# follows the second colon. Mesa's meson.build reads it the same way (split(':')[2]).
+glslang_version() { "$1" --version 2>/dev/null | first_line | sed -n 's/^[^:]*:[^:]*:[[:space:]]*//p' | version_of; }
 pc_version() { [ ! -f "$1" ] || sed -n 's/^Version:[[:space:]]*//p' "$1" | first_line; }
 find_tools() {
   find_brew
-  local cands=() p
+  local cands=() p v
   # Python 3.10 or newer: NM_PYTHON, Homebrew python@3.14 and older, then PATH
   for p in "${NM_PYTHON:-}" "$(brew_opt python@3.14)/bin/python3.14" "$(brew_opt python@3.13)/bin/python3.13" \
            "$(brew_opt python@3.12)/bin/python3.12" "$(brew_opt python@3.11)/bin/python3.11" "$(brew_opt python@3.10)/bin/python3.10" \
@@ -413,7 +416,12 @@ find_tools() {
   T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(command -v ninja 2>/dev/null || true)")
   T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(command -v cmake 2>/dev/null || true)")
   T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(command -v pkg-config 2>/dev/null || true)")
-  T_GLSLANG=$(pick "$NM_PIN_TOOL_GLSLANG_MIN" --version "$(brew_opt glslang)/bin/glslangValidator" "$(command -v glslangValidator 2>/dev/null || true)")
+  T_GLSLANG=""
+  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(command -v glslangValidator 2>/dev/null || true)"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    v=$(glslang_version "$p" || true)
+    [ -n "$v" ] && ver_ge "$v" "$NM_PIN_TOOL_GLSLANG_MIN" && { T_GLSLANG=$p; break; }
+  done
   # LLVM 22 (its libraries build the native mesa_clc; NVK itself is compiled by Xcode's clang)
   LLVM_PREFIX=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""; LIBCLANG_DIR=""
   for p in "${NM_LLVM_PREFIX:-}" "$(brew_opt "llvm@$NM_PIN_TOOL_LLVM_MAJOR")" "$(brew_opt llvm)"; do
@@ -556,7 +564,7 @@ doctor() {   # prints; sets D_MISSING
   [ -n "$T_NINJA" ] && d_ok "ninja $("$T_NINJA" --version)" || d_missing "ninja $NM_PIN_TOOL_NINJA_MIN or later"
   [ -n "$T_CMAKE" ] && d_ok "cmake $("$T_CMAKE" --version | first_line | version_of)" || d_missing "cmake $NM_PIN_TOOL_CMAKE_MIN or later"
   [ -n "$T_PKGCONFIG" ] && d_ok "pkg-config $T_PKGCONFIG" || d_missing "pkg-config (Homebrew pkgconf)"
-  [ -n "$T_GLSLANG" ] && d_ok "glslangValidator $("$T_GLSLANG" --version 2>/dev/null | first_line | version_of)" || d_missing "glslangValidator $NM_PIN_TOOL_GLSLANG_MIN or later (Homebrew glslang)"
+  [ -n "$T_GLSLANG" ] && d_ok "glslangValidator $(glslang_version "$T_GLSLANG")" || d_missing "glslangValidator $NM_PIN_TOOL_GLSLANG_MIN or later (Homebrew glslang)"
   if [ -n "$LLVM_PREFIX" ]; then d_ok "LLVM $("$T_LLVMCONFIG" --version) at $LLVM_PREFIX"
   else d_missing "LLVM $NM_PIN_TOOL_LLVM_MAJOR.x with clang libraries (Homebrew llvm@$NM_PIN_TOOL_LLVM_MAJOR, or NM_LLVM_PREFIX)"; fi
   if [ -n "$PC_SPIRV_LLVM" ]; then
