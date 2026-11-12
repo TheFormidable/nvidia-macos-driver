@@ -426,7 +426,7 @@ on_err() {
   [ -n "$rep" ] && say "report file: $(printf '%s' "$rep" | tilde)" >&2
   exit "$rc"
 }
-on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -f "$TMPF" "$TMPF".* 2>/dev/null || true; }
+on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -rf "$TMPF" "$TMPF".* 2>/dev/null || true; }
 on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during step $CUR_STEP}" >&2; release_lock; exit 130; }
 
 # ---------------------------------------------------------------------------------------------------------- tools
@@ -457,7 +457,34 @@ brew_opt() { printf '%s/opt/%s' "${BREW_PREFIX:-/nonexistent-homebrew}" "$1"; } 
 
 # Each tool: the path the build will use ("" when none fits) and a status line. Homebrew's bin folder is never put on
 # the build's PATH: tools/bin gets a link to each chosen tool, so nothing else from Homebrew can leak into the build.
-T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""
+# patch_works <patch> [new]: does it apply, without a question, a change (and with "new" also a new file) in git's form
+# the way the scripts do: build_rm620.sh and tools/test_patch_chain.sh "-p1 --fuzz=0 --dry-run" then "-p1 --fuzz=0
+# --no-backup-if-mismatch" (changes only), build_nvk.sh "-p1 -s --no-backup-if-mismatch -d <dir>" (NVK's chain also
+# creates files). It works in a temporary folder, removed at once.
+patch_works() {
+  local p=$1 d=${TMPF:-/nonexistent}.patch ok=1
+  [ -n "${TMPF:-}" ] || return 1
+  rm -rf "$d"; mkdir -p "$d/t/a" || return 1
+  printf 'one\ntwo\nthree\n' > "$d/t/a/f.txt"
+  printf '%s\n' 'diff --git a/a/f.txt b/a/f.txt' '--- a/a/f.txt' '+++ b/a/f.txt' '@@ -1,3 +1,3 @@' ' one' '-two' '+TWO' ' three' > "$d/c.patch"
+  [ "${2:-}" != new ] || printf '%s\n' 'diff --git a/a/new.txt b/a/new.txt' 'new file mode 100644' '--- /dev/null' '+++ b/a/new.txt' \
+    '@@ -0,0 +1 @@' '+new' >> "$d/c.patch"
+  ( cd "$d/t" && "$p" -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\ntwo\nthree')" ] && [ ! -e "$d/t/a/new.txt" ] || ok=0
+  [ "$ok" = 1 ] && "$p" -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\nTWO\nthree')" ] || ok=0
+  [ "$ok" = 1 ] && { [ "${2:-}" != new ] || [ "$(cat "$d/t/a/new.txt" 2>/dev/null)" = new ]; } || ok=0
+  [ "$ok" = 1 ] && [ -z "$(find "$d/t" -name '*.orig' -o -name '*.rej')" ] || ok=0
+  rm -rf "$d"
+  [ "$ok" = 1 ]
+}
+# kext_python: the python3 a kext step finds on its PATH (the Python environment's once deps made it, else macOS's),
+# when it is new enough for build_rm620.sh, build_kms620.sh and rmcc.py; host_python: the one libnvencvt's build
+# runs on the build Mac (this one: NM_LOCAL_HOST_PATH)
+python_at_least() { local v; [ -n "$1" ] && v=$("$1" --version 2>&1 | version_of) && [ -n "$v" ] && ver_ge "$v" "$2"; }
+kext_python() { local p; p=$(PATH=$STEP_PATH command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
+host_python() { local p; p=$(PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
+PATCH_NEW=0; T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""
 LLVM_PREFIX=""; PC_SPIRV_LLVM=""; PC_SPIRV_TOOLS=""; LIBCLANG_DIR=""
 pick() {   # <min version or ''> <version command arg> <candidates...>: the first executable at least that new
   local min=$1 arg=$2 c v; shift 2
@@ -481,10 +508,14 @@ find_tools() {
            "$(brew_opt python@3.12)/bin/python3.12" "$(brew_opt python@3.11)/bin/python3.11" "$(brew_opt python@3.10)/bin/python3.10" \
            "$(command -v python3 2>/dev/null || true)"; do cands+=( "$p" ); done
   T_PYTHON=$(pick "$NM_PIN_TOOL_PYTHON_MIN" --version "${cands[@]}")
-  # GNU patch: the scripts pass --no-backup-if-mismatch
-  T_PATCH=""
-  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(command -v gpatch 2>/dev/null || true)" "$(command -v patch 2>/dev/null || true)"; do
-    [ -n "$p" ] && [ -x "$p" ] && case "$("$p" --version 2>/dev/null | first_line)" in *'GNU patch'*) true ;; *) false ;; esac && { T_PATCH=$p; break; }
+  # a patch that applies the patch chains the way the scripts call it (patch_works); macOS's own applies the kexts' chain.
+  # gpatch first only because deps installed it for a Mac whose patch did not. PATCH_NEW: it also creates files (NVK)
+  T_PATCH=""; PATCH_NEW=0
+  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(command -v gpatch 2>/dev/null || true)" \
+           "$(command -v patch 2>/dev/null || true)"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    if patch_works "$p" new; then T_PATCH=$p; PATCH_NEW=1; break; fi
+    [ -n "$T_PATCH" ] || ! patch_works "$p" || T_PATCH=$p
   done
   T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(command -v ninja 2>/dev/null || true)")
   T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(command -v cmake 2>/dev/null || true)")
@@ -642,12 +673,20 @@ doctor() {   # prints; sets D_MISSING
     [ -z "$BREW_OTHER" ] || d_note "a second Homebrew is at $BREW_OTHER; build.sh uses $BREW, the one of this Mac's processor ($(mac_arch)). NM_BREW=$BREW_OTHER makes it use the other"
   elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
-  [ -n "$T_PATCH" ] && d_ok "GNU patch $T_PATCH" || d_missing "GNU patch (Homebrew gpatch): the scripts pass --no-backup-if-mismatch"
+  if [ -n "$T_PATCH" ]; then d_ok "patch $T_PATCH ($("$T_PATCH" --version 2>/dev/null | first_line)): applies the kexts' patch chain as build_rm620.sh calls it"
+    [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain (Homebrew gpatch; nvk only)"
+  else d_missing "a patch that applies the patch chains as the scripts call it (-p1 --fuzz=0 --dry-run, --no-backup-if-mismatch, -s -d): Homebrew gpatch (rm, nvrm, nvk)"; fi
+  x=$(kext_python)
+  if [ -n "$x" ]; then d_ok "Python $("$x" --version 2>&1 | version_of) ($x) for rm, kms, nvrm (needs $NM_PIN_TOOL_PYTHON_KEXT_MIN or later)"
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_KEXT_MIN or later as python3 for rm, kms and nvrm (macOS's own, from Xcode, is enough)"; fi
+  x=$(host_python)
+  if [ -n "$x" ]; then d_ok "Python $("$x" --version 2>&1 | version_of) ($x) for nvencvt"
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_KEXT_MIN or later as python3 in ${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} for nvencvt"; fi
   if [ -n "$T_PYTHON" ]; then
     v=$("$T_PYTHON" --version 2>&1 | version_of)
-    d_ok "Python $v ($T_PYTHON)"
+    d_ok "Python $v ($T_PYTHON) for NVK's Python environment"
     ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" || d_note "Python $NM_PIN_TOOL_PYTHON_TESTS_MIN is needed by one host test (tools/test_fw_fetch.py); the build needs $NM_PIN_TOOL_PYTHON_MIN"
-  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later (Homebrew $NM_PIN_TOOL_PYTHON_FORMULA); macOS's python3 is 3.9"; fi
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later (Homebrew $NM_PIN_TOOL_PYTHON_FORMULA) for NVK's Python environment (nvk only); macOS's python3 is 3.9"; fi
   x=$(venv_python)
   if [ -n "$x" ] && [ -x "$VENV/bin/meson" ]; then
     v=$("$VENV/bin/meson" --version 2>/dev/null)
@@ -936,7 +975,7 @@ cmd_deps() {
     else die "Homebrew is missing; install it from https://brew.sh (build.sh runs its installer only after a typed yes at a terminal)"; fi
   fi
   # formulas for what is missing
-  [ -n "$T_PATCH" ] || want+=( gpatch )
+  [ -n "$T_PATCH" ] && [ "$PATCH_NEW" = 1 ] || want+=( gpatch )
   [ -n "$T_NINJA" ] || want+=( ninja )
   [ -n "$T_CMAKE" ] || want+=( cmake )
   [ -n "$T_PKGCONFIG" ] || want+=( pkgconf )
@@ -1125,10 +1164,10 @@ comp_info() {
   C_DEPS=""; C_SRC=""; C_VARS=""; C_PINS=""; C_OUT=""; C_TOOLS="xcode"; C_DESC=""
   case "$1" in
     rm)    C_DESC="NVIDIA's RM core for macOS (libnvkernel.a), patched with kexts/NVRM/patches"
-           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode patch python"
+           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode make patch python"
            C_OUT="$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" ;;
     kms)   C_DESC="NVIDIA's modeset core for macOS (libnvkms.a)"; C_DEPS="rm"
-           C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode python"
+           C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode make python"
            C_OUT="$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
     nvrm)  C_DESC="NVRM.kext"; C_DEPS="rm kms"
            C_SRC="build/build_nvrm.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_PINS="OGKM620_"; C_TOOLS="xcode python patch"
@@ -1151,7 +1190,7 @@ comp_info() {
            C_SRC="build/build_nvk.sh build/gen_nvk_rust_crates.py nvk licenses/nvk-rust-crates.txt"
            C_VARS="NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS NVK_JOBS NVK_PATH PKG_CONFIG_PATH LIBCLANG_PATH NM_MESA_GIT NM_OGKM610"
            C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR= SPIRVLLVM_ SPIRVHEADERS_"
-           C_TOOLS="xcode patch python nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
+           C_TOOLS="xcode patch nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
     vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
            C_OUT="$O/vulkan-loader/libvulkan.1.dylib" ;;
@@ -1161,7 +1200,7 @@ comp_info() {
            C_VARS="NULLMOTH_BUILD_HOST NULLMOTH_RUST_VERSION NULLMOTH_RUST_BIN NULLMOTH_CARGO_HOME"; C_PINS="RUST_VERSION="; C_TOOLS="xcode rust"; C_OUT="$O/xlate/libnvmtl_translate.dylib" ;;
     nvencvt) C_DESC="libnvencvt.dylib (video)"; C_DEPS="rm"
            C_SRC="build/build_nvencvt.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt vendor/nvenc tools/nvencvt_header_abi.py tools/nvk_header_abi.py"
-           C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
+           C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_TOOLS="xcode hostpython"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
     nmkbl) C_DESC="NMKbdBacklight.kext (optional; needs Lilu, VirtualSMC, MacKernelSDK)"; C_SRC="kexts/NMKbdBacklight build/check_kext_libraries.sh"
@@ -1422,21 +1461,43 @@ prepare_build() {   # what every build command needs before its first step
   if [ "$NM_DRY_RUN" = 0 ]; then make_tool_links; fi
   derive_paths
 }
+# What each component's scripts really need beyond Xcode (C_TOOLS; docs/BUILDING.md has the table): each tool is
+# tested for what the scripts do with it, not for a brand.
+#   make        rm, kms: NVIDIA's makefiles, only "make -n" (GNU make; Xcode's 3.81)
+#   patch       rm, nvrm (the patch chain test), nvk (which also creates files): see patch_works
+#   python      rm, kms, nvrm: python3 on the step's PATH, NM_PIN_TOOL_PYTHON_KEXT_MIN or later (macOS's 3.9 passes)
+#   hostpython  nvencvt: python3 on the build Mac's PATH, the same minimum
+#   cmake       vulkan: cmake and ninja
+#   rust        xlate, nvk: Rust in the working directory
+#   nvk         nvk: the Python environment (Python 3.10+, meson), LLVM 22, SPIRV-LLVM-Translator, SPIRV-Tools, glslang,
+#               bindgen, cbindgen
 need_tools_for() {   # stop early, naming what a component needs and does not have
   local n=$1 miss=""
   [ "$NM_DRY_RUN" = 1 ] && return 0
   comp_info "$n"
   case " $C_TOOLS " in *" xcode "*) xcrun --show-sdk-path >/dev/null 2>&1 || miss="$miss Xcode" ;; esac
-  case " $C_TOOLS " in *" patch "*) [ -n "$T_PATCH" ] || miss="$miss GNU-patch" ;; esac
-  case " $C_TOOLS " in *" python "*) [ -n "$T_PYTHON" ] || miss="$miss Python-3.10" ;; esac
+  case " $C_TOOLS " in *" make "*) case "$(PATH=$STEP_PATH make --version 2>/dev/null || true)" in *"GNU Make"*) ;; *) miss="$miss GNU-make" ;; esac ;; esac
+  case " $C_TOOLS " in *" patch "*) [ -n "$T_PATCH" ] || miss="$miss a-patch-that-applies-the-chains(gpatch)" ;; esac
+  case " $C_TOOLS " in *" nvk "*) [ "$PATCH_NEW" = 1 ] || miss="$miss a-patch-that-creates-files(gpatch)" ;; esac
+  case " $C_TOOLS " in *" python "*) [ -n "$(kext_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN" ;; esac
+  case " $C_TOOLS " in *" hostpython "*) [ "$BUILD_HOST" != "$LOCAL_HOST" ] || [ -n "$(host_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN(build-Mac)" ;; esac
   case " $C_TOOLS " in *" cmake "*) { [ -n "$T_CMAKE" ] && [ -n "$T_NINJA" ]; } || miss="$miss cmake/ninja" ;; esac
   case " $C_TOOLS " in *" rust "*) [ -x "$RUST_BIN/rustc" ] || miss="$miss Rust-$NM_PIN_RUST_VERSION" ;; esac
   case " $C_TOOLS " in *" nvk "*)
-    [ -x "$VENV/bin/meson" ] || miss="$miss meson(venv)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
+    [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
     spirv_llvm_ok || miss="$miss SPIRV-LLVM-Translator-$NM_PIN_TOOL_LLVM_MAJOR"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
     [ -n "$T_GLSLANG" ] || miss="$miss glslang"; [ -x "$CARGO_DIR/bin/bindgen" ] || miss="$miss bindgen"; [ -x "$CARGO_DIR/bin/cbindgen" ] || miss="$miss cbindgen" ;;
   esac
   [ -z "$miss" ] || die "$n needs:$miss (./build.sh doctor shows details; ./build.sh deps installs them)"
+}
+# with_deps <component...>: the components and every one they need, in build order, without those not built here
+with_deps() {
+  local out=" " c d
+  add_dep() { case "$out" in *" $1 "*) return 0 ;; esac; comp_info "$1"; local ds=$C_DEPS d2; for d2 in $ds; do add_dep "$d2"; done; out="$out$1 "; }
+  for c in "$@"; do add_dep "$c"; done
+  for c in $ALL_COMPONENTS $EXTRA_COMPONENTS; do
+    case "$out" in *" $c "*) component_skip "$c" >/dev/null || printf '%s ' "$c" ;; esac
+  done
 }
 need_sources_for() {
   local n=$1
@@ -1473,7 +1534,8 @@ cmd_build() {
   [ $# -gt 0 ] || set -- all
   list=$(expand_components "$@")
   say "== building: $list($NM_FLAVOUR flavour, NVAccel for macOS $(accel_majors | sed 's/ / and /'), $NM_JOBS jobs, working directory $W)"
-  for c in $list; do need_tools_for "$c"; need_sources_for "$c"; done
+  # every component that will be built, the ones pulled in as dependencies too, before the first step runs
+  for c in $(with_deps $list); do need_tools_for "$c"; need_sources_for "$c"; done
   for c in $list; do build_component "$c"; done
 }
 cmd_package() {
@@ -1481,7 +1543,7 @@ cmd_package() {
   [ -e "$NM_BASE_PACKAGE" ] || [ "$NM_DRY_RUN" = 1 ] || die "the base package $NM_BASE_PACKAGE does not exist"
   [ "$NM_ACCEL" = both ] || die "a package must carry NVAccel for macOS 15 and 26 (install.sh checks both); build with --accel both"
   prepare_build
-  local c; for c in $ALL_COMPONENTS; do need_tools_for "$c"; need_sources_for "$c"; done
+  local c; for c in $(with_deps $ALL_COMPONENTS); do need_tools_for "$c"; need_sources_for "$c"; done
   build_component package
 }
 
