@@ -13,10 +13,7 @@
 #ceiling dev plugin 230
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 496
-#pending sysctl debug.nvrm_switches
-#pending sysctl debug.nvrm_switches_nondefault
-#pending sysctl debug.nvrm_switches_set
+#ceiling unreviewed all 495
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -100,7 +97,7 @@ env	NVDEC_OWNATTRS	dev	unset	2.9	-	unreviewed
 env	NVDEC_SYNC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_AMPERE_ALL_DEC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_AMPERE_ENC	dev	unset	2.9	-	unreviewed
-env	NVENCVT_ANY_GPU	dev	unset	2.9	-	unreviewed
+env	NVENCVT_ANY_GPU	dev	unset	2.9	-	Developer only (the video library's own override, in a process's environment or a line of the root-owned /usr/local/etc/nvencvt.conf): the library treats any card as an RTX 40, so on an RTX 50 it skips the decode self-test and registers every encoder and decoder untested on that card. Nothing sets it.
 env	NVENCVT_BFRAMES	dev	unset	2.9	-	unreviewed
 env	NVENCVT_BT	dev	unset	2.9	-	unreviewed
 env	NVENCVT_CONF	dev	unset	2.9	-	unreviewed
@@ -693,7 +690,7 @@ sysctl	debug.nvaccel_surf_plane_validbits	diag	read-only	3.0	-	OR of the validit
 sysctl	debug.nvaccel_surf_planes	diag	read-only	3.0	-	1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0)
 sysctl	debug.nvaccel_surface_fence	diag	read-only	3.0	-	1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only)
 sysctl	debug.nvaccel_surface_fence_dead	diag	read-only	3.0	-	fence waits that ended because the writer exited, its channel faulted or the GPU slept
-sysctl	debug.nvaccel_surface_fence_errors	diag	read-only	3.0	-	fence waits NVRM did not serve (the 2.9 marks only)
+sysctl	debug.nvaccel_surface_fence_errors	diag	read-only	3.0	-	fence waits NVRM refused (the 2.9 marks only); 0 with this NVRM, which refuses none
 sysctl	debug.nvaccel_surface_fence_pending	diag	read-only	3.0	-	page-offs that found a fence hold on the surface
 sysctl	debug.nvaccel_surface_fence_ready	diag	read-only	3.0	-	fence waits that ended because the GPU work was done
 sysctl	debug.nvaccel_surface_fence_timeouts	diag	read-only	3.0	-	fence waits that a bound ended with the work not done (the caller went on, as 2.9)
@@ -999,10 +996,10 @@ procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user 
 procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
-build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built
+build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS <names> (NVK_EXTRA_PATCHES)"
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_REF_EXPORTS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
-build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it.
+build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT <names> (NVK_SKIP_PATCHES)".
 build	NVK_SYSROOT	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVRM_PRISTINE_OGKM	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
