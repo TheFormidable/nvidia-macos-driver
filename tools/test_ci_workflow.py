@@ -3,8 +3,8 @@
 
 A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml as text (no YAML library needed) and
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
-clone, the scripts and tests the jobs name exist, the two jobs that gate do gate, the host tests get a full clone, and
-nothing uploads or publishes. Each property has a control: the same check on a copy of the file with that one thing
+clone, the scripts and tests the jobs name exist, the two jobs that gate do gate and get a full clone (their tests
+read older revisions), and nothing uploads or publishes. Each property has a control: the same check on a copy of the file with that one thing
 wrong has to fail.
 
 It also holds build/ci_plugin.sh to the compiler line of build/build_plugin_release.sh, which it copies: the release
@@ -69,6 +69,8 @@ def problems(y, root):
     if "runs-on: ubuntu" not in linux or not re.search(r"run: bash build/kext_check\.sh\s*$", linux, re.M) \
             or not re.search(r"run_all_tests\.py.* test_switch_registry\b", linux):
         out.append("kexts-linux does not run the kext check and the switch registry test on Linux")
+    if "fetch-depth: 0" not in linux:
+        out.append("kexts-linux has no full clone: the registry test would skip its comparison with the previous commit and the 2.9 release")
     host = j.get("host-tests", "")
     if "fetch-depth: 0" not in host or not re.search(r"run: python3 tools/run_all_tests\.py -j \d+\s*$", host, re.M):
         out.append("host-tests does not run every test from a full clone")
@@ -111,7 +113,8 @@ control("an upload is caught", "      - name: Host tests\n", "      - uses: acti
 control("pull_request_target is caught", "  pull_request:\n", "  pull_request_target:\n", "pull_request_target")
 control("a script that does not exist is caught", "bash build/kext_check.sh", "bash build/kext_chekc.sh", "not in the tree")
 control("a test that does not exist is caught", " test_switch_registry ", " test_switch_registy ", "not in tools/")
-control("a shallow clone for the host tests is caught", "fetch-depth: 0", "fetch-depth: 1", "full clone")
+control("a shallow clone for the host tests is caught", "fetch-depth: 0          # negative controls", "fetch-depth: 1          # negative controls", "every test from a full clone")
+control("a shallow clone for the registry test is caught", "fetch-depth: 0          # the registry test", "fetch-depth: 2          # the registry test", "kexts-linux has no full clone")
 control("the Linux job made non-gating is caught", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    continue-on-error: true\n", "kexts-linux no longer gates")
 control("the host tests made non-gating are caught", "    runs-on: macos-15\n    timeout-minutes: 45\n", "    runs-on: macos-15\n    timeout-minutes: 45\n    continue-on-error: true\n",
         "host-tests no longer gates")
