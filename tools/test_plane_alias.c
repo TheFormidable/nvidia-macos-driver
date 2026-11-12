@@ -104,6 +104,27 @@ int main(void)
     ARM("control: rules that look at the asked plane alone are told apart", eligibility_rules(el_only_asked) != 0);
     ARM("control: rules without the size check are told apart", eligibility_rules(el_no_size) != 0);
 
+    /* ---- reading IOSurface's getters ---- */
+    { nvmtl_pa_surface g; memset(&g, 0, sizeof g); g.planes = 2; g.alloc = 1920u * 1080u * 3u / 2u + 4096;
+      nvmtl_pa_set_plane(&g.p[0], 0x10000, 0x10000 + 4096, 1920, 1920, 1080, 1, 1, 1);
+      nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, 1920, 960, 540, 2, 1, 1);
+      ARM("a plane's offset is its address less the surface's", g.p[0].off == 4096 && g.p[1].off == 4096 + 1920u * 1080u &&
+          nvmtl_pa_eligible(&g, 1, 960, 540, 2) == 0);
+      nvmtl_pa_set_plane(&g.p[1], 0, 0x2000, 1920, 960, 540, 2, 1, 1);
+      ARM("no base address: the plane is refused", nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) == NVMTL_PA_LARGE);
+      nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x8000, 1920, 960, 540, 2, 1, 1);
+      ARM("a plane before the surface's base: refused", nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) == NVMTL_PA_LARGE);
+      int all = 1;
+      if (sizeof(size_t) > 4) {
+          const size_t big = (size_t)1 << 32 | 32;   /* a multiple of 32 that a cast to 32 bits would make 32 */
+          nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, big, 960, 540, 2, 1, 1); all &= nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) != 0;
+          nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, 1920, big, 540, 2, 1, 1); all &= nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) != 0;
+          nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, 1920, 960, big, 2, 1, 1); all &= nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) != 0;
+          nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, 1920, 960, 540, (size_t)1 << 32 | 2, 1, 1); all &= nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) != 0;
+          nvmtl_pa_set_plane(&g.p[1], 0x10000, 0x10000 + 4096 + 1920u * 1080u, 1920, 960, 540, 2, (size_t)1 << 32 | 1, 1); all &= nvmtl_pa_eligible(&g, 0, 1920, 1080, 1) != 0;
+      }
+      ARM("a getter's value past 32 bits is refused, never cut down to one that passes", all); }
+
     /* ---- what the kernel says ---- */
     ARM("the self-test starts only when the accelerator offers plane grants and its page-off waits unlocked",
         nvmtl_pa_kernel_says(1, 1) == NULL && nvmtl_pa_kernel_says(0, 1) && nvmtl_pa_kernel_says(1, 0) &&

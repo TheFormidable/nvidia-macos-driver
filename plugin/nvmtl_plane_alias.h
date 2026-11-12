@@ -30,6 +30,18 @@ typedef struct { uint64_t alloc; uint32_t planes; nvmtl_pa_plane p[2]; } nvmtl_p
 /* The bytes of a plane the page-off copies: every row, padding included. */
 static inline uint64_t nvmtl_pa_len(const nvmtl_pa_plane *p) { return (uint64_t)p->row * p->h; }
 
+/* A getter's size as 32 bits; a larger one becomes a value every rule below refuses, never a smaller one that passes. */
+static inline uint32_t nvmtl_pa_u32(size_t v) { return (uint64_t)v > 0xffffffffull ? 0xffffffffu : (uint32_t)v; }
+/* One plane from IOSurface's getters: `base` and `plane_base` are the surface's and the plane's addresses in this process,
+   whose difference is the plane's offset (no address, or a plane before the surface, gives an offset no grant carries). */
+static inline void nvmtl_pa_set_plane(nvmtl_pa_plane *p, uintptr_t base, uintptr_t plane_base, size_t row, size_t w, size_t h,
+                                      size_t bpe, size_t ew, size_t eh)
+{
+    p->off = (base && plane_base >= base) ? (uint64_t)(plane_base - base) : UINT64_MAX;
+    p->row = nvmtl_pa_u32(row); p->w = nvmtl_pa_u32(w); p->h = nvmtl_pa_u32(h);
+    p->bpe = nvmtl_pa_u32(bpe); p->ew = nvmtl_pa_u32(ew); p->eh = nvmtl_pa_u32(eh);
+}
+
 /* Why a surface plane is not eligible; 0 = it is. */
 enum {
     NVMTL_PA_OK = 0,
@@ -187,6 +199,13 @@ static inline int64_t nvmtl_pa_verify(const uint8_t *base, const nvmtl_pa_surfac
    nvmtl_vk_plane_selftest), what failed, and for a wrong byte its offset in the allocation (or in the image read back,
    as `what` says) with the byte found and the byte expected (at = -1: no byte to show). */
 typedef struct { int step; const char *what; int64_t at; uint8_t got, want; } nvmtl_pa_result;
+/* The self-test's view of its private surface, given by the caller that made it: a CPU lock (read-only or read-write)
+   that returns the surface's base address, NULL when the lock failed, and its unlock with the same option. */
+typedef struct {
+    void *ctx;
+    uint8_t *(*lock)(void *ctx, int read_only);
+    void (*unlock)(void *ctx, int read_only);
+} nvmtl_pa_host;
 static inline void nvmtl_pa_fail(nvmtl_pa_result *r, int step, const char *what, int64_t at, uint8_t got, uint8_t want)
 {
     r->step = step; r->what = what; r->at = at; r->got = got; r->want = want;
