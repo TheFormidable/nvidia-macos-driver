@@ -9,12 +9,17 @@
  * that nvrm_fence_kernel_ops() fills.
  *
  * One lock, the fence lock (an IOLock), and it is a leaf: nothing here allocates, sleeps on anything but the fence's
- * own wakeup, or calls IOKit or the RM while holding it. Callers may hold the user client's gate (clientClose) or the
+ * own wakeup, or calls the RM while holding it. The one IOKit call made under it is IOMemoryDescriptor::readBytes on
+ * a descriptor the fence prepared itself (a channel's wired page), which takes no lock, allocates nothing and cannot
+ * block. Callers may hold the user client's gate (clientClose) or the
  * accelerator lock (NVAccel's waits) when they call in; the fence never takes either. It makes no RM call and touches
  * no hardware, so no call here needs the GPU to be awake.
  *
  * Every function is safe, and does nothing, before the first nvrm_fence_start() and after the last nvrm_fence_stop():
- * a GPU that sleeps or stops half-way through its start calls them in any order. */
+ * a GPU that sleeps or stops half-way through its start calls them in any order. Three exceptions, each for a caller
+ * that needs it: nvrm_fence_kernel_ops() answers before the first start (NVAccel may ask first; the wait it hands out
+ * finds nothing until the fence is on); after the last stop nvrm_fence_owner_gone(), nvrm_fence_pid_gone() and the
+ * CHAN_DEL request still take channels out of the table and let their pages go; a QUERY is answered in every state. */
 #pragma once
 #include <libkern/OSTypes.h>
 #ifndef __cplusplus
@@ -30,15 +35,18 @@ extern "C" {
 enum { NVRM_FENCE_PM_RESUMED = 0, NVRM_FENCE_PM_SUSPENDING = 1, NVRM_FENCE_PM_LOST = 2 };
 
 /* A GPU finished starting. Thread context, may sleep; call it once per GPU as the last step of a successful start,
- * after the adapter is initialised. The first call reads the boot-arg nvrmfence (0 = off for this boot), allocates the
- * table and registers the debug.nvrm_fence_* sysctls. When the allocation fails the fence stays off: every later call
- * is refused or does nothing and user space keeps the older mechanism. Nothing to check, nothing to undo. */
+ * after the adapter is initialised. The first call reads the boot-arg nvrmfence (0 = off for this boot) unless
+ * nvrm_fence_kernel_ops() already has, allocates the fence lock and registers the debug.nvrm_fence_* sysctls; the table
+ * is static storage and is never freed. When the lock cannot be allocated the fence stays off: every later call is
+ * refused or does nothing and user space keeps the older mechanism. Nothing to check, nothing to undo. */
 void nvrm_fence_start(void);
 
 /* A GPU is stopping (kext stop or shutdown). Thread context; call it once for each GPU whose start called
  * nvrm_fence_start(), before any RM teardown: it makes no RM call. When the last GPU stops, every hold ends, every
- * sleeper in a wait is woken and returns, and the fence refuses everything from then on. It does not wait for the
- * sleepers to leave: they hold no fence memory that is freed (the table is never freed). */
+ * sleeper in a wait is woken and returns, and the fence refuses new holds and channels until the next
+ * nvrm_fence_start() (a GPU stopped and started again). After a resume that was LOST, or once the fence switched
+ * itself off, a start does not switch it on again before the next boot. It does not wait for the sleepers to leave:
+ * they hold no fence memory that is freed (the table is never freed). */
 void nvrm_fence_stop(void);
 
 /* The GPU may have completed work. Any thread context that may take no lock and must not sleep, including the
@@ -93,7 +101,9 @@ void nvrm_fence_pid_gone(int pid);
 
 /* The platform function NVRM_FENCE_FN_OPS: fill the table NVAccel keeps. Thread context, no RM call, no power
  * reference needed. Returns true with o->wait set when o->version and o->size match and the fence is not switched off
- * by its boot-arg; false otherwise (answer kIOReturnUnsupported: NVAccel then keeps its own waits). The pointer stays
+ * by its boot-arg, also before the first start; false otherwise. NVRM answers a false with kIOReturnOffline when
+ * nvrm_fence_off_by_bootarg() is true (NVAccel then stops asking for this boot) and with kIOReturnUnsupported
+ * otherwise (NVAccel asks again later); either way NVAccel keeps its own waits. The pointer stays
  * valid until NVRM.kext unloads, which cannot happen while NVAccel is matched on it. o->wait() takes only the fence
  * lock, cannot be interrupted, is never refused for the number of sleepers, and may sleep up to w->timeoutMs. */
 bool nvrm_fence_kernel_ops(struct NVRMFenceKernelOps *o);
