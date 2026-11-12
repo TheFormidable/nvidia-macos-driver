@@ -120,6 +120,9 @@ case "$role" in
       --version) echo "Homebrew 4.6.3" ;;
       --prefix) echo "$SB/brew" ;;
       info)
+        # like Homebrew: the formula list is downloaded into its cache, ~/Library/Caches/Homebrew unless HOMEBREW_CACHE is set
+        c=${HOMEBREW_CACHE:-$HOME/Library/Caches/Homebrew}/api; mkdir -p "$c" && echo "{}" > "$c/formula.jws.json"
+        rec brew-info "HOMEBREW_CACHE=${HOMEBREW_CACHE:-}"
         f=${3:-}
         case "$f" in llvm) v=$(cat "$S/brew-llvm") ;; llvm@22) [ -f "$S/brew-llvm22" ] || exit 1; v=22.1.3 ;;
           gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
@@ -1083,9 +1086,61 @@ def arm_dryrun(mac):
     with mac.scratch():
         mac.break_script('  if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi\n', '')
         negative("a dry run that runs the commands", dry_problems(mac, ["-n", "--force", "build", "fb"])[0])
+    def dirty_problems(s):
+        (s.co / "README.md").write_text((s.co / "README.md").read_text() + "a local change\n")
+        p, out = dry_problems(s, ["-n", "--force", "build", "plugin", "xlate"])
+        if "build_plugin_release.sh" not in out:
+            p.append(f"the plugin step was not printed: {out[-300:]}")
+        return p
+    with mac.scratch():
+        p = dirty_problems(mac)
+        check("-n build plugin in a checkout with local changes writes nothing into it (no git stash create)", not p, p)
+    with mac.scratch():
+        mac.break_script('  elif [ "$NM_DRY_RUN" = 1 ]; then   # git stash create', '  elif false; then   # git stash create')
+        negative("a dry run that records the working tree with git stash create", dirty_problems(mac))
     with sb.scratch():
-        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then', 'elif false; then')
+        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && ! brew_may_ask; then', 'elif false; then')
         negative("a dry run that asks Homebrew for its LLVM formulas", dry_problems(sb, ["--dry-run", "all"])[0])
+
+
+def readonly_problems(sb):
+    """doctor, the dry runs and env on a Mac with Homebrew and nothing installed: nothing written anywhere (the stand-in
+    brew writes Homebrew's cache when "info" runs, as the real one does); deps afterwards: its "brew info" keeps the
+    cache inside the working directory."""
+    p = []
+    for args in (["doctor"], ["--dry-run", "all"], ["-n", "deps"], ["-n", "build", "rm"], ["env"], ["--offline", "-n", "deps"]):
+        before = sb.listing(sb.dir, skip=("journal",))
+        sb.journal.write_text("")
+        rc, out = sb.run(*args)
+        after = sb.listing(sb.dir, skip=("journal",))
+        d = [x for x in diff_listing(before, after) if x != "journal"]
+        if d:
+            p.append(f"{' '.join(args)} wrote {d[:4]}")
+        asked = [l for l in sb.jlines() if l.startswith("brew-info")]
+        if asked:
+            p.append(f"{' '.join(args)} asked brew info ({len(asked)} times)")
+    sb.clear()
+    rc, out = sb.run("-y", "deps")
+    cache = sb.home / "Library/Caches/Homebrew"
+    if cache.exists():
+        p.append("deps let brew info write ~/Library/Caches/Homebrew")
+    asked = [l for l in sb.jlines() if l.startswith("brew-info")]
+    if not asked:
+        p.append("deps never asked brew info (the test does not see the LLVM formula choice)")
+    if any(f"HOMEBREW_CACHE={sb.work}/tools/homebrew-cache" not in l for l in asked):
+        p.append(f"brew info without a cache in the working directory: {asked[:2]}")
+    return p
+
+
+def arm_readonly():
+    p = readonly_problems(Sandbox("ro"))
+    check("doctor, --dry-run, -n deps, -n build and env never run brew info; deps gives it a cache in the working directory", not p, p)
+    sb = Sandbox("ro-x")
+    sb.break_script('brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }', 'brew_may_ask() { true; }')
+    sb.break_script('  HOMEBREW_CACHE=$TOOLS/homebrew-cache HOMEBREW_NO_AUTO_UPDATE=1', '  HOMEBREW_NO_AUTO_UPDATE=1')
+    p = readonly_problems(sb)
+    negative("dry runs that ask brew info, with Homebrew's own cache (as before)",
+             [x for x in p if "asked brew info" in x or "Library/Caches/Homebrew" in x or "without a cache" in x])
 
 
 def order_problems(sb, args, expect):
@@ -2063,6 +2118,8 @@ def main():
             arm_hostbrew()
         if want("whichbrew"):
             arm_whichbrew()
+        if want("readonly"):
+            arm_readonly()
         if want("noinstall"):
             arm_noinstall()
         if want("tamper"):

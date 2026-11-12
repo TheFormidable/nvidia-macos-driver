@@ -78,6 +78,17 @@ folder that carries that mark.
 | One log per step, one stamp per step, failure reports | `<workdir>/logs`, `<workdir>/stamps`, `<workdir>/reports` |
 | The staged package and its tarball | `<workdir>/package/pkgroot`, `<workdir>/package/nullmoth-nvidia-local-<commit>.tar.gz` |
 
+### What each command writes
+
+| Command | Writes |
+|---|---|
+| `doctor`, `env`, `help`, and every command with `--dry-run` | Nothing. They read the Mac (`sw_vers`, `sysctl`, `xcode-select -p`, `xcodebuild -version`, `xcrun`, each tool's `--version`), the checkout (`git status` without refreshing its index; a dry run never records local changes with `git stash create`) and the working directory. They never run `brew info` or `brew install`: a dry run of `deps` names `llvm@22` without asking Homebrew which LLVM formula it has |
+| `deps` | Homebrew's prefix, and Homebrew's own cache and logs (`~/Library/Caches/Homebrew`, `~/Library/Logs/Homebrew`) for the formulas it installs, after a yes. Its `brew info` questions keep Homebrew's formula list in `<workdir>/tools/homebrew-cache`; with `--offline` it asks none. Everything else in `<workdir>/tools` and `<workdir>/src` |
+| `fetch` | `<workdir>/src`, `<workdir>/build/...` (the layout below) and the translator's crates in `<workdir>/tools/cargo` |
+| `build`, `all`, `package` | `<workdir>` only, with one exception: when the checkout has uncommitted changes, the plugin, translator and video builds take them as a commit object made with `git stash create`, which is stored in the checkout's `.git` (on no branch; `git gc` removes it in time) |
+| `test` | `<workdir>/logs`; the host tests make temporary folders of their own and remove them |
+| `clean` | Deletes inside `<workdir>` only |
+
 ### The working directory's layout
 
 `build.sh` gives the build scripts `NULLMOTH_BUILD_ROOT=<workdir>`. The scripts that came with 2.9 put their trees in

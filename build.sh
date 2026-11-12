@@ -365,8 +365,8 @@ write_report() {   # <step> <exit status> <log or ''>
     hr; say "checkout"
     say "commit: $(git -C "$HERE" rev-parse HEAD 2>/dev/null) ($(git -C "$HERE" log -1 --format=%s 2>/dev/null | cut -c1-80))"
     say "branch: $(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    local ch; ch=$(git -C "$HERE" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$ch" = 0 ]; then say "local changes: none"; else say "local changes: $ch file(s):"; git -C "$HERE" status --porcelain 2>/dev/null | sed -n 1,40p; fi
+    local ch; ch=$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$ch" = 0 ]; then say "local changes: none"; else say "local changes: $ch file(s):"; GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain 2>/dev/null | sed -n 1,40p; fi
     hr; say "pins (build/pins.sh)"
     grep -E '^NM_PIN_[A-Z0-9_]*(_REF|_COMMIT|_SHA256|_VERSION|_MIN|_MAJOR)=' "$PINS_FILE" || true
     hr; say "variables the build passes to the scripts"; print_env 2>/dev/null | grep '^export ' || true
@@ -530,7 +530,8 @@ tool_versions() {   # one line per tool, for doctor and the report
   say "rustc:        $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version 2>/dev/null || echo "none at $RUST_BIN")"
   say "bindgen:      $([ -x "$CARGO_DIR/bin/bindgen" ] && "$CARGO_DIR/bin/bindgen" --version 2>/dev/null || echo none)"
   say "cbindgen:     $([ -x "$CARGO_DIR/bin/cbindgen" ] && "$CARGO_DIR/bin/cbindgen" --version 2>/dev/null || echo none)"
-  say "brew:         ${BREW:-none} $([ -n "$BREW" ] && "$BREW" --version 2>/dev/null | first_line)"
+  # not "brew --version": Homebrew finds its version with git describe --dirty, which may rewrite its own git index
+  say "brew:         ${BREW:-none}$([ -n "$BREW" ] && echo " (prefix $BREW_PREFIX)")"
   return 0
 }
 
@@ -566,7 +567,7 @@ doctor() {   # prints; sets D_MISSING
   if [ -n "$PATH_PROBLEMS" ]; then printf '%s' "$PATH_PROBLEMS" | while IFS= read -r x; do [ -n "$x" ] && say "  REFUSED  $x"; done; D_MISSING=$((D_MISSING + 1)); D_LINES="$D_LINES  - a path problem (above)
 "; fi
   if git -C "$HERE" rev-parse HEAD >/dev/null 2>&1; then
-    x=$(git -C "$HERE" status --porcelain | wc -l | tr -d ' ')
+    x=$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain | wc -l | tr -d ' ')   # without refreshing the checkout's index
     d_ok "checkout $HERE at $(git -C "$HERE" rev-parse --short HEAD)$([ "$x" != 0 ] && echo ", $x changed file(s): the build uses them")"
   fi
   d_note "working directory $W$([ -f "$W/$MARKER" ] && echo ' (exists)' || echo ' (created on the first fetch or build)')"
@@ -876,8 +877,15 @@ Xcode cannot be installed by a script. Do this once:
 Then run ./build.sh doctor again.
 EOF
 }
-brew_llvm_is_pinned() { local j; j=$("$BREW" info --json=v2 llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
-brew_formula_exists() { "$BREW" info --json=v2 "$1" >/dev/null 2>&1; }
+# "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
+# otherwise). Only deps asks it, never during a dry run or offline, and with a cache in the working directory.
+brew_info() {
+  mkdir -p "$TOOLS/homebrew-cache"
+  HOMEBREW_CACHE=$TOOLS/homebrew-cache HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 "$BREW" info --json=v2 "$1"
+}
+brew_llvm_is_pinned() { local j; j=$(brew_info llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
+brew_formula_exists() { brew_info "$1" >/dev/null 2>&1; }
+brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }
 brew_installed() { [ -d "$BREW_PREFIX/opt/$1" ]; }
 cmd_deps() {
   is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
@@ -913,11 +921,11 @@ cmd_deps() {
   [ -n "$PC_SPIRV_TOOLS" ] || want+=( spirv-tools )
   [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of | { read -r v; ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"; } || want+=( "$NM_PIN_TOOL_PYTHON_FORMULA" )
   # a dry run does not ask Homebrew which LLVM formula it has: "brew info" may download Homebrew's formula list into
-  # its cache, outside the working directory, and a dry run changes nothing
+  # its cache, outside the working directory, and a dry run changes nothing. Offline it cannot download it.
   if [ -z "$LLVM_PREFIX" ] && [ "$nobrew" = 1 ]; then want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
-  elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then
+  elif [ -z "$LLVM_PREFIX" ] && ! brew_may_ask; then
     want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
-    say "    (dry run: Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
+    say "    ($([ "$NM_DRY_RUN" = 1 ] && echo "dry run" || echo offline): Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
   elif [ -z "$LLVM_PREFIX" ]; then
     llvmf=""
     if brew_formula_exists "llvm@$NM_PIN_TOOL_LLVM_MAJOR"; then llvmf=llvm@$NM_PIN_TOOL_LLVM_MAJOR
@@ -927,7 +935,7 @@ cmd_deps() {
   fi
   # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22. Otherwise
   # deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
-  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && [ "$NM_DRY_RUN" = 0 ] && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
+  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && brew_may_ask && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
     want+=( spirv-llvm-translator )
   fi
   if [ ${#want[@]} -gt 0 ]; then
@@ -1239,7 +1247,9 @@ lines_to_array() { ARR=(); local l; while IFS= read -r l; do [ -n "$l" ] && ARR+
 REV=""; REV_NOTE=""
 source_rev() {   # the revision the git-archive based scripts build: HEAD, or the working tree as a commit object
   [ -n "$REV" ] && return 0
-  if [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ]; then REV=$(git -C "$HERE" rev-parse HEAD); REV_NOTE="commit $REV"
+  if [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain --untracked-files=no)" ]; then REV=$(git -C "$HERE" rev-parse HEAD); REV_NOTE="commit $REV"
+  elif [ "$NM_DRY_RUN" = 1 ]; then   # git stash create would write a commit object into the checkout
+    REV="<the working tree as a commit object>"; REV_NOTE="the working tree of $(git -C "$HERE" rev-parse --short HEAD) with its uncommitted changes"
   else
     REV=$(GIT_AUTHOR_NAME=build.sh GIT_AUTHOR_EMAIL=build@localhost GIT_COMMITTER_NAME=build.sh GIT_COMMITTER_EMAIL=build@localhost \
           git -C "$HERE" stash create "build.sh: working tree" 2>/dev/null || true)
