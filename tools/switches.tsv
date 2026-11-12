@@ -14,7 +14,6 @@
 #ceiling dev translator 53
 #ceiling test all 1
 #ceiling unreviewed all 496
-#pending env NVMTL_DROP_REPORT
 #pending sysctl debug.nvrm_switches
 #pending sysctl debug.nvrm_switches_nondefault
 #pending sysctl debug.nvrm_switches_set
