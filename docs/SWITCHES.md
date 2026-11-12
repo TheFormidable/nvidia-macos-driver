@@ -942,9 +942,9 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_rm_asserts` | diag | read-only | 3.0 | - | RM assertions that failed | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_stub_hit_count` | diag | read-only | 3.0 | - | distinct OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
 | `debug.nvrm_stub_hits` | diag | read-only | 3.0 | - | OS-layer functions without a body that the RM called | kexts/NVRM/nv_xnu_kcore.cpp |
-| `debug.nvrm_switches` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line; ! marks one an ordinary install does not need |  |
-| `debug.nvrm_switches_nondefault` | diag | read-only | 3.0 | - | of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install) |  |
-| `debug.nvrm_switches_set` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line |  |
+| `debug.nvrm_switches` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line; ! marks one an ordinary install does not need | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_switches_nondefault` | diag | read-only | 3.0 | - | of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_switches_set` | diag | read-only | 3.0 | - | driver boot arguments set beside the install line | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_tgp_ac` | diag | read-only | 2.9 | - | last power source: 1 mains, 0 battery, -1 unknown | kexts/NVRM/nvrm_power.cpp |
 | `debug.nvrm_tgp_applies` | diag | read-only | 2.9 | - | TGP mode controls sent | kexts/NVRM/nvrm_power.cpp |
 | `debug.nvrm_tgp_enable` | hardware | writable by root | 2.9 | - | 1 = TGP mode on while on mains power, 0 = hold the VBIOS default power limit | kexts/NVRM/nvrm_power.cpp |
