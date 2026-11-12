@@ -9,16 +9,50 @@ A rebase onto a newer Mesa therefore buys only the upstream commits made since. 
 `src/nouveau` (about 930 added and 650 removed lines), and the whole 2.9 patch chain applies to the newer tree without a
 reject. Moving the base would still re-base about 17,600 lines of patches that WindowServer composites through, with no
 card available to validate, so the base stays. The upstream fixes that matter for current cards are carried instead as
-`nvk/nvk-upstream-nak.patch` (eleven commits, MIT, listed in the patch header), applied only when
-`NVK_EXTRA_PATCHES=nvk-upstream-nak` is set for `build/build_nvk.sh`:
+three patches of the default chain (`build/build_nvk.sh`), right after the 2.9 patches and before this driver's own
+`nvk-evwait`, `nvk-fence` and `nvk-channel-recover`. Each holds upstream commits with their text unchanged; the
+header of each patch and `NOTICE` list them.
 
-- uniform `Ldcg` scoreboard on SM120 (RTX 50): a missing dependency, a correctness fix;
-- `ready_cycle` in the prepass scheduler, SM120 IMMA/HMMA latencies, `opt_fall_through` always applied: scheduling;
-- `IDP.4A` never encoded with an immediate, `OpBSSy` source type, input-attachment `texture_offset`.
+- `nvk/nvk-mesa-26.3.0.patch`: what the 26.3.0 release (0a6fa60a) has over rc3 in the 13 files the NVK library is
+  compiled from, 17 commits of the 26.3 branch. For RTX 50 it holds the uniform `Ldcg` scoreboard fix on SM120: a
+  register could be read before the load into it had finished. The rest are NIR and util fixes that NVK runs
+  (`nir_lower_goto_ifs`, the `load_ubo` range in `nir_lower_mem_access_bit_sizes`, `nir_opt_access` with shader
+  interlock, `nir_lower_multiview`). The release's `VERSION` and `meson.build` changes are left out: the build needs
+  the same meson as before, and the library still reports its Mesa version as 26.3.0-rc3.
+- `nvk/nvk-nak-fixes-main.patch`: four NAK fixes that are on Mesa main and in no release: the barrier source type of
+  `OpBSSy`, the insert order in `opt_bar_prop` when annotations are off, and longer SM120 IMMA/HMMA latencies (with
+  the `Copy`/`Clone` derive they need).
+- `nvk/nvk-nak-sched-main.patch`: four NAK code generation changes that are on Mesa main and in no release:
+  `ready_cycle` in the scheduler that runs before register allocation (it used a value that was always zero, so
+  latencies never influenced the order), `opt_fall_through` always applied, and `nir_opt_peephole_select` with limit
+  8 in every stage. None of the four is specific to one card generation; on RTX 50 the scheduler now orders by the
+  SM120 latency table.
 
-Checked offline: the patch applies on top of the 2.9 chain with no reject; the build with it has the same 21 warnings and
-exactly the same 2274 exports as the build without it. Not checkable offline: whether the changed scheduling is faster or
-the same on a card. Default off until a Geekbench and compositor run on the target card shows no regression.
+2.9 listed two more commits in an opt-in file (`IDP.4A` never encoded with an immediate, input-attachment
+`texture_offset`); both are already in rc3, which is why that file did not apply and is gone.
+
+`NVK_SKIP_PATCHES="<name> ..."` for `build/build_nvk.sh` leaves any of the three out of a build; no other name is
+accepted. It is there to find the cause of a rendering fault: build without `nvk-nak-sched-main` first (it is the only
+one that is not a fix, and it changes the instruction order of every shader), then without all three.
+`NVK_EXTRA_PATCHES=nvk-upstream-nak`, the 2.9 way to ask for these fixes, is accepted and ignored with a note. A
+library built that way is for the fault hunt only. Its summary line, the one line the release build shows and keeps
+in `BUILD.txt`, ends with `WITHOUT <names> (NVK_SKIP_PATCHES)` (and `PLUS <names> (NVK_EXTRA_PATCHES)` for added
+patches), so a variable that is still set at the next build cannot go unnoticed. Unset both for a library that is
+meant to be used.
+
+Checked offline, with the whole library (C, C++ and Rust) cross-built on Linux for macOS with LLVM 18: the chain
+applies from the pristine base with no fuzz; the library builds and links after each of the three patches and with
+every combination of them left out, with no new warning; its exported and undefined symbols are the same as without
+the three. Every changed and context line of the three patches was compared with the upstream commits. NAK's unit
+tests that need no GPU pass, and a random test of the changed scheduler (1,900 generated functions, each under nine or
+ten combinations of shader model and register limit, SM120 and older models, assertions on) found no case where the
+pass fails, loses an instruction, or puts a use before its definition. A second random test ran the whole back end
+(legalisation, the scheduler before register allocation, register allocation, jump threading, the scheduler after it,
+the dependency calculation and the encoder) on 3,600 generated cases for SM120 and for older models, once with and
+once without the scheduling patch, with the flags the library is built with: every case that encodes without the
+patch encodes with it. Not checkable offline: the image on a card. Mesa's CI has no RTX 50, and the scheduling patch
+has not been in a Mesa release. The library's build id changes, so shader caches written by a 2.9 build are not
+reused and shaders are compiled again once.
 
 ## NVRM headers
 
