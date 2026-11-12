@@ -20,13 +20,19 @@ if stage.exists() and platform.system() == 'Darwin' and shutil.which('clang'):
         d = pathlib.Path(d)
         pkg = d / 'pkgroot'; m = pkg / 'Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS'; m.mkdir(parents=True)
         (pkg / 'SHA256SUMS').write_text('0000  ./other\n1111  ./Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib\n')
-        good = d / 'good.c'; good.write_text('int NVEncVT_Register(int r){return r;} int NVEncVT_RegisterDecoders(int r){return r;} int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;}\n')
+        entries = 'int NVEncVT_Register(int r){return r;} int NVEncVT_RegisterDecoders(int r){return r;} int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;}'
+        good = d / 'good.c'; good.write_text(entries + ' const int NVEncVT_BlackwellSelfTest = 1;\n')
         bad = d / 'bad.c'; bad.write_text('int NVEncVT_Register(int r){return r;}\n')
+        # every entry point, but built without the RTX 50 decode self-test: the plugin refuses it on that card
+        untested = d / 'untested.c'; untested.write_text(entries + '\n')
         arch = ['-arch', 'x86_64']
-        for n, src in (('good', good), ('bad', bad)):
+        for n, src in (('good', good), ('bad', bad), ('untested', untested)):
             subprocess.run(['clang', *arch, '-dynamiclib', '-o', str(d / f'{n}.dylib'), str(src)], check=True, capture_output=True)
         r = subprocess.run(['bash', str(stage), str(pkg), str(d / 'bad.dylib')], capture_output=True, text=True)
         check('a library missing entry points is refused', r.returncode != 0 and 'does not export' in r.stdout, r.stdout.strip()[-80:])
+        r = subprocess.run(['bash', str(stage), str(pkg), str(d / 'untested.dylib')], capture_output=True, text=True)
+        check('a library without the RTX 50 decode self-test marker is refused', r.returncode != 0
+              and 'does not export _NVEncVT_BlackwellSelfTest' in r.stdout and not (m / 'libnvencvt.dylib').exists(), r.stdout.strip()[-80:])
         r = subprocess.run(['bash', str(stage), str(d / 'nope'), str(d / 'good.dylib')], capture_output=True, text=True)
         check('a path that is not a package tree is refused', r.returncode != 0)
         r = subprocess.run(['bash', str(stage), str(pkg), str(d / 'good.dylib')], capture_output=True, text=True)

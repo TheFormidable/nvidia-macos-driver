@@ -99,7 +99,8 @@ class Gate(unittest.TestCase):
         self.root = t / "pkgroot"
         self.macos = self.root / "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS"; self.macos.mkdir(parents=True)
         (t / "c.c").write_text("int NVEncVT_Register(int r){return r;} int NVEncVT_RegisterDecoders(int r){return r;} "
-                               "int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;}\n")
+                               "int NVEncVT_CreateInstance(int a){return a;} int NVDecVT_CreateInstance(int a){return a;} "
+                               "const int NVEncVT_BlackwellSelfTest = 1;\n")
         sh("clang", "-arch", "x86_64", "-dynamiclib", "-o", self.macos / "libnvencvt.dylib", t / "c.c")
         sh("codesign", "-f", "-s", "-", self.macos / "libnvencvt.dylib")
         (t / "m.c").write_text("int main(void){return 0;}\n")
