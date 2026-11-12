@@ -1901,13 +1901,14 @@ static bool nvSurfIsPending(unsigned int id)
 // rest of the boot when something unexpected is seen (nvPoStandDown). Boot-arg nvaccel_pageoff_locked=1, read once
 // before the first accelerator starts, is the way back to the locked wait for the whole boot; the sysctl only reports.
 static int gPoUnlocked = 1;
-static SInt64 gCntPoUnlocked, gCntPoNotOwner, gCntPoPinned, gCntPoAlready, gCntPoChanged, gCntPoStandDown;
+static SInt64 gCntPoUnlocked, gCntPoNotOwner, gCntPoPinned, gCntPoAlready, gCntPoRecopied, gCntPoChanged, gCntPoStandDown;
 static int gPoUnlockedMaxUs;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlocked, 0, "1 = a page-off waits for the GPU without the accelerator lock (0: boot-arg nvaccel_pageoff_locked=1, or it stood down for this boot)");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_waits,   gCntPoUnlocked, "page-offs that waited for the GPU without the accelerator lock");
 NVACCEL_CNT(nvaccel_pageoff_locked_not_owner, gCntPoNotOwner, "page-offs with a pending surface that waited locked because the thread was not the lock's owner at one level");
 NVACCEL_CNT(nvaccel_pageoff_locked_pinned,    gCntPoPinned,   "page-offs with a pending surface that waited locked because the driver's own code held the lock");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_already,   gCntPoAlready,   "unlocked page-offs that found system memory already current after the wait and copied nothing");
+NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-offs that copied although another page-off of the resource finished during the wait (that one may have read the GPU's memory too early)");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
@@ -2001,6 +2002,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_locked_not_owner); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_locked_pinned);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_already); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_changed);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_recopied);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
@@ -2381,11 +2383,15 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             // compared with it. valid[0] bit 0 = the system-memory copy holds the newest pixels (set by a page-off).
             volatile unsigned short *const v0 = *(unsigned short *volatile *)(r + 0x30);
             const bool wasCurrent = v0 && (v0[0] & 1u);
+            const unsigned long long copies0 = nvaccel_pageoff_copies_started(&fPoCopies);
             void *const surf0 = surf; NVVidMemory *const vm0 = vm;
             retain(); holdRes.o = this;
             a->retain(); holdAccel.o = a;
             nvFamUnlock(a);
             nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);   // no lock of this driver held: as long as the GPU needs, 2 s at most
+            // Read at once and without the lock: a copy of this resource that begins from here on reads the GPU's
+            // memory after this wait has ended, no earlier than this page-off would have with the lock held all along.
+            const unsigned long long copies1 = nvaccel_pageoff_copies_started(&fPoCopies);
             if (!nvFamLock(a, false)) {
                 // The accelerator's lock is gone (it is being torn down). Nothing below may run without the lock, and
                 // the family's caller will find it does not hold it: say so once and wait locked from now on.
@@ -2408,10 +2414,14 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
             if (surf != surf0 || vm != vm0) OSAddAtomic64(1, &gCntPoChanged);
             // Another thread may have paged this resource off while the lock was free, and a CPU writer may have written
-            // system memory since. Copying VRAM over it now would put older pixels on top of newer ones: the page-off is
-            // already done, so report it done and copy nothing.
+            // system memory since. When that page-off made this one's copy (it began after this wait had ended), or
+            // the family itself made system memory current, copying again would put the GPU's pixels on top of
+            // newer ones: report the page-off done and copy nothing. A copy that began before this wait ended may
+            // have come too early, and is made again. The rules are in nvaccel_pageoff_recheck.h.
             {   volatile unsigned short *const v1 = *(unsigned short *volatile *)(r + 0x30);
-                if (!wasCurrent && v1 && (v1[0] & 1u)) { OSAddAtomic64(1, &gCntPoAlready); if (out) *out = true; return; } }
+                const bool currentNow = v1 && (v1[0] & 1u);
+                if (nvaccel_pageoff_already_done(&fPoCopies, wasCurrent, currentNow, copies0, copies1)) { OSAddAtomic64(1, &gCntPoAlready); if (out) *out = true; return; }
+                if (currentNow && nvaccel_pageoff_copied_after(&fPoCopies, copies0)) OSAddAtomic64(1, &gCntPoRecopied); }
             if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) { IOAccelResource2::pageoff(ev, a1, out, a3); return; }
         } else {
             if (pending) OSAddAtomic64(1, a->lockPinned() ? &gCntPoPinned : &gCntPoNotOwner);
@@ -2427,6 +2437,9 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         IOAccelResource2::pageoff(ev, a1, out, a3);
         return;
     }
+    // This copy's number among the driver's copies of the resource (nvaccel_pageoff_recheck.h), taken before the GPU's
+    // memory is read and left behind below once the copy has finished well. The accelerator lock is held throughout.
+    const unsigned long long copyNumber = nvaccel_pageoff_copy_begin(&fPoCopies);
     bool mayUnwire = true;
     unsigned long long len = md->getLength();
     if (len > vm->fBytes) len = vm->fBytes;
@@ -2493,6 +2506,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(surf), 0);
         volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
         if (valid) valid[0] |= 1;
+        nvaccel_pageoff_copy_end(&fPoCopies, copyNumber);
         gNVSVPageoff++;
     } else gNVSVPageoffFail++;
     if (out) *out = ok;

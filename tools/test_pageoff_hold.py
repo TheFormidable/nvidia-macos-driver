@@ -8,7 +8,10 @@ held.
 The wait is the default path. Before it could be, four things were fixed, and each is asserted here against the source
 of NVResource::pageoff and its helpers, with v2.9 (7412cdd) as the control that each arm tells apart:
 - the result of taking the lock back is tested, and nothing below runs without it;
-- after the lock is back, a resource whose system memory became current while the lock was free is not copied over;
+- after the lock is back, a page-off whose copy another thread made meanwhile, or whose system memory the family made
+  current, reports done and copies nothing, and a copy that may have come too early is made again (the rule is in
+  kexts/NVRM/accel/nvaccel_pageoff_recheck.h and tools/test_pageoff_recheck.c proves it; here: that the page-off feeds it
+  what it needs and obeys it);
 - a hold that is the last reference when the function returns is kept, and the unlocked wait stands down for the boot;
   when it already is the last one as the lock comes back, nothing is read through the resource any more;
 - a lock the driver took itself (nvFamLock) is pinned, so a page-off reached from under it never lets go of it.
@@ -19,6 +22,7 @@ import pathlib, re, subprocess, sys
 R = pathlib.Path(__file__).resolve().parents[1]
 SRC = "kexts/NVRM/accel/nvrm-accel.cpp"
 HDR = "kexts/NVRM/accel/nvaccel_lock_owner.h"
+RULE = "kexts/NVRM/accel/nvaccel_pageoff_recheck.h"
 fails = 0
 
 
@@ -68,23 +72,52 @@ def relock_tested(src):
     return bool(m) and "return;" in m.group(1) and "nvPoStandDown(" in m.group(1) and "nvFamLock(a, false);" not in b
 
 
-def revalidated(src):
-    """valid[0] bit 0 is recorded before the unlock, read again after the relock, and a resource that became current
-    returns before the copy (and before the eligibility re-check that would call the family's page-off)."""
+def revalidated(src, rule):
+    """Before the unlock the page-off records the bit (valid[0] bit 0) and how many of the driver's copies of the resource
+    have begun. When its wait ends it reads that number again, at once and without the lock. After the relock it reads
+    the bit again and the rule decides; on "done" it returns before the copy (and before the eligibility re-check that
+    would call the family's page-off). The copy takes its number before the GPU's memory is read and leaves it behind
+    only when it finished well. The rule itself is the header's, line for line."""
     body = func(src, "void NVResource::pageoff(")
     if "nvFamUnlock(a);" not in body:
         return False
     u = body.index("nvFamUnlock(a);")
     pre, b = body[:u], unlocked_block(src)
-    if not re.search(r"const bool wasCurrent = v0 && \(v0\[0\] & 1u\);", pre):
+    if not re.search(r"const bool wasCurrent = v0 && \(v0\[0\] & 1u\);", pre) \
+            or "const unsigned long long copies0 = nvaccel_pageoff_copies_started(&fPoCopies);" not in pre:
         return False
-    m = re.search(r"if \(!wasCurrent && v1 && \(v1\[0\] & 1u\)\) \{[^}]*if \(out\) \*out = true; return; \}", b)
-    if not m or "nvFamLock(a, false)" not in b[:m.start()]:
+    rl = b.find("if (!nvFamLock(a, false))")
+    w = b.find("nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);")
+    c1 = b.find("const unsigned long long copies1 = nvaccel_pageoff_copies_started(&fPoCopies);")
+    # read when the wait ends: no other statement between the wait and the read, and both before the lock is asked for
+    if not 0 <= w < c1 < rl or ";" in re.sub(r"//[^\n]*", "", b[w + len("nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);"):c1]):
         return False
-    after = b[m.end():]
+    m = re.search(r"if \(nvaccel_pageoff_already_done\(&fPoCopies, wasCurrent, currentNow, copies0, copies1\)\) "
+                  r"\{[^}]*if \(out\) \*out = true; return; \}", b)
+    if not m or m.start() < rl:
+        return False
+    now = b.find("const bool currentNow = v1 && (v1[0] & 1u);", rl)
     fam = b.find("IOAccelResource2::pageoff(", m.end())
-    return "*(unsigned short *volatile *)(r + 0x30)" in b[:m.start()] and fam > 0 and "md->prepare" not in b[:m.start()] \
-        and after.strip() != ""
+    if not ("*(unsigned short *volatile *)(r + 0x30)" in b[rl:m.start()] and rl < now < m.start() and fam > 0
+            and "md->prepare" not in b[:m.start()]):
+        return False
+    # the copy: numbered after the wait block and before the copy engine is asked, the number left behind inside `if (ok)`
+    e = body.find("} else {", u)
+    tail = body[e:] if e > 0 else ""
+    beg = tail.find("const unsigned long long copyNumber = nvaccel_pageoff_copy_begin(&fPoCopies);")
+    ask = tail.find("NVRM_SS_FN_PAGEOFF")
+    okb = tail.find("    if (ok) {")
+    end = tail.find("nvaccel_pageoff_copy_end(&fPoCopies, copyNumber);", okb)
+    els = tail.find("} else gNVSVPageoffFail++;", okb)
+    if not (0 <= beg < ask and 0 <= okb < end < els and body.count("nvaccel_pageoff_copy_end(") == 1
+            and body.count("nvaccel_pageoff_copy_begin(") == 1):
+        return False
+    r = func(rule, "static inline int nvaccel_pageoff_already_done(")
+    lines = ["if (!currentNow) return 0;", "if (nvaccel_pageoff_copied_after(c, atWaitEnd)) return 1;",
+             "if (nvaccel_pageoff_copied_after(c, atUnlock)) return 0;", "return !wasCurrent;"]
+    at = [r.find(x) for x in lines]
+    return all(x >= 0 for x in at) and at == sorted(at) and r.count("return") == 4 \
+        and "{ return c->finished > seen; }" in rule and "__atomic_add_fetch(&c->started, 1ull, __ATOMIC_RELEASE)" in rule
 
 
 def last_ref_kept(src):
@@ -140,6 +173,7 @@ def default_on(src):
 
 src = (R / SRC).read_text()
 hdr = (R / HDR).read_text()
+rule = (R / RULE).read_text() if (R / RULE).exists() else ""
 new = held(src)
 arm("the unlocked wait is still in pageoff (the check looked at the right function)", new is not None)
 arm("the resource and the accelerator are held before the lock is released, until the function returns", new is True)
@@ -155,7 +189,23 @@ else:
     arm("control: the earlier source is readable", False, "neither 406d9824 nor b1603eb^ has the unlocked wait")
 
 arm("the result of taking the lock back is tested; a failure stands down and returns", relock_tested(src))
-arm("after the relock, a resource whose system memory became current is reported done and not copied over", revalidated(src))
+arm("after the relock the page-off asks the rule of nvaccel_pageoff_recheck.h with the bit before and after and the copies "
+    "begun before the unlock and at the end of its wait; its own copy is numbered",
+    revalidated(src, rule))
+EARLIER = "!wasCurrent && currentNow"
+CALL = "nvaccel_pageoff_already_done(&fPoCopies, wasCurrent, currentNow, copies0, copies1)"
+arm("control: the earlier condition (the bit clear before and set now) in place of the rule is told apart",
+    src.count(CALL) == 1 and not revalidated(src.replace(CALL, EARLIER), rule))
+NUMBER = "        nvaccel_pageoff_copy_end(&fPoCopies, copyNumber);\n"
+arm("control: a copy that leaves its number behind whether it worked or not is told apart",
+    src.count(NUMBER) == 1 and not revalidated(src.replace(NUMBER, "").replace("    if (ok) {\n", NUMBER[4:] + "    if (ok) {\n", 1), rule))
+READ1 = "            const unsigned long long copies1 = nvaccel_pageoff_copies_started(&fPoCopies);\n"
+UNPIN = "            a->unpinLock();"
+WAIT = "            nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);"
+arm("control: the copies begun read before the wait (a copy made during the wait would count as made after it) is told apart",
+    src.count(READ1) == 1 and src.count(WAIT) == 1 and not revalidated(src.replace(READ1, "").replace(WAIT, READ1 + WAIT), rule))
+arm("control: the copies begun read only once the lock is back (no other copy could then be this page-off's own) is told apart",
+    src.count(READ1) == 1 and src.count(UNPIN) == 1 and not revalidated(src.replace(READ1, "").replace(UNPIN, READ1 + UNPIN), rule))
 arm("a hold that is the last reference is kept and the unlocked wait stands down", last_ref_kept(src))
 arm("with the lock back, a resource that only the page-off still holds is not read through", orphan_not_read(src))
 arm("the driver's own locks are pinned (nvFamLock / nvFamUnlock), the relock unpins, a pinned owner may not let go",
@@ -167,7 +217,7 @@ v29 = git_show("7412cdd", SRC)
 v29h = git_show("7412cdd", HDR)
 if v29 is not None and v29h is not None:
     arm("control: v2.9 ignores the relock result", not relock_tested(v29))
-    arm("control: v2.9 copies after the relock without looking at valid[0]", not revalidated(v29))
+    arm("control: v2.9 copies after the relock without looking at valid[0]", not revalidated(v29, rule))
     arm("control: v2.9 releases the last reference", not last_ref_kept(v29))
     arm("control: v2.9 reads through the resource whoever still holds it", not orphan_not_read(v29))
     arm("control: v2.9 lets go of a lock its own code took", not pinned(v29, v29h))
