@@ -245,7 +245,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_DLSS_SKIP` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DLSS_TRACE` | diag | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DONTCARE_CLEARS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
-| `NVMTL_DROP_REPORT` | escape | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.0 | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |  |
+| `NVMTL_DROP_REPORT` | escape | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.0 | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. | plugin/nvmtl_vk.c |
 | `NVMTL_DUMP_FAILED_DIR` | diag | unset | 2.9 | - | unreviewed | translator/wrapper/src/lib.rs |
 | `NVMTL_DUMP_GROUP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_DUMP_PSO` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
