@@ -22,6 +22,9 @@ import pathlib, re, subprocess, sys
 R = pathlib.Path(__file__).resolve().parents[1]
 SRC = "kexts/NVRM/accel/nvrm-accel.cpp"
 HDR = "kexts/NVRM/accel/nvaccel_lock_owner.h"
+STUBS = "kexts/NVRM/accel/nvaccel_stubs.h"
+# the resource's validity bit: bit 0, or the bit a plane's grant recorded (two-plane surfaces)
+VALID_BIT = "unsigned short validBit() const { return fRangeLen ? fValidBit : (unsigned short)1; }"
 RULE = "kexts/NVRM/accel/nvaccel_pageoff_recheck.h"
 fails = 0
 
@@ -73,7 +76,7 @@ def relock_tested(src):
 
 
 def revalidated(src, rule):
-    """Before the unlock the page-off records the bit (valid[0] bit 0) and how many of the driver's copies of the resource
+    """Before the unlock the page-off records the bit (valid[0], bit 0 or a plane's own bit: validBit()) and how many of the driver's copies of the resource
     have begun. When its wait ends it reads that number again, at once and without the lock. After the relock it reads
     the bit again and the rule decides; on "done" it returns before the copy (and before the eligibility re-check that
     would call the family's page-off). The copy takes its number before the GPU's memory is read and leaves it behind
@@ -83,7 +86,7 @@ def revalidated(src, rule):
         return False
     u = body.index("nvFamUnlock(a);")
     pre, b = body[:u], unlocked_block(src)
-    if not re.search(r"const bool wasCurrent = v0 && \(v0\[0\] & 1u\);", pre) \
+    if not re.search(r"const bool wasCurrent = v0 && \(v0\[0\] & validBit\(\)\);", pre) \
             or "const unsigned long long copies0 = nvaccel_pageoff_copies_started(&fPoCopies);" not in pre:
         return False
     rl = b.find("if (!nvFamLock(a, false))")
@@ -96,7 +99,7 @@ def revalidated(src, rule):
                   r"\{[^}]*if \(out\) \*out = true; return; \}", b)
     if not m or m.start() < rl:
         return False
-    now = b.find("const bool currentNow = v1 && (v1[0] & 1u);", rl)
+    now = b.find("const bool currentNow = v1 && (v1[0] & validBit());", rl)
     fam = b.find("IOAccelResource2::pageoff(", m.end())
     if not ("*(unsigned short *volatile *)(r + 0x30)" in b[rl:m.start()] and rl < now < m.start() and fam > 0
             and "md->prepare" not in b[:m.start()]):
@@ -173,6 +176,7 @@ def default_on(src):
 
 src = (R / SRC).read_text()
 hdr = (R / HDR).read_text()
+stubs = (R / STUBS).read_text()
 rule = (R / RULE).read_text() if (R / RULE).exists() else ""
 new = held(src)
 arm("the unlocked wait is still in pageoff (the check looked at the right function)", new is not None)
@@ -194,6 +198,10 @@ arm("after the relock the page-off asks the rule of nvaccel_pageoff_recheck.h wi
     revalidated(src, rule))
 EARLIER = "!wasCurrent && currentNow"
 CALL = "nvaccel_pageoff_already_done(&fPoCopies, wasCurrent, currentNow, copies0, copies1)"
+arm("the bit read before and after the wait is the resource's own (bit 0, or the bit a plane's grant recorded)",
+    stubs.count(VALID_BIT) == 1)
+arm("control: bit 0 read after the wait whatever the resource is told apart",
+    src.count("(v1[0] & validBit())") == 1 and not revalidated(src.replace("(v1[0] & validBit())", "(v1[0] & 1u)"), rule))
 arm("control: the earlier condition (the bit clear before and set now) in place of the rule is told apart",
     src.count(CALL) == 1 and not revalidated(src.replace(CALL, EARLIER), rule))
 NUMBER = "        nvaccel_pageoff_copy_end(&fPoCopies, copyNumber);\n"
