@@ -186,26 +186,30 @@ check('the texture-buffer region is bounded by subtraction, not by adding origin
       obj.count('region.size.width > _i.w - region.origin.x') == 2
       and 'region.origin.x + region.size.width > _i.w' not in obj)
 
-# Two mappings could take the same slot, and a release could clear an entry a lookup was reading.
+# Two mappings could take the same slot, and a release could clear an entry a lookup was reading. The fixed table is
+# now an index of entries in two interval trees under one simple lock taken with interrupts off: every change and every
+# lookup holds it, so a lookup never meets an entry being released, and the lookups stay usable from the framebuffer's
+# interrupt path, where a mutex is not allowed.
 _mapfn = osx.split('void *NV_API_CALL os_map_kernel_space')[1].split('NvU64 nv_xnu_phys_for_kernel_va')[0]
 _unmapfn = osx.split('void NV_API_CALL os_unmap_kernel_space')[1].split('int nv_xnu_kmap_overlap')[0]
-check('the kernel mapping table serialises the paths that allocate and clear a slot',
-      'nv_xnu_maps_lock = IOLockAlloc()' in osx
-      and _mapfn.count('IOLockLock(nv_xnu_maps_lock)') == 2      # the alias path and the mapped path
-      and _mapfn.count('IOLockUnlock(nv_xnu_maps_lock)') == 3    # one per return path out of each loop
-      and 'IOLockLock(nv_xnu_maps_lock)' in _unmapfn)
+check('the kernel mapping index serialises every path that adds or removes an entry',
+      'nv_xnu_maps_slock = IOSimpleLockAlloc()' in osx
+      and _mapfn.count('nv_xnu_map_insert(') == 2                # the alias path and the mapped path
+      and 'IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock)' in _unmapfn
+      and 'nv_xnu_maps[' not in osx and 'NV_XNU_MAX_MAPS' not in osx)
 check('the driver refuses to start if that lock cannot be allocated',
       'if (!nv_xnu_maps_init())' in nvrm)
-check('a slot publishes its address last and clears it first, so a lookup never sees a partial entry',
-      '__atomic_store_n(&m->va, va, __ATOMIC_RELEASE)' in osx
-      and '__atomic_store_n(&nv_xnu_maps[i].va, (void *)NULL, __ATOMIC_RELEASE)' in _unmapfn)
-# The other direction, and the reason the readers are ordered rather than locked: they are also reached from
-# the framebuffer's interrupt path, where taking a mutex is not allowed.
+check('an entry is released and freed only after it has left the index and the lock is dropped',
+      0 <= _unmapfn.rfind('IOSimpleLockUnlockEnableInterrupt(nv_xnu_maps_slock') < _unmapfn.find('->release()')
+      < _unmapfn.find('kern_os_free(m)'))
+# The other direction: the readers are reached from the framebuffer's interrupt path, so they take the simple lock
+# (interrupts off) and never a mutex.
 _lookup = osx.split('NvU64 nv_xnu_phys_for_kernel_va')[1].split('void NV_API_CALL os_unmap_kernel_space')[0]
 _overlap = osx.split('int nv_xnu_kmap_overlap')[1].split('\n}\n')[0]
-check('the two lookups take no mutex (they run in the interrupt path) and read the address with acquire',
+check('the two lookups take no mutex (they run in the interrupt path), only the index lock with interrupts off',
       'IOLock' not in _lookup and 'IOLock' not in _overlap
-      and _lookup.count('__ATOMIC_ACQUIRE') == 1 and _overlap.count('__ATOMIC_ACQUIRE') == 1)
+      and _lookup.count('IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock)') == 1
+      and _overlap.count('IOSimpleLockLockDisableInterrupt(nv_xnu_maps_slock)') == 1)
 
 # Whether a function needs its linked visible functions was decided by reading the translator's error text.
 # The translator's wording changed, nothing matched, the function came back nil, and the system's icon and
