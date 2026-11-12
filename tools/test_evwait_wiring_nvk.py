@@ -8,7 +8,9 @@ header by tools/test_shared_headers.py. This test reads the patch and holds what
                 patches that rewrite the same wait
   one round     NVK's wait round is the header's nvrm_evw_round with four callbacks; the fence wait (vkWaitForFences)
                 passes the time left before its deadline, the channel's own wait none, and both go through the same
-                function, so a later patch changes one place
+                function, so a later patch changes one place; the callbacks are handed that time too, because a wait
+                of a channel's own (a later patch) must keep the deadline even in the mode whose sleep on the event
+                ignores it
   the seam      the wait callback declines a channel without an event (fd < 0): exactly the polling of 2.9 until a
                 later patch puts a kernel wait of the channel's own there
   the setting   NVRM_EVENT_WAIT is read with nvmtl_cfg_getenv (environment, then nvrm610.conf: a release plugin removes
@@ -83,8 +85,12 @@ def chk_round(t):
     ctx = s.get(DIR + "nvkmd_nvrm_ctx.c", ("", ""))[0]
     until = body(ctx, "nvkmd_nvrm_wait_block_until")
     old = body(ctx, "nvkmd_nvrm_wait_block")
+    shared = re.search(r"(?ms)^struct nvrm_evw_nvk \{.*?^\};$", ctx)
     return ("nvrm_evw_round(&nvrm_evw_thr," in until and "&nvrm_evw_fell_back, &ops, &c)" in until
             and all(f".{k} = nvrm_evw_nvk_{k}," in until for k in ("pending", "wait", "backoff", "stat"))
+            # the callbacks' context carries the time the deadline leaves, and the round is given the same value
+            and "uint64_t remain_ns;" in (shared.group(0) if shared else "")
+            and ".remain_ns = remain_ns," in until and "c.mode, w, remain_ns, n != 0," in until
             and "nvkmd_nvrm_wait_block_until(waited_ns, UINT64_MAX, n, slot, gen, want);" in old
             and "nvrm_xnu_wait_event(" not in old + until)
 
@@ -185,6 +191,9 @@ arm("no header line of the patch reads as a diff or an ed command to BSD patch",
 CHECKS = [
     ("one round: nvkmd_nvrm_wait_block_until runs nvrm_evw_round with NVK's four callbacks; the old name is it without "
      "a deadline", chk_round, "nvrm_evw_round(&nvrm_evw_thr,", "nvrm_evw_round_(&nvrm_evw_thr,"),
+    # a second control of the same check: the callbacks must be handed the caller's time, not "no deadline"
+    ("one round, the callbacks' time: a context that always says there is no deadline", chk_round,
+     ".remain_ns = remain_ns,", ".remain_ns = UINT64_MAX,"),
     ("vkWaitForFences passes the time left before its deadline (none for an infinite wait)", chk_deadline,
      "nvkmd_nvrm_wait_block_until(t - t0, remain,", "nvkmd_nvrm_wait_block_until(t - t0, UINT64_MAX,"),
     ("the seam: a channel without an event (pending, fd -1) is declined by the wait before any kernel call",

@@ -39,7 +39,7 @@ index 6c9cf32..2a61354 100644
  int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);
  bool nvkmd_nvrm_defer(struct nvkmd_dev *dev, void (*fn)(void *), void *arg);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 27f936c..8684165 100644
+index 27f936c..71cd898 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -5,6 +5,7 @@
@@ -86,7 +86,7 @@ index 27f936c..8684165 100644
  static bool
  nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want, int *fd)
  {
-@@ -218,42 +236,151 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
+@@ -218,42 +236,154 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
           *fd = nvkmd_nvrm_dev(s->dev)->osEvent;   /* b73: the device's one GRAPHICS event */
     }
     pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
@@ -102,6 +102,8 @@ index 27f936c..8684165 100644
 +   const uint32_t *slot, *gen;
 +   const uint64_t *want;
 +   int mode;          /* NVRM_EVW_* of this process */
++   uint64_t remain_ns;   /* the time the caller's deadline leaves, UINT64_MAX none: for a wait of a channel's own, which
++                          * keeps to it in every mode (the sleep on the event is given its time by nvrm_evw_round) */
 +   int fd;            /* the event pending() named last, -1 none: where the notes to the kext go */
 +   bool refused;      /* selector 6 failed: the kext cannot wait on the event */
 +};
@@ -252,7 +254,8 @@ index 27f936c..8684165 100644
 +      .stat = nvrm_evw_nvk_stat,
 +   };
 +   struct nvrm_evw_nvk c = {
-+      .n = n, .slot = slot, .gen = gen, .want = want, .mode = nvrm_evw_nvk_mode(), .fd = -1, .refused = false,
++      .n = n, .slot = slot, .gen = gen, .want = want, .mode = nvrm_evw_nvk_mode(), .remain_ns = remain_ns, .fd = -1,
++      .refused = false,
 +   };
 +   uint64_t w = waited_ns > 0 ? (uint64_t)waited_ns : 0;
 +   if (w > NVRM_EVW_NVK_SAMPLE_MAX_NS)
@@ -267,7 +270,7 @@ index 27f936c..8684165 100644
  }
  
  /* b73 (patch_evflush.py): the synchronous flush's sleep. true = slept on the device's graphics completion event, or
-@@ -558,10 +685,15 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -558,10 +688,15 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
        uint64_t st[1 + NVRM_GS_N];
        nvkmd_nvrm_gsub_stats(st, 1 + NVRM_GS_N);
