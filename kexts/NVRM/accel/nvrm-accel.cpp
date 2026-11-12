@@ -715,6 +715,9 @@ public:
         return nullptr;
     }
     IOService *fNVRM = nullptr;
+    // How this GPU's addresses reach the bus, as NVRM answered "nvSurfDma" QUERY (nvAccelDmaMode): 0 not asked yet,
+    // otherwise 1 + the mode.
+    unsigned fDmaAnswer = 0;
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
                            IOUserClient **handler) APPLE_KEXT_OVERRIDE {
         if ((type & 0xFFFF0000u) != 0x4E560000u) {
@@ -1922,6 +1925,20 @@ NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-
 NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
+// A DMA mapper (VT-d) that translates the GPU: the page-off copies through a staging buffer NVRM mapped ("nvSurfDma").
+// Without a mapper (mode 0) none of these moves; debug.nvaccel_dma_mode reads 0 once a page-off has asked.
+static int gNvAccelDmaMode = -1;
+static SInt64 gCntDmaStaged, gCntDmaMaps, gCntDmaMapFail, gCntDmaUnmaps, gCntDmaAbandoned, gCntDmaRefused, gCntDmaFamily,
+              gCntDmaHybrid;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_dma_mode, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvAccelDmaMode, 0, "how the GPU's addresses reach the bus, as NVRM last answered: -1 not asked yet, 0 no mapper (or an NVRM without the question), 1 system mapper, 2 device mapper, 3 a mapper the driver may not use");
+NVACCEL_CNT(nvaccel_dma_staged,    gCntDmaStaged,    "page-offs copied into the staging buffer through its bus mapping (DMA mode 1 or 2)");
+NVACCEL_CNT(nvaccel_dma_maps,      gCntDmaMaps,      "staging buffers mapped for the GPU through NVRM");
+NVACCEL_CNT(nvaccel_dma_map_fail,  gCntDmaMapFail,   "staging buffers NVRM could not map (the buffer is freed; the family copies)");
+NVACCEL_CNT(nvaccel_dma_unmaps,    gCntDmaUnmaps,    "staging buffer mappings given back to NVRM when the buffer was replaced");
+NVACCEL_CNT(nvaccel_dma_abandoned, gCntDmaAbandoned, "staging buffer mappings left in place after a copy-engine timeout (the GPU may still write)");
+NVACCEL_CNT(nvaccel_dma_refused,   gCntDmaRefused,   "page-offs NVRM refused because the pages were not mapped for the GPU (the mapping is made again)");
+NVACCEL_CNT(nvaccel_dma_family,    gCntDmaFamily,    "page-offs left to the accelerator family because the GPU is translated and no mapped staging buffer was at hand");
+NVACCEL_CNT(nvaccel_dma_hybrid,    gCntDmaHybrid,    "hybrid frames copied the old way because the GPU is translated");
 // The unlocked wait saw something it does not expect: the lock could not be taken back, or the page-off held the last
 // reference to the resource or the accelerator when it returned (so the family's caller relied on the lock alone to keep
 // the object alive). Every later page-off waits with the lock held, as 2.9 did; said once.
@@ -2015,6 +2032,11 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_already); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_changed);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_recopied);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_mode);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_staged);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_maps);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_map_fail);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_unmaps);     sysctl_register_oid(&sysctl__debug_nvaccel_dma_abandoned);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_refused);    sysctl_register_oid(&sysctl__debug_nvaccel_dma_family);
+    sysctl_register_oid(&sysctl__debug_nvaccel_dma_hybrid);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_refused); sysctl_register_oid(&sysctl__debug_nvaccel_iop_async_drop);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_late);
     sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h0);      sysctl_register_oid(&sysctl__debug_nvaccel_iop_ok_h1);
@@ -2339,22 +2361,132 @@ static IOLock *nvSVStageLock(void)
     }
     return gNVSVStageLock;
 }
-static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
+// DMA through a mapper (VT-d). NVRM answers "nvSurfDma" (nvrm_surfshare_abi.h) with how its GPU's addresses reach the
+// bus. Mode 0, every machine without a mapper and every NVRM without the question: a physical address is a bus address
+// and the page-off below runs as it always did. Modes 1 and 2: the copy engine may only be given bus addresses NVRM
+// mapped, so the staging buffer is mapped once through MAP and the page list is busBase + k * 4096; a surface's own pages
+// are never handed over. Mode 3 (a mapper the driver may not use): no address is handed over; the family copies.
+// The staging buffer's mapping, all under gNVSVStageLock: the token is NVRM's opaque serial (never dereferenced, handed
+// back to UNMAP unchanged), the NVRM that made it is held while it lives, and the buffer stays prepared until UNMAP.
+static void *gNVSVStageTok;
+static unsigned long long gNVSVStageBus, gNVSVStageMapLen;
+static IOService *gNVSVStageNvrm;
+static IOReturn nvSVDmaCall(IOService *nvrm, struct NVRMSurfDma *d)
 {
-    if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len) return gNVSVStageBuf;
+    if (!nvrm) return kIOReturnNotAttached;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_DMA);
+    if (!sym) return kIOReturnNoMemory;
+    const IOReturn r = nvrm->callPlatformFunction(sym, false, d, nullptr, nullptr, nullptr);
+    sym->release();
+    return r;
+}
+// The mode for owner's GPU. Asked once per accelerator, at its first page-off or hybrid frame (NVRM decided it before it
+// published nvrm-claimed, which the accelerator waits for). Thread context; no lock of this driver needed (QUERY takes
+// none in NVRM either, and wakes nothing). An NVRM that does not know the question answers through IOService, normally
+// kIOReturnUnsupported (whatever its providers say instead is read the same way): mode 0 for good, as NVRM answers
+// kIOReturnSuccess whenever it knows the question. No NVRM yet: mode 0 for this call, asked again next time. An answer
+// this driver does not understand (another version, a mode above 3) is mode 3.
+static unsigned nvAccelDmaMode(NVAccel *owner)
+{
+    NVAccel *a = NVAccel::resolve(owner);
+    if (!a) return 0;
+    if (a->fDmaAnswer) return a->fDmaAnswer - 1;
+    IOService *const nvrm = a->locateNVRM();
+    if (!nvrm) return 0;
+    struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+    d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_QUERY; d.status = NVRM_SS_OFF;
+    const IOReturn r = nvSVDmaCall(nvrm, &d);
+    unsigned mode;
+    if (r != kIOReturnSuccess) mode = NVRM_DMA_NONE;
+    else if (d.status != 0) mode = NVRM_DMA_REFUSE;
+    else mode = d.mode > NVRM_DMA_REFUSE ? (unsigned)NVRM_DMA_REFUSE : d.mode;
+    a->fDmaAnswer = 1 + mode;
+    gNvAccelDmaMode = (int)mode;
+    if (mode != NVRM_DMA_NONE)      // mode 0 says nothing: debug.nvaccel_dma_mode shows it
+        ALOG("surfvram pageoff: NVRM says DMA mode %u (status %#x) -- %s", mode, d.status,
+             mode == NVRM_DMA_REFUSE ? "page-offs go to the family" : "the staging buffer is mapped for the GPU");
+    return mode;
+}
+// After NVRM refused a page list as not mapped: ask again at the next page-off (its GPU may have restarted).
+static void nvAccelDmaForget(NVAccel *owner)
+{
+    if (NVAccel *a = NVAccel::resolve(owner)) a->fDmaAnswer = 0;
+}
+// MAP b (prepared, kIODirectionInOut) for nvrm's GPU. True with the token and the bus address of byte 0.
+static bool nvSVDmaMap(IOService *nvrm, IOBufferMemoryDescriptor *b, unsigned long long len, void **tok, unsigned long long *bus)
+{
+    struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+    d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_MAP; d.status = NVRM_SS_OFF; d.md = (IOMemoryDescriptor *)b; d.length = len;
+    const IOReturn r = nvSVDmaCall(nvrm, &d);
+    if (r == kIOReturnSuccess && d.status == 0 && d.token && !(d.busBase & 4095ull)) {
+        *tok = d.token; *bus = d.busBase;
+        OSAddAtomic64(1, &gCntDmaMaps);
+        return true;
+    }
+    if (r == kIOReturnSuccess && d.status == 0 && d.token) {    // mapped, but not on a page boundary: give it back
+        struct NVRMSurfDma u; nvSVZero(&u, sizeof u);
+        u.version = NVRM_SS_DMA_VERSION; u.op = NVRM_SS_DMA_UNMAP; u.status = NVRM_SS_OFF; u.token = d.token;
+        nvSVDmaCall(nvrm, &u);
+    }
+    if (OSAddAtomic64(1, &gCntDmaMapFail) < 8)
+        ALOG("surfvram pageoff: NVRM could not map a %llu B staging buffer for the GPU (%#x, status %#x, bus %#llx)", len, r, d.status, d.busBase);
+    return false;
+}
+// Free the staging buffer, after giving its mapping back to the NVRM that made it (gNVSVStageLock held). NVRM answers
+// NVRM_SS_OFF for a mapping it dropped already (its GPU stopped): nothing to do then either.
+static void nvSVStageFree(void)
+{
+    if (gNVSVStageTok) {
+        struct NVRMSurfDma d; nvSVZero(&d, sizeof d);
+        d.version = NVRM_SS_DMA_VERSION; d.op = NVRM_SS_DMA_UNMAP; d.status = NVRM_SS_OFF; d.token = gNVSVStageTok;
+        nvSVDmaCall(gNVSVStageNvrm, &d);
+        OSAddAtomic64(1, &gCntDmaUnmaps);
+    }
+    if (gNVSVStageNvrm) gNVSVStageNvrm->release();
+    gNVSVStageTok = nullptr; gNVSVStageBus = 0; gNVSVStageMapLen = 0; gNVSVStageNvrm = nullptr;
+    if (gNVSVStageBuf) { gNVSVStageBuf->complete(); gNVSVStageBuf->release(); }
+    gNVSVStageBuf = nullptr;
+}
+// After a copy-engine timeout the GPU may still write into the buffer: it is abandoned, and so is its mapping (no
+// UNMAP), so that those writes still land in the buffer. NVRM drops the mapping when its GPU stops.
+static void nvSVStageAbandon(void)
+{
+    if (gNVSVStageTok) {
+        OSAddAtomic64(1, &gCntDmaAbandoned);
+        gNVSVStageTok = nullptr; gNVSVStageBus = 0; gNVSVStageMapLen = 0;
+        if (gNVSVStageNvrm) gNVSVStageNvrm->release();
+        gNVSVStageNvrm = nullptr;
+    }
+    gNVSVStageBuf = nullptr;
+}
+// The staging buffer for a page-off of len bytes (gNVSVStageLock held). dmaMode and nvrm: the GPU's (nvAccelDmaMode,
+// and the NVRM the page-off goes to). The buffer in hand serves if it is long enough and addressed the way this GPU
+// needs: physically (mode 0, no mapping) or through a mapping made by the same NVRM.
+static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len, unsigned dmaMode, IOService *nvrm)
+{
+    if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len && (dmaMode ? gNVSVStageTok && gNVSVStageNvrm == nvrm : !gNVSVStageTok))
+        return gNVSVStageBuf;
     if (len > (64ull << 20) || gNVSVStageBackoff) { if (gNVSVStageBackoff) gNVSVStageBackoff--; return nullptr; }
     const unsigned long long want = (len + 0xFFFFFull) & ~0xFFFFFull;
-    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+    // translated: the mapper makes the buffer one run on the bus, so its memory need not be physically contiguous
+    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | (dmaMode ? 0 : kIOMemoryPhysicallyContiguous),
                                                                       (vm_size_t)want, PAGE_SIZE);
     if (b && b->prepare() != kIOReturnSuccess) { b->release(); b = nullptr; }
+    void *tok = nullptr; unsigned long long bus = 0;
+    if (b && dmaMode && !nvSVDmaMap(nvrm, b, want, &tok, &bus)) { b->complete(); b->release(); b = nullptr; }
     if (!b) {
         gNVSVStageNoBuf++; gNVSVStageBackoff = 1024;
-        ALOG("surfvram pageoff: no %llu B physically contiguous staging buffer (miss %u) -- per-page copies for the next 1024", want, gNVSVStageNoBuf);
+        if (dmaMode) ALOG("surfvram pageoff: no %llu B staging buffer mapped for the GPU (miss %u) -- the family's page-off for the next 1024", want, gNVSVStageNoBuf);
+        else ALOG("surfvram pageoff: no %llu B physically contiguous staging buffer (miss %u) -- per-page copies for the next 1024", want, gNVSVStageNoBuf);
         return nullptr;
     }
-    if (gNVSVStageBuf) { gNVSVStageBuf->complete(); gNVSVStageBuf->release(); }
+    nvSVStageFree();
     gNVSVStageBuf = b;
-    ALOG("surfvram pageoff: staging buffer %llu B, physically contiguous", want);
+    if (dmaMode) {
+        nvrm->retain();
+        gNVSVStageTok = tok; gNVSVStageBus = bus; gNVSVStageMapLen = want; gNVSVStageNvrm = nvrm;
+        ALOG("surfvram pageoff: staging buffer %llu B, mapped for the GPU at bus %#llx", want, bus);
+    } else ALOG("surfvram pageoff: staging buffer %llu B, physically contiguous", want);
     return b;
 }
 
@@ -2442,6 +2574,11 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         }
     }
     IOMemoryDescriptor *md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
+    // How this GPU's addresses reach the bus (asked once per accelerator). Mode 0, no mapper: nothing below differs from
+    // what the page-off always did. Mode 3, a mapper the driver may not use: no address may be handed over, the family
+    // copies (before any page is wired or any copy counted).
+    const unsigned dmaMode = nvAccelDmaMode(fAccel);
+    if (dmaMode >= NVRM_DMA_REFUSE) { OSAddAtomic64(1, &gCntDmaFamily); IOAccelResource2::pageoff(ev, a1, out, a3); return; }
     if (!md || md->prepare(kIODirectionNone) != kIOReturnSuccess) {
         gNVSVPageoffFail++;
         ALOG("surfvram pageoff: res %p surface pages could not be wired (md %p) -- family pageoff instead", this, md);
@@ -2459,9 +2596,12 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     bool staged = false;
     if (IOLock *lk = nvSVStageLock()) {
         IOLockLock(lk);
-        IOBufferMemoryDescriptor *sb = nvSVStage(len);
+        // Held from here across MAP, the copy into the buffer and any UNMAP: a buffer is never unmapped under a copy.
+        IOBufferMemoryDescriptor *sb = nvSVStage(len, dmaMode, dmaMode ? nvAccelNVRM(fAccel) : nullptr);
         IOByteCount sl = 0;
-        addr64_t sp = sb ? sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone) : 0;
+        // translated: the bus address NVRM mapped the buffer at (one run), never a physical one
+        addr64_t sp = !sb ? 0 : dmaMode ? (addr64_t)gNVSVStageBus : sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone);
+        if (sb && dmaMode) sl = (IOByteCount)gNVSVStageMapLen;
         unsigned long long *spa = (sp && sl >= len && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
         if (spa) {
             for (unsigned long long k = 0; k < pages; k++) spa[k] = sp + k * 4096;
@@ -2479,16 +2619,25 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
                 cpuUs = (mach_absolute_time() - t0) / 1000;
                 ok = (w == (IOByteCount)len);
                 if (!ok) st = NVRM_SS_TOO_SMALL;
-                else gNVSVStaged++;
+                else { gNVSVStaged++; if (dmaMode) OSAddAtomic64(1, &gCntDmaStaged); }
             } else if (st == 0x65u) {
                 ALOG("surfvram pageoff: CE copy TIMED OUT into the staging buffer -- abandoning it (%llu B)", (unsigned long long)sb->getLength());
-                gNVSVStageBuf = nullptr;
+                nvSVStageAbandon();
+            } else if (st == NVRM_SS_NO_DMA) {
+                // NVRM no longer has these pages mapped for its GPU (it restarted, or it translates now): nothing was
+                // copied. Ask for the mode again and map a new buffer at the next page-off.
+                OSAddAtomic64(1, &gCntDmaRefused);
+                nvAccelDmaForget(fAccel);
+                nvSVStageFree();
             }
             staged = true;
             IOFree(spa, pages * sizeof *spa);
         }
         IOLockUnlock(lk);
     }
+    // Translated and no mapped staging buffer: the surface's own pages are not mapped for the GPU and are never handed
+    // over, so the family copies. This copy was begun above and has no end: it counts as one that failed.
+    if (dmaMode && !staged) { md->complete(kIODirectionNone); OSAddAtomic64(1, &gCntDmaFamily); IOAccelResource2::pageoff(ev, a1, out, a3); return; }
     unsigned long long *pa = (!staged && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *pa) : nullptr;
     if (pa) {
         unsigned long long i = 0;
@@ -3007,6 +3156,8 @@ static bool nvAccelHybridDma(NVDisplayPipe *pipe, IOService *fb, unsigned head, 
     x.len = (unsigned long long)s->getBytesPerRow() * s->getHeight();
     x.accel = NVAccel::resolve(pipe->fAccel);
     if (!x.accel || !nvSVPend(x.id, 2, nullptr)) return false;           // the newest pixels are not only in the GPU's memory: level 3
+    // The panel driver's pages are not mapped for a translated GPU: copy the old way (level 3).
+    if (nvAccelDmaMode(x.accel) != NVRM_DMA_NONE) { OSAddAtomic64(1, &gCntDmaHybrid); return false; }
     x.sym = OSSymbol::withCStringNoCopy(NMH_FN_IMPORT);
     if (!x.sym) return false;
     struct nmh_dma_ops ops = { &x, hyDmaRender, hyDmaLockLookup, hyDmaUnlock, hyDmaAcquire, hyDmaCopy, hyDmaPresent, hyDmaAbort, hyDmaQuarantine };
