@@ -10,6 +10,9 @@
    Build and run from the repository root:
      cc -std=c11 -O1 -Wall -Wextra -Werror -pthread -I kexts/NVRM tools/test_fence_model.c -o /tmp/test_fence_model && /tmp/test_fence_model */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE                /* pthread_cond_timedwait_relative_np, see q_timedwait */
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -142,6 +145,37 @@ static void pause_us(unsigned us)
 
 static void q_wakeup(void) { pthread_mutex_lock(&Q); qEpoch++; pthread_cond_broadcast(&QC); pthread_mutex_unlock(&Q); }
 
+/* The queue's condition variable waits until a point on the monotonic clock, the clock of every deadline here. Linux
+   binds the variable to that clock (pthread_condattr_setclock). macOS has no such call and its absolute waits run on
+   the wall clock, so there the wait is given as the time left until the deadline, measured again on every call: an
+   early return is then only one more pass of the caller's loop. Called with Q held; 1 = the deadline has passed. */
+static void q_init(void)
+{
+#ifdef __APPLE__
+    pthread_cond_init(&QC, NULL);
+#else
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&QC, &ca);
+    pthread_condattr_destroy(&ca);
+#endif
+}
+static int q_timedwait(unsigned long long deadlineNs)
+{
+#ifdef __APPLE__
+    const unsigned long long t = now_ns();
+    struct timespec rel;
+    if (t >= deadlineNs) return 1;
+    rel.tv_sec = (time_t)((deadlineNs - t) / 1000000000ull);
+    rel.tv_nsec = (long)((deadlineNs - t) % 1000000000ull);
+    return pthread_cond_timedwait_relative_np(&QC, &Q, &rel) == ETIMEDOUT && now_ns() >= deadlineNs;
+#else
+    const struct timespec ts = { (time_t)(deadlineNs / 1000000000ull), (long)(deadlineNs % 1000000000ull) };
+    return pthread_cond_timedwait(&QC, &Q, &ts) == ETIMEDOUT;
+#endif
+}
+
 /* nvrm_fence_kick: the generation first, then "does anybody sleep", then the wakeup */
 static void k_kick(void) { atomic_fetch_add(&gKick, 1); if (atomic_load(&gSleepers) > 0) q_wakeup(); }
 
@@ -192,7 +226,6 @@ static int announce(int abortable)
 static int k_sleep(void *c, unsigned k, unsigned g, unsigned long long deadlineNs, int abortable)
 {
     struct actor *a = (struct actor *)c;
-    const struct timespec ts = { (time_t)(deadlineNs / 1000000000ull), (long)(deadlineNs % 1000000000ull) };
     unsigned long epoch;
     int announced = 0, moved, timedOut = 0, r = NVF_SLEPT;
 
@@ -208,7 +241,7 @@ static int k_sleep(void *c, unsigned k, unsigned g, unsigned long long deadlineN
     for (;;) {
         if (abortable && atomic_load(&a->abort)) { r = NVF_SLEEP_ABORTED; break; }
         if (qEpoch != epoch) break;
-        if (pthread_cond_timedwait(&QC, &Q, &ts) == ETIMEDOUT) { timedOut = 1; break; }
+        if (q_timedwait(deadlineNs)) { timedOut = 1; break; }
     }
     pthread_mutex_unlock(&Q);
     if (timedOut) { a->timedOut++; if (moved) a->lost++; }
@@ -692,14 +725,10 @@ static void scen_mixed(void)
 
 int main(void)
 {
-    pthread_condattr_t ca;
     pthread_t gpu, bh;
     alarm(240);                                       /* a hang is a failure, not a test that never ends */
     setvbuf(stdout, NULL, _IOLBF, 0);
-    pthread_condattr_init(&ca);
-    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
-    pthread_cond_init(&QC, &ca);
-    pthread_condattr_destroy(&ca);
+    q_init();
 
     part_a();
     part_b();
