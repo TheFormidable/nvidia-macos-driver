@@ -57,6 +57,8 @@ tilde() {   # the home folder written as ~ (report files and summaries a tester 
 
 # ---------------------------------------------------------------------------------------------------------- small tools
 is_mac() { [ "$(uname -s)" = Darwin ]; }
+# Xcode 26 (the macOS 26 SDK the plugin needs) does not run on a macOS older than NM_PIN_TOOL_MACOS_MIN
+mac_too_old() { is_mac && ! ver_ge "$(sw_vers -productVersion 2>/dev/null || echo 0)" "$NM_PIN_TOOL_MACOS_MIN"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 sha256_file() { shasum -a 256 "$1" | cut -c1-64; }   # shasum: macOS has it; on Linux it comes with perl
 sha256_stdin() { shasum -a 256 | cut -c1-64; }
@@ -492,7 +494,7 @@ doctor() {   # prints; sets D_MISSING
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
     d_ok "macOS $v ($(uname -m))"
-    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_warn "Xcode $NM_PIN_TOOL_XCODE_MIN needs macOS $NM_PIN_TOOL_MACOS_MIN or later; this is $v"
+    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later; deps, build and package refuse this Mac"
     case "$(uname -m)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not" ;;
@@ -1506,6 +1508,12 @@ main() {
     doctor) doctor; trap - ERR; if [ "$D_MISSING" = 0 ]; then exit 0; fi; exit 1 ;;
   esac
   require_paths_ok
+  case "$CMD" in
+    deps|build|package|all)
+      if mac_too_old; then
+        die "this Mac runs macOS $(sw_vers -productVersion 2>/dev/null): the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later. Update macOS (the driver supports macOS 15 and 26), or build on another Mac"
+      fi ;;
+  esac
   [ "$NM_DRY_RUN" = 0 ] || say "(dry run: nothing is changed; the commands are printed)"
   ensure_workdir
   take_lock
