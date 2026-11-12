@@ -1,7 +1,8 @@
 /* test_nvrm_workq_logic.c - the bookkeeping of NVRM's serialized work queues (kexts/NVRM/nvrm_workq_logic.h), on the
    host: items run in the order they were queued, queueing never needs memory while static nodes are left, a spare node
-   is used exactly when none is, nothing is accepted outside RUN, and the two-snapshot flush covers what it must and
-   still ends for an item that queues itself again.
+   is used exactly when none is, nothing is accepted outside RUN, the two-snapshot flush covers what it must and
+   still ends for an item that queues itself again, and a queue that is started again keeps what a flush still on its
+   way out compares against.
    Build and run anywhere:
      cc -std=c11 -O2 -Wall -Wextra -Werror -I kexts/NVRM tools/test_nvrm_workq_logic.c -o /tmp/test_nvrm_workq_logic && /tmp/test_nvrm_workq_logic */
 #include <stdio.h>
@@ -97,6 +98,35 @@ static int flush_run(int passes, int requeue_forever, int *covered_late)
     return ran;
 }
 
+/* A queue that changes hands while a flush of its previous owner is still on its way out. The flusher (an unload
+   flush) has taken its target and counted itself in, and sleeps; the worker runs what is pending and leaves, and its
+   last completion wakes the flusher; before the flusher runs, the queue is started again for its next owner; then the
+   flusher gets the lock back, takes itself out of the counts and looks at its target. Returns 0 when that flush is
+   over and both counts are back at 0, else a bit per thing that is wrong. `reinit` starts the queue again the wrong
+   way, with nvwq_core_init(): the control. *st collects what nvwq_restart() answered. */
+static int handover_run(int reinit, int *st)
+{
+    struct nvwq_node *n;
+    int bad = 0;
+    nvwq_core_init(&q);
+    *st = nvwq_restart(&q);                                                /* the first start */
+    for (unsigned long v = 1; v <= 3; v++) (void)nvwq_enqueue(&q, (void *)v, NULL, NULL);
+    const unsigned long long t = nvwq_flush_target(&q);
+    q.unload_flushers++;
+    q.flush_waiters++;                                                     /* the flusher sleeps on its target */
+    while ((n = nvwq_dequeue(&q)) != NULL) (void)nvwq_complete(&q, n);     /* the worker drains, */
+    q.state = NVWQ_OFF;                                                    /* and leaves */
+    if (reinit) { nvwq_core_init(&q); q.state = NVWQ_RUN; }
+    else *st |= nvwq_restart(&q);                                          /* the next owner's start */
+    q.flush_waiters--;                                                     /* the flusher runs at last */
+    if (!nvwq_flushed(&q, t)) bad |= 1;                                    /* it would sleep again, for nothing */
+    q.unload_flushers--;
+    if (q.flush_waiters != 0) bad |= 2;
+    if (q.unload_flushers != 0) bad |= 4;                                  /* "an unload flush is going on", for ever */
+    if (q.state != NVWQ_RUN) bad |= 8;
+    return bad;
+}
+
 int main(void)
 {
     unsigned spares, heap_back, refused;
@@ -184,6 +214,29 @@ int main(void)
         q.state = NVWQ_STOPPING;
         T("STOPPING refuses a new item and still hands out the pending one", nvwq_enqueue(&q, (void *)6, NULL, NULL) == 2
           && (n = nvwq_dequeue(&q)) != NULL && n->item == (void *)5 && nvwq_dequeue(&q) == NULL);
+    }
+    /* a queue that is started again */
+    {
+        int st = 7, ok = 1;
+        T("a queue started again under a flush that is still leaving: that flush ends and both counts return to 0",
+          handover_run(0, &st) == 0 && st == 0);
+        T("it starts empty, with every static node free and its numbers where they were", !q.head && q.depth == 0
+          && count_free() == NVWQ_STATIC_NODES && q.enq_seq == 3 && q.done_seq == 3);
+        (void)nvwq_enqueue(&q, (void *)9, NULL, NULL);
+        unsigned long long t = nvwq_flush_target(&q);
+        struct nvwq_node *n = nvwq_dequeue(&q);
+        T("the next owner's item is accepted and is what a new flush waits for", t == 4 && n && n->item == (void *)9
+          && !nvwq_flushed(&q, t) && nvwq_complete(&q, n) == NULL && nvwq_flushed(&q, t));
+        T("control: started again with nvwq_core_init(), that flush waits on and both counts are wrong for good",
+          handover_run(1, &st) == (1 | 2 | 4));
+        unsigned char states[] = { NVWQ_RUN, NVWQ_STOPPING, NVWQ_LEGACY };
+        for (unsigned i = 0; i < sizeof states; i++) {
+            nvwq_core_init(&q);
+            q.state = states[i];
+            q.enq_seq = q.done_seq = 5;
+            if (nvwq_restart(&q) != -1 || q.state != states[i] || q.enq_seq != 5 || q.done_seq != 5) ok = 0;
+        }
+        T("a queue that is not OFF is not started again (-1), and nothing changes", ok);
     }
     printf(fails ? "\n%d failed\n" : "\nall passed\n", fails);
     return fails ? 1 : 0;
