@@ -81,6 +81,12 @@ int nvrm_dma_surf(struct NVRMSurfDma *q, nv_state_t *nv);
 int nvrm_dma_pages_ok(nv_state_t *nv, const NvU64 *pages, NvU64 n);
 
 // ---- os-xnu2.cpp, called from nvrm_dma.cpp ----
+//
+// The OS layer says it has handed the RM's DMA interface over by defining NV_XNU_DMA_LAYER in nv-xnu.h, in the same
+// change that deletes its own nv_requires_dma_remap, nv_dma_map_alloc and nv_dma_unmap_alloc and adds the two helpers
+// below. nvrm_dma.cpp defines those three RM functions, and calls the two helpers, only when NV_XNU_DMA_LAYER is
+// defined: one definition of each in the kext either way. Without it, a GPU behind a mapper is refused at attach
+// (mode NVRM_DMA_REFUSE) and a GPU without one is mode NVRM_DMA_NONE as always.
 
 // The address width the RM last set for device memory (nv_set_dma_address_size); 64 until it sets one. Any context.
 // The DMA layer reads it at every mapping, because the RM lowers it around single allocations.
