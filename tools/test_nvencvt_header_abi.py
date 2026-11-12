@@ -173,6 +173,9 @@ with tempfile.TemporaryDirectory(prefix='nmabi-') as d:
             (stubs / name).chmod(0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('NM_OGKM620', 'NULLMOTH_', 'GIT_'))}
         env.update(PATH=f'{stubs}{os.pathsep}{env.get("PATH", "")}', REAL_GIT=git, NULLMOTH_BUILD_HOST='buildmac', NULLMOTH_BUILD_ROOT=str(mac))
+        # the scratch repository's commits must not run the tester's own git set-up: a global hooks folder or init
+        # template (pre-commit installs one) would run his hooks, which may install or download
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
         g = lambda *a: subprocess.run([git, '-C', str(repo), '-c', 'user.name=test', '-c', 'user.email=test@example.invalid',
                                        '-c', 'commit.gpgsign=false', *a], capture_output=True, text=True, env=env)
         made = g('init', '-q').returncode == 0 and g('add', '-A').returncode == 0 and g('commit', '-q', '-m', 'the library').returncode == 0
@@ -182,6 +185,18 @@ with tempfile.TemporaryDirectory(prefix='nmabi-') as d:
             shutil.copy(root / f, repo / f)
         made = made and g('add', '-A').returncode == 0 and g('commit', '-q', '-m', 'the comparison').returncode == 0
         check('a small repository with the build script, the library source and the tool was made', made and len(old) == 40)
+
+        def outside(e):
+            """configuration lines git reads from outside the scratch repository (a tester's hooks, templates, keys)"""
+            r = subprocess.run([git, '-C', str(repo), 'config', '--show-origin', '--list'], capture_output=True, text=True, env=e)
+            return [l for l in r.stdout.splitlines() if not l.startswith('file:.git/config')]
+        tester = d / 'tester-home'
+        tester.mkdir()
+        (tester / '.gitconfig').write_text('[init]\n\ttemplateDir = /nonexistent/hooks-template\n[commit]\n\tgpgsign = true\n')
+        check('the scratch repository reads no git configuration of the tester', not outside(dict(env, HOME=str(tester))),
+              outside(dict(env, HOME=str(tester))))
+        loose = {k: v for k, v in env.items() if k not in ('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM')}
+        check('control: without that, a tester\'s ~/.gitconfig is read', any('templatedir' in l for l in outside(dict(loose, HOME=str(tester)))))
         K1, K2 = mac / 'build/rm620/ogkm-620.70.06', mac / 'build/ogkm620/open-gpu-kernel-modules-620.70.06'
         HDR = mac / 'build/nvencvt-headers'
 
