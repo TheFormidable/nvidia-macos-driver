@@ -14,6 +14,7 @@
 //   nvx_wq_admin (IOLock)                thread context only; slot allocation, worker start, slot release. Never held
 //                                        while flushing, waiting for a worker or calling the RM, and never taken with
 //                                        a simple lock held.
+//     -> a work queue's simple lock      in wq_start_slot() only, around the run state of the slot being started
 // No two of the simple locks are ever held together. Nothing that can block, allocate or log runs under any of them.
 //
 // Opt-outs, each read once by nv_xnu_kcore_init(): nvrmworkq=0 (the work items run as before, each on a thread of its
