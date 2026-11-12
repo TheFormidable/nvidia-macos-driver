@@ -94,7 +94,37 @@ plugin       Opt-in VRAM working copies for buffers (nvmtl_shared_wc.h, NVMTL_SH
              ideas from pull request 524 by emretascii (owned staging memory for caller pages that cannot be imported, with the
              GPU working in VRAM). The code here is NullMoth's own.
 
-nvk          nvk/nvk-upstream-nak.patch carries commits from the Mesa project (MIT licence), listed in the patch header.
+nvk          Three patches of the NVK chain carry commits of the Mesa project, unchanged (MIT, licenses/Mesa-license.rst,
+             https://gitlab.freedesktop.org/mesa/mesa). Each patch repeats its list in its header.
+             nvk/nvk-mesa-26.3.0.patch: what Mesa 26.3.0 (0a6fa60a) has over 26.3.0-rc3 (90a959eb, nvk/MESA_BASE) in the files NVK
+             is built from. Commits of the 26.3 branch; in brackets the Mesa main commit each was cherry-picked from:
+               commit 1cff8320 (main 1d6fe659) compiler/nir: add missing intrinsic to avoid hitting assert
+               commit 87772f33 (main e7e773e9) util/vl_vlc: allow removebits at the top of the bit buffer
+               commit 4697a1d2 (main 1c3e49ad) util/rbsp: check each byte once for emulation prevention
+               commit 2351a39d (main 801952de) nak: Fix missing scoreboard for uniform Ldcg on SM120
+               commit b20a3da9 (main 4927b35f) nir: don't hardcode dedup_entry size in static_assert
+               commit 4b42d801 (main 607364a0) nir: allow nir_cmat_tensor_load to be smaller than its const_index slots
+               commit 17ee1c0e (main 00a0489f) nir/lower_goto_ifs: Sort sets in debug prints
+               commit 9b1ea04a (main d65e16af) nir/lower_goto_ifs: Add some additional validation
+               commit 69bfc55f (main 06bddf8a) util/set: Make some parameters const
+               commit d9989e0c (main 170450f1) util/set: Add a couple set union helpers
+               commit 1796dfc7 (main 0599e007) nir/lower_goto_ifs: Use the new set helpers
+               commit 7d95cdd3 (main 60bdade9) nir/lower_goto_ifs: Expand/reformat some of the debug prints
+               commit d75b0ba4 (main 0abe1db7) nir/lower_goto_ifs: Track outside blocks separately from break
+               commit 2fdf24ad (main 77a21c6c) util: Add more ways to delete from dynarray
+               commit b0281215 (main 880e93b6) nir: fix RANGE handling for load_ubo in lower_mem_access_bit_sizes
+               commit 95a24bda (main 9703ac81) nir/opt_access: do not infer ACCESS_CAN_REORDER with shader interlock
+               commit def7ef59 (main 88068706) nir/lower_multiview: Check variable modes before deleting
+             nvk/nvk-nak-fixes-main.patch: from Mesa main, in no Mesa release yet:
+               commit 61f3a1d0 nak: use correct src_type for OpBSSy bar_in
+               commit 77781ae8 nak: fix insert order when annotate is off
+               commit 3b3084bf nak: Derive copy and clone in lat_rs_gen
+               commit 83a732aa nak: Increase sm120 imma/hmma latencies
+             nvk/nvk-nak-sched-main.patch: from Mesa main, in no Mesa release yet:
+               commit 5e4bcb1c nak,nvk: Increase nir_opt_peephole limit
+               commit b6b973d0 nak: Fix ready_cycle calculation in prepass sched
+               commit a79e3fc7 nak: Move FutureReadyInstr::new into postpass.rs
+               commit cb0e7868 nak: Always apply opt_fall_through
 
 kexts/NVRM, kexts/NVRMFB, plugin
              The notebook power budget (nvrmtgp, with the GPS and NVPCF _DSM families behind nvrmgps and nvrmnvpcf), the

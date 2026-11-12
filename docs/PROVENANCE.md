@@ -170,7 +170,7 @@ device set-up" (a game binary, not NVIDIA's; the game's licence forbids it). The
 that the game enables ray tracing above that working set, found by changing the reported figure and watching the result
 (a black-box measurement). Not changed without a decision, because the Cyberpunk ray-tracing path depends on it.
 
-**P5. Apple class layouts in `kexts/NVRM/accel/re`, `accel/iofam`, `agdc/AppleGraphicsDeviceControl_re.h`.** Class sizes come
+**P5. Apple class layouts in `kexts/NVRM/accel/re`, `accel/iofam`, `kexts/NVRMAGDC/AppleGraphicsDeviceControl_re.h`.** Class sizes come
 from the kernel's own OSMetaClass registry at run time; method names, parameter lists and vtable order come from the symbol
 tables and vtables of Apple's kernel collection (`vtable.py`, noted in `IOAccelerator.h`). No Apple code is copied, but
 reading Apple's binaries is outside what Apple's licence allows apart from interoperability rights. These layouts are what
