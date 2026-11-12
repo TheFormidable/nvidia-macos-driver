@@ -997,10 +997,10 @@ procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user 
 procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
-build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built
+build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS <names> (NVK_EXTRA_PATCHES)"
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_REF_EXPORTS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
-build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it.
+build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT <names> (NVK_SKIP_PATCHES)".
 build	NVK_SYSROOT	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVRM_PRISTINE_OGKM	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
