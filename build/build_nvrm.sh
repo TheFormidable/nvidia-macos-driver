@@ -28,8 +28,12 @@ KMSLIB=${KMS_ARCHIVE:-$KMS/_out/Darwin_x86_64/libnvkms.a}
 CXX_SOURCES=( NVRM.cpp nv_xnu_power.cpp nv_xnu_stubs.cpp nvkms_shaders.cpp nvrm_fbinfo.cpp nvrm_gpuva.cpp
               nvrm_power.cpp nvrm_surfshare.cpp os-nvkms-xnu.cpp os-xnu.cpp os-xnu2.cpp )
 # Sources that later trees added and earlier ones do not have (so an older tag can be rebuilt with this script): nv_rtd3.cpp
-# (D3cold monitor) and nvrm_ddc.cpp (DDC/CI). The check below keeps the list honest either way.
-for s in nv_rtd3.cpp nvrm_ddc.cpp; do [ -f "$SRC/$s" ] && CXX_SOURCES+=( "$s" ); done
+# (D3cold monitor), nvrm_ddc.cpp (DDC/CI), nv_xnu_kcore.cpp (work queues, atomic context, mapping index),
+# nv_xnu_timers.cpp (RC and nano timers), nvrm_dma.cpp (DMA through an IOMMU), nvrm_fence.cpp (per-surface fence) and
+# nvrm_chan_note.cpp (channel recovery notes). The check below keeps the list honest either way.
+for s in nv_rtd3.cpp nvrm_ddc.cpp nv_xnu_kcore.cpp nv_xnu_timers.cpp nvrm_dma.cpp nvrm_fence.cpp nvrm_chan_note.cpp; do
+  [ -f "$SRC/$s" ] && CXX_SOURCES+=( "$s" )
+done
 for f in "$SRC"/*.cpp; do
   b=$(basename "$f"); found=0
   for s in "${CXX_SOURCES[@]}"; do [ "$s" = "$b" ] && found=1; done
