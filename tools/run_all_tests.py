@@ -12,11 +12,15 @@ moved on. This runs each one, prints the failures with the end of their output, 
 
 Not run here, and listed at the end with the reason: tests that need a built library or an outside source tree. They are
 run at the build step, where those exist. Needs a Mac with the Xcode command line tools (the tests compile Objective-C
-and x86_64 code). Run it from a full clone: negative controls read older revisions of the source."""
+and x86_64 code). Run it from a full clone: negative controls read older revisions of the source.
+
+Each test gets a temporary folder of its own as TMPDIR, deleted when it ends, so that what a test leaves behind in its
+temporary files does not pile up in the system's; and no test writes Python bytecode into the checkout."""
 import concurrent.futures
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,24 +61,29 @@ def run_one(path):
     name = path.name
     if name in NEEDS_INPUT:
         return name, "norun", NEEDS_INPUT[name]
+    tmp = tempfile.mkdtemp(prefix="nmtest-")
+    env = dict(os.environ, TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")
     try:
         if path.suffix == ".py":
-            r = subprocess.run([sys.executable, str(path)], cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+            r = subprocess.run([sys.executable, str(path)], cwd=ROOT, env=env, capture_output=True, text=True, timeout=TIMEOUT)
         elif path.suffix == ".sh":
-            r = subprocess.run(["/bin/bash", str(path)], cwd=TOOLS, capture_output=True, text=True, timeout=TIMEOUT)
+            r = subprocess.run(["/bin/bash", str(path)], cwd=TOOLS, env=env, capture_output=True, text=True, timeout=TIMEOUT)
         else:
-            with tempfile.TemporaryDirectory(prefix="nmtest-") as t:
-                cmd = c_command(path, Path(t) / "t")
-                if cmd == "placeholder":
-                    return name, "norun", "its build line needs a path filled in (see its header)"
-                if not cmd:
-                    return name, "norun", "its header names no build line"
-                b = subprocess.run(cmd[0], cwd=cmd[1], capture_output=True, text=True, timeout=TIMEOUT)
-                if b.returncode:
-                    return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
-                r = subprocess.run([str(Path(t) / "t")], cwd=cmd[1], capture_output=True, text=True, timeout=TIMEOUT)
+            t = Path(tmp) / "build"
+            t.mkdir()
+            cmd = c_command(path, t / "t")
+            if cmd == "placeholder":
+                return name, "norun", "its build line needs a path filled in (see its header)"
+            if not cmd:
+                return name, "norun", "its header names no build line"
+            b = subprocess.run(cmd[0], cwd=cmd[1], env=env, capture_output=True, text=True, timeout=TIMEOUT)
+            if b.returncode:
+                return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
+            r = subprocess.run([str(t / "t")], cwd=cmd[1], env=env, capture_output=True, text=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return name, "FAIL", f"no result after {TIMEOUT} s"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     out = (r.stdout + r.stderr)
     if r.returncode == 0:
         return name, "ok", ""
