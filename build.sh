@@ -50,8 +50,13 @@ q() {   # a value quoted for a shell
 }
 qcmd() { local a out=""; for a in "$@"; do out="$out $(q "$a")"; done; printf '%s\n' "${out# }"; }
 tilde() {   # the home folder written as ~ (report files and summaries a tester may post)
+  # both spellings: $HOME as set, and the same folder with its symbolic links resolved, which is how the working
+  # directory is stored (a home under /var or /tmp is /private/var or /private/tmp once resolved)
+  local ph=""
   if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
-    awk -v h="$HOME" '{ while ((i = index($0, h)) > 0) $0 = substr($0, 1, i - 1) "~" substr($0, i + length(h)); print }'
+    ph=$(cd "$HOME" 2>/dev/null && pwd -P) || ph=""
+    awk -v h="$HOME" -v p="$ph" 'function rep(s, x,   i, o) { o = ""; while ((i = index(s, x)) > 0) { o = o substr(s, 1, i - 1) "~"; s = substr(s, i + length(x)) } return o s }
+      { if (p != "" && p != "/" && p != h) $0 = rep($0, p); print rep($0, h) }'
   else cat; fi
 }
 
