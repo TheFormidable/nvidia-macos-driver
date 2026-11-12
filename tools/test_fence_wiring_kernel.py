@@ -241,13 +241,24 @@ def arms(src, header, table):
     # ---- the pages of another process -------------------------------------------------------------------------------
     arm("a page is pinned in the caller's task for reading, and a page that cannot be wired is given back at once",
         statements(b("nvfPin")) == ["IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)pageVA, NVF_PAGE, kIODirectionOut, current_task());",
-                                    "if (!md) return NULL;", "if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }", "return md;"]
+                                    "if (!md) return NULL;", "if (md->prepare() != kIOReturnSuccess) { md->release(); return NULL; }",
+                                    "IOByteCount len = 0;", "const addr64_t pa = md->getPhysicalSegment(0, &len, kIOMemoryMapperNone);",
+                                    "if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }", "return md;"]
         and count(code, r"\bwithAddressRange\s*\(") == 1 and count(code, r"->\s*prepare\s*\(") == 1)
+    # A process can hand in a page of device memory it mapped (the GPU's memory window is at 256 GB and up); the physical
+    # map that nvfRead64 reads through ends at installed memory + 4 GB, and a read beyond it stops the machine.
+    arm("a wired page is kept only when the physical map reaches it, and that end is installed memory + 4 GB, learnt once",
+        count(code, r"\bnvf_phys_ok\s*\(") == 1 and count(code, r"\bgetPhysicalSegment\s*\(") == 1
+        and re.search(r"^static\s+UInt64\s+gFPhysTop\s*;", code, re.M) is not None
+        and len(re.findall(r"\bgFPhysTop\s*=[^=]", code)) == 1
+        and count(src, r'\bsysctlbyname\s*\(\s*"hw\.memsize"\s*,') == 1 and count(code, r"\bsysctlbyname\s*\(\s*\"") == 1
+        and re.search(r'sysctlbyname\s*\(\s*"[^"]*"\s*,\s*&mem\s*,\s*&l\s*,\s*NULL\s*,\s*0\s*\)\s*==\s*0\s*&&\s*mem\s*&&\s*mem\s*<\s*\(\s*1ull\s*<<\s*46\s*\)\s*\)\s*gFPhysTop\s*=\s*mem\s*\+\s*\(\s*4ull\s*<<\s*30\s*\)\s*;', start) is not None
+        and order(start, [r"if\s*\(\s*boot\s*==\s*2\s*\)\s*return\s*;", r"\bsysctlbyname\s*\(", r"\bIOLockAlloc\s*\(", r"\bgFState\s*=\s*1\s*;"]))
     arm("letting go is complete, then release, in one place",
         statements(b("nvfUnpin")) == ["if (!md) return;", "md->complete();", "md->release();"]
         and count(code, r"->\s*complete\s*\(") == 1 and count(code, r"->\s*release\s*\(") == 2)
     arm("no page of a process is ever mapped into the kernel, and nothing but the fence's own lock is allocated",
-        not re.search(r"createMappingInTask|IOMemoryMap|->\s*map\s*\(|getVirtualAddress|getBytesNoCopy|\bkernel_task\b|ml_phys_|\bcopyin\w*\s*\(|\bcopyout\w*\s*\(|"
+        not re.search(r"createMappingInTask|\bIOMemoryMap\b|->\s*map\s*\(|getVirtualAddress|getBytesNoCopy|\bkernel_task\b|ml_phys_|\bcopyin\w*\s*\(|\bcopyout\w*\s*\(|"
                       r"\bbcopy\s*\(|\bmemcpy\s*\(|IOBufferMemoryDescriptor|\bIOMalloc\w*\s*\(|\bIONew\w*\s*\(|kern_os_malloc|\bkalloc\w*\s*\(|\bnew\s+\w", code)
         and count(code, r"\bIOLockAlloc\s*\(") == 1 and re.search(r"^static\s+struct\s+nvf_table\s+gT\s*;", code, re.M) is not None)
     arm("a pinned page is read in one place, 8 bytes into a buffer that was zeroed first",
@@ -486,6 +497,10 @@ CONTROLS = [
     ("the read buffer is not zeroed", "a pinned page is read in one place", "cpp", lambda s: broken(s, "    *out = 0;\n    return md->readBytes", "    return md->readBytes")),
     ("the flush value read before the completion value", "the table's view of a channel", "cpp",
      lambda s: moved(s, "    if (!nvfRead64(m->sem, 0, &d)) return 0;\n", "    if (flushed && !nvfRead64(m->sem, NVRM_FENCE_SEM_FLUSHED_OFF, &f)) return 0;\n")),
+    ("a wired page kept without a look at where it is", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, "    if (!nvf_phys_ok(pa, len, gFPhysTop)) { nvfUnpin(md); return NULL; }\n", "    (void)pa;\n")),
+    ("the end of the physical map taken without the 4 GB above memory", "a wired page is kept only when", "cpp",
+     lambda s: broken(s, "gFPhysTop = mem + (4ull << 30);", "gFPhysTop = mem + (64ull << 30);")),
     ("a channel registered without the probe", "CHAN_ADD: addresses checked", "cpp", lambda s: broken(s, PROBE1, "    if (!nvfRead64(sem, NVRM_FENCE_SEM_PROBE_OFF, &seen)) {\n")),
     ("a channel's pages pinned under the lock", "CHAN_ADD: addresses checked", "cpp",
      lambda s: broken(broken(s, "    IOMemoryDescriptor *sem = nvfPin(c->semVA);\n", "    IOMemoryDescriptor *sem = NULL;\n"), ADD_OWNER, ADD_OWNER + "    sem = nvfPin(c->semVA);\n")),

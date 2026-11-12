@@ -60,6 +60,12 @@ back to the system under it) and reads them through the kernel's map of physical
 is no kernel address that could fault when the process, or the RM, takes its own mapping away, and the pages stay
 wired until the registration ends: when NVK deletes it, when the proof below fails, or when the connection closes.
 
+That map covers the installed memory and the 4 GB above it, and nothing further. A page the process has mapped from a
+device, such as the GPU's own memory window (which this driver moves to 256 GB and up), has no address there, and
+reading it would stop the machine. So once a page is wired the kernel looks at where it is, and takes it only when the
+map reaches it; any other page is given back at once and the channel is not watched (`map_fail`). NVK's semaphore
+pages and notifiers are system memory, so this refuses nothing that NVK sends.
+
 Before the kernel trusts such a view it has to prove itself twice:
 
 1. At registration the process stores a value of its choice at offset 0xFF8 of the page and names it; the kernel
@@ -184,7 +190,7 @@ counter says so.
 | The kext has no fence (an older NVRM.kext is still loaded), or `nvrmfence=0` | `state` 0, or no `debug.nvrm_fence_state` at all | everything as 2.9 |
 | The layer switched itself off, a resume failed, or the last GPU stopped | `state` 2 or 3 | everything as 2.9 |
 | NVAccel does not read the fence | `accel` 0 | WindowServer keeps 2.9's marks; application holds work without it |
-| A channel's pages cannot be wired, or the view fails its proof | `map_fail`, `map_mismatch`, a log line | that channel is not watched; that process uses 2.9's marks and tags |
+| A channel's pages cannot be wired or are not system memory, or the view fails its proof | `map_fail`, `map_mismatch`, a log line | that channel is not watched; that process uses 2.9's marks and tags |
 | No room: the table (1024 holds), a connection's quota (128 holds, 32 channels, 4 connections per process) | `refused_full` | that command buffer uses 2.9's marks or tags |
 | More than 256 threads asleep in user-space waits | `wait_full` | that reader polls as 2.9 (NVAccel's waits are never refused for this) |
 | A compositor hold asked for by a process that is not WindowServer | `refused_denied` | refused |
@@ -237,7 +243,7 @@ boot" unless it says "now".
 | `chan_adds` | channels registered | above 0 after login |
 | `chan_noirq` | channels whose completions arrive without an interrupt, now | 0; see "What to look at", point 5 |
 | `chan_rebinds` | rebuilt channels given a new error notifier | 0 unless a channel was rebuilt after a fault |
-| `map_fail` | channel pages that could not be wired | 0 |
+| `map_fail` | channel pages that could not be wired, or that are not system memory | 0 |
 | `map_mismatch` | channels whose page did not show what the process wrote | 0 |
 | `live` | holds that delay readers now | returns to 0 when nothing draws |
 | `live_max` | most such holds at once | far below 1024 |
