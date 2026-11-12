@@ -1,30 +1,98 @@
-# Application event waits: CPU cost and latency
+# Event waits: when a waiting thread sleeps instead of polling
 
-`NVRM_EVENT_WAIT=1` enables the existing graphics-completion event wait for ordinary
-applications. On one RTX 5060 Laptop GPU, this reduced the CPU time spent in two
-synchronous workloads, at the cost of higher latency in the short compute test.
-This is an opt-in measurement result, not a proposed change to the shipped default.
+A thread that waits for GPU work (a fence wait, or a channel waiting for its own work to finish) can either poll the
+completion value or sleep in the NVRM kext until the GPU's graphics completion event arrives. Polling costs CPU for as
+long as the wait lasts; sleeping costs one wake-up latency at the end (about 0.13 ms measured below). Since this
+release every process uses both, chosen per wait:
 
-## What the setting does
+- WindowServer: as before, the wait spins for 20 microseconds and then sleeps on the event, at most 2 ms per sleep.
+  As before, that sleep does not look at the caller's timeout: a wait with a timeout can return up to 2 ms after it in
+  WindowServer (and in any process run with `NVRM_EVENT_WAIT=1`).
+- every other process: the first millisecond of a wait is polled exactly as before (a short pause loop up to 50
+  microseconds, then `sched_yield`), so short waits keep their latency. A wait that is still running after 1 ms
+  sleeps on the event instead of polling with `usleep(50)`. A thread whose waits run longer than about 2 ms (the
+  50-microsecond pause loop plus one 2 ms sleep) soon sleeps right after the pause loop: from its third wait when they
+  run longer than 3 ms, after some fifty waits when they are shorter. Waits between 1 and 2 ms are polled for their
+  first millisecond and then sleep, except about one in forty that sleeps right after the pause loop. (The thread
+  keeps a running mean of the time into each wait at which its last polling-or-sleeping step began;
+  `tools/test_evwait_policy.c` checks these numbers.) A sleep never runs past the caller's own timeout and does not
+  start when less than 100 microseconds of it remain. The same holds for the sleep on the copy-engine queue's own
+  semaphore ([SURFACE-FENCE.md](SURFACE-FENCE.md)), in every process: it is asked for in whole milliseconds, so it
+  starts only when at least one millisecond of the caller's timeout remains.
+- a sleep lasts at most 2 ms, so a missing event costs latency, never a hang. The GPU makes a completion visible
+  before the kext posts its event (the interrupt has to be serviced and RM has to run first), so now and then a sleep
+  runs out in that gap with the work already done: that is a missed wake, and on a healthy machine
+  `debug.nvrm_evt_user_missed` moves a little because of it. The late event shows at the thread's next call, and any
+  answer that shows the event's count moved ends the run of missed wakes. Only sixteen missed wakes in a row with the
+  count standing still all the while mean the event is dead: then the process stops using the event and polls for
+  the rest of its life; it prints one line
+  (`nvrm: event wait OFF for this process (16 wakes in a row did not arrive) - waits poll as before`) and the kext
+  counts it in `debug.nvrm_evt_user_fallbacks`. A kext that cannot wait at all is detected at the first call and the
+  process polls, as before.
 
-In `nvk/nvk-macos.patch`, `nvkmd_nvrm_wait_block()` defaults to event waits for
-WindowServer and polling/backoff for other processes. An explicit
-`NVRM_EVENT_WAIT=1` enables event waits after 20 microseconds, with a bounded
-2-millisecond wait and completion-state rechecks. The code falls back when a
-suitable event is unavailable. The setting does not increase GPU clocks or its
-power limit, and WindowServer already takes the event path by default.
+## The setting
 
-For a machine-local trial, back up `/Library/GPUBundles/nvmtl/nvrm610.conf`, then
-set exactly one `NVRM_EVENT_WAIT=1` entry while preserving its other settings.
-Reopen the application so it reads the new configuration. Restore the previous
-configuration to undo the trial. No driver reinstall or kernel-cache rebuild is
-needed for this setting.
+`NVRM_EVENT_WAIT` in `/Library/GPUBundles/nvmtl/nvrm610.conf` overrides the choice for every process, WindowServer
+included:
 
-Release builds clear inherited `NVRM_` tuning variables in the plugin constructor.
-An environment variable set before launching an application is therefore not a
-reliable A/B test. The probe below loads the installed plugin first, then sets the
-single wait-policy override before it creates the Metal device. The override is
-confined to that probe process.
+| Value | Every process |
+|---|---|
+| unset or empty (the default) | WindowServer sleeps after 20 microseconds; every other process follows the rule above |
+| `0` | polls, as every process did in 2.9 with `0`. This is the way back if the event wait is suspected; it also makes WindowServer poll, which costs WindowServer more CPU than both 2.9's default and this release's |
+| `2` | the rule above, WindowServer included |
+| `1` (or any other value) | sleeps after 20 microseconds, as WindowServer always did |
+
+No value gives exactly 2.9's default (WindowServer sleeping, applications polling). Release builds remove inherited
+`NVRM_` variables before the driver is loaded, so the file is the way to set it, and a line there applies to every
+process that starts afterwards (log out and in for WindowServer). To try one application without the event wait,
+launch it with `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` in its own environment: `NVMTL_PROCESS_ENV=1` makes a release
+plugin keep that process's own settings.
+
+`NVRM_GSUB_LOG=1` in the same file prints, when a channel closes, how many waits slept on the event (`event sleeps`),
+were woken by it, ran out, or slept on the copy queue's own semaphore (`chansleeps`), and whether the process went
+back to polling (`fellback`).
+
+## What the kext reports
+
+Selector 6 still returns the event count in its low 32 bits, so an older user space reads the same number. From this
+release the kext also says, in bits 32..39, why the call returned: the count was read, it had already moved, an event
+woke the sleep, the sleep ran to its timeout, the sleep was interrupted, it woke with nothing posted, or too many
+threads (256) were already asleep. In the last case the call returns at once, as before, but the caller now knows it
+did not sleep and takes one polling step instead of coming straight back.
+
+Read these together, while an application that waits on the GPU is running:
+
+    sysctl debug.nvrm_evt_posts debug.nvrm_evt_matched debug.nvrm_evt_waits debug.nvrm_evt_slept \
+           debug.nvrm_evt_woken debug.nvrm_evt_timeouts debug.nvrm_evt_capped debug.nvrm_evt_clients \
+           debug.nvrm_evt_user_missed debug.nvrm_evt_user_fallbacks \
+           debug.nvrm_evt_post_drain_waits debug.nvrm_evt_post_drain_stuck
+
+- `nvrm_evt_clients` 2 or more: applications, not only WindowServer, sleep on the event.
+- `nvrm_evt_woken` against `nvrm_evt_slept`: while the GPU is busy most sleeps should end woken; timeouts during long
+  GPU jobs are normal. Almost all timeouts while `nvrm_evt_posts` keeps rising means events arrive late.
+- `nvrm_evt_user_missed` is the number of full 2 ms sleeps that ended on their timeout although the GPU work was
+  already done. It should be small next to `nvrm_evt_woken`; a few are normal, for the reason given above.
+- `nvrm_evt_user_fallbacks` 0. A fall-back is also in the kernel log:
+  `NVRM-xnu: pid N went back to polling: its event wakes did not arrive (fd F)`. The kext writes that line for the
+  first eight fall-backs since boot only (any process can send the note, so the log is bounded); the counter counts
+  all of them. Only this counter above 0, together with the line
+  `nvrm: event wait OFF for this process (16 wakes in a row did not arrive)` in the application's output, means a
+  process stopped trusting the completion event.
+- `nvrm_evt_capped` 0 (more than 256 threads asleep at once otherwise).
+- `nvrm_evt_post_drain_stuck` 0. When a process closes, the kext waits for an RM event post that is still being
+  delivered to it (microseconds, normally never) before it frees the connection. It waits twice: up to 200 ms when
+  the connection closes (if the post is still in flight then, the log says
+  `NVRM-xnu: client fd N: an event post is still in flight after 200 ms` and the close goes on) and up to 200 ms
+  again when the connection's memory is about to be freed. Only a post that is still in flight after that keeps the
+  connection's memory for good, with `NVRM-xnu: client fd N: an event post never finished - the connection is kept,
+  not freed`. `nvrm_evt_post_drain_waits` counts both waits.
+
+## The measurement behind the 1 ms threshold
+
+The measurement below compared polling (`0`) with the eager sleep (`1`) on 2.9's code; the adaptive rule that is now
+the default for applications was not part of it. On a 0.6 ms compute wait the eager sleep cost 0.127 ms of latency per
+wait, which the default no longer pays on waits that short; on longer waits it saved CPU. It was made on one machine
+and does not show what the new default does there.
 
 ## Measured system
 

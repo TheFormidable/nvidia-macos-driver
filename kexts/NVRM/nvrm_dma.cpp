@@ -152,8 +152,8 @@ static nv_dma_device *dmaDev(const void *p)
 }
 static nv_dma_device *dmaDevOf(const nv_state_t *nv) { return nv ? dmaDev(nv->dma_dev) : NULL; }
 static IOMapper *dmaMapper(const nv_dma_device *d) { return d->mapper ? d->mapper : IOMapper::gSystem; }
-static void dmaMaxOf(volatile SInt64 *v, SInt64 x) { for (SInt64 o = *v; x > o && !OSCompareAndSwap64(o, x, v); o = *v) {} }
-static void dmaMinOf(volatile SInt64 *v, SInt64 x) { for (SInt64 o = *v; (o == 0 || x < o) && !OSCompareAndSwap64(o, x, v); o = *v) {} }
+static void dmaMaxOf(volatile SInt64 *v, SInt64 x) { for (SInt64 o = *v; x > o && !OSCompareAndSwap64((UInt64)o, (UInt64)x, v); o = *v) {} }
+static void dmaMinOf(volatile SInt64 *v, SInt64 x) { for (SInt64 o = *v; (o == 0 || x < o) && !OSCompareAndSwap64((UInt64)o, (UInt64)x, v); o = *v) {} }
 static unsigned dmaBitsNow(void)
 {
 #if DMA_RM_ROUTED
