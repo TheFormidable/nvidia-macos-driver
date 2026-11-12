@@ -5,7 +5,7 @@ Its default log is /tmp/nvmtl.log, a fixed name in a folder every local user can
 link planted there by one user sent the log lines of another user's process (one that had opted into logging) into any
 file that user could write. The release wrapper nvmtl_rel_fopen is lifted from plugin/NVMTLDevice.m and run; the
 control is plain fopen, which writes through the link."""
-import pathlib, shutil, subprocess, sys, tempfile
+import pathlib, re, shutil, subprocess, sys, tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
 src = (R / "plugin/NVMTLDevice.m").read_text()
@@ -49,7 +49,33 @@ dl = (R / "plugin/nvmtl_dlss.c").read_text()
 arm("the DLSS trace file is opened without following a link", "O_NOFOLLOW" in dl and 'g_trf = fopen(path, "a")' not in dl)
 nd = (R / "nvk/nvk-diag-nofollow.patch").read_text()
 bld = (R / "build/build_nvk.sh").read_text()
+
+
+def chain(script, release=None):
+    """The patch names build_nvk.sh applies: the words of the CHAIN="..." line in one release's arm of its
+    `case $REL in` block; without a release, the one the script builds when none is asked for (2.9 today).
+    A name in a comment, in another release's arm or inside a longer name is not one."""
+    if release is None:
+        default = re.search(r"\bREL=\$\{4:-([\w.]+)\}", script)
+        release = default.group(1) if default else None
+    arm_text = re.search(r"^[ \t]*" + re.escape(release) + r"\)(.*?);;", script, re.S | re.M) if release else None
+    line = re.search(r'^[ \t]*CHAIN="([^"\n]*)"', arm_text.group(1), re.M) if arm_text else None
+    return line.group(1).split() if line else []
+
+
+# The patch has to be one the default build applies. It was the last name of the chain when this arm was written, and the
+# arm asked for exactly that text; patches are appended after it now, so the arm asks for the name as a word of the line.
 arm("NVK's diagnostic log (NVK_DIAG=1) is created without following a link, for its owner alone",
     "+         int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);" in nd
-    and "-         int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);" in nd and 'nvk-diag-nofollow" ;;' in bld)
+    and "-         int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);" in nd and "nvk-diag-nofollow" in chain(bld))
+CASE = ('REL=${4:-2.9}\ncase $REL in\n  2.9) FIXES=x\n       CHAIN="nvk-macos @FIXES %s" ;;\n'
+        '  2.8) FIXES=y\n       CHAIN="nvk-macos @FIXES %s" ;;\nesac\n')
+arm("control: the name counts with patches appended after it",
+    "nvk-diag-nofollow" in chain(CASE % ("nvk-warnings nvk-diag-nofollow nvk-later nvk-last", "nvk-slab")))
+arm("control: a comment, the chain of a release that is not the default, or a longer name does not count",
+    "nvk-diag-nofollow" not in chain("#   2.9  nvk-diag-nofollow (the log is created without following a link)\n"
+                                     + CASE % ("nvk-warnings", "nvk-diag-nofollow"))
+    and "nvk-diag-nofollow" in chain(CASE % ("nvk-warnings", "nvk-diag-nofollow"), "2.8")
+    and "nvk-diag-nofollow" not in chain(CASE % ("nvk-diag-nofollow-old xnvk-diag-nofollow", "nvk-slab"))
+    and "nvk-diag-nofollow" not in chain('CHAIN="nvk-diag-nofollow"\n'))
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)
