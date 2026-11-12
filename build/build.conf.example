@@ -43,6 +43,8 @@
 #NM_RYZENADJ_URL=https://github.com/FlyGoat/RyzenAdj.git
 # the folder that holds CMBaseObjectSPI.h and VTVideoDecoderSPI.h
 #NM_WEBKIT_SPI_URL=
+#NM_SPIRV_LLVM_URL=https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git
+#NM_SPIRV_HEADERS_URL=https://github.com/KhronosGroup/SPIRV-Headers.git
 #NM_RUSTUP_URL=https://static.rust-lang.org/rustup/archive/1.29.3
 #RUSTUP_DIST_SERVER=https://static.rust-lang.org
 
