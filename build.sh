@@ -523,7 +523,8 @@ doctor() {   # prints; sets D_MISSING
     ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later; deps, build and package refuse this Mac"
     case "$(uname -m)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
-      x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not" ;;
+      x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not"
+              d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps compiles each missing formula here (LLVM: hours)" ;;
     esac
   else
     d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and --dry-run work; building needs macOS with Xcode"
@@ -888,6 +889,11 @@ cmd_deps() {
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs."
+    if [ "$(uname -m)" = x86_64 ]; then
+      say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
+      say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
+      say "one to several hours and tens of gigabytes of free space while it builds. Keep the Mac awake and on power."
+    fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
     elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 brew install $f"; done
