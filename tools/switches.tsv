@@ -816,6 +816,6 @@ build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied afte
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_REF_EXPORTS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
-build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." rebuilds NVK without the named patches of the chain (the Mesa 26.3.0 and NAK compiler fixes among them), to tell whether one of them is behind a shader or rendering problem.
+build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it.
 build	NVK_SYSROOT	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVRM_PRISTINE_OGKM	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver

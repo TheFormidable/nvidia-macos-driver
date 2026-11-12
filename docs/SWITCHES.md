@@ -49,7 +49,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `nvrmnanowait` | on (nvrmnanowait=0: a cancel does not wait, as in 2.9) | 3.2 | Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does. |
 | bootarg | `nvrmrctimer` | on (nvrmrctimer=0: no timer, as in 2.9) | 3.2 | The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens. |
 | bootarg | `nvrmworkq` | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it. |
-| build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." rebuilds NVK without the named patches of the chain (the Mesa 26.3.0 and NAK compiler fixes among them), to tell whether one of them is behind a shader or rendering problem. |
+| build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. |
 
 ## Test hooks
 
@@ -874,6 +874,6 @@ Each of these does nothing unless it is set.
 | `NVK_JOBS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVK_PATH` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh, build/build_release_inputs.sh |
 | `NVK_REF_EXPORTS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
-| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." rebuilds NVK without the named patches of the chain (the Mesa 26.3.0 and NAK compiler fixes among them), to tell whether one of them is behind a shader or rendering problem. |  |
+| `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it. |  |
 | `NVK_SYSROOT` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVRM_PRISTINE_OGKM` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvrm.sh |
