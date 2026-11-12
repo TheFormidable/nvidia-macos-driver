@@ -217,6 +217,8 @@ OWN_FLUSH = call("nv_xnu_wq_flush", "the flush of the GPU's own work queue (nv_x
 GLOBAL_FLUSH = call("nv_xnu_wq_flush", "the flush of the global work queue (nv_xnu_wq_flush(NULL, false, bound))",
                     lambda a: len(a) == 3 and a[0] in NOTHING)
 ANY_FLUSH = call("nv_xnu_wq_flush")
+QUEUE_DOWN = call("nv_xnu_wq_gpu_down", "the stop of the GPU's own work queue (nv_xnu_wq_gpu_down(queue, bound))")
+QUEUE_DOWN_UNSAID = 30000   # what nv_xnu_wq_gpu_down() waits, for each of its two waits, when the call names no bound
 SETTLE = call("irqSettle")
 IRQ_OFF = text(r"fIntSrc\s*->\s*disable\s*\(", "fIntSrc->disable()")
 IRQ_ON = text(r"fIntSrc\s*->\s*enable\s*\(", "fIntSrc->enable()")
@@ -263,9 +265,10 @@ def in_order(src, function, steps):
     return "; ".join(wrong[:4]) + (f"; and {len(wrong) - 4} more" if len(wrong) > 4 else "")
 
 
-def bounded(src, function, step, arg, most, least=1):
+def bounded(src, function, step, arg, most, least=1, unsaid=None):
     """'' when the step is in the function and every such call waits between least and most milliseconds (0 would mean
-    no bound at all). Otherwise which call does not."""
+    no bound at all). Otherwise which call does not. unsaid: what a call waits that leaves the bound out (None: the
+    bound has no default, or the default is not good enough here, so the call has to name one)."""
     body = src.steps(function)
     if body is None:
         return f"{function} is not in the file"
@@ -275,8 +278,10 @@ def bounded(src, function, step, arg, most, least=1):
     wrong = []
     for _, args in places:
         shown = args[arg] if arg < len(args) else ""
-        n = src.number(shown, body) if shown else None
-        if n is None:
+        n = src.number(shown, body) if shown else unsaid
+        if not shown and unsaid is None:
+            wrong.append(f"{step.said} names no bound; it has to name one, of " + (f"{most} ms" if least == most else f"at most {most} ms"))
+        elif n is None:
             wrong.append(f"{step.said}: its wait '{shown}' is not a number that can be read here")
         elif not least <= n <= most:
             wrong.append(f"{step.said} waits {n} ms" + (", which is no bound at all" if n == 0 else "")
@@ -349,16 +354,18 @@ RULES = [
      lambda s: in_order(s, "NVRM::stop", [call("rm_shutdown_adapter"), call("removeEventSource"), call("bottomHalfStop"),
                                           call("nv_xnu_isr_slot_release"), GLOBAL_FLUSH, call("rm_free_private_state"),
                                           call("nvrm_dma_detach")])),
-    ("stop(): every work-queue flush is bounded, at 30 s (nothing else bounds an unload, and a shorter wait would give "
-     "up on a queue that is only slow)",
-     lambda s: bounded(s, "NVRM::stop", ANY_FLUSH, 2, 30000, 30000)),
+    ("stop(): every work-queue flush is bounded, at 30 s, and the stop of the GPU's queue waits the same 30 s, named or "
+     "left to its default (nothing else bounds an unload, and a shorter wait would give up on a queue that is only slow)",
+     lambda s: both(bounded(s, "NVRM::stop", ANY_FLUSH, 2, 30000, 30000),
+                    bounded(s, "NVRM::stop", QUEUE_DOWN, 1, 30000, 30000, unsaid=QUEUE_DOWN_UNSAID))),
     ("shutdownFull(): the fence is stopped first, before the RM gate closes and the user channels stop (and after the "
      "power manager, if that is stopped here too); then the adapter goes down in the same order as in stop()",
      lambda s: in_order(s, "NVRM::shutdownFull", [call("nvrm_power_stop", needed=False), call("nvrm_fence_stop"), call("nv_xnu_pm_close"),
                                                   call("rm_stop_user_channels")] + ADAPTER_DOWN)),
-    ("shutdownFull(): each flush and the settle wait at most 2 s (the system gives the whole shutdown 8 s, and an "
-     "adapter left half shut down can fail the next boot)",
-     lambda s: both(bounded(s, "NVRM::shutdownFull", ANY_FLUSH, 2, 2000), bounded(s, "NVRM::shutdownFull", SETTLE, 0, 2000))),
+    ("shutdownFull(): each flush, the stop of the GPU's queue and the settle wait at most 2 s, and each names its "
+     "bound (the system gives the whole shutdown 8 s, and an adapter left half shut down can fail the next boot)",
+     lambda s: both(bounded(s, "NVRM::shutdownFull", ANY_FLUSH, 2, 2000), bounded(s, "NVRM::shutdownFull", QUEUE_DOWN, 1, 2000),
+                    bounded(s, "NVRM::shutdownFull", SETTLE, 0, 2000))),
     ("systemWillShutdown(): when its wait for the shutdown thread is over, the interrupt is turned off and the gate "
      "settled (not only the bottom half drained), before the BAR layout is put back",
      lambda s: in_order(s, "NVRM::systemWillShutdown", [call("kernel_thread_start"), IRQ_OFF, SETTLE, call("nvrmBuildShutdownPlan")])),
@@ -427,7 +434,7 @@ IOReturn NVRM::go(uint32_t pass)
 }
 void NVRM::irqOpen() { gNvIsrFilterAt = 0; nv_gate_open(&fIrqGate); }
 void NVRM::irqSettle(uint32_t waitMs) { nv_gate_close(&fIrqGate); bottomHalfDrain(waitMs); }
-void NVRM::workQueueDown() { struct os_work_queue *q = fNv.queue; fNv.queue = NULL; if (q) nv_xnu_wq_gpu_down(q); }
+void NVRM::workQueueDown(uint32_t capMs) { struct os_work_queue *q = fNv.queue; fNv.queue = NULL; if (q) nv_xnu_wq_gpu_down(q, capMs); }
 void NVRM::stop(IOService *provider)
 {
     nvrm_power_stop();
@@ -437,7 +444,7 @@ void NVRM::stop(IOService *provider)
     if (fAdapter) {
         nv_xnu_wq_flush(fNv.queue, true, 30000);
         rm_disable_adapter(NULL, &fNv);
-        workQueueDown();
+        workQueueDown(30000);
         if (fIntSrc) fIntSrc->disable();
         irqSettle(2000);
         rm_shutdown_adapter(NULL, &fNv); fAdapter = false;
@@ -461,7 +468,7 @@ void NVRM::shutdownFull(void *p0, wait_result_t)
     if (s->fAdapter) {
         nv_xnu_wq_flush(s->fNv.queue, true, 2000);
         rm_disable_adapter(NULL, &s->fNv);
-        s->workQueueDown();
+        s->workQueueDown(2000);
         if (s->fIntSrc) s->fIntSrc->disable();
         s->irqSettle(2000);
         rm_shutdown_adapter(NULL, &s->fNv); s->fAdapter = false;
@@ -584,12 +591,18 @@ CONTROLS = [
     ("stop(): the interrupt-thread slot never released", [3], lambda m: changed(m, "    nv_xnu_isr_slot_release(fIsrSlot, this);\n", "")),
     ("stop(): a flush with no bound", [4], lambda m: changed(m, "nv_xnu_wq_flush(NULL, false, 30000);", "nv_xnu_wq_flush(NULL, false, 0);")),
     ("stop(): a queue given up on after 5 s", [4], lambda m: changed(m, "nv_xnu_wq_flush(fNv.queue, true, 30000);", "nv_xnu_wq_flush(fNv.queue, true, 5000);")),
+    ("stop(): the GPU's queue stopped with the 2 s waits of a shutdown", [4], lambda m: changed(m, "        workQueueDown(30000);\n", "        workQueueDown(2000);\n")),
     ("shutdownFull() without the fence stop", [5], lambda m: changed(m, FENCE_STOP_S, "")),
     ("shutdownFull(): the fence stopped after the user channels", [5], lambda m: swapped(m, FENCE_STOP_S, "    rm_stop_user_channels(NULL, &s->fNv);\n")),
     ("shutdownFull(): the power manager stopped after the fence", [5], lambda m: changed(m, FENCE_STOP_S, FENCE_STOP_S + "    nvrm_power_stop();\n")),
     ("shutdownFull(): the 30 s bound of stop()", [6],
      lambda m: changed(m, "nv_xnu_wq_flush(s->fNv.queue, true, 2000);", "nv_xnu_wq_flush(s->fNv.queue, true, 30000);")),
     ("shutdownFull(): a 5 s settle", [6], lambda m: changed(m, "s->irqSettle(2000);", "s->irqSettle(5000);")),
+    ("shutdownFull(): the GPU's queue stopped with the 30 s waits of stop()", [6],
+     lambda m: changed(m, "        s->workQueueDown(2000);\n", "        s->workQueueDown(30000);\n")),
+    ("the GPU's queue stopped with no bound named, which is 30 s: right in stop(), not in shutdownFull()", [6],
+     lambda m: changed(m, "if (q) nv_xnu_wq_gpu_down(q, capMs); }", "if (q) nv_xnu_wq_gpu_down(q); }")),
+    ("shutdownFull(): the GPU's queue never stopped", [5, 6], lambda m: changed(m, "        s->workQueueDown(2000);\n", "")),
     ("systemWillShutdown() only drains the bottom half", [7], lambda m: changed(m, "    irqSettle(1000);\n", "    bottomHalfDrain(1000);\n")),
     ("gpuSuspend(): the fence is not told", [8], lambda m: changed(m, "    nvrm_fence_pm(1);\n", "")),
     ("gpuSuspend(): the fence told the GPU is back", [8], lambda m: changed(m, "    nvrm_fence_pm(1);\n", "    nvrm_fence_pm(0);\n")),
