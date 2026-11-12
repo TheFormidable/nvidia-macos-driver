@@ -1446,7 +1446,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
         // published, as in 2.9. A refusal by the accelerator ends it: no head will ever be published to it.
         int mask = 0, i;
         NvrmHeadsWait w; nvrmHeadsWaitInit(&w, old ? 1000u : (unsigned)kNvrmHeadsPollMs, want, hyWait);
-        NvrmHeadsWhy why = kNvrmHeadsKeepWaiting;
+        NvrmHeadsWhy headsWhy = kNvrmHeadsKeepWaiting;
         unsigned polls = 0, connected = 0, sinceRead = kNvrmHeadsRefreshMs, sinceWalk = kNvrmHeadsRefreshMs;
         bool noDisplay = false;
         if (hyWait) LOG("auto-go: hybrid: waiting up to 20 s for the other GPU's panel (head 4) before arming");
@@ -1467,24 +1467,24 @@ void NVRM::autoGo(void *p0, wait_result_t)
                 gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", NULL, 0);
                 accelRefused = gNvLayoutAccel == kNvLayoutRefused;
             }
-            why = nvrmHeadsWaitPoll(&w, (unsigned)mask, connected, noDisplay, accelRefused);
-            if (why != kNvrmHeadsKeepWaiting) break;
+            headsWhy = nvrmHeadsWaitPoll(&w, (unsigned)mask, connected, noDisplay, accelRefused);
+            if (headsWhy != kNvrmHeadsKeepWaiting) break;
             IOSleep(w.stepMs);
             sinceRead += w.stepMs; sinceWalk += w.stepMs;
-            if (!nvrmHeadsWaitSlept(&w)) { why = kNvrmHeadsTimeout; break; }
+            if (!nvrmHeadsWaitSlept(&w)) { headsWhy = kNvrmHeadsTimeout; break; }
             // The stepper counts sleeps. Twenty times more polls than 2.9 add twenty times its per-poll cost (a sysctl,
             // a registry read, the timer slack of each sleep), so the clock bounds the wait as well: it never ends
             // later than 2.9's twenty one-second sleeps did. -nvrmoldwaits keeps 2.9's count of polls exactly.
-            if (!old && nvrmMsSince(t0) >= kNvrmHeadsWaitMs) { why = kNvrmHeadsTimeout; break; }
+            if (!old && nvrmMsSince(t0) >= kNvrmHeadsWaitMs) { headsWhy = kNvrmHeadsTimeout; break; }
         }
-        gNvBootHeadsMs = nvrmMsSince(t0); gNvBootHeadsPolls = polls; gNvBootHeadsWhy = (unsigned)why;
-        if (why == kNvrmHeadsNoDisplay) LOG("auto-go: no display on any NVIDIA connector - not waiting for heads");
-        if (why == kNvrmHeadsHybridPanel) LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %u ms", w.elapsedMs);
+        gNvBootHeadsMs = nvrmMsSince(t0); gNvBootHeadsPolls = polls; gNvBootHeadsWhy = (unsigned)headsWhy;
+        if (headsWhy == kNvrmHeadsNoDisplay) LOG("auto-go: no display on any NVIDIA connector - not waiting for heads");
+        if (headsWhy == kNvrmHeadsHybridPanel) LOG("auto-go: hybrid: the other GPU's panel published as head 4 after %u ms", w.elapsedMs);
         LOG("auto-go: heads published mask 0x%x (%u of nvfbheads %d) after %u ms, %u polls: %s", mask, nvrmPop((unsigned)mask),
-            want, w.elapsedMs, polls, nvrmHeadsWhyName(why));
+            want, w.elapsedMs, polls, nvrmHeadsWhyName(headsWhy));
         { char ld[64]; gNvLayoutAccel = (unsigned)nvrmPeerLayout(s->fPCI, "nvaccel-layout", ld, sizeof ld);
           if (gNvLayoutAccel != kNvLayoutNotRun) LOG("auto-go: accelerator layout: %s", ld); }
-        if (why == kNvrmHeadsNoAccel) {
+        if (headsWhy == kNvrmHeadsNoAccel) {
             // NVAccel stepped aside: no acceleration on this macOS, and nothing will arm. What the hold is for is the
             // display path, which NVRMFB reports by clearing the boot guard. Wait for that, then let WindowServer start.
             const unsigned cap = nvrmAccelRefusedWaitMs(w.elapsedMs);
