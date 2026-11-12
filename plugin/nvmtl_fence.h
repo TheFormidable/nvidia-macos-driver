@@ -32,6 +32,7 @@
 
 /* The kext's numbers the plugin uses. The plugin does not see nvrm_fence_abi.h (NVK builds the request), so they are
    repeated here; tools/test_fence_plugin.c asserts each equals its NVRM_FENCE_*. */
+#define NVMTL_FENCE_MAX_IDS      8u            /* surfaces in one OPEN or ARM: a hold of 16 goes in two */
 #define NVMTL_FENCE_OP_QUERY     0u
 #define NVMTL_FENCE_OP_OPEN      4u
 #define NVMTL_FENCE_OP_ARM       5u

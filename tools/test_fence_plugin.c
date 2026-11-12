@@ -21,6 +21,8 @@ _Static_assert(NVMTL_FENCE_R_NONE == NVRM_FENCE_R_NONE && NVMTL_FENCE_R_READY ==
                NVMTL_FENCE_R_BUDGET == NVRM_FENCE_R_BUDGET && NVMTL_FENCE_R_ABORTED == NVRM_FENCE_R_ABORTED &&
                NVMTL_FENCE_R_PENDING == NVRM_FENCE_R_PENDING, "fence results");
 _Static_assert(NVMTL_FENCE_WAIT_MS <= NVRM_FENCE_WAIT_MAX_MS, "the kernel would clamp the reader's budget");
+_Static_assert(NVMTL_FENCE_MAX_IDS == NVRM_FENCE_MAX_IDS, "ids per request");
+_Static_assert(NVMTL_FENCE_HOLD_MAX % NVMTL_FENCE_MAX_IDS == 0, "a full hold goes in whole requests");
 _Static_assert(sizeof(((nvmtl_fence_hold *)0)->planes[0]) == sizeof(((struct NVRMFenceHold *)0)->planes[0]), "plane mask width");
 
 /* ---- a kernel that keeps the older marks, to prove no mark is ever left set ---- */
