@@ -70,6 +70,10 @@ def text_arms(src):
     start = src[h:h + 20000] if h >= 0 else ""
     p, q = start.find('setProperty("NVAccelSurfaceWait", 1ULL, 32);'), start.find("nvFenceAsk(locateNVRM());")
     out["start asks NVRM for the fence right after it publishes NVAccelSurfaceWait"] = 0 <= p < q and start.count("nvFenceAsk(") == 1
+    g = start.rfind("#ifndef NMX_ACCEL\n", 0, q) if q >= 0 else -1
+    out["only the NVIDIA accelerator's start looks for NVRM (an AMD/Intel one must not wait for a service it does not have)"] = (
+        0 <= p < g < q and "#endif" not in start[g:q] and "#else" not in start[g:q]
+        and start[q:].split("\n", 2)[1].strip() == "#endif")
     wf = func(src, "static bool nvSurfWaitReadyFor(unsigned int id, unsigned capMs)\n{")
     rd, dd, nf = wf.find("w.result == NVRM_FENCE_R_READY"), wf.find("w.result == NVRM_FENCE_R_DEAD"), wf.find("ready = false;")
     out["the fence wait: compositor holds, the caller's bound, a dead writer counts as done, then the 2.9 marks"] = (

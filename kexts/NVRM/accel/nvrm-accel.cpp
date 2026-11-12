@@ -856,9 +856,13 @@ public:
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
             // its pixels landed, so the plugin keeps marking them after the GPU finishes.
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
+#ifndef NMX_ACCEL
             // Ask NVRM for its surface fence now, so the plugin learns early that this accelerator's waits read it.
             // Refused here when NVRM's GPU start has not reached the fence yet: the waits ask again later.
+            // The NVIDIA accelerator only. An AMD/Intel one has no NVRM, and looking for one waits up to 100 ms for a
+            // service that may never come, in a start() that must not wait (see "No waiting here" above).
             nvFenceAsk(locateNVRM());
+#endif
             // Properties an Apple accelerator publishes that programs read when they walk the registry for the GPU in use
             // (game engines list IOAccelerator services to pick the primary GPU, and the OpenGL renderer id ties a
             // display GPU to a CGL renderer). Only added when nothing else has set them.
