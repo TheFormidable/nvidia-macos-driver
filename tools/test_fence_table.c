@@ -173,6 +173,7 @@ static void s_gpu_done_kick(int nth) { (void)nth; now += MS(1); hw[IDX(sH)].done
 static void s_gpu_done_quiet(int nth) { (void)nth; }  /* the GPU finishes without an interrupt: only the slice sees it */
 static void s_close(int nth) { (void)nth; now += MS(3); (void)close1(1, 1, 7); w_lock(NULL); w_unlock(NULL); }
 static void s_owner_gone(int nth) { unsigned fi[NVF_OWNER_CHANS]; (void)nth; now += MS(2); (void)nvf_owner_gone(&Tb, 1, fi, NVF_OWNER_CHANS); w_lock(NULL); w_unlock(NULL); }
+static void s_pid_gone(int nth) { unsigned fi[NVF_OWNER_CHANS]; (void)nth; now += MS(2); (void)nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS); w_lock(NULL); w_unlock(NULL); }
 static void s_fault(int nth) { (void)nth; now += MS(2); hw[IDX(sH)].faulted = 1; W.kick++; }
 static void s_open_more(int nth) { if (nth == 0) { now += MS(1); (void)open1(2, 22, 9, 7, 0); } else { now += MS(1); (void)close1(1, 1, 7); w_lock(NULL); w_unlock(NULL); } }
 static void s_kick_in_look(void) { W.kick++; }
@@ -439,6 +440,69 @@ static void arm_endings(void)
     hw[IDX(h)].mapped = 0;
     (void)open1(1, 11, 1, 7, 0); (void)arm1(1, 1, 7, h, 10, 0);
     T("a channel whose pages cannot be read counts as faulted: nobody waits on it", look(7, 0, 0, 0, NULL) == 0 && Tb.stat[NVF_STAT_END_CHAN_ERR] == 1);
+}
+
+/* A process exits. NVK's fence requests (its holds and channel registrations) go on a connection of their own, owner 1
+   here, while its RM objects live on another connection, which may close first and free the channels. Whichever
+   connection of the dying process closes first ends the fence state of all of them. */
+static void arm_pid_gone(void)
+{
+    unsigned h, h2, other, fi[NVF_OWNER_CHANS], one = 0, n, changes;
+    struct NVRMFenceWait w;
+    int fast = 0;
+    fresh(); w_reset();
+    h = chan_new(1, 11); sH = h;
+    h2 = chan_new(2, 11);                            /* a second fence connection of the same process */
+    other = chan_new(3, 22);                         /* another process */
+    (void)open1(1, 11, 1, 7, 0); (void)arm1(1, 1, 7, h, 100, 0);
+    (void)open1(2, 11, 1, 8, 0);
+    (void)open1(3, 22, 1, 9, COMP | AUTO); (void)arm1(3, 1, 9, other, 50, 0);
+    W.during = s_pid_gone;
+    T("the process exits while a reader sleeps on its armed hold: the reader leaves at once with DEAD", wait_for(7, 0, 0, 2000, 0, &w) == OK &&
+      w.result == NVRM_FENCE_R_DEAD && w.waitedUs == 2000 && w.ownerPid == 11);
+    T("every hold of every connection of that process ended, as at a close: no strike", Tb.live == 1 && Tb.used == 1 && look(8, 0, 0, 0, NULL) == 0 &&
+      Tb.stat[NVF_STAT_END_OWNER] == 2 && Tb.stat[NVF_STAT_STRIKES] == 0 && Tb.stat[NVF_STAT_EXPIRED_GPU] == 0);
+    T("and all its channels are out of the table", Tb.stat[NVF_STAT_CHANS] == 1 && !Tb.c[IDX(h)].used && !Tb.c[IDX(h2)].used &&
+      Tb.o[nvf_owner_find(&Tb, 1)].chans == 0 && Tb.o[nvf_owner_find(&Tb, 2)].chans == 0);
+    T("its two connections are counted once each", Tb.stat[NVF_STAT_PID_GONE] == 2);
+    T("another process keeps its hold and channel", look(9, 0, 0, COMP, NULL) == 1 && Tb.c[IDX(other)].used);
+    T("each record stays, empty and closed, until its own connection closes",
+      nvf_owner_find(&Tb, 1) >= 0 && Tb.o[nvf_owner_find(&Tb, 1)].closed && Tb.o[nvf_owner_find(&Tb, 2)].closed &&
+      !Tb.o[nvf_owner_find(&Tb, 3)].closed && Tb.o[nvf_owner_find(&Tb, 1)].entries == 0);
+    {
+        unsigned hh = 0;
+        T("a request still in flight on it adds nothing: OPEN and CHAN_ADD are OFF", open1(1, 11, 2, 7, 0) == NVRM_FENCE_ST_OFF &&
+          nvf_chan_add(&Tb, 2, 11, 0, &hh) == NVRM_FENCE_ST_OFF && hh == 0 && Tb.used == 1 && Tb.stat[NVF_STAT_CHANS] == 1);
+    }
+    T("the rest finds nothing", arm1(1, 1, 7, h, 100, 0) == NVRM_FENCE_ST_STALE && close1(1, 1, 7) == 0 &&
+      nvf_chan_del(&Tb, 1, h, now, hw_read, NULL, &one) == NVRM_FENCE_ST_STALE && nvf_chan_rebind(&Tb, 1, h, &one) == NVRM_FENCE_ST_STALE &&
+      nvf_chan_verify(&Tb, 2, h2, 1, &one) == NVRM_FENCE_ST_STALE && nvf_seq_eval(&Tb, 1, h, 1, NVF_WHY_FIRST, hw_read, NULL, &fast) == -1);
+    changes = Tb.changes;
+    T("a second call for the same process does nothing", nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS) == 0 && Tb.stat[NVF_STAT_PID_GONE] == 2 &&
+      Tb.changes == changes && Tb.live == 1);
+    T("pid 0, or a pid with nothing, does nothing", nvf_pid_gone(&Tb, 0, fi, NVF_OWNER_CHANS) == 0 && nvf_pid_gone(&Tb, 33, fi, NVF_OWNER_CHANS) == 0 &&
+      Tb.stat[NVF_STAT_PID_GONE] == 2);
+    T("each connection's own close frees its record", nvf_owner_gone(&Tb, 1, fi, NVF_OWNER_CHANS) == 0 && nvf_owner_find(&Tb, 1) < 0 &&
+      nvf_owner_gone(&Tb, 2, fi, NVF_OWNER_CHANS) == 0 && nvf_owner_find(&Tb, 2) < 0);
+    T("a later process with the same pid has records of its own and is served", open1(4, 11, 1, 7, 0) == OK && chan_new(4, 11) != 0 &&
+      !Tb.o[nvf_owner_find(&Tb, 4)].closed);
+    T("the lists agree", structure(&Tb) == NULL);
+
+    /* many channels: they come back a batch at a time, but every hold ends in the first call */
+    fresh();
+    for (n = 0; n < NVF_OWNER_CHANS; n++) { (void)chan_new(1, 11); (void)chan_new(2, 11); }
+    (void)open1(1, 11, 1, 7, 0); (void)open1(2, 11, 1, 8, 0);
+    changes = Tb.changes;
+    T("the first call ends every hold of the process and hands back one full batch", nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS) == NVF_OWNER_CHANS &&
+      Tb.live == 0 && Tb.o[nvf_owner_find(&Tb, 1)].closed && Tb.o[nvf_owner_find(&Tb, 2)].closed && Tb.changes != changes);
+    T("the next hands back the rest, then nothing", nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS) == NVF_OWNER_CHANS &&
+      nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS) == 0 && Tb.stat[NVF_STAT_CHANS] == 0 && Tb.stat[NVF_STAT_PID_GONE] == 2);
+    fresh();
+    (void)chan_new(1, 11);
+    changes = Tb.changes;
+    T("channels alone: the table still counts a change, so a producer asleep on one of them looks again",
+      nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS) == 1 && Tb.changes != changes);
+    T("the lists agree after the batches", structure(&Tb) == NULL);
 }
 
 static void arm_rebind(void)
@@ -1149,14 +1213,15 @@ static void arm_off(void)
 static struct mhold { int used; unsigned long long owner, cookie, seq, since, serial; unsigned sid, pid, chan; int state, flags, planes, expired; } mh[MH];
 static int mhN;
 static struct mchan { int used; unsigned long long owner, done; unsigned handle; int verified, faulted, found, foundSlice, noirq; } mc[NVF_CHANS];
-static struct mowner { int used; unsigned long long owner, penaltyUntil, lastStrike; unsigned pid; int strikes, distrusted; } mo[64];
+static struct mowner { int used; unsigned long long owner, penaltyUntil, lastStrike; unsigned pid; int strikes, distrusted, closed; } mo[64];
 static struct mrec { unsigned long long serial; unsigned sid, pid; int why, flags, planes; } mring[NVF_RECENT];
 static unsigned long long mserial, mrecent;
 static int m_live, m_liveC, m_used, m_flagged, m_off, m_paused, m_fused, m_distrusted, m_noirq;
 static unsigned long long m_stat[NVF_STAT_N];
 static int m_bug;                                    /* a control: 1 = an armed hold is given up 1 ms early, 2 = no snapshot,
                                                         3 = a compositor hold has the 20 ms penalty bound,
-                                                        4 = distrust flags the owner's live holds */
+                                                        4 = distrust flags the owner's live holds,
+                                                        5 = a process's exit ends only the closing connection */
 
 static void m_reset(void) { memset(mh, 0, sizeof(mh)); mhN = 0; memset(mc, 0, sizeof(mc)); memset(mo, 0, sizeof(mo)); mserial = 1; mrecent = 0;
     m_live = m_liveC = m_used = m_flagged = m_off = m_paused = m_fused = m_distrusted = m_noirq = 0; memset(m_stat, 0, sizeof(m_stat)); }
@@ -1396,6 +1461,7 @@ static unsigned long differential(const struct profile *P, unsigned long ops, un
                 for (unsigned i = 0; i < cnt; i++) if (!ids[i]) bad = 1;
                 if (bad) want = NVRM_FENCE_ST_BAD_ARG;
                 else if (!(o = mo_get(owner, pid))) want = NVRM_FENCE_ST_FULL;
+                else if (o->closed) want = NVRM_FENCE_ST_OFF;
                 else if (o->distrusted) want = NVRM_FENCE_ST_DISTRUST;
                 else {
                     int mine, ownLeft = 0, anyLeft = 0;
@@ -1516,7 +1582,8 @@ static unsigned long differential(const struct profile *P, unsigned long ops, un
             struct mowner *o;
             if (own[oi].h[slot]) continue;
             st = nvf_chan_add(&Tb, owner, pid, flags, &h);
-            want = m_off ? NVRM_FENCE_ST_OFF : !(o = mo_get(owner, pid)) ? NVRM_FENCE_ST_FULL : m_chans(owner) >= (int)NVF_OWNER_CHANS ? NVRM_FENCE_ST_FULL : OK;
+            want = m_off ? NVRM_FENCE_ST_OFF : !(o = mo_get(owner, pid)) ? NVRM_FENCE_ST_FULL : o->closed ? NVRM_FENCE_ST_OFF :
+                   m_chans(owner) >= (int)NVF_OWNER_CHANS ? NVRM_FENCE_ST_FULL : OK;
             DIFF(st == want && (st == OK) == (h != 0), "CHAN_ADD answered differently");
             if (st != OK) continue;
             DIFF(!mc[IDX(h)].used, "CHAN_ADD gave out a channel slot that is in use");
@@ -1547,7 +1614,23 @@ static unsigned long differential(const struct profile *P, unsigned long ops, un
             }
             own[oi].h[slot] = 0;
         } else if (op == O_GONE) {                        /* the connection closes; a new one takes its place */
-            unsigned fi[NVF_OWNER_CHANS], got, want = (unsigned)m_chans(owner);
+            unsigned fi[NVF_OWNER_CHANS], got, want;
+            if (rnd(3) == 0) {                            /* ...because its process exits: every connection of it ends first */
+                unsigned b;
+                want = 0; got = 0;
+                for (int i = 0; i < 64; i++) if (mo[i].used && mo[i].pid == pid) want += (unsigned)m_chans(mo[i].owner);
+                do { b = nvf_pid_gone(&Tb, pid, fi, NVF_OWNER_CHANS); got += b; } while (b == NVF_OWNER_CHANS);
+                DIFF(got == want || m_bug == 5, "an exiting process handed back a different number of channels");
+                for (int i = 0; i < 64 && m_bug != 5; i++) {
+                    struct mowner *o = &mo[i];
+                    if (!o->used || o->pid != pid) continue;
+                    if (!o->closed) { o->closed = 1; m_stat[NVF_STAT_PID_GONE]++; }
+                    for (int k = 0; k < mhN; k++) if (mh[k].used && mh[k].owner == o->owner) m_end(&mh[k], NVF_END_OWNER);
+                    for (unsigned k = 0; k < NVF_CHANS; k++) if (mc[k].used && mc[k].owner == o->owner) mc_free(&mc[k]);
+                }
+                for (unsigned k = 0; k < P->owners; k++) if (own[k].pid == pid && m_bug != 5) memset(own[k].h, 0, sizeof(own[k].h));
+            }
+            want = (unsigned)m_chans(owner);
             got = nvf_owner_gone(&Tb, owner, fi, NVF_OWNER_CHANS);
             DIFF(got == want, "a closing connection handed back a different number of channels");
             for (int i = 0; i < mhN; i++) if (mh[i].used && mh[i].owner == owner) m_end(&mh[i], NVF_END_OWNER);
@@ -1591,7 +1674,7 @@ static unsigned long differential(const struct profile *P, unsigned long ops, un
         DIFF(Tb.fused == (unsigned)m_fused && Tb.distrustedOwners == (unsigned)m_distrusted && Tb.off == (unsigned)m_off, "distrust or the fuse differs");
         Tb.evN = 0;
         if (n % 1000 == 0 || m_fused || n == ops) {
-            static const int cmp[] = { NVF_STAT_OPENS, NVF_STAT_AUTO, NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM,
+            static const int cmp[] = { NVF_STAT_OPENS, NVF_STAT_AUTO, NVF_STAT_END_OWNER, NVF_STAT_END_CHAN_ERR, NVF_STAT_END_CHAN_DEL, NVF_STAT_END_PM, NVF_STAT_PID_GONE,
                                        NVF_STAT_EXPIRED_GPU, NVF_STAT_EXPIRED_CPU, NVF_STAT_EXPIRED_PENALTY, NVF_STAT_STRIKES,
                                        NVF_STAT_OWNERS_DISTRUSTED, NVF_STAT_RECLAIMED };
             const char *bad = structure(&Tb);
@@ -1620,12 +1703,13 @@ static void cov_print(void)
     printf("     that run: %llu holds opened; %llu ended by the GPU, %llu became GPU-done or were closed, %llu were given up\n"
            "     (GPU bound %llu, CPU bound %llu, penalty bound %llu, %u of them looked at on the very edge of the bound); %llu strikes,\n"
            "     %llu connections distrusted, %u fuses, %llu slots reclaimed; ended by a fault %llu, a deleted channel %llu,\n"
-           "     a closed connection %llu, sleep %llu; %llu channels, %llu rebinds; %llu requests refused for room\n",
+           "     a closed connection %llu (%llu connections emptied at their process's exit), sleep %llu; %llu channels, %llu rebinds;\n"
+           "     %llu requests refused for room\n",
            cov[NVF_STAT_OPENS], cov[NVF_STAT_AUTO], cov[NVF_STAT_CLOSES],
            cov[NVF_STAT_EXPIRED_GPU] + cov[NVF_STAT_EXPIRED_CPU] + cov[NVF_STAT_EXPIRED_PENALTY],
            cov[NVF_STAT_EXPIRED_GPU], cov[NVF_STAT_EXPIRED_CPU], cov[NVF_STAT_EXPIRED_PENALTY], covEdges, cov[NVF_STAT_STRIKES],
            cov[NVF_STAT_OWNERS_DISTRUSTED], covFuses, cov[NVF_STAT_RECLAIMED], cov[NVF_STAT_END_CHAN_ERR], cov[NVF_STAT_END_CHAN_DEL],
-           cov[NVF_STAT_END_OWNER], cov[NVF_STAT_END_PM], cov[NVF_STAT_CHAN_ADDS], cov[NVF_STAT_CHAN_REBINDS], cov[NVF_STAT_REFUSED_FULL]);
+           cov[NVF_STAT_END_OWNER], cov[NVF_STAT_PID_GONE], cov[NVF_STAT_END_PM], cov[NVF_STAT_CHAN_ADDS], cov[NVF_STAT_CHAN_REBINDS], cov[NVF_STAT_REFUSED_FULL]);
 }
 
 static void arm_differential(void)
@@ -1637,9 +1721,10 @@ static void arm_differential(void)
     if (at) printf("     operation %lu: %s\n", at, what);
     T("200,000 random operations of a busy desktop: the table and a naive second implementation agree at every step", at == 0);
     cov_print();
-    T("and that run was the ordinary life of holds: most closed by their writers, hundreds ended by the GPU, by faults, by sleep", at == 0 &&
+    T("and that run was the ordinary life of holds: most closed by their writers, hundreds ended by the GPU, by faults, by sleep, by exits", at == 0 &&
       cov[NVF_STAT_CLOSES] * 2 > cov[NVF_STAT_OPENS] && cov[NVF_STAT_AUTO] > 500 && cov[NVF_STAT_END_CHAN_ERR] > 100 &&
-      cov[NVF_STAT_END_CHAN_DEL] > 20 && cov[NVF_STAT_CHAN_REBINDS] > 100 && cov[NVF_STAT_END_PM] > 100 && cov[NVF_STAT_END_OWNER] > 100);
+      cov[NVF_STAT_END_CHAN_DEL] > 20 && cov[NVF_STAT_CHAN_REBINDS] > 100 && cov[NVF_STAT_END_PM] > 100 && cov[NVF_STAT_END_OWNER] > 100 &&
+      cov[NVF_STAT_PID_GONE] > 100);
     at = differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what);
     if (at) printf("     operation %lu: %s\n", at, what);
     T("200,000 more of a crowded, misbehaving one: they agree", at == 0);
@@ -1669,6 +1754,8 @@ static void arm_controls(void)
     T("control: one that gives a compositor hold the 20 ms penalty bound is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
     m_bug = 4;
     T("control: one where distrust lets go of the owner's holds in flight is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
+    m_bug = 5;
+    T("control: one where an exiting process's other connections keep their holds is caught", differential(&BUSY, 200000, 0x9E3779B97F4A7C15ull, &what) != 0);
     m_bug = 0;
 
     fresh();
@@ -1710,6 +1797,7 @@ int main(void)
     arm_filters();
     arm_snapshot();
     arm_endings();
+    arm_pid_gone();
     arm_rebind();
     arm_bounds();
     arm_distrust();
