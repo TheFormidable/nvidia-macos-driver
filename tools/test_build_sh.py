@@ -1310,6 +1310,24 @@ def arm_space():
     sb2 = Sandbox("space-co", checkout_dir="my src/nvidia-macos-driver")
     p, out = space_problems(sb2, ["fetch"], created=str(sb2.work))
     check("a checkout path with a space is refused at the start", not p and "checkout path" in out, (p, out[-400:]))
+    nl = str(sb.home / "my\nbuild")
+    sb.clear()
+    rc, out = sb.run("--workdir", nl, "-y", "clean", "all")
+    check("a working directory with a line break is refused at the start, nothing created",
+          rc == 2 and "line break" in out and not os.path.exists(nl), (rc, out[-300:]))
+    for w in ("/", str(sb.home), str(sb.home / "nvmtl-build")):
+        sb.clear()
+        rc, out = sb.run("--workdir", w, "-y", "clean", "all")
+        check(f"--workdir {w.replace(str(sb.home), '~')} is refused with the reason, nothing run",
+              rc == 2 and "may not be /" in out and not mutating(sb.jlines()), (rc, out[-300:]))
+    fresh = str(sb.home / "never-made")
+    rc, out = sb.run("--workdir", fresh, "clean")
+    check("clean on a working directory that does not exist creates nothing", rc == 0 and not os.path.exists(fresh), (rc, out[-300:]))
+    with sb.scratch():
+        sb.break_script('*"$nl"*) path_problem', '*"@@@"*) path_problem')
+        sb.clear()
+        rc, out = sb.run("--workdir", nl, "-y", "clean", "all")
+        negative("a working directory with a line break accepted", [] if rc == 2 and "line break" in out else ["accepted"])
     sb.break_script('  case "$NM_WORK" in *[$ws]*) path_problem', '  case "$NM_WORK" in *[@]*) path_problem')
     negative("a working directory with a space accepted", space_problems(sb, ["--dry-run", "build"], extra={"NM_WORK": wd})[0])
 
