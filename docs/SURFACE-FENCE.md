@@ -189,11 +189,13 @@ tag says the writer holds a kernel hold, and before it reads a surface WindowSer
 
 ### NVAccel
 
-NVAccel asks NVRM for the fence's wait function once (platform function `nvFenceOps`) when the accelerator starts;
-NVRM's fence starts a little later, on the GPU's start-up thread, so NVAccel asks again at most once a second until
-NVRM offers it (`debug.nvaccel_surface_fence` turns 1, one log line `surface fence: NVRM's fence v1`). The function
-is fetched once for all GPUs and used for the rest of the boot; NVAccel keeps one reference on the NVRM that answered
-so that NVRM.kext stays loaded under it. The accelerator built for AMD and Intel GPUs never looks for NVRM.
+NVAccel asks NVRM for the fence's wait function (platform function `nvFenceOps`) when the accelerator starts. NVRM
+hands it out as soon as it is asked, also before its own fence has started on the GPU's start-up thread: until then
+a wait finds nothing pending, without taking a lock. When NVAccel has not found NVRM yet, or NVRM refuses, its waits
+ask again, never more than once a second (for `nvrmfence=0` see "The one switch"). `debug.nvaccel_surface_fence`
+turns 1 when it has the function (one log line `surface fence: NVRM's fence v1`). The function is fetched once for
+all GPUs and used for the rest of the boot; NVAccel keeps one reference on the NVRM that answered so that NVRM.kext
+stays loaded under it. The accelerator built for AMD and Intel GPUs never looks for NVRM.
 From then on every wait for a surface WindowServer is drawing asks the fence first and then the 2.9 mark table:
 
 - the flip (on the asynchronous flip thread or WindowServer's), the copied frame and the hybrid paths wait as long
