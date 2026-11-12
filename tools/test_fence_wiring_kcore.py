@@ -17,7 +17,9 @@ is right in one place only; what is asserted on the source text:
   it is suspended never resumes, so stop() gives that answer itself, right before it stops the fence (the fence
   refuses new holds, for every card, until each SUSPENDING has had its answer); nothing else tells it about power;
 - a closing client's fence owner is handed back after the one-winner test and BEFORE the RM frees the client's
-  channels; the owner word is never written by NVRM.cpp;
+  channels; the owner word is never written by NVRM.cpp; a client that is freed without ever having been closed (its
+  attach or start failed) hands its owner back in free(), after it has left the client table under the table's lock
+  and before anything it owns is released, so that the table never points at freed memory;
 - the kick follows rm_isr in the interrupt action (whatever it answered) and rm_isr_bh in the bottom half, which both
   bottom-half variants (own thread, inline on the work loop) run; never in the primary interrupt filter.
 
@@ -218,9 +220,16 @@ def arms(src, header):
                    r"\bnvrm_fence_owner_gone\s*\(\s*fFenceOwner\s*\)\s*;", r"\brm_cleanup_file_private\s*\("])
         and len(re.findall(r"\bnvrm_fence_owner_gone\s*\(", cc)) == 1)
     fr = body(code, "NVRMUserClient::free")
+    frs = statements(fr)
+    # free()'s first statement: the one-winner test with a block of two statements, (the table), then the owner
+    unclosed = re.fullmatch(r"if \( ?OSCompareAndSwap\(0, 1, &fCleaned\) ?\) \{ (.*) nvrm_fence_owner_gone\(fFenceOwner\); \}", frs[0]) if frs else None
     arm("free(): a client whose close never ran the cleanup still hands its owner back, and only then",
-        re.search(r"if\s*\(\s*OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fCleaned\s*\)\s*\)\s*nvrm_fence_owner_gone\s*\(\s*fFenceOwner\s*\)\s*;", fr) is not None
+        unclosed is not None and len(re.findall(r"\bnvrm_fence_owner_gone\s*\(", fr)) == 1
         and len(re.findall(r"\bnvrm_fence_owner_gone\s*\(", code)) == 2)
+    arm("free(): such a client first leaves the client table, under the table's lock, before anything of it is released",
+        unclosed is not None and re.fullmatch(
+            r"if \( ?gNvClientsLock && fFd >= 0 ?\) \{ IOLockLock\(gNvClientsLock\); if \( ?gNvClients\[fFd\] == this ?\) gNvClients\[fFd\] = NULL; "
+            r"nv_pm_close\(fPm\); IOLockUnlock\(gNvClientsLock\); \}", unclosed.group(1)) is not None)
     arm("the owner word starts at zero and NVRM.cpp never writes it (only the fence assigns it)",
         re.search(r"volatile\s+UInt64\s+fFenceOwner\s*=\s*0\s*;", code) is not None
         and not re.search(r"\bfFenceOwner\s*(?:=(?!=)|\+\+|--|\+=|-=)", code.replace("volatile UInt64 fFenceOwner = 0;", ""))
@@ -260,6 +269,11 @@ SUSPEND = "    if (fFenceStarted && OSCompareAndSwap(0, 1, &fFenceAsleep)) nvrm_
 RESUME = "    if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST);\n"
 GONE = "        nvrm_fence_owner_gone(fFenceOwner);\n"
 CLEANUP = "        if (fOwner) { NvXnuPmUse pmUse; rm_cleanup_file_private(NULL, nvState(), &fNvfp); }\n"
+FREE_IF = "    if (OSCompareAndSwap(0, 1, &fCleaned)) {\n"
+FREE_SLOT = "            if (gNvClients[fFd] == this) gNvClients[fFd] = NULL;\n"
+FREE_UNCLOSED = (FREE_IF + "        if (gNvClientsLock && fFd >= 0) {\n" + "            IOLockLock(gNvClientsLock);\n" + FREE_SLOT
+                 + "            nv_pm_close(fPm);\n" + "            IOLockUnlock(gNvClientsLock);\n" + "        }\n" + GONE + "    }\n")
+FREE_LOCKS = "    if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }\n"
 
 CONTROLS = [
     ("row 12 missing", "the fence row", lambda s: broken(s, ROW12, "")),
@@ -301,7 +315,14 @@ CONTROLS = [
      lambda s: broken(s, RESUME, RESUME + "    fFenceAsleep = 0;\n")),
     ("owner handed back after the RM cleanup", "clientClose: the fence owner",
      lambda s: broken(broken(s, GONE, ""), CLEANUP, CLEANUP + GONE)),
-    ("free() hands the owner back every time", "free(): a client", lambda s: broken(s, "    if (OSCompareAndSwap(0, 1, &fCleaned)) nvrm_fence_owner_gone(fFenceOwner);\n", "    nvrm_fence_owner_gone(fFenceOwner);\n")),
+    ("free() hands the owner back every time", "free(): a client", lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace(FREE_IF, "    {\n", 1))),
+    ("free() leaves a never-closed client in the table", "free(): such a client first leaves", lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace(FREE_SLOT, "", 1))),
+    ("free() empties the slot without the table's lock", "free(): such a client first leaves",
+     lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace("            IOLockLock(gNvClientsLock);\n", "", 1))),
+    ("free() empties a slot that may be another client's", "free(): such a client first leaves",
+     lambda s: broken(s, FREE_UNCLOSED, FREE_UNCLOSED.replace("if (gNvClients[fFd] == this) ", "", 1))),
+    ("free() releases what the client owns before it leaves the table", "free(): such a client first leaves",
+     lambda s: broken(broken(s, FREE_UNCLOSED, ""), FREE_LOCKS, FREE_LOCKS + FREE_UNCLOSED)),
     ("NVRM.cpp writes the owner word", "the owner word", lambda s: broken(s, GONE, GONE + "        fFenceOwner = 0;\n")),
     ("interrupt kick only when handled", "the interrupt action kicks",
      lambda s: broken(broken(s, "    nvrm_fence_kick();\n    if (handled) gNvIsrHandled++;", "    if (handled) gNvIsrHandled++;"),

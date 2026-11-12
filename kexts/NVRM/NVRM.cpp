@@ -523,7 +523,8 @@ extern "C" nv_file_private_t *nv_xnu_lookup_fd(NvS32 fd, void **priv, NvBool *is
     for (int i = 0; i < NV_XNU_MAX_CLIENTS && !c; i++) { NVRMUserClient *k = gNvClients[i]; if (k && k->pid() == pid && k->boundFd() == (int)fd) c = k; }
     for (int i = 0; i < NV_XNU_MAX_CLIENTS && !c; i++) { NVRMUserClient *k = gNvClients[i]; if (k && k->pid() == pid && !k->everBound() && k->index() == (int)fd) c = k; }
     // The caller keeps this client until nv_xnu_put_client. Taken under the table lock: clientClose empties the slot
-    // under the same lock, so a client still in the table cannot have been freed.
+    // under the same lock (free() does, for a client that was never closed), so a client still in the table cannot
+    // have been freed.
     if (c && c->cleaned()) c = NULL;
     if (c) c->retain();
     IOLockUnlock(gNvClientsLock);
@@ -2773,6 +2774,19 @@ IOReturn NVRMUserClient::clientClose(void)
 }
 void NVRMUserClient::free(void)
 {
+    // A client can be freed without clientClose ever having run: IOKit, and the accelerator for the clients it makes
+    // here, release one whose attach or start failed after initWithTask had put it in the client table. It leaves the
+    // table first, under the table's lock, as clientClose does: the table must never point at freed memory, every
+    // lookup reads each client it lists. Its fence owner is given back too (0, the usual case here, does nothing).
+    if (OSCompareAndSwap(0, 1, &fCleaned)) {
+        if (gNvClientsLock && fFd >= 0) {
+            IOLockLock(gNvClientsLock);
+            if (gNvClients[fFd] == this) gNvClients[fFd] = NULL;
+            nv_pm_close(fPm);
+            IOLockUnlock(gNvClientsLock);
+        }
+        nvrm_fence_owner_gone(fFenceOwner);
+    }
     if (fMapLock) IOLockLock(fMapLock);
     nvMapListFree(&fMapList);
     fMapLen = 0; fMapLenNode = nullptr; fMapGen++;
@@ -2783,8 +2797,6 @@ void NVRMUserClient::free(void)
     if (fMapLock) IOLockUnlock(fMapLock);
     if (fGate) { IOLockFree(fGate); fGate = nullptr; }
     if (fMapLock) { IOLockFree(fMapLock); fMapLock = nullptr; }
-    // A client freed without its close having run the cleanup still gives its fence owner back (0 does nothing).
-    if (OSCompareAndSwap(0, 1, &fCleaned)) nvrm_fence_owner_gone(fFenceOwner);
     // nv_post_event must never write into freed memory. If a post is still in flight after the drain, this object's
     // memory is kept for good (one object, counted in debug.nvrm_evt_post_drain_stuck): everything it owns is released
     // above, and the post touches only fEvtMagic and fEvtSeq.
