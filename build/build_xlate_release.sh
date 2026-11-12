@@ -25,13 +25,15 @@ rsync -a "$TMP/translator/" "$H:$R/src/"
 # there (the shipped translators are built with 1.98.1; another version builds the same source into different bytes).
 RV=${NULLMOTH_RUST_VERSION:-1.98.1}
 RB=${NULLMOTH_RUST_BIN:-\$HOME/nvmtl-build/rustup-home/toolchains/$RV-aarch64-apple-darwin/bin}
+# NULLMOTH_CARGO_HOME names the cargo home (crate cache) on the build Mac; the default is the build Mac's own.
+CH=${NULLMOTH_CARGO_HOME:-\$HOME/nvmtl-build/cargo-home}
 ssh "$H" "set -e
   TB=$RB
   [ -x \$TB/cargo ] && [ -x \$TB/rustc ] || { echo \"STOP: no cargo and rustc in \$TB (set NULLMOTH_RUST_BIN)\"; exit 3; }
   got=\$(\$TB/rustc --version | awk '{print \$2}')
   [ \"\$got\" = $RV ] || { echo \"STOP: rustc \$got in \$TB, not $RV (set NULLMOTH_RUST_VERSION to build with it knowingly)\"; exit 3; }
   [ -d \"\$(\$TB/rustc --print target-libdir --target x86_64-apple-darwin)\" ] || { echo \"STOP: the toolchain in \$TB has no x86_64-apple-darwin target\"; exit 3; }
-  export PATH=\$TB:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=\$HOME/nvmtl-build/cargo-home
+  export PATH=\$TB:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=$CH
   export RUSTFLAGS=\"--remap-path-prefix=$R/src=/src --remap-path-prefix=\$CARGO_HOME=/cargo --remap-path-prefix=\$HOME=/build\"
   cd $R/src && cargo build --release --target x86_64-apple-darwin --manifest-path wrapper/Cargo.toml --target-dir $R/target > $R/out/cargo.log 2>&1 \
     || { grep -A6 '^error' $R/out/cargo.log | head -30; exit 4; }
