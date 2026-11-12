@@ -1,0 +1,3029 @@
+Channel recovery, NVK's half. NullMoth's own change (not an upstream Mesa commit).
+A GPU fault on one channel, or a channel that makes no progress for NVRM_FLUSH_TIMEOUT_MS, used to end the whole
+Vulkan device, and with it the Metal device built on it. RM tears down only the faulting channel group, so this patch
+builds a new channel beside the old one, frees the old one, and moves the new one behind the same context: the same
+semaphore page and command ring, the channel-wide state sent again from host copies, the flushes that had not started
+replayed, and the one that was running dropped (the CPU stores its sequence number into the semaphore; its binary
+fences answer "did not run" through nvmtl_nvk_fence_dropped_v1). Before that, a stalled wait rings the doorbell again
+at half the budget. A fault inside replayed work drops everything in flight. Only channel exceptions and stalls are
+rebuilt, at most 3 times in 30 s per channel; every other loss ends exactly as 2.9 ended, plus one line naming it.
+The pure part is nvkmd/nvrm/nvkmd_nvrm_recover.h, with its host test nvkmd_nvrm_recover_test.c beside it.
+nvkmd/nvrm/nvrm_chan_note_abi.h is a byte-for-byte copy of kexts/NVRM/nvrm_chan_note_abi.h (escape 0xE8: counters in
+the kext and the adapter's power state; a kext without it fails the escape once and is not asked again).
+NVK_CHANNEL_RECOVER=0 runs the 2.9 code; NVK_FAULT_INJECT=<stall|fake|reset|mmu>:<n>[:<process>] is the test hook.
+Both are read from the environment or from /Library/GPUBundles/nvmtl/nvrm610.conf; a release build sees only the file.
+tools/test_channel_recover.py holds the wiring.
+
+diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
+index 4f2ea7e..b6a30ba 100644
+--- a/src/nouveau/vulkan/meson.build
++++ b/src/nouveau/vulkan/meson.build
+@@ -25,6 +25,9 @@ nvrm_files = files(
+   'nvkmd/nvrm/nvkmd_nvrm_pdev.c',
+   'nvkmd/nvrm/nvkmd_nvrm_va.c',
+   'nvkmd/nvrm/nvkmd_nvrm_sync.c',
++  'nvkmd/nvrm/nvkmd_nvrm_recover.c',
++  'nvkmd/nvrm/nvkmd_nvrm_recover.h',
++  'nvkmd/nvrm/nvrm_chan_note_abi.h',
+   'nvkmd/nvrm/nvRmApi.c',
+   'nvkmd/nvrm/nvRmSemSurf.c',
+ )
+diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
+index 0b543a6..823f4df 100644
+--- a/src/nouveau/vulkan/nvk_queue.c
++++ b/src/nouveau/vulkan/nvk_queue.c
+@@ -80,6 +80,8 @@ nvk_queue_heap_state_bind_image_heap(struct nvk_queue *queue,
+       });
+    }
+ 
++   /* kept for a channel rebuild before it is sent, so a rebuild that drops this very push still re-binds the heap */
++   nvkmd_ctx_set_reinit(queue->exec_ctx, NVKMD_REINIT_IMAGE_HEAP, push.start, nv_push_dw_count(&push));
+    return nvk_queue_push(queue, p);
+ }
+ 
+@@ -129,6 +131,7 @@ nvk_queue_heap_state_bind_sampler_heap(struct nvk_queue *queue,
+       });
+    }
+ 
++   nvkmd_ctx_set_reinit(queue->exec_ctx, NVKMD_REINIT_SAMPLER_HEAP, push.start, nv_push_dw_count(&push));
+    return nvk_queue_push(queue, p);
+ }
+ 
+@@ -249,6 +252,7 @@ nvk_queue_slm_state_update(struct nvk_queue *queue,
+       }
+    }
+ 
++   nvkmd_ctx_set_reinit(queue->exec_ctx, NVKMD_REINIT_SLM, push.start, nv_push_dw_count(&push));
+    return nvk_queue_push(queue, p);
+ }
+ 
+@@ -462,6 +466,7 @@ nvk_queue_init_context_state(struct nvk_queue *queue)
+          return result;
+    }
+ 
++   nvkmd_ctx_set_reinit(queue->exec_ctx, NVKMD_REINIT_CONTEXT, push.start, nv_push_dw_count(&push));
+    return nvk_queue_push(queue, &push);
+ }
+ 
+diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
+index 115034e..701554f 100644
+--- a/src/nouveau/vulkan/nvkmd/nvkmd.h
++++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
+@@ -334,6 +334,15 @@ struct nvkmd_ctx_bind {
+    uint64_t range_B;
+ };
+ 
++/* The channel-wide state an execution context's queue sends (nvk_queue.c), by kind; the latest of each is kept. */
++enum nvkmd_reinit {
++   NVKMD_REINIT_CONTEXT = 0,        /* the queue's initial context state: objects, macros, defaults */
++   NVKMD_REINIT_IMAGE_HEAP = 1,     /* the texture header pool binding */
++   NVKMD_REINIT_SAMPLER_HEAP = 2,   /* the sampler pool binding */
++   NVKMD_REINIT_SLM = 3,            /* the shader local memory binding */
++   NVKMD_REINIT_COUNT = 4,
++};
++
+ struct nvkmd_ctx_ops {
+    void (*destroy)(struct nvkmd_ctx *ctx);
+ 
+@@ -364,6 +373,10 @@ struct nvkmd_ctx_ops {
+    /* Implies flush() */
+    VkResult (*sync)(struct nvkmd_ctx *ctx,
+                     struct vk_object_base *log_obj);
++
++   /* Optional (NULL in every backend but nvrm's execution context): a copy of a channel-wide state push that the
++    * queue is about to submit, kept on the host so that a rebuilt channel can be given the same state again. */
++   void (*set_reinit)(struct nvkmd_ctx *ctx, enum nvkmd_reinit which, const uint32_t *dw, uint32_t dw_count);
+ };
+ 
+ struct nvkmd_ctx {
+@@ -519,6 +532,12 @@ uint32_t nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, ui
+ uint32_t nvmtl_nvk_fence_v1(VkDevice device, uint32_t op, uint32_t flags, uint64_t cookie, uint32_t count,
+                             const uint32_t *ids, const uint8_t *planes, VkFence fence, uint32_t pid,
+                             uint32_t timeout_ms, uint32_t out[6]);   /* exported: plugin dlsym */
++/* Channel rebuilds (nvkmd/nvrm/nvkmd_nvrm_recover.c). 1: the submission that would have signalled this fence was dropped
++ * by a channel rebuild and did not run; 0: it ran, or nothing was ever dropped in this process (one atomic load);
++ * -1: not a fence of this backend. */
++int nvmtl_nvk_fence_dropped_v1(VkDevice device, VkFence fence);   /* exported: plugin dlsym */
++/* Fills out[0..min(n, 16)) with the process's recovery statistics (index 0 = version 1) and returns how many. */
++unsigned nvmtl_nvk_recover_stats_v1(uint64_t *out, unsigned n);   /* exported: plugin dlsym */
+ 
+ /* b72 host-pointer import.
+  * 26.3: out of line in nvkmd.c, like upstream's nvkmd_dev_import_dma_buf, so the mem joins dev->mems. nvkmd_mem_unref
+@@ -686,4 +705,11 @@ nvkmd_ctx_sync(struct nvkmd_ctx *ctx,
+    return ctx->ops->sync(ctx, log_obj);
+ }
+ 
++static inline void
++nvkmd_ctx_set_reinit(struct nvkmd_ctx *ctx, enum nvkmd_reinit which, const uint32_t *dw, uint32_t dw_count)
++{
++   if (ctx != NULL && ctx->ops->set_reinit != NULL)
++      ctx->ops->set_reinit(ctx, which, dw, dw_count);
++}
++
+ #endif /* NVKMD_H */
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+index 16d894f..252d99a 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.c
+@@ -377,6 +377,15 @@ NvU32 nvRmApiSurfShare(NvRmApi *api, NvU32 cmd, struct NVRMSurfShareEsc *p)
+ 	return p->status;
+ }
+ 
++int nvRmApiChanNote(NvRmApi *api, struct NVRMChanNoteEsc *e)
++{
++	e->version = NVRM_CHAN_NOTE_VERSION;
++	e->status = 0;
++	e->reserved = 0;
++	const int ret = nvRmIoctl(api->fd, NVRM_ESC_CHAN_NOTE, e, sizeof(*e));
++	return ret == 0 && e->status == NVRM_CN_OK ? 0 : -1;
++}
++
+ NvU32 nvRmApiCardInfo(NvRmApi *api, nv_ioctl_card_info_t *ci, size_t size)
+ {
+ 	int ret = nvRmIoctl(api->fd, NV_ESC_CARD_INFO, ci, size);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h
+index 26dec3e..521cf71 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvRmApi.h
+@@ -73,3 +73,7 @@ NvU32 nvRmApiCardInfo(NvRmApi *api, nv_ioctl_card_info_t *ci, size_t size);
+ NvU32 nvRmApiDupObject(NvRmApi *api, NvU32 hParent, NvU32 *hObject, NvU32 hClientSrc, NvU32 hObjectSrc);   /* item 7 share */
+ #include "nvrm_surfshare_abi.h"   /* item 7 share: verbatim copy of NVRM.kext's (b77) */
+ NvU32 nvRmApiSurfShare(NvRmApi *api, NvU32 cmd, struct NVRMSurfShareEsc *p);                              /* item 7 share */
++#include "nvrm_chan_note_abi.h"   /* the channel note: a byte-for-byte copy of NVRM.kext's */
++/* Escape NVRM_ESC_CHAN_NOTE. 0: the kext handled it (e->status is NVRM_CN_OK and the out fields are its answer);
++ * non-zero: it has no such escape (an older kext, which hands it to the RM and gets it refused). */
++int nvRmApiChanNote(NvRmApi *api, struct NVRMChanNoteEsc *e);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+index 36e74e5..94502ab 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+@@ -18,6 +18,7 @@
+ #include <stdlib.h>
+ 
+ #include "nvRmApi.h"
++#include "nvkmd_nvrm_recover.h"
+ 
+ #include "nvtypes.h"
+ #include "ctrl/ctrl2080/ctrl2080fb.h" // NV2080_CTRL_CMD_FB_GET_SEMAPHORE_SURFACE_LAYOUT
+@@ -167,6 +168,23 @@ struct nvkmd_nvrm_slot {
+     * kseqQuiet: os_time_get_nano before which a wait does not ask the kernel to sleep on this channel again. */
+    uint32_t kchan;
+    int64_t kseqQuiet;
++   /* Channel rebuilds (nvkmd_nvrm_recover.c); zeroed when a channel takes the slot. epoch counts completed rebuilds
++    * (also read with an atomic load: a waiter restarts its stall clock when it moves). recovering: one thread is
++    * rebuilding this channel, since recStartNs. dying: the channel is being destroyed and is never rebuilt. gaveUp: a
++    * recovery ended for a reason that cannot change; the channel gets the 2.9 verdict from now on. injectFault: the
++    * test hook says "faulted" on a healthy channel. replayedThrough: the last flush the last rebuild replayed; a fault
++    * below it is a fault in replayed work. progVal / progNs: the last semaphore value seen to move, and when (the
++    * stall clock). kickVal: the semaphore value at the last doorbell ring of a stall, UINT64_MAX none. rebuildNs: the
++    * rebuild budget's stamps. drops: the sequence ranges rebuilds dropped (their syncs report "did not run"). */
++   uint32_t epoch;
++   bool recovering, dying, gaveUp, injectFault;
++   int64_t recStartNs;
++   uint64_t replayedThrough;
++   uint64_t progVal;
++   int64_t progNs;
++   uint64_t kickVal;
++   int64_t rebuildNs[NVRM_REC_MAX_REBUILDS];
++   struct nvrm_rec_drops drops;
+ };
+ extern struct nvkmd_nvrm_slot nvkmd_nvrm_slots[NVRM_CTX_MAX];
+ extern pthread_mutex_t nvkmd_nvrm_gsub_mtx;
+@@ -207,6 +225,18 @@ struct nvkmd_nvrm_exec_ctx {
+    uint32_t *segStart;                    // first push dword not yet handed to the GPFIFO
+    uint64_t slotSeq[NVRM_CMD_SLOTS];      // the wSeq whose release ends each slot (0 = never used)
+    uint64_t slotPut[NVRM_CMD_SLOTS];      // gpPut just after that release's GPFIFO entry
++   /* Channel rebuilds (nvkmd_nvrm_recover.c). The fields from notifier to gpPut above, and these, are guarded by the
++    * slot's context mutex while the channel has a slot and recovery is on (the lock rules are at nvrm_rec_mtx). */
++   enum nvkmd_engines engines;            // as asked at creation
++   int tsgQidx;                           // the graphics queue index the TSG settings used at creation, -1 none
++   uint64_t subPut;                       // gpPut at the last doorbell
++   uint64_t slotBeg[NVRM_CMD_SLOTS];      // GPFIFO index of each flush's first entry
++   uint32_t recEpoch;                     // rebuilds of this context; the owner's waits compare it to see a rebuild
++   unsigned recDepth;                     // owner thread only: ops of this context in progress on it (nesting)
++   bool recHeld;                          // owner thread only: it holds the context mutex now
++   bool reinitBroken;                     // a host copy of channel state could not be kept: never rebuilt
++   struct { uint32_t *dw; uint32_t n; } reinit[NVKMD_REINIT_COUNT];   // host copies of the channel-wide state
++   struct nvkmd_mem *recPrologue;         // the GPU copy of them the last rebuild ran; freed at the next or at destroy
+ };
+ 
+ NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
+@@ -219,6 +249,48 @@ NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
+  * its kchan is 0, so its surfaces use the 2.9 marks from now on. Either way the channel itself is unaffected. */
+ bool nvkmd_nvrm_fence_chan_rebind(struct nvkmd_nvrm_exec_ctx *ctx);
+ 
++/* The constructor of an execution context. rebuild_of != NULL builds the replacement channel for that context (its
++ * command ring and semaphore page are kept, so neither is allocated; it takes no slot and its TSG gets the settings
++ * of the same queue index). */
++VkResult nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *dev, struct vk_object_base *log_obj, enum nvkmd_engines engines,
++                                       bool allowCe, const struct nvkmd_nvrm_exec_ctx *rebuild_of,
++                                       struct nvkmd_ctx **ctx_out);
++/* One GPFIFO entry for a push segment, as write_gp_fifo_entry writes it. */
++void nvrm_gp_entry_encode(const struct nvkmd_ctx_exec *exec, uint32_t out[2]);
++/* The RM's MMU fault record of the channel, printed (the 2.9 diagnostics). */
++void nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx);
++/* Re-points the saved scheduling of a slot's channel group at the context's new group and applies the current one to
++ * it (the plugin's Game Mode). Caller holds nvkmd_nvrm_gsub_mtx. */
++void nvkmd_nvrm_tsg_rebind_locked(uint32_t slot, struct nvkmd_nvrm_exec_ctx *ctx);
++
++/* Channel rebuilds, nvkmd_nvrm_recover.c. */
++bool nvrm_rec_enabled(void);                     /* NVK_CHANNEL_RECOVER is not 0 and submission is asynchronous */
++int64_t nvrm_rec_now_ns(void);                   /* the stall clock: awake time on macOS, so a sleep is no stall */
++extern uint64_t nvrm_rec_dropped_total;          /* flushes ever dropped in this process (atomic) */
++void nvrm_rec_count_fence_dropped(void);         /* statistics: a fence was answered "dropped" */
++/* The owner of a context around each of its ops: enter first (VK_ERROR_DEVICE_LOST when a recovery holds the context
++ * for more than two budgets), leave last; release and retake around a blocking wait. */
++VkResult nvrm_rec_enter(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj);
++void nvrm_rec_leave(struct nvkmd_nvrm_exec_ctx *ctx);
++bool nvrm_rec_release(struct nvkmd_nvrm_exec_ctx *ctx);
++VkResult nvrm_rec_retake(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj);
++/* Destroy: marks the slot dying under the context mutex, so no rebuild starts or continues on it. */
++void nvrm_rec_mark_dying(struct nvkmd_nvrm_exec_ctx *ctx);
++/* A flush is being submitted (owner, context mutex held): the test hook's verdict for it. */
++enum { NVRM_REC_INJ_NONE = 0, NVRM_REC_INJ_STALL, NVRM_REC_INJ_FAKE, NVRM_REC_INJ_RESET, NVRM_REC_INJ_MMU };
++int nvrm_rec_inject_for_flush(struct nvkmd_nvrm_exec_ctx *ctx);
++void nvrm_rec_inject_after_doorbell(struct nvkmd_nvrm_exec_ctx *ctx, int mode);
++/* Under nvkmd_nvrm_gsub_mtx: the slot's semaphore moved (progress for the stall clock). */
++void nvrm_rec_observe(struct nvkmd_nvrm_slot *s, int64_t now);
++void nvkmd_nvrm_set_reinit(struct nvkmd_ctx *ctx, enum nvkmd_reinit which, const uint32_t *dw, uint32_t dw_count);
++void nvkmd_nvrm_slot_kick(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj);
++enum nvrm_rec_trigger { NVRM_TRIG_FAULT = 0, NVRM_TRIG_STALL = 1 };
++VkResult nvrm_rec_run(uint32_t slot, uint32_t gen, enum nvrm_rec_trigger trig, uint64_t want, long ms,
++                      struct vk_object_base *log_obj);
++/* The 2.9 verdicts, kept unchanged for NVK_CHANNEL_RECOVER=0 */
++VkResult nvrm_slot_health_29(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj);
++VkResult nvrm_slot_stalled_29(uint32_t slot, uint32_t gen, uint64_t want, long ms, struct vk_object_base *log_obj);
++
+ struct nvkmd_nvrm_bind_ctx {
+    struct nvkmd_ctx base;
+ };
+@@ -239,6 +311,7 @@ struct nvkmd_nvrm_sync {
+     * (VK_SYNC_WAIT_PENDING); pend = submitted GPU signals not yet seen complete. Guarded by nvkmd_nvrm_gsub_mtx. */
+    uint64_t pending;
+    uint32_t npend;
++   bool dropped;   /* binary: the submission that would signal it was dropped by a channel rebuild and did not run */
+    struct nvkmd_nvrm_sync_pend {
+       uint32_t slot;
+       uint32_t gen;
+@@ -285,6 +358,12 @@ void nvkmd_nvrm_gsub_stats(uint64_t *out, unsigned n);   /* exported: the plugin
+ long nvkmd_nvrm_flush_timeout_ms(void);
+ void nvkmd_nvrm_gsub_count(unsigned which);
+ bool nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq);   /* caller holds nvkmd_nvrm_gsub_mtx */
++/* Completed rebuilds of the slot's channel (an atomic load; no lock). */
++static inline uint32_t
++nvkmd_nvrm_slot_epoch(uint32_t slot)
++{
++   return __atomic_load_n(&nvkmd_nvrm_slots[slot].epoch, __ATOMIC_ACQUIRE);
++}
+ VkResult nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj);
+ VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
+                                  struct vk_object_base *log_obj);
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+index 63e9929..da57638 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -674,7 +674,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
+    return __atomic_load_n(s->sem, __ATOMIC_ACQUIRE) >= seq;
+ }
+ 
+-static void
++void
+ nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx)
+ {
+    struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
+@@ -690,9 +690,10 @@ nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx)
+ 
+ /* THE FAULT IS THE DEATH SIGNAL, THE CLOCK IS NOT (kept from the synchronous flush): a changed error
+  * notifier is fatal at once. Sticky per channel, so a second waiter on the dead channel fails at once too, and the
+- * fault is printed once. */
++ * fault is printed once. This is the 2.9 verdict, kept unchanged for NVK_CHANNEL_RECOVER=0; with recovery on,
++ * nvkmd_nvrm_slot_health below hands a changed notifier to the channel rebuild instead. */
+ VkResult
+-nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj)
++nvrm_slot_health_29(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj)
+ {
+    pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
+    struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[slot];
+@@ -720,9 +721,10 @@ nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_o
+    return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel faulted");
+ }
+ 
+-/* The old flush's TIMEOUT diagnostic, for a channel whose semaphore stood still for NVRM_FLUSH_TIMEOUT_MS. */
++/* The old flush's TIMEOUT diagnostic, for a channel whose semaphore stood still for NVRM_FLUSH_TIMEOUT_MS (the 2.9
++ * verdict, kept for NVK_CHANNEL_RECOVER=0). */
+ VkResult
+-nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms, struct vk_object_base *log_obj)
++nvrm_slot_stalled_29(uint32_t slot, uint32_t gen, uint64_t want, long ms, struct vk_object_base *log_obj)
+ {
+    pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_slots[slot].gen == gen ? nvkmd_nvrm_slots[slot].ctx : NULL;
+@@ -740,6 +742,56 @@ nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms, str
+    return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel made no progress within NVRM_FLUSH_TIMEOUT_MS");
+ }
+ 
++/* A changed error notifier. With recovery on, the channel is rebuilt when the loss is one a new channel cures, and the
++ * waiter goes on waiting; anything else ends exactly as 2.9 ends (nvrm_rec_run). While another thread rebuilds the
++ * channel the answer is "go on waiting". Every dereference of the context happens here under the slot table's mutex,
++ * which the rebuild also holds while it swaps the notifier. */
++VkResult
++nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj)
++{
++   if (!nvrm_rec_enabled())
++      return nvrm_slot_health_29(slot, gen, log_obj);
++   const int64_t now = nvrm_rec_now_ns();
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[slot];
++   struct nvkmd_nvrm_exec_ctx *ctx = s->gen == gen ? s->ctx : NULL;
++   if (ctx == NULL || s->recovering) {
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      return VK_SUCCESS;
++   }
++   nvrm_rec_observe(s, now);
++   if (s->faulted) {
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel faulted");
++   }
++   const NvNotification *errN = &((NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
++   const bool changed = (unsigned)errN->status != s->errBase || s->injectFault;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (!changed)
++      return VK_SUCCESS;
++   return nvrm_rec_run(slot, gen, NVRM_TRIG_FAULT, 0, 0, log_obj);
++}
++
++/* No progress for NVRM_FLUSH_TIMEOUT_MS. With recovery on: the channel the wait is really blocked on is rebuilt, or the
++ * 2.9 verdict is returned (nvrm_rec_run). VK_SUCCESS means "look again", never "done". */
++VkResult
++nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms, struct vk_object_base *log_obj)
++{
++   if (!nvrm_rec_enabled())
++      return nvrm_slot_stalled_29(slot, gen, want, ms, log_obj);
++   return nvrm_rec_run(slot, gen, NVRM_TRIG_STALL, want, ms, log_obj);
++}
++
++/* true while the channel still holds (slot, gen). */
++static bool
++nvrm_gsub_slot_registered(uint32_t slot, uint32_t gen)
++{
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   const bool live = nvkmd_nvrm_slots[slot].ctx != NULL && nvkmd_nvrm_slots[slot].gen == gen;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   return live;
++}
++
+ struct nvrm_deferred {
+    struct nvrm_deferred *next;
+    void (*fn)(void *);
+@@ -858,8 +910,15 @@ nvkmd_nvrm_reap_deferred(void)
+    }
+ }
+ 
+-/* Block until this channel's semaphore reaches seq: fault = fatal at once, no progress for NVRM_FLUSH_TIMEOUT_MS =
+- * DEVICE_LOST with the old diagnostic. The semaphore is compared >= (the old flush compared ==, one in flight). */
++/* Block until this channel's semaphore reaches seq: a changed error notifier, or no progress for NVRM_FLUSH_TIMEOUT_MS,
++ * goes to the channel rebuild (nvkmd_nvrm_slot_health, nvkmd_nvrm_slot_stalled); their 2.9 verdict, DEVICE_LOST, is
++ * returned as it comes. The ONLY successful return is the semaphore at or above seq (and, as in 2.9, a channel that was
++ * unregistered meanwhile, which idled it first): a rebuild, or a rebuild in progress elsewhere, means "look again",
++ * because a caller that returned early would reuse a ring slot or move gpGet under work that is still queued. The stall
++ * clock restarts when the semaphore moves or the channel was rebuilt (its epoch), and runs on awake time
++ * (nvrm_rec_now_ns), so a machine that slept through a wait does not wake to an expired budget. At half the budget the
++ * doorbell of the channel the wait is blocked on is rung again (nvkmd_nvrm_slot_kick). The caller holds no context
++ * mutex (nvrm_gsub_wait_seq_owner releases it). Each round sleeps at most 2 ms (nvkmd_nvrm_wait_block). */
+ static VkResult
+ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_object_base *log_obj)
+ {
+@@ -869,7 +928,9 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
+       return VK_SUCCESS;
+    const uint32_t slot = ctx->slot1 - 1, gen = nvkmd_nvrm_slots[slot].gen;
+    const int64_t t0 = os_time_get_nano(), budget = nvkmd_nvrm_flush_timeout_ms() * 1000000LL;
+-   int64_t tp = t0;
++   int64_t tp = nvrm_rec_now_ns();
++   uint32_t ep = nvkmd_nvrm_slot_epoch(slot);
++   bool kicked = false;
+    for (;;) {
+       const uint64_t v = __atomic_load_n(sem, __ATOMIC_ACQUIRE);
+       if (v >= seq)
+@@ -877,17 +938,42 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
+       VkResult r = nvkmd_nvrm_slot_health(slot, gen, log_obj);
+       if (r != VK_SUCCESS)
+          return r;
+-      const int64_t t = os_time_get_nano();
+-      if (v != last) {
++      const int64_t ta = nvrm_rec_now_ns();
++      const uint32_t e = nvkmd_nvrm_slot_epoch(slot);
++      if (v != last || e != ep) {
+          last = v;
+-         tp = t;
+-      } else if (t - tp > budget) {
+-         return nvkmd_nvrm_slot_stalled(slot, gen, seq, (long)((t - tp) / 1000000), log_obj);
++         ep = e;
++         tp = ta;
++         kicked = false;
++      } else if (ta - tp > budget) {
++         r = nvkmd_nvrm_slot_stalled(slot, gen, seq, (long)((ta - tp) / 1000000), log_obj);
++         if (r != VK_SUCCESS)
++            return r;
++         if (!nvrm_gsub_slot_registered(slot, gen))
++            return VK_SUCCESS;   /* 2.9: unregistered, so it was idled */
++         tp = ta;                /* rebuilt, or being rebuilt: look again */
++         kicked = false;
++      } else if (!kicked && ta - tp > budget / 2) {
++         kicked = true;
++         nvkmd_nvrm_slot_kick(slot, gen, log_obj);
+       }
+-      nvkmd_nvrm_wait_block(t - t0, 1, &slot, &gen, &seq);   /* b73 */
++      nvkmd_nvrm_wait_block(os_time_get_nano() - t0, 1, &slot, &gen, &seq);   /* b73 */
+    }
+ }
+ 
++/* The owner's wait inside one of its ops: its context mutex is released for the wait, so that this thread, or any
++ * other, can rebuild the channel meanwhile, and taken back afterwards. A failed wait returns with the mutex not held
++ * (recHeld false): the op returns that failure at once. */
++static VkResult
++nvrm_gsub_wait_seq_owner(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_object_base *log_obj)
++{
++   const bool released = nvrm_rec_release(ctx);
++   const VkResult r = nvrm_gsub_wait_seq(ctx, seq, log_obj);
++   if (!released || r != VK_SUCCESS)
++      return r;
++   return nvrm_rec_retake(ctx, log_obj);
++}
++
+ static void
+ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+ {
+@@ -914,6 +1000,15 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+       s->faulted = false;
+       s->kchan = 0;
+       s->kseqQuiet = 0;
++      s->epoch = 0;
++      s->recovering = s->dying = s->gaveUp = s->injectFault = false;
++      s->recStartNs = 0;
++      s->replayedThrough = 0;
++      s->progVal = 0;
++      s->progNs = nvrm_rec_now_ns();
++      s->kickVal = UINT64_MAX;
++      memset(s->rebuildNs, 0, sizeof(s->rebuildNs));
++      memset(&s->drops, 0, sizeof(s->drops));
+       ctx->slot1 = i + 1;
+       break;
+    }
+@@ -935,6 +1030,9 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+ {
+    if (ctx->slot1 == 0)
+       return;
++   /* no rebuild starts or goes on from here: one in progress finishes first (the context mutex), and the idle wait's
++    * fault or deadline then ends as 2.9 does */
++   nvrm_rec_mark_dying(ctx);
+    // idle first: nothing this channel still reads may be freed under it (a fault or deadline was already said)
+    if (ctx->wSeq != 0)
+       (void)nvrm_gsub_wait_seq(ctx, ctx->wSeq, NULL);
+@@ -1119,17 +1217,23 @@ nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, uint64_t co
+ }
+ 
+ 
++void
++nvrm_gp_entry_encode(const struct nvkmd_ctx_exec *exec, uint32_t out[2])
++{
++	out[0] = DRF_NUM(A16F, _GP_ENTRY0, _GET, NvU64_LO32(exec->addr) >> 2);
++	out[1] =
++		DRF_NUM(A16F, _GP_ENTRY1, _GET_HI, NvU64_HI32(exec->addr)) |
++		DRF_NUM(A16F, _GP_ENTRY1, _LENGTH, (exec->size_B >> 2)) |
++		DRF_NUM(A16F, _GP_ENTRY1, _SYNC, (exec->no_prefetch ? NVA16F_GP_ENTRY1_SYNC_WAIT : NVA16F_GP_ENTRY1_SYNC_PROCEED));
++}
++
+ static void
+ write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
+ {
+ 	//fprintf(stderr, "write_gp_fifo_entry(%#" PRIx64 ", %#" PRIx32 ")\n", exec->addr, exec->size_B);
+ 	uint32_t *ptr = (uint32_t*)ctx->gpFifo->map + 2*ctx->gpPut;
+ 
+-	ptr[0] = DRF_NUM(A16F, _GP_ENTRY0, _GET, NvU64_LO32(exec->addr) >> 2);
+-	ptr[1] =
+-		DRF_NUM(A16F, _GP_ENTRY1, _GET_HI, NvU64_HI32(exec->addr)) |
+-		DRF_NUM(A16F, _GP_ENTRY1, _LENGTH, (exec->size_B >> 2)) |
+-		DRF_NUM(A16F, _GP_ENTRY1, _SYNC, (exec->no_prefetch ? NVA16F_GP_ENTRY1_SYNC_WAIT : NVA16F_GP_ENTRY1_SYNC_PROCEED));
++	nvrm_gp_entry_encode(exec, ptr);
+ 
+ 	ctx->gpPut = (ctx->gpPut + 1) % 0x8000;
+ }
+@@ -1210,11 +1314,12 @@ write_semaphore_acquire(struct nv_push *push, uint64_t adrGpu, uint64_t value)
+ }
+ 
+ 
+-static VkResult
++VkResult
+ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+                               struct vk_object_base *log_obj,
+                               enum nvkmd_engines engines,
+                               bool allowCe,
++                              const struct nvkmd_nvrm_exec_ctx *rebuild_of,
+                               struct nvkmd_ctx **ctx_out)
+ {
+    struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(_dev);
+@@ -1232,12 +1337,16 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+    ctx->base.dev = &dev->base;
+ 
+    ctx->osEvent = -1;
++   ctx->engines = engines;
++   ctx->tsgQidx = -1;
+ 
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(_dev, log_obj,  0x1000,  0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,  &ctx->notifier));
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(_dev, log_obj, 0x80000, 0x10000, NVKMD_MEM_LOCAL, NVKMD_MEM_MAP_RDWR, &ctx->userD));
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(_dev, log_obj, 0x40000,  0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,  &ctx->gpFifo));
++   if (rebuild_of == NULL) {   /* a rebuilt channel keeps the context's command ring and semaphore page */
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(_dev, log_obj, 0x10000,  0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,  &ctx->cmdBuf));
+    VK_CHECK(nvkmd_dev_alloc_mapped_mem(_dev, log_obj,  0x1000,  0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,  &ctx->sem));
++   }
+ 
+ 	NV_CONTEXT_DMA_ALLOCATION_PARAMS ctxDmaParams = {
+ 		.flags =
+@@ -1292,7 +1401,9 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+             /* nvk-tsgsched (patch_nvk_tsgsched.py): timeslice / interleave knobs, unset = RM's defaults */
+             {
+                static int tsgsched_gfx_n;
+-               const int qidx = (engines & NVKMD_ENGINE_3D) ? tsgsched_gfx_n++ : -1;
++               /* a rebuilt channel's group gets the settings of the queue it replaces */
++               const int qidx = rebuild_of != NULL ? rebuild_of->tsgQidx : (engines & NVKMD_ENGINE_3D) ? tsgsched_gfx_n++ : -1;
++               ctx->tsgQidx = qidx;
+                const char *tse = getenv("NVRM_TSG_TIMESLICE_US"), *hie = getenv("NVRM_TSG_Q0_HIGH");
+                if (tse && atoi(tse) > 0) {
+                   struct { NvU64 timesliceUs; } __attribute__((aligned(8))) tsp = { (NvU64)atoi(tse) };
+@@ -1525,8 +1636,10 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+     * backtrace). The device's one event (nvkmd_nvrm_dev.c) is what waits sleep on. osEvent stays -1 and
+     * hEvent 0 here, which the teardown below already tolerates. */
+ 
++   if (rebuild_of == NULL) {   /* a rebuilt channel never owns a slot and never touches the semaphore */
+    nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4, BITFIELD_BIT(SUBC_NV9097));
+    nvrm_gsub_register(ctx);   // G-SUB (b79): a ring slot push + a channel slot, when NVRM_ASYNC is on
++   }
+ 
+    *ctx_out = &ctx->base;
+    return VK_SUCCESS;
+@@ -1547,10 +1660,10 @@ nvkmd_nvrm_create_exec_ctx(struct nvkmd_dev *_dev,
+                               enum nvkmd_engines engines,
+                               struct nvkmd_ctx **ctx_out)
+ {
+-   VkResult r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, true, ctx_out);
++   VkResult r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, true, NULL, ctx_out);
+    if (r != VK_SUCCESS && engines == NVKMD_ENGINE_COPY && nvrm610_on("CECHAN")) {
+       if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: copy-engine queue could not be built on this GPU (VkResult %d) - copy queue on a graphics channel\n", (int)r);
+-      r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, false, ctx_out);
++      r = nvkmd_nvrm_create_exec_ctx_on(_dev, log_obj, engines, false, NULL, ctx_out);
+    }
+    return r;
+ }
+@@ -1564,13 +1677,21 @@ nvrm_gsub_gpfifo_reserve(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
+    if ((ctx->gpPut + 1) % 0x8000 != ctx->gpGet)
+       return VK_SUCCESS;
+    nvkmd_nvrm_gsub_count(NVRM_GS_FIFOWAIT);
++restart:
+    for (unsigned k = 1; k <= NVRM_CMD_SLOTS; k++) {
+       const unsigned s = (ctx->curSlot + k) % NVRM_CMD_SLOTS;   // oldest first
+       if (ctx->slotSeq[s] == 0)
+          continue;
+-      VkResult r = nvrm_gsub_wait_seq(ctx, ctx->slotSeq[s], log_obj);
++      const uint32_t ep = ctx->recEpoch;
++      VkResult r = nvrm_gsub_wait_seq_owner(ctx, ctx->slotSeq[s], log_obj);
+       if (r != VK_SUCCESS)
+          return r;
++      if (ctx->recEpoch != ep) {
++         /* the channel was rebuilt during the wait: a new GPFIFO, rebased ring records */
++         if ((ctx->gpPut + 1) % 0x8000 != ctx->gpGet)
++            return VK_SUCCESS;
++         goto restart;
++      }
+       ctx->gpGet = ctx->slotPut[s];
+       if ((ctx->gpPut + 1) % 0x8000 != ctx->gpGet)
+          return VK_SUCCESS;
+@@ -1585,13 +1706,15 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+ {
+    struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
+    struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
+-   NvNotification *notifiers = ctx->notifier->map;
+-   NvNotification *submitTokenNotifier = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
+-   KeplerBControlGPFifo *userD = ctx->userD->map;
+ 
+    VkResult r = nvrm_gsub_gpfifo_reserve(ctx, log_obj);
+    if (r != VK_SUCCESS)
+       return r;
++   /* read after the reserve: a rebuild during its wait replaces the notifier, USERD and the GPFIFO */
++   NvNotification *notifiers = ctx->notifier->map;
++   NvNotification *submitTokenNotifier = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
++   KeplerBControlGPFifo *userD = ctx->userD->map;
++   const int inject = nvrm_rec_inject_for_flush(ctx);   /* the test hook: NVRM_REC_INJ_NONE unless asked */
+ 
+    ctx->wSeq++;
+    /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
+@@ -1602,7 +1725,14 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+       .addr = ctx->cmdBuf->va->addr + 4 * (uint64_t)(ctx->segStart - (uint32_t *)ctx->cmdBuf->map),
+       .size_B = 4 * (uint32_t)(ctx->push.end - ctx->segStart),
+    };
++   /* test hook: one entry at an unmapped VA ahead of the flush (a real MMU fault); the reserve above promised room
++    * for one entry only, so the extra one is written only when a second fits */
++   if (inject == NVRM_REC_INJ_MMU && (ctx->gpPut + 2) % 0x8000 != ctx->gpGet) {
++      const struct nvkmd_ctx_exec bad = { .addr = 0x1000, .size_B = 4 };
++      write_gp_fifo_entry(ctx, &bad);
++   }
+    write_gp_fifo_entry(ctx, &seg);
++   if (inject != NVRM_REC_INJ_STALL) {   /* test hook: a doorbell that never rang */
+    userD->GPPut = ctx->gpPut;
+    // batch 56: USERD and host-visible VRAM are write-combined; drain the fill buffers before the doorbell
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+@@ -1614,19 +1744,30 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+    (void)*(volatile NvU32 *)&userD->GPPut;
+    volatile NvU32 *doorbell = (void*)((NvU8*)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
+    *doorbell = submitTokenNotifier->info32;
++   }
+ 
+    const unsigned cur = ctx->curSlot, next = (cur + 1) % NVRM_CMD_SLOTS;
+    ctx->slotSeq[cur] = ctx->wSeq;
++   ctx->slotBeg[cur] = ctx->subPut;   /* this flush's entries: [the last doorbell's GPPut, this one's) */
+    ctx->slotPut[cur] = ctx->gpPut;
++   ctx->subPut = ctx->gpPut;
+    pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
+-   nvkmd_nvrm_slots[ctx->slot1 - 1].flushed = ctx->wSeq;
++   struct nvkmd_nvrm_slot *slot = &nvkmd_nvrm_slots[ctx->slot1 - 1];
++   if (nvrm_rec_enabled() && slot->sem != NULL && __atomic_load_n(slot->sem, __ATOMIC_ACQUIRE) >= slot->flushed) {
++      /* the channel was idle: its stall clock starts with this flush, not with the last progress before the idle */
++      slot->progVal = __atomic_load_n(slot->sem, __ATOMIC_ACQUIRE);
++      slot->progNs = nvrm_rec_now_ns();
++   }
++   slot->flushed = ctx->wSeq;
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+    nvkmd_nvrm_gsub_count(NVRM_GS_SUBMIT);
++   if (inject != NVRM_REC_INJ_NONE)
++      nvrm_rec_inject_after_doorbell(ctx, inject);
+ 
+    if (ctx->slotSeq[next] != 0 &&
+        __atomic_load_n((uint64_t *)ctx->sem->map, __ATOMIC_ACQUIRE) < ctx->slotSeq[next]) {
+       nvkmd_nvrm_gsub_count(NVRM_GS_SLOTWAIT);
+-      r = nvrm_gsub_wait_seq(ctx, ctx->slotSeq[next], log_obj);
++      r = nvrm_gsub_wait_seq_owner(ctx, ctx->slotSeq[next], log_obj);
+       if (r != VK_SUCCESS)
+          return r;
+    }
+@@ -1663,7 +1804,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
+          continue;
+       }
+       nvkmd_nvrm_gsub_count(NVRM_GS_CPUWAIT);
++      const bool released = nvrm_rec_release(ctx);   /* blocking: any thread may rebuild this channel meanwhile */
+       VkResult r = nvkmd_nvrm_sync_cpu_wait(waits[i].sync, waits[i].wait_value, log_obj);
++      if (r == VK_SUCCESS && released)
++         r = nvrm_rec_retake(ctx, log_obj);
+       if (r != VK_SUCCESS)
+          return r;
+    }
+@@ -1735,10 +1879,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
+       nvkmd_mem_unref(ctx->userD);
+    if (ctx->notifier != NULL)
+       nvkmd_mem_unref(ctx->notifier);
++   if (ctx->recPrologue != NULL)
++      nvkmd_mem_unref(ctx->recPrologue);
++   for (unsigned k = 0; k < NVKMD_REINIT_COUNT; k++)
++      free(ctx->reinit[k].dw);
+ 
+    FREE(ctx);
+ }
+ 
++/* Every op of an execution context runs with its context mutex held (nvrm_rec_enter .. nvrm_rec_leave; the lock rules
++ * are at nvrm_rec_mtx in nvkmd_nvrm_recover.c). */
+ static VkResult
+ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
+                             struct vk_object_base *log_obj,
+@@ -1747,16 +1897,36 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
+ {
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
+ 
+-   if (nvkmd_nvrm_async_on())   // G-SUB (b79): the waits are real now
+-      return nvrm_gsub_ctx_wait(ctx, log_obj, wait_count, waits);
+-   return VK_SUCCESS;
++   if (!nvkmd_nvrm_async_on())
++      return VK_SUCCESS;
++   VkResult r = nvrm_rec_enter(ctx, log_obj);
++   if (r != VK_SUCCESS)
++      return r;
++   r = nvrm_gsub_ctx_wait(ctx, log_obj, wait_count, waits);   // G-SUB (b79): the waits are real now
++   nvrm_rec_leave(ctx);
++   return r;
+ }
+ 
++static VkResult
++nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj);
++
+ static VkResult
+ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+                              struct vk_object_base *log_obj)
+ {
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   VkResult r = nvrm_rec_enter(ctx, log_obj);
++   if (r != VK_SUCCESS)
++      return r;
++   r = nvrm_exec_ctx_flush_held(ctx, log_obj);
++   nvrm_rec_leave(ctx);
++   return r;
++}
++
++/* The flush, with the context mutex held by the caller */
++static VkResult
++nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj)
++{
+    struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
+    struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
+    struct NvRmApi rm;
+@@ -1890,17 +2060,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
+                             const struct nvkmd_ctx_exec *execs)
+ {
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   VkResult r = nvrm_rec_enter(ctx, log_obj);
++   if (r != VK_SUCCESS)
++      return r;
+ 
+    for (uint32_t i = 0; i < exec_count; i++) {
+       if (ctx->gsub) {   // G-SUB (b79): entries of earlier flushes may still be in the ring
+-         VkResult r = nvrm_gsub_gpfifo_reserve(ctx, log_obj);
++         r = nvrm_gsub_gpfifo_reserve(ctx, log_obj);
+          if (r != VK_SUCCESS)
+-            return r;
++            break;
+       }
+       write_gp_fifo_entry(ctx, &execs[i]);
+    }
+ 
+-   return VK_SUCCESS;
++   nvrm_rec_leave(ctx);
++   return r;
+ }
+ 
+ static VkResult
+@@ -1910,10 +2084,14 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
+                               const struct vk_sync_signal *signals)
+ {
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   VkResult r = nvrm_rec_enter(ctx, log_obj);
++   if (r != VK_SUCCESS)
++      return r;
+ 
+-   VkResult r = nvkmd_nvrm_exec_ctx_flush(&ctx->base, log_obj);
++   r = nvrm_exec_ctx_flush_held(ctx, log_obj);
+    if (r == VK_SUCCESS && nvkmd_nvrm_async_on())   // G-SUB (b79): record what this submission will signal
+       nvrm_gsub_ctx_signaled(ctx, signal_count, signals);
++   nvrm_rec_leave(ctx);
+    return r;
+ }
+ 
+@@ -1922,10 +2100,14 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
+                             struct vk_object_base *log_obj)
+ {
+    struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   VkResult r = nvrm_rec_enter(ctx, log_obj);
++   if (r != VK_SUCCESS)
++      return r;
+ 
+-   VkResult r = nvkmd_nvrm_exec_ctx_flush(&ctx->base, log_obj);
++   r = nvrm_exec_ctx_flush_held(ctx, log_obj);
+    if (r == VK_SUCCESS && ctx->gsub)   // G-SUB (b79): sync = submit + wait
+-      r = nvrm_gsub_wait_seq(ctx, ctx->wSeq, log_obj);
++      r = nvrm_gsub_wait_seq_owner(ctx, ctx->wSeq, log_obj);
++   nvrm_rec_leave(ctx);
+    return r;
+ }
+ 
+@@ -1936,6 +2118,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
+    .signal = nvkmd_nvrm_exec_ctx_signal,
+    .flush = nvkmd_nvrm_exec_ctx_flush,
+    .sync = nvkmd_nvrm_exec_ctx_sync,
++   .set_reinit = nvkmd_nvrm_set_reinit,
+ };
+ 
+ static VkResult
+@@ -2070,8 +2253,31 @@ static struct {
+    NvU32 level;
+    NvU64 slice;
+    bool have;
++   NvU32 curLevel;   /* what the last successful change set, re-applied to a rebuilt channel's new group */
++   NvU64 curSlice;
+ } nvmtl_tsg_saved[NVRM_CTX_MAX];
+ 
++/* A rebuilt channel has a new group: the record follows it, and the setting in force is applied to it. */
++void
++nvkmd_nvrm_tsg_rebind_locked(uint32_t slot, struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (slot >= NVRM_CTX_MAX || nvmtl_tsg_saved[slot].ctx != ctx)
++      return;
++   nvmtl_tsg_saved[slot].hTsg = ctx->hTsg;
++   if (!nvmtl_tsg_saved[slot].have || ctx->hTsg == 0)
++      return;
++   struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
++   struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++   NvU32 lv = nvmtl_tsg_saved[slot].curLevel;
++   (void)nvRmApiControl(&rm, ctx->hTsg, 0xa06c0107, &lv, sizeof lv);
++   if (nvmtl_tsg_saved[slot].curSlice != 0) {
++      struct { NvU64 timesliceUs; } __attribute__((aligned(8))) ts = { nvmtl_tsg_saved[slot].curSlice };
++      (void)nvRmApiControl(&rm, ctx->hTsg, 0xa06c0103, &ts, sizeof ts);
++   }
++}
++
+ __attribute__((visibility("default"))) int nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us);
+ __attribute__((visibility("default"))) int
+ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2115,6 +2321,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+             ts.timesliceUs = 0;
+          nvmtl_tsg_saved[i].level = cur;
+          nvmtl_tsg_saved[i].slice = ts.timesliceUs;
++         nvmtl_tsg_saved[i].curSlice = 0;   /* nothing set on this group yet */
+          nvmtl_tsg_saved[i].have = true;
+       }
+       NvU32 lv = (NvU32)interleave_level;
+@@ -2124,8 +2331,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+          ts.timesliceUs = timeslice_us;
+          b = nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts);
+       }
+-      if (a == NV_OK && b == NV_OK)
++      if (a == NV_OK && b == NV_OK) {
+          changed++;
++         nvmtl_tsg_saved[i].curLevel = lv;
++         if (timeslice_us)   /* 0 leaves the slice alone: keep the one set before for a rebuilt group */
++            nvmtl_tsg_saved[i].curSlice = timeslice_us;
++      }
+    }
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+    return changed;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
+new file mode 100644
+index 0000000..6e60a3a
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
+@@ -0,0 +1,976 @@
++/*
++ * Copyright © 2026 NullMoth Systems.
++ * SPDX-License-Identifier: MIT
++ */
++/* nvkmd_nvrm_recover.c - rebuilding a faulted or stalled channel in place, instead of losing the Vulkan device.
++ *
++ * The decisions are in nvkmd_nvrm_recover.h (pure, host-tested). This file supplies what they need: the per-channel
++ * locks, the RM calls that build a new channel and free the old one, the swap of the new channel into the context,
++ * the doorbell, the kext's channel note (nvrm_chan_note_abi.h), the statistics, and the test hook.
++ *
++ * The ladder, on a channel a wait is blocked on:
++ *   1. half the stall budget without progress: write GPPut again and ring the doorbell (nvkmd_nvrm_slot_kick);
++ *   2. a recoverable fault, or the whole budget without progress: build a new channel beside the old one, free the old
++ *      one, give the new one the channel-wide state and the flushes that had not started, and drop the flush that was
++ *      running (the CPU stores its sequence number into the semaphore), nvrm_rec_run;
++ *   3. a fault inside work an earlier rebuild replayed: the same, dropping everything that was in flight;
++ *   4. anything else (an unrecoverable kind, the budget of 3 rebuilds in 30 s spent, an RM refusal): the 2.9 result,
++ *      VK_ERROR_DEVICE_LOST with the 2.9 lines, and one line that names the kind of loss and why it was not rebuilt.
++ *
++ * NVK_CHANNEL_RECOVER=0 (environment, or a line in /Library/GPUBundles/nvmtl/nvrm610.conf) turns all of it off: the
++ * hooks then run the 2.9 code unchanged. NVK_FAULT_INJECT=<stall|fake|reset|mmu>:<n>[:<process name>] is the test
++ * hook (nvrm_rec_inject_for_flush). A healthy GPU prints nothing from this file. */
++
++#include "nvkmd_nvrm.h"
++#include "nvrm_chan_note_abi.h"
++#include "../../nvmtl_cfg.h"
++
++#include <errno.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "vk_log.h"
++#include "util/os_time.h"
++#include "util/u_math.h"
++#include "util/u_memory.h"
++
++#include "class/clc361.h"                 /* NVC361_NOTIFY_CHANNEL_PENDING */
++#include "class/cla16f.h"                 /* KeplerBControlGPFifo */
++#include "class/cl2080_notification.h"    /* NV2080_ENGINE_TYPE_GRAPHICS */
++#include "ctrl/ctrl906f.h"                /* NV906F_CTRL_CMD_RESET_CHANNEL, NV906F_CTRL_CMD_GET_MMU_FAULT_INFO */
++#include "ctrl/ctrl2080/ctrl2080gpu.h"    /* NV2080_CTRL_CMD_GPU_GET_RECOVERY_ACTION */
++
++_Static_assert(NVRM_REC_RING == NVRM_CMD_SLOTS, "the plan's ring is the context's command ring");
++
++/* ═══ LOCK RULES ═══════════════════════════════════════════════════════════════════════════════════════════════════
++ * nvrm_rec_mtx[i] is the CONTEXT MUTEX of the execution context in channel slot i. Locks, outermost first:
++ *   1. the queue's own lock (vk_queue, or the upload queue's mutex): one op of a context at a time, as before;
++ *   2. the context mutex: the context's RM handles, notifier, userD, gpFifo, preempt[], zcull, gpGet, gpPut, subPut,
++ *      slotSeq/slotBeg/slotPut[], reinit[], recPrologue;
++ *   3. nvkmd_nvrm_gsub_mtx: the slot table, the syncs' pends, deferred frees. Short; no RM call under it except the two
++ *      TSG controls of the adopt step (nvkmd_nvrm_tsg_rebind_locked), as nvmtl_nvk_tsg_reprioritise_v1 already does.
++ * Who takes the context mutex:
++ *   - the owner thread, for the whole of every op of the context (wait, exec, signal, flush, sync, set_reinit:
++ *     nvrm_rec_enter / nvrm_rec_leave), EXCEPT around its four blocking waits, where it releases it and takes it back
++ *     (nvrm_rec_release / nvrm_rec_retake): the GPFIFO-full wait (nvrm_gsub_gpfifo_reserve), the ring-slot wait after
++ *     a submission (nvrm_gsub_submit), the CPU wait for a sync (nvrm_gsub_ctx_wait), the wait of sync. A wait that
++ *     fails returns with the mutex released, and the op returns that failure; nvrm_rec_leave then only counts down.
++ *     Every early return of an op after nvrm_rec_enter goes through nvrm_rec_leave;
++ *   - a recovering thread, for the whole rebuild, after it claimed the slot (`recovering`, under nvkmd_nvrm_gsub_mtx);
++ *   - the doorbell kick, with one trylock and nothing else;
++ *   - destroy (nvrm_rec_mark_dying), with a plain lock, only to set `dying`; it holds it for nothing else.
++ * Rules:
++ *   - No thread holds two context mutexes: a thread that holds one never rebuilds or kicks another channel (it gets
++ *     the 2.9 answer instead), and waiters hold none while they wait (the owner released its own), so any waiter can
++ *     rebuild any slot. nvrm_rec_held counts what this thread holds.
++ *   - The owner and the recoverer take the mutex with nvrm_rec_lock_bounded (trylock and 1 ms sleeps; macOS has no
++ *     timed lock): the owner for two stall budgets (failing it, the op returns VK_ERROR_DEVICE_LOST: RM is hung under a
++ *     rebuild, where 2.9 had already lost the device), the recoverer for one (failing it, the 2.9 verdict).
++ *   - Recoverers exclude each other by the `recovering` flag, never by queueing on the mutex.
++ *   - A thread that is not the owner touches the context only under its mutex, after checking under
++ *     nvkmd_nvrm_gsub_mtx that the slot still holds (ctx, gen) and is not dying: destroy cannot free the context while
++ *     the mutex is held, because nvrm_rec_mark_dying needs it first.
++ *   - The surface fence's functions (nvrm_fence_*) take only nvkmd_nvrm_gsub_mtx, never a context mutex;
++ *     nvkmd_nvrm_fence_chan_rebind is called by the rebuild with the context mutex held and nvkmd_nvrm_gsub_mtx NOT
++ *     held. */
++static pthread_mutex_t nvrm_rec_mtx[NVRM_CTX_MAX] = { [0 ... NVRM_CTX_MAX - 1] = PTHREAD_MUTEX_INITIALIZER };
++static __thread unsigned nvrm_rec_held;   /* context mutexes this thread holds: 0 or 1 */
++
++uint64_t nvrm_rec_dropped_total;
++
++/* nvmtl_nvk_recover_stats_v1's indices */
++enum { REC_ST_VERSION = 0, REC_ST_ENABLED, REC_ST_KICKS, REC_ST_REPLAYS, REC_ST_DROP_ALLS, REC_ST_DROPPED,
++       REC_ST_REPLAYED, REC_ST_GAVE_UP, REC_ST_LAST_XID, REC_ST_LAST_KIND, REC_ST_LAST_WHY, REC_ST_INJECTED,
++       REC_ST_KEXT, REC_ST_LAST_US, REC_ST_LONGEST_US, REC_ST_FENCES_DROPPED, REC_ST_N };
++static uint64_t nvrm_rec_stats[REC_ST_N];
++
++static void
++rec_stat_add(unsigned i, uint64_t v)
++{
++   __atomic_fetch_add(&nvrm_rec_stats[i], v, __ATOMIC_RELAXED);
++}
++
++static void
++rec_stat_set(unsigned i, uint64_t v)
++{
++   __atomic_store_n(&nvrm_rec_stats[i], v, __ATOMIC_RELAXED);
++}
++
++void
++nvrm_rec_count_fence_dropped(void)
++{
++   rec_stat_add(REC_ST_FENCES_DROPPED, 1);
++}
++
++/* ── switches and clocks ─────────────────────────────────────────────────────────────────────────────────────────── */
++
++bool
++nvrm_rec_enabled(void)
++{
++   static int on = -1;
++   int v = __atomic_load_n(&on, __ATOMIC_ACQUIRE);
++   if (v < 0) {
++      const char *e = nvmtl_cfg_getenv("NVK_CHANNEL_RECOVER");
++      v = !(e != NULL && e[0] == '0') && nvkmd_nvrm_async_on();
++      __atomic_store_n(&on, v, __ATOMIC_RELEASE);
++   }
++   return v != 0;
++}
++
++/* Awake time: a machine that sleeps in the middle of a wait does not wake to an expired stall budget. The absolute
++ * deadlines of vk_sync waits stay on os_time_get_nano. */
++int64_t
++nvrm_rec_now_ns(void)
++{
++#if defined(__APPLE__)
++   if (nvrm_rec_enabled())
++      return (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++#endif
++   return os_time_get_nano();
++}
++
++static int64_t
++rec_budget_ns(void)
++{
++   return nvkmd_nvrm_flush_timeout_ms() * 1000000LL;
++}
++
++static bool
++nvrm_rec_lock_bounded(pthread_mutex_t *m, int64_t limit_ns)
++{
++   const int64_t t0 = nvrm_rec_now_ns();
++   for (;;) {
++      const int rc = pthread_mutex_trylock(m);
++      if (rc == 0)
++         return true;
++      if (rc != EBUSY || nvrm_rec_now_ns() - t0 > limit_ns)
++         return false;
++      usleep(1000);
++   }
++}
++
++/* ── the kext's channel note ─────────────────────────────────────────────────────────────────────────────────────── */
++
++static int nvrm_rec_kext;   /* 0 not asked yet, 1 the kext answers escape 0xE8, 2 it does not (asked no more) */
++
++/* 0 = noted, the kext's answers in *e; -1 = no kext answer (an older kext: the power state is unknown) */
++static int
++rec_note(struct nvkmd_nvrm_pdev *pdev, uint32_t what, uint32_t xid, uint32_t dropped, uint32_t kind, uint32_t why,
++         int32_t *pm)
++{
++   if (pm != NULL)
++      *pm = -1;
++   if (pdev == NULL || __atomic_load_n(&nvrm_rec_kext, __ATOMIC_ACQUIRE) == 2)
++      return -1;
++   struct NVRMChanNoteEsc e;
++   memset(&e, 0, sizeof(e));
++   e.what = what;
++   e.xid = xid;
++   e.dropped = dropped;
++   e.kind = kind;
++   e.why = why;
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++   if (nvRmApiChanNote(&rm, &e) != 0) {
++      int expect = 0;
++      __atomic_compare_exchange_n(&nvrm_rec_kext, &expect, 2, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
++      return -1;
++   }
++   __atomic_store_n(&nvrm_rec_kext, 1, __ATOMIC_RELEASE);
++   if (pm != NULL && e.pm <= NVRM_CN_PM_LOST)
++      *pm = (int32_t)e.pm;
++   return 0;
++}
++
++/* ── the owner's side ────────────────────────────────────────────────────────────────────────────────────────────── */
++
++static bool
++rec_owner_applies(const struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   return ctx->slot1 != 0 && nvrm_rec_enabled();
++}
++
++VkResult
++nvrm_rec_enter(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj)
++{
++   if (!rec_owner_applies(ctx))
++      return VK_SUCCESS;
++   if (ctx->recDepth > 0) {   /* an op called from another op of the same context */
++      ctx->recDepth++;
++      return VK_SUCCESS;
++   }
++   if (!nvrm_rec_lock_bounded(&nvrm_rec_mtx[ctx->slot1 - 1], 2 * rec_budget_ns())) {
++      fprintf(stderr, "nvrm: a channel rebuild has held this channel for more than %ld ms - the device is lost\n",
++              2 * nvkmd_nvrm_flush_timeout_ms());
++      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel rebuild did not finish");
++   }
++   nvrm_rec_held++;
++   ctx->recDepth = 1;
++   ctx->recHeld = true;
++   return VK_SUCCESS;
++}
++
++void
++nvrm_rec_leave(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (ctx->recDepth == 0)
++      return;
++   if (--ctx->recDepth == 0 && ctx->recHeld) {
++      ctx->recHeld = false;
++      nvrm_rec_held--;
++      pthread_mutex_unlock(&nvrm_rec_mtx[ctx->slot1 - 1]);
++   }
++}
++
++bool
++nvrm_rec_release(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (!ctx->recHeld)
++      return false;
++   ctx->recHeld = false;
++   nvrm_rec_held--;
++   pthread_mutex_unlock(&nvrm_rec_mtx[ctx->slot1 - 1]);
++   return true;
++}
++
++VkResult
++nvrm_rec_retake(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj)
++{
++   if (!nvrm_rec_lock_bounded(&nvrm_rec_mtx[ctx->slot1 - 1], 2 * rec_budget_ns())) {
++      fprintf(stderr, "nvrm: a channel rebuild has held this channel for more than %ld ms - the device is lost\n",
++              2 * nvkmd_nvrm_flush_timeout_ms());
++      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel rebuild did not finish");
++   }
++   nvrm_rec_held++;
++   ctx->recHeld = true;
++   return VK_SUCCESS;
++}
++
++void
++nvrm_rec_mark_dying(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (ctx->slot1 == 0)
++      return;
++   const bool locked = nvrm_rec_enabled();
++   if (locked)
++      pthread_mutex_lock(&nvrm_rec_mtx[ctx->slot1 - 1]);
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   nvkmd_nvrm_slots[ctx->slot1 - 1].dying = true;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (locked)
++      pthread_mutex_unlock(&nvrm_rec_mtx[ctx->slot1 - 1]);
++}
++
++void
++nvkmd_nvrm_set_reinit(struct nvkmd_ctx *_ctx, enum nvkmd_reinit which, const uint32_t *dw, uint32_t dw_count)
++{
++   struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   if ((unsigned)which >= NVKMD_REINIT_COUNT || !rec_owner_applies(ctx))
++      return;   /* never rebuilt: nothing to keep */
++   if (nvrm_rec_enter(ctx, NULL) != VK_SUCCESS) {
++      ctx->reinitBroken = true;   /* not kept: this context is never rebuilt */
++      return;
++   }
++   uint32_t *copy = NULL;
++   if (dw_count != 0) {
++      copy = malloc(sizeof(uint32_t) * dw_count);
++      if (copy == NULL)
++         ctx->reinitBroken = true;
++      else
++         memcpy(copy, dw, sizeof(uint32_t) * dw_count);
++   }
++   free(ctx->reinit[which].dw);
++   ctx->reinit[which].dw = copy;
++   ctx->reinit[which].n = copy != NULL ? dw_count : 0;
++   nvrm_rec_leave(ctx);
++}
++
++/* ── shared helpers ──────────────────────────────────────────────────────────────────────────────────────────────── */
++
++void
++nvrm_rec_observe(struct nvkmd_nvrm_slot *s, int64_t now)
++{
++   if (s->sem == NULL)
++      return;
++   const uint64_t v = __atomic_load_n(s->sem, __ATOMIC_ACQUIRE);
++   if (v != s->progVal) {
++      s->progVal = v;
++      s->progNs = now;
++   }
++}
++
++static const NvNotification *
++rec_err_notifier(const struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   return &((const NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
++}
++
++/* Under nvkmd_nvrm_gsub_mtx: every registered channel of x's device, observed, as the root search needs it. */
++static void
++rec_views_locked(const struct nvkmd_nvrm_slot *x, int64_t now, struct nvrm_rec_view v[NVRM_CTX_MAX])
++{
++   for (uint32_t i = 0; i < NVRM_CTX_MAX; i++) {
++      struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
++      memset(&v[i], 0, sizeof(v[i]));
++      if (s->ctx == NULL || s->dev != x->dev)
++         continue;
++      nvrm_rec_observe(s, now);
++      v[i].valid = true;
++      v[i].changed = (unsigned)rec_err_notifier(s->ctx)->status != s->errBase || s->injectFault;
++      v[i].sem = __atomic_load_n(s->sem, __ATOMIC_ACQUIRE);
++      v[i].flushed = s->flushed;
++      v[i].semVA = s->semVA;
++      v[i].acqVA = s->acqVA;
++      v[i].acqSeq = s->acqSeq;
++   }
++}
++
++static void
++rec_doorbell(struct nvkmd_nvrm_exec_ctx *ctx, uint32_t gpPut)
++{
++   struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(ctx->base.dev->pdev);
++   const NvNotification *tok = &((const NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
++   KeplerBControlGPFifo *userD = ctx->userD->map;
++   userD->GPPut = gpPut;
++   __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* the same four steps as a submission (nvrm_gsub_submit) */
++   (void)*(volatile NvU32 *)&userD->GPPut;
++   volatile NvU32 *doorbell = (void *)((NvU8 *)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
++   *doorbell = tok->info32;
++}
++
++/* ── step 1 of the ladder: ring the doorbell again ─────────────────────────────────────────────────────────────────────────────── */
++
++void
++nvkmd_nvrm_slot_kick(uint32_t slot, uint32_t gen, struct vk_object_base *log_obj)
++{
++   (void)log_obj;
++   if (!nvrm_rec_enabled() || nvrm_rec_held != 0)
++      return;
++   const int64_t now = nvrm_rec_now_ns();
++   struct nvrm_rec_view v[NVRM_CTX_MAX];
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   struct nvkmd_nvrm_slot *x = &nvkmd_nvrm_slots[slot];
++   if (x->ctx == NULL || x->gen != gen) {
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      return;
++   }
++   rec_views_locked(x, now, v);
++   const uint32_t R = nvrm_rec_root(v, NVRM_CTX_MAX, slot);
++   struct nvkmd_nvrm_slot *r = &nvkmd_nvrm_slots[R];
++   const bool go = r->ctx != NULL && !r->recovering && !r->dying && !r->faulted && !r->gaveUp &&
++                   r->flushed > v[R].sem && r->kickVal != v[R].sem;
++   struct nvkmd_nvrm_exec_ctx *rctx = r->ctx;
++   const uint32_t rgen = r->gen;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (!go || pthread_mutex_trylock(&nvrm_rec_mtx[R]) != 0)
++      return;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   const bool still = r->ctx == rctx && r->gen == rgen && !r->dying && !r->recovering && !r->faulted;
++   if (still)
++      r->kickVal = __atomic_load_n(r->sem, __ATOMIC_ACQUIRE);
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (still) {
++      rec_doorbell(rctx, (uint32_t)rctx->subPut);
++      rec_stat_add(REC_ST_KICKS, 1);
++      rec_note(nvkmd_nvrm_pdev(rctx->base.dev->pdev), NVRM_CN_KICK, 0, 0, 0, 0, NULL);
++      if (nvkmd_nvrm_diag_on())
++         fprintf(stderr, "nvrm: channel slot %u made no progress for half the stall budget - doorbell rung again\n", R);
++   }
++   pthread_mutex_unlock(&nvrm_rec_mtx[R]);
++}
++
++/* ── steps 2 and 3 of the ladder: the rebuild ──────────────────────────────────────────────────────────────────────────────────── */
++
++struct rec_job {
++   struct nvkmd_nvrm_exec_ctx *ctx;
++   uint32_t slot;
++   struct nvkmd_nvrm_pdev *pdev;
++   struct vk_object_base *log_obj;
++   struct nvkmd_nvrm_exec_ctx *donor;      /* the new channel, until adopted */
++   struct nvkmd_mem *prologue;             /* the channel-wide state for the new channel, until adopted */
++   uint32_t prologueEntry[2];
++   uint32_t xid;
++   int64_t now;
++   /* what the adopt step took out of the context: freed after the new channel was started */
++   struct nvkmd_mem *oldMem[3 + 5 + 1];
++   uint64_t dropped, replayed;
++};
++
++static void
++rec_op_inputs(void *u, struct nvrm_rec_inputs *in)
++{
++   struct rec_job *j = u;
++   const NvNotification *errN = rec_err_notifier(j->ctx);
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   const unsigned base = nvkmd_nvrm_slots[j->slot].errBase;
++   const bool inj = nvkmd_nvrm_slots[j->slot].injectFault;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   const unsigned st = (unsigned)errN->status;
++   in->changed = st != base || inj;
++   in->xid = st != base ? (uint32_t)errN->info32 : inj ? 13u : 0u;   /* the test hook reports a graphics exception */
++   j->xid = in->xid;
++   int32_t pm = -1;
++   (void)rec_note(j->pdev, NVRM_CN_QUERY, 0, 0, 0, 0, &pm);
++   in->pm = pm;
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(j->pdev, &rm);
++   NV2080_CTRL_GPU_GET_RECOVERY_ACTION_PARAMS ap;
++   memset(&ap, 0, sizeof(ap));
++   in->actionRc = nvRmApiControl(&rm, j->pdev->hSubdevice, NV2080_CTRL_CMD_GPU_GET_RECOVERY_ACTION, &ap, sizeof(ap));
++   in->actionAsked = 1;
++   in->action = (uint32_t)ap.action;
++}
++
++static uint64_t
++rec_op_read_sem(void *u)
++{
++   struct rec_job *j = u;
++   return __atomic_load_n((const uint64_t *)j->ctx->sem->map, __ATOMIC_ACQUIRE);
++}
++
++static void
++rec_op_discard(void *u)
++{
++   struct rec_job *j = u;
++   if (j->prologue != NULL)
++      nvkmd_mem_unref(j->prologue);
++   j->prologue = NULL;
++   if (j->donor != NULL)
++      nvkmd_ctx_destroy(&j->donor->base);
++   j->donor = NULL;
++}
++
++static int
++rec_op_build(void *u)
++{
++   struct rec_job *j = u;
++   struct nvkmd_nvrm_exec_ctx *ctx = j->ctx;
++   struct nvkmd_ctx *d = NULL;
++   if (nvkmd_nvrm_create_exec_ctx_on(ctx->base.dev, j->log_obj, ctx->engines, ctx->ceOnly, ctx, &d) != VK_SUCCESS)
++      return -1;
++   j->donor = nvkmd_nvrm_exec_ctx(d);
++   if (j->donor->ceOnly != ctx->ceOnly || (!ctx->ceOnly && (j->donor->hTsg == 0 || j->donor->hCtxShare == 0))) {
++      fprintf(stderr, "nvrm: the rebuilt channel did not come up in the old one's shape (copy engine %d/%d, group 0x%x)\n",
++              (int)j->donor->ceOnly, (int)ctx->ceOnly, (unsigned)j->donor->hTsg);
++      rec_op_discard(j);
++      return -1;
++   }
++   uint64_t n = 0;
++   for (unsigned k = 0; k < NVKMD_REINIT_COUNT; k++)
++      n += ctx->reinit[k].n;
++   if (n != 0) {
++      const uint64_t size = align64(n * 4, 0x1000);
++      if (size > 0x10000 ||
++          nvkmd_dev_alloc_mapped_mem(ctx->base.dev, j->log_obj, size, 0x1000, NVKMD_MEM_GART, NVKMD_MEM_MAP_RDWR,
++                                     &j->prologue) != VK_SUCCESS) {
++         j->prologue = NULL;
++         rec_op_discard(j);
++         return -1;
++      }
++      uint32_t *p = j->prologue->map;
++      for (unsigned k = 0; k < NVKMD_REINIT_COUNT; k++) {
++         if (ctx->reinit[k].n != 0)
++            memcpy(p, ctx->reinit[k].dw, 4 * (size_t)ctx->reinit[k].n);
++         p += ctx->reinit[k].n;
++      }
++      __atomic_thread_fence(__ATOMIC_SEQ_CST);
++      const struct nvkmd_ctx_exec e = { .addr = j->prologue->va->addr, .size_B = (uint32_t)(n * 4) };
++      nvrm_gp_entry_encode(&e, j->prologueEntry);
++   }
++   return 0;
++}
++
++static int
++rec_op_free_old(void *u)
++{
++   struct rec_job *j = u;
++   struct nvkmd_nvrm_exec_ctx *ctx = j->ctx;
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(j->pdev, &rm);
++   const NvU32 rc = nvRmApiFree(&rm, ctx->hChannel);   /* RM frees the engine objects under it */
++   if (rc != NV_OK) {
++      fprintf(stderr, "nvrm: the faulted channel 0x%x could not be freed (rc 0x%x)\n", (unsigned)ctx->hChannel,
++              (unsigned)rc);
++      return -1;
++   }
++   ctx->hChannel = 0;
++   memset(&ctx->subchannels, 0, sizeof(ctx->subchannels));
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);   /* nvmtl_nvk_tsg_reprioritise_v1 reads hTsg under it */
++   const NvHandle hTsg = ctx->hTsg, hShare = ctx->hCtxShare;
++   ctx->hTsg = 0;
++   ctx->hCtxShare = 0;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   nvRmApiFree(&rm, hShare);
++   nvRmApiFree(&rm, hTsg);
++   nvRmApiFree(&rm, ctx->hCtxDma);
++   ctx->hCtxDma = 0;
++   return 0;
++}
++
++static void
++rec_op_adopt(void *u, const struct nvrm_rec_ring *ring, const struct nvrm_rec_plan *p)
++{
++   struct rec_job *j = u;
++   struct nvkmd_nvrm_exec_ctx *ctx = j->ctx, *d = j->donor;
++   struct nvrm_rec_ring out;
++   /* the new GPFIFO is the new channel's own memory, not seen by any GPU yet; the old one is only read */
++   nvrm_rec_fill(ring, p, ctx->gpFifo->map, d->gpFifo->map, j->prologueEntry, &out);
++   const bool dropped = p->dropLo <= p->dropHi;
++   j->dropped = dropped ? p->dropHi - p->dropLo + 1 : 0;
++   j->replayed = p->keepLo <= p->keepHi ? p->keepHi - p->keepLo + 1 : 0;
++   const uint64_t S = p->S;
++   const int64_t now = nvrm_rec_now_ns();
++   const unsigned newBase = (unsigned)rec_err_notifier(d)->status;
++
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   unsigned m = 0;
++   j->oldMem[m++] = ctx->notifier;
++   j->oldMem[m++] = ctx->userD;
++   j->oldMem[m++] = ctx->gpFifo;
++   for (unsigned b = 0; b < ARRAY_SIZE(ctx->preempt); b++)
++      j->oldMem[m++] = ctx->preempt[b];
++   j->oldMem[m++] = ctx->zcull;
++   ctx->notifier = d->notifier;
++   ctx->userD = d->userD;
++   ctx->gpFifo = d->gpFifo;
++   memcpy(ctx->preempt, d->preempt, sizeof(ctx->preempt));
++   ctx->zcull = d->zcull;
++   ctx->hCtxDma = d->hCtxDma;
++   ctx->hChannel = d->hChannel;
++   ctx->hTsg = d->hTsg;
++   ctx->hCtxShare = d->hCtxShare;
++   ctx->subchannels = d->subchannels;
++   d->notifier = d->userD = d->gpFifo = d->zcull = NULL;
++   memset(d->preempt, 0, sizeof(d->preempt));
++   d->hCtxDma = d->hChannel = d->hTsg = d->hCtxShare = 0;
++   memset(&d->subchannels, 0, sizeof(d->subchannels));
++
++   ctx->gpGet = 0;
++   ctx->gpPut = out.gpPut;
++   ctx->subPut = out.subPut;
++   memcpy(ctx->slotSeq, out.slotSeq, sizeof(ctx->slotSeq));
++   memcpy(ctx->slotBeg, out.slotBeg, sizeof(ctx->slotBeg));
++   memcpy(ctx->slotPut, out.slotPut, sizeof(ctx->slotPut));
++   ctx->recEpoch++;
++
++   struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[j->slot];
++   s->errBase = newBase;
++   s->faulted = false;
++   s->injectFault = false;
++   s->replayedThrough = p->F;
++   s->progVal = dropped && p->dropHi > S ? p->dropHi : S;
++   s->progNs = now;
++   s->kickVal = UINT64_MAX;
++   nvrm_rec_budget_push(s->rebuildNs, now);
++   if (dropped) {
++      nvrm_rec_drops_add(&s->drops, p->dropLo, p->dropHi);
++      __atomic_fetch_add(&nvrm_rec_dropped_total, j->dropped, __ATOMIC_RELEASE);
++   }
++   nvkmd_nvrm_tsg_rebind_locked(j->slot, ctx);
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++
++   /* the surface fence follows the new error notifier (the old one is still mapped: it is freed after this) */
++   (void)nvkmd_nvrm_fence_chan_rebind(ctx);
++
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   if (dropped) {
++      /* the dropped flushes are reported done; the old channel is gone and the new one has not been told about the
++       * work after them yet, so the semaphore never moves backwards */
++      uint64_t *sem = ctx->sem->map;
++      if (__atomic_load_n(sem, __ATOMIC_ACQUIRE) < p->dropHi)
++         __atomic_store_n(sem, p->dropHi, __ATOMIC_RELEASE);
++      __atomic_thread_fence(__ATOMIC_SEQ_CST);
++   }
++   __atomic_store_n(&s->epoch, s->epoch + 1, __ATOMIC_RELEASE);
++   s->recovering = false;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++}
++
++static void
++rec_op_start(void *u, const struct nvrm_rec_plan *p)
++{
++   struct rec_job *j = u;
++   if (p->newSubPut != 0)
++      rec_doorbell(j->ctx, p->newSubPut);
++}
++
++static const struct nvrm_rec_ops nvrm_rec_rm_ops = {
++   .inputs = rec_op_inputs,
++   .read_sem = rec_op_read_sem,
++   .build = rec_op_build,
++   .discard = rec_op_discard,
++   .free_old = rec_op_free_old,
++   .adopt = rec_op_adopt,
++   .start = rec_op_start,
++};
++
++/* What the 2.9 lines print, read under nvkmd_nvrm_gsub_mtx (no dereference of the context after it). */
++struct rec_diag {
++   bool have;
++   unsigned base, status, info32, info16, gpGet, gpPut;
++   uint64_t sem, flushed;
++   NvHandle hChannel;
++   struct nvkmd_nvrm_pdev *pdev;
++};
++
++static void
++rec_diag_locked(const struct nvkmd_nvrm_slot *s, struct rec_diag *d)
++{
++   const struct nvkmd_nvrm_exec_ctx *ctx = s->ctx;
++   const NvNotification *errN = rec_err_notifier(ctx);
++   const KeplerBControlGPFifo *userD = ctx->userD->map;
++   d->have = true;
++   d->base = s->errBase;
++   d->status = (unsigned)errN->status;
++   d->info32 = (unsigned)errN->info32;
++   d->info16 = (unsigned)errN->info16;
++   d->gpGet = userD->GPGet;
++   d->gpPut = userD->GPPut;
++   d->sem = __atomic_load_n(s->sem, __ATOMIC_ACQUIRE);
++   d->flushed = s->flushed;
++   d->hChannel = ctx->hChannel;
++   d->pdev = nvkmd_nvrm_pdev(ctx->base.dev->pdev);
++}
++
++static void
++rec_fault_info(const struct rec_diag *d)
++{
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(d->pdev, &rm);
++   NV906F_CTRL_GET_MMU_FAULT_INFO_PARAMS fi;
++   memset(&fi, 0, sizeof(fi));
++   int frc = nvRmApiControl(&rm, d->hChannel, NV906F_CTRL_CMD_GET_MMU_FAULT_INFO, &fi, sizeof fi);
++   fprintf(stderr, "nvrm: MMU fault info (rc %d): addr 0x%08x%08x type 0x%x \"%s\" compute shader VA 0x%llx\n", frc,
++           fi.addrHi, fi.addrLo, fi.faultType, fi.faultString,
++           (unsigned long long)fi.shaderProgramVA[NV906F_CTRL_MMU_FAULT_SHADER_TYPE_COMPUTE]);
++}
++
++/* The 2.9 result for the trigger, with the 2.9 lines, and the line that says why the channel was not rebuilt. */
++static VkResult
++rec_fail(enum nvrm_rec_trigger trig, enum nvrm_rec_why why, enum nvrm_rec_kind kind, uint32_t xid, uint32_t slot,
++         const struct rec_diag *d, bool report, bool faultInfo, uint64_t want, long ms, struct vk_object_base *log_obj)
++{
++   rec_stat_add(REC_ST_GAVE_UP, 1);
++   rec_stat_set(REC_ST_LAST_XID, xid);
++   rec_stat_set(REC_ST_LAST_KIND, kind);
++   rec_stat_set(REC_ST_LAST_WHY, why);
++   if (d->have)
++      rec_note(d->pdev, NVRM_CN_GAVE_UP, xid, 0, kind, why, NULL);
++   if (trig == NVRM_TRIG_FAULT) {
++      if (report && d->have) {
++         fprintf(stderr, "nvrm: channel FAULTED (error notifier status 0x%x -> 0x%x, info32 0x%x) at sem %llu of %llu flushed\n",
++                 d->base, d->status, d->info32, (unsigned long long)d->sem, (unsigned long long)d->flushed);
++         if (faultInfo)
++            rec_fault_info(d);
++      }
++   } else if (d->have) {
++      fprintf(stderr, "nvrm: wait TIMEOUT - no progress in %ld ms: sem %llu want %llu (flushed %llu)  GPGet %u GPPut %u  error notifier status 0x%x info32 0x%x info16 0x%x\n",
++              ms, (unsigned long long)d->sem, (unsigned long long)want, (unsigned long long)d->flushed, d->gpGet,
++              d->gpPut, d->status, d->info32, d->info16);
++      if (faultInfo)
++         rec_fault_info(d);
++      fprintf(stderr, "nvrm: NO channel fault was reported in %ld ms. The GPU was still working; this DEADLINE is the only reason the device is being called lost. Raise NVRM_FLUSH_TIMEOUT_MS if the work is legitimate.\n", ms);
++   }
++   if (report || trig == NVRM_TRIG_STALL) {
++      fprintf(stderr, "nvrm: channel slot %u not rebuilt: loss kind %s (Xid %u), %s\n", slot, nvrm_rec_kind_name(kind),
++              (unsigned)xid, nvrm_rec_why_name(why));
++      if (log_obj != NULL)
++         vk_logw(VK_LOG_OBJS(log_obj), "nvrm channel slot %u not rebuilt: loss kind %s (Xid %u), %s", slot,
++                 nvrm_rec_kind_name(kind), (unsigned)xid, nvrm_rec_why_name(why));
++   }
++   if (trig == NVRM_TRIG_FAULT)
++      return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel faulted");
++   return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel made no progress within NVRM_FLUSH_TIMEOUT_MS");
++}
++
++static bool
++rec_why_is_final(enum nvrm_rec_why w)
++{
++   return w == NVRM_WHY_KIND || w == NVRM_WHY_BUDGET || w == NVRM_WHY_PLAN || w == NVRM_WHY_BUILD ||
++          w == NVRM_WHY_FREE || w == NVRM_WHY_SHAPE || w == NVRM_WHY_BLOBS || w == NVRM_WHY_COPY_REFAULT;
++}
++
++VkResult
++nvrm_rec_run(uint32_t slot, uint32_t gen, enum nvrm_rec_trigger trig, uint64_t want, long ms,
++             struct vk_object_base *log_obj)
++{
++   const int64_t budget = rec_budget_ns();
++   int64_t now = nvrm_rec_now_ns();
++   struct nvrm_rec_view v[NVRM_CTX_MAX];
++   struct rec_diag d;
++   memset(&d, 0, sizeof(d));
++
++   /* 1. claim, under the slot table's mutex */
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   struct nvkmd_nvrm_slot *x = &nvkmd_nvrm_slots[slot];
++   if (x->ctx == NULL || x->gen != gen) {
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      return VK_SUCCESS;   /* unregistered, so it was idled: the caller looks again (2.9) */
++   }
++   rec_views_locked(x, now, v);
++   uint32_t R = trig == NVRM_TRIG_FAULT ? slot : nvrm_rec_root(v, NVRM_CTX_MAX, slot);
++   if (R != slot && v[R].sem >= v[R].flushed)
++      R = slot;   /* the channel waited on is idle: what does not move is the waiter's own channel */
++   struct nvkmd_nvrm_slot *r = &nvkmd_nvrm_slots[R];
++   enum nvrm_rec_why why = NVRM_WHY_OK;
++   if (r->dying) {
++      why = NVRM_WHY_DYING;
++   } else if (r->faulted || r->gaveUp) {
++      why = NVRM_WHY_GAVE_UP_BEFORE;
++   } else if (r->recovering) {
++      if (now - r->recStartNs <= 2 * budget) {
++         pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++         return VK_SUCCESS;
++      }
++      why = NVRM_WHY_BUSY;
++   } else if (!v[R].changed) {
++      if (trig == NVRM_TRIG_FAULT ||                          /* rebuilt already by someone else */
++          v[R].sem >= v[R].flushed || (R == slot && v[slot].sem >= want)) {
++         pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++         return VK_SUCCESS;
++      }
++      if (now - r->progNs < budget / 2) {
++         if (R == slot) {
++            pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++            return VK_SUCCESS;                                /* it moved meanwhile: the waiter re-arms */
++         }
++         why = NVRM_WHY_ROOT_ALIVE;
++      }
++   }
++   rec_diag_locked(x, &d);
++   bool report = false;
++   if (why != NVRM_WHY_OK) {
++      /* before the claim: no flag of R changes; a fault of the waited channel itself is sticky, as in 2.9 */
++      if (trig == NVRM_TRIG_FAULT && v[slot].changed && !x->faulted)
++         x->faulted = report = true;
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      return rec_fail(trig, why, NVRM_LOSS_NONE, v[slot].changed ? d.info32 : 0, slot, &d, report,
++                      why != NVRM_WHY_DYING, want, ms, log_obj);
++   }
++   r->recovering = true;
++   r->recStartNs = now;
++   struct nvkmd_nvrm_exec_ctx *ctx = r->ctx;
++   const uint32_t rgen = r->gen;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++
++   /* 2. lock the channel, then make sure it is still the one claimed */
++   bool locked = false;
++   if (nvrm_rec_held != 0) {
++      why = NVRM_WHY_BUSY;   /* never two context mutexes */
++   } else if (!nvrm_rec_lock_bounded(&nvrm_rec_mtx[R], budget)) {
++      why = NVRM_WHY_BUSY;
++   } else {
++      locked = true;
++      nvrm_rec_held++;
++      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++      if (r->ctx != ctx || r->gen != rgen || r->dying)
++         why = NVRM_WHY_DYING;
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   }
++
++   /* 3. what a rebuild needs */
++   if (why == NVRM_WHY_OK) {
++      if (!ctx->gsub || (!ctx->ceOnly && (ctx->hTsg == 0 || ctx->hCtxShare == 0)))
++         why = NVRM_WHY_SHAPE;
++      else if (ctx->reinitBroken || ((ctx->engines & ~NVKMD_ENGINE_COPY) != 0 && ctx->reinit[NVKMD_REINIT_CONTEXT].n == 0))
++         why = NVRM_WHY_BLOBS;
++   }
++
++   /* 4. the sequence (nvkmd_nvrm_recover.h) */
++   enum nvrm_rec_kind kind = NVRM_LOSS_NONE;
++   enum nvrm_rec_level level = NVRM_REC_REPLAY;
++   struct nvrm_rec_plan plan;
++   memset(&plan, 0, sizeof(plan));
++   struct rec_job job;
++   memset(&job, 0, sizeof(job));
++   const int64_t t0 = nvrm_rec_now_ns();
++   if (why == NVRM_WHY_OK) {
++      job.ctx = ctx;
++      job.slot = R;
++      job.pdev = nvkmd_nvrm_pdev(ctx->base.dev->pdev);
++      job.log_obj = log_obj;
++      job.now = t0;
++      struct nvrm_rec_state st;
++      memset(&st, 0, sizeof(st));
++      memcpy(st.ring.slotSeq, ctx->slotSeq, sizeof(st.ring.slotSeq));
++      memcpy(st.ring.slotBeg, ctx->slotBeg, sizeof(st.ring.slotBeg));
++      memcpy(st.ring.slotPut, ctx->slotPut, sizeof(st.ring.slotPut));
++      st.ring.subPut = ctx->subPut;
++      st.ring.gpPut = ctx->gpPut;
++      st.ring.wSeq = ctx->wSeq;
++      st.copyOnly = ctx->engines == NVKMD_ENGINE_COPY;
++      for (unsigned k = 0; k < NVKMD_REINIT_COUNT; k++)
++         st.havePrologue = st.havePrologue || ctx->reinit[k].n != 0;
++      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++      st.replayedThrough = r->replayedThrough;
++      memcpy(st.stamps, r->rebuildNs, sizeof(st.stamps));
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      st.now = t0;
++      why = nvrm_rec_execute(&nvrm_rec_rm_ops, &job, &st, &kind, &level, &plan);
++   }
++
++   if (why != NVRM_WHY_OK) {
++      /* after the claim: give it back; a notifier that changed stays a sticky fault, a reason that cannot change is
++       * remembered, and the 2.9 verdict is returned */
++      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++      if (r->ctx == ctx && r->gen == rgen) {
++         const bool changed = (unsigned)rec_err_notifier(ctx)->status != r->errBase || r->injectFault;
++         r->recovering = false;
++         if (why != NVRM_WHY_DYING && changed && !r->faulted)
++            r->faulted = report = true;
++         if (rec_why_is_final(why))
++            r->gaveUp = true;
++      }
++      /* the 2.9 lines describe the waited channel, as 2.9 printed them */
++      if (why != NVRM_WHY_DYING && x->ctx != NULL && x->gen == gen)
++         rec_diag_locked(x, &d);
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      const VkResult res = rec_fail(trig, why, kind, job.xid, R, &d, report, locked && why != NVRM_WHY_DYING,
++                                    want, ms, log_obj);
++      if (locked) {
++         nvrm_rec_held--;
++         pthread_mutex_unlock(&nvrm_rec_mtx[R]);
++      }
++      return res;
++   }
++
++   /* 5. clean up: the old channel's memories go after the channel (freed in free_old) */
++   for (unsigned m = 0; m < ARRAY_SIZE(job.oldMem); m++)
++      if (job.oldMem[m] != NULL)
++         nvkmd_mem_unref(job.oldMem[m]);
++   if (ctx->recPrologue != NULL)
++      nvkmd_mem_unref(ctx->recPrologue);
++   ctx->recPrologue = job.prologue;
++   FREE(job.donor);   /* it gave everything away: only the struct is left */
++   const int64_t us = (nvrm_rec_now_ns() - t0) / 1000;
++   rec_stat_add(level == NVRM_REC_DROP_ALL ? REC_ST_DROP_ALLS : REC_ST_REPLAYS, 1);
++   rec_stat_add(REC_ST_DROPPED, job.dropped);
++   rec_stat_add(REC_ST_REPLAYED, job.replayed);
++   rec_stat_set(REC_ST_LAST_XID, job.xid);
++   rec_stat_set(REC_ST_LAST_KIND, kind);
++   rec_stat_set(REC_ST_LAST_WHY, NVRM_WHY_OK);
++   rec_stat_set(REC_ST_LAST_US, (uint64_t)us);
++   uint64_t longest = __atomic_load_n(&nvrm_rec_stats[REC_ST_LONGEST_US], __ATOMIC_RELAXED);
++   while ((uint64_t)us > longest &&
++          !__atomic_compare_exchange_n(&nvrm_rec_stats[REC_ST_LONGEST_US], &longest, (uint64_t)us, false,
++                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++      ;
++   rec_note(job.pdev, NVRM_CN_RECOVERED, job.xid, (uint32_t)job.dropped, kind, NVRM_WHY_OK, NULL);
++   static const char *const lvname[] = { "replay", "replay all", "drop all" };
++   fprintf(stderr, "nvrm: channel slot %u rebuilt after a %s loss (Xid %u): %llu flush(es) dropped, %llu replayed (%s), %lld us\n",
++           R, nvrm_rec_kind_name(kind), (unsigned)job.xid, (unsigned long long)job.dropped,
++           (unsigned long long)job.replayed, lvname[level], (long long)us);
++   if (log_obj != NULL)
++      vk_logw(VK_LOG_OBJS(log_obj), "nvrm channel slot %u rebuilt after a %s loss (Xid %u): %llu flush(es) dropped, %llu replayed",
++              R, nvrm_rec_kind_name(kind), (unsigned)job.xid, (unsigned long long)job.dropped,
++              (unsigned long long)job.replayed);
++   nvrm_rec_held--;
++   pthread_mutex_unlock(&nvrm_rec_mtx[R]);
++   return VK_SUCCESS;
++}
++
++/* ── the test hook ───────────────────────────────────────────────────────────────────────────────────────────────── */
++
++static struct {
++   pthread_once_t once;
++   int mode;
++   unsigned n;
++   const void *ctx;      /* the first non-copy context that flushed */
++   unsigned count;
++   bool done;
++} nvrm_rec_inj = { .once = PTHREAD_ONCE_INIT };
++
++static void
++rec_inject_parse(void)
++{
++   const char *e = nvmtl_cfg_getenv("NVK_FAULT_INJECT");   /* a rotating static buffer: copied */
++   if (e == NULL)
++      return;
++   char buf[96];
++   snprintf(buf, sizeof buf, "%s", e);
++   char *n = strchr(buf, ':');
++   if (n == NULL)
++      return;
++   *n++ = 0;
++   char *pn = strchr(n, ':');
++   if (pn != NULL)
++      *pn++ = 0;
++   const int mode = strcmp(buf, "stall") == 0 ? NVRM_REC_INJ_STALL : strcmp(buf, "fake") == 0 ? NVRM_REC_INJ_FAKE
++                  : strcmp(buf, "reset") == 0 ? NVRM_REC_INJ_RESET : strcmp(buf, "mmu") == 0 ? NVRM_REC_INJ_MMU
++                  : NVRM_REC_INJ_NONE;
++   const long count = strtol(n, NULL, 10);
++   const char *me = getprogname();
++   if (mode == NVRM_REC_INJ_NONE || count <= 0 || me == NULL)
++      return;
++   if (pn != NULL && pn[0] != 0 ? strcmp(pn, me) != 0
++                                : (strcmp(me, "WindowServer") == 0 || strcmp(me, "loginwindow") == 0))
++      return;
++   nvrm_rec_inj.mode = mode;
++   nvrm_rec_inj.n = (unsigned)count;
++   fprintf(stderr, "nvrm: NVK_FAULT_INJECT: %s at flush %ld of the first graphics queue of %s\n", buf, count, me);
++}
++
++int
++nvrm_rec_inject_for_flush(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   pthread_once(&nvrm_rec_inj.once, rec_inject_parse);
++   if (nvrm_rec_inj.mode == NVRM_REC_INJ_NONE || !nvrm_rec_enabled())
++      return NVRM_REC_INJ_NONE;
++   if (ctx->ceOnly || ctx->engines == NVKMD_ENGINE_COPY)
++      return NVRM_REC_INJ_NONE;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   int mode = NVRM_REC_INJ_NONE;
++   if (nvrm_rec_inj.ctx == NULL)
++      nvrm_rec_inj.ctx = ctx;
++   if (nvrm_rec_inj.ctx == ctx && !nvrm_rec_inj.done && ++nvrm_rec_inj.count == nvrm_rec_inj.n) {
++      nvrm_rec_inj.done = true;
++      mode = nvrm_rec_inj.mode;
++   }
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (mode != NVRM_REC_INJ_NONE) {
++      rec_stat_add(REC_ST_INJECTED, 1);
++      rec_note(nvkmd_nvrm_pdev(ctx->base.dev->pdev), NVRM_CN_INJECTED, 0, 0, 0, 0, NULL);
++      fprintf(stderr, "nvrm: NVK_FAULT_INJECT: injecting at flush %u (sequence %llu)\n", nvrm_rec_inj.n,
++              (unsigned long long)ctx->wSeq + 1);
++   }
++   return mode;
++}
++
++void
++nvrm_rec_inject_after_doorbell(struct nvkmd_nvrm_exec_ctx *ctx, int mode)
++{
++   if (mode == NVRM_REC_INJ_FAKE) {
++      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++      nvkmd_nvrm_slots[ctx->slot1 - 1].injectFault = true;
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   } else if (mode == NVRM_REC_INJ_RESET) {
++      struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(ctx->base.dev->pdev);
++      struct NvRmApi rm;
++      nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++      NV906F_CTRL_CMD_RESET_CHANNEL_PARAMS rp;
++      memset(&rp, 0, sizeof(rp));
++      rp.engineID = NV2080_ENGINE_TYPE_GRAPHICS;
++      rp.resetReason = NV906F_CTRL_CMD_RESET_CHANNEL_REASON_VERIF;
++      const NvU32 rc = nvRmApiControl(&rm, ctx->hChannel, NV906F_CTRL_CMD_RESET_CHANNEL, &rp, sizeof(rp));
++      fprintf(stderr, "nvrm: NVK_FAULT_INJECT: channel reset rc 0x%x\n", (unsigned)rc);
++   }
++}
++
++/* ── the export ──────────────────────────────────────────────────────────────────────────────────────────────────── */
++
++__attribute__((visibility("default"))) unsigned
++nvmtl_nvk_recover_stats_v1(uint64_t *out, unsigned n)
++{
++   if (out == NULL)
++      return 0;
++   const unsigned k = n < REC_ST_N ? n : REC_ST_N;
++   for (unsigned i = 0; i < k; i++)
++      out[i] = __atomic_load_n(&nvrm_rec_stats[i], __ATOMIC_RELAXED);
++   if (k > REC_ST_VERSION)
++      out[REC_ST_VERSION] = 1;
++   if (k > REC_ST_ENABLED)
++      out[REC_ST_ENABLED] = nvrm_rec_enabled();
++   if (k > REC_ST_KEXT)
++      out[REC_ST_KEXT] = (uint64_t)__atomic_load_n(&nvrm_rec_kext, __ATOMIC_ACQUIRE);
++   return k;
++}
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
+new file mode 100644
+index 0000000..49dd2fd
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
+@@ -0,0 +1,403 @@
++/*
++ * Copyright © 2026 NullMoth Systems.
++ * SPDX-License-Identifier: MIT
++ */
++/* nvkmd_nvrm_recover.h - the pure part of rebuilding a faulted or stalled channel in place.
++ *
++ * A GPU fault on one channel used to end the process's whole Vulkan device: the waiter saw the error notifier change
++ * (or a deadline pass) and returned VK_ERROR_DEVICE_LOST, which the Metal plugin turns into a lost Metal device and,
++ * in WindowServer, a lost session. RM tears down only the faulting channel group, so a new channel can usually be made
++ * beside it. nvkmd_nvrm_recover.c does that: it builds a new channel, frees the old one, moves the new one behind the
++ * same context (same semaphore page, same command ring), re-sends the channel-wide state, replays the flushes that had
++ * not started, and stores the sequence number of the one flush it drops into the semaphore from the CPU.
++ *
++ * This header holds every decision of that sequence that needs no RM and no clock: which losses are recoverable, the
++ * rebuild budget, the plan of what is dropped and what is replayed, the copy of the GPFIFO entries into the new ring,
++ * the channel a stalled wait is really blocked on, the dropped sequence ranges, and the order of the steps themselves
++ * (nvrm_rec_execute drives a table of operations that NVK fills with RM calls and the host test with fakes).
++ * Plain C: only <stdint.h>, <stdbool.h>, <string.h>; every function static inline. The host test is
++ * nvkmd_nvrm_recover_test.c beside this file (build line in its first comment). */
++#ifndef NVKMD_NVRM_RECOVER_H
++#define NVKMD_NVRM_RECOVER_H 1
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#define NVRM_REC_RING          64             /* ring slots of a context's command ring (== NVRM_CMD_SLOTS) */
++#define NVRM_REC_FIFO          0x8000u        /* GPFIFO entries of a channel, two dwords each */
++#define NVRM_REC_MAX_REBUILDS  3              /* rebuilds of one channel allowed inside the window */
++#define NVRM_REC_WINDOW_NS     30000000000ll
++#define NVRM_REC_DROPS         8              /* dropped sequence ranges remembered per channel slot */
++#define NVRM_REC_CHAIN         4              /* SEM_ACQUIRE hops followed to the channel that blocks a wait */
++
++/* The kind of loss. Only CHANNEL and STALL are rebuilt; every other kind ends as 2.9 ended, with its name logged. */
++enum nvrm_rec_kind { NVRM_LOSS_NONE = 0, NVRM_LOSS_CHANNEL = 1, NVRM_LOSS_STALL = 2, NVRM_LOSS_MEMORY = 3,
++                     NVRM_LOSS_GSP = 4, NVRM_LOSS_BUS = 5, NVRM_LOSS_RESUME = 6, NVRM_LOSS_UNKNOWN = 7 };
++/* Why a recovery ended. OK: rebuilt. Every other value: the 2.9 result was returned, for that reason. */
++enum nvrm_rec_why  { NVRM_WHY_OK = 0, NVRM_WHY_OFF = 1, NVRM_WHY_KIND = 2, NVRM_WHY_BUDGET = 3, NVRM_WHY_PLAN = 4,
++                     NVRM_WHY_BUILD = 5, NVRM_WHY_FREE = 6, NVRM_WHY_COPY_REFAULT = 7, NVRM_WHY_BUSY = 8,
++                     NVRM_WHY_DYING = 9, NVRM_WHY_SHAPE = 10, NVRM_WHY_BLOBS = 11, NVRM_WHY_ROOT_ALIVE = 12,
++                     NVRM_WHY_GAVE_UP_BEFORE = 13 };
++/* REPLAY: drop the flush that was running, replay the rest. REPLAY_ALL: drop nothing (a copy-only context: copies are
++ * idempotent and carry state that later work needs). DROP_ALL: the channel faulted again inside the work an earlier
++ * rebuild replayed, so that work is the cause: drop everything in flight. */
++enum nvrm_rec_level { NVRM_REC_REPLAY = 0, NVRM_REC_REPLAY_ALL = 1, NVRM_REC_DROP_ALL = 2 };
++
++static inline const char *
++nvrm_rec_kind_name(unsigned k)
++{
++   static const char *const n[] = { "none", "channel", "stall", "memory", "gsp", "bus", "resume", "unknown" };
++   return k < sizeof(n) / sizeof(n[0]) ? n[k] : "?";
++}
++
++static inline const char *
++nvrm_rec_why_name(unsigned w)
++{
++   static const char *const n[] = { "ok", "recovery off", "kind not recoverable", "rebuild budget spent",
++                                    "ring bookkeeping inconsistent", "new channel could not be built",
++                                    "old channel could not be freed", "copy channel faulted in replayed work",
++                                    "another recovery is stuck", "channel is being destroyed",
++                                    "channel shape not rebuildable", "channel state not captured",
++                                    "the channel it waits on is still progressing", "gave up before" };
++   return w < sizeof(n) / sizeof(n[0]) ? n[w] : "?";
++}
++
++/* ── classification ─────────────────────────────────────────────────────────────────────────────────────────────── */
++
++struct nvrm_rec_inputs {
++   uint32_t xid;         /* the error notifier's info32 when it changed, else 0 */
++   uint32_t changed;     /* the error notifier's status differs from the one the channel started with */
++   int32_t  pm;          /* -1 unknown (a kext without the channel note), else NVRM_CN_PM_* */
++   uint32_t actionAsked; /* 0: RM's recovery action was not asked */
++   uint32_t actionRc;    /* the NV_STATUS of that control */
++   uint32_t action;      /* its answer; 0 = no action needed */
++};
++
++#define NVRM_REC_PM_LOST           2u      /* NVRM_CN_PM_LOST: the adapter did not come back from sleep */
++#define NVRM_REC_RC_GPU_IS_LOST    0x0Fu   /* NV_ERR_GPU_IS_LOST */
++#define NVRM_REC_RC_FULLCHIP_RESET 0x10u   /* NV_ERR_GPU_IN_FULLCHIP_RESET */
++#define NVRM_REC_RC_NOT_SUPPORTED  0x56u   /* NV_ERR_NOT_SUPPORTED */
++#define NVRM_REC_RC_RESET_REQUIRED 0x62u   /* NV_ERR_RESET_REQUIRED */
++
++/* In this order: a failed wake; the GPU off the bus; the firmware crashed or wants a reset; uncorrectable memory errors;
++ * RM answering anything unexpected; then the channel exceptions that end only the faulting channel group (graphics
++ * exception 13, MMU fault 31, PBDMA 32, copy engine 39-41, reset verification 43, fault during a context switch 44,
++ * preemptive removal 45, graphics class error 69, context switch timeout 109 - 109 is not in the open RM headers, it is
++ * what this port measured for a long compute dispatch). A changed notifier with any other Xid is UNKNOWN and is not
++ * rebuilt. Nothing changed and nothing reported: NONE, which the caller turns into STALL. An unknown power state (-1)
++ * and "not supported" for the action say nothing either way. */
++static inline enum nvrm_rec_kind
++nvrm_rec_classify(const struct nvrm_rec_inputs *in)
++{
++   const uint32_t x = in->xid;
++   if (in->pm >= 0 && (uint32_t)in->pm == NVRM_REC_PM_LOST)
++      return NVRM_LOSS_RESUME;
++   if ((in->actionAsked && in->actionRc == NVRM_REC_RC_GPU_IS_LOST) || x == 79)
++      return NVRM_LOSS_BUS;
++   if (x == 119 || x == 120 ||
++       (in->actionAsked && (in->actionRc == NVRM_REC_RC_RESET_REQUIRED || in->actionRc == NVRM_REC_RC_FULLCHIP_RESET)) ||
++       (in->actionAsked && in->actionRc == 0 && in->action != 0))
++      return NVRM_LOSS_GSP;
++   if (x == 48 || x == 94 || x == 95 || x == 140)
++      return NVRM_LOSS_MEMORY;
++   if (in->actionAsked && in->actionRc != 0 && in->actionRc != NVRM_REC_RC_NOT_SUPPORTED)
++      return NVRM_LOSS_UNKNOWN;
++   if (in->changed) {
++      switch (x) {
++      case 13: case 31: case 32: case 39: case 40: case 41: case 43: case 44: case 45: case 69: case 109:
++         return NVRM_LOSS_CHANNEL;
++      default:
++         return NVRM_LOSS_UNKNOWN;
++      }
++   }
++   return NVRM_LOSS_NONE;
++}
++
++/* ── the rebuild budget: at most NVRM_REC_MAX_REBUILDS inside NVRM_REC_WINDOW_NS; a stamp of 0 is an unused one ─── */
++
++static inline bool
++nvrm_rec_budget_ok(const int64_t stamps[NVRM_REC_MAX_REBUILDS], int64_t now)
++{
++   unsigned recent = 0;
++   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++)
++      if (stamps[i] != 0 && now - stamps[i] < NVRM_REC_WINDOW_NS)
++         recent++;
++   return recent < NVRM_REC_MAX_REBUILDS;
++}
++
++static inline void
++nvrm_rec_budget_push(int64_t stamps[NVRM_REC_MAX_REBUILDS], int64_t now)
++{
++   unsigned oldest = 0;
++   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++) {
++      if (stamps[i] == 0) {
++         oldest = i;
++         break;
++      }
++      if (stamps[i] < stamps[oldest])
++         oldest = i;
++   }
++   stamps[oldest] = now != 0 ? now : 1;
++}
++
++/* ── the plan ────────────────────────────────────────────────────────────────────────────────────────────────────── */
++
++/* A context's ring bookkeeping, copied under its mutex. A flush n (its sequence number) that is still in flight has
++ * exactly one ring slot i with slotSeq[i] == n: a slot is reused only after the semaphore passed its flush. Its GPFIFO
++ * entries are [slotBeg[i], slotPut[i]). Entries written after the last doorbell ([subPut, gpPut)) belong to the flush
++ * being built and were never handed to the GPU. */
++struct nvrm_rec_ring {
++   uint64_t slotSeq[NVRM_REC_RING];   /* sequence number whose release ends each ring slot, 0 = unused */
++   uint64_t slotBeg[NVRM_REC_RING];   /* GPFIFO index of that flush's first entry */
++   uint64_t slotPut[NVRM_REC_RING];   /* GPFIFO index after its last entry */
++   uint64_t subPut;                   /* GPPut at the last doorbell */
++   uint64_t gpPut;                    /* where the next entry goes */
++   uint64_t wSeq;                     /* F: the last flushed sequence number */
++};
++
++struct nvrm_rec_plan {
++   uint64_t S, F;                     /* the semaphore after the old channel is gone, and the last flushed number */
++   uint64_t dropLo, dropHi;           /* dropped flushes, inclusive; dropLo > dropHi = nothing dropped */
++   uint64_t keepLo, keepHi;           /* replayed flushes, inclusive; keepLo > keepHi = none */
++   uint32_t oldBegin;                 /* old GPFIFO index of the first entry carried into the new ring */
++   uint32_t nCarry;                   /* entries carried: the replayed flushes', then the ones never handed over */
++   uint32_t prologue;                 /* 0 or 1: one entry before them that re-sends the channel-wide state */
++   uint32_t newSubPut, newGpPut;      /* the new ring's GPPut to ring now, and where the next entry goes */
++};
++
++static inline uint32_t
++nvrm_rec_fifo_dist(uint64_t from, uint64_t to)
++{
++   return (uint32_t)((to + NVRM_REC_FIFO - (from % NVRM_REC_FIFO)) % NVRM_REC_FIFO);
++}
++
++/* 0 = a plan; -1 = the bookkeeping is not what a plan needs (nothing may be changed: the caller gives up). S is the
++ * semaphore's value; a value above F (the GPU never writes one) is refused. */
++static inline int
++nvrm_rec_plan(const struct nvrm_rec_ring *r, uint64_t S, enum nvrm_rec_level lv, bool havePrologue,
++              struct nvrm_rec_plan *p)
++{
++   memset(p, 0, sizeof(*p));
++   const uint64_t F = r->wSeq;
++   if (S > F || r->gpPut >= NVRM_REC_FIFO || r->subPut >= NVRM_REC_FIFO)
++      return -1;
++   const uint64_t first = lv == NVRM_REC_REPLAY ? S + 2 : lv == NVRM_REC_REPLAY_ALL ? S + 1 : F + 1;
++   p->S = S;
++   p->F = F;
++   p->dropLo = S + 1;
++   p->dropHi = (first - 1 < F ? first - 1 : F);
++   p->keepLo = first;
++   p->keepHi = F;
++   p->prologue = havePrologue ? 1u : 0u;
++   if (p->dropLo > p->dropHi) {   /* normalised "nothing dropped" */
++      p->dropLo = 1;
++      p->dropHi = 0;
++   }
++   uint64_t begin = r->subPut;
++   if (first <= F) {
++      unsigned idx = NVRM_REC_RING, prev = NVRM_REC_RING;
++      for (uint64_t n = first; n <= F; n++) {
++         unsigned hit = NVRM_REC_RING, count = 0;
++         for (unsigned i = 0; i < NVRM_REC_RING; i++)
++            if (r->slotSeq[i] == n) {
++               hit = i;
++               count++;
++            }
++         if (count != 1)
++            return -1;                                        /* missing or duplicate record */
++         if (r->slotBeg[hit] >= NVRM_REC_FIFO || r->slotPut[hit] >= NVRM_REC_FIFO)
++            return -1;
++         if (prev != NVRM_REC_RING) {
++            if (hit != (prev + 1) % NVRM_REC_RING || r->slotBeg[hit] != r->slotPut[prev])
++               return -1;                                     /* not consecutive, or a gap between two flushes */
++         } else {
++            idx = hit;
++         }
++         prev = hit;
++      }
++      if (r->slotPut[prev] != r->subPut)
++         return -1;                                           /* the last flush is not the last doorbell */
++      begin = r->slotBeg[idx];
++   }
++   p->oldBegin = (uint32_t)begin;
++   p->nCarry = nvrm_rec_fifo_dist(begin, r->gpPut);
++   if (p->prologue + p->nCarry > NVRM_REC_FIFO - 2)
++      return -1;
++   p->newSubPut = nvrm_rec_fifo_dist(begin, r->subPut) + p->prologue;
++   p->newGpPut = p->nCarry + p->prologue;
++   if (p->newSubPut > p->newGpPut)
++      return -1;                                              /* the doorbell would hand over unflushed entries */
++   return 0;
++}
++
++/* Writes the new GPFIFO (2 * NVRM_REC_FIFO dwords) and the ring as the context must see it afterwards. The new GPFIFO
++ * is the new channel's own memory, not yet seen by any GPU; the old one is only read. */
++static inline void
++nvrm_rec_fill(const struct nvrm_rec_ring *r, const struct nvrm_rec_plan *p, const uint32_t *oldFifo,
++              uint32_t *newFifo, const uint32_t prologueEntry[2], struct nvrm_rec_ring *out)
++{
++   memset(out, 0, sizeof(*out));
++   if (p->prologue) {
++      newFifo[0] = prologueEntry[0];
++      newFifo[1] = prologueEntry[1];
++   }
++   for (uint32_t k = 0; k < p->nCarry; k++) {
++      const uint32_t from = (p->oldBegin + k) % NVRM_REC_FIFO, to = p->prologue + k;
++      newFifo[2 * to] = oldFifo[2 * from];
++      newFifo[2 * to + 1] = oldFifo[2 * from + 1];
++   }
++   for (unsigned i = 0; i < NVRM_REC_RING; i++) {
++      const uint64_t n = r->slotSeq[i];
++      if (n == 0 || n < p->keepLo || n > p->keepHi)
++         continue;
++      out->slotSeq[i] = n;
++      out->slotBeg[i] = nvrm_rec_fifo_dist(p->oldBegin, r->slotBeg[i]) + p->prologue;
++      out->slotPut[i] = nvrm_rec_fifo_dist(p->oldBegin, r->slotPut[i]) + p->prologue;
++   }
++   out->subPut = p->newSubPut;
++   out->gpPut = p->newGpPut;
++   out->wSeq = r->wSeq;
++}
++
++/* ── the channel a stalled wait is really blocked on ─────────────────────────────────────────────────────────────── */
++
++struct nvrm_rec_view {          /* one channel slot, as seen under the slot table's mutex */
++   bool valid, changed;         /* registered on the same device as the waited channel; its error notifier changed */
++   uint64_t sem, flushed, semVA, acqVA, acqSeq;
++};
++
++/* From `start`, follow the last semaphore acquire each channel emitted while its target has not reached the value:
++ * at most NVRM_REC_CHAIN hops; a changed notifier, a satisfied or unknown target, another device's channel or a cycle
++ * ends the walk where it is. */
++static inline uint32_t
++nvrm_rec_root(const struct nvrm_rec_view v[], uint32_t n, uint32_t start)
++{
++   uint32_t cur = start, seen[NVRM_REC_CHAIN + 1];
++   unsigned nseen = 0;
++   if (start >= n)
++      return start;
++   seen[nseen++] = cur;
++   for (unsigned hop = 0; hop < NVRM_REC_CHAIN; hop++) {
++      const struct nvrm_rec_view *c = &v[cur];
++      if (c->changed || c->acqVA == 0)
++         break;
++      uint32_t t = n;
++      for (uint32_t i = 0; i < n; i++)
++         if (i != cur && v[i].valid && v[i].semVA == c->acqVA) {
++            t = i;
++            break;
++         }
++      if (t == n || v[t].sem >= c->acqSeq)
++         break;
++      bool cycle = false;
++      for (unsigned j = 0; j < nseen; j++)
++         cycle = cycle || seen[j] == t;
++      if (cycle)
++         break;
++      cur = t;
++      seen[nseen++] = cur;
++   }
++   return cur;
++}
++
++/* ── dropped sequence ranges: a ring, the newest wins ───────────────────────────────────────────────────────────── */
++
++struct nvrm_rec_drops {
++   uint64_t lo[NVRM_REC_DROPS], hi[NVRM_REC_DROPS];
++   uint32_t n;                  /* ranges ever added; the last NVRM_REC_DROPS are kept */
++};
++
++static inline void
++nvrm_rec_drops_add(struct nvrm_rec_drops *d, uint64_t lo, uint64_t hi)
++{
++   if (lo > hi)
++      return;
++   const uint32_t i = d->n % NVRM_REC_DROPS;
++   d->lo[i] = lo;
++   d->hi[i] = hi;
++   d->n++;
++}
++
++static inline bool
++nvrm_rec_drops_has(const struct nvrm_rec_drops *d, uint64_t seq)
++{
++   const uint32_t k = d->n < NVRM_REC_DROPS ? d->n : NVRM_REC_DROPS;
++   for (uint32_t i = 0; i < k; i++)
++      if (seq >= d->lo[i] && seq <= d->hi[i])
++         return true;
++   return false;
++}
++
++/* ── the order of the rebuild ───────────────────────────────────────────────────────────────────────────────────── */
++
++struct nvrm_rec_state {         /* read under the context's mutex before the sequence starts */
++   struct nvrm_rec_ring ring;
++   bool copyOnly, havePrologue;
++   uint64_t replayedThrough;    /* F of the last rebuild: a fault below it is a fault in replayed work */
++   int64_t stamps[NVRM_REC_MAX_REBUILDS], now;
++};
++
++struct nvrm_rec_ops {
++   void     (*inputs)(void *u, struct nvrm_rec_inputs *in);   /* the notifier, the kext's power state, RM's action */
++   uint64_t (*read_sem)(void *u);
++   int      (*build)(void *u);                                /* the new channel and the prologue buffer; 0 = ok */
++   void     (*discard)(void *u);                              /* destroy what build made */
++   int      (*free_old)(void *u);                             /* 0 = the old channel is gone */
++   /* fill the new GPFIFO from the snapshot (nvrm_rec_fill), move the new channel in, store the dropped value */
++   void     (*adopt)(void *u, const struct nvrm_rec_ring *ring, const struct nvrm_rec_plan *p);
++   void     (*start)(void *u, const struct nvrm_rec_plan *p); /* GPPut and the doorbell */
++};
++
++/* Classify, check the budget, choose the level, plan, build, free the old channel, plan again with the final
++ * semaphore, adopt, start. A refusal before free_old changes nothing; a failed build cleans up after itself; a failed
++ * free_old is followed by discard and nothing else. After free_old nothing can fail: the plan that held for the
++ * semaphore before it holds for any later value (fewer flushes remain), and adopt and start are memory writes.
++ * *kind and *level are set as far as the sequence got; *plan is the plan that was adopted. */
++static inline enum nvrm_rec_why
++nvrm_rec_execute(const struct nvrm_rec_ops *ops, void *u, const struct nvrm_rec_state *st,
++                 enum nvrm_rec_kind *kind, enum nvrm_rec_level *level, struct nvrm_rec_plan *plan)
++{
++   struct nvrm_rec_inputs in;
++   memset(&in, 0, sizeof(in));
++   in.pm = -1;
++   ops->inputs(u, &in);
++   enum nvrm_rec_kind k = nvrm_rec_classify(&in);
++   if (k == NVRM_LOSS_NONE && !in.changed)
++      k = NVRM_LOSS_STALL;
++   *kind = k;
++   *level = NVRM_REC_REPLAY;
++   if (k != NVRM_LOSS_CHANNEL && k != NVRM_LOSS_STALL)
++      return NVRM_WHY_KIND;
++   if (!nvrm_rec_budget_ok(st->stamps, st->now))
++      return NVRM_WHY_BUDGET;
++   const uint64_t S0 = ops->read_sem(u);
++   enum nvrm_rec_level lv;
++   if (st->copyOnly) {
++      if (S0 < st->replayedThrough)
++         return NVRM_WHY_COPY_REFAULT;
++      lv = NVRM_REC_REPLAY_ALL;
++   } else {
++      lv = S0 < st->replayedThrough ? NVRM_REC_DROP_ALL : NVRM_REC_REPLAY;
++   }
++   *level = lv;
++   struct nvrm_rec_plan pre;
++   if (nvrm_rec_plan(&st->ring, S0, lv, st->havePrologue, &pre) != 0)
++      return NVRM_WHY_PLAN;
++   if (ops->build(u) != 0)
++      return NVRM_WHY_BUILD;
++   if (ops->free_old(u) != 0) {
++      ops->discard(u);
++      return NVRM_WHY_FREE;
++   }
++   uint64_t S = ops->read_sem(u);
++   if (S < S0 || S > st->ring.wSeq)
++      S = S0;   /* the old channel is gone: a value outside [S0, F] is not the GPU's; the plan for S0 is still sound */
++   if (nvrm_rec_plan(&st->ring, S, lv, st->havePrologue, plan) != 0)
++      *plan = pre;   /* cannot happen (a plan for S0 holds for every later S); keep the checked one */
++   ops->adopt(u, &st->ring, plan);
++   ops->start(u, plan);
++   return NVRM_WHY_OK;
++}
++
++#endif /* NVKMD_NVRM_RECOVER_H */
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
+new file mode 100644
+index 0000000..6ae76fa
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
+@@ -0,0 +1,558 @@
++/* Host test of nvkmd_nvrm_recover.h (the pure part of rebuilding a channel). Not built by meson. From this directory:
++ *   cc -std=c11 -O1 -g -Wall -Wextra -Werror -I. nvkmd_nvrm_recover_test.c -o /tmp/nvkmd_nvrm_recover_test && /tmp/nvkmd_nvrm_recover_test
++ * (add -fsanitize=address,undefined where the compiler has a runtime for them). Exit 0 = every arm passed.
++ * The plan and fill arms run against a model of a context's ring driven by the rules of nvrm_gsub_submit: flushes of
++ * 1 to 40 GPFIFO entries, up to 63 in flight, the GPFIFO wrapping, entries written after the last doorbell or not. The
++ * controls at the end feed the checkers a damaged result and must see it refused. */
++#include "nvkmd_nvrm_recover.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++static unsigned fails, oks;
++
++static void
++arm(const char *name, bool ok)
++{
++   if (ok) {
++      oks++;
++      return;
++   }
++   fails++;
++   printf("FAIL %s\n", name);
++}
++
++static uint64_t rng = 0x9E3779B97F4A7C15ull;
++static uint32_t
++rnd(uint32_t n)
++{
++   rng ^= rng << 13;
++   rng ^= rng >> 7;
++   rng ^= rng << 17;
++   return (uint32_t)(rng % n);
++}
++
++/* ── classification ── */
++static enum nvrm_rec_kind
++cls(uint32_t xid, uint32_t changed, int32_t pm, uint32_t asked, uint32_t rc, uint32_t action)
++{
++   const struct nvrm_rec_inputs in = { xid, changed, pm, asked, rc, action };
++   return nvrm_rec_classify(&in);
++}
++
++static void
++test_classify(void)
++{
++   static const uint32_t chan[] = { 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109 };
++   bool all = true;
++   for (unsigned i = 0; i < sizeof(chan) / sizeof(chan[0]); i++)
++      all = all && cls(chan[i], 1, -1, 0, 0, 0) == NVRM_LOSS_CHANNEL && cls(chan[i], 1, 0, 1, 0x56, 0) == NVRM_LOSS_CHANNEL;
++   arm("classify: every allow-listed Xid with a changed notifier is CHANNEL (pm unknown or running, action unsupported)", all);
++   arm("classify: an allow-listed Xid without a changed notifier is not CHANNEL", cls(13, 0, -1, 0, 0, 0) == NVRM_LOSS_NONE);
++   arm("classify: power state LOST wins over everything", cls(31, 1, 2, 1, 0x62, 5) == NVRM_LOSS_RESUME);
++   arm("classify: Xid 79 is BUS", cls(79, 1, 0, 0, 0, 0) == NVRM_LOSS_BUS);
++   arm("classify: NV_ERR_GPU_IS_LOST from the action is BUS", cls(0, 0, 0, 1, 0x0F, 0) == NVRM_LOSS_BUS);
++   arm("classify: Xid 119 and 120 are GSP", cls(119, 1, -1, 0, 0, 0) == NVRM_LOSS_GSP && cls(120, 1, -1, 0, 0, 0) == NVRM_LOSS_GSP);
++   arm("classify: Xid 31 with RESET_REQUIRED is GSP", cls(31, 1, 0, 1, 0x62, 0) == NVRM_LOSS_GSP);
++   arm("classify: FULLCHIP_RESET is GSP", cls(0, 0, 0, 1, 0x10, 0) == NVRM_LOSS_GSP);
++   arm("classify: a recovery action other than NONE is GSP", cls(13, 1, 0, 1, 0, 1) == NVRM_LOSS_GSP);
++   arm("classify: ECC Xids 48 94 95 140 are MEMORY",
++       cls(48, 1, -1, 0, 0, 0) == NVRM_LOSS_MEMORY && cls(94, 1, -1, 0, 0, 0) == NVRM_LOSS_MEMORY &&
++       cls(95, 1, -1, 0, 0, 0) == NVRM_LOSS_MEMORY && cls(140, 1, -1, 0, 0, 0) == NVRM_LOSS_MEMORY);
++   arm("classify: an unexpected RM status is UNKNOWN", cls(13, 1, 0, 1, 0x1F, 0) == NVRM_LOSS_UNKNOWN);
++   arm("classify: NOT_SUPPORTED for the action is neutral", cls(13, 1, 0, 1, 0x56, 0) == NVRM_LOSS_CHANNEL &&
++       cls(0, 0, 0, 1, 0x56, 0) == NVRM_LOSS_NONE);
++   arm("classify: an unlisted Xid (200) with a changed notifier is UNKNOWN", cls(200, 1, -1, 0, 0, 0) == NVRM_LOSS_UNKNOWN);
++   arm("classify: nothing changed, nothing reported is NONE", cls(0, 0, -1, 1, 0, 0) == NVRM_LOSS_NONE &&
++       cls(0, 0, 0, 0, 0, 0) == NVRM_LOSS_NONE);
++   arm("classify: suspended (pm 1) is neutral", cls(13, 1, 1, 0, 0, 0) == NVRM_LOSS_CHANNEL);
++}
++
++static void
++test_budget(void)
++{
++   int64_t s[NVRM_REC_MAX_REBUILDS] = { 0 };
++   const int64_t t = 1000000000000ll;
++   arm("budget: no stamp allows", nvrm_rec_budget_ok(s, t));
++   nvrm_rec_budget_push(s, t);
++   nvrm_rec_budget_push(s, t + 1000);
++   arm("budget: two inside the window allow a third", nvrm_rec_budget_ok(s, t + 2000));
++   nvrm_rec_budget_push(s, t + 2000);
++   arm("budget: three inside the window refuse", !nvrm_rec_budget_ok(s, t + 3000));
++   arm("budget: the oldest ageing out allows again", nvrm_rec_budget_ok(s, t + NVRM_REC_WINDOW_NS));
++   nvrm_rec_budget_push(s, t + NVRM_REC_WINDOW_NS);
++   bool replaced = false;
++   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++)
++      replaced = replaced || s[i] == t + NVRM_REC_WINDOW_NS;
++   bool oldest_gone = true;
++   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++)
++      oldest_gone = oldest_gone && s[i] != t;
++   arm("budget: a push replaces the oldest stamp", replaced && oldest_gone);
++   arm("budget: after it, three inside the window refuse again", !nvrm_rec_budget_ok(s, t + NVRM_REC_WINDOW_NS + 1));
++}
++
++/* ── the ring model ── */
++struct model {
++   struct nvrm_rec_ring r;
++   uint64_t S, gpGet;
++   unsigned cur;
++   uint32_t fifo[2 * NVRM_REC_FIFO];
++   uint32_t unflushed;   /* entries written after the last doorbell */
++   uint64_t total;       /* entries ever written */
++};
++
++#define TAG_UNFLUSHED 0x80000000u
++
++static void
++model_complete_to(struct model *m, uint64_t seq)
++{
++   if (seq <= m->S)
++      return;
++   m->S = seq;
++   for (unsigned i = 0; i < NVRM_REC_RING; i++)
++      if (m->r.slotSeq[i] == seq)
++         m->gpGet = m->r.slotPut[i];
++}
++
++static void
++model_entry(struct model *m, uint32_t dw0, uint32_t dw1)
++{
++   while ((m->r.gpPut + 1) % NVRM_REC_FIFO == m->gpGet) {
++      /* full: the oldest flush in flight completes (the reserve's wait) */
++      uint64_t oldest = 0;
++      for (unsigned i = 0; i < NVRM_REC_RING; i++)
++         if (m->r.slotSeq[i] > m->S && (oldest == 0 || m->r.slotSeq[i] < oldest))
++            oldest = m->r.slotSeq[i];
++      model_complete_to(m, oldest);
++   }
++   m->fifo[2 * m->r.gpPut] = dw0;
++   m->fifo[2 * m->r.gpPut + 1] = dw1;
++   m->r.gpPut = (m->r.gpPut + 1) % NVRM_REC_FIFO;
++   m->total++;
++}
++
++static void
++model_flush(struct model *m, uint32_t entries)
++{
++   const uint64_t n = m->r.wSeq + 1;
++   for (uint32_t k = 0; k < entries; k++)
++      model_entry(m, (uint32_t)n, k);
++   m->r.slotBeg[m->cur] = m->r.subPut;   /* the flush owns everything since the last doorbell */
++   m->r.wSeq = n;
++   m->r.slotSeq[m->cur] = n;
++   m->r.slotPut[m->cur] = m->r.gpPut;
++   m->r.subPut = m->r.gpPut;
++   const unsigned next = (m->cur + 1) % NVRM_REC_RING;
++   if (m->r.slotSeq[next] != 0 && m->S < m->r.slotSeq[next])
++      model_complete_to(m, m->r.slotSeq[next]);   /* the slot wait */
++   m->cur = next;
++}
++
++static void
++model_build(struct model *m, unsigned flushes, uint32_t maxEntries, bool unflushed)
++{
++   memset(m, 0, sizeof(*m));
++   for (unsigned f = 0; f < flushes; f++) {
++      model_flush(m, 1 + rnd(maxEntries));
++      if (rnd(4) == 0)   /* the GPU makes progress now and then */
++         model_complete_to(m, m->S + rnd((uint32_t)(m->r.wSeq - m->S) + 1));
++   }
++   m->unflushed = unflushed ? 1 + rnd(12) : 0;
++   for (uint32_t k = 0; k < m->unflushed; k++)
++      model_entry(m, TAG_UNFLUSHED | k, k);
++}
++
++/* Checks one plan and fill against the model; returns NULL when right, else what is wrong. */
++static const char *
++check_fill(const struct model *m, const struct nvrm_rec_plan *p, const uint32_t *nf, const struct nvrm_rec_ring *out,
++           const uint32_t pro[2])
++{
++   uint32_t at = 0;
++   if (p->prologue) {
++      if (nf[0] != pro[0] || nf[1] != pro[1])
++         return "the prologue entry is not first";
++      at = 1;
++   }
++   for (uint64_t n = p->keepLo; n <= p->keepHi; n++) {
++      unsigned i = NVRM_REC_RING;
++      for (unsigned j = 0; j < NVRM_REC_RING; j++)
++         if (m->r.slotSeq[j] == n)
++            i = j;
++      if (i == NVRM_REC_RING)
++         return "a kept flush has no record in the model";
++      if (out->slotSeq[i] != n || out->slotBeg[i] != at)
++         return "a kept flush's record is not rebased to where its entries went";
++      for (uint64_t e = m->r.slotBeg[i]; e != m->r.slotPut[i]; e = (e + 1) % NVRM_REC_FIFO) {
++         if (nf[2 * at] != m->fifo[2 * e] || nf[2 * at + 1] != m->fifo[2 * e + 1] || nf[2 * at] != (uint32_t)n)
++            return "a kept flush's entries are not copied in order and unchanged";
++         at++;
++      }
++      if (out->slotPut[i] != at)
++         return "a kept flush's end is not rebased";
++   }
++   if (out->subPut != at || p->newSubPut != at)
++      return "the new GPPut is not the end of the kept flushes";
++   for (uint32_t k = 0; k < m->unflushed; k++, at++)
++      if (nf[2 * at] != (TAG_UNFLUSHED | k))
++         return "the unflushed entries do not follow the kept flushes in order";
++   if (out->gpPut != at || p->newGpPut != at)
++      return "the new put is not after the unflushed entries";
++   for (uint32_t e = 0; e < at; e++) {
++      const uint32_t tag = nf[2 * e];
++      if (!(tag & TAG_UNFLUSHED) && !(p->prologue && e == 0) && tag >= p->dropLo && tag <= p->dropHi)
++         return "a dropped flush's entry was carried";
++   }
++   for (unsigned i = 0; i < NVRM_REC_RING; i++) {
++      const uint64_t n = m->r.slotSeq[i];
++      const bool kept = n != 0 && n >= p->keepLo && n <= p->keepHi;
++      if (!kept && (out->slotSeq[i] | out->slotBeg[i] | out->slotPut[i]) != 0)
++         return "a ring slot that is not replayed is not zero";
++   }
++   if (out->wSeq != m->r.wSeq)
++      return "the last flushed number changed";
++   if (p->dropLo <= p->dropHi && (p->dropLo != p->S + 1 || p->dropHi + 1 != (p->keepLo <= p->keepHi ? p->keepLo : p->F + 1)))
++      return "the dropped range is not the flushes between the semaphore and the first replayed one";
++   return NULL;
++}
++
++static uint32_t newFifo[2 * NVRM_REC_FIFO];
++
++static void
++test_plan_fill(void)
++{
++   static const uint32_t pro[2] = { 0xA5A5A5A5u, 0x5A5A5A5Au };
++   static struct model m;
++   unsigned rounds = 0, plans = 0, wraps = 0;
++   const char *first_bad = NULL;
++   bool level_ranges_ok = true, monotonic = true;
++   for (unsigned t = 0; t < 400; t++) {
++      const uint32_t maxE = t % 3 == 0 ? 40 : t % 3 == 1 ? 8 : 400;   /* the third shape wraps the GPFIFO often */
++      model_build(&m, 70 + rnd(300), maxE, t % 2 == 0);
++      if (m.total > NVRM_REC_FIFO)
++         wraps++;
++      rounds++;
++      const uint64_t F = m.r.wSeq;
++      for (uint64_t S = m.S; S <= F; S++) {
++         for (int lv = NVRM_REC_REPLAY; lv <= NVRM_REC_DROP_ALL; lv++) {
++            for (int hp = 0; hp < 2; hp++) {
++               struct nvrm_rec_plan p;
++               if (nvrm_rec_plan(&m.r, S, (enum nvrm_rec_level)lv, hp != 0, &p) != 0) {
++                  if (!first_bad)
++                     first_bad = "a consistent ring was refused";
++                  continue;
++               }
++               plans++;
++               const uint64_t first = lv == NVRM_REC_REPLAY ? S + 2 : lv == NVRM_REC_REPLAY_ALL ? S + 1 : F + 1;
++               level_ranges_ok = level_ranges_ok && p.keepLo == first && p.keepHi == F &&
++                                 (lv != NVRM_REC_REPLAY_ALL || p.dropLo > p.dropHi) &&
++                                 (lv != NVRM_REC_DROP_ALL || S == F || (p.dropLo == S + 1 && p.dropHi == F)) &&
++                                 (lv != NVRM_REC_REPLAY || S == F || (p.dropLo == S + 1 && p.dropHi == S + 1));
++               memset(newFifo, 0xCD, sizeof(newFifo));
++               struct nvrm_rec_ring out;
++               nvrm_rec_fill(&m.r, &p, m.fifo, newFifo, pro, &out);
++               const char *bad = check_fill(&m, &p, newFifo, &out, pro);
++               if (bad && !first_bad)
++                  first_bad = bad;
++               /* the claim the rebuild rests on: a plan for S holds for every later S */
++               for (uint64_t S2 = S; S2 <= F && S2 < S + 3; S2++) {
++                  struct nvrm_rec_plan p2;
++                  monotonic = monotonic && nvrm_rec_plan(&m.r, S2, (enum nvrm_rec_level)lv, hp != 0, &p2) == 0;
++               }
++            }
++         }
++      }
++   }
++   if (first_bad)
++      printf("     (%s)\n", first_bad);
++   arm("plan/fill: kept flushes copied in order and unchanged, dropped ones absent, unflushed entries after GPPut, "
++       "records rebased, other slots zero (random rings, every S in flight, three levels, with and without prologue)",
++       first_bad == NULL && plans > 10000);
++   arm("plan/fill: the model wrapped the GPFIFO in some rings", wraps > 10);
++   arm("plan: the levels drop and keep what they say", level_ranges_ok);
++   arm("plan: a plan valid for S is valid for every later S up to F", monotonic);
++   (void)rounds;
++}
++
++static void
++test_plan_refusals(void)
++{
++   static struct model m;
++   rng = 12345;
++   model_build(&m, 200, 10, true);
++   while (m.r.wSeq - m.S < 4) {   /* at least four in flight */
++      model_flush(&m, 3);
++   }
++   const uint64_t S = m.S, F = m.r.wSeq;
++   struct nvrm_rec_plan p;
++   arm("refusal: the unchanged ring is accepted", nvrm_rec_plan(&m.r, S, NVRM_REC_REPLAY, true, &p) == 0);
++   unsigned iF = 0, iK = 0;
++   for (unsigned i = 0; i < NVRM_REC_RING; i++) {
++      if (m.r.slotSeq[i] == F)
++         iF = i;
++      if (m.r.slotSeq[i] == S + 3)
++         iK = i;
++   }
++   struct nvrm_rec_ring keep = m.r;
++   m.r.slotSeq[iK] = 0;
++   arm("refusal: a kept flush with no record", nvrm_rec_plan(&m.r, S, NVRM_REC_REPLAY, true, &p) != 0);
++   m.r = keep;
++   m.r.slotBeg[iK] = (m.r.slotBeg[iK] + 1) % NVRM_REC_FIFO;
++   arm("refusal: a gap between one flush's end and the next one's start", nvrm_rec_plan(&m.r, S, NVRM_REC_REPLAY, true, &p) != 0);
++   m.r = keep;
++   m.r.slotSeq[(iF + 1) % NVRM_REC_RING] = S + 3;
++   arm("refusal: a sequence number recorded twice", nvrm_rec_plan(&m.r, S, NVRM_REC_REPLAY, true, &p) != 0);
++   m.r = keep;
++   m.r.subPut = (m.r.subPut + 1) % NVRM_REC_FIFO;
++   arm("refusal: the last flush does not end at the last doorbell", nvrm_rec_plan(&m.r, S, NVRM_REC_REPLAY, true, &p) != 0);
++   m.r = keep;
++   arm("refusal: a semaphore above the last flushed number", nvrm_rec_plan(&m.r, F + 1, NVRM_REC_REPLAY, true, &p) != 0);
++   arm("refusal: DROP_ALL needs no record and is accepted even with a record missing",
++       (m.r.slotSeq[iK] = 0, nvrm_rec_plan(&m.r, S, NVRM_REC_DROP_ALL, true, &p) == 0));
++   m.r = keep;
++   /* a ring that holds more than fits after the prologue */
++   struct nvrm_rec_ring big;
++   memset(&big, 0, sizeof(big));
++   big.wSeq = 1;
++   big.slotSeq[0] = 1;
++   big.slotBeg[0] = 5;
++   big.slotPut[0] = 4;   /* wraps the whole FIFO */
++   big.subPut = 4;
++   big.gpPut = 4;
++   arm("refusal: a carry that does not fit the new GPFIFO with the prologue",
++       nvrm_rec_plan(&big, 0, NVRM_REC_REPLAY_ALL, true, &p) != 0);
++}
++
++static void
++test_root(void)
++{
++   struct nvrm_rec_view v[6];
++   memset(v, 0, sizeof(v));
++   for (unsigned i = 0; i < 6; i++) {
++      v[i].valid = true;
++      v[i].semVA = 0x1000 * (i + 1);
++      v[i].sem = 10;
++      v[i].flushed = 20;
++   }
++   arm("root: no acquire pending -> own slot", nvrm_rec_root(v, 6, 2) == 2);
++   v[0].acqVA = v[1].semVA;
++   v[0].acqSeq = 15;
++   arm("root: one hop", nvrm_rec_root(v, 6, 0) == 1);
++   v[1].acqVA = v[2].semVA;
++   v[1].acqSeq = 11;
++   v[2].acqVA = v[3].semVA;
++   v[2].acqSeq = 11;
++   v[3].acqVA = v[4].semVA;
++   v[3].acqSeq = 11;
++   arm("root: four hops", nvrm_rec_root(v, 6, 0) == 4);
++   v[4].acqVA = v[5].semVA;
++   v[4].acqSeq = 11;
++   arm("root: at most four hops", nvrm_rec_root(v, 6, 0) == 4);
++   v[4].acqVA = v[0].semVA;
++   arm("root: a cycle stops the walk", nvrm_rec_root(v, 6, 2) == 1 || nvrm_rec_root(v, 6, 2) == 4 ||
++       nvrm_rec_root(v, 6, 2) == 0);
++   memset(v, 0, sizeof(v));
++   for (unsigned i = 0; i < 6; i++) {
++      v[i].valid = true;
++      v[i].semVA = 0x1000 * (i + 1);
++      v[i].sem = 10;
++   }
++   v[0].acqVA = v[1].semVA;
++   v[0].acqSeq = 10;
++   arm("root: a satisfied acquire stops the walk", nvrm_rec_root(v, 6, 0) == 0);
++   v[0].acqSeq = 11;
++   v[0].changed = true;
++   arm("root: a changed notifier stops the walk", nvrm_rec_root(v, 6, 0) == 0);
++   v[0].changed = false;
++   v[1].valid = false;
++   arm("root: a channel of another device is ignored", nvrm_rec_root(v, 6, 0) == 0);
++   v[1].valid = true;
++   v[0].acqVA = v[0].semVA;
++   arm("root: an acquire on its own semaphore is not followed", nvrm_rec_root(v, 6, 0) == 0);
++}
++
++static void
++test_drops(void)
++{
++   struct nvrm_rec_drops d;
++   memset(&d, 0, sizeof(d));
++   arm("drops: empty has nothing", !nvrm_rec_drops_has(&d, 1));
++   nvrm_rec_drops_add(&d, 5, 7);
++   arm("drops: membership inclusive", nvrm_rec_drops_has(&d, 5) && nvrm_rec_drops_has(&d, 7) &&
++       !nvrm_rec_drops_has(&d, 4) && !nvrm_rec_drops_has(&d, 8));
++   nvrm_rec_drops_add(&d, 9, 8);
++   arm("drops: an empty range is not added", d.n == 1);
++   for (uint64_t k = 0; k < 8; k++)
++      nvrm_rec_drops_add(&d, 100 + 10 * k, 100 + 10 * k);
++   arm("drops: nine ranges keep the newest eight", !nvrm_rec_drops_has(&d, 5) && nvrm_rec_drops_has(&d, 100) &&
++       nvrm_rec_drops_has(&d, 170));
++}
++
++/* ── the order of the rebuild, with fake operations ── */
++struct fake {
++   char log[64];
++   unsigned n;
++   struct nvrm_rec_inputs in;
++   uint64_t sem[2];
++   unsigned semReads;
++   int buildRc, freeRc;
++   struct nvrm_rec_plan adopted;
++};
++
++static void f_note(struct fake *f, char c) { if (f->n < sizeof(f->log) - 1) f->log[f->n++] = c; f->log[f->n] = 0; }
++static void f_inputs(void *u, struct nvrm_rec_inputs *in) { struct fake *f = u; f_note(f, 'i'); *in = f->in; }
++static uint64_t f_sem(void *u) { struct fake *f = u; f_note(f, 's'); uint64_t v = f->sem[f->semReads < 1 ? 0 : 1]; f->semReads++; return v; }
++static int f_build(void *u) { struct fake *f = u; f_note(f, 'b'); return f->buildRc; }
++static void f_discard(void *u) { f_note(u, 'd'); }
++static int f_free(void *u) { struct fake *f = u; f_note(f, 'f'); return f->freeRc; }
++static void f_adopt(void *u, const struct nvrm_rec_ring *r, const struct nvrm_rec_plan *p) { struct fake *f = u; (void)r; f_note(f, 'a'); f->adopted = *p; }
++static void f_start(void *u, const struct nvrm_rec_plan *p) { (void)p; f_note(u, 't'); }
++static const struct nvrm_rec_ops fops = { f_inputs, f_sem, f_build, f_discard, f_free, f_adopt, f_start };
++
++static void
++state_ring(struct nvrm_rec_state *st, uint64_t S, uint64_t F)
++{
++   memset(st, 0, sizeof(*st));
++   /* flushes S+1..F, one entry each, in slots 0.. */
++   uint64_t put = 0;
++   for (uint64_t n = S + 1; n <= F; n++) {
++      const unsigned i = (unsigned)(n - S - 1);
++      st->ring.slotSeq[i] = n;
++      st->ring.slotBeg[i] = put;
++      st->ring.slotPut[i] = ++put;
++   }
++   st->ring.subPut = put;
++   st->ring.gpPut = put + 2;   /* two unflushed */
++   st->ring.wSeq = F;
++   st->havePrologue = true;
++   st->now = 1000000000000ll;
++}
++
++static enum nvrm_rec_why
++run(struct fake *f, const struct nvrm_rec_state *st, enum nvrm_rec_kind *k, enum nvrm_rec_level *lv)
++{
++   struct nvrm_rec_plan p;
++   f->n = 0;
++   f->log[0] = 0;
++   f->semReads = 0;
++   return nvrm_rec_execute(&fops, f, st, k, lv, &p);
++}
++
++static void
++test_execute(void)
++{
++   struct nvrm_rec_state st;
++   struct fake f;
++   enum nvrm_rec_kind k;
++   enum nvrm_rec_level lv;
++   memset(&f, 0, sizeof(f));
++   state_ring(&st, 10, 15);
++   f.in.changed = 1;
++   f.in.xid = 13;
++   f.in.pm = -1;
++   f.sem[0] = 10;
++   f.sem[1] = 11;
++   arm("execute: a channel fault runs inputs, sem, build, free, sem, adopt, start in that order",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "isbfsat") == 0 && k == NVRM_LOSS_CHANNEL &&
++       lv == NVRM_REC_REPLAY);
++   arm("execute: the adopted plan uses the semaphore read after the free",
++       f.adopted.S == 11 && f.adopted.dropLo == 12 && f.adopted.dropHi == 12 && f.adopted.keepLo == 13);
++   f.in.xid = 120;
++   arm("execute: a non-recoverable kind never builds", run(&f, &st, &k, &lv) == NVRM_WHY_KIND && strcmp(f.log, "i") == 0 &&
++       k == NVRM_LOSS_GSP);
++   f.in.xid = 13;
++   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++)
++      st.stamps[i] = st.now - 1000 - i;
++   arm("execute: an exhausted budget never builds", run(&f, &st, &k, &lv) == NVRM_WHY_BUDGET && strcmp(f.log, "i") == 0);
++   memset(st.stamps, 0, sizeof(st.stamps));
++   st.ring.slotSeq[2] = 0;   /* flush 13 lost its record */
++   arm("execute: a refused plan never builds", run(&f, &st, &k, &lv) == NVRM_WHY_PLAN && strcmp(f.log, "is") == 0);
++   state_ring(&st, 10, 15);
++   st.copyOnly = true;
++   st.replayedThrough = 12;
++   arm("execute: a copy-only refault never builds",
++       run(&f, &st, &k, &lv) == NVRM_WHY_COPY_REFAULT && strcmp(f.log, "is") == 0);
++   st.replayedThrough = 10;
++   arm("execute: copy-only replays everything", run(&f, &st, &k, &lv) == NVRM_WHY_OK && lv == NVRM_REC_REPLAY_ALL &&
++       f.adopted.dropLo > f.adopted.dropHi && f.adopted.keepLo == 12);
++   st.copyOnly = false;
++   f.buildRc = -1;
++   arm("execute: a failed build never frees the old channel", run(&f, &st, &k, &lv) == NVRM_WHY_BUILD &&
++       strcmp(f.log, "isb") == 0);
++   f.buildRc = 0;
++   f.freeRc = -1;
++   arm("execute: a failed free discards the new channel and adopts nothing",
++       run(&f, &st, &k, &lv) == NVRM_WHY_FREE && strcmp(f.log, "isbfd") == 0);
++   f.freeRc = 0;
++   st.replayedThrough = 12;
++   arm("execute: DROP_ALL exactly when the semaphore is below the replayed work on a graphics context",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && lv == NVRM_REC_DROP_ALL && f.adopted.dropLo == 12 && f.adopted.dropHi == 15);
++   st.replayedThrough = 10;
++   f.sem[0] = 10;
++   f.sem[1] = 10;
++   arm("execute: REPLAY when the semaphore is at the replayed work", run(&f, &st, &k, &lv) == NVRM_WHY_OK &&
++       lv == NVRM_REC_REPLAY);
++   f.in.changed = 0;
++   f.in.xid = 0;
++   arm("execute: nothing changed and nothing reported is a STALL, and is rebuilt", run(&f, &st, &k, &lv) == NVRM_WHY_OK &&
++       k == NVRM_LOSS_STALL);
++   f.in.changed = 1;
++   f.in.xid = 200;
++   arm("execute: an unknown Xid is not rebuilt", run(&f, &st, &k, &lv) == NVRM_WHY_KIND && k == NVRM_LOSS_UNKNOWN);
++   bool startAfterAdopt = true;
++   f.in.xid = 31;
++   for (unsigned t = 0; t < 4; t++) {
++      run(&f, &st, &k, &lv);
++      const char *a = strchr(f.log, 'a'), *s = strchr(f.log, 't');
++      startAfterAdopt = startAfterAdopt && a != NULL && s == a + 1 && s[1] == 0;
++   }
++   arm("execute: start always directly follows adopt, and nothing follows start", startAfterAdopt);
++}
++
++/* ── controls: the checkers must refuse a damaged result ── */
++static void
++test_controls(void)
++{
++   static const uint32_t pro[2] = { 1, 2 };
++   static struct model m;
++   rng = 777;
++   model_build(&m, 120, 20, true);
++   while (m.r.wSeq - m.S < 5)
++      model_flush(&m, 4);
++   struct nvrm_rec_plan p;
++   struct nvrm_rec_ring out;
++   const bool planned = nvrm_rec_plan(&m.r, m.S, NVRM_REC_REPLAY, true, &p) == 0;
++   nvrm_rec_fill(&m.r, &p, m.fifo, newFifo, pro, &out);
++   arm("control: the undamaged result passes the checker", planned && check_fill(&m, &p, newFifo, &out, pro) == NULL);
++   const uint32_t keep = newFifo[2 * 2];
++   newFifo[2 * 2] ^= 1;
++   arm("control: one carried entry changed is caught", check_fill(&m, &p, newFifo, &out, pro) != NULL);
++   newFifo[2 * 2] = keep;
++   struct nvrm_rec_plan bad = p;
++   bad.keepLo = p.dropLo;   /* a plan that would replay the flush that faulted */
++   arm("control: a plan that keeps the dropped flush is caught", check_fill(&m, &bad, newFifo, &out, pro) != NULL);
++   struct nvrm_rec_ring o2 = out;
++   for (unsigned i = 0; i < NVRM_REC_RING; i++)
++      if (o2.slotSeq[i] == 0) {
++         o2.slotSeq[i] = 3;
++         break;
++      }
++   arm("control: a stale ring slot left in the new ring is caught", check_fill(&m, &p, newFifo, &o2, pro) != NULL);
++   /* a classifier that rebuilt every changed notifier (the rejected rule) would call Xid 120 a channel fault */
++   const struct nvrm_rec_inputs gsp = { 120, 1, -1, 0, 0, 0 };
++   arm("control: the GSP crash is not a channel fault", nvrm_rec_classify(&gsp) != NVRM_LOSS_CHANNEL);
++}
++
++int
++main(void)
++{
++   test_classify();
++   test_budget();
++   test_plan_fill();
++   test_plan_refusals();
++   test_root();
++   test_drops();
++   test_execute();
++   test_controls();
++   printf("%u ok, %u failed\n", oks, fails);
++   return fails ? 1 : 0;
++}
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
+index 61b65ab..f6d421b 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_sync.c
+@@ -5,6 +5,7 @@
+ #include "vk_log.h"
+ #include "nvk_device.h"
+ #include "nvRmSemSurf.h"
++#include "vk_fence.h"
+ #include "util/os_time.h" // G-SUB: vk_sync absolute timeouts are on os_time_get_nano
+ #include <string.h>
+ 
+@@ -239,6 +240,11 @@ nvrm_gsub_reap(struct nvkmd_nvrm_sync *s)
+       if (nvkmd_nvrm_seq_done(p.slot, p.gen, p.seq)) {
+          if (p.value > s->value)
+             s->value = p.value;
++         /* a channel rebuild dropped the submission: it is done, and it did not run */
++         if (nvrm_gsub_is_binary(s) && __atomic_load_n(&nvrm_rec_dropped_total, __ATOMIC_ACQUIRE) != 0 &&
++             nvkmd_nvrm_slots[p.slot].ctx != NULL && nvkmd_nvrm_slots[p.slot].gen == p.gen &&
++             nvrm_rec_drops_has(&nvkmd_nvrm_slots[p.slot].drops, p.seq))
++            s->dropped = true;
+       } else {
+          s->pend[k++] = p;
+       }
+@@ -253,6 +259,7 @@ nvrm_gsub_sync_init(struct vk_device *device, struct vk_sync *vs, uint64_t initi
+    s->sem = NULL;
+    s->index = 0;
+    s->npend = 0;
++   s->dropped = false;
+    s->value = nvrm_gsub_is_binary(s) ? initial_value != 0 : initial_value;
+    s->pending = s->value;
+    return VK_SUCCESS;
+@@ -269,6 +276,7 @@ nvkmd_nvrm_sync_add_pending(struct vk_sync *vs, uint64_t value, uint32_t slot, u
+    if (nvrm_gsub_is_binary(s)) {
+       s->value = 0;   // a binary signal replaces the payload: unsignalled until this submission completes
+       s->npend = 0;
++      s->dropped = false;
+       value = 1;
+    } else {
+       nvrm_gsub_reap(s);
+@@ -328,6 +336,7 @@ nvrm_gsub_sync_reset(struct vk_device *device, struct vk_sync *vs)
+    s->value = 0;
+    s->pending = 0;
+    s->npend = 0;
++   s->dropped = false;
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+    return VK_SUCCESS;
+ }
+@@ -341,25 +350,30 @@ nvrm_gsub_sync_move(struct vk_device *device, struct vk_sync *dst, struct vk_syn
+    d->pending = s->pending;
+    d->npend = s->npend;
+    memcpy(d->pend, s->pend, sizeof(s->pend[0]) * s->npend);
++   d->dropped = s->dropped;
+    s->value = 0;
+    s->pending = 0;
+    s->npend = 0;
++   s->dropped = false;
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+    return VK_SUCCESS;
+ }
+ 
+ /* The wait: each pass reaps every sync under the lock and sums the semaphores of the channels it still needs.
+- * A changed error notifier = DEVICE_LOST at once; those semaphores standing still for NVRM_FLUSH_TIMEOUT_MS =
+- * DEVICE_LOST with the old diagnostic; a wait on a CPU signal or an unsubmitted value has only abs_timeout. */
++ * A changed error notifier, or those semaphores standing still for NVRM_FLUSH_TIMEOUT_MS, go to the channel rebuild
++ * (nvkmd_nvrm_slot_health, nvkmd_nvrm_slot_stalled), whose 2.9 verdict, DEVICE_LOST, is returned as it comes; a wait
++ * on a CPU signal or an unsubmitted value has only abs_timeout. The stall clock runs on awake time (nvrm_rec_now_ns) and
++ * restarts when a channel was rebuilt (its epoch is part of the sum); abs_timeout stays on os_time_get_nano. At half
++ * the budget the doorbell of the channel the wait is blocked on is rung again. */
+ static VkResult
+ nvrm_gsub_wait(uint32_t n, const struct vk_sync_wait *waits, enum vk_sync_wait_flags flags,
+                uint64_t abs_timeout_ns, struct vk_object_base *log_obj)
+ {
+    const bool any = flags & VK_SYNC_WAIT_ANY, pending = flags & VK_SYNC_WAIT_PENDING;
+    const int64_t t0 = os_time_get_nano(), budget = nvkmd_nvrm_flush_timeout_ms() * 1000000LL;
+-   int64_t tp = t0;
++   int64_t tp = nvrm_rec_now_ns();
+    uint64_t lastSum = 0;
+-   bool seen = false;
++   bool seen = false, kicked = false;
+    nvkmd_nvrm_gsub_count(NVRM_GS_WAITS);
+    for (;;) {
+       uint32_t done = 0, nh = 0, hslot[8], hgen[8];
+@@ -394,7 +408,7 @@ nvrm_gsub_wait(uint32_t n, const struct vk_sync_wait *waits, enum vk_sync_wait_f
+       for (unsigned h = 0; h < nh; h++) {
+          const struct nvkmd_nvrm_slot *sl = &nvkmd_nvrm_slots[hslot[h]];
+          if (sl->ctx != NULL && sl->gen == hgen[h])
+-            sum += __atomic_load_n(sl->sem, __ATOMIC_ACQUIRE);
++            sum += __atomic_load_n(sl->sem, __ATOMIC_ACQUIRE) + ((uint64_t)sl->epoch << 40);
+       }
+       pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+       if (any ? (done > 0 || n == 0) : done == n) {
+@@ -417,15 +431,21 @@ nvrm_gsub_wait(uint32_t n, const struct vk_sync_wait *waits, enum vk_sync_wait_f
+          if (r != VK_SUCCESS)
+             return r;
+       }
++      const int64_t ta = nvrm_rec_now_ns();
+       if (nh == 0 || !seen || sum != lastSum) {
+          seen = nh != 0;
+          lastSum = sum;
+-         tp = t;
+-      } else if (t - tp > budget) {
+-         VkResult r = nvkmd_nvrm_slot_stalled(hslot[0], hgen[0], hseq[0], (long)((t - tp) / 1000000), log_obj);
++         tp = ta;
++         kicked = false;
++      } else if (ta - tp > budget) {
++         VkResult r = nvkmd_nvrm_slot_stalled(hslot[0], hgen[0], hseq[0], (long)((ta - tp) / 1000000), log_obj);
+          if (r != VK_SUCCESS)
+             return r;
+-         tp = t;
++         tp = ta;
++         kicked = false;
++      } else if (!kicked && ta - tp > budget / 2) {
++         kicked = true;
++         nvkmd_nvrm_slot_kick(hslot[0], hgen[0], log_obj);
+       }
+       /* b73: a polling step or a sleep on the completion event; remain (t < abs_timeout_ns here) keeps an
+        * application's sleep inside its deadline */
+@@ -540,3 +560,26 @@ nvkmd_nvrm_sync_get_type(struct nvkmd_nvrm_pdev *pdev)
+    }
+    return type;
+ }
++
++/* The plugin asks, for a fence whose wait succeeded, whether its submission ran (nvkmd.h). No lock and no lookup while
++ * nothing was ever dropped in this process. */
++__attribute__((visibility("default"))) int
++nvmtl_nvk_fence_dropped_v1(VkDevice device, VkFence fence)
++{
++   (void)device;
++   if (__atomic_load_n(&nvrm_rec_dropped_total, __ATOMIC_ACQUIRE) == 0)
++      return 0;
++   VK_FROM_HANDLE(vk_fence, f, fence);
++   if (f == NULL)
++      return -1;
++   struct nvkmd_nvrm_sync *s = vk_sync_as_nvkmd_nvrm_sync(vk_fence_get_active_sync(f));
++   if (s == NULL)
++      return -1;
++   pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++   nvrm_gsub_reap(s);
++   const bool dropped = s->dropped;
++   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   if (dropped)
++      nvrm_rec_count_fence_dropped();
++   return dropped ? 1 : 0;
++}
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h
+new file mode 100644
+index 0000000..24c2614
+--- /dev/null
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h
+@@ -0,0 +1,70 @@
++/*
++ * NullMoth NVIDIA driver for macOS
++ * Copyright (c) 2026 NullMoth Systems.
++ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
++ */
++
++/* nvrm_chan_note_abi.h - the channel note: NVK tells NVRM.kext what it did about a faulted or stalled channel, and
++ * learns the adapter's power state and the RM's Xid count in the same call.
++ *
++ * When a channel of a process faults, NVK rebuilds it instead of losing the device. The kext takes no part in the
++ * rebuild; it only keeps machine-wide read-only counters (debug.nvrm_chan_*, debug.nvrm_xid_*) so one place shows
++ * what every process did, and answers whether the GPU is running, asleep or lost, which decides whether a rebuild
++ * is worth trying. The escape carries fixed-size counters from an unprivileged process and nothing else: no pointer,
++ * bounded increments. A process can make the counters lie; nothing acts on them.
++ *
++ * Shared by the kext (C++) and NVK (C, a byte-identical copy that its patch adds as nvkmd/nvrm/nvrm_chan_note_abi.h;
++ * tools/test_shared_headers.py compares the two). Plain C, stdint only.
++ *
++ * A kext without the escape passes 0xE8 to the RM, which rejects an unknown command: the call fails, `status` stays 0,
++ * and the caller treats the power state as unknown and stops asking. No user-client selector and no capability bit. */
++#pragma once
++#include <stdint.h>
++/* Private escape through user-client selector 1. 0xE2 and 0xE3 are nvrm_surfshare_abi.h; the RM's own escapes are
++ * 0x27-0x5F and 0xC8-0xDB. */
++#define NVRM_ESC_CHAN_NOTE      0xE8u
++#define NVRM_CHAN_NOTE_VERSION  1u
++enum { NVRM_CN_QUERY = 0, NVRM_CN_KICK = 1, NVRM_CN_RECOVERED = 2, NVRM_CN_GAVE_UP = 3, NVRM_CN_INJECTED = 4,
++       NVRM_CN_WHAT_COUNT = 5 };
++enum { NVRM_CN_PM_RUNNING = 0, NVRM_CN_PM_SUSPENDED = 1, NVRM_CN_PM_LOST = 2 };   /* == NVRM::kGpuPm* */
++#define NVRM_CN_OK 1u
++struct NVRMChanNoteEsc {
++   uint32_t version;    /* in   NVRM_CHAN_NOTE_VERSION                                   offset  0 */
++   uint32_t what;       /* in   NVRM_CN_*                                                offset  4 */
++   uint32_t xid;        /* in   error-notifier info32, 0 = none (stall)                  offset  8 */
++   uint32_t dropped;    /* in   flushes not executed (RECOVERED), else 0                 offset 12 */
++   uint32_t kind;       /* in   enum nvrm_rec_kind (RECOVERED, GAVE_UP), else 0          offset 16 */
++   uint32_t why;        /* in   enum nvrm_rec_why (GAVE_UP), else 0                      offset 20 */
++   uint32_t pm;         /* out  NVRM_CN_PM_* of the adapter behind this connection       offset 24 */
++   uint32_t status;     /* out  NVRM_CN_OK when the kext handled it; the caller sends 0  offset 28 */
++   uint64_t xidCount;   /* out  debug.nvrm_xid_count                                     offset 32 */
++   uint32_t xidLast;    /* out  debug.nvrm_xid_last                                      offset 40 */
++   uint32_t reserved;   /* 0                                                             offset 44 */
++};                      /* 48 bytes, no padding */
++#ifdef __cplusplus
++static_assert(sizeof(struct NVRMChanNoteEsc) == 48, "NVRMChanNoteEsc is wire ABI");
++#else
++_Static_assert(sizeof(struct NVRMChanNoteEsc) == 48, "NVRMChanNoteEsc is wire ABI");
++#endif
++#ifdef KERNEL
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* The RM logged an Xid. ANY context: it is called from the RM's error log hook with RM locks held and possibly with
++ * preemption off, so it does two atomic stores and nothing else: no IOLock, no allocation, no IOLog, no wakeup.
++ * Safe before nvrm_chan_note_sysctls() and at any time until the kext unloads. */
++void nvrm_chan_note_xid(uint32_t xid);
++/* The escape's body, from the user client's escape switch on the caller's thread. `e` is the kernel's copy of the
++ * record and the caller has checked that the escape's size is exactly sizeof(struct NVRMChanNoteEsc); `pm` is the
++ * adapter's power state as NVRM_CN_PM_*. For an unknown version or `what` it leaves `status` 0 and writes nothing;
++ * otherwise it counts by `what` (bounded), fills pm, xidCount, xidLast and sets status NVRM_CN_OK. Atomics only: no
++ * lock, no RM call, never sleeps. The caller answers kIOReturnSuccess either way; the record is copied back as for
++ * every escape. */
++void nvrm_chan_note_handle(struct NVRMChanNoteEsc *e, uint32_t pm);
++/* Registers the read-only sysctls. Thread context, from the kext's sysctl registration block; a second call does
++ * nothing. They stay registered until the kext unloads. */
++void nvrm_chan_note_sysctls(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
