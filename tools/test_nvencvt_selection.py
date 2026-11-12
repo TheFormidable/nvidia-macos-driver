@@ -5,7 +5,8 @@ Ada had no hardware encoder and no VP9 or AV1 decoder because the library regist
 nvrm610.conf; and Safari, QuickTime and FaceTime, which decode inside VTDecoderXPCService, never saw it because that
 process registered only the built-in decoders. On Blackwell (RTX 50) the library is asked for in that one process and
 nowhere else: there the built-in H.264 decoder's picture comes out green, and the library registers its own only after
-the card has decoded its test streams (tools/test_nvencvt_blackwell.py holds that part). The selection function is
+the card has decoded its test streams (tools/test_nvencvt_blackwell.py holds that part). A library built before that
+test existed is refused on Blackwell: the plugin looks up the marker a tested build exports. The selection function is
 compiled out of the plugin source and run on a table; the decode service's wiring is checked in the text around it.
 
 usage: test_nvencvt_selection.py [repo root]"""
@@ -76,6 +77,12 @@ if sel and cc:
 reg = function('static void nvmtl_nvencvt_register(')
 svc = function('static void nvmtl_nvdec_in_decode_service(')
 check('the registrar can register decoders alone', reg is not None and 'NVEncVT_RegisterDecoders' in reg)
+# On Blackwell the library is asked for by default, which is only right beside a build that tests its decoder on the
+# card before it registers; an older libnvencvt.dylib registered it untested. Such a build exports no marker.
+check('on Blackwell the registrar refuses a library without the decode self-test, before it looks up an entry point',
+      reg is not None and 'dlsym(h, "NVEncVT_BlackwellSelfTest")' in reg and 'nvmtl_gen_is(gen, "Blackwell")' in reg
+      and reg.index('dlopen(path') < reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")') < reg.index('dlsym(h, entry)')
+      and 'REFUSED' in reg[reg.index('dlsym(h, "NVEncVT_BlackwellSelfTest")'):reg.index('dlsym(h, entry)')])
 check('the decode service asks for libnvencvt after the built-in decoders',
       svc is not None and 'nvmtl_nvencvt_register(true)' in svc
       and svc.index('nvmtl_nvdec_hevc_register()') < svc.index('nvmtl_nvencvt_register(true)'))

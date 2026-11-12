@@ -15,7 +15,8 @@ them changes, and stops the build when it fails. This checks:
     an allowed name; 2 for a tree without the headers;
   * the build script, run here with stand-ins for the build Mac's ssh, rsync and compiler: it compares before it
     compiles; a difference, or a tree the tool cannot read, stops it with exit 3 before the compiler runs; it takes the
-    second tree when the first is not there; with no tree, or a revision without the tool, it says so and builds;
+    second tree when the first is not there; with no tree, or a revision without the tool, it says so and builds; a
+    library whose exports are not the four entry points and the marker of the Blackwell self-test stops it;
   * when the real trees are on this machine ($NVENCVT_HEADERS/ogkm, and $NM_OGKM620 or $NM_OGKM620_PRISTINE), the real
     comparison: nothing differs outside the allowed names, and (control) with every name compared the two do differ.
 
@@ -162,7 +163,9 @@ with tempfile.TemporaryDirectory(prefix='nmabi-') as d:
             'curl': 'echo "curl must not run here" >&2; exit 97',
             'xcrun': 'echo "the compiler runs"; : > ../out/libnvencvt.dylib',
             'vtool': 'echo "    minos 15.0"',
-            'nm': 'for s in NVDecVT_CreateInstance NVEncVT_CreateInstance NVEncVT_Register NVEncVT_RegisterDecoders; do echo "0000000000001000 T _$s"; done',
+            # what the library exports: the five symbols of a good build, or what $STUB_EXPORTS says
+            'nm': 'for s in ${STUB_EXPORTS:-NVDecVT_CreateInstance NVEncVT_BlackwellSelfTest NVEncVT_CreateInstance NVEncVT_Register '
+                  'NVEncVT_RegisterDecoders}; do echo "0000000000001000 T _$s"; done',
             'shasum': 'echo "0123456789abcdef  $3"',
         }
         for name, body in STUBS.items():
@@ -229,6 +232,12 @@ with tempfile.TemporaryDirectory(prefix='nmabi-') as d:
         tree(other, [GREW])
         rc, out = build(first=[], extra={'NM_OGKM620': str(other)})
         check('$NM_OGKM620 names the tree, as in the release build', rc == 3 and str(other) in out and not compiled(out), out[-500:])
+        entry = 'NVDecVT_CreateInstance NVEncVT_CreateInstance NVEncVT_Register NVEncVT_RegisterDecoders'
+        rc, out = build(first=[], extra={'STUB_EXPORTS': entry})
+        check('a library without the marker of the Blackwell self-test is not a build: the script stops and shows the exports',
+              rc == 1 and 'STOP: exports are [' in out and 'libnvencvt ' not in out.split('\n')[-2], out[-300:])
+        rc, out = build(first=[], extra={'STUB_EXPORTS': 'NVDecVT_CreateInstance NVEncVT_BlackwellSelfTest NVEncVT_CreateInstance NVEncVT_Other NVEncVT_Register NVEncVT_RegisterDecoders'})
+        check('nor is one that lets another symbol out', rc == 1 and 'STOP: exports are [' in out, out[-300:])
         check('the script compares before the compile line and stops with its own exit code',
               0 < text.find('tools/nvencvt_header_abi.py --source') < text.find('xcrun clang') and 'exit 3' in text)
 

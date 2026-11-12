@@ -56,6 +56,10 @@ Changes made here, in this order of importance:
                    same bytes (H.264 decoding is exact by specification), not of this library;
                  - vt/nvencvt.c: NVEncVT_Register and NVEncVT_RegisterDecoders return kVTCouldNotFindVideoDecoderErr and
                    register nothing on Blackwell until that test has passed in the process.
+                   NVEncVT_BlackwellSelfTest, an exported constant, marks a build that does this: the plugin looks it up
+                   and leaves a library without it alone on Blackwell, so that a newer plugin beside an older library
+                   cannot put the untested decoder into the decode service. build/build_nvencvt.sh lists it among the
+                   five symbols the library may export.
 
 Where upstream's own facts come from (read before calling this library clean of NVIDIA's closed driver): the decoders'
 picture setups are open-gpu-doc's nvdec_drv.h. The ENCODERS' per-picture control blocks (src/h264enctmpl.h,

@@ -315,6 +315,19 @@ check('it decodes with the entry points a VideoToolbox session uses',
                              'h264dec_release(', 'h264dec_close(')))
 check('it reports the layout a plane would have been right in and never changes how the decoder reads',
       'gob_untile_plane(' in kat and not re.search(r'gob[YC]\s*=[^=]', kat))
+# The plugin asks for the library on Blackwell by default (in the decode service), which is only right beside a build
+# that has the gate above. The build says so with one exported marker, and the plugin refuses a library without it on
+# Blackwell (tools/test_nvencvt_selection.py holds the plugin's side).
+MARKER = '__attribute__((visibility("default"))) const int NVEncVT_BlackwellSelfTest = 1;'
+exported = sorted('_' + m for f in sorted(V.rglob('*.c'))
+                  for m in re.findall(r'(?m)^__attribute__\(\(visibility\("default"\)\)\)[^;{(=]*?(\w+)\s*[(=]', f.read_text(errors='ignore')))
+build = (root / 'build/build_nvencvt.sh').read_text()
+want = re.search(r'(?m)^want="([^"]*)"', build)
+check('a build with the gate says so: it exports a marker for the plugin to look up',
+      vt.count(MARKER) == 1 and proven is not None and vt.index(proven) < vt.index(MARKER) < vt.index(regenc or MARKER))
+check('the build holds the library to exactly the symbols the source exports, the marker among them',
+      want is not None and want.group(1).split() == exported and '_NVEncVT_BlackwellSelfTest' in exported and len(exported) == 5,
+      ' '.join(exported))
 TABLE = r'''
 #include <stdbool.h>
 #include <stddef.h>
