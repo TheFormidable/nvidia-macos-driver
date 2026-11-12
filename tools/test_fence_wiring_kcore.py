@@ -13,7 +13,9 @@ is right in one place only; what is asserted on the source text:
 - go() starts the fence once per GPU, after the adapter is up and after the power manager; stop() and shutdownFull()
   stop it as their first step after the power manager, only for a GPU whose start reached it, once;
 - gpuSuspend tells it right after the power manager, before the user channels stop; gpuResume tells it after the
-  power manager and the RC timer are resumed, RESUMED or LOST, and only when the suspend did;
+  power manager and the RC timer are resumed, RESUMED or LOST, and only when the suspend did; a GPU that stops while
+  it is suspended never resumes, so stop() gives that answer itself, right before it stops the fence (the fence
+  refuses new holds, for every card, until each SUSPENDING has had its answer); nothing else tells it about power;
 - a closing client's fence owner is handed back after the one-winner test and BEFORE the RM frees the client's
   channels; the owner word is never written by NVRM.cpp;
 - the kick follows rm_isr in the interrupt action (whatever it answered) and rm_isr_bh in the bottom half, which both
@@ -33,6 +35,9 @@ ROWS_29 = ["{ sGo, 1, 0, 0, 0 }", "{ sEsc, 1, kIOUCVariableStructureSize, 0, kIO
            "{ sWaitEvent, 2, 0, 1, 0 }", "{ sCaps, 0, 0, 1, 0 }", "{ sForgetToken, 1, 0, 0, 0 }"]
 STARTED_ON = r"OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&\s*fFenceStarted\s*\)"
 STARTED_OFF = r"OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&\s*(?:s\s*->\s*)?fFenceStarted\s*\)"
+ASLEEP_OFF = r"OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&\s*fFenceAsleep\s*\)"
+# stop()'s answer for a GPU that stops while it is suspended: the one statement allowed between the test and the stop
+ANSWER = r"if\s*\(\s*" + ASLEEP_OFF + r"\s*\)\s*nvrm_fence_pm\s*\(\s*NVRM_FENCE_PM_RESUMED\s*\)\s*;"
 
 
 def code_only(text):
@@ -122,10 +127,12 @@ def order(text, patterns):
     return True
 
 
-def guarded(text, call, guard):
-    """Every `call(` in text is the statement of an `if (guard)` (and there is at least one)."""
+def guarded(text, call, guard, first=None):
+    """Every `call(` in text is the statement of an `if (guard)`, or (when `first` is given) the second of the two
+    statements of its block, the first being exactly `first`; and there is at least one."""
     calls = re.findall(r"\b" + call + r"\s*\(", text)
-    good = re.findall(r"if\s*\(\s*" + guard + r"\s*\)\s*" + call + r"\s*\(", text)
+    block = r"(?:\{\s*" + first + r"\s*)?" if first else ""
+    good = re.findall(r"if\s*\(\s*" + guard + r"\s*\)\s*" + block + call + r"\s*\(", text)
     return len(calls) >= 1 and len(calls) == len(good)
 
 
@@ -171,15 +178,21 @@ def arms(src, header):
         order(go, [r"\brm_init_adapter\s*\(", r"\bnvrm_power_start\s*\(\s*&fNv\s*\)\s*;", r"if\s*\(\s*" + STARTED_ON + r"\s*\)\s*nvrm_fence_start\s*\(\s*\)\s*;"])
         and len(re.findall(r"\bnvrm_fence_start\s*\(", code)) == 1)
 
-    st = statements(body(code, "NVRM::stop"))
+    stop = body(code, "NVRM::stop")
+    st = statements(stop)
+    # the second statement is the one-winner test with a block of two statements: (what comes first) nvrm_fence_stop();
+    blk = re.fullmatch(r"if \( ?" + STARTED_OFF + r" ?\) \{ (.*) nvrm_fence_stop\(\); \}", st[1]) if len(st) > 1 else None
     arm("stop(): the fence is stopped by the second statement, right after nvrm_power_stop(), only where it was started",
-        len(st) > 1 and st[0] == "nvrm_power_stop();" and re.fullmatch(r"if \( ?" + STARTED_OFF + r" ?\) nvrm_fence_stop\(\);", st[1]) is not None)
+        blk is not None and st[0] == "nvrm_power_stop();" and ";" not in blk.group(1)[:-1] and "nvrm_fence_stop" not in blk.group(1))
+    arm("stop(): a GPU that stops while suspended answers its SUSPENDING with RESUMED, one winner, right before the fence is stopped",
+        blk is not None and re.fullmatch(ANSWER, blk.group(1)) is not None
+        and len(re.findall(r"\bnvrm_fence_pm\s*\(", stop)) == 1)
     sf = statements(body(code, "NVRM::shutdownFull"))
     arm("shutdownFull(): the fence is stopped first (after taking the object), only where it was started",
         len(sf) > 1 and re.fullmatch(r"NVRM \*s = \(NVRM \*\)p0;", sf[0]) is not None
         and re.fullmatch(r"if \( ?" + STARTED_OFF + r" ?\) nvrm_fence_stop\(\);", sf[1]) is not None)
     arm("every nvrm_fence_stop() is behind the one-winner test of the per-GPU flag (one stop per started GPU)",
-        guarded(code, "nvrm_fence_stop", STARTED_OFF)
+        guarded(code, "nvrm_fence_stop", STARTED_OFF, first=ANSWER)
         and not re.search(r"\bfFenceStarted\s*(?:=(?!=)|\+\+|--|\+=|-=)", code.replace("volatile UInt32 fFenceStarted = 0;", "")))
 
     sus = body(code, "NVRM::gpuSuspend")
@@ -193,7 +206,11 @@ def arms(src, header):
         order(res, [r"\brm_power_management\s*\(", r"if\s*\(\s*ok\s*\)\s*nvrm_power_resume\s*\(\s*\)\s*;",
                     r"if\s*\(\s*ok\s*\)\s*nv_xnu_rc_resume\s*\(\s*&fNv\s*\)\s*;",
                     r"if\s*\(\s*OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&\s*fFenceAsleep\s*\)\s*\)\s*nvrm_fence_pm\s*\(\s*ok\s*\?\s*NVRM_FENCE_PM_RESUMED\s*:\s*NVRM_FENCE_PM_LOST\s*\)\s*;"])
-        and len(re.findall(r"\bnvrm_fence_pm\s*\(", res)) == 1 and len(re.findall(r"\bnvrm_fence_pm\s*\(", code)) == 2)
+        and len(re.findall(r"\bnvrm_fence_pm\s*\(", res)) == 1)
+    arm("the fence is told about power in three places only: gpuSuspend, gpuResume, and the answer stop() gives",
+        len(re.findall(r"\bnvrm_fence_pm\s*\(", code)) == 3
+        and all(len(re.findall(r"\bnvrm_fence_pm\s*\(", b)) == 1 for b in (sus, res, stop))
+        and not re.search(r"\bfFenceAsleep\s*(?:=(?!=)|\+\+|--|\+=|-=)", code.replace("volatile UInt32 fFenceAsleep = 0;", "")))
 
     cc = body(code, "NVRMUserClient::clientClose")
     arm("clientClose: the fence owner is handed back after the one-winner test and BEFORE the RM frees the client's channels",
@@ -234,7 +251,10 @@ ROW12 = "        { sFence, 0, sizeof(struct NVRMFenceReq), 0, sizeof(struct NVRM
 OPS = ("    if (fn && p1 && fn->isEqualTo(NVRM_FENCE_FN_OPS))\n"
        "        return nvrm_fence_kernel_ops((struct NVRMFenceKernelOps *)p1) ? kIOReturnSuccess : kIOReturnUnsupported;\n")
 START = "        if (OSCompareAndSwap(0, 1, &fFenceStarted)) nvrm_fence_start();\n"
-STOP = "    if (OSCompareAndSwap(1, 0, &fFenceStarted)) nvrm_fence_stop();\n"
+STOP_IF = "    if (OSCompareAndSwap(1, 0, &fFenceStarted)) {\n"
+STOP_ANSWER = "        if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);\n"
+STOP_CALL = "        nvrm_fence_stop();\n"
+STOP = STOP_IF + STOP_ANSWER + STOP_CALL + "    }\n"
 STOP_S = "    if (OSCompareAndSwap(1, 0, &s->fFenceStarted)) nvrm_fence_stop();\n"
 SUSPEND = "    if (fFenceStarted && OSCompareAndSwap(0, 1, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_SUSPENDING);\n"
 RESUME = "    if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST);\n"
@@ -257,6 +277,15 @@ CONTROLS = [
     ("fence started without the flag", "go() starts the fence", lambda s: broken(s, START, "        nvrm_fence_start();\n")),
     ("stop(): fence stopped late", "stop(): the fence is stopped",
      lambda s: broken(broken(s, STOP, ""), "    if (fPmJoined) { PMstop(); fPmJoined = false; }\n", "    if (fPmJoined) { PMstop(); fPmJoined = false; }\n" + STOP)),
+    ("stop(): something else between the test and the stop", "stop(): the fence is stopped",
+     lambda s: broken(s, STOP_ANSWER + STOP_CALL, STOP_ANSWER + "        notifyFramebuffers(0);\n" + STOP_CALL)),
+    ("stop(): a suspend left without its answer", "stop(): a GPU that stops while suspended", lambda s: broken(s, STOP_ANSWER, "")),
+    ("stop(): the answer comes after the fence is stopped", "stop(): a GPU that stops while suspended",
+     lambda s: broken(s, STOP_ANSWER + STOP_CALL, STOP_CALL + STOP_ANSWER)),
+    ("stop(): the answer says LOST, which turns the fence off for every card", "stop(): a GPU that stops while suspended",
+     lambda s: broken(s, STOP_ANSWER, STOP_ANSWER.replace("NVRM_FENCE_PM_RESUMED", "NVRM_FENCE_PM_LOST"))),
+    ("stop(): the answer given whether or not a suspend is open", "stop(): a GPU that stops while suspended",
+     lambda s: broken(s, STOP_ANSWER, "        nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);\n")),
     ("shutdownFull(): fence not stopped", "shutdownFull(): the fence is stopped", lambda s: broken(s, STOP_S, "")),
     ("an unguarded stop", "every nvrm_fence_stop()", lambda s: broken(s, STOP_S, "    nvrm_fence_stop();\n")),
     ("the flag written outside the one-winner test", "every nvrm_fence_stop()", lambda s: broken(s, STOP, STOP + "    fFenceStarted = 0;\n")),
@@ -266,6 +295,10 @@ CONTROLS = [
     ("resume always says RESUMED", "gpuResume: after", lambda s: broken(s, "ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST", "NVRM_FENCE_PM_RESUMED")),
     ("resume tells the fence before the RC timer", "gpuResume: after",
      lambda s: broken(broken(s, RESUME, ""), "    if (ok) nv_xnu_rc_resume(&fNv);\n", RESUME + "    if (ok) nv_xnu_rc_resume(&fNv);\n")),
+    ("the fence told about power somewhere else", "the fence is told about power in three places only",
+     lambda s: broken(s, "    s->gpuSuspend();\n", "    s->gpuSuspend();\n    nvrm_fence_pm(NVRM_FENCE_PM_LOST);\n")),
+    ("the asleep flag written outside its one-winner tests", "the fence is told about power in three places only",
+     lambda s: broken(s, RESUME, RESUME + "    fFenceAsleep = 0;\n")),
     ("owner handed back after the RM cleanup", "clientClose: the fence owner",
      lambda s: broken(broken(s, GONE, ""), CLEANUP, CLEANUP + GONE)),
     ("free() hands the owner back every time", "free(): a client", lambda s: broken(s, "    if (OSCompareAndSwap(0, 1, &fCleaned)) nvrm_fence_owner_gone(fFenceOwner);\n", "    nvrm_fence_owner_gone(fFenceOwner);\n")),
