@@ -931,14 +931,16 @@ def fetch_problems(sb, commits):
     for f in ("CMBaseObjectSPI.h", "VTVideoDecoderSPI.h"):
         if not any(f"raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/" in l and f in l for l in curls):
             p.append(f"{f} not downloaded from the pinned URL")
-    pristine = sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06/version.mk"
+    pristine = sb.work / "build/ogkm620/open-gpu-kernel-modules-620.70.06/version.mk"
     if not pristine.exists() or "620.70.06" not in pristine.read_text():
         p.append("the 620.70.06 tree was not exported")
-    mesa = sb.work / "build/build/gpu-src/mesa"
+    mesa = sb.work / "build/gpu-src/mesa"
     if not mesa.is_dir() or git("rev-parse", "HEAD", cwd=mesa, check_rc=False) != commits["MESA"]:
         p.append("the Mesa clone is not at the pinned commit")
     if not any(l.startswith("cargo fetch --locked") for l in j):
         p.append("the translator's crates were not fetched (cargo fetch --locked)")
+    if (sb.work / "build/build").exists():
+        p.append("the trees are laid out in <work>/build/build (NULLMOTH_BUILD_ROOT one folder too deep)")
     return p, out
 
 
@@ -946,6 +948,9 @@ def arm_fetch(sb, commits):
     with sb.scratch():
         sb.break_script('fetch -q --depth 1 "$url" "+refs/tags/$ref:refs/tags/$ref"', 'fetch -q --depth 1 "$url" "+refs/heads/main:refs/tags/$ref"')
         negative("fetch that asks for a branch instead of the pinned tag", fetch_problems(sb, commits)[0])
+    with sb.scratch():
+        sb.break_script("R=${NULLMOTH_BUILD_ROOT:-$W}", "R=${NULLMOTH_BUILD_ROOT:-$W/build}")
+        negative("NULLMOTH_BUILD_ROOT=<work>/build (the trees in <work>/build/build, as before)", fetch_problems(sb, commits)[0])
     p, out = fetch_problems(sb, commits)
     check("fetch asks for every pinned ref at its pinned URL, verifies and lays out the sources", not p, (p, out[-1200:]))
     sb.clear()
@@ -962,7 +967,7 @@ def tamper_problems(sb, extra=None, what="620.70.06"):
         p.append("a tampered source was accepted (exit 0)")
     if "the pin is" not in out:
         p.append("no message naming the pin")
-    if what == "620.70.06" and (sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06").exists():
+    if what == "620.70.06" and (sb.work / "build/ogkm620/open-gpu-kernel-modules-620.70.06").exists():
         p.append("the tampered tree was exported anyway")
     if what == "webkit" and (sb.work / "src/webkit-spi/CMBaseObjectSPI.h").exists():
         p.append("the tampered header was kept")
@@ -1644,6 +1649,24 @@ def arm_clean(mac):
         check("clean all --yes leaves only the marker", rc == 0 and left == [".nullmoth-build-workdir"], left)
         p = outside_problems(mac)
         check("clean never deletes outside the working directory (NULLMOTH_BUILD_ROOT elsewhere)", not p, p)
+
+        def old_layout_problems(s, extra=None):
+            old = s.work / "build/build/ogkm620/x"
+            old.parent.mkdir(parents=True, exist_ok=True)
+            old.write_text("x")
+            rc, out = s.run("clean", extra=extra)
+            gone = not (s.work / "build/build").exists()
+            if extra:   # a NULLMOTH_BUILD_ROOT the tester set: their folder, kept
+                return [] if not gone and rc == 0 else [f"clean deleted <work>/build/build although NULLMOTH_BUILD_ROOT names it (exit {rc})"]
+            return [] if gone and rc == 0 else [f"clean left the old <work>/build/build (exit {rc}): {out[-200:]}"]
+        p = old_layout_problems(mac)
+        check("clean deletes the <work>/build/build an earlier build.sh left", not p, p)
+        p = old_layout_problems(mac, {"NULLMOTH_BUILD_ROOT": str(mac.work / "build")})
+        check("clean keeps <work>/build/build when NULLMOTH_BUILD_ROOT is <work>/build", not p, p)
+        # the scratch above puts build.sh back when it ends
+        mac.break_script("    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\"\n             old_layout_rm ;;",
+                         "    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\" ;;")
+        negative("clean that leaves the old <work>/build/build", old_layout_problems(mac))
         other = mac.home / "notours"
         other.mkdir()
         (other / "keep").write_text("x")

@@ -53,6 +53,11 @@ Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio 
 `~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`.
 
+Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
+eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
+los ponía en `<directorio de trabajo>/build/build/...`; esa carpeta ya no se usa y `./build.sh clean` la borra. Detalles en
+[BUILDING.md](BUILDING.md#the-working-directorys-layout).
+
 Para hacer un paquete instalable hace falta un paquete de una versión publicada como base, porque algunos archivos que
 `install.sh` necesita no tienen código fuente en este repositorio:
 
