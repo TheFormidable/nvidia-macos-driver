@@ -1,4 +1,4 @@
-/* test_accel_lock_owner.c - the accelerator-lock owner record and the unlocked page-off wait, proven on the host.
+/* test_accel_lock_owner.c - the accelerator-lock owner record, its pin and the unlocked page-off wait, proven on the host.
    Build and run anywhere:  cc -pthread -I kexts/NVRM/accel tools/test_accel_lock_owner.c -o /tmp/t && /tmp/t */
 #include "nvaccel_lock_owner.h"
 #include <pthread.h>
@@ -46,5 +46,43 @@ int main(void)
     ARM("after one level is dropped it may", nvaccel_owner_may_release(&own, A));
     nvaccel_owner_will_unlock(&own, A);
     ARM("and the record is empty after the last", own.owner == 0);
+
+    /* The pin: a lock the driver took itself (nvFamLock) is never let go inside a page-off reached from under it. */
+    memset(&own, 0, sizeof own);
+    nvaccel_owner_did_lock(&own, A);
+    nvaccel_owner_pin(&own, A);
+    ARM("a pinned owner at one level may not release", !nvaccel_owner_may_release(&own, A));
+    ARM("the pin is reported for the owner", nvaccel_owner_pinned_by(&own, A) && !nvaccel_owner_pinned_by(&own, B));
+    /* negative control: the rule before the pin (owner at one level) would have let go of this lock */
+    ARM("control: owner-and-depth alone would allow it", own.owner == A && own.depth == 1);
+    nvaccel_owner_pin(&own, B);
+    ARM("a pin from a thread that is not the owner changes nothing", own.pinned == 1);
+    nvaccel_owner_pin(&own, A);
+    nvaccel_owner_unpin(&own, A);
+    ARM("pins nest: one unpin of two leaves it pinned", !nvaccel_owner_may_release(&own, A));
+    nvaccel_owner_unpin(&own, B);
+    ARM("an unpin from a thread that is not the owner changes nothing", own.pinned == 1);
+    nvaccel_owner_unpin(&own, A);
+    ARM("the last unpin allows letting go again", nvaccel_owner_may_release(&own, A));
+    nvaccel_owner_unpin(&own, A);
+    ARM("an unpin with nothing pinned does not go below zero", own.pinned == 0 && nvaccel_owner_may_release(&own, A));
+    /* the driver's own lock: pin after did_lock, unpin before will_unlock, as nvFamLock / nvFamUnlock do */
+    nvaccel_owner_pin(&own, A);
+    nvaccel_owner_will_unlock(&own, A);
+    ARM("after the final unlock nobody owns it (a pin left behind is not anyone's)", own.owner == 0 && !nvaccel_owner_pinned_by(&own, A));
+    nvaccel_owner_did_lock(&own, B);
+    ARM("a new owner starts unpinned, even after a pin left behind", own.pinned == 0 && nvaccel_owner_may_release(&own, B));
+    nvaccel_owner_will_unlock(&own, B);
+    /* the unlocked page-off: it relocks through nvFamLock (which pins) and unpins at once, so the family's caller gets
+       back an owner record exactly as it was before the wait: one level, unpinned */
+    nvaccel_owner_did_lock(&own, A);
+    ARM("the family's caller holds the lock at one level, unpinned", nvaccel_owner_may_release(&own, A));
+    nvaccel_owner_will_unlock(&own, A);                              /* nvFamUnlock (its unpin had nothing to undo) */
+    nvaccel_owner_did_lock(&own, B); nvaccel_owner_pin(&own, B);     /* another thread's own nvFamLock meanwhile */
+    nvaccel_owner_unpin(&own, B); nvaccel_owner_will_unlock(&own, B);
+    nvaccel_owner_did_lock(&own, A); nvaccel_owner_pin(&own, A);     /* the relock */
+    nvaccel_owner_unpin(&own, A);
+    ARM("after the relock and its unpin the record is the caller's again", own.owner == A && own.depth == 1 && own.pinned == 0);
+    nvaccel_owner_will_unlock(&own, A);
     return fails ? 1 : 0;
 }
