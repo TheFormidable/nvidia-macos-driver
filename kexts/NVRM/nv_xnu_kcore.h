@@ -58,10 +58,13 @@ struct os_work_queue *nv_xnu_wq_gpu_start(void);
 
 // Stop a GPU's own queue: flush it, tell the worker to exit, wait for it, release the slot. Thread context, and never
 // from a work item (a call from the queue's own worker is refused and logged). Set nv->queue to NULL BEFORE calling,
-// so that items queued from then on go to the global queue. Every wait inside is capped; when a cap runs out, or the
-// queue was already abandoned by a capped flush, the slot is marked abandoned and never used again, the worker is left
-// alone and the function returns: the teardown goes on, as it always did before there were queues. NULL does nothing.
-void nv_xnu_wq_gpu_down(struct os_work_queue *q);
+// so that items queued from then on go to the global queue. There are two waits inside, the flush and the wait for the
+// worker to leave, and cap_ms bounds each of them (0 is no bound to ask for here and is taken as 30000). The kext's
+// stop, which nothing else bounds, uses 30000; the system shutdown path has 8 s for everything it does and passes at
+// most 2000, as it does to its flushes. When a wait runs out, or the queue was already abandoned by a capped flush,
+// the slot is marked abandoned and never used again, the worker is left alone and the function returns: the teardown
+// goes on, as it always did before there were queues. NULL does nothing.
+void nv_xnu_wq_gpu_down(struct os_work_queue *q, unsigned cap_ms = 30000);
 
 // Wait until every item that was queued before the call has run. q NULL is the global queue. `unload` marks the flush
 // that belongs to a GPU's teardown (the RM's is_unload): while it runs, os_is_queue_flush_ongoing() answers true for
