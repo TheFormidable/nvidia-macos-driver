@@ -617,33 +617,45 @@ static void arm_distrust(void)
     h = chan_new(1, 11);
     for (i = 0; i < 3; i++) {
         (void)open1(1, 11, 10 + i, 7, 0);
-        if (i == 2) { (void)open1(1, 11, 20, 8, 0); (void)open1(1, 11, 21, 9, COMP); (void)arm1(1, 21, 9, h, 5, 0); }
         now += MS(100);
+        if (i == 2) { (void)open1(1, 11, 20, 8, 0); (void)open1(1, 11, 21, 9, COMP | AUTO); (void)arm1(1, 21, 9, h, 5, 0); }   /* in flight */
         (void)look(7, 0, 0, 0, NULL);
-        if (i < 2) (void)close1(1, 10 + i, 7);
-        now += MS(40000);                            /* past every penalty window, inside the forgiveness window */
+        if (i < 2) { (void)close1(1, 10 + i, 7); now += MS(40000); }   /* past every penalty window, inside the forgiveness window */
     }
     T("the third strike distrusts the connection", Tb.stat[NVF_STAT_STRIKES] == 3 && Tb.o[nvf_owner_find(&Tb, 1)].distrusted == 1 &&
       Tb.distrustedOwners == 1 && Tb.stat[NVF_STAT_OWNERS_DISTRUSTED] == 1);
-    T("its other holds were flagged with it: they delay nobody", look(8, 0, 0, 0, NULL) == 0 && look(9, 0, 0, COMP, NULL) == 0 && Tb.live == 0 &&
-      Tb.flagged == 3 && Tb.liveCompositor == 0);
+    /* its producer took those surfaces out of the 2.9 marks when it opened them: letting their readers go now would
+       let them read work the GPU is still writing */
+    T("its holds in flight are not let go with it: they still delay readers", look(8, 0, 0, 0, NULL) == 1 && look(9, 0, 0, COMP, NULL) == 1 &&
+      Tb.live == 2 && Tb.liveCompositor == 1 && Tb.flagged == 1 && Tb.stat[NVF_STAT_RECLAIMED] == 0);
     T("its OPENs are refused from now on (that process keeps the older mechanism)", open1(1, 11, 30, 7, 0) == NVRM_FENCE_ST_DISTRUST &&
       Tb.stat[NVF_STAT_REFUSED_DISTRUST] == 1);
+    T("but it may still arm and close what it has", arm1(1, 20, 8, h, 9, 0) == OK && hold_of(1, 20, 8)->state == E_ARMED);
+    hw[IDX(h)].done = 5;
+    T("a hold in flight ends by its GPU work", look(9, 0, 0, COMP, NULL) == 0 && Tb.stat[NVF_STAT_AUTO] == 1 && Tb.liveCompositor == 0);
+    now += MS(19);
+    T("one that does not complete is in the way until the penalty bound the strike set", look(8, 0, 0, 0, NULL) == 1);
+    now += MS(1);
+    T("and is given up there, without another strike", look(8, 0, 0, 0, NULL) == 0 && Tb.stat[NVF_STAT_EXPIRED_PENALTY] == 1 &&
+      Tb.stat[NVF_STAT_STRIKES] == 3 && Tb.live == 0);
     T("other connections are not affected", open1(2, 22, 1, 7, 0) == OK && look(7, 0, 0, 0, NULL) == 1);
-    T("its CLOSE still frees its slots", close1(1, 12, 7) == 1 && close1(1, 20, 8) == 1 && close1(1, 21, 9) == 1 && Tb.flagged == 0);
+    T("its CLOSE still frees its slots", close1(1, 12, 7) == 1 && close1(1, 20, 8) == 1 && Tb.flagged == 0);
     T("the layer is still on", Tb.fused == 0 && Tb.off == 0);
     T("the lists agree", structure(&Tb) == NULL);
 
-    /* a reader that had counted a hold before the same look distrusted its owner does not go on waiting for it */
+    /* a hold of the same connection that a look counted before the strike that distrusted it stays counted */
     fresh();
     (void)open1(1, 11, 1, 7, 0);                     /* oldest: will give the third strike */
     Tb.o[nvf_owner_find(&Tb, 1)].strikes = 2; Tb.o[nvf_owner_find(&Tb, 1)].lastStrikeNs = now;
     now += MS(50);
     (void)open1(1, 11, 2, 7, 0);                     /* newest: walked first, 50 ms younger */
     now += MS(50);
-    T("a hold counted before its owner was distrusted in the same look is not counted", look(7, 0, 0, 0, NULL) == 0 && Tb.flagged == 2);
+    T("a hold counted in the look that distrusted its connection is still counted", look(7, 0, 0, 0, NULL) == 1 && Tb.flagged == 1 &&
+      Tb.o[nvf_owner_find(&Tb, 1)].distrusted == 1);
+    T("the next look gives it the penalty bound: 50 ms old, it is given up", look(7, 0, 0, 0, NULL) == 0 && Tb.flagged == 2 &&
+      Tb.stat[NVF_STAT_EXPIRED_PENALTY] == 1 && Tb.stat[NVF_STAT_STRIKES] == 1);
 
-    /* a reader asleep on one hold of a connection leaves when another hold of it brings the third strike */
+    /* a reader asleep on one hold of a connection whose other hold brings the third strike */
     {
         struct NVRMFenceWait w;
         unsigned st;
@@ -656,9 +668,9 @@ static void arm_distrust(void)
         (void)open1(1, 11, 2, 8, 0); (void)arm1(1, 2, 8, h, 100, 0);   /* fresh, armed: good for 2000 ms */
         W.during = s_third_strike;
         st = wait_for(8, 0, 0, 2000, 0, &w);
-        T("a reader asleep on a hold wakes at once when the hold's connection is distrusted: TIMEOUT after 1 ms, not at its slice",
-          st == OK && w.result == NVRM_FENCE_R_TIMEOUT && w.waitedUs == 1000 && W.sleeps == 1 && Tb.stat[NVF_STAT_WAKE_STATE] == 1 &&
-          Tb.stat[NVF_STAT_DONE_ON_STATE] == 1 && Tb.o[nvf_owner_find(&Tb, 1)].distrusted == 1);
+        T("wakes at the strike, and keeps waiting for its own hold, now only until the penalty bound: TIMEOUT at 20 ms, no new strike",
+          st == OK && w.result == NVRM_FENCE_R_TIMEOUT && w.waitedUs == 20000 && Tb.stat[NVF_STAT_WAKE_STATE] == 1 &&
+          Tb.stat[NVF_STAT_EXPIRED_PENALTY] == 1 && Tb.stat[NVF_STAT_STRIKES] == 1 && Tb.o[nvf_owner_find(&Tb, 1)].distrusted == 1);
     }
 
     /* the fuse */
@@ -1143,7 +1155,8 @@ static unsigned long long mserial, mrecent;
 static int m_live, m_liveC, m_used, m_flagged, m_off, m_paused, m_fused, m_distrusted, m_noirq;
 static unsigned long long m_stat[NVF_STAT_N];
 static int m_bug;                                    /* a control: 1 = an armed hold is given up 1 ms early, 2 = no snapshot,
-                                                        3 = a compositor hold has the 20 ms penalty bound */
+                                                        3 = a compositor hold has the 20 ms penalty bound,
+                                                        4 = distrust flags the owner's live holds */
 
 static void m_reset(void) { memset(mh, 0, sizeof(mh)); mhN = 0; memset(mc, 0, sizeof(mc)); memset(mo, 0, sizeof(mo)); mserial = 1; mrecent = 0;
     m_live = m_liveC = m_used = m_flagged = m_off = m_paused = m_fused = m_distrusted = m_noirq = 0; memset(m_stat, 0, sizeof(m_stat)); }
@@ -1247,7 +1260,7 @@ static int m_strike(struct mowner *o)
     m_stat[NVF_STAT_STRIKES]++;
     if (o->strikes < (int)NVF_STRIKES || o->distrusted) return 0;
     o->distrusted = 1; m_distrusted++; m_stat[NVF_STAT_OWNERS_DISTRUSTED]++;
-    for (int i = 0; i < mhN; i++) if (mh[i].used && mh[i].owner == o->owner) m_flag(&mh[i], NVF_END_DISTRUST);
+    if (m_bug == 4) for (int i = 0; i < mhN; i++) if (mh[i].used && mh[i].owner == o->owner) m_flag(&mh[i], NVF_END_DISTRUST);
     if (m_distrusted < (int)NVF_FUSE_OWNERS) return 1;
     m_fused = 1; m_off = 1;
     return 2;
@@ -1266,7 +1279,7 @@ static unsigned m_eval(struct mq *q, int why, struct nvf_view *v)
 {
     int again;
     if (!q->snap) { q->snap = mserial; q->recent0 = mrecent; }
-    do {
+    do {                                                        /* again: only for the control m_bug 4 */
         again = 0;
         memset(v, 0, sizeof(*v)); v->deadlineNs = ~0ull;
         for (int i = mhN - 1; i >= 0 && !again; i--) {         /* newest first, as a bucket chain is */
@@ -1294,7 +1307,7 @@ static unsigned m_eval(struct mq *q, int why, struct nvf_view *v)
                     memset(v, 0, sizeof(*v)); v->deadlineNs = ~0ull;
                     return 0;
                 }
-                if (struck == 1) again = 1;
+                if (struck == 1 && m_bug == 4) again = 1;
                 continue;
             }
             if (!v->blockers) { v->firstPid = h->pid; v->firstState = (unsigned)h->state; }
@@ -1654,6 +1667,8 @@ static void arm_controls(void)
     T("control: one that forgets the snapshot rule is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
     m_bug = 3;
     T("control: one that gives a compositor hold the 20 ms penalty bound is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
+    m_bug = 4;
+    T("control: one where distrust lets go of the owner's holds in flight is caught", differential(&CROWDED, 200000, 0xD1B54A32D192ED03ull, &what) != 0);
     m_bug = 0;
 
     fresh();

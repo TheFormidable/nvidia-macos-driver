@@ -96,7 +96,9 @@ go on (their answer says "given up"), and the connection that owns it gets a str
   Inside it every hold of the connection has the 20 ms bound, and holds given up there are not strikes. So a writer
   that is stopped in a debugger costs its readers one 100 ms wait and then 20 ms each, about what 2.9 cost.
 - One strike is forgiven for every 10 minutes without one.
-- At the third strike the connection is distrusted: its holds stop delaying anybody and its new holds are refused.
+- At the third strike the connection is distrusted: its new holds are refused. The holds it already has stay, because
+  their surfaces were taken out of the older mechanism when they were opened; each ends by completion, its close or
+  the penalty bound the strike set.
   That process is back on 2.9's marks and tags until it is restarted. Three stalls that were each recovered (for
   example three channel rebuilds after injected faults within those 10 minutes) are enough, so
   `owners_distrusted` above 0 after such a test is expected and not a second problem.
@@ -289,7 +291,7 @@ All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then ev
 | Line | Meaning |
 |---|---|
 | `surface 0x.. writer pid N state S for M ms - given up (...), strike K` | a hold outlived its bound; S is `open`, `armed` or `gpu-done`, which tells where the writer was stuck |
-| `pid N: K holds given up - this connection's holds are refused from now on (it keeps the older surface sync)` | third strike: that process is on 2.9's marks and tags until it restarts |
+| `pid N: K holds given up - this connection's new holds are refused from now on (it keeps the older surface sync)` | third strike: that process is on 2.9's marks and tags until it restarts; the holds it already had end on their own (completion, close, or the penalty bound) |
 | `8 connections refused since boot - the surface fence is off until the next boot (debug.nvrm_fence_state 2)` | the layer switched itself off |
 | `channel C of pid N completes without an interrupt - it is polled every 250 us instead` | see `chan_noirq` |
 | `pid N: ... - this channel is not watched (its surfaces keep the older surface sync)` | a channel's page could not be wired, or the kernel's view of it failed its proof; the text says which |
