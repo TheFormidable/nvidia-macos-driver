@@ -6,17 +6,21 @@ puede preparar un paquete instalable. Nunca usa `sudo` y nunca instala el driver
 hacerlo. La guía completa, en inglés, es [BUILDING.md](BUILDING.md); aquí están el inicio rápido, la referencia de
 comandos y opciones y la solución de problemas.
 
-> **Escrito y probado sin un Mac.** Nadie ha ejecutado todavía `./build.sh` en un Mac. Está escrito para el
-> `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra sustitutos de las herramientas de
-> macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación (`tools/test_build_sh.py`). En un
-> sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y `--dry-run`. No ha compilado ningún componente, `deps` no ha instalado nada
-> real y no ha preparado ningún paquete. Para la primera ejecución esto significa: es probable que algún paso se
-> detenga por algo que ningún sustituto imitó (un detalle de Xcode o de Homebrew, el nombre de una fórmula, un aviso
-> del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un paso se detiene, el mensaje dice
-> cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver [Cuando falla la compilación](#cuando-falla-la-compilación)).
-> Un paso que falla nunca queda marcado como terminado, así que, una vez corregido, la siguiente ejecución sigue desde ese paso.
-> Los scripts de los componentes sí se ejecutaron a mano en el Mac Intel del propietario (macOS 26.7, Xcode 26.5) para
-> los kexts y el RM; lo que eso mostró sobre un nombre de cuenta corto ya está resuelto (fila `rm` de la tabla de problemas).
+> **Escrito y probado sin un Mac.** `./build.sh` se ha ejecutado en un solo Mac (Intel, macOS 26.7, Xcode 26.5), y solo
+> en parte: funcionaron `doctor`, `env`, `--dry-run` y `fetch`, y compiló el plugin, la biblioteca de vídeo (y el RM por
+> el camino) y las herramientas pequeñas; los kexts se detuvieron en su comprobación de GNU patch y Python 3.10, que ese
+> Mac no tenía. Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
+> sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
+> (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
+> `--dry-run`. `deps` no ha instalado nada real, no ha compilado NVK ni el traductor y no ha preparado ningún paquete.
+> Para la primera ejecución esto significa: es probable que algún paso se detenga por algo que ningún sustituto imitó
+> (un detalle de Xcode o de Homebrew, el nombre de una fórmula, un aviso del compilador). Ejecuta primero `./build.sh
+> doctor` y después `./build.sh`; si un paso se detiene, el mensaje dice cuál es y da un archivo de informe para
+> adjuntar al reportar el fallo (ver [Cuando falla la compilación](#cuando-falla-la-compilación)). Un paso que falla
+> nunca queda marcado como terminado, así que, una vez corregido, la siguiente ejecución sigue desde ese paso. Los
+> scripts de los componentes sí se ejecutaron a mano en el Mac Intel del propietario (macOS 26.7, Xcode 26.5) para los
+> kexts y el RM; lo que eso mostró sobre un nombre de cuenta corto ya está resuelto (fila `rm` de la tabla de
+> problemas).
 
 ## Requisitos
 
