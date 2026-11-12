@@ -411,8 +411,11 @@ static void nvmtl_nvenc_register(void)
 // beside ours and lets VTRating decide which one an app gets. It is the only hardware encoder on Ada, which
 // nvmtl_nvenc_register above turns away, and the only VP9 and AV1 decoder on Ada and consumer Ampere. It reports H.264
 // encoding at about 5 ms where the library we ship takes about 12.
-// NVMTL_NVENCVT, from nvrm610.conf or the environment: unset = automatic on Ada and Ampere, 0 = never, 1 = every
-// process and any card the library accepts (GTX 16 included), a list of process names = only those.
+// NVMTL_NVENCVT, from nvrm610.conf or the environment: unset = automatic on Ada and Ampere, and on Blackwell (RTX 50)
+// in the decode service only; 0 = never; 1 = every process and any card the library accepts (GTX 16 included); a list
+// of process names = only those. On Blackwell, whatever the value, the library registers nothing (an H.264 decoder is
+// all it has there) until the card has decoded the library's test streams bit for bit in that process; a process
+// where it has not keeps the decoders it had.
 // This loads code into every app that encodes, so the library and the directory holding it must be
 // ours and nobody else's. The firmware taught this: it used to sit in /Users/Shared, which is mode
 // 1777, and the only permission step was a chmod that adds read bits and never takes write away, so
@@ -430,11 +433,16 @@ static bool nvmtl_loadable_root_only(const char *path)
     return ds.st_uid == 0 && !(ds.st_mode & (S_IWGRP | S_IWOTH));
 }
 // Whether libnvencvt registers in the process `me` on a card of generation `gen` (the profile's string, NULL when the
-// driver publishes none) under the selector `sel`. Automatic is limited to the generations the library was measured on.
+// driver publishes none) under the selector `sel`. Automatic is limited to the generations the library was measured on,
+// and to the decode service on Blackwell: there our own H.264 decoder's picture comes out green in Safari, QuickTime
+// and FaceTime, and the library proves its decoder on the card before it registers (vendor/nvenc/src/h264kat.h). App
+// processes on Blackwell keep our decoder, which is not known to be wrong there.
 static bool nvmtl_nvencvt_selected(const char *sel, const char *me, const char *gen)
 {
     if (sel && !strcmp(sel, "0")) return false;
-    if (!sel || !*sel) return gen && (nvmtl_gen_is(gen, "Ada") || nvmtl_gen_is(gen, "Ampere"));
+    if (!sel || !*sel)
+        return gen && (nvmtl_gen_is(gen, "Ada") || nvmtl_gen_is(gen, "Ampere") ||
+                       (nvmtl_gen_is(gen, "Blackwell") && nvmtl_is_decode_service(me)));
     if (!strcmp(sel, "1")) return true;
     char list[512]; strlcpy(list, sel, sizeof list);   // a process list, so one app can be moved over at a time
     for (char *t = strtok(list, ", :"); t; t = strtok(NULL, ", :")) if (!strcmp(t, me)) return true;
@@ -494,6 +502,13 @@ static void nvmtl_nvencvt_register(bool decodersOnly)
         }
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvencvt: dlopen %s FAILED: %s", path, dlerror()); return; }
+        // Blackwell: only a build of the library that decodes its test streams on the card before it registers. Such a
+        // build exports this marker (vendor/nvenc/vt/nvencvt.c); an older one registered its Blackwell decoder untested,
+        // and VideoToolbox does not fall back once it has picked a decoder.
+        if (haveGen && nvmtl_gen_is(gen, "Blackwell") && !dlsym(h, "NVEncVT_BlackwellSelfTest")) {
+            nvlog("nvencvt: %s is a build without the Blackwell decode self-test - REFUSED on this card", path);
+            return;
+        }
         typedef int32_t (*RegFn)(int);
         const char *entry = decodersOnly ? "NVEncVT_RegisterDecoders" : "NVEncVT_Register";
         RegFn r = (RegFn)dlsym(h, entry);
