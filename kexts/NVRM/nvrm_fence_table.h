@@ -107,6 +107,7 @@ struct nvf_table {
     struct nvf_chan  c[NVF_CHANS];   unsigned chanHigh, chanGen, pass;
     struct nvf_owner o[NVF_OWNERS];
     struct nvf_recent recent[NVF_RECENT]; unsigned long long recentSeq;   /* how the last holds ended */
+    unsigned long long allSeq; unsigned allWhy;   /* recentSeq after the last nvf_end_all and its reason; allWhy 0 = never */
     unsigned long long serial;           /* ++ at every open; never 0 after nvf_init */
     unsigned live, liveCompositor, liveMax;   /* holds that still delay someone (not flagged) */
     unsigned used, flagged;              /* slots taken; of those, flagged */
@@ -327,10 +328,14 @@ static inline int nvf_find(const struct nvf_table *T, unsigned oi, unsigned long
     return -1;
 }
 
+/* Everything ends at once: the GPU goes to sleep, the last GPU stops, or the layer switches itself off. This can be
+ * more endings than the ring of recent ones holds, so the event itself is remembered for the readers that were waiting
+ * (nvf_result_from_recent). */
 static inline void nvf_end_all(struct nvf_table *T, unsigned why)
 {
     unsigned i;
     for (i = 0; i < NVF_ENTRIES; i++) if (T->e[i].state) nvf_end(T, i, why);
+    T->allSeq = T->recentSeq; T->allWhy = why;
     T->changes++;       /* also for sleepers that wait for no hold (nvf_wait_seq) */
 }
 
@@ -837,12 +842,23 @@ static inline unsigned nvf_eval(struct nvf_table *T, struct nvf_query *q, unsign
     return v->blockers;
 }
 
-/* What became of the holds this reader was (or would have been) waiting for: the worst of how they ended. */
+/* What became of the holds this reader was (or would have been) waiting for: the worst of how they ended.
+ * The ring remembers the last NVF_RECENT endings. When more have ended since the reader first looked, how its own
+ * holds ended is no longer known and the answer degrades to READY, with one exception: when everything was ended at
+ * once in that time (nvf_end_all), the reader is given that event's answer, DEAD or TIMEOUT. Sleep, the last stop and
+ * the switch-off are the endings that come by the hundred, and they are the ones after which the work is NOT done: a
+ * reader told READY there would take an unfinished surface for a finished one. (A reader only gets here with more
+ * than NVF_RECENT endings behind it when it had something in front of it: after a sleep, or in the one look in which
+ * its own hold's expiry switched the layer off.) */
 static inline unsigned nvf_result_from_recent(const struct nvf_table *T, const struct nvf_query *q, int saw)
 {
     unsigned long long s;
     unsigned res = saw ? NVRM_FENCE_R_READY : NVRM_FENCE_R_NONE;
-    if (T->recentSeq - q->recent0 > NVF_RECENT) return NVRM_FENCE_R_READY;     /* more ended than the ring remembers */
+    if (T->recentSeq - q->recent0 > NVF_RECENT) {                              /* more ended than the ring remembers */
+        if (T->allWhy && T->allSeq > q->recent0)
+            return T->allWhy == NVF_END_DISTRUST ? NVRM_FENCE_R_TIMEOUT : NVRM_FENCE_R_DEAD;
+        return NVRM_FENCE_R_READY;
+    }
     for (s = q->recent0; s != T->recentSeq; s++) {
         const struct nvf_recent *r = &T->recent[s % NVF_RECENT];
         unsigned one;
