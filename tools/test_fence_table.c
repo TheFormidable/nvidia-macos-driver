@@ -939,9 +939,27 @@ static void arm_results(void)
         T("63 other endings later the reader still learns DEAD", nvf_eval(&Tb, &q, now, NVF_WHY_STATE, hw_read, NULL, &v) == 0 &&
           nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_DEAD);
         (void)open1(2, 22, 5, 100, 0); (void)close1(2, 5, 100);
-        T("after 64 the ring has forgotten: the answer degrades to READY", nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_READY);
+        T("after 64 the ring has forgotten which hold that was, but not that one ended without completing: still DEAD",
+          Tb.recentSeq - q.recent0 > NVF_RECENT && nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_DEAD);
     }
-    /* ...but not when everything ended at once: that is more endings than the ring holds exactly when the work is not done */
+    fresh();
+    {
+        struct nvf_query q = { 7, 0, 0, 0, 0, 0 };
+        struct nvf_view v;
+        (void)open1(1, 11, 1, 7, 0);
+        (void)nvf_eval(&Tb, &q, now, NVF_WHY_FIRST, hw_read, NULL, &v);
+        (void)close1(1, 1, 7);
+        for (i = 0; i < NVF_RECENT; i++) { (void)open1(2, 22, 5, 100 + i, 0); (void)close1(2, 5, 100 + i); }
+        T("past the ring the answer is READY when everything that ended since the reader's first look completed",
+          Tb.recentSeq - q.recent0 > NVF_RECENT && nvf_eval(&Tb, &q, now, NVF_WHY_STATE, hw_read, NULL, &v) == 0 &&
+          nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_READY);
+        (void)open1(2, 22, 5, 100, 0);
+        now += MS(NVF_CAP_CPU_MS);
+        (void)look(100, 0, 0, 0, NULL);                       /* somebody else's hold is given up */
+        T("and TIMEOUT or DEAD as soon as one of them did not, whoever's it was: which were the reader's own is forgotten",
+          nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_TIMEOUT);
+    }
+    /* more than the ring holds end at once exactly when the work is not done: a sleep, the last stop, the switch-off... */
     {
         static const unsigned whys[3] = { NVF_END_PM, NVF_END_SHUTDOWN, NVF_END_DISTRUST };
         static const unsigned want[3] = { NVRM_FENCE_R_DEAD, NVRM_FENCE_R_DEAD, NVRM_FENCE_R_TIMEOUT };
@@ -964,6 +982,48 @@ static void arm_results(void)
         }
         T("sleep, the last stop, the switch-off with one hold alive: its reader learns DEAD, DEAD, TIMEOUT from the ring", few == 3);
         T("the same with 71 holds alive, more than the ring remembers: still DEAD, DEAD, TIMEOUT, not READY", good == 3);
+    }
+    /* ...a connection that closes or a process that exits with more holds than the ring remembers... */
+    {
+        unsigned k, good = 0, fi[NVF_OWNER_CHANS];
+        for (k = 0; k < 2; k++) {
+            struct nvf_query q = { 7, 0, 11, 0, 0, 0 }, q9 = { 9, 0, 22, 0, 0, 0 };
+            struct nvf_view v;
+            fresh();
+            (void)open1(1, 11, 1, 7, 0);
+            for (i = 0; i < NVF_RECENT + 6; i++) (void)open1(1, 11, 5, 100 + i, 0);
+            (void)open1(2, 22, 1, 9, 0);                      /* another process, another surface */
+            if (nvf_eval(&Tb, &q, now, NVF_WHY_FIRST, hw_read, NULL, &v) != 1 || nvf_eval(&Tb, &q9, now, NVF_WHY_FIRST, hw_read, NULL, &v) != 1) continue;
+            if (k) (void)nvf_pid_gone(&Tb, 11, fi, NVF_OWNER_CHANS); else (void)nvf_owner_gone(&Tb, 1, fi, NVF_OWNER_CHANS);
+            (void)close1(2, 1, 9);
+            if (Tb.recentSeq - q.recent0 > NVF_RECENT && Tb.stat[NVF_STAT_END_OWNER] == NVF_RECENT + 7 &&
+                nvf_eval(&Tb, &q, now, NVF_WHY_STATE, hw_read, NULL, &v) == 0 && nvf_result_from_recent(&Tb, &q, 1) == NVRM_FENCE_R_DEAD &&
+                nvf_eval(&Tb, &q9, now, NVF_WHY_STATE, hw_read, NULL, &v) == 0 && nvf_result_from_recent(&Tb, &q9, 1) == NVRM_FENCE_R_DEAD) good++;
+        }
+        T("a connection closes, a process exits, with 71 holds: the reader of one learns DEAD, not READY; so does a reader "
+          "whose own hold completed meanwhile, which is the price", good == 2);
+    }
+    /* ...and a fault or a bound under more holds of one surface than the ring remembers, all ended by one look */
+    fresh();
+    {
+        struct nvf_query q = { 7, 0, 0, 0, 0, 0 };
+        struct nvf_view v;
+        const unsigned hc = chan_new(1, 11);
+        for (i = 0; i < NVF_RECENT + 6; i++) { (void)open1(1, 11, 1 + i, 7, 0); (void)arm1(1, 1 + i, 7, hc, 5, 0); }
+        hw[IDX(hc)].faulted = 1;
+        T("70 holds armed on a channel that faults, one surface: the reader that finds them learns DEAD in its first look",
+          nvf_eval(&Tb, &q, now, NVF_WHY_FIRST, hw_read, NULL, &v) == 0 && Tb.recentSeq - q.recent0 > NVF_RECENT &&
+          Tb.stat[NVF_STAT_END_CHAN_ERR] == NVF_RECENT + 6 && nvf_result_from_recent(&Tb, &q, 0) == NVRM_FENCE_R_DEAD);
+    }
+    fresh();
+    {
+        struct nvf_query q = { 7, 0, 0, 0, 0, 0 };
+        struct nvf_view v;
+        for (i = 0; i < NVF_RECENT + 6; i++) (void)open1(1, 11, 1 + i, 7, 0);
+        now += MS(NVF_CAP_CPU_MS);
+        T("70 holds of one surface all past their bound: the reader that gives them up learns TIMEOUT in its first look",
+          nvf_eval(&Tb, &q, now, NVF_WHY_FIRST, hw_read, NULL, &v) == 0 && Tb.recentSeq - q.recent0 > NVF_RECENT &&
+          Tb.flagged == NVF_RECENT + 6 && Tb.fused == 0 && nvf_result_from_recent(&Tb, &q, 0) == NVRM_FENCE_R_TIMEOUT);
     }
     fresh();
     {
@@ -1262,8 +1322,10 @@ static int mhN;
 static struct mchan { int used; unsigned long long owner, done; unsigned handle; int verified, faulted, found, foundSlice, noirq; } mc[NVF_CHANS];
 static struct mowner { int used; unsigned long long owner, penaltyUntil, lastStrike; unsigned pid; int strikes, distrusted, closed; } mo[64];
 static struct mrec { unsigned long long serial; unsigned sid, pid; int why, flags, planes; } mring[NVF_RECENT];
-static unsigned long long mserial, mrecent, m_allAt;   /* m_allAt, m_allWhy: the last time everything was ended at once */
+static unsigned long long mserial, mrecent, m_allAt;   /* m_allAt, m_allWhy: the last time everything was ended at once (m_bug 7) */
 static int m_allWhy;
+static struct mbad { unsigned long long at; int why; } *m_bad;   /* every ending that was not a completion, oldest first: */
+static size_t m_badN, m_badCap;                                  /* what a reader past the ring is still owed */
 static int m_live, m_liveC, m_used, m_flagged, m_off, m_paused, m_fused, m_distrusted, m_noirq;
 static unsigned long long m_stat[NVF_STAT_N];
 static int m_bug;                                    /* a control: 1 = an armed hold is given up 1 ms early, 2 = no snapshot,
@@ -1271,10 +1333,12 @@ static int m_bug;                                    /* a control: 1 = an armed 
                                                         4 = distrust flags the owner's live holds,
                                                         5 = a process's exit ends only the closing connection,
                                                         6 = past the ring every answer is READY, also after everything
-                                                            was ended at once */
+                                                            was ended at once,
+                                                        7 = past the ring only an ending of everything is remembered, not
+                                                            a process's exit, a fault or a bound */
 
 static void m_reset(void) { memset(mh, 0, sizeof(mh)); mhN = 0; memset(mc, 0, sizeof(mc)); memset(mo, 0, sizeof(mo)); mserial = 1; mrecent = 0;
-    m_allAt = 0; m_allWhy = 0;
+    m_allAt = 0; m_allWhy = 0; m_badN = 0;
     m_live = m_liveC = m_used = m_flagged = m_off = m_paused = m_fused = m_distrusted = m_noirq = 0; memset(m_stat, 0, sizeof(m_stat)); }
 static struct mowner *mo_find(unsigned long long owner) { for (int i = 0; i < 64; i++) if (mo[i].used && mo[i].owner == owner) return &mo[i]; return NULL; }
 static struct mowner *mo_get(unsigned long long owner, unsigned pid)
@@ -1292,6 +1356,14 @@ static void m_rec(const struct mhold *h, int why)
     struct mrec *r = &mring[mrecent % NVF_RECENT];
     r->serial = h->serial; r->sid = h->sid; r->pid = h->pid; r->why = why; r->flags = h->flags; r->planes = h->planes;
     mrecent++;
+    if (why != NVF_END_CLOSE && why != NVF_END_GPU) {
+        if (m_badN == m_badCap) {
+            void *p = realloc(m_bad, (m_badCap = m_badCap ? 2 * m_badCap : 1024) * sizeof(*m_bad));
+            if (!p) { printf("FAIL out of memory\n"); exit(1); }
+            m_bad = p;
+        }
+        m_bad[m_badN].at = mrecent; m_bad[m_badN].why = why; m_badN++;
+    }
 }
 static void m_drop(const struct mhold *h) { m_live--; if (h->flags & (int)COMP) m_liveC--; }
 static void m_flag(struct mhold *h, int why) { if (!h->used || h->expired) return; h->expired = why; m_rec(h, why); m_drop(h); m_flagged++; }
@@ -1438,9 +1510,15 @@ static unsigned m_eval(struct mq *q, int why, struct nvf_view *v)
 static unsigned m_result(const struct mq *q, int saw)
 {
     unsigned res = saw ? NVRM_FENCE_R_READY : NVRM_FENCE_R_NONE;
-    if (mrecent - q->recent0 > NVF_RECENT) {            /* the ring has forgotten; an ending of everything since then is known */
-        if (m_bug != 6 && m_allWhy && m_allAt > q->recent0) return m_allWhy == NVF_END_DISTRUST ? NVRM_FENCE_R_TIMEOUT : NVRM_FENCE_R_DEAD;
-        return NVRM_FENCE_R_READY;
+    if (mrecent - q->recent0 > NVF_RECENT) {            /* the ring has forgotten: the worst of everything that ended since */
+        if (m_bug == 6) return NVRM_FENCE_R_READY;
+        if (m_bug == 7) return m_allWhy && m_allAt > q->recent0 ? (m_allWhy == NVF_END_DISTRUST ? NVRM_FENCE_R_TIMEOUT : NVRM_FENCE_R_DEAD) : NVRM_FENCE_R_READY;
+        res = NVRM_FENCE_R_READY;
+        for (size_t i = m_badN; i-- > 0 && m_bad[i].at > q->recent0; ) {
+            const unsigned one = (m_bad[i].why == NVF_END_EXPIRED || m_bad[i].why == NVF_END_DISTRUST) ? NVRM_FENCE_R_TIMEOUT : NVRM_FENCE_R_DEAD;
+            if (one > res) res = one;
+        }
+        return res;
     }
     for (unsigned long long s = q->recent0; s != mrecent; s++) {
         const struct mrec *r = &mring[s % NVF_RECENT];
@@ -1813,6 +1891,8 @@ static void arm_controls(void)
     T("control: one where an exiting process's other connections keep their holds is caught", differential(&BUSY, 200000, 0x9E3779B97F4A7C15ull, &what) != 0);
     m_bug = 6;
     T("control: one that answers READY past the ring even after everything was ended at once is caught", differential(&BUSY, 200000, 0x9E3779B97F4A7C15ull, &what) != 0);
+    m_bug = 7;
+    T("control: one that remembers past the ring only an ending of everything is caught", differential(&BUSY, 200000, 0x9E3779B97F4A7C15ull, &what) != 0);
     m_bug = 0;
 
     fresh();

@@ -107,7 +107,8 @@ struct nvf_table {
     struct nvf_chan  c[NVF_CHANS];   unsigned chanHigh, chanGen, pass;
     struct nvf_owner o[NVF_OWNERS];
     struct nvf_recent recent[NVF_RECENT]; unsigned long long recentSeq;   /* how the last holds ended */
-    unsigned long long allSeq; unsigned allWhy;   /* recentSeq after the last nvf_end_all and its reason; allWhy 0 = never */
+    unsigned long long deadSeq, timeoutSeq;   /* recentSeq after the last ending that tells readers DEAD, and after the
+                                                 last that tells them TIMEOUT; 0 = none yet. They outlive the ring. */
     unsigned long long serial;           /* ++ at every open; never 0 after nvf_init */
     unsigned live, liveCompositor, liveMax;   /* holds that still delay someone (not flagged) */
     unsigned used, flagged;              /* slots taken; of those, flagged */
@@ -260,12 +261,23 @@ static inline int nvf_matches(const struct nvf_query *q, unsigned sid, unsigned 
     return 1;
 }
 
+/* What the readers of a hold are told when it ends with `why`: complete, given up, or gone without completing. */
+static inline unsigned nvf_end_result(unsigned why)
+{
+    if (why == NVF_END_CLOSE || why == NVF_END_GPU) return NVRM_FENCE_R_READY;
+    if (why == NVF_END_EXPIRED || why == NVF_END_DISTRUST) return NVRM_FENCE_R_TIMEOUT;
+    return NVRM_FENCE_R_DEAD;
+}
+
 static inline void nvf_note_end(struct nvf_table *T, const struct nvf_entry *e, unsigned why)
 {
     struct nvf_recent *r = &T->recent[T->recentSeq % NVF_RECENT];
+    const unsigned res = nvf_end_result(why);
     r->serial = e->serial; r->sid = e->sid; r->pid = e->pid;
     r->why = (unsigned char)why; r->flags = e->flags; r->planes = e->planes;
     T->recentSeq++;
+    if (res == NVRM_FENCE_R_TIMEOUT) T->timeoutSeq = T->recentSeq;     /* for the readers the ring will have forgotten */
+    else if (res == NVRM_FENCE_R_DEAD) T->deadSeq = T->recentSeq;
 }
 
 static inline void nvf_live_drop(struct nvf_table *T, const struct nvf_entry *e)
@@ -329,13 +341,12 @@ static inline int nvf_find(const struct nvf_table *T, unsigned oi, unsigned long
 }
 
 /* Everything ends at once: the GPU goes to sleep, the last GPU stops, or the layer switches itself off. This can be
- * more endings than the ring of recent ones holds, so the event itself is remembered for the readers that were waiting
+ * more endings than the ring of recent ones holds; the readers that were waiting still learn how it ended
  * (nvf_result_from_recent). */
 static inline void nvf_end_all(struct nvf_table *T, unsigned why)
 {
     unsigned i;
     for (i = 0; i < NVF_ENTRIES; i++) if (T->e[i].state) nvf_end(T, i, why);
-    T->allSeq = T->recentSeq; T->allWhy = why;
     T->changes++;       /* also for sleepers that wait for no hold (nvf_wait_seq) */
 }
 
@@ -843,29 +854,30 @@ static inline unsigned nvf_eval(struct nvf_table *T, struct nvf_query *q, unsign
 }
 
 /* What became of the holds this reader was (or would have been) waiting for: the worst of how they ended.
- * The ring remembers the last NVF_RECENT endings. When more have ended since the reader first looked, how its own
- * holds ended is no longer known and the answer degrades to READY, with one exception: when everything was ended at
- * once in that time (nvf_end_all), the reader is given that event's answer, DEAD or TIMEOUT. Sleep, the last stop and
- * the switch-off are the endings that come by the hundred, and they are the ones after which the work is NOT done: a
- * reader told READY there would take an unfinished surface for a finished one. (A reader only gets here with more
- * than NVF_RECENT endings behind it when it had something in front of it: after a sleep, or in the one look in which
- * its own hold's expiry switched the layer off.) */
+ * The ring remembers the last NVF_RECENT endings. When more have ended since the reader first looked, which of them
+ * were its own is no longer known, and the answer is the worst of ALL endings since that look, whoever's they were:
+ * READY only when every one of them was a completion. Endings come by the hundred at a sleep, at the last stop, at
+ * the switch-off, when a process with many holds exits and when a fault or a bound ends many holds of one surface in
+ * one look, and those are the endings after which the work is NOT done: a reader told READY there would take an
+ * unfinished surface for a finished one. The price is a reader that is told DEAD or TIMEOUT although its own holds
+ * completed, because somebody else's did not in the same time. To every caller those two answers mean "go on, the
+ * surface is not known to be complete", which costs it nothing when the surface is complete. (A reader only gets
+ * here with more than NVF_RECENT endings behind it when it had something in front of it: after a sleep, or in the
+ * one look that itself ended that many holds, its own or, at the switch-off, everybody's.) */
 static inline unsigned nvf_result_from_recent(const struct nvf_table *T, const struct nvf_query *q, int saw)
 {
     unsigned long long s;
     unsigned res = saw ? NVRM_FENCE_R_READY : NVRM_FENCE_R_NONE;
     if (T->recentSeq - q->recent0 > NVF_RECENT) {                              /* more ended than the ring remembers */
-        if (T->allWhy && T->allSeq > q->recent0)
-            return T->allWhy == NVF_END_DISTRUST ? NVRM_FENCE_R_TIMEOUT : NVRM_FENCE_R_DEAD;
+        if (T->timeoutSeq > q->recent0) return NVRM_FENCE_R_TIMEOUT;
+        if (T->deadSeq > q->recent0) return NVRM_FENCE_R_DEAD;
         return NVRM_FENCE_R_READY;
     }
     for (s = q->recent0; s != T->recentSeq; s++) {
         const struct nvf_recent *r = &T->recent[s % NVF_RECENT];
         unsigned one;
         if (!nvf_matches(q, r->sid, r->serial, r->planes, r->pid, r->flags)) continue;
-        if (r->why == NVF_END_CLOSE || r->why == NVF_END_GPU) one = NVRM_FENCE_R_READY;
-        else if (r->why == NVF_END_EXPIRED || r->why == NVF_END_DISTRUST) one = NVRM_FENCE_R_TIMEOUT;
-        else one = NVRM_FENCE_R_DEAD;
+        one = nvf_end_result(r->why);
         if (one > res) res = one;
     }
     return res;
