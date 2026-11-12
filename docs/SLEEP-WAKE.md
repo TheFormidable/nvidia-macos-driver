@@ -6,7 +6,9 @@ the core channel spun in `nvEvoMakeRoom` forever, and the Mac needed a hard rese
 `Sleep Wake Failure` report). The work below makes sleep and wake behave as on Linux, plus the steps macOS needs on top.
 
 Tested on an RTX 5050 (GB207, FSP boot), MacPro7,1 SMBIOS, macOS 15.8.1: repeated sleep and wake with the desktop,
-windows and Metal apps intact.
+windows and Metal apps intact. That test was of 2.9. The additions of release 3.0 (the interrupt gate, the paused 1 Hz
+timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d) have not run through a sleep
+on a card yet; they are marked "(3.0)" below.
 
 ## What happens
 
@@ -14,9 +16,9 @@ windows and Metal apps intact.
 |---|---|---|
 | System is about to sleep | NVAccel | A root-domain priority power interest opens the *sleep window*: page-offs IOGraphicsAccelerator2 does now keep their VRAM (see below). |
 | Display goes off | NVRMFB | As before (DPMS). |
-| NVRM `setPowerState(0)` | NVRM | Tell the framebuffers; `nvKmsSuspend` (heads off, while the GPU still serves the core channel); close the RM gate; stop user channels; save PCI config, Resizable BAR control and the root port window; `rm_power_management(STANDBY)`. |
+| NVRM `setPowerState(0)` | NVRM | Pause the notebook power manager; then (3.0) the surface fence (every hold ends and new ones are refused until the wake) and the RM's 1 Hz timer; tell the framebuffers; `nvKmsSuspend` (heads off, while the GPU still serves the core channel); close the RM gate; stop user channels; save PCI config, Resizable BAR control and the root port window; (3.0) wait for the RM's global work queue, 5 s at most; `rm_power_management(STANDBY)`. Then (3.0) the interrupt source is turned off and the interrupt path is closed: no handler enters the RM from here on, and the driver waits (2 s at most) until no handler is inside and no bottom half is pending or running. |
 | — | RM | With `PreserveVideoMemoryAllocations=1` RM copies **every** VRAM allocation out through its temporary-file interface. NVRM backs that "file" with pageable kernel memory (no disk I/O). GSP-RM is unloaded. |
-| Slot powered again, NVRM `setPowerState(1)` | NVRM | Restore the root port window and the Resizable BAR size (the firmware resets BAR1 to 256 MB), check `PMC_BOOT_0`, `rm_power_management(RESUME)` (GSP boots again through FSP and VRAM is copied back), restart user channels, `nvKmsResume`, open the RM gate, tell the framebuffers. |
+| Slot powered again, NVRM `setPowerState(1)` | NVRM | Restore the root port window and the Resizable BAR size (the firmware resets BAR1 to 256 MB), check `PMC_BOOT_0`; open the interrupt path again before the interrupt source is turned on, so that the RM's resume gets its interrupts (3.0); `rm_power_management(RESUME)` (GSP boots again through FSP and VRAM is copied back), restart user channels, `nvKmsResume`, open the RM gate; when the resume worked, resume the power manager and (3.0) the 1 Hz timer; tell the surface fence that the GPU is back, or that it is lost, after which the fence stays off until the next boot (3.0); tell the framebuffers. |
 | NVRMFB `setPowerState(1)` | NVRMFB | Re-light the head once NVRM says the GPU is back, then do IOGraphics' own wake work (below). |
 | CPU back on | NVAccel | The sleep window closes: page-offs give VRAM back again. |
 
@@ -57,6 +59,39 @@ sleep while the display showed the new one: a black desktop with only the cursor
 (`debug.nvaccel_vm_sticky`, on by default) keeps a surface's VRAM across page-off, and its next page-on takes the same
 VRAM back; RM has kept the contents through the sleep, so nothing is lost.
 
+## What else happens around a sleep (3.0)
+
+**The sleep line.** `NVRM-xnu: sleep #n: user channels stopped ... rm_power_management(STANDBY) ...` now also says how
+much VRAM the RM wrote to its save file during standby (`<n> MB of VRAM (<bytes> bytes) written to the save file`).
+That is the VRAM this sleep preserved through the file; a RM that preserves VRAM by another method writes 0 here, and
+two GPUs going to sleep at the same moment can each count some of the other's bytes.
+
+**RM work.** Before the GPU goes to standby the driver waits for the RM's global work queue, 5 s at most, because all
+of this runs inside the system's power change ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md),
+"RM work items").
+
+**The surface fence** ([SURFACE-FENCE.md](SURFACE-FENCE.md)). It is told about sleep before the user channels stop:
+every hold ends, NVAccel's waits for a frame go on at once, a reader in the Metal plugin falls back to the writer's
+busy tag for up to 10 ms as in 2.9, and new holds are refused until the wake (`debug.nvrm_fence_end_pm` grows by the
+holds that were in flight). Its views of the channels' pages are ordinary wired memory and survive the sleep. After a
+wake `debug.nvrm_fence_state` is 1 again and `debug.nvrm_fence_opens` grows; if the GPU did not resume, the state is
+3 and the driver keeps 2.9's marks and tags until the next boot. A GPU that goes away while it is suspended
+(unplugged or unloaded during sleep, or while its slot is powered off by `nvrtd3=1`) never wakes; the driver tells the
+fence so when that GPU stops, so that the fence does not stay closed for a second card (`nvmultigpu=1`) or for a card
+that is started later.
+
+**Waits that span the sleep.** NVK's no-progress budget (`NVRM_FLUSH_TIMEOUT_MS`) and the Metal plugin's fence wait
+(the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) are measured in awake time
+(`CLOCK_UPTIME_RAW`): a wait that is in progress when the machine sleeps continues after wake with the time it had
+left, so a frame that was pending at sleep is not declared lost, and a channel is not rung again or rebuilt, merely
+because the machine slept. Application timeouts (`vkWaitForFences`) are still measured on the ordinary clock. With
+`NVK_CHANNEL_RECOVER=0` NVK's budget is on the ordinary clock, as in 2.9 (a wait across a long sleep can then be
+called lost at wake).
+
+**VT-d.** With a DMA mapper (DMA modes 1 and 2, [DMA-IOMMU.md](DMA-IOMMU.md)) the GPU's bus addresses stay valid
+across sleep: AppleVTD keeps its tables in memory and restores them before drivers wake. `debug.nvrm_dma_live` reads
+the same before and after a sleep with nothing else running. Not yet observed on hardware.
+
 ## Switches and diagnostics
 
 | Name | Kind | Effect |
@@ -67,6 +102,9 @@ VRAM back; RM has kept the contents through the sleep, so nothing is lost.
 | `debug.nvrm_pm_waited` | sysctl | RM calls that waited at the gate for a resume. |
 | `debug.nvrm_isr_count`, `debug.nvrm_isr_handled` | sysctl | GPU interrupts taken and claimed by RM. |
 | `nvrm-pm` | NVRM registry property | `running`, `suspended` or `lost (resume failed)`. |
+| `debug.nvrm_isr_skipped` | sysctl | GPU interrupts that arrived while the interrupt path was closed for sleep (not given to the RM). |
+| `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet before standby that ran out. Should stay 0. |
+| `debug.nvrm_fence_end_pm`, `debug.nvrm_fence_state` | sysctl | Surface holds ended by a sleep; the fence's state (1 on, 3 off after a failed resume). |
 
 Kernel log lines to look for (`/usr/bin/log show --predicate 'process == "kernel"'`): `NVRM-xnu: sleep #`,
 `NVRM-xnu: wake #`, `VRAM save file closed: N MB held`, `NVRM-fb: system wake:`.
