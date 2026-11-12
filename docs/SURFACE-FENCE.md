@@ -412,6 +412,11 @@ from a channel or from the process.
   back this way for as long as it keeps its connection open, as it can with any driver that wires its pages.
 - A GPU that goes to sleep in the last moment of its start is not announced to the fence. Holds opened then end at
   their bounds, with a strike.
+- When every hold ends at once (the GPU goes to sleep, the last GPU stops, the layer switches itself off),
+  WindowServer's work in flight has neither a hold nor a 2.9 mark: no mark was sent for a surface the kernel held.
+  NVAccel's flip, copy or page-off of such a surface then goes on at once and can show a frame the GPU has not
+  finished, once, as 2.9 did when its 100 ms ran out. An application's surface still carries its busy tag, and its
+  readers fall back to that.
 
 ## What to look at on the card
 
