@@ -226,17 +226,21 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   then kept it 10 ms; otherwise it does what 2.9 did with the tag, which the writer still writes and clears: a tag
   older than 100 ms is passed at once, a newer one is polled for up to 10 ms. An interrupted wait or an error does the
   same. So a reader reads a surface earlier than 2.9 did only on the kernel's answer that the write is complete, and
-  never waits longer than the kernel's bound for the hold plus 10 ms. (The kernel also gives that answer when more
-  than 64 holds ended during one wait, because it then no longer knows how this one ended: sleep, a stop of the fence
-  or the exit of a process with that many holds open can do it.) A tag that names no writer (pid 0) is never asked of
-  the kernel. A reader in any process but WindowServer that imports a surface no application wrote waits for
-  WindowServer's compositor holds on it (a capture of a frame WindowServer is still drawing).
+  never waits longer than the kernel's bound for the hold plus 10 ms. (When more than 64 holds ended during one wait,
+  the kernel no longer knows how this one ended. It then gives that answer only if every one of them was a
+  completion; otherwise it answers with the worst that ended, given up or gone, and the reader does as above. Sleep,
+  a stop of the fence or the exit of a process with that many holds open can do it.) A tag that names no writer
+  (pid 0) is never asked of the kernel. A reader in any process but WindowServer that imports a surface no
+  application wrote waits for WindowServer's compositor holds on it (a capture of a frame WindowServer is still
+  drawing).
 - **Exactly one mechanism per command buffer.** The decision is the open's: a hold the kernel took replaces that
   surface's pending mark (not sent) and is announced in the busy tag's pad word; a hold the kernel refused (table
   full, a channel the kernel does not watch, a distrusted process, an older kext, `nvrmfence=0`) leaves the command
   buffer's tags and marks exactly as 2.9 wrote them. Surface 0 (WindowServer's once-a-second probe of the NVAccel
   marks) always reaches the kernel.
-- **Log lines** (the plugin's log, `nvmtl.log`): `surface fences: kernel (NVRM fence v1, compositor)` when the fence
+- **Log lines** (the plugin's log, `nvmtl.log`, which an installed release plugin writes only for a process started
+  with `NVMTL_PROCESS_ENV=1`: [TROUBLESHOOTING.md](TROUBLESHOOTING.md), "The new paths of release 3.0"):
+  `surface fences: kernel (NVRM fence v1, compositor)` when the fence
   is on and NVAccel reads the kernel's table; `surface fences: kernel (NVRM fence v1; NVAccel does not read it, so
   WindowServer keeps its pending marks)` when NVAccel does not; `surface fences: off (...)` with the reason (`NVK or
   the kext answered 0x80000002: no fence there` for an older kext, an older NVK's answer, or `nvrmfence=0`); one line
