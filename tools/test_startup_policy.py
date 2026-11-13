@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """Startup timing: headless deadline after the settle delay, nvrmsettle override, early exit when no connector has a display.
 Compiles kexts/NVRM/nvrm_startup_policy.h on the host and checks the kernel sources use it."""
-import os, shutil, subprocess, sys, tempfile
+import os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
+
+# Comments blanked, string and character literals kept, offsets unchanged (the LEX of test_lifecycle_order.py, with the
+# strings kept so a structural check can read both code and the string literals it names).
+LEX = re.compile(r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])'""", re.S)
+
+
+def code_keep_strings(text):
+    return LEX.sub(lambda m: m.group(0) if m.group(0)[0] in "\"'" else re.sub(r"[^\n]", " ", m.group(0)), text)
+
 
 root = Path(__file__).resolve().parents[1]
 nvrm = (root / "kexts/NVRM/NVRM.cpp").read_text(encoding="utf-8")
@@ -263,10 +272,33 @@ def wiring(src):
     tail = start.rstrip()[:-1].rstrip().splitlines()
     if not (len(tail) >= 2 and tail[-1].strip() == "return true;" and "&fStartReturned" in tail[-2]):
         broken.append("the last statement of startGPU before its final return true writes fStartReturned")
-    go = auto.find("s->go(2)")
-    if not (0 <= auto.find("fStartReturned") < go):
+    # These two read the structure, not just a name: start() runs on past the thread it started, so auto-go must spin on
+    # fStartReturned until it returns before it touches the card; and a framebuffer-layout refusal seen late must step
+    # aside (release the hold and return) before go(2). A later edit that drops the wait or disables the late refusal
+    # leaves a log line or the string behind, which a find() of the name would still accept.
+    autoc = code_keep_strings(auto)
+    go = autoc.find("s->go(2)")
+    m = re.search(r"while\s*\(\s*!\s*OSAddAtomic\s*\(\s*0\s*,\s*&s->fStartReturned\s*\)\s*&&\s*waited\s*<\s*"
+                  r"kNvrmStartGateMaxMs\s*\)\s*\{\s*IOSleep\s*\(", autoc)
+    if not (m and 0 <= m.start() < go):
         broken.append("autoGo waits for fStartReturned before go(2)")
-    if not (0 <= auto.find('"nvrmfb-layout"') < go):
+    ref = autoc.find("if (gNvLayoutFb == kNvLayoutRefused) {")
+    refuse_ok = False
+    if 0 <= ref < go:
+        ob = autoc.find("{", ref)
+        depth, end = 0, -1
+        for i in range(ob, len(autoc)):
+            if autoc[i] == "{":
+                depth += 1
+            elif autoc[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end >= 0:
+            block = autoc[ob:end]
+            refuse_ok = "releaseBootHold(" in block and "return;" in block and end < go
+    if not refuse_ok:
         broken.append("autoGo reads nvrmfb-layout again before go(2)")
     if src.count('"-nvrmoldwaits"') != 1 or '"-nvrmoldwaits"' not in start:
         broken.append("-nvrmoldwaits is read once, in startGPU")
@@ -309,6 +341,16 @@ for name, m, rule in [
      "-nvrmoldwaits is read once, in startGPU"),
     ("control: the raster early exit taken under -nvrmoldwaits too", mutated("!fOldWaits && nvrmRasterHeadIdle(", "nvrmRasterHeadIdle("),
      "the raster early exit is skipped under -nvrmoldwaits"),
+    # S1: the wait for start() to return is deleted; the LOG line after it still names fStartReturned before go(2).
+    ("control: the wait for start() to return removed from autoGo",
+     mutated("        while (!OSAddAtomic(0, &s->fStartReturned) && waited < kNvrmStartGateMaxMs) "
+             "{ IOSleep(kNvrmStartGateStepMs); waited += kNvrmStartGateStepMs; }\n", ""),
+     "autoGo waits for fStartReturned before go(2)"),
+    # S2: the late framebuffer-layout refusal is disabled; the string "nvrmfb-layout" stays in the nvrmPeerLayout call.
+    ("control: the late framebuffer-layout refusal disabled",
+     mutated('if (gNvLayoutFb == kNvLayoutRefused) {\n            LOG("auto-go: NOT STARTING THE GPU',
+             'if (0 && gNvLayoutFb == kNvLayoutRefused) {\n            LOG("auto-go: NOT STARTING THE GPU'),
+     "autoGo reads nvrmfb-layout again before go(2)"),
 ]:
     arm(name, m is not None and rule in wiring(m))
 
