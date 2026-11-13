@@ -4,10 +4,10 @@
 A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml as text (no YAML library needed) and
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
 clone, the scripts and tests the jobs name exist, the jobs that gate do gate (the two that run tests get a full clone:
-their tests read older revisions), the Mac kext job runs on Apple silicon and on Intel and checks what an Intel Mac's
-compiler can slip into a kext, the host tests and the plugin get the Vulkan headers the release uses (and a host test
-that needs them cannot pass by being skipped), and nothing uploads or publishes. Each property has a control: the
-same check on a copy of the file with that one thing wrong has to fail.
+their tests read older revisions), the host tests and the Mac kext job run on Apple silicon and on Intel, the kext job
+checks what an Intel Mac's compiler can slip into a kext, the host tests and the plugin get the Vulkan headers the
+release uses (and a host test that needs them cannot pass by being skipped), and nothing uploads or publishes. Each
+property has a control: the same check on a copy of the file with that one thing wrong has to fail.
 
 .github/workflows/full-build.yml, the build from an empty folder, is held to the same rules (its actions pinned to the
 commits ci.yml uses, its Xcode step equal to ci.yml's) and to what it is for: one job on macos-15-intel with a timeout,
@@ -95,6 +95,11 @@ def problems(y, root):
     m = re.search(r"run_all_tests\.py -j \d+ --tail (\d+) ", host)
     if not m or int(m.group(1)) < 20000:
         out.append("host-tests does not print a failed test's output whole (--tail of at least 20000 characters)")
+    m = re.search(r"runner: \[([^\]]*)\]", host)
+    if not m or {r.strip() for r in m.group(1).split(",")} != {"macos-15", "macos-15-intel"} or "runs-on: ${{ matrix.runner }}" not in host \
+            or "fail-fast: false" not in host:
+        out.append("host-tests does not run on both an Apple-silicon and an Intel runner (macos-15, macos-15-intel), each to its end "
+                   "(fail-fast: false)")
     # the runner counts a skip as no failure: a skip of a test that reads NM_VULKAN_INCLUDE must fail the job
     sk = re.search(r"if grep -E '\^skip \(([\w|]+)\)\\\.py:' \"\$RUNNER_TEMP/tests\.txt\"; then\n\s*echo \"::error::[^\"\n]*\"; exit 1\n\s*fi\n", host)
     if not sk or set(sk.group(1).split("|")) != vulkan_tests(root):
@@ -175,8 +180,15 @@ control("the count check dropped is caught", "          grep -qx '5 passed, 0 fa
 control("a shallow clone for the host tests is caught", "fetch-depth: 0          # negative controls", "fetch-depth: 1          # negative controls", "every test from a full clone")
 control("a shallow clone for the registry test is caught", "fetch-depth: 0          # the registry test", "fetch-depth: 2          # the registry test", "kexts-linux has no full clone")
 control("the Linux job made non-gating is caught", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    continue-on-error: true\n", "kexts-linux no longer gates")
-control("the host tests made non-gating are caught", "    runs-on: macos-15\n    timeout-minutes: 45\n", "    runs-on: macos-15\n    timeout-minutes: 45\n    continue-on-error: true\n",
-        "host-tests no longer gates")
+control("the host tests made non-gating are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n",
+        "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n    continue-on-error: true\n", "host-tests no longer gates")
+HOST_RUNNERS = "        # Apple silicon and Intel, as the kext job below: the tests must hold on both\n        runner: [macos-15, macos-15-intel]\n"
+control("the host tests on Apple silicon only are caught", HOST_RUNNERS, HOST_RUNNERS.replace("[macos-15, macos-15-intel]", "[macos-15]"),
+        "host-tests does not run on both")
+control("the host tests on one runner by name are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n", "    runs-on: macos-15\n    timeout-minutes: 45\n",
+        "host-tests does not run on both")
+control("host tests that are cancelled when the other runner's fail are caught", "    strategy:\n      fail-fast: false\n      matrix:\n" + HOST_RUNNERS,
+        "    strategy:\n      matrix:\n" + HOST_RUNNERS, "host-tests does not run on both")
 control("a checkout that keeps the token is caught", "          persist-credentials: false\n", "", "persist-credentials")
 control("the kext check dropped from the Linux job is caught", "        run: bash build/kext_check.sh\n      - name: Switch registry", "        run: true\n      - name: Switch registry",
         "does not run the kext check")
@@ -190,7 +202,9 @@ control("the Mac kext job made non-gating is caught", "    timeout-minutes: 90\n
         "kexts-mac no longer gates")
 control("a checksum of the compile lines as make spaced them is caught", """"$f" | tr -s ' ' > "$cut\"""", """"$f" > "$cut\"""",
         "runs of spaces squeezed")
-control("the kext job on Apple silicon only is caught", "runner: [macos-15, macos-15-intel]", "runner: [macos-15]", "both an Apple-silicon and an Intel runner")
+KEXT_RUNNERS = "        # Apple silicon and Intel, both macOS 15 (labels from GitHub's list of standard hosted runners)\n        runner: [macos-15, macos-15-intel]\n"
+control("the kext job on Apple silicon only is caught", KEXT_RUNNERS, KEXT_RUNNERS.replace("[macos-15, macos-15-intel]", "[macos-15]"),
+        "kexts-mac does not run on both")
 control("the kext job without its check of NVRM's imports is caught", "if grep -qE '(^|[[:space:]])___x86_'", "if false",
         "does not check its compile lines")
 control("the kext job that checks only the RM's compile lines is caught", "for part in nvidia nvidia-modeset; do", "for part in nvidia; do",

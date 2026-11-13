@@ -4,10 +4,13 @@
 #                 symbol the objects import checked against the export lists of the macOS 15 and the macOS 26 kernel
 #                 (build/kext_check.sh); the switch registry; the translator's own registry test. A few minutes; it
 #                 gates every push.
-#   host-tests    tools/run_all_tests.py on a Mac (the tests compile Objective-C and read older revisions, so the
-#                 clone is a full one), with the Vulkan headers the release compiles the plugin against
-#                 (build/ci_vulkan_headers.sh, in NM_VULKAN_INCLUDE: a test that needs them fails rather than skips
-#                 when they are wrong). It gates: a failing host test must not go unnoticed.
+#   host-tests    tools/run_all_tests.py on two Macs, an Apple-silicon and an Intel one (the tests compile Objective-C
+#                 and read older revisions, so the clone is a full one), with the Vulkan headers the release compiles
+#                 the plugin against (build/ci_vulkan_headers.sh, in NM_VULKAN_INCLUDE: a test that needs them fails
+#                 rather than skips when they are wrong). The kexts are x86_64, so a tester's Mac is an Intel one, and
+#                 an Intel Mac differs where the tests of the build script look: its Homebrew is in /usr/local/bin, on
+#                 every shell's PATH. Each runner's job runs to its end and gates: a failing host test must not go
+#                 unnoticed.
 #   kexts-mac     the real kext builds with Xcode, once on an Apple-silicon runner and once on an Intel one: NVIDIA's
 #                 RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26), NVRMAGDC and NMSMN linked. Catches what a
 #                 compile cannot: a duplicate or missing definition at link. NVIDIA's makefiles ask the compiler of the
@@ -71,7 +74,12 @@ jobs:
       - name: Translator environment registry
         run: cargo test --manifest-path translator/translator/Cargo.toml --test env_registry
   host-tests:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple silicon and Intel, as the kext job below: the tests must hold on both
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
