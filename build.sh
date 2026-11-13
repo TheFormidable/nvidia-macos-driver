@@ -863,7 +863,12 @@ make_step_env() { STEP_ENV=(); local l; while IFS= read -r l; do STEP_ENV+=( "$l
 passthru() { local v; for v in "$@"; do eval "[ -n \"\${$v+x}\" ] && printf '%s\n' \"$v=\${$v}\"" || true; done; }
 
 # ---------------------------------------------------------------------------------------------------------- fetch
-git_q() { git -c advice.detachedHead=false -c init.defaultBranch=nm "$@"; }
+# git for the sources build.sh fetches: the tester's own git set-up stays out. No hooks (a global core.hooksPath would run
+# its post-checkout in every clone; a hook may download or install anything), no file system monitor, no global
+# attributes file (the pinned repositories mark no file for a filter; a global one could send every file through
+# git-lfs or another filter), and git init / clone get an empty template (init.templateDir would copy hooks and files).
+git_q() { git -c advice.detachedHead=false -c init.defaultBranch=nm -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              -c core.attributesFile=/dev/null "$@"; }
 mirror_url() {   # <pin id>: the mirror variable's value, or the pinned URL
   local mv url
   mv=$(pin "$1_MIRROR"); url=$(pin "$1_URL")
@@ -885,7 +890,7 @@ fetch_bare() {
   if [ "$NM_DRY_RUN" = 1 ]; then
     say "    git init --bare $(q "$repo"); git fetch --depth 1 $(q "$url") $([ -n "$ref" ] && echo "refs/tags/$ref" || echo "$commit")"; return 0
   fi
-  [ -d "$repo" ] || git_q init -q --bare "$repo"
+  [ -d "$repo" ] || git_q init -q --bare --template= "$repo"
   if [ -n "$ref" ]; then
     git_q -C "$repo" fetch -q --depth 1 "$url" "+refs/tags/$ref:refs/tags/$ref" || die "could not fetch $ref from $url"
     got=$(git_q -C "$repo" rev-parse "refs/tags/$ref^{commit}")
@@ -923,7 +928,7 @@ checkout_clone() {
   say "  checkout $commit -> $dir"
   if [ -e "$dir" ]; then in_workdir "$dir" || die "$dir exists, is outside the working directory and is not a clean checkout at $commit"; safe_rm "$dir"; fi
   [ "$NM_DRY_RUN" = 1 ] && { say "    git clone --no-checkout file://$repo $(q "$dir"); git checkout $commit"; return 0; }
-  git_q clone -q --no-checkout "file://$repo" "$dir"
+  git_q clone -q --no-checkout --template= "file://$repo" "$dir"
   if [ $# -gt 0 ]; then git_q -C "$dir" sparse-checkout set "$@"; fi
   git_q -C "$dir" checkout -q --detach "$commit"
 }

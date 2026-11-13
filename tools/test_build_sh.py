@@ -1244,6 +1244,52 @@ def tamper_problems(sb, extra=None, what="620.70.06"):
     return p, out
 
 
+def githooks_problems(sb):
+    """./build.sh fetch on a Mac whose global git set-up has a hooks folder, a template folder and an attributes file
+    that sends every file through a filter: none of them may act in what fetch makes (each leaves a mark when it does)."""
+    marks = sb.dir / "git-marks"
+    shutil.rmtree(marks, ignore_errors=True)
+    marks.mkdir()
+    hooks, tpl = sb.dir / "git-hooks", sb.dir / "git-template"
+    for d, what in ((hooks, "core.hooksPath"), (tpl / "hooks", "init.templateDir")):
+        d.mkdir(parents=True, exist_ok=True)
+        for h in ("post-checkout", "post-merge", "reference-transaction"):
+            (d / h).write_text(f'#!/bin/sh\n: > "{marks}/{h} hook of {what}"\n')
+            (d / h).chmod(0o755)
+    (tpl / "nm-template-mark").write_text("copied from init.templateDir\n")
+    attrs = sb.dir / "git-attributes"
+    attrs.write_text("* filter=nmmark\n")
+    filt = sb.dir / "git-filter"
+    filt.write_text(f'#!/bin/sh\n: > "{marks}/filter"\ncat\n')
+    filt.chmod(0o755)
+    cfg = sb.dir / "gitconfig"
+    base = cfg.read_text().split("# --- githooks\n")[0]
+    cfg.write_text(base + "# --- githooks\n" + f"[core]\n\thooksPath = {hooks}\n\tattributesFile = {attrs}\n[init]\n\ttemplateDir = {tpl}\n"
+                   f"[filter \"nmmark\"]\n\tsmudge = {filt}\n\tclean = {filt}\n")
+    if sb.work.exists():
+        shutil.rmtree(sb.work)
+    rc, out = sb.run("fetch")
+    p = []
+    if rc != 0:
+        p.append(f"fetch: exit {rc}: {out[-400:]}")
+    p += [f"{m.name} acted" for m in sorted(marks.iterdir())]
+    p += [f"the template was copied into {str(m.parent.relative_to(sb.work))}" for m in sb.work.rglob("nm-template-mark")]
+    cfg.write_text(base)
+    return p
+
+
+def arm_githooks():
+    sb = Sandbox("githooks")
+    p = githooks_problems(sb)
+    check("fetch runs none of the tester's git hooks, template or filters", not p, p)
+    with sb.scratch():
+        sb.break_script(" -c core.hooksPath=/dev/null -c core.fsmonitor=false \\\n              -c core.attributesFile=/dev/null", "")
+        negative("git without the hooks, monitor and attributes settings", githooks_problems(sb))
+    with sb.scratch():
+        sb.break_script(" --template= ", " ", count=2)
+        negative("git init and clone without an empty template", githooks_problems(sb))
+
+
 def arm_tamper():
     rt = TMP / "remotes-tampered"
     make_remotes(rt, tamper=True)
@@ -2449,6 +2495,8 @@ def main():
             arm_needs()
         if want("tamper"):
             arm_tamper()
+        if want("githooks"):
+            arm_githooks()
         if want("space"):
             arm_space()
         if want("hosts"):
