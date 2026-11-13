@@ -56,6 +56,8 @@
 #NM_PYTHON=/opt/homebrew/bin/python3.14
 # LLVM 22 with its clang libraries, when Homebrew has none
 #NM_LLVM_PREFIX=/opt/homebrew/opt/llvm@22
+# a SPIRV-Tools that is not Homebrew's: the prefix whose lib/pkgconfig holds SPIRV-Tools.pc
+#NM_SPIRV_TOOLS_PREFIX=
 # NVIDIA 620.70.06 unpacked (checked by its version.mk)
 #NM_OGKM620_PRISTINE=
 # a 620.70.06 tree whose RM and modeset archives are built already (the rm and kms steps are then skipped)

@@ -1212,6 +1212,58 @@ def deps_problems(sb, rc, out, before):
     return p
 
 
+def spirvprefix_problems(script_edit=None):
+    """A SPIRV-Tools that is not Homebrew's, named by NM_SPIRV_TOOLS_PREFIX: doctor takes it, deps asks Homebrew for none,
+    and a prefix without the .pc file is named and not taken."""
+    sb = Sandbox("spirvprefix")
+    if script_edit:
+        sb.break_script(*script_edit)
+    p = []
+    pre = sb.home / "spirv-tools-of-mine"
+    (pre / "lib/pkgconfig").mkdir(parents=True)
+    (pre / "lib/pkgconfig/SPIRV-Tools.pc").write_text("Name: SPIRV-Tools\nVersion: 2025.5\n")
+
+    def formulas(out):
+        m = re.search(r"^Homebrew formulas to install \(.*\): (.*)$", out, re.M)
+        return m.group(1).split() if m else None
+
+    rc, out = sb.run("doctor")
+    if not re.search(r"^  MISSING  SPIRV-Tools .*NM_SPIRV_TOOLS_PREFIX", out, re.M):
+        p.append("without the setting, doctor's MISSING line for SPIRV-Tools does not name it")
+    rc, out = sb.run("--dry-run", "deps")
+    if "spirv-tools" not in (formulas(out) or []):
+        p.append(f"without the setting, the dry run of deps does not ask Homebrew for spirv-tools: {formulas(out)}")
+    extra = {"NM_SPIRV_TOOLS_PREFIX": str(pre)}
+    rc, out = sb.run("doctor", extra=extra)
+    if not re.search(r"^  ok       SPIRV-Tools 2025\.5$", out, re.M):
+        p.append("with the setting, doctor does not say: ok SPIRV-Tools 2025.5")
+    if [i for i in doctor_items(out) if i.startswith("SPIRV-Tools")]:
+        p.append("with the setting, doctor still counts SPIRV-Tools as missing")
+    rc, out = sb.run("--dry-run", "deps", extra=extra)
+    f = formulas(out)
+    if f is None or "spirv-tools" in f or "ninja" not in f:
+        p.append(f"with the setting, the dry run of deps asks Homebrew for: {f} (expected the others, without spirv-tools)")
+    empty = sb.home / "nothing-here"
+    rc, out = sb.run("doctor", extra={"NM_SPIRV_TOOLS_PREFIX": str(empty)})
+    # build.sh prints a path under the home folder with ~
+    if not re.search(r"^  note     NM_SPIRV_TOOLS_PREFIX names ~/nothing-here, which has no lib/pkgconfig/SPIRV-Tools\.pc", out, re.M):
+        p.append("a prefix without SPIRV-Tools.pc is not named by doctor")
+    if not [i for i in doctor_items(out) if i.startswith("SPIRV-Tools")]:
+        p.append("a prefix without SPIRV-Tools.pc is taken as SPIRV-Tools")
+    return p
+
+
+def arm_spirvprefix():
+    p = spirvprefix_problems()
+    check("NM_SPIRV_TOOLS_PREFIX names a SPIRV-Tools that is not Homebrew's: doctor takes it and deps installs none", not p, p)
+    negative("SPIRV-Tools looked for in Homebrew only (the setting is ignored)",
+             spirvprefix_problems(script_edit=('  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(brew_opt spirv-tools)"; do',
+                                               '  for p in "$(brew_opt spirv-tools)"; do')))
+    negative("a prefix taken without looking for its SPIRV-Tools.pc",
+             spirvprefix_problems(script_edit=('    [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] || continue\n    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break',
+                                               '    [ -n "$p" ] || continue\n    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break')))
+
+
 def cargoconf_problems(script_edit=None):
     """doctor names a cargo configuration in a folder above the working directory (here the home folder's own)."""
     sb = Sandbox("cargoconf")
@@ -2858,6 +2910,8 @@ def main():
                     timed("llvm23", arm_llvm23)
                 if want("cargoconf"):
                     timed("cargoconf", arm_cargoconf)
+                if want("spirvprefix"):
+                    timed("spirvprefix", arm_spirvprefix)
             except BaseException as e:   # reported after the join, as a failure
                 errors.append(e)
 
