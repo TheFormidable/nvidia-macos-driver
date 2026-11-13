@@ -1351,7 +1351,10 @@ tc_seconds() {
     pkgconf) echo 7 ;; spirv-tools) echo 771 ;; glslang) echo 71 ;; llvm) echo 2040 ;; *) echo 0 ;; esac
 }
 TC_SPACE_GB=10
-tc_sh() { bash "$HERE/build/toolchain.sh" "$@"; }
+# build/toolchain.sh is run with the system's own folders as PATH: the bash that runs it and the helpers it calls (otool,
+# perl, awk, sort and the like) are macOS's, never a Homebrew copy that a shell's PATH puts first
+TC_SYSPATH=/usr/bin:/bin:/usr/sbin:/sbin
+tc_sh() { env "PATH=$TC_SYSPATH" bash "$HERE/build/toolchain.sh" "$@"; }
 # A tool of the toolchain is taken (find_tools) only when its stamp is there: build/toolchain.sh writes it after the
 # tool's checks passed, so a half-installed tool is never taken. It is up to date when the stamp is "<pinned
 # commit(s)> <toolchain.sh id>", followed for a tool that has others' code linked into it (tc_linked) by "; with "
@@ -1408,7 +1411,8 @@ tc_plan() {
 }
 tc_env() {   # <tool>: the settings build/toolchain.sh is run with (docs: the interface in its header)
   printf '%s\n' "NM_TC_PREFIX=$TC_PREFIX" "NM_TC_SRC=$TC_SRC" "NM_TC_WORK=$TC_WORK" "NM_TC_LOGS=$TC_LOGS" "NM_TC_JOBS=$NM_JOBS" \
-    "NM_TC_MESON=$VENV/bin/meson" "NM_TC_STAMP=$(tc_want "$1")" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+    "NM_TC_MESON=$VENV/bin/meson" "NM_TC_STAMP=$(tc_want "$1")" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" \
+    "PATH=$TC_SYSPATH"
 }
 tc_free_kb() {   # free space, in KB, of the file system the working directory is on (or will be on)
   local d=$W; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
