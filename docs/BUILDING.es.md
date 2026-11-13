@@ -181,7 +181,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | Variable | Para qué |
 |---|---|
 | `NM_BASE_PACKAGE_SHA256` | SHA-256 del paquete base, comprobado antes de usarlo |
-| `NM_PACKAGE_VERSION` | Versión escrita en `VERSION` del paquete, que install.sh guarda en `/Library/NullMoth/driver-version` (la versión instalada que leen la búsqueda de actualizaciones de la app y Send logs). Por defecto, la del primer encabezado de CHANGELOG.md (`3.0`), no la del paquete base; `package` se detiene si ese encabezado no es una versión y la variable no está puesta |
+| `NM_PACKAGE_VERSION` | Versión escrita en `VERSION` del paquete, que install.sh guarda en `/Library/NullMoth/driver-version` (la versión instalada que leen la búsqueda de actualizaciones de la app y Send logs). Por defecto, la del primer encabezado de CHANGELOG.md (`3.0`), no la del paquete base; `package` se detiene si ese encabezado no es una versión y la variable no está puesta, y también si la variable tiene algo más que cifras y puntos (install.sh solo guarda esos: `3.0rc1` quedaría como `3.01`) |
 | `NM_OGKM_URL` | Réplica de open-gpu-kernel-modules de NVIDIA |
 | `NM_MESA_URL` | Réplica de Mesa |
 | `NM_KHRONOS_URL` | Prefijo de URL con `Vulkan-Headers` y `Vulkan-Loader` |

@@ -2791,6 +2791,22 @@ def arm_package(mac):
         p, out = unversioned_changelog_problems(mac)
         check("a CHANGELOG.md whose first heading is not a version stops the package step with a sentence; no base version is taken",
               not p, (p, out[-500:]))
+    def odd_version_problems(s):
+        s.clear()
+        rc, out = s.run("--base-package", str(s.dir / "brew"), "package", extra={"NM_PACKAGE_VERSION": "3.0rc1"})
+        q = []
+        if rc == 0 or "package" in s.step_keys():
+            q.append(f"the package step ran (exit {rc}) with a version install.sh would record as 3.01")
+        if "would record '3.01'" not in out:
+            q.append("the stop does not say what would be recorded")
+        return q, out
+    with mac.scratch():
+        p, out = odd_version_problems(mac)
+        check("a version the user sets that is not digits and dots stops the package step (install.sh would record 3.0rc1 as 3.01)",
+              not p, (p, out[-500:]))
+    with mac.scratch():
+        mac.break_script("    *[!0-9.]*|.*|*.|*..*) die", "    *[!0-9.]*|.*|*.|*..*) true")
+        negative("a package step that takes any version the user sets", odd_version_problems(mac)[0])
     with mac.scratch():
         mac.break_script('then NM_PACKAGE_VERSION=$(changelog_version); PKG_VERSION_FROM="CHANGELOG.md"; fi', 'then :; fi')
         negative("build.sh that leaves the package's VERSION to the base package", package_version_problems(mac, top, "CHANGELOG.md")[0])

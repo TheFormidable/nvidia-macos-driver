@@ -1825,6 +1825,10 @@ cmd_package() {
   [ -e "$NM_BASE_PACKAGE" ] || [ "$NM_DRY_RUN" = 1 ] || die "the base package $NM_BASE_PACKAGE does not exist"
   [ "$NM_ACCEL" = both ] || die "a package must carry NVAccel for macOS 15 and 26 (install.sh checks both); build with --accel both"
   [ -n "$NM_PACKAGE_VERSION" ] || die "the package's version is read from the first heading of CHANGELOG.md (\"## <version>\"), and that heading is not a version: set NM_PACKAGE_VERSION to the version the install should record"
+  # install.sh keeps only the digits and dots of VERSION: 3.0rc1 would be recorded as 3.01, a release that never was
+  case "$NM_PACKAGE_VERSION" in
+    *[!0-9.]*|.*|*.|*..*) die "NM_PACKAGE_VERSION is '$NM_PACKAGE_VERSION': install.sh records only the digits and dots of a package's version, so the Mac would record '$(printf '%s' "$NM_PACKAGE_VERSION" | tr -cd '0-9.')'. Set it to digits and dots, such as 3.0" ;;
+  esac
   say "package version $NM_PACKAGE_VERSION (from $PKG_VERSION_FROM), written to the package's VERSION and, by install.sh, to /Library/NullMoth/driver-version"
   prepare_build
   local c; for c in $(with_deps $ALL_COMPONENTS); do need_tools_for "$c"; need_sources_for "$c"; done
