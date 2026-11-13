@@ -667,8 +667,38 @@ def main():
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("/usr/local/lib",)),
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))
         # Rust's rust-lld searches a folder of the machine Rust was built on: the first prove above passed with it
-        arm("the search path of Rust's build machine in Rust's own rust-lld is not a finding, and the tools' line says how many it left out",
-            f"not counted: 1 search path(s) under {RUST_DIST}" in out and "ships in its own rust-lld and which name no folder of this Mac" in out, out)
+        arm("the search path of Rust's build machine in Rust's own rust-lld is not a finding, and the tools' line says how many it left out and where",
+            f"not counted: 1 search path(s) under {RUST_DIST} (Rust's build machine) that name no folder of this Mac, in the working directory's Rust toolchains: rust-lld\n" in out, out)
+        # a second file of the toolchain with that search path: both are named, and counted
+        ld64 = sc.rust_lld.parent / "gcc-ld/ld64.lld"
+        mk.make(ld64, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=(RUST_DIST + "/x86_64-apple-darwin/llvm/lib",))
+        try:
+            rc, o = sc.prove()
+            arm("two files of the Rust toolchain with that search path are counted and named, with a comma between them",
+                rc == 0 and f"not counted: 2 search path(s) under {RUST_DIST} " in o and "Rust toolchains: ld64.lld, rust-lld\n" in o, "\n".join(failures(o)) or o)
+        finally:
+            shutil.rmtree(ld64.parent)
+        # the working directory by a second name (a link to it): the tools that prove names one by one are found by their
+        # real path, and each is still one line of the list
+        def tools_count(o):
+            m = re.search(r"Mach-O files of the working directory's tools \(toolchain, Translator, Rust, mesa_clc\): (\d+),", o)
+            return int(m.group(1)) if m else None
+        wl = tmp / "workdir-by-a-link"
+        wl.symlink_to(w)
+        real_path = variant("realpath", ('      case "$g" in "$wr"/*) g=$w/${g#"$wr"/} ;; esac\n', ""))
+        sc.w = wl
+        try:
+            rc, o = sc.prove()
+            arm("a working directory given by a link to it: prove passes, and counts each tool once, as with its own name",
+                rc == 0 and tools_count(out) is not None and tools_count(o) == tools_count(out) and "not counted: 1 search path(s)" in o,
+                (rc, tools_count(out), tools_count(o), "\n".join(failures(o))))
+            rc, o = sc.prove(script=real_path)
+            arm("control: a script that lists the tools it names by their real path counts them twice then",
+                tools_count(o) is not None and tools_count(o) > tools_count(out), (rc, tools_count(out), tools_count(o)))
+        finally:
+            sc.w = w
+            wl.unlink()
+            real_path.unlink()
         control("the same search path in a tool that is not Rust's own is caught", f"rpath {RUST_DIST}/x86_64-apple-darwin/llvm/lib",
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=(RUST_DIST + "/x86_64-apple-darwin/llvm/lib",)),
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))

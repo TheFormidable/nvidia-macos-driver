@@ -526,6 +526,9 @@ prove_loads() {
       g=$(resolve "$f"); named="$named ${f#"$pr"/}"
       # a link of the toolchain that leads out of the working directory is a tool taken from elsewhere
       case "$g" in "$w"/*|"$wr"/*) ;; *) printf '%s: leads to %s, outside the working directory\n' "$f" "$g" >> "$t/bad-tools.txt" ;; esac
+      # by the working directory's name as it was given, which is how machos listed it: a working directory reached
+      # through a link has two names, and the same file is one line of the list
+      case "$g" in "$wr"/*) g=$w/${g#"$wr"/} ;; esac
       grep -qxF "$g" "$t/tools.txt" || printf '%s\n' "$g" >> "$t/tools.txt"
     else missing="$missing ${f#"$w"/}"; fi
   done
@@ -539,7 +542,7 @@ prove_loads() {
   b=$(grep -c . "$t/bad-tools.txt" || true)
   rd=$(grep -c . "$t/rust-dist.txt" || true)
   if [ "$rd" = 0 ]; then rd=""
-  else rd="; not counted: $rd search path(s) under $RUST_DIST_BUILD, the machine Rust was built on, which Rust's distribution ships in its own$(sed -e 's/: rpath .*//' -e 's|.*/| |' "$t/rust-dist.txt" | LC_ALL=C sort -u | tr -d '\n') and which name no folder of this Mac"; fi
+  else rd="; not counted: $rd search path(s) under $RUST_DIST_BUILD (Rust's build machine) that name no folder of this Mac, in the working directory's Rust toolchains: $(sed -e 's/: rpath .*//' -e 's|.*/||' "$t/rust-dist.txt" | LC_ALL=C sort -u | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"; fi
   if [ -n "$missing" ]; then fail "tools of the working directory that are not there:$missing"; fi
   if [ "$n" = 0 ]; then fail "Mach-O files of the working directory's tools (toolchain, Translator, Rust): none found"
   elif [ "$b" = 0 ]; then ok "Mach-O files of the working directory's tools (toolchain, Translator, Rust, mesa_clc): $n, every library they load and every folder they search lies in /usr/lib, /System or the working directory; among them$named$rd"
