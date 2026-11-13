@@ -153,8 +153,10 @@ case "$role" in
       *) exit 0 ;;
     esac ;;
   brew)
-    # every call, whatever it asks: the three variables a login shell exports for a Homebrew
-    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
+    # every call, whatever it asks: the three variables a login shell exports for a Homebrew, the PATH Homebrew keeps
+    # for post-install steps and its "std" builds, and the two that make Homebrew's bin/brew take HOMEBREW_PATH as PATH
+    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}" \
+        "PATH=$PATH" "HOMEBREW_PATH=${HOMEBREW_PATH:-}" "HOMEBREW_BREW_FILE=${HOMEBREW_BREW_FILE:-}"
     case "${1:-}" in
       --version) echo "Homebrew 4.6.3" ;;
       --prefix) echo "$SB/brew" ;;
@@ -934,14 +936,20 @@ def arm_whichbrew():
 def arm_brewenv():
     """Every call build.sh makes to Homebrew drops HOMEBREW_PREFIX, HOMEBREW_CELLAR and HOMEBREW_REPOSITORY, whatever
     the caller exported: a tester's login shell exports them for a Homebrew of the other architecture, and inherited
-    they would send the chosen brew at the wrong installation. The stand-in brew records the three; a non-empty one fails."""
-    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
-    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY")
+    they would send the chosen brew at the wrong installation. It also runs with a fixed PATH (that Homebrew's bin, then
+    the system's folders) and without HOMEBREW_PATH and HOMEBREW_BREW_FILE: Homebrew keeps the caller's PATH for a
+    formula's post-install step and its "std" builds, where a login shell's other-architecture bin folder would come
+    first. The stand-in brew records them all; a non-empty one, or another PATH, fails."""
+    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew",
+              "HOMEBREW_PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOMEBREW_BREW_FILE": "/opt/homebrew/bin/brew"}
+    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY", "HOMEBREW_PATH", "HOMEBREW_BREW_FILE")
 
     def problems(sb):
         sb.clear()
-        sb.run("deps", "-y", extra=dict(poison))
+        extra = dict(poison, PATH=f"{sb.dir}/opt/homebrew/bin:" + sb.env()["PATH"])
+        sb.run("deps", "-y", extra=extra)
         calls = [l for l in sb.jlines() if l.startswith("brew-callenv")]
+        want_path = f"{sb.dir}/brew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         p = []
         if not calls:
             p.append("no brew call was recorded at all (the arm proves nothing)")
@@ -950,13 +958,20 @@ def arm_brewenv():
                 k, _, v = tok.partition("=")
                 if k in keys and v:
                     p.append(f"{tok} reached brew (in {l.split()[0]})")
+                if k == "PATH" and v != want_path:
+                    p.append(f"brew ran with PATH={v}, not {want_path}")
         return p
 
     sb = Sandbox("brewenv")
-    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY, whatever the caller exported", not (p := problems(sb)), p)
+    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY/PATH/BREW_FILE and with a fixed PATH, whatever "
+          "the caller exported", not (p := problems(sb)), p)
     neg = Sandbox("brewenv-neg")
-    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
-    negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
+    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\',
+                     'env -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\')
+    negative("a run_brew that passes the three location variables through", problems(neg))
+    neg3 = Sandbox("brewenv-neg3")
+    neg3.break_script(' -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\', ' \\')
+    negative("a run_brew that gives brew the caller's PATH and HOMEBREW_PATH (as before)", problems(neg3))
     around = ('  # formulas for what is missing\n', '  [ -z "$("$BREW" --prefix)" ] || true\n  # formulas for what is missing\n')
     neg2 = Sandbox("brewenv-neg2")
     neg2.break_script(*around)
