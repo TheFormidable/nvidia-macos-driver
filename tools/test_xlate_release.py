@@ -85,10 +85,10 @@ class Scene:
              'echo "   Compiling nvmtl_translate v0.1.0 (/src/wrapper)" >&2\n'
              'case "${CARGO_PROFILE_RELEASE_STRIP-}" in\n'
              '  none|false) ;;\n'   # rustc is not asked to strip: rust-objcopy is not started
-             '  *) echo "warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)" >&2\n'
-             '     echo "warning: `nvmtl_translate` (lib) generated 1 warning" >&2 ;;\n'
+             '  *) echo \'warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)\' >&2\n'
+             '     echo \'warning: `nvmtl_translate` (lib) generated 1 warning\' >&2 ;;\n'
              'esac\n'
-             'echo "    Finished `release` profile [optimized] target(s) in 0.01s" >&2\n')
+             'echo \'    Finished `release` profile [optimized] target(s) in 0.01s\' >&2\n')
         tool(self.tb / "strip", 'd=$(cd "$(dirname "$0")" && pwd)\n'
              '[ "$1" = -S ] && [ -f "$2" ] || { echo "stand-in strip: unexpected: $*" >&2; exit 64; }\n'
              '[ -e "$d/strip-leaves-the-map" ] && exit 0\n'
@@ -146,7 +146,8 @@ try:
     s = scene(src.replace(SETTING, "CARGO_HOME=$CH")); made.append(s.tmp)
     rc, out = s.run()
     check("negative control: without the setting the script stops on the translator's warning ceiling, as it did on the Intel Mac",
-          rc == 4 and "STOP: translator has 2 compiler warnings, more than its ceiling of 0" in out and s.record().get("strip") == "<unset>", (rc, out[-600:], s.record()))
+          rc == 4 and "STOP: translator has 2 compiler warnings, more than its ceiling of 0" in out and s.record().get("strip") == "<unset>"
+          and "warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)" in out, (rc, out[-600:], s.record()))
 
     s = scene(strip_leaves=True); made.append(s.tmp)
     rc, out = s.run()
