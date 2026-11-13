@@ -178,9 +178,9 @@ static inline void nvmtl_fence_mark_sent(nvmtl_fence_legacy *L, uint32_t sid, ui
    than 100 ms is passed at once, a newer one is polled for up to 10 ms). `waited_us` is how long the kernel kept this
    reader, the second word of the wait's answer.
      READY    the kernel saw the write complete, or its writer closed the hold: always 1. Nothing else says "complete".
-              The kernel also answers READY when more holds ended during the wait than it keeps the reasons of, so
-              that it cannot say how this one ended; nothing in the answer tells that case apart, and it ends the
-              wait like any READY.
+              When more holds ended during the wait than the kernel keeps the reasons of, it answers READY only if
+              every one of them was a completion, and otherwise the worst of them (TIMEOUT before DEAD), whoever's
+              they were: so a reader whose own write completed can be told DEAD or TIMEOUT, and goes on as below.
      NONE     the kernel holds nothing for this reader: the writer closed its hold and writes its tag next, or the hold
               was let go before this reader came (the cases of DEAD and TIMEOUT below).
      DEAD     the hold was let go without completion: the writer exited, its channel faulted, the GPU went to sleep or
