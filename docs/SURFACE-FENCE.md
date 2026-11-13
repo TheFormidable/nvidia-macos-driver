@@ -462,9 +462,10 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   holds and for 2.9's marks alike. The name alone is the executable's file name, which any user can give a program;
   a user account cannot run as a system account without an administrator. The bounds are: no hold, of either kind,
   delays anybody past them.
-- Any process can still learn whether a surface id has a writer pending right now (a look answers PENDING or NONE):
-  a reader asks by id, which is inherent to the design. The writer's pid and the state of its hold are told only to
-  the writer itself; any other caller gets 0 for both.
+- Any process can still learn whether a surface id has a writer pending right now (a look answers PENDING or NONE),
+  and, because a look may name the writer's pid (the plugin's reader names the one the surface's tag gives), whether a
+  given process is that writer: a reader asks by id and by pid, which is inherent to the design. The answer's pid and
+  hold-state fields are filled only for the writer itself; any other caller gets 0 for both.
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
   behaviour, and eight distrusted connections (one process can supply them one after another) switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.
