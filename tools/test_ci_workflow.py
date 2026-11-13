@@ -85,8 +85,11 @@ def problems(y, root):
     if "fetch-depth: 0" not in linux:
         out.append("kexts-linux has no full clone: the registry test would skip its comparison with the previous commit and the 2.9 release")
     host = j.get("host-tests", "")
-    if "fetch-depth: 0" not in host or not re.search(r"^\s*set -o pipefail\n\s*python3 tools/run_all_tests\.py -j \d+ \| tee \"\$RUNNER_TEMP/tests\.txt\"\s*$", host, re.M):
+    if "fetch-depth: 0" not in host or not re.search(r"^\s*set -o pipefail\n\s*python3 tools/run_all_tests\.py -j \d+ --tail \d+ \| tee \"\$RUNNER_TEMP/tests\.txt\"\s*$", host, re.M):
         out.append("host-tests does not run every test from a full clone (with the runner's own exit code: set -o pipefail before the tee)")
+    m = re.search(r"run_all_tests\.py -j \d+ --tail (\d+) ", host)
+    if not m or int(m.group(1)) < 20000:
+        out.append("host-tests does not print a failed test's output whole (--tail of at least 20000 characters)")
     # the runner counts a skip as no failure: a skip of a test that reads NM_VULKAN_INCLUDE must fail the job
     sk = re.search(r"if grep -E '\^skip \(([\w|]+)\)\\\.py:' \"\$RUNNER_TEMP/tests\.txt\"; then\n\s*echo \"::error::[^\"\n]*\"; exit 1\n\s*fi\n", host)
     if not sk or set(sk.group(1).split("|")) != vulkan_tests(root):
@@ -182,6 +185,9 @@ control("the kext job that checks only the RM's compile lines is caught", "for p
         "does not check its compile lines")
 control("a host test run whose failures the tee hides is caught", "          set -o pipefail\n          python3 tools/run_all_tests.py -j 4",
         "          python3 tools/run_all_tests.py -j 4", "every test from a full clone")
+control("host tests that print only the end of a failed test's output are caught", "run_all_tests.py -j 4 --tail 20000 |", "run_all_tests.py -j 4 |",
+        "output whole")
+control("a --tail too short for a failed test's whole output is caught", "--tail 20000 |", "--tail 1200 |", "output whole")
 control("host tests that pass with the Vulkan tests skipped are caught",
         "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings",
         "is skipped")
