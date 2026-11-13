@@ -1413,7 +1413,7 @@ comp_info() {
     nmhda) C_DESC="NMHDA.kext (optional; needs Lilu, MacKernelSDK)"; C_SRC="kexts/NMHDA build/check_kext_libraries.sh"
            C_VARS="NM_LILU_DEBUG_KEXT NM_MACKERNELSDK"; C_OUT="$O/kexts/nmhda/NMHDA.kext/Contents/MacOS/NMHDA" ;;
     package) C_DESC="the package directory"; C_DEPS="$ALL_COMPONENTS"
-           C_SRC="build/package_local.sh package licenses"; C_VARS="NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"; C_TOOLS="xcode"
+           C_SRC="build/package_local.sh package licenses NOTICE LICENSE"; C_VARS="NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"; C_TOOLS="xcode"
            C_OUT="$PKGDIR/pkgroot/SHA256SUMS" ;;
     *) return 1 ;;
   esac
