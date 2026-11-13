@@ -4,15 +4,17 @@
 #                 symbol the objects import checked against the export lists of the macOS 15 and the macOS 26 kernel
 #                 (build/kext_check.sh); the switch registry; the translator's own registry test. A few minutes; it
 #                 gates every push.
-#   host-tests    tools/run_all_tests.py on two Macs, an Apple-silicon and an Intel one (the tests compile Objective-C
+#   host-tests    tools/run_all_tests.py on two Macs, an Apple-silicon one (macos-15) and GitHub's Intel runner
+#                 (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) (the tests compile Objective-C
 #                 and read older revisions, so the clone is a full one), with the Vulkan headers the release compiles
 #                 the plugin against (build/ci_vulkan_headers.sh, in NM_VULKAN_INCLUDE: a test that needs them fails
 #                 rather than skips when they are wrong). The kexts are x86_64, so a tester's Mac is an Intel one, and
 #                 an Intel Mac differs where the tests of the build script look: its Homebrew is in /usr/local/bin, on
 #                 every shell's PATH. Each runner's job runs to its end and gates: a failing host test must not go
-#                 unnoticed. The Intel runner has four slow processors, and tools/test_build_sh.py alone may take most
-#                 of an hour beside the other tests there (the runner gives that test an hour), so the job has 80
-#                 minutes. A test that made macOS start an on-demand install of the command line tools fails the job.
+#                 unnoticed. The Intel runner's processors are slow: in the run of commit 3933ff6
+#                 tools/test_build_sh.py took 2088 s there beside the other tests (the runner gives that test an hour),
+#                 so the job has 80 minutes. A test that made macOS start an on-demand install of the command line tools
+#                 fails the job.
 #   kexts-mac     the real kext builds with Xcode, once on an Apple-silicon runner and once on an Intel one: NVIDIA's
 #                 RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26), NVRMAGDC and NMSMN linked. Catches what a
 #                 compile cannot: a duplicate or missing definition at link. NVIDIA's makefiles ask the compiler of the
@@ -23,27 +25,39 @@
 #   plugin        the release compile of the Metal plugin (build/ci_plugin.sh) against the release's Vulkan headers.
 #                 Needs the macOS 26 SDK.
 #
-# What GitHub's runners have shown (the logs of runs 43344333098 to 43419906041, 2026-11-13): kexts-linux and plugin
-# green in every run. kexts-mac green on both runners in 43410589619 and 43419906041, with Xcode 26.3: NVIDIA's RM
-# core (1121 commands) and NVKMS (225) compiled, every kext linked with 0 warnings, NVRM importing no ___x86_ helper,
-# and the two runners' kexts equal byte for byte. Before that it had stopped at its import check on
-# ____chkstk_darwin, a name the kext link itself provides (tools/kext_imports.py says why), and then at the link of
-# NVRM, where the image's default Xcode, 16.4, brought a libkmod.a built for a newer macOS than the kext. The two
-# runners' compile lines hold the same words in the same order and differed in spaces only: the make of macOS (GNU
-# make 3.81) leaves a space where the compiler refused an option NVIDIA's makefile asked it about, so the checksum
-# is taken with runs of spaces squeezed.
-# host-tests red in every run so far. On the Apple-silicon runner, in 43419906041, 299 of 312 tests passed, the four
-# that compile against the Vulkan headers among them, and tools/test_toolchain_sh.py failed (its stand-in build stops
-# at its first tool on a Mac). On the Intel runner, whose first run was 43443873231, 298 of 314 passed and three
-# failed for reasons of the tests' own: tools/test_build_sh.py had not ended after 1200 s beside the other tests,
+# What GitHub's runners have shown, a history (the logs of runs 43344333098 to 43419906041, then of the runs of commits
+# 95811c2 and 3933ff6, all 2026-11-13). kexts-linux green in every run. plugin, on the macos-26 image with its newer
+# Xcode, green in every run that was not cancelled; GitHub cancelled it at 8364212, at ef2a216 and at 3933ff6 (run
+# 43497487987: before it started, for lack of a runner). kexts-mac green on both runners in 43410589619, 43419906041
+# and at 95811c2, with Xcode 26.3: NVIDIA's RM core (1121 commands) and NVKMS (225) compiled, every kext linked with 0
+# warnings, NVRM importing no ___x86_ helper, and the two runners' kexts equal byte for byte. At 3933ff6 it was green on the Intel runner and cancelled
+# for lack of a runner on Apple silicon, so the two were not compared there (no kext source changed between 95811c2
+# and 3933ff6). Before 43410589619 it had stopped at its import check on ____chkstk_darwin, a name the kext link
+# itself provides (tools/kext_imports.py says why), and then at the link of NVRM, where the image's default Xcode,
+# 16.4, brought a libkmod.a built for a newer macOS than the kext. The two runners' compile lines hold the same words
+# in the same order and differed in spaces only: the make of macOS (GNU make 3.81) leaves a space where the compiler
+# refused an option NVIDIA's makefile asked it about, so the checksum is taken with runs of spaces squeezed.
+# host-tests on the Intel runner: green at 95811c2 (302 of 314 passed, 0 failed, 3 skipped, 9 not run) and at 3933ff6
+# (303 of 315 passed, 0 failed, 3 skipped, 9 not run). The three skipped at 3933ff6: tools/test_h264_kat_selftest.py
+# and tools/test_nvenc_parsers.py (NVIDIA's headers are not where the runner looks: it is not told the working
+# directory) and tools/test_h264_kat_vectors.py (no ffmpeg); the nine not run are those the runner leaves to the
+# build step or that name no build line. Its first run, 43443873231, had passed 298 of 314, and three had failed for
+# reasons of the tests' own: tools/test_build_sh.py had not ended after 1200 s beside the other tests,
 # tools/test_dlss_fetch.sh wanted a zstd command, which macOS does not have, and the controls of
 # tools/test_rtd3_hold.cpp got one sleep in their fixed time on the loaded runner; tools/test_ci_full_build.py was
 # skipped: the compiler's command that made its stand-in for libSystem failed (its words were not kept).
+# host-tests on the Apple-silicon runner: never green. Its last run that got a runner, at 22536c6, passed 298 of 312
+# with 2 failed, 3 skipped and 9 not run: one arm of tools/test_build_sh.py (a caller's SDKROOT for another
+# platform) and two of tools/test_toolchain_sh.py (variables macOS itself sets reached a step's record;
+# version_above). The same arms failed on the Intel runner at 8364212 and pass there since ef2a216. At every push
+# after 22536c6 (96bf32c, 8364212, ef2a216, 95811c2, 3933ff6) GitHub cancelled that job: "The job was not acquired by
+# Runner of type hosted even after multiple attempts".
 # In 43429828046 and 43443873231 the tests left /private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 # and an xcodebuild result bundle behind, and in no run before: those were the runs in which tools/test_build_sh.py
 # handed Apple's own /usr/bin/make an SDKROOT that names no SDK, and the first two in which tools/test_toolchain_sh.py
 # ran its stand-in build past its first tool (its make then got an empty folder as SDKROOT). On a Mac with a desktop that
 # marker is taken to belong to the dialog that offers to install the command line tools (not seen: GitHub's log shows the file only).
+# The runs of ef2a216, 95811c2 and 3933ff6, after those tests stopped handing such an SDKROOT on, left no marker.
 # Every job gates: one that fails turns the run red.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
 # Vulkan-Headers) are pinned in the scripts and build/pins.sh; none is copied into the repository or into an artifact.
