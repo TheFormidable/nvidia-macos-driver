@@ -874,7 +874,9 @@ public:
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
 #ifndef NMX_ACCEL
             // Ask NVRM for its surface fence now, so the plugin learns early that this accelerator's waits read it.
-            // Refused here when NVRM's GPU start has not reached the fence yet: the waits ask again later.
+            // NVRM answers this before its own fence has started (the wait it hands out then finds nothing
+            // pending, without a lock), so a refusal here is an NVRM.kext of another release or boot-arg
+            // nvrmfence=0, never a matter of timing. Only an NVRM that is not found yet is left to the waits.
             // The NVIDIA accelerator only. An AMD/Intel one has no NVRM, and looking for one waits up to 100 ms for a
             // service that may never come, in a start() that must not wait (see "No waiting here" above).
             nvFenceAsk(locateNVRM());
