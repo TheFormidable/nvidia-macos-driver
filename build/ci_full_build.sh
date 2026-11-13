@@ -153,7 +153,8 @@ brew_own_folders() {
 # Which process is Homebrew's brew: the list shows a command line, and brew is a shell script that goes on as
 # Homebrew's own brew.sh and then as its own Ruby. So the first word decides, or, while the words are programs that
 # run another (a shell, env, ruby and the like), the first word after them that is neither an option nor an
-# assignment: it must START with <prefix>/bin/brew, <prefix>/Homebrew/ or <prefix>/Library/Homebrew/. A path that only
+# assignment: it must be <prefix>/bin/brew (not <prefix>/bin/brew-gem or another program whose name begins so) or
+# start with <prefix>/Homebrew/ or <prefix>/Library/Homebrew/. A path that only
 # holds such a name further in is not Homebrew's: the stand-in brews of this tree's tests live in folders named
 # <a test's folder>/usr/local/bin and <a test's folder>/opt/homebrew/bin, and the full build runs those tests under
 # this watch. Nor is a program that merely names brew's path as an argument, nor another program of that Homebrew
@@ -205,7 +206,7 @@ cmd_watch_loop() {
   while [ -f "$dir/brew-watch.pid" ] && [ $((prev - t0)) -lt "$max" ]; do
     # the prefixes reach awk through its environment: a value given with -v would have its backslashes read as escapes
     ps -axo pid=,ppid=,command= 2>/dev/null | NMCI_WATCH_PREFIXES="$*" awk -v me="$$" '
-      function is_brew(word,   k) { for (k = 1; k <= np; k++) if (index(word, bp[k]) == 1) return 1; return 0 }
+      function is_brew(word,   k) { for (k = 1; k <= np; k++) if (index(word, bp[k]) == 1 && (word == bp[k] || bp[k] ~ /\/$/)) return 1; return 0 }
       BEGIN { m = split(ENVIRON["NMCI_WATCH_PREFIXES"], pre, " ")
               for (k = 1; k <= m; k++) { bp[++np] = pre[k] "/bin/brew"; bp[++np] = pre[k] "/Homebrew/"; bp[++np] = pre[k] "/Library/Homebrew/" } }
       $1 == me || $2 == me { next }

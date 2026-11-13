@@ -463,12 +463,13 @@ def main():
         def not_brew():
             return [script_run(sandbox_brew, "install", "x"),
                     script_run(sbx / "probe", str(p2 / "bin/brew")),   # it names brew's path, as ls -l or test -x would
-                    named(python), named(p2 / "bin/cmake")]
+                    named(python), named(p2 / "bin/cmake"), named(p2 / "bin/brew-gem")]
         rc, o = watched(not_brew)
         m = re.search(r"other processes named brew: (\d+)", o)
-        arm("a stand-in brew in a folder whose path holds the prefix further in, a program that names brew's path, and Homebrew's Python "
-            "and cmake are not Homebrew's brew", rc == 0 and "brew processes seen: 0 " in o and m is not None and int(m.group(1)) >= 2, o)
-        anywhere = variant("anywhere", ("if (index(word, bp[k]) == 1) return 1", "if (index(c, bp[k])) return 1"))
+        arm("a stand-in brew in a folder whose path holds the prefix further in, a program that names brew's path, and Homebrew's Python, "
+            "cmake and brew-gem are not Homebrew's brew", rc == 0 and "brew processes seen: 0 " in o and m is not None and int(m.group(1)) >= 2, o)
+        own_test = "if (index(word, bp[k]) == 1 && (word == bp[k] || bp[k] ~ /\\/$/)) return 1"
+        anywhere = variant("anywhere", (own_test, "if (index(c, bp[k])) return 1"))
         rc, o = watched(not_brew, script=anywhere)
         seen = lines(o, "homebrew ")
         arm("control: a watch that looks for the path anywhere in a command line takes the stand-in and the program that names it for brew",
@@ -478,7 +479,11 @@ def main():
         seen = lines(o, "homebrew ")
         arm("control: a watch that takes every program under the prefix for brew counts Homebrew's Python and cmake",
             rc == 1 and any(str(python) in l for l in seen) and any(str(p2 / "bin/cmake") in l for l in seen), o)
-        for v in (only_first, anywhere, whole):
+        begins = variant("begins", (own_test, "if (index(word, bp[k]) == 1) return 1"))
+        rc, o = watched(not_brew, script=begins)
+        arm("control: a watch that takes every program whose path begins with <prefix>/bin/brew counts brew-gem",
+            rc == 1 and any(str(p2 / "bin/brew-gem") in l for l in lines(o, "homebrew ")), o)
+        for v in (only_first, anywhere, whole, begins):
             v.unlink()
 
         ruby3 = p3 / "Library/Homebrew/vendor/portable-ruby/current/bin/ruby"   # a Homebrew that is its own repository, as /opt/homebrew
