@@ -137,8 +137,13 @@ case "$role" in
       machdep.cpu.brand_string) echo "Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz" ;; *) exit 1 ;;
     esac ;;
   xcode-select)
-    [ -f "$S/xcode" ] || { echo "xcode-select: error: unable to get active developer directory" >&2; exit 2; }
-    case "${1:-}" in -p|--print-path) echo /Applications/Xcode.app/Contents/Developer ;; *) exit 1 ;; esac ;;
+    # like Apple's: DEVELOPER_DIR first, then the selected folder (state/devdir: one that may no longer be there), else
+    # the sandbox's Xcode.app once "Xcode is installed"
+    if [ -n "${DEVELOPER_DIR:-}" ]; then d=$DEVELOPER_DIR
+    elif [ -f "$S/devdir" ]; then d=$(cat "$S/devdir")
+    elif [ -f "$S/xcode" ]; then d=$SB/Xcode.app/Contents/Developer
+    else echo "xcode-select: error: unable to get active developer directory" >&2; exit 2; fi
+    case "${1:-}" in -p|--print-path) echo "$d" ;; *) exit 1 ;; esac ;;
   xcodebuild)
     [ -f "$S/xcode" ] || { echo "xcode-select: error: tool 'xcodebuild' requires Xcode" >&2; exit 1; }
     case "${1:-}" in -version) printf 'Xcode %s\nBuild version 17A400\n' "$(cat "$S/xcode")" ;; *) exit 1 ;; esac ;;
@@ -507,6 +512,8 @@ class Sandbox:
         (self.state / "brew-llvm").write_text("22.1.3\n")
         if xcode:
             (self.state / "xcode").write_text(xcode + "\n")
+        # the developer folder xcode-select names once Xcode is installed, with the xcrun build.sh looks for in it
+        self.wrap(self.dir / "Xcode.app/Contents/Developer/usr/bin/xcrun", "xcrun")
         sdk = self.dir / "sdk"
         for f in ("System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h", "usr/lib/libkmod.a",
                   "System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h"):
@@ -711,9 +718,10 @@ def arm_fresh():
     missing, exits 1, changes nothing; a dry run of everything ends without error and installs nothing."""
     bare = Sandbox("fresh-noxcode", xcode=None, brew=False)
 
-    def bare_problems():
+    def bare_problems(more=None, want="xcode-select"):
         p = []
         extra = {k: v.replace("<sb>", str(bare.dir)) for k, v in fresh_brew().items()}
+        extra.update(more or {})
         bare.clear()
         rc, out = bare.run("doctor", extra=extra)
         items = doctor_items(out)
@@ -721,19 +729,34 @@ def arm_fresh():
             p.append(f"doctor: exit {rc}, missing {items}")
         for args in (("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm")):
             rc, out = bare.run(*args, extra=extra)
-            if rc != 2 or "xcode-select" not in out:
-                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode: {out[-300:]}")
+            if rc != 2 or "xcode-select" not in out or want not in out:
+                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode ({want}): {out[-300:]}")
         if shim_runs(bare.jlines()):
-            p.append(f"ran what opens Apple's install dialog on such a Mac: {shim_runs(bare.jlines())[:4]}")
+            p.append(f"ran what opens Apple's install dialog on such a Mac, or fails there: {shim_runs(bare.jlines())[:4]}")
         if mutating(bare.jlines()):
             p.append(f"ran more than probes: {mutating(bare.jlines())[:3]}")
         return p
 
+    def gone_problems():
+        # an Xcode selected and then removed or renamed; and DEVELOPER_DIR naming a folder that is not there
+        (bare.state / "devdir").write_text(f"{bare.dir}/Applications/Xcode-old.app/Contents/Developer\n")
+        p = bare_problems(want="does not exist")
+        (bare.state / "devdir").unlink()
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/Applications/Xcode-26.app"}, want="DEVELOPER_DIR")
+        (bare.dir / "half/usr/bin").mkdir(parents=True, exist_ok=True)
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="has no usr/bin/xcrun")
+        return p
+
     p = bare_problems()
     check("no Xcode: every command stops before git, make, python3 or xcrun; doctor names exactly Xcode", not p, p)
+    p = gone_problems()
+    check("a developer folder that is gone or has no xcrun (xcode-select, DEVELOPER_DIR): the same stop, naming it", not p, p)
     with bare.scratch():
-        bare.break_script('  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then',
-                          '  if false; then')
+        bare.break_script('    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi',
+                          '    if ! xcode-select -p >/dev/null 2>&1; then devp="none selected"; fi')
+        negative("only xcode-select's exit status checked (a folder that is gone passes; check_paths then runs git)", gone_problems())
+    with bare.scratch():
+        bare.break_script('  if [ "$CMD" != help ] && is_mac; then', '  if false; then')
         negative("no early stop without Xcode (check_paths then runs git)", bare_problems())
 
     sb = Sandbox("fresh", brew=False)
@@ -766,6 +789,10 @@ def arm_fresh():
 
     p, out = problems()
     check("fresh Mac with Xcode: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
+    rc, out = sb.run("doctor", extra=dict(extra, DEVELOPER_DIR=f"{sb.dir}/Xcode.app"))
+    items = doctor_items(out)
+    check("DEVELOPER_DIR naming an installed Xcode.app: doctor goes on and finds Xcode", rc == 1 and items and
+          not any(i.startswith("Xcode") for i in items) and "Xcode 26.1 at" in out, (rc, items, out[-400:]))
     with sb.scratch():
         sb.break_script('  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR', '  else d_note "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR')
         negative("doctor that forgets one missing tool", problems()[0])

@@ -1030,6 +1030,20 @@ ask() {   # <question>: yes with --yes; otherwise a y/N answer from the terminal
   else say "$1 [y/N] no (no terminal; run with --yes to agree)"; fi
   return 1
 }
+# developer_dir_problem: nothing when the developer folder Apple's tools use (DEVELOPER_DIR when it is set, otherwise
+# the one xcode-select -p names) is there with its xcrun; otherwise what is wrong with it. The folder of an Xcode removed
+# or renamed after it was selected, a DEVELOPER_DIR with a wrong path, and command line tools that a macOS update left
+# without xcrun all fail this test, the one Apple's tools make themselves ("missing xcrun at: <folder>/usr/bin/xcrun").
+developer_dir_problem() {
+  local d from
+  if [ -n "${DEVELOPER_DIR:-}" ]; then d=$DEVELOPER_DIR; from=DEVELOPER_DIR
+  else d=$(xcode-select -p 2>/dev/null || true); from="xcode-select -p"; fi
+  [ -n "$d" ] || { printf 'no developer folder (%s names none)' "$from"; return 0; }
+  [ -x "$d/usr/bin/xcrun" ] || [ -x "$d/Contents/Developer/usr/bin/xcrun" ] || \
+    printf 'the developer folder %s names, %s, %s' "$from" "$(printf '%s' "$d" | tilde)" \
+      "$(if [ -d "$d" ]; then echo "has no usr/bin/xcrun (not a whole Xcode or command line tools)"; else echo "does not exist (an Xcode removed or renamed after it was selected?)"; fi)"
+  return 0
+}
 xcode_help() {
   cat <<EOF
 Xcode cannot be installed by a script. Do this once:
@@ -1894,17 +1908,26 @@ main() {
   # On a Mac with neither Xcode nor its command line tools, /usr/bin/git, make, python3, xcrun and xcodebuild are Apple's
   # stand-ins, and the first one that runs opens a dialog offering to install the command line tools. So before any of
   # them runs (check_paths runs git, doctor make and python3): xcode-select -p, which opens nothing, says whether there
-  # is a developer folder; without one every command but help stops here, doctor with its usual summary.
-  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then
+  # is a developer folder; without one every command but help stops here, doctor with its usual summary. The same for
+  # a developer folder that is not there or not whole (developer_dir_problem): Apple's tools then all fail with "invalid
+  # active developer path", and check_paths would take the failing git for a checkout that is not a git clone.
+  local devp=""
+  if [ "$CMD" != help ] && is_mac; then
+    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi
+  fi
+  if [ -n "$devp" ]; then
     if [ "$CMD" = doctor ]; then
       say "== Xcode (cannot be installed by a script)"
-      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs)"
+      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later ($devp; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs, or they fail)"
       xcode_help; say ""
-      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected)"
+      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later ($devp)"
       trap - ERR; exit 1
     fi
     xcode_help >&2
-    die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+    if [ "$devp" = "none selected" ]; then
+      die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+    fi
+    die "$devp, so nothing was run: git, make, python3 and xcrun would all fail. Select an installed Xcode (xcode-select --switch, above) or correct DEVELOPER_DIR"
   fi
   case "$CMD" in
     help) cmd_help; return 0 ;;

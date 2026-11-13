@@ -12,7 +12,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). None of the changes
 > made to `build.sh` after that run has run on a Mac yet: the tool check per component, the choice of Homebrew and of
 > the tools taken from `PATH`, the layout of the working directory, rm's compile list, `fetch`'s git set-up, the
-> stop without Xcode, the `patch` the scripts get (with `-f`) and the `PATH` brew is given were tested only against the stand-ins described next. It was written
+> stop without Xcode (also for a developer folder that is gone), the `patch` the scripts get (with `-f`) and the `PATH`
+> brew is given were tested only against the stand-ins described next. It was written
 > for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
 > Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
 > macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
@@ -34,6 +35,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   is needed: no build step reads one. On a Mac with neither Xcode nor the command line tools, every command but
   `help` stops at once with the instructions (`doctor` names Xcode as the one thing missing): macOS's `git`, `make`,
   `python3` and `xcrun` are then stand-ins that offer to install the command line tools, and none of them is run.
+  The same stop comes when the developer folder that `DEVELOPER_DIR` or `xcode-select -p` names is not there or has no
+  `usr/bin/xcrun` (an Xcode removed or renamed after it was selected): Apple's tools would then all fail.
 - A git clone of this repository (not a downloaded archive): the plugin, translator and video library are built from
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
@@ -425,6 +428,7 @@ back as it was before the app's install.
 | `STOP: the working directory contains a space` (or the checkout path, or the home folder) | The release scripts' remote commands and build_nvk.sh's compiler flags split on spaces | Use `--workdir` with a path without spaces; move the checkout |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 needs macOS 15.6 or later | Update macOS, or build on another Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` points at the command line tools | Install Xcode 26, then `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
+| `STOP: the developer folder xcode-select -p names, ..., does not exist` (or `has no usr/bin/xcrun`, or `DEVELOPER_DIR names`) | The selected Xcode was removed or renamed, `DEVELOPER_DIR` names a wrong folder, or a macOS update left the command line tools incomplete | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` with the Xcode you have, or correct or unset `DEVELOPER_DIR` |
 | doctor: `MISSING Metal/MTL4CommandQueue.h` | The selected Xcode has an older SDK | Select Xcode 26, or set `DEVELOPER_DIR` |
 | `Homebrew has no LLVM 22 formula today` | Homebrew dropped `llvm@22` | Install LLVM 22.x with its clang libraries, set `NM_LLVM_PREFIX` to it and run `./build.sh deps` again (it builds SPIRV-LLVM-Translator against it) |
 | `SPIRV-LLVM-Translator ... does not match LLVM` | Its version must have LLVM's major.minor | `./build.sh deps` builds one that matches |
@@ -479,7 +483,7 @@ order, the variables every step gets, skipping and rebuilding, a failing step an
 an earlier good build, build_rm620.sh's exit 6, the step's python3, that the scripts' `patch` never waits for an answer at the terminal, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
 which of two Homebrews is used, that no tool of the other architecture's Homebrew is taken from `PATH`, that no brew
 call keeps the caller's `HOMEBREW_` location variables or `PATH`, that `fetch` runs none of your git hooks, template or filters, that
-nothing opens Apple's install dialog on a Mac without Xcode, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
+nothing opens Apple's install dialog on a Mac without Xcode or runs with a developer folder that is gone, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
 dry runs and env write nothing (Homebrew's cache included) and print no home path,
 an interrupted run,
 two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `env`, this document against the script,
