@@ -319,7 +319,7 @@ boot" unless it says "now".
 | `close_gone` | closes that found no hold | grows in normal use: WindowServer's holds end in the kernel before its close arrives |
 | `auto` | compositor holds ended by the kernel at GPU completion | grows with every WindowServer frame |
 | `end_owner` | holds ended because their writer's connection closed or its process exited | grows when a process that was drawing exits or is killed |
-| `pid_gone` | connections emptied because their process was exiting, at its first connection to close | grows when a GPU process exits; stays 0 while NVRM.kext does not make the call (see "A process exits") |
+| `pid_gone` | connections emptied because their process was exiting, at its first connection to close | grows when a GPU process exits (see "A process exits") |
 | `end_chan_err` | holds ended by a channel fault | 0 unless a channel faulted (an Xid in the log) |
 | `end_chan_del` | holds ended because their channel was deleted first | 0 or small |
 | `end_pm` | holds ended by GPU sleep | grows by the holds in flight at each sleep |
@@ -416,9 +416,7 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   before the RM frees the channels they are armed on, the first connection of the process to close must end all of
   them. NVRM.kext does that by calling `nvrm_fence_pid_gone` in `clientClose`, before the RM's cleanup, when the
   connection's process is exiting (`pid_gone` counts it); and from the moment a process is exiting the fence refuses
-  it new holds and channels. Without that call (an NVRM.kext built before it), a hold armed on a channel of the
-  process can outlive the channel until the fence connection closes, or until its bound if a reader looks first.
-  With it, NVAccel's waits on the process's surfaces end at once, where 2.9 waited 100 ms for a mark nobody would
+  it new holds and channels. So NVAccel's waits on the process's surfaces end at once, where 2.9 waited 100 ms for a mark nobody would
   clear; a plugin reader falls back to the busy tag, which costs it what 2.9 did (at most 10 ms per read for the
   first 100 ms).
 - **A channel faults.** The RM writes the fault into the channel's notifier in the bottom half, the kick follows,
@@ -487,8 +485,6 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
 6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` and `pid_gone` grow, no stall in WindowServer.
    Expect up to 10 ms per composite of that application's surfaces for 100 ms, as in 2.9 (the plugin reader polls
    the dead writer's busy tag): not a stall, but not zero.
-   `pid_gone` growing needs the NVRM.kext with the `nvrm_fence_pid_gone` call; with an older one only `end_owner`
-   moves, and a wait of up to 2 s on that application's surfaces is possible.
    **Stop one** (`kill -STOP`, then `-CONT`): one `expired_cpu` and one `strikes`, a single hitch of at most
    100 ms, nothing after.
 7. **Sleep and wake.** `end_pm` grows by the holds that were in flight; `state` is 1 afterwards and `opens` grows
