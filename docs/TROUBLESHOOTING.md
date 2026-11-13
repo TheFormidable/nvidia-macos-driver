@@ -195,9 +195,13 @@ send `sysctl debug | grep -E 'nvaccel_(surf_plane|surfvram_ranged|pageoff_ranged
 then uses more CPU than before). If it helps, report it with `sysctl debug.nvrm_evt_woken debug.nvrm_evt_timeouts
 debug.nvrm_evt_user_missed debug.nvrm_evt_user_fallbacks` taken while the application ran.
 `debug.nvrm_evt_user_missed` is the number of full 2 ms sleeps that ended on their timeout although the GPU work was
-already done; a few of them are normal (the GPU shows a completion a moment before its event arrives). Only
-`debug.nvrm_evt_user_fallbacks` above 0, together with the line `nvrm: event wait OFF for this process (16 wakes in a
-row did not arrive)` in the application's output, means that a process stopped trusting the completion event.
+already done; a few of them are normal (the GPU shows a completion a moment before its event arrives).
+`debug.nvrm_evt_user_fallbacks` counts each time a process went back to polling because its wakes stopped arriving
+(the line `nvrm: event wait OFF for this process (16 wakes in a row did not arrive; it is tried again now and then)`
+in its output). One or two around a display mode change, a display waking or a wake from sleep are expected: the
+process tries the event again and, when its wakes arrive, prints `nvrm: event wait back ON for this process` and
+sleeps on it again. Only a counter that keeps rising while `debug.nvrm_evt_woken` stands still means the event is not
+being posted.
 `NVRM_GSUB_LOG=1` in `nvrm610.conf` prints, when a channel closes, how its waits went. [EVENT-WAIT.md](EVENT-WAIT.md)
 explains the numbers.
 
