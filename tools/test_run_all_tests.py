@@ -258,7 +258,10 @@ def escape_run(runner_text):
         (root / "systmp").mkdir()
         (root / "tools/run_all_tests.py").write_text(runner_text)
         (root / "tools/test_escape.py").write_text(ESCAPE)
-        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py")], env=dict(CLEAN, TMPDIR=str(root / "systmp")),
+        # two tests that leave nothing, one before and one after it (the runner takes them in the order of their names)
+        (root / "tools/test_a_quiet.py").write_text("pass\n")
+        (root / "tools/test_z_quiet.py").write_text("pass\n")
+        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py"), "-j", "1"], env=dict(CLEAN, TMPDIR=str(root / "systmp")),
                            capture_output=True, text=True, timeout=120)
         return r.returncode, r.stdout + r.stderr, sorted(os.listdir(root / "systmp"))
 
@@ -273,7 +276,11 @@ arm("a folder it made with a name like the runner's own is listed too", any(l.rs
 arm("the test's own temporary folder is not listed (it is gone)",
     not any(re.fullmatch(r"nmtest-(?!escaped-).*", l.rsplit(": ", 1)[-1]) for l in lines)
     and not any(re.fullmatch(r"nmtest-(?!escaped-).*", n) for n in there), out)
-report = '            print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")\n'
+escaped = [l for l in lines if "escaped-" in l]
+arm("each entry is listed with the test that was running when it was first seen, and with no other",
+    len(escaped) == 2 and all("; first seen while these ran: test_escape.py): " in l for l in escaped), out)
+report = ('            print(f"left in {root} during the run (by a test, or by another program meanwhile; '
+          'first seen while these ran: {who}): {n}")\n')
 arm("the runner lists what appeared in one place", RUNNER.count(report) == 1)
 own = "        if os.path.join(root, n) not in OWN_TMPS:"
 arm("the runner leaves out of the list only the folders it made itself", RUNNER.count(own) == 1)
@@ -283,6 +290,11 @@ arm("control: leaving out every name like the runner's own hides the second fold
 rc, out, there = escape_run(RUNNER.replace(report, "            pass\n"))
 arm("control: without the list the escaped folder goes unnoticed", rc == 0 and any(n.startswith("escaped-") for n in there)
     and not any("escaped-" in l for l in out.splitlines()), out)
+per_test = "            note_new(p.name)\n"
+arm("the runner lists the temporary folders again when a test ends, in one place", RUNNER.count(per_test) == 1)
+rc, out, there = escape_run(RUNNER.replace(per_test, "            pass\n"))
+arm("control: a runner that lists the folders only at the end cannot say which tests were running",
+    rc == 0 and any("escaped-" in l and "first seen while these ran: none: it appeared after the last test had ended" in l for l in out.splitlines()), out)
 
 
 # ---- what a test leaves running, its time limit, and the terminal
