@@ -435,6 +435,8 @@ if [ -f "$SB/ctl/block-$key" ]; then
   exec 3<&-
 fi
 if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
+# ctl/step-git: a script making the kinds of git call the component scripts make, in stand-in trees (arm stepgit)
+[ ! -f "$SB/ctl/step-git" ] || /bin/bash "$SB/ctl/step-git" "$key" || { echo "stand-in for $key: its git calls failed"; exit 8; }
 mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
 # like NVIDIA's archives (libtool records each member's time): a rebuild of rm or kms is never byte-identical
 mknew() { mk "$1"; printf 'build %s-%s\n' "$$" "$RANDOM" >> "$1"; }
@@ -2748,6 +2750,148 @@ def arm_githooks():
         negative("git init and clone without an empty template", githooks_problems(sb))
 
 
+# The component scripts' own git calls (build_nvencvt.sh, build_nvk.sh, build_osver.sh, build_nvrm.sh, accel_build_all.sh,
+# build_plugin_release.sh, build_xlate_release.sh, build_vulkan_loader.sh, tools/ryzenadj-macos/build.sh): rev-parse,
+# status, describe, cat-file and archive of a tree; clone, sparse-checkout, fetch and checkout of one; init. The stand-in
+# of each step that has such calls makes them (STEPLIB_SH, ctl/step-git) in trees named nmgit-*, as does a command sent
+# through build/local_build_host.sh's ssh, which build_nvencvt.sh's are.
+STEP_GIT_KEYS = ("nvrm", "accel", "ryzenadj", "osver", "plugin", "nvencvt")
+
+
+def step_git_script(tree, clones):
+    return f"""set -e
+case "$1" in {"|".join(STEP_GIT_KEYS)}|host) ;; *) exit 0 ;; esac
+T={tree}; C={clones}/nmgit-clone-$1; G={GIT}
+rm -rf "$C" "$C.init"
+$G -C "$T" rev-parse --short HEAD >/dev/null
+$G -C "$T" status --porcelain >/dev/null
+$G -C "$T" describe --tags --always HEAD >/dev/null
+$G -C "$T" cat-file -e "HEAD^{{commit}}"
+$G -C "$T" archive HEAD | tar -t >/dev/null
+$G clone -q --filter=blob:none --no-checkout "file://$T" "$C"
+$G -C "$C" sparse-checkout set d
+$G -C "$C" fetch -q --tags origin
+$G -C "$C" checkout -q "$($G -C "$T" rev-parse HEAD)"
+$G -C "$C" status --porcelain >/dev/null
+$G init -q "$C.init"
+"""
+
+
+def stepgit_setup(sb):
+    """A tester's ~/.gitconfig (on top of the sandbox's own) with a hooks folder, commit signing and a file system
+    monitor, each a program that records where it ran; the stand-in tree nmgit-tree. Returns the record file."""
+    rec = sb.dir / "git-record"
+    hooks = sb.dir / "tester-hooks"
+    hooks.mkdir(exist_ok=True)
+    for h in ("post-checkout", "post-merge", "post-index-change", "reference-transaction", "pre-commit", "post-rewrite",
+              "pre-auto-gc"):
+        (hooks / h).write_text(f'#!/bin/sh\necho "hook {h} $PWD" >> "{rec}"\n')
+        (hooks / h).chmod(0o755)
+    for name_, line in (("tester-gpg", "gpg $PWD"), ("tester-fsmonitor", "fsmonitor $PWD")):
+        (sb.dir / name_).write_text(f'#!/bin/sh\necho "{line}" >> "{rec}"\nexit 1\n')
+        (sb.dir / name_).chmod(0o755)
+    (sb.home / ".gitconfig").write_text(f"[include]\n\tpath = {sb.dir / 'gitconfig'}\n[core]\n\thooksPath = {hooks}\n"
+                                        f"\tfsmonitor = {sb.dir / 'tester-fsmonitor'}\n[commit]\n\tgpgsign = true\n"
+                                        f"[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = {sb.dir / 'tester-gpg'}\n")
+    tree = sb.dir / "nmgit-tree"
+    if not tree.exists():
+        (tree / "d").mkdir(parents=True)
+        (tree / "d/f.txt").write_text("a file of a stand-in tree\n")
+        git("init", "-q", tree)
+        git("-C", tree, "add", "-A")
+        git("-C", tree, "commit", "-q", "-m", "stand-in tree")
+        git("-C", tree, "tag", "v1")
+    (sb.ctl / "step-git").write_text(step_git_script(tree, sb.dir / "tmp"))
+    return rec
+
+
+def stepgit_record(rec):
+    lines = rec.read_text().splitlines() if rec.exists() else []
+    return [l for l in lines if "nmgit-" in l or l.startswith("gpg ")]
+
+
+def stepgit_problems(sb):
+    """build (--force) of the steps with git calls, the tester's ~/.gitconfig as their global configuration"""
+    rec = stepgit_setup(sb)
+    rec.write_text("")
+    sb.clear()
+    rc, out = sb.run("--no-install", "--force", "build", *STEP_GIT_KEYS, extra={"GIT_CONFIG_GLOBAL": str(sb.home / ".gitconfig")})
+    p = []
+    if rc != 0:
+        p.append(f"build: exit {rc}: {out[-500:]}")
+    if [k for k in STEP_GIT_KEYS if k not in sb.step_keys()]:
+        p.append(f"ran {sb.step_keys()}, not each of {list(STEP_GIT_KEYS)}")
+    got = stepgit_record(rec)
+    if got:
+        p.append(f"the tester's git set-up acted in a step: {got[:6]}")
+    return p
+
+
+def host_git_problems(sb, script):
+    """the same git calls sent through local_build_host.sh as ssh, HOME holding the tester's ~/.gitconfig"""
+    rec = stepgit_setup(sb)
+    rec.write_text("")
+    d = sb.dir / "hostlink"
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir()
+    os.symlink(script, d / "ssh")
+    r = subprocess.run([str(d / "ssh"), "nullmoth-local-build", f"/bin/bash {sb.ctl / 'step-git'} host"],
+                       env={"HOME": str(sb.home), "PATH": "/usr/bin:/bin", "USER": "tester"}, capture_output=True, text=True)
+    p = []
+    if r.returncode != 0:
+        p.append(f"ssh: exit {r.returncode}: {r.stderr[-400:]}")
+    got = stepgit_record(rec)
+    if got:
+        p.append(f"the tester's git set-up acted in a command of the build host: {got[:6]}")
+    return p
+
+
+def host_proxy_problems(sb, script):
+    """the proxy variables reach a command of the build host (its git takes no http.proxy of the tester's any more)"""
+    d = sb.dir / "hostlink-proxy"
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir()
+    os.symlink(script, d / "ssh")
+    pv = {"https_proxy": "http://proxy.invalid:3128", "no_proxy": "localhost", "HTTPS_PROXY": "http://proxy.invalid:3129"}
+    r = subprocess.run([str(d / "ssh"), "nullmoth-local-build", 'echo "$https_proxy|$no_proxy|$HTTPS_PROXY|${http_proxy-unset}"'],
+                       env={"HOME": str(sb.home), "PATH": "/usr/bin:/bin", **pv}, capture_output=True, text=True)
+    want = "http://proxy.invalid:3128|localhost|http://proxy.invalid:3129|unset"
+    return [] if r.stdout.strip() == want else [f"the build host's command saw {r.stdout.strip()!r}, not {want!r} ({r.stderr[-200:]})"]
+
+
+def arm_stepgit():
+    sb = Sandbox("stepgit")
+    rc, out = sb.run("fetch")
+    if rc != 0:
+        check("fetch for the steps' git arm", False, out[-400:])
+        return
+    p = stepgit_problems(sb)
+    check("a step's git reads none of the tester's configuration: no hooks folder, signing or file system monitor of "
+          "theirs acts in a step's clone, checkout, status or archive", not p, p)
+    with sb.scratch():
+        sb.break_script(' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1\n', '\n')
+        p = stepgit_problems(sb)
+        negative("steps that get the tester's git configuration", p)
+        check("that control fails by the record alone (hooks and the monitor acted)", len(p) == 1 and "acted" in p[0], p)
+    p = host_git_problems(sb, sb.co / "build/local_build_host.sh")
+    check("local_build_host.sh's ssh gives its command's git none of the tester's configuration", not p, p)
+    bad = sb.dir / "local_build_host-without.sh"
+    t = (sb.co / "build/local_build_host.sh").read_text()
+    old = '\n           GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 )'
+    assert old in t, "broken-script control: text not found in local_build_host.sh"
+    bad.write_text(t.replace(old, ' )'))
+    bad.chmod(0o755)
+    p = host_git_problems(sb, bad)
+    negative("a build host whose git reads the tester's configuration", p)
+    check("that control fails by the record alone", len(p) == 1 and "acted" in p[0], p)
+    p = host_proxy_problems(sb, sb.co / "build/local_build_host.sh")
+    check("local_build_host.sh passes the proxy variables that are set to its command, and no other", not p, p)
+    t2 = t.replace('      [ -n "${!v:-}" ] && envs+=( "$v=${!v}" )\n', '      :\n')
+    assert t2 != t, "broken-script control: the proxy loop not found in local_build_host.sh"
+    bad.write_text(t2)
+    negative("a build host that drops the proxy variables", host_proxy_problems(sb, bad))
+
+
 def arm_tamper():
     rt = TMP / "remotes-tampered"
     make_remotes(rt, tamper=True)
@@ -4410,6 +4554,8 @@ def main():
                     timed("settings", arm_settings)
                 if want("basepkg"):
                     timed("basepkg", arm_basepkg)
+                if want("stepgit"):
+                    timed("stepgit", arm_stepgit)
                 if want("source"):
                     timed("source", arm_source)
                     timed("source_some", arm_source_some)

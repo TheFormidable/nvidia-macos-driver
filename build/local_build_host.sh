@@ -6,7 +6,12 @@
 # the name below. For that host only:
 #   ssh <host> <command>        runs <command> here with /bin/bash -c, in a login-like environment (env -i: HOME, USER,
 #                               LOGNAME, TMPDIR, LANG, PATH=$NM_LOCAL_HOST_PATH, and DEVELOPER_DIR / CARGO_NET_OFFLINE
-#                               when set), as ssh would on a build Mac; no ssh login or Remote Login is needed
+#                               when set), as ssh would on a build Mac; no ssh login or Remote Login is needed. Its
+#                               git reads no configuration of the tester's (GIT_CONFIG_GLOBAL=/dev/null,
+#                               GIT_CONFIG_NOSYSTEM=1), as every step of build.sh: build_nvencvt.sh's clone, fetch and
+#                               checkout of its header trees run no hooks, monitor or filters of theirs. The proxy
+#                               variables (http_proxy, https_proxy, all_proxy, no_proxy, either case) are passed when
+#                               set: a proxy for those downloads comes from them, not from a git configuration
 #   rsync -a <dir>/ <host>:<dir>/   copies the folder's contents (the one form the scripts use)
 #   scp [-q] <host>:<file>... <dir>/   copies the files
 # Any other host or form is refused (exit 255, as ssh fails), so the scripts never reach a real machine by mistake.
@@ -28,10 +33,14 @@ case "$me" in
     shift
     cmd="$*"   # ssh joins its arguments with spaces before the remote shell reads them
     envs=( "HOME=$HOME" "USER=${USER:-}" "LOGNAME=${LOGNAME:-${USER:-}}" "SHELL=/bin/bash" "TMPDIR=${TMPDIR:-/tmp}"
-           "LANG=${LANG:-en_US.UTF-8}" "PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" )
+           "LANG=${LANG:-en_US.UTF-8}" "PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+           GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 )
     [ -n "${DEVELOPER_DIR:-}" ] && envs+=( "DEVELOPER_DIR=$DEVELOPER_DIR" )
     [ -n "${CARGO_NET_OFFLINE:-}" ] && envs+=( "CARGO_NET_OFFLINE=$CARGO_NET_OFFLINE" )
     [ -n "${PYTHONDONTWRITEBYTECODE:-}" ] && envs+=( "PYTHONDONTWRITEBYTECODE=$PYTHONDONTWRITEBYTECODE" )
+    for v in http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+      [ -n "${!v:-}" ] && envs+=( "$v=${!v}" )
+    done
     exec /usr/bin/env -i "${envs[@]}" /bin/bash -c "$cmd"
     ;;
   rsync)
