@@ -5,8 +5,14 @@ When WindowServer cannot get a Metal device for a display this driver drives, Co
 MetalDevice" and launchd restarts WindowServer every ten seconds: a black screen with only the cursor. The head is lit,
 so the kernel's guard was already cleared, and the job saw *a* WindowServer at both of its looks and called the start
 good, so nothing ever turned the driver off. The job is lifted out of install.sh and run against fake pgrep, sysctl,
-nvram, stat, sleep and shutdown. The negative control is the job as 2.8.1 shipped it (tag v2.8.1), which must call the looping
-WindowServer good."""
+nvram, stat, sleep, ioreg and shutdown. The negative control is the job as 2.8.1 shipped it (tag v2.8.1), which must
+call the looping WindowServer good.
+
+A WindowServer that stays up is not this driver's desktop either when the driver's framebuffer refused this macOS's
+classes: NVRM then declined the card and wrote that on the PCI device (nvrm-layout = "declined ..."), and nothing of the
+driver shows a picture. Calling that start good would end the install's trial, and the fallback job
+(tools/test_lastgood_refusal.py) would take itself away at the next start. The job reads the registry before it calls
+a start good; the control is the job without that look."""
 import os
 import pathlib
 import re
@@ -64,10 +70,14 @@ if [ "$1" = 45 ] && [ "$n" -lt "${CRASHES:-0}" ]; then : > "$DRDIR/WindowServer-
 exit 0''',
     "shutdown": r'''#!/bin/bash
 echo "shutdown $*" >> "$T/calls"''',
+    # what `ioreg -l -w0` prints: the properties the test gave it
+    "ioreg": r'''#!/bin/bash
+[ -z "$REGISTRY" ] || printf '%s\n' "$REGISTRY"
+exit 0''',
 }
 
 
-def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None):
+def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, registry=""):
     t = pathlib.Path(tempfile.mkdtemp(prefix="bgws-"))
     fake = t / "bin"
     fake.mkdir()
@@ -87,7 +97,7 @@ def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None):
     script = t / "bootguard.sh"
     script.write_text(text)
     env = dict(os.environ, T=str(t), WS_PIDS=" ".join(map(str, pids)), ARMED=armed or "", CRASHES=str(crashes),
-               CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120))
+               CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120), REGISTRY=registry)
     try:
         p = subprocess.run(["/bin/bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
         log = (t / "bootguard.log").read_text() if (t / "bootguard.log").exists() else ""
@@ -157,6 +167,33 @@ arm("two crashes at boot and then a steady WindowServer still counts as good", "
 
 p, log, calls = run(job, pids=loop, crashes=0)
 arm("a WindowServer seen as four processes counts as a loop even with no reports", "nv-starts=%02" in calls, log + calls)
+
+# a framebuffer that refused this macOS's classes: NVRM declined the card, and a WindowServer that stays up (with no
+# display, or on another GPU's) is not a good start of this driver. The texts are the ones NVRM writes.
+LOOK = "      if ioreg -l -w0 2>/dev/null | grep -q '\"nvrm-layout\" = \"declined'; then\n"
+written = re.findall(r'setProperty\("nvrm-layout",\s*"([^"]*)"\)', (ROOT / "kexts/NVRM/NVRM.cpp").read_text())
+arm("NVRM writes its refusal on the PCI device, early and late", len(written) == 2, written)
+arm("the job looks for it before it calls a start good", job.count(LOOK) == 1
+    and job.index(LOOK) < job.index("nvram $V:nullmoth-nv-ok=1"))
+for text in written:
+    p, log, calls = run(job, pids=[777], registry=f'    | |   "nvrm-layout" = "{text}"')
+    arm(f"a WindowServer that stays up after NVRM {text.split(':')[0]} the card is not a good start",
+        "counts as good" not in log and "does not count as good" in log and "nullmoth-nv-ok=1" not in calls,
+        log + calls)
+    arm("  and the start count and the driver are left as they are", "nullmoth-nv-starts" not in calls
+        and "shutdown" not in calls, calls)
+p, log, calls = run(job, pids=[777],
+                    registry='    | |   "nvrmfb-layout" = "ok: 3 classes, vtables not compared; macOS 25G342"\n'
+                             '    | |   "nvaccel-layout" = "refused: IOAccelDevice2 is 0x90 bytes in this macOS"')
+arm("the other layout lines are not NVRM's refusal: the desktop that stayed up counts as good", "counts as good" in log
+    and "nullmoth-nv-ok=1" in calls, log + calls)
+if written and job.count(LOOK) == 1:
+    p, log, calls = run(job.replace(LOOK, "      if false; then\n"), pids=[777],
+                        registry=f'    | |   "nvrm-layout" = "{written[0]}"')
+    arm("control: without the look the job calls the refused start good (what ends the install's trial)",
+        "counts as good" in log and "nullmoth-nv-ok=1" in calls, log + calls)
+else:
+    arm("control: the job without its look at the registry can be made", False)
 
 # a job whose PATH line moved, or that names nvram by its full path, is not run at all
 for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
