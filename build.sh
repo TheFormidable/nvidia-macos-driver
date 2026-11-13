@@ -1378,7 +1378,10 @@ tc_mine() { case "$1" in "$TC_PREFIX"/*) return 0 ;; esac; return 1; }
 tc_plan() {
   local want="" t n plan="" pyv
   pyv=$( { [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of; } || true)
-  { [ -n "$T_PYTHON" ] && ver_ge "${pyv:-0}" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" && ! { tc_mine "$T_PYTHON" && ! tc_current python; }; } || want="$want python"
+  # a Python of your own (NM_PYTHON) older than the tests want still wins in find_tools: the toolchain's is built once
+  # beside it, not again by every deps
+  { [ -n "$T_PYTHON" ] && { ver_ge "${pyv:-0}" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" || tc_current python; } \
+    && ! { tc_mine "$T_PYTHON" && ! tc_current python; }; } || want="$want python"
   { [ -n "$T_NINJA" ] && ! { tc_mine "$T_NINJA" && ! tc_current ninja; }; } || want="$want ninja"
   { [ -n "$T_CMAKE" ] && ! { tc_mine "$T_CMAKE" && ! tc_current cmake; }; } || want="$want cmake"
   { [ -n "$T_PKGCONFIG" ] && ! { tc_mine "$T_PKGCONFIG" && ! tc_current pkgconf; }; } || want="$want pkgconf"
