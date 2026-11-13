@@ -19,7 +19,10 @@ or the arm's own check given a broken result):
                      no build step; DEVELOPER_DIR does; the SDK is xcrun's
   outside            nothing is written outside the four folders (sources included: never written to)
   fail               a failing step: exit status 1, its last lines and its log named, no stamp, nothing after it built
-  check              a missing layout file, a foreign library and an @rpath library in otool -L each refuse the stamp
+  check              a missing layout file, a foreign library and an @rpath library in otool -L, and a link the tool
+                     installed that leads out of the prefix, /usr/lib and /System/Library each refuse the stamp
+  pinver             ninja, cmake, Python, pkgconf, glslang and LLVM must print the pinned version as a whole word; the
+                     lines the real tools print pass
   pkgconfig          pkgconf whose "system" folders are inside the prefix is refused; after SPIRV-Tools, the toolchain's
                      pkg-config --cflags / --libs SPIRV-Tools, run from / with an empty environment, give -I<prefix>/include
                      and -L<prefix>/lib -lSPIRV-Tools-opt -lSPIRV-Tools -lSPIRV-Tools-link, or the stamp is refused
@@ -707,6 +710,53 @@ def main():
             (sb.prefix / "bin/spirv-val").unlink()
             rc, out, err = sb.run(["check", "spirv-tools"])
             check("check fails and names a file removed since", rc == 1 and "spirv-val" in out, out + err)
+
+        if arm("pinver"):
+            # each program's --version against the version this script builds. The lines a real build printed (one
+            # 12-thread Intel Mac's record; pkgconf's from its cli/main.c at the pinned commit: PACKAGE_VERSION alone)
+            # pass; the same lines with another version, or the pinned one inside a longer number, are refused
+            real = {"ninja": ("bin/ninja", "1.13.2"), "cmake": ("bin/cmake", "cmake version 4.4.5\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."),
+                    "python": ("python/bin/python3.14", "Python 3.14.10"), "pkgconf": ("bin/pkgconf", "2.5.1"),
+                    "glslang": ("bin/glslangValidator", "Glslang Version: 11:16.6.0"), "llvm": ("llvm/bin/llvm-config", "22.1.8")}
+            wrong = {"ninja": ["1.13.20", "1.12.1", "21.13.2"], "cmake": ["cmake version 4.4.50", "cmake version 3.31.6"],
+                     "python": ["Python 3.14.1", "Python 3.13.10"], "pkgconf": ["2.5.10", "2.4.3"],
+                     "glslang": ["Glslang Version: 11:16.6.01", "Glslang Version: 11:15.4.0"], "llvm": ["22.1.80", "21.1.8"]}
+
+            def answer_as(s, rel, text):
+                """the installed program prints <text> for --version and does what it did for anything else"""
+                f = s.prefix / rel
+                orig = f.with_name(f.name + ".orig")
+                if not orig.exists():
+                    os.rename(f, orig)
+                body = "".join(f"echo '{l}'\n" for l in text.split("\n"))
+                write(f, f'#!/bin/sh\ncase "${{1:-}}" in --version) {body};; *) exec "{orig}" "$@" ;; esac\n', 0o755)
+
+            def pinver_problems(script=None):
+                s = sandbox()
+                rc, out, err = s.run(["build"] + TOOLS)
+                if rc != 0:
+                    return [f"the build of the ten tools failed: exit {rc}: {err[-500:]}"]
+                probs = []
+                for tool, (rel, line) in real.items():
+                    answer_as(s, rel, line)
+                    rc, out, err = s.run(["check", tool], script=script)
+                    if rc != 0:
+                        probs.append(f"{tool}: the real line {line.splitlines()[0]!r} is refused: {out[-300:]}")
+                    for w in wrong[tool]:
+                        answer_as(s, rel, w)
+                        rc, out, err = s.run(["check", tool], script=script)
+                        if rc != 1 or f"prints \"{w}\"" not in out:
+                            probs.append(f"{tool}: {w!r} is taken (exit {rc})")
+                    answer_as(s, rel, line)
+                return probs
+            probs = pinver_problems()
+            check("the checks compare ninja, cmake, Python, pkgconf, glslang and LLVM's --version with the pinned version: "
+                  "the real lines pass, another version or a longer number is refused", not probs, probs)
+            sb = sandbox()
+            control("checks that only want an answer", pinver_problems(mutate(sb, "pinver", [('    *[!0-9.]"$want"[!0-9.]*) cnote', '    *) cnote')])))
+            sb = sandbox()
+            control("a pinned-version match that is not a whole word",
+                    pinver_problems(mutate(sb, "pinver-word", [('    *[!0-9.]"$want"[!0-9.]*) cnote', '    *"$want"*) cnote')])))
 
         if arm("pkgconfig"):
             def pc_problems(sb, script=None, expect_pkgconf=True):

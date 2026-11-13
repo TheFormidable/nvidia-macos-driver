@@ -3976,7 +3976,21 @@ def pin_expectations(pins):
         ("NM_PIN_RYZENADJ_COMMIT", "tools/ryzenadj-macos/build.sh", "COMMIT=" + p["NM_PIN_RYZENADJ_COMMIT"]),
         ("NM_PIN_RUST_VERSION", "build/build_xlate_release.sh", "RV=${NULLMOTH_RUST_VERSION:-%s}" % p["NM_PIN_RUST_VERSION"]),
         ("NM_PIN_TOOL_LLVM_MAJOR", "build/build_nvk.sh", "(LLVM %s.1.x)" % p["NM_PIN_TOOL_LLVM_MAJOR"]),
+    ] + [
+        # the version build/toolchain.sh compares each tool's --version with: the pinned tag without its prefix
+        (f"NM_PIN_TC{pid}_REF", "build/toolchain.sh", f"    {tool}) echo {tc_tag_version(p[f'NM_PIN_TC{pid}_REF'])} ;;")
+        for tool, pid in (("ninja", "NINJA"), ("cmake", "CMAKE"), ("python", "PYTHON"), ("pkgconf", "PKGCONF"),
+                          ("glslang", "GLSLANG"), ("llvm", "LLVM"))
     ]
+
+
+def tc_tag_version(ref):
+    """v1.13.2, pkgconf-2.5.1, llvmorg-22.1.8, 16.6.0 -> the version alone (only these prefixes: another is kept, and
+    then compared, whole)"""
+    for pre in ("v", "pkgconf-", "llvmorg-"):
+        if ref.startswith(pre):
+            return ref[len(pre):]
+    return ref
 
 
 def pin_problems(pins, read):
