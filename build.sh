@@ -348,14 +348,25 @@ ensure_workdir() {
   [ -f "$W/$MARKER" ] || printf 'made by build.sh of the NullMoth driver; everything below can be deleted with ./build.sh clean all\n' > "$W/$MARKER"
 }
 LOCK_HELD=0
+# lock_owner_alive <pid>: that process exists and, where ps can say, is a build.sh (after a crash or a restart the pid
+# of a lock left behind may belong to another program, which would keep the lock for ever)
+lock_owner_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  have ps || return 0
+  case "$(ps -p "$1" -o command= 2>/dev/null || true)" in *build.sh*) return 0 ;; esac
+  return 1
+}
 take_lock() {
   [ "$NM_DRY_RUN" = 1 ] && return 0
-  local l=$W/build.lock pid tries=0
+  local l=$W/build.lock pid tries=0 waited=0
   while ! mkdir "$l" 2>/dev/null; do
-    pid=$(sed -n 's/^pid=//p' "$l/owner" 2>/dev/null | first_line)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pid=$(sed -n 's/^pid=//p' "$l/owner" 2>/dev/null | first_line || true)   # no owner file: sed fails, and errexit stopped here
+    if [ -n "$pid" ] && lock_owner_alive "$pid"; then
       die "another build.sh run (pid $pid) is using $W; wait for it or stop it ($(tr '\n' ' ' < "$l/owner" 2>/dev/null))"
     fi
+    # a run that has just made the lock writes its owner a moment later: a lock without one is taken over only when it
+    # still has none after three seconds, or two runs started together would both go on
+    if [ -z "$pid" ] && [ "$waited" -lt 3 ]; then waited=$((waited + 1)); sleep 1; continue; fi
     tries=$((tries + 1)); [ "$tries" -le 2 ] || die "cannot take the lock $l"
     note "taking over the lock of a run that is gone (${pid:-unknown pid})"
     rm -f "$l/owner"; rmdir "$l" 2>/dev/null || true

@@ -371,7 +371,9 @@ the values of the variables it reads, the contents of its scripts and source fol
 not), and the stamps of the components it needs. A step whose stamp is unchanged and whose output exists is skipped;
 any change rebuilds that step and the steps built on it, and nothing else. A changed `build.sh` rebuilds everything.
 A step that stops leaves no stamp. One run at a time per working directory: a second one stops at the lock and names
-the first; a lock left by a run that is gone is taken over.
+the first; a lock left by a run that is gone is taken over (one whose process number now belongs to another program
+too, and one without an owner once it has had none for three seconds: a run that has just made it writes its
+owner a moment later).
 
 ## Installing the result and going back
 
