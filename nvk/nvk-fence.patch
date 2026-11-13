@@ -112,7 +112,7 @@ index 2a61354..36e74e5 100644
  
  /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 71cd898..63e9929 100644
+index 630283f..0c79274 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -6,6 +6,7 @@
@@ -154,8 +154,8 @@ index 71cd898..63e9929 100644
 +static int nvrm_fence_have;       /* 0 not asked yet, 1 the kext answers selector 12, -1 it does not (for good) */
 +static pthread_mutex_t nvrm_fence_open_mtx = PTHREAD_MUTEX_INITIALIZER;   /* opening the connection, nothing else */
 +/* After a WAIT_SEQ that did not sleep, that channel is polled for this long before the kernel is asked again: a channel
-+ * whose interrupts the kernel does not trust yet is answered PENDING at once, and asking at every polling step would
-+ * add a system call to each. */
++ * the kernel has judged it cannot follow (its interrupts kept missing the slice) is answered PENDING at once, and
++ * asking at every polling step would add a system call to each. */
 +#define NVRM_FENCE_SEQ_QUIET_NS 50000000LL
 +
 +static void
@@ -312,8 +312,8 @@ index 71cd898..63e9929 100644
 + * milliseconds, so it is given the whole milliseconds of that, never more; a round with less than one millisecond left
 + * is polled.
 + * Returns 0 with WOKEN (the value was reached) or TIMEOUT (the kernel slept the whole time); -1 when the kernel did not
-+ * sleep: no watched channel is pending, the kernel will not sleep on that channel (it has not seen its interrupts arrive
-+ * yet: PENDING), the channel faulted or is gone (DEAD: the caller's own health check then reports the fault), the sleep
++ * sleep: no watched channel is pending, the kernel will not sleep on that channel (it judged that channel's interrupts
++ * unreliable to follow: PENDING), the channel faulted or is gone (DEAD: the caller's own health check then reports the fault), the sleep
 + * was interrupted, the fence is off, or the answer does not hold up (a value the semaphore has not reached, a "slept"
 + * shorter than half the time). The round then takes one step of the 2.9 polling, and that channel is polled, not asked,
 + * for NVRM_FENCE_SEQ_QUIET_NS. So every 0 is a real sleep or a real completion, and the loop cannot spin in the kernel. */
