@@ -31,6 +31,13 @@ some): every variable with a prefix of the plugin's knobs and every name tools/s
 environment is left out, except the standard ones, NVRM_PRISTINE_OGKM (a source tree a test may be pointed at) and
 NM_VULKAN_INCLUDE (the Vulkan headers a test compiles against).
 What a test is meant to take from the tester stays: CC, CXX, ZSTD, BUILD_SH_BASH, NVENCVT_HEADERS, NVDEC_HEADERS, NM_*."""
+# Where the whole suite has run on a Mac, with the commit of each run. On GitHub's Intel runner (macos-15-intel: 4
+# processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6: 303 of 315 passed, 0 failed, 3 skipped, 9
+# not run. On Apple silicon it has never passed whole: GitHub's last run there that got a runner, at commit 22536c6,
+# passed 298 of 312 with 2 failed, in arms that pass on the Intel runner since commit ef2a216.
+# {{PENDING 5b}}
+# On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) it ran at an earlier state of the branch: 291 of 310 passed,
+# and the seven that failed were fixed afterwards.
 import sys
 sys.dont_write_bytecode = True   # nor the runner itself, for what it imports from here on (python3 -B, but from inside)
 import concurrent.futures  # noqa: E402
@@ -62,9 +69,10 @@ SLOW = 30                # seconds from which a test is named at the end with th
 STILL = 300              # every so many seconds, the tests running for at least that long are named on standard error
 # A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
 # real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
-# 376 s alone on an Intel Mac with 12 CPUs, grows under load with -j 4, and had not ended after 1200 s beside the
-# other tests on an Intel Mac with 4, so the general 600 s is too tight for it. Each of its own runs of the script has
-# a limit of its own, so the hour is room for a slow Mac, not for a hang.
+# 376 s alone on an Intel Mac with 12 threads, grows under load with -j 4, and beside the other tests on GitHub's Intel
+# runner, with 4 processors, it had not ended after 1200 s and took 2088 s at commit 3933ff6 once it had the hour, so
+# the general 600 s is too tight for it. Each of its own runs of the script has a limit of its own, so the hour is room
+# for a slow Mac, not for a hang.
 # The limit is per test name; every other test keeps TIMEOUT.
 PER_TEST_TIMEOUT = {"test_build_sh.py": 3600}
 # the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
