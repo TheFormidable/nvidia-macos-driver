@@ -13,8 +13,8 @@ In 2.9 a GPU fault on one channel ended the application's Metal device: every la
 in WindowServer the session ended. The GPU itself was fine; only the faulting channel had been torn down.
 
 A GPU fault on one channel no longer ends the application's Metal device. When a wait finds that its channel faulted
-with an exception that ends only that channel (Xid 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109, or a copy engine's
-fault: 70, 71, 72, 75, 76, 77, 85, 126-135), or that the channel
+with an exception that ends only that channel (Xid 13, 31, 32, 43, 44, 45, 69, 109, or a fault on any copy engine:
+39, 40, 41, 70, 71, 72, 75, 76, 77, 85, 126-135), or that the channel
 made no progress for `NVRM_FLUSH_TIMEOUT_MS` (when it is not set, the Metal plugin sets it to 5 s in WindowServer
 and 60 s in every other process), NVK builds a new channel beside the old one, frees the
 old one, and continues on the new one with the same semaphore and command ring: the channel-wide state (objects,

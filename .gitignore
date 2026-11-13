@@ -10,3 +10,6 @@ translator/translator/target/
 # Default work folder of build_agdc.sh, kext_check.sh and ci_plugin.sh (the pinned downloads of the last two live there):
 # never committed.
 build-out/
+
+# Finder's folder metadata: it appears in any folder opened in Finder and is never part of a build.
+.DS_Store
