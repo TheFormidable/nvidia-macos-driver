@@ -100,12 +100,13 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    entero se ha compilado allí con Xcode 26.5 en macOS 26.7, y en la máquina de GitHub con Xcode 26.3 (SDK 26.2, el
    Xcode más nuevo que funciona en macOS 15); Xcode 26.0 a 26.2 no se han probado. En Apple silicon,
    `./build.sh deps` toma sus herramientas de Homebrew, un camino que solo se ha ejecutado contra sustitutos, y allí no
-   se ha hecho ninguna compilación completa. Todo lo que compila `./build.sh` está hecho para macOS 15.0 y posteriores
-   (el traductor de shaders para 10.12 y posteriores), así que un paquete compilado en macOS 26 sirve también para
-   macOS 15; las comprobaciones de las clases de Apple de la sección 2, paso 3, deciden en cada macOS en su primer
-   arranque. En ese Mac `./build.sh deps` tardó 46,5 minutos en un directorio de trabajo vacío en el commit 650db45,
-   descargas incluidas; en el commit 3933ff6 la compilación de los 17 componentes tardó 5 minutos 41 segundos y el
-   paquete 27 segundos, y el directorio de trabajo ocupaba después unos 8 GB.
+   se ha hecho ninguna compilación completa. Nada de lo que compila `./build.sh` pide un macOS posterior a 15.0: el
+   traductor de shaders está hecho para 10.12 y posteriores, los dos programas de la caché de DLSS para 12.0, todo lo
+   demás que declara un mínimo para 15.0, y los kexts no declaran ninguno. Así que un paquete compilado en macOS 26
+   está hecho también para macOS 15; las comprobaciones de las clases de Apple de la sección 2, paso 3, deciden en cada
+   macOS en su primer arranque. En ese Mac `./build.sh deps` tardó 46,5 minutos en un directorio de trabajo vacío en
+   el commit 650db45, descargas incluidas; en el commit 3933ff6 la compilación de los 17 componentes tardó 5 minutos
+   41 segundos y el paquete 27 segundos, y el directorio de trabajo ocupaba después unos 8 GB.
    Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Todavía
    no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete y nada más. Bien: su
    última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
