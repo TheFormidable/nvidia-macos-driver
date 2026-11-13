@@ -14,22 +14,23 @@
 #                 computer they run on which options it takes, and an Intel Mac's says yes to some that make a kext
 #                 macOS cannot load, so after the link each run checks that no compile line carries such an option
 #                 and that NVRM imports no ___x86_ helper, and prints a checksum of its compile lines (with the
-#                 runner's own folders cut out): the two runs' checksums must be equal.
+#                 runner's own folders cut out and runs of spaces squeezed): the two runs' checksums must be equal.
 #   plugin        the release compile of the Metal plugin (build/ci_plugin.sh) against the release's Vulkan headers.
 #                 Needs the macOS 26 SDK.
 #
-# What GitHub's runners have shown (the logs of runs 43344333098, 43384015615 and 43401345624, 2026-11-13; every run
-# red until then): kexts-linux and plugin green in every run. host-tests red in every run. In 43401345624, 298 of 311
-# tests passed, the four that compile against the Vulkan headers among them, and tools/test_fence_model.c failed one
-# arm (one in 43384015615, three in 43344333098) that the runner's excerpt of the output did not show: which arm
-# failed has not been seen. kexts-mac first stopped at its import check on ____chkstk_darwin, a name the kext link
-# itself provides (tools/kext_imports.py says why). In 43401345624 both runs passed that check and compiled NVIDIA's
-# RM core (1121 commands) and NVKMS (225), and both stopped at the link of NVRM: with the image's default Xcode, 16.4,
-# the link warned four times that libkmod.a was built for a newer macOS than the kext, above that link's warning
-# ceiling of 0. The job now takes the newest Xcode of the image that the release accepts; the link of the kexts and
-# the check after it have not run on GitHub yet.
-# A job gates once it has been seen green on GitHub's runners: kexts-linux, host-tests and plugin gate; kexts-mac is
-# marked continue-on-error until both of its runs have been seen green once: then delete that line.
+# What GitHub's runners have shown (the logs of runs 43344333098 to 43419906041, 2026-11-13): kexts-linux and plugin
+# green in every run. kexts-mac green on both runners in 43410589619 and 43419906041, with Xcode 26.3: NVIDIA's RM
+# core (1121 commands) and NVKMS (225) compiled, every kext linked with 0 warnings, NVRM importing no ___x86_ helper,
+# and the two runners' kexts equal byte for byte. Before that it had stopped at its import check on
+# ____chkstk_darwin, a name the kext link itself provides (tools/kext_imports.py says why), and then at the link of
+# NVRM, where the image's default Xcode, 16.4, brought a libkmod.a built for a newer macOS than the kext. The two
+# runners' compile lines hold the same words in the same order and differed in spaces only: the make of macOS (GNU
+# make 3.81) leaves a space where the compiler refused an option NVIDIA's makefile asked it about, so the checksum
+# is taken with runs of spaces squeezed.
+# host-tests red in every run so far: in 43419906041, 299 of 312 tests passed, the four that compile against the
+# Vulkan headers among them, and tools/test_toolchain_sh.py failed (its stand-in build stops at its first tool on a
+# Mac).
+# Every job gates: one that fails turns the run red.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
 # Vulkan-Headers) are pinned in the scripts and build/pins.sh; none is copied into the repository or into an artifact.
 # The token can read the repository and nothing else; no job uses a secret or uploads anything.
@@ -107,7 +108,6 @@ jobs:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
@@ -172,11 +172,13 @@ jobs:
               bad=1
             fi
             cut="$RUNNER_TEMP/$part.lines"
-            sed -e "s|$RUNNER_TEMP|<tmp>|g" -e "s|$GITHUB_WORKSPACE|<repo>|g" "$f" > "$cut"
+            # runs of spaces squeezed: macOS's make leaves a space for every option its compiler refused, so the lines
+            # of an Intel and an Apple-silicon Mac hold the same words with different spacing
+            sed -e "s|$RUNNER_TEMP|<tmp>|g" -e "s|$GITHUB_WORKSPACE|<repo>|g" "$f" | tr -s ' ' > "$cut"
             sum=$(shasum -a 256 < "$cut" | cut -c1-64)
             echo "compile lines of $part: $(wc -l < "$f" | tr -d ' ') lines, sha256 $sum (${{ matrix.runner }}, $(uname -m))"
             # What the checksum is made of, for when the two runs' checksums differ: the same lines in sorted order (a
-            # different order only), how many times each option occurs, and the first line as it is.
+            # different order only), how many times each option occurs, and the first line.
             echo "::group::what the compile lines of $part are made of"
             echo "sorted: sha256 $(LC_ALL=C sort "$cut" | shasum -a 256 | cut -c1-64)"
             tr ' ' '\n' < "$cut" | grep -e '^-' | LC_ALL=C sort | uniq -c | awk '{ print $1, $2 }'
