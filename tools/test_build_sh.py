@@ -1767,6 +1767,35 @@ def arm_source_fail():
     check("the next deps starts at SPIRV-Tools", rc == 0 and got == ["spirv-tools", "glslang", "llvm"], (rc, got, out[-600:]))
 
 
+def arm_source_ownpy():
+    """a Python of the tester's own (NM_PYTHON) that is older than the host tests want: it stays the one used, the
+    toolchain's Python is built beside it once, and the next deps builds nothing"""
+    def run(edit=None, tag=""):
+        sb = source_sandbox("srcownpy" + tag)
+        if edit:
+            sb.break_script(*edit)
+        own = sb.dir / "own/bin/python3.12"
+        sb.wrap(own, "py", "3.12.9")
+        env = {"NM_PYTHON": str(own)}
+        sb.clear()
+        rc1, out1 = sb.run("deps", "-y", extra=env)
+        first = [t for t, _ in tc_builds(sb)]
+        sb.clear()
+        rc2, out2 = sb.run("deps", "-y", extra=env)
+        again = [t for t, _ in tc_builds(sb)]
+        p = []
+        if "python" not in first:
+            p.append(f"the first deps built {first}, not the toolchain's Python")
+        if again:
+            p.append(f"the second deps built {again} again (exit {rc2}): {out2[-300:]}")
+        return p, out1
+    p, out = run()
+    check("NM_PYTHON older than the tests want: the toolchain's Python is built once, a second deps builds nothing", not p, (p, out[-600:]))
+    p2, _ = run(edit=('{ ver_ge "${pyv:-0}" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" || tc_current python; }',
+                      'ver_ge "${pyv:-0}" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"'), tag="-neg")
+    negative("a deps that builds the toolchain's Python again whenever NM_PYTHON is older than the tests want", p2)
+
+
 def arm_source_modes():
     """dry run, --no-install, --offline, too little space, a working directory with a blank, the pins, the modes"""
     sb = source_sandbox("srcmodes")
@@ -3910,6 +3939,7 @@ def main():
                     timed("source_some", arm_source_some)
                     timed("source_fail", arm_source_fail)
                     timed("source_modes", arm_source_modes)
+                    timed("source_ownpy", arm_source_ownpy)
                 if want("sdkroot"):
                     timed("sdkdeps", arm_sdkdeps)
                     timed("nosdk", arm_nosdk)
