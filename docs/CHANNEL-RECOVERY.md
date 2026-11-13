@@ -125,12 +125,14 @@ NVK's no-progress budget (`NVRM_FLUSH_TIMEOUT_MS`) is measured in awake time (`C
 waits are: a wait that is in progress when the machine sleeps continues after wake with the time it had left. The
 seconds the machine is awake while the GPU suspends and resumes do count, and the channels stand still all that time,
 so past half the budget the doorbell may be rung once more. A channel is not rebuilt merely because the machine slept:
-the escape answers "asleep" from the start of the GPU's suspend until the RM has resumed and restarted the channels,
-without waiting for the resume as RM calls do, and a wait that reaches the whole budget then starts the budget again
-instead of rebuilding, asking RM nothing. NVK believes that answer for 30 s of awake time from the first one; a GPU
-that stays suspended longer (a resume that never comes) gets the usual sequence, which waits for the resume inside RM,
-as it does with an older kext, which cannot give that answer in time. No escape is made while a channel's lock is held by the doorbell ring,
-so a ring during a sleep holds up nobody. What a tester sees after a sleep: nothing; `debug.nvrm_chan_recovered` and
+the escape answers "asleep" from the start of the GPU's suspend until the kext lets RM calls through again at the
+end of the resume, without waiting for the resume as RM calls do, and a wait that reaches the whole budget then starts
+the budget again instead of rebuilding, asking RM nothing. NVK believes that answer for 360 s of awake time from the
+first one of each sleep (a channel that moved since an earlier sleep starts a new count; an Intel Mac's own sleep and
+wake watchdogs end any sleep that takes longer); a GPU that stays suspended longer (a resume that never comes) gets
+the usual sequence, which waits for the resume inside RM, as it does with an older kext, which cannot give that
+answer in time. No escape is made while a channel's lock is held by the doorbell ring, so a ring during a sleep holds
+up nobody. What a tester sees after a sleep: nothing; `debug.nvrm_chan_recovered` and
 `debug.nvrm_chan_gave_up` do not move (`debug.nvrm_chan_kicks` may), and with `NVK_DIAG=1` a process prints
 `nvrm: channel slot N stands still while the GPU is suspended for a sleep or wake - waiting again`. Application
 timeouts (`vkWaitForFences`) are still measured on the ordinary clock. With `NVK_CHANNEL_RECOVER=0` the budget is on

@@ -87,10 +87,11 @@ driver tells the fence so when that GPU stops, so that the fence does not stay c
 left, so a frame that was pending at sleep is not declared lost. The seconds the machine is awake while the GPU
 suspends and resumes (user channels stopped, preserved VRAM written to the save file and read back) do count: past
 half the budget NVK may ring a waiting channel's doorbell once more (`debug.nvrm_chan_kicks`). A channel is not
-rebuilt merely because the machine slept: NVRM reports the GPU as suspended from the start of its suspend until the
-RM has resumed and restarted the channels, and while it does, a wait that reaches the whole budget starts the budget
-again instead of rebuilding, for up to 30 s of awake time from the first such report (then the usual rebuild runs,
-after waiting for the resume, as with an older kext, which cannot report it in time). Application timeouts
+rebuilt merely because the machine slept: NVRM reports the GPU as suspended from the start of its suspend until it
+lets RM calls through again at the end of the resume, and while it does, a wait that reaches the whole budget starts
+the budget again instead of rebuilding, for up to 360 s of awake time from the first such report of each sleep (an
+Intel Mac's own sleep and wake watchdogs end any sleep that takes longer; past that the usual rebuild runs, after
+waiting for the resume, as with an older kext, which cannot report it in time). Application timeouts
 (`vkWaitForFences`) are still measured on the ordinary clock. With `NVK_CHANNEL_RECOVER=0` NVK's budget is on the
 ordinary clock, as in 2.9 (a wait across a long sleep can then be called lost at wake).
 

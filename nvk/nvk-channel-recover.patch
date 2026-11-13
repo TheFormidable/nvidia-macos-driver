@@ -8,7 +8,8 @@ fences answer "did not run" through nvmtl_nvk_fence_dropped_v1). Before that, a 
 at half the budget. A fault inside replayed work drops everything in flight. Only channel exceptions and stalls are
 rebuilt, at most 3 times in 30 s per channel; every other loss ends exactly as 2.9 ended, plus one line naming it.
 A system sleep is not a fault: while the kext reports the GPU suspended for a sleep or wake, a stalled wait looks
-again instead of rebuilding (for at most 30 s of awake time), and no escape is made with a channel's mutex held.
+again instead of rebuilding (for at most 360 s of awake time per sleep), and no escape is made with a channel's mutex
+held.
 The pure part is nvkmd/nvrm/nvkmd_nvrm_recover.h, with its host test nvkmd_nvrm_recover_test.c beside it.
 nvkmd/nvrm/nvrm_chan_note_abi.h is a byte-for-byte copy of kexts/NVRM/nvrm_chan_note_abi.h (escape 0xE8: counters in
 the kext and the adapter's power state; a kext without it fails the escape once and is not asked again).
@@ -856,10 +857,10 @@ index 42f5f01..4a65a44 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..ea62272
+index 0000000..d40da9b
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -0,0 +1,1009 @@
+@@ -0,0 +1,1010 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1684,6 +1685,7 @@ index 0000000..ea62272
 +      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
 +      st.replayedThrough = r->replayedThrough;
 +      memcpy(st.stamps, r->rebuildNs, sizeof(st.stamps));
++      st.progNs = r->progNs;
 +      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
 +      st.now = t0;
 +      why = nvrm_rec_execute(&nvrm_rec_rm_ops, &job, &st, &ctx->recAsleepNs, &kind, &level, &plan);
@@ -1871,10 +1873,10 @@ index 0000000..ea62272
 +}
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
 new file mode 100644
-index 0000000..3d5845a
+index 0000000..ef8e738
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
-@@ -0,0 +1,434 @@
+@@ -0,0 +1,440 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1907,7 +1909,7 @@ index 0000000..3d5845a
 +#define NVRM_REC_WINDOW_NS     30000000000ll
 +#define NVRM_REC_DROPS         8              /* dropped sequence ranges remembered per channel slot */
 +#define NVRM_REC_CHAIN         4              /* SEM_ACQUIRE hops followed to the channel that blocks a wait */
-+#define NVRM_REC_ASLEEP_NS     30000000000ll  /* awake time a channel's "GPU suspended" answers are believed for */
++#define NVRM_REC_ASLEEP_NS     360000000000ll /* awake time a channel's "GPU suspended" answers are believed for */
 +
 +/* The kind of loss. Only CHANNEL and STALL are rebuilt; every other kind ends as 2.9 ended, with its name logged. */
 +enum nvrm_rec_kind { NVRM_LOSS_NONE = 0, NVRM_LOSS_CHANNEL = 1, NVRM_LOSS_STALL = 2, NVRM_LOSS_MEMORY = 3,
@@ -1998,18 +2000,23 @@ index 0000000..3d5845a
 + * every user channel and holds every RM call from the start of the suspend to the end of the resume, while the awake
 + * clock of the stall budget goes on running. So a stall (nothing changed in the error notifier) on a GPU the kext
 + * calls suspended is answered "look again", without asking RM anything (RM calls wait for the resume). *since is the
-+ * awake time of the first such answer for this channel, 0 none; any other answer clears it. The answer is believed
-+ * for NVRM_REC_ASLEEP_NS of awake time only: a GPU that stays suspended (a resume that never comes) must not keep a
-+ * waiter looking forever at work that cannot finish, so after that the normal sequence runs, which then waits for the
-+ * resume inside RM as it always did. An unknown power state (-1: an older kext) is never "suspended". */
++ * awake time of the first such answer for this channel, 0 none; any other answer clears it, and so does progress:
++ * prog is the awake time the channel's semaphore was last seen to move, and a stamp older than that belongs to an
++ * earlier sleep (the channel ran after it, and the waits of that sleep ended without asking again), so the next sleep
++ * gets a stamp of its own. The answer is believed for NVRM_REC_ASLEEP_NS of awake time only: a GPU that stays
++ * suspended (a resume that never comes) must not keep a waiter looking forever at work that cannot finish, so after
++ * that the normal sequence runs, which then waits for the resume inside RM as it always did. That is 360 s because an
++ * Intel Mac's own sleep and wake watchdogs (180 s each) end any sleep that takes longer, so it is never reached by a
++ * sleep the machine survives; the kext's own bounded waits in the suspend alone come to 17 s, besides the copy of the
++ * preserved VRAM out and back. An unknown power state (-1: an older kext) is never "suspended". */
 +static inline bool
-+nvrm_rec_asleep(int32_t pm, uint32_t changed, int64_t now, int64_t *since)
++nvrm_rec_asleep(int32_t pm, uint32_t changed, int64_t now, int64_t prog, int64_t *since)
 +{
 +   if (pm < 0 || (uint32_t)pm != NVRM_REC_PM_SUSPENDED || changed) {
 +      *since = 0;
 +      return false;
 +   }
-+   if (*since == 0)
++   if (*since == 0 || prog >= *since)
 +      *since = now != 0 ? now : 1;
 +   return now - *since < NVRM_REC_ASLEEP_NS;
 +}
@@ -2236,6 +2243,7 @@ index 0000000..3d5845a
 +   bool copyOnly, havePrologue;
 +   uint64_t replayedThrough;    /* F of the last rebuild: a fault below it is a fault in replayed work */
 +   int64_t stamps[NVRM_REC_MAX_REBUILDS], now;
++   int64_t progNs;              /* awake time the channel's semaphore was last seen to move (nvrm_rec_asleep) */
 +};
 +
 +struct nvrm_rec_ops {
@@ -2267,7 +2275,7 @@ index 0000000..3d5845a
 +   ops->inputs(u, &in);
 +   *kind = NVRM_LOSS_NONE;
 +   *level = NVRM_REC_REPLAY;
-+   if (nvrm_rec_asleep(in.pm, in.changed, st->now, asleepSince))
++   if (nvrm_rec_asleep(in.pm, in.changed, st->now, st->progNs, asleepSince))
 +      return NVRM_WHY_ASLEEP;
 +   ops->action(u, &in);
 +   enum nvrm_rec_kind k = nvrm_rec_classify(&in);
@@ -2311,10 +2319,10 @@ index 0000000..3d5845a
 +#endif /* NVKMD_NVRM_RECOVER_H */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 new file mode 100644
-index 0000000..7f8b277
+index 0000000..cf52b79
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,654 @@
 +/* Host test of nvkmd_nvrm_recover.h (the pure part of rebuilding a channel). Not built by meson. From this directory:
 + *   cc -std=c11 -O1 -g -Wall -Wextra -Werror -I. nvkmd_nvrm_recover_test.c -o /tmp/nvkmd_nvrm_recover_test && /tmp/nvkmd_nvrm_recover_test
 + * (add -fsanitize=address,undefined where the compiler has a runtime for them). Exit 0 = every arm passed.
@@ -2889,10 +2897,33 @@ index 0000000..7f8b277
 +   arm("asleep: a running answer clears the stamp, so the next sleep gets its own NVRM_REC_ASLEEP_NS",
 +       asleep == 0 && run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && asleep == st.now);
 +
++   /* the usual end of a sleep: no run at all after the wake (the channel moved on and the waits ended), so no running
++    * answer ever clears the stamp; hours later the machine sleeps again */
++   f.in.pm = 1;
++   asleep = 0;
++   st.now = T;
++   st.progNs = T - 3000000000ll;   /* the channel last moved 3 s before the first look */
++   bool first = run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && asleep == T;
++   st.now = T + 20000000000ll;
++   first = first && run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && asleep == T;
++   arm("asleep: a progress stamp older than the first suspended answer keeps the stamp (one sleep, one bound)", first);
++   st.progNs = T + 60000000000ll;               /* after the wake the channel ran */
++   st.now = T + 4 * 3600 * 1000000000ll;      /* the next sleep, four hours of awake time later */
++   arm("asleep: the next sleep, after the channel moved, looks again with a stamp of its own (no running answer between)",
++       run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && strcmp(f.log, "i") == 0 && asleep == st.now);
++   st.now += NVRM_REC_ASLEEP_NS;
++   arm("asleep: and that sleep's own bound ends it",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "irsbfsat") == 0 && asleep == st.now - NVRM_REC_ASLEEP_NS);
++   st.progNs = 0;
++
 +   int64_t s0 = 0;
 +   arm("asleep: the pure rule: suspended and unchanged only, and an awake clock of 0 still sets a stamp",
-+       nvrm_rec_asleep(1, 0, 0, &s0) && s0 == 1 && !nvrm_rec_asleep(1, 1, 5, &s0) && s0 == 0 &&
-+       !nvrm_rec_asleep(0, 0, 5, &s0) && !nvrm_rec_asleep(-1, 0, 5, &s0) && !nvrm_rec_asleep(2, 0, 5, &s0) && s0 == 0);
++       nvrm_rec_asleep(1, 0, 0, 0, &s0) && s0 == 1 && !nvrm_rec_asleep(1, 1, 5, 0, &s0) && s0 == 0 &&
++       !nvrm_rec_asleep(0, 0, 5, 0, &s0) && !nvrm_rec_asleep(-1, 0, 5, 0, &s0) && !nvrm_rec_asleep(2, 0, 5, 0, &s0) &&
++       s0 == 0);
++   s0 = 7;
++   arm("asleep: the pure rule: progress at or after the stamp starts a new one, progress before it keeps it",
++       nvrm_rec_asleep(1, 0, 9, 7, &s0) && s0 == 9 && nvrm_rec_asleep(1, 0, 12, 8, &s0) && s0 == 9);
 +   arm("asleep: the reason has a name", strcmp(nvrm_rec_why_name(NVRM_WHY_ASLEEP), "?") != 0);
 +   asleep = 0;
 +}
