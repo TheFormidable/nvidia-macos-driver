@@ -117,8 +117,10 @@ Now:
 - each arm carries a generation; cancel and destroy move it on, so a late callback finds a stale generation and returns
   without calling the RM;
 - cancel and destroy then wait for a callback that is running, as `hrtimer_cancel` does: at most 2 s from a thread,
-  50 ms where the caller may not sleep, and not at all from inside the callback itself. A timer whose wait ran out is
-  never reused;
+  50 ms where the caller may not sleep, and not at all from inside the callback itself. A timer that is destroyed
+  while a callback may still be inside (the wait ran out, or was not made) is never reused: its slot is out of use for
+  the rest of the boot, and counted. With `nvrmnanowait=0` that is the price of every destroy that meets a running
+  callback; the RM's callback only queues a work item, so the two rarely meet;
 - a timer's deadline is computed in 64-bit nanoseconds (the 32-bit microsecond count ran out at 71 minutes);
 - when a GPU stops, every nano timer the RM did not destroy is stopped, counted and kept out of use.
 
@@ -131,6 +133,7 @@ Now:
 | `debug.nvrm_nano_waits` | sysctl | Cancels and destroys that waited for a running callback |
 | `debug.nvrm_nano_wait_timeouts` | sysctl | Such waits that ran out. Should stay 0; `nvrmnanowait=0` removes the wait |
 | `debug.nvrm_nano_leaked` | sysctl | Timers the RM had not destroyed when its GPU stopped |
+| `debug.nvrm_nano_retired` | sysctl | Slots taken out of use for the rest of the boot: the leaked ones, and each timer destroyed while a callback could still be inside. Should stay 0 while the GPU runs; the pool is 4096 less this |
 | `debug.nvrm_nano_bad_handle` | sysctl | Calls with a timer that was not in use (a second destroy, for example); each is a no-op |
 
 ## RM work items
