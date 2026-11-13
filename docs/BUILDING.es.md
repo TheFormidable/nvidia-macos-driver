@@ -47,11 +47,15 @@ comandos y opciones y la solución de problemas.
   bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
   (`<directorio de trabajo>/tools/bin/patch`): sin él, el `patch` de macOS pregunta en el terminal cuando no encuentra
   el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
-  pregunta que nadie ve. Si falta, `./build.sh deps` explica cómo instalarlo y
+  pregunta que nadie ve. Si falta Homebrew, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
 - Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
   que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
-  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas.
+  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas. Para
+  compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
+  macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o `Your Command Line Tools are
+  too outdated`. `xcode-select --install` las instala y Actualización de software las actualiza;
+  `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` muestra la versión que tienes.
 
 ## Inicio rápido
 
