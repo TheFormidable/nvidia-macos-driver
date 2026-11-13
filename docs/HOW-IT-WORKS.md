@@ -106,6 +106,12 @@ screen, which only survives macOS's PCI setup with a small BAR: `ResizeAppleGpuB
 `IONDRVSupport` not excluded. 1401 builds the installer that way. The 1401 Mac app switches to the table above when it
 installs the driver.
 
+With `IONDRVSupport` not excluded the installed driver still gets the card: `NVRMFBClaim` (probe score 30000) holds
+the card's `IOFramebuffer` match category before Apple's `IONDRVFramebuffer` (20000) is tried, and `NVRMBootFB` (25000)
+comes before it with the driver off. Apple's framebuffer takes the card only when both step aside, mainly after the
+framebuffer's layout check refused this macOS. It then shows the firmware's picture, when that picture still lies
+inside the card's memory window, as a slow desktop without acceleration, where the exclusion leaves the screen dark.
+
 ## 5. The 1401 Mac app (installs the driver)
 
 **1401.app** lives in the [1401](https://github.com/nullmoth/1401) repository (`mac/`, Swift + WebKit; the window is

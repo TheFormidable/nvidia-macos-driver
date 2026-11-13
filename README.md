@@ -149,6 +149,12 @@ not excluded: it runs on the firmware framebuffer. The Mac app keeps your existi
 updates the driver, and the driver sets up the BAR itself after macOS starts, so don't copy BAR values from someone
 else's board.
 
+An installed macOS whose OpenCore does not exclude IONDRVSupport also runs the driver: its framebuffer kext claims the
+NVIDIA card before Apple's firmware framebuffer can. The difference shows when the driver does not draw the card,
+mainly when it declined this macOS: Apple's firmware framebuffer then shows the firmware's picture as a slow desktop
+without acceleration (when that picture still lies inside the card's memory window), where the table's setting leaves
+the screen dark ([docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), the layout-refusal entry).
+
 Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.
 - **SMBIOS:** a Mac model that runs macOS 15 with a discrete GPU (tested: `iMacPro1,1`, which 1401 uses).

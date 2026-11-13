@@ -55,7 +55,8 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    `== 4. back up what is there now -> ...`; anótalo. También deja una tarea que se ejecuta en cada arranque: cuando el
    driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
    WindowServer una y otra vez en la pantalla NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este
-   macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez;
+   macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez (tras un rechazo te deja
+   a ti el reinicio cuando hay una pantalla encendida y has iniciado sesión: sección 2, paso 1);
    `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Tras un rechazo solo lo hace mientras el Mac
    siga en la compilación de macOS en la que se instaló, así que no actualices macOS entre la instalación y estas
    pruebas. Se borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un
@@ -107,6 +108,25 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    línea da el motivo) y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos. En el segundo,
    `cat /Library/NullMoth/lastgood.log` dice por qué la tarea del instalador devolvió 2.9 (el paso 3 explica el
    rechazo que puede nombrar); envía ese archivo con `sw_vers`.
+   En un Mac cuyo OpenCore no excluye IONDRVSupport de Apple (la tabla del README lo excluye) una ventana de inicio de
+   sesión todavía no es un "bien": cuando el driver rechaza la tarjeta, el framebuffer de firmware de la propia Apple
+   la toma y muestra una ventana de inicio de sesión y un escritorio lentos y sin aceleración. Dos órdenes de solo
+   lectura distinguen los casos:
+
+   ```bash
+   ioreg -r -c IOFramebuffer -w0 | grep -o '<class [A-Za-z]*'
+   cat /Library/NullMoth/lastgood.log
+   ```
+
+   Ejecútalas en el escritorio que apareció tras la instalación. La primera nombra `NVRMNVDAFramebuffer` cuando el
+   driver dibuja la pantalla (bien) e `IONDRVFramebuffer` cuando lo hace el framebuffer de firmware de Apple (mal: el
+   driver rechazó la tarjeta, el paso 3 dice por qué). La segunda dice qué hizo entonces la tarea del instalador. En
+   un Mac así, o bien reinició sola a 2.9 a los pocos segundos del arranque, antes de que nadie iniciara sesión (el
+   archivo termina con `previous driver restored; restarting`; tras ese reinicio la primera orden nombra el
+   framebuffer de 2.9, así que lee el archivo), o bien, tras un inicio de sesión automático, devolvió los archivos de
+   2.9 y te dejó a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous driver
+   starts at the next restart`). En los dos casos 2.9 vuelve en el siguiente arranque; envía el archivo con
+   `sw_vers`.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -135,19 +155,22 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    - Mal: una línea empieza por `refused:` (nombra la clase y los dos tamaños). Lo que hace cada rechazo:
      - `nvrmfb-layout` rechazado, leído por NVRM antes de arrancar la tarjeta: el registro del kernel tiene
        `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` dice `declined: ...`,
-       y no aparece ningún escritorio: todos los framebuffers del driver están construidos sobre esas clases, también
-       el que muestra un escritorio con el driver apagado. El guardián de arranque no cuenta este arranque. La tarea
+       y el driver no muestra nada: todos los framebuffers del driver están construidos sobre esas clases, también el
+       que muestra un escritorio con el driver apagado. No aparece ningún escritorio donde OpenCore excluye
+       IONDRVSupport; donde no lo excluye, el framebuffer de firmware de Apple muestra uno lento y sin aceleración
+       (paso 1). El guardián de arranque no cuenta este arranque. La tarea
        del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
        minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log` y,
        en la compilación de macOS en la que se instaló, devuelve el driver anterior y reinicia, así que vuelves a
-       estar en 2.9 y ese archivo es lo que hay que enviar (solo cuando una pantalla en otra GPU muestra un
-       escritorio y has iniciado sesión te deja a ti el reinicio, y el archivo lo dice). Sin la tarea (una primera
+       estar en 2.9 y ese archivo es lo que hay que enviar (solo cuando hay una pantalla encendida y has iniciado
+       sesión, en otra GPU o en el framebuffer de firmware de Apple tras un inicio de sesión automático, te deja a ti
+       el reinicio, y el archivo lo dice). Sin la tarea (una primera
        instalación, o cuando la tarea ya se borró sola en el arranque siguiente a uno que encendió la pantalla), o en
        otra compilación de macOS, no se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o
        quites el driver. `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
      - El mismo rechazo leído solo después de que NVRM arrancara: `auto-go: NOT STARTING THE GPU: the framebuffer
-       refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Tampoco aparece
-       ningún escritorio, este arranque sí cuenta, y la tarea del instalador hace lo mismo que arriba.
+       refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Tampoco aquí
+       muestra nada el driver, este arranque sí cuenta, y la tarea del instalador hace lo mismo que arriba.
      - `nvaccel-layout` rechazado: `NVAccel: does not attach: ... the display runs without acceleration` y, de NVRM,
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` vale 6, no existe
        `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
