@@ -9,8 +9,9 @@
 process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
 through long GPU waits instead of polling; a GPU fault on one channel costs the frames in flight instead of the
 application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime and FaceTime once a short self-test
-has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed, and each one that
-changes how the driver runs has exactly one way back to the 2.9 behaviour. None of it has run on an NVIDIA card yet.
+has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed; each risky change that
+changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
+are undone only by reinstalling 2.9. None of it has run on an NVIDIA card yet.
 Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card once the notice above is gone:
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 

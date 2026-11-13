@@ -9,11 +9,15 @@ and none of them was loaded there (the host tests ran there too);
 NVK and the shader translator have not yet been built on a Mac. The check list for a first run on a card is
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
-Nothing new in this release has to be switched on: every change below is active as installed. Each one that changes
-how the driver runs has exactly one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
-a line of `/Library/GPUBundles/nvmtl/nvrm610.conf` when a process starts). They are listed under "The ways back" below
-and in [docs/SWITCHES.md](docs/SWITCHES.md). They are there to tell whether a new path is behind a problem, not to be
-left set.
+Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
+alters how the driver runs has one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
+a line of `/Library/GPUBundles/nvmtl/nvrm610.conf` when a process starts). These are listed under "The ways back" below
+and in [docs/SWITCHES.md](docs/SWITCHES.md), and are there to tell whether a new path is behind a problem, not to be
+left set. Several default-on changes have no switch of their own: the interrupt path's closing at sleep, shutdown and
+stop; the adapter-teardown order and the idle power-down hold; the per-GPU interrupt mark and the real CPU count; the
+unbounded kernel-mapping table; the nano timers apart from their cancel wait; the event connection's close; the
+plugin's fence clock; and the kernel extensions staying loaded once started. The way back from these is to reinstall
+2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
 
 ### Fixes and changes
 
