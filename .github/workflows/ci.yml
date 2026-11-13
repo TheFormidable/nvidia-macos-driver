@@ -18,13 +18,16 @@
 #   plugin        the release compile of the Metal plugin (build/ci_plugin.sh) against the release's Vulkan headers.
 #                 Needs the macOS 26 SDK.
 #
-# What GitHub's runners have shown (the logs of runs 43344333098 and 43384015615, 2026-11-13; 26 runs, all red):
-# kexts-linux and plugin green in every run. host-tests red in every run; in the later of the two, 293 of 310 tests
-# passed and five failed: four found no Vulkan headers (they looked only in ~/Vulkan-Headers) and
-# tools/test_fence_model.c failed one timing arm (it failed in the earlier run too). kexts-mac compiled all 31
-# units with 0 warnings and stopped at its import check on ____chkstk_darwin, a name the kext link itself provides
-# (tools/kext_imports.py says why), so NVIDIA's RM core, NVKMS and the link of the kexts have never run on GitHub, and
-# nothing has run on an Intel runner.
+# What GitHub's runners have shown (the logs of runs 43344333098, 43384015615 and 43401345624, 2026-11-13; every run
+# red until then): kexts-linux and plugin green in every run. host-tests red in every run. In 43401345624, 298 of 311
+# tests passed, the four that compile against the Vulkan headers among them, and tools/test_fence_model.c failed one
+# arm (one in 43384015615, three in 43344333098) that the runner's excerpt of the output did not show: which arm
+# failed has not been seen. kexts-mac first stopped at its import check on ____chkstk_darwin, a name the kext link
+# itself provides (tools/kext_imports.py says why). In 43401345624 both runs passed that check and compiled NVIDIA's
+# RM core (1121 commands) and NVKMS (225), and both stopped at the link of NVRM: with the image's default Xcode, 16.4,
+# the link warned four times that libkmod.a was built for a newer macOS than the kext, above that link's warning
+# ceiling of 0. The job now takes the newest Xcode of the image that the release accepts; the link of the kexts and
+# the check after it have not run on GitHub yet.
 # A job gates once it has been seen green on GitHub's runners: kexts-linux, host-tests and plugin gate; kexts-mac is
 # marked continue-on-error until both of its runs have been seen green once: then delete that line.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
