@@ -18,13 +18,23 @@ clone Vulkan-Loader "$LOADER_SHA"
 ARCH="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_BUILD_TYPE=Release"
 cmake -S "$W/Vulkan-Headers" -B "$W/hb" -G Ninja $ARCH -DCMAKE_INSTALL_PREFIX="$W/headers" >/dev/null
 cmake --install "$W/hb" >/dev/null
-cmake -S "$W/Vulkan-Loader" -B "$W/lb" -G Ninja $ARCH -DUPDATE_DEPS=OFF -DBUILD_TESTS=OFF \
+# SYSCONFDIR=/etc: left to itself the loader's CMake compiles "<install prefix>/etc" into the library as a folder where
+# it looks for manifests and settings, ahead of /etc. The prefix is this build's temporary folder: the library would
+# carry that folder's name, look there on every Mac it runs on, and differ from one build to the next.
+cmake -S "$W/Vulkan-Loader" -B "$W/lb" -G Ninja $ARCH -DUPDATE_DEPS=OFF -DBUILD_TESTS=OFF -DSYSCONFDIR=/etc \
   -DVULKAN_HEADERS_INSTALL_DIR="$W/headers" -DCMAKE_INSTALL_PREFIX="$W/loader" >/dev/null
 cmake --build "$W/lb" >/dev/null
 cmake --install "$W/lb" >/dev/null
 mkdir -p "$OUT"
 L=$(ls "$W"/loader/lib/libvulkan.1.*.*.dylib 2>/dev/null | head -1)
 [ -n "$L" ] || { echo "STOP: the loader library was not produced"; exit 3; }
+# Before the library is copied out: it does not name this build's temporary folder, under any spelling of the path
+# (the folder's own name is looked for). strings reads the whole file on its standard input: given a Mach-O file by
+# name, macOS's strings reads its sections only. Its output is kept apart from grep's count, which is 0 also when
+# strings itself failed.
+sl=$(strings -a < "$L") || { echo "STOP: strings could not read the loader"; exit 3; }
+left=$(printf '%s\n' "$sl" | grep -cF "${W##*/}" || true)
+[ "$left" = 0 ] || { echo "STOP: the loader names this build's temporary folder ($left place(s))"; printf '%s\n' "$sl" | grep -F "${W##*/}" | sed -n 1,3p; exit 3; }
 cp "$L" "$OUT/libvulkan.1.dylib"
 cp "$W/Vulkan-Loader/LICENSE.txt" "$OUT/Vulkan-Loader-LICENSE.txt"
 lipo -archs "$OUT/libvulkan.1.dylib" | grep -qx x86_64 || { echo "STOP: not x86_64"; exit 3; }
