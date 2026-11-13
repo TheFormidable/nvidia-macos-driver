@@ -152,6 +152,8 @@ int main(void)
     /* addressable */
     arm("range below the limit", nvrm_dma_addressable(0xFFFFF000ull, 0x1000, 32));
     arm("range crossing the limit", !nvrm_dma_addressable(0xFFFFF000ull, 0x2000, 32));
+    arm("a last byte exactly at 2^bits is above the limit", !nvrm_dma_addressable(1ull << 32, 1, 32)
+        && nvrm_dma_addressable((1ull << 32) - 1, 1, 32));
     arm("64 bits always fits unless it wraps", nvrm_dma_addressable(~0ull - 0xFFF, 0x1000, 64) && !nvrm_dma_addressable(~0ull - 0xFFF, 0x2000, 64));
     arm("empty range is not addressable", !nvrm_dma_addressable(0x1000, 0, 40));
     arm("37-bit limit (AppleVTD's 128 GB)", nvrm_dma_addressable((1ull << 37) - 0x1000, 0x1000, 37) && !nvrm_dma_addressable(1ull << 37, 0x1000, 37));
