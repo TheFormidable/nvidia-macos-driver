@@ -1263,7 +1263,7 @@ cmd_deps() {
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
     elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 $BREW install $f"; done
-      say "    $BREW unlink <formula>   (with the same environment; only if $BREW_PREFIX/bin/python3, absent now, then links into a Python formula those installs added)"
+      say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 $BREW unlink <formula>   (only if $BREW_PREFIX/bin/python3, absent now, then links into a Python formula those installs added)"
     elif ask "Install them now?"; then
       # what the user's shell finds before the installs, to tell afterwards what they changed (deps_python3_back,
       # deps_shadowed). The unlink comes after the last install: an install of a later formula links a dependency
