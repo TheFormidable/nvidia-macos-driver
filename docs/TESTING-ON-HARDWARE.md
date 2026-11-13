@@ -129,10 +129,10 @@ restart. Take every test setting out again when its test is done.
        desktop with the driver off too. The boot guard does not count this start. The installer's job of section 1,
        step 1, looks for the refusal every five seconds during the first four minutes of the start; it copies the
        `nvrm-layout` and `nvrmfb-layout` lines into `/Library/NullMoth/lastgood.log`, puts the previous driver back
-       and restarts, so you are on 2.9 again and that file is what to send. Without the job (a first install, or a
-       driver that has shown its display at an earlier start) nothing is put back, and every start ends like this one
-       until `nvlayout=0` or until the driver is taken out. `debug.nvrmfb_layout` does not exist (the framebuffer did
-       not start).
+       and restarts, so you are on 2.9 again and that file is what to send. Without the job (a first install, or once
+       the job has taken itself away at the start after one that lit the display) nothing is put back, and every
+       start ends like this one until `nvlayout=0` or until the driver is taken out. `debug.nvrmfb_layout` does not
+       exist (the framebuffer did not start).
      - The same refusal read only after NVRM had started: `auto-go: NOT STARTING THE GPU: the framebuffer refused
        this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. No desktop comes up
        either, this start is counted, and the installer's job does the same as above.
