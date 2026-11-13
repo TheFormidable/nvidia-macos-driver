@@ -117,8 +117,10 @@ Now:
 - each arm carries a generation; cancel and destroy move it on, so a late callback finds a stale generation and returns
   without calling the RM;
 - cancel and destroy then wait for a callback that is running, as `hrtimer_cancel` does: at most 2 s from a thread,
-  50 ms where the caller may not sleep, and not at all from inside the callback itself. A timer whose wait ran out is
-  never reused;
+  50 ms where the caller may not sleep, and not at all from inside the callback itself. A timer that is destroyed
+  while a callback may still be inside (the wait ran out, or was not made) is never reused: its slot is out of use for
+  the rest of the boot, and counted. With `nvrmnanowait=0` that is the price of every destroy that meets a running
+  callback; the RM's callback only queues a work item, so the two rarely meet;
 - a timer's deadline is computed in 64-bit nanoseconds (the 32-bit microsecond count ran out at 71 minutes);
 - when a GPU stops, every nano timer the RM did not destroy is stopped, counted and kept out of use.
 
@@ -131,6 +133,7 @@ Now:
 | `debug.nvrm_nano_waits` | sysctl | Cancels and destroys that waited for a running callback |
 | `debug.nvrm_nano_wait_timeouts` | sysctl | Such waits that ran out. Should stay 0; `nvrmnanowait=0` removes the wait |
 | `debug.nvrm_nano_leaked` | sysctl | Timers the RM had not destroyed when its GPU stopped |
+| `debug.nvrm_nano_retired` | sysctl | Slots taken out of use for the rest of the boot: the leaked ones, and each timer destroyed while a callback could still be inside. Should stay 0 while the GPU runs; the pool is 4096 less this |
 | `debug.nvrm_nano_bad_handle` | sysctl | Calls with a timer that was not in use (a second destroy, for example); each is a no-op |
 
 ## RM work items
@@ -141,7 +144,7 @@ of one GPU ran in any order and at the same time, and a flush waited for every i
 global queue and, from the second start pass on, one queue per GPU, each with one worker thread (`nvrm-wq0` for the
 global queue, `nvrm-wq1`.. for GPUs): items run one at a time in the order they were queued, and a flush returns once
 everything queued before it has run. The RM's own flushes wait as long as they need to (each 5 s of waiting logs the
-item that is running); the driver's own waits are bounded: 30 s per step when the kext stops, 2 s per step at system
+item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step at system
 shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
 on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
 at a time, less one for each queue that was given up on; or no thread) its items go to the global queue; that is never
@@ -201,6 +204,38 @@ GPU's interrupts), the queue stopped, the interrupt source off and the gate sett
 the RC timer and the nano timers let go. A GPU that stops while it is suspended skips `rm_disable_adapter`: its RM is
 in standby. When the system's 8 s bound for the shutdown runs out, the interrupt source is turned off and the gate
 closed anyway, whatever the shutdown thread is doing.
+
+Before any of that, right after the surface fence is stopped, `stop()` takes the GPU away from the idle power-down
+monitor (`nvrtd3=1`). That monitor is a timer that is never stopped; when the GPU has been idle for a minute it runs
+the GPU's suspend path, and later its resume path, which opens the interrupt gate again. Its calls reach the GPU only
+through a gate of their own: `stop()` closes it and waits until no call is inside (30 s at most; a call that is still
+inside then keeps the GPU object alive and is logged). From then on the monitor has no GPU for the rest of the boot,
+also when another card is started later.
+
+System sleep and shutdown run the same suspend and resume paths themselves, so they hold the GPU against the monitor
+for as long as they last: `setPowerState(0)` until the wake has run, `systemWillShutdown` for good. The hold waits
+first for a monitor call that is already inside (30 s at sleep, 8 s at shutdown); every call that comes meanwhile does
+nothing: a power-off it asks for fails, and the poll then counts the GPU idle from zero. The one exception is the
+power resource's switch-on that the wake itself asks for, through the monitor's call, before the GPU's resume. Without
+the hold a poll could suspend the GPU a second time while the system did, resume it while the system went to sleep
+(it then woke marked running on a slot that had lost power), or switch the power resource off under the system's
+resume.
+
+## The kext stays loaded
+
+Nothing NVRM.kext registers is ever taken back: its sysctls (the kernel links them into its own list, but they are
+the kext's data), the worker thread of the global work queue, the thread calls behind the timers, and the functions
+NVAccel and NVRMFB call through pointers. That is only safe while the kext's code and data stay where they are, and
+the kernel does unload kexts: by itself, about a minute after the last object of a kext's classes is gone (a start
+that declined the card, a card that was unplugged), and when `kmutil unload` asks for it. So from the moment a start
+registers its first sysctl, NVRM.kext holds one reference on itself for the rest of the boot. With it the kernel
+refuses the unload before it terminates a service: `kmutil unload -b com.nullmoth.NVRM` fails with the kext in use and
+the display keeps running. Should the reference ever not be obtained, the kext's stop function refuses instead (logged
+as `no reference on this kext`); the code then stays, but the driver cannot start a card again before a restart.
+
+A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
+and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
+for, and none of them unloads the running kext. Not yet observed on hardware.
 
 ## The wait queue
 
