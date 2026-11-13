@@ -178,3 +178,84 @@ NM_PIN_TOOL_RUSTC_MIN=1.85
 # Homebrew formulas build.sh installs when the tool is missing (only missing ones; never an upgrade). llvm@22 is "llvm"
 # while Homebrew's current LLVM is 22, and so is spirv-llvm-translator; otherwise the translator is built (above).
 NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 python@3.14"
+
+# ---- The working-directory toolchain (build/toolchain.sh)
+# On a Mac where Homebrew has no ready-made builds (every Intel Mac since 2026: homebrew-core carries bottles for Apple
+# silicon only), the tools NVK's build needs are built from these sources into the working directory instead of being
+# installed with Homebrew. Each is a tag's peeled commit as "git ls-remote" gave it on 2026-11-13. The ninja, glslang,
+# SPIRV-Tools, Python and LLVM versions equal homebrew-core's on that day, so an Intel Mac building this way and an
+# Apple-silicon Mac using Homebrew build NVK with the same tools. The mirror variable replaces the URL, as above.
+NM_PIN_TOOLCHAIN_SOURCES="TCNINJA TCCMAKE TCOPENSSL TCZSTD TCXZ TCPYTHON TCPKGCONF TCSPIRVHEADERS TCSPIRVTOOLS TCGLSLANG TCLLVM"
+# ninja 1.13.2: what meson and cmake drive (meson needs 1.8.2); Homebrew's version.
+NM_PIN_TCNINJA_NAME="ninja 1.13.2 (toolchain)"
+NM_PIN_TCNINJA_URL=https://github.com/ninja-build/ninja.git
+NM_PIN_TCNINJA_MIRROR=NM_TC_NINJA_URL
+NM_PIN_TCNINJA_REF=v1.13.2
+NM_PIN_TCNINJA_COMMIT=3441b633c2fe2c494e958780ba0f4227b1327634
+# CMake 4.4.5: the Vulkan loader, SPIRV-Tools, glslang, LLVM and the SPIRV-LLVM-Translator are CMake projects (the
+# loader needs 3.22.1). The newest 4.4 release; Homebrew has 4.5.0, and nothing here needs a 4.5 feature.
+NM_PIN_TCCMAKE_NAME="CMake 4.4.5 (toolchain)"
+NM_PIN_TCCMAKE_URL=https://github.com/Kitware/CMake.git
+NM_PIN_TCCMAKE_MIRROR=NM_TC_CMAKE_URL
+NM_PIN_TCCMAKE_REF=v4.4.5
+NM_PIN_TCCMAKE_COMMIT=aa4fae824a02a175c4a11653d7a851a948f0c004
+# OpenSSL 3.5.9 (the 3.5 long-term-support line, Homebrew's openssl@3), static, only inside Python (ssl, hashlib).
+NM_PIN_TCOPENSSL_NAME="OpenSSL 3.5.9 (toolchain, for Python)"
+NM_PIN_TCOPENSSL_URL=https://github.com/openssl/openssl.git
+NM_PIN_TCOPENSSL_MIRROR=NM_TC_OPENSSL_URL
+NM_PIN_TCOPENSSL_REF=openssl-3.5.9
+NM_PIN_TCOPENSSL_COMMIT=45e844fa2a14ec92d146bd8f5778ac130b6625fb
+# zstd 1.5.7, static, only inside Python: compression.zstd, which tools/test_fw_fetch.py imports. Homebrew's version.
+NM_PIN_TCZSTD_NAME="zstd 1.5.7 (toolchain, for Python)"
+NM_PIN_TCZSTD_URL=https://github.com/facebook/zstd.git
+NM_PIN_TCZSTD_MIRROR=NM_TC_ZSTD_URL
+NM_PIN_TCZSTD_REF=v1.5.7
+NM_PIN_TCZSTD_COMMIT=f8745da6ff1ad1e7bab384bd1f9d742439278e99
+# xz 5.8.4, static liblzma only inside Python: lzma, which tools/test_igfx_trace.py imports (the macOS SDK has no
+# lzma.h). Homebrew's version.
+NM_PIN_TCXZ_NAME="xz 5.8.4 (toolchain, for Python)"
+NM_PIN_TCXZ_URL=https://github.com/tukaani-project/xz.git
+NM_PIN_TCXZ_MIRROR=NM_TC_XZ_URL
+NM_PIN_TCXZ_REF=v5.8.4
+NM_PIN_TCXZ_COMMIT=d3e650e63c110e830fd5391e7f8b45df0b91d3da
+# CPython 3.14.10: Mesa needs 3.10, the host tests 3.14 (NM_PIN_TOOL_PYTHON_TESTS_MIN); Homebrew's python@3.14.
+NM_PIN_TCPYTHON_NAME="CPython 3.14.10 (toolchain)"
+NM_PIN_TCPYTHON_URL=https://github.com/python/cpython.git
+NM_PIN_TCPYTHON_MIRROR=NM_TC_PYTHON_URL
+NM_PIN_TCPYTHON_REF=v3.14.10
+NM_PIN_TCPYTHON_COMMIT=b703b2c5e704341d61e367b9b940b77ed11dded0
+# pkgconf 2.5.1 as pkg-config, for meson. Homebrew has 3.0.10; 2.5.1 is the release whose meson build the toolchain's
+# recipe was written against, and Mesa asks pkg-config nothing a 2.x pkgconf does not answer.
+NM_PIN_TCPKGCONF_NAME="pkgconf 2.5.1 (toolchain)"
+NM_PIN_TCPKGCONF_URL=https://github.com/pkgconf/pkgconf.git
+NM_PIN_TCPKGCONF_MIRROR=NM_TC_PKGCONF_URL
+NM_PIN_TCPKGCONF_REF=pkgconf-2.5.1
+NM_PIN_TCPKGCONF_COMMIT=4fc570f91d9d8d843ab32d2198a5c064538d8ffd
+# SPIRV-Headers vulkan-sdk-1.4.363.0, the commit SPIRV-Tools vulkan-sdk-1.4.363.0 is built with (its DEPS file names
+# 496543121ce6419f23d6fa5d7194ba66c36212d2 as spirv_headers_revision; glslang 16.6.0's known_good.json names the same).
+# Not NM_PIN_SPIRVHEADERS above, which is the commit the SPIRV-LLVM-Translator names: the two are fetched separately.
+NM_PIN_TCSPIRVHEADERS_NAME="Khronos SPIRV-Headers vulkan-sdk-1.4.363.0 (toolchain, for SPIRV-Tools)"
+NM_PIN_TCSPIRVHEADERS_URL=https://github.com/KhronosGroup/SPIRV-Headers.git
+NM_PIN_TCSPIRVHEADERS_MIRROR=NM_TC_SPIRVHEADERS_URL
+NM_PIN_TCSPIRVHEADERS_REF=vulkan-sdk-1.4.363.0
+NM_PIN_TCSPIRVHEADERS_COMMIT=496543121ce6419f23d6fa5d7194ba66c36212d2
+# SPIRV-Tools vulkan-sdk-1.4.363.0: Mesa's mesa_clc needs 2024.1 or newer (NM_PIN_TOOL_SPIRV_TOOLS_MIN); Homebrew's.
+NM_PIN_TCSPIRVTOOLS_NAME="Khronos SPIRV-Tools vulkan-sdk-1.4.363.0 (toolchain)"
+NM_PIN_TCSPIRVTOOLS_URL=https://github.com/KhronosGroup/SPIRV-Tools.git
+NM_PIN_TCSPIRVTOOLS_MIRROR=NM_TC_SPIRVTOOLS_URL
+NM_PIN_TCSPIRVTOOLS_REF=vulkan-sdk-1.4.363.0
+NM_PIN_TCSPIRVTOOLS_COMMIT=ef96ed763b43b59b33b31b362f09a02b729fa1c9
+# glslang 16.6.0 (glslangValidator, 12.2 or newer for NVK's BVH shaders); Homebrew's. Its known_good.json names the
+# SPIRV-Tools commit above.
+NM_PIN_TCGLSLANG_NAME="Khronos glslang 16.6.0 (toolchain)"
+NM_PIN_TCGLSLANG_URL=https://github.com/KhronosGroup/glslang.git
+NM_PIN_TCGLSLANG_MIRROR=NM_TC_GLSLANG_URL
+NM_PIN_TCGLSLANG_REF=16.6.0
+NM_PIN_TCGLSLANG_COMMIT=e1b562a8bed273a02f30b59b66a5d499793cede5
+# LLVM 22.1.8 with clang: NM_PIN_TOOL_LLVM_MAJOR, and the SPIRV-LLVM-Translator v22.1.8 above is built against it;
+# Homebrew's llvm@22.
+NM_PIN_TCLLVM_NAME="LLVM 22.1.8 with clang (toolchain)"
+NM_PIN_TCLLVM_URL=https://github.com/llvm/llvm-project.git
+NM_PIN_TCLLVM_MIRROR=NM_TC_LLVM_URL
+NM_PIN_TCLLVM_REF=llvmorg-22.1.8
+NM_PIN_TCLLVM_COMMIT=ca7933e47d3a3451d81e72ac174dcb5aa28b59d1
