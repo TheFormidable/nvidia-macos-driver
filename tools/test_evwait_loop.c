@@ -38,6 +38,8 @@ struct waiter {
     unsigned max_run;         /* the longest run of missed wakes (t->misses) seen after any round */
     unsigned runs2;           /* second missed wakes in a row, each one when the first one's event was not yet posted */
     unsigned bad_runs;        /* second missed wakes in a row that the in-order GPU cannot explain, or a third */
+    unsigned uncounted;       /* jobs the thread cannot tell from the one before (nvrm_evw_begin sees no new wait): a
+                                 scheduler that delays the waiter past a whole job leaves it a single round */
 };
 static void k_post(uint64_t job) { pthread_mutex_lock(&klk); kseq++; kposted = job; pthread_cond_broadcast(&kcv); pthread_mutex_unlock(&klk); }
 static int k_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
@@ -126,7 +128,14 @@ static int run(int mode, int jobs, int delay_us, int until, struct waiter *w, st
     for (i = 1; i <= jobs; i++) {
         w->want = (uint64_t)i; gpu_go = (uint64_t)i;
         const uint64_t t0 = now_ns();
-        while (done_seq < w->want) { nvrm_evw_round(t, mode, now_ns() - t0, UINT64_MAX, 1, &fell_back, &ops, w); after_round(w, t, &prev, &last_job); }
+        int first = 1;
+        while (done_seq < w->want) {
+            const uint64_t waited = now_ns() - t0;
+            if (first && waited >= t->last_waited_ns) w->uncounted++;
+            first = 0;
+            nvrm_evw_round(t, mode, waited, UINT64_MAX, 1, &fell_back, &ops, w); after_round(w, t, &prev, &last_job);
+        }
+        if (first) w->uncounted++;
         if ((until == 1 && fell_back) || (until == 2 && !fell_back)) break;
     }
     gpu_stop = 1;      /* the GPU thread waits for no job the waiter will not ask for */
@@ -584,10 +593,12 @@ int main(void)
     const int went_quiet = fell_back == NVRM_EVW_FB_QUIET;
     kdrop = 0;
     const int back_after = run(NVRM_EVW_EAGER, 2 * NVRM_EVW_PAUSE_FIRST, 500, 2, &w, &t);
-    printf("     events back: quiet %d, back after %d jobs, trials %u, back %u, woken %u\n", went_quiet, back_after,
-           w.stats[NVRM_EVW_S_TRIAL], w.stats[NVRM_EVW_S_BACK], w.stats[NVRM_EVW_S_WOKEN]);
+    printf("     events back: quiet %d, back after %d jobs (%u not seen as a new wait), trials %u, back %u, woken %u, missed %u,"
+           " lost %u\n", went_quiet, back_after, w.uncounted, w.stats[NVRM_EVW_S_TRIAL], w.stats[NVRM_EVW_S_BACK],
+           w.stats[NVRM_EVW_S_WOKEN], w.stats[NVRM_EVW_S_MISSED], w.lost);
     T("invariant 2: events stop and come back: the busy thread has the process sleeping on events again within its pause "
-      "(256 waits) and its trial", went_quiet && !fell_back && back_after <= (int)(NVRM_EVW_PAUSE_FIRST + NVRM_EVW_TRIAL_MISSES)
+      "(256 waits) and its trial", went_quiet && !fell_back
+      && back_after <= (int)(NVRM_EVW_PAUSE_FIRST + NVRM_EVW_TRIAL_MISSES + w.uncounted)
       && w.stats[NVRM_EVW_S_BACK] == 1 && w.stats[NVRM_EVW_S_TRIAL] == 1 && w.lost == 0);
     run(NVRM_EVW_EAGER, 40, 500, 0, &w, &t);
     T("and then its waits sleep and are woken, with no fallback", !fell_back && w.stats[NVRM_EVW_S_WOKEN] >= 20 && w.lost == 0);
