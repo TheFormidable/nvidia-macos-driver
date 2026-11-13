@@ -58,6 +58,7 @@
 #include "nv_xnu_kcore.h"
 #include "nv_xnu_quiesce.h"
 #include "nv_xnu_slots.h"
+#include "nvrm_devtab.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/thread.h>
@@ -363,6 +364,7 @@ void nv_xnu_nano_retire(nv_state_t *nv)
 // refusal, such as a tick that lands during a power transition), and the driver pauses the timer itself around sleep,
 // RTD3 and shutdown (nv_xnu_rc_suspend / nv_xnu_rc_resume) instead of leaving it to fire at a GPU without power.
 #define NV_XNU_RC_SLOTS 8   // one per GPU
+static_assert(NV_XNU_RC_SLOTS == NVRM_DEVTAB_MAX, "one RC timer slot for every card the device table can hold");
 struct nv_xnu_rc {
     thread_call_t     call;     // made on the first start in this slot and kept: a late tick always finds it
     NvXnuGen          gate;

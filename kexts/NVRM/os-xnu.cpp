@@ -8,6 +8,7 @@
 #include "nv_xnu_kcore.h"
 #include "nvrm_itree.h"
 #include "nv_xnu_slots.h"
+#include "nvrm_devtab.h"
 #include "nvrm_chan_note_abi.h"
 
 extern "C" void nv_xnu_power_state(bool *acPlugged, bool *haveBattery);   // nv_xnu_power.cpp
@@ -236,6 +237,7 @@ NvBool NV_API_CALL os_semaphore_may_sleep(void) { NV_XNU_TRC; if (nvx_can_block(
 // scan needs no lock: the thread inside rm_isr always finds its own slot and no other thread can match it.
 volatile thread_t nv_xnu_isr_threads[NV_XNU_ISR_SLOTS] __attribute__((aligned(64))) = {};
 static void *volatile nv_xnu_isr_owner[NV_XNU_ISR_SLOTS];   // the NVRM object that holds each slot
+static_assert(NV_XNU_ISR_SLOTS == NVRM_DEVTAB_MAX, "one interrupt-thread slot for every card the device table can hold");
 volatile int nv_xnu_in_isr = 0;
 // The slot of a starting GPU (the same one again if it already holds one), or -1 when all are taken.
 int nv_xnu_isr_slot_claim(void *owner)

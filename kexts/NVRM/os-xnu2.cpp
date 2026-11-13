@@ -6,6 +6,7 @@
 
 #include "nv-xnu.h"
 #include "nv_xnu_kcore.h"
+#include "nvrm_devtab.h"
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -532,14 +533,16 @@ extern "C" bool nv_pm_is_gpu_fb(NvU64 start, NvU64 size)
 }
 extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index);   // NVRM.cpp: NULL past the last started card
 // Inside one of the windows of any started card. The primary is looked at first, as it always was, then every card
-// the device table lists: with nvmultigpu=1 there can be up to eight, and the surface fence relies on this to refuse
-// a page in any card's registers or apertures, not only the first card's. No lock: the table is read as the primary
-// is, and a card's window addresses are set during its start, before it has a client. With one card the table holds
-// only the primary, so the answer is the one it always was.
+// the device table lists: with nvmultigpu=1 there can be up to NVRM_DEVTAB_MAX, and the surface fence relies on this
+// to refuse a page in any card's registers or apertures, not only the first card's. No lock: the table is read as the
+// primary is, and a card's window addresses are set during its start, before it has a client. With one card the table
+// holds only the primary, so the answer is the one it always was. The bound is <=, not <: the first pass is the
+// primary and every later pass looks at the entry fetched with g one behind, so table entries 0 to NVRM_DEVTAB_MAX - 1
+// take passes 2 to NVRM_DEVTAB_MAX + 1 (the entry fetched last, at(NVRM_DEVTAB_MAX), is always NULL).
 extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size)
 {
     nv_state_t *nv = nv_xnu_gpu_state(); if (!nv) return false;
-    for (unsigned g = 0; nv && g <= 8; nv = nv_xnu_gpu_state_at(g++))
+    for (unsigned g = 0; nv && g <= NVRM_DEVTAB_MAX; nv = nv_xnu_gpu_state_at(g++))
         for (int i = 0; i < NV_GPU_NUM_BARS; i++) {
             NvU64 b = nv->bars[i].cpu_address, s = nv->bars[i].size;
             if (b && s && start >= b && start + size <= b + s && start + size >= start) return true;
@@ -1454,6 +1457,8 @@ extern "C" {
 // Cached per GPU (PCI address), kept retained for the life of the kext: a PC with two NVIDIA cards must ask each
 // card's own ACPI node, never the first one found.
 static struct { NvU32 domain; NvU8 bus, slot, function; IOACPIPlatformDevice *acpi; } nv_xnu_acpi_nodes[8];
+static_assert(sizeof nv_xnu_acpi_nodes / sizeof nv_xnu_acpi_nodes[0] == NVRM_DEVTAB_MAX,
+              "one cached ACPI node for every card the device table can hold");
 static IOACPIPlatformDevice *nv_xnu_gpu_acpi(nv_state_t *nv)
 {
     if (!nv) return NULL;
