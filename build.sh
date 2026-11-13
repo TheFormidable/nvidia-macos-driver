@@ -238,6 +238,12 @@ load_config() {   # NAME=value lines; read, never run; unknown names stop
   done < "$f"
 }
 
+# changelog_version: the version of CHANGELOG.md's first "## " heading ("## 3.0" -> 3.0); nothing when that heading
+# is not a version (digits and dots)
+changelog_version() {
+  awk '/^## /{ if ($2 ~ /^[0-9]+(\.[0-9]+)*$/) print $2; exit }' "$HERE/CHANGELOG.md" 2>/dev/null || true
+}
+
 set_defaults() {
   : "${NM_WORK:=$HOME/nullmoth-build}"
   NM_WORK=$(expand_tilde "$NM_WORK")
@@ -246,6 +252,11 @@ set_defaults() {
   : "${NM_JOBS:=$(ncpu)}"
   : "${NM_ASSUME_YES:=0}" "${NM_NO_INSTALL:=0}" "${NM_OFFLINE:=0}" "${NM_DRY_RUN:=0}" "${NM_VERBOSE:=0}" "${NM_FORCE:=0}"
   : "${NM_FLAVOUR:=release}" "${NM_ACCEL:=both}"
+  # The version a package records (install.sh writes it to /Library/NullMoth/driver-version, which the app's update
+  # check and Send logs read): unless one is set, the release this checkout is, CHANGELOG.md's top heading. Without it a
+  # package kept its base package's VERSION, and an install of this checkout was recorded as that older release.
+  PKG_VERSION_FROM="NM_PACKAGE_VERSION"
+  if [ -z "${NM_PACKAGE_VERSION:-}" ]; then NM_PACKAGE_VERSION=$(changelog_version); PKG_VERSION_FROM="CHANGELOG.md"; fi
   case "$NM_JOBS" in ''|*[!0-9]*|0) die "the job count must be a positive number (got '$NM_JOBS')" ;; esac
   case "$NM_FLAVOUR" in release|dev) ;; *) die "--flavour must be release or dev (got '$NM_FLAVOUR')" ;; esac
   case "$NM_ACCEL" in 15|26|both) ;; *) die "--accel must be 15, 26 or both (got '$NM_ACCEL')" ;; esac
@@ -1742,6 +1753,8 @@ cmd_package() {
   [ -n "${NM_BASE_PACKAGE:-}" ] || die "package needs a release package as its base: --base-package nullmoth-nvidia-<version>.tar.gz (or NM_BASE_PACKAGE). Why: install.sh needs files that have no source in this repository (nullmoth-runtime-check, nvmtl-allow.txt, the plugin bundle's Info.plist, air-runtime, ...); docs/BUILDING.md explains"
   [ -e "$NM_BASE_PACKAGE" ] || [ "$NM_DRY_RUN" = 1 ] || die "the base package $NM_BASE_PACKAGE does not exist"
   [ "$NM_ACCEL" = both ] || die "a package must carry NVAccel for macOS 15 and 26 (install.sh checks both); build with --accel both"
+  [ -n "$NM_PACKAGE_VERSION" ] || die "the package's version is read from the first heading of CHANGELOG.md (\"## <version>\"), and that heading is not a version: set NM_PACKAGE_VERSION to the version the install should record"
+  say "package version $NM_PACKAGE_VERSION (from $PKG_VERSION_FROM), written to the package's VERSION and, by install.sh, to /Library/NullMoth/driver-version"
   prepare_build
   local c; for c in $(with_deps $ALL_COMPONENTS); do need_tools_for "$c"; need_sources_for "$c"; done
   build_component package

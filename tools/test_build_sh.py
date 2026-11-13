@@ -2518,6 +2518,52 @@ def arm_package(mac):
     with mac.scratch():
         mac.break_script('[ "$NM_ACCEL" = both ] || die', 'true || die')
         negative("a package with one NVAccel flavour", problems(mac))
+    top = re.search(r"(?m)^## ([0-9]+(?:\.[0-9]+)*)\s*$", (mac.co / "CHANGELOG.md").read_text())
+    top = top.group(1) if top else "?"
+    with mac.scratch():
+        p, out = package_version_problems(mac, top, "CHANGELOG.md")
+        check(f"a package records the release this checkout is ({top}, CHANGELOG.md's first heading), not its base's", not p, (p, out[-500:]))
+    with mac.scratch():
+        p, out = package_version_problems(mac, "2.9.7", "NM_PACKAGE_VERSION", extra={"NM_PACKAGE_VERSION": "2.9.7"})
+        check("a version the user sets wins", not p, (p, out[-500:]))
+    with mac.scratch():
+        p, out = unversioned_changelog_problems(mac)
+        check("a CHANGELOG.md whose first heading is not a version stops the package step with a sentence; no base version is taken",
+              not p, (p, out[-500:]))
+    with mac.scratch():
+        mac.break_script('then NM_PACKAGE_VERSION=$(changelog_version); PKG_VERSION_FROM="CHANGELOG.md"; fi', 'then :; fi')
+        negative("build.sh that leaves the package's VERSION to the base package", package_version_problems(mac, top, "CHANGELOG.md")[0])
+    with mac.scratch():
+        mac.break_script('  [ -n "$NM_PACKAGE_VERSION" ] || die "the package\'s version', '  [ -n "$NM_PACKAGE_VERSION" ] || true "the package\'s version')
+        negative("a package step that goes on without a version", unversioned_changelog_problems(mac)[0])
+
+
+def package_version_problems(s, want, source, extra=None):
+    """./build.sh package: the version its package step is given, and where build.sh says it came from."""
+    s.clear()
+    rc, out = s.run("--base-package", str(s.dir / "brew"), "package", extra=extra)
+    st = [e for k, _, e in s.steps() if k == "package"]
+    p = []
+    if rc != 0 or not st:
+        p.append(f"the package step did not run (exit {rc})")
+    elif st[-1].get("NM_PACKAGE_VERSION") != want:
+        p.append(f"package_local.sh got NM_PACKAGE_VERSION={st[-1].get('NM_PACKAGE_VERSION')!r}, not {want}")
+    if f"package version {want} (from {source})" not in out:
+        p.append(f"build.sh does not say that the package version is {want}, from {source}")
+    return p, out
+
+
+def unversioned_changelog_problems(s):
+    c = s.co / "CHANGELOG.md"
+    c.write_text(c.read_text().replace("\n## ", "\n## Unreleased\n\n## ", 1))
+    s.clear()
+    rc, out = s.run("--base-package", str(s.dir / "brew"), "package")
+    p = []
+    if rc == 0 or "package" in s.step_keys():
+        p.append(f"the package step ran (exit {rc}) without a version to record")
+    if "set NM_PACKAGE_VERSION" not in out:
+        p.append("the stop does not say how to go on")
+    return p, out
 
 
 def arm_clean(mac):

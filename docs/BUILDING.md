@@ -195,7 +195,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | Variable | Default | Meaning |
 |---|---|---|
 | `NM_BASE_PACKAGE_SHA256` | none | The base package's SHA-256 from the release page; checked before it is used |
-| `NM_PACKAGE_VERSION` | the base's | Written to the package's `VERSION` (install.sh keeps only digits and dots) |
+| `NM_PACKAGE_VERSION` | the version of CHANGELOG.md's first heading (`3.0`) | Written to the package's `VERSION`. install.sh keeps only digits and dots and records it in `/Library/NullMoth/driver-version`, the installed version the app's update check and Send logs read. Before, the package kept its base package's `VERSION`, so this checkout installed was recorded as that release (2.9). `package` stops when the heading is not a version and this is not set |
 | `NM_OGKM_URL` | the URL in build/pins.sh | A mirror of NVIDIA's open-gpu-kernel-modules (both trees) |
 | `NM_MESA_URL` | the URL in build/pins.sh | A mirror of Mesa; any clone that has the pinned commit works |
 | `NM_KHRONOS_URL` | the URL in build/pins.sh | A URL prefix that holds `Vulkan-Headers` and `Vulkan-Loader`. Set by you, it is also what the loader build clones from; unset, the loader is built from the verified copies in `<workdir>/src/khronos` |
@@ -397,7 +397,8 @@ video libraries, the Vulkan loader 1.4.362 and a few configuration files have no
 `nullmoth-nvidia-<version>.tar.gz` from Releases or its unpacked `pkgroot`), `build/package_local.sh` checks the base
 against its own SHA256SUMS (and against `NM_BASE_PACKAGE_SHA256` when set), replaces every part this checkout builds
 (the kexts, NVK, the translator, the plugin binary, the scripts, the DLSS tools, the licences), refreshes their
-SHA256SUMS lines, adds `NULLMOTH-LOCAL-BUILD.txt` (commit, local changes, pins), runs `package/finish_package.sh`
+SHA256SUMS lines, writes `VERSION` (`NM_PACKAGE_VERSION`: by default the release this checkout is, from CHANGELOG.md),
+adds `NULLMOTH-LOCAL-BUILD.txt` (commit, local changes, pins), runs `package/finish_package.sh`
 like a release, then makes the check install.sh makes first (`shasum -a 256 -c SHA256SUMS`). install.sh checks a
 package's integrity, not who built it, so it accepts this one. The ryzenadj built here has another SHA-256 than the
 one the 1401 app pins, so the app will not install it; the driver is not affected.
