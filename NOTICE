@@ -13,6 +13,10 @@ kexts/       Builds against NVIDIA's open GPU kernel modules 620.70.06, MIT (wit
              (licenses/NVIDIA-open-gpu-kernel-modules-COPYING.txt).
 
 NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth's changes ship as patches.
+             Three files those patches add to Mesa's tree are not MIT: src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h,
+             nvrm_fence_abi.h and nvrm_chan_note_abi.h are copies of NullMoth's own headers for the interface between
+             NVK and the NVRM kernel extension (nvrm_evwait.h also holds the event-wait policy), under PolyForm
+             Noncommercial 1.0.0 (LICENSE) like the kernel side they come from; nothing of Mesa is relicensed.
              NAK's Rust crates (paste, proc-macro2, quote, rustc-hash, syn, unicode-ident; MIT and/or Apache-2.0): licenses/nvk-rust-crates.txt.
 
 Vulkan loader  The Khronos Vulkan-Loader v1.4.367 (commit aa6dee8385afe4b2cc0152d086af2184743e16fd), built unmodified from source

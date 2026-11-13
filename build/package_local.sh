@@ -115,6 +115,10 @@ fi
 put_file "$OUT/plugin/NVMTLDriver" Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver 755
 if [ -d "$R/licenses" ]; then
   for f in "$HERE"/licenses/*; do if [ -f "$f" ]; then put_file "$f" "licenses/$(basename "$f")"; fi; done
+  # This checkout's notice and licence too: install.sh copies licenses/ to /Library/NullMoth/licenses, and the base
+  # package's copies describe the base release (they do not name, for example, the PolyForm files of this NVK chain).
+  put_file "$HERE/NOTICE" licenses/NOTICE; put_file "$HERE/LICENSE" licenses/LICENSE
+  for f in NOTICE LICENSE; do if [ -f "$R/$f" ]; then put_file "$HERE/$f" "$f"; fi; done
 fi
 if [ -n "${NM_PACKAGE_VERSION:-}" ]; then
   printf '%s\n' "$NM_PACKAGE_VERSION" > "$R/VERSION"; bash "$P/sums_refresh.sh" "$R" VERSION; echo "VERSION $NM_PACKAGE_VERSION"
