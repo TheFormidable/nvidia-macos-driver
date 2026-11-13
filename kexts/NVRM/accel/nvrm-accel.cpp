@@ -833,6 +833,26 @@ public:
 #endif
         return IOGraphicsAccelerator2::probe(provider, score);
     }
+#ifndef NMX_ACCEL
+    // NVRM's early decline of this card: a property "nvrm-layout" on the PCI device whose text starts with "declined:",
+    // which NVRM writes before it returns false from its start, never after nvrm-claimed. Its late decline
+    // ("declined late ...") comes after the claim and does not count. NVRM writes nothing of the kind when it starts.
+    // text, when given, receives the property's text.
+    static bool nvrmDeclinedEarly(IOPCIDevice *pci, char *text, size_t cap) {
+        static const char kEarly[] = "declined:";
+        OSObject *o = pci->copyProperty("nvrm-layout");
+        OSString *s = OSDynamicCast(OSString, o);
+        bool early = false;
+        if (s) {
+            const char *t = s->getCStringNoCopy();
+            early = t != nullptr;
+            for (unsigned i = 0; early && i < sizeof kEarly - 1; i++) early = t[i] == kEarly[i];
+            if (early && text && cap) strlcpy(text, t, cap);
+        }
+        OSSafeReleaseNULL(o);
+        return early;
+    }
+#endif
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
         { if (nvrm_driver_off()) return false; }
         // Without nvmultigpu=1 the gate is absent. With it, one accelerator starts at a time and an unmarked card waits for the
@@ -868,10 +888,17 @@ public:
         if (!PE_parse_boot_argn("nvaccel", &gate, sizeof gate) || !gate) { ALOG("boot-arg nvaccel=1 absent: NOT starting (boot-loop guard)"); return false; }
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             unsigned waited = 0;
-            while (pci->getProperty("nvrm-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
+            // An NVRM that declined the card says so on the device at once: no reason to hold the device's matching
+            // for the rest of the 30 s. Where NVRM starts, that property never appears and the wait is as before.
+            while (pci->getProperty("nvrm-claimed") != kOSBooleanTrue && !nvrmDeclinedEarly(pci, nullptr, 0) && waited < 300) { IOSleep(100); waited++; }
             if (pci->getProperty("nvrm-claimed") != kOSBooleanTrue) {
-                ALOG("NVRM never claimed %04x:%04x in 30 s - NOT starting the accelerator on a GPU with no RM",
-                     pci->configRead16(0x00), pci->configRead16(0x02));
+                char declined[200];
+                if (nvrmDeclinedEarly(pci, declined, sizeof declined))
+                    ALOG("NVRM declined this card %04x:%04x (nvrm-layout: %s) - NOT starting the accelerator",
+                         pci->configRead16(0x00), pci->configRead16(0x02), declined);
+                else
+                    ALOG("NVRM never claimed %04x:%04x in 30 s - NOT starting the accelerator on a GPU with no RM",
+                         pci->configRead16(0x00), pci->configRead16(0x02));
                 return false;
             }
             ALOG("NVRM owns %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
