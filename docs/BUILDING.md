@@ -334,9 +334,11 @@ What `build.sh` does around the existing scripts, so that they no longer need th
   try fails at once and the script tries the other folder; a change that looks applied fails instead of being reversed.
 - build_rm620.sh does not stop when compiles fail; `build.sh` reads its `failed: N of M` line and stops the step when
   N is not 0. Each time the `rm` step runs, its work tree is deleted first, so no old object or old patch set survives.
-- build_rm620.sh and build_kms620.sh end with exit 6 when the account name or the computer's short name occurs in the
-  archive as a whole word (a path, `user@host`); inside another word (an account "ana" in "banana") it is not one. They
-  do not print the names, and they give NVIDIA's makefiles neutral values for the build user and host
+- build_rm620.sh and build_kms620.sh end with exit 6 when the archive holds the account name or the computer's short
+  name in a form a build leaks it in: a path in the home folder (`$HOME`, `/Users/<account>`), `<account>@`, `@<computer>`
+  or `<computer>.local`. As an ordinary word it is only reported (a `note:` line in the log): NVIDIA's own text has
+  words such as user, admin and test, which an account may be named, and inside another word (an account "ana" in
+  "banana") it is not one at all. They do not print the names, and they give NVIDIA's makefiles neutral values for the build user and host
   (`NV_BUILD_USER=build NV_BUILD_HOST=localhost`), so that `make-n.txt` names neither. The archive itself never held
   them: its identity string is replaced with fixed text before anything is compiled, and the compile lines carry no
   absolute path and no debug information.
@@ -441,7 +443,7 @@ back as it was before the app's install.
 | `offline, and ... is not in ... yet` | `--offline` before any fetch | Run `./build.sh fetch` with the network once |
 | `offline: NVK needs the network` | See [What is not automated](#what-is-not-automated-and-why) | Build NVK with the network |
 | `<component> needs: ...` (for example `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | A tool that component, or one it needs, uses is missing or does not do what the scripts ask of it; nothing was built | `./build.sh doctor` says which; `./build.sh deps` installs it |
-| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive contains your account name or the computer's short name as a whole word (not inside another word) | The log names the command that shows the lines. If the name is a common word (user, mac, admin), build from another account or change the computer's local hostname (System Settings > General > Sharing) |
+| rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive holds your home folder's path, your account name followed by `@`, or `@` and the computer's short name: a build leaked them | The log names the command that shows the lines. Report it with the report file (the lines name you: read them before you post them) |
 | `STOP: N compile commands for arch/nvalloc/unix/src/osapi.c in .../compile_cmds.sh, one expected` (nvrm, accel) | The RM's compile list is incomplete; the kexts take their -D flags from NVIDIA's own command for osapi.c and stop rather than take another file's | `./build.sh --force build rm` (build.sh rebuilds rm in a fresh folder and then everything built from it); by hand, run build_rm620.sh in a new work folder |
 | `STOP: make -n listed N compile commands, fewer than ...` | build_rm620.sh or build_kms620.sh would have replaced a complete list with a shorter one; it kept the old one | Use a new work folder |
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |
@@ -495,5 +497,5 @@ input) on purpose and shows the check then fails. It runs `build.sh` under `/bin
 3.2.48 and 5.2 on Linux, and once on the owner's Intel Mac, at a commit before the last changes to `build.sh` (the
 Homebrew of the other architecture, the tools taken from `PATH`, `fetch`'s git set-up, the stop without Xcode). `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
 build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
-folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check takes whole words. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
+folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
 the first run on a Mac will show.
