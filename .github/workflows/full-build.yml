@@ -38,8 +38,11 @@
 #     ("<pinned commit> <recipe id>") decides what is built again. Saved after deps whenever a tool was finished, also
 #     when deps failed or was cancelled, so that a failure after LLVM does not cost LLVM again.
 #   the rest of what deps makes (the Python environment, Rust with bindgen and cbindgen, the SPIRV-LLVM-Translator):
-#     only under the exact hash of build.sh, build/pins.sh and build/toolchain.sh, because build.sh takes these as
-#     they are when they exist (a Rust of the pinned version is not asked for its bindgen's version).
+#     only under the exact hash of build.sh, build/pins.sh and build/toolchain.sh followed by the hash of the stamps of
+#     the toolchain it was made with, because build.sh takes these as they are when they exist (a Rust of the pinned
+#     version is not asked for its bindgen's version, a Translator is not built again when the LLVM under it is). It is
+#     looked up with the stamps of the toolchain restored above: when deps then rebuilds a tool of it, the stamps
+#     differ and this cache is not taken; it is saved after deps under the stamps deps left.
 #   the fetched sources (W/src, the git repositories): under the hash of build/pins.sh, or the newest older one; fetch
 #     checks every commit and fetches what is missing.
 #   the 2.9 package: under its SHA-256, which is checked again before every use.
@@ -115,6 +118,9 @@ jobs:
           restore-keys: |
             fb-tc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/toolchain.sh', 'build/pins.sh') }}-
             fb-tc-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Which tools the restored toolchain holds
+        id: tcid0
+        run: echo "id=$(/bin/bash build/ci_full_build.sh toolchain-id "$NMCI_WORK")" >> "$GITHUB_OUTPUT"
       - name: Restore the Python environment, Rust and the Translator
         id: rest
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
@@ -125,7 +131,7 @@ jobs:
             ${{ runner.temp }}/nmw/tools/rustup
             ${{ runner.temp }}/nmw/tools/cargo
             ${{ runner.temp }}/nmw/tools/spirv-llvm-translator
-          key: fb-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sh', 'build/pins.sh', 'build/toolchain.sh') }}
+          key: fb-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sh', 'build/pins.sh', 'build/toolchain.sh') }}-${{ steps.tcid0.outputs.id }}
       - name: Restore the fetched sources
         id: src
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
@@ -175,7 +181,8 @@ jobs:
             ${{ runner.temp }}/nmw/tools/toolchain
           key: ${{ steps.tc.outputs.cache-primary-key }}-${{ steps.tcid.outputs.id }}
       - name: Save the Python environment, Rust and the Translator
-        if: ${{ steps.deps.outcome == 'success' && steps.rest.outputs.cache-hit != 'true' }}
+        # under the stamps of the toolchain deps left: the one they were made with
+        if: ${{ steps.deps.outcome == 'success' && steps.tcid.outputs.id != '' && (steps.rest.outputs.cache-hit != 'true' || steps.tcid0.outputs.id != steps.tcid.outputs.id) }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
         with:
           path: |
@@ -184,7 +191,7 @@ jobs:
             ${{ runner.temp }}/nmw/tools/rustup
             ${{ runner.temp }}/nmw/tools/cargo
             ${{ runner.temp }}/nmw/tools/spirv-llvm-translator
-          key: ${{ steps.rest.outputs.cache-primary-key }}
+          key: fb-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sh', 'build/pins.sh', 'build/toolchain.sh') }}-${{ steps.tcid.outputs.id }}
       - name: Free disk after deps
         if: ${{ always() && steps.deps.outcome != 'skipped' }}
         run: df -h "$RUNNER_TEMP" /

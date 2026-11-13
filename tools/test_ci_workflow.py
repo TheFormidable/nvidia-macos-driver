@@ -285,6 +285,14 @@ def full_problems(fb, ci, root):
         out.append("the tools are not saved by explicit save steps right after deps (before doctor)")
     if not re.search(r"if: \$\{\{ always\(\) && steps\.tcid\.outputs\.id != ''", code):
         out.append("the toolchain is not saved after a failed or cancelled deps")
+    # the Python environment, Rust and the Translator belong to the toolchain they were made with: looked up under the
+    # stamps of the restored toolchain, saved under the stamps deps left
+    rk = re.search(r"- name: Restore the Python environment, Rust and the Translator\n(?:.*\n)*?\s+key: (.*)\n", code)
+    sk = re.search(r"- name: Save the Python environment, Rust and the Translator\n(?:.*\n)*?\s+key: (.*)\n", code)
+    if not (rk and rk.group(1).endswith("-${{ steps.tcid0.outputs.id }}") and sk and sk.group(1).endswith("-${{ steps.tcid.outputs.id }}")
+            and rk.group(1)[:-len("${{ steps.tcid0.outputs.id }}")] == sk.group(1)[:-len("${{ steps.tcid.outputs.id }}")]
+            and code.index("id: tcid0") < code.index("id: rest")):
+        out.append("the Python environment, Rust and the Translator are not cached under the stamps of the toolchain they were made with")
     if not re.search(r"if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh logs ", code):
         out.append("no last step that prints the logs when the build failed or ran out of time")
     if not re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh prove ", code):
@@ -358,6 +366,10 @@ fb_control("the toolchain saved only at the end is caught", "      - name: Save 
            "right after deps")
 fb_control("the toolchain saved only after a good deps is caught", "if: ${{ always() && steps.tcid.outputs.id != ''", "if: ${{ success() && steps.tcid.outputs.id != ''",
            "failed or cancelled deps")
+fb_control("a Python environment, Rust and Translator cached apart from their toolchain are caught", "build/toolchain.sh') }}-${{ steps.tcid0.outputs.id }}\n",
+           "build/toolchain.sh') }}\n", "the toolchain they were made with")
+fb_control("one saved under the restored toolchain's stamps is caught", "build/toolchain.sh') }}-${{ steps.tcid.outputs.id }}\n",
+           "build/toolchain.sh') }}-${{ steps.tcid0.outputs.id }}\n", "the toolchain they were made with")
 fb_control("the logs step dropped is caught", "        if: ${{ failure() || cancelled() }}\n", "", "prints the logs")
 fb_control("logs that are not shown after the job's timeout are caught", "if: ${{ failure() || cancelled() }}", "if: ${{ failure() }}", "ran out of time")
 fb_control("the checks run only after a good build is caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh prove",
