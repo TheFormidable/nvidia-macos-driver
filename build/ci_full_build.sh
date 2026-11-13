@@ -11,9 +11,11 @@
 #       what Homebrew has before the build: the names and link targets in <prefix>/bin and <prefix>/opt and the formula
 #       and version folders of <prefix>/Cellar (prefix: /usr/local, Homebrew's place on an Intel Mac). The file's time
 #       is also the moment from which "prove" looks for files Homebrew keeps that changed.
-#   ci_full_build.sh watch-start <dir> [prefix]   /   ci_full_build.sh watch-stop <dir>
+#   ci_full_build.sh watch-start <dir> [prefix ...]   /   ci_full_build.sh watch-stop <dir>
 #       a watch in the background that lists the running processes twice a second and keeps every one that is
-#       Homebrew's brew (its record and pid file are in <dir>).
+#       Homebrew's brew: a process whose program, or whose script when the program is a shell, is <prefix>/bin/brew
+#       or lies in <prefix>/Homebrew or <prefix>/Library/Homebrew (prefixes: /usr/local and /opt/homebrew, Homebrew's
+#       two places, when none is given). Its record and pid file are in <dir>.
 #   ci_full_build.sh deps-plan <file>
 #       reads the output of "./build.sh --dry-run deps" in <file>: exit 1 when deps would call Homebrew.
 #   ci_full_build.sh toolchain-id <workdir>
@@ -148,23 +150,40 @@ brew_own_folders() {
 
 # The watch. A brew command that runs Homebrew's Ruby lives for well over a second, so a list of the processes taken
 # every half second sees it; a process of the watch itself (ps, awk) is told apart by its parent.
+# Which process is Homebrew's brew: the list shows a command line, and brew is a shell script that goes on as
+# Homebrew's own brew.sh and then as its own Ruby. So the first word decides, or, while the words are programs that
+# run another (a shell, env, ruby and the like), the first word after them that is neither an option nor an
+# assignment: it must START with <prefix>/bin/brew, <prefix>/Homebrew/ or <prefix>/Library/Homebrew/. A path that only
+# holds such a name further in is not Homebrew's: the stand-in brews of this tree's tests live in folders named
+# <a test's folder>/usr/local/bin and <a test's folder>/opt/homebrew/bin, and the full build runs those tests under
+# this watch. Nor is a program that merely names brew's path as an argument, nor another program of that Homebrew
+# (the Python of /opt/homebrew runs the tests themselves on many Macs). Those that are named brew are counted apart.
 # It must outlive the step that starts it and be read by a later step. GitHub's runner stops what a job left running
 # when the job ends (it finds those processes by a variable of the job's environment); whether it also stops a step's
 # background processes when that step ends is not shown here. So the loop is started in a session of its own (perl's
 # setsid: macOS has no setsid command) where perl is there, and prove checks rather than assumes: a watch that is not
 # running at the end, made no list for more than WATCH_GAP seconds at a time, or stopped listing before prove, is
 # "not checked" (which fails the job), never "0 seen".
+# Being outside every process group, it is not ended with whatever started it: it ends when watch-stop or prove
+# removes its pid file, when the folder of that file is gone, and by itself after NMCI_WATCH_MAX seconds (eight hours
+# when unset, more than any job runs), so that one whose starter was killed does not list processes for ever.
 WATCH_GAP=10
 cmd_watch_start() {
-  local dir=${1:-} p=${2:-/usr/local} pid i
+  local dir=${1:-} p pid i
   [ -n "$dir" ] || usage
+  shift
+  [ $# -gt 0 ] || set -- /usr/local /opt/homebrew
+  for p in "$@"; do
+    case "$p" in /*) ;; *) stop "watch-start: a Homebrew prefix is an absolute path, not '$p'" ;; esac
+    case "$p" in *[[:space:]]*) stop "watch-start: a prefix with a blank cannot be told apart in a list of processes: '$p'" ;; esac
+  done
   mkdir -p "$dir" || stop "cannot make $dir"
   : > "$dir/brew-watch.txt"; printf '0 0 0 0\n' > "$dir/brew-watch.count"
   printf 'starting\n' > "$dir/brew-watch.pid"   # the loop runs while this file exists
   if [ -x /usr/bin/perl ]; then
-    nohup /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' /bin/bash "$SELF" watch-loop "$dir" "$p" > /dev/null 2>&1 < /dev/null &
+    nohup /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' /bin/bash "$SELF" watch-loop "$dir" "$@" > /dev/null 2>&1 < /dev/null &
   else
-    nohup /bin/bash "$SELF" watch-loop "$dir" "$p" > /dev/null 2>&1 < /dev/null &
+    nohup /bin/bash "$SELF" watch-loop "$dir" "$@" > /dev/null 2>&1 < /dev/null &
   fi
   pid=$!
   printf '%s\n' "$pid" > "$dir/brew-watch.pid"
@@ -178,13 +197,27 @@ cmd_watch_start() {
   say "watching for brew processes (pid $pid), twice a second, until watch-stop"
 }
 cmd_watch_loop() {
-  local dir=$1 p=$2 n=0 t0 t prev gap=0
+  local dir=$1 n=0 t0 t prev gap=0
+  shift
+  local max=${NMCI_WATCH_MAX:-28800}
+  case "$max" in ''|*[!0-9]*) max=28800 ;; esac
   t0=$(date +%s); prev=$t0
-  while [ -f "$dir/brew-watch.pid" ]; do
-    ps -axo pid=,ppid=,command= 2>/dev/null | awk -v me="$$" -v p="$p" '
+  while [ -f "$dir/brew-watch.pid" ] && [ $((prev - t0)) -lt "$max" ]; do
+    # the prefixes reach awk through its environment: a value given with -v would have its backslashes read as escapes
+    ps -axo pid=,ppid=,command= 2>/dev/null | NMCI_WATCH_PREFIXES="$*" awk -v me="$$" '
+      function is_brew(word,   k) { for (k = 1; k <= np; k++) if (index(word, bp[k]) == 1) return 1; return 0 }
+      BEGIN { m = split(ENVIRON["NMCI_WATCH_PREFIXES"], pre, " ")
+              for (k = 1; k <= m; k++) { bp[++np] = pre[k] "/bin/brew"; bp[++np] = pre[k] "/Homebrew/"; bp[++np] = pre[k] "/Library/Homebrew/" } }
       $1 == me || $2 == me { next }
       { c = $0; sub(/^ *[0-9]+ +[0-9]+ +/, "", c)
-        if (index(c, p "/bin/brew") || index(c, p "/Homebrew/") || index(c, "/opt/homebrew/")) print "homebrew " c
+        nw = split(c, w, " "); hit = 0
+        for (i = 1; i <= nw; i++) {
+          if (i > 1 && (w[i] ~ /^-/ || w[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/)) continue
+          if (is_brew(w[i])) { hit = 1; break }
+          b = w[i]; sub(/^.*\//, "", b)
+          if (b !~ /^(bash|sh|zsh|dash|ksh|env|ruby|nohup|nice|time|timeout|caffeinate)$/) break
+        }
+        if (hit) print "homebrew " c
         else if (c ~ /(^|\/)brew( |$)/) print "other " c }' >> "$dir/brew-watch.txt"
     n=$((n + 1)); t=$(date +%s)
     if [ $((t - prev)) -gt "$gap" ]; then gap=$((t - prev)); fi

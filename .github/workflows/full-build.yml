@@ -106,7 +106,7 @@ jobs:
       - name: Homebrew as it is before the build, and a watch for brew processes
         run: |
           /bin/bash build/ci_full_build.sh brew-state "$NMCI/brew-before.txt" /usr/local
-          /bin/bash build/ci_full_build.sh watch-start "$NMCI" /usr/local
+          /bin/bash build/ci_full_build.sh watch-start "$NMCI" /usr/local /opt/homebrew
       - name: The pinned 2.9 package (build/pins.sh)
         id: pins
         run: echo "basepkg_sha256=$(sed -n 's/^NM_PIN_CI_BASEPKG_SHA256=\([0-9a-f]\{64\}\)$/\1/p' build/pins.sh)" >> "$GITHUB_OUTPUT"

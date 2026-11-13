@@ -149,7 +149,8 @@ class Scene:
         self.w = tmp / "work"              # the working directory
         self.ci = tmp / "ci"               # the job's own files
         self.env = mk.env()
-        self.env.update(HOME=str(self.home), TMPDIR=str(tmp), LC_ALL="C")
+        # NMCI_WATCH_MAX: a watch this test starts ends by itself within ten minutes, also when the test was killed
+        self.env.update(HOME=str(self.home), TMPDIR=str(tmp), LC_ALL="C", NMCI_WATCH_MAX="600")
         self.env.pop("GITHUB_ACTIONS", None)
         self.homebrew()
         self.workdir()
@@ -333,6 +334,131 @@ def main():
         # their own at the same time
         m = re.search(r"; (\d+) other process\(es\) named brew", o)
         arm("a brew of the tests' sandboxes is counted apart, not as Homebrew's", rc == 0 and m is not None and int(m.group(1)) >= 1, o)
+
+        # Which process the watch takes for Homebrew's brew. The full build runs this tree's tests under its watch, and
+        # the build script's test keeps its stand-in brews in <its folder>/usr/local/bin and <its folder>/opt/homebrew/bin;
+        # on many Macs the Python that runs the tests is Homebrew's own. These arms use prefixes of their own (p2, p3):
+        # prove counts files that appear under the scene's prefix as Homebrew's.
+        p2, p3, sbx = tmp / "brew2", tmp / "brew3", tmp / "sandbox2"
+
+        def lists():
+            try:
+                return int((sc.ci / "brew-watch.count").read_text().split()[0])
+            except (OSError, ValueError, IndexError):
+                return 0
+
+        def named(argv0):
+            """a process that the list of processes shows under the name argv0 (bash's exec -a), for five minutes at most"""
+            q = subprocess.Popen([BASH, "-c", 'exec -a "$1" sleep 300', "x", str(argv0)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            end = time.time() + 30
+            while time.time() < end:
+                shown = subprocess.run(["ps", "-o", "command=", "-p", str(q.pid)], capture_output=True, text=True).stdout.strip()
+                if shown.startswith(str(argv0)):
+                    break
+                time.sleep(0.1)
+            return q
+
+        def script_run(path, *args, opts=()):
+            """a shell that runs the script at `path` (made here: it waits, two minutes at most) with these arguments"""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\ni=0\nwhile [ $i -lt 600 ]; do sleep 0.2; i=$((i + 1)); done\n")
+            return subprocess.Popen([BASH, *opts, str(path), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def watched(start, prefixes=(p2,), script=None):
+            """-> watch-stop's exit status and output after a new watch has listed the processes `start` makes three times"""
+            run([script or sc.script, "watch-start", sc.ci, *prefixes], sc.env)
+            procs = []
+            try:
+                procs = start()
+                n0, end = lists(), time.time() + 60
+                while lists() < n0 + 3 and time.time() < end:
+                    time.sleep(0.2)
+                return run([sc.script, "watch-stop", sc.ci], sc.env)
+            finally:
+                for q in procs:
+                    q.kill()
+                    q.wait()
+
+        def variant(name, *changes):
+            """a copy of the script beside it (it finds the checkout from its own place) with these (old, new) changes"""
+            v = sc.co / f"build/ci_full_build_{name}.sh"
+            text = sc.script.read_text()
+            for old_text, new_text in (('SELF="$HERE/build/ci_full_build.sh"', f'SELF="$HERE/build/ci_full_build_{name}.sh"'),) + changes:
+                assert old_text in text, old_text
+                text = text.replace(old_text, new_text)
+            v.write_text(text)
+            with open(sc.co / ".git/info/exclude", "a") as ex:
+                ex.write(f"/build/ci_full_build_{name}.sh\n")
+            return v
+
+        ruby, brewsh = p2 / "Homebrew/Library/Homebrew/vendor/portable-ruby/current/bin/ruby", p2 / "Homebrew/Library/Homebrew/brew.sh"
+
+        def brew_itself():
+            return [script_run(p2 / "bin/brew", "info", "--json=v2", "llvm", opts=("-p",)), script_run(brewsh, "info", opts=("-p",)), named(ruby)]
+        rc, o = watched(brew_itself)
+        seen = lines(o, "homebrew ")
+        arm("Homebrew's brew is seen as its command, as its brew.sh under a shell with an option, and as its own Ruby",
+            rc == 1 and all(any(str(x) in l for l in seen) for x in (p2 / "bin/brew", brewsh, ruby)), o)
+        only_first = variant("first", ("          if (b !~ /^(bash|sh|zsh|dash|ksh|env|ruby|nohup|nice|time|timeout|caffeinate)$/) break\n", "          break\n"))
+        rc, o = watched(brew_itself, script=only_first)
+        seen = lines(o, "homebrew ")
+        arm("control: a watch that looks at a process's own name only misses brew under its shell",
+            any(str(ruby) in l for l in seen) and not any(str(x) in l for l in seen for x in (p2 / "bin/brew", brewsh)), o)
+
+        python = p2 / "Cellar/python@3.13/3.13.5/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python"
+        sandbox_brew = pathlib.Path(str(sbx) + str(p2)) / "bin/brew"   # <a test's folder><the prefix>/bin/brew
+
+        def not_brew():
+            return [script_run(sandbox_brew, "install", "x"),
+                    script_run(sbx / "probe", str(p2 / "bin/brew")),   # it names brew's path, as ls -l or test -x would
+                    named(python), named(p2 / "bin/cmake")]
+        rc, o = watched(not_brew)
+        m = re.search(r"other processes named brew: (\d+)", o)
+        arm("a stand-in brew in a folder whose path holds the prefix further in, a program that names brew's path, and Homebrew's Python "
+            "and cmake are not Homebrew's brew", rc == 0 and "brew processes seen: 0 " in o and m is not None and int(m.group(1)) >= 2, o)
+        anywhere = variant("anywhere", ("if (index(word, bp[k]) == 1) return 1", "if (index(c, bp[k])) return 1"))
+        rc, o = watched(not_brew, script=anywhere)
+        seen = lines(o, "homebrew ")
+        arm("control: a watch that looks for the path anywhere in a command line takes the stand-in and the program that names it for brew",
+            rc == 1 and any(str(sandbox_brew) in l for l in seen) and any(str(sbx / "probe") in l for l in seen), o)
+        whole = variant("whole", ('bp[++np] = pre[k] "/bin/brew"; ', 'bp[++np] = pre[k] "/"; '))
+        rc, o = watched(not_brew, script=whole)
+        seen = lines(o, "homebrew ")
+        arm("control: a watch that takes every program under the prefix for brew counts Homebrew's Python and cmake",
+            rc == 1 and any(str(python) in l for l in seen) and any(str(p2 / "bin/cmake") in l for l in seen), o)
+        for v in (only_first, anywhere, whole):
+            v.unlink()
+
+        ruby3 = p3 / "Library/Homebrew/vendor/portable-ruby/current/bin/ruby"   # a Homebrew that is its own repository, as /opt/homebrew
+        rc, o = watched(lambda: [named(ruby3)], prefixes=(p2, p3))
+        arm("a second prefix is watched as well", rc == 1 and any(str(ruby3) in l for l in lines(o, "homebrew ")), o)
+        rc, o = watched(lambda: [named(ruby3)])
+        arm("control: a prefix that was not given is not watched", rc == 0 and "brew processes seen: 0 " in o, o)
+        run([sc.script, "watch-start", sc.ci], sc.env)
+        wpid = (sc.ci / "brew-watch.pid").read_text().split()[0]
+        shown = subprocess.run(["ps", "-o", "command=", "-p", wpid], capture_output=True, text=True).stdout.strip()
+        run([sc.script, "watch-stop", sc.ci], sc.env)
+        arm("with no prefix given the watch looks in Homebrew's two places", shown.endswith(f"watch-loop {sc.ci} /usr/local /opt/homebrew"), shown)
+        for bad, why in (("usr/local", "an absolute path"), (str(tmp / "a b"), "a blank")):
+            rc, o = run([sc.script, "watch-start", sc.ci, bad], sc.env)
+            arm(f"watch-start refuses the prefix '{bad}'", rc == 2 and why in o and not (sc.ci / "brew-watch.pid").exists(), o)
+
+        # a watch whose starter was killed must not list processes for ever
+        run([sc.script, "watch-start", sc.ci, p2], dict(sc.env, NMCI_WATCH_MAX="2"))
+        wpid = (sc.ci / "brew-watch.pid").read_text().split()[0]
+        end = time.time() + 30
+        while time.time() < end and subprocess.run(["kill", "-0", wpid], capture_output=True).returncode == 0:
+            time.sleep(0.5)
+        gone = subprocess.run(["kill", "-0", wpid], capture_output=True).returncode != 0
+        rc, o = run([sc.script, "watch-stop", sc.ci], sc.env)
+        arm("a watch ends by itself after NMCI_WATCH_MAX seconds, and is then not taken for none seen",
+            gone and rc == 1 and "the watch was not running at the end" in o, o)
+        run([sc.script, "watch-start", sc.ci, p2], sc.env)
+        wpid = (sc.ci / "brew-watch.pid").read_text().split()[0]
+        time.sleep(5)
+        still = subprocess.run(["kill", "-0", wpid], capture_output=True).returncode == 0
+        rc, o = run([sc.script, "watch-stop", sc.ci], sc.env)
+        arm("control: with a larger limit it is still running after five seconds", still and rc == 0, o)
         rc, o = sc.prove(watch=False)
         arm("control: a watch that is not running is not taken for none seen", rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
 
