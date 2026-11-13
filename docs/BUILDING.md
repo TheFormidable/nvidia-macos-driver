@@ -31,6 +31,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 - A Mac with macOS 15.6 or later, Intel or Apple silicon. Xcode 26 does not run on older systems, so `deps`, `build`,
   `package` and `all` refuse them at the start. Apple silicon is supported as a build host (the release scripts
   default to an Apple-silicon Rust toolchain); every part is built for x86_64, the architecture the driver runs on.
+  An Intel Mac compiles NVIDIA's RM and NVKMS with exactly the commands an Apple-silicon Mac uses (see
+  [byte-identical results](#what-is-not-automated-and-why)).
 - **Xcode 26 or later**, the full Xcode, selected with `xcode-select`. The command line tools alone are not enough:
   the plugin imports Metal 4 headers (`Metal/MTL4CommandQueue.h`) that only the macOS 26 SDK has. No Kernel Debug Kit
   is needed: no build step reads one. On a Mac with neither Xcode nor the command line tools, every command but
@@ -436,7 +438,7 @@ after you installed a tester build has met that case.
 | The GSP firmware | install.sh downloads NVIDIA's firmware at install time, not at build time |
 | `nmkbl`, `nmhda` | They need Lilu, VirtualSMC and MacKernelSDK at the revisions the EFI uses, which no script records; give them with the three variables |
 | Signing with a real identity | Releases are signed by their maintainer. In a tester package the NVK, translator and other libraries are signed ad hoc, and a kext is signed ad hoc where the base package's copy was signed |
-| Byte-identical results | The release's Xcode version is recorded nowhere, and an Intel Mac may record other compiler flags in the RM archive than the release's Apple-silicon build Mac (`doctor` says so) |
+| Byte-identical results | The release's Xcode version is recorded nowhere. The compile commands of NVIDIA's RM and NVKMS are the same on an Intel and on an Apple-silicon Mac: NVIDIA's makefiles ask the build Mac's compiler which x86-only hardening options it takes, and `build/nv_compile_lines.py` leaves out whatever that adds, so an Intel Mac compiles with the release's commands (its build log names what was left out) |
 
 ## Troubleshooting
 
@@ -459,6 +461,7 @@ after you installed a tester build has met that case.
 | rm or kms ends with exit 6 | build_rm620.sh and build_kms620.sh stop when NVIDIA's archive holds your home folder's path, your account name followed by `@`, or `@` and the computer's short name: a build leaked them | The log names the command that shows the lines. Report it with the report file (the lines name you: read them before you post them) |
 | `STOP: N compile commands for arch/nvalloc/unix/src/osapi.c in .../compile_cmds.sh, one expected` (nvrm, accel) | The RM's compile list is incomplete; the kexts take their -D flags from NVIDIA's own command for osapi.c and stop rather than take another file's | `./build.sh --force build rm` (build.sh rebuilds rm in a fresh folder and then everything built from it); by hand, run build_rm620.sh in a new work folder |
 | `STOP: make -n listed N compile commands, fewer than ...` | build_rm620.sh or build_kms620.sh would have replaced a complete list with a shorter one; it kept the old one | Use a new work folder |
+| `STOP: NVRM.kext imports ___x86_return_thunk, which no macOS defines` (or another kext, or another `___x86_`, `___fentry__` or `mcount` name; the step ends with exit 7) | The kext was compiled with an option made for the Linux kernel, whose helper no macOS has: it would link and never load. It stops before anything is packaged | With `KMS_ARCHIVE` set, it names an NVKMS archive built with other commands: unset it. Otherwise build again in a new work folder (`--workdir`); if it stays, report it with the report file |
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |
 | a step stops at a warning ceiling (`warn_ceiling`) | The ceilings in build/warnings.txt are 0: a compiler or linker other than the release's may print a new warning | Report it with the report file and your Xcode version |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | A Homebrew library (often libelf in /usr/local on Intel) was linked | Report it with the report file |
