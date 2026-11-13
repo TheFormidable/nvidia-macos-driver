@@ -124,8 +124,9 @@ and a user is logged in when it has put the driver back, it leaves the restart t
 brings the previous driver back. A display on this card does not hold the restart back, since only Apple's firmware
 framebuffer can draw it then: after an automatic login onto Apple's slow desktop the Mac restarts as well, and the
 log's last line says `The only lit display is on the card whose driver was refused ... restarting`. A slow desktop
-without acceleration that stays after an install means that nothing was put back: the log says that the previous
-driver is not put back (another macOS build), or there is no such job. That job takes itself away at the first start
+without acceleration that stays after an install while the log does not end with the `not restarted now` line means
+that nothing was put back: the log says why (another macOS build, or the backup is gone), or there is no such job. That
+job takes itself away at the first start
 after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS update
 that changed a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow
 one, until you boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
