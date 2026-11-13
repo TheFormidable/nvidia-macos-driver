@@ -27,13 +27,18 @@ RV=${NULLMOTH_RUST_VERSION:-1.98.1}
 RB=${NULLMOTH_RUST_BIN:-\$HOME/nvmtl-build/rustup-home/toolchains/$RV-aarch64-apple-darwin/bin}
 # NULLMOTH_CARGO_HOME names the cargo home (crate cache) on the build Mac; the default is the build Mac's own.
 CH=${NULLMOTH_CARGO_HOME:-\$HOME/nvmtl-build/cargo-home}
+# CARGO_PROFILE_RELEASE_STRIP=none: a release build makes rustc strip every crate it links (-C strip=debuginfo, cargo's
+# default) with Rust's own rust-objcopy, which finds Rust's libLLVM only when rustup's proxies start it. Started from the
+# toolchain's own folder, as here, it aborts each time: the build still ends, with a warning that the ceiling below
+# stops on, and macOS writes a crash report for each abort. The strip -S below removes the same debug map from the
+# dylib, so cargo is told to leave its own strip out and rust-objcopy is never started.
 ssh "$H" "set -e
   TB=$RB
   [ -x \$TB/cargo ] && [ -x \$TB/rustc ] || { echo \"STOP: no cargo and rustc in \$TB (set NULLMOTH_RUST_BIN)\"; exit 3; }
   got=\$(\$TB/rustc --version | awk '{print \$2}')
   [ \"\$got\" = $RV ] || { echo \"STOP: rustc \$got in \$TB, not $RV (set NULLMOTH_RUST_VERSION to build with it knowingly)\"; exit 3; }
   [ -d \"\$(\$TB/rustc --print target-libdir --target x86_64-apple-darwin)\" ] || { echo \"STOP: the toolchain in \$TB has no x86_64-apple-darwin target\"; exit 3; }
-  export PATH=\$TB:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=$CH
+  export PATH=\$TB:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=$CH CARGO_PROFILE_RELEASE_STRIP=none
   export RUSTFLAGS=\"--remap-path-prefix=$R/src=/src --remap-path-prefix=\$CARGO_HOME=/cargo --remap-path-prefix=\$HOME=/build\"
   cd $R/src && cargo build --release --target x86_64-apple-darwin --manifest-path wrapper/Cargo.toml --target-dir $R/target > $R/out/cargo.log 2>&1 \
     || { grep -A6 '^error' $R/out/cargo.log | head -30; exit 4; }
@@ -46,6 +51,8 @@ mkdir -p "$OUT"
 scp -q "$H:$R/out/libnvmtl_translate.dylib" "$H:$R/out/cargo.log" "$OUT/"
 D="$OUT/libnvmtl_translate.dylib"
 bash "$HERE/build/warn_ceiling.sh" translator "$(grep -c '^warning' "$OUT/cargo.log" || true)" "$OUT/cargo.log" || exit 4
-left=$(strings -a "$D" | grep -cE '/Users/|/Volumes/' || true)
-[ "$left" = 0 ] || { echo "STOP: $left build machine path(s) left in the dylib"; strings -a "$D" | grep -E '/Users/|/Volumes/' | sort -u | head -5; exit 5; }
+# strings reads the dylib on its standard input: given a Mach-O file by name, macOS's strings reads its sections only,
+# and the names a debug map would leave are in the symbol table's strings, outside every section.
+left=$(strings -a < "$D" | grep -cE '/Users/|/Volumes/' || true)
+[ "$left" = 0 ] || { echo "STOP: $left build machine path(s) left in the dylib"; strings -a < "$D" | grep -E '/Users/|/Volumes/' | sort -u | head -5; exit 5; }
 echo "libnvmtl_translate $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$D" | cut -c1-8) arch $(lipo -archs "$D") rustc $RV"
