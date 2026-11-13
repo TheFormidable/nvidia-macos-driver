@@ -165,8 +165,9 @@ NM_PIN_PY_PACKAGING_HASHES="29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24
 # Xcode 26: plugin/NVMTLMetal4.m:17 imports <Metal/MTL4CommandQueue.h> without a guard, which only the macOS 26 SDK
 # has. Every component has been built with Xcode 26.5 (SDK 26.5) on one Intel Mac (12 threads, macOS 26.7) and with
 # Xcode 26.3 (SDK 26.2, the newest Xcode that runs on macOS 15) on GitHub's Intel runner (macos-15-intel: 4 processors,
-# macOS 15); Xcode 26.0 to 26.2 have not been tried. Every product is built for macOS 15.0 except the translator,
-# which keeps rustc's default, 10.12.
+# macOS 15); Xcode 26.0 to 26.2 have not been tried. The files the build makes are built for macOS 15.0, except the
+# translator (rustc's default, 10.12) and the two DLSS cache programs (12.0, build/build_dlss_cache.sh); a kext binary
+# names no minimum. GitHub's run of 3933ff6 counted them: minos 10.12 x1, 12.0 x2, 15.0 x7, none x6 (the kexts).
 NM_PIN_TOOL_XCODE_MIN=26.0
 NM_PIN_TOOL_SDK_MIN=26.0
 # Xcode 26.0.1 to 26.3 run on macOS 15.6 or later; Xcode 26.4.1 and later need macOS 26.2 or later (Apple's table of
