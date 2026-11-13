@@ -6,9 +6,10 @@
 #   build/toolchain.sh build <name>...      build, install and check each, in the order given; stop at the first failure
 #   build/toolchain.sh check <name>...      only the checks of what is installed
 #
-# Homebrew has no ready-made builds for Intel Macs any more: there "brew install" compiles LLVM with every target, two
-# Pythons and OpenSSL for hours into /usr/local. This script builds only what NVK's build uses, for this Mac's own
-# processor, with Apple's clang, from source trees that build.sh has fetched and verified by commit.
+# When homebrew-core was read on 2026-11-13 it had no ready-made builds for Intel Macs of the formulas build.sh would
+# install: there "brew install" compiles LLVM with every target, two Pythons and OpenSSL into /usr/local. This script
+# builds only what NVK's build uses, for this Mac's own processor, with Apple's clang, from source trees that build.sh
+# has fetched and verified by commit.
 #
 # Input is the environment only (build.sh sets it):
 #   NM_TC_PREFIX  where the tools are installed. Fixed layout: bin/ (ninja, cmake, pkgconf and its pkg-config link,
