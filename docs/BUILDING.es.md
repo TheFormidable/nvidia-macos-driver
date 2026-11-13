@@ -12,7 +12,7 @@ comandos y opciones y la solución de problemas.
 > Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Ninguno de los cambios hechos en `build.sh`
 > después de esa ejecución se ha ejecutado aún en un Mac: la comprobación de herramientas por componente, la elección
 > de Homebrew y de las herramientas que toma del `PATH`, la organización del directorio de trabajo, la lista de
-> compilación del RM, la configuración de git de `fetch`, la parada sin Xcode, el `patch` que reciben los scripts (con
+> compilación del RM, la configuración de git de `fetch`, la parada sin Xcode (también con una carpeta de desarrollo que ya no está), el `patch` que reciben los scripts (con
 > `-f`) y el `PATH` que recibe brew solo se probaron contra los sustitutos.
 > Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
 > sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
@@ -37,6 +37,8 @@ comandos y opciones y la solución de problemas.
   Debug Kit. En un Mac sin Xcode ni herramientas de línea de comandos, todos los comandos salvo `help` se detienen al
   empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
   de macOS son entonces sustitutos que ofrecen instalar las herramientas de línea de comandos, y no se ejecuta ninguno.
+  Lo mismo ocurre si la carpeta de desarrollo que indican `DEVELOPER_DIR` o `xcode-select -p` no existe o no tiene
+  `usr/bin/xcrun` (un Xcode borrado o renombrado después de seleccionarlo): todas las herramientas de Apple fallarían.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
@@ -253,6 +255,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: the working directory contains a space` (o la ruta del clon, o la carpeta personal) | Los scripts de publicación y build_nvk.sh separan por espacios | Usa `--workdir` con una ruta sin espacios; mueve el clon |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 necesita macOS 15.6 o posterior | Actualiza macOS o compila en otro Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` apunta a las herramientas de línea de comandos | Instala Xcode 26 y ejecuta `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
+| `STOP: the developer folder xcode-select -p names, ..., does not exist` (o `has no usr/bin/xcrun`, o `DEVELOPER_DIR names`) | El Xcode seleccionado se borró o se renombró, `DEVELOPER_DIR` indica una carpeta equivocada, o una actualización de macOS dejó incompletas las herramientas de línea de comandos | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` con el Xcode que tengas, o corrige o quita `DEVELOPER_DIR` |
 | doctor: `MISSING Metal/MTL4CommandQueue.h` | El Xcode seleccionado tiene un SDK anterior | Selecciona Xcode 26 o define `DEVELOPER_DIR` |
 | `Homebrew has no LLVM 22 formula today` | Homebrew retiró `llvm@22` | Instala LLVM 22.x con sus bibliotecas de clang, define `NM_LLVM_PREFIX` y ejecuta otra vez `./build.sh deps` (compila SPIRV-LLVM-Translator para él) |
 | `SPIRV-LLVM-Translator ... does not match LLVM` | Su versión debe coincidir con la de LLVM | `./build.sh deps` compila uno que coincide |
