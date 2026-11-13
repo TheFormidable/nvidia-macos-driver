@@ -30,13 +30,14 @@
 # Xcode, green in every run that was not cancelled; GitHub cancelled it at 8364212, at ef2a216 and at 3933ff6 (run
 # 43497487987: before it started, for lack of a runner). kexts-mac green on both runners in 43410589619, 43419906041
 # and at 95811c2, with Xcode 26.3: NVIDIA's RM core (1121 commands) and NVKMS (225) compiled, every kext linked with 0
-# warnings, NVRM importing no ___x86_ helper, and the two runners' kexts equal byte for byte. At 3933ff6 it was green on the Intel runner and cancelled
-# for lack of a runner on Apple silicon, so the two were not compared there (no kext source changed between 95811c2
-# and 3933ff6). Before 43410589619 it had stopped at its import check on ____chkstk_darwin, a name the kext link
-# itself provides (tools/kext_imports.py says why), and then at the link of NVRM, where the image's default Xcode,
-# 16.4, brought a libkmod.a built for a newer macOS than the kext. The two runners' compile lines hold the same words
-# in the same order and differed in spaces only: the make of macOS (GNU make 3.81) leaves a space where the compiler
-# refused an option NVIDIA's makefile asked it about, so the checksum is taken with runs of spaces squeezed.
+# warnings, NVRM importing no ___x86_ helper, and the two runners' kexts equal byte for byte. At 3933ff6 it was green
+# on the Intel runner and cancelled for lack of a runner on Apple silicon, so the two were not compared there (no kext
+# source changed between 95811c2 and 3933ff6). Before 43410589619 it had stopped at its import check on
+# ____chkstk_darwin, a name the kext link itself provides (tools/kext_imports.py says why), and then at the link of
+# NVRM, where the image's default Xcode, 16.4, brought a libkmod.a built for a newer macOS than the kext. The two
+# runners' compile lines hold the same words in the same order and differed in spaces only: the make of macOS (GNU
+# make 3.81) leaves a space where the compiler refused an option NVIDIA's makefile asked it about, so the checksum is
+# taken with runs of spaces squeezed.
 # host-tests on the Intel runner: green at 95811c2 (302 of 314 passed, 0 failed, 3 skipped, 9 not run) and at 3933ff6
 # (303 of 315 passed, 0 failed, 3 skipped, 9 not run). The three skipped at 3933ff6: tools/test_h264_kat_selftest.py
 # and tools/test_nvenc_parsers.py (NVIDIA's headers are not where the runner looks: it is not told the working
