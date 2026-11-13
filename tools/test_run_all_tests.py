@@ -7,7 +7,9 @@ behind, as several tests of this tree do, and imports a module of the tree. Nega
 its own TMPDIR leaves the folder; without PYTHONDONTWRITEBYTECODE the module's bytecode is written where this Python
 puts it (importlib's cache_from_source): under a pycache prefix (Apple's python3 always has one, in
 ~/Library/Caches/com.apple.python; the arms set one inside the scratch tree, so nothing reaches the tester's caches),
-and, on a Python without a prefix of its own, beside the module as well.
+and, on a Python without a prefix of its own, beside the module as well. A Python that keeps its own prefix even when
+PYTHONPYCACHEPREFIX names another would write that bytecode into the tester's caches: there the test imports nothing,
+and the arms hold the switch that every write of bytecode obeys, sys.dont_write_bytecode, as the test sees it.
 
 The tester's environment with the driver's settings (NVMTL_X, NVENCVT_LOG, VK_ICD_FILENAMES, ...) and the inputs a test
 may take from the tester (CC, NVENCVT_HEADERS, NM_OGKM620, ZSTD, ...): the first do not reach a test, the second do.
@@ -19,14 +21,15 @@ end of the run. Negative control: the runner without that list.
 Then tests that leave a program running in the background, that pass their time limit, and that try to reach the
 terminal: the runner starts each test as a session of its own, without a terminal and with nothing on its input, and
 stops what it started. Negative control: the same runner with the test in the runner's own session."""
-import json
+import sys
+sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
+import json  # noqa: E402
 import os
 import pathlib
 import re
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -41,9 +44,17 @@ def arm(name, ok, detail=""):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else f" ({str(detail)[-400:]})"))
 
 
-LEAK = """import pathlib, sys, tempfile
+LEAK = """import os, sys
+flag = sys.dont_write_bytecode
+sys.dont_write_bytecode = True   # the standard library's bytecode would land outside the tree, even in a control
+import pathlib, tempfile
+here = pathlib.Path(__file__).resolve().parents[1]
+here.joinpath("flag.txt").write_text(str(flag))
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import helper_mod  # noqa: F401  (Python would write its bytecode for it: beside it, or under a pycache prefix)
+if not here.joinpath("no-import").exists():
+    sys.dont_write_bytecode = flag
+    import helper_mod  # noqa: F401  (Python would write its bytecode for it: beside it, or under a pycache prefix)
+    sys.dont_write_bytecode = True
 d = tempfile.mkdtemp(prefix="leak-")
 pathlib.Path(d, "x").write_text("left behind")
 pathlib.Path(__file__).resolve().parents[1].joinpath("leak.txt").write_text(d)
@@ -62,9 +73,9 @@ BUILTIN_PREFIX = py(CLEAN, "import sys; print(sys.pycache_prefix or '')")
 
 def leak_run(runner_text, prefix):
     """-> (runner exit status, the folder the test made, whether it still exists, where Python writes the bytecode of the
-    module the test imports (the tree is not run when that is outside it), whether it is there, whether any bytecode was written
-    in the tree or there, output). prefix: run with PYTHONPYCACHEPREFIX set to a
-    folder of the scratch tree (sys.pycache_prefix, as Apple's python3 has one), else with none."""
+    module the test imports ("" when that is outside the tree: the test then imports nothing), whether it is there, whether
+    any bytecode was written in the tree or there, sys.dont_write_bytecode as the test saw it, output). prefix: run with
+    PYTHONPYCACHEPREFIX set to a folder of the scratch tree (sys.pycache_prefix, as Apple's python3 has one), else with none."""
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         (root / "tools").mkdir()
@@ -77,7 +88,8 @@ def leak_run(runner_text, prefix):
         target = py(env, "import importlib.util, sys; print(importlib.util.cache_from_source(sys.argv[1]))",
                     str(root / "tools/helper_mod.py"))
         if not target.startswith(str(root)):   # a control would write it there: outside the tree, into the tester's caches
-            return -1, "", False, "", False, False, f"this Python would put the bytecode outside the scratch tree: {target}"
+            (root / "no-import").write_text(target)
+            target = ""
         # -B: the runner itself writes nothing; what it starts gets only what the runner puts in its environment
         r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py")], env=env, capture_output=True,
                            text=True, timeout=120)
@@ -87,30 +99,39 @@ def leak_run(runner_text, prefix):
             shutil.rmtree(made, ignore_errors=True)
         at_target = bool(target) and os.path.exists(target)
         written = at_target or any(root.rglob("*.pyc"))
-        return r.returncode, made, left, target, at_target, written, r.stdout + r.stderr
+        flag = (root / "flag.txt").read_text() if (root / "flag.txt").exists() else ""
+        return r.returncode, made, left, target, at_target, written, flag, r.stdout + r.stderr
 
 
-rc, made, left, target, at, pyc, out = leak_run(RUNNER, prefix=True)
+rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER, prefix=True)
 arm("a test's temporary folder is made inside one the runner gave it", rc == 0 and pathlib.Path(made).parent.name.startswith("nmtest-"),
     (rc, made, out))
 arm("and is gone when the runner is done", made and not left, (made, out))
-arm("with a pycache prefix, a module the test imports leaves no bytecode, under the prefix or anywhere in the tree",
-    rc == 0 and "pycache-prefix" in target and not pyc, (target, out))
+if target:
+    arm("with a pycache prefix, a module the test imports leaves no bytecode, under the prefix or anywhere in the tree",
+        rc == 0 and "pycache-prefix" in target and not pyc and flag == "True", (target, flag, out))
+else:
+    print(f"(this python3 keeps its own pycache prefix whatever PYTHONPYCACHEPREFIX says: {BUILTIN_PREFIX})")
+    arm("the test runs with the writing of bytecode off, which every import obeys", rc == 0 and flag == "True" and not pyc, (flag, out))
 if BUILTIN_PREFIX:
     print(f"not run: the case without a pycache prefix (this python3 always has one: {BUILTIN_PREFIX})")
 else:
-    rc, made, left, target, at, pyc, out = leak_run(RUNNER, prefix=False)
-    arm("without one, it leaves none beside the module either", rc == 0 and "__pycache__" in target and not pyc, (target, out))
+    rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER, prefix=False)
+    arm("without one, it leaves none beside the module either", rc == 0 and "__pycache__" in target and not pyc and flag == "True",
+        (target, flag, out))
 
 old_line = 'env.update(TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")'
 arm("the runner sets TMPDIR (and no bytecode) in one place", RUNNER.count(old_line) == 1)
-rc, made, left, target, at, pyc, out = leak_run(RUNNER.replace(old_line, 'env.update(PYTHONDONTWRITEBYTECODE="1")'), prefix=True)
+rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER.replace(old_line, 'env.update(PYTHONDONTWRITEBYTECODE="1")'), prefix=True)
 arm("control: without its own TMPDIR the test's folder is left behind", made and left, (rc, made, out))
-rc, made, left, target, at, pyc, out = leak_run(RUNNER.replace(old_line, "env.update(TMPDIR=tmp)"), prefix=True)
-arm("control: without PYTHONDONTWRITEBYTECODE the bytecode is written under the prefix", rc == 0 and at and target, (target, out))
+rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER.replace(old_line, "env.update(TMPDIR=tmp)"), prefix=True)
+if target:
+    arm("control: without PYTHONDONTWRITEBYTECODE the bytecode is written under the prefix", rc == 0 and at and flag == "False", (target, flag, out))
+else:
+    arm("control: without PYTHONDONTWRITEBYTECODE the test runs with the writing of bytecode on", rc == 0 and flag == "False", (flag, out))
 if not BUILTIN_PREFIX:
-    rc, made, left, target, at, pyc, out = leak_run(RUNNER.replace(old_line, "env.update(TMPDIR=tmp)"), prefix=False)
-    arm("control: and without a prefix it is written beside the module", rc == 0 and at and target, (target, out))
+    rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER.replace(old_line, "env.update(TMPDIR=tmp)"), prefix=False)
+    arm("control: and without a prefix it is written beside the module", rc == 0 and at and target and flag == "False", (target, flag, out))
 
 
 # ---- the tester's driver settings do not reach a test; what a test takes from the tester does
