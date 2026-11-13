@@ -524,11 +524,27 @@ PLANE_LINES = [
 ]
 
 
+BIT_GUARD_LINES = [
+    "            const unsigned short bitAtUnlock = validBit();   // the bit wasCurrent was read on\n",
+    "            const bool bitChanged = validBit() != bitAtUnlock;\n",
+]
+BIT_GUARD_SAME = [
+    ("if (surf != surf0 || vm != vm0 || bitChanged) OSAddAtomic64(1, &gCntPoChanged);", "if (surf != surf0 || vm != vm0) OSAddAtomic64(1, &gCntPoChanged);"),
+    ("            if (!bitChanged) {   volatile unsigned short *const v1 =", "            {   volatile unsigned short *const v1 ="),
+]
+
+
 def unranged(po):
     """the page-off as a resource without a range runs it: the plane-only lines out, the validity bit as it is then (1)"""
     for l in PLANE_LINES:
         po = po.replace(l, "")
     po = po.replace("(v0[0] & validBit())", "(v0[0] & 1u)").replace("(v1[0] & validBit())", "(v1[0] & 1u)")
+    # the guard against a range granted during the unlocked wait: validBit() is 1 at both reads for a resource that has
+    # no range then, so bitChanged is false and the guard is the block the step before had
+    for l in BIT_GUARD_LINES:
+        po = po.replace(l, "")
+    for a, b in BIT_GUARD_SAME:
+        po = po.replace(a, b)
     # the one statement split over lines and the comment widened for the bit
     po = po.replace("            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {\n"
                     "                IOAccelResource2::pageoff(ev, a1, out, a3); return;\n            }",
