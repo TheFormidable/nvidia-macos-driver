@@ -55,15 +55,19 @@ left set.
   on a private surface came back right on the card, once per process. Way back: boot argument
   `nvaccel_surf_planes=0`.
 - The accelerator now checks, before it attaches, that the accelerator family classes it builds on have the size
-  (and, where it can be read safely, the number of virtual functions) this driver was built for. If a macOS update
-  changed one, the accelerator does not attach and the desktop runs without acceleration instead of crashing; the
-  kernel log names the class (`NVAccel: Apple class layout refused: ...`).
+  this driver was built for. If a macOS update changed one, the accelerator does not attach and the desktop runs
+  without acceleration instead of crashing; the kernel log names the class
+  (`NVAccel: Apple class layout refused: ...`). It also reports how many virtual functions those classes have
+  (`nvaccel-layout-vtables`); that is a report and never a reason to decline.
 - NVRMFB and NVRMAGDC compare the Apple classes they are built on with the running macOS before they start. NVRMFB
   compares the size of IOFramebuffer, IOGraphicsDevice and IODisplayParameterHandler; NVRMAGDC the size of
   AppleGraphicsDeviceControl. On a different size the kext does not start (NVRMFB) or does not create its
   device-control object (NVRMAGDC, `debug.nvrmfb_agdc` = -6) and says which class differs, instead of running on a
-  misplaced base. When NVRMFB refuses, NVRM does not start the card and the firmware's picture stays; that is not
-  counted as a failed start. The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout` and
+  misplaced base. When NVRMFB refuses, NVRM does not start the card and no desktop comes up on it, since every
+  framebuffer of the driver is built on those classes; that is not counted as a failed start. After an install over
+  an earlier driver, the installer's fallback job finds the refusal at that start, keeps it (the class and both
+  sizes) in `/Library/NullMoth/lastgood.log`, puts the earlier driver back and restarts. The verdicts are on the
+  GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout` and
   `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler have
   in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for all
   three checks: boot argument `nvlayout=0`.

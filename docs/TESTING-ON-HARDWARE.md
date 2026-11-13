@@ -49,13 +49,14 @@ restart. Take every test setting out again when its test is done.
    `/Library/NullMoth/backup-<date>-<time>.<random>`, whose name it prints on its line
    `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
    each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
-   after WindowServer kept dying on the NVIDIA display), the job puts everything back from that folder and restarts
-   once. It removes itself at the first start after one that lit the display, so it does not help with a problem that
-   comes later. Know how you will start the Mac when the
+   after WindowServer kept dying on the NVIDIA display), or when its framebuffer refused the Apple classes of this
+   macOS (section 2, step 3), the job puts everything back from that folder and restarts once;
+   `/Library/NullMoth/lastgood.log` says which it was. It removes itself at the first start after one that lit the
+   display, so it does not help with a problem that comes later. Know how you will start the Mac when the
    desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; the 1401 picker entries
    exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings, General, Sharing) and make
-   sure you can reach the Mac over `ssh` from another computer: several failures below leave the firmware's picture
-   or a frozen desktop, and the logs are then read over the network.
+   sure you can reach the Mac over `ssh` from another computer: several failures below leave no desktop
+   or a frozen one, and the logs are then read over the network.
    Pass: you have started the Mac once by that way back, and logged in over `ssh`. Fail: either does not work; do not
    go on.
 2. **A clean starting point.** `nvram boot-args` shows the `boot-args` line: it should hold the install line of
@@ -92,9 +93,11 @@ restart. Take every test setting out again when its test is done.
 1. **The card started.** Install, restart. Pass: the login window comes up on the NVIDIA card;
    `kmutil showloaded --list-only | grep nullmoth` shows four lines (NVRM, NVAccel, NVRMFB, NVRMAGDC), five on
    macOS 26 where the installer adds its audio driver `com.nullmoth.NMXAudio` for an HD Audio controller;
-   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: the firmware's picture stays or
-   the screen is black. Over `ssh`, look in the kernel log for `NOT STARTING THE GPU` (the line gives the reason)
-   and go on with steps 3 and 5 below, which tell the reasons apart.
+   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: no login window (the screen
+   keeps the last picture of the start, or is black), or the Mac restarts by itself and comes up on 2.9 again. In the
+   first case look, over `ssh`, in the kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on
+   with steps 3 and 5 below, which tell the reasons apart. In the second `cat /Library/NullMoth/lastgood.log` says why
+   the installer's job put 2.9 back (step 3 has the refusal it may name); send that file with `sw_vers`.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
@@ -122,12 +125,17 @@ restart. Take every test setting out again when its test is done.
    - Fail: a line starts with `refused:` (it names the class and both sizes). What each refusal does:
      - `nvrmfb-layout` refused, read by NVRM before it started the card: the kernel log has
        `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` reads `declined: ...`,
-       the firmware's picture stays and the boot guard does not count this start. `debug.nvrmfb_layout` does not
-       exist (the framebuffer did not start).
+       and no desktop comes up: every framebuffer of the driver is built on those classes, the one that shows a
+       desktop with the driver off too. The boot guard does not count this start. The installer's job of section 1,
+       step 1, looks for the refusal every five seconds during the first four minutes of the start; it copies the
+       `nvrm-layout` and `nvrmfb-layout` lines into `/Library/NullMoth/lastgood.log`, puts the previous driver back
+       and restarts, so you are on 2.9 again and that file is what to send. Without the job (a first install, or a
+       driver that has shown its display at an earlier start) nothing is put back, and every start ends like this one
+       until `nvlayout=0` or until the driver is taken out. `debug.nvrmfb_layout` does not exist (the framebuffer did
+       not start).
      - The same refusal read only after NVRM had started: `auto-go: NOT STARTING THE GPU: the framebuffer refused
-       this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. The firmware's picture
-       stays, and this start is counted: two such starts in a row without a desktop that stays up turn the driver off,
-       and the installer's job of section 1, step 1, puts the previous driver back.
+       this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. No desktop comes up
+       either, this start is counted, and the installer's job does the same as above.
      - `nvaccel-layout` refused: `NVAccel: does not attach: ... the display runs without acceleration` and NVRM's
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` is 6, there is no
        `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
@@ -137,9 +145,11 @@ restart. Take every test setting out again when its test is done.
      - `nvagdc-layout` refused: `debug.nvrmfb_agdc` is -6 and `debug.nvrmfb_agdc_layout` 2; the desktop runs without
        AppleGraphicsDeviceControl, and the start counts as good.
 
-     Send the output of the three commands with `sw_vers`. Then boot once with `nvlayout=0` only to see whether the
-     rest works (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out
-     again (TROUBLESHOOTING.md has what that boot risks).
+     Send the output of the three commands with `sw_vers` (after a framebuffer refusal that the job undid,
+     `/Library/NullMoth/lastgood.log` instead). Then boot once with `nvlayout=0` only to see whether the rest works
+     (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out again
+     (TROUBLESHOOTING.md has what that boot risks). After the job has put 2.9 back, that means installing again with
+     `nvlayout=0` already in the boot arguments.
 4. **Start-up time.** `sysctl debug | grep nvrm_boot_` gives each phase of the start in milliseconds. Pass: the
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
    Fail: it comes up later, or 7 with a display connected; boot once with `-nvrmoldwaits` and send both sets of
