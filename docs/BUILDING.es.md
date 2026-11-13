@@ -12,7 +12,8 @@ comandos y opciones y la solución de problemas.
 > Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Ninguno de los cambios hechos en `build.sh`
 > después de esa ejecución se ha ejecutado aún en un Mac: la comprobación de herramientas por componente, la elección
 > de Homebrew y de las herramientas que toma del `PATH`, la organización del directorio de trabajo, la lista de
-> compilación del RM, la configuración de git de `fetch` y la parada sin Xcode solo se probaron contra los sustitutos.
+> compilación del RM, la configuración de git de `fetch`, la parada sin Xcode (también con una carpeta de desarrollo que ya no está), el `patch` que reciben los scripts (con
+> `-f`) y el `PATH` que recibe brew solo se probaron contra los sustitutos.
 > Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
 > sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
 > (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
@@ -37,16 +38,25 @@ comandos y opciones y la solución de problemas.
   Debug Kit. En un Mac sin Xcode ni herramientas de línea de comandos, todos los comandos salvo `help` se detienen al
   empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
   de macOS son entonces sustitutos que ofrecen instalar las herramientas de línea de comandos, y no se ejecuta ninguno.
+  Lo mismo ocurre si la carpeta de desarrollo que indican `DEVELOPER_DIR` o `xcode-select -p` no existe o no tiene
+  `usr/bin/xcrun` (un Xcode borrado o renombrado después de seleccionarlo): todas las herramientas de Apple fallarían.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
 - Homebrew, solo para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
   airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
-  bastan; [tabla](BUILDING.md#tools-each-component-needs)). Si falta, `./build.sh deps` explica cómo instalarlo y
+  bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
+  (`<directorio de trabajo>/tools/bin/patch`): sin él, el `patch` de macOS pregunta en el terminal cuando no encuentra
+  el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
+  pregunta que nadie ve. Si falta Homebrew, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
 - Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
   que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
-  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas.
+  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas. Para
+  compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
+  macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o `Your Command Line Tools are
+  too outdated`. `xcode-select --install` las instala y Actualización de software las actualiza;
+  `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` muestra la versión que tienes.
 
 ## Inicio rápido
 
@@ -69,7 +79,10 @@ lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiar
 
 Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio de trabajo, por defecto
 `~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
-tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`.
+tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`. Pero cargo lee el `.cargo/config.toml` de cada
+carpeta por encima de aquella en la que trabaja: con el directorio de trabajo o el clon dentro de tu carpeta personal,
+tu `~/.cargo/config.toml` se aplica a la descarga y la compilación del traductor (sus ajustes de perfil, enlazador y
+fuentes cambian lo que se compila), y `doctor` lo nombra.
 
 `doctor`, `env`, `help` y cualquier comando con `--dry-run` no escriben nada tuyo: no ejecutan `brew info` ni
 `brew install`, leen el clon sin actualizar su índice y no guardan cambios locales con `git stash create`. Cada uno
@@ -77,9 +90,16 @@ crea un archivo temporal propio (y una carpeta a su lado para probar `patch`) en
 borra al terminar; `xcrun` guarda su caché de búsqueda (`xcrun_db`) en esa misma carpeta temporal, como hace siempre que
 se ejecuta una herramienta de Xcode. `fetch` ejecuta git sin tus hooks (`core.hooksPath`), sin monitor de archivos ni
 archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). `deps`
-escribe en la carpeta de Homebrew y en su caché (`~/Library/Caches/Homebrew`) al instalar, pero sus preguntas
-`brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache`. La tabla completa está en
-[BUILDING.md](BUILDING.md#what-each-command-writes).
+escribe en la carpeta de Homebrew, en su caché (`~/Library/Caches/Homebrew`) y en sus registros
+(`~/Library/Logs/Homebrew`) al instalar, y mientras Homebrew compila una fórmula usa una carpeta en `/private/tmp` que
+borra al terminarla; sus preguntas `brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache` y pip
+guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con
+`HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew no sigue la instalación con su limpieza propia, que borraría versiones
+anteriores de tus fórmulas (cada 30 días, de todas), fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de
+su prefijo. Homebrew instala también lo que esas fórmulas necesitan y enlaza en su `bin` los comandos de las que no son
+keg-only (`llvm@22` lo es); hoy eso incluye `python@3.15`, que `llvm@22` necesita para compilarse y que pasa a ser el
+`python3` de una shell que tenga el `bin` de Homebrew antes de `/usr/bin` (la compilación usa `python@3.14`). La tabla
+completa está en [BUILDING.md](BUILDING.md#what-each-command-writes).
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
@@ -162,7 +182,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
-| `NM_BREW` | El `brew` que se usa. Si se indica, es el único Homebrew que se considera, sea cual sea su arquitectura. Sin él, `build.sh` usa solo el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), y si no, un `brew` del `PATH` solo cuando se resuelve dentro de ese mismo prefijo (un envoltorio que no está en ningún prefijo de Homebrew, o uno que se resuelve en el prefijo de la otra arquitectura, no se toma). Un Homebrew de la otra arquitectura, cuyas fórmulas están compiladas para el otro procesador y no se pueden enlazar aquí, lo nombra `doctor` pero solo se usa si `NM_BREW` lo indica. Cada llamada a `brew` se ejecuta con `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` y `HOMEBREW_REPOSITORY` sin definir, para que la configuración de otro Homebrew en la shell no pueda redirigirla. Una herramienta tomada del `PATH` (`python3`, `patch`, `gpatch`, `ninja`, `cmake`, `pkg-config`, `glslangValidator`) se descarta si pertenece al Homebrew de la otra arquitectura (su archivo, tras seguir sus enlaces, está allí; o lo está su intérprete `#!`; o `file` dice que es un programa Mach-O sin código de este procesador); `doctor` dice cuál y por qué |
+| `NM_BREW` | El `brew` que se usa. Si se indica, es el único Homebrew que se considera, sea cual sea su arquitectura. Sin él, `build.sh` usa solo el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), y si no, un `brew` del `PATH` solo cuando se resuelve dentro de ese mismo prefijo (un envoltorio que no está en ningún prefijo de Homebrew, o uno que se resuelve en el prefijo de la otra arquitectura, no se toma). Un Homebrew de la otra arquitectura, cuyas fórmulas están compiladas para el otro procesador y no se pueden enlazar aquí, lo nombra `doctor` pero solo se usa si `NM_BREW` lo indica. Cada llamada a `brew` se ejecuta con `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY`, `HOMEBREW_PATH` y `HOMEBREW_BREW_FILE` sin definir y con `PATH` igual al `bin` de ese Homebrew seguido de `/usr/bin:/bin:/usr/sbin:/sbin`, para que la configuración de otro Homebrew en la shell no pueda redirigirla: Homebrew guarda el `PATH` de quien lo llama para el paso posterior a la instalación de una fórmula y para algunas de sus compilaciones, donde los programas de ese otro Homebrew irían si no primero. Una herramienta tomada del `PATH` (`python3`, `patch`, `gpatch`, `ninja`, `cmake`, `pkg-config`, `glslangValidator`) se descarta si pertenece al Homebrew de la otra arquitectura (su archivo, tras seguir sus enlaces, está allí; o lo está su intérprete `#!`; o `file` dice que es un programa Mach-O sin código de este procesador); `doctor` dice cuál y por qué |
 | `NM_PYTHON` | Un Python 3.10 o posterior para el entorno virtual |
 | `NM_LLVM_PREFIX` | Un LLVM 22.x con sus bibliotecas de clang |
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
@@ -250,6 +270,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: the working directory contains a space` (o la ruta del clon, o la carpeta personal) | Los scripts de publicación y build_nvk.sh separan por espacios | Usa `--workdir` con una ruta sin espacios; mueve el clon |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 necesita macOS 15.6 o posterior | Actualiza macOS o compila en otro Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` apunta a las herramientas de línea de comandos | Instala Xcode 26 y ejecuta `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
+| `STOP: the developer folder xcode-select -p names, ..., does not exist` (o `has no usr/bin/xcrun`, o `DEVELOPER_DIR names`) | El Xcode seleccionado se borró o se renombró, `DEVELOPER_DIR` indica una carpeta equivocada, o una actualización de macOS dejó incompletas las herramientas de línea de comandos | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` con el Xcode que tengas, o corrige o quita `DEVELOPER_DIR` |
 | doctor: `MISSING Metal/MTL4CommandQueue.h` | El Xcode seleccionado tiene un SDK anterior | Selecciona Xcode 26 o define `DEVELOPER_DIR` |
 | `Homebrew has no LLVM 22 formula today` | Homebrew retiró `llvm@22` | Instala LLVM 22.x con sus bibliotecas de clang, define `NM_LLVM_PREFIX` y ejecuta otra vez `./build.sh deps` (compila SPIRV-LLVM-Translator para él) |
 | `SPIRV-LLVM-Translator ... does not match LLVM` | Su versión debe coincidir con la de LLVM | `./build.sh deps` compila uno que coincide |
@@ -260,7 +281,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `offline, and ... is not in ... yet` | `--offline` antes de cualquier `fetch` | Ejecuta `./build.sh fetch` una vez con red |
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
 | `<componente> needs: ...` (por ejemplo `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | Falta una herramienta que usa ese componente o uno que necesita, o no hace lo que le piden los scripts; no se compiló nada | `./build.sh doctor` dice cuál; `./build.sh deps` la instala |
-| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene tu nombre de cuenta o el nombre corto del equipo como palabra completa (no dentro de otra palabra) | El registro da la orden que muestra esas líneas. Si el nombre es una palabra común (user, mac, admin), compila desde otra cuenta o cambia el nombre local del equipo (Ajustes del Sistema > General > Compartir) |
+| rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene la ruta de tu carpeta personal, tu nombre de cuenta seguido de `@`, o `@` y el nombre corto del equipo: la compilación los filtró. Como palabra suelta solo se informa (una línea `note:` en el registro), porque el texto de NVIDIA tiene palabras como user, admin o test | El registro da la orden que muestra esas líneas. Infórmalo con el archivo de informe (las líneas te nombran: léelas antes de publicarlas) |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |

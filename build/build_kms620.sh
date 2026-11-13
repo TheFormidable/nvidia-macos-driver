@@ -36,9 +36,15 @@ nf=$(grep -c FAIL "$B/kfails.txt"); echo "failed: $nf of $n"
 rm -f "$O/libnvkms.a"; ls "$O"/*.o > "$B/kobjs.txt"
 xcrun libtool -static -o "$O/libnvkms.a" -filelist "$B/kobjs.txt" 2>"$B/klibtool.err" || { tail -5 "$B/klibtool.err"; exit 4; }
 echo "libnvkms.a $(stat -f%z "$O/libnvkms.a") B from $(wc -l < "$B/kobjs.txt" | tr -d " ") objects"
-# the account or the computer's short name as a whole word, not inside other words (see build_rm620.sh); names not printed
-re=$(for x in "$(id -un 2>/dev/null)" "$(hostname -s 2>/dev/null)"; do [ -z "$x" ] || printf '%s\n' "$x" | sed 's/[][\.*^$+?(){}|]/\\&/g'; done | paste -sd'|' -)
-if [ -z "$re" ]; then echo "personal strings in libnvkms.a: not checked (no account or computer name)"; exit 0; fi
-left=$(strings -a "$O/libnvkms.a" | grep -ciE "(^|[^[:alnum:]])($re)([^[:alnum:]]|$)" || true)
-[ "$left" = 0 ] || { echo "STOP: $left string(s) in libnvkms.a name this account or computer as a word; see them with: strings -a $B/ogkm-$V/src/nvidia-modeset/$O/libnvkms.a | grep -iw \"\$(id -un)\""; exit 6; }
+# the account or the computer's short name in the forms a build leaks them in (see build_rm620.sh); names not printed
+u=$(id -un 2>/dev/null || true); h=$(hostname -s 2>/dev/null || true); pats=()
+[ -z "$u" ] || pats+=( -e "/Users/$u" -e "$u@" )
+[ -z "$h" ] || pats+=( -e "@$h" -e "$h.local" )
+case "${HOME:-/}" in /) ;; *) pats+=( -e "${HOME%/}" ) ;; esac
+if [ ${#pats[@]} = 0 ]; then echo "personal strings in libnvkms.a: not checked (no account or computer name)"; exit 0; fi
+left=$(strings -a "$O/libnvkms.a" | grep -ciF "${pats[@]}" || true)
+[ "$left" = 0 ] || { echo "STOP: $left string(s) in libnvkms.a hold the home folder, the account name with @ or the computer's name; see them with: strings -a $B/ogkm-$V/src/nvidia-modeset/$O/libnvkms.a | grep -iF -e \"\$HOME\" -e \"\$(id -un)@\" -e \"@\$(hostname -s)\""; exit 6; }
+re=$(for x in "$u" "$h"; do [ -z "$x" ] || printf '%s\n' "$x" | sed 's/[][\.*^$+?(){}|]/\\&/g'; done | paste -sd'|' -)
+words=0; [ -z "$re" ] || words=$(strings -a "$O/libnvkms.a" | grep -ciE "(^|[^[:alnum:]])($re)([^[:alnum:]]|$)" || true)
 echo "personal strings in libnvkms.a: 0"
+[ "$words" = 0 ] || echo "note: $words string(s) in libnvkms.a hold the account or computer name as an ordinary word, not as a path or user@host (see them with: strings -a $B/ogkm-$V/src/nvidia-modeset/$O/libnvkms.a | grep -iw \"\$(id -un)\")"

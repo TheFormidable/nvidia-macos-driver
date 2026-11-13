@@ -12,8 +12,10 @@ libtool, strings, stat, md5 and for the account and computer names) and checks:
     touched, and a fresh work folder (what build.sh --force does), and accel_build.sh gets the same -D flags each time;
   * a list that lacks the osapi.c command, or whose command lacks the RM's defines, stops build/rm_defines.sh and
     accel_build.sh with a message, and nothing is compiled;
-  * neither the account nor the computer name reaches make-n.txt or the output, and the personal-string check takes
-    whole words only ("max" inside "maximum" is not the account "max"), with the same verdict as build.sh.
+  * neither the account nor the computer name reaches make-n.txt or the output, and the personal-string check stops
+    only at the forms a build leaks them in (a home path, user@host): "max" inside "maximum" is not the account "max",
+    and the account "max" as an ordinary word (as NVIDIA's own text has "user", "admin" or "test") is reported, not
+    stopped at.
 Negative controls: the scripts as they were at 19279ba (read with git show) must fail the same checks."""
 import os
 import shutil
@@ -127,9 +129,10 @@ PATCH_MODESET = """--- a/src/kapi.c
 """
 
 
-def repo(base, old):
-    """A copy of the scripts under test: build/ and kexts/NVRM (patches, the accel source) as build_rm620.sh expects."""
-    r = base / ("repo-old" if old else "repo")
+def repo(base, old, edit=None):
+    """A copy of the scripts under test: build/ and kexts/NVRM (patches, the accel source) as build_rm620.sh expects.
+    edit: (old text, new text) for build_rm620.sh, a control's broken copy."""
+    r = base / ("repo-old" if old else "repo-edit" if edit else "repo")
     for rel in ("build/build_rm620.sh", "build/build_kms620.sh", "build/accel_build.sh", "build/rm_defines.sh",
                 "build/warn_ceiling.sh", "build/warnings.txt"):
         p = r / rel
@@ -142,6 +145,10 @@ def repo(base, old):
             p.write_text(text.stdout)
         elif not (old and rel == "build/rm_defines.sh"):
             shutil.copy2(ROOT / rel, p)
+        if edit and rel == "build/build_rm620.sh":
+            text = p.read_text()
+            assert edit[0] in text, edit[0]
+            p.write_text(text.replace(*edit))
     (r / "kexts/NVRM/patches").mkdir(parents=True, exist_ok=True)
     (r / "kexts/NVRM/patches/600-root.patch").write_text(PATCH_ROOT)
     (r / "kexts/NVRM/patches/610-modeset.patch").write_text(PATCH_MODESET)
@@ -270,9 +277,10 @@ def truncated_problems(base, old):
     return p
 
 
-def personal_problems(base, old, archive_text, want_stop):
-    """the personal-string check: whole words only; the names never printed; make-n.txt names neither"""
-    r = repo(base, old)
+def personal_problems(base, old, archive_text, want_stop, want_note=False, edit=None):
+    """the personal-string check: a home path or user@host stops it, an ordinary word is reported (want_note); the names
+    never printed; make-n.txt names neither"""
+    r = repo(base, old, edit)
     env = Env(base, extra=archive_text)
     src = base / "pristine"
     if not src.exists():
@@ -286,6 +294,8 @@ def personal_problems(base, old, archive_text, want_stop):
         p.append(f"exit {rc} for {archive_text!r}, expected 6")
     if not want_stop and rc != 0:
         p.append(f"exit {rc} for {archive_text!r}: {out[-300:]}")
+    if want_note and "hold the account or computer name as an ordinary word" not in out:
+        p.append(f"no note for {archive_text!r}: {out[-300:]}")
     for name in (ACCOUNT, HOST):
         if name in out.replace(archive_text, ""):
             p.append(f"the output names {name!r}: {[l for l in out.splitlines() if name in l][:2]}")
@@ -321,6 +331,12 @@ def main():
         check("the computer's short name as a word stops it, without printing the name", not p, p)
         p = personal_problems(base / "pers", False, "the GPU stopped", want_stop=False)
         check("make-n.txt names neither the account nor the computer (NV_BUILD_USER, NV_BUILD_HOST)", not p, p)
+        p = personal_problems(base / "pers", False, "MAX clock exceeded", want_stop=False, want_note=True)
+        check("the account name as an ordinary word (an account named like a word of NVIDIA's text) is reported, not "
+              "stopped at, without printing the name", not p, p)
+        negative("a whole-word match that stops (an account named user, admin or test could not build)",
+                 personal_problems(base / "pers-word", False, "MAX clock exceeded", want_stop=False, want_note=True,
+                                   edit=('grep -ciF "${pats[@]}"', 'grep -ciw -e "$u" -e "$h"')))
         negative("build_rm620.sh of " + OLD + " (substring match, names printed)",
                  personal_problems(base / "pers-old", True, "The maximum clock was reached", want_stop=False))
     finally:

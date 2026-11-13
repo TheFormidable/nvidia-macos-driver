@@ -348,14 +348,25 @@ ensure_workdir() {
   [ -f "$W/$MARKER" ] || printf 'made by build.sh of the NullMoth driver; everything below can be deleted with ./build.sh clean all\n' > "$W/$MARKER"
 }
 LOCK_HELD=0
+# lock_owner_alive <pid>: that process exists and, where ps can say, is a build.sh (after a crash or a restart the pid
+# of a lock left behind may belong to another program, which would keep the lock for ever)
+lock_owner_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  have ps || return 0
+  case "$(ps -p "$1" -o command= 2>/dev/null || true)" in *build.sh*) return 0 ;; esac
+  return 1
+}
 take_lock() {
   [ "$NM_DRY_RUN" = 1 ] && return 0
-  local l=$W/build.lock pid tries=0
+  local l=$W/build.lock pid tries=0 waited=0
   while ! mkdir "$l" 2>/dev/null; do
-    pid=$(sed -n 's/^pid=//p' "$l/owner" 2>/dev/null | first_line)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    pid=$(sed -n 's/^pid=//p' "$l/owner" 2>/dev/null | first_line || true)   # no owner file: sed fails, and errexit stopped here
+    if [ -n "$pid" ] && lock_owner_alive "$pid"; then
       die "another build.sh run (pid $pid) is using $W; wait for it or stop it ($(tr '\n' ' ' < "$l/owner" 2>/dev/null))"
     fi
+    # a run that has just made the lock writes its owner a moment later: a lock without one is taken over only when it
+    # still has none after three seconds, or two runs started together would both go on
+    if [ -z "$pid" ] && [ "$waited" -lt 3 ]; then waited=$((waited + 1)); sleep 1; continue; fi
     tries=$((tries + 1)); [ "$tries" -le 2 ] || die "cannot take the lock $l"
     note "taking over the lock of a run that is gone (${pid:-unknown pid})"
     rm -f "$l/owner"; rmdir "$l" 2>/dev/null || true
@@ -544,7 +555,8 @@ PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator"
 # patch_works <patch> [new]: does it apply, without a question, a change (and with "new" also a new file) in git's form
 # the way the scripts do: build_rm620.sh and tools/test_patch_chain.sh "-p1 --fuzz=0 --dry-run" then "-p1 --fuzz=0
 # --no-backup-if-mismatch" (changes only), build_nvk.sh "-p1 -s --no-backup-if-mismatch -d <dir>" (NVK's chain also
-# creates files). It works in a temporary folder, removed at once.
+# creates files). It works in a temporary folder, removed at once. Each call carries -f, as tools/bin/patch adds it to
+# every call of the scripts (make_tool_links).
 patch_works() {
   local p=$1 d=${TMPF:-/nonexistent}.patch ok=1
   [ -n "${TMPF:-}" ] || return 1
@@ -553,9 +565,9 @@ patch_works() {
   printf '%s\n' 'diff --git a/a/f.txt b/a/f.txt' '--- a/a/f.txt' '+++ b/a/f.txt' '@@ -1,3 +1,3 @@' ' one' '-two' '+TWO' ' three' > "$d/c.patch"
   [ "${2:-}" != new ] || printf '%s\n' 'diff --git a/a/new.txt b/a/new.txt' 'new file mode 100644' '--- /dev/null' '+++ b/a/new.txt' \
     '@@ -0,0 +1 @@' '+new' >> "$d/c.patch"
-  ( cd "$d/t" && "$p" -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
+  ( cd "$d/t" && "$p" -f -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
   [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\ntwo\nthree')" ] && [ ! -e "$d/t/a/new.txt" ] || ok=0
-  [ "$ok" = 1 ] && "$p" -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && "$p" -f -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
   [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\nTWO\nthree')" ] || ok=0
   [ "$ok" = 1 ] && { [ "${2:-}" != new ] || [ "$(cat "$d/t/a/new.txt" 2>/dev/null)" = new ]; } || ok=0
   [ "$ok" = 1 ] && [ -z "$(find "$d/t" -name '*.orig' -o -name '*.rej')" ] || ok=0
@@ -688,8 +700,8 @@ d_note()    { say "  note     $1"; }
 d_warn()    { say "  WARNING  $1"; }
 
 doctor() {   # prints; sets D_MISSING
-  D_MISSING=0; D_LINES=""
-  local v x sdk
+  D_MISSING=0; D_LINES=""; D_CARGO_SEEN=""
+  local v x sdk d
   say "== host"
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
@@ -814,6 +826,18 @@ doctor() {   # prints; sets D_MISSING
   source_status
   say "== things that can stop a build on another Mac"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
+  # cargo reads the .cargo/config.toml of every folder above the one it works in, before its own CARGO_HOME's: the
+  # translator is fetched from the checkout and built under the working directory, so with either inside the home
+  # folder the tester's own ~/.cargo/config.toml applies to it. Nothing turns that off; doctor names the files.
+  for d in "$W" "$HERE"; do
+    while [ -n "$d" ]; do
+      d=${d%/*}
+      for x in "$d/.cargo/config.toml" "$d/.cargo/config"; do
+        [ ! -f "$x" ] || case "$D_CARGO_SEEN" in *"|$x|"*) ;; *) D_CARGO_SEEN="$D_CARGO_SEEN|$x|"
+          d_note "$(printf '%s' "$x" | tilde) applies to cargo's fetch and build of the translator (cargo reads the configuration in every folder above the one it works in): its profile, linker and source settings change what is built" ;; esac
+      done
+    done
+  done
   if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
   fi
@@ -1029,6 +1053,20 @@ ask() {   # <question>: yes with --yes; otherwise a y/N answer from the terminal
   else say "$1 [y/N] no (no terminal; run with --yes to agree)"; fi
   return 1
 }
+# developer_dir_problem: nothing when the developer folder Apple's tools use (DEVELOPER_DIR when it is set, otherwise
+# the one xcode-select -p names) is there with its xcrun; otherwise what is wrong with it. The folder of an Xcode removed
+# or renamed after it was selected, a DEVELOPER_DIR with a wrong path, and command line tools that a macOS update left
+# without xcrun all fail this test, the one Apple's tools make themselves ("missing xcrun at: <folder>/usr/bin/xcrun").
+developer_dir_problem() {
+  local d from
+  if [ -n "${DEVELOPER_DIR:-}" ]; then d=$DEVELOPER_DIR; from=DEVELOPER_DIR
+  else d=$(xcode-select -p 2>/dev/null || true); from="xcode-select -p"; fi
+  [ -n "$d" ] || { printf 'no developer folder (%s names none)' "$from"; return 0; }
+  [ -x "$d/usr/bin/xcrun" ] || [ -x "$d/Contents/Developer/usr/bin/xcrun" ] || \
+    printf 'the developer folder %s names, %s, %s' "$from" "$(printf '%s' "$d" | tilde)" \
+      "$(if [ -d "$d" ]; then echo "has no usr/bin/xcrun (not a whole Xcode or command line tools)"; else echo "does not exist (an Xcode removed or renamed after it was selected?)"; fi)"
+  return 0
+}
 xcode_help() {
   cat <<EOF
 Xcode cannot be installed by a script. Do this once:
@@ -1042,15 +1080,20 @@ Then run ./build.sh doctor again.
 EOF
 }
 # Every call to Homebrew goes through here. The tester's login shell may export HOMEBREW_PREFIX, HOMEBREW_CELLAR and
-# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them); inherited, they
-# would make the brew build.sh chose read the wrong prefix and act on the wrong installation. So each call drops the
-# three, and runs with HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the
-# working directory, the install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them), and put its bin
+# folder first on PATH. Homebrew's bin/brew works out its own prefix, but it keeps the caller's PATH as HOMEBREW_PATH
+# (or takes HOMEBREW_PATH as its PATH when HOMEBREW_BREW_FILE is set too, as inside another brew), and its Ruby code
+# puts that PATH back for a formula's post-install step, for builds in its "std" environment and when it looks for a
+# requirement: the other architecture's programs would run there. So each call drops the three location variables and
+# those two, gives brew the PATH of a plain Mac with this Homebrew's bin first (brew_path), and runs with
+# HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the working directory, the
+# install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+brew_path() { printf '%s/bin:/usr/bin:/bin:/usr/sbin:/sbin' "$BREW_PREFIX"; }
 run_brew() {
   local kv=()
   while [ $# -gt 0 ] && [ "$1" != -- ]; do kv+=( "$1" ); shift; done
   [ "${1:-}" = -- ] && shift
-  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
+  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \
       HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 ${kv[@]+"${kv[@]}"} "$BREW" "$@"
 }
 # "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
@@ -1116,7 +1159,11 @@ cmd_deps() {
   fi
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
-    say "Homebrew itself may upgrade an outdated dependency of a formula it installs."
+    say "Homebrew also installs what they need, and links the commands of those that are not keg-only (llvm@22 is) into"
+    say "$BREW_PREFIX/bin: a shell that has that folder before /usr/bin finds them first, python3 too when one of them needs"
+    say "Homebrew's newest Python."
+    say "Homebrew itself may upgrade an outdated dependency of a formula it installs; the older version stays, as Homebrew's"
+    say "own clean-up after an install is turned off for these installs (HOMEBREW_NO_INSTALL_CLEANUP=1)."
     if [ "$(mac_arch)" = x86_64 ]; then
       say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
       say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
@@ -1124,11 +1171,15 @@ cmd_deps() {
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
-    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 $BREW install $f"; done
+    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 $BREW install $f"; done
     elif ask "Install them now?"; then
+      # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
+      # installed or upgraded and, when the last clean-up is 30 days old, of every formula, then the formulas nothing needs
+      # any more, dead links and empty folders in the prefix (on an Intel Mac that is /usr/local, shared with other
+      # software) and old downloads. None of that is build.sh's to remove.
       for f in "${want[@]}"; do
         say "brew install $f"
-        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 -- install "$f" || die "brew install $f failed"
+        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f" || die "brew install $f failed"
       done
     else say "not installed; the build needs them"; fi
     find_tools
@@ -1211,7 +1262,8 @@ deps_python() {
   mkdir -p "$TOOLS"
   "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
   write_requirements > "$TOOLS/requirements.txt"
-  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
+  # pip keeps what it downloads in ~/Library/Caches/pip unless told otherwise: that cache is the working directory's too
+  PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
     || die "pip could not install the pinned packages (see above)"
   write_requirements | sha256_stdin > "$VENV/.nm-requirements"
   : "$want_new"
@@ -1249,11 +1301,19 @@ deps_rust() {
   env "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_CBINDGEN_VERSION" cbindgen || die "cargo install cbindgen failed"
 }
 # tools/bin: one link per tool the build may take from outside Xcode; it is the first folder on every step's PATH.
+# tools/bin/patch is not a link but a two-line script that runs the chosen patch with -f. macOS's patch asks a question
+# and waits for the answer on the terminal (/dev/tty, wherever its output goes) when a patch names a file that is not
+# there or looks applied already. build_rm620.sh and tools/test_patch_chain.sh try every patch in two folders with their
+# output sent to /dev/null, so without -f the rm step stopped at a question nobody could see. With -f no patch asks:
+# a missing file is skipped and counted as failed, a change that looks applied is not reversed, and patch exits 1, so
+# the scripts go on to the next folder or stop. GNU patch reads -f the same way.
 make_tool_links() {
   mkdir -p "$TBIN" "$THOST"
   local l
   for l in "$TBIN"/*; do [ -L "$l" ] && rm -f "$l"; done
-  [ -n "$T_PATCH" ] && ln -s "$T_PATCH" "$TBIN/patch"
+  rm -f "$TBIN/patch"
+  [ -z "$T_PATCH" ] || { printf '#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec %s -f "$@"\n' \
+                           "$(q "$T_PATCH")" > "$TBIN/patch" && chmod 755 "$TBIN/patch"; }
   [ -n "$T_NINJA" ] && ln -s "$T_NINJA" "$TBIN/ninja"
   [ -n "$T_CMAKE" ] && ln -s "$T_CMAKE" "$TBIN/cmake"
   [ -n "$T_PKGCONFIG" ] && ln -s "$T_PKGCONFIG" "$TBIN/pkg-config"
@@ -1681,9 +1741,12 @@ cmd_test() {
   case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac
   # the runner leaves this one to build_nvrm.sh; with the fetched pristine tree it can run here
   local pc="not run (no pristine $NM_PIN_OGKM620_REF tree yet: ./build.sh fetch)"
-  if [ -f "$PRISTINE/version.mk" ]; then
+  # with the patch the build uses (tools/bin/patch, which never asks: make_tool_links) and the steps' PATH
+  [ ! -f "$PRISTINE/version.mk" ] || { find_tools; make_tool_links; }
+  if [ -f "$PRISTINE/version.mk" ] && [ -z "$T_PATCH" ]; then pc="not run (no patch that applies the chains: ./build.sh doctor)"
+  elif [ -f "$PRISTINE/version.mk" ]; then
     say "== the kexts/NVRM patch chain against $PRISTINE"
-    if ( cd "$HERE" && env "PATH=$TBIN:$PATH" bash tools/test_patch_chain.sh "$PRISTINE" ) > "$LOGS/test-patch-chain.log" 2>&1; then
+    if ( cd "$HERE" && env "PATH=$STEP_PATH" bash tools/test_patch_chain.sh "$PRISTINE" ) > "$LOGS/test-patch-chain.log" 2>&1; then
       pc="every patch applies with --fuzz=0"
     else pc="FAILED (see $(printf '%s' "$LOGS/test-patch-chain.log" | tilde))"; rc=1; fi
   fi
@@ -1877,17 +1940,26 @@ main() {
   # On a Mac with neither Xcode nor its command line tools, /usr/bin/git, make, python3, xcrun and xcodebuild are Apple's
   # stand-ins, and the first one that runs opens a dialog offering to install the command line tools. So before any of
   # them runs (check_paths runs git, doctor make and python3): xcode-select -p, which opens nothing, says whether there
-  # is a developer folder; without one every command but help stops here, doctor with its usual summary.
-  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then
+  # is a developer folder; without one every command but help stops here, doctor with its usual summary. The same for
+  # a developer folder that is not there or not whole (developer_dir_problem): Apple's tools then all fail with "invalid
+  # active developer path", and check_paths would take the failing git for a checkout that is not a git clone.
+  local devp=""
+  if [ "$CMD" != help ] && is_mac; then
+    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi
+  fi
+  if [ -n "$devp" ]; then
     if [ "$CMD" = doctor ]; then
       say "== Xcode (cannot be installed by a script)"
-      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs)"
+      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later ($devp; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs, or they fail)"
       xcode_help; say ""
-      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected)"
+      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later ($devp)"
       trap - ERR; exit 1
     fi
     xcode_help >&2
-    die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+    if [ "$devp" = "none selected" ]; then
+      die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+    fi
+    die "$devp, so nothing was run: git, make, python3 and xcrun would all fail. Select an installed Xcode (xcode-select --switch, above) or correct DEVELOPER_DIR"
   fi
   case "$CMD" in
     help) cmd_help; return 0 ;;
