@@ -323,6 +323,13 @@ has proven itself, renewed with a reason otherwise.
   or one only one of the two systems exports, fails the check instead of failing to load on a user's Mac.
 - `.github/workflows/ci.yml` runs that check, the host tests and the Mac builds on every push once Actions are enabled
   for the repository.
+- On an Intel Mac `./build.sh deps` no longer needs Homebrew: it builds the missing build tools (ninja, CMake, Python
+  3.14 with its OpenSSL, zstd and xz, pkgconf, SPIRV-Tools, glslang, LLVM 22 with clang) from pinned sources with
+  `build/toolchain.sh` into the working directory, for macOS 15.0 and later, and checks that each links only macOS's
+  libraries and its own. About 70 minutes and 10 GB of free space on one 12-thread Intel Mac. `NM_TOOLS_FROM`
+  (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon. A tool you
+  already have is used as before. Homebrew's SPIRV-LLVM-Translator is now taken only with Homebrew's own `llvm`; with
+  any other LLVM the pinned translator is built against it.
 - Every step of `./build.sh`, its SPIRV-LLVM-Translator build and its pip now get `SDKROOT` set to the macOS SDK of
   the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
   searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel

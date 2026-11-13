@@ -208,9 +208,9 @@ translator, the video library and the tools. Each part is a step with its own lo
 is skipped the next time. It never calls `sudo` and never installs the driver: at the end it prints the `install.sh`
 command to run yourself.
 
-On an Intel Mac the first `./build.sh` takes hours: Homebrew has no ready-made builds for Intel Macs any more, so it
-compiles each missing formula (LLVM 22 above all) on the Mac, and for that it also needs Apple's command line tools
-(`xcode-select --install`) besides Xcode. On Apple silicon it installs ready-made ones.
+On an Intel Mac Homebrew has no ready-made builds any more, so the first `./build.sh` builds the missing build tools
+(LLVM 22 above all) from pinned sources into its working directory, without Homebrew: about 70 minutes on one
+12-thread Intel Mac, and 10 GB of free space while it builds. On Apple silicon it installs Homebrew's ready-made ones.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
 repository, so a package is the release's with every part this checkout builds replaced):

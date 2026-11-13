@@ -47,9 +47,24 @@
 #NM_SPIRV_LLVM_URL=https://github.com/KhronosGroup/SPIRV-LLVM-Translator.git
 #NM_SPIRV_HEADERS_URL=https://github.com/KhronosGroup/SPIRV-Headers.git
 #NM_RUSTUP_URL=https://static.rust-lang.org/rustup/archive/1.29.3
+# the sources deps builds the toolchain from (NM_TOOLS_FROM=source)
+#NM_TC_NINJA_URL=https://github.com/ninja-build/ninja.git
+#NM_TC_CMAKE_URL=https://github.com/Kitware/CMake.git
+#NM_TC_OPENSSL_URL=https://github.com/openssl/openssl.git
+#NM_TC_ZSTD_URL=https://github.com/facebook/zstd.git
+#NM_TC_XZ_URL=https://github.com/tukaani-project/xz.git
+#NM_TC_PYTHON_URL=https://github.com/python/cpython.git
+#NM_TC_PKGCONF_URL=https://github.com/pkgconf/pkgconf.git
+#NM_TC_SPIRVHEADERS_URL=https://github.com/KhronosGroup/SPIRV-Headers.git
+#NM_TC_SPIRVTOOLS_URL=https://github.com/KhronosGroup/SPIRV-Tools.git
+#NM_TC_GLSLANG_URL=https://github.com/KhronosGroup/glslang.git
+#NM_TC_LLVM_URL=https://github.com/llvm/llvm-project.git
 #RUSTUP_DIST_SERVER=https://static.rust-lang.org
 
 # --- tools and trees you already have -----------------------------------------------------------------------------
+# where deps gets a missing build tool: source (built from pinned sources into <workdir>/tools/toolchain, no
+# Homebrew), homebrew, or auto (source on an Intel Mac, homebrew on Apple silicon)
+#NM_TOOLS_FROM=auto
 # an Xcode other than the selected one
 #DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 # the brew to use; when set, no other Homebrew is looked for

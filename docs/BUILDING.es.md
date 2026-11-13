@@ -45,15 +45,29 @@ comandos y opciones y la solución de problemas.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
-- Homebrew, solo para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
+- Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor. Una que ya tengas se usa donde esté
+  (un ajuste como `NM_LLVM_PREFIX`, Homebrew, el `PATH`); una que falte sale de donde diga `NM_TOOLS_FROM`. En un
+  **Mac Intel** (`auto` es allí `source`), `./build.sh deps` compila ninja, CMake, Python 3.14 (con OpenSSL, zstd y xz),
+  pkgconf, SPIRV-Tools, glslang y LLVM 22 con clang desde fuentes fijadas con `build/toolchain.sh`, en
+  `<directorio de trabajo>/tools/toolchain`: **no hace falta Homebrew** y nada se instala fuera del directorio de
+  trabajo. Solo GNU patch no se compila: si el `patch` de macOS no puede crear archivos (los parches de NVK lo
+  necesitan), pon GNU patch en el `PATH` como `gpatch` (la fórmula de Homebrew es `gpatch`); `deps` lo dice. En
+  **Apple silicon** (`auto` es allí `homebrew`) `deps` instala las fórmulas listas de Homebrew.
+- Homebrew (solo con `NM_TOOLS_FROM=homebrew`, el valor de `auto` en Apple silicon), para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
   airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
   bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
   (`<directorio de trabajo>/tools/bin/patch`): sin él, el `patch` de macOS pregunta en el terminal cuando no encuentra
   el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
   pregunta que nadie ve. Si falta Homebrew, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
-- Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
-  que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
+- Tiempo y disco de las herramientas compiladas desde fuentes, medidos en un Mac Intel de 12 hilos: unos 70 minutos en
+  total (11 de descargas, 34 solo LLVM) y 6,7 GB con todas las carpetas de compilación (fuentes 3,2 GB, compilación
+  2,4 GB, herramientas instaladas 1,1 GB). `deps` pide 10 GB libres antes de empezar LLVM y dice cuánto queda libre si
+  hay menos. Mantén el Mac despierto y enchufado: una herramienta interrumpida (Ctrl-C, reposo, corte) se vuelve a
+  compilar desde el principio con el siguiente `./build.sh deps`, y LLVM es la larga. Una herramienta que falla detiene
+  `deps` y nombra su registro (`<directorio de trabajo>/logs/toolchain/<herramienta>.log`); el siguiente `deps` empieza
+  por ella. Homebrew ya no tiene compilaciones listas (bottles) para Mac Intel: con `NM_TOOLS_FROM=homebrew`, `deps` hace
+  que Homebrew compile aquí cada fórmula que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
   mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas. Para
   compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
   macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o `Your Command Line Tools are
@@ -80,7 +94,11 @@ que falta después de preguntar, descarga las fuentes fijadas, compila todos los
 lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiaron se saltan.
 
 Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio de trabajo, por defecto
-`~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
+`~/nullmoth-build` (fuera del clon); las herramientas compiladas desde fuentes van a su `tools/toolchain`, sus
+carpetas de compilación a `tools/toolchain-build`, sus registros a `logs/toolchain` y sus fuentes verificadas a
+`src/git/tc-*.git` y `src/toolchain`. Ninguna de ellas se distribuye: la compilación de NVK tiene LLVM y SPIRV-Tools
+desactivados y solo `mesa_clc`, un programa que se usa al compilar, los enlaza. Solo las fórmulas de Homebrew
+(`NM_TOOLS_FROM=homebrew`) van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`. Un Rust que tengas en otro sitio (en
 `~/.cargo`, por ejemplo) no se usa ni se toca: `doctor` dice que falta Rust hasta que `deps` pone el fijado en el
 directorio de trabajo. Pero cargo lee el `.cargo/config.toml` de cada carpeta por encima de aquella en la que trabaja:
@@ -190,6 +208,18 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_WEBKIT_SPI_URL` | Carpeta (URL) con las dos cabeceras de WebKit |
 | `NM_SPIRV_LLVM_URL` | Réplica de SPIRV-LLVM-Translator (deps lo compila para LLVM 22) |
 | `NM_SPIRV_HEADERS_URL` | Réplica de SPIRV-Headers |
+| `NM_TOOLS_FROM` | De dónde saca `deps` una herramienta de compilación que falta (la que ya está se usa donde esté): `source` la compila con `build/toolchain.sh` desde las fuentes fijadas en `<workdir>/tools/toolchain`, sin Homebrew; `homebrew` instala la fórmula de Homebrew; `auto` (por defecto) es `source` en un Mac Intel (Homebrew no tiene compilaciones listas para él) y `homebrew` en Apple silicon. Otro valor detiene `build.sh` |
+| `NM_TC_NINJA_URL` | Réplica de ninja (v1.13.2), fuente de las herramientas que compila deps |
+| `NM_TC_CMAKE_URL` | Réplica de CMake (v4.4.5), fuente de las herramientas que compila deps |
+| `NM_TC_OPENSSL_URL` | Réplica de OpenSSL (openssl-3.5.9), fuente de las herramientas que compila deps |
+| `NM_TC_ZSTD_URL` | Réplica de zstd (v1.5.7), fuente de las herramientas que compila deps |
+| `NM_TC_XZ_URL` | Réplica de xz (v5.8.4), fuente de las herramientas que compila deps |
+| `NM_TC_PYTHON_URL` | Réplica de CPython (v3.14.10), fuente de las herramientas que compila deps |
+| `NM_TC_PKGCONF_URL` | Réplica de pkgconf (pkgconf-2.5.1), fuente de las herramientas que compila deps |
+| `NM_TC_SPIRVHEADERS_URL` | Réplica de SPIRV-Headers (para el SPIRV-Tools de la cadena de herramientas) (vulkan-sdk-1.4.363.0), fuente de las herramientas que compila deps |
+| `NM_TC_SPIRVTOOLS_URL` | Réplica de SPIRV-Tools (vulkan-sdk-1.4.363.0), fuente de las herramientas que compila deps |
+| `NM_TC_GLSLANG_URL` | Réplica de glslang (16.6.0), fuente de las herramientas que compila deps |
+| `NM_TC_LLVM_URL` | Réplica de llvm-project (llvmorg-22.1.8), fuente de las herramientas que compila deps |
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
@@ -298,6 +328,11 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: NVRM.kext imports ___x86_return_thunk, which no macOS defines` (u otro kext, u otro nombre `___x86_`, `___fentry__` o `mcount`; el paso termina con código 7) | El kext se compiló con una opción hecha para el kernel de Linux, cuya función auxiliar no existe en macOS: enlazaría y nunca cargaría. Se detiene antes de empaquetar nada | Si `KMS_ARCHIVE` está definida, apunta a un archivo de NVKMS compilado con otros comandos: quítala. Si no, compila de nuevo en otra carpeta de trabajo (`--workdir`); si sigue, repórtalo con el archivo de informe |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
+| `STOP: step 'toolchain-<tool>' failed` (deps) | `build/toolchain.sh` no pudo compilar o comprobar esa herramienta; su registro es `logs/toolchain/<tool>.log` | Lee sus últimas líneas; el siguiente `./build.sh deps` empieza por esa herramienta |
+| `... links <library>, which is neither the system's nor the toolchain's` (en un registro de toolchain) | Una herramienta tomó una biblioteca de otra carpeta, normalmente el `/usr/local` de Homebrew en un Mac Intel; no se escribe su sello y no se usa | Repórtalo con el archivo de informe |
+| `... is built for macOS N and later, above MACOSX_DEPLOYMENT_TARGET` (en un registro de toolchain) | Una herramienta se compiló para un macOS más nuevo que el mínimo (15.0) | Repórtalo con el archivo de informe |
+| `deps` se interrumpió mientras compilaba LLVM | El árbol a medias no se retoma | Ejecuta `./build.sh deps` otra vez: LLVM se compila de nuevo desde cero (34 minutos en un Mac Intel de 12 hilos); mantén el Mac despierto |
+| `building LLVM needs about 10 GB free` | Poco espacio libre donde está el directorio de trabajo | Haz sitio o elige otro directorio con `--workdir` |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |
 | `the base package does not match its own SHA256SUMS` | El paquete publicado está dañado o modificado | Descárgalo de nuevo |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` con `--accel 15` o `26` | Usa `--accel both` |
