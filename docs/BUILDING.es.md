@@ -139,8 +139,10 @@ eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modul
 los ponía en `<directorio de trabajo>/build/build/...`; esa carpeta ya no se usa y `./build.sh clean` la borra. Detalles en
 [BUILDING.md](BUILDING.md#the-working-directorys-layout).
 
-Para hacer un paquete instalable hace falta un paquete de una versión publicada como base, porque algunos archivos que
-`install.sh` necesita no tienen código fuente en este repositorio:
+Para hacer un paquete instalable hace falta el paquete publicado de la versión 2.9 como base, porque algunos archivos
+que `install.sh` necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo
+que lleve algo más que carpetas, archivos normales y enlaces a un archivo de su misma carpeta). El paquete resultante
+no lleva el nombre de tu cuenta en sus cabeceras ni los atributos extendidos de tu Mac, así que se puede pasar a otros:
 
 ```bash
 ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
@@ -339,6 +341,8 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `building LLVM needs about 10 GB free` | Poco espacio libre donde está el directorio de trabajo | Haz sitio o elige otro directorio con `--workdir` |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |
 | `the base package does not match its own SHA256SUMS` | El paquete publicado está dañado o modificado | Descárgalo de nuevo |
+| `the base package is release <x>, not 2.9` | `package` solo parte de la versión 2.9: los archivos de otra versión que no tienen fuente aquí saldrían bajo la versión de esta compilación | Usa `nullmoth-nvidia-2.9.tar.gz` de Releases |
+| `the base package holds a link that leaves its folder` (o `a device, pipe or socket`, `a set-user-id or set-group-id file`) | El archivo no es un paquete publicado: uno publicado solo lleva carpetas, archivos normales y enlaces a un archivo de su misma carpeta | Descarga otra vez el paquete de Releases; no uses ese archivo |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` con `--accel 15` o `26` | Usa `--accel both` |
 
 ## Cuando falla la compilación

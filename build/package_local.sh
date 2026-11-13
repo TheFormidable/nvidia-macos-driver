@@ -7,7 +7,8 @@
 # nine video libraries, libvulkan 1.4.362, nvk_icd.json and nvrm610.conf have no source here (docs/PROVENANCE.md). The
 # release itself starts each package from the previous one and replaces what it rebuilds; this does the same.
 #
-#   <base package>   nullmoth-nvidia-<version>.tar.gz, or an unpacked pkgroot folder
+#   <base package>   nullmoth-nvidia-2.9.tar.gz, or its unpacked pkgroot folder. Refused: another release, and a base
+#                    that holds anything but folders, plain files and links to a file beside them
 #   <build out dir>  ./build.sh's out/ folder (kexts/, nvk/, xlate/, plugin/, nvencvt/, userland/, dlss-pkg/, ...)
 #   <package dir>    gets base/ (the unpacked base), pkgroot/ (the result) and the tarball
 # Environment: NM_BASE_PACKAGE_SHA256 (checked when set), NM_PACKAGE_VERSION (written to VERSION when set; install.sh
@@ -24,6 +25,7 @@ BASEPKG=${1:?base package (tarball or pkgroot folder)}; OUT=${2:?build out dir};
 HERE=$(cd "$(dirname "$0")/.." && pwd); P=$HERE/package
 mkdir -p "$PKG"; PKG=$(cd "$PKG" && pwd); OUT=$(cd "$OUT" && pwd)
 stop() { echo "STOP: $*"; exit 1; }
+BASE_RELEASE=2.9   # the release package this tree replaces parts of (docs/PROVENANCE.md lists what it keeps from it)
 
 # 1. the base
 if [ -f "$BASEPKG" ]; then
@@ -41,10 +43,26 @@ elif [ -d "$BASEPKG" ]; then
 else
   stop "$BASEPKG is neither a file nor a folder"
 fi
+# The base is a file somebody downloaded or was given. Everything below writes into a copy of it by fixed names (cp,
+# chmod, mkdir -p, printf >, rm -rf, ditto), and `cp -pR` copies its links as links: a link in it would carry those
+# writes out of the package folder (SHA256SUMS.new -> ~/.zshrc, Library/NullMoth/boost -> ~), and the base check below
+# reads only the files its SHA256SUMS lists. A release package holds folders, plain files and links to a file beside
+# them (nvmtl/libvulkan.dylib -> libvulkan.1.dylib); anything else is refused before the first write.
+while IFS= read -r l; do
+  case "$(readlink "$l")" in */*|.|..|'') stop "the base package holds a link that leaves its folder: ${l#"$B"/} -> $(readlink "$l") (not a release package)" ;; esac
+done < <(find "$B" -type l)
+odd=$(find "$B" ! -type f ! -type d ! -type l -print | sed -n 1p)
+[ -z "$odd" ] || stop "the base package holds a device, pipe or socket: ${odd#"$B"/} (not a release package)"
+odd=$(find "$B" -type f \( -perm -4000 -o -perm -2000 \) -print | sed -n 1p)
+[ -z "$odd" ] || stop "the base package holds a set-user-id or set-group-id file: ${odd#"$B"/} (not a release package)"
 for f in install.sh SHA256SUMS nullmoth-runtime-check.sh Library/GPUBundles/nvmtl-allow.txt Library/GPUBundles/NVMTLDriver.bundle/Contents/Info.plist; do
   [ -e "$B/$f" ] || stop "the base package has no $f (it must be a NullMoth release package; see docs/BUILDING.md)"
 done
 ( cd "$B" && shasum -a 256 --strict -c SHA256SUMS --quiet ) || stop "the base package does not match its own SHA256SUMS"
+# The release this tree's package is staged onto. Another release's files that have no source here (the plugin bundle's
+# Info.plist, air-runtime, the video libraries, nvk_icd.json) would ship beside this build's, under this build's version.
+bv=$(sed -n 1p "$B/VERSION" 2>/dev/null || true)
+[ "$bv" = "$BASE_RELEASE" ] || stop "the base package is release ${bv:-unknown (it has no VERSION)}, not $BASE_RELEASE, the release this checkout's package is staged onto (docs/BUILDING.md)"
 echo "base package: $BASEPKG ($(sed -n 1p "$B/VERSION" 2>/dev/null || echo 'no VERSION'))"
 
 # 2. a fresh copy
@@ -136,6 +154,10 @@ bash "$P/finish_package.sh" "$R" --nvencvt "$OUT/nvencvt/libnvencvt.dylib" --air
 ( cd "$R" && shasum -a 256 --strict -c SHA256SUMS --quiet ) || stop "SHA256SUMS does not match the staged files"
 bash "$R/sums_complete.sh" "$R" || stop "a staged file is not listed in SHA256SUMS"
 T=$PKG/${NM_PACKAGE_NAME:-nullmoth-nvidia-local.tar.gz}
-rm -f "$T"; ( cd "$PKG" && COPYFILE_DISABLE=1 tar -czf "$T" pkgroot ) || stop "could not write $T"
+# A package is passed on: its headers name root/wheel, not the account and group that built it, and it carries no
+# extended attributes, ACLs or file flags of this Mac (com.apple.quarantine names the browser that downloaded the base,
+# com.apple.provenance this Mac's records). COPYFILE_DISABLE=1 keeps out the "._name" AppleDouble entries only.
+rm -f "$T"; ( cd "$PKG" && COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname wheel --no-xattrs --no-acls --no-fflags \
+  --no-mac-metadata -czf "$T" pkgroot ) || stop "could not write $T"
 echo "package: $R"
 echo "tarball: $T ($(shasum -a 256 "$T" | cut -d' ' -f1))"

@@ -427,13 +427,17 @@ package without `nullmoth-runtime-check`, and the plugin bundle's Info.plist, `n
 video libraries, the Vulkan loader 1.4.362 and a few configuration files have no source here
 ([PROVENANCE.md](PROVENANCE.md)). The release itself starts each package from the previous one. So
 `./build.sh package` does the same: with a release package as the base (`--base-package`, a
-`nullmoth-nvidia-<version>.tar.gz` from Releases or its unpacked `pkgroot`), `build/package_local.sh` checks the base
-against its own SHA256SUMS (and against `NM_BASE_PACKAGE_SHA256` when set), replaces every part this checkout builds
+`nullmoth-nvidia-2.9.tar.gz` from Releases or its unpacked `pkgroot`), `build/package_local.sh` checks the base
+against its own SHA256SUMS (and against `NM_BASE_PACKAGE_SHA256` when set), refuses a base that is not release 2.9
+(the release this tree is staged onto) or that holds anything but folders, plain files and links to a file beside
+them (a link out of its folder would carry the step's writes with it), replaces every part this checkout builds
 (the kexts, NVK, the translator, the plugin binary, the scripts, the DLSS tools, the licences), refreshes their
 SHA256SUMS lines, writes `VERSION` (`NM_PACKAGE_VERSION`: by default the release this checkout is, from CHANGELOG.md),
 adds `NULLMOTH-LOCAL-BUILD.txt` (commit, local changes, pins), runs `package/finish_package.sh`
 like a release, then makes the check install.sh makes first (`shasum -a 256 -c SHA256SUMS`). install.sh checks a
-package's integrity, not who built it, so it accepts this one. The ryzenadj built here has another SHA-256 than the
+package's integrity, not who built it, so it accepts this one. The tarball's headers name `root` and `wheel`, not the
+account that built it, and it carries none of your Mac's extended attributes (the quarantine mark of a downloaded
+base names your browser), so it can be passed on. The ryzenadj built here has another SHA-256 than the
 one the 1401 app pins, so the app will not install it; the driver is not affected.
 
 Install it yourself, as for a release (read [README.md](../README.md), "Install — by hand", first: OpenCore must be
@@ -509,6 +513,8 @@ restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brin
 | deps was interrupted while LLVM built (Ctrl-C, sleep, power) | The half-built tree is not resumed | Run `./build.sh deps` again: LLVM is built again from an empty build tree (34 minutes on one 12-thread Intel Mac); keep the Mac awake |
 | `building LLVM needs about 10 GB free` | Not enough free space where the working directory is | Make room, or choose a working directory on another disk with `--workdir` |
 | `the base package does not match its own SHA256SUMS` | The release package is damaged or changed | Download it again |
+| `the base package is release <x>, not 2.9` | `package` stages onto release 2.9 only: another release's files that have no source here would ship under this build's version | Use `nullmoth-nvidia-2.9.tar.gz` from Releases |
+| `the base package holds a link that leaves its folder` (or `a device, pipe or socket`, `a set-user-id or set-group-id file`) | The file is not a release package: a release holds folders, plain files and links to a file beside them | Download the release package again from Releases; do not use the file |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` with `--accel 15` or `26` | Use `--accel both` |
 | the summary says the plugin was built from "the working tree ... with its uncommitted changes" | Your checkout has local changes | Expected; untracked files are not part of that build |
 

@@ -3639,6 +3639,12 @@ SCAN = [
 ]
 
 
+# long options that macOS's own tar (bsdtar) has, for writing an archive that names no account and carries none of
+# the Mac's attributes (build/package_local.sh): they are not what the long-options rule is after, which still catches
+# every other long option of tar
+BSDTAR_OPTIONS = r"--(?:uid|gid|uname|gname)\s+\S+|--no-(?:xattrs|acls|fflags|mac-metadata)\b"
+
+
 def scan_problems(files):
     p = []
     for f, text in files.items():
@@ -3646,6 +3652,8 @@ def scan_problems(files):
             if line.lstrip().startswith("#"):
                 continue
             code = re.sub(r"\s#\s.*$", "", line)
+            if re.search(r"\btar\s", code):
+                code = re.sub(BSDTAR_OPTIONS, "", code)
             for rx, what, _ in SCAN:
                 if re.search(rx, code):
                     p.append(f"{f}:{n}: {what}: {line.strip()[:120]}")
@@ -3665,6 +3673,10 @@ def arm_scan():
         if not scan_problems({"control": sample}):
             check(f"control: the scan catches {what}", False, sample)
     check(f"control: each of the {len(SCAN)} scan patterns catches its example", all(scan_problems({"c": s}) for _, _, s in SCAN))
+    own = "tar --uid 0 --gid 0 --uname root --gname wheel --no-xattrs --no-acls --no-fflags --no-mac-metadata -czf t d"
+    check("the scan lets through the long options macOS's own tar has for an archive without the builder's account",
+          not scan_problems({"c": own}), scan_problems({"c": own}))
+    check("control: a GNU-only option of tar beside them is caught", bool(scan_problems({"c": own.replace("--gid 0", "--owner=root")})))
     for n in names:
         r = subprocess.run([BASH, "-n", str(ROOT / n)], capture_output=True, text=True)
         check(f"{BASH} -n {n}", r.returncode == 0, r.stderr)

@@ -303,10 +303,11 @@ has proven itself, renewed with a reason otherwise.
   missing after asking (Homebrew formulas only, with the Homebrew of the Mac's own processor, and build.sh itself
   upgrades and removes nothing you have; Python and Rust inside its own working directory),
   fetches every outside source at a pinned commit or checksum (`build/pins.sh`), builds each component as a logged,
-  skippable step, and can stage a package from a release package. A package it makes records the version of the
+  skippable step, and can stage a package from the 2.9 release package (another release, or a file that holds more
+  than a release package does, is refused). A package it makes records the version of the
   checkout it was built from (the first heading of this changelog, or `NM_PACKAGE_VERSION`) as the installed version
-  that Send logs and the app's update check read, not its base package's. It never uses `sudo` and never installs the
-  driver.
+  that Send logs and the app's update check read, not its base package's, and its headers do not name the account
+  that built it. It never uses `sudo` and never installs the driver.
   Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
   so the first runs may stop on something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
 - Building the kexts on an Intel Mac, with 2.9's scripts too, made an NVRM.kext that macOS cannot load: NVIDIA's
