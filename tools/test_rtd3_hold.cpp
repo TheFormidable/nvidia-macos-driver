@@ -1,7 +1,8 @@
 /* test_rtd3_hold.cpp - system sleep and wake against the opt-in idle power-down monitor (nvrtd3=1), under real threads.
    Build and run from the repository root:
      c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread -I kexts/NVRM tools/test_rtd3_hold.cpp -o /tmp/test_rtd3_hold && /tmp/test_rtd3_hold
-   Optional argument: seconds per threaded scenario (default 1; use 5 or more, and -fsanitize=thread, for a long run).
+   Optional argument: seconds the scenario of the real hold runs at least (default 1; use 5 or more, and
+   -fsanitize=thread, for a long run).
 
    The monitor (kexts/NVRM/nv_rtd3.cpp) is a thread call that polls the GPU and, after a minute of idle, runs the GPU's
    own suspend path and switches the slot's power resource off; when something wants the GPU again it switches the
@@ -28,6 +29,11 @@
      running is not resumed by the wake);
    - the wake ends with the GPU running and the resource on, before it gives the GPU back.
    Each property has a negative control: the same scenario with one line of the hold broken must fail.
+   The threads hand the processor to each other at every step (a yield), and a machine that is busy with other work
+   answers a yield with another program's whole turn: there a second can hold a single sleep, which shows nothing
+   either way. So no scenario is judged by what one second happened to hold: the real hold runs until it has seen
+   kMinSleeps sleeps with the monitor powering the GPU off between them, a control until its broken line is caught,
+   and each gives up kPatience seconds after its start. Every line ends with the numbers it was judged by.
    Under -fsanitize=thread the checks pass, and the sanitizer reports races on the monitor's plain fields (the state
    and the idle count of nv_rtd3_policy.h), which the wake's switch-on and the poll share in the kernel the same way:
    word-sized, and every decision that acts on them is made inside the gate under the hold. */
@@ -44,10 +50,12 @@
 static int g_fail;
 static void check(const char *name, bool ok, const char *detail = "")
 {
-    std::printf("%s %s%s%s\n", ok ? "ok  " : "FAIL", name, (!ok && detail[0]) ? " - " : "", ok ? "" : detail);
+    std::printf("%s %s%s%s\n", ok ? "ok  " : "FAIL", name, detail[0] ? " - " : "", detail);
     if (!ok) g_fail++;
 }
 static double g_seconds = 1.0;
+static const long kMinSleeps = 200;                    // sleeps the real hold is judged by, where the machine allows
+static const double kPatience = 30.0;                  // seconds a scenario waits for what it is judged by
 using Clock = std::chrono::steady_clock;
 static bool elapsed(Clock::time_point t0, double s) { return std::chrono::duration<double>(Clock::now() - t0).count() >= s; }
 
@@ -192,8 +200,10 @@ static int op_off(void *) { int ok = 0; if (Model *n = g_m->rtd3Enter()) { if (!
 static int op_on(void *) { int ok = 0; if (Model *n = g_m->rtd3Enter()) { if (!n->rtd3Held()) ok = n->power_on(); n->rtd3Leave(); } Model::spin(*tl_rng, 8); return ok; }
 static const struct nv_rtd3_ops kOps = { nullptr, heads, clients, op_suspend, op_resume, op_off, op_on };
 
-struct Run { long bad, sleeps, path_runs, monitor_offs; };
-static Run scenario(const Variant &v, double seconds)
+struct Run { long bad, sleeps, path_runs, monitor_offs; double seconds; };
+// control: the scenario ends at the first violation; else it runs for `seconds` and on until it has seen kMinSleeps
+// sleeps and a power-off by the monitor. Either way it ends kPatience seconds after that at the latest.
+static Run scenario(const Variant &v, double seconds, bool control)
 {
     Model m;
     m.v = v;
@@ -213,7 +223,11 @@ static Run scenario(const Variant &v, double seconds)
     tl_rng = &r;
     long sleeps = 0;
     const auto t0 = Clock::now();
-    while (!elapsed(t0, seconds)) {
+    const double least = control ? 0.0 : seconds;
+    auto seen_enough = [&] {
+        return control ? m.bad.load() > 0 : (sleeps >= kMinSleeps && m.monitor_offs.load() > 0);
+    };
+    while (!elapsed(t0, least) || (!seen_enough() && !elapsed(t0, least + kPatience))) {
         Model::spin(r, 64);                            // the system is awake for a while
         m.setPowerState(0, &kOps, r);
         // asleep: the slot loses power, and nothing may move until the wake
@@ -226,10 +240,11 @@ static Run scenario(const Variant &v, double seconds)
         if (m.v.no_release) m.rtd3Release();           // so that the control's monitor keeps running into the next cycle
         sleeps++;
     }
+    const double took = std::chrono::duration<double>(Clock::now() - t0).count();
     m.stop.store(1);
     monitor.join();
     g_m = nullptr;
-    return Run{m.bad.load(), sleeps, m.path_runs.load(), m.monitor_offs.load()};
+    return Run{m.bad.load(), sleeps, m.path_runs.load(), m.monitor_offs.load(), took};
 }
 
 int main(int argc, char **argv)
@@ -238,9 +253,9 @@ int main(int argc, char **argv)
     if (g_seconds <= 0) g_seconds = 1.0;
     char why[200];
 
-    Run run = scenario(Variant{}, g_seconds);
-    std::snprintf(why, sizeof why, "%ld violations in %ld sleeps (%ld suspends and resumes, %ld power-offs by the monitor)",
-                  run.bad, run.sleeps, run.path_runs, run.monitor_offs);
+    Run run = scenario(Variant{}, g_seconds, false);
+    std::snprintf(why, sizeof why, "%ld violations in %ld sleeps in %.1f s (%ld suspends and resumes, %ld power-offs by the monitor)",
+                  run.bad, run.sleeps, run.seconds, run.path_runs, run.monitor_offs);
     check("the hold keeps the monitor out of every sleep and wake, and the monitor still powers the GPU off and on between them",
           run.bad == 0 && run.sleeps > 0 && run.monitor_offs > 0, why);
 
@@ -252,8 +267,8 @@ int main(int argc, char **argv)
         {"control: monitor calls that look only at the hold, not at the GPU's state, are caught", Variant{false, false, false, false, false, true}},
     };
     for (auto &c : controls) {
-        run = scenario(c.v, g_seconds);
-        std::snprintf(why, sizeof why, "%ld violations in %ld sleeps", run.bad, run.sleeps);
+        run = scenario(c.v, g_seconds, true);
+        std::snprintf(why, sizeof why, "%ld violations in %ld sleeps in %.1f s", run.bad, run.sleeps, run.seconds);
         check(c.name, run.bad > 0, why);
     }
     // A wake that never gives the GPU back keeps every sleep safe; what it breaks is the monitor, which never powers the
