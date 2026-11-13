@@ -161,7 +161,13 @@ static void rules()
    "Was it open" cannot be answered by reading `closed` before and after the attempt (a whole close and open fits in
    between), so the closer counts in `era`: odd from just before a close until just after the open, even in between.
    An enterer that reads the same even number before and after its attempt had the gate open all the way through, and
-   a refusal then is a violation. Any other pair of readings proves nothing and is not counted. */
+   a refusal then is a violation. Any other pair of readings proves nothing and is not counted.
+
+   The closer's wait for idle has a bound, as every such wait in the kernel has, and running into it is a violation: a
+   closed gate empties as soon as the enterers inside have had the processor once. Without the bound the first control
+   below did not end on a machine with one processor: its enter ignores `closed`, the closer only gets to look while
+   all three enterers are switched out, and they are switched out inside the gate nearly every time. */
+static const double kIdleBound = 10.0;   // seconds
 struct GateRun { long bad, cycles, open_tries, turned_away; };
 static GateRun gate_scenario(const GateOps &ops, double seconds)
 {
@@ -198,7 +204,10 @@ static GateRun gate_scenario(const GateOps &ops, double seconds)
     while (!elapsed(t0, seconds)) {
         era++;                                   // odd: a close is on its way
         nv_gate_close(&g);
-        while (!nv_gate_idle(&g)) std::this_thread::yield();
+        const auto closed_at = Clock::now();
+        bool idle = nv_gate_idle(&g);
+        while (!idle && !elapsed(closed_at, kIdleBound)) { std::this_thread::yield(); idle = nv_gate_idle(&g); }
+        if (!idle) { bad++; break; }             // closed, and still somebody inside after the bound
         sealed.store(1);
         if (users.load() != 0) bad++;
         for (int i = (int)(r() % 200); i > 0; i--) std::this_thread::yield();
