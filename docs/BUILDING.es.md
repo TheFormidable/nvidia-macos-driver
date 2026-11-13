@@ -15,19 +15,19 @@ comandos y opciones y la solución de problemas.
 >   terminaron bien, `./build.sh --no-install build` compiló los 17 componentes en 5 minutos 41 segundos sin ningún
 >   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. `./build.sh test` pasó allí
 >   303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 20 minutos 49 segundos. Nada
->   fuera del directorio de trabajo cambió, salvo los informes de fallo que las pruebas dejan a propósito (ver `test`
->   en [Comandos](#comandos)).
+>   fuera del directorio de trabajo cambió, salvo los informes de fallo que macOS escribe de los programas pequeños que
+>   las pruebas hacen fallar a propósito (ver `test` en [Comandos](#comandos)).
 > - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
->   3933ff6. De las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron allí),
->   `tools/test_build_sh.py` entre ellas. El flujo que compila todo en un directorio de trabajo vacío, con las
->   herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17 componentes en
->   30 minutos 20 segundos y preparó el paquete en 60 segundos; el resultado de su `./build.sh test` y de sus
->   comprobaciones de lo compilado no se indica aquí. {{PENDING full-test}} {{PENDING full-prove}}
+>   3933ff6. En el flujo `ci`, de las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron
+>   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
+>   vacío con las herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17
+>   componentes en 30 minutos 20 segundos y preparó el paquete en 60 segundos; después falló su paso `./build.sh test`,
+>   y también sus comprobaciones de lo compilado.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
 >   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
 >   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
 > - En ninguna parte: una compilación completa en Apple silicon (ver [Requisitos](#requisitos)), ni una compilación
->   de los commits de esta rama posteriores a 3933ff6 en ninguno de los dos Mac. {{PENDING 5c}}
+>   de los commits de esta rama posteriores a 3933ff6 en ninguno de los dos Mac.
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
 > funcionan `doctor`, `fetch`, `test`, `env` y la prueba en seco de cualquier comando salvo `deps`. Un paso todavía
@@ -53,7 +53,7 @@ comandos y opciones y la solución de problemas.
   ninguna máquina con Apple silicon en ningún push posterior.
 - **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Compilaciones completas han terminado
   bien con dos de ellos, ambas en el commit 3933ff6: Xcode 26.5 (SDK 26.5) en el Mac Intel de arriba y Xcode 26.3 (SDK 26.2)
-  en la máquina Intel de GitHub. Xcode 26.3 es el Xcode más nuevo que funciona en macOS 15.6 a 26.1 (Xcode 26.4.1,
+  en la máquina Intel de GitHub. Xcode 26.3 es el Xcode más nuevo que funciona en macOS 15 (Xcode 26.4.1,
   26.5 y 26.6 necesitan macOS 26.2 o posterior), y con un SDK anterior al 26.4 el plugin compila una parte propia que
   el SDK 26.5 deja fuera. Xcode 26.0 a 26.2 no se han probado. Las herramientas de línea de comandos solas no bastan:
   el plugin usa cabeceras de Metal 4 (`Metal/MTL4CommandQueue.h`) que solo tiene el SDK de macOS 26. No hace falta
@@ -163,7 +163,7 @@ borra al terminarla; sus preguntas `brew info` (ninguna con `--offline` o `--no-
 no sigue la instalación con su limpieza propia, que borraría versiones anteriores de tus fórmulas (cada 30 días, de todas),
 fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de su prefijo. Homebrew instala también lo que esas
 fórmulas necesitan y enlaza en su `bin` los comandos de las que no son keg-only (`llvm@22` lo es), que el `PATH` por
-defecto de macOS pone antes de `/usr/bin` en un Mac Intel; hoy eso incluye `python@3.15`, que `llvm@22` necesita para
+defecto de macOS pone antes de `/usr/bin` en un Mac Intel; cuando se leyó homebrew-core el 2026-11-13 eso incluía `python@3.15`, que `llvm@22` necesita para
 compilarse y que pasaría a ser el `python3` de una shell con ese `PATH` (la compilación usa `python@3.14`, desde la
 carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Homebrew un `python3` que no tenía,
 enlazado a una fórmula de Python que ellas añadieron o que un `deps` anterior de este directorio de trabajo
@@ -218,7 +218,11 @@ GSP lo descarga install.sh al instalar.
 Instalar una compilación de prueba sobre una versión publicada deja el mismo trabajo de respaldo que deja la
 instalación de una versión publicada: si el framebuffer de esta compilación rechaza las clases de Apple del macOS en
 uso y el driver no muestra nada en la tarjeta, ese trabajo vuelve a poner la versión publicada y reinicia el Mac por
-sí solo durante los primeros minutos de un arranque (ver [TROUBLESHOOTING.md](TROUBLESHOOTING.md)). Solo una pantalla
+sí solo durante los primeros minutos de un arranque (ver [TROUBLESHOOTING.md](TROUBLESHOOTING.md)). Un Mac que se
+reinicia solo con la versión publicada después de instalar una compilación de prueba ha llegado a ese caso, también
+uno cuyo OpenCore no excluye IONDRVSupport: allí el framebuffer del firmware de Apple puede mostrar antes, durante unos
+segundos, un escritorio lento sin aceleración en la tarjeta, y el Mac se reinicia aunque haya abierto tu sesión por sí
+solo. Solo una pantalla
 en otra GPU con una sesión abierta deja el reinicio en tus manos (`/Library/NullMoth/lastgood.log` lo dice); el
 siguiente reinicio trae la versión publicada.
 
@@ -233,9 +237,9 @@ siguiente reinicio trae la versión publicada.
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256. Cuando ya está Rust, descarga también los crates del traductor (`cargo fetch --locked`) para que su compilación funcione sin red |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
-| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch`. En un Mac, una ejecución deja unos veinticuatro informes de fallo en `~/Library/Logs/DiagnosticReports` (con nombres como ca, cb, oldv, resset): son de programas pequeños que las pruebas hacen fallar a propósito, y se pueden borrar |
+| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch`. En un Mac, una ejecución deja unas dos docenas de informes de fallo en `~/Library/Logs/DiagnosticReports` (con nombres como ca, cb, oldv, resset): son de programas pequeños que las pruebas hacen fallar a propósito, y se pueden borrar |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
-| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` las vuelve a compilar: 46,5 minutos en el Mac Intel de arriba y 3 horas 53 minutos en la máquina Intel de GitHub; `all` pregunta antes) |
+| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` las vuelve a compilar (`deps` desde un directorio de trabajo vacío tardó 46,5 minutos en el Mac Intel de arriba y 3 horas 53 minutos en la máquina Intel de GitHub); `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
 <!-- end -->
 
@@ -345,7 +349,7 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 | `NM_LOCAL_BUILD_HOST` | el nombre que atiende `build/local_build_host.sh` |
 | `CARGO_NET_OFFLINE` | `true` con `--offline` |
 | `PYTHONDONTWRITEBYTECODE` | `1` |
-| `SDKROOT` | el SDK de macOS del Xcode elegido (`xcrun --sdk macosx --show-sdk-path`), nunca el tuyo; también para compilar SPIRV-LLVM-Translator y para pip. Sin él, el clang de Apple busca en `/usr/local/include` y `/usr/local/lib` (el Homebrew de un Mac Intel) antes que en el SDK. No se pone donde no hay xcrun. Tu `SDKROOT` y tu `TOOLCHAINS` tampoco llegan al propio `build.sh`: el `git`, el `make` y el `python3` de `/usr/bin` buscan la herramienta real con xcrun, y `build.sh` les pregunta antes de su primer paso; con un `SDKROOT` que nombraba un SDK que no existía, una compilación en un Mac se detuvo ahí. doctor los nombra cuando están puestos; para compilar con otro SDK se elige su Xcode con `DEVELOPER_DIR` |
+| `SDKROOT` | el SDK de macOS del Xcode elegido (`xcrun --sdk macosx --show-sdk-path`), nunca el tuyo; también para compilar SPIRV-LLVM-Translator y para pip. Sin él, el clang de Apple busca en `/usr/local/include` y `/usr/local/lib` (el Homebrew de un Mac Intel) antes que en el SDK. No se pone donde no hay xcrun. Tu `SDKROOT` y tu `TOOLCHAINS` tampoco llegan al propio `build.sh`: el `git`, el `make` y el `python3` de `/usr/bin` buscan la herramienta real con xcrun, y `build.sh` les pregunta antes de su primer paso: un `SDKROOT` que nombra un SDK que no existe las haría fallar. doctor los nombra cuando están puestos; para compilar con otro SDK se elige su Xcode con `DEVELOPER_DIR` |
 | `PATH` | `<workdir>/tools/host`, `<workdir>/tools/bin`, `<workdir>/tools/venv/bin`, `/usr/bin:/bin:/usr/sbin:/sbin` |
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | nombre del paquete y descripción de la compilación |
 <!-- end -->
@@ -448,10 +452,9 @@ falló se repite. `-v` muestra la salida de cada paso mientras se ejecuta.
 
 Además, cada push se compila en un directorio de trabajo vacío en la máquina Intel de GitHub (sin tarjeta NVIDIA,
 sin instalar ni cargar nada), con las herramientas compiladas desde fuentes recuperadas de la caché de GitHub cuando
-una ejecución anterior las hizo (desde cero, `deps` tardó allí 3 horas 53 minutos): `.github/workflows/full-build.yml`
+una ejecución anterior las hizo (desde cero, en el commit 96bf32c, `deps` tardó allí 3 horas 53 minutos): `.github/workflows/full-build.yml`
 ejecuta deps, doctor, fetch, build, package y test, y comprueba que Homebrew no se usó ni cambió y que todo lo
 compilado carga solo de macOS, de esa carpeta y de las carpetas del propio driver. El resultado está en la pestaña
 Actions del repositorio, flujo full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. En
-el commit 3933ff6 todos los pasos hasta `package` terminaron bien; el resultado de su paso `test` y de sus
-comprobaciones no se indica aquí. {{PENDING full-test}} {{PENDING full-prove}} Hasta que haya pasado una vez, su
-resultado no detiene ningún cambio.
+el commit 3933ff6 todos los pasos hasta `package` terminaron bien allí; después falló su paso `test`, y también sus
+comprobaciones de lo compilado. Hasta que haya pasado una vez, su resultado no detiene ningún cambio.
