@@ -759,7 +759,7 @@ def arm_fresh():
     missing, exits 1, changes nothing; a dry run of everything ends without error and installs nothing."""
     bare = Sandbox("fresh-noxcode", xcode=None, brew=False)
 
-    def bare_problems(more=None, want="xcode-select"):
+    def bare_problems(more=None, want="xcode-select", cmds=(("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm"))):
         p = []
         extra = {k: v.replace("<sb>", str(bare.dir)) for k, v in fresh_brew().items()}
         extra.update(more or {})
@@ -768,7 +768,7 @@ def arm_fresh():
         items = doctor_items(out)
         if rc != 1 or len(items) != 1 or not items[0].startswith("Xcode"):
             p.append(f"doctor: exit {rc}, missing {items}")
-        for args in (("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm")):
+        for args in cmds:
             rc, out = bare.run(*args, extra=extra)
             if rc != 2 or "xcode-select" not in out or want not in out:
                 p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode ({want}): {out[-300:]}")
@@ -779,13 +779,15 @@ def arm_fresh():
         return p
 
     def gone_problems():
-        # an Xcode selected and then removed or renamed; and DEVELOPER_DIR naming a folder that is not there
+        # an Xcode selected and then removed or renamed; and DEVELOPER_DIR naming a folder that is not there (two
+        # commands each: the stop is the same code for all of them, which the case without Xcode shows for four)
+        two = (("env",), ("--dry-run", "build", "rm"))
         (bare.state / "devdir").write_text(f"{bare.dir}/Applications/Xcode-old.app/Contents/Developer\n")
-        p = bare_problems(want="does not exist")
+        p = bare_problems(want="does not exist", cmds=two)
         (bare.state / "devdir").unlink()
-        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/Applications/Xcode-26.app"}, want="DEVELOPER_DIR")
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/Applications/Xcode-26.app"}, want="DEVELOPER_DIR", cmds=two)
         (bare.dir / "half/usr/bin").mkdir(parents=True, exist_ok=True)
-        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="has no usr/bin/xcrun")
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="has no usr/bin/xcrun", cmds=two)
         return p
 
     p = bare_problems()
