@@ -12,10 +12,9 @@ directory at commit 650db45. At an earlier state of the branch that macOS's `kmu
 symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed have been fixed since. On
 GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6, the
 build of all 17 components and the package succeeded, and the host tests passed (303 passed, 0 failed, 3 skipped,
-9 not run, of 315). At commit 95811c2 the kernel extensions built on
-GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has run on an Apple-silicon Mac, and the
-host tests have not passed whole on one. The check list for a first run on a card is
-[docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
+9 not run, of 315). At commit 95811c2 the kernel extensions built on GitHub's Intel and Apple-silicon runners had the
+same bytes; no whole build has run on an Apple-silicon Mac, and the host tests have not passed whole on one. The check
+list for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
 alters how the driver runs has one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
@@ -318,9 +317,10 @@ has proven itself, renewed with a reason otherwise.
   checkout it was built from (the first heading of this changelog, or `NM_PACKAGE_VERSION`) as the installed version
   that Send logs and the app's update check read, not its base package's, and its headers do not name the account
   that built it. It never uses `sudo` and never installs the driver.
-  Needs macOS 15.6 or later and Xcode 26 (the whole driver has been built with Xcode 26.3 and with Xcode 26.5;
-  Xcode 26.0 to 26.2 have not been tried). It has built every component and a package on the Intel Mac and on
-  GitHub's Intel runner named at the top of this section; on Apple silicon it has run only against stand-ins. See
+  Needs macOS 15.6 or later and Xcode 26. At commit 3933ff6 it built every component and staged a package with
+  Xcode 26.5 on the Intel Mac and with Xcode 26.3 (SDK 26.2, the newest Xcode that runs on macOS 15) on GitHub's
+  Intel runner, both named at the top of this section; Xcode 26.0 to 26.2 have not been tried, and on Apple silicon
+  it has run only against stand-ins. See
   [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
 - Building the kexts on an Intel Mac, with 2.9's scripts too, made an NVRM.kext that macOS cannot load: NVIDIA's
   makefiles gave the display code an x86-only option because the Mac's own compiler accepted it, and every return
@@ -364,15 +364,17 @@ has proven itself, renewed with a reason otherwise.
 - On an Intel Mac `./build.sh deps` no longer needs Homebrew: it builds the missing build tools (ninja, CMake, Python
   3.14 with its OpenSSL, zstd and xz, pkgconf, SPIRV-Tools, glslang, LLVM 22 with clang) from pinned sources with
   `build/toolchain.sh` into the working directory, for macOS 15.0 and later, and checks that each links only macOS's
-  libraries and its own. From an empty working directory this took 46.5 minutes on the Intel Mac (30 of them for
-  LLVM) and 3 hours 53 minutes on GitHub's Intel runner, and needs 10 GB of free space while LLVM builds.
+  libraries and its own. `deps` from an empty working directory took 46.5 minutes on the Intel Mac at commit 650db45
+  (building LLVM about 30 of them) and 3 hours 53 minutes on GitHub's Intel runner at commit 96bf32c; it needs 10 GB
+  of free space while LLVM builds.
   `NM_TOOLS_FROM` (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon,
   a path tried only against a stand-in for Homebrew. On an Intel Mac build.sh does not use Homebrew, even when it is
   installed: with tools from source only the toolchain's tools and your own settings are used, and no `brew` is
   called. With `homebrew` a tool you already have is used as before.
   Homebrew's SPIRV-LLVM-Translator is now taken only with Homebrew's own `llvm`; with any other LLVM the pinned
   translator is built against it, and built again when the LLVM in use changes; a translator built before `deps`
-  noted its LLVM is built once more (on the Intel Mac, with every other tool already there, that `deps` took 49 s).
+  noted its LLVM is built once more (on the Intel Mac at commit 3933ff6, with every other tool already there, that
+  `deps` took 49 seconds).
 - Every step of `./build.sh`, its SPIRV-LLVM-Translator build and its pip now get `SDKROOT` set to the macOS SDK of
   the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
   searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel
