@@ -136,9 +136,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
        minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log`,
        devuelve el driver anterior y reinicia, así que vuelves a estar en 2.9 y ese archivo es lo que hay que enviar.
-       Sin la tarea (una primera instalación, o un driver que ya mostró su pantalla en un arranque anterior) no se
-       devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o quites el driver.
-       `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
+       Sin la tarea (una primera instalación, o cuando la tarea ya se borró sola en el arranque siguiente a uno que
+       encendió la pantalla) no se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o
+       quites el driver. `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
      - El mismo rechazo leído solo después de que NVRM arrancara: `auto-go: NOT STARTING THE GPU: the framebuffer
        refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Tampoco aparece
        ningún escritorio, este arranque sí cuenta, y la tarea del instalador hace lo mismo que arriba.
