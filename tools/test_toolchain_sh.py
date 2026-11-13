@@ -462,7 +462,9 @@ def main():
     print(f"shell: {BASH} ({subprocess.run([BASH, '-c', 'echo $BASH_VERSION'], capture_output=True, text=True).stdout.strip()})")
     check("build/toolchain.sh passes bash -n", subprocess.run([BASH, "-n", str(REAL_SCRIPT)]).returncode == 0)
     with tempfile.TemporaryDirectory(prefix="tc-test-") as tmp:
-        tmp = pathlib.Path(tmp)
+        # where it really is: on a Mac the temporary folder is under /var, a link to /private/var, and the script
+        # judges and names its folders by their real place
+        tmp = pathlib.Path(os.path.realpath(tmp))
         n = [0]
 
         def sandbox(**kw):
@@ -480,10 +482,14 @@ def main():
             check("build ran the tools in the order given", configure_order(sb) == TOOLS, configure_order(sb))
             check("the layout build.sh looks in is there", not layout_problems(sb.prefix), layout_problems(sb.prefix))
             broken = sb.sb / "broken-prefix"
-            shutil.copytree(sb.prefix, broken, symlinks=True)
-            (broken / "bin/glslangValidator").unlink()
-            control("the layout check reports a missing glslangValidator", layout_problems(broken))
-            shutil.rmtree(broken)
+            if (sb.prefix / "bin/glslangValidator").is_symlink():
+                shutil.copytree(sb.prefix, broken, symlinks=True)
+                (broken / "bin/glslangValidator").unlink()
+                control("the layout check reports a missing glslangValidator", layout_problems(broken))
+                shutil.rmtree(broken)
+            else:
+                check("control: the layout check reports a missing glslangValidator", False,
+                      "not run: the build above left no glslangValidator to remove")
             check("every tool has its stamp, with the caller's NM_TC_STAMP text",
                   all(sb.stamp(t) == "stamp-text-from-caller" for t in TOOLS), {t: sb.stamp(t) for t in TOOLS})
             check("build folders are removed once the checks pass", not any((sb.work / t).exists() for t in TOOLS),
@@ -972,4 +978,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # a check that failed may leave a later arm without what it works on: that is one more failure, said with
+        # where it happened, never a bare traceback that hides the count
+        import traceback
+        check("the test ran to its end", False, traceback.format_exc()[-1000:])
+        print(f"FAILED {fails}")
+        sys.exit(1)
