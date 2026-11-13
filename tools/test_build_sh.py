@@ -2138,6 +2138,45 @@ def translator_llvm_problems(sb):
     return p
 
 
+# doctor and a base package given as a folder (an unpacked release): its VERSION is read at once, and another release
+# is named as a problem then, not by the package step an hour later. A tarball is not unpacked for it.
+def basepkg_problems(script_edit=None):
+    sb = Sandbox("basepkg")
+    if script_edit:
+        sb.break_script(*script_edit)
+    p = []
+    for version, want_ok in (("2.9\n", True), ("2.8\n", False), (None, False)):
+        d = sb.home / f"base-{version and version.strip()}"
+        d.mkdir()
+        if version:
+            (d / "VERSION").write_text(version)
+        rc, out = sb.run("doctor", extra={"NM_BASE_PACKAGE": str(d)})
+        named = [i for i in doctor_items(out) if "base package" in i]
+        if want_ok and (named or not [l for l in out.splitlines() if l.strip().startswith("ok") and "base package" in l and "(release 2.9)" in l]):
+            p.append(f"release 2.9 as a folder is not ok: {named}")
+        if not want_ok:
+            what = version.strip() if version else "unknown (it has no VERSION)"
+            if not [i for i in named if f"is release {what}, which the package step refuses" in i] or rc == 0:
+                p.append(f"a folder of release {what} is not named as a problem (exit {rc}): {named}")
+    tgz = sb.home / "nullmoth-nvidia-2.8.tar.gz"
+    tgz.write_text("not a tarball: doctor must not open it\n")
+    rc, out = sb.run("doctor", extra={"NM_BASE_PACKAGE": str(tgz)})
+    said = [l.strip() for l in out.splitlines() if tgz.name in l]
+    if [i for i in doctor_items(out) if "base package" in i] or [l for l in said if "release" in l]:
+        p.append(f"a tarball was judged by doctor: {said}")
+    return p
+
+
+def arm_basepkg():
+    p = basepkg_problems()
+    check("doctor reads an unpacked base package's VERSION and names another release (or none) at once; a tarball is left "
+          "to the package step", not p, p)
+    negative("a doctor that takes any folder as the base package",
+             basepkg_problems(('  elif [ -d "$NM_BASE_PACKAGE" ]; then\n', '  elif false; then\n')))
+    negative("a doctor that reads a tarball as if it were a folder",
+             basepkg_problems(('  elif [ -d "$NM_BASE_PACKAGE" ]; then\n', '  elif [ -e "$NM_BASE_PACKAGE" ]; then\n')))
+
+
 def arm_llvm23():
     sb = Sandbox("llvm23", formulas=("cmake",))
     (sb.state / "brew-llvm").write_text("23.1.5\n")
@@ -4369,6 +4408,8 @@ def main():
                     timed("ownllvm", arm_ownllvm)
                 if want("settings"):
                     timed("settings", arm_settings)
+                if want("basepkg"):
+                    timed("basepkg", arm_basepkg)
                 if want("source"):
                     timed("source", arm_source)
                     timed("source_some", arm_source_some)

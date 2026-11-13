@@ -345,6 +345,8 @@ has proven itself, renewed with a reason otherwise.
   way of one of its links (a `python3` from python.org's installer, say) no longer stops it; it warns and goes on.
   A Python formula that `deps` unlinked (so that your shell's `python3` stays the one it was) is unlinked again
   when a later `deps` links it once more as a dependency of another formula.
+- `./build.sh doctor` reads the `VERSION` of a base package given as an unpacked folder and names a release other than
+  2.9 at once, instead of the package step stopping on it at the end of the build.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 

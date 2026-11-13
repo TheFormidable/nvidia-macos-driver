@@ -203,7 +203,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `--accel 15\|26\|both` | `NM_ACCEL` | `both` | Which NVAccel.kext builds to make: for macOS 15, for macOS 26, or both. A package needs both |
 | `-v`, `--verbose` | `NM_VERBOSE` | `0` | Show each step's output on the terminal as well as in its log |
 | `--force` | `NM_FORCE` | `0` | Rebuild the named components (or all) even when they are up to date |
-| `--base-package FILE` | `NM_BASE_PACKAGE` | none | The release package the package is made from: `nullmoth-nvidia-2.9.tar.gz` or its unpacked `pkgroot` (the release is `NM_PIN_BASE_RELEASE` in `build/pins.sh`; another release is refused) |
+| `--base-package FILE` | `NM_BASE_PACKAGE` | none | The release package the package is made from: `nullmoth-nvidia-2.9.tar.gz` or its unpacked `pkgroot` (the release is `NM_PIN_BASE_RELEASE` in `build/pins.sh`; another release is refused, by doctor at once for an unpacked folder, whose `VERSION` it reads) |
 | `--config FILE` | `NM_CONFIG` | `~/.config/nullmoth/build.conf` when it exists | The configuration file |
 | `-h`, `--help` | | | The same as `help` |
 <!-- end -->
