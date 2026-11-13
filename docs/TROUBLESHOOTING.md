@@ -130,8 +130,9 @@ line on a Mac whose display works is worth a report with the macOS build.
 - First, is the surface fence in use? `sysctl debug.nvrm_fence_state debug.nvrm_fence_accel debug.nvrm_fence_map_fail
   debug.nvrm_fence_map_mismatch debug.nvrm_fence_owners_distrusted`. State 1 and accel 1 with the other three at 0 is
   the normal case. State 0: `nvrmfence=0` is in the boot arguments. State 2: the fence switched itself off because
-  eight processes did not finish what they held; state 3 after a wake: the GPU did not resume. In both the driver
-  runs as 2.9 until the next boot; send the `NVRM-xnu: fence:` lines of `log show --last boot`.
+  eight connections to the fence were distrusted since boot for holds they did not end; state 3 after a wake: the
+  GPU did not resume. In both the driver runs as 2.9 until the next boot; send the `NVRM-xnu: fence:` lines of
+  `log show --last boot`.
 - Boot once with `nvrmfence=0`. If that cures it, send `sysctl debug | grep -e nvrm_fence -e nvaccel_surface` from the
   boot without the boot argument: `wait_ge100ms`, `expired_gpu`, `expired_cpu`, `chan_noirq` and `done_on_slice` say
   whether readers waited long for a slow writer, a writer did not finish, or interrupts did not arrive for a channel.
@@ -162,15 +163,15 @@ line on a Mac whose display works is worth a report with the macOS build.
 **The desktop freezes while recording the screen, taking screenshots or showing window thumbnails.** Boot once with
 `nvaccel_pageoff_locked=1` added to the boot arguments. If the freeze is gone, the page-off wait without the
 accelerator lock is the cause: please report it with the output of `sysctl debug | grep nvaccel_pageoff` and the
-kernel log lines that start with `page-off:`, and keep a spindump of WindowServer and kernel_task taken while it is
+kernel log lines `NVAccel: page-off: ...`, and keep a spindump of WindowServer and kernel_task taken while it is
 frozen. `debug.nvaccel_pageoff_unlocked_standdown` = 1 without the boot argument means the driver already turned that
 path off for the boot; the log line says why.
 
 **Screen sharing, recording or video shows wrong colours, a green or purple cast, a frame from a moment ago, or
 frames that flicker between two.** Boot once with `nvaccel_surf_planes=0` and say whether it goes away. Before that,
-send `sysctl debug | grep -E 'nvaccel_(surf_plane|surfvram_ranged|pageoff_ranged)'`, the kernel log lines that start
-with `surfvram: surface ... ranged` and `surfvram pageoff: res ... plane`, and the `planar surfaces:` lines of
-`nvmtl.log`.
+send `sysctl debug | grep -E 'nvaccel_(surf_plane|surfvram_ranged|pageoff_ranged)'`, the kernel log lines
+`NVAccel: surfvram: surface ... ranged ...` and `NVAccel: surfvram pageoff: res ... plane ...`, and the
+`planar surfaces:` lines of `nvmtl.log`.
 
 **Applications use more CPU or stutter, with frame times between 1 and 3 ms.** Try `NVRM_EVENT_WAIT=0` in
 `nvrm610.conf` and relaunch the application: that restores polling for every process, WindowServer included (which
@@ -184,11 +185,11 @@ row did not arrive)` in the application's output, means that a process stopped t
 explains the numbers.
 
 **A window or game glitched once (a black frame, a missing frame, a stutter) and went on.**
-- A line `nvrm: channel slot ... rebuilt` in an application's output, or `nvk-reason: nvrm channel slot ... rebuilt`
-  in `nvmtl.log`, means the GPU faulted on one of that application's channels and NVK recovered it; the frames that
-  were on the GPU then may be missing. A line `not rebuilt` names the kind of loss and the reason; that application
-  lost its device as in 2.9. To rule the recovery out, put `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf` and restart the
-  application.
+- A line `nvrm: channel slot ... rebuilt` in an application's output, or `nvk-reason: W ...: nvrm channel slot ...
+  rebuilt` in `nvmtl.log`, means the GPU faulted on one of that application's channels and NVK recovered it; the
+  frames that were on the GPU then may be missing. A line `not rebuilt` names the kind of loss and the reason; that
+  application lost its device as in 2.9. To rule the recovery out, put `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf` and
+  restart the application.
 - `vk: after a GPU fault, a channel rebuild dropped this command buffer` in `nvmtl.log`: one frame (or the frames in
   flight) of that process was lost. Send the line and the `fault context:` lines after it. If the desktop froze after
   such a line in WindowServer, add `NVMTL_DROP_REPORT=0` to `nvrm610.conf` and say whether that changes it.
