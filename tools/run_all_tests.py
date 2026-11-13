@@ -239,6 +239,40 @@ def run_one(path, names=frozenset()):
     return name, "FAIL", f"exit {r.returncode}\n" + out[-TAIL:]
 
 
+# The release tags whose files the tests' controls read from git (git show v2.9:..., v2.8.1:..., v1.15.0:...); the
+# commits they read lie in the branch's own history.
+HISTORY_TAGS = ("v2.9", "v2.8.1", "v1.15.0")
+
+
+def history_note():
+    """-> one line for the end of a run with a failure when this tree lacks the history the tests' controls read from
+    git, else "". A tree without .git (an unpacked archive) is no checkout at all; a shallow clone (git clone --depth 1,
+    actions/checkout without fetch-depth) has neither the older commits nor the tags, and `git fetch --unshallow` alone
+    brings no tag when the clone was made with --no-tags; a whole clone made with --no-tags lacks only the tags. Git is
+    asked with a time limit, and a missing git or any error of it gives no note."""
+    if not (ROOT / ".git").exists():
+        return ("note: this tree is not a git checkout, and the tests whose controls read earlier revisions from git fail in it: "
+                "run them in a clone of the whole repository (git clone without --depth).")
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(ROOT), *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              errors="replace", timeout=10)
+    try:
+        shallow, tags = git("rev-parse", "--is-shallow-repository"), git("tag", "-l", *HISTORY_TAGS)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if shallow.returncode or tags.returncode:
+        return ""
+    if shallow.stdout.strip() == "true":
+        return ("note: this checkout is a shallow clone, and the tests whose controls read earlier revisions and the tags "
+                f"{', '.join(HISTORY_TAGS)} from git fail in it: `git fetch --unshallow --tags` brings them.")
+    missing = [t for t in HISTORY_TAGS if t not in tags.stdout.split()]
+    if missing:
+        return (f"note: this checkout lacks the tag{'s' if len(missing) > 1 else ''} {', '.join(missing)}, and the tests whose "
+                "controls read them from git fail without them: `git fetch --tags` brings them.")
+    return ""
+
+
 def main(argv):
     global TAIL
     jobs = 4
@@ -309,6 +343,10 @@ def main(argv):
     slow = sorted(((t, n) for n, t in took.items() if t >= SLOW), reverse=True)
     if slow:
         print(f"took {SLOW} s or more: " + ", ".join(f"{n} {t:.0f} s" for t, n in slow))
+    if by["FAIL"]:
+        note = history_note()
+        if note:
+            print(note)
     print(f"{len(by['ok'])} passed, {len(by['FAIL'])} failed, {len(by['skip'])} skipped, {len(by['norun'])} not run, of {len(results)}")
     return 1 if by["FAIL"] else 0
 
