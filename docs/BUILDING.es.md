@@ -6,43 +6,62 @@ puede preparar un paquete instalable. Nunca usa `sudo` y nunca instala el driver
 hacerlo. La guía completa, en inglés, es [BUILDING.md](BUILDING.md); aquí están el inicio rápido, la referencia de
 comandos y opciones y la solución de problemas.
 
-> **Escrito y probado sin un Mac.** `./build.sh` se ha ejecutado en un solo Mac (Intel, macOS 26.7, Xcode 26.5), y solo
-> en parte: funcionaron `doctor`, `env`, `--dry-run` y `fetch`, y compiló el plugin, la biblioteca de video (y el RM por
-> el camino) y las herramientas pequeñas; los kexts se detuvieron en su comprobación de GNU patch y Python 3.10, que ese
-> Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Ninguno de los cambios hechos en `build.sh`
-> después de esa ejecución se ha ejecutado aún en un Mac: la comprobación de herramientas por componente, la elección
-> de Homebrew y de las herramientas que toma del `PATH`, la organización del directorio de trabajo, la lista de
-> compilación del RM, la configuración de git de `fetch`, la parada sin Xcode (también con una carpeta de desarrollo que ya no está), el `patch` que reciben los scripts (con
-> `-f`) y el `PATH` que recibe brew solo se probaron contra los sustitutos.
-> Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
-> sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
-> (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
-> `--dry-run`. `deps` no ha instalado nada real, y `build.sh` todavía no ha compilado NVK ni el traductor ni ha preparado
-> ningún paquete.
-> Para la primera ejecución esto significa: es probable que algún paso se detenga por algo que ningún sustituto imitó
-> (un detalle de Xcode o de Homebrew, el nombre de una fórmula, un aviso del compilador). Ejecuta primero `./build.sh
-> doctor` y después `./build.sh`; si un paso se detiene, el mensaje dice cuál es y da un archivo de informe para
-> adjuntar al reportar el fallo (ver [Cuando falla la compilación](#cuando-falla-la-compilación)). Un paso que falla
-> nunca queda marcado como terminado, así que, una vez corregido, la siguiente ejecución sigue desde ese paso. Los
-> scripts de los componentes sí se ejecutaron a mano en el Mac Intel del propietario (macOS 26.7, Xcode 26.5) para los
-> kexts, el RM y el plugin; lo que eso mostró sobre un nombre de cuenta corto ya está resuelto (fila `rm` de la tabla de
-> problemas).
+> **Qué se ha ejecutado, y dónde.** Nada compilado desde esta rama se ha instalado, cargado ni ejecutado en una
+> tarjeta NVIDIA, y no se ha instalado ningún paquete hecho con `./build.sh package`. Lo que se ha ejecutado:
+>
+> - En un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5). En el commit 650db45, `./build.sh deps` empezó con un
+>   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
+>   46,5 minutos, sin Homebrew. En el commit 3933ff6, con esas herramientas ya hechas, `deps`, `doctor` y `fetch`
+>   terminaron bien, `./build.sh --no-install build` compiló los 17 componentes en 5 minutos 41 segundos sin ningún
+>   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. Nada fuera del directorio de trabajo
+>   cambió. Las pruebas no se han ejecutado completas en ese Mac en ese commit. {{PENDING 5b}}
+> - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
+>   3933ff6. De las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron allí),
+>   `tools/test_build_sh.py` entre ellas. El flujo que compila todo en un directorio de trabajo vacío, con las
+>   herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17 componentes en
+>   30 minutos 20 segundos y preparó el paquete en 60 segundos; el resultado de su `./build.sh test` y de sus
+>   comprobaciones de lo compilado no se indica aquí. {{PENDING full-test}} {{PENDING full-prove}}
+> - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
+>   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
+>   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
+> - En ninguna parte: una compilación completa en Apple silicon (ver [Requisitos](#requisitos)), ni una compilación
+>   de los commits de esta rama posteriores a 3933ff6 en ninguno de los dos Mac. {{PENDING 5c}}
+>
+> `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
+> funcionan `doctor`, `fetch`, `test`, `env` y la prueba en seco de cualquier comando salvo `deps`. Un paso todavía
+> puede detenerse por algo que no mostraron ni los sustitutos ni estos dos Mac (otro Xcode u otro SDK, el nombre de
+> una fórmula, un aviso del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un paso se
+> detiene, el mensaje dice cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver
+> [Cuando falla la compilación](#cuando-falla-la-compilación)). Un paso que falla nunca queda marcado como terminado,
+> así que, una vez corregido, la siguiente ejecución sigue desde ese paso.
 
 ## Requisitos
 
 - Un Mac con macOS 15.6 o posterior, Intel o Apple silicon. Xcode 26 no funciona en sistemas anteriores, así que
-  `deps`, `build`, `package` y `all` los rechazan al empezar. Apple silicon sirve para compilar; todo se compila para
-  x86_64, la arquitectura en la que funciona el driver. Un Mac Intel compila el RM y NVKMS de NVIDIA con exactamente
-  los mismos comandos que un Mac con Apple silicon: los Makefiles de NVIDIA preguntan al compilador del Mac qué
-  opciones de protección solo para x86 acepta, y `build/nv_compile_lines.py` quita lo que eso añade.
-- **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Las herramientas de línea de comandos
-  solas no bastan: el plugin usa cabeceras de Metal 4 que solo tiene el SDK de macOS 26. No hace falta ningún Kernel
-  Debug Kit. En un Mac sin Xcode ni herramientas de línea de comandos, todos los comandos salvo `help` se detienen al
-  empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
+  `deps`, `build`, `package` y `all` los rechazan al empezar. Todo se compila para x86_64, la arquitectura en la que
+  funciona el driver. Un Mac Intel compila el RM y NVKMS de NVIDIA con exactamente los mismos comandos que un Mac con
+  Apple silicon: los Makefiles de NVIDIA preguntan al compilador del Mac qué opciones de protección solo para x86
+  acepta, y `build/nv_compile_lines.py` quita lo que eso añade.
+  Apple silicon debería servir para compilar (los scripts de publicación usan por defecto un Rust para Apple silicon),
+  pero `build.sh` no ha hecho ninguna compilación completa en un Mac con Apple silicon: allí `deps` toma sus
+  herramientas de Homebrew, un camino que solo se ha probado contra sustitutos. La máquina con Apple silicon de GitHub
+  compila y enlaza los kexts, y en el commit 95811c2 salieron con los mismos bytes que en su máquina Intel. Las pruebas
+  no han pasado completas en Apple silicon: su última ejecución que consiguió máquina, en un commit anterior, pasó 298
+  de 312 con 2 fallos, en partes que pasan en la máquina Intel desde el commit ef2a216, y GitHub no ha tenido libre
+  ninguna máquina con Apple silicon en ningún push posterior.
+- **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Compilaciones completas han terminado
+  bien con dos de ellos, ambas en el commit 3933ff6: Xcode 26.5 (SDK 26.5) en el Mac Intel de arriba y Xcode 26.3 (SDK 26.2)
+  en la máquina Intel de GitHub. Xcode 26.3 es el Xcode más nuevo que funciona en macOS 15.6 a 26.1 (Xcode 26.4.1,
+  26.5 y 26.6 necesitan macOS 26.2 o posterior), y con un SDK anterior al 26.4 el plugin compila una parte propia que
+  el SDK 26.5 deja fuera. Xcode 26.0 a 26.2 no se han probado. Las herramientas de línea de comandos solas no bastan:
+  el plugin usa cabeceras de Metal 4 (`Metal/MTL4CommandQueue.h`) que solo tiene el SDK de macOS 26. No hace falta
+  ningún Kernel Debug Kit: ningún paso lee uno. En un Mac sin Xcode ni herramientas de línea de comandos, todos los
+  comandos salvo `help` se detienen al empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
   de macOS son entonces sustitutos que ofrecen instalar las herramientas de línea de comandos, y no se ejecuta ninguno.
   Lo mismo ocurre si la carpeta de desarrollo que indican `DEVELOPER_DIR` o `xcode-select -p` no existe o no contiene
   las herramientas de Apple (un Xcode borrado o renombrado después de seleccionarlo): todas fallarían.
-- Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
+- Un clon git de este repositorio (no un archivo descargado): el plugin, el traductor y la biblioteca de video se
+  compilan desde revisiones de git. La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios, y la del directorio de trabajo tampoco `:` `;` `'` `"` `\` `$` ni una
   comilla invertida.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
@@ -57,7 +76,9 @@ comandos y opciones y la solución de problemas.
   su lugar, y `doctor` dice que son tuyos. Solo GNU patch no se compila: si el `patch` de macOS no puede crear archivos (los parches de NVK lo
   necesitan), pon GNU patch en el `PATH` como `gpatch` (la fórmula de Homebrew es `gpatch`); `deps` lo dice. En
   **Apple silicon** (`auto` es allí `homebrew`) una herramienta que ya tengas se usa donde esté (un ajuste como
-  `NM_LLVM_PREFIX`, Homebrew, el `PATH`) y `deps` instala la que falte de las fórmulas listas de Homebrew.
+  `NM_LLVM_PREFIX`, Homebrew, el `PATH`) y `deps` instala la que falte de las fórmulas listas de Homebrew;
+  `NM_TOOLS_FROM=source` las compila en su lugar como en un Mac Intel. Ese camino solo se ha probado contra los
+  sustitutos de `tools/test_build_sh.py`, nunca en un Mac con Apple silicon.
 - Homebrew (solo con `NM_TOOLS_FROM=homebrew`, el valor de `auto` en Apple silicon), para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
   airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
   bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
@@ -65,16 +86,23 @@ comandos y opciones y la solución de problemas.
   el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
   pregunta que nadie ve. Si falta Homebrew, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
-- Tiempo y disco de las herramientas compiladas desde fuentes, medidos en un Mac Intel de 12 hilos: hasta unos 70 minutos en
-  total (11 de descargas, 34 solo LLVM) y 6,7 GB con todas las carpetas de compilación (fuentes 3,2 GB, compilación
-  2,4 GB, herramientas instaladas 1,1 GB). `deps` pide 10 GB libres antes de empezar LLVM y dice cuánto queda libre si
+- Tiempo y disco, medidos con `build.sh`. En el Mac Intel de arriba, `deps` desde un directorio de trabajo vacío tardó
+  46,5 minutos, descargas incluidas (unos 30 de ellos compilando LLVM), y 49 segundos con las herramientas ya hechas;
+  `fetch` tardó 40 segundos, `build` de los 17 componentes 5 minutos 41 segundos y `package` 27 segundos. En la
+  máquina Intel de GitHub, `deps` desde cero tardó 3 horas 53 minutos; con las herramientas recuperadas de su caché,
+  `deps` tardó 40 segundos, `build` 30 minutos 20 segundos y `package` 60 segundos. `deps` deja las herramientas
+  compiladas desde fuentes (1,1 GB: cada carpeta de compilación se borra cuando su herramienta pasa sus
+  comprobaciones), Rust (515 MB) y sus crates (97 MB). Después de compilar todo y preparar el paquete, el directorio
+  de trabajo del Mac Intel ocupaba unos 8 GB (fuentes 3,4 GB, herramientas 1,8 GB, carpetas de compilación 1,2 GB,
+  resultados 1,1 GB, el paquete 492 MB). `deps` pide 10 GB libres antes de empezar LLVM y dice cuánto queda libre si
   hay menos. Mantén el Mac despierto y enchufado: una herramienta interrumpida (Ctrl-C, reposo, corte) se vuelve a
   compilar desde el principio con el siguiente `./build.sh deps`, y LLVM es la larga. Una herramienta que falla detiene
   `deps` y nombra su registro (`<directorio de trabajo>/logs/toolchain/<herramienta>.log`); el siguiente `deps` empieza
-  por ella. Homebrew ya no tiene compilaciones listas (bottles) para Mac Intel: con `NM_TOOLS_FROM=homebrew`, `deps` hace
-  que Homebrew compile aquí cada fórmula que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes
-  mientras compila. `deps` lo avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas. Para
-  compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
+  por ella. Las fórmulas de Homebrew de estas herramientas no tenían compilaciones listas (bottles) para Mac Intel
+  cuando se leyó homebrew-core el 2026-11-13: con `NM_TOOLS_FROM=homebrew`, `deps` hace que Homebrew compile aquí
+  cada fórmula que falte y lo que necesita, LLVM 22 la más larga, y eso puede cambiar tu `python3`. Ese camino solo se
+  ha probado contra sustitutos y nunca se ha medido; `deps` avisa antes de preguntar. En Apple silicon Homebrew
+  instala compilaciones listas. Para compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
   macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o `Your Command Line Tools are
   too outdated`. `xcode-select --install` las instala y Actualización de software las actualiza;
   `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` muestra la versión que tienes.
@@ -99,7 +127,9 @@ que falta después de preguntar, descarga las fuentes fijadas, compila todos los
 lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiaron se saltan.
 
 Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio de trabajo, por defecto
-`~/nullmoth-build` (fuera del clon); las herramientas compiladas desde fuentes van a su `tools/toolchain`, sus
+`~/nullmoth-build`. Debe estar fuera del clon y no puede ser tu carpeta personal, `/` ni `~/nvmtl-build` (la carpeta
+del autor original); `build.sh` lo marca con el archivo `.nullmoth-build-workdir` y solo borra dentro de una carpeta
+que lleve esa marca. Las herramientas compiladas desde fuentes van a su `tools/toolchain`, sus
 carpetas de compilación a `tools/toolchain-build`, sus registros a `logs/toolchain` y sus fuentes verificadas a
 `src/git/tc-*.git` y `src/toolchain`. El sello de cada herramienta (`tools/toolchain/.nm-toolchain/<herramienta>`)
 guarda su commit fijado y su receta: si cambian, `deps` vuelve a compilar esa herramienta y la que la lleva enlazada (Python
@@ -147,8 +177,17 @@ Una prueba en seco (`--dry-run`) dice esta regla y no llama a `brew`. La tabla c
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
-los ponía en `<directorio de trabajo>/build/build/...`; esa carpeta ya no se usa y `./build.sh clean` la borra. Detalles en
+los ponía en `<directorio de trabajo>/build/build/...`; nada usa esa carpeta y `./build.sh clean` la borra. Detalles en
 [BUILDING.md](BUILDING.md#the-working-directorys-layout).
+
+Todas las fuentes salen de las versiones fijadas en [build/pins.sh](../build/pins.sh); una fuente que no coincide con
+lo fijado detiene la compilación y no se usa nada de ella. `./build.sh doctor` compara lo fijado con los scripts que
+usan las mismas fuentes.
+
+Ningún paquete hecho con `./build.sh package` se ha instalado en ningún Mac, y nada compilado desde esta rama se ha
+cargado ni ejecutado en una tarjeta NVIDIA: quien instale uno primero lo está probando. Tampoco se han medido los
+tamaños de las clases IOKit de Apple en macOS 26.7; los kexts los comparan con los suyos al arrancar (la comprobación
+de la disposición de las clases).
 
 Para hacer un paquete instalable hace falta el paquete publicado de la versión 2.9 como base, porque algunos archivos
 que `install.sh` necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo
@@ -167,6 +206,20 @@ en [README.md](../README.md) "Install — by hand" (OpenCore debe estar configur
 misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`; para quitar el driver por completo:
 `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están en [BUILDING.md](BUILDING.md#installing-the-result-and-going-back).
 
+Ejecuta los comandos tal como aparecen (`./install.sh`, no `bash install.sh`: install.sh reconoce por ese nombre una
+instalación en curso). install.sh comprueba la integridad de un paquete, no quién lo hizo, así que acepta este.
+`uninstall.sh` se niega con SIP activado, y no restaura la copia que nombra la línea `Undo:` de install.sh: quita el
+driver. En un paquete de prueba NVK, el traductor y las demás bibliotecas van firmados ad hoc; el ryzenadj compilado
+aquí tiene otro SHA-256 que el que fija la app 1401, que no lo instalará (el driver no se ve afectado). El firmware
+GSP lo descarga install.sh al instalar.
+
+Instalar una compilación de prueba sobre una versión publicada deja el mismo trabajo de respaldo que deja la
+instalación de una versión publicada: si el framebuffer de esta compilación rechaza las clases de Apple del macOS en
+uso y el driver no muestra nada en la tarjeta, ese trabajo vuelve a poner la versión publicada y reinicia el Mac por
+sí solo durante los primeros minutos de un arranque (ver [TROUBLESHOOTING.md](TROUBLESHOOTING.md)). Solo una pantalla
+en otra GPU con una sesión abierta deja el reinicio en tus manos (`/Library/NullMoth/lastgood.log` lo dice); el
+siguiente reinicio trae la versión publicada.
+
 ## Comandos
 
 <!-- reference: commands -->
@@ -175,12 +228,12 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 | `all` | Por defecto. doctor, deps si falta algo (salvo con `--no-install`), fetch, compilar todo, el paquete si hay paquete base, y un resumen |
 | `doctor` | Solo examina; no cambia nada tuyo. Código 1 si falta algo necesario o es demasiado antiguo |
 | `deps` | Instala lo que falta: fórmulas de Homebrew (después de un sí, o `--yes`), SPIRV-LLVM-Translator para LLVM 22, el entorno de Python y Rust (estos tres en el directorio de trabajo) |
-| `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256 |
+| `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256. Cuando ya está Rust, descarga también los crates del traductor (`cargo fetch --locked`) para que su compilación funcione sin red |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
 | `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch` |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
-| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` tarda cerca de una hora en volver a compilarlas; `all` pregunta antes) |
+| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` las vuelve a compilar: 46,5 minutos en el Mac Intel de arriba y 3 horas 53 minutos en la máquina Intel de GitHub; `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
 <!-- end -->
 
@@ -210,12 +263,14 @@ archivo y el archivo sobre el valor por defecto. El archivo se lee, nunca se eje
 | `-h`, `--help` | | | Lo mismo que `help` |
 <!-- end -->
 
+Las opciones con valor aceptan también la forma `--nombre=valor`, y `-jN` funciona.
+
 Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.md#settings-without-an-option)):
 
 <!-- reference: variables -->
 | Variable | Para qué |
 |---|---|
-| `NM_BASE_PACKAGE_SHA256` | SHA-256 del paquete base, comprobado antes de usarlo |
+| `NM_BASE_PACKAGE_SHA256` | SHA-256 del paquete base, de la página de la versión (para la 2.9 es también `NM_PIN_CI_BASEPKG_SHA256` en build/pins.sh), comprobado antes de usarlo |
 | `NM_PACKAGE_VERSION` | Versión escrita en `VERSION` del paquete, que install.sh guarda en `/Library/NullMoth/driver-version` (la versión instalada que leen la búsqueda de actualizaciones de la app y Send logs). Por defecto, la del primer encabezado de CHANGELOG.md (`3.0`), no la del paquete base; `package` se detiene si ese encabezado no es una versión y la variable no está puesta, y también si la variable tiene algo más que cifras y puntos (install.sh solo guarda esos: `3.0rc1` quedaría como `3.01`) |
 | `NM_OGKM_URL` | Réplica de open-gpu-kernel-modules de NVIDIA |
 | `NM_MESA_URL` | Réplica de Mesa |
@@ -293,6 +348,18 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | nombre del paquete y descripción de la compilación |
 <!-- end -->
 
+Cada paso recibe además `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`, tu
+`SDKROOT` y tu `TOOLCHAINS`, las rutas de búsqueda (`PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`, `LIBRARY_PATH`, `CPATH`,
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`) y `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`,
+`HOMEBREW_REPOSITORY` quitados de su entorno. Para ejecutar un script a mano como lo hace `build.sh`:
+
+```bash
+eval "$(./build.sh env)"
+bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
+```
+
+`./build.sh --dry-run --force build <componente>` muestra la línea exacta de un paso.
+
 ## Componentes
 
 <!-- reference: components -->
@@ -311,7 +378,7 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 | `osver` | libnvmtl_osver.dylib |
 | `nvk` | NVK, el driver Vulkan |
 | `boost` | nvmtl-boost |
-| `vulkan` | el cargador de Vulkan de Khronos |
+| `vulkan` | el cargador de Vulkan de Khronos v1.4.367, que el paquete ofrece a las aplicaciones (`vulkan-for-apps.sh`); no es el cargador propio del plugin |
 | `plugin` | el plugin de Metal (NVMTLDriver) |
 | `xlate` | el traductor de shaders |
 | `nvencvt` | libnvencvt.dylib (video) |
@@ -322,6 +389,9 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 
 Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejemplos: `./build.sh build fb`,
 `./build.sh --force build plugin`, `./build.sh --flavour dev build plugin`.
+
+Cada paso guarda un sello de lo que lo compuso; un paso cuyo sello no cambió y cuya salida existe se salta, y un cambio
+recompila ese paso y los que dependen de él. Una sola ejecución a la vez por directorio de trabajo.
 
 ## Solución de problemas
 
@@ -338,24 +408,28 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `STOP: step 'spirv-llvm-translator' failed` | Falló la compilación de SPIRV-LLVM-Translator v22.1.8 con LLVM 22 | Repórtalo con el archivo de informe; el registro completo es `logs/spirv-llvm-translator.log` |
 | `STOP: the pins and the scripts disagree` | build/pins.sh y un script piden versiones distintas | Ejecuta `./build.sh doctor`; cambia ambos a la vez |
 | `... gave commit X for ..., the pin is Y` o `... has SHA-256 ..., the pin is ...` | Una réplica o descarga no es la fuente fijada | Revisa la variable de réplica; no se usó nada de ella |
-| `STOP: another build.sh run (pid N) is using ...` | Dos ejecuciones sobre el mismo directorio de trabajo | Espera a que termine o detenla |
+| `STOP: another build.sh run (pid N) is using ...` | Dos ejecuciones sobre el mismo directorio de trabajo | Espera a que termine o detenla; el bloqueo de una ejecución que ya no existe se toma |
 | `offline, and ... is not in ... yet` | `--offline` antes de cualquier `fetch` | Ejecuta `./build.sh fetch` una vez con red |
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
 | `<componente> needs: ...` (por ejemplo `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | Falta una herramienta que usa ese componente o uno que necesita, o no hace lo que le piden los scripts; no se compiló nada | `./build.sh doctor` dice cuál; `./build.sh deps` la instala |
 | rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene la ruta de tu carpeta personal, tu nombre de cuenta seguido de `@`, o `@` y el nombre corto del equipo: la compilación los filtró. Como palabra suelta solo se informa (una línea `note:` en el registro), porque el texto de NVIDIA tiene palabras como user, admin o test | El registro da la orden que muestra esas líneas. Infórmalo con el archivo de informe (las líneas te nombran: léelas antes de publicarlas) |
 | `STOP: NVRM.kext imports ___x86_return_thunk, which no macOS defines` (u otro kext, u otro nombre `___x86_`, `___fentry__` o `mcount`; el paso termina con código 7) | El kext se compiló con una opción hecha para el kernel de Linux, cuya función auxiliar no existe en macOS: enlazaría y nunca cargaría. Se detiene antes de empaquetar nada | Si `KMS_ARCHIVE` está definida, apunta a un archivo de NVKMS compilado con otros comandos: quítala. Si no, compila de nuevo en otra carpeta de trabajo (`--workdir`); si sigue, repórtalo con el archivo de informe |
+| `STOP: N compile commands for arch/nvalloc/unix/src/osapi.c in .../compile_cmds.sh, one expected` (nvrm, accel) | La lista de compilación del RM está incompleta; los kexts toman sus opciones -D del comando de NVIDIA para osapi.c y se detienen antes que tomar las de otro archivo | `./build.sh --force build rm` |
+| `STOP: make -n listed N compile commands, fewer than ...` | build_rm620.sh o build_kms620.sh habrían cambiado una lista completa por una más corta; se quedó la anterior | Usa otra carpeta de trabajo |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
 | `STOP: step 'toolchain-<tool>' failed` (deps) | `build/toolchain.sh` no pudo compilar o comprobar esa herramienta; su registro es `logs/toolchain/<tool>.log` | Lee sus últimas líneas; el siguiente `./build.sh deps` empieza por esa herramienta |
-| `... links <library>, which is neither the system's nor the toolchain's`, o `... is a link to <path>, which is neither ...` (en un registro de toolchain) | Una herramienta tomó una biblioteca de otra carpeta, normalmente el `/usr/local` de Homebrew en un Mac Intel, o instaló un enlace que lleva allí; no se escribe su sello y no se usa | Repórtalo con el archivo de informe |
-| `... is built for macOS N and later, above MACOSX_DEPLOYMENT_TARGET` (en un registro de toolchain) | Una herramienta se compiló para un macOS más nuevo que el mínimo (15.0) | Repórtalo con el archivo de informe |
-| `deps` se interrumpió mientras compilaba LLVM | El árbol a medias no se retoma | Ejecuta `./build.sh deps` otra vez: LLVM se compila de nuevo desde cero (34 minutos en un Mac Intel de 12 hilos); mantén el Mac despierto |
+| `... links <library>, which is neither the system's nor the toolchain's`, o `... is a link to <path>, which is neither ...` (en un registro de toolchain) | Una herramienta tomó una biblioteca de otra carpeta, normalmente el `/usr/local` de Homebrew en un Mac Intel, o instaló un enlace que lleva allí; no se escribe su sello y no se usa | Repórtalo con el archivo de informe; la biblioteca nombrada es la que se filtró |
+| `... is built for macOS N and later, above MACOSX_DEPLOYMENT_TARGET` (en un registro de toolchain) | Una herramienta se compiló para un macOS más nuevo que el mínimo (15.0), así que el enlace de NVK daría avisos | Repórtalo con el archivo de informe |
+| `deps` se interrumpió mientras compilaba LLVM | El árbol a medias no se retoma | Ejecuta `./build.sh deps` otra vez: LLVM se compila de nuevo desde cero (unos 30 minutos en el Mac Intel de arriba); mantén el Mac despierto |
+| `deps` muestra dos veces el aviso de rustup `default toolchain implicitly overridden` | rustup lo imprime mientras `deps` instala el Rust fijado; una ejecución correcta en el Mac Intel de arriba también lo imprimió | Nada: es lo esperado |
 | `building LLVM needs about 10 GB free` | Poco espacio libre donde está el directorio de trabajo | Haz sitio o elige otro directorio con `--workdir` |
-| `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |
+| `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de fuera de macOS (de Homebrew, por ejemplo) | Repórtalo con el archivo de informe |
 | `the base package does not match its own SHA256SUMS` | El paquete publicado está dañado o modificado | Descárgalo de nuevo |
 | `the base package is release <x>, not 2.9` | `package` solo parte de la versión 2.9: los archivos de otra versión que no tienen fuente aquí saldrían bajo la versión de esta compilación | Usa `nullmoth-nvidia-2.9.tar.gz` de Releases |
 | `the base package holds a link that leaves its folder` (o `a device, pipe or socket`, `a set-user-id or set-group-id file`) | El archivo no es un paquete publicado: uno publicado solo lleva carpetas, archivos normales y enlaces a un archivo de su misma carpeta | Descarga otra vez el paquete de Releases; no uses ese archivo |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` con `--accel 15` o `26` | Usa `--accel both` |
+| el resumen dice que el plugin se compiló desde "the working tree ... with its uncommitted changes" | Tu clon tiene cambios locales | Es lo esperado; los archivos sin seguimiento no entran en esa compilación |
 
 ## Cuando falla la compilación
 
@@ -370,8 +444,12 @@ Para reportar un fallo: abre un issue, di qué comando ejecutaste y adjunta el a
 indique el mensaje o la tabla de arriba y ejecuta el mismo comando otra vez: los pasos terminados se saltan y el que
 falló se repite. `-v` muestra la salida de cada paso mientras se ejecuta.
 
-Además, cada push se compila desde cero en un Mac Intel de GitHub (macOS 15, sin tarjeta NVIDIA, sin instalar ni
-cargar nada): `.github/workflows/full-build.yml` ejecuta deps, doctor, fetch, build, package y test en una carpeta
-vacía y comprueba que Homebrew no se usó ni cambió. El resultado está en la pestaña Actions del repositorio, flujo
-full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. Hasta que haya pasado una vez, su
+Además, cada push se compila en un directorio de trabajo vacío en la máquina Intel de GitHub (sin tarjeta NVIDIA,
+sin instalar ni cargar nada), con las herramientas compiladas desde fuentes recuperadas de la caché de GitHub cuando
+una ejecución anterior las hizo (desde cero, `deps` tardó allí 3 horas 53 minutos): `.github/workflows/full-build.yml`
+ejecuta deps, doctor, fetch, build, package y test, y comprueba que Homebrew no se usó ni cambió y que todo lo
+compilado carga solo de macOS, de esa carpeta y de las carpetas del propio driver. El resultado está en la pestaña
+Actions del repositorio, flujo full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. En
+el commit 3933ff6 todos los pasos hasta `package` terminaron bien; el resultado de su paso `test` y de sus
+comprobaciones no se indica aquí. {{PENDING full-test}} {{PENDING full-prove}} Hasta que haya pasado una vez, su
 resultado no detiene ningún cambio.
