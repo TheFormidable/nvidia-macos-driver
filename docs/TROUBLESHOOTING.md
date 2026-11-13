@@ -1,14 +1,25 @@
 # Why a machine does not work, and how to fix it
 
-Every entry below comes from real logs people sent. Find the place your machine stops, read why, and do the fix. If yours
-is not here, press **Send logs** (Mac app) or **Scan for logs and send them** (1401 for Windows) and post the report ID.
+Every entry below, except those under "The new paths of release 3.0", comes from real logs people sent. Find the place
+your machine stops, read why, and do the fix. If yours is not here, press **Send logs** (Mac app) or **Scan for logs
+and send them** (1401 for Windows) and post the report ID.
 
 Before anything else: **use the newest 1401 and driver.** Most problems below are already fixed in a later version, and a
 stick made by an old 1401 keeps the old problem until you make it again.
 
-Problems building the driver from source are in [BUILDING.md](BUILDING.md), "When a build fails". The changes of
-release 3.0 and the way back from each are in [CHANGELOG.md](../CHANGELOG.md); what to check on a card that runs it
-for the first time is in [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md).
+The changes of release 3.0 and the way back from each are in [CHANGELOG.md](../CHANGELOG.md); what to check on a
+card that runs it for the first time is in [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). Problems building the
+driver from source are in [BUILDING.md](BUILDING.md), "When a build fails"; two more are here:
+
+- `./build.sh deps` prints rustup's warning "default toolchain implicitly overridden" twice. That is expected: build.sh
+  installs Rust with no default toolchain and names the pinned version itself. Nothing to do.
+- The translator's step stops with `STOP: translator has ... compiler warnings, more than its ceiling of 0`, after a
+  warning that stripping debug info with `rust-objcopy` failed. build.sh tells cargo not to strip, but a cargo configuration
+  outside the checkout can bring that strip back for the translator's build scripts and procedural macros: a
+  `[profile.release.package."*"]`, `[profile.release.package.<name>]` or `[profile.release.build-override]` table with
+  its own `strip`, in a `.cargo/config.toml` of any folder above the checkout or the working directory (your own
+  `~/.cargo/config.toml` when either is inside your home folder). `./build.sh doctor` names every such file it finds;
+  take the `strip` out of that table. A `strip` in `[profile.release]` itself does not do this.
 
 ---
 
