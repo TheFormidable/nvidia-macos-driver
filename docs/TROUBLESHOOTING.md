@@ -139,9 +139,12 @@ line on a Mac whose display works is worth a report with the macOS build.
   process's GPU channel, or the page is not system memory (it lies in one of the GPU's own memory windows, or beyond
   installed memory + 4 GB), or its view of the page did not follow what the process wrote. That process uses 2.9's
   marks and tags; everything else is unaffected. Send the line: which of them it was decides the fix.
-- In the plugin's log (`nvmtl.log`): `surface fences: off (NVK or the kext answered 0x80000002 ...)` means the kext's
-  fence is off (`nvrmfence=0`, or the kext or NVK is older than the plugin) and the plugin uses the 2.9 busy tags and
-  pending marks; nothing to do unless the fence was expected to be on. Many `surface fences: hold refused
+- In the plugin's log (`nvmtl.log`): `surface fences: off (...)` means the plugin uses the 2.9 busy tags and
+  pending marks, and the words in the parentheses say why: `the kext's fence is not on for this process: state 0` with
+  `nvrmfence=0` (state 3 or 2 when the fence stopped or switched itself off, state 1 with NVK's `NVRM_ASYNC=0`), `NVK or
+  the kext answered 0x80000002: no fence there` with a kext older than the plugin, `request N answered off` when a
+  later request was refused that way. With an NVK older than the plugin there is no such line at all. Nothing to do
+  unless the fence was expected to be on. Many `surface fences: hold refused
   (0x80000007)` lines in one process mean a Vulkan channel of that process is not watched by the kernel: that process
   keeps the 2.9 mechanism; send the `NVRM-xnu: fence:` kernel lines.
 - In an application's output: a line starting `nvrm: surface fence:` means that process is not using the surface
