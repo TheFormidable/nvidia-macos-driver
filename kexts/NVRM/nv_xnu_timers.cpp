@@ -23,8 +23,10 @@
 //     detach move the generation on, so a late callback finds a token that no longer matches and returns without
 //     touching the RM (nv_xnu_quiesce.h, NvXnuGen);
 //   - after moving the generation on, they wait until no callback is inside, bounded: 2 s for a nano timer (50 ms when
-//     the caller may not sleep), 10 s for the RC timer (2 s on the way into sleep). A wait that runs out is counted;
-//     a nano timer whose wait ran out is never reused.
+//     the caller may not sleep), 10 s for the RC timer (2 s on the way into sleep). A wait that runs out is counted.
+//     A nano timer that is destroyed while a callback may still be inside (its wait ran out, or was not made: asked
+//     from inside the callback, or nvrmnanowait=0) is never reused, and that is counted too: each one makes the pool
+//     one slot smaller for the rest of the boot.
 //
 // Opt-outs, each read once: nvrmrctimer=0 (the RC timer is never started: nv->rc_timer_enabled stays 0, as with the old
 // stubs) and nvrmnanowait=0 (cancel and destroy of a nano timer do not wait for a running callback). The old opt-in
@@ -46,8 +48,10 @@
 //   debug.nvrm_nano_fires         nano timer callbacks run
 //   debug.nvrm_nano_stale         late nano callbacks turned away by their generation
 //   debug.nvrm_nano_waits         cancels and destroys that had to wait for a running callback
-//   debug.nvrm_nano_wait_timeouts such waits that ran out (should stay 0); the slot is then never reused
+//   debug.nvrm_nano_wait_timeouts such waits that ran out (should stay 0); at a destroy the slot is then retired
 //   debug.nvrm_nano_leaked        nano timers the RM had not destroyed when its GPU stopped
+//   debug.nvrm_nano_retired       slots taken out of use for good: the leaked ones, and each timer destroyed while a
+//                                 callback could still be inside
 //   debug.nvrm_nano_bad_handle    calls with a handle that was not a live nano timer (a second destroy, for example)
 
 #include "nv-xnu.h"
@@ -70,6 +74,7 @@ extern "C" {
 
 static int64_t gRcArmed, gRcTicks, gRcRuns, gRcRefused, gRcStale, gRcWaitTimeouts;
 static int64_t gNanoSlots, gNanoLive, gNanoFires, gNanoStale, gNanoWaits, gNanoWaitTimeouts, gNanoLeaked, gNanoBadHandle;
+static int64_t gNanoRetired;
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_armed, CTLFLAG_RD | CTLFLAG_LOCKED, &gRcArmed, "GPUs whose RC timer runs");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_ticks, CTLFLAG_RD | CTLFLAG_LOCKED, &gRcTicks, "RC timer ticks");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_rc_runs, CTLFLAG_RD | CTLFLAG_LOCKED, &gRcRuns, "RC timer ticks the RM accepted");
@@ -83,6 +88,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_stale, CTLFLAG_RD | CTLFLAG_LOCKED, &gNa
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gNanoWaits, "nano timer cancels that waited for a callback");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_wait_timeouts, CTLFLAG_RD | CTLFLAG_LOCKED, &gNanoWaitTimeouts, "nano timer waits that ran out");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_leaked, CTLFLAG_RD | CTLFLAG_LOCKED, &gNanoLeaked, "nano timers left when their GPU stopped");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_retired, CTLFLAG_RD | CTLFLAG_LOCKED, &gNanoRetired, "nano timer slots taken out of use for good");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_nano_bad_handle, CTLFLAG_RD | CTLFLAG_LOCKED, &gNanoBadHandle, "nano timer calls with a handle not in use");
 
 static inline void cnt(int64_t *c, int64_t d = 1) { __atomic_add_fetch(c, d, __ATOMIC_RELAXED); }
@@ -98,6 +104,7 @@ void nv_xnu_timers_sysctls(void)
     sysctl_register_oid(&sysctl__debug_nvrm_nano_fires); sysctl_register_oid(&sysctl__debug_nvrm_nano_stale);
     sysctl_register_oid(&sysctl__debug_nvrm_nano_waits); sysctl_register_oid(&sysctl__debug_nvrm_nano_wait_timeouts);
     sysctl_register_oid(&sysctl__debug_nvrm_nano_leaked); sysctl_register_oid(&sysctl__debug_nvrm_nano_bad_handle);
+    sysctl_register_oid(&sysctl__debug_nvrm_nano_retired);
 }
 
 // 1 when the boot-arg `name` is present with the value 0 (the opt-out); any other value, or none, is the default.
@@ -312,7 +319,9 @@ void NV_API_CALL nv_cancel_nano_timer(nv_state_t *nv, nv_nano_timer_t *t)
 }
 
 // Ends a timer that is live: stops it and puts its slot back, or keeps the slot out of use for good when a callback
-// may still be inside (the wait ran out or was not made). Returns false when the timer was not live (already ended).
+// may still be inside (the wait ran out or was not made) or the caller asks for it. A slot that is not put back is
+// counted: nothing else tells a pool that got smaller from one that is in use. Returns false when the timer was not
+// live (already ended).
 static bool nv_xnu_nano_end(nv_nano_timer_t *t, uint64_t deadline, bool quarantine)
 {
     uint32_t one = 1;
@@ -320,6 +329,7 @@ static bool nv_xnu_nano_end(nv_nano_timer_t *t, uint64_t deadline, bool quaranti
     cnt(&gNanoLive, -1);
     const bool idle = nv_xnu_nano_quiesce(t, deadline);
     if (idle && !quarantine) nv_xnu_nano_free(t);
+    else cnt(&gNanoRetired);
     return true;
 }
 

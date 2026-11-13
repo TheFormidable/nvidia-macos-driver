@@ -55,6 +55,16 @@ static int enter_check_first(NvXnuGate *g)
     __atomic_add_fetch(&g->inside, 1, __ATOMIC_SEQ_CST);
     return 1;
 }
+/* broken: a lock instead of a gate. It keeps the closer's guarantee, but turns an enterer away while another one is
+   inside: with two handlers on two work loops, an interrupt dropped although nobody closed anything */
+static int enter_one_at_a_time(NvXnuGate *g)
+{
+    if (__atomic_add_fetch(&g->inside, 1, __ATOMIC_SEQ_CST) != 1 || __atomic_load_n(&g->closed, __ATOMIC_SEQ_CST)) {
+        __atomic_sub_fetch(&g->inside, 1, __ATOMIC_SEQ_CST);
+        return 0;
+    }
+    return 1;
+}
 
 static int gen_enter_real(NvXnuGen *g, unsigned long long armed) { return nv_gen_enter(g, armed); }
 /* broken: runs whatever generation the callback was armed with */
@@ -145,17 +155,43 @@ static void rules()
 
 /* ---- the interrupt gate under threads ----------------------------------------------------------------------------------
    Enterers stand for interrupt handlers on several work loops, the closer for irqSettle()/irqOpen(). While the closer
-   holds the gate closed and has seen it idle ("sealed"), an enterer that gets in, or one still inside, is a violation. */
-static long gate_scenario(const GateOps &ops, double seconds, long *opens)
+   holds the gate closed and has seen it idle ("sealed"), an enterer that gets in, or one still inside, is a violation.
+
+   The other half is that an open gate turns nobody away: a refused enter is an interrupt whose top half did not run.
+   "Was it open" cannot be answered by reading `closed` before and after the attempt (a whole close and open fits in
+   between), so the closer counts in `era`: odd from just before a close until just after the open, even in between.
+   An enterer that reads the same even number before and after its attempt had the gate open all the way through, and
+   a refusal then is a violation. Any other pair of readings proves nothing and is not counted.
+
+   The closer's wait for idle has a bound, as every such wait in the kernel has, and running into it is a violation: a
+   closed gate empties as soon as the enterers inside have had the processor once. Without the bound the first control
+   below did not end on a machine with one processor: its enter ignores `closed`, the closer only gets to look while
+   all three enterers are switched out, and they are switched out inside the gate nearly every time.
+
+   An enterer that is turned away gives up the processor before it tries again, as a handler that is turned away
+   returns instead of trying again at once. On one processor an enterer that tried again at once ran out its whole time
+   slice against the closed gate, and so did the next one, every time the closer yielded: about two close and open
+   cycles fitted in a second, and the second control below went uncaught in three runs of eight at the default length
+   (pinned to one processor, with and without the thread sanitizer). Yielding there, a second holds about two thousand
+   cycles on one processor, and as many as before on four. */
+static const double kIdleBound = 10.0;   // seconds
+struct GateRun { long bad, cycles, open_tries, turned_away; };
+static GateRun gate_scenario(const GateOps &ops, double seconds)
 {
     NvXnuGate g = {};
     std::atomic<int> sealed{0}, users{0}, stop{0};
-    std::atomic<long> bad{0}, entered{0}, refused_open{0};
+    std::atomic<long> bad{0}, entered{0}, open_tries{0}, refused_open{0};
+    std::atomic<unsigned long> era{0};
     auto enterer = [&] {
         std::mt19937 r(std::random_device{}());
         while (!stop.load()) {
-            const bool wasOpen = !__atomic_load_n(&g.closed, __ATOMIC_SEQ_CST) && !sealed.load();
-            if (ops.enter(&g)) {
+            const unsigned long before = era.load();
+            const int in = ops.enter(&g);
+            if (!(before & 1) && era.load() == before) {   // open from before the attempt until after it
+                open_tries++;
+                if (!in) refused_open++;
+            }
+            if (in) {
                 if (sealed.load()) bad++;
                 users++;
                 for (int i = (int)(r() % 64); i > 0; i--) std::atomic_signal_fence(std::memory_order_seq_cst);
@@ -164,9 +200,7 @@ static long gate_scenario(const GateOps &ops, double seconds, long *opens)
                 users--;
                 nv_gate_leave(&g);
                 entered++;
-            } else if (wasOpen && !__atomic_load_n(&g.closed, __ATOMIC_SEQ_CST)) {
-                refused_open++;   // turned away although nobody closed the gate around the attempt
-            }
+            } else std::this_thread::yield();
         }
     };
     std::vector<std::thread> th;
@@ -175,22 +209,25 @@ static long gate_scenario(const GateOps &ops, double seconds, long *opens)
     long cycles = 0;
     std::mt19937 r(12345);
     while (!elapsed(t0, seconds)) {
+        era++;                                   // odd: a close is on its way
         nv_gate_close(&g);
-        while (!nv_gate_idle(&g)) std::this_thread::yield();
+        const auto closed_at = Clock::now();
+        bool idle = nv_gate_idle(&g);
+        while (!idle && !elapsed(closed_at, kIdleBound)) { std::this_thread::yield(); idle = nv_gate_idle(&g); }
+        if (!idle) { bad++; break; }             // closed, and still somebody inside after the bound
         sealed.store(1);
         if (users.load() != 0) bad++;
         for (int i = (int)(r() % 200); i > 0; i--) std::this_thread::yield();
         if (users.load() != 0) bad++;
         sealed.store(0);
         nv_gate_open(&g);
+        era++;                                   // even: open, and it stays open until the next odd number
         for (int i = (int)(r() % 200); i > 0; i--) std::this_thread::yield();
         cycles++;
     }
     stop.store(1);
     for (auto &t : th) t.join();
-    *opens = cycles;
-    (void)refused_open;
-    return bad.load() + (entered.load() == 0 ? 1 : 0);
+    return GateRun{bad.load() + (entered.load() == 0 ? 1 : 0), cycles, open_tries.load(), refused_open.load()};
 }
 
 /* ---- the generation gate with a timer slot that is reused ------------------------------------------------------------
@@ -384,17 +421,22 @@ int main(int argc, char **argv)
 
     char why[160];
     long n = 0;
-    long bad = gate_scenario(GateOps{enter_real}, g_seconds, &n);
-    std::snprintf(why, sizeof why, "%ld violations in %ld close/open cycles", bad, n);
-    check("gate: after close and idle nobody is inside and nobody gets in, under three enterers", bad == 0 && n > 0, why);
-    bad = gate_scenario(GateOps{enter_no_recheck}, g_seconds / 2, &n);
-    std::snprintf(why, sizeof why, "%ld violations in %ld cycles", bad, n);
-    check("control: an enter without the re-check of closed is caught", bad > 0, why);
-    bad = gate_scenario(GateOps{enter_check_first}, g_seconds, &n);
-    std::snprintf(why, sizeof why, "%ld violations in %ld cycles", bad, n);
-    check("control: an enter that looks before it announces itself is caught", bad > 0, why);
+    GateRun gr = gate_scenario(GateOps{enter_real}, g_seconds);
+    std::snprintf(why, sizeof why, "%ld violations in %ld close/open cycles", gr.bad, gr.cycles);
+    check("gate: after close and idle nobody is inside and nobody gets in, under three enterers", gr.bad == 0 && gr.cycles > 0, why);
+    std::snprintf(why, sizeof why, "%ld of %ld attempts made while the gate was open were turned away", gr.turned_away, gr.open_tries);
+    check("gate: while it is open no enterer is turned away", gr.turned_away == 0 && gr.open_tries > 0, why);
+    gr = gate_scenario(GateOps{enter_no_recheck}, g_seconds / 2);
+    std::snprintf(why, sizeof why, "%ld violations in %ld cycles", gr.bad, gr.cycles);
+    check("control: an enter without the re-check of closed is caught", gr.bad > 0, why);
+    gr = gate_scenario(GateOps{enter_check_first}, g_seconds);
+    std::snprintf(why, sizeof why, "%ld violations in %ld cycles", gr.bad, gr.cycles);
+    check("control: an enter that looks before it announces itself is caught", gr.bad > 0, why);
+    gr = gate_scenario(GateOps{enter_one_at_a_time}, g_seconds / 2);
+    std::snprintf(why, sizeof why, "%ld of %ld attempts made while the gate was open were turned away", gr.turned_away, gr.open_tries);
+    check("control: an enter that lets one in at a time is caught turning enterers away from an open gate", gr.turned_away > 0, why);
 
-    bad = gen_scenario(gen_enter_real, g_seconds, &n);
+    long bad = gen_scenario(gen_enter_real, g_seconds, &n);
     std::snprintf(why, sizeof why, "%ld bad callbacks over %ld timers", bad, n);
     check("generation: a late callback never sees a released payload or a later timer's payload", bad == 0 && n > 0, why);
     bad = gen_scenario(gen_enter_no_check, g_seconds / 2, &n);

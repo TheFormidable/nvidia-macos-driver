@@ -871,6 +871,7 @@ sysctl	debug.nvrm_nano_bad_handle	diag	read-only	3.0	-	nano timer calls with a h
 sysctl	debug.nvrm_nano_fires	diag	read-only	3.0	-	nano timer callbacks run
 sysctl	debug.nvrm_nano_leaked	diag	read-only	3.0	-	nano timers left when their GPU stopped
 sysctl	debug.nvrm_nano_live	diag	read-only	3.0	-	nano timers in use
+sysctl	debug.nvrm_nano_retired	diag	read-only	3.0	-	nano timer slots taken out of use for good
 sysctl	debug.nvrm_nano_slots	diag	read-only	3.0	-	nano timer slots made
 sysctl	debug.nvrm_nano_stale	diag	read-only	3.0	-	late nano timer callbacks turned away
 sysctl	debug.nvrm_nano_wait_timeouts	diag	read-only	3.0	-	nano timer waits that ran out

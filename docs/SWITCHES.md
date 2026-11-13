@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 5 | 1 | 54 | 410 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 347 |  |  |  | 368 |
+| sysctl |  | 5 | 4 | 12 |  |  | 348 |  |  |  | 369 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -931,6 +931,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_nano_fires` | diag | read-only | 3.0 | - | nano timer callbacks run | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_leaked` | diag | read-only | 3.0 | - | nano timers left when their GPU stopped | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_live` | diag | read-only | 3.0 | - | nano timers in use | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_retired` | diag | read-only | 3.0 | - | nano timer slots taken out of use for good | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_slots` | diag | read-only | 3.0 | - | nano timer slots made | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_stale` | diag | read-only | 3.0 | - | late nano timer callbacks turned away | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_wait_timeouts` | diag | read-only | 3.0 | - | nano timer waits that ran out | kexts/NVRM/nv_xnu_timers.cpp |

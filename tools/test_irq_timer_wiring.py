@@ -12,11 +12,20 @@ None of it can run without the card, so what must hold is asserted on the source
   source and then irqSettle();
 - go() claims the GPU's interrupt-thread slot before the event source exists and refuses without one; stop() gives it
   back after the event source is gone;
+- a second try of go()'s second pass is refused while the first try's interrupt source is there, and neither the
+  source nor the work loop is ever made over an existing one (the first stayed registered, with nothing to remove it);
+- the idle power-down monitor (nvrtd3=1), a thread call that is never stopped, is not handed the GPU object: each of
+  its calls enters a gate first, and stop() closes that gate, waits until no call is inside and takes the GPU away
+  before it tears anything down (right after the fence stop, which keeps its place); system sleep (until the wake)
+  and shutdown (for good) hold the GPU against it, after waiting for a call that is inside, and each of its calls
+  does nothing while the GPU is held, except the power resource's switch-on that the wake itself asks for;
+- the kext holds one reference on itself (never given back) before startGPU registers its first sysctl, and its
+  module stop function refuses from then on: nothing the kext registers is ever unregistered, so it must not unload;
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
   kernel's real_ncpus (at least 1) and os_get_cpu_number() stays 0;
 - no source names thread_call_cancel_wait (not exported to kexts); nv_destroy_nano_timer frees nothing (the slots are
-  type-stable); a nano or RC callback reaches the RM only after its generation matched, and the RC tick re-arms only
-  with the generation it ran with;
+  type-stable), and a slot it does not put back is counted; a nano or RC callback reaches the RM only after its
+  generation matched, and the RC tick re-arms only with the generation it ran with;
 - the waits of the quiesce (irqSettle, the timer waits) ask nv_quiesce_may_sleep(), the kernel's own
   preemption_enabled(), and never nvx_can_block();
 - a nano timer's deadline is computed in 64-bit nanoseconds (the old 32-bit microsecond count ran out at 71 minutes);
@@ -146,9 +155,58 @@ def arms(src, others):
         order(go, [r"fIsrSlot\s*=\s*nv_xnu_isr_slot_claim\s*\(\s*this\s*\)", r"if\s*\(\s*fIsrSlot\s*<\s*0\s*\)\s*\{[^}]*return\s+kIOReturnNoResources",
                    r"addEventSource\s*\("])
         and order(stop, [r"removeEventSource\s*\(", r"bottomHalfStop\s*\(", r"nv_xnu_isr_slot_release\s*\(\s*fIsrSlot\s*,\s*this\s*\)"]))
+    arm("go(): a second try of pass 2 is refused while the first try's interrupt source is there; no source or work loop is made over one",
+        order(go, [r"if\s*\(\s*fIntSrc\s*\)\s*\{[^}]*return\s+kIOReturnError\s*;", r"nv_xnu_wq_gpu_start\s*\(",
+                   r"if\s*\(\s*!\s*fWorkLoop\s*\)\s*fWorkLoop\s*=\s*IOWorkLoop::workLoop\s*\(\s*\)\s*;",
+                   r"fIntSrc\s*=\s*IOFilterInterruptEventSource::filterInterruptEventSource\s*\("])
+        and len(re.findall(r"\bfIntSrc\s*=\s*IOFilterInterruptEventSource\b", n)) == 1
+        and len(re.findall(r"\bfWorkLoop\s*=\s*IOWorkLoop::workLoop\b", n)) == 1)
     arm("stop(): rm_disable_adapter before rm_shutdown_adapter; the timers let go before the private state is freed",
         order(stop, [r"rm_disable_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)", r"rm_shutdown_adapter\s*\(\s*NULL\s*,\s*&fNv\s*\)",
                      r"nv_xnu_rc_detach\s*\(\s*&fNv\s*\)", r"nv_xnu_nano_retire\s*\(\s*&fNv\s*\)", r"rm_free_private_state\s*\("]))
+
+    rarm, rdet = body(n, "NVRM::rtd3Arm"), body(n, "NVRM::rtd3Detach")
+    rcalls = rarm + body(n, "rtd3Clients") + body(n, "rtd3Heads")
+    arm("the idle power-down monitor reaches the GPU only through a gate; stop() closes it, waits it out and takes the GPU away before any teardown",
+        re.search(r"nv_rtd3_ops\s+ops\s*=\s*\{\s*NULL\s*,", rarm)
+        and not re.search(r"\(\s*(?:NVRM|IOService)\s*\*\s*\)\s*(?:c|ctx)\b", rcalls) and not re.search(r"\bthis\s*,\s*rtd3Heads\b", rarm)
+        and len(re.findall(r"=\s*rtd3Enter\s*\(\s*\)", rarm)) == 4
+        and re.search(r"\brtd3Enter\s*\(\s*\)", body(n, "rtd3Clients")) and re.search(r"\brtd3Enter\s*\(\s*\)", body(n, "rtd3Heads"))
+        and re.search(r"if\s*\(\s*!\s*nv_gate_enter\s*\(\s*&gNvRtd3Gate\s*\)\s*\)\s*return\s+NULL\s*;", body(n, "rtd3Enter"))
+        and re.search(r"NvXnuGate\s+gNvRtd3Gate\s*=\s*\{\s*1\s*,\s*0\s*\}\s*;", n)
+        and order(rdet, [r"gNvRtd3Gpu\b[^;]*!=\s*this\s*\)\s*return\s*;", r"nv_gate_close\s*\(\s*&gNvRtd3Gate\s*\)",
+                         r"nv_quiesce_may_sleep\s*\(", r"nv_gate_idle\s*\(\s*&gNvRtd3Gate\s*\)",
+                         r"__atomic_store_n\s*\(\s*&gNvRtd3Gpu\s*,\s*\(\s*NVRM\s*\*\s*\)\s*NULL"])
+        and "nvx_can_block" not in rdet
+        and order(stop, [r"nvrm_fence_stop\s*\(\s*\)\s*;", r"\brtd3Detach\s*\(\s*\)\s*;", r"\bfUtilizationLock\b"])
+        and order(stop, [r"\brtd3Detach\s*\(\s*\)\s*;", r"\bPMstop\s*\(", r"\bnv_xnu_wq_flush\s*\("]))
+
+    sps, sws, rhold = body(n, "NVRM::setPowerState"), body(n, "NVRM::systemWillShutdown"), body(n, "NVRM::rtd3Hold")
+    arm("system sleep and shutdown hold the GPU against the idle power-down monitor: before the suspend, until the wake; "
+        "every monitor call does nothing while it is held, but the wake's own",
+        order(sps, [r"if\s*\(\s*ordinal\s*==\s*0\s*\)\s*rtd3Hold\s*\(\s*\d+\s*\)\s*;", r"OSAddAtomic\s*\(\s*0\s*,\s*&fGpuPm\s*\)",
+                    r"\bgpuSuspend\s*\(\s*\)", r"fRtd3Waker\s*=\s*current_thread\s*\(\s*\)\s*;",
+                    r"nv_rtd3_before_system_resume\s*\(\s*\)", r"\bgpuResume\s*\(\s*\)", r"fRtd3Waker\s*=\s*THREAD_NULL\s*;",
+                    r"if\s*\(\s*ordinal\s*!=\s*0\s*\)\s*rtd3Release\s*\(\s*\)\s*;"])
+        and order(sws, [r"\brtd3Hold\s*\(\s*\d+\s*\)\s*;", r"\bkernel_thread_start\s*\("]) and "rtd3Release" not in sws
+        and len(re.findall(r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*\)", rarm)) == 4
+        and order(rhold, [r"OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fRtd3Hold\s*\)", r"gNvRtd3Gpu\b[^;]*!=\s*this\s*\)\s*return\s*;",
+                          r"nv_quiesce_may_sleep\s*\(", r"nv_gate_idle\s*\(\s*&gNvRtd3Gate\s*\)"])
+        and "nvx_can_block" not in rhold
+        and re.search(r"OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&fRtd3Hold\s*\)", body(n, "NVRM::rtd3Release"))
+        and re.search(r"OSAddAtomic\s*\(\s*0\s*,\s*&fRtd3Hold\s*\)\s*!=\s*0\s*&&\s*current_thread\s*\(\s*\)\s*!=\s*fRtd3Waker",
+                      body(n, "NVRM::rtd3Held")))
+
+    stay, sgpu = body(n, "nvrmStayLoaded"), body(n, "NVRM::startGPU")
+    arm("the kext stays loaded: a reference on itself before anything is registered, never given back, and a stop function that refuses from then on",
+        order(stay, [r"if\s*\(\s*!\s*OSCompareAndSwap\s*\(\s*0\s*,\s*2\s*,\s*&gNvStayLoaded\s*\)\s*\)\s*return\s*;",
+                     r"OSKextRetainKextWithLoadTag\s*\(\s*\(\s*OSKextLoadTag\s*\)\s*kmod_info\.id\s*\)",
+                     r"OSCompareAndSwap\s*\(\s*2\s*,\s*1\s*,\s*&gNvStayLoaded\s*\)"])
+        and "OSKextReleaseKextWithLoadTag" not in n
+        and order(sgpu, [r"\bnvrmStayLoaded\s*\(\s*\)\s*;", r"\bnvrm_dma_attach\s*\("])
+        and not re.search(r"sysctl_register_oid|nv_xnu_kcore_init|\w+_sysctls\w*\s*\(|\bnvrm_dma_attach\s*\(",
+                          sgpu[:sgpu.find("nvrmStayLoaded")] + body(n, "NVRM::probe") + body(n, "NVRM::start"))
+        and re.search(r"\b_stop\s*\([^)]*\)\s*\{\s*return\s+OSAddAtomic\s*\(\s*0\s*,\s*&gNvStayLoaded\s*\)\s*\?\s*KERN_FAILURE\s*:\s*KERN_SUCCESS\s*;", n))
 
     isr = body(os_, "os_is_isr")
     arm("os_is_isr() answers from the per-GPU slots, and the single global is gone from every kext source",
@@ -163,6 +221,10 @@ def arms(src, others):
     destroy = body(t, "nv_destroy_nano_timer") + body(t, "nv_xnu_nano_end") + body(t, "nv_xnu_nano_quiesce")
     arm("nv_destroy_nano_timer frees nothing: no kern_os_free, IOFree or thread_call_free on the way",
         destroy and not re.search(r"\b(kern_os_free|IOFree|thread_call_free)\s*\(", destroy))
+    arm("a nano timer that ends puts its slot back or counts it as taken out of use for good, nothing in between",
+        re.search(r"if\s*\(\s*idle\s*&&\s*!\s*quarantine\s*\)\s*nv_xnu_nano_free\s*\(\s*t\s*\)\s*;\s*else\s+cnt\s*\(\s*&gNanoRetired\s*\)\s*;",
+                  body(t, "nv_xnu_nano_end"))
+        and re.search(r"SYSCTL_QUAD\s*\(\s*_debug\s*,\s*OID_AUTO\s*,\s*nvrm_nano_retired\s*,[^;]*&gNanoRetired\s*,", t))
     fire = body(t, "nv_xnu_nano_fire")
     arm("a nano timer callback reaches the RM only after its generation matched, and checks it once more after reading the slot",
         order(fire, [r"if\s*\(\s*!\s*nv_gen_enter\s*\(\s*&t->gate\s*,\s*token\s*\)\s*\)\s*\{[^}]*return\s*;", r"nv_gen_current\s*\(\s*&t->gate\s*\)\s*==\s*token",
@@ -246,10 +308,58 @@ CONTROLS = [
      lambda s: broken(s, "nvrm", "return kIOReturnNoResources; }", "}")),
     ("stop() keeps the slot", "go() claims the interrupt-thread slot",
      lambda s: broken(s, "nvrm", "    nv_xnu_isr_slot_release(fIsrSlot, this); fIsrSlot = -1;\n", "")),
+    ("go() making a second interrupt source over the first", "go(): a second try of pass 2",
+     lambda s: broken(s, "nvrm", "        if (fIntSrc) {\n            LOG(\"pass 2 failed before", "        if (0) {\n            LOG(\"pass 2 failed before")),
+    ("go() making a second work loop over the first", "go(): a second try of pass 2",
+     lambda s: broken(s, "nvrm", "        if (!fWorkLoop) fWorkLoop = IOWorkLoop::workLoop();", "        fWorkLoop = IOWorkLoop::workLoop();")),
     ("stop() without rm_disable_adapter", "stop(): rm_disable_adapter",
      lambda s: broken(s, "nvrm", "rm_disable_adapter(NULL, &fNv);", ";")),
     ("stop() lets the timers go after the private state", "stop(): rm_disable_adapter",
      lambda s: broken(broken(s, "nvrm", "    nv_xnu_nano_retire(&fNv);\n", ""), "nvrm", "    nvrm_dma_detach(&fNv);", "    nv_xnu_nano_retire(&fNv);\n    nvrm_dma_detach(&fNv);")),
+    ("stop() that leaves the GPU with the idle power-down monitor", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    rtd3Detach();\n", "")),
+    ("the GPU taken from the monitor only after the driver left power management", "the idle power-down monitor reaches",
+     lambda s: broken(broken(s, "nvrm", "    rtd3Detach();\n", ""), "nvrm", "    if (fPmJoined) { PMstop(); fPmJoined = false; }\n",
+                      "    rtd3Detach();\n    if (fPmJoined) { PMstop(); fPmJoined = false; }\n")),
+    ("the monitor handed the GPU object again", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "        NULL, rtd3Heads, rtd3Clients,", "        this, rtd3Heads, rtd3Clients,")),
+    ("a monitor call that does not enter the gate", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    if (!nv_gate_enter(&gNvRtd3Gate)) return NULL;\n", "")),
+    ("a monitor gate that starts open", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "static NvXnuGate gNvRtd3Gate = { 1, 0 };", "static NvXnuGate gNvRtd3Gate = {};")),
+    ("stop() that takes the GPU away without closing the monitor's gate", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "    nv_gate_close(&gNvRtd3Gate);\n", "")),
+    ("stop() that does not wait for the monitor", "the idle power-down monitor reaches",
+     lambda s: broken(s, "nvrm", "{ IOSleep(10); out = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
+    ("a system sleep that leaves the GPU to the monitor", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "    if (ordinal == 0) rtd3Hold(30000);\n", "")),
+    ("a hold taken only after the state was read", "system sleep and shutdown hold the GPU",
+     lambda s: broken(broken(s, "nvrm", "    if (ordinal == 0) rtd3Hold(30000);\n", ""), "nvrm",
+                      "    if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();",
+                      "    if (ordinal == 0) rtd3Hold(30000);\n    if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();")),
+    ("a wake that never gives the GPU back", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "    if (ordinal != 0) rtd3Release();\n", "")),
+    ("a wake whose own switch-on is refused", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "        fRtd3Waker = current_thread();", "       ")),
+    ("a shutdown that leaves the GPU to the monitor", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "        rtd3Hold(8000);", "       ")),
+    ("a monitor suspend that ignores the hold", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "if (!n->rtd3Held()) n->gpuSuspend();", "n->gpuSuspend();")),
+    ("a hold that does not wait for the call inside", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "{ IOSleep(10); idle = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
+    ("a hold that the waking thread cannot pass", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "OSAddAtomic(0, &fRtd3Hold) != 0 && current_thread() != fRtd3Waker", "OSAddAtomic(0, &fRtd3Hold) != 0")),
+    ("startGPU registering before the kext holds itself", "the kext stays loaded",
+     lambda s: broken(broken(s, "nvrm", "    nvrmStayLoaded();\n", ""), "nvrm", "    nvrm_guard_count_start();\n", "    nvrm_guard_count_start();\n    nvrmStayLoaded();\n")),
+    ("a kext that never holds itself", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    nvrmStayLoaded();\n", "")),
+    ("a module stop function that always agrees", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "{ return OSAddAtomic(0, &gNvStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }", "{ return KERN_SUCCESS; }")),
+    ("the kext's reference given back", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    if (r == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gNvStayLoaded);",
+                      "    if (r == kOSReturnSuccess) { OSCompareAndSwap(2, 1, &gNvStayLoaded); OSKextReleaseKextWithLoadTag((OSKextLoadTag)kmod_info.id); }")),
+    ("a reference taken at every start", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    if (!OSCompareAndSwap(0, 2, &gNvStayLoaded)) return;\n", "")),
     ("os_is_isr on one global again", "os_is_isr() answers",
      lambda s: broken(s, "os", "if (nv_xnu_isr_threads[i] == me)", "if (nv_xnu_isr_thread == me)")),
     ("a CPU count of 4 again", "os_get_cpu_count() is real_ncpus",
@@ -258,6 +368,8 @@ CONTROLS = [
      lambda s: broken(s, "os", "os_get_cpu_number(void) { NV_XNU_TRC; return 0; }", "os_get_cpu_number(void) { NV_XNU_TRC; return cpu_number(); }")),
     ("destroy frees the slot", "nv_destroy_nano_timer frees nothing",
      lambda s: broken(s, "timers", "    if (idle && !quarantine) nv_xnu_nano_free(t);", "    if (idle && !quarantine) nv_xnu_nano_free(t); else IOFree(t, sizeof *t);")),
+    ("a slot kept out of use without a count", "a nano timer that ends puts its slot back or counts it",
+     lambda s: broken(s, "timers", "    else cnt(&gNanoRetired);\n", "")),
     ("a nano callback without the generation check", "a nano timer callback reaches",
      lambda s: broken(s, "timers", "    if (!nv_gen_enter(&t->gate, token)) { cnt(&gNanoStale); return; }", "    nv_gen_enter(&t->gate, nv_gen_current(&t->gate));")),
     ("a nano callback without the second check", "a nano timer callback reaches",
