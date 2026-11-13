@@ -21,8 +21,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > warning). Run `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report
 > file to attach to an issue (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a
 > half-built result behind as finished, so after the fix the next run continues from that step. The component scripts
-> themselves have been run by hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts and the RM; what that
-> showed about a short account name is handled (see the `rm` row of [Troubleshooting](#troubleshooting)).
+> themselves have been run by hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts, the RM and the
+> plugin; what that showed about a short account name is handled (see the `rm` row of
+> [Troubleshooting](#troubleshooting)).
 
 ## Requirements
 
