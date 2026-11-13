@@ -394,7 +394,23 @@ def main():
         control("a tool the toolchain should have and has not is caught", "bin/pkgconf", lambda: pk.rename(pk.with_suffix(".x")), lambda: pk.with_suffix(".x").rename(pk))
         gl = w / "tools/bin/glslangValidator"
         control("a tool missing from tools/bin is caught", "glslangValidator: not in tools/bin", gl.unlink, lambda: gl.symlink_to(tc / "bin/glslangValidator"))
+        vp = w / "tools/venv/bin/python3"
+        control("a Python environment made from Homebrew's Python is caught", "python3 of the Python environment",
+                lambda: (vp.unlink(), vp.symlink_to(p / "opt/python@3.14/bin/python3.14")), lambda: (vp.unlink(), vp.symlink_to(tc / "python/bin/python3.14")))
+        ll = tc / "llvm/lib/libLLVM.dylib"
+        hb_llvm = tmp / "elsewhere/llvm/lib/libLLVM.dylib"   # not in Homebrew's own folders, whose changes another line counts
+        control("a tool of the toolchain that is a link into Homebrew is caught", "outside the working directory",
+                lambda: (mk.make(hb_llvm, "dylib", ("/usr/lib/libSystem.B.dylib",)), ll.unlink(), ll.symlink_to(hb_llvm)),
+                lambda: (ll.unlink(), ll.symlink_to("libLLVM-22.dylib")))
+        bg = w / "tools/cargo/bin/bindgen"
+        control("a tool that searches Homebrew's lib folder (LC_RPATH) is caught", "rpath /usr/local/lib",
+                lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("/usr/local/lib",)),
+                lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))
         r = w / "package/pkgroot"
+        tbz = w / "package/nullmoth-nvidia-local-abc1234.tar.gz"
+        control("a staged package without its tarball is caught", "no tarball", lambda: tbz.rename(tmp / "tb.away"), lambda: (tmp / "tb.away").rename(tbz))
+        control("a package without VERSION is caught", "has no VERSION", lambda: ((r / "VERSION").unlink(), write_sums(r)),
+                lambda: ((r / "VERSION").write_text("3.0\n"), write_sums(r)))
         new = r / "Library/NullMoth/dlss/nm_unzstd"
         control("a shipped file built for macOS 26 is caught", "minos 26.0",
                 lambda: (mk.make(new, "bundle", minos="26.0"), write_sums(r)), lambda: (mk.make(new, "bundle", minos="12.0"), write_sums(r)))
