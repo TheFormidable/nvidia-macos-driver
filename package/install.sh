@@ -558,9 +558,11 @@ OSB='$BUILD'   # the macOS build this install was made on: the one the previous 
 done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
 # NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
 refused() { ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; }
-# Someone may be working at a desktop that another GPU shows: a display is connected to some framebuffer (IOGraphics
-# keeps an IODisplayConnect under a framebuffer while a display is on it) and a user owns the console.
-shown() { ioreg -r -c IODisplayConnect -w0 2>/dev/null | grep -q .; }
+# Someone may be working at a desktop that another GPU shows: a display is connected to some framebuffer and a user
+# owns the console. IOGraphics attaches an IODisplayConnect to a framebuffer once it is opened with its connection
+# enabled; a framebuffer with nothing plugged in reports it disabled and gets none. Only that class's own line counts,
+# so that any other text ioreg might print reads as no display, and the Mac restarts as it always did.
+shown() { ioreg -r -c IODisplayConnect -w0 2>/dev/null | grep -q '<class IODisplayConnect,'; }
 busy() { shown && [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
 ok=0; nvram \$V:nullmoth-nv-ok >/dev/null 2>&1 && ok=1
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
@@ -578,7 +580,9 @@ done
 if [ "\$why" = refused ]; then
   said="the new driver cannot drive a display on this macOS (its framebuffer refused Apple's classes)"
   [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) \$said but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
+  # asked again before it counts as unknown: a build that cannot be read leaves this start without a desktop
   now=\$(sw_vers -buildVersion 2>/dev/null)
+  for i in 1 2; do [ -z "\$now" ] || break; sleep 5; now=\$(sw_vers -buildVersion 2>/dev/null); done
   if [ -z "\$OSB" ] || [ "\$now" != "\$OSB" ]; then
     echo "\$(date) \$said. This is macOS build \${now:-unknown} and the install was made on" \\
          "\${OSB:-an unknown build}: the previous driver is not put back onto a macOS it was not running on." \\

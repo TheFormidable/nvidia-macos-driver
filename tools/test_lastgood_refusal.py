@@ -110,8 +110,10 @@ def redirect(job, fake, t):
         for m in ABS.finditer(line):
             if m.start() and line[m.start() - 1] not in " \t\"'=(>;|&:":
                 continue   # inside a longer path, which the match that started it has judged
-            if m.group(0) in ("/dev/null", "/dev/console") or m.group(0).startswith(f"{t}/"):
-                continue   # /dev/console is only named to stat, which is a fake here
+            if m.group(0) == "/dev/null" or m.group(0).startswith(f"{t}/"):
+                continue
+            if m.group(0) == "/dev/console" and line[:m.start()].endswith("stat -f %Su "):
+                continue   # only asked who owns it, of stat, which is a fake here; any other use is refused
             raise Unsafe(f"line {n} of the job names {m.group(0)!r}, outside the test's folder")
     return text
 
@@ -133,8 +135,16 @@ exec "@REAL@" "$@"'''
 FAKES = {
     # what `ioreg -l -w0` prints: the file the test wrote (and may write again between two looks)
     "ioreg": r'''#!/bin/bash
-# `ioreg -r -c IODisplayConnect`: the displays connected to this Mac's framebuffers, and `-c IOFramebuffer` the
-# framebuffers themselves; none unless the test wrote some (neither is one of the looks)
+# `ioreg -r -c IODisplayConnect`: the displays connected to this Mac's framebuffers, and `-r -c IOFramebuffer` the
+# framebuffers themselves; none unless the test wrote some (neither is one of the looks). Without -r, -c only picks
+# whose properties are shown: the whole tree is printed, as the real ioreg does.
+case " $* " in
+  *" -c "*)
+    case " $* " in *" -r "*) ;; *)
+      echo "+-o Root  <class IORegistryEntry, id 0x100000100, retain 30>"
+      cat "$T/fbs.txt" "$T/displays.txt" "$T/ioreg.txt" 2>/dev/null; exit 0;;
+    esac;;
+esac
 case " $* " in
   *" -c IODisplayConnect "*) [ ! -f "$T/displays.txt" ] || cat "$T/displays.txt"; exit 0;;
   *" -c IOFramebuffer "*) [ ! -f "$T/fbs.txt" ] || cat "$T/fbs.txt"; exit 0;;
@@ -163,14 +173,19 @@ n=$(cat "$T/sleep.n" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$T/sleep.n
 exit 0''',
     "shutdown": r'''#!/bin/bash
 echo "shutdown $*" >> "$T/calls"''',
-    # the running macOS build: the file the test wrote; no file, no answer (the tool failed)
+    # the running macOS build: the file the test wrote; no file, no answer (the tool failed). osbuild.fail holds how
+    # many questions fail before it answers.
     "sw_vers": r'''#!/bin/bash
 [ "$*" = "-buildVersion" ] || { echo "sw_vers $*" >> "$T/calls"; exit 1; }
+echo "sw_vers $*" >> "$T/asked"
+f=$(cat "$T/osbuild.fail" 2>/dev/null || echo 0)
+if [ "$f" -gt 0 ]; then echo $((f - 1)) > "$T/osbuild.fail"; exit 1; fi
 [ -f "$T/osbuild.txt" ] || exit 1
 cat "$T/osbuild.txt"''',
-    # who owns the console: the file the test wrote. Any other question is not answered.
+    # who owns the console: the file the test wrote; no file, no answer (stat failed). Any other question is refused.
     "stat": r'''#!/bin/bash
 [ "$*" = "-f %Su /dev/console" ] || { echo "stat $*" >> "$T/calls"; exit 1; }
+[ -f "$T/console.txt" ] || exit 1
 cat "$T/console.txt"''',
 }
 
@@ -195,12 +210,13 @@ class Result:
 
 
 def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False, osbuild=INSTALLER["BUILD"],
-        fbs="", displays="", console="root"):
+        osbuild_fail=0, fbs="", displays="", console="root"):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
-    line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read), fbs
-    the framebuffers the registry holds, displays the displays connected to them (none: nothing shows a picture) and
-    console the owner of /dev/console."""
+    line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read) and
+    osbuild_fail how many times sw_vers fails before it says so, fbs the framebuffers the registry holds, displays
+    what ioreg prints for the displays connected to them (none: nothing shows a picture) and console the owner of
+    /dev/console (None: stat fails)."""
     t = pathlib.Path(tempfile.mkdtemp(prefix="lgr-"))
     r = Result()
     try:
@@ -249,11 +265,13 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
         (t / "ioreg.txt").write_text(registry)
         if osbuild is not None:
             (t / "osbuild.txt").write_text(osbuild + "\n")
+        (t / "osbuild.fail").write_text(f"{osbuild_fail}\n")
         if fbs:
             (t / "fbs.txt").write_text(fbs)
         if displays:
             (t / "displays.txt").write_text(displays)
-        (t / "console.txt").write_text(console + "\n")
+        if console is not None:
+            (t / "console.txt").write_text(console + "\n")
         for name, value in (nv or {}).items():
             (t / f"nv.{name}").write_text(value + "\n")
         for n, more in (later or {}).items():
@@ -270,6 +288,7 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
         r.fake = fake if keep else None
         r.log = read(lib / "NullMoth/lastgood.log")
         r.calls = read(t / "calls")
+        r.asked = read(t / "asked").count("sw_vers")
         r.sleeps = int(read(t / "sleep.n") or 0)
         r.looks = int(read(t / "ioreg.n") or 0)
         r.kexts = [read(lib / "Extensions" / f"{k}.kext" / "which").strip() for k in NAMES]
@@ -387,6 +406,12 @@ arm("  and the log names both builds and keeps what the framebuffer found",
     and "restoring" not in r.log, r.log)
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild=None)
 arm("  nor when the running build cannot be read", untouched(r) and r.job_left and "build unknown" in r.log, show(r))
+arm("    after asking three times", r.asked == 3, show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild_fail=1)
+arm("  a build that cannot be read once is asked again: the previous driver is put back and the Mac restarts",
+    restored(r) and r.asked == 2 and "unknown" not in r.log, show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild_fail=2)
+arm("    and so it is at the third question", restored(r) and r.asked == 3, show(r))
 try:
     r = run(fill(template(src), BUILD=""), registry=FB_REFUSED + ioreg_line(EARLY))
     arm("  nor when the install recorded no build", untouched(r) and r.job_left and "an unknown build" in r.log,
@@ -414,6 +439,30 @@ r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs="", displays="", conso
 arm("  and so it does with no framebuffer at all", restored(r), show(r))
 r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, fbs=OTHER_FB, displays=OTHER_DISPLAY, console="tester")
 arm("  (two starts in a row without a display restart whoever is logged in, as before)", restored(r), show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays=OTHER_DISPLAY, console=None)
+arm("  a display on another GPU and a console whose owner cannot be read: put back, the restart left to the user",
+    put_back(r) and not r.restarted, show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), displays="ioreg: could not be reached\n", console="tester")
+arm("  any other text from ioreg is not a display: the Mac restarts", restored(r), show(r))
+
+# ---- the owner's Mac: one display, on the NVIDIA card, so nothing can show a picture after a refusal. In every
+# order of the job, the kexts and the login it gets the previous driver back and restarts.
+for label, kw in (
+        ("the refusal at the job's first look, at the login window", dict(registry=FB_REFUSED + ioreg_line(EARLY))),
+        ("the refusal at the first look, a user logged in by itself", dict(registry=FB_REFUSED + ioreg_line(EARLY),
+                                                                             console="tester")),
+        ("the kexts after the job, a user logged in", dict(registry="", later={3: FB_REFUSED + ioreg_line(EARLY)},
+                                                           console="tester")),
+        ("the refusal read late, after a long settle, a user logged in", dict(registry=FB_OK,
+                                                                               later={30: ioreg_line(LATE)},
+                                                                               console="tester")),
+        ("the owner of the console cannot be read", dict(registry=FB_REFUSED + ioreg_line(EARLY), console=None)),
+        ("the build answers at the second question, a user logged in",
+         dict(registry=FB_REFUSED + ioreg_line(EARLY), osbuild_fail=1, console="tester")),
+        ("a display-came-up word from before, a user logged in",
+         dict(registry=FB_REFUSED + ioreg_line(EARLY), nv={"nullmoth-nv-ok": "1"}, console="tester"))):
+    r = run(job, **kw)
+    arm(f"the owner's Mac gets the previous driver back and restarts: {label}", restored(r), show(r))
 
 # ---- what must not look like a refusal
 r = run(job, registry=FB_REFUSED)
@@ -494,7 +543,8 @@ except (Unsafe, AssertionError) as e:
 for what, bad in (("its PATH line changed", job.replace(PATH_LINE, "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
                   ("it calls /sbin/shutdown", job.replace("shutdown -r now", "/sbin/shutdown -r now")),
                   ("it names a path outside the installer's folders", job.replace('rm -rf /Library/NullMoth/kexts',
-                                                                               'rm -rf /System/Library/Extensions'))):
+                                                                               'rm -rf /System/Library/Extensions')),
+                  ("it writes to the console", job.replace('shutdown -r now', 'echo x > /dev/console; shutdown -r now'))):
     try:
         if bad == job:
             raise AssertionError("the control's edit found nothing to change")
