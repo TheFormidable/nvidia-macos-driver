@@ -357,6 +357,9 @@ has proven itself, renewed with a reason otherwise.
   driver with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when it has
   them), stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken from
   Homebrew.
+- `tools/run_all_tests.py` says, after a failed test, when the checkout lacks the history that 14 of the tests read
+  from git (a clone made with `--depth 1`, a clone without the release tags, a tree that is not a git checkout), and
+  names the command that brings it.
 - NVK's library came out with the same bytes in three builds on the Intel Mac (once with build tools made by hand,
   then with `./build.sh` at commits 650db45 and 3933ff6, which do not differ in NVK's sources or patches), and
   NVRM.kext's binary and the plugin had the same bytes at those two commits. The other kexts, the shader translator
