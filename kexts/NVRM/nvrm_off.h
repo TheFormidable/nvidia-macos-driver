@@ -11,10 +11,12 @@
 // install's recovery puts the previous driver back. Every check is a read, so all parts of the driver agree within a
 // boot; only NVRM's start counts. A variable that cannot be written (NVRAM not native) only means the guard never trips.
 // One failure is outside the guard: a framebuffer that refuses this macOS's classes (nvrmfb_layout.h). NVRM declines
-// the card before it counts, because turning the driver off could not light the screen (the driver-off framebuffer
+// the card before it counts, because turning the driver off could not change the picture (the driver-off framebuffer
 // refuses the same classes). After an install over an earlier driver, and on the macOS build of that install, the
 // install's fallback job reads that refusal on the PCI device and puts the earlier driver back; otherwise every start
-// ends without a desktop on the card until boot-arg nvlayout=0 or the driver is taken out.
+// ends the same way until boot-arg nvlayout=0 or the driver is taken out: without a desktop on the card where the
+// OpenCore setup excludes Apple's IONDRVSupport, on Apple's slow firmware framebuffer (when it can draw) where it does
+// not.
 #pragma once
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>

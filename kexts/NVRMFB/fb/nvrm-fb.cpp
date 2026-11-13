@@ -902,11 +902,12 @@ class NVRMFBClaim : public IOService
 public:
     // The claim is the first of this kext's classes to see the PCI device, before NVRM starts on it: it compares the
     // Apple framebuffer classes with this build and publishes the verdict there. When they differ every framebuffer of
-    // this kext would run on a misplaced base, so the claim steps aside too. Nothing takes the category then on an
-    // installed system (its OpenCore setup excludes Apple's IONDRVSupport, and NVRMBootFB below refuses for the same
-    // reason): no desktop comes up on this card, NVRM declines it on the same verdict, and after an install over an
-    // earlier driver, on the macOS build of that install, the install's fallback job puts that driver back
-    // (package/install.sh, step 6b).
+    // this kext would run on a misplaced base, so the claim steps aside too, and NVRMBootFB below refuses for the same
+    // reason. NVRM declines the card on the same verdict, and after an install over an earlier driver, on the macOS
+    // build of that install, the install's fallback job puts that driver back (package/install.sh, step 6b). Until
+    // then the category goes to whoever is left: nobody where the OpenCore setup excludes Apple's IONDRVSupport (no
+    // desktop comes up on this card), Apple's IONDRVFramebuffer (probe score 20000) where it does not (a slow desktop
+    // without acceleration on the firmware's picture, when that picture is still inside this card's apertures).
     IOService *probe(IOService *provider, SInt32 *score) override
     {
         if (!nvrmfbLayoutAllows(provider, "NVRMFBClaim")) return NULL;
@@ -914,9 +915,10 @@ public:
     }
     bool start(IOService *provider) override
     {
-        // With the driver off, leave the slot to NVRMBootFB below (or to IONDRVFramebuffer where IONDRVSupport is
-        // not excluded) so the firmware's display stays lit while the removal runs. WAS: the claim held it anyway and
-        // the screen stayed dark until the second restart.
+        // With the driver off, leave the slot to NVRMBootFB below so the firmware's display stays lit while the
+        // removal runs; IONDRVFramebuffer, where IONDRVSupport is not excluded, comes after it (20000 against 25000)
+        // and takes the slot only when NVRMBootFB declines. WAS: the claim held it anyway and the screen stayed dark
+        // until the second restart.
         if (nvrm_driver_off()) return false;
         if (!IOService::start(provider)) return false;
         nvrmfbStayLoaded();
@@ -932,7 +934,10 @@ OSDefineMetaClassAndStructors(NVRMFBClaim, IOService)
 // install excludes IONDRVSupport in OpenCore so Apple's firmware framebuffer never takes this display: nothing lit the
 // screen and both driver-off starts came up black (1.14.0/1.14.1 reports). This is what IONDRVFramebuffer does for a card
 // without an NDRV: one fixed mode on the firmware's (GOP) framebuffer, drawn by the CPU. It only matches with the driver
-// off, and only when the firmware's framebuffer lies inside this card's BARs (a panel on the iGPU is not ours).
+// off, and only when the firmware's framebuffer lies inside this card's BARs (a panel on the iGPU is not ours). Where
+// IONDRVSupport is not excluded this class still comes first (25000 against IONDRVFramebuffer's 20000), and when it
+// declines IONDRVFramebuffer takes the display as it would without this class. Neither starts while the claim
+// holds the category, which it does whenever the driver is on and the layout check allows.
 class NVRMBootFB : public IOFramebuffer
 {
     OSDeclareDefaultStructors(NVRMBootFB)
