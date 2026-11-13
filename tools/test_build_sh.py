@@ -360,16 +360,28 @@ printf '%s\n' "$@" > "$f.args"
 { printf 'step %s' "$key"; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$J"
 echo "stand-in for $key: started"
 # told to wait: until released, until the test takes the block away (or its sandbox is gone), at most two minutes;
-# a stand-in that outlives its run must not wait for ever
-# (a bash 4 or later waits with its own "read -t" on a FIFO that never delivers, instead of starting a sleep every 50 ms:
-# 2400 forks are slow on a loaded machine; bash 3.2 cannot time out a read in less than a second, so it keeps sleep)
+# a stand-in that outlives its run must not wait for ever.
+# It waits with the shell's own timed "read" on a FIFO that never delivers, and from "started" to the end of the wait
+# nothing but the shell itself runs. A "sleep" every 50 ms instead loses about one Ctrl-C in eighty (a SIGINT to the
+# run's process group, as the test sends it) under a bash 3.2 on a busy machine: a bash that is waiting for a child
+# takes a SIGINT for dealt with when that child ends by itself in the same moment, so the stand-in naps on and
+# build.sh waits for it. (And 2400 forks are slow.) bash 3.2 cannot time out a read in less than a second, so there a
+# release is seen up to a second late.
+# ctl/sigint-exits-<key>: the stand-in is a tool that deals with the interrupt itself and ends with a status of its
+# own, as ninja and cargo do
 if [ -f "$SB/ctl/block-$key" ]; then
-  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0; nap="sleep 0.05"
-  if [ "${BASH_VERSINFO[0]}" -ge 4 ] && mkfifo "$SB/ctl/nap-$$" 2>/dev/null; then
-    exec 3<>"$SB/ctl/nap-$$"; rm -f "$SB/ctl/nap-$$"; nap="read -t 0.05 -u 3 _"
+  w=0; lim=2400; nap="sleep 0.05"
+  if mkfifo "$SB/ctl/nap-$$" 2>/dev/null && { exec 3<>"$SB/ctl/nap-$$"; } 2>/dev/null; then
+    if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then nap="read -t 0.05 -u 3 _"; else nap="read -t 1 -u 3 _"; lim=120; fi
+  else
+    # no FIFO to be had: the sleep it is, with a trap, which bash acts on in all but the rarest of those moments
+    trap 'trap - INT; kill -INT $$' INT
   fi
+  rm -f "$SB/ctl/nap-$$"
+  [ ! -f "$SB/ctl/sigint-exits-$key" ] || trap 'echo "stand-in for $key: stopped, interrupted by user"; exit 2' INT
+  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"
   while [ ! -f "$SB/ctl/release-$key" ] && [ -f "$SB/ctl/block-$key" ]; do
-    w=$((w + 1)); [ "$w" -le 2400 ] || { echo "stand-in for $key: never released"; exit 9; }
+    w=$((w + 1)); [ "$w" -le "$lim" ] || { echo "stand-in for $key: never released"; exit 9; }
     $nap || true
   done
   exec 3<&-
@@ -2924,8 +2936,11 @@ def alive(pid):
     return True
 
 
-def interrupt_problems(sb, wait=60, default_sigint=True):
+def interrupt_problems(sb, wait=60, default_sigint=True, tool_exits=False):
+    """tool_exits: the step's tool deals with the interrupt itself and ends with its own failure status."""
     (sb.ctl / "block-fb").write_text("")
+    if tool_exits:
+        (sb.ctl / "sigint-exits-fb").write_text("")
     sb.clear()
     pr = sb.popen("--force", "build", "fb", default_sigint=default_sigint)
     p = []
@@ -2949,10 +2964,14 @@ def interrupt_problems(sb, wait=60, default_sigint=True):
             p.append(f"the step's stand-in (pid {pid}) outlived the interrupted run")
     finally:
         # the stand-in waits while the block is there: never leave it for the arms that follow
-        for f in ("block-fb", "started-fb", "pid-fb"):
+        for f in ("block-fb", "started-fb", "pid-fb", "sigint-exits-fb"):
             (sb.ctl / f).unlink(missing_ok=True)
     if pr.returncode == 0:
         p.append("exit 0 after an interrupt")
+    if tool_exits and "interrupted by user" not in (sb.work / "logs/fb.log").read_text():
+        p.append("the stand-in did not end by itself (its own message is not in the step's log)")
+    if "STOP: step" in out:
+        p.append("the interrupt is reported as a failed step")
     if (sb.work / "stamps/fb").exists():
         p.append("the interrupted step has a stamp")
     if (sb.work / "build.lock").exists():
@@ -2972,6 +2991,14 @@ def arm_interrupt(mac):
     with mac.scratch():
         mac.break_script("release_lock() {\n", "release_lock() { return 0\n")
         negative("an interrupt that leaves the lock", interrupt_problems(mac)[0])
+    # ninja and cargo catch the interrupt, stop their jobs and end with a failure status of their own: the shell that
+    # waited then sees a child that ended normally, and only its trap tells it that the user pressed Ctrl-C
+    with mac.scratch():
+        p, out = interrupt_problems(mac, tool_exits=True)
+        check("Ctrl-C in a step whose tool ends by itself with a failure status: still an interrupt, not a failed step", not p, (p, out[-600:]))
+    with mac.scratch():
+        mac.break_script("  trap on_signal INT TERM\n", "  trap on_signal TERM\n")
+        negative("a run that takes such a tool's status for a failed step", interrupt_problems(mac, tool_exits=True)[0])
     # started from "nohup ... &" or a script's "&", this test and everything it starts inherit an ignored SIGINT, which
     # build.sh cannot trap: the Ctrl-C must still reach it, or the arm waits a minute and its step is left running
     old = signal.signal(signal.SIGINT, signal.SIG_IGN)
