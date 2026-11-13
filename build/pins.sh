@@ -46,6 +46,12 @@ NM_PIN_MESA_COMMIT=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
 # pin above moves, ci_vulkan_headers.sh stops until the two are compared again (its --compare) and both lines move.
 NM_PIN_CI_VKHEADERS_COMMIT=6802bb4733b63ed5efd3adb308a6c885ef180ea1
 NM_PIN_CI_VKHEADERS_MESA=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
+# Not fetched by build.sh: the base package of the automatic full build (build/ci_full_build.sh basepkg, run by
+# .github/workflows/full-build.yml), which gives it to "./build.sh package" with NM_BASE_PACKAGE_SHA256. The release
+# package 2.9 as published on the original project's release page; size and SHA-256 of the file downloaded 2026-11-13.
+NM_PIN_CI_BASEPKG_URL=https://github.com/nullmoth/nvidia-macos-driver/releases/download/v2.9/nullmoth-nvidia-2.9.tar.gz
+NM_PIN_CI_BASEPKG_SIZE=68833656
+NM_PIN_CI_BASEPKG_SHA256=b624bf07c78cea03043e096383d5c8b01e4fb2c804a6ba377a4e66a2566422ef
 
 # Khronos Vulkan-Headers and Vulkan-Loader v1.4.367: build/build_vulkan_loader.sh (TAG=, LOADER_SHA=, HEADERS_SHA=),
 # NOTICE. The mirror variable is a base URL (".../KhronosGroup"); build_vulkan_loader.sh reads the same variable.
