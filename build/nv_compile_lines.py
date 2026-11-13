@@ -70,8 +70,9 @@ def transform(component, lines):
         for rx, name, _why in rules:
             found = rx.findall(rest)
             if found:
-                for f in found:
-                    dropped[f.strip()] = dropped.get(f.strip(), 0) + 1
+                # counted once per command: the note says in how many commands an option was
+                for f in set(f.strip() for f in found):
+                    dropped[f] = dropped.get(f, 0) + 1
                 rest = rx.sub("", rest)
         rest = rest[1:].replace(" -mcmodel=kernel", "").replace(" -fno-pic", "")
         out.append(tools[cc] + " " + PREFIX + " " + rest)
