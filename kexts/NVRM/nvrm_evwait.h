@@ -260,8 +260,10 @@ static inline void nvrm_evw_dead(struct nvrm_evw_thread *t, volatile int *fell_b
 /* has_gpu_work: the wait has at least one GPU completion to wait for (2.9: `n != 0`).
    *fell_back: one flag for the process (NVRM_EVW_FB_*). Set to DEAD here when a kernel wait call fails, for good; to
    QUIET when a thread reaches NVRM_EVW_MISS_LIMIT missed wakes; from QUIET back to 0 by an answer that proves events
-   arrive. Threads read and write it without a lock: two threads that go QUIET together say FELL_BACK twice (the caller
-   says it once), and a thread that clears QUIET just as another sets DEAD costs that other thread one more failed call. */
+   arrive. Threads read it without a lock. The two changes that depend on what it holds are compare-and-swaps (0 to
+   QUIET, QUIET to 0), so a DEAD stored by another thread in between is never overwritten and never cleared, and of
+   two threads that go QUIET or bring the events back together only one says so; DEAD is a plain store, it wins
+   over anything. */
 static inline void nvrm_evw_round(struct nvrm_evw_thread *t, int mode, uint64_t waited_ns, uint64_t remain_ns, int has_gpu_work,
                                   volatile int *fell_back, const struct nvrm_evw_ops *ops, void *ctx)
 {
@@ -318,7 +320,9 @@ static inline void nvrm_evw_round(struct nvrm_evw_thread *t, int mode, uint64_t 
         if (give_up) {
             /* QUIET; and this thread's run starts again, so that it is not one missed wake from QUIET when events return */
             t->misses = 0;
-            if (!*fell_back) { *fell_back = NVRM_EVW_FB_QUIET; ops->stat(ctx, NVRM_EVW_S_FELL_BACK); }
+            int was = 0;
+            if (__atomic_compare_exchange_n(fell_back, &was, NVRM_EVW_FB_QUIET, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                ops->stat(ctx, NVRM_EVW_S_FELL_BACK);
         } else if (missed && t->trial && ++t->trial_misses >= NVRM_EVW_TRIAL_MISSES) {
             nvrm_evw_trial_failed(t);   /* not another FELL_BACK: the process never stopped polling */
         }
@@ -329,7 +333,10 @@ static inline void nvrm_evw_round(struct nvrm_evw_thread *t, int mode, uint64_t 
     }
     if (proof) {
         nvrm_evw_events_back(t);
-        if (*fell_back == NVRM_EVW_FB_QUIET) { *fell_back = 0; ops->stat(ctx, NVRM_EVW_S_BACK); }
+        int was = NVRM_EVW_FB_QUIET;
+        if (*fell_back == NVRM_EVW_FB_QUIET &&
+            __atomic_compare_exchange_n(fell_back, &was, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            ops->stat(ctx, NVRM_EVW_S_BACK);
     }
     if (nvrm_evw_must_poll(why)) ops->backoff(ctx, waited_ns);
 }
