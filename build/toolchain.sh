@@ -606,10 +606,35 @@ macho_files() {   # <record file>: "m <file>" for each Mach-O file, "a <file>" f
       elsif ($m eq "!<arch>\n") { print "a $rel\n" }
     }' "$P" < "$1"
 }
+# A link the tool installed is not a Mach-O file and is skipped above, but whatever loads or runs it reaches its target:
+# links_out lists "<file> <target>" for each link of the record whose target, after every link on the way, lies
+# outside the prefix, /usr/lib and /System/Library (a link that leads nowhere is judged by where it points)
+links_out() {   # <record file>
+  perl -e '
+    use Cwd qw(abs_path);
+    my $root = shift;
+    sub lexical { my @o; for my $c (split m{/}, $_[0]) { next if $c eq "" || $c eq "."; if ($c eq "..") { pop @o } else { push @o, $c } } return "/" . join("/", @o) }
+    while (my $rel = <STDIN>) {
+      chomp $rel; my $f = "$root/$rel";
+      next unless -l $f;
+      my ($p, $n) = ($f, 0);
+      while (-l $p && $n++ < 40) {
+        my $t = readlink $p; last unless defined $t;
+        (my $d = $p) =~ s{/[^/]*$}{};
+        $p = lexical($t =~ m{^/} ? $t : "$d/$t");
+      }
+      my $r = (-e $p && abs_path($p)) || $p;
+      next if index("$r/", "$root/") == 0 || index($r, "/usr/lib/") == 0 || index($r, "/System/Library/") == 0;
+      print "$rel $r\n";
+    }' "$P" < "$1"
+}
 check_libraries() {   # <tool>
-  local rec=$P/.nm-toolchain/$1.files kind rel lib n=0 na=0 mo
+  local rec=$P/.nm-toolchain/$1.files kind rel lib n=0 na=0 mo to
   is_darwin || return 0
   [ -f "$rec" ] || { bad "no record of the files $1 installed (build it with this script)"; return 0; }
+  while read -r rel to; do
+    bad "$P/$rel is a link to $to, which is neither the system's nor the toolchain's"
+  done < <(links_out "$rec")
   while read -r kind rel; do
     mo=$(macho_minos "$P/$rel")
     if [ "$kind" = a ]; then
@@ -626,7 +651,7 @@ check_libraries() {   # <tool>
     if [ -z "$mo" ]; then bad "$P/$rel: otool -l shows no minimum macOS version"
     elif version_above "$mo" "$DT"; then bad "$P/$rel is built for macOS $mo and later, above MACOSX_DEPLOYMENT_TARGET $DT"; fi
   done < <(macho_files "$rec")
-  cnote "$n Mach-O files of $1 name only /usr/lib, /System/Library and $P, and they and its $na static libraries run on macOS $DT"
+  cnote "$n Mach-O files of $1 name only /usr/lib, /System/Library and $P, and they and its $na static libraries run on macOS $DT; its links lead nowhere else"
 }
 run_checks() {   # <tool>: CHECK_BAD counts the failures
   CHECK_BAD=0
