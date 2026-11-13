@@ -49,6 +49,10 @@ def skip(why):
 
 
 # ------------------------------------------------------------------------------------------------ making Mach-O files
+LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
+OLDEST = "12.0"      # the oldest macOS a file of this test is made for (the base package's nm_unzstd)
+
+
 def toolchain(bindir):
     """-> the compiler command for an x86_64 macOS target, with an otool on PATH (a stand-in made in bindir)."""
     if platform.system() == "Darwin":
@@ -73,6 +77,10 @@ class Maker:
         self.bin = tmp / "bin"
         self.bin.mkdir()
         self.cc, self.extra_path = toolchain(self.bin)
+        # On a Mac the files are linked as every program there is, with the SDK's libSystem, whose install name is
+        # LIBSYSTEM. Elsewhere there is no SDK: they are linked with -nostdlib, against a stand-in of that name.
+        self.sdk_libsystem = platform.system() == "Darwin"
+        self.nostdlib = [] if self.sdk_libsystem else ["-nostdlib"]
         (self.src / "f.c").write_text("int nm_f(void) { return 1; }\n")
         # no call into the libraries: the load commands are what is checked, and a call would need macOS's dyld_stub_binder
         (self.src / "m.c").write_text("int nm_g(void) { return 2; }\n")
@@ -84,10 +92,11 @@ class Maker:
         return self.cc + [f"-mmacosx-version-min={minos}"]
 
     def stub(self, name):
-        """a library whose install name is `name`, to link against (nothing of it is copied anywhere)"""
+        """a library whose install name is `name`, to link against (nothing of it is copied anywhere). Made for the
+        oldest macOS a file of this test is made for, so that no linker finds it too new for what links it."""
         if name not in self.stubs:
             out = self.src / f"stub{len(self.stubs)}.dylib"
-            subprocess.run(self._cc("15.0") + ["-nostdlib", "-dynamiclib", "-install_name", name, "-o", str(out), str(self.src / "f.c")], check=True,
+            subprocess.run(self._cc(OLDEST) + self.nostdlib + ["-dynamiclib", "-install_name", name, "-o", str(out), str(self.src / "f.c")], check=True,
                            capture_output=True, env=self.env())
             self.stubs[name] = out
         return self.stubs[name]
@@ -101,7 +110,7 @@ class Maker:
     def make(self, out, kind="dylib", loads=("/usr/lib/libSystem.B.dylib",), rpaths=(), minos="15.0", install_name=None):
         out = pathlib.Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        args = self._cc(minos) + ["-nostdlib"]
+        args = self._cc(minos) + self.nostdlib
         if kind == "dylib":
             args += ["-dynamiclib", "-install_name", install_name or str(out)]
         elif kind == "bundle":
@@ -111,7 +120,7 @@ class Maker:
             return out
         for r in rpaths:
             args += ["-Wl,-rpath," + r]
-        libs = [str(self.stub(n)) for n in loads]
+        libs = [str(self.stub(n)) for n in loads if not (self.sdk_libsystem and n == LIBSYSTEM)]
         r = subprocess.run(args + ["-o", str(out), str(self.src / "m.c")] + libs, capture_output=True, text=True, env=self.env())
         if r.returncode:
             raise RuntimeError(r.stderr)
