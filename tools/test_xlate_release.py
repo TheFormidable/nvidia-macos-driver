@@ -153,11 +153,17 @@ try:
     check("a debug map left in the dylib stops the script: its names are read although they are in no section",
           rc == 5 and "STOP: 1 build machine path(s) left in the dylib" in out and MAP in out, (rc, out[-600:]))
     by_name = src.replace('strings -a < "$D"', 'strings -a "$D"')
-    assert src.count('strings -a < "$D"') == 2 and by_name != src, "control: the two reads of the dylib are not in the script"
+    assert src.count('strings -a < "$D"') == 1 and by_name != src, "control: the read of the dylib is not in the script"
     s = scene(by_name, strip_leaves=True); made.append(s.tmp)
     rc, out = s.run()
     check("negative control: a script that hands strings the file by name does not see the debug map and ends well",
           rc == 0 and "build machine path" not in out, (rc, out[-600:]))
+
+    s = scene(); made.append(s.tmp)
+    tool(s.bin / "strings", 'echo "strings: cannot read" >&2; exit 1\n')
+    rc, out = s.run()
+    check("a strings that fails stops the script: what it did not print is not taken for a dylib without paths",
+          rc == 5 and "STOP: strings could not read the dylib" in out, (rc, out[-600:]))
 finally:
     for t in made:
         shutil.rmtree(t, ignore_errors=True)
