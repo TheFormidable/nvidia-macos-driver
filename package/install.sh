@@ -541,11 +541,13 @@ step "6b. falling back to the previous driver if this one cannot start"
 # install was made on: the previous driver was running there, so it fits; after a macOS update the refusal may be the
 # update's doing, and a driver from before these checks would be put onto classes that really changed. On another
 # build the job only keeps the refusal in its log. And it restarts at once unless someone may be working at a desktop
-# (a display is connected to some framebuffer and a user owns the console): then the files are put back and the
-# restart is left to that user. That desktop may be another GPU's, or Apple's firmware framebuffer on this same card
-# after an automatic login; the job does not tell the two apart. A framebuffer with nothing plugged into it shows
-# nothing (a second GPU that only computes), so with no display on any framebuffer the Mac restarts whoever is logged
-# in, and at the login window it restarts whatever shows it.
+# of another GPU (a display is connected to a framebuffer that is not on the declined card, and a user owns the
+# console): then the files are put back and the restart is left to that user. A display on the declined card itself
+# does not hold the restart back: only Apple's firmware framebuffer can draw there, slowly and without acceleration,
+# and the driver it stands in for is back, so the Mac restarts even after an automatic login, as it does where
+# nothing can draw on that card. A framebuffer with nothing plugged into it shows nothing (a second GPU that only
+# computes), so with no display on any framebuffer the Mac restarts whoever is logged in, and at the login window it
+# restarts whatever shows it.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
@@ -563,13 +565,30 @@ OSB='$BUILD'   # the macOS build this install was made on: the one the previous 
 done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
 # NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
 refused() { ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; }
-# Someone may be working at a desktop: a display is connected to some framebuffer (another GPU's, or Apple's firmware
-# framebuffer on this card) and a user owns the console. IOGraphics attaches an IODisplayConnect to a framebuffer once
-# it is opened with its connection enabled; a framebuffer with nothing plugged in reports it disabled and gets none.
-# Only that class's own line counts, so that any other text ioreg might print reads as no display, and the Mac
-# restarts as it always did.
-shown() { ioreg -r -c IODisplayConnect -w0 2>/dev/null | grep -q '<class IODisplayConnect,'; }
-busy() { shown && [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
+# Someone may be working at a desktop: a display is connected to another GPU's framebuffer and a user owns the
+# console. IOGraphics attaches an IODisplayConnect to a framebuffer once it is opened with its connection enabled; a
+# framebuffer with nothing plugged in reports it disabled and gets none. A display under a card NVRM declined (the PCI
+# device that carries nvrm-layout, printed with everything under it by ioreg -r -k) does not count: only Apple's
+# firmware framebuffer can be drawing there, and the driver it stands in for has just been put back. Displays are
+# told apart by their registry ids, so a subtree printed twice, or a display found by both questions, cannot tip it.
+# Only that class's own line with its id counts: any other text ioreg prints reads as no display, so the Mac restarts
+# as it always did, and when nothing is found under a declined card every display counts. lit records that some
+# display was found at all, for the words of the restart.
+ids() { grep -o '<class IODisplayConnect, id 0x[0-9a-fA-F]*' | grep -o '0x[0-9a-fA-F]*'; }
+shown() {
+  lit=0
+  all=\$(ioreg -r -c IODisplayConnect -w0 2>/dev/null | ids)
+  [ -n "\$all" ] || return 1
+  lit=1
+  card=\$(ioreg -r -k nvrm-layout -w0 2>/dev/null | ids)
+  card=" \$(echo \$card) "
+  for d in \$all; do
+    case "\$card" in *" \$d "*) ;; *) return 0;; esac
+  done
+  return 1
+}
+user() { [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
+busy() { shown && user; }
 ok=0; nvram \$V:nullmoth-nv-ok >/dev/null 2>&1 && ok=1
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
 why=""; n=0
@@ -620,7 +639,12 @@ if [ "\$why" = refused ] && busy; then
        "now: the previous driver starts at the next restart" >> \$LOG
   exit 0
 fi
-echo "\$(date) previous driver restored; restarting" >> \$LOG
+if [ "\$why" = refused ] && [ "\$lit" = 1 ] && user; then
+  echo "\$(date) previous driver restored. The only lit display is on the card whose driver was refused, where" \\
+       "macOS's firmware framebuffer draws it without acceleration; the previous driver is back; restarting" >> \$LOG
+else
+  echo "\$(date) previous driver restored; restarting" >> \$LOG
+fi
 shutdown -r now
 EOF
   chmod 755 "$LG.tmp" && chown root:wheel "$LG.tmp" && mv -f "$LG.tmp" "$LG" || die "install the fallback job"
