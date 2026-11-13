@@ -6,8 +6,8 @@ a work queue, the idle power-down monitor at stop, sleep and shutdown, the kext'
 retired nano timer slots) were compiled only by this repository's cross-compile check. The kernel functions the code
 calls are checked against the export lists of macOS 15 and 26. The gates and the hold against the idle power-down
 monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
-`tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in this
-table have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
+`tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in the
+table below have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
 the order of the teardown, the hold against the idle power-down monitor, the kext staying loaded) have none. The old
 spellings `nvrmbhthread=1` and `nvrmrctimer=1` are still accepted and mean the default.
 
