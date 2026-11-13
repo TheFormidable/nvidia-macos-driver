@@ -41,7 +41,7 @@ buffer writes, at commit. A hold is in one of three states:
 
 | Kind | Who opens it | When it ends | Whom it delays |
 |---|---|---|---|
-| compositor | WindowServer only (any other process is refused) | in the kernel, the moment the GPU reaches the armed value; also at its close, when WindowServer exits, when the channel faults | NVAccel's flips, copies and page-offs; readers of that surface in other processes |
+| compositor | WindowServer only (any other process is refused) | in the kernel, at the first look (a reader's, or the writer's next request) after the GPU has reached the armed value; also at its close, when WindowServer exits, when the channel faults | NVAccel's flips, copies and page-offs; readers of that surface in other processes |
 | application | every other process | when the application says it has published (close); also when it exits or its channel faults | only a reader in another process that found this writer's tag on the surface |
 
 **A reader** asks "is anything pending on this surface?" and sleeps until the answer is no. It waits for the holds
@@ -53,7 +53,8 @@ Only "ready" says that the surface is complete. On the other answers the reader 
 goes on, as 2.9 did at its bound. A reader in the Metal plugin goes on when the kernel has kept it 10 ms or longer;
 one that was let go sooner does what 2.9 did, which is to poll the writer's busy tag for up to 10 ms, or not at all
 once the tag is 100 ms old. So no reader reads earlier than in 2.9 unless the hold ended as complete: the GPU
-reached its value, or the writer closed it.
+reached its value, or the writer closed it. The exception is NVAccel when every hold ends at once (sleep, the last
+GPU stopping, the layer switching itself off): see "Limits to know".
 
 The kernel remembers how the last 64 holds ended. A reader that waited through more endings than that is told the
 worst of all of them, whoever's they were: "ready" only when every one was a completion.
@@ -96,7 +97,8 @@ Before the kernel trusts such a view it has to prove itself twice:
 
 A channel that fails either step is not watched: nothing is ever armed on it, a line goes to the log
 (`NVRM-xnu: fence: pid N: ... - this channel is not watched`), `map_fail` or `map_mismatch` counts it, and that
-process's surfaces keep 2.9's marks and tags. The cost of any failure here is that one channel.
+process's surfaces keep 2.9's marks and tags. The cost of any failure here is the fence for that process while the
+channel exists; the channel itself keeps working.
 
 When NVK rebuilds a channel after a fault, the channel gets a new error notifier. NVK tells the kernel, which wires
 the new page, swaps it in, forgets the old fault and lets the old page go. Nothing else about the channel changes
