@@ -167,7 +167,8 @@ taken alone by a close of the connection and by a memory map or unmap through it
 the same connection returns. This is why user space keeps all its fence calls on one connection that it uses for
 nothing else and never closes. NVAccel asks NVRM once for the fence's wait function (platform function `nvFenceOps`).
 The fence starts with each GPU once the adapter is up, stops right after the notebook power manager when the GPU
-stops, and first when the machine shuts down; it is told about sleep before the user channels stop and about the
+stops, and first in a full shutdown (boot-arg `nvrmshutdown=full` with no connection open; the default shutdown puts
+the GPU in standby, which tells the fence about sleep as a system sleep does); it is told about sleep before the user channels stop and about the
 wake after the GPU is back. When a connection closes, the holds and channels it registered end before the RM frees
 what that connection owns. When a process exits, all its holds and channels end at the first of its connections to
 close, before the RM frees anything of it (NVRM.kext's `clientClose` calls `nvrm_fence_pid_gone` for this; see "A
@@ -323,7 +324,7 @@ boot" unless it says "now".
 | `close_gone` | closes that found no hold | grows in normal use: WindowServer's holds end in the kernel before its close arrives |
 | `auto` | compositor holds ended by the kernel at GPU completion | grows with every WindowServer frame |
 | `end_owner` | holds ended because their writer's connection closed or its process exited | grows when a process that was drawing exits or is killed |
-| `pid_gone` | connections emptied because their process was exiting, at its first connection to close | grows when a GPU process exits (see "A process exits") |
+| `pid_gone` | connections emptied because their process was exiting, at its first connection to close | grows when a GPU process exits and another of its connections closes before its fence connection (see "A process exits"); when the fence connection closes first, only `end_owner` moves |
 | `end_chan_err` | holds ended by a channel fault | 0 unless a channel faulted (an Xid in the log) |
 | `end_chan_del` | holds ended because their channel was deleted first | 0 or small |
 | `end_pm` | holds ended by GPU sleep | grows by the holds in flight at each sleep |
@@ -420,8 +421,8 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   before the RM frees the channels they are armed on, the first connection of the process to close must end all of
   them. NVRM.kext does that by calling `nvrm_fence_pid_gone` in `clientClose`, before the RM's cleanup, when the
   connection's process is exiting (`pid_gone` counts it); and from the moment a process is exiting the fence refuses
-  it new holds and channels. So NVAccel's waits on the process's surfaces end at once, where 2.9 waited 100 ms for a mark nobody would
-  clear; a plugin reader falls back to the busy tag, which costs it what 2.9 did (at most 10 ms per read for the
+  it new holds and channels. So when the process is WindowServer, NVAccel's waits on its surfaces end at once, where 2.9 waited 100 ms for a
+  mark nobody would clear; a plugin reader falls back to the busy tag, which costs it what 2.9 did (at most 10 ms per read for the
   first 100 ms).
 - **A channel faults.** The RM writes the fault into the channel's notifier in the bottom half, the kick follows,
   and holds armed on that channel end. If NVK rebuilds the channel, later holds are watched again.
@@ -486,7 +487,8 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
 5. **`chan_noirq` above 0, `done_on_slice` growing fast, or `seq_refused` growing.** Interrupts do not arrive for
    some channels (the copy-engine queue is the open question). It still works, in 250 us looks; report which
    processes (the log line names the pid and says `(copy engine)` for such a channel).
-6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` and `pid_gone` grow, no stall in WindowServer.
+6. **Kill a GPU application mid-frame** (`kill -9`): `end_owner` grows (and `pid_gone`, unless the process's fence
+   connection happened to close first), no stall in WindowServer.
    Expect up to 10 ms per composite of that application's surfaces for 100 ms, as in 2.9 (the plugin reader polls
    the dead writer's busy tag): not a stall, but not zero.
    **Stop one** (`kill -STOP`, then `-CONT`): one `expired_cpu` and one `strikes`, a single hitch of at most
