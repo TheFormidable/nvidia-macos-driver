@@ -21,8 +21,10 @@ header by tools/test_shared_headers.py. This test reads the patch and holds what
                 notes; an old kext's answer that came back at once with nothing posted is not taken as a sleep
   no sleep      asked to sleep, a kext that says why and answers "count read", "moved" or "woken" with the count it
                 was given did not sleep and saw no event: the round polls one step instead of asking again at once
-  the counters  seven slots appended after the eight of 2.9 (the plugin reads the first nine by position), one per
+  the counters  nine slots appended after the eight of 2.9 (the plugin reads the first nine by position), one per
                 NVRM_EVW_S_*, each mapped to its own slot, and printed with the others
+  the notes     FELL_BACK goes to the kext once each time the process goes back to polling, and the mark that says
+                it was told is cleared when the events come back (NVRM_EVW_S_BACK), so the next time is told too
 
 Each source check also runs on a damaged copy of the patch text, which must fail it (the controls)."""
 import pathlib, re, subprocess, sys
@@ -152,8 +154,8 @@ def chk_nosleep(t):
             and w.count("NVRM_EVW_R_SPURIOUS);") == 3 and w.count("return 0;") == 1)
 
 
-GS = ["SLEEPS", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FALLBACK", "CHAN_SLEEP"]
-EVW = ["SLEEP", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FELL_BACK", "CHAN_SLEEP"]
+GS = ["SLEEPS", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FALLBACK", "CHAN_SLEEP", "TRIAL", "BACK"]
+EVW = ["SLEEP", "WOKEN", "TIMEOUT", "MISSED", "CAPPED", "FELL_BACK", "CHAN_SLEEP", "TRIAL", "BACK"]
 
 
 def chk_counters(t):
@@ -167,8 +169,20 @@ def chk_counters(t):
                           "NVRM_GS_DEFER", "NVRM_GS_REAPED", "NVRM_GS_WAITS"]
             and names[8:] == ["NVRM_GS_EVW_" + g for g in GS] + ["NVRM_GS_N"]
             and sorted(pairs) == sorted(zip(EVW, GS))
-            and "_Static_assert(NVRM_EVW_S_N == 7," in ctx
+            and f"_Static_assert(NVRM_EVW_S_N == {len(EVW)}," in ctx
             and all(f"st[1 + NVRM_GS_EVW_{g}]" in ctx for g in GS))
+
+
+def chk_notes(t):
+    ctx = sections(t).get(DIR + "nvkmd_nvrm_ctx.c", ("", ""))[0]
+    st = body(ctx, "nvrm_evw_nvk_stat")
+    fb = st.find("if (what == NVRM_EVW_S_FELL_BACK) {")
+    bk = st.find("if (what == NVRM_EVW_S_BACK) {")
+    return (0 <= fb < bk
+            and order(st[fb:bk], "__atomic_exchange_n(&nvrm_evw_told, 1,", "nvrm_xnu_evt_note(c->fd, NVRM_EVW_NOTE_FELL_BACK);")
+            and "__atomic_store_n(&nvrm_evw_told, 0," in st[bk:]
+            and "NVRM_EVW_NOTE_FELL_BACK" not in st[bk:] and st.count("NVRM_EVW_NOTE_FELL_BACK") == 1
+            and "static int nvrm_evw_told;" in ctx)
 
 
 patch = PATCH.read_text() if PATCH.exists() else ""
@@ -208,8 +222,10 @@ CHECKS = [
     ("no sleep, for any count: a rule that also rewrites a count read or a moved count", chk_nosleep,
      "} else if (timeout_us != 0 && nvrm_evw_seq(*out) == seen &&\n+              (why == NVRM_EVW_R_COUNT",
      "} else if (\n+              (why == NVRM_EVW_R_COUNT"),
-    ("seven counters after the eight of 2.9, one per NVRM_EVW_S_*, each in its own slot, all printed", chk_counters,
+    ("nine counters after the eight of 2.9, one per NVRM_EVW_S_*, each in its own slot, all printed", chk_counters,
      "[NVRM_EVW_S_MISSED] = NVRM_GS_EVW_MISSED", "[NVRM_EVW_S_MISSED] = NVRM_GS_EVW_TIMEOUT"),
+    ("the notes: FELL_BACK told to the kext once each time the process goes back to polling, again after the events "
+     "came back", chk_notes, "+      __atomic_store_n(&nvrm_evw_told, 0, __ATOMIC_RELAXED);\n", ""),
 ]
 checked = set()
 for name, fn, good, broken in CHECKS:

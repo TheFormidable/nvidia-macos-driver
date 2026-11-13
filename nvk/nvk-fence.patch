@@ -71,7 +71,7 @@ index e1e860c..115034e 100644
  /* b72 host-pointer import.
   * 26.3: out of line in nvkmd.c, like upstream's nvkmd_dev_import_dma_buf, so the mem joins dev->mems. nvkmd_mem_unref
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index 2a61354..36e74e5 100644
+index 393f859..29f5c52 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 @@ -161,6 +161,12 @@ struct nvkmd_nvrm_slot {
@@ -102,7 +102,7 @@ index 2a61354..36e74e5 100644
  struct nvkmd_nvrm_bind_ctx {
     struct nvkmd_ctx base;
  };
-@@ -293,6 +307,8 @@ int nvkmd_nvrm_sync_gpu_target(struct vk_sync *sync, uint64_t wait_value, uint32
+@@ -294,6 +308,8 @@ int nvkmd_nvrm_sync_gpu_target(struct vk_sync *sync, uint64_t wait_value, uint32
                                 struct nvkmd_dev *dev, uint64_t *sem_va, uint64_t *seq);
  VkResult nvkmd_nvrm_sync_cpu_wait(struct vk_sync *sync, uint64_t wait_value,
                                    struct vk_object_base *log_obj);
@@ -112,7 +112,7 @@ index 2a61354..36e74e5 100644
  
  /* b81: NVRM_610_<ITEM>=0 turns one recipe item back to the b80 shape (TSG PREEMPT LGPROMO ZCULL USERMODE BOOST CECHAN) */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 630283f..0c79274 100644
+index 2644259..42f5f01 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -6,6 +6,7 @@
@@ -373,7 +373,7 @@ index 630283f..0c79274 100644
  /* b73 SLEEP ON THE GPU'S COMPLETION EVENT. NVK ends every submission with NON_STALL_INTERRUPT after its semaphore
   * release; RM's event for it reaches the device's osEvent connection (one per VkDevice, and GPU-wide: every graphics
   * completion posts it), and the kext's selector 6 sleeps until that event's count moves.
-@@ -289,14 +533,24 @@ nvrm_evw_nvk_pending(void *p, int *fd)
+@@ -297,14 +541,24 @@ nvrm_evw_nvk_pending(void *p, int *fd)
     return pending;
  }
  
@@ -401,7 +401,7 @@ index 630283f..0c79274 100644
     const int64_t t0 = timeout_us != 0 ? os_time_get_nano() : 0;
     if (nvrm_xnu_wait_event2(fd, seen, timeout_us, out) != 0) {
        c->refused = true;
-@@ -641,8 +895,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -657,8 +911,11 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        return;
     volatile uint64_t *sem = ctx->sem->map;
     *sem = 0;   // compared >= seq now: it must start below the first seq (the old == never needed it)
@@ -413,7 +413,7 @@ index 630283f..0c79274 100644
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     for (unsigned i = 0; i < NVRM_CTX_MAX; i++) {
        struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[i];
-@@ -653,8 +910,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -669,8 +926,10 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        s->semVA = ctx->sem->va->addr;
        s->dev = ctx->base.dev;
        s->flushed = 0;
@@ -425,7 +425,7 @@ index 630283f..0c79274 100644
        ctx->slot1 = i + 1;
        break;
     }
-@@ -663,6 +922,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -679,6 +938,8 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        fprintf(stderr, "nvrm: G-SUB: all %d channel slots in use - this channel stays SYNCHRONOUS\n", NVRM_CTX_MAX);
        return;
     }
@@ -434,7 +434,7 @@ index 630283f..0c79274 100644
     ctx->gsub = true;
     ctx->curSlot = 0;
     nv_push_init(&ctx->push, ctx->cmdBuf->map, 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
-@@ -682,7 +943,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -698,7 +959,11 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     s->ctx = NULL;
     s->sem = NULL;
     s->gen++;
@@ -446,7 +446,7 @@ index 630283f..0c79274 100644
     ctx->slot1 = 0;
     ctx->gsub = false;
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
-@@ -701,6 +966,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -719,6 +984,158 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     nvkmd_nvrm_reap_deferred();
  }
  
@@ -605,7 +605,7 @@ index 630283f..0c79274 100644
  
  static void
  write_gp_fifo_entry(struct nvkmd_nvrm_exec_ctx *ctx, const struct nvkmd_ctx_exec *exec)
-@@ -1177,6 +1594,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1195,6 +1612,8 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        return r;
  
     ctx->wSeq++;
@@ -614,7 +614,7 @@ index 630283f..0c79274 100644
     write_l2_sysmem_tail(&ctx->push);
     write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
     const struct nvkmd_ctx_exec seg = {
-@@ -1355,6 +1774,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1373,6 +1792,8 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
        return nvrm_gsub_submit(ctx, log_obj);
  
     ctx->wSeq++;
