@@ -95,9 +95,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 1. **La tarjeta arrancó.** Instala y reinicia. Bien: la ventana de inicio de sesión aparece en la tarjeta NVIDIA;
    `kmutil showloaded --list-only | grep nullmoth` muestra cuatro líneas (NVRM, NVAccel, NVRMFB, NVRMAGDC), cinco
    en macOS 26, donde el instalador agrega su driver de audio `com.nullmoth.NMXAudio` para un controlador HD Audio;
-   `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: se queda la imagen del firmware o la pantalla en negro. Por `ssh`,
-   busca en el registro del kernel `NOT STARTING THE GPU` (la línea da el motivo) y sigue con los pasos 3 y 5 de
-   abajo, que distinguen los motivos.
+   `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: se queda la imagen del firmware
+   o la pantalla en negro. Por `ssh`, busca en el registro del kernel `NOT STARTING THE GPU` (la línea da el motivo)
+   y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -165,8 +165,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 
    Bien: `nvrm_wq_mode` 1, `nvrm_atomic_mode` 1, `nvrm_bh_thread` y `nvrm_rc_armed` 1 con una tarjeta,
    `nvrm_rc_ticks` unos diez más la segunda vez, `nvrm_nano_wait_timeouts` y `nvrm_nano_retired` 0 (un espacio
-   retirado es uno que el driver dejó de reutilizar porque una llamada de un temporizador podía seguir dentro). Mal: -1 en uno de los dos modos (un
-   trabajador o una autoprueba no arrancó), 0 en una cuenta, o los ticks parados; envía los valores y las líneas
+   retirado es uno que el driver dejó de reutilizar porque una llamada de un temporizador podía seguir dentro). Mal:
+   -1 en uno de los dos modos (un trabajador o una autoprueba no arrancó), 0 en una cuenta, o los ticks parados;
+   envía los valores y las líneas
    `NVRM-xnu:` ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md) explica cada valor).
 7. **La valla de superficies tras iniciar sesión.** Sigue el punto 1 de [SURFACE-FENCE.md](SURFACE-FENCE.md), "What to
    look at on the card". Bien: `debug.nvrm_fence_state` 1, `debug.nvrm_fence_accel` 1, `debug.nvrm_fence_map_fail` y
@@ -205,7 +206,8 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 3. **Un proceso que muere.** Punto 6 de la misma lista: `kill -9` a una aplicación Metal en mitad de un fotograma,
    después detén otra con `kill -STOP` y reanúdala con `kill -CONT`. Bien: el escritorio no se atasca; como mucho un
    tirón de hasta 100 ms por la detenida, que suma uno a `debug.nvrm_fence_expired_cpu` y uno a
-   `debug.nvrm_fence_strikes` (aquí es lo esperado, a diferencia del punto 2). Mal: el escritorio se atasca, o `debug.nvrm_fence_state` pasa a 2.
+   `debug.nvrm_fence_strikes` (aquí es lo esperado, a diferencia del punto 2). Mal: el escritorio se atasca, o
+   `debug.nvrm_fence_state` pasa a 2.
 
 ### Superficies de dos planos
 
