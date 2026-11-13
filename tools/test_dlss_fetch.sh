@@ -22,7 +22,7 @@ ZSTD=${ZSTD:-$(command -v zstd || echo /opt/homebrew/bin/zstd)}   # only the fix
 mkdir -p "$W/payload" && printf 'ngx core\n' > "$W/payload/libnvidia-ngx.so.620.70.06" && printf 'other\n' > "$W/payload/other.bin"
 { printf '#!/bin/sh\n# makeself stand-in\nCRCsum=0\nskip=6\n'; printf 'exit 1\n'; tar -C "$W/payload" -cf - . | "$ZSTD" -q -c; } > "$F/driver.run"
 clang -O1 -DZSTD_DISABLE_ASM -o "$W/tools/nm_unzstd" "$ROOT/dlss/nm_unzstd.c" "$ROOT"/dlss/zstd/common/*.c "$ROOT"/dlss/zstd/decompress/*.c || { echo "cannot build nm_unzstd"; exit 2; }
-python3 -I - "$F" <<'PY'
+python3 -I -B - "$F" <<'PY'   # -I ignores PYTHONDONTWRITEBYTECODE: -B keeps the bytecode of what it imports unwritten
 import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1] + "/nvjitlink.whl", "w")
 z.writestr("nvidia/nvjitlink/lib/libnvJitLink.so.12", b"jitlink\n")

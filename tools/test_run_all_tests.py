@@ -15,6 +15,8 @@ The tester's environment with the driver's settings (NVMTL_X, NVENCVT_LOG, VK_IC
 may take from the tester (CC, NVENCVT_HEADERS, NM_OGKM620, ZSTD, ...): the first do not reach a test, the second do.
 Negative control: the runner that passes its environment on as it is. The prefixes it leaves out are the plugin's own.
 
+A Python a test starts in isolated mode ignores that variable: every such start must also give -B (a text arm).
+
 A test that makes a folder beside the temporary folder it was given (a bare mktemp on macOS does) has it listed at the
 end of the run. Negative control: the runner without that list.
 
@@ -132,6 +134,25 @@ else:
 if not BUILTIN_PREFIX:
     rc, made, left, target, at, pyc, flag, out = leak_run(RUNNER.replace(old_line, "env.update(TMPDIR=tmp)"), prefix=False)
     arm("control: and without a prefix it is written beside the module", rc == 0 and at and target and flag == "False", (target, flag, out))
+
+# isolated mode (-I, or -E) ignores PYTHONDONTWRITEBYTECODE: a Python a test starts that way writes the bytecode of its imports
+# wherever that Python keeps it (on a Mac, into the tester's ~/Library/Caches), unless it is given -B as well
+def isolated_without_b(text):
+    found = []
+    for m in re.finditer(r"\bpython3?((?:[ \t]+-[A-Za-z]+)+)|sys\.executable((?:\s*,\s*[\"']-[A-Za-z]+[\"'])+)", text):
+        flags = "".join(re.findall(r"-([A-Za-z]+)", m.group(1) or m.group(2)))
+        if re.search("[IE]", flags) and "B" not in flags:
+            found.append(m.group(0).strip())
+    return found
+
+
+tests = sorted(p for p in (ROOT / "tools").glob("test_*") if p.suffix in (".py", ".sh") and p.name != "test_run_all_tests.py")  # its controls
+bad = {p.name: isolated_without_b(p.read_text(errors="replace")) for p in tests}
+bad = {k: v for k, v in bad.items() if v}
+arm("no test starts Python in isolated mode without -B", len(tests) > 100 and not bad, bad)
+arm("control: a Python started with -I alone is caught, in a script and from Python",
+    isolated_without_b('python3 -I - "$F" <<PY') and isolated_without_b('subprocess.run([sys.executable, "-I", str(x)])')
+    and not isolated_without_b('python3 -I -B - <<PY') and not isolated_without_b('[sys.executable, "-I", "-B", s]'))
 
 
 # ---- the tester's driver settings do not reach a test; what a test takes from the tester does
