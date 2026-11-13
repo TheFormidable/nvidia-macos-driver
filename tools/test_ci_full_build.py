@@ -333,7 +333,14 @@ def main():
         try:
             sc = Scene(tmp, mk)
         except (RuntimeError, subprocess.CalledProcessError) as e:
-            skip(f"cannot make the Mach-O files here: {str(e)[-300:]}")
+            # what the failing program said (a CalledProcessError's text names only the command), and on a Mac, where
+            # toolchain() found Xcode, a failure: the runner counts a skip as none, and every arm would go unseen
+            err = getattr(e, "stderr", None)
+            why = err.decode(errors="replace") if isinstance(err, bytes) else (err or "")
+            why = (why.strip() or str(e))[-1500:]
+            if platform.system() == "Darwin":
+                print(f"FAIL cannot make the Mach-O files or the scratch checkout on this Mac: {why}"); sys.exit(1)
+            skip(f"cannot make the Mach-O files here: {why}")
         sc.before()
         rc, out = sc.prove()
         fails = lines(out, "FAIL") + lines(out, "NOT CHECKED")
