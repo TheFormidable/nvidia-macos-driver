@@ -1313,19 +1313,47 @@ keg_of() {
 # install links it again (Homebrew links a dependency it has to upgrade), it is still deps' doing. A name is dropped
 # when deps finds that formula linked before its installs: the user linked it on purpose. clean tools removes the file.
 brew_unlinked_file() { printf '%s/.nm-brew-unlinked' "$TOOLS"; }
-brew_unlinked_names() { cat "$(brew_unlinked_file)" 2>/dev/null || true; }
-brew_unlinked_has() { local NL=$'\n'; case "$NL$(brew_unlinked_names)$NL" in *"$NL$1$NL"*) return 0 ;; esac; return 1; }
-brew_unlinked_add() {
-  brew_unlinked_has "$1" && return 0
-  { mkdir -p "$TOOLS" && printf '%s\n' "$1" >> "$(brew_unlinked_file)"; } 2>/dev/null || warn "could not note $1 in $(brew_unlinked_file)"
+# The names it holds, each once: only a plain file is read (a link there is not followed), and only the names deps
+# writes, Python formulas, of formulas installed now (one no longer installed cannot be linked again by an upgrade).
+brew_unlinked_names() {
+  local f n seen=$'\n'; f=$(brew_unlinked_file)
+  [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] || return 0
+  while IFS= read -r n || [ -n "$n" ]; do
+    case "$n" in python|python@[0-9]*) ;; *) continue ;; esac
+    case "$n" in *[!a-z0-9@.]*) continue ;; esac
+    [ -d "$BREW_PREFIX/opt/$n" ] || continue
+    case "$seen" in *$'\n'"$n"$'\n'*) continue ;; esac
+    seen="$seen$n"$'\n'; printf '%s\n' "$n"
+  done < "$f"
   return 0
 }
+brew_unlinked_has() { local NL=$'\n'; case "$NL$(brew_unlinked_names)$NL" in *"$NL$1$NL"*) return 0 ;; esac; return 1; }
+# brew_unlinked_write <names, one per line>: the record is replaced by a new file (a link in its place is removed, never
+# written through); no names removes it. A record deps cannot write is reported and deps goes on: it only means that a
+# later deps may leave a Python linked that a later install links again.
+brew_unlinked_write() {
+  local f t; f=$(brew_unlinked_file); t=$f.new.$$
+  if [ -L "$f" ]; then rm -f "$f" 2>/dev/null || true; fi
+  if [ -z "$1" ]; then
+    { [ ! -e "$f" ] || rm -f "$f"; } 2>/dev/null || warn "could not remove $f"
+  elif [ -d "$f" ]; then warn "could not write $f: it is a folder"
+  else
+    { mkdir -p "$TOOLS" && printf '%s\n' "$1" > "$t" && mv -f "$t" "$f"; } 2>/dev/null || { rm -f "$t" 2>/dev/null || true; warn "could not write $f"; }
+  fi
+  return 0
+}
+brew_unlinked_add() {
+  local names NL=$'\n'
+  names=$(brew_unlinked_names)
+  case "$NL$names$NL" in *"$NL$1$NL"*) ;; *) names="$names${names:+$NL}$1" ;; esac
+  brew_unlinked_write "$names"
+}
 brew_unlinked_drop() {
-  local n rest=""
-  while IFS= read -r n; do [ -z "$n" ] || [ "$n" = "$1" ] || rest="$rest$n"$'\n'; done <<EOF
+  local n rest="" NL=$'\n'
+  while IFS= read -r n; do [ -z "$n" ] || [ "$n" = "$1" ] || rest="$rest${rest:+$NL}$n"; done <<EOF
 $(brew_unlinked_names)
 EOF
-  if [ -n "$rest" ]; then printf '%s' "$rest" > "$(brew_unlinked_file)"; else rm -f "$(brew_unlinked_file)"; fi
+  brew_unlinked_write "$rest"
 }
 # brew_linked <formula>: Homebrew counts it as linked (its record var/homebrew/linked/<formula>, which brew link writes
 # and brew unlink removes), or <prefix>/bin/python3 leads into its keg
