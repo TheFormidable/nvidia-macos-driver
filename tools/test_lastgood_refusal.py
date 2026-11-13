@@ -104,6 +104,8 @@ def redirect(job, fake, t):
     for prog in FAKES:
         if re.search(rf"(^|[^\w.-])/(usr/)?s?bin/{prog}\b", job, re.M):
             raise Unsafe(f"the job names /…/{prog} by its full path, past the fakes")
+    if re.search(r"\bcommand\s+-[A-Za-z]*p", job):
+        raise Unsafe("the job asks for the system's own PATH (command -p), past the fakes")
     text = re.sub(r"/(Library|Users)/", lambda m: f"{t}/{m.group(1)}/", job)   # one pass: t itself is not looked at
     mine = f"PATH={fake}"
     text = text.replace(PATH_LINE, mine)
@@ -685,6 +687,7 @@ except (Unsafe, AssertionError) as e:
 
 for what, bad in (("its PATH line changed", job.replace(PATH_LINE, "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
                   ("it calls /sbin/shutdown", job.replace("shutdown -r now", "/sbin/shutdown -r now")),
+                  ("it asks for the system's own PATH", job.replace("shutdown -r now", "command -p shutdown -r now")),
                   ("it names a path outside the installer's folders", job.replace('rm -rf /Library/NullMoth/kexts',
                                                                                'rm -rf /System/Library/Extensions')),
                   ("it writes to the console", job.replace('shutdown -r now', 'echo x > /dev/console; shutdown -r now'))):
