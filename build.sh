@@ -1104,7 +1104,7 @@ cmd_deps() {
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
-    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 brew install $f"; done
+    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 $BREW install $f"; done
     elif ask "Install them now?"; then
       for f in "${want[@]}"; do
         say "brew install $f"
