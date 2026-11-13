@@ -423,10 +423,16 @@ def configure_order(sb):
 
 
 # what the script gives, what a shell adds, and LC_CTYPE, which Python sets for its children when the locale is C
-# (ninja's configure.py runs the stand-in step); its value is checked like every other for the caller's text
+# (ninja's configure.py runs the stand-in step); its value is checked like every other for the caller's text.
+# On a Mac two more, which macOS itself adds to what Apple's /usr/bin/python3 and /usr/bin/make start (the steps of
+# ninja's configure.py and of zstd's make, seen on a Mac of GitHub's): those two programs run the real tool through
+# xcrun, which gives it a MANPATH of the developer folder, and CoreFoundation sets __CF_USER_TEXT_ENCODING in every
+# program that loads it. The caller's own MANPATH is poisoned, so one that reached a step would show.
 ALLOWED_STEP_ENV = {"HOME", "USER", "LANG", "TMPDIR", "PATH", "PYTHONDONTWRITEBYTECODE", "SDKROOT", "DEVELOPER_DIR",
                     "MACOSX_DEPLOYMENT_TARGET", "PWD", "OLDPWD", "SHLVL", "_", "LC_CTYPE", "MAKEFLAGS", "MAKELEVEL",
                     "MFLAGS"}
+if platform.system() == "Darwin":
+    ALLOWED_STEP_ENV |= {"MANPATH", "__CF_USER_TEXT_ENCODING"}
 POISONED = ["CC", "CFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "PYTHONPATH", "HOMEBREW_PREFIX"]
 
 
@@ -446,7 +452,7 @@ def developer_dir(sb):
 def poison_env(sb):
     return dict(CC="/poison/bin/cc", CFLAGS="-DPOISON", LDFLAGS="-L/poison/lib", CPATH="/poison/include",
                 LIBRARY_PATH="/poison/lib", PKG_CONFIG_PATH="/poison/lib/pkgconfig", PYTHONPATH="/poison/py",
-                HOMEBREW_PREFIX="/poison", SDKROOT="/poison/sdk", DEVELOPER_DIR=developer_dir(sb),
+                HOMEBREW_PREFIX="/poison", MANPATH="/poison/man", SDKROOT="/poison/sdk", DEVELOPER_DIR=developer_dir(sb),
                 PATH=f"{sb.sb}/poison/bin:{sb.sb}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 NM_TC_PYTHON=None if os.access("/usr/bin/python3", os.X_OK) else sys.executable,
                 NM_TC_STAMP="stamp-text-from-caller")
@@ -759,7 +765,8 @@ def main():
             rc, out, err = sb.run(["build", "ninja", "cmake", "spirv-tools"])
             check("a Mach-O file without a version refuses the stamp", rc != 0 and sb.stamp("spirv-tools") is None
                   and "shows no minimum macOS version" in err, (rc, err[-300:]))
-            vs = subprocess.run([BASH, "-c", 'source <(sed -n "/^version_above()/,/^}/p" "$1"); r=""; '
+            # eval, not "source <(...)": bash 3.2 reads nothing from a process substitution it is told to source
+            vs = subprocess.run([BASH, "-c", 'eval "$(sed -n "/^version_above()/,/^}/p" "$1")"; r=""; '
                                  'for a in "15.1 15.0" "15.0 15" "26.0 15.0" "15.0 15.0" "14.9 15.0" "15.0.1 15.0"; do '
                                  'set -- $a; if version_above "$1" "$2"; then r="$r y"; else r="$r n"; fi; done; echo $r', "-",
                                  str(REAL_SCRIPT)], capture_output=True, text=True).stdout.split()
