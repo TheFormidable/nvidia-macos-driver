@@ -30,7 +30,9 @@ The driver now asks IOKit, once per GPU at start, which case it is in, and acts 
 | 3, refused | A mapper translates the GPU and the driver may not or cannot use it (boot-arg `nvrmdma=0`, a failed self-test, or a build that does not route the GPU's memory requests through the mapper) | The GPU is not started. This is a clean "not started", not a failed boot: the boot guard does not count it. |
 
 In modes 1 and 2:
-- before the GPU is started, two pages are mapped and read back from the mapper (the self-test); if that fails the
+- before the GPU is started, two pages are mapped and read back from the mapper, and at least one of their bus
+  addresses must differ from the page's physical address (the self-test: the mapper answers an address it has no
+  entry for with that same address, so a read-back alone would also pass an untranslated mapping); if that fails the
   mode becomes 3;
 - a mapping the mapper splits where the GPU needs one run, an address above what the GPU can reach, or a page whose
   bus address does not lead back to it, is refused (the allocation fails; nothing wrong reaches the GPU);
@@ -128,7 +130,8 @@ kernels' export lists; the decisions were tested on a host. Nothing of it has ru
 - sleep and wake with live mappings.
 
 Mode 0 is the one that runs on every machine the driver supports today. There, the only new work is at GPU start:
-one question to IOKit about the mapper, one property read, one log line and the `nvrm-dma` property. Allocation
+two questions to IOKit about the mapper (is there a system mapper, does the GPU have one of its own), one property
+read, one lock, the read-only counters, one log line and the `nvrm-dma` property. Allocation
 options, addresses and the surface copies are those of 2.9.
 
 ## Checking a VT-d machine (optional, with the rollback at hand)

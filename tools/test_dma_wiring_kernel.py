@@ -126,6 +126,57 @@ def chk_own_reference(dma):
         and before(r, "m->cmd->complete(", "m->md->complete();") and before(r, "m->md->complete();", "m->md->release();")
 
 
+def chk_source_reference_returned(dma):
+    """nv_dma_map_alloc gives back the reference nv_xnu_dma_source() handed it, on the failure path and after the
+    mapping (which holds its own), before it returns the mapping's status."""
+    b = body(strip_comments(dma), "nv_dma_map_alloc")
+    src = b.find("nv_xnu_dma_source(")
+    if src < 0:
+        return False
+    tail = b[src:]
+    fail = re.search(r"if \(!md\) \{(.*?)\}", tail, re.S)
+    after_map = tail.find("dmaMap(")
+    rel = tail.find("md->release();", after_map)
+    return bool(fail) and "return" in fail.group(1) and "md->release()" not in fail.group(1) \
+        and after_map >= 0 and rel > after_map and rel < tail.find("if (st != NV_OK) return st;") \
+        and tail.count("md->release();") == 1
+
+
+def chk_users_balanced(dma):
+    """Every user count a mapping call takes (dmaGet) is given back (dmaPut) before each return that follows it;
+    a count that is never given back makes every later stop of that GPU wait out its bound and keep the record."""
+    s = strip_comments(dma)
+    ok = True
+    for fn in ("nv_dma_map_alloc", "nvrm_dma_surf"):
+        b = body(s, fn)
+        g = b.find("dmaGet(")
+        if g < 0:
+            return False
+        tail = b[b.find("\n", g):]
+        last_put = tail.rfind("dmaPut(d);")
+        if last_put < 0:
+            return False
+        for r in re.finditer(r"\breturn\b", tail[:last_put]):
+            ok = ok and "dmaPut(d);" in tail[tail.rfind("{", 0, r.start()):r.start()]
+    return ok
+
+
+def chk_link_only_while_live(dma):
+    """dmaMap links a new mapping only under the lock and only while the GPU is not stopping, so a stop that has
+    already drained the list cannot miss it."""
+    b = body(strip_comments(dma), "dmaMap")
+    m = re.search(r"IOLockLock\(gDmaLock\);(.*?)IOLockUnlock\(gDmaLock\);", b, re.S)
+    return bool(m) and before(m.group(1), "if (d->dead) st = NV_ERR_INVALID_STATE;", "gDmaHead = m;") \
+        and "else" in m.group(1) and "gDmaHead = m;" not in b.replace(m.group(0), "")
+
+
+def chk_selftest_translated(dma):
+    """The self-test refuses a mapping whose bus addresses are the pages' physical addresses: the mapper's read-back
+    answers an address it has no entry for with the address itself, so only this tells "not translated" apart."""
+    b = body(strip_comments(dma), "dmaSelfTest")
+    return "getPhysicalSegment(" in b and "va[k] != (NvU64)phys" in b and re.search(r"const bool ok = [^;]*&& translated;", b) is not None
+
+
 def chk_unlink_before_release(dma):
     """Every function that releases a live mapping (dmaUnmap) took it off the list first (dmaTake), and nothing else
     frees a linked one."""
@@ -193,7 +244,8 @@ def chk_token_is_serial(dma):
 
 def chk_detach_drains(dma):
     b = body(strip_comments(dma), "nvrm_dma_detach")
-    return before(b, "d->dead = 1;", "dmaTake(", "mp->release()") and "IOSleep(1)" in b and "kDmaDrainMs" in b \
+    return before(b, "d->dead = 1;", "dmaTake(", "mp->release()") and "IOSleep(1)" in b \
+        and re.search(r"while \(d->users > 0 && waited < kDmaDrainMs\) \{ IOSleep\(1\); waited\+\+; \}", b) is not None \
         and "IOFree(" not in b and "kDevRetired" in b
 
 
@@ -223,6 +275,10 @@ arm("the self-test mapping runs only when a mapper will be used, between the dec
     chk_selftest_only_with_mapper(dma))
 arm("a mapping holds its own reference and wire count, given back after the mapping (pages stay alive)", chk_own_reference(dma))
 arm("a mapping is released only after it was taken off the list (exactly one release)", chk_unlink_before_release(dma))
+arm("nv_dma_map_alloc gives back the descriptor reference it was handed, once, on every path", chk_source_reference_returned(dma))
+arm("a new mapping is linked only while its GPU is not stopping", chk_link_only_while_live(dma))
+arm("every user count a mapping call takes is given back before it returns", chk_users_balanced(dma))
+arm("the self-test refuses bus addresses that are the physical ones (nothing translated)", chk_selftest_translated(dma))
 arm("the accelerator's token is a serial number, never a pointer, and unmaps only a mapping of the same GPU",
     chk_token_is_serial(dma))
 arm("a GPU's stop shuts new mappings out, waits a bounded time, drains its mappings and never frees a record",
@@ -279,6 +335,17 @@ control("a pointer handed out as the token", not chk_token_is_serial(dma.replace
     "q->token = (void *)(uintptr_t)m->serial;", "q->token = m;")))
 control("an UNMAP that takes another GPU's mapping", not chk_token_is_serial(dma.replace(
     "dmaTake(NULL, serial, d, 1u << kKindSurf)", "dmaTake(NULL, serial, NULL, 1u << kKindSurf)")))
+control("a descriptor reference kept after the mapping", not chk_source_reference_returned(dma.replace(
+    "    md->release();                                                    // the mapping holds its own reference\n", "")))
+control("a descriptor reference given back twice", not chk_source_reference_returned(dma.replace(
+    "    dmaPut(d);\n    if (st != NV_OK) return st;", "    dmaPut(d);\n    md->release();\n    if (st != NV_OK) return st;")))
+control("a mapping linked while its GPU stops", not chk_link_only_while_live(dma.replace(
+    "if (d->dead) st = NV_ERR_INVALID_STATE;", "if (0) st = NV_ERR_INVALID_STATE;")))
+control("a failure path that keeps its user count", not chk_users_balanced(dma.replace(
+    "        dmaPut(d);\n        return NV_ERR_INVALID_STATE;", "        return NV_ERR_INVALID_STATE;")))
+control("a self-test that takes physical addresses for translated ones", not chk_selftest_translated(dma.replace(" && translated;", ";")))
+control("a stop that waits for its users without a bound", not chk_detach_drains(dma.replace(
+    "while (d->users > 0 && waited < kDmaDrainMs)", "while (d->users > 0)")))
 control("a stop that frees the record", not chk_detach_drains(dma.replace("    if (mp) mp->release();", "    if (mp) mp->release();\n    IOFree(d, sizeof *d);")))
 control("the remapping calls defined without the OS layer's consent", not chk_rm_interface(dma.replace("#if DMA_RM_ROUTED\n", "#if 1\n", 1)))
 control("both define the interface (no link)", not chk_one_definition(
