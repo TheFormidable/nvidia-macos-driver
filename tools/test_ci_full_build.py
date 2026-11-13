@@ -672,6 +672,10 @@ def main():
         control("the same search path in a tool that is not Rust's own is caught", f"rpath {RUST_DIST}/x86_64-apple-darwin/llvm/lib",
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=(RUST_DIST + "/x86_64-apple-darwin/llvm/lib",)),
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))
+        up = RUST_DIST + "/../../../../../../usr/local/lib"   # under that name, but its ".." lead to Homebrew's lib folder
+        control("a search path of Rust's own rust-lld that leaves that folder through '..' is caught", f"rust-lld: rpath {up}",
+                lambda: mk.make(sc.rust_lld, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib", up)),
+                lambda: mk.make(sc.rust_lld, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib", RUST_DIST + "/x86_64-apple-darwin/llvm/lib")))
         # a folder of that name that IS on this Mac would be searched. No test makes /Users/runner/...: a copy of the
         # script whose name for Rust's build machine is a folder of this test shows both sides (the name is its only change)
         named_line = f"RUST_DIST_BUILD={RUST_DIST}\n"

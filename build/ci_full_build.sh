@@ -361,9 +361,12 @@ rust_dist_rpaths() {
   : > "$t/rust-dist.txt"; : > "$t/bad-tools.kept"
   while IFS= read -r l; do
     d=${l##*: rpath }
+    # only a path under that folder by its name: a ".." could lead out of it for a reader that drops the ".." with the
+    # name before it, which a missing folder does not stop as it stops test -e
+    case "/${d#"$RUST_DIST_BUILD/"}/" in "/$d/"|*/../*) d="" ;; esac
     case "$l" in
       "$w/tools/rustup/toolchains/"*": rpath $RUST_DIST_BUILD/"*|"$wr/tools/rustup/toolchains/"*": rpath $RUST_DIST_BUILD/"*)
-        if [ ! -e "$d" ]; then printf '%s\n' "$l" >> "$t/rust-dist.txt"; continue; fi ;;
+        if [ -n "$d" ] && [ ! -e "$d" ]; then printf '%s\n' "$l" >> "$t/rust-dist.txt"; continue; fi ;;
     esac
     printf '%s\n' "$l" >> "$t/bad-tools.kept"
   done < "$t/bad-tools.txt"
