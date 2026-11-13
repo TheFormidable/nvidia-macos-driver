@@ -79,7 +79,8 @@ page is wired the kernel looks at where it is, and in two cases gives it back at
   it, and nothing further; a page beyond it has no address there, and reading it would stop the machine. The GPU's
   large memory window is such a place on the machines where this driver moves it to 256 GB and up.
 - The page is inside one of the GPU's own memory windows, wherever they are: firmware also leaves them below 4 GB or
-  right above the installed memory, inside the map. NVRM maps these windows, the registers included, into the
+  right above the installed memory, inside the map. Only the windows of the first card are compared: with
+  `nvmultigpu=1` a page in a second card's windows inside the map is not refused here. NVRM maps these windows, the registers included, into the
   processes the RM grants them to, and reading one would touch the GPU itself, also while it sleeps.
 
 NVK's semaphore pages and notifiers are system memory, so this refuses nothing that NVK sends. A page of some other
