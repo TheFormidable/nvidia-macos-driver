@@ -26,6 +26,7 @@ source, which this audit could not fetch, so the owner's statement that none was
 | `nvidia-modeset-os-interface.h` (two copies) | the same tree | MIT, NVIDIA copyright | file header (SPDX said PolyForm: corrected) |
 | Vulkan driver NVK and the NAK compiler | Mesa commit `90a959eb` (26.3.0-rc3) plus `nvk/*.patch` | MIT, except three files the patches add, which are NullMoth's own under PolyForm Noncommercial 1.0.0 (nothing of Mesa is relicensed): `nvkmd/nvrm/nvrm_evwait.h`, `nvrm_fence_abi.h` and `nvrm_chan_note_abi.h`, copies of the `kexts/NVRM` headers for the interface between NVK and the kernel extension (`nvrm_evwait.h` also holds the event-wait policy) | `NOTICE`, `licenses/Mesa-license.rst`, `LICENSE` |
 | Rust crates NAK builds from (proc-macro2, quote, syn, paste and similar, fetched by Mesa's meson wraps) | crates.io | MIT and/or Apache-2.0 | stays with Mesa's tree; see item P8 |
+| Vulkan loader `Library/NullMoth/vulkan/libvulkan.1.dylib` | Khronos Vulkan-Loader v1.4.367 (commit `aa6dee83`), built unmodified from source by `build/build_vulkan_loader.sh` against Vulkan-Headers v1.4.367 | Apache-2.0 | `NOTICE`, `licenses/Vulkan-Loader-LICENSE.txt` (also staged beside the library) |
 | Shader translator | `steelbrain/metal2vulkan` (Anees Iqbal) | LGPL-3.0-or-later | `NOTICE`, `translator/LICENSE`, `translator/COPYING` |
 | The Rust crates linked into the translator | crates.io | MIT, Apache-2.0, Unlicense or MIT, Unicode-3.0 | `licenses/translator-rust-crates.txt` (new) |
 | GSP firmware | NVIDIA 620.70.06 driver package, unmodified | NVIDIA "License For Customer Use of NVIDIA Software" | `licenses/NVIDIA-firmware-LICENCE.txt`; fetched on the user's Mac, see P1 (resolved) |
@@ -50,9 +51,9 @@ pinned sources in its working directory (ninja, CMake, OpenSSL, zstd, xz, CPytho
 glslang, LLVM with clang, then the SPIRV-LLVM-Translator; `build/pins.sh`, `NM_PIN_TC*`); on Apple silicon it installs
 them as Homebrew formulas. On both it sets up a Python environment and Rust (with bindgen and cbindgen) in the working
 directory. None of these tools reaches the package: NVK's own build has LLVM and SPIRV-Tools turned off, and only the
-native `mesa_clc`, a program run during the build, links them and the Translator. Of Rust, only its standard library
-ends up in shipped files: rustc links it into the shader translator and into NVK's NAK compiler, as into every Rust
-library (MIT or Apache-2.0).
+native `mesa_clc`, a program run during the build, links them and the Translator. Of the Rust toolchain itself, only
+its standard library ends up in shipped files: rustc links it into the shader translator and into NVK's NAK compiler,
+as into every Rust library (MIT or Apache-2.0). The crates those two link are in the table above.
 
 No closed NVIDIA library is in the package. `libnvencvt` talks to the card through the RM interface of the open
 modules and the open-gpu-doc class headers.
