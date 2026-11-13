@@ -525,6 +525,22 @@ step "6b. falling back to the previous driver if this one cannot start"
 # from this install's backup and restarts once. It removes itself as soon as the new driver has shown its display
 # (nullmoth-nv-ok), so nothing keeps running on a Mac where the update worked. A fresh install has no previous driver to
 # go back to: the guard still keeps the Mac usable, and nothing is restored.
+# One failure never reaches that guard. The framebuffer compares Apple's classes on this macOS with the ones it was
+# built for, and when they differ NVRM declines the card before the guard counts anything (NVRM.cpp, startGPU). Every
+# framebuffer of the driver refuses for the same reason, the one that shows the desktop with the driver off included,
+# and Apple's own is excluded by the OpenCore setup: no desktop comes up, at that start or at any later one, and
+# nothing counts towards turning the driver off. NVRM says so on the PCI device (nvrm-layout = "declined ..."), and
+# the job reads it there. The kexts can start after the job does, so it looks every five seconds for four minutes.
+# Its other two looks stay as they were and where they were, at the job's start: a start count of two or more, and
+# the word that the display came up. A display that comes up later ends the looking and leaves the job in place, as
+# before: WindowServer can still keep dying on that display (step 6c), and the next start must find the job.
+# The refusal's restore has two conditions that the older rule does not have. It happens only on the macOS build this
+# install was made on: the previous driver was running there, so it fits; after a macOS update the refusal may be the
+# update's doing, and a driver from before these checks would be put onto classes that really changed. On another
+# build the job only keeps the refusal in its log. And it restarts at once unless someone may be working at a desktop
+# that another GPU shows (a display is connected to some framebuffer and a user owns the console): then the files are
+# put back and the restart is left to that user. A framebuffer with nothing plugged into it shows nothing (a second GPU
+# that only computes), so with no display on any framebuffer the Mac restarts whoever is logged in.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
@@ -537,13 +553,49 @@ if [ -d "$BK/NVRM.kext" ]; then
 # Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
+OSB='$BUILD'   # the macOS build this install was made on: the one the previous driver was running on
 # no launchctl bootout here: booting out the running job kills this script before it can restart the Mac (10-17 test)
 done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
-if nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0; fi
+# NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
+refused() { ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; }
+# Someone may be working at a desktop that another GPU shows: a display is connected to some framebuffer and a user
+# owns the console. IOGraphics attaches an IODisplayConnect to a framebuffer once it is opened with its connection
+# enabled; a framebuffer with nothing plugged in reports it disabled and gets none. Only that class's own line counts,
+# so that any other text ioreg might print reads as no display, and the Mac restarts as it always did.
+shown() { ioreg -r -c IODisplayConnect -w0 2>/dev/null | grep -q '<class IODisplayConnect,'; }
+busy() { shown && [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
+ok=0; nvram \$V:nullmoth-nv-ok >/dev/null 2>&1 && ok=1
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
-case "\$v" in %0[2-9a-f]|%[1-9a-f]?) ;; *) exit 0;; esac
-[ -d "\$BK/NVRM.kext" ] || { echo "\$(date) the driver turned itself off but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
-echo "\$(date) the new driver did not bring the display up twice; restoring the previous driver from \$BK" >> \$LOG
+why=""; n=0
+while [ -z "\$why" ]; do
+  if refused; then why=refused; break; fi
+  if [ "\$n" = 0 ]; then
+    if [ "\$ok" = 1 ]; then echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0; fi
+    case "\$v" in %0[2-9a-f]|%[1-9a-f]?) why=twice; break;; esac
+  elif nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then exit 0
+  fi
+  n=\$((n + 1)); [ "\$n" -lt 48 ] || exit 0
+  sleep 5
+done
+if [ "\$why" = refused ]; then
+  said="the new driver cannot drive a display on this macOS (its framebuffer refused Apple's classes)"
+  [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) \$said but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
+  # asked again before it counts as unknown: a build that cannot be read leaves this start without a desktop
+  now=\$(sw_vers -buildVersion 2>/dev/null)
+  for i in 1 2; do [ -z "\$now" ] || break; sleep 5; now=\$(sw_vers -buildVersion 2>/dev/null); done
+  if [ -z "\$OSB" ] || [ "\$now" != "\$OSB" ]; then
+    echo "\$(date) \$said. This is macOS build \${now:-unknown} and the install was made on" \\
+         "\${OSB:-an unknown build}: the previous driver is not put back onto a macOS it was not running on." \\
+         "What the driver found:" >> \$LOG
+    ioreg -l -w0 2>/dev/null | grep -e '"nvrm-layout' -e '"nvrmfb-layout' >> \$LOG
+    exit 0
+  fi
+  echo "\$(date) \$said; restoring the previous driver from \$BK. What it found:" >> \$LOG
+  ioreg -l -w0 2>/dev/null | grep -e '"nvrm-layout' -e '"nvrmfb-layout' >> \$LOG
+else
+  [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) the driver turned itself off but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
+  echo "\$(date) the new driver did not bring the display up twice; restoring the previous driver from \$BK" >> \$LOG
+fi
 for k in $KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
 rm -rf /Library/NullMoth/kexts "$FW"
@@ -557,6 +609,11 @@ if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullM
 nvram -d \$V:nullmoth-nv-starts 2>/dev/null
 echo "previous" > /Library/NullMoth/driver-restored
 done_job
+if [ "\$why" = refused ] && busy; then
+  echo "\$(date) previous driver restored. A user is logged in and another GPU shows a desktop, so the Mac is not" \\
+       "restarted now: the previous driver starts at the next restart" >> \$LOG
+  exit 0
+fi
 echo "\$(date) previous driver restored; restarting" >> \$LOG
 shutdown -r now
 EOF
@@ -618,6 +675,14 @@ while [ "$n" -lt 48 ]; do
     p2=$(pgrep -x WindowServer 2>/dev/null | head -1)
     r1=$(ws_reports)
     if [ "$p2" = "$p" ] && [ "$r1" = "$r0" ]; then
+      # A WindowServer that stays up is not this driver's desktop when its framebuffer refused this macOS's classes:
+      # NVRM declined the card (nvrm-layout on the PCI device) and nothing of the driver shows a picture. Calling that
+      # start good would end the install's trial, and the fallback job (6b) would take itself away at the next start.
+      if ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; then
+        echo "$(date) WindowServer $p stayed up, but the driver declined the card (its framebuffer refused this" \
+             "macOS's classes); this start does not count as good" >> $LOG
+        exit 0
+      fi
       nvram -d $V:nullmoth-nv-starts 2>/dev/null
       nvram $V:nullmoth-nv-ok=1 2>/dev/null
       nvram -d $V:nullmoth-ws-loop 2>/dev/null
