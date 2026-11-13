@@ -137,6 +137,8 @@ def redirect(job, fake, t, dr):
     for prog in FAKES:
         if re.search(rf"(^|[^\w.-])/(usr/)?s?bin/{prog}\b", text):
             raise Unredirected(f"the job names /…/{prog} by its full path, past the fakes")
+    if re.search(r"\bcommand\s+-[A-Za-z]*p", text):
+        raise Unredirected("the job asks for the system's own PATH (command -p), past the fakes")
     # the PATH line (holds /usr/bin etc. by design, after the fakes) and the shebang are the job's only system paths
     # that are not a bug; everything else must have been moved under the test's folder (or be /dev/null, or the one
     # read of /dev/console's owner through the fake stat).
@@ -223,7 +225,8 @@ else:
 # a job whose PATH line moved, or that names nvram by its full path, is not run at all
 for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
                   ("it calls /usr/sbin/nvram", job.replace("nvram -d", "/usr/sbin/nvram -d", 1)),
-                  ("it names a real /Library path for a file operation", job.replace("shutdown -r now", "rm -rf /Library/NullMoth; shutdown -r now"))):
+                  ("it names a real /Library path for a file operation", job.replace("shutdown -r now", "rm -rf /Library/NullMoth; shutdown -r now")),
+                  ("it asks for the system's own PATH", job.replace("shutdown -r now", "command -p shutdown -r now"))):
     try:
         redirect(bad, pathlib.Path("/nonexistent/bin"), pathlib.Path("/nonexistent"), pathlib.Path("/nonexistent/dr"))
         arm(f"control: a job that would reach the real nvram and shutdown is refused ({what})", False, "it would have run")
