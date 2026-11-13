@@ -3221,19 +3221,25 @@ index 0000000..35ee792
 +#endif
 +#endif
 diff --git a/src/nouveau/vulkan/nvmtl_cfg.h b/src/nouveau/vulkan/nvmtl_cfg.h
-index 462b2a7..cb87f1f 100644
+index 462b2a7..ce554fe 100644
 --- a/src/nouveau/vulkan/nvmtl_cfg.h
 +++ b/src/nouveau/vulkan/nvmtl_cfg.h
-@@ -1,27 +1,39 @@
+@@ -1,27 +1,45 @@
  /* r3-cfgall: every NVK/NVRM/NVMTL switch also reads /Library/GPUBundles/nvmtl/nvrm610.conf
 - * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang. */
 + * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang.
 + * The last line that begins with "NAME=" wins, the way the Metal plugin's own reader does: a shipped value above
 + * the user's own line no longer silently beats it, and a "# NAME=..." comment does not count, because the match
-+ * must start a line. This differs from the plugin's reader in one way: it looks only at the first 8191 bytes of
-+ * the file, where the plugin reads the file whole, so a name whose only line sits past that point is not seen here.
-+ * The installed file is far shorter than that, and in a Metal process the plugin has already set the variable, so
-+ * getenv answers before this reader is reached. */
++ * must start a line. It differs from the plugin's reader (nvmtl_conf_read_file, plugin/NVMTLObjects.m) in four ways:
++ * - it looks only at the first 8191 bytes of the file, where the plugin reads the file whole, so a name whose only
++ *   line sits past that point is not seen here;
++ * - a line must begin with "NAME=" exactly: a line with blanks before the name or between the name and the "=" is
++ *   not taken here, where the plugin skips those blanks;
++ * - the value is everything up to the newline, a trailing CR or blanks included, where the plugin drops them (neither
++ *   reader drops blanks after the "=");
++ * - the value keeps at most 63 bytes, where the plugin reads up to 511 bytes of a line.
++ * The installed file is far shorter than 8191 bytes, and in a Metal process the plugin has already set the variable,
++ * so getenv answers before this reader is reached. */
  #ifndef NVMTL_CFG_H
  #define NVMTL_CFG_H
  #include <stdio.h>
