@@ -20,7 +20,9 @@ and 60 s in every other process), NVK builds a new channel beside the old one, f
 old one, and continues on the new one with the same semaphore and command ring: the channel-wide state (objects,
 descriptor heaps, shader local memory) is sent again, the submissions that had not started are replayed, and the one
 that was running is dropped. A dropped submission is reported complete, and the plugin can ask whether a fence's
-submission ran (`nvmtl_nvk_fence_dropped_v1`). A fault inside replayed work drops everything that was in flight.
+submission ran (`nvmtl_nvk_fence_dropped_v1`). A fault inside replayed work drops everything that was in flight;
+a copy channel (uploads) replays everything instead of dropping, and when it faults again inside that work the device
+ends at once.
 Before any of that, a wait that sees no progress for half the budget rings the channel's doorbell again.
 
 On an RTX 50 (Blackwell) card the copy channel NVK uses for uploads runs on copy engine 4, whose fault the hardware
