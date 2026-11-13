@@ -30,7 +30,8 @@ output, the runner that leaves Python's output buffered, the runner with its rea
 
 A test that prints bytes that are not UTF-8 fails with its output and the run reaches its summary (control: the output
 read strictly ends the run with Python's error). An entry a test removes and a later one makes again names the later
-test (control: a runner that remembers every entry it saw)."""
+test (control: a runner that remembers every entry it saw). A test that runs long is named on standard error while the
+run goes on (control: a runner that says nothing until the end)."""
 import sys
 sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
 import importlib.util  # noqa: E402
@@ -528,6 +529,18 @@ arm("a test that prints bytes that are not UTF-8 is a failure with its output, a
 rc, out = scratch_run(RUNNER.replace(replace, "text=True"), RAW)
 arm("control: read strictly, those bytes end the whole run with Python's error and no summary",
     rc == 1 and "UnicodeDecodeError" in out and "passed" not in out, out[-600:])
+
+# ---- a test that runs long is named while the run goes on, not only in the summary at its end
+LONG = {"test_long_one.py": "import time\ntime.sleep(1.7)\nprint('PASS')\n", "test_short_one.py": "print('PASS')\n"}
+still_at = "STILL = 300 "
+arm("the runner names its interval for a long test in one place", RUNNER.count(still_at) == 1)
+rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 0.5 "), LONG)
+during = [l for l in out.splitlines() if l.startswith("still running: ")]
+arm("every interval the tests running that long are named with their times, and only those",
+    rc == 0 and len(during) >= 2 and all(re.fullmatch(r"still running: test_long_one\.py \(\d+ s\)", l) for l in during)
+    and "2 passed, 0 failed, 0 skipped, 0 not run, of 2" in out.splitlines(), out[-600:])
+rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 0.5 ").replace("long_ones = sorted(", "long_ones = [] and sorted("), LONG)
+arm("control: a runner that waits silently says nothing until the end", rc == 0 and "still running" not in out, out[-600:])
 
 
 print(f"{fails} failed")
