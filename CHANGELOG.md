@@ -3,10 +3,17 @@
 ## 3.0
 
 **Not released.** This section describes the branch being prepared as 3.0. Nothing in it has run on an NVIDIA card
-yet. Its kernel extensions (NVRM, NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC) and its Metal plugin were compiled
-and linked with Apple's own toolchain on one Mac (Intel, macOS 26.7, Xcode 26.5), at an earlier state of the branch,
-and none of them was loaded there (the host tests ran there too);
-NVK and the shader translator have not yet been built on a Mac. The check list for a first run on a card is
+yet, and nothing built from it has been installed or loaded. At commit 3933ff6, `./build.sh` built all 17 components
+of the driver with no warning on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5): the kernel extensions (NVRM,
+NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC), NVK, the Metal plugin, the shader translator, the video library and
+the other components; it then staged a package over the 2.9 release package there. It had built that Mac's build
+tools from an empty working directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found
+every one of the 506 kernel symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed
+have been fixed since. {{PENDING 5b}} On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3
+with the 26.2 SDK), at commit 3933ff6, the same build of all 17 components and the package succeeded, and the host
+tests passed (303 passed, 0 failed, 3 skipped, 9 not run, of 315). At commit 95811c2 the kernel extensions built on
+GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has run on an Apple-silicon Mac, and the
+host tests have not passed whole on one. The check list for a first run on a card is
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
@@ -79,8 +86,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   left to that user; a display on the refused card, which only Apple's firmware framebuffer can draw, does not hold it
   back, even after an automatic login). The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout`
   and `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler
-  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for
-  all three checks: boot argument `nvlayout=0`.
+  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. None of the
+  three checks has run on a Mac yet, and the sizes of these classes in macOS 26.7 were not measured: each check
+  decides when its kext starts. Way back for all three checks: boot argument `nvlayout=0`.
 
 #### Applications and games
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
@@ -300,7 +308,8 @@ has proven itself, renewed with a reason otherwise.
 
 ### For developers
 - `./build.sh` builds the whole driver on a Mac with one command: it checks Xcode and the tools, installs what is
-  missing after asking (Homebrew formulas only, with the Homebrew of the Mac's own processor, and build.sh itself
+  missing after asking (on an Intel Mac the build tools are built from pinned sources into its working directory; on
+  Apple silicon they are Homebrew formulas, with the Homebrew of the Mac's own processor, and build.sh itself
   upgrades and removes nothing you have; Python and Rust inside its own working directory),
   fetches every outside source at a pinned commit or checksum (`build/pins.sh`), builds each component as a logged,
   skippable step, and can stage a package from the 2.9 release package (another release, or a file that holds more
@@ -308,8 +317,10 @@ has proven itself, renewed with a reason otherwise.
   checkout it was built from (the first heading of this changelog, or `NM_PACKAGE_VERSION`) as the installed version
   that Send logs and the app's update check read, not its base package's, and its headers do not name the account
   that built it. It never uses `sudo` and never installs the driver.
-  Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
-  so the first runs may stop on something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
+  Needs macOS 15.6 or later and Xcode 26 (the whole driver has been built with Xcode 26.3 and with Xcode 26.5;
+  Xcode 26.0 to 26.2 have not been tried). It has built every component and a package on the Intel Mac and on
+  GitHub's Intel runner named at the top of this section; on Apple silicon it has run only against stand-ins. See
+  [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
 - Building the kexts on an Intel Mac, with 2.9's scripts too, made an NVRM.kext that macOS cannot load: NVIDIA's
   makefiles gave the display code an x86-only option because the Mac's own compiler accepted it, and every return
   then jumped to a function that only Linux has. NVIDIA's RM and display code are now compiled with the same commands
@@ -319,7 +330,8 @@ has proven itself, renewed with a reason otherwise.
   the Rust toolchain's own folder, and the strip that rustc then asks of Rust's `rust-objcopy` aborted for every crate
   it linked: that program finds Rust's libLLVM only when rustup's proxies start it. The script now tells cargo to
   leave that strip out (its own `strip -S` already removed the same debug map), and its check that the dylib names no
-  build machine path reads every byte of the file, where macOS's `strings` read only its sections.
+  build machine path reads every byte of the file, where macOS's `strings` read only its sections. At commit 3933ff6
+  the translator built with no warning on the Intel Mac and built on GitHub's Intel runner.
 - The Vulkan loader that `package/vulkan-for-apps.sh` offers to applications is built and installed in a temporary
   folder, and the loader's CMake compiled an `etc` folder inside it into the library as a folder to look in for
   manifests and settings: the library carried the folder's name, looked there on every Mac, and two builds of the same
@@ -328,7 +340,9 @@ has proven itself, renewed with a reason otherwise.
   out. With that option two builds on one Intel Mac had the same bytes.
 - With an SDK older than 26.4 (Xcode 26.3 and earlier, the newest a Mac with macOS 15 runs) the plugin's device class
   now declares `supportsPlacementSparse` itself: `MTLDevice` declares it from the 26.4 SDK on, and a build with
-  Xcode 26.3 stopped there. With the 26.4 SDK or a later one nothing changes.
+  Xcode 26.3 stopped there. At commit 3933ff6 the plugin built with the 26.2 SDK of Xcode 26.3 on GitHub's Intel
+  runner. With the 26.4 SDK or a later one nothing changes: that declaration is not compiled, and the plugin built
+  with Xcode 26.5 on the Intel Mac had the same bytes before this change (commit 650db45) and after it (3933ff6).
 - `tools/switches.tsv` is the registry of every switch, and `tools/test_switch_registry.py` fails when the source
   reads a name it does not have. A switch added from now on cannot be an opt-in or a writable sysctl: the test says
   what it may be instead (an opt-out of a default path with a review release, a test hook that does nothing unset, a
@@ -338,16 +352,26 @@ has proven itself, renewed with a reason otherwise.
   or one only one of the two systems exports, fails the check instead of failing to load on a user's Mac.
 - `.github/workflows/ci.yml` runs that check, the host tests and the Mac builds on every push once Actions are enabled
   for the repository.
+- `.github/workflows/full-build.yml` runs on every push and by hand: on GitHub's Intel runner it builds the whole
+  driver with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when it has
+  them), stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken from
+  Homebrew.
+- NVK's library came out with the same bytes in three builds on the Intel Mac (once with build tools made by hand,
+  then with `./build.sh` at commits 650db45 and 3933ff6, which do not differ in NVK's sources or patches), and
+  NVRM.kext's binary and the plugin had the same bytes at those two commits. The other kexts, the shader translator
+  and the video library were not compared.
 - On an Intel Mac `./build.sh deps` no longer needs Homebrew: it builds the missing build tools (ninja, CMake, Python
   3.14 with its OpenSSL, zstd and xz, pkgconf, SPIRV-Tools, glslang, LLVM 22 with clang) from pinned sources with
   `build/toolchain.sh` into the working directory, for macOS 15.0 and later, and checks that each links only macOS's
-  libraries and its own. Up to about 70 minutes and 10 GB of free space on one 12-thread Intel Mac. `NM_TOOLS_FROM`
-  (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon. On an Intel
-  Mac build.sh does not use Homebrew, even when it is installed: with tools from source only the toolchain's tools
-  and your own settings are used, and no `brew` is called. With `homebrew` a tool you already have is used as before.
+  libraries and its own. From an empty working directory this took 46.5 minutes on the Intel Mac (30 of them for
+  LLVM) and 3 hours 53 minutes on GitHub's Intel runner, and needs 10 GB of free space while LLVM builds.
+  `NM_TOOLS_FROM` (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon,
+  a path tried only against a stand-in for Homebrew. On an Intel Mac build.sh does not use Homebrew, even when it is
+  installed: with tools from source only the toolchain's tools and your own settings are used, and no `brew` is
+  called. With `homebrew` a tool you already have is used as before.
   Homebrew's SPIRV-LLVM-Translator is now taken only with Homebrew's own `llvm`; with any other LLVM the pinned
-  translator is built against it, and built again (a few minutes) when the LLVM in use changes; a translator built
-  before `deps` noted its LLVM is built once more.
+  translator is built against it, and built again when the LLVM in use changes; a translator built before `deps`
+  noted its LLVM is built once more (on the Intel Mac, with every other tool already there, that `deps` took 49 s).
 - Every step of `./build.sh`, its SPIRV-LLVM-Translator build and its pip now get `SDKROOT` set to the macOS SDK of
   the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
   searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel
@@ -359,7 +383,8 @@ has proven itself, renewed with a reason otherwise.
 - `./build.sh deps` with Homebrew: a `brew install` that ends with an error only because a file of yours was in the
   way of one of its links (a `python3` from python.org's installer, say) no longer stops it; it warns and goes on.
   A Python formula that `deps` unlinked (so that your shell's `python3` stays the one it was) is unlinked again
-  when a later `deps` links it once more as a dependency of another formula.
+  when a later `deps` links it once more as a dependency of another formula. Both have been tried only against a
+  stand-in for Homebrew.
 - `./build.sh doctor` reads the `VERSION` of a base package given as an unpacked folder and names a release other than
   2.9 at once, instead of the package step stopping on it at the end of the build.
 - The git calls of `./build.sh`'s build steps no longer read your global or system git configuration: your hooks, file
