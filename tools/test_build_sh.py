@@ -2201,15 +2201,16 @@ def arm_pylink():
     neg.break_script('  case "$f" in python|python@*) ;; *) return 0 ;; esac\n', '  case "$f" in python@3.14) ;; *) return 0 ;; esac\n')
     negative("a rule that only knows the Python formula deps asked for", pylink_problems(neg, unlinked="python@3.15")[0])
 
-    # 3. a python3 was there before (here a dead link of the tester's, which Homebrew replaces): no unlink
+    # 3. a dead python3 link of the tester's before deps: the shell skipped it, and Homebrew replaces it without asking,
+    # so it counts as none and the new link is unlinked; a python3 that leads somewhere is left (5c)
     links = {"python@3.14": PY_LINKS.format(f="python@3.14")}
     sb = pylink_sandbox("pylink-before", links, dead_python3=True)
-    p, _ = pylink_problems(sb, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3", out_lacks=("brew link python@3.14",))
-    check("deps: no unlink when Homebrew's bin had a python3 before the installs", not p, p)
+    p, _ = pylink_problems(sb, unlinked="python@3.14", linked_to=None, out_has=("brew link python@3.14",))
+    check("deps: a dead python3 link in Homebrew's bin before the installs counts as none: the link Homebrew puts there is unlinked", not p, p)
     neg = pylink_sandbox("pylink-before-neg", links, dead_python3=True)
-    neg.break_script('[ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1', '[ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=0')
-    negative("deps that forgets that python3 was there before",
-             pylink_problems(neg, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")[0])
+    neg.break_script('DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1',
+                     'DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1')
+    negative("deps that takes a dead python3 link for the tester's python3", pylink_problems(neg, unlinked="python@3.14", linked_to=None)[0])
 
     # 4. the Python formula was not in this run's list: the tester had it, and an install linked it (Homebrew links a
     # dependency again when it upgrades it): no unlink, and the list names python3 when macOS has one

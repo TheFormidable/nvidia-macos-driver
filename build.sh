@@ -1300,8 +1300,8 @@ EOF
 # brew_linked <formula>: Homebrew counts it as linked (its record var/homebrew/linked/<formula>, which brew link writes
 # and brew unlink removes), or <prefix>/bin/python3 leads into its keg
 brew_linked() { [ -L "$BREW_PREFIX/var/homebrew/linked/$1" ] || [ "$(keg_of "$BREW_PREFIX/bin/python3")" = "$1" ]; }
-# What cmd_deps saw before its installs: DEPS_PY3_BEFORE 1 when <prefix>/bin had a python3, DEPS_KEGS_BEFORE the
-# formulas installed then.
+# What cmd_deps saw before its installs: DEPS_PY3_BEFORE 1 when <prefix>/bin had a python3 that leads somewhere,
+# DEPS_KEGS_BEFORE the formulas installed then.
 DEPS_PY3_BEFORE=1; DEPS_KEGS_BEFORE=""
 # deps_python3_back: when the installs gave <prefix>/bin a python3 that it did not have before, as a link into a Python
 # formula that these installs added or that an earlier deps of this working directory unlinked, that formula is
@@ -1610,7 +1610,9 @@ cmd_deps() {
       # only when it installs or upgrades that dependency, which an unlinked formula installed minutes before is not.
       local bin_before shadowed n NL=$'\n'
       bin_before=$(brew_bin_names); DEPS_KEGS_BEFORE=$(brew_kegs)
-      DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1
+      # a dead python3 link counts as none: the user's shell skipped it and ran the next python3 on its PATH, and Homebrew
+      # replaces such a link without asking
+      DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1
       for n in $(brew_unlinked_names); do ! brew_linked "$n" || brew_unlinked_drop "$n"; done
       # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
       # installed or upgraded and, when the last clean-up is 30 days old, of every formula, then the formulas nothing needs
