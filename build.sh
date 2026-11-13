@@ -1129,15 +1129,71 @@ run_brew() {
       HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 ${kv[@]+"${kv[@]}"} "$BREW" "$@"
 }
 # "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
-# otherwise). Only deps asks it, never during a dry run or offline, and with a cache in the working directory.
+# otherwise). Only deps asks it, never during a dry run, offline or with --no-install, and with a cache in the working
+# directory.
 brew_info() {
   mkdir -p "$TOOLS/homebrew-cache"
   run_brew "HOMEBREW_CACHE=$TOOLS/homebrew-cache" -- info --json=v2 "$1"
 }
 brew_llvm_is_pinned() { local j; j=$(brew_info llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
 brew_formula_exists() { brew_info "$1" >/dev/null 2>&1; }
-brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }
+brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ] && [ "$NM_NO_INSTALL" = 0 ]; }
 brew_installed() { [ -d "$BREW_PREFIX/opt/$1" ]; }
+# What the installs of deps change in the folder a shell finds commands in. Homebrew links the commands of every formula
+# it installs that is not keg-only into <prefix>/bin, dependencies included, and macOS's default PATH (/etc/paths) has
+# /usr/local/bin, an Intel Homebrew's bin, before /usr/bin. homebrew-core's default Python (python3 is its alias; today
+# python@3.15, which llvm@22 needs to build) links python3, pip3 and their companions there: the user's shell would then
+# run Homebrew's Python where it ran Apple's, and scripts of theirs that rely on packages installed for that one stop
+# working. The build never needs that link: it takes Python from <prefix>/opt (find_tools), which "brew unlink" leaves.
+# brew_bin_names / brew_kegs: the names in <prefix>/bin, and the formulas installed (Cellar and opt), one per line
+brew_bin_names() { ls -A "$BREW_PREFIX/bin" 2>/dev/null | LC_ALL=C sort || true; }
+brew_kegs() { { ls -A "$BREW_PREFIX/Cellar"; ls -A "$BREW_PREFIX/opt"; } 2>/dev/null | LC_ALL=C sort -u || true; }
+# keg_of <path in the prefix>: the formula whose keg it leads into, after its links (nothing when it leads elsewhere)
+keg_of() {
+  local r; r=$(resolve_path "$1" 2>/dev/null) || return 0
+  case "$r" in "$BREW_PREFIX/Cellar/"?*/*) r=${r#"$BREW_PREFIX/Cellar/"}; printf '%s' "${r%%/*}" ;; esac
+  return 0
+}
+# deps_python3_back <0|1: <prefix>/bin had a python3 before the installs> <the formulas installed before them>: when
+# the installs gave <prefix>/bin a python3, as a link into a Python formula that they installed, that formula is
+# unlinked again. A python3 that was there before is the user's, and so is a formula they already had: those stay.
+deps_python3_back() {
+  local f NL=$'\n'
+  [ "$1" = 0 ] && [ -L "$BREW_PREFIX/bin/python3" ] || return 0
+  f=$(keg_of "$BREW_PREFIX/bin/python3")
+  case "$f" in python|python@*) ;; *) return 0 ;; esac
+  case "$NL$2$NL" in *"$NL$f$NL"*) return 0 ;; esac
+  if run_brew -- unlink "$f"; then
+    say "python3: Homebrew had linked $BREW_PREFIX/bin/python3, which was not there before, into $f, which these installs added; build.sh unlinked $f again (brew unlink $f), so your shell runs the python3 it ran before. $f stays installed and is reached through $BREW_PREFIX/opt/$f. To have it as python3 after all: brew link $f"
+  else
+    say "python3: brew unlink $f failed, so a shell that has $BREW_PREFIX/bin before /usr/bin now runs Homebrew's python3 ($f) instead of the one it ran before; brew unlink $f puts that back. deps goes on"
+  fi
+  return 0
+}
+# deps_shadowed <the names in <prefix>/bin before the installs>: one line per formula naming the commands the installs
+# added to <prefix>/bin that macOS also has in /usr/bin, /bin, /usr/sbin or /sbin. Its caller drops the output of a
+# run that failed anywhere, so a mistake here costs the list and never deps itself.
+deps_shadowed() {
+  local n d f fs names pairs="" out="" NL=$'\n'
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case "$NL$1$NL" in *"$NL$n$NL"*) continue ;; esac
+    for d in /usr/bin /bin /usr/sbin /sbin; do
+      if [ -e "$d/$n" ] || [ -L "$d/$n" ]; then f=$(keg_of "$BREW_PREFIX/bin/$n"); pairs="$pairs${f:--} $n$NL"; break; fi
+    done
+  done <<EOF
+$(brew_bin_names)
+EOF
+  [ -n "$pairs" ] || return 0
+  # every step is checked and the lines are printed only at the end: a failure prints nothing
+  fs=$(printf '%s' "$pairs" | awk '{ print $1 }' | LC_ALL=C sort -u) || return 1
+  for f in $fs; do
+    names=$(printf '%s' "$pairs" | awk -v f="$f" '$1 == f { printf "%s%s", s, $2; s = ", " }') && [ -n "$names" ] || return 1
+    if [ "$f" = - ]; then out="${out}a shell that has $BREW_PREFIX/bin before /usr/bin now finds $names there first (not a link into a Homebrew formula)$NL"
+    else out="${out}a shell that has $BREW_PREFIX/bin before /usr/bin now finds Homebrew's $names first; brew unlink $f puts each back$NL"; fi
+  done
+  printf '%s' "$out"
+}
 cmd_deps() {
   is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
   find_tools
@@ -1176,7 +1232,7 @@ cmd_deps() {
   if [ -z "$LLVM_PREFIX" ] && [ "$nobrew" = 1 ]; then want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
   elif [ -z "$LLVM_PREFIX" ] && ! brew_may_ask; then
     want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
-    say "    ($([ "$NM_DRY_RUN" = 1 ] && echo "dry run" || echo offline): Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
+    say "    ($([ "$NM_DRY_RUN" = 1 ] && echo "dry run" || { [ "$NM_OFFLINE" = 1 ] && echo offline; } || printf %s --no-install): Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
   elif [ -z "$LLVM_PREFIX" ]; then
     llvmf=""
     if brew_formula_exists "llvm@$NM_PIN_TOOL_LLVM_MAJOR"; then llvmf=llvm@$NM_PIN_TOOL_LLVM_MAJOR
@@ -1192,8 +1248,11 @@ cmd_deps() {
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
     say "Homebrew also installs what they need, and links the commands of those that are not keg-only (llvm@22 is) into"
-    say "$BREW_PREFIX/bin: a shell that has that folder before /usr/bin finds them first, python3 too when one of them needs"
-    say "Homebrew's newest Python."
+    say "$BREW_PREFIX/bin, where a shell that has that folder before /usr/bin finds them first. If that gives"
+    say "$BREW_PREFIX/bin a python3 it does not have now, from a Python formula these installs add (llvm@22 needs"
+    say "Homebrew's newest Python to build), build.sh unlinks that formula again (brew unlink; the build reaches Python"
+    say "through $BREW_PREFIX/opt), so python3 in your shell stays the one it is. After the installs build.sh names each"
+    say "other command of macOS that such a shell then finds in Homebrew first."
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs; the older version stays, as Homebrew's"
     say "own clean-up after an install is turned off for these installs (HOMEBREW_NO_INSTALL_CLEANUP=1)."
     if [ "$(mac_arch)" = x86_64 ]; then
@@ -1204,7 +1263,14 @@ cmd_deps() {
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
     elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 $BREW install $f"; done
+      say "    $BREW unlink <formula>   (with the same environment; only if $BREW_PREFIX/bin/python3, absent now, then links into a Python formula those installs added)"
     elif ask "Install them now?"; then
+      # what the user's shell finds before the installs, to tell afterwards what they changed (deps_python3_back,
+      # deps_shadowed). The unlink comes after the last install: an install of a later formula links a dependency
+      # only when it installs or upgrades that dependency, which an unlinked formula installed minutes before is not.
+      local bin_before kegs_before py3_before=0 shadowed
+      bin_before=$(brew_bin_names); kegs_before=$(brew_kegs)
+      [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=1
       # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
       # installed or upgraded and, when the last clean-up is 30 days old, of every formula, then the formulas nothing needs
       # any more, dead links and empty folders in the prefix (on an Intel Mac that is /usr/local, shared with other
@@ -1213,6 +1279,9 @@ cmd_deps() {
         say "brew install $f"
         run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f" || die "brew install $f failed"
       done
+      deps_python3_back "$py3_before" "$kegs_before"
+      shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""
+      [ -z "$shadowed" ] || say "$shadowed"
     else say "not installed; the build needs them"; fi
     find_tools
   fi
