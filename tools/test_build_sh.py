@@ -2861,10 +2861,16 @@ def arm_githooks():
 STEP_GIT_KEYS = ("nvrm", "accel", "ryzenadj", "osver", "plugin", "nvencvt")
 
 
-def step_git_script(tree, clones):
+def step_git_script(tree, clones, keep_sdk=False):
+    # the tester's git may be Apple's /usr/bin/git, which goes through xcrun: it runs without the stand-in SDK settings
+    # (the sandbox's sdk folder is no SDK); $C.sdk records what a program started the same way sees. The control
+    # (keep_sdk) records them and runs no git at all
+    unset = "" if keep_sdk else "env -u SDKROOT -u DEVELOPER_DIR -u TOOLCHAINS"
     return f"""set -e
 case "$1" in {"|".join(STEP_GIT_KEYS)}|host) ;; *) exit 0 ;; esac
-T={tree}; C={clones}/nmgit-clone-$1; G={GIT}
+T={tree}; C={clones}/nmgit-clone-$1; U="{unset}"; G="$U {GIT}"
+$U /bin/sh -c 'echo "${{SDKROOT-}}${{DEVELOPER_DIR-}}${{TOOLCHAINS-}}"' > "$C.sdk"
+{"exit 0" if keep_sdk else ""}
 rm -rf "$C" "$C.init"
 $G -C "$T" rev-parse --short HEAD >/dev/null
 $G -C "$T" status --porcelain >/dev/null
@@ -2880,7 +2886,7 @@ $G init -q "$C.init"
 """
 
 
-def stepgit_setup(sb):
+def stepgit_setup(sb, keep_sdk=False):
     """A tester's ~/.gitconfig (on top of the sandbox's own) with a hooks folder, commit signing and a file system
     monitor, each a program that records where it ran; the stand-in tree nmgit-tree. Returns the record file."""
     rec = sb.dir / "git-record"
@@ -2904,7 +2910,7 @@ def stepgit_setup(sb):
         git("-C", tree, "add", "-A")
         git("-C", tree, "commit", "-q", "-m", "stand-in tree")
         git("-C", tree, "tag", "v1")
-    (sb.ctl / "step-git").write_text(step_git_script(tree, sb.dir / "tmp"))
+    (sb.ctl / "step-git").write_text(step_git_script(tree, sb.dir / "tmp", keep_sdk))
     return rec
 
 
@@ -2913,9 +2919,9 @@ def stepgit_record(rec):
     return [l for l in lines if "nmgit-" in l or l.startswith("gpg ")]
 
 
-def stepgit_problems(sb):
+def stepgit_problems(sb, keep_sdk=False):
     """build (--force) of the steps with git calls, the tester's ~/.gitconfig as their global configuration"""
-    rec = stepgit_setup(sb)
+    rec = stepgit_setup(sb, keep_sdk)
     rec.write_text("")
     sb.clear()
     rc, out = sb.run("--no-install", "--force", "build", *STEP_GIT_KEYS, extra={"GIT_CONFIG_GLOBAL": str(sb.home / ".gitconfig")})
@@ -2927,6 +2933,10 @@ def stepgit_problems(sb):
     got = stepgit_record(rec)
     if got:
         p.append(f"the tester's git set-up acted in a step: {got[:6]}")
+    sdk = {k: (sb.dir / f"tmp/nmgit-clone-{k}.sdk").read_text().strip() for k in STEP_GIT_KEYS
+           if (sb.dir / f"tmp/nmgit-clone-{k}.sdk").exists()}
+    if [v for v in sdk.values() if v] or len(sdk) != len(STEP_GIT_KEYS):
+        p.append(f"git got the steps' SDK settings: {sdk}")
     return p
 
 
@@ -2976,6 +2986,9 @@ def arm_stepgit():
         p = stepgit_problems(sb)
         negative("steps that get the tester's git configuration", p)
         check("that control fails by the record alone (hooks and the monitor acted)", len(p) == 1 and "acted" in p[0], p)
+    p = stepgit_problems(sb, keep_sdk=True)
+    negative("a stand-in step that hands the tester's git the sandbox's SDKROOT", p)
+    check("that control fails by the SDK settings alone", len(p) == 1 and "SDK settings" in p[0], p)
     p = host_git_problems(sb, sb.co / "build/local_build_host.sh")
     check("local_build_host.sh's ssh gives its command's git none of the tester's configuration", not p, p)
     bad = sb.dir / "local_build_host-without.sh"
