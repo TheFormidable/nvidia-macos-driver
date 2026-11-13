@@ -72,16 +72,17 @@ Read these together, while an application that waits on the GPU is running:
   GPU jobs are normal. Almost all timeouts while `nvrm_evt_posts` keeps rising means events arrive late.
 - `nvrm_evt_user_missed` is the number of full 2 ms sleeps that ended on their timeout although the GPU work was
   already done. It should be small next to `nvrm_evt_woken`; a few are normal, for the reason given above.
-- `nvrm_evt_user_fallbacks` 0. A fall-back is also in the kernel log:
-  `NVRM-xnu: pid N went back to polling: its event wakes did not arrive (fd F)`. The kext writes that line for the
-  first eight fall-backs since boot only (any process can send the note, so the log is bounded); the counter counts
-  all of them. Only this counter above 0, together with the line
+- `nvrm_evt_user_fallbacks` 0. The kext also prints
+  `NVRM-xnu: pid N went back to polling: its event wakes did not arrive (fd F)`, for the first eight fall-backs since
+  boot only (any process can send the note, so the output is bounded); the counter counts all of them. That line and
+  the two below go only to the kernel's debug output (`kprintf`: a serial console or a debugger), not to the log that
+  `log show` reads, so on an ordinary Mac only the counters show them. Only this counter above 0, together with the line
   `nvrm: event wait OFF for this process (16 wakes in a row did not arrive)` in the application's output, means a
   process stopped trusting the completion event.
 - `nvrm_evt_capped` 0 (more than 256 threads asleep at once otherwise).
 - `nvrm_evt_post_drain_stuck` 0. When a process closes, the kext waits for an RM event post that is still being
   delivered to it (microseconds, normally never) before it frees the connection. It waits twice: up to 200 ms when
-  the connection closes (if the post is still in flight then, the log says
+  the connection closes (if the post is still in flight then, the debug output says
   `NVRM-xnu: client fd N: an event post is still in flight after 200 ms` and the close goes on) and up to 200 ms
   again when the connection's memory is about to be freed. Only a post that is still in flight after that keeps the
   connection's memory for good, with `NVRM-xnu: client fd N: an event post never finished - the connection is kept,

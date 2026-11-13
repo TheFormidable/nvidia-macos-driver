@@ -9,7 +9,7 @@ haya observado.
 In English: [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). La versión en inglés es la de referencia.
 
 Los pasos van en el orden en que te los encuentras: antes de instalar, el primer arranque, el escritorio, juegos y
-vídeo, reposo y activación, y dos GPU si las tienes. Cada uno dice qué es "bien" y qué es "mal". Cuando uno sale mal,
+video, reposo y activación, y dos GPU si las tienes. Cada uno dice qué es "bien" y qué es "mal". Cuando uno sale mal,
 para ahí: anota lo que viste, usa la vuelta atrás de ese cambio (la tabla del final) durante un arranque o un
 lanzamiento de la aplicación, y di en el informe si el problema desapareció con ella. Lo que significa cada línea y
 cada contador está explicado una sola vez, en el documento que enlaza cada paso (en inglés); esta página solo dice qué
@@ -46,8 +46,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    ([BUILDING.md](BUILDING.md), "Installing the result and going back", que también dice qué hace y qué no hace
    `uninstall.sh`). Ten claro cómo arrancarás el Mac si el escritorio no aparece
    ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; las entradas de 1401 en el selector de arranque
-   solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Ajustes del Sistema, General, Compartir)
-   y comprueba que llegas al Mac por `ssh` desde otro ordenador: varios fallos de abajo dejan la imagen del firmware
+   solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Configuración del Sistema, o Ajustes del
+   Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
+   fallos de abajo dejan la imagen del firmware
    o un escritorio congelado, y entonces los registros se leen por la red.
    Bien: has arrancado el Mac una vez por esa vuelta atrás y has entrado por `ssh`. Mal: alguna de las dos no
    funciona; no sigas.
@@ -62,7 +63,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    ```
 
    Apunta cuánto tarda el escritorio en aparecer después del selector, y el uso de CPU de WindowServer con el
-   escritorio en reposo y con un vídeo en marcha (Monitor de Actividad).
+   escritorio en reposo y con un video en marcha (Monitor de Actividad).
 4. **El paquete.** Desde su `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia
    nada. Bien: termina sin rechazar nada. Mal: dice qué rechazó; arréglalo primero.
 
@@ -119,7 +120,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 ## 3. El escritorio
 
 1. **Grabar la pantalla: la primera prueba que solo una tarjeta puede hacer.** Graba la pantalla (o compártela)
-   durante diez minutos mientras arrastras ventanas sobre un vídeo en marcha y abres Mission Control. Una captura o
+   durante diez minutos mientras arrastras ventanas sobre un video en marcha y abres Mission Control. Una captura o
    una grabación espera ahora al trabajo de GPU de WindowServer sin tener el cerrojo del acelerador; si el código de
    Apple mantiene durante esa espera otro cerrojo que también necesita un hilo con el cerrojo del acelerador, el
    escritorio se congela para siempre. Bien: no se congela, y después `sysctl debug | grep nvaccel_pageoff` muestra
@@ -132,7 +133,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    `sysctl debug | grep nvaccel_pageoff` y las líneas `NVAccel: page-off:` del kernel.
    `nvaccel_pageoff_unlocked_standdown` 1 también es un fallo (el camino se apagó solo; la línea `page-off:` dice
    por qué).
-2. **Fotogramas.** Usa el escritorio un minuto, después pon un vídeo 4K o un juego con la GPU ocupada, y captura
+2. **Fotogramas.** Usa el escritorio un minuto, después pon un video 4K o un juego con la GPU ocupada, y captura
    mientras la GPU está cargada: puntos 2 a 4 de SURFACE-FENCE.md, "What to look at on the card". Bien: sin cortes
    (tearing), parpadeo ni fotogramas a medio dibujar; los contadores como dice esa lista
    (`debug.nvrm_fence_expired_gpu`, `debug.nvrm_fence_expired_cpu`, `debug.nvrm_fence_strikes` y
@@ -144,7 +145,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 
 ### Superficies de dos planos
 
-Con un vídeo en marcha, captura la pantalla durante un minuto (compartir pantalla, una grabación o una aplicación de
+Con un video en marcha, captura la pantalla durante un minuto (compartir pantalla, una grabación o una aplicación de
 captura). Primero comprueba que el camino se ofrece:
 `sysctl debug.nvaccel_surf_planes debug.nvaccel_pageoff_unlocked_wait` (los dos a 1) e
 `ioreg -l | grep NVAccelSurfPlanes` (1). Después de la captura:
@@ -179,7 +180,7 @@ largas que miden este camino.
    compara ([EVENT-WAIT.md](EVENT-WAIT.md) explica cada número).
 2. **Un fallo de GPU que la aplicación sobrevive.** Sigue [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md), "What to look at
    on the machine", en su orden: primero una hora de uso normal con todos los contadores `debug.nvrm_chan_*` a 0,
-   después los fallos inyectados en una aplicación Metal de usar y tirar, y WindowServer al final. Bien: lo que dice
+   después los fallos inyectados en una aplicación Metal desechable, y WindowServer al final. Bien: lo que dice
    cada punto de allí (un tirón o un fotograma incorrecto, y la aplicación sigue; el escritorio y las demás
    aplicaciones no lo notan). Mal: la aplicación pierde su dispositivo, el escritorio se congela o
    `debug.nvrm_chan_gave_up` sube; envía los contadores, las líneas `nvrm:` de la salida de la aplicación y las líneas
@@ -203,20 +204,20 @@ largas que miden este camino.
    NVK sin uno de los parches del compilador para encontrar cuál lo causa
    ([NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)).
 
-## 5. Vídeo
+## 5. Video
 
-1. **Qué decodificador hizo los fotogramas (RTX 50).** Reproduce un vídeo H.264 en Safari, y después:
+1. **Qué decodificador hizo los fotogramas (RTX 50).** Reproduce un video H.264 en Safari, y después:
 
    ```bash
    log show --last 10m --predicate 'eventMessage CONTAINS "decode self-test"'
    ```
 
-   Un vídeo que ya estaba empezando mientras la tarjeta hacía la prueba (normalmente el primero después de reiniciar)
+   Un video que ya estaba empezando mientras la tarjeta hacía la prueba (normalmente el primero después de reiniciar)
    puede seguir con el decodificador integrado: recárgalo una vez antes de juzgar. El servicio de decodificación
    (`VTDecoderXPCService`, que decodifica para Safari, QuickTime y FaceTime) pide el decodificador H.264 de la
    biblioteca de códecs solo después de que la tarjeta haya decodificado dos flujos de prueba integrados y cada
    fotograma coincidiera bit a bit, una vez por cada proceso del servicio.
-   - Bien: una línea `NullMoth: nvencvt:` con `decode self-test: PASS` (dice cuánto tardó la prueba), y el vídeo se ve
+   - Bien: una línea `NullMoth: nvencvt:` con `decode self-test: PASS` (dice cuánto tardó la prueba), y el video se ve
      con los colores correctos.
    - Mal: `decode self-test: FAIL at <step>`. Entonces el decodificador integrado es el único, como en 2.9 (verde en
      RTX 50); el paso dice hasta dónde llegó la tarjeta. Una prueba fallida puede dejar un Xid en el registro del
@@ -227,22 +228,23 @@ largas que miden este camino.
    - Ninguna línea: el proceso no lo pidió nunca (la tarjeta no es una RTX 50 por su id PCI, está puesto
      `NVMTL_NVENCVT=0`, o la biblioteca no está instalada con root como propietario), o todavía no ha arrancado ningún
      servicio de decodificación.
-   - PASS pero un vídeo roto: pon `NVMTL_NVENCVT=0` en `nvrm610.conf` para volver al decodificador de 2.9, y envía la
-     línea con los datos del vídeo.
+   - PASS pero un video roto: pon `NVMTL_NVENCVT=0` en `nvrm610.conf` para volver al decodificador de 2.9, y envía la
+     línea con los datos del video.
 
    Para el registro propio de la biblioteca, `sudo touch /tmp/nvencvt.log` antes de que arranque el proceso; cada
    proceso que carga la biblioteca escribe entonces `/tmp/nvencvt-<pid>.log`. El servicio de decodificación funciona
    en un sandbox y puede que no se le permita: si no aparece ese archivo para él, eso no dice nada de la prueba, cuyo
    veredicto es la línea del registro del sistema de arriba.
-2. **RTX 30 y 40.** Reproduce vídeos H.264, HEVC, VP9 y AV1 en Safari y QuickTime. Bien: como con 2.9. Mal: un vídeo
-   que se veía con 2.9 no se ve; envía los datos del vídeo y
+2. **RTX 30 y 40.** Reproduce videos H.264, HEVC, VP9 y AV1 en Safari y QuickTime. Bien: como con 2.9. Mal: un video
+   que se veía con 2.9 no se ve; envía los datos del video y
    `log show --last 10m --predicate 'eventMessage CONTAINS "nvencvt"'`.
 
 ## 6. Reposo y activación
 
-1. Pon el Mac en reposo desde el menú Apple, espera un minuto y actívalo. Hazlo tres veces, una con un vídeo en marcha
-   y otra con un juego abierto. Bien: el escritorio vuelve cada vez; `sysctl debug.nvrm_fence_state` es 1 después y
-   `debug.nvrm_fence_end_pm` ha crecido; `debug.nvrm_irq_settle_timeouts` 0; el registro del kernel tiene una línea
+1. Pon el Mac en reposo desde el menú Apple, espera un minuto y actívalo. Hazlo tres veces, una con un video en marcha
+   y otra con un juego abierto. Bien: el escritorio vuelve cada vez; `sysctl debug.nvrm_fence_state` es 1 después
+   (`debug.nvrm_fence_end_pm` cuenta las retenciones que estaban en curso en el momento de cada reposo, que pueden ser
+   ninguna, así que puede quedarse igual); `debug.nvrm_irq_settle_timeouts` 0; el registro del kernel tiene una línea
    `NVRM-xnu: sleep #` y una `NVRM-xnu: wake #` por cada vez; ninguna aplicación perdió su GPU y ningún fotograma
    pendiente en el reposo se dio por perdido. Con VT-d activo, `debug.nvrm_dma_live` da lo mismo antes y después de
    un reposo sin nada más en marcha. Mal: pantalla negra o congelada tras la activación, `debug.nvrm_fence_state` 3

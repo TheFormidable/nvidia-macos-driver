@@ -10,10 +10,13 @@ The accelerator, the display side and the resource-manager glue all assume exact
 
 | Layer | Single-card assumption | Measured |
 |---|---|---|
-| NVRM service | one global service object returned by `nv_xnu_gpu_state()` and `nv_xnu_gpu_os_device()` (`kexts/NVRM/NVRM.cpp`, `gNVRMService`) | 4 uses of the global; 19 file-level statics in `NVRM.cpp`; the two accessors have 7 callers in `os-nvkms-xnu.cpp`, `os-xnu2.cpp`, `nvrm_ddc.cpp` |
+| NVRM service | one global service object returned by `nv_xnu_gpu_state()` and `nv_xnu_gpu_os_device()` (`kexts/NVRM/NVRM.cpp`, `gNVRMService`) | 4 uses of the global; 31 file-level statics in `NVRM.cpp`; the two accessors have 7 callers in `os-nvkms-xnu.cpp`, `os-xnu2.cpp`, `nvrm_ddc.cpp` |
 | NVKMS glue | `nvkms_open_gpu` and the GPU list are built from `gpu_info[0]` only (`kexts/NVRM/os-nvkms-xnu.cpp`) | 11 file-level statics; the GPU table has one slot |
-| NVAccel | one global accelerator object (`NVAccel::gAccel`) read by every allocation, surface and framebuffer path | 34 uses of `gAccel` in `kexts/NVRM/accel/nvrm-accel.cpp`, 64 file-level statics |
-| NVRMFB | one framebuffer family bound to that accelerator | 46 file-level statics in `kexts/NVRMFB/fb/nvrm-fb.cpp` |
+| NVAccel | one global accelerator object (`NVAccel::gAccel`) read by every allocation, surface and framebuffer path | 34 uses of `gAccel` in `kexts/NVRM/accel/nvrm-accel.cpp`, 91 file-level statics |
+| NVRMFB | one framebuffer family bound to that accelerator | 49 file-level statics in `kexts/NVRMFB/fb/nvrm-fb.cpp` |
+
+A file-level static is counted here as one line at file scope that declares a static variable that is not `const`
+(a line that declares several counts once), in this release's sources.
 | Plugin | the device is found with a first-match registry lookup (`IOServiceGetMatchingService`, 3 sites in `plugin/`) and the process creates one Metal device | `MTLCopyAllDevices` can list only what the plugin creates |
 
 ## Slices, each provable before the next

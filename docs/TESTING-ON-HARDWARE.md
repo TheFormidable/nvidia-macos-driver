@@ -228,8 +228,9 @@ cast, an old frame, frames that flicker between two, one of those counters above
 ## 6. Sleep and wake
 
 1. Sleep the Mac from the Apple menu, wait a minute, wake it. Do it three times, once while a video plays and once
-   while a game runs. Pass: the desktop comes back each time; `sysctl debug.nvrm_fence_state` is 1 afterwards and
-   `debug.nvrm_fence_end_pm` has grown; `debug.nvrm_irq_settle_timeouts` 0; the kernel log has a
+   while a game runs. Pass: the desktop comes back each time; `sysctl debug.nvrm_fence_state` is 1 afterwards
+   (`debug.nvrm_fence_end_pm` counts the holds that were in flight at the moment of each sleep, which can be none, so
+   it may stay where it was); `debug.nvrm_irq_settle_timeouts` 0; the kernel log has a
    `NVRM-xnu: sleep #` and a `NVRM-xnu: wake #` line for each; no application lost its GPU and no frame pending at the
    sleep was reported lost. With VT-d on, `debug.nvrm_dma_live` reads the same before and after a sleep with nothing
    else running. Fail: a black or frozen screen after the wake, `debug.nvrm_fence_state` 3 (the GPU did not
