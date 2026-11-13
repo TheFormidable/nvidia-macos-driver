@@ -1242,7 +1242,8 @@ deps_python() {
   mkdir -p "$TOOLS"
   "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
   write_requirements > "$TOOLS/requirements.txt"
-  PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
+  # pip keeps what it downloads in ~/Library/Caches/pip unless told otherwise: that cache is the working directory's too
+  PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
     || die "pip could not install the pinned packages (see above)"
   write_requirements | sha256_stdin > "$VENV/.nm-requirements"
   : "$want_new"

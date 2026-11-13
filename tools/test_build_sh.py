@@ -191,6 +191,8 @@ case "$role" in
         case "${2:-}" in
           venv) d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
           pip) [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
+               # like pip: what it downloads is kept in ~/Library/Caches/pip unless PIP_CACHE_DIR or PIP_NO_CACHE_DIR says otherwise
+               [ -n "${PIP_NO_CACHE_DIR:-}" ] || { c=${PIP_CACHE_DIR:-$HOME/Library/Caches/pip}; mkdir -p "$c/http-v2" && : > "$c/http-v2/stand-in"; }
                mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
           *) exit 1 ;;
         esac ;;
@@ -1192,6 +1194,11 @@ def arm_deps_control():
     before = sb.listing(sb.home)
     rc, out = sb.run("deps", "-y")
     negative("deps that asks Homebrew for a formula already installed", deps_problems(sb, rc, out, before))
+    sb = Sandbox("deps-neg2", formulas=("cmake",))
+    sb.break_script('PIP_CACHE_DIR="$TOOLS/pip-cache" ', '')
+    before = sb.listing(sb.home)
+    rc, out = sb.run("deps", "-y")
+    negative("pip with its own cache (~/Library/Caches/pip, outside the working directory)", deps_problems(sb, rc, out, before))
 
 
 def llvm23_problems(sb, rc, out):
