@@ -930,13 +930,15 @@ bool NVRM::startGPU(IOService *provider)
     // NVRMFB's verdict on the Apple framebuffer classes of this macOS (nvrm_layout.h). Every way the driver has of
     // lighting this card's display is a subclass of them, the framebuffer that shows the desktop with the driver off
     // included, so when the framebuffer refuses nothing of this driver can show a picture on this macOS, and a
-    // started card would be a GPU with no display. The install excludes Apple's own firmware framebuffer
-    // (IONDRVSupport, README.md), so no desktop comes up on this card at this start or at any later one; the Mac still
-    // boots and can be reached over the network. Declined here, before the boot guard counts this start: counting
-    // could not help, since a driver that the guard turned off would refuse the same classes. What puts a working
-    // driver back is the install's fallback job (package/install.sh, step 6b): it reads the nvrm-layout property
-    // written below and restores the driver that the install replaced, where there was one. nvlayout=0 makes the
-    // framebuffer publish "overridden" instead, and both start as before.
+    // started card would be a GPU with no display. The OpenCore setup excludes Apple's own firmware framebuffer
+    // (IONDRVSupport, README.md), so no desktop comes up on this card at this start or at any later start of this
+    // driver; the Mac still boots and can be reached over the network. Declined here, before the boot guard counts
+    // this start: a driver that the guard turned off would refuse the same classes and leave the screen just as dark,
+    // so two counted starts would only put two dark starts before the way back. That way back is the install's
+    // fallback job (package/install.sh, step 6b): after an install over an earlier driver, and until the start after
+    // the first one that lit the display, it reads the nvrm-layout property written below and restores the driver
+    // that the install replaced. Without it (a first install, or a macOS update after that trial) every start ends
+    // like this one. nvlayout=0 makes the framebuffer publish "overridden" instead, and both start as before.
     // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
     // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
     // logs the same from its side. A verdict published later is read again just before go(2).
@@ -951,9 +953,9 @@ bool NVRM::startGPU(IOService *provider)
         if (gNvLayoutFb == kNvLayoutRefused) {
             provider->setProperty("nvrm-layout", "declined: the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
             LOG("NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS (its Apple classes differ from the ones it "
-                "was built for), so no desktop comes up on this card. Not counted as a failed start: the install's "
-                "fallback job reads this refusal and puts the previous driver back, where it kept one. Boot-arg "
-                "nvlayout=0 starts the card anyway.");
+                "was built for), so no desktop comes up on this card. Not counted as a failed start. After an install "
+                "over an earlier driver, the install's fallback job reads this refusal and puts that driver back; "
+                "without that job nothing changes at the next start. Boot-arg nvlayout=0 starts the card anyway.");
             return false;
         }
     }
