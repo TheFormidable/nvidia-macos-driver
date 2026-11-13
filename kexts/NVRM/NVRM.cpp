@@ -1463,11 +1463,14 @@ void NVRM::autoGo(void *p0, wait_result_t)
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
     // The framebuffer may have published its verdict after startGPU read it (kexts loaded on their own rather than
-    // from one collection). A refusal now still keeps the card as the firmware left it, and this driver shows nothing
-    // on it (see startGPU for what the screen shows then). This boot's start stays counted; the install's fallback job
-    // reads the nvrm-layout property written below, as for the early refusal. Without that job two such boots switch
-    // the driver off through the boot guard, which does not change the picture either: the driver-off framebuffer
-    // refuses the same classes.
+    // from one collection). A refusal now means go(2) never runs, and this driver shows nothing on the card (see
+    // startGPU for what the screen shows then). Unlike the early refusal, startGPU has already run placeLargeBar1(), so
+    // on a card with Resizable BAR the firmware's picture may lie outside BAR1 by now, out of reach of Apple's firmware
+    // framebuffer too. This boot's start stays counted; the install's fallback job reads the nvrm-layout property
+    // written below, as for the early refusal. Without that job two such boots switch the driver off through the boot
+    // guard, and the driver shows nothing then either: the driver-off framebuffer refuses the same classes. Where
+    // IONDRVSupport is not excluded the driver-off start leaves BAR1 as IOPCIFamily placed it (without nvoffbar=1),
+    // so Apple's framebuffer may draw there although it could not at the refused start.
     {
         char text[200];
         gNvLayoutFb = (unsigned)nvrmPeerLayout(s->fPCI, "nvrmfb-layout", text, sizeof text);
