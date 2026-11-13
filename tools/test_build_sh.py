@@ -33,7 +33,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
+import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -46,10 +46,25 @@ ONLY = sys.argv[1:]
 HOST_BREW = [b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if os.path.exists(b)]
 
 
+# The arms run in two threads (see main): each arm's lines are kept and printed together when it ends.
+_LOCK = threading.Lock()
+_TLS = threading.local()
+
+
+def emit(line):
+    buf = getattr(_TLS, "buf", None)
+    if buf is None:
+        with _LOCK:
+            print(line, flush=True)
+    else:
+        buf.append(line)
+
+
 def check(name, ok, detail=""):
     global fails
-    print(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""), flush=True)
-    fails += 0 if ok else 1
+    emit(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""))
+    with _LOCK:
+        fails += 0 if ok else 1
     return ok
 
 
@@ -244,12 +259,18 @@ printf '%s\n' "$@" > "$f.args"
 echo "stand-in for $key: started"
 # told to wait: until released, until the test takes the block away (or its sandbox is gone), at most two minutes;
 # a stand-in that outlives its run must not wait for ever
+# (a bash 4 or later waits with its own "read -t" on a FIFO that never delivers, instead of starting a sleep every 50 ms:
+# 2400 forks are slow on a loaded machine; bash 3.2 cannot time out a read in less than a second, so it keeps sleep)
 if [ -f "$SB/ctl/block-$key" ]; then
-  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0
+  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0; nap="sleep 0.05"
+  if [ "${BASH_VERSINFO[0]}" -ge 4 ] && mkfifo "$SB/ctl/nap-$$" 2>/dev/null; then
+    exec 3<>"$SB/ctl/nap-$$"; rm -f "$SB/ctl/nap-$$"; nap="read -t 0.05 -u 3 _"
+  fi
   while [ ! -f "$SB/ctl/release-$key" ] && [ -f "$SB/ctl/block-$key" ]; do
     w=$((w + 1)); [ "$w" -le 2400 ] || { echo "stand-in for $key: never released"; exit 9; }
-    sleep 0.05
+    $nap || true
   done
+  exec 3<&-
 fi
 if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
 mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
@@ -553,10 +574,11 @@ class Sandbox:
     def popen(self, *args, extra=None, default_sigint=True):
         # Ctrl-C reaches build.sh even when this test was started with SIGINT ignored (nohup, "&" in a script), which
         # build.sh would inherit and could not trap
-        pre = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if default_sigint else None
-        return subprocess.Popen([BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
-                                preexec_fn=pre)
+        # (by a small exec wrapper, not preexec_fn, which is not safe while another thread runs)
+        pre = [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])"]
+        return subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
 
     def jlines(self):
         return self.journal.read_text().splitlines() if self.journal.exists() else []
@@ -2504,6 +2526,28 @@ def arm_docs():
 
 
 # ------------------------------------------------------------------------------------------------- main
+def timed(name, fn, *args):
+    """Run one arm and print its lines together; with NMT_TIMES=1 also how long it took."""
+    t0 = time.monotonic()
+    _TLS.buf = []
+    try:
+        return fn(*args)
+    finally:
+        lines, _TLS.buf = _TLS.buf, None
+        if os.environ.get("NMT_TIMES"):
+            lines.append(f"time {name}: {time.monotonic() - t0:.1f} s")
+        with _LOCK:
+            for l in lines:
+                print(l, flush=True)
+
+
+def finish(worker):
+    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends)."""
+    if worker is not None and worker.ident:
+        worker.join()
+    return None
+
+
 def main():
     v = subprocess.run([BASH, "-c", 'echo "$BASH_VERSION"'], capture_output=True, text=True).stdout.strip()
     print(f"build.sh runs under {BASH} (bash {v})")
@@ -2513,61 +2557,82 @@ def main():
         if not shutil.which(t):
             print(f"SKIP: {t} is needed to imitate a Mac here")
             sys.exit(2)
+    worker = None
     try:
         if want("pins"):
-            arm_pins()
+            timed("pins", arm_pins)
         if want("scan"):
-            arm_scan()
+            timed("scan", arm_scan)
         if want("docs"):
-            arm_docs()
+            timed("docs", arm_docs)
         if want("plugin"):
-            arm_plugin_link()
-        commits = build_template()
+            timed("plugin_link", arm_plugin_link)
+        commits = timed("template", build_template)
         if want("pins"):
-            arm_pins_script()
-        if want("fresh"):
-            arm_fresh()
-        if want("hostbrew"):
-            arm_hostbrew()
-        if want("whichbrew"):
-            arm_whichbrew()
-        if want("brewenv"):
-            arm_brewenv()
-        if want("pathtools"):
-            arm_pathtools()
-        if want("readonly"):
-            arm_readonly()
-        if want("noinstall"):
-            arm_noinstall()
-        if want("needs"):
-            arm_needs()
-        if want("tamper"):
-            arm_tamper()
-        if want("githooks"):
-            arm_githooks()
-        if want("space"):
-            arm_space()
-        if want("hosts"):
-            arm_hosts(commits)
-        if want("deps"):
-            arm_deps_control()
-        if want("llvm23"):
-            arm_llvm23()
+            timed("pins_script", arm_pins_script)
+        # Each arm below makes its own imitated Mac and shares nothing with the others, so they run in a second thread
+        # beside the arms that build on one shared Mac (those stay in this thread: the interrupt arm sets the signal
+        # handling, which only the main thread may). Most of the time is build.sh's own forks; two threads halve the
+        # time the test needs on a loaded machine. NMT_SERIAL=1 runs everything in this thread.
+        errors = []
+
+        def standalone():
+            try:
+                if want("fresh"):
+                    timed("fresh", arm_fresh)
+                if want("hostbrew"):
+                    timed("hostbrew", arm_hostbrew)
+                if want("whichbrew"):
+                    timed("whichbrew", arm_whichbrew)
+                if want("brewenv"):
+                    timed("brewenv", arm_brewenv)
+                if want("pathtools"):
+                    timed("pathtools", arm_pathtools)
+                if want("readonly"):
+                    timed("readonly", arm_readonly)
+                if want("noinstall"):
+                    timed("noinstall", arm_noinstall)
+                if want("needs"):
+                    timed("needs", arm_needs)
+                if want("tamper"):
+                    timed("tamper", arm_tamper)
+                if want("githooks"):
+                    timed("githooks", arm_githooks)
+                if want("space"):
+                    timed("space", arm_space)
+                if want("hosts"):
+                    timed("hosts", arm_hosts, commits)
+                if want("deps"):
+                    timed("deps_control", arm_deps_control)
+                if want("llvm23"):
+                    timed("llvm23", arm_llvm23)
+            except BaseException as e:   # reported after the join, as a failure
+                errors.append(e)
+
+        worker = threading.Thread(target=standalone, name="standalone arms")
+        if os.environ.get("NMT_SERIAL"):
+            standalone()
+        else:
+            worker.start()
         mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
                     "test", "package", "nohome", "clean"]
         if any(want(a) for a in mac_arms):
             mac = Sandbox("mac", formulas=("cmake",))
-            arm_deps(mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
-            arm_fetch(mac, commits)
+            timed("deps", arm_deps, mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
+            timed("fetch", arm_fetch, mac, commits)
             if want("offline"):
-                arm_offline(mac)
-            arm_order(mac)
+                timed("offline", arm_offline, mac)
+            timed("order", arm_order, mac)
             for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
                              ("failure", arm_failure), ("steps", arm_steps), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
                              ("test", arm_test_cmd), ("package", arm_package), ("nohome", arm_nohome), ("clean", arm_clean)):
                 if want(name):
-                    fn(mac)
+                    timed(name, fn, mac)
+        worker = finish(worker)
+        for e in errors:
+            raise e
     finally:
+        finish(worker)
         if os.environ.get("NMT_KEEP"):
             print(f"sandbox kept: {TMP}")
         else:
