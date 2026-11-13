@@ -29,7 +29,8 @@ flushing, and the tests that took long are named with their times. Negative cont
 output, the runner that leaves Python's output buffered, the runner with its real threshold for "long".
 
 A test that prints bytes that are not UTF-8 fails with its output and the run reaches its summary (control: the output
-read strictly ends the run with Python's error)."""
+read strictly ends the run with Python's error). An entry a test removes and a later one makes again names the later
+test (control: a runner that remembers every entry it saw)."""
 import sys
 sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
 import importlib.util  # noqa: E402
@@ -299,6 +300,36 @@ rc, out, there = escape_run(RUNNER.replace(per_test, "            pass\n"))
 arm("control: a runner that lists the folders only at the end cannot say which tests were running",
     rc == 0 and any("escaped-" in l and "first seen while these ran: none: it appeared after the last test had ended" in l for l in out.splitlines()), out)
 
+
+# an entry that a test removes and a later test makes again is laid at the door of the tests running when the one that is
+# left appeared, not of those that made the first
+AGAIN = {"test_1_makes.py": "import os\nos.mkdir(os.path.join(os.environ['NMT_SYSTMP'], 'again'))\n",
+         "test_2_removes.py": "import os\nos.rmdir(os.path.join(os.environ['NMT_SYSTMP'], 'again'))\n",
+         "test_3_makes.py": "import os\nos.mkdir(os.path.join(os.environ['NMT_SYSTMP'], 'again'))\n"}
+
+
+def again_run(runner_text):
+    """-> the runner's line for the entry `again`, which test_1 makes, test_2 removes and test_3 makes again (-j 1)"""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d).resolve()
+        (root / "tools").mkdir()
+        (root / "systmp").mkdir()
+        (root / "tools/run_all_tests.py").write_text(runner_text)
+        for name, source in AGAIN.items():
+            (root / f"tools/{name}").write_text(source)
+        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py"), "-j", "1"],
+                           env=dict(CLEAN, TMPDIR=str(root / "systmp"), NMT_SYSTMP=str(root / "systmp")), capture_output=True, text=True, timeout=120)
+        return [l for l in (r.stdout + r.stderr).splitlines() if l.startswith("left in ") and "systmp during the run" in l and l.endswith(": again")]
+
+
+forget = "        KNOWN.clear()\n"
+arm("the runner forgets an entry that went away, in one place", RUNNER.count(forget) == 1)
+got = again_run(RUNNER)
+arm("an entry removed and made again names the test that made the one that is left",
+    len(got) == 1 and got[0].endswith("first seen while these ran: test_3_makes.py): again"), got)
+got = again_run(RUNNER.replace(forget, ""))
+arm("control: a runner that remembers every entry it ever saw names the test that made the first one",
+    len(got) == 1 and "first seen while these ran: test_1_makes.py): again" in got[0], got)
 
 
 # ---- what a test leaves running, its time limit, and the terminal
