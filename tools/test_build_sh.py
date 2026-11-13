@@ -171,6 +171,9 @@ case "$role" in
     case "${1:-}" in -version) printf 'Xcode %s\nBuild version 17A400\n' "$(cat "$S/xcode")" ;; *) exit 1 ;; esac ;;
   xcrun)
     [ -f "$S/xcode" ] || { echo "xcrun: error: invalid active developer path" >&2; exit 1; }
+    # like Apple's: a set SDKROOT is the SDK it names (build.sh's steps get the one --sdk macosx gave)
+    if [ "${1:-}" = --sdk ]; then shift 2
+    elif [ -n "${SDKROOT:-}" ] && [ "${1:-}" = --show-sdk-path ]; then echo "$SDKROOT"; exit 0; fi
     case "${1:-}" in
       --show-sdk-path) echo "$SB/sdk" ;;
       --show-sdk-version) cat "$S/sdk" ;;
@@ -223,8 +226,8 @@ case "$role" in
       --version|-V) echo "Python $(cat "$self.version")" ;;
       -m)
         case "${2:-}" in
-          venv) d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
-          pip) [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
+          venv) rec sdkroot venv "${SDKROOT-UNSET}"; d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
+          pip) rec sdkroot pip "${SDKROOT-UNSET}"; [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
                # like pip: what it downloads is kept in ~/Library/Caches/pip unless PIP_CACHE_DIR or PIP_NO_CACHE_DIR says otherwise
                [ -n "${PIP_NO_CACHE_DIR:-}" ] || { c=${PIP_CACHE_DIR:-$HOME/Library/Caches/pip}; mkdir -p "$c/http-v2" && : > "$c/http-v2/stand-in"; }
                mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
@@ -266,6 +269,7 @@ case "$role" in
       *) exit 1 ;;
     esac ;;
   cmake)   # configure records the install prefix; --install lays out what SPIRV-LLVM-Translator installs
+    case "${1:-}" in -S|--build|--install) rec sdkroot "cmake${1}" "${SDKROOT-UNSET}" ;; esac
     case "${1:-}" in
       --version) cat "$self.version" ;;
       -S) b=""; pre=""; prev=""
@@ -2058,6 +2062,102 @@ def arm_vars(mac):
         negative("a step_env that keeps clang's include paths and the caller's HOMEBREW_ variables", leak_problems("c"))
 
 
+# SDKROOT. Every step, the translator's build and pip get the macOS SDK of the Xcode chosen as SDKROOT (without it Apple's
+# clang searches /usr/local/include and /usr/local/lib, Homebrew's on an Intel Mac, before the SDK); the caller's own
+# SDKROOT (it may name another platform's SDK) never reaches them; without an xcrun nothing is set and nothing fails.
+IOS_SDK = "/some/iPhoneOS.sdk"
+
+
+def sdkstep_problems(mac, tag, extra=None):
+    mac.clear()
+    e = {"FB_DEFS": f"-DNM_SDK_{tag}=1"}   # a fresh value each call so fb really re-runs
+    e.update(extra or {})
+    mac.run("build", "fb", extra=e)
+    steps = mac.steps()
+    want = str(mac.dir / "sdk")
+    bad = [f"{key}: SDKROOT={env.get('SDKROOT', '(not set)')}, expected {want}" for key, args, env in steps if env.get("SDKROOT") != want]
+    return bad or ([] if steps else ["no step ran"])
+
+
+def arm_sdkstep(mac):
+    with mac.scratch():
+        check("a step gets SDKROOT = the SDK xcrun names for macosx", not (q := sdkstep_problems(mac, "a")), q)
+        check("a caller's SDKROOT=/some/iPhoneOS.sdk does not reach a step; it gets the macOS SDK",
+              not (q := sdkstep_problems(mac, "b", {"SDKROOT": IOS_SDK})), q)
+        rc, out = mac.run("env", extra={"SDKROOT": IOS_SDK})
+        check("./build.sh env prints the SDKROOT the steps get, not the caller's",
+              f"export SDKROOT={mac.dir / 'sdk'}" in out and IOS_SDK not in out, out[-600:])
+        rc, out = mac.run("doctor", extra={"SDKROOT": IOS_SDK})
+        check("doctor names the SDK every step builds with, and that the caller's SDKROOT is not passed on",
+              re.search(r"^  note     every step builds with SDKROOT=\S*/sdk \(the SDK of the Xcode above; your SDKROOT=/some/iPhoneOS\.sdk is not passed on\)$",
+                        out, re.M) is not None, out[-1500:])
+        mac.break_script('  [ -z "$STEP_SDK" ] || printf \'%s\\n\' "SDKROOT=$STEP_SDK"\n', "")
+        negative("a step_env that only removes SDKROOT (as before)", sdkstep_problems(mac, "c"))
+    with mac.scratch():
+        mac.break_script("env -u SDKROOT xcrun --sdk macosx --show-sdk-path", "xcrun --show-sdk-path")
+        negative("an SDK asked of xcrun with the caller's SDKROOT in force (it names that SDK)",
+                 sdkstep_problems(mac, "d", {"SDKROOT": IOS_SDK}))
+
+
+def sdkdeps_problems(script_edit=None):
+    """deps on a Mac whose Homebrew LLVM is 23 (the translator is built) with SDKROOT=/some/iPhoneOS.sdk in the caller's
+    environment: the translator's cmake runs and the Python environment's venv and pip all get the macOS SDK"""
+    sb = Sandbox("sdkdeps", formulas=("cmake",))
+    (sb.state / "brew-llvm").write_text("23.1.5\n")
+    (sb.state / "brew-llvm22").write_text("")
+    if script_edit:
+        sb.break_script(*script_edit)
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra={"SDKROOT": IOS_SDK})
+    got = [l.split()[1:] for l in sb.jlines() if l.startswith("sdkroot ")]
+    want = str(sb.dir / "sdk")
+    p = [] if rc == 0 else [f"deps exit {rc}: {out[-400:]}"]
+    for who in ("cmake-S", "cmake--build", "cmake--install", "venv", "pip"):
+        seen = [g[1] for g in got if g[0] == who]
+        if not seen:
+            p.append(f"{who} did not run")
+        elif any(s != want for s in seen):
+            p.append(f"{who} got SDKROOT={seen}, expected {want}")
+    return p
+
+
+def arm_sdkdeps():
+    p = sdkdeps_problems()
+    check("the translator's cmake, venv and pip get SDKROOT = the macOS SDK, not the caller's", not p, p)
+    negative("a translator build that keeps the caller's environment as it is",
+             sdkdeps_problems(('  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S', '  x env "PATH=$tpath" "$T_CMAKE" -S')))
+    negative("a pip without SDKROOT",
+             sdkdeps_problems(('  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=', '  env -u SDKROOT PIP_CACHE_DIR=')))
+
+
+def nosdk_problems(script_edit=None):
+    """not a Mac and no xcrun: ./build.sh env and doctor set no SDKROOT, even with the caller's, and do not fail on it"""
+    sb = Sandbox("nosdk")
+    (sb.state / "os").write_text("Linux\n")
+    (sb.bin / "xcrun").unlink()
+    if script_edit:
+        sb.break_script(*script_edit)
+    p = []
+    rc, out = sb.run("env", extra={"SDKROOT": IOS_SDK})
+    if rc != 0:
+        p.append(f"env exit {rc}: {out[-300:]}")
+    if re.search(r"^export SDKROOT=", out, re.M):
+        p.append("env exports an SDKROOT without an xcrun: " + re.search(r"^export SDKROOT=.*$", out, re.M).group(0))
+    if not re.search(r"^unset SDKROOT ", out, re.M):
+        p.append("env does not say that no SDKROOT is set")
+    rc, out = sb.run("doctor", extra={"SDKROOT": IOS_SDK})
+    if "SDKROOT" in out:
+        p.append("doctor speaks of an SDKROOT on a computer without xcrun")
+    return p
+
+
+def arm_nosdk():
+    p = nosdk_problems()
+    check("no xcrun (not a Mac): no SDKROOT is exported, the caller's included, and nothing fails", not p, p)
+    negative("an SDK taken from the caller's SDKROOT when xcrun gives none",
+             nosdk_problems(('  STEP_SDK_DONE=1; STEP_SDK=""\n', '  STEP_SDK_DONE=1; STEP_SDK=${SDKROOT:-}\n')))
+
+
 def rebuilt(sb, *args, extra=None, edit=None):
     if edit:
         p = sb.co / edit[0]
@@ -3264,6 +3364,9 @@ def main():
                     timed("cargoconf", arm_cargoconf)
                 if want("spirvprefix"):
                     timed("spirvprefix", arm_spirvprefix)
+                if want("sdkroot"):
+                    timed("sdkdeps", arm_sdkdeps)
+                    timed("nosdk", arm_nosdk)
             except BaseException as e:   # reported after the join, as a failure
                 errors.append(e)
 
@@ -3272,7 +3375,7 @@ def main():
             standalone()
         else:
             worker.start()
-        mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
+        mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "sdkroot", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
                     "test", "package", "nohome", "clean"]
         if any(want(a) for a in mac_arms):
             mac = Sandbox("mac", formulas=("cmake",))
@@ -3281,7 +3384,7 @@ def main():
             if want("offline"):
                 timed("offline", arm_offline, mac)
             timed("order", arm_order, mac)
-            for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
+            for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("sdkroot", arm_sdkstep), ("env", arm_env), ("stamps", arm_stamps),
                              ("failure", arm_failure), ("steps", arm_steps), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
                              ("test", arm_test_cmd), ("package", arm_package), ("nohome", arm_nohome), ("clean", arm_clean)):
                 if want(name):

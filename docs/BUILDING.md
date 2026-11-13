@@ -259,12 +259,13 @@ These are not settings: `build.sh` derives them, gives them to the build scripts
 | `NM_LOCAL_BUILD_HOST` | the host name `build/local_build_host.sh` serves |
 | `CARGO_NET_OFFLINE` | `true` with `--offline` |
 | `PYTHONDONTWRITEBYTECODE` | `1`, so that no `__pycache__` is written into the checkout |
+| `SDKROOT` | the macOS SDK of the Xcode chosen (`xcrun --sdk macosx --show-sdk-path`), never yours | Also for the SPIRV-LLVM-Translator build and pip. Without it Apple's clang searches `/usr/local/include` and `/usr/local/lib` (Homebrew's on an Intel Mac) before the SDK, so what is in Homebrew could change what is built. Not set where there is no xcrun |
 | `PATH` | `<workdir>/tools/host` (only for the release scripts), `<workdir>/tools/bin`, `<workdir>/tools/venv/bin` (Python finds its environment only when started from there), then `/usr/bin:/bin:/usr/sbin:/sbin` |
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | the tarball name and the build description `build/package_local.sh` puts in the package |
 <!-- end -->
 
 Every step also gets `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`,
-`SDKROOT`, the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
+your own `SDKROOT` (it may name another platform's SDK; the step gets the macOS one, above), the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
 `LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, and `HOMEBREW_PREFIX`,
 `HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY` removed from its environment: an exported `CC` breaks build_rm620.sh,
 `NM_TAHOE` selects the macOS 26 accelerator, and a login shell may point the others at a Homebrew of the other
