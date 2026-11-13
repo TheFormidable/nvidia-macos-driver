@@ -35,6 +35,14 @@ NM_PIN_MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
 NM_PIN_MESA_MIRROR=NM_MESA_URL
 NM_PIN_MESA_REF=mesa-26.3.0-rc3
 NM_PIN_MESA_COMMIT=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
+# Not fetched by build.sh: the Vulkan headers of the automatic checks (build/ci_vulkan_headers.sh, used by
+# build/ci_plugin.sh and the host tests on GitHub's runners). Khronos Vulkan-Headers v1.4.363 (the tag's peeled commit,
+# git ls-remote 2026-11-13): each of its C headers in include/vulkan and include/vk_video is byte for byte the file of
+# the same name in Mesa's include/ at the commit on the second line (34 files compared, git blob ids equal), and Mesa
+# has two more there, vk_android_native_buffer.h and .editorconfig. VK_HEADER_VERSION is 363 in both. When the Mesa
+# pin above moves, ci_vulkan_headers.sh stops until the two are compared again (its --compare) and both lines move.
+NM_PIN_CI_VKHEADERS_COMMIT=6802bb4733b63ed5efd3adb308a6c885ef180ea1
+NM_PIN_CI_VKHEADERS_MESA=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
 
 # Khronos Vulkan-Headers and Vulkan-Loader v1.4.367: build/build_vulkan_loader.sh:9-11 (TAG, HEADERS_SHA, LOADER_SHA),
 # NOTICE. The mirror variable is a base URL (".../KhronosGroup"); build_vulkan_loader.sh reads the same variable.

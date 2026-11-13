@@ -60,6 +60,17 @@ jobs:
         with:
           fetch-depth: 0          # negative controls read older revisions and tags
           persist-credentials: false
+      - name: Which Vulkan headers (build/pins.sh)
+        id: vkh
+        run: echo "commit=$(sed -n 's/^NM_PIN_CI_VKHEADERS_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' build/pins.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9      # v6.1.0
+        with:
+          path: build-out/ci-vulkan-headers
+          key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}
+      - name: The release's Vulkan headers, for the tests that compile against them
+        run: |
+          d=$(bash build/ci_vulkan_headers.sh)
+          echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"
       - name: Host tests
         run: python3 tools/run_all_tests.py -j 4
   kexts-mac:
@@ -99,5 +110,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           persist-credentials: false
+      - name: Which Vulkan headers (build/pins.sh)
+        id: vkh
+        run: echo "commit=$(sed -n 's/^NM_PIN_CI_VKHEADERS_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' build/pins.sh)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9      # v6.1.0
+        with:
+          path: build-out/ci-vulkan-headers
+          key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}
       - name: Release compile of the Metal plugin
         run: bash build/ci_plugin.sh
