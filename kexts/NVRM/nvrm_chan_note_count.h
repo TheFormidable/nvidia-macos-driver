@@ -21,8 +21,9 @@
 
 /* At most this many dropped flushes are counted from one note: one rebuild drops at most a ring of 64 flushes. */
 #define NVRM_CN_DROPPED_MAX  64u
-/* The last loss kind and reason NVK's channel recovery names (UNKNOWN = 7, "gave up before" = 13). Larger values are
- * recorded as -1. */
+/* The last loss kind NVK's channel recovery names (UNKNOWN = 7) and the last reason it can send ("gave up before" =
+ * 13). Larger values are recorded as -1. NVK numbers one more reason, 14, "the GPU is suspended": with it a waiter
+ * only looks again, and it is never sent. tools/test_recover_reason_range.py holds both limits against NVK's enums. */
 #define NVRM_CN_KIND_MAX     7u
 #define NVRM_CN_WHY_MAX      13u
 
