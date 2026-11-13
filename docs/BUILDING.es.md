@@ -95,9 +95,10 @@ borra al terminarla; sus preguntas `brew info` usan una caché en `<directorio d
 guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con
 `HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew no sigue la instalación con su limpieza propia, que borraría versiones
 anteriores de tus fórmulas (cada 30 días, de todas), fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de
-su prefijo. Homebrew instala también lo que esas fórmulas necesitan y enlaza sus comandos en su `bin`; hoy eso incluye
-`python@3.15`, que `llvm@22` necesita para compilarse y que pasa a ser el `python3` de una shell que tenga el `bin` de
-Homebrew antes de `/usr/bin` (la compilación usa `python@3.14`). La tabla completa está en [BUILDING.md](BUILDING.md#what-each-command-writes).
+su prefijo. Homebrew instala también lo que esas fórmulas necesitan y enlaza en su `bin` los comandos de las que no son
+keg-only (`llvm@22` lo es); hoy eso incluye `python@3.15`, que `llvm@22` necesita para compilarse y que pasa a ser el
+`python3` de una shell que tenga el `bin` de Homebrew antes de `/usr/bin` (la compilación usa `python@3.14`). La tabla
+completa está en [BUILDING.md](BUILDING.md#what-each-command-writes).
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
