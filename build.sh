@@ -1874,6 +1874,21 @@ main() {
   trap on_exit EXIT
   trap on_signal INT TERM
   TMPF=$(mktemp "${TMPDIR:-/tmp}/nullmoth-build.XXXXXX")
+  # On a Mac with neither Xcode nor its command line tools, /usr/bin/git, make, python3, xcrun and xcodebuild are Apple's
+  # stand-ins, and the first one that runs opens a dialog offering to install the command line tools. So before any of
+  # them runs (check_paths runs git, doctor make and python3): xcode-select -p, which opens nothing, says whether there
+  # is a developer folder; without one every command but help stops here, doctor with its usual summary.
+  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then
+    if [ "$CMD" = doctor ]; then
+      say "== Xcode (cannot be installed by a script)"
+      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs)"
+      xcode_help; say ""
+      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected)"
+      trap - ERR; exit 1
+    fi
+    xcode_help >&2
+    die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+  fi
   case "$CMD" in
     help) cmd_help; return 0 ;;
     env) check_paths; print_env; return 0 ;;
