@@ -18,6 +18,7 @@ import pathlib
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -154,7 +155,8 @@ class Scene:
         p = self.p
         for d in ("bin", "opt", "Cellar/cmake/4.5.0/bin", "Cellar/pkgconf/3.0.10/bin", "Homebrew/Library/Homebrew", "var/homebrew/locks"):
             (p / d).mkdir(parents=True, exist_ok=True)
-        (p / "bin/brew").write_text("#!/bin/sh\nsleep 3\n")
+        # it runs until the watch has listed it (at most 20 s): a loaded machine cannot make it end unseen
+        (p / "bin/brew").write_text(seen_then_exit(self.ci))
         (p / "bin/brew").chmod(0o755)
         (p / "Cellar/cmake/4.5.0/bin/cmake").write_text("")
         (p / "bin/cmake").symlink_to("../Cellar/cmake/4.5.0/bin/cmake")
@@ -243,6 +245,12 @@ class Scene:
         return run([self.script, "prove", self.w, self.ci / "brew-before.txt", self.ci, self.p], self.env, timeout=300)
 
 
+def seen_then_exit(ci):
+    """a stand-in brew that ends once the watch's record names it (at most 20 s)"""
+    return (f'#!/bin/sh\ni=0\nwhile [ $i -lt 40 ]; do grep -qF "$0" "{ci}/brew-watch.txt" 2>/dev/null && exit 0; sleep 0.5; i=$((i + 1)); done\n'
+            'exit 0\n')
+
+
 def lines(out, start):
     return [l for l in out.splitlines() if l.startswith(start)]
 
@@ -313,13 +321,58 @@ def main():
         control("a brew process is seen by the watch", "brew processes seen: 1", brew_runs, lambda: None)
         fake = tmp / "sandbox/bin/brew"
         fake.parent.mkdir(parents=True)
-        fake.write_text("#!/bin/sh\nsleep 2\n")
+        fake.write_text(seen_then_exit(sc.ci))
         run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
         subprocess.run(["/bin/sh", str(fake), "install", "x"], timeout=10)
         rc, o = sc.prove(watch=False)
         arm("a brew of the tests' sandboxes is counted apart, not as Homebrew's", rc == 0 and "1 other process(es) named brew" in o, o)
         rc, o = sc.prove(watch=False)
         arm("control: a watch that is not running is not taken for none seen", rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
+
+        # the watch must outlive the step that starts it: a step's process group killed when the step ends leaves it running
+        def start_as_step(script):
+            st = subprocess.Popen([BASH, str(script), "watch-start", sc.ci, sc.p], env=sc.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  start_new_session=True)
+            st.communicate(timeout=60)
+            try:
+                os.killpg(st.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            time.sleep(1.5)
+        start_as_step(sc.script)
+        wpid = int((sc.ci / "brew-watch.pid").read_text().split()[0])
+        alive = subprocess.run(["kill", "-0", str(wpid)], capture_output=True).returncode == 0
+        rc, o = sc.prove(watch=False)
+        arm("the watch runs in a session of its own and outlives the step that started it (its process group killed)",
+            alive and rc == 0 and "brew processes seen: 0" in o, o)
+        nosid = sc.co / "build/ci_full_build_nosid.sh"   # beside the script, which finds the checkout from its own place
+        with open(sc.co / ".git/info/exclude", "a") as ex:
+            ex.write("/build/ci_full_build_nosid.sh\n")
+        nosid.write_text(sc.script.read_text().replace("if [ -x /usr/bin/perl ]; then", "if [ -x /nonexistent/perl ]; then"))
+        start_as_step(nosid)
+        rc, o = sc.prove(watch=False)
+        nosid.unlink()
+        arm("control: a watch started in the step's own process group dies with it and is not taken for none seen",
+            rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
+        def stall(resume):
+            run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
+            wp = int((sc.ci / "brew-watch.pid").read_text().split()[0])
+            os.kill(wp, signal.SIGSTOP)
+            time.sleep(12)
+            if resume:
+                os.kill(wp, signal.SIGCONT)
+                time.sleep(1.5)
+            r = sc.prove(watch=False)
+            try:
+                os.kill(wp, signal.SIGCONT)   # a stopped watch gets prove's SIGTERM only now
+            except ProcessLookupError:
+                pass
+            return r
+        rc, o = stall(True)
+        arm("control: a watch that made no list for 12 s is not taken for none seen", rc == 1 and any("made no list for" in l for l in lines(o, "NOT CHECKED")), o)
+        rc, o = stall(False)
+        arm("control: a watch that stopped listing before the end is not taken for none seen",
+            rc == 1 and any("last list is" in l for l in lines(o, "NOT CHECKED")), o)
 
         control("a tool taken from Homebrew is caught", "lie outside the working directory",
                 lambda: ((w / "tools/bin/cmake").unlink(), (w / "tools/bin/cmake").symlink_to(p / "bin/cmake")),
