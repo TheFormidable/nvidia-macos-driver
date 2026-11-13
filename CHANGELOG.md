@@ -135,9 +135,9 @@ left set.
   and is stopped and let go before the GPU's state is freed. Way back: boot argument `nvrmrctimer=0`.
 - RM nano timers can no longer run their callback after the timer was destroyed (use after free), and timers longer
   than 71 minutes no longer fire early. Way back for the new wait only: boot argument `nvrmnanowait=0`.
-- Sleep, shutdown and unload close the interrupt path and wait, bounded, until it is quiet. Unload and the full
-  shutdown (`nvrmshutdown=full`) take the adapter down in Linux's order, `rm_disable_adapter` first; every wait at
-  shutdown is 2 s at most, and when the system's 8 s run out the interrupt path is closed anyway.
+- Sleep, shutdown and the stop of a GPU close the interrupt path and wait, bounded, until it is quiet. The stop and
+  the full shutdown (`nvrmshutdown=full`) take the adapter down in Linux's order, `rm_disable_adapter` first; every
+  wait at shutdown is 2 s at most, and when the system's 8 s run out the interrupt path is closed anyway.
 - Two GPUs no longer corrupt each other's interrupt-context mark in the RM. The RM sees the real number of CPUs.
 - The start-up waits for the displays, the arming of the accelerator and the boot raster measurement end as soon as
   what they wait for is there, instead of at the next whole second, and never later than before. Each phase is in
