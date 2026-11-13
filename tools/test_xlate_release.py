@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """build/build_xlate_release.sh builds the shader translator with the cargo and rustc of the Rust toolchain's own
 folder, not through rustup's proxies. A release build makes rustc strip what it links with Rust's rust-objcopy, and
-that program finds Rust's libLLVM only when a proxy starts it. On an Intel Mac it aborted for every linked crate:
+that program finds Rust's libLLVM only when a proxy starts it. On an Intel Mac it aborted:
 cargo's log carried "warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)", the script stopped
-on the translator's warning ceiling of 0, and macOS wrote a crash report per abort. The script tells cargo to leave that
+on the translator's warning ceiling of 0, and macOS kept crash reports of it. The script tells cargo to leave that
 strip out (CARGO_PROFILE_RELEASE_STRIP=none); its own strip -S removes the debug map from the dylib.
 
 The script's last check is that the dylib names no build machine path. macOS's strings, given a Mach-O file by name,
@@ -17,7 +17,7 @@ and lipo:
            writes the two warning lines cargo 1.98.1 wrote on that Mac
   strip    removes the debug map, as strip -S does, or leaves it (the check's own case)
   strings  reads the part before the symbol table of a file it is given by name, and every byte of its standard input
-Nothing outside the temporary folder is read or written.
+Nothing outside the temporary folder is written.
 usage: test_xlate_release.py"""
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path
