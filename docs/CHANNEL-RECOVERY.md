@@ -43,14 +43,19 @@ Nothing is printed on a healthy GPU.
   buffer completes with an error (`MTLCommandBufferErrorInternal`), the backend stays up and the next command buffer
   runs; nothing is quarantined, its command pool and pages are destroyed (not reused, not leaked), and no completion
   witness is waited for. A surface upload that was dropped returns its failure to the caller, which uploads again at
-  the next use; an application's asynchronous surface upload whose copy was dropped is copied again from its staging
-  buffer before that buffer is freed. The surface-fence holds of the command buffer are closed on its error path as on
-  every other.
+  the next use; an application's asynchronous surface or texture upload whose copy was dropped is copied again from
+  its staging buffer when something next finishes that upload (a readback, a migration, the next upload of the same
+  image), but only if the image has only been sampled since; if a render pass, a copy or a storage use came after it,
+  the copy is not made again (it could overwrite what that work wrote) and the image keeps what it holds. An image
+  that is being freed is not copied again. The surface-fence holds of the command buffer are closed on its error path
+  as on every other.
 - Log lines (`nvmtl.log`; in a release build also the system log, since the line holds the word "fault"):
   `vk: after a GPU fault, a channel rebuild dropped this command buffer (N so far in <process>, fence after W ms): it
   did not run and is reported as failed; the device stays up; NVK: Xid X, R channel rebuilds, D flushes dropped, P
   replayed` for the first and every 256th, and on the first one the `fault context:` lines of the work that was
-  running. `vk: tex upload async: the copy a channel rebuild dropped was made again -> 0` after the async-upload copy.
+  running. `vk: tex upload async: the copy a channel rebuild dropped was made again -> 0` after the async-upload copy,
+  or `vk: tex upload async: the copy a channel rebuild dropped is not made again - the image was used since (layout
+  N), the image keeps what it held`.
 - A loss that is not rebuilt still ends the process's device exactly as before; the loss line in `nvmtl.log` is now
   followed by `vk: NVK channel recovery: last loss <KIND (...)>, Xid X, not rebuilt because: <reason>; ...` where KIND
   is CHANNEL, STALL, MEMORY (ECC), GSP (firmware), BUS, RESUME (failed wake) or UNKNOWN. With `NVK_CHANNEL_RECOVER=0`
