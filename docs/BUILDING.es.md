@@ -141,7 +141,7 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256 |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
-| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM |
+| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch` |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
 | `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`; `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
@@ -199,7 +199,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_OGKM620` | Un árbol 620.70.06 con el RM ya compilado (se saltan `rm` y `kms`) |
 | `NM_OGKM610` | Un árbol NVIDIA 610.57.04 ya descomprimido |
 | `NM_MESA_GIT` | Un clon de Mesa con el commit 90a959eb |
-| `NM_VULKAN_INCLUDE` | Cabeceras de Vulkan para el plugin de desarrollo |
+| `NM_VULKAN_INCLUDE` | Cabeceras de Vulkan para el plugin de desarrollo y para las pruebas de `./build.sh test` |
 | `NM_LILU_DEBUG_KEXT` | Para `nmkbl` y `nmhda` |
 | `NM_VIRTUALSMC_SRC` | Para `nmkbl` |
 | `NM_MACKERNELSDK` | Para `nmkbl` y `nmhda` |

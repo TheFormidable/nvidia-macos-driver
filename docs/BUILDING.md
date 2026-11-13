@@ -154,7 +154,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 | `fetch` | Downloads the pinned sources into the working directory and verifies each commit id or SHA-256. Also fetches the translator's crates (`cargo fetch --locked`) once Rust is there, so that its build runs offline |
 | `build [component...]` | Builds the named components and what they need, or all of them. Names and groups: [Components](#components-and-their-order) |
 | `package` | Builds what is not up to date, then stages a package from a release package (`--base-package`) with every part this checkout builds replaced. Needs `--accel both` |
-| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails |
+| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch` |
 | `env` | Prints `export` lines for every variable `build.sh` gives the build scripts, to run one of them by hand with the same environment |
 | `clean [outputs\|sources\|tools\|all]` | Deletes inside the working directory only. `outputs` (the default): outputs, stamps, logs, the package and the RM work tree. `sources`: the fetched sources (and the stamps). `tools`: everything under `<workdir>/tools`, the Python environment and Rust included (and the stamps). `all`: everything except the mark, after a yes |
 | `help` | The commands, components and settings |
@@ -215,7 +215,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_OGKM620` | `<workdir>/build/rm620/ogkm-620.70.06` | A 620.70.06 tree whose RM and modeset archives are already built: the `rm` and `kms` steps are then skipped |
 | `NM_OGKM610` | fetched | An unpacked NVIDIA 610.57.04 tree to use instead of fetching |
 | `NM_MESA_GIT` | fetched | A Mesa clone that holds commit 90a959eb (mesa-26.3.0-rc3). The release plugin takes its Vulkan headers from that clone's work tree |
-| `NM_VULKAN_INCLUDE` | Mesa's `include` | Vulkan headers for the development plugin |
+| `NM_VULKAN_INCLUDE` | Mesa's `include` | Vulkan headers for the development plugin and for the host tests of `./build.sh test` |
 | `NM_LILU_DEBUG_KEXT` | none | For the optional kexts `nmkbl` and `nmhda`: a Lilu DEBUG kext |
 | `NM_VIRTUALSMC_SRC` | none | For `nmkbl`: a VirtualSMC source tree |
 | `NM_MACKERNELSDK` | none | For `nmkbl` and `nmhda`: a MacKernelSDK tree |
@@ -505,7 +505,7 @@ real git against local repositories that stand in for the remotes, and a scratch
 component build script is replaced by a stand-in that records what it receives. It checks doctor on a Mac with
 nothing installed, deps with and without installing, when deps unlinks a Python formula again and when it does not, fetch (and a tampered remote), offline, dry run, the build
 order, the variables every step gets, skipping and rebuilding, a failing step and its report, a failed script after
-an earlier good build, build_rm620.sh's exit 6, the step's python3, that the scripts' `patch` never waits for an answer at the terminal, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
+an earlier good build, build_rm620.sh's exit 6, the step's python3, the Vulkan headers `test` gives the host tests, that the scripts' `patch` never waits for an answer at the terminal, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
 which of two Homebrews is used, that no tool of the other architecture's Homebrew is taken from `PATH`, that no brew
 call keeps the caller's `HOMEBREW_` location variables or `PATH`, that `fetch` runs none of your git hooks, template or filters, that
 nothing opens Apple's install dialog on a Mac without Xcode or runs with a developer folder that is gone, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
