@@ -406,10 +406,12 @@ prove_tools_used() {
 $name -> ${tg:-?}" ;;
     esac
   done < <(find "$w/tools/bin" -mindepth 1 -maxdepth 1 2>/dev/null | LC_ALL=C sort)
-  if [ -e "$w/tools/venv/bin/python3" ]; then
+  if [ -e "$w/tools/venv/bin/python3" ] || [ -L "$w/tools/venv/bin/python3" ]; then
     n=$((n + 1)); tg=$(resolve "$w/tools/venv/bin/python3")
     case "$tg" in "$w"/*|"$wr"/*) ;; *) bad="$bad
 python3 of the Python environment -> $tg" ;; esac
+  else bad="$bad
+python3 of the Python environment: not in tools/venv/bin"
   fi
   for name in $TOOL_LINKS; do
     [ -e "$w/tools/bin/$name" ] || [ -L "$w/tools/bin/$name" ] || bad="$bad
@@ -442,7 +444,11 @@ prove_loads() {
   named=""; missing=""
   for f in "$pr/bin/ninja" "$pr/bin/cmake" "$pr/python/bin/python3.14" "$pr/bin/pkgconf" "$pr/bin/spirv-val" "$pr/bin/spirv-opt" \
            "$pr/bin/glslang" "$pr/llvm/bin/llvm-config" "$pr/llvm/lib/libLLVM.dylib" "$pr/llvm/lib/libclang-cpp.dylib"; do
-    if [ -e "$f" ]; then g=$(resolve "$f"); named="$named ${f#"$pr"/}"; grep -qxF "$g" "$t/tools.txt" || printf '%s\n' "$g" >> "$t/tools.txt"
+    if [ -e "$f" ]; then
+      g=$(resolve "$f"); named="$named ${f#"$pr"/}"
+      # a link of the toolchain that leads out of the working directory is a tool taken from elsewhere
+      case "$g" in "$w"/*|"$wr"/*) ;; *) printf '%s: leads to %s, outside the working directory\n' "$f" "$g" >> "$t/bad-tools.txt" ;; esac
+      grep -qxF "$g" "$t/tools.txt" || printf '%s\n' "$g" >> "$t/tools.txt"
     else missing="$missing ${f#"$w"/}"; fi
   done
   n=$(find "$pr/python/lib" -path '*/lib-dynload/*.so' -type f 2>/dev/null | wc -l | tr -d ' ')
