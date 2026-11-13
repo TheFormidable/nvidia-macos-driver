@@ -17,9 +17,10 @@ failure.
 
 ## Where the driver writes
 
-- **Kernel**: `log show --last boot --predicate 'process == "kernel"'`. NVRM's lines start with `NVRM-xnu:`, the
+- **Kernel**: `log show --last boot --predicate 'process == "kernel"'` (every `log show --last boot` takes about a
+  minute). NVRM's lines start with `NVRM-xnu:`, the
   framebuffer's with `NVRM-fb:`, the accelerator's with `NVAccel:`. The counters are sysctls under `debug.`
-  (`sysctl debug | grep nvrm_` and `sysctl debug | grep nvaccel_`).
+  (`sysctl debug | grep nvrm_`, `sysctl debug | grep nvrmfb_` and `sysctl debug | grep nvaccel_`).
 - **The Metal plugin** (what each application and WindowServer do with Metal): a package built with `./build.sh`
   carries the release plugin, which writes its own log, `nvmtl.log`, only for a process started with
   `NVMTL_PROCESS_ENV=1` in its environment (not as root). For every other process, WindowServer included, only the
@@ -32,7 +33,8 @@ failure.
   application: start the application from Terminal to see them.
 
 Settings in `/Library/GPUBundles/nvmtl/nvrm610.conf` go into your own block at the end of the file, between
-`# --- my settings, kept on update ---` and `# --- end my settings ---`; the last line for a name wins, and a process
+`# --- my settings, kept on update ---` and `# --- end my settings ---` (section 1, step 5, says why and what an
+install keeps); the last line for a name wins, and a process
 reads the file when it starts (restart the application, or log out and in for WindowServer). Boot arguments go on the
 `boot-args` line of OpenCore's `config.plist` (README.md, "Wiring into an existing OpenCore setup") and need a
 restart. Take every test setting out again when its test is done.
@@ -41,7 +43,15 @@ restart. Take every test setting out again when its test is done.
 
 1. **A way back you have tried.** Keep the unpacked package of the release you install over (2.9) at hand: installing
    it again with its own `install.sh` puts every file back ([BUILDING.md](BUILDING.md), "Installing the result and
-   going back", which also says what `uninstall.sh` does and does not do). Know how you will start the Mac when the
+   going back", which also says what `uninstall.sh` does and does not do). Before it changes anything, the installer
+   copies what is installed now (the kexts, the plugin bundle, the folder `/Library/GPUBundles/nvmtl` with its
+   settings file, the kernel collection, the firmware) into a new folder
+   `/Library/NullMoth/backup-<date>-<time>.<random>`, whose name it prints on its line
+   `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
+   each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
+   after WindowServer kept dying on the NVIDIA display), the job puts everything back from that folder and restarts
+   once. It removes itself at the first start after one that lit the display, so it does not help with a problem that
+   comes later. Know how you will start the Mac when the
    desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; the 1401 picker entries
    exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings, General, Sharing) and make
    sure you can reach the Mac over `ssh` from another computer: several failures below leave the firmware's picture
@@ -49,65 +59,117 @@ restart. Take every test setting out again when its test is done.
    Pass: you have started the Mac once by that way back, and logged in over `ssh`. Fail: either does not work; do not
    go on.
 2. **A clean starting point.** `nvram boot-args` shows the `boot-args` line: it should hold the install line of
-   README.md and nothing else of the driver's (`gfxrst=4` stays if WhateverGreen needs it). The own block of
-   `nvrm610.conf` should be empty. Remove what an earlier test left, restart, and check again.
+   README.md and nothing else of the driver's but settings you chose for the machine, such as `nvfbhidpi=1`
+   (`gfxrst=4` stays if WhateverGreen needs it). Your own block of `nvrm610.conf` (step 5) should hold no test
+   setting. Remove what an earlier test left, restart, and check again.
 3. **Numbers from 2.9.** On the release that runs now, save what the driver reports, to compare later:
 
    ```bash
    sw_vers > ~/before-3.0.txt; nvram boot-args >> ~/before-3.0.txt
-   sysctl debug | grep -e nvrm_ -e nvaccel_ >> ~/before-3.0.txt
+   sysctl debug | grep -e nvrm -e nvaccel >> ~/before-3.0.txt
    ```
 
    Note how long the desktop takes to come up after the picker, and the CPU use of WindowServer on an idle desktop
    and with a video playing (Activity Monitor).
 4. **The package.** From its `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes
-   nothing. Pass: it ends without refusing. Fail: it says what it refused; fix that first.
+   nothing. Pass: its last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that
+   first.
+5. **Your settings file.** Read it before you install: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. The installer
+   replaces the whole folder `/Library/GPUBundles/nvmtl` with the package's, and of your old file it puts back, at the
+   end of the package's file, only the lines between `# --- my settings, kept on update ---` and
+   `# --- end my settings ---` (each marker exactly so, on a line of its own), and of those only `NAME=value` lines
+   whose name starts with `NVMTL_`, `NVK_` or `NVRM_` and whose value holds nothing but letters, digits and
+   `. _ , = * -`. Every other line is replaced by the package's file: a file without the two markers (2.9's own has
+   none) comes out of the install as the package's file. A line whose name has none of the three prefixes is read by
+   nothing at all. Your old file is not lost: it is `nvmtl/nvrm610.conf` in the backup folder of step 1. To carry a
+   line of your own over, put it between the two markers: in the old file before you install (the installer then
+   keeps it), or in the new file afterwards. To see which of your lines are not the package's, compare your file with
+   the package's own, `Library/GPUBundles/nvmtl/nvrm610.conf` under its `pkgroot`. Going back to 2.9 by installing it
+   again keeps only that block too.
 
 ## 2. The first boot
 
 1. **The card started.** Install, restart. Pass: the login window comes up on the NVIDIA card;
-   `kmutil showloaded --list-only | grep nullmoth` shows four lines; `system_profiler SPDisplaysDataType` shows the
-   GeForce with Metal supported. Fail: the firmware's picture stays or the screen is black. Over `ssh`, look in the
-   kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on with steps 3 and 5 below, which tell
-   the reasons apart.
+   `kmutil showloaded --list-only | grep nullmoth` shows four lines (NVRM, NVAccel, NVRMFB, NVRMAGDC), five on
+   macOS 26 where the installer adds its audio driver `com.nullmoth.NMXAudio` for an HD Audio controller;
+   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: the firmware's picture stays or
+   the screen is black. Over `ssh`, look in the kernel log for `NOT STARTING THE GPU` (the line gives the reason)
+   and go on with steps 3 and 5 below, which tell the reasons apart.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
-3. **The Apple class checks.** On each macOS you have (15 and 26), the first boot is the test that matters:
+3. **The Apple class checks.** Nobody has compared the sizes of Apple's classes that this build was made for with
+   the ones your macOS registers: on each macOS you have (15 and 26) the first start is that comparison, and it is the
+   test that matters. Right after it (over `ssh` if the screen did not come up):
 
    ```bash
    ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'
-   sysctl debug.nvrmfb_layout debug.nvrmfb_agdc debug.nvaccel_layout debug.nvaccel_layout_bad
+   sysctl debug.nvrmfb_layout debug.nvrmfb_layout_vtdiff debug.nvrmfb_agdc debug.nvrmfb_agdc_layout \
+          debug.nvaccel_layout debug.nvaccel_layout_bad debug.nvaccel_layout_vtlong debug.nvaccel_layout_vtshort
+   log show --last boot --predicate 'eventMessage CONTAINS "Apple class layout" OR eventMessage CONTAINS "Apple vtable lengths"'
    ```
 
-   Pass: `nvrmfb-layout`, `nvagdc-layout` and `nvaccel-layout` each start with `ok:`; `debug.nvaccel_layout` is 1 and
-   `debug.nvaccel_layout_bad` 0. A `differ:` or `not compared:` line in `nvrmfb-layout-vtables` or
-   `nvaccel-layout-vtables` is not a failure, but send it with `sw_vers`. Fail: a line starts with `refused:`. Send
-   it with `sw_vers`; then boot once with `nvlayout=0` only to see whether the rest works, and take it out again
-   (TROUBLESHOOTING.md has what each refusal means and what that boot risks).
+   `sysctl` prints `unknown oid` for a name that no kext registered, goes on with the others and then exits with the
+   number of unknown names; the `log show` takes about a minute. What the code is written to show:
+   - Pass: `nvrmfb-layout` reads `ok: 3 classes, vtables not compared; macOS <build> (Darwin <version>)`,
+     `nvagdc-layout` `ok: 1 class, vtables not compared; macOS ...`, and `nvaccel-layout` starts with `ok:` and
+     the number of classes and vtables it compared; there is no `nvrm-layout` line (NVRM writes one only when it
+     declines). `debug.nvrmfb_layout`, `debug.nvrmfb_agdc`, `debug.nvrmfb_agdc_layout` and `debug.nvaccel_layout`
+     are 1 and `debug.nvaccel_layout_bad` is 0. A `differ:` or `not compared:` line in `nvrmfb-layout-vtables` or
+     `nvaccel-layout-vtables`, or `debug.nvrmfb_layout_vtdiff`, `debug.nvaccel_layout_vtlong` or
+     `debug.nvaccel_layout_vtshort` above 0, is not a failure (a vtable length is reported, never a reason to
+     refuse), but send it with `sw_vers`.
+   - Fail: a line starts with `refused:` (it names the class and both sizes). What each refusal does:
+     - `nvrmfb-layout` refused, read by NVRM before it started the card: the kernel log has
+       `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` reads `declined: ...`,
+       the firmware's picture stays and the boot guard does not count this start. `debug.nvrmfb_layout` does not
+       exist (the framebuffer did not start).
+     - The same refusal read only after NVRM had started: `auto-go: NOT STARTING THE GPU: the framebuffer refused
+       this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. The firmware's picture
+       stays, and this start is counted: two such starts in a row without a desktop that stays up turn the driver off,
+       and the installer's job of section 1, step 1, puts the previous driver back.
+     - `nvaccel-layout` refused: `NVAccel: does not attach: ... the display runs without acceleration` and NVRM's
+       `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` is 6, there is no
+       `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
+       started). The framebuffer lights the display, so the boot guard counts the start as good and the installer's
+       job puts nothing back. A desktop without acceleration on this driver has not been seen: if the screen stays
+       black or shows only a cursor, use `ssh`.
+     - `nvagdc-layout` refused: `debug.nvrmfb_agdc` is -6 and `debug.nvrmfb_agdc_layout` 2; the desktop runs without
+       AppleGraphicsDeviceControl, and the start counts as good.
+
+     Send the output of the three commands with `sw_vers`. Then boot once with `nvlayout=0` only to see whether the
+     rest works (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out
+     again (TROUBLESHOOTING.md has what that boot risks).
 4. **Start-up time.** `sysctl debug | grep nvrm_boot_` gives each phase of the start in milliseconds. Pass: the
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
    Fail: it comes up later, or 7 with a display connected; boot once with `-nvrmoldwaits` and send both sets of
    numbers.
-5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode`. Pass: 0 on a machine without VT-d (or with the DMAR table dropped),
-   and every other `debug.nvrm_dma_*` counter 0. With VT-d on, 1 or 2: follow
+5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode` and `ioreg -l -w0 | grep nvrm-dma`, once, so that the report says
+   which mode ran. Pass: on a machine without VT-d (or with the DMAR table dropped) `debug.nvrm_dma_mode: 0` and
+   `"nvrm-dma" = "none (bus address = physical address)"`: the DMA layer then passes every address through as 2.9
+   did, and every other `debug.nvrm_dma_*` counter stays 0 (`nvrm_dma_refused` too, unless the RM asks for a peer or
+   device-register mapping, which is refused in every mode). With VT-d on, 1 or 2: follow
    [DMA-IOMMU.md](DMA-IOMMU.md), "Checking a VT-d machine". Fail: 3 means the driver did not start the card behind
    the mapper (the log line `NVRM-xnu: DMA: refused:` says why); send it.
 6. **The RM's helpers.** Read twice, ten seconds apart:
 
    ```bash
    sysctl debug.nvrm_wq_mode debug.nvrm_atomic_mode debug.nvrm_bh_thread debug.nvrm_rc_armed debug.nvrm_rc_ticks \
-          debug.nvrm_nano_wait_timeouts
+          debug.nvrm_nano_wait_timeouts debug.nvrm_nano_retired
    ```
 
    Pass: `nvrm_wq_mode` 1, `nvrm_atomic_mode` 1, `nvrm_bh_thread` and `nvrm_rc_armed` 1 with one card,
-   `nvrm_rc_ticks` about ten higher the second time, `nvrm_nano_wait_timeouts` 0. Fail: -1 in either mode (a worker
-   or a self-test did not start), 0 in a count, or ticks standing still; send the values and the `NVRM-xnu:` lines
+   `nvrm_rc_ticks` about ten higher the second time, `nvrm_nano_wait_timeouts` and `nvrm_nano_retired` 0 (a retired
+   slot is one the driver stopped reusing because a timer callback could still be running in it). Fail: -1 in either
+   mode (a worker or a self-test did not start), 0 in a count, or ticks standing still; send
+   the values and the `NVRM-xnu:` lines
    ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md) has every value).
 7. **The surface fence after login.** Follow step 1 of [SURFACE-FENCE.md](SURFACE-FENCE.md), "What to look at on the
    card". Pass: `debug.nvrm_fence_state` 1, `debug.nvrm_fence_accel` 1, `debug.nvrm_fence_map_fail` and
-   `debug.nvrm_fence_map_mismatch` 0. This is the first time a channel is ever registered with the fence. Fail: any
-   other value; send the `NVRM-xnu: fence:` lines.
+   `debug.nvrm_fence_map_mismatch` 0. This is the first time a channel is ever registered with the fence. An
+   application started from Terminal with `NVMTL_PROCESS_ENV=1` writes `surface fences: kernel (NVRM fence v1,
+   compositor)` in its `nvmtl.log`; `surface fences: off (...)` says in the parentheses why it is not used
+   (TROUBLESHOOTING.md lists the reasons). Fail: any other value; send the `NVRM-xnu: fence:` lines.
 8. **Channels.** `sysctl debug | grep nvrm_chan_`. Pass: all 0. Fail: anything else on a desktop that has done
    nothing yet; send it with `sysctl debug.nvrm_xid_count`.
 
@@ -120,7 +182,9 @@ restart. Take every test setting out again when its test is done.
    afterwards `sysctl debug | grep nvaccel_pageoff` shows `nvaccel_pageoff_unlocked_wait` 1,
    `nvaccel_pageoff_unlocked_waits` higher than before the recording, `nvaccel_pageoff_unlocked_standdown` 0 and
    `nvaccel_pageoff_unlocked_wait_max_us` not above 2000000 (2 s) by more than the moment it takes to get the lock
-   back. Fail: the desktop freezes and stays frozen. Over `ssh`
+   back. `nvaccel_pageoff_unlocked_already`, `_recopied` and `_changed` above 0 are not a failure: each counts a
+   page-off that found, after the wait, that the resource had moved on (another copy, another surface or memory, or
+   another validity bit) and acted on what it found. Fail: the desktop freezes and stays frozen. Over `ssh`
    run `sudo spindump` while it is frozen (it samples every process, WindowServer and kernel_task included, and says
    where it wrote its file), then restart, boot with `nvaccel_pageoff_locked=1` and repeat the test. A freeze that
    this boot argument cures is the case described here: send the spindump, `sysctl debug | grep nvaccel_pageoff`
@@ -134,7 +198,9 @@ restart. Take every test setting out again when its test is done.
    away.
 3. **A process that dies.** Step 6 of the same list: `kill -9` a Metal application mid-frame, then stop one
    with `kill -STOP` and continue it with `kill -CONT`. Pass: no stall of the desktop; at most one hitch of up to
-   100 ms for the stopped one. Fail: the desktop stalls, or `debug.nvrm_fence_state` becomes 2.
+   100 ms for the stopped one, which adds one to `debug.nvrm_fence_expired_cpu` and one to
+   `debug.nvrm_fence_strikes` (expected here, unlike in step 2). Fail: the desktop stalls, or `debug.nvrm_fence_state`
+   becomes 2.
 
 ### Two-plane surfaces
 
@@ -213,8 +279,10 @@ cast, an old frame, frames that flicker between two, one of those counters above
    - Fail: a line that says the installed codec library is a build without the Blackwell decode self-test and was
      REFUSED on this card: the library is older than the plugin beside it. Build both from the same revision and
      install both.
-   - No line at all: the process never asked (the card is not an RTX 50 by its PCI id, `NVMTL_NVENCVT=0` is set, or
-     the library is not installed root-owned), or no decode service has started yet.
+   - No such line (`log show` then prints only its header and one line that is the `log` command itself, which
+     matches its own predicate): the process never asked (the driver does not report the card's generation as
+     Blackwell, `NVMTL_NVENCVT=0` is set, or the library is not installed root-owned), or no decode service has
+     started yet.
    - PASS but a broken video: put `NVMTL_NVENCVT=0` in `nvrm610.conf` to go back to the 2.9 decoder, and send the
      line with the video's details.
 
@@ -250,11 +318,13 @@ send the kernel log of that boot.
 ## The ways back
 
 One per change; each restores the 2.9 behaviour of that change only. They exist to tell whether a change is behind a
-problem, not to be left set.
+problem, not to be left set. A boot argument takes effect at the next restart: the four kexts cannot be unloaded and
+loaded again by hand, since each holds itself loaded once it has started (`kmutil unload` refuses it until the next
+restart).
 
 | Change | Way back | Where |
 |---|---|---|
-| Surface fence | `nvrmfence=0` | boot argument |
+| Surface fence | `nvrmfence=0` (surface sync is 2.9's; the fence still answers a process that asks whether it is on, and NVK still opens its connection) | boot argument |
 | Page-off wait without the accelerator lock | `nvaccel_pageoff_locked=1` | boot argument |
 | Two-plane surfaces in VRAM | `nvaccel_surf_planes=0` | boot argument |
 | Apple class layout checks | `nvlayout=0` | boot argument |
@@ -264,7 +334,7 @@ problem, not to be left set.
 | Bottom-half thread | `nvrmbhthread=0` | boot argument |
 | RC timer | `nvrmrctimer=0` | boot argument |
 | Nano timer cancel wait | `nvrmnanowait=0` | boot argument |
-| DMA through VT-d | `nvrmdma=0` (with a mapper the card is then not started) | boot argument |
+| DMA through VT-d | `nvrmdma=0` (with a mapper the card is then not started; without one nothing changes) | boot argument |
 | Event wait | `NVRM_EVENT_WAIT=0` (every process polls, WindowServer included) | `nvrm610.conf` |
 | Channel recovery | `NVK_CHANNEL_RECOVER=0` | `nvrm610.conf` |
 | Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
@@ -279,7 +349,7 @@ CHANGELOG.md, "The ways back", and SWITCHES.md say what each one restores in ful
 - `sw_vers`, the card, and `nvram boot-args`.
 - `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
 - Your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf`.
-- `sysctl debug | grep -e nvrm_ -e nvaccel_`, taken while or right after the problem shows, and the same from 2.9
+- `sysctl debug | grep -e nvrm -e nvaccel`, taken while or right after the problem shows, and the same from 2.9
   (`~/before-3.0.txt`).
 - The kernel log of the boot: `log show --last boot --predicate 'process == "kernel"' > ~/kernel.txt`.
 - The plugin's failure lines: `log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"' > ~/nullmoth.txt`.
