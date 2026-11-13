@@ -1,10 +1,34 @@
 #!/usr/bin/env python3
 """Exercise production graphics binding elision, including every cache input."""
+import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
+
+
+def vulkan_include():
+    """-> the folder that holds vulkan/vulkan.h. NM_VULKAN_INCLUDE first: when it is set it must be right, so a wrong
+    one fails the test (continuous integration sets it, and a skip there would hide the test). Unset: 2.9's place,
+    ~/Vulkan-Headers/include. Neither: the test is skipped (exit 2 and SKIP, as tools/run_all_tests.py counts it)."""
+    env = os.environ.get('NM_VULKAN_INCLUDE', '')
+    if env:
+        if not (pathlib.Path(env) / 'vulkan/vulkan.h').is_file():
+            print(f'FAIL: NM_VULKAN_INCLUDE={env} holds no vulkan/vulkan.h')
+            sys.exit(1)
+        return pathlib.Path(env)
+    home = pathlib.Path.home() / 'Vulkan-Headers/include'
+    if (home / 'vulkan/vulkan.h').is_file():
+        return home
+    print('SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h '
+          '(./build.sh test does, after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers')
+    sys.exit(2)
+
+
+VULKAN_INCLUDE = vulkan_include()
+
 source = (root/'plugin/nvmtl_vk.c').read_text()
 def section(start, end):
     i = source.index(start)
@@ -103,5 +127,5 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-graphics-bindings-') as tmp:
     path=pathlib.Path(tmp)
     (path/'test.c').write_text(fixture)
     subprocess.run(['xcrun','clang','-O2',str(path/'test.c'),'-I'+str(root/'plugin'),
-                    '-I'+str(pathlib.Path.home()/'Vulkan-Headers/include'),'-o',str(path/'test')],check=True)
+                    '-I'+str(VULKAN_INCLUDE),'-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)

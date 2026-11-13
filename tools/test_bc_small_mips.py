@@ -4,12 +4,35 @@
 An optional source path permits checking an older revision with the same cases.
 This does not load a driver or perform a GPU copy.
 """
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parents[1]
+
+
+def vulkan_include():
+    """-> the folder that holds vulkan/vulkan.h. NM_VULKAN_INCLUDE first: when it is set it must be right, so a wrong
+    one fails the test (continuous integration sets it, and a skip there would hide the test). Unset: 2.9's place,
+    ~/Vulkan-Headers/include. Neither: the test is skipped (exit 2 and SKIP, as tools/run_all_tests.py counts it)."""
+    env = os.environ.get('NM_VULKAN_INCLUDE', '')
+    if env:
+        if not (pathlib.Path(env) / 'vulkan/vulkan.h').is_file():
+            print(f'FAIL: NM_VULKAN_INCLUDE={env} holds no vulkan/vulkan.h')
+            sys.exit(1)
+        return pathlib.Path(env)
+    home = pathlib.Path.home() / 'Vulkan-Headers/include'
+    if (home / 'vulkan/vulkan.h').is_file():
+        return home
+    print('SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h '
+          '(./build.sh test does, after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers')
+    sys.exit(2)
+
+
+VULKAN_INCLUDE = vulkan_include()
+
 source_path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else root/'plugin/nvmtl_vk.c'
 source = source_path.read_text()
 
@@ -125,6 +148,6 @@ with tempfile.TemporaryDirectory(prefix='nvmtl-bc-small-mips-') as temporary:
     path = pathlib.Path(temporary)
     (path/'test.c').write_text(fixture)
     subprocess.run(['xcrun','clang','-O1','-g','-fsanitize=address,undefined',str(path/'test.c'),
-                    '-I'+str(root/'plugin'),'-I'+str(pathlib.Path.home()/'Vulkan-Headers/include'),
+                    '-I'+str(root/'plugin'),'-I'+str(VULKAN_INCLUDE),
                     '-o',str(path/'test')],check=True)
     subprocess.run([str(path/'test')],check=True)
