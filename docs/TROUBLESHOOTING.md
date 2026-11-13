@@ -144,8 +144,9 @@ line on a Mac whose display works is worth a report with the macOS build.
   pending marks; nothing to do unless the fence was expected to be on. Many `surface fences: hold refused
   (0x80000007)` lines in one process mean a Vulkan channel of that process is not watched by the kernel: that process
   keeps the 2.9 mechanism; send the `NVRM-xnu: fence:` kernel lines.
-- In an application's output: a line starting `nvrm: surface fence:` means the kext has the surface fence but that
-  process is not using it; the line says why. Report it with `sysctl debug.nvrm_fence_state
+- In an application's output: a line starting `nvrm: surface fence:` means that process is not using the surface
+  fence; the line says why (`no connection to the kext`: NVK could not open the kext at all; any other reason: the
+  kext has the fence but not for that process or channel). Report it with `sysctl debug.nvrm_fence_state
   debug.nvrm_fence_map_fail debug.nvrm_fence_map_mismatch`. No such line does not mean the fence is in use: with a
   kext older than the fence nothing is printed unless `NVK_DIAG=1` is set in `nvrm610.conf`, and then
   `nvrm: surface fence: the kext has none` is in `/private/tmp/nvk-diag-<pid>.log`. `debug.nvrm_fence_state` says
