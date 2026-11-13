@@ -142,10 +142,36 @@ static void nvrmEdidPanelSizeMm(const NvU8 *edid, NvU16 size, NvU16 *mmW, NvU16 
 
 typedef NvU64 (*nvrm_phys_for_va_t)(const void *va);
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVRMFB, "0.1", _start, _stop) }
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+// Staying loaded. From its first start that does not decline, this kext makes things that outlive its objects and are
+// never taken back: the display device NVKMS (in NVRM.kext) keeps for the boot, with this kext's eventCallback in it,
+// called on every display event; the hot-plug thread calls, kept for the boot (the poll re-arms itself); the first
+// framebuffer, retained for the boot; and its sysctls (their OIDs are this kext's data, linked into the kernel's list).
+// The kernel unloads a kext with IOService classes by itself, about a minute after the registry has gone quiet, when
+// no object of its classes exists and nothing else holds a reference on it (the card was unplugged, or a start failed
+// half-way), and `kmutil unload` asks for the same by hand. The next display event, hot-plug tick or sysctl walk would
+// then run through memory that is gone or was reset to the file's contents. So the kext holds one reference on itself,
+// taken once before the first of those and never given back: while it is held, an unload, automatic or by hand, is
+// refused before a service is terminated or a class unregistered. The stop function refuses too, for the case that
+// the reference could not be taken (the kernel has unregistered the classes by then: the code stays mapped, and no
+// framebuffer of this kext starts again before a restart). A start that declines (driver off, a different Apple class
+// layout, no nvfb=1) comes before it and leaves a kext that unloads as before.
+// The first call is made in a start, in thread context; every later one is one compare-and-swap, so a later caller
+// (the first video-memory grant, a guard clear) never takes the kernel's kext lock.
+static volatile SInt32 gNvrmfbStayLoaded;   // 0 nothing made yet; 1 the reference is held; 2 it was wanted and not obtained
+static void nvrmfbStayLoaded(void)
+{
+    if (!OSCompareAndSwap(0, 2, &gNvrmfbStayLoaded)) return;
+    // kmod_info.id is this kext's load tag: the loader writes it there (OSKextGetCurrentLoadTag() returns the same field,
+    // from libkmod's c_start.o, which this kext does not link)
+    const OSReturn r = OSKextRetainKextWithLoadTag((OSKextLoadTag)kmod_info.id);
+    if (r == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gNvrmfbStayLoaded);
+    else IOLog("NVRMFB: no reference on this kext (0x%x): only its stop function keeps it loaded\n", (unsigned)r);
+}
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return OSAddAtomic(0, &gNvrmfbStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }
 static inline void nvu_zero(void *p, size_t n) { __asm__ __volatile__("rep stosb" : "+D"(p), "+c"(n) : "a"(0) : "memory"); }
 static inline void nvu_copy(void *d, const void *s, size_t n) { __asm__ __volatile__("rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory"); }
 // Clears freshly granted VRAM through its BAR1 mapping. Byte stores are the slow case there: on an RTX 3070 Laptop a byte-wise clear of an
@@ -888,6 +914,7 @@ public:
         // removal runs. WAS: the claim held it anyway and the screen stayed dark until the second restart.
         if (nvrm_driver_off()) return false;
         if (!IOService::start(provider)) return false;
+        nvrmfbStayLoaded();
         nvrmfbLayoutSysctls();
         IOLog("NVRMFB: NVRMFBClaim holds the IOFramebuffer match category on %s - IONDRVFramebuffer blocked\n",
               provider ? provider->getName() : "?");
@@ -3062,6 +3089,9 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
             return false;
         }
     }
+    // before the hot-plug calls, the retained first framebuffer and the NVKMS device below: all three outlive this
+    // object. The claim is matched on its own (on the PCI device's name too) and need not have started on this card.
+    nvrmfbStayLoaded();
     fFlipCacheLock = IOSimpleLockAlloc();
     if (!fFlipCacheLock) return false;
     struct NVRMDisplayPointers displayPtrs = {};
@@ -4550,8 +4580,9 @@ SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED, 
 static void fbGuardCleared(const char *why)
 {
     static volatile SInt32 once;
+    nvrmfbStayLoaded();         // held already (the framebuffer's start); never unregistered, so the kext must stay
     if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_guard_cleared);
-    nvrmfbLayoutSysctls();      // the same lifetime argument: registered once, by code that stays
+    nvrmfbLayoutSysctls();      // the same lifetime argument: registered once, by a kext that stays
     nvrm_guard_display_up(why);
     gGuardCleared = 1;
 }
@@ -4587,6 +4618,7 @@ SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_color_vibrance, CTLTYPE_INT | CTLFLAG_RW | 
 static void nvrmfbInstallSysctl(void)
 {
     if (gFbSysctl) return; gFbSysctl = true;
+    nvrmfbStayLoaded();         // held already (the framebuffer's start); never unregistered, so the kext must stay
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grants);   sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grant_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_releases); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_release_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_mapped_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_budget_bytes);
