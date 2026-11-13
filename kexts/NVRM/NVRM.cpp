@@ -90,7 +90,7 @@ static bool nvrmMultiGpu(void)
 }
 #include "nv_rtd3_policy.h"
 #include "nvrm_dma.h"   // attach in startGPU, detach in stop() and on a failed start, nvSurfDma
-extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops);
+extern "C" int  nv_rtd3_arm(const struct nv_rtd3_ops *ops);   // 1 armed, 0 no monitor
 extern "C" void nvrm_power_start(nv_state_t *nv);   // nvrm_power.cpp
 extern "C" void nvrm_power_stop(void);
 extern "C" void nvrm_power_suspend(void);
@@ -286,7 +286,9 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_handled, CTLFLAG_RD, (int64_t *)&gNvIsrHa
 //   debug.nvrm_isr_late_1ms, _4ms  such waits longer than 1 ms and 4 ms
 //   debug.nvrm_isr_during_bh       MSIs that arrived while a bottom half was still running
 //   debug.nvrm_bh_runs             bottom halves run
-//   debug.nvrm_bh_max_us           longest bottom half, its wait for the GPU lock included
+//   debug.nvrm_bh_max_us           longest bottom half: its own run, rm_isr_bh (which starts with the GPU lock rm_isr
+//                                  handed over and releases it, so no wait for that lock is in it) and then the fence
+//                                  kick; the wait for the thread is nvrm_bh_wake_max_us
 //   debug.nvrm_bh_over_1ms, _4ms   bottom halves longer than 1 ms and 4 ms
 //   debug.nvrm_bh_thread           GPUs whose bottom half runs on its own thread
 //   debug.nvrm_bh_wake_max_us      longest wait between a bottom half's request and the start of its run on that thread
@@ -2983,7 +2985,10 @@ void NVRM::gpuResume()
 // handed another GPU afterwards: it keeps the first set of calls it was given, and what it remembers about the power
 // resource belongs to the GPU that is gone. System sleep and shutdown hold the GPU for as long as they run (rtd3Hold()):
 // its calls then do nothing.
-static NvXnuGate gNvRtd3Gate = { 1, 0 };   // closed until a GPU arms the monitor, and again once that GPU stops
+// The gate is open only while the monitor has a GPU: rtd3Arm opens it for the first GPU that starts and closes it again
+// at once when nv_rtd3_arm armed nothing (nvrtd3 unset, the default, or nvrtd3=1 without nvrtd3res); that GPU's stop()
+// closes it otherwise.
+static NvXnuGate gNvRtd3Gate = { 1, 0 };
 static NVRM *volatile gNvRtd3Gpu;          // the monitor's GPU: read inside the gate, taken away by its stop()
 extern "C" int nv_rtd3_reachable(void);    // nv_rtd3.cpp: 1 while the power resource is on
 // The monitor's GPU with the gate entered (the caller leaves it), or NULL when it has none.
@@ -3060,7 +3065,10 @@ void NVRM::rtd3Arm()
         [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmSuspended)) ok = nv_rtd3_power_off(rtd3Acpi(n)); rtd3Leave(); } return ok; },
         [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held()) ok = nv_rtd3_power_on(rtd3Acpi(n)); rtd3Leave(); } return ok; },
     };
-    nv_rtd3_arm(&ops);
+    // No monitor (the default machine): nothing will ever call through the gate, so it is closed again and the GPU
+    // taken back, in stop()'s order. rtd3Hold and rtd3Detach then find no GPU of theirs. The first-GPU mark stays:
+    // nv_rtd3_arm would answer the same for any later GPU.
+    if (!nv_rtd3_arm(&ops)) { nv_gate_close(&gNvRtd3Gate); __atomic_store_n(&gNvRtd3Gpu, (NVRM *)NULL, __ATOMIC_SEQ_CST); }
 }
 // stop(): the monitor loses this GPU, if this is the one it has. A call that is inside can be in gpuSuspend() or
 // gpuResume(), which take seconds, so the wait is the 30 s of the other waits of stop(); like them it asks the kernel

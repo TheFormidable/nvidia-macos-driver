@@ -980,15 +980,14 @@ static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(VkDebugUtilsMessageSeverityFlagBitsEXT 
     uint64_t rep; int full;
     if (!nvmtl_vkmsg_budget(nvmtl_vkmsg_key(id, m), &rep, &full)) return VK_FALSE;
     const char *b = strrchr(id, '/'); b = b ? b + 1 : id;
-    char t[600]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
+    // 584: the longest note below (54 characters) still fits in the 640 of nvlog_every's line
+    char t[584]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
     for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
-    extern const char *nvmtl_log_path(void);
-    FILE *f = fopen(nvmtl_log_path(), "a");
-    if (f) {
-        if (rep) fprintf(f, "pid %d NVMTL: %s   [logged %llu times now%s]\n", getpid(), t, (unsigned long long)rep, full ? ", table full" : "");
-        else     fprintf(f, "pid %d NVMTL: %s%s\n", getpid(), t, full ? "   [table full]" : "");
-        fclose(f);
-    }
+    // The plugin's log rule places the line (nvlog_line): a release build writes the file only for a process started with
+    // NVMTL_PROCESS_ENV=1 and sends NVK's errors and its channel-rebuild lines to the system log (nvmtl_log_failure.h);
+    // a debug build does both for every line. nvlog_every, because the budget above already limits repeats.
+    if (rep) nvlog_every("%s   [logged %llu times now%s]", t, (unsigned long long)rep, full ? ", table full" : "");
+    else     nvlog_every("%s%s", t, full ? "   [table full]" : "");
     return VK_FALSE;
 }
 static int nvmtl_vkmsg_off_by_env(void) { const char *e = getenv("NVMTL_NVK_MESSAGES"); return e && !strcmp(e, "0"); }
@@ -3043,7 +3042,8 @@ void nvmtl_vk_fence_close_all(nvmtl_fence_hold *h)
    decides (nvmtl_fence_wait_handled: only an answer that the write is complete, or a wait that already lasted as long
    as the older poll, ends it here). `pid` is the writer the tag names: the kernel then looks at that process's holds
    only, so never at the caller's own. A tag that names no writer is not asked, because the kernel reads pid 0 as "any
-   process", the caller included. */
+   process", the caller included. The kernel answers the writer's pid only to the writer itself, so the log line names
+   the writer from the tag. */
 int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
 {
     if (!sid || !pid || !nvmtl_vk_fence_ready(0)) return 0;
@@ -3053,7 +3053,7 @@ int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
     if (st == NVMTL_FENCE_ST_OK && out[0] == NVMTL_FENCE_R_TIMEOUT) {
         const unsigned b = __atomic_add_fetch(&g_fence_bound, 1, __ATOMIC_RELAXED);
         if (b <= 8 || b % 2000 == 0)
-            nvlog("surface fences: surface %u - the kernel gave up pid %u's hold at its bound after %u us (%u so far)", sid, out[2], out[1], b);
+            nvlog("surface fences: surface %u - the kernel gave up the hold of pid %u (the writer the tag names) at its bound after %u us (%u so far)", sid, pid, out[1], b);
     }
     return nvmtl_fence_wait_handled(st, out[0], out[1]);
 }

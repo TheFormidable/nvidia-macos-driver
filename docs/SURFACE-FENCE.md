@@ -41,7 +41,7 @@ buffer writes, at commit. A hold is in one of three states:
 
 | Kind | Who opens it | When it ends | Whom it delays |
 |---|---|---|---|
-| compositor | WindowServer only (any other process is refused) | in the kernel, at the first look (a reader's, or the writer's next request) after the GPU has reached the armed value; also at its close, when WindowServer exits, when the channel faults | NVAccel's flips, copies and page-offs; readers of that surface in other processes |
+| compositor | WindowServer only: a process of that name running as a system account (user id below 500, which is root and `_windowserver`); any other process is refused | in the kernel, at the first look (a reader's, or the writer's next request) after the GPU has reached the armed value; also at its close, when WindowServer exits, when the channel faults | NVAccel's flips, copies and page-offs; readers of that surface in other processes |
 | application | every other process | when the application says it has published (close); also when it exits or its channel faults | only a reader in another process that found this writer's tag on the surface |
 
 **A reader** asks "is anything pending on this surface?" and sleeps until the answer is no. It waits for the holds
@@ -256,8 +256,8 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   state S` for `nvrmfence=0` (S 0), a fence that stopped or switched itself off (3 or 2), or NVK's
   `NVRM_ASYNC=0` (S 1); `request N answered off` when a later request is refused that way; an NVK without the fence
   writes no line); one line per change. `surface fences: hold refused (0x8000000N) - that command buffer keeps the older tags and marks (N so
-  far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up pid P's hold at its
-  bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
+  far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up the hold of pid P (the
+  writer the tag names) at its bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
   2000th).
 - **Cost.** One OPEN (two for 9 to 16 surfaces), one ARM per part that is the last writer of a surface (two when it is
   the last writer of more than 8), one CLOSE per
@@ -277,7 +277,7 @@ counter says so.
 | A channel's pages cannot be wired or are not system memory, or the view fails its proof | `map_fail`, `map_mismatch`, a log line | that channel is not watched; that process uses 2.9's marks and tags |
 | No room: the table (1024 holds), a connection's quota (128 holds, 32 channels, 4 connections per process) | `refused_full` | that command buffer uses 2.9's marks or tags |
 | More than 256 threads asleep in user-space waits | `wait_full` | that reader polls as 2.9 (NVAccel's waits are never refused for this) |
-| A compositor hold asked for by a process that is not WindowServer | `refused_denied` | refused |
+| A compositor hold asked for by a process that is not WindowServer (another name, or that name under a user account) | `refused_denied` | refused |
 | A channel's completions arrive without interrupts | `chan_noirq`, `done_on_slice`, a log line | the kernel looks every 250 us for holds on it; producers' own waits on it poll |
 | A writer does not finish or close what it holds | `expired_gpu`, `expired_cpu`, `strikes`, a log line | readers go on at the bound; after three strikes that process is on 2.9 |
 | The GPU is asleep | `end_pm` | every hold ends, new ones are refused until the wake; 2.9's marks and tags meanwhile |
@@ -337,7 +337,7 @@ boot" unless it says "now".
 | `end_chan_del` | holds ended because their channel was deleted first | 0 or small |
 | `end_pm` | holds ended by GPU sleep | grows by the holds in flight at each sleep |
 | `refused_full` | requests refused for room: table or quota | 0 |
-| `refused_denied` | compositor holds asked for by a process that is not WindowServer | 0 |
+| `refused_denied` | compositor holds asked for by a process that is not WindowServer (another name, or that name under a user account) | 0 |
 | `refused_stale` | requests naming an unknown hold or channel | small |
 | `refused_distrust` | holds refused to a distrusted connection | 0 |
 | `chans` | channels watched now | a few per process that uses the GPU |
@@ -388,7 +388,10 @@ NVAccel's own counters for its waits are `debug.nvaccel_surface_fence` and `debu
 
 ## The log lines
 
-All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then every 256th.
+All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then every 256th; the last line of the
+table is the exception: its first 8 since boot reach the system log and every later one only the kernel's debug
+output (`kprintf`: a serial console, or a debug boot-arg), because any process can provoke it as often as it likes.
+`map_fail` and `map_mismatch` count every one.
 
 | Line | Meaning |
 |---|---|
@@ -455,9 +458,14 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
 
 ## Limits to know
 
-- The test "is this WindowServer" is the process name, as for 2.9's marks. It keeps applications from delaying the
-  compositor by accident; it is not a security boundary. The bounds are: no hold, of either kind, delays anybody
-  past them.
+- The test "is this WindowServer" is the process name and a system account (user id below 500), for compositor
+  holds and for 2.9's marks alike. The name alone is the executable's file name, which any user can give a program;
+  a user account cannot run as a system account without an administrator. The bounds are: no hold, of either kind,
+  delays anybody past them.
+- Any process can still learn whether a surface id has a writer pending right now (a look answers PENDING or NONE),
+  and, because a look may name the writer's pid (the plugin's reader names the one the surface's tag gives), whether a
+  given process is that writer: a reader asks by id and by pid, which is inherent to the design. The answer's pid and
+  hold-state fields are filled only for the writer itself; any other caller gets 0 for both.
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
   behaviour, and eight distrusted connections (one process can supply them one after another) switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.

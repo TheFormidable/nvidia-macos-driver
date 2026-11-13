@@ -29,6 +29,7 @@
 #include <pexpert/pexpert.h>
 extern "C" {
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <sys/sysctl.h>
 }
 #include "nvrm_fence.h"
@@ -89,7 +90,7 @@ static volatile SInt32 gFState = 3;          // debug.nvrm_fence_state
 static volatile SInt32 gFAccel;              // 1 once NVAccel fetched the function table
 static volatile SInt32 gFBoot;               // the boot-arg: 0 not read yet, 1 on, 2 nvrmfence=0
 static volatile SInt32 gFSysctls;            // 1 once the sysctls are registered
-static volatile SInt32 gFMapLogs;            // mapping failures logged so far (rate limit)
+static volatile SInt32 gFMapLogs;            // mapping failures so far, read as unsigned (which of them reach IOLog)
 static volatile SInt64 gFNextOwner;          // owner ids handed out
 static unsigned gFChangesSeen;               // under gFLock: gT.changes at the last unlock
 static unsigned gFCards, gFSuspended;        // under gFLock: GPUs started; of those, GPUs between SUSPENDING and RESUMED
@@ -385,12 +386,18 @@ static void nvfTake(unsigned ci, IOMemoryDescriptor **sem, IOMemoryDescriptor **
     gFMap[ci].probe0 = 0; gFMap[ci].errOff = 0; gFMap[ci].errBase = 0;
 }
 
+// Any process can fail a CHAN_ADD as often as it likes, so only the first 8 failures since boot reach the system log;
+// every later one goes to kprintf only (serial or debug output), and debug.nvrm_fence_map_fail and _map_mismatch count
+// them all. Unsigned: a signed count would turn negative after 2^31 failures and pass "n < 8" on every call.
 static void nvfMapFailed(const char *what)
 {
-    const SInt32 n = OSIncrementAtomic(&gFMapLogs);
-    if (n < 8 || ((n + 1) & 0xFF) == 0)
+    const UInt32 n = (UInt32)OSIncrementAtomic(&gFMapLogs);
+    if (n < 8)
         IOLog("NVRM-xnu: fence: pid %d: %s - this channel is not watched (its surfaces keep the older surface sync)\n",
               proc_selfpid(), what);
+    else
+        kprintf("NVRM-xnu: fence: pid %d: %s - this channel is not watched (its surfaces keep the older surface sync)\n",
+                proc_selfpid(), what);
 }
 
 // ---- what the wait loop needs --------------------------------------------------------------------------------------
@@ -440,11 +447,13 @@ static UInt64 nvfOwner(volatile UInt64 *ownerId)
 }
 
 // The test NVAccel makes for its mark escape: compositor-class holds delay WindowServer's own flips, so only
-// WindowServer may take them.
+// WindowServer may take them. The name alone is what the executable file is called, which any user can choose, so the
+// caller must also run as a system account (uid < 500: root and _windowserver, the rule NVRM's client table uses).
 static bool nvfCallerIsWindowServer(void)
 {
     static const char want[] = "WindowServer";
     char name[32];
+    if (kauth_getuid() >= 500) return false;
     name[0] = 0;
     proc_selfname(name, (int)sizeof(name));
     for (unsigned i = 0; i < sizeof(want); i++) if (name[i] != want[i]) return false;
@@ -652,6 +661,9 @@ void nvrm_fence_user(volatile UInt64 *ownerId, const volatile SInt32 *closing, s
         if (!w->id) { r->status = NVRM_FENCE_ST_BAD_ARG; break; }
         struct nvf_query q = { w->id, w->planes & 0xFFu, w->pid, r->flags & NVRM_FENCE_F_COMPOSITOR, 0, 0 };
         r->status = nvf_wait(&gT, &gFOps, NULL, &q, w->timeoutMs, (r->flags & NVRM_FENCE_F_LOOK) != 0, 1, w);
+        // Any process may ask about any surface id, so the writer's pid and the state of its hold go back only when
+        // the writer is the caller itself. Whether something is pending (the result) is the answer and stays.
+        if (w->ownerPid != (unsigned)proc_selfpid()) { w->ownerPid = 0; w->state = 0; }
         break;
     }
     case NVRM_FENCE_OP_WAIT_SEQ: {
