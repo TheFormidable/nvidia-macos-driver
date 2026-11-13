@@ -5,9 +5,9 @@ A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
 clone, the scripts and tests the jobs name exist, the jobs that gate do gate (the two that run tests get a full clone:
 their tests read older revisions), the Mac kext job runs on Apple silicon and on Intel and checks what an Intel Mac's
-compiler can slip into a kext, the host tests and the plugin get the Vulkan headers the release uses, and nothing
-uploads or publishes. Each property has a control: the same check on a copy of the file with that one thing
-wrong has to fail.
+compiler can slip into a kext, the host tests and the plugin get the Vulkan headers the release uses (and a host test
+that needs them cannot pass by being skipped), and nothing uploads or publishes. Each property has a control: the
+same check on a copy of the file with that one thing wrong has to fail.
 
 It also holds build/ci_plugin.sh to the compiler line of build/build_plugin_release.sh, which it copies: the release
 script runs on the build Mac over ssh and cannot run on a CI runner, and a copy drifts. And it holds the Vulkan headers
@@ -85,8 +85,13 @@ def problems(y, root):
     if "fetch-depth: 0" not in linux:
         out.append("kexts-linux has no full clone: the registry test would skip its comparison with the previous commit and the 2.9 release")
     host = j.get("host-tests", "")
-    if "fetch-depth: 0" not in host or not re.search(r"run: python3 tools/run_all_tests\.py -j \d+\s*$", host, re.M):
-        out.append("host-tests does not run every test from a full clone")
+    if "fetch-depth: 0" not in host or not re.search(r"^\s*set -o pipefail\n\s*python3 tools/run_all_tests\.py -j \d+ \| tee \"\$RUNNER_TEMP/tests\.txt\"\s*$", host, re.M):
+        out.append("host-tests does not run every test from a full clone (with the runner's own exit code: set -o pipefail before the tee)")
+    # the runner counts a skip as no failure: a skip of a test that reads NM_VULKAN_INCLUDE must fail the job
+    sk = re.search(r"if grep -E '\^skip \(([\w|]+)\)\\\.py:' \"\$RUNNER_TEMP/tests\.txt\"; then\n\s*echo \"::error::[^\"\n]*\"; exit 1\n\s*fi\n", host)
+    if not sk or set(sk.group(1).split("|")) != vulkan_tests(root):
+        out.append("host-tests does not fail when a test that needs the Vulkan headers is skipped (the list must be the tests that read "
+                   f"NM_VULKAN_INCLUDE: {' '.join(sorted(vulkan_tests(root)))})")
     # the four tests that compile against vulkan/vulkan.h skip without headers: the job must hand them the release's
     hv = re.search(r"^\s*d=\$\(bash build/ci_vulkan_headers\.sh\)\n\s*echo \"NM_VULKAN_INCLUDE=\$d\" >> \"\$GITHUB_ENV\"", host, re.M)
     if not hv or hv.start() > host.find("tools/run_all_tests.py"):
@@ -104,6 +109,11 @@ def problems(y, root):
                                   "grep -qE '(^|[[:space:]])___x86_' \"$O/nvrm/imports.txt\"", "shasum -a 256", "exit $bad")):
         out.append("kexts-mac does not check its compile lines and NVRM's imports for what an Intel Mac's compiler adds")
     return out
+
+
+def vulkan_tests(root):
+    """-> the tests that compile against vulkan/vulkan.h: the ones that take the folder from NM_VULKAN_INCLUDE."""
+    return {p.stem for p in (root / "tools").glob("test_*.py") if re.search(r"environ\.get\(['\"]NM_VULKAN_INCLUDE", p.read_text())}
 
 
 def compile_line(text, end):
@@ -163,6 +173,14 @@ control("the kext job without its check of NVRM's imports is caught", "if grep -
         "does not check its compile lines")
 control("the kext job that checks only the RM's compile lines is caught", "for part in nvidia nvidia-modeset; do", "for part in nvidia; do",
         "does not check its compile lines")
+control("a host test run whose failures the tee hides is caught", "          set -o pipefail\n          python3 tools/run_all_tests.py -j 4",
+        "          python3 tools/run_all_tests.py -j 4", "every test from a full clone")
+control("host tests that pass with the Vulkan tests skipped are caught",
+        "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings",
+        "is skipped")
+control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
+arm("the Vulkan tests are found by what they read (four of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings", "test_opengl_perf"},
+    " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
 
 rel = compile_line((ROOT / "build/build_plugin_release.sh").read_text(), r"2>\.\./out/build\.err")
