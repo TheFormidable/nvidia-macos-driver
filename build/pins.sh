@@ -163,18 +163,22 @@ NM_PIN_PY_PACKAGING_HASHES="29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24
 
 # Minimum versions of the tools the build takes from the Mac (checked by "./build.sh doctor").
 # Xcode 26: plugin/NVMTLMetal4.m:17 imports <Metal/MTL4CommandQueue.h> without a guard, which only the macOS 26 SDK
-# has (README.md's "Xcode 16" predates it). Every other part builds with it for macOS 15.0.
+# has. Every component has been built with Xcode 26.5 (SDK 26.5) on one Intel Mac (12 threads, macOS 26.7) and with
+# Xcode 26.3 (SDK 26.2, the newest Xcode that runs on macOS 15) on GitHub's Intel runner (macos-15-intel: 4 processors,
+# macOS 15); Xcode 26.0 to 26.2 have not been tried. Every product is built for macOS 15.0 except the translator,
+# which keeps rustc's default, 10.12.
 NM_PIN_TOOL_XCODE_MIN=26.0
 NM_PIN_TOOL_SDK_MIN=26.0
-# Xcode 26 runs on macOS 15.6 or later (Apple's Xcode 26 release notes).
+# Xcode 26.0.1 to 26.3 run on macOS 15.6 or later; Xcode 26.4.1 and later need macOS 26.2 or later (Apple's table of
+# Xcode versions).
 NM_PIN_TOOL_MACOS_MIN=15.6
 # GNU make: open-gpu-kernel-modules utils.mk:210-218 needs 3.80 (macOS ships 3.81). Only "make -n" runs.
 NM_PIN_TOOL_MAKE_MIN=3.80
 # Python: Mesa meson.build:1155 ">= 3.10". 3.14 is installed: its compression.zstd is what tools/test_fw_fetch.py uses first.
 NM_PIN_TOOL_PYTHON_MIN=3.10
 # Python for the kexts and libnvencvt (build_rm620.sh, build_kms620.sh, kexts/NVRM/rmcc.py, tools/nvencvt_header_abi.py):
-# their newest needs are f-strings (3.6) and subprocess.run(capture_output=, text=) (3.7); 3.8 is the oldest they were
-# run with. macOS's own python3 (3.9 with Xcode) is enough; only NVK needs 3.10.
+# their newest needs are f-strings (3.6) and subprocess.run(capture_output=, text=) (3.7); the oldest they have been
+# run with is macOS's own python3 (3.9 with Xcode), which is enough; only NVK needs 3.10.
 NM_PIN_TOOL_PYTHON_KEXT_MIN=3.8
 NM_PIN_TOOL_PYTHON_TESTS_MIN=3.14
 NM_PIN_TOOL_PYTHON_FORMULA=python@3.14
@@ -197,11 +201,11 @@ NM_PIN_TOOL_RUSTC_MIN=1.85
 NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 python@3.14"
 
 # ---- The working-directory toolchain (build/toolchain.sh)
-# On a Mac where Homebrew has no ready-made builds (every Intel Mac since 2026: homebrew-core carries bottles for Apple
-# silicon only), the tools NVK's build needs are built from these sources into the working directory instead of being
-# installed with Homebrew. Each is a tag's peeled commit as "git ls-remote" gave it on 2026-11-13. The ninja, glslang,
-# SPIRV-Tools, Python and LLVM versions equal homebrew-core's on that day, so an Intel Mac building this way and an
-# Apple-silicon Mac using Homebrew build NVK with the same tools. The mirror variable replaces the URL, as above.
+# On a Mac where Homebrew has no ready-made builds (homebrew-core, read on 2026-11-13, had Intel bottles for none of the
+# formulas build.sh installs), the tools NVK's build needs are built from these sources into the working directory
+# instead of being installed with Homebrew. Each is a tag's peeled commit as "git ls-remote" gave it on 2026-11-13.
+# The ninja, glslang, SPIRV-Tools, Python and LLVM versions equal homebrew-core's on that day (NVK has not been built
+# on an Apple-silicon Mac). The mirror variable replaces the URL, as above.
 NM_PIN_TOOLCHAIN_SOURCES="TCNINJA TCCMAKE TCOPENSSL TCZSTD TCXZ TCPYTHON TCPKGCONF TCSPIRVHEADERS TCSPIRVTOOLS TCGLSLANG TCLLVM"
 # ninja 1.13.2: what meson and cmake drive (meson needs 1.8.2); Homebrew's version.
 NM_PIN_TCNINJA_NAME="ninja 1.13.2 (toolchain)"
