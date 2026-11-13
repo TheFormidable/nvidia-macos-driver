@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""build/ci_full_build.sh, the checks of the full build from an empty folder (.github/workflows/full-build.yml), says
+"ok" for a working directory that did what it should, and "FAIL" for each way one can be wrong.
+
+The full build itself runs only on GitHub's Intel Mac. Its checks are logic that runs anywhere, so this test builds a
+small working directory as such a build leaves it, with real Mach-O files (made with clang for macOS: on a Mac with
+Xcode's, elsewhere with clang, ld64.lld and llvm-otool, put on PATH as otool), a stand-in Homebrew prefix and home
+folder, and a scratch git checkout holding the script. Then: everything ok; and one control per check, each breaking
+that one thing (a library loaded from Homebrew's prefix, a search path there, a tool taken from Homebrew, a shipped
+file for macOS 26, a changed Homebrew listing, a file Homebrew keeps that changed, a brew process the watch sees, a
+damaged package, a changed checkout, a step log naming Homebrew's prefix, a missing tool, a missing package). Also:
+the download of the base package refuses a file that is not the pinned one, the dry-run reader recognises the lines
+build.sh prints before it calls Homebrew, and the failure listing shows the logs' ends and their error lines.
+Usage: test_ci_full_build.py [driver checkout]. Exit 2 with SKIP when this machine cannot make Mach-O files."""
+import hashlib
+import os
+import pathlib
+import platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "build/ci_full_build.sh"
+BASH = os.environ.get("BUILD_SH_BASH", "/bin/bash")
+FAILS = []
+
+
+def arm(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[-1500:]}]" if detail and not ok else ""))
+    if not ok:
+        FAILS.append(name)
+
+
+def skip(why):
+    print(f"SKIP: {why}")
+    sys.exit(2)
+
+
+# ------------------------------------------------------------------------------------------------ making Mach-O files
+def toolchain(bindir):
+    """-> the compiler command for an x86_64 macOS target, with an otool on PATH (a stand-in made in bindir)."""
+    if platform.system() == "Darwin":
+        if not shutil.which("xcrun") or subprocess.run(["xcrun", "--find", "otool"], capture_output=True).returncode:
+            skip("no Xcode (xcrun, otool)")
+        return ["xcrun", "clang", "-arch", "x86_64"], None
+    cc = shutil.which("clang")
+    lld = next((shutil.which(n) for n in ("ld64.lld", "ld64.lld-18", "ld64.lld-19", "ld64.lld-20") if shutil.which(n)), None)
+    otool = next((shutil.which(n) for n in ("llvm-otool", "llvm-otool-18", "llvm-otool-19", "llvm-otool-20") if shutil.which(n)), None)
+    if not (cc and lld and otool):
+        skip("needs clang, ld64.lld and llvm-otool to make and read Mach-O files on this system")
+    (bindir / "otool").write_text(f'#!/bin/sh\nexec {otool} "$@"\n')
+    (bindir / "otool").chmod(0o755)
+    (bindir / "ld64.lld").symlink_to(lld) if not (bindir / "ld64.lld").exists() else None
+    return [cc, "-target", "x86_64-apple-macos"], str(bindir)
+
+
+class Maker:
+    def __init__(self, tmp):
+        self.src = tmp / "src"
+        self.src.mkdir()
+        self.bin = tmp / "bin"
+        self.bin.mkdir()
+        self.cc, self.extra_path = toolchain(self.bin)
+        (self.src / "f.c").write_text("int nm_f(void) { return 1; }\n")
+        # no call into the libraries: the load commands are what is checked, and a call would need macOS's dyld_stub_binder
+        (self.src / "m.c").write_text("int nm_g(void) { return 2; }\n")
+        self.stubs = {}
+
+    def _cc(self, minos):
+        if self.cc[-1] == "x86_64-apple-macos":
+            return self.cc[:-1] + [f"x86_64-apple-macos{minos}", "-fuse-ld=lld", f"-B{self.bin}"]
+        return self.cc + [f"-mmacosx-version-min={minos}"]
+
+    def stub(self, name):
+        """a library whose install name is `name`, to link against (nothing of it is copied anywhere)"""
+        if name not in self.stubs:
+            out = self.src / f"stub{len(self.stubs)}.dylib"
+            subprocess.run(self._cc("15.0") + ["-nostdlib", "-dynamiclib", "-install_name", name, "-o", str(out), str(self.src / "f.c")], check=True,
+                           capture_output=True, env=self.env())
+            self.stubs[name] = out
+        return self.stubs[name]
+
+    def env(self):
+        e = dict(os.environ)
+        if self.extra_path:
+            e["PATH"] = self.extra_path + os.pathsep + e["PATH"]
+        return e
+
+    def make(self, out, kind="dylib", loads=("/usr/lib/libSystem.B.dylib",), rpaths=(), minos="15.0", install_name=None):
+        out = pathlib.Path(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        args = self._cc(minos) + ["-nostdlib"]
+        if kind == "dylib":
+            args += ["-dynamiclib", "-install_name", install_name or str(out)]
+        elif kind == "bundle":
+            args += ["-bundle"]
+        elif kind == "object":
+            subprocess.run(self._cc(minos) + ["-c", "-o", str(out), str(self.src / "f.c")], check=True, capture_output=True, env=self.env())
+            return out
+        for r in rpaths:
+            args += ["-Wl,-rpath," + r]
+        libs = [str(self.stub(n)) for n in loads]
+        r = subprocess.run(args + ["-o", str(out), str(self.src / "m.c")] + libs, capture_output=True, text=True, env=self.env())
+        if r.returncode:
+            raise RuntimeError(r.stderr)
+        out.chmod(0o755)
+        return out
+
+
+# ------------------------------------------------------------------------------------------------ the scene
+def sha(p):
+    return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+
+
+def write_sums(root):
+    files = sorted(p for p in pathlib.Path(root).rglob("*") if p.is_file() and p.name != "SHA256SUMS")
+    (pathlib.Path(root) / "SHA256SUMS").write_text("".join(f"{sha(p)}  {p.relative_to(root)}\n" for p in files))
+
+
+def run(argv, env, cwd=None, timeout=120):
+    r = subprocess.run([BASH, str(argv[0])] + [str(a) for a in argv[1:]], capture_output=True, text=True, env=env, cwd=cwd, timeout=timeout)
+    return r.returncode, r.stdout + r.stderr
+
+
+class Scene:
+    def __init__(self, tmp, mk):
+        self.tmp, self.mk = tmp, mk
+        # a checkout that holds the script, so that its git status is this test's to set
+        self.co = tmp / "checkout"
+        (self.co / "build").mkdir(parents=True)
+        shutil.copy(SCRIPT, self.co / "build/ci_full_build.sh")
+        (self.co / "build/pins.sh").write_text("NM_PIN_X=1\n")
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"]
+        subprocess.run(g + ["init", "-q", str(self.co)], check=True)
+        subprocess.run(g + ["-C", str(self.co), "add", "-A"], check=True)
+        subprocess.run(g + ["-C", str(self.co), "commit", "-q", "-m", "x"], check=True)
+        self.script = self.co / "build/ci_full_build.sh"
+        self.home = tmp / "home"
+        self.p = tmp / "usrlocal"          # Homebrew's prefix as an Intel Mac has it
+        self.w = tmp / "work"              # the working directory
+        self.ci = tmp / "ci"               # the job's own files
+        self.env = mk.env()
+        self.env.update(HOME=str(self.home), TMPDIR=str(tmp), LC_ALL="C")
+        self.env.pop("GITHUB_ACTIONS", None)
+        self.homebrew()
+        self.workdir()
+
+    def homebrew(self):
+        p = self.p
+        for d in ("bin", "opt", "Cellar/cmake/4.5.0/bin", "Cellar/pkgconf/3.0.10/bin", "Homebrew/Library/Homebrew", "var/homebrew/locks"):
+            (p / d).mkdir(parents=True, exist_ok=True)
+        (p / "bin/brew").write_text("#!/bin/sh\nsleep 3\n")
+        (p / "bin/brew").chmod(0o755)
+        (p / "Cellar/cmake/4.5.0/bin/cmake").write_text("")
+        (p / "bin/cmake").symlink_to("../Cellar/cmake/4.5.0/bin/cmake")
+        (p / "opt/cmake").symlink_to("../Cellar/cmake/4.5.0")
+        (p / "opt/pkgconf").symlink_to("../Cellar/pkgconf/3.0.10")
+        (p / "bin/gtar").write_text("")
+        for d in ("Library/Caches/Homebrew/api", "Library/Logs/Homebrew"):
+            (self.home / d).mkdir(parents=True, exist_ok=True)
+        (self.home / "Library/Caches/Homebrew/api/formula.jws.json").write_text("{}")
+
+    def workdir(self):
+        w, mk = self.w, self.mk
+        tc = w / "tools/toolchain"
+        (w / ".nullmoth-build-workdir").parent.mkdir(parents=True, exist_ok=True)
+        (w / ".nullmoth-build-workdir").write_text("made by build.sh\n")
+        for b in ("ninja", "cmake", "pkgconf", "spirv-val", "spirv-opt", "glslang"):
+            mk.make(tc / "bin" / b, "bundle", ("/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib"))
+        mk.make(tc / "python/bin/python3.14", "bundle", ("/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"))
+        mk.make(tc / "python/lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so", "bundle")
+        mk.make(tc / "llvm/lib/libLLVM-22.dylib", "dylib", ("/usr/lib/libz.1.dylib", "/usr/lib/libSystem.B.dylib"))
+        (tc / "llvm/lib/libLLVM.dylib").symlink_to("libLLVM-22.dylib")
+        mk.make(tc / "llvm/lib/libclang-cpp.dylib", "dylib", (str(tc / "llvm/lib/libLLVM.dylib"), "/usr/lib/libSystem.B.dylib"))
+        mk.make(tc / "llvm/bin/llvm-config", "bundle", (str(tc / "llvm/lib/libLLVM.dylib"), "/usr/lib/libSystem.B.dylib"))
+        (tc / ".nm-toolchain").mkdir()
+        (tc / ".nm-toolchain/ninja").write_text("3441b633 ninja recipe 2 Darwin-x86_64 macos15.0\n")
+        mk.make(w / "tools/spirv-llvm-translator/lib/libLLVMSPIRVLib.dylib", "dylib", (str(tc / "llvm/lib/libLLVM.dylib"),))
+        mk.make(w / "tools/cargo/bin/bindgen", "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",))
+        tb = w / "tools/bin"
+        tb.mkdir(parents=True)
+        for n, t in (("ninja", tc / "bin/ninja"), ("cmake", tc / "bin/cmake"), ("pkg-config", tc / "bin/pkgconf"), ("llvm-config", tc / "llvm/bin/llvm-config")):
+            (tb / n).symlink_to(t)
+        (tb / "patch").write_text('#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec /usr/bin/patch -f "$@"\n')
+        (w / "tools/venv/bin").mkdir(parents=True)
+        (w / "tools/venv/bin/python3").symlink_to(tc / "python/bin/python3.14")
+        # out/: what the steps built, NVK's build tree with mesa_clc and object files among it
+        mk.make(w / "out/plugin/NVMTLDriver", "bundle", ("/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+                                                          "/Library/GPUBundles/nvmtl/libnvmtl_osver.dylib"))
+        mk.make(w / "out/nvk/libvulkan_nouveau.dylib", "dylib", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path",),
+                install_name="@rpath/libvulkan_nouveau.dylib")
+        mk.make(w / "out/nvk-build/src/compiler/clc/mesa_clc", "bundle", (str(tc / "llvm/lib/libLLVM.dylib"), str(tc / "llvm/lib/libclang-cpp.dylib"),
+                                                                          str(w / "tools/spirv-llvm-translator/lib/libLLVMSPIRVLib.dylib")))
+        mk.make(w / "out/nvk-build/src/x.o", "object")
+        (w / "logs").mkdir()
+        (w / "logs/nvk.log").write_text("build.sh step nvk\n----\nProgram glslangValidator found: YES (" + str(tc) + "/bin/glslang)\n")
+        (w / "logs/plugin.log").write_text("build.sh step plugin\nNVMTLDriver compiled\n")
+        # the package: a base package as 2.9 has it, and the staged one
+        base = w / "package/base/pkgroot"
+        lib = "Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS"
+        mk.make(base / lib / "NVMTLDriver", "bundle", minos="15.0")
+        mk.make(base / "Library/NullMoth/video/libold.dylib", "dylib", minos="13.0")
+        (base / "install.sh").write_text("#!/bin/sh\n")
+        (base / "VERSION").write_text("2.9\n")
+        (base / "Library/NullMoth/gone.txt").write_text("x")
+        write_sums(base)
+        r = w / "package/pkgroot"
+        shutil.copytree(base, r, symlinks=True)
+        (r / "Library/NullMoth/gone.txt").unlink()
+        shutil.copy(w / "out/plugin/NVMTLDriver", r / lib / "NVMTLDriver")
+        mk.make(r / "Library/NullMoth/dlss/nm_unzstd", "bundle", minos="12.0")
+        (r / "VERSION").write_text("3.0\n")
+        write_sums(r)
+        with tarfile.open(w / "package/nullmoth-nvidia-local-abc1234.tar.gz", "w:gz") as t:
+            t.add(r, arcname="pkgroot")
+
+    def before(self):
+        rc, out = run([self.script, "brew-state", self.ci / "brew-before.txt", self.p], self.env)
+        assert rc == 0, out
+        time.sleep(1.1)   # a file changed later is newer than the listing also where times have whole seconds
+        rc, out = run([self.script, "watch-start", self.ci, self.p], self.env)
+        assert rc == 0, out
+
+    def prove(self, watch=True):
+        if watch and not (self.ci / "brew-watch.pid").exists():
+            run([self.script, "watch-start", self.ci, self.p], self.env)
+        return run([self.script, "prove", self.w, self.ci / "brew-before.txt", self.ci, self.p], self.env, timeout=300)
+
+
+def lines(out, start):
+    return [l for l in out.splitlines() if l.startswith(start)]
+
+
+def failures(out):
+    """-> the FAIL and NOT CHECKED lines, each with the indented lines that follow it (what was found)"""
+    blocks, cur = [], None
+    for l in out.splitlines():
+        if l.startswith(("FAIL", "NOT CHECKED")):
+            cur = [l]; blocks.append(cur)
+        elif cur is not None and l.startswith("        "):
+            cur.append(l)
+        else:
+            cur = None
+    return ["\n".join(b) for b in blocks]
+
+
+def main():
+    if not SCRIPT.is_file():
+        print(f"FAIL {SCRIPT} is missing"); sys.exit(1)
+    with tempfile.TemporaryDirectory() as d:
+        tmp = pathlib.Path(d).resolve()
+        mk = Maker(tmp)
+        try:
+            sc = Scene(tmp, mk)
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            skip(f"cannot make the Mach-O files here: {str(e)[-300:]}")
+        sc.before()
+        rc, out = sc.prove()
+        fails = lines(out, "FAIL") + lines(out, "NOT CHECKED")
+        arm("a working directory that did everything right: every check ok, exit 0", rc == 0 and not fails and len(lines(out, "ok")) >= 12, out)
+        for want in ("Homebrew's", "unchanged", "files Homebrew keeps that changed during the build: 0", "homebrew-cache): absent",
+                     "brew processes seen: 0", "every one inside the working directory", "/usr/bin/patch",
+                     "Mach-O programs and libraries under", "Mach-O files of the working directory's tools", "mesa_clc",
+                     "minos 12.0 x1, 15.0 x1", "carried over unchanged from the base package: 1", "build step logs that name",
+                     "git status --porcelain prints nothing", "VERSION 3.0", "2 replaced, 1 added, 1 removed, 2 unchanged",
+                     "--strict -c SHA256SUMS in the package"):
+            arm(f"the ok lines say: {want}", want in out, out)
+        arm("the object files of NVK's build tree are not counted as programs", "under " + str(sc.w) + "/out: 3," in out, out)
+
+        def control(name, want, prepare, undo):
+            prepare()
+            try:
+                rc, o = sc.prove()
+            finally:
+                undo()
+            f = failures(o)
+            arm("control: " + name, rc == 1 and any(want in b for b in f), o)
+
+        w, p, tc = sc.w, sc.p, sc.w / "tools/toolchain"
+        control("a formula Homebrew gained is caught", "Homebrew's", lambda: (p / "Cellar/llvm@22/22.1.8").mkdir(parents=True),
+                lambda: shutil.rmtree(p / "Cellar/llvm@22"))
+        control("a link Homebrew moved is caught", "changed during the build",
+                lambda: ((p / "opt/cmake").unlink(), (p / "opt/cmake").symlink_to("../Cellar/cmake/4.4.0")),
+                lambda: ((p / "opt/cmake").unlink(), (p / "opt/cmake").symlink_to("../Cellar/cmake/4.5.0")))
+        log = sc.home / "Library/Logs/Homebrew/ninja/01.cmake"
+        control("a log Homebrew wrote is caught", "files Homebrew keeps that changed", lambda: (log.parent.mkdir(), log.write_text("x")),
+                lambda: shutil.rmtree(log.parent))
+        api = sc.home / "Library/Caches/Homebrew/api/formula.jws.json"
+        control("Homebrew's formula list fetched again is caught", "files Homebrew keeps that changed", lambda: api.write_text("{ }"), lambda: None)
+        sc.before()   # a new reference time for the controls after this one
+        control("build.sh's Homebrew cache folder is caught", "asked Homebrew", lambda: (w / "tools/homebrew-cache").mkdir(),
+                lambda: (w / "tools/homebrew-cache").rmdir())
+
+        def brew_runs():
+            run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
+            subprocess.run(["/bin/sh", str(p / "bin/brew"), "info", "llvm"], timeout=10)
+        control("a brew process is seen by the watch", "brew processes seen: 1", brew_runs, lambda: None)
+        fake = tmp / "sandbox/bin/brew"
+        fake.parent.mkdir(parents=True)
+        fake.write_text("#!/bin/sh\nsleep 2\n")
+        run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
+        subprocess.run(["/bin/sh", str(fake), "install", "x"], timeout=10)
+        rc, o = sc.prove(watch=False)
+        arm("a brew of the tests' sandboxes is counted apart, not as Homebrew's", rc == 0 and "1 other process(es) named brew" in o, o)
+        rc, o = sc.prove(watch=False)
+        arm("control: a watch that is not running is not taken for none seen", rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
+
+        control("a tool taken from Homebrew is caught", "lie outside the working directory",
+                lambda: ((w / "tools/bin/cmake").unlink(), (w / "tools/bin/cmake").symlink_to(p / "bin/cmake")),
+                lambda: ((w / "tools/bin/cmake").unlink(), (w / "tools/bin/cmake").symlink_to(tc / "bin/cmake")))
+        pt = w / "tools/bin/patch"
+        good_patch = pt.read_text()
+        control("a patch from Homebrew is caught", "lie outside the working directory",
+                lambda: pt.write_text(good_patch.replace("/usr/bin/patch", "/usr/local/opt/gpatch/bin/gpatch")), lambda: pt.write_text(good_patch))
+        bad = w / "out/vulkan-loader/libvulkan.1.dylib"
+        control("a library under out/ that loads from Homebrew's prefix is caught", "loads /usr/local/lib/libintl.8.dylib",
+                lambda: mk.make(bad, "dylib", ("/usr/lib/libSystem.B.dylib", "/usr/local/lib/libintl.8.dylib")), lambda: bad.unlink())
+        control("a search path into Homebrew is caught", "rpath /opt/homebrew/lib",
+                lambda: mk.make(bad, "dylib", ("/usr/lib/libSystem.B.dylib",), rpaths=("/opt/homebrew/lib",)), lambda: bad.unlink())
+        cm = tc / "bin/cmake"
+        control("a tool of the toolchain that loads from Homebrew is caught", "loads /usr/local/opt/curl/lib/libcurl.4.dylib",
+                lambda: mk.make(cm, "bundle", ("/usr/lib/libSystem.B.dylib", "/usr/local/opt/curl/lib/libcurl.4.dylib")),
+                lambda: mk.make(cm, "bundle", ("/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib")))
+        pk = w / "tools/toolchain/bin/pkgconf"
+        control("a tool the toolchain should have and has not is caught", "bin/pkgconf", lambda: pk.rename(pk.with_suffix(".x")), lambda: pk.with_suffix(".x").rename(pk))
+        r = w / "package/pkgroot"
+        new = r / "Library/NullMoth/dlss/nm_unzstd"
+        control("a shipped file built for macOS 26 is caught", "minos 26.0",
+                lambda: (mk.make(new, "bundle", minos="26.0"), write_sums(r)), lambda: (mk.make(new, "bundle", minos="12.0"), write_sums(r)))
+        control("a damaged package is caught", "--strict -c SHA256SUMS in the package fails", lambda: (r / "VERSION").write_text("3.1\n"),
+                lambda: (r / "VERSION").write_text("3.0\n"))
+        control("a changed checkout is caught", "git status --porcelain prints 1", lambda: (sc.co / "build/pins.sh").write_text("NM_PIN_X=2\n"),
+                lambda: (sc.co / "build/pins.sh").write_text("NM_PIN_X=1\n"))
+        nl = w / "logs/nvk.log"
+        good_log = nl.read_text()
+        control("a step log that names Homebrew's prefix is caught", "build step logs that name",
+                lambda: nl.write_text(good_log + f"Program bison found: YES ({p}/opt/bison/bin/bison)\n"), lambda: nl.write_text(good_log))
+        hold = tmp / "pkg-away"
+        control("a run without a package is not taken for a good one", "no staged package", lambda: (w / "package").rename(hold), lambda: hold.rename(w / "package"))
+        rc, out = sc.prove()
+        arm("after the controls the scene is good again (each control undid its change)", rc == 0, out)
+
+        # toolchain-id
+        rc1, a = run([sc.script, "toolchain-id", w], sc.env)
+        (tc / ".nm-toolchain/llvm").write_text("ca7933e4 llvm recipe 2 Darwin-x86_64 macos15.0\n")
+        rc2, b = run([sc.script, "toolchain-id", w], sc.env)
+        rc3, c = run([sc.script, "toolchain-id", tmp / "nowhere"], sc.env)
+        arm("toolchain-id changes when a tool is finished, and is empty without a toolchain",
+            rc1 == rc2 == rc3 == 0 and len(a.strip()) == 16 and len(b.strip()) == 16 and a != b and c == "", (a, b, c))
+
+        # deps-plan: the lines build.sh prints before it calls Homebrew
+        bsh = (ROOT / "build.sh").read_text()
+        arm("build.sh still prints the lines deps-plan looks for before a Homebrew install",
+            "Homebrew formulas to install (only these;" in bsh and '$BREW install $f"; done' in bsh, "")
+        plan = tmp / "plan.txt"
+        plan.write_text("Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ninja llvm@22\n"
+                        "    env -u HOMEBREW_PREFIX PATH=/usr/local/bin:/usr/bin HOMEBREW_NO_AUTO_UPDATE=1 /usr/local/bin/brew install ninja\n")
+        rc, o = run([sc.script, "deps-plan", plan], sc.env)
+        arm("control: a dry run of deps that would install formulas is refused", rc == 1 and "would call Homebrew" in o, o)
+        plan.write_text("    /usr/local/bin/brew unlink <formula>   (with the same environment; only if ...)\n")
+        rc, o = run([sc.script, "deps-plan", plan], sc.env)
+        arm("control: a dry run of deps that would unlink a formula is refused", rc == 1, o)
+        plan.write_text("deps: build/toolchain.sh build ninja cmake llvm (NM_TC_PREFIX=...)\nGNU patch is needed as gpatch on PATH; Homebrew's formula is gpatch\n"
+                        "deps: dry run; the commands above would run, nothing was installed\n")
+        rc, o = run([sc.script, "deps-plan", plan], sc.env)
+        arm("a dry run of deps that builds the tools from source passes", rc == 0 and "names no Homebrew command" in o, o)
+
+        # basepkg, against a pins.sh of this test's own (it never reaches the network: the URL is a closed local port)
+        blob = tmp / "dl/nullmoth-nvidia-2.9.tar.gz"
+        blob.parent.mkdir()
+        blob.write_bytes(b"not a package, but the pinned bytes\n")
+        pins = sc.co / "build/pins.sh"
+        pins.write_text("NM_PIN_X=1\nNM_PIN_CI_BASEPKG_URL=https://127.0.0.1:9/v2.9/nullmoth-nvidia-2.9.tar.gz\n"
+                        f"NM_PIN_CI_BASEPKG_SIZE={blob.stat().st_size}\nNM_PIN_CI_BASEPKG_SHA256={sha(blob)}\n")
+        r = subprocess.run([BASH, str(sc.script), "basepkg", str(blob.parent)], capture_output=True, text=True, env=sc.env, timeout=60)
+        arm("basepkg takes a file that has the pinned size and SHA-256, and prints only its path", r.returncode == 0 and r.stdout == f"{blob}\n", (r.stdout, r.stderr))
+        blob.write_bytes(b"not the pinned bytes!!!!!!!!!!!!!!\n")
+        r = subprocess.run([BASH, str(sc.script), "basepkg", str(blob.parent)], capture_output=True, text=True, env=sc.env, timeout=60)
+        arm("control: a file that is not the pinned one is removed and fetched again (here: the download fails, exit 2)",
+            r.returncode == 2 and r.stdout == "" and not blob.exists() and "could not download" in r.stderr, (r.returncode, r.stdout, r.stderr))
+        pins.write_text("NM_PIN_X=1\n")
+        r = subprocess.run([BASH, str(sc.script), "basepkg", str(blob.parent)], capture_output=True, text=True, env=sc.env, timeout=60)
+        arm("control: no pin, no download", r.returncode == 2 and "NM_PIN_CI_BASEPKG_URL" in r.stderr, r.stderr)
+        real = (ROOT / "build/pins.sh").read_text()
+        arm("build/pins.sh pins the base package's URL, size and SHA-256",
+            "NM_PIN_CI_BASEPKG_URL=https://github.com/nullmoth/nvidia-macos-driver/releases/download/v2.9/nullmoth-nvidia-2.9.tar.gz\n" in real
+            and "NM_PIN_CI_BASEPKG_SIZE=68833656\n" in real
+            and "NM_PIN_CI_BASEPKG_SHA256=b624bf07c78cea03043e096383d5c8b01e4fb2c804a6ba377a4e66a2566422ef\n" in real, "")
+        pins.write_text("NM_PIN_X=1\n")
+
+        # logs
+        (w / "logs/toolchain-llvm.log").write_text("".join(f"line {i}\n" for i in range(400)) + "ld: error: undefined symbol: _x\n")
+        (w / "reports").mkdir(exist_ok=True)
+        (w / "reports/failure-nvk-20261113T000000Z.txt").write_text("NullMoth driver build: failure report\nstep: nvk\n")
+        (w / "logs/fetch.log").write_text("STOP: could not fetch x\n")
+        rc, o = run([sc.script, "logs", w], sc.env)
+        arm("logs shows the end of the newest logs (300 lines), the newest report, and every error: and STOP: line",
+            rc == 0 and "\nline 399\n" in o and "\nline 101\n" in o and "\nline 100\n" not in o and "failure report" in o
+            and "ld: error: undefined symbol" in o and "STOP: could not fetch x" in o, o[-2000:])
+        # nothing of the watch is left running
+        left = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
+        arm("no watch is left running", str(sc.ci) not in left, "")
+    print(f"{len(FAILS)} failed")
+    sys.exit(1 if FAILS else 0)
+
+
+main()
