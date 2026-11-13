@@ -108,8 +108,10 @@ def run(argv, cwd, env, timeout=TIMEOUT):
     """subprocess.run, but the program is a session of its own (no controlling terminal) with /dev/null as its input, and
     at the limit it is stopped with everything it started: killing only the test would leave its children running, still
     writing into the temporary folder that is deleted next. At the limit: TimedOut, with what the program had printed."""
+    # errors="replace": a byte that is not UTF-8 in what a test prints (a binary diff, a tool's raw output) would otherwise
+    # end the whole run with Python's error, before any result is printed
     p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         text=True, start_new_session=True)
+                         errors="replace", text=True, start_new_session=True)
     with RUNNING_LOCK:
         RUNNING.add(p)
     try:
