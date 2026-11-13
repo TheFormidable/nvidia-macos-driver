@@ -42,6 +42,7 @@
 #include <mach/mach_time.h>
 #include <kern/clock.h>
 #include "nvrm_dma.h"
+#include "nvrm_devtab.h"
 extern "C" {
 #include "nvrm_dma_policy.h"
 }
@@ -69,6 +70,7 @@ enum : UInt32 { kDevFree = 0, kDevLive = 0x4e444431u /* NDD1 */, kDevBusy = 0x4e
 enum : NvU32 { kMapMagic = 0x4e444d31u /* NDM1 */, kMapDead = 0x4e444d58u /* NDMX */ };
 enum : NvU32 { kKindRm = 0, kKindUser = 1, kKindSurf = 2, kKindTest = 3 };
 enum { kDmaMaxDev = 8, kDmaMaxSeg = 16, kDmaDrainMs = 2000 };
+static_assert(kDmaMaxDev == NVRM_DEVTAB_MAX, "one DMA record for every card the device table can hold");
 
 struct nv_dma_device {             // the RM's opaque nv_dma_device_t (nv.h); nv->dma_dev points at one of gDmaDevs
     volatile UInt32 state;         // kDev*; only kDevLive is ever handed out

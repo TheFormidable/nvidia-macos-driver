@@ -236,10 +236,12 @@ def problems(src):
     if not (0 <= sus.find("nv_xnu_wq_flush(NULL, false, 5000)") < sus.find("rm_power_management(")):
         out.append("gpuSuspend() does not flush the global queue, at most 5 s, before RM standby")
     # The question "is this range inside a GPU's windows" covers every started card (the surface fence refuses such a
-    # page; with nvmultigpu=1 a second card's windows were not seen), the primary first, through the device table.
+    # page; with nvmultigpu=1 a second card's windows were not seen), the primary first, through the device table. The
+    # loop runs to g <= NVRM_DEVTAB_MAX: the first pass is the primary and at(g) is fetched one behind, so a bound of <
+    # would skip the table's last card, and a bare number would not follow the table's size.
     isg = body(osx2, 'bool nv_pm_is_gpu(NvU64 start, NvU64 size)') or ""
     if not (re.search(r"nv_state_t\s*\*\s*nv\s*=\s*nv_xnu_gpu_state\s*\(\s*\)\s*;", isg)
-            and re.search(r"for\s*\(\s*unsigned\s+g\s*=\s*0\s*;\s*nv\s*&&\s*g\s*<=\s*8\s*;\s*nv\s*=\s*nv_xnu_gpu_state_at\s*\(\s*g\s*\+\+\s*\)\s*\)", isg)
+            and re.search(r"for\s*\(\s*unsigned\s+g\s*=\s*0\s*;\s*nv\s*&&\s*g\s*<=\s*NVRM_DEVTAB_MAX\s*;\s*nv\s*=\s*nv_xnu_gpu_state_at\s*\(\s*g\s*\+\+\s*\)\s*\)", isg)
             and re.search(r"nv_state_t\s*\*\s*nv_xnu_gpu_state_at\s*\(\s*unsigned\s+index\s*\)\s*;", osx2)
             and re.search(r"extern\s+\"C\"\s+nv_state_t\s*\*\s*nv_xnu_gpu_state_at\s*\(\s*unsigned\s+index\s*\)\s*\{\s*NVRM\s*\*\s*s\s*=\s*gNVRMTab\.at\s*\(\s*index\s*\)", nvrm)):
         out.append("nv_pm_is_gpu does not look at the windows of every started card")
@@ -349,7 +351,14 @@ def main():
             "NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *q, void *i) { return 0; }\n// x",
             "os-xnu2.cpp still defines os_queue_work_item")
     control("a window check that sees only the primary card", "os-xnu2.cpp",
-            "for (unsigned g = 0; nv && g <= 8; nv = nv_xnu_gpu_state_at(g++))", "for (unsigned g = 0; nv && g < 1; g++)",
+            "for (unsigned g = 0; nv && g <= NVRM_DEVTAB_MAX; nv = nv_xnu_gpu_state_at(g++))",
+            "for (unsigned g = 0; nv && g < 1; g++)",
+            "nv_pm_is_gpu does not look at the windows of every started card")
+    control("a window check that stops before the table's last card", "os-xnu2.cpp",
+            "nv && g <= NVRM_DEVTAB_MAX;", "nv && g < NVRM_DEVTAB_MAX;",
+            "nv_pm_is_gpu does not look at the windows of every started card")
+    control("a window check bounded by a bare number", "os-xnu2.cpp",
+            "nv && g <= NVRM_DEVTAB_MAX;", "nv && g <= 8;",
             "nv_pm_is_gpu does not look at the windows of every started card")
     print(("\n%d failed" % len(FAILS)) if FAILS else "\nall passed")
     return 1 if FAILS else 0
