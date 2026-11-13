@@ -647,6 +647,7 @@ class Sandbox:
         # tools_from: NM_TOOLS_FROM in every run's environment. The arms written before the source way existed are about
         # Homebrew's behaviour and say so (homebrew); None leaves it unset (auto), as a tester's Mac has it
         self.tools_from = tools_from
+        self.host_brew_hidden = False
         self.dir = TMP / "sb" / name
         shutil.rmtree(self.dir, ignore_errors=True)
         self.home = self.dir / "home"
@@ -730,9 +731,16 @@ class Sandbox:
         if self.tools_from:
             e["NM_TOOLS_FROM"] = self.tools_from
         e.update(extra or {})
-        if not e.get("NM_BREW") and HOST_BREW and not self.has_brew:
+        if not e.get("NM_BREW") and HOST_BREW and not self.has_brew and not self.host_brew_hidden:
             raise RuntimeError(f"an imitated Mac without Homebrew cannot run here without NM_BREW: build.sh would find {HOST_BREW[0]}")
         return e
+
+    def hide_host_brew(self):
+        """For an imitated Mac that has no Homebrew and, like a tester's, no NM_BREW: in this clone's build.sh the two
+        places Homebrew is looked for before PATH become two that do not exist, so that on a machine with a Homebrew
+        of its own build.sh finds none here either (env() refuses to run such a Mac otherwise)."""
+        self.break_script(BREW_PLACES_LINE, f'brew_places() {{ echo "{self.dir}/no-homebrew/bin/brew {self.dir}/no-homebrew-other/bin/brew"; }}')
+        self.host_brew_hidden = True
 
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
         """./build.sh <args> from the checkout; returns (exit status, stdout+stderr)."""
@@ -1507,9 +1515,12 @@ def tc_stamp_want(sb, tool, recipe=2):
 
 
 def source_sandbox(name, **kw):
-    """an Intel Mac without Homebrew, NM_TOOLS_FROM unset (auto), with GNU patch on PATH as gpatch"""
+    """an Intel Mac without Homebrew, NM_TOOLS_FROM and NM_BREW unset (as on a tester's Mac), with GNU patch on PATH as
+    gpatch"""
     kw.setdefault("brew", False)
     sb = Sandbox(name, tools_from=None, **kw)
+    if not sb.has_brew:
+        sb.hide_host_brew()
     sb.wrap(sb.bin / "gpatch", "patch", "GNU patch 2.8")
     return sb
 
@@ -2615,10 +2626,10 @@ def arm_vars(mac):
     def leak_problems(tag):
         mac.clear()
         e = dict(leak); e["FB_DEFS"] = f"-DNM_LEAK_{tag}=1"   # a fresh value each call so fb really re-runs
-        mac.run("build", "fb", extra=e)
+        rc, out = mac.run("build", "fb", extra=e)
         steps = mac.steps()
         bad = [f"{key}: {v}={env[v]} inherited from the caller" for key, args, env in steps for v in leak if v in env]
-        return bad or ([] if steps else ["no step ran"])
+        return bad or ([] if steps else [f"no step ran (exit {rc}): {out[-800:]}"])
 
     with mac.scratch():
         check("a step inherits no compiler search path, LDFLAGS/CPPFLAGS or HOMEBREW_ variable from the caller", not (q := leak_problems("a")), q)
@@ -2639,11 +2650,11 @@ def sdkstep_problems(mac, tag, extra=None):
     mac.clear()
     e = {"FB_DEFS": f"-DNM_SDK_{tag}=1"}   # a fresh value each call so fb really re-runs
     e.update(extra or {})
-    mac.run("build", "fb", extra=e)
+    rc, out = mac.run("build", "fb", extra=e)
     steps = mac.steps()
     want = str(mac.dir / "sdk")
     bad = [f"{key}: SDKROOT={env.get('SDKROOT', '(not set)')}, expected {want}" for key, args, env in steps if env.get("SDKROOT") != want]
-    return bad or ([] if steps else ["no step ran"])
+    return bad or ([] if steps else [f"no step ran (exit {rc}): {out[-800:]}"])
 
 
 def arm_sdkstep(mac):
