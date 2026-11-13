@@ -1,6 +1,7 @@
-# The whole driver built from an empty folder on an Intel Mac of GitHub's, at every push and by hand (Actions, full-build,
-# Run workflow): "anybody can build it" shown on a Mac nobody here prepared. The job types what docs/BUILDING.md tells a
-# tester, in a new working directory W under the runner's temporary folder:
+# The whole driver built from an empty folder on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode
+# 26.3 with the 26.2 SDK), at every push and by hand (Actions, full-build, Run workflow), to show "anybody can build it"
+# on a Mac nobody here prepared. The job types what docs/BUILDING.md tells a tester, in a new working directory W under
+# the runner's temporary folder:
 #   ./build.sh --yes --workdir W deps          default settings: on an Intel Mac NVK's tools are built from pinned
 #                                              sources into W, with no Homebrew call (a dry run checks that first)
 #   ./build.sh --workdir W doctor              nothing may be MISSING
@@ -17,26 +18,37 @@
 # extension modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the
 # Translator, Rust) lies in W and loads only from /usr/lib, /System and W (and, for W/out, the driver's own folders
 # under /Library); what the package ships and this build made names macOS 15.0 or older as its minimum (LC_BUILD_VERSION
-# minos); no step log names /usr/local or /opt/homebrew; the checkout is unchanged; the package's VERSION, size,
-# SHA-256, files replaced against 2.9, and its SHA256SUMS checked as install.sh checks it.
+# minos; on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) at commit 3933ff6 that was 10.12, rustc's default, for
+# the translator and 15.0 for every other product); no step log names /usr/local or /opt/homebrew; the checkout is
+# unchanged; the package's VERSION, size, SHA-256, files replaced against 2.9, and its SHA256SUMS checked as install.sh
+# checks it.
 #
+# {{PENDING full-test}} {{PENDING full-prove}}
 # What it checks, once it has run: that the pinned sources and the repository alone make every component and a package
 # on a Mac whose /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several
-# Xcodes. What it cannot show: anything on macOS 26 or on the owner's hardware (this is macOS 15 on GitHub's), anything
+# Xcodes. What it cannot show: anything on macOS 26 or on a tester's hardware (this is macOS 15 on GitHub's), anything
 # with an NVIDIA card (there is none), anything about installing or loading the driver (nothing is installed or loaded),
-# a brew command that changes no file and is over between two lists of the watch (half a second apart, more when the
-# runner holds the watch up), and nothing about the package's contents beyond the checks above. The package is not
-# uploaded: it never leaves the runner.
+# a brew command that changes no file and is over between two lists of the watch (taken twice a second; in the run of
+# 95811c2 on this runner about 0.75 s apart on average and once 11 s apart), and nothing about the package's contents
+# beyond the checks above. The package is not uploaded: it never leaves the runner.
 #
 # A job gates once it has been seen green on GitHub's runners (the rule of ci.yml): this one is marked
 # continue-on-error until it has been seen green once: then delete that line.
 #
-# Time, estimated from one 12-thread Intel Mac's records (toolchain about 70 min, LLVM 34 of them at -j10; kexts and
-# plugin 85 s; NVK 219 s) scaled to the runner's 4 CPUs: a first run about 4 hours (the toolchain 2.5, Rust, bindgen,
-# cbindgen and the Translator 0.3, the driver 0.5, the host tests 0.5), a run with the tools cached about 1 hour. Disk,
-# from the same records: about 12 GB at the most (the toolchain's sources 3.2 GB, LLVM's build tree 1 GB while it builds,
-# the installed tools 1.1 GB, Rust 0.6 GB, the driver's sources 1 GB, NVK's build 1 GB, the RM's build and the package),
-# printed with df at the start, after deps and at the end.
+# What it has shown, a history. Commit 96bf32c, nothing cached: deps took 3 h 53 min, the build stopped at the plugin
+# (SDK 26.2 does not declare MTLDevice.supportsPlacementSparse; fixed in 3d4df3f) and prove reported Rust's own
+# rust-lld (fixed in 71cb29d and 76e1fed). Commit 95811c2, caches restored: deps 12.7 min, the build 20 min to the
+# same stop.
+# {{PENDING full-test}} {{PENDING full-prove}} {{PENDING full-time}}
+# Commit 3933ff6 (run 43497488138), caches restored: deps, doctor, fetch, the build of every component (the plugin with
+# SDK 26.2 and the translator among them) and the package succeeded.
+#
+# Time, as measured on this runner. From nothing (96bf32c): deps 3 h 53 min (LLVM 8709 s, CMake 2289 s, SPIRV-Tools
+# 1152 s), then about 23 min of build before the plugin stopped it. With the caches below restored (3933ff6): the four
+# restores 4 min 34 s, deps 40 s, fetch 45 s, the build of every component 30 min 20 s, the package 60 s. A run from
+# nothing with every step has not been made: deps alone takes 3 h 53 min of the 340 minutes. Disk: the working
+# directory held 7.3 GB at the end of the run of 96bf32c, which made no package (sources 3.4 GB, tools 1.8 GB, build
+# trees 1.1 GB, outputs 1.1 GB); df is printed at the start, after deps and at the end.
 # Caches, each restored at the start and saved by its own step as soon as what it holds is complete:
 #   the toolchain (W/tools/toolchain): under the hash of build/toolchain.sh and build/pins.sh, followed by the hash of
 #     its stamps; the newest cache of the same files, or else of any, is restored, and build.sh's stamp of each tool
