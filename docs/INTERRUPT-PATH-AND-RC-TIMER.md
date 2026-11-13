@@ -1,11 +1,10 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
 Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **None of it has run on a
-GPU yet.** Apple's compiler on a Mac with macOS 26 built an earlier state of this code; the later changes (the reuse of
-a work queue, the idle power-down monitor at stop, sleep and shutdown, the kext's reference on itself, the count of
-retired nano timer slots) were compiled only by this repository's cross-compile check. The kernel functions the code
-calls are checked against the export lists of macOS 15 and 26. The gates and the hold against the idle power-down
-monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
+GPU yet.** Apple's compiler has built this code as it stands at commit 3933ff6, every change below included: on one
+Intel Mac (12 threads, macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4
+processors, macOS 15, Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
+export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
 `tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in the
 table below have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
 the order of the teardown, the hold against the idle power-down monitor, the kext staying loaded) have none. The old
