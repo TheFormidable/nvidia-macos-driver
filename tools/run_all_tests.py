@@ -4,7 +4,8 @@
 The tests are separate programs (Python scripts, C and C++ files with their build line in the header comment, shell
 scripts), and nothing ran them all: seven of them had been failing unnoticed because the code they lift pieces from had
 moved on. This runs each one, prints the failures with the end of their output (the last 1200 characters, or the last N
-with --tail N), names the tests that took half a minute or more, and exits 1 if any failed.
+with --tail N), names the tests that took half a minute or more, and exits 1 if any failed. While it runs, every five
+minutes, it names on standard error the tests that have been running for five minutes or more.
 
   Python   tools/test_*.py, run as they are.
   C, C++   tools/test_*.c and .cpp whose header names their build ("cc <flags> <file> -o /tmp/x && /tmp/x"): built into a
@@ -58,6 +59,7 @@ TIMEOUT = 600
 TAIL = 1200              # characters of a failed test's output that are printed (--tail)
 SKIP_REASON = 400        # characters of a skipped test's last line that are printed: its reason, with the path or message in it
 SLOW = 30                # seconds from which a test is named at the end with the time it took
+STILL = 300              # every so many seconds, the tests running for at least that long are named on standard error
 # A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
 # real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
 # 376 s alone on an Intel Mac with 12 CPUs, grows under load with -j 4, and had not ended after 1200 s beside the
@@ -75,6 +77,7 @@ RUNNING = set()          # the tests' process groups, stopped when the run is in
 RUNNING_LOCK = threading.Lock()
 OWN_TMPS = set()         # the temporary folders this runner made for its tests (realpath), not left by a test
 ACTIVE = set()           # the names of the tests running now
+STARTED = {}             # name -> time.monotonic() at its start
 FIRST_SEEN = {}          # (folder, name) of a temporary folder's entry -> the tests that were running when it was first seen
 KNOWN = set()            # the entries of the temporary folders at the last list
 SEEN_LOCK = threading.Lock()
@@ -258,13 +261,23 @@ def main(argv):
         t0 = time.monotonic()
         with SEEN_LOCK:
             ACTIVE.add(p.name)
+            STARTED[p.name] = t0
         try:
             return run_one(p, names)
         finally:
             took[p.name] = time.monotonic() - t0
             note_new(p.name)
     try:
-        results = list(pool.map(timed_one, tests))
+        futures = [pool.submit(timed_one, p) for p in tests]
+        # results are printed when every test has ended: until then a test that takes most of its hour (or hangs) would
+        # leave a tester's terminal without a word, so the long ones are named as they go
+        while concurrent.futures.wait(futures, timeout=STILL).not_done:
+            now = time.monotonic()
+            with SEEN_LOCK:
+                long_ones = sorted((n, now - STARTED[n]) for n in ACTIVE if now - STARTED[n] >= STILL)
+            if long_ones:
+                print("still running: " + ", ".join(f"{n} ({t:.0f} s)" for n, t in long_ones), file=sys.stderr, flush=True)
+        results = [f.result() for f in futures]
     except KeyboardInterrupt:
         pool.shutdown(wait=False, cancel_futures=True)
         with RUNNING_LOCK:
