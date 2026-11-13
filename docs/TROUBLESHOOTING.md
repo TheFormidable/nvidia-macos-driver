@@ -109,7 +109,10 @@ every framebuffer of the driver is built on those classes, the one that shows a 
 (section 4), and the OpenCore setup excludes Apple's own. The Mac can be reached over the network. After an install
 over an earlier driver, `install.sh`'s fallback job looks for this refusal every five seconds during the first four
 minutes of a start; when it finds it, it copies the `nvrm-layout` and `nvrmfb-layout` lines into
-`/Library/NullMoth/lastgood.log`, puts the earlier driver back and restarts. That job takes itself away at the first
+`/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts the
+earlier driver back and restarts. On another build it only writes those lines: the earlier driver ran on the build of
+the install, and after a macOS update the refusal may be the update's doing. Where another GPU shows a desktop and a
+user is logged in, it puts the driver back and leaves the restart to that user. That job takes itself away at the first
 start after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS
 update that changed a class, for example) ends every start without a desktop until you boot with `nvlayout=0` or take
 the driver out (section 4). With AGDC refused the display runs without AppleGraphicsDeviceControl; with the

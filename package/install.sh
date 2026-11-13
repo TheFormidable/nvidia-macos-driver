@@ -534,6 +534,13 @@ step "6b. falling back to the previous driver if this one cannot start"
 # Its other two looks stay as they were and where they were, at the job's start: a start count of two or more, and
 # the word that the display came up. A display that comes up later ends the looking and leaves the job in place, as
 # before: WindowServer can still keep dying on that display (step 6c), and the next start must find the job.
+# The refusal's restore has two conditions that the older rule does not have. It happens only on the macOS build this
+# install was made on: the previous driver was running there, so it fits; after a macOS update the refusal may be the
+# update's doing, and a driver from before these checks would be put onto classes that really changed. On another
+# build the job only keeps the refusal in its log. And it restarts at once unless someone may be working at a desktop
+# that another GPU shows (a display is connected to some framebuffer and a user owns the console): then the files are
+# put back and the restart is left to that user. A framebuffer with nothing plugged into it shows nothing (a second GPU
+# that only computes), so with no display on any framebuffer the Mac restarts whoever is logged in.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
@@ -546,10 +553,15 @@ if [ -d "$BK/NVRM.kext" ]; then
 # Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
+OSB='$BUILD'   # the macOS build this install was made on: the one the previous driver was running on
 # no launchctl bootout here: booting out the running job kills this script before it can restart the Mac (10-17 test)
 done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
 # NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
 refused() { ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; }
+# Someone may be working at a desktop that another GPU shows: a display is connected to some framebuffer (IOGraphics
+# keeps an IODisplayConnect under a framebuffer while a display is on it) and a user owns the console.
+shown() { ioreg -r -c IODisplayConnect -w0 2>/dev/null | grep -q .; }
+busy() { shown && [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
 ok=0; nvram \$V:nullmoth-nv-ok >/dev/null 2>&1 && ok=1
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
 why=""; n=0
@@ -566,6 +578,14 @@ done
 if [ "\$why" = refused ]; then
   said="the new driver cannot drive a display on this macOS (its framebuffer refused Apple's classes)"
   [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) \$said but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
+  now=\$(sw_vers -buildVersion 2>/dev/null)
+  if [ -z "\$OSB" ] || [ "\$now" != "\$OSB" ]; then
+    echo "\$(date) \$said. This is macOS build \${now:-unknown} and the install was made on" \\
+         "\${OSB:-an unknown build}: the previous driver is not put back onto a macOS it was not running on." \\
+         "What the driver found:" >> \$LOG
+    ioreg -l -w0 2>/dev/null | grep -e '"nvrm-layout' -e '"nvrmfb-layout' >> \$LOG
+    exit 0
+  fi
   echo "\$(date) \$said; restoring the previous driver from \$BK. What it found:" >> \$LOG
   ioreg -l -w0 2>/dev/null | grep -e '"nvrm-layout' -e '"nvrmfb-layout' >> \$LOG
 else
@@ -585,6 +605,11 @@ if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullM
 nvram -d \$V:nullmoth-nv-starts 2>/dev/null
 echo "previous" > /Library/NullMoth/driver-restored
 done_job
+if [ "\$why" = refused ] && busy; then
+  echo "\$(date) previous driver restored. A user is logged in and another GPU shows a desktop, so the Mac is not" \\
+       "restarted now: the previous driver starts at the next restart" >> \$LOG
+  exit 0
+fi
 echo "\$(date) previous driver restored; restarting" >> \$LOG
 shutdown -r now
 EOF

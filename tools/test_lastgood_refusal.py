@@ -13,7 +13,14 @@ The job is lifted out of install.sh, filled in the way the installer fills it, a
 sleep and shutdown with every path of it moved into a folder of the test's. The job removes kexts and restarts the Mac,
 so nothing of it runs unless every path it names lies in that folder, its PATH holds that folder only, and the real rm,
 cp and mkdir it reaches there refuse an argument that is not under the folder. The negative control is the same job
-without its look at the registry, which must leave the refused driver in place."""
+without its look at the registry, which must leave the refused driver in place.
+
+Two conditions belong to the refusal alone. The previous driver is put back only on the macOS build the install was
+made on: it was running there, so it fits; after a macOS update the refusal may be the update's doing, and the driver
+that was replaced has no such check. And the Mac is restarted at once unless someone may be working: a display is
+connected to another GPU's framebuffer and a user owns the console. Then the files are put back and the restart is
+left to the user. The job's older rule (two starts in a row without a display) is compared with 2.9's job and must not
+change."""
 import os
 import pathlib
 import re
@@ -43,6 +50,7 @@ INSTALLER = {
     "FW": "/Library/NullMoth/nvfw",
     "FWOLD": "/Users/Shared/nvfw",
     "KC": "/Library/KernelCollections/AuxiliaryKernelExtensions.kc",
+    "BUILD": "25G342",
 }
 PATH_LINE = "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
 LOOK = "refused() { ioreg -l -w0 2>/dev/null | grep -q '\"nvrm-layout\" = \"declined'; }"
@@ -60,15 +68,18 @@ def template(src):
     return body[:body.index("\nEOF\n") + 1]
 
 
-def fill(tmpl):
+def fill(tmpl, **other):
     """The job as the installer writes it to disk. Only the installer's own variables may be filled in here: a command
-    substitution that is not escaped would run now, in the test, with whatever it names."""
+    substitution that is not escaped would run now, in the test, with whatever it names. `other` replaces one of the
+    installer's values (an install that could not read its macOS build, for instance)."""
     if re.search(r"(?<!\\)\$\(|`", tmpl):
         raise Unsafe("the job's template runs a command while it is written")
     names = set(re.findall(r"(?<!\\)\$\{?([A-Za-z_][A-Za-z0-9_]*)", tmpl))
     if not names <= set(INSTALLER):
         raise Unsafe(f"the job's template fills in {sorted(names - set(INSTALLER))}, which this test does not know")
-    script = "".join(f"{k}='{v}'\n" for k, v in INSTALLER.items()) + "cat <<EOF\n" + tmpl + "EOF\n"
+    if not set(other) <= set(INSTALLER):
+        raise Unsafe(f"{sorted(set(other) - set(INSTALLER))} is not one of the installer's variables")
+    script = "".join(f"{k}='{v}'\n" for k, v in {**INSTALLER, **other}.items()) + "cat <<EOF\n" + tmpl + "EOF\n"
     p = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=60,
                        env={"PATH": "/usr/bin:/bin"})
     if p.returncode != 0 or not p.stdout.startswith("#!/bin/bash\n"):
@@ -99,8 +110,8 @@ def redirect(job, fake, t):
         for m in ABS.finditer(line):
             if m.start() and line[m.start() - 1] not in " \t\"'=(>;|&:":
                 continue   # inside a longer path, which the match that started it has judged
-            if m.group(0) == "/dev/null" or m.group(0).startswith(f"{t}/"):
-                continue
+            if m.group(0) in ("/dev/null", "/dev/console") or m.group(0).startswith(f"{t}/"):
+                continue   # /dev/console is only named to stat, which is a fake here
             raise Unsafe(f"line {n} of the job names {m.group(0)!r}, outside the test's folder")
     return text
 
@@ -122,6 +133,12 @@ exec "@REAL@" "$@"'''
 FAKES = {
     # what `ioreg -l -w0` prints: the file the test wrote (and may write again between two looks)
     "ioreg": r'''#!/bin/bash
+# `ioreg -r -c IODisplayConnect`: the displays connected to this Mac's framebuffers, and `-c IOFramebuffer` the
+# framebuffers themselves; none unless the test wrote some (neither is one of the looks)
+case " $* " in
+  *" -c IODisplayConnect "*) [ ! -f "$T/displays.txt" ] || cat "$T/displays.txt"; exit 0;;
+  *" -c IOFramebuffer "*) [ ! -f "$T/fbs.txt" ] || cat "$T/fbs.txt"; exit 0;;
+esac
 n=$(cat "$T/ioreg.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$T/ioreg.n"
 [ ! -f "$T/ioreg.txt" ] || cat "$T/ioreg.txt"
 exit 0''',
@@ -146,6 +163,15 @@ n=$(cat "$T/sleep.n" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$T/sleep.n
 exit 0''',
     "shutdown": r'''#!/bin/bash
 echo "shutdown $*" >> "$T/calls"''',
+    # the running macOS build: the file the test wrote; no file, no answer (the tool failed)
+    "sw_vers": r'''#!/bin/bash
+[ "$*" = "-buildVersion" ] || { echo "sw_vers $*" >> "$T/calls"; exit 1; }
+[ -f "$T/osbuild.txt" ] || exit 1
+cat "$T/osbuild.txt"''',
+    # who owns the console: the file the test wrote. Any other question is not answered.
+    "stat": r'''#!/bin/bash
+[ "$*" = "-f %Su /dev/console" ] || { echo "stat $*" >> "$T/calls"; exit 1; }
+cat "$T/console.txt"''',
 }
 
 def ioreg_line(text):
@@ -155,6 +181,12 @@ def ioreg_line(text):
 FB_REFUSED = ('    | |   "nvrmfb-layout" = "refused: IOFramebuffer is 0x1e0 bytes in this macOS, 0x1d0 in the driver '
               '(1 size, 0 vtables differ of 3, 0); macOS 25G342 (Darwin 25.7.0)"\n')
 FB_OK = '    | |   "nvrmfb-layout" = "ok: 3 classes, vtables not compared; macOS 25G342 (Darwin 25.7.0)"\n'
+# what `ioreg -r -c IOFramebuffer -w0` prints on a Mac with a second GPU, and `ioreg -r -c IODisplayConnect -w0` when a
+# display is connected to it
+OTHER_FB = ('+-o AppleIntelFramebuffer@0  <class AppleIntelFramebuffer, id 0x1000004d2, registered, matched, active, '
+            'busy 0 (9 ms), retain 14>\n')
+OTHER_DISPLAY = ('+-o display0  <class IODisplayConnect, id 0x1000004e0, registered, matched, active, busy 0 (2 ms), '
+                 'retain 6>\n')
 NAMES = ("NVRM", "NVAccel", "NVRMFB", "NVRMAGDC")
 
 
@@ -162,10 +194,13 @@ class Result:
     pass
 
 
-def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False):
+def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False, osbuild=INSTALLER["BUILD"],
+        fbs="", displays="", console="root"):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
-    line that changes the fake NVRAM during it."""
+    line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read), fbs
+    the framebuffers the registry holds, displays the displays connected to them (none: nothing shows a picture) and
+    console the owner of /dev/console."""
     t = pathlib.Path(tempfile.mkdtemp(prefix="lgr-"))
     r = Result()
     try:
@@ -212,6 +247,13 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
             (bk / "nvfw/which").write_text("previous\n")
             (bk / "driver-version").write_text("2.9\n")
         (t / "ioreg.txt").write_text(registry)
+        if osbuild is not None:
+            (t / "osbuild.txt").write_text(osbuild + "\n")
+        if fbs:
+            (t / "fbs.txt").write_text(fbs)
+        if displays:
+            (t / "displays.txt").write_text(displays)
+        (t / "console.txt").write_text(console + "\n")
         for name, value in (nv or {}).items():
             (t / f"nv.{name}").write_text(value + "\n")
         for n, more in (later or {}).items():
@@ -245,9 +287,14 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
     return r
 
 
-def restored(r):
+def put_back(r):
+    """The previous driver is on disk again and the job took itself away (the restart is a separate question)."""
     return (r.kexts == ["previous"] * 4 and r.bundle == "previous" and r.kc == "previous" and r.fw == "previous"
-            and r.version == "2.9" and r.marker == "previous" and r.job_gone and r.restarted)
+            and r.version == "2.9" and r.marker == "previous" and r.job_gone)
+
+
+def restored(r):
+    return put_back(r) and r.restarted
 
 
 def untouched(r):
@@ -330,6 +377,44 @@ r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), backup=False)
 arm("a refusal with the backup gone: nothing is removed, the job says so and takes itself away",
     untouched(r) and r.job_gone and "its backup" in r.log and "is gone" in r.log, show(r))
 
+# ---- never onto another macOS: the previous driver ran on the build the install was made on, and only there is it
+# known to fit. After a macOS update the refusal may be the update's doing, and that driver has no such check.
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild="25H100")
+arm("a refusal on another macOS build than the install was made on: the previous driver is not put back",
+    untouched(r) and r.job_left and r.rc == 0, show(r))
+arm("  and the log names both builds and keeps what the framebuffer found",
+    "macOS build 25H100" in r.log and "made on 25G342" in r.log and "IOFramebuffer is 0x1e0 bytes" in r.log
+    and "restoring" not in r.log, r.log)
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild=None)
+arm("  nor when the running build cannot be read", untouched(r) and r.job_left and "build unknown" in r.log, show(r))
+try:
+    r = run(fill(template(src), BUILD=""), registry=FB_REFUSED + ioreg_line(EARLY))
+    arm("  nor when the install recorded no build", untouched(r) and r.job_left and "an unknown build" in r.log,
+        show(r))
+    r = run(fill(template(src), BUILD=""), registry=FB_REFUSED + ioreg_line(EARLY), osbuild=None)
+    arm("  nor when neither build is known (two unknowns are not the same build)", untouched(r) and r.job_left, show(r))
+except Unsafe as e:
+    arm("  nor when the install recorded no build", False, e)
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, osbuild="25H100")
+arm("  (two starts in a row without a display restore on any build, as before: that rule is 2.9's and is not changed)",
+    restored(r), show(r))
+
+# ---- the restart after a refusal: at once, unless someone may be working at a desktop another GPU shows
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays=OTHER_DISPLAY, console="tester")
+arm("a refusal while a user is logged in and another GPU shows a display: the previous driver is put back and the "
+    "Mac is not restarted", put_back(r) and not r.restarted and r.rc == 0, show(r))
+arm("  and the log says that the restart is left to the user", "not restarted now" in r.log
+    and "starts at the next restart" in r.log and "restarting" not in r.log, r.log)
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays=OTHER_DISPLAY, console="root")
+arm("  at the login window of such a Mac it restarts", restored(r), show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays="", console="tester")
+arm("  a second GPU with nothing plugged into it shows nothing: the Mac restarts whoever owns the console",
+    restored(r), show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs="", displays="", console="tester")
+arm("  and so it does with no framebuffer at all", restored(r), show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, fbs=OTHER_FB, displays=OTHER_DISPLAY, console="tester")
+arm("  (two starts in a row without a display restart whoever is logged in, as before)", restored(r), show(r))
+
 # ---- what must not look like a refusal
 r = run(job, registry=FB_REFUSED)
 arm("the framebuffer's own refusal without NVRM's word (nvlayout=0 would read \"overridden\") restores nothing",
@@ -384,6 +469,9 @@ if job29 is not None:
          dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, backup=False)),
         ("one start below the count", dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%01"})),
         ("a quiet first start, nothing set and an empty registry", dict(registry="", nv={})),
+        ("two starts without a display on another macOS build, a user logged in at another GPU's desktop",
+         dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, osbuild="25H100", fbs=OTHER_FB,
+              displays=OTHER_DISPLAY, console="tester")),
     ):
         a, b = run(job, **kw), run(job29, **kw)
         ca, cb = canon(a), canon(b)
