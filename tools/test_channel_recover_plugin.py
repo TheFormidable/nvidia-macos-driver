@@ -21,15 +21,22 @@ This test holds what only the plugin's glue in plugin/nvmtl_vk.c and plugin/NVMT
                  never for an image that is being freed
   Metal          -1 completes the command buffer with an error and is not quarantined; the error completion closes the
                  surface fence holds first (nvmtl_busy_mark_done), so a hold armed on dropped work cannot stay open
+  NVK's lines    the "nvk-reason:" lines (among them "nvrm channel slot N rebuilt after ..." and "... not rebuilt: ...")
+                 go through the plugin's log rule (nvlog_every -> nvlog_line) with NVK's text as an argument, never as
+                 the format, and the callback opens no file of its own; the release rule (nvmtl_log_failure.h, built
+                 and run here with the host's cc) sends NVK's errors and both channel lines to the system log and no
+                 other NVK warning, whatever words it holds
 
 Each source check also runs on a damaged copy of the text, which must fail it (the controls).
 Run: python3 tools/test_channel_recover_plugin.py [root]"""
-import pathlib, re, sys
+import pathlib, re, shutil, subprocess, sys, tempfile
 
 R = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 VK = (R / "plugin/nvmtl_vk.c").read_text()
 EV = (R / "plugin/NVMTLEventSync.m").read_text()
 LOSS = (R / "plugin/nvmtl_loss.h").read_text()
+DEV = (R / "plugin/NVMTLDevice.m").read_text()
+FAILURE_H = (R / "plugin/nvmtl_log_failure.h").read_text()
 PATCH = R / "nvk/nvk-channel-recover.patch"
 fails = 0
 
@@ -220,6 +227,128 @@ run("Metal: -1 completes with an error, is not quarantined, and the fence holds 
                                            "if (result) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:part];"),)),
     ("every failed ahead part quarantined at the finish", (sub(EV, "if (result == -2) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:p];",
                                                                "if (result < 0) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:p];"),)),
+])
+# NVK's messages and the plugin's log rule.
+def chk_vkmsg(vk):
+    cb = body(vk, "static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(")
+    calls = re.findall(r"\bnvlog\w*\s*\(", cb)
+    return (bool(cb)
+            and "fopen(" not in cb and "nvmtl_log_path" not in cb and "fprintf(" not in cb and "FILE" not in cb
+            and 'snprintf(t, sizeof t, "nvk-reason: %s %s: %s",' in cb
+            and "for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';" in cb
+            and calls == ["nvlog_every(", "nvlog_every("]
+            # the message is the argument t; the format is a literal that holds the 2.9 file text
+            and 'if (rep) nvlog_every("%s   [logged %llu times now%s]", t, (unsigned long long)rep, full ? ", table full" : "");' in cb
+            and 'else     nvlog_every("%s%s", t, full ? "   [table full]" : "");' in cb
+            and not re.search(r"nvlog_every\(\s*[^\s\"]", cb)
+            and cb.index("*c = ' ';") < cb.index("nvlog_every("))
+
+
+def chk_rule(dev):
+    """nvlog_every adds no repeat limiter; nvlog_line is the release rule the documents describe."""
+    every = body(dev, "void nvlog_every(const char *fmt, ...) {")
+    line = body(dev, "static void nvlog_line(const char *t) {")
+    rel = line.split("#else")[0] if "#else" in line else ""
+    sl = 'if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);'
+    gate = "if (!nvmtl_process_env_on()) return;"
+    wr = 'FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\\n", getpid(), t); fclose(f); }'
+    return (bool(every) and "nvlog_dropped" not in every and "nvlog_line(t);" in every
+            and "#if NVMTL_RELEASE" in line and sl in rel and gate in rel and rel.index(sl) < rel.index(gate)
+            and line.count(wr) == 1 and line.index("#endif") < line.index(wr)
+            and 'syslog(LOG_NOTICE, "NVMTL: %s", t);' in line.split("#else")[1].split("#endif")[0])
+
+
+# What the release rule must answer: 1 = the system log ("NullMoth: ..."), 0 = not.
+RULE_CASES = [
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1723: nvrm channel slot 3 rebuilt after a CHANNEL loss (Xid 31): 1 flush(es) dropped, 0 replayed", 1),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1537: nvrm channel slot 12 not rebuilt: loss kind FIRMWARE (Xid 119), kind", 1),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1537: nvrm channel slot 0 not rebuilt: loss kind STALL (Xid 0), off   [logged 4096 times now]", 1),
+    ("nvk-reason: E nvkmd_nvrm_queue.c:308: NVRM channel faulted", 1),
+    ("nvk-reason: E ?: (no message)   [table full]", 1),
+    ("nvk-reason: W nvk_physical_device.c:900: VK_EXT_foo missing, the feature is unsupported and cannot be used", 0),
+    ("nvk-reason: W nvk_queue.c:12: FAILED to keep a FAULT record, refused", 0),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1: nvrm channel slot 3 rebuilt", 0),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1: nvrm channel slot rebuilt after a CHANNEL loss", 0),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1: the nvrm channel slot 3 rebuilt after a CHANNEL loss", 0),
+    ("nvk-reason: W nvkmd_nvrm_queue.c:1: nvrm channel slot 3 was rebuilt after", 0),
+    ("nvk-reason: X nvkmd_nvrm_queue.c:1: nvrm channel slot 3 rebuilt after a CHANNEL loss", 0),
+    ("vk: vkCreateDevice -> -8", 1),
+    ("vk: a channel rebuild dropped this command buffer; fault context follows", 1),
+    ("vk: initialized successfully", 0),
+    ('vk: NVK messages ON: its own warnings and errors land here as "nvk-reason:"', 0),
+]
+RULE_PROG = r"""
+#include "nvmtl_log_failure.h"
+#include <stdio.h>
+int main(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) printf("%d\n", nvmtl_log_failure(argv[i]) ? 1 : 0);
+    printf("%d\n", nvmtl_log_failure(0) ? 1 : 0);
+    return 0;
+}
+"""
+
+
+def chk_failure_rule(header):
+    """Builds a host program against `header` (the text of nvmtl_log_failure.h) and compares every case's answer."""
+    cc = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+    if not cc:
+        return False
+    with tempfile.TemporaryDirectory(prefix="nullmoth-nvkmsg-") as td:
+        d = pathlib.Path(td)
+        (d / "nvmtl_log_failure.h").write_text(header)
+        (d / "t.c").write_text(RULE_PROG)
+        b = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(d), "-o", str(d / "t"), str(d / "t.c")],
+                           capture_output=True, text=True)
+        if b.returncode:
+            return False
+        r = subprocess.run([str(d / "t")] + [c for c, _ in RULE_CASES], capture_output=True, text=True, timeout=60)
+    got = r.stdout.split()
+    return r.returncode == 0 and got == [str(want) for _, want in RULE_CASES] + ["0"]
+
+
+OLD_CB = """    char t[600]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
+    for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
+    extern const char *nvmtl_log_path(void);
+    FILE *f = fopen(nvmtl_log_path(), "a");
+    if (f) {
+        if (rep) fprintf(f, "pid %d NVMTL: %s   [logged %llu times now%s]\\n", getpid(), t, (unsigned long long)rep, full ? ", table full" : "");
+        else     fprintf(f, "pid %d NVMTL: %s%s\\n", getpid(), t, full ? "   [table full]" : "");
+        fclose(f);
+    }
+    return VK_FALSE;"""
+NEW_CB_FROM = '    char t[584]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s"'
+
+
+def old_callback(vk):
+    """The 2.9 body of the callback (it appended to nvmtl_log_path() itself) in place of today's."""
+    i = vk.index(NEW_CB_FROM)
+    j = vk.index("    return VK_FALSE;", i) + len("    return VK_FALSE;")
+    return vk[:i] + OLD_CB + vk[j:]
+
+
+run("NVK's lines go through the plugin's log rule with the message as an argument; the callback opens no file", chk_vkmsg, (VK,), [
+    ("the 2.9 body that appends to nvmtl_log_path() itself", (old_callback(VK),)),
+    ("NVK's text used as the format", (sub(VK, 'else     nvlog_every("%s%s", t, full ? "   [table full]" : "");', "else     nvlog_every(t);"),)),
+    ("a second repeat limiter (nvlog)", (sub(VK, 'else     nvlog_every("%s%s", t,', 'else     nvlog("%s%s", t,'),)),
+    ("control characters kept", (sub(VK, "    for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';\n    // The plugin's log rule", "    // The plugin's log rule"),)),
+    ("the repeat count dropped from the line", (sub(VK, 'nvlog_every("%s   [logged %llu times now%s]", t,', 'nvlog_every("%s%s", t,'),)),
+])
+run("nvlog_every adds no repeat limiter and nvlog_line is the documented release rule", chk_rule, (DEV,), [
+    ("nvlog_every through the limiter", (sub(DEV, "    char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);\n    nvlog_line(t);\n}",
+                                               "    uint64_t rep; if (nvlog_dropped(fmt, &rep)) return;\n    char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);\n    nvlog_line(t);\n}"),)),
+    ("a release file for every process", (sub(DEV, "    if (!nvmtl_process_env_on()) return;   // the file below", "    // the file below"),)),
+])
+NVK_DISPATCH = "    if (text && !strncmp(text, NVMTL_NVK_REASON, sizeof NVMTL_NVK_REASON - 1)) return nvmtl_log_nvk_reason(text);\n"
+run("release rule: NVK's errors and both channel lines reach the system log, no other NVK warning (host program)",
+    chk_failure_rule, (FAILURE_H,), [
+    ("NVK's lines judged by the plugin's words (the rule before this one)", (sub(FAILURE_H, NVK_DISPATCH, ""),)),
+    ("every NVK warning kept", (sub(FAILURE_H, "    if (p[0] != 'W' || p[1] != ' ') return 0;\n", "    if (p[0] == 'W') return 1;\n"),)),
+    ("the not-rebuilt line not recognised", (sub(FAILURE_H, ' || !strncmp(m, " not rebuilt: ", 14)', ""),)),
+    ("the rebuilt line not recognised", (sub(FAILURE_H, '!strncmp(m, " rebuilt after ", 15) || ', ""),)),
+    ("an NVK error not kept", (sub(FAILURE_H, "    if (p[0] == 'E' && p[1] == ' ') return 1;\n", ""),)),
+    ("a channel line recognised anywhere in the message", (sub(FAILURE_H, "    if (strncmp(m, slot, sizeof slot - 1)) return 0;\n",
+                                                               "    const char *at = strstr(m, slot); if (!at) return 0; m = at;\n"),)),
 ])
 print(f"{'FAILED' if fails else 'PASS'}: {fails} failed")
 sys.exit(1 if fails else 0)
