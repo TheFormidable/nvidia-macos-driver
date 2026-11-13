@@ -25,15 +25,15 @@ The driver now asks IOKit, once per GPU at start, which case it is in, and acts 
 | Mode | When | What the driver does |
 |---|---|---|
 | 0, none | No mapper translates the GPU (no system mapper, or IOKit marked the GPU untranslated) | Exactly what 2.9 did: physical addresses everywhere. |
-| 1, system mapper | AppleVTD's shared space translates the GPU | Every block of system memory the GPU uses is mapped through the mapper, as the Linux driver does with an IOMMU. Each mapping is read back from the mapper's own tables before the GPU is given its address. |
+| 1, system mapper | AppleVTD's shared space translates the GPU | Every block of system memory the GPU uses is mapped through the mapper, as the Linux driver does with an IOMMU. Each mapping is read back from the mapper's own tables before the GPU is given its address: its first and last page always, and every page (up to 4096) of the first 64 mappings and of every 64th after them. |
 | 2, device mapper | IOKit gave the GPU a translated space of its own | As mode 1, on that space. The driver never asks for one; it uses what IOKit chose. |
 | 3, refused | A mapper translates the GPU and the driver may not or cannot use it (boot-arg `nvrmdma=0`, a failed self-test, or a build that does not route the GPU's memory requests through the mapper) | The GPU is not started. This is a clean "not started", not a failed boot: the boot guard does not count it. |
 
 In modes 1 and 2:
 - before the GPU is started, two pages are mapped and read back from the mapper, and at least one of their bus
-  addresses must differ from the page's physical address (the self-test: the mapper answers an address it has no
-  entry for with that same address, so a read-back alone would also pass an untranslated mapping); if that fails the
-  mode becomes 3;
+  addresses must differ from the page's physical address, and the two bus addresses from each other (the self-test:
+  the mapper answers an address it has no entry for with that same address, so a read-back alone would also pass an
+  untranslated mapping); if that fails the mode becomes 3;
 - a mapping the mapper splits where the GPU needs one run, an address above what the GPU can reach, or a page whose
   bus address does not lead back to it, is refused (the allocation fails; nothing wrong reaches the GPU);
 - the driver keeps at most 64 GB (system mapper) or 6 GB (device mapper) mapped at once, because AppleVTD waits
@@ -54,15 +54,25 @@ it. This has not been tried (see the last section).
 
 The registry property `nvrm-dma` on the GPU's PCI device holds one line, for example
 `none (bus address = physical address)`, `system mapper`, or `refused: ...` with the reason. The log has one line per
-GPU, `NVRM-xnu: DMA: <mode> (system mapper present|absent, device mapper present|absent)`, and in modes 1 and 2 the
-self-test line `NVRM-xnu: DMA self-test: 2 pages mapped at bus 0x..., 0x... and read back from the mapper`.
+GPU, `NVRM-xnu: DMA: <the property's text> (system mapper present|absent, device mapper present|absent)` (with
+`, nub marked untranslated` before the closing parenthesis when IOKit marked the GPU so), and in modes 1 and 2 the
+self-test line `NVRM-xnu: DMA self-test: 2 pages mapped at bus 0x..., 0x... and read back from the mapper`, or, when
+it fails, `NVRM-xnu: DMA self-test failed: the mapping gave the pages' physical addresses (...)` or
+`NVRM-xnu: DMA self-test failed (status 0x...)`. A refused GPU adds
+`NVRM-xnu: NOT STARTING THE GPU: refused: .... Not counted as a failed start.`
+
+On a machine without VT-d (mode 0) the three commands should print `debug.nvrm_dma_mode: 0`, the property
+`"nvrm-dma" = "none (bus address = physical address)"`, and, after the header line and the line of the `log` command
+itself that `log show` always prints, `NVRM-xnu: DMA: none (bus address = physical address) (system mapper absent,
+device mapper absent)`. `log show --last boot` takes about a minute.
 
 `debug.nvrm_dma_mode` is the highest mode of the GPUs that are attached, and stays 3 once a GPU was refused (a
 refused GPU is not attached for long, and the refusal is what must show).
 
 ## The counters (`sysctl debug | grep nvrm_dma`)
 
-All read-only. In mode 0 every one of them except `nvrm_dma_mode` stays 0.
+All read-only. In mode 0 every one of them except `nvrm_dma_mode` stays 0 (`nvrm_dma_refused` too, unless the RM
+asks for a peer or device-register mapping, which is refused in every mode).
 
 | Name | Meaning | Healthy |
 |---|---|---|
@@ -85,9 +95,10 @@ All read-only. In mode 0 every one of them except `nvrm_dma_mode` stays 0.
 
 ## The accelerator's copies (`sysctl debug | grep nvaccel_dma`)
 
-NVAccel asks NVRM once, at its first page-off, how the GPU's addresses reach the bus (`debug.nvaccel_dma_mode`: -1
-until then, then the same numbers as above). Without a mapper it copies as 2.9 did and every other `nvaccel_dma_*`
-counter stays 0. With a mapper its copies of GPU memory to the CPU go through a staging buffer that NVRM mapped for the
+Each accelerator asks NVRM, at its first page-off, hybrid frame or two-plane grant check, how the GPU's addresses
+reach the bus, and keeps the answer until NVRM refuses one of its page lists (then it asks again at the next one)
+(`debug.nvaccel_dma_mode`: -1 until then, then the same numbers as above). Without a mapper it copies as 2.9 did and
+every other `nvaccel_dma_*` counter stays 0. With a mapper its copies of GPU memory to the CPU go through a staging buffer that NVRM mapped for the
 GPU, instead of raw physical addresses that the mapper would send elsewhere.
 
 | Name | Meaning | Healthy |
@@ -119,8 +130,10 @@ installer's dropped DMAR table), which gives mode 0.
 
 ## What was never run on hardware
 
-Everything in modes 1, 2 and 3. The code was compiled for macOS 15 and 26 and its imports checked against both
-kernels' export lists; the decisions were tested on a host. Nothing of it has run with a real mapper:
+Everything in modes 1, 2 and 3, and mode 0 too: nothing of this branch has been loaded on a Mac yet. An earlier state
+of the DMA layer (before the self-test's check for an untranslated address) was compiled and linked on a Mac with the
+macOS 26 SDK for macOS 15 and later; its kernel imports were checked by hand against the export lists in the published
+source of the macOS 15 and 26 kernels; the decisions were tested on a host. Nothing of it has run with a real mapper:
 
 - the NVIDIA RM's own bus-address path (it is compiled into the driver and is the path Linux always uses, but it was
   never executed on macOS);

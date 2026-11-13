@@ -60,7 +60,7 @@ for the first time is in [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md).
 | Kernel panic as the login screen appears (WindowServer, `IOFramebuffer::postOpen`, page fault in `memcpy`), with WhateverGreen installed | WhateverGreen copies the boot screen on the first framebuffer start from an address it saved at boot. macOS can free that mapping before the NVIDIA display opens (seen on a laptop whose boot screen is on the Intel GPU). | Add `gfxrst=4` to boot-args. It turns that copy off; the driver draws its own start-up screen. |
 | The app edits the wrong OpenCore partition | Two OpenCore partitions on the macOS disk. | Fixed in 1.14 (the boot arguments decide which one started the Mac). |
 | A problem that other Macs with the same card do not have | The Mac may still carry a boot argument or a setting from an earlier test: an opt-out of a default path, a test hook, a development switch. | `sysctl debug.nvrm_switches` lists the driver boot arguments set beside the install line, with a `!` on each one an ordinary install does not need; `sysctl debug.nvrm_switches_nondefault` should say 0. Remove the marked ones from `boot-args` and restart. Settings in `/Library/GPUBundles/nvmtl/nvrm610.conf` are not in that list: look at the file too. From a checkout, `python3 tools/switch_registry.py doctor` also reads the settings file and names entries that are misspelled or that this version no longer reads. [SWITCHES.md](SWITCHES.md) says what each one does. |
-| RTX 50: video in Safari, QuickTime or FaceTime is green, or an H.264 video there does not play | These apps decode in a system service. The driver's own H.264 decoder gives them a green picture on RTX 50; the newer decoder is used there only after the card passes a short decode test, and is not proven on every stream. | In Terminal: `log show --last 10m --predicate 'eventMessage CONTAINS "decode self-test"'` after playing a video. `PASS` and a broken video: add `NVMTL_NVENCVT=0` to `nvrm610.conf` to go back to the old decoder, and send the line with the video's details. `FAIL at ...`: the old decoder is in use (green); send the line, it says what the card refused. A line `... is a build without the Blackwell decode self-test - REFUSED on this card`: the codec library installed beside the plugin is older than the plugin; build and install both from the same revision. |
+| RTX 50: video in Safari, QuickTime or FaceTime is green, or an H.264 video there does not play | These apps decode in a system service. The driver's own H.264 decoder gives them a green picture on RTX 50; the newer decoder is used there only after the card passes a short decode test, and is not proven on every stream. | In Terminal: `log show --last 10m --predicate 'eventMessage CONTAINS "decode self-test"'` after playing a video. `PASS` and a broken video: add `NVMTL_NVENCVT=0` to `nvrm610.conf` to go back to the old decoder, and send the line with the video's details. `FAIL at ...`: the old decoder is in use (green); send the line, it says what the card refused. A line `... is a build without the Blackwell decode self-test - REFUSED on this card`: the codec library installed beside the plugin is older than the plugin; build and install both from the same revision. `log show` always prints its header and one line of its own (the `log` command matches its own words): only the `NullMoth: nvencvt:` lines are the driver's. A video that was already starting while the test ran (the first one after a restart, typically) can still be on the old decoder: reload it once before judging. |
 
 ### Several NVIDIA cards
 
@@ -91,7 +91,10 @@ of 2.9, boot once with `-nvrmoldwaits` and send both sets of numbers.
 reason. "NVRMFB cannot drive a display on this macOS" means the framebuffer's Apple classes differ from the ones it
 was built for (`nvrm-layout` and `nvrmfb-layout` on the PCI device say the same; see the next item). A reason about
 DMA means a DMA mapper (VT-d) translates the card and the driver may not or cannot use it (`nvrm-dma` names it; see
-below). Neither counts as a failed start, so neither turns the driver off.
+below). Neither counts as a failed start, so neither turns the driver off. A framebuffer refusal that NVRM reads only
+after it has started is different: `auto-go: NOT STARTING THE GPU: the framebuffer refused this macOS's classes after
+NVRM had started (...)`. That start stays counted, so two such boots in a row without a desktop that stays up turn the
+driver off (section 4).
 
 **`nvrmfb-layout`, `nvagdc-layout` or `nvaccel-layout` says refused, or no acceleration after a macOS update.** Check
 with `ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'` and `sysctl debug.nvrmfb_layout
@@ -112,8 +115,9 @@ line on a Mac whose display works is worth a report with the macOS build.
 ([DMA-IOMMU.md](DMA-IOMMU.md)).
 - `NVRM-xnu: DMA: refused: ...` in the log, `debug.nvrm_dma_mode` = 3: VT-d translates the GPU and the driver did not
   start it: either `nvrmdma=0` is in the boot arguments, or the two-page self-test through the mapper did not read
-  back. The driver will not run the GPU on untranslated addresses behind VT-d (that is what made 2.9 fail on such
-  machines). Turn VT-d off in the firmware (or keep the installer's dropped DMAR table) to get mode 0, and send the
+  back or gave the pages' physical addresses (nothing translated; the `NVRM-xnu: DMA self-test failed` line before it
+  says which). The driver will not run the GPU on untranslated addresses behind VT-d (that is what made 2.9 fail on
+  such machines). Turn VT-d off in the firmware (or keep the installer's dropped DMAR table) to get mode 0, and send the
   log line.
 - Desktop broken or GPU errors in mode 1 or 2: send `sysctl debug | grep -e nvrm_dma -e nvaccel_dma` and any AppleVTD
   fault lines naming the GPU (`log show --last boot | grep -i vtd`). Boot once with `nvrmdma=0`: if that gives a clean
@@ -126,8 +130,9 @@ line on a Mac whose display works is worth a report with the macOS build.
 - First, is the surface fence in use? `sysctl debug.nvrm_fence_state debug.nvrm_fence_accel debug.nvrm_fence_map_fail
   debug.nvrm_fence_map_mismatch debug.nvrm_fence_owners_distrusted`. State 1 and accel 1 with the other three at 0 is
   the normal case. State 0: `nvrmfence=0` is in the boot arguments. State 2: the fence switched itself off because
-  eight processes did not finish what they held; state 3 after a wake: the GPU did not resume. In both the driver
-  runs as 2.9 until the next boot; send the `NVRM-xnu: fence:` lines of `log show --last boot`.
+  eight connections to the fence were distrusted since boot for holds they did not end; state 3 after a wake: the
+  GPU did not resume. In both the driver runs as 2.9 until the next boot; send the `NVRM-xnu: fence:` lines of
+  `log show --last boot`.
 - Boot once with `nvrmfence=0`. If that cures it, send `sysctl debug | grep -e nvrm_fence -e nvaccel_surface` from the
   boot without the boot argument: `wait_ge100ms`, `expired_gpu`, `expired_cpu`, `chan_noirq` and `done_on_slice` say
   whether readers waited long for a slow writer, a writer did not finish, or interrupts did not arrive for a channel.
@@ -158,15 +163,15 @@ line on a Mac whose display works is worth a report with the macOS build.
 **The desktop freezes while recording the screen, taking screenshots or showing window thumbnails.** Boot once with
 `nvaccel_pageoff_locked=1` added to the boot arguments. If the freeze is gone, the page-off wait without the
 accelerator lock is the cause: please report it with the output of `sysctl debug | grep nvaccel_pageoff` and the
-kernel log lines that start with `page-off:`, and keep a spindump of WindowServer and kernel_task taken while it is
+kernel log lines `NVAccel: page-off: ...`, and keep a spindump of WindowServer and kernel_task taken while it is
 frozen. `debug.nvaccel_pageoff_unlocked_standdown` = 1 without the boot argument means the driver already turned that
 path off for the boot; the log line says why.
 
 **Screen sharing, recording or video shows wrong colours, a green or purple cast, a frame from a moment ago, or
 frames that flicker between two.** Boot once with `nvaccel_surf_planes=0` and say whether it goes away. Before that,
-send `sysctl debug | grep -E 'nvaccel_(surf_plane|surfvram_ranged|pageoff_ranged)'`, the kernel log lines that start
-with `surfvram: surface ... ranged` and `surfvram pageoff: res ... plane`, and the `planar surfaces:` lines of
-`nvmtl.log`.
+send `sysctl debug | grep -E 'nvaccel_(surf_plane|surfvram_ranged|pageoff_ranged)'`, the kernel log lines
+`NVAccel: surfvram: surface ... ranged ...` and `NVAccel: surfvram pageoff: res ... plane ...`, and the
+`planar surfaces:` lines of `nvmtl.log`.
 
 **Applications use more CPU or stutter, with frame times between 1 and 3 ms.** Try `NVRM_EVENT_WAIT=0` in
 `nvrm610.conf` and relaunch the application: that restores polling for every process, WindowServer included (which
@@ -180,11 +185,11 @@ row did not arrive)` in the application's output, means that a process stopped t
 explains the numbers.
 
 **A window or game glitched once (a black frame, a missing frame, a stutter) and went on.**
-- A line `nvrm: channel slot ... rebuilt` in an application's output, or `nvk-reason: nvrm channel slot ... rebuilt`
-  in `nvmtl.log`, means the GPU faulted on one of that application's channels and NVK recovered it; the frames that
-  were on the GPU then may be missing. A line `not rebuilt` names the kind of loss and the reason; that application
-  lost its device as in 2.9. To rule the recovery out, put `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf` and restart the
-  application.
+- A line `nvrm: channel slot ... rebuilt` in an application's output, or `nvk-reason: W ...: nvrm channel slot ...
+  rebuilt` in `nvmtl.log`, means the GPU faulted on one of that application's channels and NVK recovered it; the
+  frames that were on the GPU then may be missing. A line `not rebuilt` names the kind of loss and the reason; that
+  application lost its device as in 2.9. To rule the recovery out, put `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf` and
+  restart the application.
 - `vk: after a GPU fault, a channel rebuild dropped this command buffer` in `nvmtl.log`: one frame (or the frames in
   flight) of that process was lost. Send the line and the `fault context:` lines after it. If the desktop froze after
   such a line in WindowServer, add `NVMTL_DROP_REPORT=0` to `nvrm610.conf` and say whether that changes it.
@@ -220,7 +225,18 @@ then freed at once, as in 2.9.
 - If the screen is black even at the picker, or the Mac starts only from a USB stick you no longer have: boot into
   macOS Recovery (the driver cannot run there), open **Terminal**, run
   `nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then restart into macOS. The Mac removes the driver by
-  itself, with no picture needed, and restarts clean. This is the same removal the picker entry runs.
+  itself, with no picture needed, and restarts clean. This is the same removal the picker entry runs; it is done by
+  a job that the 1401 app installs. A driver installed from source with `package/install.sh` alone has no such job:
+  there the flag only keeps every part of the driver off at each start (the firmware's picture), until
+  `sudo nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove` or the next run of `install.sh` clears it.
+- Over the network (Remote Login on, from another computer): the same
+  `sudo nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then `sudo shutdown -r now`, gives the next
+  starts the firmware's picture. Without it, two starts in a row whose display never came up turn the driver off by
+  themselves; after an install over an earlier driver, `install.sh`'s job then puts that driver back and restarts.
+  Where OpenCore writes `boot-args` at each start (the 1401 install sets it up so), changing them with `nvram` does
+  not last: `-nvoff`, or a boot argument taken away, has to go into OpenCore's `config.plist`. Once an accelerator
+  has started, NVAccel.kext (like NVRM.kext) holds itself loaded until the next restart: unloading it by hand does
+  not work.
 - Boot logo: earlier versions could add `NullMothLogo.efi` to OpenCore. It is no longer part of the driver; installing,
   updating or removing the driver takes its entry and file out. If the picker never appears on an EFI that still has
   it, disable that entry in the EFI configuration from another operating system.
