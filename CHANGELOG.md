@@ -106,6 +106,11 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   buffer can never write (eight of those used to switch command-pool reuse off for the process). A device loss that
   is not recovered now names its kind (firmware, bus, failed wake, ECC) in the log. Way back for the error report:
   `NVMTL_DROP_REPORT=0` in `nvrm610.conf` (the command buffer is reported as completed).
+- NVK's own warnings and errors no longer go to a file in `/private/tmp` from every Metal process. An installed
+  plugin writes them to `nvmtl.log` only for a process started with `NVMTL_PROCESS_ENV=1`; from every other process,
+  WindowServer included, NVK's errors and the two channel-recovery lines (`nvrm channel slot N rebuilt after ...` and
+  `nvrm channel slot N not rebuilt: ...`) reach the system log with the prefix `NullMoth:`, while its other warnings
+  stay out of it.
 - The Metal plugin's fence wait (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) no
   longer counts time asleep, so a frame that was pending at sleep is not declared lost at wake.
 - A texture the application releases while the GPU may still use it is now freed only once no command buffer that
