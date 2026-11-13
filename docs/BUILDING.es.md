@@ -14,7 +14,8 @@ comandos y opciones y la solución de problemas.
 >   46,5 minutos, sin Homebrew. En el commit 3933ff6, con esas herramientas ya hechas, `deps`, `doctor` y `fetch`
 >   terminaron bien, `./build.sh --no-install build` compiló los 17 componentes en 5 minutos 41 segundos sin ningún
 >   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. Nada fuera del directorio de trabajo
->   cambió. Las pruebas no se han ejecutado completas en ese Mac en ese commit. {{PENDING 5b}}
+>   cambió. `./build.sh test` pasó allí 303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se
+>   ejecutaron), en 20 minutos 49 segundos.
 > - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
 >   3933ff6. De las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron allí),
 >   `tools/test_build_sh.py` entre ellas. El flujo que compila todo en un directorio de trabajo vacío, con las
@@ -231,7 +232,7 @@ siguiente reinicio trae la versión publicada.
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256. Cuando ya está Rust, descarga también los crates del traductor (`cargo fetch --locked`) para que su compilación funcione sin red |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
-| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch` |
+| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch`. En un Mac, una ejecución deja unos veinticuatro informes de fallo en `~/Library/Logs/DiagnosticReports` (con nombres como ca, cb, oldv, resset): son de programas pequeños que las pruebas hacen fallar a propósito, y se pueden borrar |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
 | `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` las vuelve a compilar: 46,5 minutos en el Mac Intel de arriba y 3 horas 53 minutos en la máquina Intel de GitHub; `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |

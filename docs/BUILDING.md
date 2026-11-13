@@ -13,8 +13,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
 >   commit 3933ff6, with those tools kept, `deps`, `doctor` and `fetch` succeeded, `./build.sh --no-install build` built
 >   all 17 components in 5 minutes 41 seconds with no warning, and `package` staged a package on release 2.9 in
->   27 seconds. Nothing outside the working directory changed. The host tests have not run whole on that Mac at that
->   commit. {{PENDING 5b}}
+>   27 seconds. Nothing outside the working directory changed. `./build.sh test` passed 303 of the 315 host tests there
+>   and none failed (3 were skipped and 9 not run), in 20 minutes 49 seconds.
 > - On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6.
 >   303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there), `tools/test_build_sh.py`
 >   among them. The workflow that builds everything in an empty working directory, with the tools restored from
@@ -199,7 +199,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 | `fetch` | Downloads the pinned sources into the working directory and verifies each commit id or SHA-256. Also fetches the translator's crates (`cargo fetch --locked`) once Rust is there, so that its build runs offline |
 | `build [component...]` | Builds the named components and what they need, or all of them. Names and groups: [Components](#components-and-their-order) |
 | `package` | Builds what is not up to date, then stages a package from a release package (`--base-package`) with every part this checkout builds replaced. Needs `--accel both` |
-| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch` |
+| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch`. On a Mac a run leaves about two dozen crash reports in `~/Library/Logs/DiagnosticReports` (names such as ca, cb, oldv, resset): they are of small programs the tests make fail on purpose, and can be deleted |
 | `env` | Prints `export` lines for every variable `build.sh` gives the build scripts, to run one of them by hand with the same environment |
 | `clean [outputs\|sources\|tools\|all]` | Deletes inside the working directory only. `outputs` (the default): outputs, stamps, logs, the package, the RM work tree, and the build trees and exported sources of the tools built from source (not those tools). `sources`: the fetched sources (and the stamps). `tools`: everything under `<workdir>/tools`, the Python environment, Rust and the tools built from source included (and the stamps), without a question: on an Intel Mac the next `deps` builds those tools again, which took 46.5 minutes on the Intel Mac above and 3 hours 53 minutes on GitHub's Intel runner. `all`: everything except the mark, after a yes |
 | `help` | The commands, components and settings |
@@ -595,8 +595,8 @@ two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `en
 and the pins against the scripts that use them; each part has at least one control that breaks `build.sh` (or its
 input) on purpose and shows the check then fails. It runs `build.sh` under `/bin/bash`, or the bash named by
 `BUILD_SH_BASH`, and says so when that is not bash 3.2, the `/bin/bash` of macOS; it has passed under GNU bash
-3.2.48 and 5.2 on Linux, and under macOS's `/bin/bash` on GitHub's Intel runner at commit 3933ff6 (it has not run on
-the Intel Mac at that commit). {{PENDING 5b}} `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
+3.2.48 and 5.2 on Linux, and under macOS's `/bin/bash` on GitHub's Intel runner and on the Intel Mac named at the top,
+both at commit 3933ff6. `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
 build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
 folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What these tests cannot show is how a real Xcode, Homebrew and compiler behave: the whole builds on the two Macs
 named at the top have shown it for Xcode 26.3 and 26.5, and no run on a Mac has used Homebrew.
