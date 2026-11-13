@@ -91,7 +91,10 @@ of 2.9, boot once with `-nvrmoldwaits` and send both sets of numbers.
 reason. "NVRMFB cannot drive a display on this macOS" means the framebuffer's Apple classes differ from the ones it
 was built for (`nvrm-layout` and `nvrmfb-layout` on the PCI device say the same; see the next item). A reason about
 DMA means a DMA mapper (VT-d) translates the card and the driver may not or cannot use it (`nvrm-dma` names it; see
-below). Neither counts as a failed start, so neither turns the driver off.
+below). Neither counts as a failed start, so neither turns the driver off. A framebuffer refusal that NVRM reads only
+after it has started is different: `auto-go: NOT STARTING THE GPU: the framebuffer refused this macOS's classes after
+NVRM had started (...)`. That start stays counted, so two such boots in a row without a desktop that stays up turn the
+driver off (section 4).
 
 **`nvrmfb-layout`, `nvagdc-layout` or `nvaccel-layout` says refused, or no acceleration after a macOS update.** Check
 with `ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'` and `sysctl debug.nvrmfb_layout
@@ -112,8 +115,9 @@ line on a Mac whose display works is worth a report with the macOS build.
 ([DMA-IOMMU.md](DMA-IOMMU.md)).
 - `NVRM-xnu: DMA: refused: ...` in the log, `debug.nvrm_dma_mode` = 3: VT-d translates the GPU and the driver did not
   start it: either `nvrmdma=0` is in the boot arguments, or the two-page self-test through the mapper did not read
-  back. The driver will not run the GPU on untranslated addresses behind VT-d (that is what made 2.9 fail on such
-  machines). Turn VT-d off in the firmware (or keep the installer's dropped DMAR table) to get mode 0, and send the
+  back or gave the pages' physical addresses (nothing translated; the `NVRM-xnu: DMA self-test failed` line before it
+  says which). The driver will not run the GPU on untranslated addresses behind VT-d (that is what made 2.9 fail on
+  such machines). Turn VT-d off in the firmware (or keep the installer's dropped DMAR table) to get mode 0, and send the
   log line.
 - Desktop broken or GPU errors in mode 1 or 2: send `sysctl debug | grep -e nvrm_dma -e nvaccel_dma` and any AppleVTD
   fault lines naming the GPU (`log show --last boot | grep -i vtd`). Boot once with `nvrmdma=0`: if that gives a clean
