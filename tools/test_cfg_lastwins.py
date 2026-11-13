@@ -12,6 +12,8 @@ controls WITHOUT changing the path the driver uses, builds a tiny C program arou
   - the name only as the tail of a longer name         -> not matched
   - a value at the very end of the file, no newline     -> matched
   - an empty file / no file at all                      -> no value
+  - a line indented with blanks                         -> not taken (the plugin's reader would take it; the header's
+                                                           comment says so), with two controls
 
 The negative control is the reader BEFORE this change (reconstructed from the same hunk): it takes the first match
 and gives up at a comment, so it must get the first two cases wrong.
@@ -143,6 +145,8 @@ def main():
         "const char *last = NULL;" in after and "last = h;" in after and "const char *last" not in before)
     arm("the new reader documents the 8191-byte limit it keeps (differs from the plugin, which reads the file whole)",
         "first 8191 bytes" in after and "reads the file whole" in after)
+    arm("the header's comment says a line must begin with NAME= exactly, where the plugin skips blanks",
+        'a line must begin with "NAME=" exactly' in after and "where the plugin skips those blanks" in after)
 
     arm("the test can point the reader at its own file: the header names the driver's path once, as a string",
         redirected(after) is not None and redirected(before) is not None)
@@ -162,6 +166,30 @@ def main():
         for desc, name, conf, expect, _ in CASES:
             got = lookup(exe, name, conf, d, write_file=conf is not None)
             arm(f"driver reader: {desc}", got == expect, f"got {got!r}, expected {expect!r}")
+
+        # The header's comment says a line must begin with "NAME=" exactly, where the plugin's reader also takes a
+        # line indented with blanks. Pin that: an indented line for a name is not taken, and the unindented line
+        # above it stands. Control 1: the same line without its indentation is taken (the arm sees the indentation,
+        # not something else). Control 2: a reader that skips blanks before the name, as the plugin's does, takes
+        # the indented line, so this arm would fail it.
+        indented = "NVK_CHANNEL_RECOVER=1\n  NVK_CHANNEL_RECOVER=0\n\tNVK_CHANNEL_RECOVER=2\n"
+        got = lookup(exe, "NVK_CHANNEL_RECOVER", indented, d)
+        arm("driver reader: a line indented with blanks is not taken; the unindented line above it stands",
+            got == "1", f"got {got!r}, expected '1'")
+        got = lookup(exe, "NVK_CHANNEL_RECOVER", "NVK_CHANNEL_RECOVER=1\nNVK_CHANNEL_RECOVER=0\n", d)
+        arm("control: the same line without its indentation is taken", got == "0", f"got {got!r}, expected '0'")
+        start = "      if (h == conf || h[-1] == '\\n') last = h;\n"
+        skipping = ("      { const char *b = h; while (b > conf && (b[-1] == ' ' || b[-1] == '\\t')) b--;\n"
+                    "        if (b == conf || b[-1] == '\\n') last = h; }\n")
+        skipd = d / "skip"
+        skipd.mkdir()
+        skipexe, said = (build(cc, after.replace(start, skipping), skipd) if after.count(start) == 1
+                         else (None, "the reader's line-start test was not found once in the header"))
+        arm("control: a reader that skips blanks before the name builds", skipexe is not None, said)
+        if skipexe is not None:
+            got = lookup(skipexe, "NVK_CHANNEL_RECOVER", indented, skipd)
+            arm("control: a reader that skips blanks before the name takes the indented line (the arm would fail it)",
+                got != "1", f"it gave {got!r}")
 
         # negative control: the reader before this change must get the first two cases wrong.
         oldd = d / "old"
