@@ -388,7 +388,10 @@ NVAccel's own counters for its waits are `debug.nvaccel_surface_fence` and `debu
 
 ## The log lines
 
-All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then every 256th.
+All start with `NVRM-xnu: fence:`. Of each kind the first 8 are written, then every 256th; the last line of the
+table is the exception: its first 8 since boot reach the system log and every later one only the kernel's debug
+output (`kprintf`: a serial console, or a debug boot-arg), because any process can provoke it as often as it likes.
+`map_fail` and `map_mismatch` count every one.
 
 | Line | Meaning |
 |---|---|
