@@ -276,8 +276,10 @@ cast, an old frame, frames that flicker between two, one of those counters above
    - Fail: a line that says the installed codec library is a build without the Blackwell decode self-test and was
      REFUSED on this card: the library is older than the plugin beside it. Build both from the same revision and
      install both.
-   - No line at all: the process never asked (the card is not an RTX 50 by its PCI id, `NVMTL_NVENCVT=0` is set, or
-     the library is not installed root-owned), or no decode service has started yet.
+   - No such line (`log show` then prints only its header and one line that is the `log` command itself, which
+     matches its own predicate): the process never asked (the driver does not report the card's generation as
+     Blackwell, `NVMTL_NVENCVT=0` is set, or the library is not installed root-owned), or no decode service has
+     started yet.
    - PASS but a broken video: put `NVMTL_NVENCVT=0` in `nvrm610.conf` to go back to the 2.9 decoder, and send the
      line with the video's details.
 
