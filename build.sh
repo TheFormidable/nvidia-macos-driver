@@ -1164,7 +1164,7 @@ deps_python3_back() {
   case "$f" in python|python@*) ;; *) return 0 ;; esac
   case "$NL$2$NL" in *"$NL$f$NL"*) return 0 ;; esac
   if run_brew -- unlink "$f"; then
-    say "python3: Homebrew had linked $BREW_PREFIX/bin/python3, which was not there before, into $f, which these installs added; build.sh unlinked $f again (brew unlink $f), so your shell runs the python3 it ran before. $f stays installed and is reached through $BREW_PREFIX/opt/$f. To have it as python3 after all: brew link $f"
+    say "python3: Homebrew had linked $BREW_PREFIX/bin/python3, which was not there before, into $f, which these installs added; build.sh unlinked $f again (brew unlink $f), so your shell runs the python3 it ran before. $f stays installed and is reached through $BREW_PREFIX/opt/$f; brew doctor lists it among the unlinked kegs and advises brew link, which is only needed if you want it as python3, and a later brew install or upgrade that has to upgrade it as a dependency of another formula links it again (brew unlink $f undoes that). To have it as python3 after all: brew link $f"
   else
     say "python3: brew unlink $f failed, so a shell that has $BREW_PREFIX/bin before /usr/bin now runs Homebrew's python3 ($f) instead of the one it ran before; brew unlink $f puts that back. deps goes on"
   fi
