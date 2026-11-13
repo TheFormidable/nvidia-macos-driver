@@ -156,16 +156,21 @@ def git_quiet(env):
 # process group): it lists the machine's processes twice a second for as long as its pid file exists, which is for
 # good when the test was run by hand, and a watch the stall controls stopped (SIGSTOP) stays stopped even after the
 # runner deletes the folder. The guard is a small process of its own session as well: it notes every watch this test
-# starts and, once the test's process is gone, removes the pid file (every watch then ends by itself) and ends each of
-# those watches that is still there, also a stopped one. It names the folder only in its environment, so that the
-# test's own last check ("no watch is left running") does not see it.
+# starts (it looks once a second, and once more when the test's process is gone: a watch started since its last look
+# would else stay unknown to it) and then removes the pid file (every watch then ends by itself) and ends each of those
+# watches that is still there, also a stopped one. It names the folder only in its environment, so that the test's own
+# last check ("no watch is left running") does not see it.
 GUARD = r'''seen=" "
-# a killed test that its parent has not reaped yet is a zombie, which kill -0 still finds: that one is gone too
-while kill -0 "$NMT_PID" 2>/dev/null && case "$(ps -o stat= -p "$NMT_PID" 2>/dev/null)" in *Z*) false ;; *) true ;; esac; do
+note() {   # the watch the pid file names now, when it is one not noted yet
   p=$(sed -n 1p "$NMT_CI/brew-watch.pid" 2>/dev/null)
   case "$p" in ""|*[!0-9]*) ;; *) case "$seen" in *" $p "*) ;; *) seen="$seen$p " ;; esac ;; esac
+}
+# a killed test that its parent has not reaped yet is a zombie, which kill -0 still finds: that one is gone too
+while kill -0 "$NMT_PID" 2>/dev/null && case "$(ps -o stat= -p "$NMT_PID" 2>/dev/null)" in *Z*) false ;; *) true ;; esac; do
+  note
   sleep 1
 done
+note   # a watch started after the last look
 rm -f "$NMT_CI/brew-watch.pid"
 for p in $seen; do
   case "$(ps -o command= -p "$p" 2>/dev/null)" in *"watch-loop $NMT_CI "*) kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null ;; esac
@@ -173,9 +178,9 @@ done
 '''
 
 
-def guard(ci, pid):
+def guard(ci, pid, script=GUARD):
     """starts the guard of the watches in <ci> for as long as process <pid> lives"""
-    return subprocess.Popen(["/bin/sh", "-c", GUARD], env={"PATH": "/usr/bin:/bin", "NMT_PID": str(pid), "NMT_CI": str(ci)},
+    return subprocess.Popen(["/bin/sh", "-c", script], env={"PATH": "/usr/bin:/bin", "NMT_PID": str(pid), "NMT_CI": str(ci)},
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
@@ -591,8 +596,10 @@ def main():
             os.kill(wp, signal.SIGSTOP)
             time.sleep(12)
             if resume:
+                n0, end = lists(), time.time() + 60
                 os.kill(wp, signal.SIGCONT)
-                time.sleep(1.5)
+                while lists() == n0 and time.time() < end:   # the next list is the one that carries the gap
+                    time.sleep(0.2)
             r = sc.prove(watch=False)
             try:
                 os.kill(wp, signal.SIGCONT)   # a stopped watch gets prove's SIGTERM only now
@@ -826,31 +833,49 @@ def main():
             "core.fsmonitor is not started); control: the same git status with the tester's configuration starts it",
             rc_x == 0 and not ran and fsmon.with_name("fsmonitor.calls").exists(), (rc_x, ran, o_x[-600:]))
 
-        # the guard (GUARD): a test that is killed leaves no watch running, also not one a stall control stopped
+        # the guard (GUARD): a test that is killed leaves no watch running, also not one a stall control stopped and
+        # not one it started just before it was killed
+        def killed_test(ci2, script, first_look=None):
+            """-> the watches a test started for <ci2> right before it was killed, and those left once its guard has
+            ended (first_look: a file the guard makes after its first look, waited for before the watch is started)"""
+            stands_for_test = subprocess.Popen(["sleep", "120"])
+            g = guard(ci2, stands_for_test.pid, script)
+            end = time.time() + 30
+            while first_look is not None and not first_look.exists() and time.time() < end:
+                time.sleep(0.1)
+            run([sc.script, "watch-start", ci2, sc.p], sc.env)
+            started = watches(ci2)
+            for pid, _ in started:
+                os.kill(pid, signal.SIGSTOP)
+            stands_for_test.kill()   # not reaped until the guard is done: a killed test whose parent has not waited for it yet
+            try:
+                g.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                g.kill()
+            stands_for_test.wait()
+            end = time.time() + (10 if first_look is None else 1)
+            while watches(ci2) and time.time() < end:
+                time.sleep(0.2)
+            left = watches(ci2)
+            for pid, _ in left:   # what was found, so that this test itself leaves nothing
+                for sg in (signal.SIGCONT, signal.SIGKILL):
+                    try:
+                        os.kill(pid, sg)
+                    except ProcessLookupError:
+                        pass
+            return started, left
         ci2 = tmp / "ci-guarded"
-        stands_for_test = subprocess.Popen(["sleep", "120"])
-        g = guard(ci2, stands_for_test.pid)
-        run([sc.script, "watch-start", ci2, sc.p], sc.env)
-        time.sleep(2.5)   # the guard reads the pid file once a second
-        started = watches(ci2)
-        for pid, _ in started:
-            os.kill(pid, signal.SIGSTOP)
-        stands_for_test.kill()   # not reaped until the guard is done: a killed test whose parent has not waited for it yet
-        try:
-            g.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            g.kill()
-        stands_for_test.wait()
-        time.sleep(1)
-        left = watches(ci2)
-        arm("a killed test leaves no watch running: once its process is gone (also while it is an unreaped zombie), its guard ends every watch it started, also a stopped one",
+        started, left = killed_test(ci2, GUARD)
+        arm("a killed test leaves no watch running: once its process is gone (also while it is an unreaped zombie), its guard ends every watch it started, "
+            "also a stopped one and one started after the guard's last look",
             len(started) == 1 and not left and not (ci2 / "brew-watch.pid").exists(), (started, left))
-        for pid, _ in left:   # what the arm found, so that this test itself leaves nothing
-            for sg in (signal.SIGCONT, signal.SIGKILL):
-                try:
-                    os.kill(pid, sg)
-                except ProcessLookupError:
-                    pass
+        # the control's guard looks once, says so, and then sleeps longer than watch-start can take
+        ci3 = tmp / "ci-guarded-late"
+        looks_once = GUARD.replace("note   # a watch started after the last look\n", "").replace('  sleep 1\n', '  : > "$NMT_CI.looked"; sleep 20\n')
+        assert looks_once.count("note\n") == 1 and "sleep 20" in looks_once
+        started, left = killed_test(ci3, looks_once, first_look=tmp / "ci-guarded-late.looked")
+        arm("control: a guard that does not look again once the test is gone leaves a stopped watch the test started after its last look",
+            len(started) == 1 and len(left) == 1, (started, left))
         # nothing of the watch is left running
         left = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
         arm("no watch is left running", str(sc.ci) not in left, "")
