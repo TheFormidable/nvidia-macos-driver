@@ -193,8 +193,8 @@ sudo ./uninstall.sh && sudo shutdown -r now
 
 On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools; the whole
 driver has been built with Xcode 26.3 (SDK 26.2), the newest Xcode that runs on macOS 15, and with Xcode 26.5, not yet
-with Xcode 26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and branch name in
-place of `<owner>` and `<branch>` (the original project's repository does not have `build.sh`):
+with Xcode 26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and
+branch name in place of `<owner>` and `<branch>` (the original project's repository does not have `build.sh`):
 
 ```bash
 git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
@@ -204,27 +204,28 @@ cd nvidia-macos-driver
 ```
 
 `./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac and, after asking,
-gets the build tools it lacks: on an Intel Mac it builds them from pinned sources into its working directory and
-calls no Homebrew, even when Homebrew is installed; on Apple silicon it installs the missing Homebrew formulas with the
+gets the build tools it lacks: on an Intel Mac it builds them from pinned sources into its working directory and calls
+no Homebrew, even when Homebrew is installed; on Apple silicon it installs the missing Homebrew formulas with the
 Homebrew of the Mac's own processor (only those, and what Homebrew installs for them; `build.sh` upgrades and removes
 nothing, though Homebrew may upgrade an outdated dependency of a formula it installs). It makes a Python environment
 and a Rust toolchain inside its working directory (`~/nullmoth-build` by default, never inside the checkout),
-downloads NVIDIA's `open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
-checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the plugin, the
-translator, the video library and the tools. Each part is a step with its own log; a step whose inputs did not change
-is skipped the next time. It never calls `sudo` and never installs the driver: at the end it prints the `install.sh`
-command to run yourself. After a whole build and package on the Intel Mac named at the top, nothing outside the
-working directory had changed (Homebrew's folders, the shell's settings files, the user's own Rust) and no file it
-made named the user's home folder.
+downloads NVIDIA's `open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other
+pinned sources, checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the
+plugin, the translator, the video library and the tools. Each part is a step with its own log; a step whose inputs did
+not change is skipped the next time. It never calls `sudo` and never installs the driver: at the end it prints the
+`install.sh` command to run yourself. After a whole build and package on the Intel Mac named at the top, nothing
+outside the working directory had changed (Homebrew's folders, the shell's settings files, the user's own Rust) and no
+file it made named the user's home folder.
 
 On an Intel Mac the first `./build.sh` builds the missing build tools (LLVM 22 above all) from pinned sources. From an
-empty working directory `deps` took 46.5 minutes on that Intel Mac (building LLVM about 30 of them) and `fetch`
-40 seconds there, and `deps` took 3 hours 53 minutes on GitHub's Intel runner; it needs 10 GB of free space while LLVM
-builds. In a later run on that Mac with those tools kept, `deps` took 49 seconds, the build of all 17 components
-5 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon
-`deps` installs Homebrew's ready-made tools instead. That path has run only against a stand-in for Homebrew: no whole
-build with `build.sh` has run on an Apple-silicon Mac, and the host tests have not passed whole on one. GitHub's Apple-silicon runner compiles and links the kexts; at commit
-95811c2 they had the same bytes as the kexts built on GitHub's Intel runner.
+empty working directory `deps` took 46.5 minutes on that Intel Mac (building LLVM about 30 of them) and `fetch` 40
+seconds there, and `deps` took 3 hours 53 minutes on GitHub's Intel runner; it needs 10 GB of free space while LLVM
+builds. In a later run on that Mac with those tools kept, `deps` took 49 seconds, the build of all 17 components 5
+minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon `deps`
+installs Homebrew's ready-made tools instead. That path has run only against a stand-in for Homebrew: no whole build
+with `build.sh` has run on an Apple-silicon Mac, and the host tests have not passed whole on one. GitHub's
+Apple-silicon runner compiles and links the kexts; at commit 95811c2 they had the same bytes as the kexts built on
+GitHub's Intel runner.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
 repository, so a package is the release's with every part this checkout builds replaced):
@@ -240,9 +241,10 @@ scripts read, to run one of them by hand. [docs/BUILDING.md](docs/BUILDING.md) e
 to do when a step fails ([en español](docs/BUILDING.es.md)).
 
 `build.sh` was written on Linux and tested there against stand-ins for Xcode, Homebrew and the build scripts;
-[docs/BUILDING.md](docs/BUILDING.md) says which of its paths have since run on the two Intel Macs above and which
-only against the stand-ins. A step can still stop on something neither the stand-ins nor those two Macs showed
-(another Xcode or SDK, a formula name, a compiler warning). When a step stops, the message names it and gives a report file to attach to an issue.
+[docs/BUILDING.md](docs/BUILDING.md) says which of its paths have since run on the two Intel Macs above and which only
+against the stand-ins. A step can still stop on something neither the stand-ins nor those two Macs showed (another
+Xcode or SDK, a formula name, a compiler warning). When a step stops, the message names it and gives a report file to
+attach to an issue.
 
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black. `./build.sh` does this by
