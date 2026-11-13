@@ -16,13 +16,12 @@ the kext and the adapter's power state; a kext without it fails the escape once 
 NVK_CHANNEL_RECOVER=0 runs the 2.9 code; NVK_FAULT_INJECT=<stall|fake|reset|mmu>:<n>[:<process>] is the test hook.
 Both are read from the environment or from /Library/GPUBundles/nvmtl/nvrm610.conf; a release build sees only the file.
 tools/test_channel_recover.py holds the wiring.
-Two whole-branch review corrections ride in this patch. Channel recovery now treats a fault on any copy engine
-(not only engines 0 to 2) as a channel loss it rebuilds: this card's upload channel is copy engine 4, whose
-fault is Xid 71, which 2.9 lost the device on. And the nvrm610.conf reader (nvmtl_cfg.h) now keeps the last line
-that begins with a name, as the Metal plugin's reader does, so a shipped line or a comment above the user's own
-line no longer wins in a Vulkan-only process; it still reads only the first 8191 bytes. The nvrm_chan_note_abi.h
-comment is made exact (the note answers before both gates; the power state it returns reads suspended while RM
-calls are held).
+A fault on any copy engine is a channel loss that is rebuilt: the upload channel of an RTX 50 card runs on copy
+engine 4, whose fault is Xid 71, and 2.9 lost the device on it. The patch also changes 2.9's nvrm610.conf reader
+(src/nouveau/vulkan/nvmtl_cfg.h): it keeps the last line that begins with a name, as the Metal plugin's reader
+does, where 2.9 kept the first, so a shipped line or a comment above the user's own line does not win in a process
+that loads NVK without the plugin; the header's comment lists where it still differs from the plugin's reader.
+Leaving this patch out of the chain also brings back the first-line-wins reader.
 
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
 index 4f2ea7e..b6a30ba 100644
@@ -2328,7 +2327,7 @@ index 0000000..2d80ffc
 +#endif /* NVKMD_NVRM_RECOVER_H */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 new file mode 100644
-index 0000000..d2288b6
+index 0000000..e4406c4
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 @@ -0,0 +1,666 @@
