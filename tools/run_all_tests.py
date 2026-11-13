@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""run_all_tests.py [-j N] [name ...]: every host test in tools/, in one run, with one answer.
+"""run_all_tests.py [-j N] [--tail N] [name ...]: every host test in tools/, in one run, with one answer.
 
 The tests are separate programs (Python scripts, C and C++ files with their build line in the header comment, shell
 scripts), and nothing ran them all: seven of them had been failing unnoticed because the code they lift pieces from had
-moved on. This runs each one, prints the failures with the end of their output, and exits 1 if any failed.
+moved on. This runs each one, prints the failures with the end of their output (the last 1200 characters, or the last N
+with --tail N), and exits 1 if any failed.
 
   Python   tools/test_*.py, run as they are.
   C, C++   tools/test_*.c and .cpp whose header names their build ("cc <flags> <file> -o /tmp/x && /tmp/x"): built into a
@@ -49,6 +50,7 @@ NEEDS_INPUT = {
 }
 BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+\S+")
 TIMEOUT = 600
+TAIL = 1200              # characters of a failed test's output that are printed (--tail)
 # A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
 # real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
 # 376 s alone on an Intel Mac with 12 CPUs and grows under load with -j 4, so the general 600 s is too tight for it.
@@ -167,7 +169,7 @@ def run_one(path, names=frozenset()):
                 return name, "norun", "its header names no build line"
             b = run(cmd[0], cmd[1], env, limit)
             if b.returncode:
-                return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
+                return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-TAIL:]
             r = run([str(t / "t")], cmd[1], env, limit)
     except subprocess.TimeoutExpired:
         return name, "FAIL", f"no result after {limit} s"
@@ -178,13 +180,18 @@ def run_one(path, names=frozenset()):
         return name, "ok", ""
     if r.returncode == 2 and "SKIP" in out:
         return name, "skip", out.strip().splitlines()[-1][:200]
-    return name, "FAIL", f"exit {r.returncode}\n" + out[-1200:]
+    return name, "FAIL", f"exit {r.returncode}\n" + out[-TAIL:]
 
 
 def main(argv):
+    global TAIL
     jobs = 4
-    if argv[:1] == ["-j"]:
-        jobs, argv = int(argv[1]), argv[2:]
+    while argv[:1] in (["-j"], ["--tail"]):
+        if argv[0] == "-j":
+            jobs = int(argv[1])
+        else:
+            TAIL = int(argv[1])
+        argv = argv[2:]
     tests = sorted(p for p in TOOLS.glob("test_*") if p.suffix in (".py", ".c", ".cpp", ".sh"))
     if argv:
         tests = [p for p in tests if p.name in argv or p.stem in argv]

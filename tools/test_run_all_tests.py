@@ -366,5 +366,29 @@ out = limit_run(no_table, "test_build_sh.py", 4)
 arm("control: without its own limit test_build_sh.py is held to the general limit and stopped", "no result after 2 s" in out, out)
 
 
+# ---- how much of a failed test's output is printed: the last 1200 characters, or the last N with --tail N
+def tail_run(runner_text, *opts):
+    """Run a scratch test that prints a first line, 5000 characters and a last line, then fails. -> the runner's output."""
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        (root / "tools").mkdir()
+        (root / "tools/run_all_tests.py").write_text(runner_text)
+        (root / "tools/test_long.py").write_text("import sys\nprint('FIRST-LINE')\nprint('x' * 5000)\nprint('LAST-LINE')\nsys.exit(1)\n")
+        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py"), *opts, "test_long"],
+                           env=CLEAN, capture_output=True, text=True, timeout=120)
+        return r.returncode, r.stdout + r.stderr
+
+
+rc, out = tail_run(RUNNER)
+arm("a failed test's output is cut to its last 1200 characters by default", rc == 1 and "LAST-LINE" in out and "FIRST-LINE" not in out
+    and out.count("x") < 1300, out[-400:])
+rc, out = tail_run(RUNNER, "-j", "2", "--tail", "20000")
+arm("--tail 20000 (beside -j) prints the whole of it", rc == 1 and "FIRST-LINE" in out and "LAST-LINE" in out and "1 failed" in out, out[-400:])
+rc, out = tail_run(RUNNER, "--tail", "300")
+arm("--tail 300 prints less than the default", rc == 1 and "LAST-LINE" in out and out.count("x") < 300, out[-400:])
+rc, out = tail_run(RUNNER.replace("out[-TAIL:]", "out[-1200:]"), "--tail", "20000")
+arm("control: a runner that ignores the option still cuts the output", rc == 1 and "FIRST-LINE" not in out, out[-400:])
+
+
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
