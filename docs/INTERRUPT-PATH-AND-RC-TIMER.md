@@ -93,9 +93,10 @@ by the user-space driver's own wait budget.
 
 Differences from Linux, on purpose: the tick re-arms whatever `rm_run_rc_callback` returns (Linux lets the timer die on
 the first refusal, such as a tick that lands during a power transition); and the driver pauses the timer itself before
-RM standby (sleep, RTD3 and the shutdown path) and resumes it only after a resume that worked, instead of leaving it to
-fire at a GPU without power. When the GPU stops, the timer is stopped by `rm_disable_adapter` and then let go of for
-good, before the GPU's state is freed: no tick can reach a GPU that is gone.
+RM standby (sleep, RTD3 and the shutdown path; it waits up to 2 s for a tick that is running) and resumes it only
+after a resume that worked, instead of leaving it to fire at a GPU without power. When the GPU stops, the timer is
+stopped by `rm_disable_adapter` (up to 10 s for a running tick) and then let go of for good, before the GPU's state is
+freed: no tick can reach a GPU that is gone.
 
 | Name | Kind | Meaning |
 |---|---|---|
@@ -133,7 +134,7 @@ Now:
 
 | Name | Kind | Meaning |
 |---|---|---|
-| `debug.nvrm_nano_slots` | sysctl | Timer slots made (tens) |
+| `debug.nvrm_nano_slots` | sysctl | Timer slots made, 32 at a time |
 | `debug.nvrm_nano_live` | sysctl | Timers in use; returns to its idle value after the apps quit |
 | `debug.nvrm_nano_fires` | sysctl | Callbacks run |
 | `debug.nvrm_nano_stale` | sysctl | Late callbacks turned away |
