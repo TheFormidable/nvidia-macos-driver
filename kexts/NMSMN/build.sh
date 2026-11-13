@@ -31,6 +31,7 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min="$MIN" -fapple-kext -nostdlib \
 lrc=$?
 if [ $lrc -ne 0 ]; then echo "LINK FAILED (rc=$lrc)"; head -12 "$OUT/$NAME.link.err"; exit 1; fi
 bash "$SRC/../../build/warn_ceiling.sh" nmsmn-link "$(grep -c 'warning' "$OUT/$NAME.link.err")" "$OUT/$NAME.link.err" || exit 4
+xcrun nm -u "$K/Contents/MacOS/$NAME" | bash "$SRC/../../build/kext_link_imports.sh" - "$NAME.kext" || exit 7   # a name no macOS defines
 cp "$SRC/Info.plist" "$K/Contents/Info.plist"
 echo "$(shasum -a 256 "$K/Contents/MacOS/$NAME" | cut -c1-16)  $(stat -f %z "$K/Contents/MacOS/$NAME") B"
 echo "kmod_info:    $(nm "$K/Contents/MacOS/$NAME" | grep -c "_kmod_info")"

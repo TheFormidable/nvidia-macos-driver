@@ -62,6 +62,7 @@ case "$role" in
       libtool) out=""; list=""; shift
                while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; -filelist) list=$2; shift ;; esac; shift; done
                { while read -r f; do cat "$f"; done < "$list"; printf '%s\n' "${NMT_ARCHIVE_EXTRA:-}"; } > "$out" ;;
+      nm) [ "${2:-}" = -u ] && { printf '%s\n' _IOLog __ZN9IOService5startEPS_; exit 0; }; exec "$@" ;;   # a linked kext's imports
       *) exec "$@" ;;
     esac ;;
 esac
@@ -134,9 +135,9 @@ def repo(base, old, edit=None):
     edit: (old text, new text) for build_rm620.sh, a control's broken copy."""
     r = base / ("repo-old" if old else "repo-edit" if edit else "repo")
     # files that came after OLD: the old scripts neither have nor call them
-    later = ("build/rm_defines.sh", "build/nv_compile_lines.py")
+    later = ("build/rm_defines.sh", "build/nv_compile_lines.py", "build/kext_link_imports.sh")
     for rel in ("build/build_rm620.sh", "build/build_kms620.sh", "build/accel_build.sh", "build/rm_defines.sh",
-                "build/nv_compile_lines.py", "build/warn_ceiling.sh", "build/warnings.txt"):
+                "build/nv_compile_lines.py", "build/kext_link_imports.sh", "build/warn_ceiling.sh", "build/warnings.txt"):
         p = r / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         if old and rel not in later:

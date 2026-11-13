@@ -79,6 +79,9 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xli
 bash "$HERE/warn_ceiling.sh" nvrm-link "$(grep -c 'warning' "$OUT/link.err")" "$OUT/link.err" || exit 4
 cp "$SRC/Info.plist" "$OUT/NVRM.kext/Contents/Info.plist"
 xcrun nm -u "$OUT/NVRM.kext/Contents/MacOS/NVRM" > "$OUT/imports.txt"
+# a name no macOS defines (the helper of a Linux-kernel compiler option, as NVKMS built on an Intel Mac once imported)
+# stops here, before the kext is signed or packaged: such a kext links and then never loads
+bash "$HERE/kext_link_imports.sh" "$OUT/imports.txt" NVRM.kext || exit 7
 xcrun nm "$OUT/NVRM.kext/Contents/MacOS/NVRM" > "$OUT/symbols.txt"
 xcrun strip -S "$OUT/NVRM.kext/Contents/MacOS/NVRM"
 echo "NVRM $(shasum -a 256 "$OUT/NVRM.kext/Contents/MacOS/NVRM" | cut -c1-16) $(stat -f %z "$OUT/NVRM.kext/Contents/MacOS/NVRM") B uuid $(xcrun otool -l "$OUT/NVRM.kext/Contents/MacOS/NVRM" | awk '/LC_UUID/{getline; getline; print $2; exit}') from $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo "$SRC")"

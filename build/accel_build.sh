@@ -22,5 +22,6 @@ xcrun clang++ "${CFLAGS[@]}" -I"$SRC/accel" -I"$SRC/accel/iofam" -I"$RE" -c "$SR
 bash "$(dirname "$0")/warn_ceiling.sh" nvaccel "$(grep -c ': warning:' "$OUT/accel.err")" "$OUT/accel.err" || exit 4
 xcrun clang++ -arch x86_64 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/nvrm-accel.o" -o "$OUT/NVAccel.kext/Contents/MacOS/NVAccel" 2>"$OUT/accelld.err" || { cat "$OUT/accelld.err" | head; exit 1; }
 bash "$(dirname "$0")/warn_ceiling.sh" nvaccel-link "$(grep -c 'warning' "$OUT/accelld.err")" "$OUT/accelld.err" || exit 4
+xcrun nm -u "$OUT/NVAccel.kext/Contents/MacOS/NVAccel" | bash "$(dirname "$0")/kext_link_imports.sh" - NVAccel.kext || exit 7   # a name no macOS defines
 cp "$SRC/accel/Info.plist" "$OUT/NVAccel.kext/Contents/Info.plist"
 echo "NVAccel $(md5 -q "$OUT/NVAccel.kext/Contents/MacOS/NVAccel") $(stat -f %z "$OUT/NVAccel.kext/Contents/MacOS/NVAccel") B  ($(xcrun clang++ --version | head -1))"
