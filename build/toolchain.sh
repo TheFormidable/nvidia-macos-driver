@@ -371,7 +371,7 @@ check_openssl() {
   grep -q 'BEGIN CERTIFICATE' "$P/ssl/cert.pem" 2>/dev/null || bad "ssl/cert.pem holds no certificate"
 }
 
-# zstd 1.5.7, static, only for Python's compression.zstd (the driver's tests import it). Its own Makefile in lib/, in a
+# zstd 1.5.7, static, only for Python's compression.zstd (a test uses it where present). Its own Makefile in lib/, in a
 # copy of the tree, as on the Mac: the static library and the headers only (no programs, which would look for zlib, lzma
 # and lz4).
 recipe_zstd() {
