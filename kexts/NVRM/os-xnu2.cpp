@@ -530,13 +530,20 @@ extern "C" bool nv_pm_is_gpu_fb(NvU64 start, NvU64 size)
     const NvU64 b = nv->bars[NV_GPU_BAR_INDEX_FB].cpu_address, s = nv->bars[NV_GPU_BAR_INDEX_FB].size;
     return b && s && start >= b && start + size <= b + s && start + size >= start;
 }
+extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index);   // NVRM.cpp: NULL past the last started card
+// Inside one of the windows of any started card. The primary is looked at first, as it always was, then every card
+// the device table lists: with nvmultigpu=1 there can be up to eight, and the surface fence relies on this to refuse
+// a page in any card's registers or apertures, not only the first card's. No lock: the table is read as the primary
+// is, and a card's window addresses are set during its start, before it has a client. With one card the table holds
+// only the primary, so the answer is the one it always was.
 extern "C" bool nv_pm_is_gpu(NvU64 start, NvU64 size)
 {
     nv_state_t *nv = nv_xnu_gpu_state(); if (!nv) return false;
-    for (int i = 0; i < NV_GPU_NUM_BARS; i++) {
-        NvU64 b = nv->bars[i].cpu_address, s = nv->bars[i].size;
-        if (b && s && start >= b && start + size <= b + s && start + size >= start) return true;
-    }
+    for (unsigned g = 0; nv && g <= 8; nv = nv_xnu_gpu_state_at(g++))
+        for (int i = 0; i < NV_GPU_NUM_BARS; i++) {
+            NvU64 b = nv->bars[i].cpu_address, s = nv->bars[i].size;
+            if (b && s && start >= b && start + size <= b + s && start + size >= start) return true;
+        }
     return false;
 }
 extern "C" void nv_pm_foreign(NvU64 start, NvU64 size, NvU32 mode, void *caller)
