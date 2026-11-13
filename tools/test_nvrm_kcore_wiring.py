@@ -126,6 +126,58 @@ def problems(src):
     if not fl or not re.search(r"if \(q->abandoned\) \{ wq_unlock\(q, s\); return NV_ERR_TIMEOUT; \}", fl) \
             or fl.find("q->abandoned) {") > fl.find("assert_wait_timeout("):
         out.append("a flush of an abandoned queue waits")
+    # The glue of the default-on work queue: the worker's wakes and the flush and stop bounds. Each of these is the
+    # only thing that keeps a boot, a sleep or a shutdown from waiting for ever, and none of them is read by any other
+    # test. A later edit that drops one would leave the owner's machine hanging with every test still green.
+    worker = body(k, "static void wq_worker(")
+    if not worker:
+        out.append("wq_worker not found")
+    else:
+        # after completing an item, under the lock, the worker must wake a flush that is waiting on done_seq
+        c = worker.find("nvwq_complete(")
+        fw = worker.find("thread_wakeup(&q->core.done_seq)")
+        cu = worker.find("wq_unlock(q, s)", c) if c >= 0 else -1
+        if not (0 <= c < fw < cu):
+            out.append("wq_worker does not wake a flush waiter after completing an item")
+        # when it leaves, the worker must wake a stop that is waiting on alive, before its last unlock
+        aw = worker.rfind("thread_wakeup(&q->alive)")
+        lu = worker.rfind("wq_unlock(q, s)")
+        if not (0 <= aw < lu):
+            out.append("wq_worker does not wake a stop waiter before it leaves")
+    # every locked region of os_queue_work_item that enqueues an item must then wake the parked worker (the first
+    # region's wake is `if (q->idle) ...`, the spare-node region's is `if (r == 0 && q->idle) ...`): the arm asks only
+    # that a wake of &q->core.head follow the enqueue in that region, so both forms pass
+    oqwi = body(k, "NV_STATUS NV_API_CALL os_queue_work_item(")
+    enq_regions = [r for r in locked_regions(oqwi or "", "= wq_lock(q)", "wq_unlock(q, s)") if "nvwq_enqueue(" in r]
+    if not enq_regions:
+        out.append("os_queue_work_item has no locked region that enqueues an item")
+    for r in enq_regions:
+        e = r.find("nvwq_enqueue(")
+        w = r.find("thread_wakeup(&q->core.head)")
+        if not (0 <= e < w):
+            out.append("os_queue_work_item does not wake the parked worker after enqueuing an item")
+    # nv_xnu_wq_flush must test the cap and break out before it sleeps again, or every bound (stop 30 s, shutdown 2 s,
+    # sleep 5 s) disappears
+    if fl:
+        cap = fl.find("if (cap_ms && waited_ms >= cap_ms)")
+        awt = fl.find("assert_wait_timeout(&q->core.done_seq")
+        if not (0 <= cap < awt):
+            out.append("nv_xnu_wq_flush does not bound its wait by cap_ms before sleeping")
+    # nv_xnu_wq_gpu_down must set the queue stopping and wake the worker before it waits for the worker to leave
+    down = body(k, "void nv_xnu_wq_gpu_down(")
+    if down:
+        st = down.find("q->core.state = NVWQ_STOPPING")
+        wk = down.find("thread_wakeup(&q->core.head)")
+        loop = down.find("while (!gave_up && q->alive)")
+        if not (0 <= st < wk < loop):
+            out.append("nv_xnu_wq_gpu_down does not ask the worker to stop and wake it before it waits")
+    # nvx_atomic_free, when it cannot block, must schedule the thread call that drains the deferred-free list, once
+    af = body(k, "int nvx_atomic_free(")
+    if af:
+        pe = af.find("__atomic_exchange_n(&nvx_dfree_pending, 1, __ATOMIC_ACQ_REL)")
+        tc = af.find("thread_call_enter(nvx_dfree_call)")
+        if not (0 <= pe < tc):
+            out.append("nvx_atomic_free does not schedule the deferred-free drain")
     # a slot that is started again keeps its numbers and its flusher counts: a flush of its previous owner may still
     # be on its way out. The bookkeeping is initialised only where the slot gets its lock, and the run state changes
     # only under that lock
@@ -235,6 +287,33 @@ def main():
             "nv_xnu_wq_flush(NULL, false, 30000);", "gpuSuspend() does not flush")
     control("a flush that waits on an abandoned queue", "nv_xnu_kcore.cpp",
             "    if (q->abandoned) { wq_unlock(q, s); return NV_ERR_TIMEOUT; }\n", "", "a flush of an abandoned queue waits")
+    # K1: the worker drops the flush wake. Then every flush sleeps out its 5 s slices instead of being woken when the
+    # queue drains.
+    control("the worker without its flush wake", "nv_xnu_kcore.cpp",
+            "        if (q->core.flush_waiters) thread_wakeup(&q->core.done_seq);\n", "",
+            "wq_worker does not wake a flush waiter after completing an item")
+    # K2: os_queue_work_item drops the first region's wake. An item queued while the worker is parked never runs, and
+    # the next unbounded flush never returns.
+    control("the enqueue without its wake", "nv_xnu_kcore.cpp",
+            "        if (q->idle) thread_wakeup(&q->core.head);\n", "",
+            "os_queue_work_item does not wake the parked worker after enqueuing an item")
+    # K3: the worker leaves without waking a stop waiter. nv_xnu_wq_gpu_down then loses up to about 5 s per stop (its
+    # slices are 5 s), not the whole cap.
+    control("the worker without its stop wake", "nv_xnu_kcore.cpp", "    thread_wakeup(&q->alive);\n", "",
+            "wq_worker does not wake a stop waiter before it leaves")
+    # K5: the flush drops the cap test, so the 30 s / 2 s / 5 s bounds of stop, shutdown and sleep all disappear.
+    control("the flush without its cap test", "nv_xnu_kcore.cpp",
+            "            if (cap_ms && waited_ms >= cap_ms) { st = NV_ERR_TIMEOUT; break; }\n", "",
+            "nv_xnu_wq_flush does not bound its wait by cap_ms before sleeping")
+    # K4: gpu_down never sets the queue stopping, so the worker never leaves and gpu_down runs to its cap.
+    control("the stop that never asks the worker to stop", "nv_xnu_kcore.cpp",
+            "    if (q->core.state == NVWQ_RUN) q->core.state = NVWQ_STOPPING;\n", "",
+            "nv_xnu_wq_gpu_down does not ask the worker to stop and wake it before it waits")
+    # A2: heap frees made where blocking is not allowed pile on the deferred list and are never freed.
+    control("the deferred free never scheduled", "nv_xnu_kcore.cpp",
+            "    if (!__atomic_exchange_n(&nvx_dfree_pending, 1, __ATOMIC_ACQ_REL)) thread_call_enter(nvx_dfree_call);\n",
+            "    (void)__atomic_exchange_n(&nvx_dfree_pending, 1, __ATOMIC_ACQ_REL);\n",
+            "nvx_atomic_free does not schedule the deferred-free drain")
     control("a slot initialised again each time it is started", "nv_xnu_kcore.cpp",
             "    IOInterruptState s = wq_lock(q);\n    const bool ok = !q->alive && nvwq_restart(&q->core) == 0;",
             "    nvwq_core_init(&q->core);\n    IOInterruptState s = wq_lock(q);\n"

@@ -49,6 +49,11 @@ NEEDS_INPUT = {
 }
 BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+\S+")
 TIMEOUT = 600
+# A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
+# real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
+# 376 s alone on the owner's Mac and grows under load with -j 4, so the general 600 s is too tight for it. The limit is
+# per test name; every other test keeps TIMEOUT.
+PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}
 # the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
 KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_", "MESA_", "NIR_", "RADV_", "ACO_")
 # listed in switches.tsv because the driver reads them too, and still the tester's to give
@@ -70,7 +75,7 @@ def stop(p):
         pass
 
 
-def run(argv, cwd, env):
+def run(argv, cwd, env, timeout=TIMEOUT):
     """subprocess.run, but the program is a session of its own (no controlling terminal) with /dev/null as its input, and
     at the limit it is stopped with everything it started: killing only the test would leave its children running, still
     writing into the temporary folder that is deleted next."""
@@ -79,7 +84,7 @@ def run(argv, cwd, env):
     with RUNNING_LOCK:
         RUNNING.add(p)
     try:
-        out, err = p.communicate(timeout=TIMEOUT)
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         stop(p)
         try:
@@ -143,14 +148,15 @@ def run_one(path, names=frozenset()):
     name = path.name
     if name in NEEDS_INPUT:
         return name, "norun", NEEDS_INPUT[name]
+    limit = PER_TEST_TIMEOUT.get(name, TIMEOUT)
     tmp = tempfile.mkdtemp(prefix="nmtest-")
     OWN_TMPS.add(os.path.realpath(tmp))
     env = test_env(tmp, names)
     try:
         if path.suffix == ".py":
-            r = run([sys.executable, str(path)], ROOT, env)
+            r = run([sys.executable, str(path)], ROOT, env, limit)
         elif path.suffix == ".sh":
-            r = run(["/bin/bash", str(path)], TOOLS, env)
+            r = run(["/bin/bash", str(path)], TOOLS, env, limit)
         else:
             t = Path(tmp) / "build"
             t.mkdir()
@@ -159,12 +165,12 @@ def run_one(path, names=frozenset()):
                 return name, "norun", "its build line needs a path filled in (see its header)"
             if not cmd:
                 return name, "norun", "its header names no build line"
-            b = run(cmd[0], cmd[1], env)
+            b = run(cmd[0], cmd[1], env, limit)
             if b.returncode:
                 return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-1200:]
-            r = run([str(t / "t")], cmd[1], env)
+            r = run([str(t / "t")], cmd[1], env, limit)
     except subprocess.TimeoutExpired:
-        return name, "FAIL", f"no result after {TIMEOUT} s"
+        return name, "FAIL", f"no result after {limit} s"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     out = (r.stdout + r.stderr)

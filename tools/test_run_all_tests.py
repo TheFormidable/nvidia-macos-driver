@@ -338,5 +338,33 @@ pid, running, tty, out = bg_run(loose, "test_hang.py")
 arm("control: in the runner's session what it started outlives it", pid and running, (pid, out))
 
 
+# ---- a per-test time limit: a named test may run past the general limit, others may not
+def limit_run(runner_text, test_name, sleep_s):
+    """Run a scratch test <test_name> that sleeps sleep_s then passes, under a runner whose general limit is 2 s and
+    whose table gives test_build_sh.py 8 s. -> the runner's output."""
+    text = runner_text.replace("TIMEOUT = 600", "TIMEOUT = 2").replace('"test_build_sh.py": 1200', '"test_build_sh.py": 8')
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        (root / "tools").mkdir()
+        (root / "tools/run_all_tests.py").write_text(text)
+        (root / f"tools/{test_name}").write_text(f"import time\ntime.sleep({sleep_s})\nprint('PASS')\n")
+        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py"), test_name],
+                           env=CLEAN, capture_output=True, text=True, timeout=120)
+        return r.stdout + r.stderr
+
+
+arm("the runner reads a per-test limit from a table, not just the general one", "PER_TEST_TIMEOUT" in RUNNER
+    and RUNNER.count("PER_TEST_TIMEOUT.get(name, TIMEOUT)") == 1 and 'timeout=timeout' in RUNNER)
+out = limit_run(RUNNER, "test_build_sh.py", 4)
+arm("a test in the table runs past the general limit (test_build_sh.py: 4 s under a 2 s general limit, 8 s table limit)",
+    "1 passed, 0 failed" in out and "no result" not in out, out)
+out = limit_run(RUNNER, "test_other.py", 4)
+arm("a test not in the table is held to the general limit", "no result after 2 s" in out, out)
+no_table = RUNNER.replace('PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}', "PER_TEST_TIMEOUT = {}")
+arm("control precondition: the table has exactly the one entry", no_table != RUNNER)
+out = limit_run(no_table, "test_build_sh.py", 4)
+arm("control: without its own limit test_build_sh.py is held to the general limit and stopped", "no result after 2 s" in out, out)
+
+
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
