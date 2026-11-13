@@ -117,7 +117,7 @@ them from `EFI/OC/Kexts`. OpenCore only needs to set SIP and boot-args.
 
 | Key | Value | Why |
 |---|---|---|
-| `csr-active-config` | `<430A0000>` (Data) | the tested value: unsigned kexts, plus what root patches need |
+| `csr-active-config` | `<430A0000>` (Data) | the value tested with release 2.9: unsigned kexts, plus what root patches need |
 | `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle |
 
 Optional boot arguments, for troubleshooting:
@@ -162,7 +162,7 @@ the screen dark ([docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), the layout-
 
 Also required:
 - **BIOS:** Above 4G Decoding ON (the card maps memory above 4 GB), CSM OFF.
-- **SMBIOS:** a Mac model that runs macOS 15 with a discrete GPU (tested: `iMacPro1,1`, which 1401 uses).
+- **SMBIOS:** a Mac model that runs macOS 15 with a discrete GPU (tested with release 2.9: `iMacPro1,1`, which 1401 uses).
 - **Remove** any `nv_disable=1`, WhateverGreen NVIDIA patches, or `agdpmod=pikera` for this card.
 - **With WhateverGreen installed** (for an Intel or AMD GPU), add `gfxrst=4` to boot-args. Without it, WhateverGreen's
   boot screen copy can read freed memory when the NVIDIA display opens, and the Mac panics.
@@ -192,8 +192,8 @@ sudo ./uninstall.sh && sudo shutdown -r now
 ## Build from source
 
 On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools; the whole
-driver has been built with Xcode 26.3, the newest Xcode that runs on macOS 15, and with Xcode 26.5, not yet with Xcode
-26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and branch name in
+driver has been built with Xcode 26.3 (SDK 26.2), the newest Xcode that runs on macOS 15, and with Xcode 26.5, not yet
+with Xcode 26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and branch name in
 place of `<owner>` and `<branch>` (the original project's repository does not have `build.sh`):
 
 ```bash
@@ -218,10 +218,10 @@ working directory had changed (Homebrew's folders, the shell's settings files, t
 made named the user's home folder.
 
 On an Intel Mac the first `./build.sh` builds the missing build tools (LLVM 22 above all) from pinned sources. From an
-empty working directory `deps` took 46.5 minutes on that Intel Mac (30 of them for LLVM) and 3 hours 53 minutes on
-GitHub's Intel runner; it needs 10 GB of free space while LLVM builds. With the tools already there, on that Mac,
-`deps` took 49 s, `fetch` 40 s, the build of all 17 components 5 minutes 41 seconds and the package 27 s, and the
-working directory then held about 8 GB. On Apple silicon `deps` installs Homebrew's ready-made tools instead. That
+empty working directory `deps` took 46.5 minutes on that Intel Mac (building LLVM about 30 of them) and `fetch`
+40 seconds there, and `deps` took 3 hours 53 minutes on GitHub's Intel runner; it needs 10 GB of free space while LLVM
+builds. In a later run on that Mac with those tools kept, `deps` took 49 seconds, the build of all 17 components
+5 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon `deps` installs Homebrew's ready-made tools instead. That
 path has run only against a stand-in for Homebrew: no whole build with `build.sh` has run on an Apple-silicon Mac, and
 the host tests have not passed whole on one. GitHub's Apple-silicon runner compiles and links the kexts; at commit
 95811c2 they had the same bytes as the kexts built on GitHub's Intel runner.
@@ -241,7 +241,8 @@ to do when a step fails ([en español](docs/BUILDING.es.md)).
 
 `build.sh` was written on Linux and tested there against stand-ins for Xcode, Homebrew and the build scripts;
 [docs/BUILDING.md](docs/BUILDING.md) says which of its paths have since run on the two Intel Macs above and which
-only against the stand-ins. When a step stops, the message names it and gives a report file to attach to an issue.
+only against the stand-ins. A step can still stop on something neither the stand-ins nor those two Macs showed
+(another Xcode or SDK, a formula name, a compiler warning). When a step stops, the message names it and gives a report file to attach to an issue.
 
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black. `./build.sh` does this by
