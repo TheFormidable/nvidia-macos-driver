@@ -112,6 +112,26 @@ jobs:
         with:
           path: build-out/kext-check/src
           key: kext-check-src-${{ hashFiles('build/kext_check.sh', 'tools/kext_imports.py') }}
+      - name: Xcode 26 or later, as the release build needs
+        # build.sh refuses an Xcode older than NM_PIN_TOOL_XCODE_MIN (build/pins.sh). The image's default Xcode is older
+        # (16.4 in run 861330e): with it every kext link warned that libkmod.a was built for a newer macOS than the
+        # kext, and the link's warning ceiling of 0 stopped the job. So the newest Xcode of the image that the release
+        # accepts is taken, for every step after this one.
+        run: |
+          min=$(sed -n 's/^NM_PIN_TOOL_XCODE_MIN=\([0-9][0-9.]*\)$/\1/p' build/pins.sh)
+          num() { local a b c; IFS=. read -r a b c <<< "$1"; echo $(( ${a:-0} * 1000000 + ${b:-0} * 1000 + ${c:-0} )); }
+          [ -n "$min" ] || { echo "::error::build/pins.sh names no NM_PIN_TOOL_XCODE_MIN"; exit 1; }
+          best=; bestn=0
+          for x in /Applications/Xcode_*.app; do
+            v=${x#/Applications/Xcode_}; v=${v%.app}
+            [[ "$v" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || continue
+            n=$(num "$v")
+            if [ "$n" -ge "$(num "$min")" ] && [ "$n" -gt "$bestn" ]; then best=$x; bestn=$n; fi
+          done
+          [ -n "$best" ] || { echo "::error::no Xcode $min or later on this runner (the release build needs one)"; ls -d /Applications/Xcode*.app; exit 1; }
+          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$best/Contents/Developer" xcodebuild -version
+          echo "SDK $(DEVELOPER_DIR="$best/Contents/Developer" xcrun --show-sdk-version), $(DEVELOPER_DIR="$best/Contents/Developer" xcrun clang --version | head -1)"
       - name: Compile check with Xcode's kernel headers (also fetches the pinned NVIDIA tree)
         run: bash build/kext_check.sh
       - name: NVIDIA RM core and NVKMS for macOS

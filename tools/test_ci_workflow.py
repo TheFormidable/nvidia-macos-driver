@@ -101,6 +101,10 @@ def problems(y, root):
                 or "NM_PIN_CI_VKHEADERS_COMMIT" not in j.get(name, ""):
             out.append(f"{name} does not keep the Vulkan headers under the key of their pin")
     mac = j.get("kexts-mac", "")
+    # the release build takes Xcode NM_PIN_TOOL_XCODE_MIN or later; the image's default Xcode is older
+    xc = mac.find('echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"')
+    if xc < 0 or "s/^NM_PIN_TOOL_XCODE_MIN=" not in mac or xc > mac.find("run: bash build/kext_check.sh"):
+        out.append("kexts-mac does not select an Xcode the release accepts (NM_PIN_TOOL_XCODE_MIN) before it builds")
     m = re.search(r"runner: \[([^\]]*)\]", mac)
     if not m or {r.strip() for r in m.group(1).split(",")} != {"macos-15", "macos-15-intel"} or "runs-on: ${{ matrix.runner }}" not in mac:
         out.append("kexts-mac does not run on both an Apple-silicon and an Intel runner (macos-15, macos-15-intel)")
@@ -179,6 +183,7 @@ control("host tests that pass with the Vulkan tests skipped are caught",
         "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings",
         "is skipped")
 control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
+control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
 arm("the Vulkan tests are found by what they read (four of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings", "test_opengl_perf"},
     " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
