@@ -178,9 +178,12 @@ case "$role" in
           gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
         printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
       install)
-        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
+        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_NO_INSTALL_CLEANUP=${HOMEBREW_NO_INSTALL_CLEANUP:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
+        # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
+        # versions of formulas (every 30 days of all of them), formulas nothing needs and dead links in the prefix
+        [ -n "${HOMEBREW_NO_INSTALL_CLEANUP:-}" ] || rm -rf "$SB/brew/Cellar/yours/1.0"
         echo "==> Pouring $2" ;;
       *) echo "stand-in brew: '$1' is not something build.sh may do" >&2; exit 1 ;;
     esac ;;
@@ -578,6 +581,7 @@ class Sandbox:
             self.wrap(self.dir / "brew/bin/brew", "brew")
             for f in formulas:
                 self.run_tool(self.dir / "brew/bin/brew", "install", f)
+            (self.dir / "brew/Cellar/yours/1.0").mkdir(parents=True, exist_ok=True)   # an older version of a formula of the tester's
         self.journal.write_text("")
 
     def wrap(self, path, role, version=None):
@@ -1152,8 +1156,11 @@ def deps_problems(sb, rc, out, before):
     if other:
         p.append(f"brew was asked for something else: {other}")
     env = [l for l in j if l.startswith("brew-env")]
-    if not env or any("HOMEBREW_NO_AUTO_UPDATE=1" not in l or "HOMEBREW_NO_INSTALL_UPGRADE=1" not in l for l in env):
-        p.append(f"brew install ran without HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1: {env}")
+    if not env or any("HOMEBREW_NO_AUTO_UPDATE=1" not in l or "HOMEBREW_NO_INSTALL_UPGRADE=1" not in l
+                      or "HOMEBREW_NO_INSTALL_CLEANUP=1" not in l for l in env):
+        p.append(f"brew install ran without HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALL_CLEANUP=1: {env}")
+    if not (sb.dir / "brew/Cellar/yours/1.0").is_dir():
+        p.append("an older version of a formula of the tester's was removed (Homebrew's clean-up after an install)")
     if any(re.search(r"(^|\s)sudo(\s|$)", l) for l in j):
         p.append("a journal entry contains sudo")
     after = sb.listing(sb.home)
@@ -1199,6 +1206,14 @@ def arm_deps_control():
     before = sb.listing(sb.home)
     rc, out = sb.run("deps", "-y")
     negative("pip with its own cache (~/Library/Caches/pip, outside the working directory)", deps_problems(sb, rc, out, before))
+    sb = Sandbox("deps-neg3", formulas=("cmake",))
+    sb.break_script('HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install', 'HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 -- install')
+    before = sb.listing(sb.home)
+    rc, out = sb.run("deps", "-y")
+    p = deps_problems(sb, rc, out, before)
+    negative("brew install followed by Homebrew's clean-up (HOMEBREW_NO_INSTALL_CLEANUP not set)", p)
+    check("control: that clean-up removes an older version of a formula of the tester's",
+          any("older version of a formula" in x for x in p), p)
 
 
 def llvm23_problems(sb, rc, out):
