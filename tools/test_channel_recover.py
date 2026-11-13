@@ -362,6 +362,8 @@ def chk_off_is_29(p):
 def chk_classes(p):
     cl = body(newfile(p, REC_H), "nvrm_rec_classify")
     return ("case 13: case 31: case 32: case 39: case 40: case 41: case 43: case 44: case 45: case 69: case 109:" in cl
+            and "case 70: case 71: case 72: case 75: case 76: case 77: case 85:" in cl
+            and "case 126: case 127: case 128: case 129: case 130: case 131: case 132: case 133: case 134: case 135:" in cl
             and "return NVRM_LOSS_UNKNOWN;" in cl
             and "if (k != NVRM_LOSS_CHANNEL && k != NVRM_LOSS_STALL)\n      return NVRM_WHY_KIND;" in newfile(p, REC_H))
 
@@ -446,6 +448,9 @@ CHECKS = [
     ("the kinds: only channel exceptions and stalls are rebuilt", chk_classes,
      "+   if (k != NVRM_LOSS_CHANNEL && k != NVRM_LOSS_STALL)\n+      return NVRM_WHY_KIND;",
      "+   if (k == NVRM_LOSS_NONE)\n+      return NVRM_WHY_KIND;"),
+    ("the kinds: every copy engine's fault is a channel loss, not an unknown one", chk_classes,
+     "case 70: case 71: case 72: case 75: case 76: case 77: case 85:",
+     "case 170: case 71: case 72: case 75: case 76: case 77: case 85:"),
 ]
 for name, fn, good, broken in CHECKS:
     arm(name, fn(patch))

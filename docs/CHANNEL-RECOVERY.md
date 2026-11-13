@@ -13,7 +13,8 @@ In 2.9 a GPU fault on one channel ended the application's Metal device: every la
 in WindowServer the session ended. The GPU itself was fine; only the faulting channel had been torn down.
 
 A GPU fault on one channel no longer ends the application's Metal device. When a wait finds that its channel faulted
-with an exception that ends only that channel (Xid 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109), or that the channel
+with an exception that ends only that channel (Xid 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109, or a copy engine's
+fault: 70, 71, 72, 75, 76, 77, 85, 126-135), or that the channel
 made no progress for `NVRM_FLUSH_TIMEOUT_MS` (when it is not set, the Metal plugin sets it to 5 s in WindowServer
 and 60 s in every other process), NVK builds a new channel beside the old one, frees the
 old one, and continues on the new one with the same semaphore and command ring: the channel-wide state (objects,
@@ -21,6 +22,9 @@ descriptor heaps, shader local memory) is sent again, the submissions that had n
 that was running is dropped. A dropped submission is reported complete, and the plugin can ask whether a fence's
 submission ran (`nvmtl_nvk_fence_dropped_v1`). A fault inside replayed work drops everything that was in flight.
 Before any of that, a wait that sees no progress for half the budget rings the channel's doorbell again.
+
+On an RTX 50 (Blackwell) card the copy channel NVK uses for uploads runs on copy engine 4, whose fault the hardware
+reports as Xid 71; a fault there is now a rebuilt loss, not a lost device.
 
 Not rebuilt, and ending exactly as in 2.9 (`VK_ERROR_DEVICE_LOST`): a firmware crash or a reset request (Xid 119,
 120, or RM asking for a recovery action), the GPU off the bus (Xid 79), uncorrectable memory errors (Xid 48, 94, 95,
