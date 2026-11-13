@@ -93,11 +93,14 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
   ends only that channel, or makes no progress for 5 s in WindowServer (60 s in any other process), NVK builds a new
   channel, sends the channel-wide state again, replays the submissions that had not started and drops the one that
-  was running; a stalled channel's doorbell is rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, an
-  error that is not on the list of those that end only one channel, a fourth rebuild of one channel within 30 s) ends
-  the device exactly as in 2.9. A Mac put to sleep with a game or
-  WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for the
-  sleep: the kext answers NVK's channel note without waiting for the GPU's resume and reports the GPU as suspended
+  was running; a stalled channel's doorbell is rung again first. A fault on any copy engine, not only the first three,
+  is rebuilt like this: on an RTX 50 (Blackwell) card the channel NVK uses for uploads runs on copy engine 4, whose
+  fault the hardware reports as Xid 71, and that fault used to lose the device as it did in 2.9; a copy channel that
+  faults again inside the work its rebuild replayed ends the device at once. A fault the GPU cannot recover from this
+  way (firmware, bus, memory errors, a failed wake, an error that is not on the list of those that end only one
+  channel, a fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a
+  game or WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for
+  the sleep: the kext answers NVK's channel note without waiting for the GPU's resume and reports the GPU as suspended
   until it lets RM calls through again, NVK sends no escape while it holds a channel's lock, and a stall seen while
   the GPU is suspended restarts the no-progress budget instead of rebuilding, at every sleep, for up to 360 s of
   awake time per sleep. Way back: `NVK_CHANNEL_RECOVER=0` in
@@ -112,6 +115,10 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   WindowServer included, NVK's errors and the two channel-recovery lines (`nvrm channel slot N rebuilt after ...` and
   `nvrm channel slot N not rebuilt: ...`) reach the system log with the prefix `NullMoth:`, while its other warnings
   stay out of it.
+- In a program that uses NVK's Vulkan driver without the Metal plugin, a setting written twice in
+  `/Library/GPUBundles/nvmtl/nvrm610.conf` now takes its last line, and a comment that names a setting is ignored: the
+  rule a Metal process already followed and the one the documents describe. NVK reads only the first 8191 bytes of
+  the file, where the plugin reads it whole.
 - The Metal plugin's fence wait (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) no
   longer counts time asleep, so a frame that was pending at sleep is not declared lost at wake.
 - A texture the application releases while the GPU may still use it is now freed only once no command buffer that
