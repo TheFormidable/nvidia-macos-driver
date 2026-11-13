@@ -22,7 +22,11 @@ end of the run. Negative control: the runner without that list.
 
 Then tests that leave a program running in the background, that pass their time limit, and that try to reach the
 terminal: the runner starts each test as a session of its own, without a terminal and with nothing on its input, and
-stops what it started. Negative control: the same runner with the test in the runner's own session."""
+stops what it started. Negative control: the same runner with the test in the runner's own session.
+
+A test stopped at its limit is reported with the end of what it had printed, also what a Python test printed without
+flushing, and the tests that took long are named with their times. Negative controls: the runner that drops the
+output, the runner that leaves Python's output buffered, the runner with its real threshold for "long"."""
 import sys
 sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
 import importlib.util  # noqa: E402
@@ -62,7 +66,8 @@ d = tempfile.mkdtemp(prefix="leak-")
 pathlib.Path(d, "x").write_text("left behind")
 pathlib.Path(__file__).resolve().parents[1].joinpath("leak.txt").write_text(d)
 """
-CLEAN = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}  # the outer runner sets the first
+# the outer runner sets the first and the last
+CLEAN = {k: v for k, v in os.environ.items() if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONUNBUFFERED")}
 
 
 def py(env, code, *args):
@@ -357,7 +362,8 @@ arm("control: in the runner's session what it started outlives it", pid and runn
 def limit_run(runner_text, test_name, sleep_s):
     """Run a scratch test <test_name> that sleeps sleep_s then passes, under a runner whose general limit is 2 s and
     whose table gives test_build_sh.py 8 s. -> the runner's output."""
-    text = runner_text.replace("TIMEOUT = 600", "TIMEOUT = 2").replace('"test_build_sh.py": 1200', '"test_build_sh.py": 8')
+    text = runner_text.replace("TIMEOUT = 600", "TIMEOUT = 2").replace('"test_build_sh.py": 3600', '"test_build_sh.py": 8')
+    assert text.count("TIMEOUT = 2\n") == 1, "the runner's general limit is not where this test changes it"
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         (root / "tools").mkdir()
@@ -375,10 +381,69 @@ arm("a test in the table runs past the general limit (test_build_sh.py: 4 s unde
     "1 passed, 0 failed" in out and "no result" not in out, out)
 out = limit_run(RUNNER, "test_other.py", 4)
 arm("a test not in the table is held to the general limit", "no result after 2 s" in out, out)
-no_table = RUNNER.replace('PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}', "PER_TEST_TIMEOUT = {}")
+no_table = RUNNER.replace('PER_TEST_TIMEOUT = {"test_build_sh.py": 3600}', "PER_TEST_TIMEOUT = {}")
 arm("control precondition: the table has exactly the one entry", no_table != RUNNER)
 out = limit_run(no_table, "test_build_sh.py", 4)
 arm("control: without its own limit test_build_sh.py is held to the general limit and stopped", "no result after 2 s" in out, out)
+
+
+# ---- a test stopped at its limit: the end of what it had printed is shown, and the slow tests are named
+def scratch_run(runner_text, tests, *opts):
+    """Run the scratch tests {name: source} under the runner with a general limit of 2 s. -> (exit status, output)."""
+    text = runner_text.replace("TIMEOUT = 600", "TIMEOUT = 2")
+    assert text.count("TIMEOUT = 2\n") == 1
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        (root / "tools").mkdir()
+        (root / "tools/run_all_tests.py").write_text(text)
+        for name, source in tests.items():
+            (root / f"tools/{name}").write_text(source)
+        r = subprocess.run([sys.executable, "-B", str(root / "tools/run_all_tests.py"), *opts], env=CLEAN, capture_output=True, text=True, timeout=120)
+        return r.returncode, r.stdout + r.stderr
+
+
+# print() without a flush: into a pipe Python keeps it in its buffer, and a test stopped at its limit takes it along
+STUCK = {"test_stuck.py": "import time\nprint('x' * 3000)\nprint('ARM-BEFORE-THE-HANG')\ntime.sleep(60)\n",
+         "test_stuck.sh": "echo SHELL-BEFORE-THE-HANG\nsleep 60\n",
+         "test_mute.py": "import time\ntime.sleep(60)\n"}
+rc, out = scratch_run(RUNNER, STUCK)
+stuck = out.split("FAIL test_stuck.py: ", 1)[-1].split("\n\n", 1)[0]
+arm("a test stopped at its limit is a failure that ends with what it had printed (a Python test's unflushed lines too)",
+    rc == 1 and stuck.startswith("no result after 2 s") and stuck.rstrip().endswith("ARM-BEFORE-THE-HANG") and "3 failed" in out, out[-900:])
+arm("of that output only the end is shown, as for any failed test", 1000 < stuck.count("x") < 1300, stuck.count("x"))
+arm("a shell test stopped at its limit shows its last line as well",
+    "SHELL-BEFORE-THE-HANG" in out.split("FAIL test_stuck.sh: ", 1)[-1].split("\n\n", 1)[0], out[-900:])
+arm("a test that had printed nothing says so",
+    out.split("FAIL test_mute.py: ", 1)[-1].split("\n\n", 1)[0].strip() == "no result after 2 s, stopped; it had printed nothing", out[-900:])
+keep = "        raise TimedOut(as_text(out) + as_text(err)) from None\n"
+unbuf = '    env["PYTHONUNBUFFERED"] = "1"'
+arm("the runner hands on what a stopped test had printed in one place, and starts Python tests unbuffered in one place",
+    RUNNER.count(keep) == 1 and RUNNER.count(unbuf) == 1)
+rc, out = scratch_run(RUNNER.replace(keep, '        raise TimedOut("") from None\n'), STUCK)
+arm("control: a runner that drops the output shows nothing of the stopped tests",
+    rc == 1 and "BEFORE-THE-HANG" not in out and out.count("it had printed nothing") == 3, out[-900:])
+rc, out = scratch_run(RUNNER.replace(unbuf, "    pass"), STUCK)
+arm("control: with Python's output left buffered the stopped Python test's lines are lost, the shell test's are not",
+    rc == 1 and "ARM-BEFORE-THE-HANG" not in out and "SHELL-BEFORE-THE-HANG" in out, out[-900:])
+
+SLOWS = {"test_quick.py": "print('PASS')\n", "test_slowish.py": "import time\ntime.sleep(1.5)\nprint('PASS')\n"}
+slow_at = "SLOW = 30 "
+arm("the runner names its threshold for a slow test in one place", RUNNER.count(slow_at) == 1)
+rc, out = scratch_run(RUNNER.replace(slow_at, "SLOW = 1 "), SLOWS)
+named = [l for l in out.splitlines() if l.startswith("took 1 s or more: ")]
+arm("the tests that took long are named with their times before the last line, the others are not",
+    rc == 0 and len(named) == 1 and re.fullmatch(r"took 1 s or more: test_slowish\.py [12] s", named[0])
+    and out.strip().splitlines()[-1] == "2 passed, 0 failed, 0 skipped, 0 not run, of 2", out[-600:])
+rc, out = scratch_run(RUNNER, SLOWS)
+arm("control: under the real threshold a test of a second and a half is not named", rc == 0 and "or more:" not in out, out[-600:])
+
+# a skipped test's reason is its last line: enough of it is printed to hold a path and a tool's own message
+LONG_SKIP = {"test_skips.py": "import sys\nprint('SKIP: cannot do it here: ' + 'p' * 300 + ' THE-TOOLS-OWN-WORDS')\nsys.exit(2)\n"}
+rc, out = scratch_run(RUNNER, LONG_SKIP)
+arm("a skipped test's reason is printed with its end, 330 characters on", rc == 0 and "THE-TOOLS-OWN-WORDS" in out and "1 skipped" in out, out[-600:])
+cut = "[:SKIP_REASON]"
+rc, out = scratch_run(RUNNER.replace(cut, "[:200]"), LONG_SKIP)
+arm("control: cut at 200 characters the reason loses its end", RUNNER.count(cut) == 1 and rc == 0 and "THE-TOOLS-OWN-WORDS" not in out and "1 skipped" in out, out[-600:])
 
 
 # ---- how much of a failed test's output is printed: the last 1200 characters, or the last N with --tail N
