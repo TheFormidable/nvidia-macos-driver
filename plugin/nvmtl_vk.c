@@ -3043,7 +3043,8 @@ void nvmtl_vk_fence_close_all(nvmtl_fence_hold *h)
    decides (nvmtl_fence_wait_handled: only an answer that the write is complete, or a wait that already lasted as long
    as the older poll, ends it here). `pid` is the writer the tag names: the kernel then looks at that process's holds
    only, so never at the caller's own. A tag that names no writer is not asked, because the kernel reads pid 0 as "any
-   process", the caller included. */
+   process", the caller included. The kernel answers the writer's pid only to the writer itself, so the log line names
+   the writer from the tag. */
 int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
 {
     if (!sid || !pid || !nvmtl_vk_fence_ready(0)) return 0;
@@ -3053,7 +3054,7 @@ int nvmtl_vk_fence_wait(uint32_t sid, uint32_t planes, uint32_t pid)
     if (st == NVMTL_FENCE_ST_OK && out[0] == NVMTL_FENCE_R_TIMEOUT) {
         const unsigned b = __atomic_add_fetch(&g_fence_bound, 1, __ATOMIC_RELAXED);
         if (b <= 8 || b % 2000 == 0)
-            nvlog("surface fences: surface %u - the kernel gave up pid %u's hold at its bound after %u us (%u so far)", sid, out[2], out[1], b);
+            nvlog("surface fences: surface %u - the kernel gave up the hold of pid %u (the writer the tag names) at its bound after %u us (%u so far)", sid, pid, out[1], b);
     }
     return nvmtl_fence_wait_handled(st, out[0], out[1]);
 }
