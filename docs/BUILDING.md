@@ -28,8 +28,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > - Only against stand-ins for macOS's tools, Xcode, Homebrew, rustup, the git remotes and each component's build
 >   script (`tools/test_build_sh.py`, on Linux and on that runner): `deps` taking its tools from Homebrew, which is what
 >   it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
-> - Nowhere: a whole build on Apple silicon (see [Requirements](#requirements)), and a build of this branch's commits
->   after 3933ff6 on either Mac.
+> - Nowhere when this notice was written (2026-11-13): a whole build on Apple silicon (see
+>   [Requirements](#requirements)), and a build of this branch's commits after 3933ff6 on either Mac.
 >
 > `build.sh` is written for macOS's `/bin/bash` 3.2 and its BSD tools. On a system other than macOS only `doctor`,
 > `fetch`, `test`, `env` and a dry run of any command but `deps` work. A step can still stop on something neither the
