@@ -13,7 +13,7 @@ libtool, strings, stat, md5 and for the account and computer names) and checks:
   * a list that lacks the osapi.c command, or whose command lacks the RM's defines, stops build/rm_defines.sh and
     accel_build.sh with a message, and nothing is compiled;
   * neither the account nor the computer name reaches make-n.txt or the output, and the personal-string check takes
-    whole words only ("ike" inside "likely" is not the account "ike"), with the same verdict as build.sh.
+    whole words only ("max" inside "maximum" is not the account "max"), with the same verdict as build.sh.
 Negative controls: the scripts as they were at 19279ba (read with git show) must fail the same checks."""
 import os
 import shutil
@@ -25,7 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OLD = "19279ba"   # the scripts before the fix
-ACCOUNT, HOST = "ike", "mybox"
+ACCOUNT, HOST = "max", "mybox"
 fails = 0
 
 
@@ -313,16 +313,16 @@ def main():
         p = truncated_problems(base / "cut", old=False)
         check("a list without the osapi.c command or without its defines: rm_defines.sh and accel_build.sh stop with a message", not p, p)
         negative("accel_build.sh of " + OLD + " (head -1)", truncated_problems(base / "cut-old", old=True))
-        p = personal_problems(base / "pers", False, "Most likely the GPU stopped", want_stop=False)
-        check("the account name inside an ordinary word ('ike' in 'likely') does not stop build_rm620.sh", not p, p)
-        p = personal_problems(base / "pers", False, "/Users/ike/src/nv.c", want_stop=True)
+        p = personal_problems(base / "pers", False, "The maximum clock was reached", want_stop=False)
+        check("the account name inside an ordinary word ('max' in 'maximum') does not stop build_rm620.sh", not p, p)
+        p = personal_problems(base / "pers", False, "/Users/max/src/nv.c", want_stop=True)
         check("the account name as a word (a home path) stops it (exit 6), without printing the name", not p, p)
         p = personal_problems(base / "pers", False, "built by root@mybox", want_stop=True)
         check("the computer's short name as a word stops it, without printing the name", not p, p)
         p = personal_problems(base / "pers", False, "the GPU stopped", want_stop=False)
         check("make-n.txt names neither the account nor the computer (NV_BUILD_USER, NV_BUILD_HOST)", not p, p)
         negative("build_rm620.sh of " + OLD + " (substring match, names printed)",
-                 personal_problems(base / "pers-old", True, "Most likely the GPU stopped", want_stop=False))
+                 personal_problems(base / "pers-old", True, "The maximum clock was reached", want_stop=False))
     finally:
         if os.environ.get("NMT_KEEP"):
             print(f"kept: {base}")

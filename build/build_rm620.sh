@@ -90,7 +90,7 @@ rm -f "$O/libnvkernel.a"
 ls "$O"/*.o > "$B/objs.txt"; xcrun libtool -static -o "$O/libnvkernel.a" -filelist "$B/objs.txt" 2>"$B/libtool.err" || { tail -5 "$B/libtool.err"; exit 4; }
 echo "libnvkernel.a $(stat -f%z "$O/libnvkernel.a") B from $(wc -l < "$B/objs.txt") objects"
 # the building account or the computer's short name, as a whole word (a path, user@host): a short name inside an ordinary
-# word ("ike" in "likely") is not one. The names themselves are not printed.
+# word ("max" in "maximum") is not one. The names themselves are not printed.
 re=$(for x in "$(id -un 2>/dev/null)" "$(hostname -s 2>/dev/null)"; do [ -z "$x" ] || printf '%s\n' "$x" | sed 's/[][\.*^$+?(){}|]/\\&/g'; done | paste -sd'|' -)
 if [ -z "$re" ]; then echo "personal strings in libnvkernel.a: not checked (no account or computer name)"; exit 0; fi
 left=$(strings -a "$O/libnvkernel.a" | grep -ciE "(^|[^[:alnum:]])($re)([^[:alnum:]]|$)" || true)
