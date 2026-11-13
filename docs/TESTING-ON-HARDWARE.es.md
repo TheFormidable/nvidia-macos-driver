@@ -241,8 +241,9 @@ largas que miden este camino.
 ## 6. Reposo y activación
 
 1. Pon el Mac en reposo desde el menú Apple, espera un minuto y actívalo. Hazlo tres veces, una con un vídeo en marcha
-   y otra con un juego abierto. Bien: el escritorio vuelve cada vez; `sysctl debug.nvrm_fence_state` es 1 después y
-   `debug.nvrm_fence_end_pm` ha crecido; `debug.nvrm_irq_settle_timeouts` 0; el registro del kernel tiene una línea
+   y otra con un juego abierto. Bien: el escritorio vuelve cada vez; `sysctl debug.nvrm_fence_state` es 1 después
+   (`debug.nvrm_fence_end_pm` cuenta las retenciones que estaban en curso en el momento de cada reposo, que pueden ser
+   ninguna, así que puede quedarse igual); `debug.nvrm_irq_settle_timeouts` 0; el registro del kernel tiene una línea
    `NVRM-xnu: sleep #` y una `NVRM-xnu: wake #` por cada vez; ninguna aplicación perdió su GPU y ningún fotograma
    pendiente en el reposo se dio por perdido. Con VT-d activo, `debug.nvrm_dma_live` da lo mismo antes y después de
    un reposo sin nada más en marcha. Mal: pantalla negra o congelada tras la activación, `debug.nvrm_fence_state` 3
