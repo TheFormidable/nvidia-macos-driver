@@ -1630,6 +1630,9 @@ def nobrew_sandbox(tag, edits=()):
     for f, (cmd, rel) in NOBREW_LINKS.items():
         (b / "bin" / cmd).symlink_to(b / "opt" / f / rel)
     sb.break_script(BREW_PLACES_LINE, f'brew_places() {{ echo "{b}/bin/brew /nonexistent/bin/brew"; }}')
+    # Homebrew's bash, first on PATH: it notes what it runs, then runs it with the system's bash
+    (b / "bin/bash").write_text(f'#!/bin/sh\necho "$*" >> {sb.dir}/brew-bash-runs\nexec /bin/bash "$@"\n')
+    (b / "bin/bash").chmod(0o755)
     for old, new in edits:
         sb.break_script(old, new)
     sb.nobrew_env = {"NM_BREW": "", "PATH": f"{b}/bin:{sb.bin}"}
@@ -1641,7 +1644,7 @@ def nobrew_problems(sb):
     tools/bin leads to none of Homebrew's (patch: the patch on PATH, macOS's); the Python environment is made from the
     toolchain's Python; no brew call in deps, doctor, fetch or build; doctor names the copies it does not use; the NVK
     step's pkg-config is the toolchain's"""
-    P = {k: [] for k in ("built", "links", "patch", "venv", "brew", "doctor", "nvkpc")}
+    P = {k: [] for k in ("built", "links", "patch", "venv", "brew", "doctor", "nvkpc", "bash")}
     env = sb.nobrew_env
     brew = str(sb.dir / "brew")
     tc = str(sb.work / "tools/toolchain")
@@ -1649,6 +1652,10 @@ def nobrew_problems(sb):
     sb.clear()
     rc, out = sb.run("deps", "-y", extra=env)
     calls = brew_calls(sb)
+    runs = sb.dir / "brew-bash-runs"
+    tcb = [l for l in runs.read_text().splitlines() if "toolchain.sh" in l] if runs.exists() else []
+    if tcb:
+        P["bash"].append(f"Homebrew's bash ran build/toolchain.sh: {tcb[:2]}")
     P["built"] = [x for x in source_deps_problems(sb, rc, out, before) if not x.startswith("Homebrew was called")]
     if calls:
         P["brew"].append(f"deps called brew: {calls[:3]}")
@@ -1717,7 +1724,8 @@ def arm_source_some():
              "venv": "the Python environment made by the Homebrew way is made again from the toolchain's Python",
              "brew": "no brew call at all in deps, doctor, fetch and build nvk",
              "doctor": "doctor names each copy Homebrew offers as not used, says Homebrew is not used, and is content",
-             "nvkpc": "the NVK step's pkg-config is the toolchain's"}
+             "nvkpc": "the NVK step's pkg-config is the toolchain's",
+             "bash": "build/toolchain.sh runs with the system's PATH, not under Homebrew's bash"}
     for k, n in names.items():
         check("source way on an Intel Mac with a full Homebrew: " + n, not P[k], (P[k], out[-800:]))
     # one control per claim: build.sh changed so that exactly that claim breaks
@@ -1735,6 +1743,9 @@ def arm_source_some():
          [('then d_note "Homebrew $BREW: not used, with tools from source build.sh calls no brew"',
            'then run_brew -- --version >/dev/null 2>&1 || true; d_note "Homebrew $BREW: not used, with tools from source build.sh calls no brew"')]),
         ("doctor", "doctor without the notes on unused copies", [('  tc_unused\n', '')]),
+        ("bash", "a source way that runs build/toolchain.sh with the caller's PATH",
+         [('"MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" \\\n    "PATH=$TC_SYSPATH"', '"MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}"'),
+          ('tc_sh() { env "PATH=$TC_SYSPATH" bash', 'tc_sh() { bash')]),
         ("nvkpc", "a source way that takes Homebrew's pkg-config",
          [('    T_PKGCONFIG=$(pick "" "" "$(tc_path pkgconf bin/pkg-config)")\n',
            '    T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(tc_path pkgconf bin/pkg-config)")\n')]),
