@@ -33,7 +33,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time
+import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -62,6 +62,8 @@ def emit(line):
 
 def check(name, ok, detail=""):
     global fails
+    if _STOPPING.is_set():   # the test is being stopped: what the stopped runs gave is not a result
+        return ok
     emit(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""))
     with _LOCK:
         fails += 0 if ok else 1
@@ -357,6 +359,33 @@ def stop(pr):
         pass
 
 
+# The build.sh runs going on, in both threads. Each runs in its own session, so Ctrl-C at the terminal reaches only
+# this test: on Ctrl-C (or a crash) the main thread stops them all with what they started, and no new run starts, so
+# that the second thread ends at once instead of going through its remaining arms, and nothing outlives the test.
+_LIVE = set()
+_STOPPING = threading.Event()
+
+
+def track(pr):
+    with _LOCK:
+        _LIVE.add(pr)
+    return pr
+
+
+def stop_all():
+    _STOPPING.set()
+    with _LOCK:
+        live = list(_LIVE)
+    for pr in live:
+        if pr.poll() is None:   # not yet reaped: its process group is still the one it made
+            stop(pr)
+
+
+def not_stopping():
+    if _STOPPING.is_set():
+        raise KeyboardInterrupt("the test is being stopped")
+
+
 def git(*args, cwd=None, check_rc=True):
     r = subprocess.run([GIT, *map(str, args)], cwd=cwd, env=GENV, capture_output=True, text=True)
     if check_rc and r.returncode:
@@ -578,16 +607,23 @@ class Sandbox:
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
         """./build.sh <args> from the checkout; returns (exit status, stdout+stderr)."""
         argv = [BASH, script or "./build.sh", *args]
+        not_stopping()
         # its own session, so that a run that never ends is stopped with everything it started (a step stand-in left
         # behind would keep running after the test)
-        pr = subprocess.Popen(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, start_new_session=True)
+        pr = track(subprocess.Popen(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True))
         try:
             out, err = pr.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             stop(pr)
             out, err = pr.communicate()
             return 124, f"{out}{err}\n[test: no result after {timeout} s; the run and what it started were stopped]"
+        except BaseException:   # Ctrl-C in this thread: the run is in a session of its own and would go on
+            stop(pr)
+            raise
+        finally:
+            with _LOCK:
+                _LIVE.discard(pr)
         return pr.returncode, out + err
 
     def popen(self, *args, extra=None, default_sigint=True):
@@ -595,9 +631,10 @@ class Sandbox:
         # build.sh would inherit and could not trap
         # (by a small exec wrapper, not preexec_fn, which is not safe while another thread runs)
         pre = [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])"]
-        return subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                start_new_session=True)
+        not_stopping()
+        return track(subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                      start_new_session=True))
 
     def jlines(self):
         return self.journal.read_text().splitlines() if self.journal.exists() else []
@@ -2667,9 +2704,13 @@ def timed(name, fn, *args):
 
 
 def finish(worker):
-    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends)."""
-    if worker is not None and worker.ident:
-        worker.join()
+    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends); another
+    Ctrl-C while waiting stops its runs again instead of leaving it and the sandboxes behind."""
+    while worker is not None and worker.ident and worker.is_alive():
+        try:
+            worker.join(0.5)
+        except KeyboardInterrupt:
+            stop_all()
     return None
 
 
@@ -2683,6 +2724,7 @@ def main():
             print(f"SKIP: {t} is needed to imitate a Mac here")
             sys.exit(2)
     worker = None
+    errors = []
     try:
         if want("pins"):
             timed("pins", arm_pins)
@@ -2699,7 +2741,6 @@ def main():
         # beside the arms that build on one shared Mac (those stay in this thread: the interrupt arm sets the signal
         # handling, which only the main thread may). Most of the time is build.sh's own forks; two threads halve the
         # time the test needs on a loaded machine. NMT_SERIAL=1 runs everything in this thread.
-        errors = []
 
         def standalone():
             try:
@@ -2756,8 +2797,15 @@ def main():
         worker = finish(worker)
         for e in errors:
             raise e
+    except BaseException as e:
+        stop_all()
+        raise
     finally:
         finish(worker)
+        if worker is not None:   # this thread failed first: what the other one raised is not lost
+            for e in errors:
+                if not isinstance(e, KeyboardInterrupt):
+                    traceback.print_exception(type(e), e, e.__traceback__)
         if os.environ.get("NMT_KEEP"):
             print(f"sandbox kept: {TMP}")
         else:
@@ -2767,4 +2815,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("interrupted: the runs were stopped and the sandboxes removed; no result", flush=True)
+        sys.exit(130)
