@@ -36,7 +36,10 @@ failure.
 
 Settings in `/Library/GPUBundles/nvmtl/nvrm610.conf` go into your own block at the end of the file, between
 `# --- my settings, kept on update ---` and `# --- end my settings ---` (section 1, step 5, says why and what an
-install keeps); the last line for a name wins, and a process
+install keeps). Write each as `NAME=value` from the first column, with no blank anywhere on the line: the plugin's
+reader forgives a blank before the name, before the `=` and after the value, NVK's own reader forgives none, and a
+program that uses Vulkan without Metal may then not see the setting, or read another value. The last line for a name
+wins, and a process
 reads the file when it starts (restart the application, or log out and in for WindowServer). Boot arguments go on the
 `boot-args` line of OpenCore's `config.plist` (README.md, "Wiring into an existing OpenCore setup") and need a
 restart. Take every test setting out again when its test is done.

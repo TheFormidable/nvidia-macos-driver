@@ -39,7 +39,10 @@ cada tipo de fallo.
 
 Los ajustes de `/Library/GPUBundles/nvmtl/nvrm610.conf` van en tu propio bloque al final del archivo, entre
 `# --- my settings, kept on update ---` y `# --- end my settings ---` (la sección 1, paso 5, dice por qué y qué
-conserva una instalación); gana la última línea de cada nombre, y un
+conserva una instalación). Escribe cada uno como `NOMBRE=valor` desde la primera columna, sin ningún espacio en la
+línea: el lector del plugin perdona un espacio antes del nombre, antes del `=` y después del valor, el lector propio
+de NVK no perdona ninguno, y un programa que use Vulkan sin Metal puede entonces no ver el ajuste o leer otro valor.
+Gana la última línea de cada nombre, y un
 proceso lee el archivo al arrancar (reinicia la aplicación, o cierra sesión y vuelve a entrar para WindowServer). Los
 argumentos de arranque van en la línea `boot-args` del `config.plist` de OpenCore (README.md, "Wiring into an existing
 OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termines su prueba.
