@@ -137,9 +137,12 @@ class Scene:
         shutil.copy(SCRIPT, self.co / "build/ci_full_build.sh")
         (self.co / "build/pins.sh").write_text("NM_PIN_X=1\n")
         g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"]
-        subprocess.run(g + ["init", "-q", str(self.co)], check=True)
-        subprocess.run(g + ["-C", str(self.co), "add", "-A"], check=True)
-        subprocess.run(g + ["-C", str(self.co), "commit", "-q", "-m", "x"], check=True)
+        # with no configuration but these settings: a tester's ~/.gitconfig may sign every commit (it would run their
+        # signing program, and a failed signature fails the commit), name a template folder or start a file monitor
+        genv = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        subprocess.run(g + ["init", "-q", str(self.co)], check=True, env=genv)
+        subprocess.run(g + ["-C", str(self.co), "add", "-A"], check=True, env=genv)
+        subprocess.run(g + ["-C", str(self.co), "commit", "-q", "-m", "x"], check=True, env=genv)
         self.script = self.co / "build/ci_full_build.sh"
         self.home = tmp / "home"
         self.p = tmp / "usrlocal"          # Homebrew's prefix as an Intel Mac has it
@@ -326,7 +329,10 @@ def main():
         run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
         subprocess.run(["/bin/sh", str(fake), "install", "x"], timeout=10)
         rc, o = sc.prove(watch=False)
-        arm("a brew of the tests' sandboxes is counted apart, not as Homebrew's", rc == 0 and "1 other process(es) named brew" in o, o)
+        # one or more: the watch lists every process of the machine, and other tests of the suite run stand-in brews of
+        # their own at the same time
+        m = re.search(r"; (\d+) other process\(es\) named brew", o)
+        arm("a brew of the tests' sandboxes is counted apart, not as Homebrew's", rc == 0 and m is not None and int(m.group(1)) >= 1, o)
         rc, o = sc.prove(watch=False)
         arm("control: a watch that is not running is not taken for none seen", rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
 
