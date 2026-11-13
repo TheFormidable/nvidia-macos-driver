@@ -126,11 +126,18 @@ KMSINC=( -I"$KMS/os-interface/include" -I"$KMS/kapi/interface" -I"$KMS/kapi/incl
 RMDEFS_TEXT=$(bash "$HERE/build/rm_defines.sh" "$NV" 2>&1) || stop "${RMDEFS_TEXT#STOP: }"   # the -D flags of the RM's compile command for osapi.c
 RMDEFS=(); while read -r d; do RMDEFS+=("$d"); done <<< "$RMDEFS_TEXT"
 [ ${#RMDEFS[@]} -gt 0 ] || stop "the RM's compile line in $NV/_out/Darwin_x86_64/compile_cmds.sh names no -D"
+# Apple's clang driver turns these warning groups on by itself whenever -mkernel or -fapple-kext is given, before the
+# command line's own -W flags; this machine's clang does not. Without them a kext compile on Linux misses the very
+# -Wshadow and -Wsign-conversion (and the rest) that stop the build on the Mac at its zero warning ceiling. They go on
+# every kext compile line here, so the gate that runs on Linux sees what the Mac build would.
+MACWARN=( -Werror=implicit-function-declaration -Warray-bounds -Warray-bounds-pointer-arithmetic -Wbuiltin-memcpy-chk-size
+  -Wconditional-uninitialized -Wempty-body -Wimplicit-int-conversion -Wmemset-transposed-args -Wreturn-stack-address -Wshadow
+  -Wshorten-64-to-32 -Wsign-conversion -Wsizeof-pointer-memaccess -Wvla )
 # KEXT_FLAGS is the flag set every build script under build/ and kexts/*/build.sh gives its compiler; tools/test_kext_check.py
 # compares the two, so a flag added to a build script and not here fails a host test.
 KEXT_FLAGS=( -fapple-kext -mkernel -nostdinc -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
   -g0 -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common
-  -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override -Wno-unused-function -O2 )
+  "${MACWARN[@]}" -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override -Wno-unused-function -O2 )
 RMFLAGS=( "${KEXT_FLAGS[@]}" -I"$KHDR" -I"$SRC" "${RMINC[@]}" "${KMSINC[@]}" "${RMDEFS[@]}" )
 rc=0; units=0
 unit() {   # unit <exit status of the compile> <unit> <ceiling component> <object stem>: the warnings are added up per component
@@ -182,9 +189,9 @@ SMNX=(); grep -q IOMallocData "$KHDR/IOKit/IOLib.h" || { printf '%s\n' '#include
   'void IOFreeData(void *address, vm_size_t size);' '__END_DECLS' > "$WORK/iolib_data.h"; SMNX=( -include "$WORK/iolib_data.h" ); }
 one "NMSMN/nmsmn.cpp" nmsmn nmsmn "${CXX[@]}" "${KEXT_FLAGS[@]}" ${SMNX[@]+"${SMNX[@]}"} -I"$KHDR" -I"$K/NMSMN" -c "$K/NMSMN/nmsmn.cpp"
 one "NMDRM/nmdrm.cpp" nmdrm nmdrm "${CXX[@]}" -fapple-kext -mkernel -nostdinc -I"$KHDR" -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
-  -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 -Wall -Werror -Wno-unused-parameter -g0 -Wno-deprecated-declarations -Wno-inconsistent-missing-override -c "$K/NMDRM/nmdrm.cpp"
+  -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -O2 "${MACWARN[@]}" -Wall -Werror -Wno-unused-parameter -g0 -Wno-deprecated-declarations -Wno-inconsistent-missing-override -c "$K/NMDRM/nmdrm.cpp"
 one "NVPrimarySelector/NVPrimarySelector.cpp" primary-selector primary "${CXX[@]}" -fapple-kext -mkernel -nostdinc -I"$KHDR" -I"$K/NVPrimarySelector" \
-  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -fno-stack-protector -O2 -Wall -Wextra -c "$K/NVPrimarySelector/NVPrimarySelector.cpp"
+  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -fno-stack-protector -O2 "${MACWARN[@]}" -Wall -Wextra -c "$K/NVPrimarySelector/NVPrimarySelector.cpp"
 say "not checked here: NMHDA and NMKbdBacklight (they need the Lilu and VirtualSMC SDKs; kexts/NMHDA/build.sh, kexts/NMKbdBacklight/build.sh)"
 for wf in "$O"/warn.*; do
   [ -f "$wf" ] || continue; c=${wf##*/warn.}; n=$(awk '{ s += $1 } END { print s + 0 }' "$wf")
