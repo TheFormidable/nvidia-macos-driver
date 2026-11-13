@@ -26,7 +26,10 @@ stops what it started. Negative control: the same runner with the test in the ru
 
 A test stopped at its limit is reported with the end of what it had printed, also what a Python test printed without
 flushing, and the tests that took long are named with their times. Negative controls: the runner that drops the
-output, the runner that leaves Python's output buffered, the runner with its real threshold for "long"."""
+output, the runner that leaves Python's output buffered, the runner with its real threshold for "long".
+
+A test that prints bytes that are not UTF-8 fails with its output and the run reaches its summary (control: the output
+read strictly ends the run with Python's error)."""
 import sys
 sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
 import importlib.util  # noqa: E402
@@ -297,6 +300,7 @@ arm("control: a runner that lists the folders only at the end cannot say which t
     rc == 0 and any("escaped-" in l and "first seen while these ran: none: it appeared after the last test had ended" in l for l in out.splitlines()), out)
 
 
+
 # ---- what a test leaves running, its time limit, and the terminal
 BG = '''import os, pathlib, subprocess, sys, time
 here = pathlib.Path(__file__).resolve().parents[1]
@@ -480,6 +484,19 @@ rc, out = tail_run(RUNNER, "--tail", "300")
 arm("--tail 300 prints less than the default", rc == 1 and "LAST-LINE" in out and out.count("x") < 300, out[-400:])
 rc, out = tail_run(RUNNER.replace("out[-TAIL:]", "out[-1200:]"), "--tail", "20000")
 arm("control: a runner that ignores the option still cuts the output", rc == 1 and "FIRST-LINE" not in out, out[-400:])
+
+
+# ---- bytes that are not UTF-8 in a test's output: the test fails with its output shown, the run goes on to its summary
+RAW = {"test_raw.py": "import sys\nsys.stdout.buffer.write(b'BEFORE \\xff\\xfe AFTER\\n')\nsys.exit(1)\n", "test_fine.py": "print('PASS')\n"}
+replace = 'errors="replace", text=True'
+arm("the runner reads a test's output with undecodable bytes replaced, in one place", RUNNER.count(replace) == 1)
+rc, out = scratch_run(RUNNER, RAW)
+arm("a test that prints bytes that are not UTF-8 is a failure with its output, and the run ends with its summary",
+    rc == 1 and "FAIL test_raw.py: exit 1" in out and "BEFORE \ufffd\ufffd AFTER" in out
+    and out.strip().splitlines()[-1] == "1 passed, 1 failed, 0 skipped, 0 not run, of 2", out[-600:])
+rc, out = scratch_run(RUNNER.replace(replace, "text=True"), RAW)
+arm("control: read strictly, those bytes end the whole run with Python's error and no summary",
+    rc == 1 and "UnicodeDecodeError" in out and "passed" not in out, out[-600:])
 
 
 print(f"{fails} failed")
