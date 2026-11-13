@@ -315,11 +315,13 @@ send the kernel log of that boot.
 ## The ways back
 
 One per change; each restores the 2.9 behaviour of that change only. They exist to tell whether a change is behind a
-problem, not to be left set.
+problem, not to be left set. A boot argument takes effect at the next restart: the four kexts cannot be unloaded and
+loaded again by hand, since each holds itself loaded once it has started (`kmutil unload` refuses it until the next
+restart).
 
 | Change | Way back | Where |
 |---|---|---|
-| Surface fence | `nvrmfence=0` | boot argument |
+| Surface fence | `nvrmfence=0` (surface sync is 2.9's; the fence still answers a process that asks whether it is on, and NVK still opens its connection) | boot argument |
 | Page-off wait without the accelerator lock | `nvaccel_pageoff_locked=1` | boot argument |
 | Two-plane surfaces in VRAM | `nvaccel_surf_planes=0` | boot argument |
 | Apple class layout checks | `nvlayout=0` | boot argument |
@@ -329,7 +331,7 @@ problem, not to be left set.
 | Bottom-half thread | `nvrmbhthread=0` | boot argument |
 | RC timer | `nvrmrctimer=0` | boot argument |
 | Nano timer cancel wait | `nvrmnanowait=0` | boot argument |
-| DMA through VT-d | `nvrmdma=0` (with a mapper the card is then not started) | boot argument |
+| DMA through VT-d | `nvrmdma=0` (with a mapper the card is then not started; without one nothing changes) | boot argument |
 | Event wait | `NVRM_EVENT_WAIT=0` (every process polls, WindowServer included) | `nvrm610.conf` |
 | Channel recovery | `NVK_CHANNEL_RECOVER=0` | `nvrm610.conf` |
 | Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |

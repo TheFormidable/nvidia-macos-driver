@@ -329,11 +329,13 @@ tarjeta en esos contadores, o una activación pierde una; envía el registro del
 ## Las vueltas atrás
 
 Una por cambio; cada una devuelve el comportamiento de 2.9 solo de ese cambio. Están para saber si un cambio está
-detrás de un problema, no para dejarlas puestas.
+detrás de un problema, no para dejarlas puestas. Un argumento de arranque actúa en el siguiente reinicio: las cuatro
+kexts no se pueden descargar y volver a cargar a mano, porque cada una se mantiene cargada desde que arrancó
+(`kmutil unload` lo rechaza hasta el siguiente reinicio).
 
 | Cambio | Vuelta atrás | Dónde |
 |---|---|---|
-| Valla de superficies | `nvrmfence=0` | argumento de arranque |
+| Valla de superficies | `nvrmfence=0` (la sincronización de superficies es la de 2.9; la valla sigue respondiendo a un proceso que pregunta si está activa, y NVK sigue abriendo su conexión) | argumento de arranque |
 | Espera de page-off sin el cerrojo del acelerador | `nvaccel_pageoff_locked=1` | argumento de arranque |
 | Superficies de dos planos en VRAM | `nvaccel_surf_planes=0` | argumento de arranque |
 | Comprobaciones de las clases de Apple | `nvlayout=0` | argumento de arranque |
@@ -343,7 +345,7 @@ detrás de un problema, no para dejarlas puestas.
 | Hilo de la mitad inferior (bottom half) | `nvrmbhthread=0` | argumento de arranque |
 | Temporizador RC | `nvrmrctimer=0` | argumento de arranque |
 | Espera al cancelar un temporizador nano | `nvrmnanowait=0` | argumento de arranque |
-| DMA a través de VT-d | `nvrmdma=0` (con un mapeador la tarjeta no arranca) | argumento de arranque |
+| DMA a través de VT-d | `nvrmdma=0` (con un mapeador la tarjeta no arranca; sin él no cambia nada) | argumento de arranque |
 | Espera por evento | `NVRM_EVENT_WAIT=0` (todo proceso sondea, WindowServer incluido) | `nvrm610.conf` |
 | Recuperación de canales | `NVK_CHANNEL_RECOVER=0` | `nvrm610.conf` |
 | Informe de error del trabajo descartado | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
