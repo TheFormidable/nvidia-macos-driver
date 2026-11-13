@@ -790,12 +790,12 @@ def main():
         # the lines of build.sh's own dry run on an imitated Intel Mac whose Homebrew has every formula (tools/test_build_sh.py's
         # nobrew_sandbox), shortened: the sentences that name Homebrew without calling it must not be taken for a call
         src_line = ("missing build tools are built by ./build.sh deps from pinned sources into /w/tools/toolchain, without Homebrew "
-                    "(NM_TOOLS_FROM=auto on an Intel Mac: Homebrew has no ready-made builds for Intel Macs).\n")
+                    "(NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs on 2026-11-13).\n")
         rest = ("deps builds from pinned sources: ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm\n"
                 "  Nothing is installed outside the working directory and Homebrew is not used.\n"
                 "  note: NVK's patches need a patch that also creates files: put GNU patch on PATH as gpatch (Homebrew's formula is gpatch); deps does not build patch\n"
                 "    env NM_TC_PREFIX=/w/tools/toolchain bash build/toolchain.sh build llvm\n"
-                "SPIRV-LLVM-Translator v22.1.8 for LLVM 22: Homebrew has none that matches; it is built from source into /w/tools/spirv-llvm-translator (a few minutes)\n"
+                "SPIRV-LLVM-Translator v22.1.8 for LLVM 22: Homebrew has none that matches; it is built from source into /w/tools/spirv-llvm-translator (under a minute on one 12-thread Intel Mac)\n"
                 "deps: dry run; the commands above would run, nothing was built or installed\n")
         plan = tmp / "plan.txt"
         plan.write_text(src_line + "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ninja llvm@22\n"
