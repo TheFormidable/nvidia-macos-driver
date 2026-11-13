@@ -106,13 +106,16 @@ def problems(y, root):
         out.append("host-tests does not fail when a test that needs the Vulkan headers is skipped (the list must be the tests that read "
                    f"NM_VULKAN_INCLUDE: {' '.join(sorted(vulkan_tests(root)))})")
     # a test must not make macOS start an install of the command line tools: the marker the runner lists fails the
-    # job, in a step that also runs after a failed test, and its pattern finds the line the runner prints
-    od = re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: \|\n(?:.*\n)*?\s*if grep -E '(\^left in [^'\n]*installondemand[^'\n]*)' "
+    # job, in a step after the tests' own that also runs after a failed test, whose only line before the check is the
+    # one for tests that did not run, and its pattern finds the line the runner prints
+    od = re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: \|\n\s*\[ -f \"\$RUNNER_TEMP/tests\.txt\" \] \|\| \{ echo \"[^\"\n]*\"; exit 0; \}\n"
+                   r"\s*if grep -E '(\^left in [^'\n]*installondemand[^'\n]*)' "
                    r"\"\$RUNNER_TEMP/tests\.txt\"; then\n\s*echo \"::error::[^\"\n]*\"; exit 1\n\s*fi\n", host)
     line = re.search(r'print\(f"(left in \{root\} during the run [^"\n]*: \{n\})"\)', (root / "tools/run_all_tests.py").read_text())
     shown = line.group(1).replace("{root}", "/private/tmp").replace("{who}", "test_a.py, test_b.py") \
         .replace("{n}", ".com.apple.dt.CommandLineTools.installondemand.in-progress") if line else ""
-    if not od or not shown or not re.search(od.group(1), shown) or re.search(od.group(1), shown.replace("installondemand", "other")):
+    if not od or od.start() < host.find("python3 tools/run_all_tests.py") or not shown or not re.search(od.group(1), shown) \
+            or re.search(od.group(1), shown.replace("installondemand", "other")):
         out.append("host-tests does not fail when a test left the marker of an on-demand install of the command line tools "
                    "(a step that also runs after a failed test, with a pattern that finds the runner's line for the marker and no other)")
     # the four tests that compile against vulkan/vulkan.h skip without headers: the job must hand them the release's
@@ -237,6 +240,11 @@ control("a pattern that finds every entry the tests left is caught", "'^left in 
         "'^left in .*installondemand|^left in '", "on-demand install")
 control("a pattern for another line than the runner's is caught", "'^left in .*: \\.com\\.apple\\.dt\\.CommandLineTools\\.installondemand'",
         "'^left behind: \\.com\\.apple\\.dt\\.CommandLineTools\\.installondemand'", "on-demand install")
+control("a check for the marker that ends before its grep is caught", '"the tests did not run"; exit 0; }\n',
+        '"the tests did not run"; exit 0; }\n          exit 0\n', "on-demand install")
+MARKER_STEP = y[y.index("      - name: No test made macOS start an install"):y.index("  kexts-mac:")]
+HOST_STEP = y[y.index("      - name: Host tests\n"):y.index(MARKER_STEP)]
+control("a check for the marker made before the tests is caught", HOST_STEP + MARKER_STEP, MARKER_STEP + HOST_STEP, "on-demand install")
 control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
 control("the compile-line check that runs only after a good link is caught", "        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}\n", "",
         "whenever the RM and NVKMS were compiled")
