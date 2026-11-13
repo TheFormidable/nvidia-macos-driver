@@ -303,7 +303,7 @@ makes xcrun find another toolchain's compiler), the search paths `PKG_CONFIG_PAT
 `NM_TAHOE` selects the macOS 26 accelerator, and a login shell may point the others at a Homebrew of the other
 architecture. Your `SDKROOT` and `TOOLCHAINS` do not reach `build.sh` itself either: Apple's `/usr/bin/git`, `make`
 and `python3` find the real tool through xcrun, and `build.sh` asks those tools questions before its first step. With
-an `SDKROOT` that named an SDK which was not there, a build on one Mac stopped there, taking `make` for missing.
+an `SDKROOT` that named an SDK which was not there, a build on one Mac stopped there.
 doctor names both when they are set; to build with another SDK, choose its Xcode with `DEVELOPER_DIR`. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
 build_plugin.sh, the original author's development scripts for trees in `~/nvmtl-build`) are not used: `build.sh`
 replaces those scripts.

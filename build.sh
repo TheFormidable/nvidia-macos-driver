@@ -34,7 +34,7 @@ umask 022
 # concerned: /usr/bin/git, make and python3 are small programs of Apple's that find the real tool through xcrun, and
 # build.sh asks them questions before its first step. With an SDKROOT that named an SDK which was not there (as a
 # line left in a shell profile from an older Xcode does, or another platform's SDK of an Xcode since removed), a
-# build on a Mac stopped there, taking a make that was there for missing, and macOS was left with the marker of an
+# build on a Mac ran no step, and the run of the tests it was part of left the marker of an
 # on-demand install of the command line tools. That xcrun cannot find such an SDK is the explanation taken, not one
 # a log shows in xcrun's own words.
 CALLER_SDKROOT=${SDKROOT:-}; CALLER_TOOLCHAINS=${TOOLCHAINS:-}
