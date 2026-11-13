@@ -11,7 +11,8 @@ on the source text:
 - the escape goes through NVRMUserClient::esc (no new selector), answered first, before the connection's own gate
   and before the power gate (NvXnuPmUse) that holds every RM call during a GPU suspend and resume, so that a note is
   never parked behind either and can report the suspended state; it still refuses an adapter that is not up, the size
-  is checked before the record is touched, the power state passed is the adapter's own, and the answer is
+  is checked before the record is touched, the power state passed is the adapter's own, reported as suspended while
+  the power gate is still closed (gpuResume marks the adapter running before it opens the gate), and the answer is
   kIOReturnSuccess;
 - the note checks version and request before it counts or writes anything, and reads each field of the record once;
 - the ten documented sysctls, read-only, each declared and registered once, never unregistered, behind a once
@@ -169,10 +170,19 @@ def arms(t):
         and len(re.findall(r"\bNvXnuPmUse\b", esc)) == 1 and len(re.findall(r"\bfGate\b", esc)) == 1
         and not re.search(r"case\s+NVRM_ESC_CHAN_NOTE\b", esc))
     arm("NVRM.cpp: the note refuses an adapter that is not up, checks the exact size first, passes the adapter's "
-        "power state, answers success",
+        "power state (suspended while the power gate is still closed), answers success",
         cbody == "if (!fOwner || fOwner->fPassDone < 2) return kIOReturnNotReady; "
                  "if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument; "
-                 "nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm); return kIOReturnSuccess;")
+                 "SInt32 pm = OSAddAtomic(0, &fOwner->fGpuPm); "
+                 "if (pm == NVRM::kGpuPmRunning && __atomic_load_n(&gNvPmClosed, __ATOMIC_ACQUIRE)) pm = NVRM::kGpuPmSuspended; "
+                 "nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)pm); return kIOReturnSuccess;")
+    # the gate flag the answer reads is the one nv_xnu_pm_close sets and nv_xnu_pm_open clears
+    pc = re.search(r"static\s+int\s+nv_xnu_pm_close\s*\(", nvrm)
+    po = re.search(r"static\s+void\s+nv_xnu_pm_open\s*\(", nvrm)
+    arm("NVRM.cpp: gNvPmClosed is set by nv_xnu_pm_close and cleared only by nv_xnu_pm_open",
+        pc and po and "gNvPmClosed = true;" in block_after(nvrm, pc.end())
+        and "gNvPmClosed = false;" in block_after(nvrm, po.end())
+        and len(re.findall(r"\bgNvPmClosed\s*=[^=]", nvrm)) == 2)
     arm("NVRM.cpp: the escape number appears only in that case (no selector, no capability bit) and the header is included",
         len(re.findall(r"\bNVRM_ESC_CHAN_NOTE\b", nvrm)) == 1 and len(re.findall(r"\bnvrm_chan_note_handle\s*\(", nvrm)) == 1
         and '#include "nvrm_chan_note_abi.h"' in t["kexts/NVRM/NVRM.cpp"])
@@ -220,7 +230,9 @@ CPP, HDR, NVRM, OSX = ("kexts/NVRM/nvrm_chan_note.cpp", "kexts/NVRM/nvrm_chan_no
                        "kexts/NVRM/os-xnu.cpp")
 XID_HOOK = "    nvrm_chan_note_xid(error_number);\n"
 CASE_SIZE = "        if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument;\n"
-CASE_CALL = "        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm);\n"
+CASE_PM = ("        SInt32 pm = OSAddAtomic(0, &fOwner->fGpuPm);\n"
+           "        if (pm == NVRM::kGpuPmRunning && __atomic_load_n(&gNvPmClosed, __ATOMIC_ACQUIRE)) pm = NVRM::kGpuPmSuspended;\n")
+CASE_CALL = CASE_PM + "        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)pm);\n"
 CASE_UP = "        if (!fOwner || fOwner->fPassDone < 2) return kIOReturnNotReady;\n"
 NOTE_IF = ("    if (cmd == NVRM_ESC_CHAN_NOTE) {\n" + CASE_UP + CASE_SIZE + CASE_CALL + "        return kIOReturnSuccess;\n    }\n")
 CHECK = "   if (version != NVRM_CHAN_NOTE_VERSION || what >= NVRM_CN_WHAT_COUNT)\n      return 0;\n"
@@ -252,7 +264,12 @@ CONTROLS = [
     ("a size check that accepts a larger record", "checks the exact size first", NVRM,
      lambda s: broken(s, CASE_SIZE, CASE_SIZE.replace("!=", "<"))),
     ("a power state that is not the adapter's", "passes the adapter's power state", NVRM,
-     lambda s: broken(s, CASE_CALL, CASE_CALL.replace("(uint32_t)fOwner->fGpuPm", "0"))),
+     lambda s: broken(s, CASE_CALL, CASE_CALL.replace("(uint32_t)pm)", "0)"))),
+    ("the adapter's flag alone: running as soon as the channels restart, gate still closed", "power gate is still closed",
+     NVRM, lambda s: broken(s, CASE_PM, "        SInt32 pm = OSAddAtomic(0, &fOwner->fGpuPm);\n")),
+    ("a second writer of the gate flag", "cleared only by nv_xnu_pm_open", NVRM,
+     lambda s: broken(s, "    gNvPmUsers++;\n    IOLockUnlock(gNvPmGate);\n    return 1;\n",
+                      "    gNvPmUsers++;\n    gNvPmClosed = false;\n    IOLockUnlock(gNvPmGate);\n    return 1;\n")),
     ("the note answered after the power gate again", "the power gate (NvXnuPmUse) and the escape switch", NVRM,
      lambda s: broken(broken(s, NOTE_IF, ""), "    NvXnuPmUse pmUse;\n    switch (cmd) {\n",
                       "    NvXnuPmUse pmUse;\n" + NOTE_IF + "    switch (cmd) {\n")),
