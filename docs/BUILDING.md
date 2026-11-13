@@ -428,10 +428,10 @@ Installing a tester build over a release leaves the same fallback job a release 
 framebuffer refuses the running macOS's Apple classes so that the driver shows nothing on the card, the job puts the
 release back and restarts the Mac by itself during the first few minutes of a start (see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md), the layout-refusal entry). A Mac that restarts by itself onto the release
-after you installed a tester build has met that case. A Mac whose OpenCore does not exclude IONDRVSupport and that
-logs in by itself can meet it without restarting: Apple's firmware framebuffer can show a slow desktop without
-acceleration on the card, and when the automatic login has finished before the job has put the release's files back,
-the job leaves the restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brings the release.
+after you installed a tester build has met that case, also one whose OpenCore does not exclude IONDRVSupport: there
+Apple's firmware framebuffer can show a slow desktop without acceleration on the card for a few seconds first, and the
+Mac restarts even when it has logged you in by itself. Only a display on another GPU with a user logged in leaves the
+restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brings the release.
 
 ## What is not automated, and why
 

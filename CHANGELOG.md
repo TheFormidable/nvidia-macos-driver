@@ -75,11 +75,11 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   install over an earlier driver, while the installer's fallback job is still there (until the start after the first
   one that showed the display), the job finds the refusal at that start, keeps it (the class and both sizes) in
   `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts the
-  earlier driver back and restarts (where a display is lit and a user is logged in by then, on another GPU or on
-  Apple's firmware framebuffer after an automatic login, the restart is left to that user). The verdicts are on the
-  GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout` and `nvaccel-layout`. NVRMFB also publishes how many virtual
-  functions IOFramebuffer and IODisplayParameterHandler have in the running macOS (`nvrmfb-layout-vtables`); that is a
-  report and never a reason to refuse. Way back for all three checks: boot argument `nvlayout=0`.
+  earlier driver back and restarts (where another GPU shows a display and a user is logged in by then, the restart is
+  left to that user; a display on the refused card, which only Apple's firmware framebuffer can draw, does not hold it
+  back, even after an automatic login). The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout`
+  and `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler
+  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for all three checks: boot argument `nvlayout=0`.
 
 #### Applications and games
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
