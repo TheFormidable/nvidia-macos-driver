@@ -27,7 +27,7 @@ fails = 0
 
 def arm(name, ok, detail=""):
     global fails
-    print(("ok   " if ok else "FAIL ") + name + (f" ({str(detail).strip()[-400:]})" if detail and not ok else ""))
+    print(("ok   " if ok else "FAIL ") + name + (f" ({str(detail).strip()[-1200:]})" if detail and not ok else ""))
     fails += not ok
 
 
@@ -79,7 +79,8 @@ with tempfile.TemporaryDirectory() as d:
         and "\nall passed" in out, out)
     for n in range(1, 6):
         arm(f"the program has an arm for invariant {n}, and it passes", f'T("invariant {n}:' in src
-            and f"ok   invariant {n}:" in out)
+            and f"ok   invariant {n}:" in out,
+            " | ".join(l for l in out.splitlines() if f"invariant {n}:" in l or l.startswith("     ")))
     for i, (inv, what, edits) in enumerate(CONTROLS):
         damaged = hdr
         applied = all(damaged.count(a) == 1 for a, _ in edits)
