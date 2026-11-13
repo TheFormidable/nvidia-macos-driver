@@ -1043,15 +1043,20 @@ Then run ./build.sh doctor again.
 EOF
 }
 # Every call to Homebrew goes through here. The tester's login shell may export HOMEBREW_PREFIX, HOMEBREW_CELLAR and
-# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them); inherited, they
-# would make the brew build.sh chose read the wrong prefix and act on the wrong installation. So each call drops the
-# three, and runs with HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the
-# working directory, the install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them), and put its bin
+# folder first on PATH. Homebrew's bin/brew works out its own prefix, but it keeps the caller's PATH as HOMEBREW_PATH
+# (or takes HOMEBREW_PATH as its PATH when HOMEBREW_BREW_FILE is set too, as inside another brew), and its Ruby code
+# puts that PATH back for a formula's post-install step, for builds in its "std" environment and when it looks for a
+# requirement: the other architecture's programs would run there. So each call drops the three location variables and
+# those two, gives brew the PATH of a plain Mac with this Homebrew's bin first (brew_path), and runs with
+# HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the working directory, the
+# install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+brew_path() { printf '%s/bin:/usr/bin:/bin:/usr/sbin:/sbin' "$BREW_PREFIX"; }
 run_brew() {
   local kv=()
   while [ $# -gt 0 ] && [ "$1" != -- ]; do kv+=( "$1" ); shift; done
   [ "${1:-}" = -- ] && shift
-  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
+  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \
       HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 ${kv[@]+"${kv[@]}"} "$BREW" "$@"
 }
 # "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
@@ -1125,7 +1130,7 @@ cmd_deps() {
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
-    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 $BREW install $f"; done
+    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 $BREW install $f"; done
     elif ask "Install them now?"; then
       for f in "${want[@]}"; do
         say "brew install $f"
