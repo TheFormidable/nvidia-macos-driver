@@ -445,7 +445,7 @@ arm("  a display on another GPU and a console whose owner cannot be read: put ba
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), displays="ioreg: could not be reached\n", console="tester")
 arm("  any other text from ioreg is not a display: the Mac restarts", restored(r), show(r))
 
-# ---- the owner's Mac: one display, on the NVIDIA card, so nothing can show a picture after a refusal. In every
+# ---- the usual Mac: one display, on the NVIDIA card, so nothing can show a picture after a refusal. In every
 # order of the job, the kexts and the login it gets the previous driver back and restarts.
 for label, kw in (
         ("the refusal at the job's first look, at the login window", dict(registry=FB_REFUSED + ioreg_line(EARLY))),
@@ -462,7 +462,8 @@ for label, kw in (
         ("a display-came-up word from before, a user logged in",
          dict(registry=FB_REFUSED + ioreg_line(EARLY), nv={"nullmoth-nv-ok": "1"}, console="tester"))):
     r = run(job, **kw)
-    arm(f"the owner's Mac gets the previous driver back and restarts: {label}", restored(r), show(r))
+    arm(f"a Mac with its one display on the card gets the previous driver back and restarts: {label}", restored(r),
+        show(r))
 
 # ---- what must not look like a refusal
 r = run(job, registry=FB_REFUSED)

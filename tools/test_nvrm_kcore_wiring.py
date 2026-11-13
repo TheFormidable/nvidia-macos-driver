@@ -128,7 +128,7 @@ def problems(src):
         out.append("a flush of an abandoned queue waits")
     # The glue of the default-on work queue: the worker's wakes and the flush and stop bounds. Each of these is the
     # only thing that keeps a boot, a sleep or a shutdown from waiting for ever, and none of them is read by any other
-    # test. A later edit that drops one would leave the owner's machine hanging with every test still green.
+    # test. A later edit that drops one would leave a user's machine hanging with every test still green.
     worker = body(k, "static void wq_worker(")
     if not worker:
         out.append("wq_worker not found")

@@ -4,7 +4,7 @@
 The decisions of the fence are in kexts/NVRM/nvrm_fence_table.h and are run by tools/test_fence_table.c and
 tools/test_fence_model.c. This file is about the kernel code around them, which no host test can run: the lock, the
 sleep and the wakeup, the pages of another process, the boot-arg and the counters. A mistake in any of these is a
-panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted on the source text:
+panic, a hang or a lost wakeup on the user's machine, so each rule is asserted on the source text:
 
 - every function nvrm_fence.h declares is defined with the declared parameters; the file makes no RM call and asks
   the rest of the driver one thing only, where a page is pinned: whether it lies in the GPU's memory windows; the
