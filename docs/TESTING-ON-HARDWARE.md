@@ -97,8 +97,9 @@ restart. Take every test setting out again when its test is done.
    tools from Homebrew, a path that has run only against stand-ins, and no whole build has run there. Everything
    `./build.sh` builds is made for macOS 15.0 and later (the shader translator for 10.12 and later), so a package
    built on macOS 26 is meant for macOS 15 too; the Apple class checks of section 2, step 3, decide on each macOS at
-   its first start. On that Mac `./build.sh deps` took 46.5 minutes in an empty working directory, the build of the
-   17 components 5 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB.
+   its first start. On that Mac `./build.sh deps` took 46.5 minutes in an empty working directory at commit 650db45,
+   downloads included; at commit 3933ff6 the build of the 17 components took 5 minutes 41 seconds and the package
+   27 seconds, and the working directory then held about 8 GB.
    Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. It has not
    yet been run with a package that `./build.sh` made: on that Mac the package was staged and nothing more. Pass: its
    last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that first.
@@ -118,8 +119,8 @@ restart. Take every test setting out again when its test is done.
 ## 2. The first boot
 
 1. **The card started.** Install, restart. Pass: the login window comes up on the NVIDIA card;
-   `kmutil showloaded --list-only | grep nullmoth` shows four lines (NVRM, NVAccel, NVRMFB, NVRMAGDC), five on
-   macOS 26 where the installer adds its audio driver `com.nullmoth.NMXAudio` for an HD Audio controller;
+   `kmutil showloaded --list-only | grep nullmoth` shows the lines of NVRM, NVAccel, NVRMFB and NVRMAGDC, and on
+   macOS 26 also `com.nullmoth.NMXAudio`, the audio driver the installer adds there for an HD Audio controller;
    `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: no login window (the screen
    keeps the last picture of the start, or is black), or the Mac restarts by itself and comes up on 2.9 again. In the
    first case look, over `ssh`, in the kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on
