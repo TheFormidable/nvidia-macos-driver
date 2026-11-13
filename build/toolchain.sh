@@ -60,6 +60,21 @@ recipe_number() {
   esac
 }
 known_tool() { case " $TOOLS " in *" $1 "*) return 0 ;; esac; return 1; }
+# The version of the pinned source each tool is built from (build/pins.sh pins the sources; tools/test_build_sh.py holds
+# these equal to those pins): the checks compare it with what the installed program prints, so that a build from a
+# source tree of another version (a by-hand run with another NM_TC_SRC) stops instead of being stamped. Only the tools
+# whose real --version line is known; the others print nothing to compare.
+pinned_version() {
+  case "$1" in
+    ninja) echo 1.13.2 ;;
+    cmake) echo 4.4.5 ;;
+    python) echo 3.14.10 ;;
+    pkgconf) echo 2.5.1 ;;
+    glslang) echo 16.6.0 ;;
+    llvm) echo 22.1.8 ;;
+    *) return 1 ;;
+  esac
+}
 # On a Mac the oldest macOS the tools are built for is part of the id too.
 tool_id() {
   local dt=""
@@ -308,7 +323,7 @@ recipe_ninja() {
   x cp "$B/ninja/ninja" "$P/bin/ninja"
   x chmod 755 "$P/bin/ninja"
 }
-check_ninja() { need_file bin/ninja; answers bin/ninja --version; }
+check_ninja() { need_file bin/ninja; answers_pin ninja bin/ninja --version; }
 
 # cmake 4.4.5: its bootstrap and make, in a copy of the tree, as on the Mac. The bootstrap takes the system's curl, zlib
 # and iconv on macOS (it links /usr/lib/libcurl.4.dylib, libz and libiconv: the system's own, which the checks accept)
@@ -328,7 +343,7 @@ recipe_cmake() {
 }
 check_cmake() {
   need_file bin/cmake; need_file bin/ctest; need_file bin/cpack; need_glob share 'cmake-*'
-  answers bin/cmake --version; answers bin/ctest --version; answers bin/cpack --version
+  answers_pin cmake bin/cmake --version; answers bin/ctest --version; answers bin/cpack --version
 }
 
 # OpenSSL 3.5.9, static, only so that Python has ssl and hashlib (pip and meson's downloads need them). In a copy of the
@@ -414,7 +429,7 @@ recipe_python() {
 check_python() {
   local py=python/bin/python3.14 out
   need_file "$py"; [ -e "$P/$py" ] || return 0
-  answers "$py" --version
+  answers_pin python "$py" --version
   out=$(cd / && env -i "$P/$py" -c 'import ssl, zlib, ctypes, hashlib, venv, lzma, bz2, sqlite3, compression.zstd
 print(ssl.OPENSSL_VERSION)
 print(ssl.get_default_verify_paths().openssl_cafile)' 2>&1) \
@@ -444,7 +459,7 @@ recipe_pkgconf() {
 check_pkgconf() {
   local v out d
   need_file bin/pkgconf; need_file bin/pkg-config; [ -e "$P/bin/pkgconf" ] || return 0
-  answers bin/pkgconf --version; answers bin/pkg-config --version
+  answers_pin pkgconf bin/pkgconf --version; answers_pin pkgconf bin/pkg-config --version
   # the folders whose -I and -L pkgconf leaves out of its answers must not be the toolchain's own
   for v in pc_system_includedirs pc_system_libdirs; do
     out=$(cd / && env -i "$P/bin/pkgconf" --variable "$v" pkg-config 2>&1) || { bad "pkgconf --variable $v pkg-config fails: $out"; continue; }
@@ -502,7 +517,7 @@ recipe_glslang() {
 check_glslang() {
   local first
   need_file bin/glslang; need_file bin/glslangValidator; [ -e "$P/bin/glslangValidator" ] || return 0
-  answers bin/glslangValidator --version
+  answers_pin glslang bin/glslangValidator --version
   first=$(cd / && env -i "$P/bin/glslangValidator" --version 2>/dev/null | sed -n 1p)
   case "$first" in "Glslang Version: "*:*) ;; *) bad "glslangValidator --version starts with \"$first\", not \"Glslang Version: N:x.y.z\" (build.sh reads it)" ;; esac
 }
@@ -539,7 +554,7 @@ check_llvm() {
   need_file llvm/bin/llvm-config; [ -e "$P/llvm/bin/llvm-config" ] || return 0
   need_file llvm/bin/clang; need_glob llvm/lib "libLLVM*.$so*"; need_glob llvm/lib "libclang-cpp*.$so*"; need_file "llvm/lib/libclang.$so"
   need_file llvm/lib/cmake/llvm/LLVMConfig.cmake; need_file llvm/lib/cmake/clang/ClangConfig.cmake
-  answers llvm/bin/llvm-config --version; answers llvm/bin/clang --version
+  answers_pin llvm llvm/bin/llvm-config --version; answers llvm/bin/clang --version
   major=$(cd / && env -i "$P/llvm/bin/llvm-config" --version 2>/dev/null | sed 's/\..*//')
   need_file "llvm/lib/clang/$major/include/opencl-c.h"; need_file "llvm/lib/clang/$major/include/opencl-c-base.h"
   [ "$(cd / && env -i "$P/llvm/bin/llvm-config" --shared-mode 2>/dev/null)" = shared ] || bad "llvm-config --shared-mode does not say shared"
@@ -578,6 +593,19 @@ answers() {   # <program, relative> [arguments]: started from / with an empty en
   out=$(cd / && env -i "$P/$p" "$@" 2>&1) || rc=$?
   if [ "$rc" != 0 ] || [ -z "$out" ]; then bad "$p $* does not answer from an empty environment (exit $rc): $(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"
   else cnote "$p $*: $(printf '%s\n' "$out" | sed -n 1p)"; fi
+}
+# answers_pin <tool> <program, relative> [arguments]: it answers, and its first line holds the pinned version of <tool>
+# as a whole word (1.13.20 or 21.13.2 is not 1.13.2)
+answers_pin() {
+  local t=$1 p=$2 want out rc=0 first; shift 2
+  want=$(pinned_version "$t")
+  out=$(cd / && env -i "$P/$p" "$@" 2>&1) || rc=$?
+  if [ "$rc" != 0 ] || [ -z "$out" ]; then bad "$p $* does not answer from an empty environment (exit $rc): $(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"; return 0; fi
+  first=$(printf '%s\n' "$out" | sed -n 1p)
+  case " $first " in
+    *[!0-9.]"$want"[!0-9.]*) cnote "$p $*: $first" ;;
+    *) bad "$p $* prints \"$first\", not $t $want, the version this script builds: is NM_TC_SRC/$t the pinned source tree?" ;;
+  esac
 }
 # On macOS, every Mach-O file the tool installed may name only the system's libraries and the toolchain's own: a
 # library of a Homebrew (or of any other folder) that a build picked up would tie the toolchain to it. And each must run
