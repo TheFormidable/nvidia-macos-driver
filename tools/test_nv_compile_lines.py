@@ -140,6 +140,15 @@ def main():
     negative("the transform without its -mfunction-return rule makes the NVKMS commands differ", same_problems(mod, "kms"))
     mod.HOST_PROBED = saved
 
+    # an option a command carries twice is counted once for that command: the note counts commands
+    twice = ["cc -c -fcf-protection=full -fcf-protection=full a.c\n", "cc -c b.c\n"]
+    note = mod.transform("kms", twice)[1]
+    check("the note counts the commands that had an option, not its occurrences ('from 1 of 2')",
+          len(note) == 1 and "from 1 of 2 kms commands" in note[0], note)
+    src = (ROOT / "build/nv_compile_lines.py").read_text()
+    per_hit = {"__name__": "nm_per_hit"}
+    exec(compile(src.replace("for f in set(f.strip() for f in found):", "for f in [f.strip() for f in found]:"), "nm_per_hit", "exec"), per_hit)
+    negative("a note that counts occurrences", "from 1 of 2 kms commands" not in "".join(per_hit["transform"]("kms", twice)[1]))
     cli = [sys.executable, "-B", str(ROOT / "build/nv_compile_lines.py")]
     r = subprocess.run(cli + ["kms"], input="".join(rec("kms", "intel")), capture_output=True, text=True)
     check("the command line gives the same commands, notes on standard error only",
