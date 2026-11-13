@@ -46,6 +46,11 @@ NM_PIN_MESA_COMMIT=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
 # pin above moves, ci_vulkan_headers.sh stops until the two are compared again (its --compare) and both lines move.
 NM_PIN_CI_VKHEADERS_COMMIT=6802bb4733b63ed5efd3adb308a6c885ef180ea1
 NM_PIN_CI_VKHEADERS_MESA=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
+# The release package "./build.sh package" stages this checkout onto: build/package_local.sh (BASE_RELEASE) refuses a
+# base package of another release, whose files with no source here (the plugin bundle's Info.plist, air-runtime, the
+# video libraries) would ship under this build's version. build.sh checks that the two agree and names this release
+# where it asks for a base package; the base package of the automatic full build below is of the same release.
+NM_PIN_BASE_RELEASE=2.9
 # Not fetched by build.sh: the base package of the automatic full build (build/ci_full_build.sh basepkg, run by
 # .github/workflows/full-build.yml), which gives it to "./build.sh package" with NM_BASE_PACKAGE_SHA256. The release
 # package 2.9 as published on the original project's release page; size and SHA-256 of the file downloaded 2026-11-13.

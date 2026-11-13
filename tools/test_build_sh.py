@@ -3981,6 +3981,7 @@ def pin_expectations(pins):
         ("NM_PIN_RYZENADJ_COMMIT", "tools/ryzenadj-macos/build.sh", "COMMIT=" + p["NM_PIN_RYZENADJ_COMMIT"]),
         ("NM_PIN_RUST_VERSION", "build/build_xlate_release.sh", "RV=${NULLMOTH_RUST_VERSION:-%s}" % p["NM_PIN_RUST_VERSION"]),
         ("NM_PIN_TOOL_LLVM_MAJOR", "build/build_nvk.sh", "(LLVM %s.1.x)" % p["NM_PIN_TOOL_LLVM_MAJOR"]),
+        ("NM_PIN_BASE_RELEASE", "build/package_local.sh", "\nBASE_RELEASE=%s " % p["NM_PIN_BASE_RELEASE"]),
     ] + [
         # the version build/toolchain.sh compares each tool's --version with: the pinned tag without its prefix
         (f"NM_PIN_TC{pid}_REF", "build/toolchain.sh", f"    {tool}) echo {tc_tag_version(p[f'NM_PIN_TC{pid}_REF'])} ;;")
@@ -4003,6 +4004,11 @@ def pin_problems(pins, read):
     for name, rel, text in pin_expectations(pins):
         if text not in read(rel):
             p.append(f"{name}={pins[name]}: {rel} does not say {text!r}")
+    # the base package of the automatic full build is the pinned release's own tarball
+    url = pins.get("NM_PIN_CI_BASEPKG_URL")
+    rel = pins["NM_PIN_BASE_RELEASE"]
+    if url is not None and not url.endswith(f"/v{rel}/nullmoth-nvidia-{rel}.tar.gz"):
+        p.append(f"NM_PIN_CI_BASEPKG_URL={url} is not the tarball of release {rel} (NM_PIN_BASE_RELEASE)")
     for key in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
         url = pins[f"NM_PIN_{key}_URL"]
         if not url.startswith(f"https://raw.githubusercontent.com/WebKit/WebKit/{pins['NM_PIN_WEBKIT_COMMIT']}/"):
@@ -4047,6 +4053,18 @@ def arm_pins():
     bad["build/build_xlate_release.sh"] = read("build/build_xlate_release.sh").replace(
         "RV=${NULLMOTH_RUST_VERSION:-%s}" % pins["NM_PIN_RUST_VERSION"], "RV=${NULLMOTH_RUST_VERSION:-1.99.0}")
     negative("a consuming script that moved to another Rust", pin_problems(pins, lambda r: bad.get(r) or read(r)))
+    if "NM_PIN_CI_BASEPKG_URL" in pins:
+        moved = dict(pins, NM_PIN_CI_BASEPKG_URL=pins["NM_PIN_CI_BASEPKG_URL"].replace("2.9", "2.8"))
+        negative("a full build's base package of another release than the pinned one", pin_problems(moved, read))
+    # build.sh's own sentences that ask for a base package name the pinned release's tarball, from the pin
+    def base_name_problems(bs):
+        names = [l for l in bs.splitlines() if "nullmoth-nvidia-" in l and "nullmoth-nvidia-local" not in l]
+        q = [f"{l.strip()[:100]}" for l in names if "nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz" not in l]
+        return q + ([] if len(names) == 3 else [f"{len(names)} places, expected 3"])
+    q = base_name_problems(read("build.sh"))
+    check("build.sh names the base package as nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz wherever it names one (3 places)", not q, q)
+    negative("a build.sh that asks for nullmoth-nvidia-<version>.tar.gz",
+             base_name_problems(read("build.sh").replace("~/Downloads/nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz", "~/Downloads/nullmoth-nvidia-<version>.tar.gz")))
 
 
 def arm_pins_script():

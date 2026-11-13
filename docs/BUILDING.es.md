@@ -202,7 +202,7 @@ archivo y el archivo sobre el valor por defecto. El archivo se lee, nunca se eje
 | `--accel 15\|26\|both` | `NM_ACCEL` | `both` | NVAccel.kext para macOS 15, 26 o ambos (un paquete necesita ambos) |
 | `-v`, `--verbose` | `NM_VERBOSE` | `0` | Mostrar la salida de cada paso además de guardarla en su registro |
 | `--force` | `NM_FORCE` | `0` | Recompilar aunque esté al día |
-| `--base-package FILE` | `NM_BASE_PACKAGE` | ninguno | El paquete publicado que sirve de base |
+| `--base-package FILE` | `NM_BASE_PACKAGE` | ninguno | El paquete publicado que sirve de base: `nullmoth-nvidia-2.9.tar.gz` o su `pkgroot` desempaquetado (la versión es `NM_PIN_BASE_RELEASE` en `build/pins.sh`; otra se rechaza) |
 | `--config FILE` | `NM_CONFIG` | `~/.config/nullmoth/build.conf` si existe | El archivo de configuración |
 | `-h`, `--help` | | | Lo mismo que `help` |
 <!-- end -->
