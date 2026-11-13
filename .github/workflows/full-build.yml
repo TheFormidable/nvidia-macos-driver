@@ -10,7 +10,8 @@
 #   ./build.sh --workdir W test
 # and then build/ci_full_build.sh prove, one line per check with its number: Homebrew was not used and not changed
 # (/usr/local/bin, opt and Cellar listed before and after; no file of Homebrew's own folders changed; no brew process
-# in a list of the processes taken twice a second, by a watch that must have run to the end without a gap; build.sh
+# in a list of the processes taken twice a second, by a watch that must have run to the end and never stood still for
+# a minute (its longest pause is printed with the time it ended: a busy runner holds it up for some seconds); build.sh
 # never made its folder for Homebrew's cache); every link build.sh makes in W/tools/bin is there and leads into W or to
 # macOS's own /usr/bin and /bin; every Mach-O file under W/out and every tool of W (ninja, cmake, python3.14 and its
 # extension modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the
@@ -23,8 +24,9 @@
 # on a Mac whose /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several
 # Xcodes. What it cannot show: anything on macOS 26 or on the owner's hardware (this is macOS 15 on GitHub's), anything
 # with an NVIDIA card (there is none), anything about installing or loading the driver (nothing is installed or loaded),
-# a brew command shorter than half a second that changes no file, and nothing about the package's contents beyond the
-# checks above. The package is not uploaded: it never leaves the runner.
+# a brew command that changes no file and is over between two lists of the watch (half a second apart, more when the
+# runner holds the watch up), and nothing about the package's contents beyond the checks above. The package is not
+# uploaded: it never leaves the runner.
 #
 # A job gates once it has been seen green on GitHub's runners (the rule of ci.yml): this one is marked
 # continue-on-error until it has been seen green once: then delete that line.
