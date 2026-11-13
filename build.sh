@@ -1835,6 +1835,17 @@ cmd_test() {
   py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(path_tool python3)}; }
   [ -n "$py" ] || die "no python3"
   say "== pins"; check_pins
+  # The plugin's tests compile against Vulkan's headers, from NM_VULKAN_INCLUDE (a folder that holds vulkan/vulkan.h).
+  # Unset, they get the fetched Mesa's include/, the folder the release plugin is compiled against.
+  if [ -n "${NM_VULKAN_INCLUDE:-}" ]; then
+    export NM_VULKAN_INCLUDE
+    say "Vulkan headers for the tests: $NM_VULKAN_INCLUDE (NM_VULKAN_INCLUDE)"
+  elif [ -f "$MESA/include/vulkan/vulkan.h" ]; then
+    export NM_VULKAN_INCLUDE=$MESA/include
+    say "Vulkan headers for the tests: $NM_VULKAN_INCLUDE (the fetched Mesa's, which the release plugin is compiled against)"
+  else
+    say "Vulkan headers for the tests: none (no fetched Mesa), so the plugin's tests that compile against them are skipped unless ~/Vulkan-Headers/include has them; ./build.sh fetch brings Mesa's"
+  fi
   say "== host tests: $(qcmd "$py" tools/run_all_tests.py -j "$NM_JOBS")"
   if [ "$NM_DRY_RUN" = 1 ]; then return 0; fi
   CUR_LOG=$LOGS/test.log

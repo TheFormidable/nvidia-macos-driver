@@ -228,7 +228,8 @@ case "$role" in
                mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
           *) exit 1 ;;
         esac ;;
-      *run_all_tests.py) if [ -f "$SB/ctl/tests-fail" ]; then echo "269 passed, 1 failed, 0 skipped, 0 not run, of 270"; exit 1; fi
+      *run_all_tests.py) rec tests-env "NM_VULKAN_INCLUDE=${NM_VULKAN_INCLUDE-UNSET}"
+                         if [ -f "$SB/ctl/tests-fail" ]; then echo "269 passed, 1 failed, 0 skipped, 0 not run, of 270"; exit 1; fi
                          echo "270 passed, 0 failed, 0 skipped, 0 not run, of 270" ;;
       *) exit 0 ;;
     esac ;;
@@ -479,7 +480,8 @@ def make_remotes(root, tamper=False):
     shutil.rmtree(p, ignore_errors=True)
     git("clone", "-q", "--bare", work, p)
     _, commits["MESA"] = make_repo(root / "gitlab.freedesktop.org/mesa/mesa.git",
-                                   {"meson.build": MESON_BUILD + salt, "include/vulkan/vulkan_core.h": "#define VK_HEADER_VERSION 363\n"},
+                                   {"meson.build": MESON_BUILD + salt, "include/vulkan/vulkan_core.h": "#define VK_HEADER_VERSION 363\n",
+                                    "include/vulkan/vulkan.h": '#include "vulkan_core.h"\n'},
                                    tags=["mesa-26.3.0-rc3"])
     _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.367"])
     _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.367"])
@@ -2683,6 +2685,35 @@ def arm_test_cmd(mac):
         mac.break_script('  case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac\n', "")
         mac.break_script('| tee "$CUR_LOG" || rc=$?', '| tee "$CUR_LOG" || true')
         negative("test that ignores a failing host test", problems(mac))
+
+    # the plugin's tests get Vulkan's headers: NM_VULKAN_INCLUDE as the tester set it, else the fetched Mesa's include/
+    # (the folder the release plugin is compiled against), else none, and one line says which
+    mesa_inc = str(mac.work / "build/gpu-src/mesa/include")
+    shown = "~/" + os.path.relpath(mesa_inc, mac.home)   # build.sh writes a path in the home folder with ~
+
+    def vk_problems(s, want, says, extra=None):
+        s.clear()
+        rc, out = s.run("test", extra=extra)
+        got = [l for l in s.jlines() if l.startswith("tests-env ")]
+        q = []
+        if got != [f"tests-env NM_VULKAN_INCLUDE={want}"]:
+            q.append(f"the tests got {got}, expected NM_VULKAN_INCLUDE={want}")
+        if says not in out:
+            q.append(f"the output lacks: {says}")
+        return q
+    p = vk_problems(mac, mesa_inc, f"Vulkan headers for the tests: {shown} (the fetched Mesa's")
+    check("test gives the host tests the fetched Mesa's include/ as NM_VULKAN_INCLUDE and says so", not p, p)
+    p = vk_problems(mac, "/somewhere/include", "Vulkan headers for the tests: /somewhere/include (NM_VULKAN_INCLUDE)",
+                    extra={"NM_VULKAN_INCLUDE": "/somewhere/include"})
+    check("test passes a NM_VULKAN_INCLUDE the tester set unchanged", not p, p)
+    with mac.scratch():
+        (mac.work / "build/gpu-src/mesa/include/vulkan/vulkan.h").unlink()
+        p = vk_problems(mac, "UNSET", "./build.sh fetch brings Mesa's")
+        check("test without fetched headers sets nothing and says that ./build.sh fetch brings them", not p, p)
+    with mac.scratch():
+        mac.break_script("    export NM_VULKAN_INCLUDE=$MESA/include\n", "    NM_VULKAN_INCLUDE=$MESA/include\n")
+        negative("test that does not export the Mesa headers to the tests",
+                 vk_problems(mac, mesa_inc, f"Vulkan headers for the tests: {shown} (the fetched Mesa's"))
 
     # the patch chain is applied the way build_rm620.sh and build_nvrm.sh apply it, through tools/bin/patch; macOS's
     # patch would wait at the terminal for an answer about every patch whose file is not in the first folder tried
