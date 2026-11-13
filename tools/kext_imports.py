@@ -83,9 +83,21 @@ KEXTS = {
     "NVPrimarySelector": (r"^primary\.o$", "kexts/NVPrimarySelector/Info.plist"),
 }
 # symbols the compiler or the kext start-up objects (libkmod, libkmodc++, libcc_kext) provide at link time
+#
+# ____chkstk_darwin is the stack probe. Apple's clang, compiling for macOS, makes a function whose frame is larger than
+# a page call ___chkstk_darwin first, and the object names it with the usual extra underscore, four in all (NVRMFB has
+# one such function, as 2.9 did; the macos-15 runner's check reported it as unresolved). The kext link's -lcc_kext (the toolchain's lib/clang/<n>/lib/darwin/libclang_rt.cc_kext.a)
+# defines it, so the linked kext carries it as a local text symbol: `nm` of NVRMFB, the installed 2.9 one and one built
+# from this tree, shows `t ____chkstk_darwin` beside `t ___chkstk_darwin`, `t ___chkstk_darwin_probe` and
+# `t ___chkstk_darwin_llvm_probe`, and none of them undefined. Only the four-underscore name is listed: it is the one
+# name the compiler asks for; the other three are what the archive defines around it, and an object that named one of
+# them would be calling the probe by hand. The clang of a Linux machine never asks for it: LLVM emits the probe only
+# for a function that carries a "probe-stack" attribute, which Apple's clang adds for macOS and LLVM's own clang does
+# not (a 9000-byte frame compiled for x86_64-apple-macos15.0 with -mkernel imports no probe there; the same code with
+# the attribute added imports ____chkstk_darwin). So only the check on a Mac sees it.
 LINKTIME = re.compile(r"^(___stack_chk_(fail|guard)|_kmod_info|__start|__stop|___cxa_pure_virtual|__realmain|__antimain|"
                       r"__kext_apple_cc|___bzero|___udivti3|___umodti3|___divti3|___modti3|_OSKextGetCurrentIdentifier|"
-                      r"_OSKextGetCurrentLoadTag|_OSKextGetCurrentVersionString)$")
+                      r"_OSKextGetCurrentLoadTag|_OSKextGetCurrentVersionString|____chkstk_darwin)$")
 ATEXIT = ("___cxa_atexit", "___dso_handle")
 
 
@@ -350,6 +362,10 @@ def selftest():
          not nv & {"os_alloc_mem", "g_only_declared", "_helperOnly", "rm_called_only", "rm_macro_only", "rm_in_a_comment", "floor", "free", "portMemFree"}),
         ("a symbol another kext of the tree defines is a sibling's", C("_nv_xnu_helper", sib={"_nv_xnu_helper"}) == "sibling"),
         ("an allow-listed symbol passes", C("_x", allow={"_x"}) == "allowed"),
+        ("the stack probe the compiler calls in a frame larger than a page is the kext link's (____chkstk_darwin)",
+         C("____chkstk_darwin") == "linktime"),
+        ("control: a call to the probe by its C name, or to the names the archive defines around it, is not excused",
+         all(C(s) == "UNRESOLVED" for s in ("___chkstk_darwin", "___chkstk_darwin_probe", "___chkstk_darwin_llvm_probe", "____chkstk_darwin_x"))),
         ("a global destructor lowered to __cxa_atexit is caught unless the toolchain is known to do that",
          C("___cxa_atexit").startswith("UNRESOLVED") and C("___cxa_atexit", atexit=True) == "toolchain"),
         ("PE_boot_args resolves on macOS 26 alone", C("_PE_boot_args", ex=new) == "kernel" and C("_PE_boot_args", ex=old) == "UNRESOLVED" and rc_new == 0),
