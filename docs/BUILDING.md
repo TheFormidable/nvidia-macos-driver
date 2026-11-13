@@ -418,6 +418,12 @@ every file the tester build changed, and the next restart loads the release. To 
 backup: it removes the driver. With the 1401 app, "1401: Remove NVIDIA driver" in the OpenCore picker puts the Mac
 back as it was before the app's install.
 
+Installing a tester build over a release leaves the same fallback job a release install leaves: if this build's
+framebuffer refuses the running macOS's Apple classes so that no desktop comes up on the card, the job puts the
+release back and restarts the Mac by itself during the first few minutes of a start (see
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md), the layout-refusal entry). A Mac that restarts by itself onto the release
+after you installed a tester build has met that case.
+
 ## What is not automated, and why
 
 | What | Why |
