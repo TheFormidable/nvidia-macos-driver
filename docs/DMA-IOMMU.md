@@ -130,10 +130,13 @@ installer's dropped DMAR table), which gives mode 0.
 
 ## What was never run on hardware
 
-Everything in modes 1, 2 and 3, and mode 0 too: nothing of this branch has been loaded on a Mac yet. An earlier state
-of the DMA layer (before the self-test's check for an untranslated address) was compiled and linked on a Mac with the
-macOS 26 SDK for macOS 15 and later; its kernel imports were checked by hand against the export lists in the published
-source of the macOS 15 and 26 kernels; the decisions were tested on a host. Nothing of it has run with a real mapper:
+Everything in modes 1, 2 and 3, and mode 0 too: nothing of this branch has been loaded on a Mac yet. The DMA layer as
+it stands at commit 3933ff6, the self-test's check for an untranslated address included, was compiled and linked for
+macOS 15 and later on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner
+(macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). Its kernel imports were checked against the
+export lists in the published source of the macOS 15 and 26 kernels, and on that Mac `kmutil libraries` found every
+symbol NVRM imported at an earlier state of the branch; the decisions were tested on a host. Nothing of it has run
+with a real mapper:
 
 - the NVIDIA RM's own bus-address path (it is compiled into the driver and is the path Linux always uses, but it was
   never executed on macOS);
