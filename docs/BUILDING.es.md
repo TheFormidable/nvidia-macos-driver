@@ -173,7 +173,7 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
 | `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch` |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
-| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`; `all` pregunta antes) |
+| `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` tarda cerca de una hora en volver a compilarlas; `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
 <!-- end -->
 
