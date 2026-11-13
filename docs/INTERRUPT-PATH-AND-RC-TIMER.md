@@ -27,8 +27,8 @@ readable over SSH while the screen is frozen.
 Linux registers the GPU interrupt with `request_threaded_irq`: `rm_isr` runs in the hard interrupt and `rm_isr_bh` on
 the interrupt's own kernel thread. Here the primary filter only counts and time-stamps the MSI; `rm_isr` runs on the
 GPU's work-loop thread (`NVRM::interruptOccurred`), and `rm_isr_bh` on a thread of its own, one per GPU, named
-`NVRM bottom half` (it shows in spindumps). A bottom half that waits for the GPU lock, for example behind a long RM
-control from another process, then no longer delays the next `rm_isr`.
+`NVRM bottom half` (it shows in spindumps). A long bottom half (it runs with the GPU lock that `rm_isr` took for it)
+then no longer delays the next `rm_isr`.
 
 When `rm_isr` asks for a bottom half, it has handed the GPU lock over to it: only `rm_isr_bh` gives it back. So the
 request alone decides (as on Linux), and a requested bottom half is always run, also when the GPU stops at the same
@@ -58,7 +58,7 @@ was still inside `rm_isr`. Each GPU now has its own slot (8, one per possible ca
 | `debug.nvrm_bh_thread` | sysctl | GPUs whose bottom half runs on its own thread (1 with one card) |
 | `debug.nvrm_bh_runs` | sysctl | Bottom halves run |
 | `debug.nvrm_bh_wake_max_us` | sysctl | Longest wait between a bottom half's request and the start of its run: the cost of the hand-off, well under 1000 expected |
-| `debug.nvrm_bh_max_us` | sysctl | Longest bottom half, its wait for the GPU lock included |
+| `debug.nvrm_bh_max_us` | sysctl | Longest bottom half, microseconds |
 | `debug.nvrm_bh_over_1ms`, `debug.nvrm_bh_over_4ms` | sysctl | Bottom halves over 1 ms and over 4 ms |
 | `debug.nvrm_isr_count`, `debug.nvrm_isr_handled` | sysctl | MSIs taken, and those the RM claimed |
 | `debug.nvrm_isr_latency_max_us` | sysctl | Longest wait between an MSI and its `rm_isr` |
@@ -68,8 +68,10 @@ was still inside `rm_isr`. Each GPU now has its own slot (8, one per possible ca
 | `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet that ran out. Should stay 0 |
 | `debug.nvrm_bh_stuck` | sysctl | Bottom-half threads that did not exit within 5 s of the GPU's stop. Should stay 0 |
 
-How to read them: compare `debug.nvrm_isr_late_*` and `debug.nvrm_isr_latency_max_us` during a session that stuttered
-in 2.9 (4K playback, screen capture, a browser with video); they should be lower or equal. If something hangs and
+How to read them: 2.9 has none of these counters, so compare `debug.nvrm_isr_late_*` and
+`debug.nvrm_isr_latency_max_us` after the same session (one that stuttered in 2.9: 4K playback, screen capture, a
+browser with video) booted once as it is and once with `nvrmbhthread=0`; with the thread they should be lower or
+equal. If something hangs and
 `debug.nvrm_bh_runs` stops growing, boot with `nvrmbhthread=0` and say so in the report.
 
 ## The RC timer
