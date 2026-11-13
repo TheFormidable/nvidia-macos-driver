@@ -1369,8 +1369,8 @@ def arm_spirvprefix():
     p = spirvprefix_problems()
     check("NM_SPIRV_TOOLS_PREFIX names a SPIRV-Tools that is not Homebrew's: doctor takes it and deps installs none", not p, p)
     negative("SPIRV-Tools looked for in Homebrew only (the setting is ignored)",
-             spirvprefix_problems(script_edit=('  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(tc_path spirv-tools)" "$(brew_opt spirv-tools)"; do',
-                                               '  for p in "$(brew_opt spirv-tools)"; do')))
+             spirvprefix_problems(script_edit=('  cands=( "${NM_SPIRV_TOOLS_PREFIX:-}" "$(tc_path spirv-tools)" )\n',
+                                               '  cands=( )\n')))
     negative("a prefix taken without looking for its SPIRV-Tools.pc",
              spirvprefix_problems(script_edit=('    [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] || continue\n    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break',
                                                '    [ -n "$p" ] || continue\n    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break')))
@@ -1438,7 +1438,7 @@ def arm_ownllvm():
     check("an LLVM 22 that is not Homebrew's (NM_LLVM_PREFIX): deps calls no brew at all and builds the translator against it, "
           "with Homebrew's translator installed or not", not p, p)
     negative("Homebrew's translator taken whatever the LLVM in use",
-             ownllvm_problems(('  ! brew_llvm_chosen || brewtr=$(brew_opt spirv-llvm-translator)\n',
+             ownllvm_problems(('  [ "$tc" = 1 ] || ! brew_llvm_chosen || brewtr=$(brew_opt spirv-llvm-translator)\n',
                                '  brewtr=$(brew_opt spirv-llvm-translator)\n')))
     negative("Homebrew asked for its translator whatever the LLVM in use",
              ownllvm_problems(('[ "$nobrew" = 0 ] && { brew_llvm_chosen || case " ${want[*]-} " in *" llvm "*) true ;; *) false ;; esac; } && brew_may_ask',
@@ -1580,24 +1580,141 @@ def arm_source():
     negative("deps that goes the Homebrew way on an Intel Mac", p3)
 
 
+# Homebrew's offer on the imitated Intel Mac of arm_source_some: formula -> its command in <prefix>/bin (as Homebrew links
+# them; python3 is python@3.14's), the commands a shell then finds on PATH before macOS's own
+NOBREW_LINKS = {"gpatch": ("gpatch", "bin/gpatch"), "ninja": ("ninja", "bin/ninja"), "cmake": ("cmake", "bin/cmake"),
+                "pkgconf": ("pkg-config", "bin/pkg-config"), "python@3.14": ("python3", "bin/python3.14"),
+                "glslang": ("glslangValidator", "bin/glslangValidator")}
+
+
+def nobrew_sandbox(tag, edits=()):
+    """an Intel Mac, NM_TOOLS_FROM unset (auto), whose Homebrew at its fixed place (brew_places, NM_BREW unset) offers
+    cmake, ninja, pkgconf, python3, gpatch, glslang, SPIRV-Tools and llvm, with their commands linked into its bin
+    folder, which comes first on PATH"""
+    sb = Sandbox("nobrew" + tag, tools_from=None,
+                 formulas=tuple(NOBREW_LINKS) + ("spirv-tools", "llvm"))
+    b = sb.dir / "brew"
+    for f, (cmd, rel) in NOBREW_LINKS.items():
+        (b / "bin" / cmd).symlink_to(b / "opt" / f / rel)
+    sb.break_script(BREW_PLACES_LINE, f'brew_places() {{ echo "{b}/bin/brew /nonexistent/bin/brew"; }}')
+    for old, new in edits:
+        sb.break_script(old, new)
+    sb.nobrew_env = {"NM_BREW": "", "PATH": f"{b}/bin:{sb.bin}"}
+    return sb
+
+
+def nobrew_problems(sb):
+    """the claims of the source way on that Mac, each with its own list of problems: deps builds all ten tools;
+    tools/bin leads to none of Homebrew's (patch: the patch on PATH, macOS's); the Python environment is made from the
+    toolchain's Python; no brew call in deps, doctor, fetch or build; doctor names the copies it does not use; the NVK
+    step's pkg-config is the toolchain's"""
+    P = {k: [] for k in ("built", "links", "patch", "venv", "brew", "doctor", "nvkpc")}
+    env = sb.nobrew_env
+    brew = str(sb.dir / "brew")
+    tc = str(sb.work / "tools/toolchain")
+    before = sb.listing(sb.home)
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra=env)
+    calls = brew_calls(sb)
+    P["built"] = [x for x in source_deps_problems(sb, rc, out, before) if not x.startswith("Homebrew was called")]
+    if calls:
+        P["brew"].append(f"deps called brew: {calls[:3]}")
+    tbin = sb.work / "tools/bin"
+    for l in sorted(tbin.iterdir()) if tbin.is_dir() else []:
+        r = os.path.realpath(l)
+        if r.startswith(brew + "/"):
+            P["links"].append(f"tools/bin/{l.name} leads to {r}")
+        if l.name in ("ninja", "cmake", "pkg-config", "glslangValidator", "llvm-config") and not r.startswith(tc + "/"):
+            P["links"].append(f"tools/bin/{l.name} is not the toolchain's: {r}")
+    pt = (tbin / "patch").read_text() if (tbin / "patch").is_file() else ""
+    if f"exec {sb.bin}/patch -f" not in pt:
+        P["patch"].append(f"tools/bin/patch is not the patch on PATH (macOS's): {pt[-200:]!r}")
+    cfg = sb.work / "tools/venv/pyvenv.cfg"
+    home = cfg.read_text().split("=", 1)[1].strip() if cfg.exists() else ""
+    if not home.startswith(tc + "/"):
+        P["venv"].append(f"the Python environment was made from {home or 'nothing'}")
+    sb.clear()
+    rc, dout = sb.run("doctor", extra=env)
+    if brew_calls(sb):
+        P["brew"].append(f"doctor called brew: {brew_calls(sb)[:3]}")
+    for n in ("ninja", "cmake", "pkg-config", "python3", "glslangValidator", "llvm-config", "SPIRV-Tools"):
+        if not re.search(rf"^  note     {re.escape(n)}: .* not used: with tools from source only the toolchain's", dout, re.M):
+            P["doctor"].append(f"doctor does not name Homebrew's {n} as not used")
+    if not re.search(r"^  note     Homebrew \S+: not used", dout, re.M) or re.search(r"^  ok       Homebrew", dout, re.M):
+        P["doctor"].append("doctor does not say that Homebrew is not used")
+    if "doctor: everything required is present" not in dout:
+        P["doctor"].append("doctor is not content: " + dout[-300:])
+    sb.clear()
+    rc, fout = sb.run("fetch", extra=env)
+    rc2, bout = sb.run("build", "nvk", extra=env)
+    if brew_calls(sb):
+        P["brew"].append(f"fetch or build called brew: {brew_calls(sb)[:3]}")
+    envs = [e for k, _, e in sb.steps() if k == "nvk"]
+    if not envs:
+        P["nvkpc"].append(f"nvk did not run (fetch {rc}, build {rc2}): {bout[-400:]}")
+    else:
+        found = None
+        for d in envs[0].get("PATH", "").split(":"):
+            c = os.path.join(d, "pkg-config")
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                found = os.path.realpath(c)
+                break
+        if found != tc + "/bin/pkg-config":
+            P["nvkpc"].append(f"the NVK step's pkg-config is {found}")
+    return P, out
+
+
 def arm_source_some():
-    """Homebrew's ninja, cmake, pkgconf, glslang, SPIRV-Tools and Python are there, LLVM is not, NM_TOOLS_FROM=source:
-    deps builds exactly LLVM and the toolchain's own ninja and cmake (not Homebrew's) and calls no brew"""
-    def run(edit=None, tag=""):
-        sb = Sandbox("srcsome" + tag, tools_from="source",
-                     formulas=("gpatch", "ninja", "cmake", "pkgconf", "glslang", "spirv-tools", "python@3.14"))
-        (sb.state / "brew-llvm").write_text("23.1.5\n")
-        if edit:
-            sb.break_script(*edit)
-        before = sb.listing(sb.home)
-        sb.clear()
-        rc, out = sb.run("deps", "-y")
-        return source_deps_problems(sb, rc, out, before, want=["ninja", "cmake", "llvm"]), out
-    p, out = run()
-    check("only LLVM missing: deps builds ninja, cmake (though Homebrew's are there) and llvm, nothing else, and no brew call",
-          not p, (p, out[-1200:]))
-    p, out = run(edit=('  for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done\n', '', 2), tag="-neg")
-    negative("a toolchain that builds LLVM with the ninja and cmake it found elsewhere", p)
+    """22c: on an Intel Mac whose Homebrew offers ninja, cmake, pkgconf, python3, gpatch and more, the source way takes
+    nothing from it: deps builds all ten tools, tools/bin leads to none of Homebrew's, no brew is called, the NVK step's
+    pkg-config is the toolchain's. With NM_TOOLS_FROM=homebrew the same Mac uses Homebrew's as before."""
+    sb = nobrew_sandbox("")
+    # first the Homebrew way on this Mac: as before, Homebrew's tools are taken and nothing is built from source
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra=dict(sb.nobrew_env, NM_TOOLS_FROM="homebrew"))
+    tbin = sb.work / "tools/bin"
+    viabrew = {l.name for l in tbin.iterdir() if os.path.realpath(l).startswith(str(sb.dir / "brew") + "/")} if tbin.is_dir() else set()
+    hb_ok = rc == 0 and not tc_builds(sb) and {"ninja", "cmake", "pkg-config", "glslangValidator", "llvm-config"} <= viabrew
+    check("NM_TOOLS_FROM=homebrew on that Mac: Homebrew's tools are taken as before, nothing is built from source",
+          hb_ok, (rc, sorted(viabrew), [t for t, _ in tc_builds(sb)], out[-600:]))
+    P, out = nobrew_problems(sb)
+    names = {"built": "deps builds all ten tools in order (none counts as there because Homebrew has it) and ends with everything present",
+             "links": "tools/bin leads to none of Homebrew's tools: ninja, cmake, pkg-config, glslangValidator and llvm-config are the toolchain's",
+             "patch": "tools/bin/patch runs the patch on PATH (macOS's), not Homebrew's gpatch",
+             "venv": "the Python environment made by the Homebrew way is made again from the toolchain's Python",
+             "brew": "no brew call at all in deps, doctor, fetch and build nvk",
+             "doctor": "doctor names each copy Homebrew offers as not used, says Homebrew is not used, and is content",
+             "nvkpc": "the NVK step's pkg-config is the toolchain's"}
+    for k, n in names.items():
+        check("source way on an Intel Mac with a full Homebrew: " + n, not P[k], (P[k], out[-800:]))
+    # one control per claim: build.sh changed so that exactly that claim breaks
+    controls = [
+        ("built", "find_tools that counts Homebrew's tools as there with tools from source",
+         [('  [ "$(tools_from)" != source ] || tc=1\n', '')]),
+        ("links", "a source way that takes Homebrew's ninja",
+         [('    T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(tc_path ninja bin/ninja)")\n',
+           '    T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(tc_path ninja bin/ninja)")\n')]),
+        ("patch", "a source way that prefers Homebrew's gpatch",
+         [('  [ "$tc" = 0 ] || cands=( "$(path_tool patch)" "$(brew_opt gpatch)/bin/gpatch"', '  [ "$tc" = 0 ] || cands=( "$(brew_opt gpatch)/bin/gpatch" "$(path_tool patch)"')]),
+        ("venv", "a Python environment that counts whatever Python made it",
+         [('     && venv_of_python; then', '     ; then')]),
+        ("brew", "doctor that asks brew its version with tools from source",
+         [('then d_note "Homebrew $BREW: not used, with tools from source build.sh calls no brew"',
+           'then run_brew -- --version >/dev/null 2>&1 || true; d_note "Homebrew $BREW: not used, with tools from source build.sh calls no brew"')]),
+        ("doctor", "doctor without the notes on unused copies", [('  tc_unused\n', '')]),
+        ("nvkpc", "a source way that takes Homebrew's pkg-config",
+         [('    T_PKGCONFIG=$(pick "" "" "$(tc_path pkgconf bin/pkg-config)")\n',
+           '    T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(tc_path pkgconf bin/pkg-config)")\n')]),
+    ]
+    for key, name, edits in controls:
+        s = nobrew_sandbox("-" + key, edits)
+        if key == "venv":   # the Homebrew way first, as above, so that a venv of Homebrew's Python is there
+            s.run("deps", "-y", extra=dict(s.nobrew_env, NM_TOOLS_FROM="homebrew"))
+        negative(name, nobrew_problems(s)[0][key])
+    s = nobrew_sandbox("-hbneg", [('    *) printf \'%s\' "$NM_TOOLS_FROM" ;;', '    *) printf source ;;')])
+    s.clear()
+    rc, out = s.run("deps", "-y", extra=dict(s.nobrew_env, NM_TOOLS_FROM="homebrew"))
+    negative("NM_TOOLS_FROM=homebrew that builds from source", [] if not tc_builds(s) else ["built from source"])
 
 
 def arm_source_fail():
