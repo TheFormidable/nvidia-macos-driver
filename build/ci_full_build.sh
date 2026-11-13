@@ -41,9 +41,15 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 # Folders of build.sh's working directory (its derive_paths): tools/bin holds a link to every tool a step uses, the
 # Python environment is tools/venv, Rust tools/rustup and tools/cargo, the SPIRV-LLVM-Translator
 # tools/spirv-llvm-translator, the step logs logs/<component>.log, the failure reports reports/, the package package/.
+# The tools deps builds from pinned sources (build/toolchain.sh) are installed in tools/toolchain, with one stamp per
+# finished tool in tools/toolchain/.nm-toolchain/, and each tool's log is logs/toolchain/<tool>.log; their sources are
+# src/git/tc-<tool>.git (fetched) and src/toolchain/<tool> (exported from it), their build trees tools/toolchain-build.
 # When build.sh asks Homebrew anything it keeps Homebrew's cache in tools/homebrew-cache.
-tc_prefix() { printf '%s/tools/toolchain' "$1"; }   # WIRING: the toolchain's place, from the plan for deps' source way; not yet in build.sh
-tc_logs() { printf '%s/logs' "$1"; }                # WIRING: the toolchain's own log folder, from the same plan
+tc_prefix() { printf '%s/tools/toolchain' "$1"; }
+tc_logs() { printf '%s/logs/toolchain' "$1"; }
+# the links build.sh makes in tools/bin (make_tool_links) once deps has every tool: a step that finds one of these
+# missing there would look for it on its PATH, which leads to macOS's own folders only, and stop
+TOOL_LINKS="bindgen cargo cbindgen cmake glslangValidator llvm-config llvm-spirv ninja patch pkg-config rustc"
 
 # ---------------------------------------------------------------------------------------------------------- small tools
 sha256_file() { shasum -a 256 "$1" | cut -c1-64; }
@@ -367,10 +373,14 @@ $name -> ${tg:-?}" ;;
     case "$tg" in "$w"/*|"$wr"/*) ;; *) bad="$bad
 python3 of the Python environment -> $tg" ;; esac
   fi
+  for name in $TOOL_LINKS; do
+    [ -e "$w/tools/bin/$name" ] || [ -L "$w/tools/bin/$name" ] || bad="$bad
+$name: not in tools/bin"
+  done
   if [ -z "$bad" ]; then
     ok "the tools the steps use (tools/bin and the Python environment): $n, every one inside the working directory${sys:+; from macOS itself:$sys}"
   else
-    fail "the tools the steps use: $(printf '%s' "$bad" | grep -c .) of $n lie outside the working directory and macOS:"
+    fail "the tools the steps use: $(printf '%s' "$bad" | grep -c .) of $n lie outside the working directory and macOS, or are not there:"
     printf '%s\n' "$bad" | grep . | indent 20
   fi
 }

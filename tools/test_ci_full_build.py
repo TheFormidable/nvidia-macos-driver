@@ -16,6 +16,7 @@ import hashlib
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -181,9 +182,20 @@ class Scene:
         (tc / ".nm-toolchain/ninja").write_text("3441b633 ninja recipe 2 Darwin-x86_64 macos15.0\n")
         mk.make(w / "tools/spirv-llvm-translator/lib/libLLVMSPIRVLib.dylib", "dylib", (str(tc / "llvm/lib/libLLVM.dylib"),))
         mk.make(w / "tools/cargo/bin/bindgen", "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",))
+        mk.make(w / "tools/cargo/bin/cbindgen", "bundle", ("/usr/lib/libSystem.B.dylib",))
+        mk.make(w / "tools/spirv-llvm-translator/bin/llvm-spirv", "bundle", (str(w / "tools/spirv-llvm-translator/lib/libLLVMSPIRVLib.dylib"),))
+        rs = w / "tools/rustup/toolchains/1.98.1-x86_64-apple-darwin/bin"
+        for b in ("rustc", "cargo"):
+            mk.make(rs / b, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",))
+        (tc / "bin/pkg-config").symlink_to("pkgconf")
+        (tc / "bin/glslangValidator").symlink_to("glslang")
         tb = w / "tools/bin"
         tb.mkdir(parents=True)
-        for n, t in (("ninja", tc / "bin/ninja"), ("cmake", tc / "bin/cmake"), ("pkg-config", tc / "bin/pkgconf"), ("llvm-config", tc / "llvm/bin/llvm-config")):
+        # the links build.sh's make_tool_links makes
+        for n, t in (("ninja", tc / "bin/ninja"), ("cmake", tc / "bin/cmake"), ("pkg-config", tc / "bin/pkg-config"),
+                     ("glslangValidator", tc / "bin/glslangValidator"), ("llvm-config", tc / "llvm/bin/llvm-config"),
+                     ("llvm-spirv", w / "tools/spirv-llvm-translator/bin/llvm-spirv"), ("rustc", rs / "rustc"), ("cargo", rs / "cargo"),
+                     ("bindgen", w / "tools/cargo/bin/bindgen"), ("cbindgen", w / "tools/cargo/bin/cbindgen")):
             (tb / n).symlink_to(t)
         (tb / "patch").write_text('#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec /usr/bin/patch -f "$@"\n')
         (w / "tools/venv/bin").mkdir(parents=True)
@@ -327,6 +339,8 @@ def main():
                 lambda: mk.make(cm, "bundle", ("/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib")))
         pk = w / "tools/toolchain/bin/pkgconf"
         control("a tool the toolchain should have and has not is caught", "bin/pkgconf", lambda: pk.rename(pk.with_suffix(".x")), lambda: pk.with_suffix(".x").rename(pk))
+        gl = w / "tools/bin/glslangValidator"
+        control("a tool missing from tools/bin is caught", "glslangValidator: not in tools/bin", gl.unlink, lambda: gl.symlink_to(tc / "bin/glslangValidator"))
         r = w / "package/pkgroot"
         new = r / "Library/NullMoth/dlss/nm_unzstd"
         control("a shipped file built for macOS 26 is caught", "minos 26.0",
@@ -352,8 +366,33 @@ def main():
         arm("toolchain-id changes when a tool is finished, and is empty without a toolchain",
             rc1 == rc2 == rc3 == 0 and len(a.strip()) == 16 and len(b.strip()) == 16 and a != b and c == "", (a, b, c))
 
-        # deps-plan: the lines build.sh prints before it calls Homebrew
+        # the folders of the working directory the job and these checks name are build.sh's own (derive_paths, tc_path,
+        # make_tool_links), and the workflow's caches name the same
         bsh = (ROOT / "build.sh").read_text()
+        fbw = (ROOT / ".github/workflows/full-build.yml").read_text()
+        own = (ROOT / "build/ci_full_build.sh").read_text()
+        names = ['  SRC=$W/src\n', '  TOOLS=$W/tools\n', '  LOGS=$W/logs\n', '  GITDIR=$SRC/git\n',
+                 '  TC_PREFIX=$TOOLS/toolchain; TC_WORK=$TOOLS/toolchain-build; TC_LOGS=$LOGS/toolchain; TC_SRC=$SRC/toolchain\n',
+                 'tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ]', '  VENV=$TOOLS/venv\n', '  RUSTUP_DIR=$TOOLS/rustup\n',
+                 '  CARGO_DIR=$TOOLS/cargo\n', '  SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator\n', '  TBIN=$TOOLS/bin\n']
+        gone = [n.strip() for n in names if n not in bsh]
+        links = set(re.findall(r'ln -s "\$\w+(?:/\$l)?" "\$TBIN/([\w-]+)"', bsh)) | {"patch"}
+        loops = re.findall(r'for l in ([\w ]+); do \[ -x "\$(?:RUST_BIN|CARGO_DIR/bin)/\$l" \]', bsh)
+        links |= {x for l in loops for x in l.split()} - {"rustdoc"}
+        want_links = set(re.search(r'^TOOL_LINKS="([^"]*)"', own, re.M).group(1).split())
+        arm("the folders the job names are build.sh's: the toolchain in tools/toolchain with its stamps in .nm-toolchain, its logs in "
+            "logs/toolchain, its sources in src/toolchain, the rest of deps in tools/venv, rustup, cargo, spirv-llvm-translator",
+            not gone, gone)
+        arm("the links prove expects in tools/bin are the ones build.sh makes (rustdoc aside: no step needs it, it is linked when Rust has it)",
+            want_links == links, (sorted(want_links), sorted(links)))
+        arm("the scripts' toolchain folders are those", "tc_prefix() { printf '%s/tools/toolchain' \"$1\"; }" in own
+            and "tc_logs() { printf '%s/logs/toolchain' \"$1\"; }" in own, "")
+        cache = {"${{ runner.temp }}/nmw/tools/toolchain", "!${{ runner.temp }}/nmw/src/toolchain", "${{ runner.temp }}/nmw/tools/venv",
+                 "${{ runner.temp }}/nmw/tools/rustup", "${{ runner.temp }}/nmw/tools/cargo", "${{ runner.temp }}/nmw/tools/spirv-llvm-translator",
+                 "${{ runner.temp }}/nmw/src"}
+        arm("the workflow's caches name those folders", all(f"            {c}\n" in fbw for c in cache) and 'NMCI_WORK=$RUNNER_TEMP/nmw' in fbw,
+            sorted(c for c in cache if f"            {c}\n" not in fbw))
+        # deps-plan: the lines build.sh prints before it calls Homebrew
         arm("build.sh still prints the lines deps-plan looks for before a Homebrew install",
             "Homebrew formulas to install (only these;" in bsh and '$BREW install $f"; done' in bsh, "")
         plan = tmp / "plan.txt"
@@ -392,8 +431,9 @@ def main():
             and "NM_PIN_CI_BASEPKG_SHA256=b624bf07c78cea03043e096383d5c8b01e4fb2c804a6ba377a4e66a2566422ef\n" in real, "")
         pins.write_text("NM_PIN_X=1\n")
 
-        # logs
-        (w / "logs/toolchain-llvm.log").write_text("".join(f"line {i}\n" for i in range(400)) + "ld: error: undefined symbol: _x\n")
+        # logs: build.sh's step logs in logs/, the toolchain's in logs/toolchain/
+        (w / "logs/toolchain").mkdir()
+        (w / "logs/toolchain/llvm.log").write_text("".join(f"line {i}\n" for i in range(400)) + "ld: error: undefined symbol: _x\n")
         (w / "reports").mkdir(exist_ok=True)
         (w / "reports/failure-nvk-20261113T000000Z.txt").write_text("NullMoth driver build: failure report\nstep: nvk\n")
         (w / "logs/fetch.log").write_text("STOP: could not fetch x\n")
@@ -401,6 +441,12 @@ def main():
         arm("logs shows the end of the newest logs (300 lines), the newest report, and every error: and STOP: line",
             rc == 0 and "\nline 399\n" in o and "\nline 101\n" in o and "\nline 100\n" not in o and "failure report" in o
             and "ld: error: undefined symbol" in o and "STOP: could not fetch x" in o, o[-2000:])
+        # the toolchain's newest log is shown also when three step logs are newer
+        for n in ("a", "b", "c"):
+            (w / f"logs/{n}.log").write_text(n + "\n")
+        rc, o = run([sc.script, "logs", w], sc.env)
+        arm("logs shows the toolchain's newest log (logs/toolchain/) beside three newer step logs",
+            rc == 0 and f"==== {w}/logs/toolchain/llvm.log (last 300" in o, o[:1500])
         # nothing of the watch is left running
         left = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
         arm("no watch is left running", str(sc.ci) not in left, "")
