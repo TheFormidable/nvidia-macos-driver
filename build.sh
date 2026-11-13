@@ -23,7 +23,8 @@
 #   --base-package FILE (NM_BASE_PACKAGE)  --force (NM_FORCE)  --config FILE (NM_CONFIG)
 # docs/BUILDING.md explains everything; docs/BUILDING.es.md has the quick start in Spanish.
 #
-# Written for the /bin/bash 3.2 of macOS and its BSD tools, and runs on Linux for doctor, fetch, test, env and --dry-run.
+# Written for the /bin/bash 3.2 of macOS and its BSD tools, and runs on Linux for doctor, fetch, test, env and a dry run
+# of any command but deps.
 # It never calls sudo and never installs the driver.
 set -Eeu -o pipefail
 umask 022
@@ -115,7 +116,8 @@ mac_arch() {
   printf '%s' "$MAC_ARCH"
 }
 rosetta() { [ "$(mac_arch)" = arm64 ] && [ "$(uname -m)" = x86_64 ]; }   # this shell is an Intel process on Apple silicon
-# Xcode 26 (the macOS 26 SDK the plugin needs) does not run on a macOS older than NM_PIN_TOOL_MACOS_MIN
+# Xcode 26 (the macOS 26 SDK the plugin needs) does not run on a macOS older than NM_PIN_TOOL_MACOS_MIN, and Xcode
+# 26.4.1 and later need macOS 26.2
 mac_too_old() { is_mac && ! ver_ge "$(sw_vers -productVersion 2>/dev/null || echo 0)" "$NM_PIN_TOOL_MACOS_MIN"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 sha256_file() { shasum -a 256 "$1" | cut -c1-64; }   # shasum: macOS has it; on Linux it comes with perl
@@ -834,16 +836,16 @@ doctor() {   # prints; sets D_MISSING
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
     d_ok "macOS $v ($(mac_arch))"
-    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later; deps, build and package refuse this Mac"
+    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (on macOS $NM_PIN_TOOL_MACOS_MIN to 26.1 that is at most Xcode 26.3, with SDK 26.2, with which every component has been built); deps, build and package refuse this Mac"
     rosetta && d_note "this shell runs under Rosetta (uname -m says x86_64); build.sh takes the Mac's own processor, Apple silicon, for its choices"
     case "$(mac_arch)" in
-      arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
+      arm64) d_note "Apple silicon: by default deps takes the missing tools from Homebrew here. No whole build with build.sh has run on an Apple-silicon Mac yet (the kexts compile and link on GitHub's Apple-silicon runner); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. The RM and NVKMS are compiled with the commands an Apple-silicon Mac makes: the x86-only options NVIDIA's makefiles add when this Mac's compiler takes them are left out (build/nv_compile_lines.py)"
-              if [ "$(tools_from)" = source ]; then d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps builds the missing tools from pinned sources in the working directory instead (up to about 70 minutes on one 12-thread Intel Mac, LLVM most of it)"
-              else d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (LLVM: hours); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
+              if [ "$(tools_from)" = source ]; then d_note "Intel: homebrew-core had no ready-made builds for Intel Macs when it was read on 2026-11-13; deps builds the missing tools from pinned sources in the working directory instead (46.5 minutes from an empty working directory on one 12-thread Intel Mac, LLVM about 30 of them; 3 hours 53 minutes on GitHub's 4-processor Intel runner)"
+              else d_note "Intel: homebrew-core had no ready-made builds for Intel Macs when it was read on 2026-11-13; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (not timed); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
     esac
   else
-    d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and --dry-run work; building needs macOS with Xcode"
+    d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and a dry run of any command but deps work; building needs macOS with Xcode"
   fi
   say "== checkout and working directory"
   check_paths
@@ -882,7 +884,7 @@ doctor() {   # prints; sets D_MISSING
       for x in clang clang++ libtool lipo vtool otool nm strip install_name_tool dwarfdump codesign; do
         xcrun -f "$x" >/dev/null 2>&1 || have "$x" || d_missing "$x (Xcode)"
       done
-      d_note "the build stops on any new compiler or linker warning (build/warnings.txt ceilings are 0): an Xcode other than the release's may add one; the release's Xcode version is not recorded anywhere"
+      d_note "the build stops on any new compiler or linker warning (build/warnings.txt ceilings are 0): an Xcode other than the release's may add one; the release's Xcode version is not recorded anywhere; this branch has built every component with Xcode 26.5 and with Xcode 26.3"
     fi
   else
     d_note "not checked: not a Mac"
@@ -991,8 +993,8 @@ doctor() {   # prints; sets D_MISSING
   fi
   if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs the release tarball nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz (docs/BUILDING.md)"
   elif [ -d "$NM_BASE_PACKAGE" ]; then
-    # an unpacked base says its release in VERSION, which the package step compares with the pin an hour later: here it
-    # costs one read. A tarball is not unpacked for this; the package step reads it there. Only a plain file is read, and
+    # an unpacked base says its release in VERSION, which the package step compares with the pin later in the run: here
+    # it costs one read. A tarball is not unpacked for this; the package step reads it there. Only a plain file is read, and
     # only its start: a pipe or a link to a device there would hold doctor up (the package step refuses either)
     v=""; if [ -f "$NM_BASE_PACKAGE/VERSION" ]; then v=$(head -c 256 "$NM_BASE_PACKAGE/VERSION" 2>/dev/null | sed -n 1p || true); fi
     if [ "$v" = "$NM_PIN_BASE_RELEASE" ]; then d_ok "base package $NM_BASE_PACKAGE (release $v)"
@@ -1414,8 +1416,9 @@ EOF
 # (NM_PIN_TC*) into <workdir>/tools/toolchain, and only those (or the user's own settings) are used: a copy Homebrew or
 # PATH offers does not count, and build.sh calls no brew at all. "homebrew": a tool that is there is used wherever it
 # is (a setting, the toolchain, Homebrew, PATH, as find_tools finds it), and a missing one comes from Homebrew's
-# formulas. "auto": source on an Intel Mac, for which homebrew-core has no ready-made builds (Homebrew would compile
-# LLVM, two Pythons and more for hours into /usr/local), homebrew on Apple silicon, which has them.
+# formulas. "auto": source on an Intel Mac, for which homebrew-core had no ready-made builds when it was read on
+# 2026-11-13 (Homebrew would compile LLVM with every target, two Pythons and more into /usr/local), homebrew on Apple
+# silicon, which has them.
 tools_from() {
   case "$NM_TOOLS_FROM" in
     auto) if [ "$(mac_arch)" = x86_64 ]; then printf source; else printf homebrew; fi ;;
@@ -1425,7 +1428,7 @@ tools_from() {
 tools_from_why() {   # one sentence: which way missing tools come, and why
   local where; where=$(printf '%s' "$TC_PREFIX" | tilde)
   case "$NM_TOOLS_FROM:$(tools_from)" in
-    auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac: Homebrew has no ready-made builds for Intel Macs)' "$where" ;;
+    auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs on 2026-11-13)' "$where" ;;
     auto:homebrew) printf "missing build tools come from Homebrew's ready-made builds (NM_TOOLS_FROM=auto on Apple silicon; NM_TOOLS_FROM=source builds them from pinned sources into %s instead)" "$where" ;;
     source:*) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=source)' "$where" ;;
     *) printf 'missing build tools come from Homebrew (NM_TOOLS_FROM=homebrew)' ;;
@@ -1449,14 +1452,16 @@ tc_needs() {
     python) echo "openssl zstd xz" ;; *) echo "" ;;
   esac
 }
-# Times of one 12-thread Intel Mac building each tool (the record of its by-hand build: SPIRV-Tools at -j2, LLVM
-# at -j10), in seconds; the downloads took about 11 minutes more. Those two ran at reduced parallelism beside each
-# other, and deps builds one tool after another at NM_JOBS: the sum is an upper figure ("up to about"). Sizes: 6.7 GB
-# in all with every build tree kept (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it); deps
-# asks for TC_SPACE_GB free.
+# Seconds each tool took in build.sh's own deps on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5), from an empty
+# working directory at commit 650db45: what build/toolchain.sh prints as "<tool> ok (N s)", the build, the install
+# and the checks, without the download of its sources, which deps does before. The whole of that deps, the downloads,
+# the Python environment, the Translator and Rust included, took 46.5 minutes; on GitHub's Intel runner
+# (macos-15-intel: 4 processors, macOS 15) from nothing it took 3 hours 53 minutes (LLVM 2 hours 25 minutes). Sizes: that deps, which removes each build tree,
+# left 1.1 GB of toolchain; a build by hand with every build tree kept used 6.7 GB in all (sources 3.2 GB, build trees
+# 2.4 GB, installed 1.1 GB, LLVM 605 MB of it). deps asks for TC_SPACE_GB free.
 tc_seconds() {
-  case "$1" in ninja) echo 36 ;; cmake) echo 440 ;; openssl) echo 53 ;; zstd) echo 6 ;; xz) echo 11 ;; python) echo 104 ;;
-    pkgconf) echo 7 ;; spirv-tools) echo 771 ;; glslang) echo 71 ;; llvm) echo 2040 ;; *) echo 0 ;; esac
+  case "$1" in ninja) echo 37 ;; cmake) echo 421 ;; openssl) echo 45 ;; zstd) echo 5 ;; xz) echo 11 ;; python) echo 108 ;;
+    pkgconf) echo 4 ;; spirv-tools) echo 119 ;; glslang) echo 21 ;; llvm) echo 1776 ;; *) echo 0 ;; esac
 }
 TC_SPACE_GB=10
 # build/toolchain.sh is run with the system's own folders as PATH: the bash that runs it and the helpers it calls (otool,
@@ -1558,9 +1563,11 @@ deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means sourc
     say "deps builds from pinned sources: $TC_PLAN"
     say "  into $(printf '%s' "$TC_PREFIX" | tilde) (sources in $(printf '%s' "$TC_SRC" | tilde), build trees in $(printf '%s' "$TC_WORK" | tilde), logs in $(printf '%s' "$TC_LOGS" | tilde))."
     say "  Nothing is installed outside the working directory and Homebrew is not used."
-    say "  On one 12-thread Intel Mac this takes up to about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 34)') plus about 11 minutes of downloads,"
-    say "  and needs up to $TC_SPACE_GB GB of free space while it builds (6.7 GB measured with every build tree kept). Keep the"
-    say "  Mac awake and on power: an interrupted tool is built again from the beginning by the next ./build.sh deps."
+    say "  On one 12-thread Intel Mac this takes about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 30)') once the sources are"
+    say "  downloaded; all of deps from an empty working directory took 46.5 minutes there and 3 hours 53 minutes on"
+    say "  GitHub's 4-processor Intel runner. It needs up to $TC_SPACE_GB GB of free space while it builds (6.7 GB measured"
+    say "  in a build by hand that kept every build tree). Keep the Mac awake and on power: an interrupted tool is built"
+    say "  again from the beginning by the next ./build.sh deps."
   fi
   if [ -n "$TC_PLAN" ]; then
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not building (--no-install)"; first=""; second=""
@@ -1595,7 +1602,7 @@ deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means sourc
   say "deps: everything required is present"
 }
 cmd_deps() {
-  is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
+  is_mac || die "deps installs Mac tools, also in a dry run; this is $(uname -s). On this machine only doctor, fetch, test, env and a dry run of any command but deps work"
   find_tools
   local missing_xcode=0 f want=() llvmf nobrew=0
   xcode-select -p >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 || missing_xcode=1
@@ -1658,9 +1665,10 @@ cmd_deps() {
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs; the older version stays, as Homebrew's"
     say "own clean-up after an install is turned off for these installs (HOMEBREW_NO_INSTALL_CLEANUP=1)."
     if [ "$(mac_arch)" = x86_64 ]; then
-      say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
-      say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
-      say "one to several hours and tens of gigabytes of free space while it builds. Keep the Mac awake and on power."
+      say "This is an Intel Mac. homebrew-core had no ready-made builds (bottles) for Intel Macs of these formulas when it"
+      say "was read on 2026-11-13, so Homebrew compiles each formula above, and what it needs, on this Mac. That has not"
+      say "been timed; llvm@22 builds every LLVM target, and build.sh's own LLVM, with two, took about 30 minutes on one"
+      say "12-thread Intel Mac and 2 hours 25 minutes on GitHub's 4-processor one. Keep the Mac awake and on power."
       say "NM_TOOLS_FROM=source (the default on an Intel Mac) builds the tools from pinned sources in the working directory instead."
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
@@ -1718,11 +1726,11 @@ deps_spirv_llvm() {
   local tpath="$TBIN:/usr/bin:/bin:/usr/sbin:/sbin" conf
   if spirv_llvm_ok; then say "SPIRV-LLVM-Translator: $PC_SPIRV_LLVM (matches LLVM $(llvm_version))"; return 0; fi
   if [ -n "$LLVM_PREFIX" ] && spirv_llvm_stale; then
-    say "SPIRV-LLVM-Translator in $pre: it was built against another LLVM, or before build.sh noted which; it is built again for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (a few minutes)"
+    say "SPIRV-LLVM-Translator in $pre: it was built against another LLVM, or before build.sh noted which; it is built again for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (under a minute on one 12-thread Intel Mac)"
   elif [ -z "$LLVM_PREFIX" ] || brew_llvm_chosen; then
-    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (a few minutes)"
+    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (under a minute on one 12-thread Intel Mac)"
   else
-    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (Homebrew's belongs to Homebrew's llvm only): it is built from source into $pre (a few minutes)"
+    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (Homebrew's belongs to Homebrew's llvm only): it is built from source into $pre (under a minute on one 12-thread Intel Mac)"
   fi
   if [ "$NM_NO_INSTALL" = 1 ]; then say "not building it (--no-install)"; return 0; fi
   if [ "$NM_DRY_RUN" = 1 ]; then
@@ -2170,7 +2178,7 @@ write_build_info() {
 
 # ---------------------------------------------------------------------------------------------------------- build
 prepare_build() {   # what every build command needs before its first step
-  is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac with Xcode; this is $(uname -s). Here only doctor, fetch, test, env and --dry-run work"
+  is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac with Xcode; this is $(uname -s). Here only doctor, fetch, test, env and a dry run of any command but deps work"
   find_tools
   if [ "$NM_DRY_RUN" = 0 ]; then make_tool_links; fi
   derive_paths
@@ -2528,7 +2536,7 @@ main() {
   case "$CMD" in
     deps|build|package|all)
       if mac_too_old; then
-        die "this Mac runs macOS $(sw_vers -productVersion 2>/dev/null): the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later. Update macOS (the driver supports macOS 15 and 26), or build on another Mac"
+        die "this Mac runs macOS $(sw_vers -productVersion 2>/dev/null): the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (on macOS $NM_PIN_TOOL_MACOS_MIN to 26.1 that is at most Xcode 26.3, with SDK 26.2, with which every component has been built). Update macOS (the driver supports macOS 15 and 26), or build on another Mac"
       fi ;;
   esac
   [ "$NM_DRY_RUN" = 0 ] || say "(dry run: nothing is changed; the commands are printed)"

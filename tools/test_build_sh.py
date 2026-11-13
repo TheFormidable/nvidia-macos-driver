@@ -1684,11 +1684,11 @@ def arm_source():
     check("source way on an Intel Mac without Homebrew: deps builds the ten tools in order with the interface's settings and "
           "stamps, calls no brew, offers no Homebrew, writes nothing outside the working directory, ends with everything present",
           not p, (p, out[-1500:]))
-    # the per-tool times were measured partly at reduced parallelism: their sum is an upper figure, and deps says so
+    # the per-tool times are one measured run on one Mac: deps states their sum as an estimate for this Mac's plan
     def estimate_problems(text):
-        return [] if re.search(r"^  On one 12-thread Intel Mac this takes up to about \d+ minutes", text, re.M) else ["no upper figure"]
-    check("deps states its time for the tools as an upper figure (up to about N minutes)", not estimate_problems(out), out[:1500])
-    negative("a time stated as the time it takes", estimate_problems(out.replace("this takes up to about", "this took about")))
+        return [] if re.search(r"^  On one 12-thread Intel Mac this takes about \d+ minutes", text, re.M) else ["no estimate"]
+    check("deps states its time for the tools as an estimate (about N minutes)", not estimate_problems(out), out[:1500])
+    negative("a time stated as the time it took", estimate_problems(out.replace("this takes about", "this took about")))
     sb.clear()
     rc, out = sb.run("deps", "-y")
     again = tc_builds(sb) + [(l, {}) for l in mutating(sb.jlines()) if l.startswith("git fetch")]
@@ -3926,7 +3926,9 @@ def arm_hosts(commits):
         rc, out = sb.run("deps", "-y")
         negative("an Apple-silicon Mac taken for an Intel one", [] if arm_deps_ok(sb, rc) else ["no aarch64 rustup"])
     rc, out = sb.run("doctor")
-    check("Apple silicon: doctor says it is supported", "Apple silicon: supported" in out, out[:600])
+    check("Apple silicon: doctor says where the tools come from and that no whole build has run there",
+          "Apple silicon: by default deps takes the missing tools from Homebrew here. No whole build with build.sh has run on an "
+          "Apple-silicon Mac yet" in out, out[:600])
     sb.clear()
     rc, out = sb.run("deps", "-y")
     check("Apple silicon: deps installs the aarch64 rustup and toolchain", arm_deps_ok(sb, rc), (rc, out[-500:]))
