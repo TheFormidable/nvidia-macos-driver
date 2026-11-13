@@ -224,6 +224,7 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
         def read(path):
             return path.read_text() if path.exists() else ""
         r.rc, r.err = p.returncode, p.stderr
+        r.troot = str(t)
         r.fake = fake if keep else None
         r.log = read(lib / "NullMoth/lastgood.log")
         r.calls = read(t / "calls")
@@ -252,6 +253,34 @@ def restored(r):
 def untouched(r):
     return (r.kexts == ["new"] * 4 and r.bundle == "new" and r.kc == "new" and r.fw == "new" and r.version == "3.0"
             and not r.marker and not r.restarted)
+
+
+DATE = re.compile(r"\w{3} \w{3} +\d+ \d{2}:\d{2}:\d{2} \w+ \d{4}")
+
+
+def dedate(text):
+    """The log with the timestamp of each line replaced, so two runs a second apart compare equal."""
+    return DATE.sub("<date>", text)
+
+
+def changing(r):
+    """The calls that change the Mac: NVRAM writes and deletes, file copies, the restart. A plain read of a variable
+    (both jobs read nullmoth-nv-ok and nullmoth-nv-starts, the new one on every look) is left out: it changes nothing."""
+    return [ln for ln in r.calls.splitlines()
+            if ln.startswith(("nvram -d ", "ditto ", "shutdown")) or (ln.startswith("nvram ") and "=" in ln)]
+
+
+def filestate(r):
+    """What the start left on disk and whether it restarted: the four kexts, the bundle, the kernel collection, the
+    firmware, the recorded version, the restore marker, whether the job removed itself, and the restart."""
+    return (r.kexts, r.bundle, r.kc, r.fw, r.version, r.marker, r.job_gone, r.restarted)
+
+
+def canon(r):
+    """Everything about a run that two jobs must share, with this run's own temporary folder written out so that two
+    runs in different folders compare equal: the state-changing calls, the log, and the files left behind."""
+    out = [ln.replace(r.troot, "<t>") for ln in changing(r)]
+    return out, dedate(r.log).replace(r.troot, "<t>"), filestate(r)
 
 
 def show(r):
@@ -329,6 +358,39 @@ r = run(job, registry=FB_OK, nv_later={2: 'echo 1 > "$T/nv.nullmoth-nv-ok"'})
 arm("a display that comes up while the job is looking ends the looking", untouched(r) and r.sleeps == 2, show(r))
 arm("  and leaves the job in place: WindowServer can still keep dying on that display, and the next start needs it",
     r.job_left and "keeping it" not in r.log, show(r))
+
+# ---- differential against 2.9's job (v2.9 = 7412cdd), which had no look at the registry and ran once.
+# Whenever NVRM has NOT declined the card, the new job must do at its first pass exactly what 2.9's did: restore or
+# leave the same files, make the same NVRAM writes and deletes, write the same log, and restart (or not) the same.
+# Only a refusal, which 2.9 cannot see, is allowed to differ. 2.9's job is read from git; when it cannot be read the
+# arm says so and fails, as test_bootguard_ws_loop.py does for its tag.
+job29 = None
+try:
+    src29 = subprocess.run(["git", "-C", str(ROOT), "show", "v2.9:package/install.sh"], capture_output=True, text=True)
+    if src29.returncode != 0:
+        raise Unsafe(f"v2.9:package/install.sh could not be read ({src29.stderr.strip()[-200:]})")
+    job29 = fill(template(src29.stdout))
+    arm("2.9's fallback job can be lifted from git for the differential", True)
+except Unsafe as e:
+    arm("2.9's fallback job can be lifted from git for the differential", False, e)
+
+if job29 is not None:
+    # every no-refusal case the two jobs can meet at the first pass: the display came up before, two failed starts
+    # (with and without a backup), one failed start (below the count), and a quiet start with nothing set.
+    for label, kw in (
+        ("the display came up at an earlier start", dict(registry=FB_OK, nv={"nullmoth-nv-ok": "1"})),
+        ("two starts in a row without a display", dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"})),
+        ("two starts without a display and the backup gone",
+         dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, backup=False)),
+        ("one start below the count", dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%01"})),
+        ("a quiet first start, nothing set and an empty registry", dict(registry="", nv={})),
+    ):
+        a, b = run(job, **kw), run(job29, **kw)
+        ca, cb = canon(a), canon(b)
+        arm(f"with no refusal the new job does at its first pass what 2.9's did: {label}", ca == cb,
+            f"\n   new state-changing: {ca[0]}\n   2.9 state-changing: {cb[0]}"
+            f"\n   new files/restart:  {ca[2]}\n   2.9 files/restart:  {cb[2]}"
+            f"\n   new log: {ca[1]!r}\n   2.9 log: {cb[1]!r}")
 
 # ---- controls
 try:
