@@ -18,7 +18,9 @@ release every process uses both, chosen per wait:
   `tools/test_evwait_policy.c` checks these numbers.) A sleep never runs past the caller's own timeout and does not
   start when less than 100 microseconds of it remain. The same holds for the sleep on the copy-engine queue's own
   semaphore ([SURFACE-FENCE.md](SURFACE-FENCE.md)), in every process: it is asked for in whole milliseconds, so it
-  starts only when at least one millisecond of the caller's timeout remains.
+  starts only when at least one millisecond of the caller's timeout remains. A channel that stays synchronous
+  (`NVRM_ASYNC=0`, or every channel slot already in use) keeps 2.9's flush wait, which sleeps on the event after 20
+  microseconds in every process.
 - a sleep lasts at most 2 ms, so a missing event costs latency, never a hang. The GPU makes a completion visible
   before the kext posts its event (the interrupt has to be serviced and RM has to run first), so now and then a sleep
   runs out in that gap with the work already done: that is a missed wake, and on a healthy machine
@@ -67,7 +69,8 @@ Read these together, while an application that waits on the GPU is running:
            debug.nvrm_evt_user_missed debug.nvrm_evt_user_fallbacks \
            debug.nvrm_evt_post_drain_waits debug.nvrm_evt_post_drain_stuck
 
-- `nvrm_evt_clients` 2 or more: applications, not only WindowServer, sleep on the event.
+- `nvrm_evt_clients` counts the connections that have slept on the event at least once since boot (it never goes
+  down): a rise when an application starts waiting shows that applications, not only WindowServer, sleep on it.
 - `nvrm_evt_woken` against `nvrm_evt_slept`: while the GPU is busy most sleeps should end woken; timeouts during long
   GPU jobs are normal. Almost all timeouts while `nvrm_evt_posts` keeps rising means events arrive late.
 - `nvrm_evt_user_missed` is the number of full 2 ms sleeps that ended on their timeout although the GPU work was
@@ -90,7 +93,8 @@ Read these together, while an application that waits on the GPU is running:
 
 ## The measurement behind the 1 ms threshold
 
-The measurement below compared polling (`0`) with the eager sleep (`1`) on 2.9's code; the adaptive rule that is now
+The measurement below compared polling (`0`) with the eager sleep (`1`) on the code of release 1.13.0 (the baseline
+named below; 2.9 kept both policies unchanged); the adaptive rule that is now
 the default for applications was not part of it. On a 0.6 ms compute wait the eager sleep cost 0.127 ms of latency per
 wait, which the default no longer pays on waits that short; on longer waits it saved CPU. It was made on one machine
 and does not show what the new default does there.
@@ -173,7 +177,10 @@ Use a new output directory. The runner compiles the probe into a temporary
 directory, alternates both policies for five rounds, verifies the event-wait
 log, compares image hashes, and stops on a probe failure, timeout, or a changed
 WindowServer PID. It then checks cross-queue synchronization and buffer copies
-with both policies. `--rounds 1` is a smoke test, not the five-round measurement.
+with both policies. `--rounds 1` is a smoke test, not the five-round measurement. As it stands the runner cannot
+pass on this release: its log check looks for the line `event wait ON`, which the driver no longer prints (NVK writes
+its event-wait line only with `NVK_DIAG=1`, and then into a file, not to stderr), so it stops at the first event-wait
+probe with "requested wait policy was not verified".
 The tool writes local results and logs; it does not upload anything or edit the
 driver configuration. Normal driver shader-cache activity can still occur.
 

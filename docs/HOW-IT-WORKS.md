@@ -19,7 +19,7 @@ NVMTLDriver.bundle  (Metal driver plugin)                         [plugin/]
 NVK  (Mesa's Vulkan driver for NVIDIA, with the NAK compiler)      [nvk/nvk-macos.patch]
         |  SPIR-V -> NVIDIA machine code, command buffers
         v
-NVRM.kext  (NVIDIA's open GPU kernel modules, r610, ported to XNU) [kexts/NVRM]
+NVRM.kext  (NVIDIA's open GPU kernel modules, r620, ported to XNU) [kexts/NVRM]
         |  talks to the GPU's GSP firmware
         v
 GeForce RTX GPU  (GSP firmware from /Library/NullMoth/nvfw/nvidia/620.70.06)
@@ -159,7 +159,7 @@ Nothing is sent; you can upload the file on the site yourself.
 See the README, *Build from source*. The kexts need NVIDIA's `open-gpu-kernel-modules` at tag `620.70.06`; NVK needs
 Mesa `90a959eb` (the mesa-26.3.0-rc3 tag; 2.8 and 2.8.1 used `17ca6174`) with, in order, `nvk/nvk-macos.patch`, `nvk/nvk-fixes-after-def16.patch`, `nvk/nvk-620-kernel.patch`,
 `nvk/nvk-recycle.patch`, `nvk/nvk-slab.patch`, `nvk/nvk-slabdef.patch`, `nvk/nvk-hubfix.patch`, `nvk/nvk-perf-boost-burst.patch`,
-`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch`, `nvk/nvk-metal-wsi.patch`, `nvk/nvk-card-select.patch`, `nvk/hwrt/ttu-nak.patch`, `nvk/hwrt/ttu-rq.patch`, `nvk/curves/curves.patch`, `nvk/hwrt/wide.patch`, `nvk/nvk-warnings.patch`, `nvk/nvk-unbound-stage.patch`, `nvk/nvk-diag-nofollow.patch`, the three patches of upstream Mesa commits newer than the base (`nvk/nvk-mesa-26.3.0.patch`, `nvk/nvk-nak-fixes-main.patch`, `nvk/nvk-nak-sched-main.patch`; see [NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)), then NullMoth's own `nvk/nvk-evwait.patch` (waits sleep on the GPU's completion event in every process, [EVENT-WAIT.md](EVENT-WAIT.md)), `nvk/nvk-fence.patch` (channels registered with the kext's surface fence, and the plugin's calls into it, [SURFACE-FENCE.md](SURFACE-FENCE.md)) and `nvk/nvk-channel-recover.patch` (a faulted channel rebuilt instead of the device lost, [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md)) (`patch -p1` from the Mesa root; the two `hwrt` patches are the ray-query part for the RT cores, off unless `NVK_HWRT_QUERY=1`, see `docs/HWRT.md`; `nvk/hwrt/nvk_hwrt.h` and `nvk_hwrt_layout.h` are copied into `src/nouveau/vulkan` after the chain), then
+`nvk/nvk-rated-tdp.patch`, `nvk/nvk-gps-maxpower.patch`, `nvk/nvk-metal-wsi.patch`, `nvk/nvk-card-select.patch`, `nvk/hwrt/ttu-nak.patch`, `nvk/hwrt/ttu-rq.patch`, `nvk/curves/curves.patch`, `nvk/hwrt/wide.patch`, `nvk/nvk-warnings.patch`, `nvk/nvk-unbound-stage.patch`, `nvk/nvk-diag-nofollow.patch`, the three patches of upstream Mesa commits newer than the base (`nvk/nvk-mesa-26.3.0.patch`, `nvk/nvk-nak-fixes-main.patch`, `nvk/nvk-nak-sched-main.patch`; see [NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)), then NullMoth's own `nvk/nvk-evwait.patch` (waits sleep on the GPU's completion event in every process, [EVENT-WAIT.md](EVENT-WAIT.md)), `nvk/nvk-fence.patch` (channels registered with the kext's surface fence, and the plugin's calls into it, [SURFACE-FENCE.md](SURFACE-FENCE.md)) and `nvk/nvk-channel-recover.patch` (a faulted channel rebuilt instead of the device lost, [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md)) (`patch -p1` from the Mesa root; the `hwrt` patches are the ray-query part for the RT cores (`wide.patch` its 8-wide node option), off unless `NVK_HWRT_QUERY=1`, see `docs/HWRT.md`; `nvk/hwrt/nvk_hwrt.h` and `nvk_hwrt_layout.h` are copied into `src/nouveau/vulkan` after the chain), then
 `nvk/dlss/patch_dlss_cache.py <mesa tree>`. NVK compiles against the `open-gpu-kernel-modules` 610.57.04 headers with
 `nvk/ogkm-nvos-620.patch` and `nvk/ogkm-warnings.patch` applied to that tree; 620's `nv.h` does not compile in user space, so the rest stays 610.
 
@@ -168,8 +168,8 @@ Mesa `90a959eb` (the mesa-26.3.0-rc3 tag; 2.8 and 2.8.1 used `17ca6174`) with, i
 `build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `90a959eb` (26.3.0-rc3; `2.8` exports `17ca6174`) with `git archive`,
 applies the header patch and the chain above (and copies the two hwrt headers), builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
 revision deserialize NVK's internal shaders as garbage), cross-builds `libvulkan_nouveau.dylib` for x86_64 and prints its
-LC_UUID and export count, and what was left out of or added to the chain, if anything. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
-or gps-maxpower patches; `nvk/release-2.8/nvk-fixes-after-def16.patch`). Rebuilding 2.8 gives the shipped library byte for byte
+LC_UUID and export count, and what was left out of or added to the chain, if anything. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (`nvk-macos`,
+`nvk/release-2.8/nvk-fixes-after-def16.patch`, `nvk-620-kernel`, `nvk-recycle`, `nvk-slab` and `nvk-slabdef` only). Rebuilding 2.8 gives the shipped library byte for byte
 except the 16 LC_UUID bytes: the linker derives the UUID from the unstripped file, which records the absolute path of every
 object, so a different build directory gives a different UUID. `build/nvk_compare.py` states exactly which bytes differ.
 The NAK changes under `nvk/speed267` are already contained in `nvk-macos.patch`; the scripts there record how they were made.
@@ -185,7 +185,8 @@ The plugin asks the library whether it has that test before it uses it on RTX 50
 `NVEncVT_BlackwellSelfTest`), so an older build of the library beside a newer plugin is refused there instead of
 registering an untested decoder. `build/build_nvencvt.sh` also compares every struct and constant the library takes
 from NVIDIA's 610.57.04 headers with the 620.70.06 tree the kernel module is built from
-(`tools/nvencvt_header_abi.py`) and stops on a difference.
+(`tools/nvencvt_header_abi.py`) and stops on a difference; without that tree on the build Mac it says that it skipped the
+comparison and builds on.
 The GPU's boost policy is `NVRM_610_BOOST`: unset is a short lease renewed while work is submitted, `hold` keeps one boost
 for the device's life, `0` never boosts.
 `NVRM_610_MAXPOWER_MW=<mW>` (off unless set) asks the GPU performance-scaling code for that maximum power through the public root-client GPS control and reads it back.
@@ -195,6 +196,6 @@ for the device's life, `0` never boosts.
 `tools/nvmtl-smi` (build with `tools/nvmtl-smi/build.sh <patched Mesa tree> <out>`) prints the GPU's temperature, power, clocks, pstate, utilisation, throttle reasons and fan from the resource manager's shared-data block.
 The opt-in D3cold code is `kexts/NVRM/nv_rtd3.cpp` (`nvrtd3=1` and `nvrtd3res=<ACPI path>` on the boot line).
 
-Kernel log volume: start-up, mode changes, sleep and wake, errors and warnings always log. The per-query lines of NVRMFB are on with the boot argument `nvfblog=1`, those of NVAccel with `-nvaccelverbose`. NVRM's lines are all boot, sleep and wake events. The plugin's log lines are rate-limited per call site.
+Kernel log volume: start-up, mode changes, sleep and wake, errors and warnings always log. The per-query lines of NVRMFB are on with the boot argument `nvfblog=1`, those of NVAccel with `-nvaccelverbose`. NVRM's lines are boot, sleep and wake events, and warnings (the surface fence, for one, says when it gives a writer up or polls a channel that raises no interrupt). The plugin's log lines are rate-limited per call site.
 Opt-in D3cold: `nvrtd3=1` and `nvrtd3res=<ACPI path of the GPU's power resource>` on the boot line. After 60 idle seconds (no framebuffer, no user client) the driver runs its sleep path and then the resource's `_OFF`; the first client or framebuffer runs `_ON` and then the wake path; system wake runs `_ON` before the resume.
 `package/finish_package.sh <pkgroot> --nvencvt <lib> --air-dis <nvmtl-air-dis> --nmsmn <kext> <ryzenadj> <sha256> [--boost <bin>] [--vulkan-loader <dir>]` is the last stage of a package build: it stages those parts in one order, adds `sums_complete.sh`, and runs `package/check_package.sh <pkgroot>`, which fails if `libnvencvt.dylib` is missing, unsigned or not in `SHA256SUMS`, if the Ryzen power parts are missing, if any file in the tree has no line in `SHA256SUMS`, if a program in it is signed by Apple, or if a library in it loads from outside the system and the folders the package installs. `nvmtl-air-dis` (`plugin/air_dis.c`, built by `build/build_air_dis.sh`) is the plugin's out-of-process AIR decoder, on the same upstream LLVM as `air-runtime`; packages up to 2.8.1 carried the Metal toolchain's `air-opt` for this instead, which is Apple's program and is no longer shipped. `install.sh` runs the same completeness check (`sums_complete.sh`) right after `shasum -c`, because `shasum -c` reads only the files the list names.
