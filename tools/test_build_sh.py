@@ -1926,7 +1926,7 @@ def arm_readonly():
     p = readonly_problems(Sandbox("ro"))
     check("doctor, --dry-run, -n deps, -n build and env never run brew info; deps gives it a cache in the working directory", not p, p)
     sb = Sandbox("ro-x")
-    sb.break_script('brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }', 'brew_may_ask() { true; }')
+    sb.break_script('brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ] && [ "$NM_NO_INSTALL" = 0 ]; }', 'brew_may_ask() { true; }')
     sb.break_script('run_brew "HOMEBREW_CACHE=$TOOLS/homebrew-cache" -- info', 'run_brew -- info')
     p = readonly_problems(sb)
     negative("dry runs that ask brew info, with Homebrew's own cache (as before)",
