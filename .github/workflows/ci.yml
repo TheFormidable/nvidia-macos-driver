@@ -3,18 +3,32 @@
 #   kexts-linux   every kext source compiled to a Mach-O object with clang on Linux, the warning ceilings, and every
 #                 symbol the objects import checked against the export lists of the macOS 15 and the macOS 26 kernel
 #                 (build/kext_check.sh); the switch registry; the translator's own registry test. A few minutes; it
-#                 gates every push. Each command of this job was run on a Linux machine before the file was committed.
+#                 gates every push.
 #   host-tests    tools/run_all_tests.py on a Mac (the tests compile Objective-C and read older revisions, so the
-#                 clone is a full one). It gates: a failing host test must not go unnoticed.
-#   kexts-mac     the real kext builds with Xcode: NVIDIA's RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26),
-#                 NVRMAGDC and NMSMN linked. Catches what a compile cannot: a duplicate or missing definition at link.
-#   plugin        the release compile of the Metal plugin (build/ci_plugin.sh). Needs the macOS 26 SDK.
+#                 clone is a full one), with the Vulkan headers the release compiles the plugin against
+#                 (build/ci_vulkan_headers.sh, in NM_VULKAN_INCLUDE: a test that needs them fails rather than skips
+#                 when they are wrong). It gates: a failing host test must not go unnoticed.
+#   kexts-mac     the real kext builds with Xcode, once on an Apple-silicon runner and once on an Intel one: NVIDIA's
+#                 RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26), NVRMAGDC and NMSMN linked. Catches what a
+#                 compile cannot: a duplicate or missing definition at link. NVIDIA's makefiles ask the compiler of the
+#                 computer they run on which options it takes, and an Intel Mac's says yes to some that make a kext
+#                 macOS cannot load, so after the link each run checks that no compile line carries such an option
+#                 and that NVRM imports no ___x86_ helper, and prints a checksum of its compile lines (with the
+#                 runner's own folders cut out): the two runs' checksums must be equal.
+#   plugin        the release compile of the Metal plugin (build/ci_plugin.sh) against the release's Vulkan headers.
+#                 Needs the macOS 26 SDK.
 #
-# None of the three Mac jobs could be run where this file was written. kexts-mac and plugin are marked
-# continue-on-error until each has been seen green once on GitHub's runners: delete that line from a job to make it
-# gate. If host-tests fails on its first run for a reason of the runner and not of the tree, that is the place to look.
+# What GitHub's runners have shown (the logs of runs 43344333098 and 43384015615, 2026-11-13; 26 runs, all red):
+# kexts-linux and plugin green in every run. host-tests red in every run; in the later of the two, 293 of 310 tests
+# passed and five failed: four found no Vulkan headers (they looked only in ~/Vulkan-Headers) and
+# tools/test_fence_model.c failed one timing arm (it failed in the earlier run too). kexts-mac compiled all 31
+# units with 0 warnings and stopped at its import check on ____chkstk_darwin, a name the kext link itself provides
+# (tools/kext_imports.py says why), so NVIDIA's RM core, NVKMS and the link of the kexts have never run on GitHub, and
+# nothing has run on an Intel runner.
+# A job gates once it has been seen green on GitHub's runners: kexts-linux, host-tests and plugin gate; kexts-mac is
+# marked continue-on-error until both of its runs have been seen green once: then delete that line.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
-# Vulkan-Headers) are pinned in the scripts that fetch them; none is copied into the repository or into an artifact.
+# Vulkan-Headers) are pinned in the scripts and build/pins.sh; none is copied into the repository or into an artifact.
 # The token can read the repository and nothing else; no job uses a secret or uploads anything.
 name: ci
 on:
@@ -137,7 +151,6 @@ jobs:
   plugin:
     runs-on: macos-26
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
