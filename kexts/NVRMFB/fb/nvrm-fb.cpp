@@ -905,7 +905,8 @@ public:
     // this kext would run on a misplaced base, so the claim steps aside too. Nothing takes the category then on an
     // installed system (its OpenCore setup excludes Apple's IONDRVSupport, and NVRMBootFB below refuses for the same
     // reason): no desktop comes up on this card, NVRM declines it on the same verdict, and after an install over an
-    // earlier driver the install's fallback job puts that driver back (package/install.sh, step 6b).
+    // earlier driver, on the macOS build of that install, the install's fallback job puts that driver back
+    // (package/install.sh, step 6b).
     IOService *probe(IOService *provider, SInt32 *score) override
     {
         if (!nvrmfbLayoutAllows(provider, "NVRMFBClaim")) return NULL;

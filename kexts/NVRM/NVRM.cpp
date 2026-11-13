@@ -937,8 +937,10 @@ bool NVRM::startGPU(IOService *provider)
     // so two counted starts would only put two dark starts before the way back. That way back is the install's
     // fallback job (package/install.sh, step 6b): after an install over an earlier driver, and until the start after
     // the first one that lit the display, it reads the nvrm-layout property written below and restores the driver
-    // that the install replaced. Without it (a first install, or a macOS update after that trial) every start ends
-    // like this one. nvlayout=0 makes the framebuffer publish "overridden" instead, and both start as before.
+    // that the install replaced, while the Mac still runs the macOS build of that install (that driver ran there; on
+    // another build the job only records the refusal). Without it (a first install, or a macOS update after that
+    // trial) every start ends like this one. nvlayout=0 makes the framebuffer publish "overridden" instead, and both
+    // start as before.
     // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
     // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
     // logs the same from its side. A verdict published later is read again just before go(2).
@@ -954,8 +956,9 @@ bool NVRM::startGPU(IOService *provider)
             provider->setProperty("nvrm-layout", "declined: the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
             LOG("NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS (its Apple classes differ from the ones it "
                 "was built for), so no desktop comes up on this card. Not counted as a failed start. After an install "
-                "over an earlier driver, the install's fallback job reads this refusal and puts that driver back; "
-                "without that job nothing changes at the next start. Boot-arg nvlayout=0 starts the card anyway.");
+                "over an earlier driver on this macOS build, the install's fallback job reads this refusal and puts "
+                "that driver back; otherwise nothing changes at the next start. Boot-arg nvlayout=0 starts the card "
+                "anyway.");
             return false;
         }
     }

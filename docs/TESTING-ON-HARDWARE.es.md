@@ -53,14 +53,15 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
    WindowServer una y otra vez en la pantalla NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este
    macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez;
-   `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Se borra sola en el primer arranque después de
-   uno que encendió la pantalla, así que no ayuda con un problema que aparezca más tarde. Ten claro cómo arrancarás
-   el Mac si el escritorio no aparece
+   `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Tras un rechazo solo lo hace mientras el Mac
+   siga en la compilación de macOS en la que se instaló, así que no actualices macOS entre la instalación y estas
+   pruebas. Se borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un
+   problema que aparezca más tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece
    ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; las entradas de 1401 en el selector de arranque
    solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Configuración del Sistema, o Ajustes del
    Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
-   fallos de abajo dejan el Mac sin escritorio
-   o con el escritorio congelado, y entonces los registros se leen por la red.
+   fallos de abajo dejan el Mac sin escritorio o con el escritorio congelado, y entonces los registros se leen por la
+   red.
    Bien: has arrancado el Mac una vez por esa vuelta atrás y has entrado por `ssh`. Mal: alguna de las dos no
    funciona; no sigas.
 2. **Un punto de partida limpio.** `nvram boot-args` muestra la línea `boot-args`: debe tener la línea de instalación
@@ -134,11 +135,12 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        y no aparece ningún escritorio: todos los framebuffers del driver están construidos sobre esas clases, también
        el que muestra un escritorio con el driver apagado. El guardián de arranque no cuenta este arranque. La tarea
        del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
-       minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log`,
-       devuelve el driver anterior y reinicia, así que vuelves a estar en 2.9 y ese archivo es lo que hay que enviar.
-       Sin la tarea (una primera instalación, o cuando la tarea ya se borró sola en el arranque siguiente a uno que
-       encendió la pantalla) no se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o
-       quites el driver. `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
+       minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log` y,
+       en la compilación de macOS en la que se instaló, devuelve el driver anterior y reinicia, así que vuelves a
+       estar en 2.9 y ese archivo es lo que hay que enviar. Sin la tarea (una primera instalación, o cuando la tarea
+       ya se borró sola en el arranque siguiente a uno que encendió la pantalla), o en otra compilación de macOS, no
+       se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o quites el driver.
+       `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
      - El mismo rechazo leído solo después de que NVRM arrancara: `auto-go: NOT STARTING THE GPU: the framebuffer
        refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Tampoco aparece
        ningún escritorio, este arranque sí cuenta, y la tarea del instalador hace lo mismo que arriba.

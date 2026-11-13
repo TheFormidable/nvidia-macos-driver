@@ -51,12 +51,13 @@ restart. Take every test setting out again when its test is done.
    each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
    after WindowServer kept dying on the NVIDIA display), or when its framebuffer refused the Apple classes of this
    macOS (section 2, step 3), the job puts everything back from that folder and restarts once;
-   `/Library/NullMoth/lastgood.log` says which it was. It removes itself at the first start after one that lit the
-   display, so it does not help with a problem that comes later. Know how you will start the Mac when the
-   desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; the 1401 picker entries
-   exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings, General, Sharing) and make
-   sure you can reach the Mac over `ssh` from another computer: several failures below leave no desktop
-   or a frozen one, and the logs are then read over the network.
+   `/Library/NullMoth/lastgood.log` says which it was. After a refusal it does so only while the Mac runs the macOS
+   build the install was made on, so do not update macOS between the install and these tests. It removes itself at the
+   first start after one that lit the display, so it does not help with a problem that comes later. Know how you will
+   start the Mac when the desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in";
+   the 1401 picker entries exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings,
+   General, Sharing) and make sure you can reach the Mac over `ssh` from another computer: several failures below
+   leave no desktop or a frozen one, and the logs are then read over the network.
    Pass: you have started the Mac once by that way back, and logged in over `ssh`. Fail: either does not work; do not
    go on.
 2. **A clean starting point.** `nvram boot-args` shows the `boot-args` line: it should hold the install line of
@@ -128,10 +129,11 @@ restart. Take every test setting out again when its test is done.
        and no desktop comes up: every framebuffer of the driver is built on those classes, the one that shows a
        desktop with the driver off too. The boot guard does not count this start. The installer's job of section 1,
        step 1, looks for the refusal every five seconds during the first four minutes of the start; it copies the
-       `nvrm-layout` and `nvrmfb-layout` lines into `/Library/NullMoth/lastgood.log`, puts the previous driver back
-       and restarts, so you are on 2.9 again and that file is what to send. Without the job (a first install, or once
-       the job has taken itself away at the start after one that lit the display) nothing is put back, and every
-       start ends like this one until `nvlayout=0` or until the driver is taken out. `debug.nvrmfb_layout` does not
+       `nvrm-layout` and `nvrmfb-layout` lines into `/Library/NullMoth/lastgood.log` and, on the macOS build the
+       install was made on, puts the previous driver back and restarts, so you are on 2.9 again and that file is what
+       to send. Without the job (a first install, or once the job has taken itself away at the start after one that
+       lit the display), or on another macOS build, nothing is put back, and every start ends like this one until
+       `nvlayout=0` or until the driver is taken out. `debug.nvrmfb_layout` does not
        exist (the framebuffer did not start).
      - The same refusal read only after NVRM had started: `auto-go: NOT STARTING THE GPU: the framebuffer refused
        this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. No desktop comes up
