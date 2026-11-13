@@ -19,9 +19,11 @@ without its look at the registry, which must leave the refused driver in place.
 Two conditions belong to the refusal alone. The previous driver is put back only on the macOS build the install was
 made on: it was running there, so it fits; after a macOS update the refusal may be the update's doing, and the driver
 that was replaced has no such check. And the Mac is restarted at once unless someone may be working: a display is
-connected to some framebuffer (another GPU's, or Apple's firmware framebuffer on the same card) and a user owns the
-console. Then the files are put back and the restart is left to the user. The job's older rule (two starts in a row without a display) is compared with 2.9's job and must not
-change."""
+connected to another GPU's framebuffer and a user owns the console. Then the files are put back and the restart is
+left to the user. A display under the declined card itself (Apple's firmware framebuffer, where OpenCore does not
+exclude IONDRVSupport) does not hold the restart back: the job subtracts, by registry id, the displays that
+`ioreg -r -k nvrm-layout` prints under the card from all of them. The job's older rule (two starts in a row without a
+display) is compared with 2.9's job and must not change."""
 import os
 import pathlib
 import re
@@ -136,19 +138,23 @@ exec "@REAL@" "$@"'''
 FAKES = {
     # what `ioreg -l -w0` prints: the file the test wrote (and may write again between two looks)
     "ioreg": r'''#!/bin/bash
-# `ioreg -r -c IODisplayConnect`: the displays connected to this Mac's framebuffers, and `-r -c IOFramebuffer` the
-# framebuffers themselves; none unless the test wrote some (neither is one of the looks). Without -r, -c only picks
-# whose properties are shown: the whole tree is printed, as the real ioreg does.
+# `ioreg -r -c IODisplayConnect`: the displays connected to this Mac's framebuffers, `-r -c IOFramebuffer` the
+# framebuffers themselves, and `-r -k nvrm-layout` the subtree of the card NVRM declined (its PCI device and everything
+# under it); none unless the test wrote some (none is one of the looks, and each is written down in the calls).
+# Without -r, -c and -k only pick whose properties are shown: the whole tree is printed, as the real ioreg does.
+case " $* " in *" -r "*) echo "ioreg $*" >> "$T/calls";; esac
 case " $* " in
-  *" -c "*)
+  *" -c "*|*" -k "*)
     case " $* " in *" -r "*) ;; *)
       echo "+-o Root  <class IORegistryEntry, id 0x100000100, retain 30>"
-      cat "$T/fbs.txt" "$T/displays.txt" "$T/ioreg.txt" 2>/dev/null; exit 0;;
+      cat "$T/card.txt" "$T/fbs.txt" "$T/displays.txt" "$T/ioreg.txt" 2>/dev/null; exit 0;;
     esac;;
 esac
 case " $* " in
   *" -c IODisplayConnect "*) [ ! -f "$T/displays.txt" ] || cat "$T/displays.txt"; exit 0;;
   *" -c IOFramebuffer "*) [ ! -f "$T/fbs.txt" ] || cat "$T/fbs.txt"; exit 0;;
+  *" -k nvrm-layout "*) [ ! -f "$T/card.txt" ] || cat "$T/card.txt"; exit 0;;
+  *" -k "*|*" -c "*) exit 0;;
 esac
 n=$(cat "$T/ioreg.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$T/ioreg.n"
 [ ! -f "$T/ioreg.txt" ] || cat "$T/ioreg.txt"
@@ -209,6 +215,19 @@ APPLE_FB = ('+-o .Display_boot  <class IONDRVFramebuffer, id 0x1000004f1, regist
             'retain 12>\n')
 APPLE_DISPLAY = ('+-o display0  <class IODisplayConnect, id 0x1000004f8, registered, matched, active, busy 0 (1 ms), '
                  'retain 6>\n')
+# what `ioreg -r -k nvrm-layout -w0` prints after a refusal: the declined card's PCI device and its subtree, with
+# Apple's framebuffer in it, and its display once WindowServer has opened that framebuffer (as a Mac's read of the same
+# command for nvrm-claimed showed: one subtree, rooted at the IOPCIDevice, the display under the framebuffer)
+CARD_PCI = ('+-o GFX0@0  <class IOPCIDevice, id 0x1000002a0, registered, matched, active, busy 0 (120 ms), '
+            'retain 18>\n')
+CARD = CARD_PCI + APPLE_FB
+CARD_LIT = CARD + APPLE_DISPLAY
+# a second NVIDIA card, declined as well, with Apple's framebuffer drawing on it too
+APPLE_DISPLAY2 = ('+-o display0  <class IODisplayConnect, id 0x100000a18, registered, matched, active, busy 0 (1 ms), '
+                  'retain 6>\n')
+CARD2_LIT = ('+-o GFX1@0  <class IOPCIDevice, id 0x100000a00, registered, matched, active, busy 0 (98 ms), retain 17>\n'
+             '+-o .Display_boot  <class IONDRVFramebuffer, id 0x100000a11, registered, matched, active, busy 0 (2 ms), '
+             'retain 12>\n' + APPLE_DISPLAY2)
 NAMES = ("NVRM", "NVAccel", "NVRMFB", "NVRMAGDC")
 
 
@@ -217,13 +236,14 @@ class Result:
 
 
 def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False, osbuild=INSTALLER["BUILD"],
-        osbuild_fail=0, fbs="", displays="", console="root"):
+        osbuild_fail=0, fbs="", displays="", console="root", card=""):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
     line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read) and
     osbuild_fail how many times sw_vers fails before it says so, fbs the framebuffers the registry holds, displays
-    what ioreg prints for the displays connected to them (none: nothing shows a picture) and console the owner of
-    /dev/console (None: stat fails)."""
+    what ioreg prints for the displays connected to them (none: nothing shows a picture), card what it prints for the
+    subtree of the PCI device that carries nvrm-layout (none: no such device, or ioreg found nothing) and console the
+    owner of /dev/console (None: stat fails)."""
     t = pathlib.Path(tempfile.mkdtemp(prefix="lgr-"))
     r = Result()
     try:
@@ -277,6 +297,8 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
             (t / "fbs.txt").write_text(fbs)
         if displays:
             (t / "displays.txt").write_text(displays)
+        if card:
+            (t / "card.txt").write_text(card)
         if console is not None:
             (t / "console.txt").write_text(console + "\n")
         for name, value in (nv or {}).items():
@@ -486,19 +508,104 @@ for label, kw in (
         show(r))
 
 # ---- the same Mac where OpenCore does not exclude IONDRVSupport: Apple's firmware framebuffer takes the card after the
-# refusal and WindowServer brings the login window up on it. The job cannot tell that display from another GPU's, and
-# does not try: at the login window it restarts, after an automatic login it leaves the restart to the user.
-r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays=APPLE_DISPLAY, console="root")
+# refusal and WindowServer brings the login window up on it. That display hangs under the declined card (its PCI device
+# carries nvrm-layout), so it is not someone's desktop of another GPU: the Mac restarts, at the login window and after
+# an automatic login alike, and says why in its log.
+ONLY_CARD = ("previous driver restored. The only lit display is on the card whose driver was refused, where macOS's "
+             "firmware framebuffer draws it without acceleration; the previous driver is back; restarting")
+PLAIN = "previous driver restored; restarting"
+LEFT = "A display is lit and a user is logged in, so the Mac is not restarted now"
+
+
+def asked(r):
+    """The subtree questions the job put to ioreg (the fake writes each one down), in order."""
+    return [ln for ln in r.calls.splitlines() if ln.startswith("ioreg -r ")]
+
+
+def after_restore(r):
+    """Every subtree question came after the last file was put back: the display is asked about only once the restore
+    is done, where it was asked before."""
+    lines = r.calls.splitlines()
+    last = max((i for i, ln in enumerate(lines) if ln.startswith("ditto ")), default=-1)
+    first = min((i for i, ln in enumerate(lines) if ln.startswith("ioreg -r ")), default=len(lines))
+    return last >= 0 and first > last
+
+
+REF = dict(registry=FB_REFUSED + ioreg_line(EARLY))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card=CARD_LIT, console="root")
 arm("Apple's firmware framebuffer on the card shows the login window: the previous driver is put back and the Mac "
-    "restarts", restored(r), show(r))
-r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays="", console="root")
-arm("  before WindowServer has opened it (no display yet): the same", restored(r), show(r))
-r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays=APPLE_DISPLAY, console="tester")
-arm("  a user logged in by itself on that desktop: the previous driver is put back, the restart is left to the user",
-    put_back(r) and not r.restarted and r.rc == 0, show(r))
-arm("    and the log line holds for that desktop too (a display is lit, a user is logged in; no other GPU named)",
-    "A display is lit and a user is logged in" in r.log and "starts at the next restart" in r.log
-    and "another GPU" not in r.log, r.log)
+    "restarts", restored(r) and PLAIN in r.log and ONLY_CARD not in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays="", card=CARD, console="root")
+arm("  before WindowServer has opened it (no display yet): the same", restored(r) and PLAIN in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays="", card=CARD, console="tester")
+arm("  no display anywhere, a user logged in: the Mac restarts, with the usual line",
+    restored(r) and PLAIN in r.log and ONLY_CARD not in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card=CARD_LIT, console="tester")
+arm("  a user logged in by itself on that desktop: the previous driver is put back and the Mac restarts",
+    restored(r) and r.rc == 0, show(r))
+arm("    and the log says why: the only display is on the refused card, drawn by the firmware framebuffer; restarting",
+    ONLY_CARD in r.log and LEFT not in r.log and "another GPU" not in r.log, r.log)
+arm("    and the display was asked about after the restore, the card's subtree after all the displays",
+    after_restore(r) and asked(r) == ["ioreg -r -c IODisplayConnect -w0", "ioreg -r -k nvrm-layout -w0"], r.calls)
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card=CARD_LIT, console=None)
+arm("    and so when the console's owner cannot be read (taken, as before, for someone who may be there)",
+    restored(r) and ONLY_CARD in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY + APPLE_DISPLAY, card=CARD_LIT + CARD_LIT, console="tester")
+arm("    and so when ioreg prints the display and the card's subtree twice (ids, not counts, are compared)",
+    restored(r) and ONLY_CARD in r.log, show(r))
+CARD_BLIND = "card=\\$(ioreg -r -k nvrm-layout -w0 2>/dev/null | ids)"
+old_rule = job.replace(CARD_BLIND.replace("\\$", "$"), "card=")
+if old_rule == job:
+    arm("control: the job with the old rule can be made", False, "the line that asks for the card's subtree is gone")
+else:
+    r = run(old_rule, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card=CARD_LIT, console="tester")
+    arm("control: with every display counting (the old rule) that Mac is left on the slow desktop, not restarted",
+        put_back(r) and not r.restarted and LEFT in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card="", console="tester")
+arm("  ioreg finds nothing under a declined card: every display counts, as before (put back, not restarted)",
+    put_back(r) and not r.restarted and LEFT in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY, card="ioreg: could not be reached\n", console="tester")
+arm("  nor when it prints something that is not a display's line", put_back(r) and not r.restarted, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY,
+        card=CARD + APPLE_DISPLAY.replace("0x1000004f8", "0x1000004f80"), console="tester")
+arm("  a display id under the card that only begins like the lit one does not take it away (whole ids compared)",
+    put_back(r) and not r.restarted, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays="ioreg: could not be reached\n", card=CARD_LIT, console="tester")
+arm("  the displays' question answered with other text: no display, the Mac restarts as before",
+    restored(r) and PLAIN in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY.replace(", id 0x1000004f8", ""), card=CARD, console="tester")
+arm("    and so when a display's line carries no id", restored(r), show(r))
+
+# a display on another GPU still holds the restart back, whatever the declined card shows
+r = run(job, **REF, fbs=OTHER_FB + APPLE_FB, displays=OTHER_DISPLAY + APPLE_DISPLAY, card=CARD_LIT, console="tester")
+arm("a display on another GPU beside Apple's on the card, a user logged in: put back, not restarted, the usual words",
+    put_back(r) and not r.restarted and LEFT in r.log and "starts at the next restart" in r.log
+    and ONLY_CARD not in r.log, show(r))
+r = run(job, **REF, fbs=OTHER_FB + APPLE_FB, displays=OTHER_DISPLAY + APPLE_DISPLAY, card=CARD_LIT + CARD_LIT,
+        console="tester")
+arm("  and so when ioreg prints the card's subtree twice (a count of displays would come out even and restart)",
+    put_back(r) and not r.restarted and LEFT in r.log, show(r))
+r = run(job, **REF, fbs=OTHER_FB + APPLE_FB, displays=OTHER_DISPLAY, card=CARD, console="tester")
+arm("  another GPU's display and nothing lit on the card: the same", put_back(r) and not r.restarted, show(r))
+r = run(job, **REF, fbs=OTHER_FB + APPLE_FB, displays=OTHER_DISPLAY + APPLE_DISPLAY, card=CARD_LIT, console="root")
+arm("  at the login window of that Mac it restarts", restored(r) and PLAIN in r.log, show(r))
+
+# two NVIDIA cards, both declined, each with Apple's framebuffer drawing: both subtrees are subtracted
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY + APPLE_DISPLAY2, card=CARD_LIT + CARD2_LIT,
+        console="tester")
+arm("two declined cards, each lit by Apple's framebuffer, a user logged in: put back and restarted",
+    restored(r) and ONLY_CARD in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY + APPLE_DISPLAY2, card=CARD_LIT, console="tester")
+arm("  control: a lit display outside the declined subtrees (the second card not declined) holds the restart back",
+    put_back(r) and not r.restarted and LEFT in r.log, show(r))
+r = run(job, **REF, fbs=APPLE_FB, displays=APPLE_DISPLAY + APPLE_DISPLAY2, card=CARD_LIT + CARD2_LIT, console="root")
+arm("  at the login window: restarted", restored(r) and PLAIN in r.log, show(r))
+
+# the older rule never asks about displays
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, fbs=APPLE_FB, displays=APPLE_DISPLAY, card=CARD_LIT,
+        console="tester")
+arm("two starts in a row without a display: restored and restarted without a question about displays, as before",
+    restored(r) and asked(r) == [] and PLAIN in r.log, show(r))
 
 # ---- what must not look like a refusal
 r = run(job, registry=FB_REFUSED)
