@@ -1509,6 +1509,7 @@ def arm_pylink():
     sb = pylink_sandbox("pylink-ours", links)
     p, out = pylink_problems(sb, unlinked="python@3.14",
                              out_has=("build.sh unlinked python@3.14 again (brew unlink python@3.14)", "brew link python@3.14",
+                                      "brew doctor lists it among the unlinked kegs", "links it again",
                                       "deps: everything required is present"))
     opt = sb.dir / "brew/opt/python@3.14/bin/python3.14"
     if not opt.exists():
