@@ -1,9 +1,13 @@
 # NullMoth NVIDIA Driver for macOS
 
-> **Work in progress: do not install this branch yet.** `claude/all-improvements` is a branch of a fork. It changes a
-> large part of the driver and its review is not finished. It is published so that it can be compiled and its tests
-> run on real Macs (`./build.sh`, see [docs/BUILDING.md](docs/BUILDING.md)). Nothing built from it has run on a GPU.
-> This notice goes away when the branch is ready to be tried on hardware.
+> **Not yet run on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
+> At commit 3933ff6, `./build.sh` built every component of it, with build tools it had built from pinned sources, and
+> staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel runner
+> (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). The host tests pass on that runner
+> {{PENDING 5b}} ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been installed,
+> loaded or run on an NVIDIA card: whoever installs it first is testing it. Read
+> [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back to 2.9 at hand
+> ([CHANGELOG.md](CHANGELOG.md), "The ways back").
 
 **What this branch is.** Release 2.9 of the driver with the changes being prepared as 3.0: the kernel knows which
 process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
@@ -12,7 +16,7 @@ application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime
 has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed; each risky change that
 changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
 are undone only by reinstalling 2.9. None of it has run on an NVIDIA card yet.
-Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card once the notice above is gone:
+Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card, in order:
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 A Metal driver for NVIDIA GeForce cards on macOS 15 Sequoia (Intel Macs and OpenCore PCs). It is open source; the
@@ -20,7 +24,7 @@ kernel extensions, the Metal plugin and the shader translator are in this reposi
 (Mac and Windows) is its own project: [1401](https://github.com/nullmoth/1401).
 
 Supported cards are Turing and newer: GTX 16, RTX 20, 30, 40 and 50, TITAN RTX, Quadro RTX and the T-series. Most
-testing is done on an RTX 5060, so other cards may have problems that haven't been found yet. See
+testing of release 2.9 was done on an RTX 5060, so other cards may have problems that haven't been found yet. See
 [card support](docs/CARD-SUPPORT.md) for what has been reported working.
 
 - Changes: [CHANGELOG.md](CHANGELOG.md), downloads on the [releases page](https://github.com/nullmoth/nvidia-macos-driver/releases)
@@ -37,7 +41,7 @@ Support the work: https://buymeacoffee.com/nullmoth
 
 | | |
 |---|---|
-| macOS | 15.5 Sequoia or later (tested 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
+| macOS | 15.5 Sequoia or later (2.9 was tested on 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
 | GPUs | NVIDIA Turing and later; developed on an RTX 5060 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
 | Also | OpenGL (through Apple's GL-on-Metal), OpenCL, Core Image, Core ML |
@@ -56,7 +60,7 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 | Kernel extensions | `/Library/Extensions/NVRM, NVAccel, NVRMFB, NVRMAGDC` | `kexts/` |
 | GPU firmware (GSP) | `/Library/NullMoth/nvfw/nvidia/620.70.06` | NVIDIA, unmodified; fetched from NVIDIA's driver package at install (`package/fw_fetch.sh`) |
 
-The kernel side runs NVIDIA's own open GPU kernel modules (r610) under macOS. NVRMFB is the display framebuffer,
+The kernel side runs NVIDIA's own open GPU kernel modules (620.70.06) under macOS. NVRMFB is the display framebuffer,
 NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-policy shim.
 
 ## Install — by hand
@@ -186,9 +190,10 @@ sudo ./uninstall.sh && sudo shutdown -r now
 
 ## Build from source
 
-On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools), from a
-git clone of the repository and branch that carry `build.sh`, with its owner and branch name in place of `<owner>`
-and `<branch>` (the original project's repository does not have `build.sh`):
+On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools; the whole
+driver has been built with Xcode 26.3, the newest Xcode that runs on macOS 15, and with Xcode 26.5, not yet with Xcode
+26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and branch name in
+place of `<owner>` and `<branch>` (the original project's repository does not have `build.sh`):
 
 ```bash
 git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
@@ -197,21 +202,28 @@ cd nvidia-macos-driver
 ./build.sh
 ```
 
-`./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac, offers to install
-the missing Homebrew formulas with the Homebrew of the Mac's own processor (only those, and what Homebrew installs for
-them; `build.sh` upgrades and removes nothing, though Homebrew may upgrade an outdated dependency of a formula it
-installs), makes a Python environment and a Rust toolchain
-inside its working directory (`~/nullmoth-build` by default, never inside the checkout), downloads NVIDIA's
-`open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
+`./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac and, after asking,
+gets the build tools it lacks: on an Intel Mac it builds them from pinned sources into its working directory and
+calls no Homebrew, even when Homebrew is installed; on Apple silicon it installs the missing Homebrew formulas with the
+Homebrew of the Mac's own processor (only those, and what Homebrew installs for them; `build.sh` upgrades and removes
+nothing, though Homebrew may upgrade an outdated dependency of a formula it installs). It makes a Python environment
+and a Rust toolchain inside its working directory (`~/nullmoth-build` by default, never inside the checkout),
+downloads NVIDIA's `open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
 checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the plugin, the
 translator, the video library and the tools. Each part is a step with its own log; a step whose inputs did not change
 is skipped the next time. It never calls `sudo` and never installs the driver: at the end it prints the `install.sh`
-command to run yourself.
+command to run yourself. After a whole build and package on the Intel Mac named at the top, nothing outside the
+working directory had changed (Homebrew's folders, the shell's settings files, the user's own Rust) and no file it
+made named the user's home folder.
 
-On an Intel Mac Homebrew has no ready-made builds any more, so the first `./build.sh` builds the missing build tools
-(LLVM 22 above all) from pinned sources into its working directory, without Homebrew: up to about 70 minutes on
-one 12-thread Intel Mac, and 10 GB of free space while it builds. On an Intel Mac build.sh does not use Homebrew, even
-when it is installed. On Apple silicon it installs Homebrew's ready-made ones.
+On an Intel Mac the first `./build.sh` builds the missing build tools (LLVM 22 above all) from pinned sources. From an
+empty working directory `deps` took 46.5 minutes on that Intel Mac (30 of them for LLVM) and 3 hours 53 minutes on
+GitHub's Intel runner; it needs 10 GB of free space while LLVM builds. With the tools already there, on that Mac,
+`deps` took 49 s, `fetch` 40 s, the build of all 17 components 5 minutes 41 seconds and the package 27 s, and the
+working directory then held about 8 GB. On Apple silicon `deps` installs Homebrew's ready-made tools instead. That
+path has run only against a stand-in for Homebrew: no whole build with `build.sh` has run on an Apple-silicon Mac, and
+the host tests have not passed whole on one. GitHub's Apple-silicon runner compiles and links the kexts; at commit
+95811c2 they had the same bytes as the kexts built on GitHub's Intel runner.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
 repository, so a package is the release's with every part this checkout builds replaced):
@@ -220,14 +232,15 @@ repository, so a package is the release's with every part this checkout builds r
 ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
 ```
 
+Such a package has been staged on both Intel Macs above; none has been installed yet.
+
 `./build.sh help` lists the commands, components and options; `./build.sh env` prints every variable the build
 scripts read, to run one of them by hand. [docs/BUILDING.md](docs/BUILDING.md) explains everything, including what
 to do when a step fails ([en español](docs/BUILDING.es.md)).
 
-`build.sh` was written and tested without a Mac, against stand-ins for Xcode, Homebrew and the build scripts, and has
-so far run on one Mac only in part ([docs/BUILDING.md](docs/BUILDING.md) says how far); the first runs on a Mac may
-stop on something the stand-ins did not imitate. When a step stops, the message names it and gives a report file to
-attach to an issue.
+`build.sh` was written on Linux and tested there against stand-ins for Xcode, Homebrew and the build scripts;
+[docs/BUILDING.md](docs/BUILDING.md) says which of its paths have since run on the two Intel Macs above and which
+only against the stand-ins. When a step stops, the message names it and gives a report file to attach to an issue.
 
 Rebuild both accelerators whenever `nvrm_vram_abi.h` or `nvrm_gpuva_abi.h` changes: an accelerator built against an
 older ABI loads, but NVRMFB refuses all its VRAM requests and the desktop stays black. `./build.sh` does this by
@@ -243,8 +256,11 @@ python3 tools/run_all_tests.py
 The first compiles every kext source without linking and checks every kernel symbol the kexts import against the
 export lists of macOS 15 and macOS 26; it runs on a Mac or on Linux (clang, llvm-nm, python3, git, make, patch) and
 downloads its pinned inputs into `build-out/` on the first run. The second runs the host tests (on a Mac; on Linux
-the tests that compile Objective-C fail). `.github/workflows/ci.yml` runs both, and the kext and plugin builds, on
-every push once Actions are enabled for the repository.
+the tests that need a Mac fail, among them every test that compiles Objective-C). `.github/workflows/ci.yml` runs
+both, and the kext and plugin builds, on every push once Actions are enabled for the repository.
+`.github/workflows/full-build.yml` runs on every push and by hand: on GitHub's Intel runner it builds the whole driver
+with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when it has them),
+stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken from Homebrew.
 
 A change that adds a switch (an environment name, a boot argument, a sysctl) needs a row in `tools/switches.tsv`;
 `python3 tools/switch_registry.py check` says which, and what a new switch may be.
