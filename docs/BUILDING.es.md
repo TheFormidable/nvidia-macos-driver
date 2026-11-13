@@ -119,7 +119,10 @@ descarga y la compilación del traductor (sus ajustes de perfil, enlazador y fue
 crea un archivo temporal propio (y una carpeta a su lado para probar `patch`) en tu carpeta temporal (`$TMPDIR`) y los
 borra al terminar; `xcrun` guarda su caché de búsqueda (`xcrun_db`) en esa misma carpeta temporal, como hace siempre que
 se ejecuta una herramienta de Xcode. `fetch` ejecuta git sin tus hooks (`core.hooksPath`), sin monitor de archivos ni
-archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). `deps`
+archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). Los scripts
+de los pasos de `build` ejecutan git sin configuración global ni del sistema (`GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM=1`): no actúan tus hooks, monitor, firma, filtros ni reescrituras de URL; un proxy para sus
+descargas se toma de `https_proxy` (y las demás variables de proxy). `deps`
 escribe en la carpeta de Homebrew, en su caché (`~/Library/Caches/Homebrew`) y en sus registros
 (`~/Library/Logs/Homebrew`) al instalar, y mientras Homebrew compila una fórmula usa una carpeta en `/private/tmp` que
 borra al terminarla; sus preguntas `brew info` (ninguna con `--offline` o `--no-install`) usan una caché en

@@ -347,6 +347,8 @@ has proven itself, renewed with a reason otherwise.
   when a later `deps` links it once more as a dependency of another formula.
 - `./build.sh doctor` reads the `VERSION` of a base package given as an unpacked folder and names a release other than
   2.9 at once, instead of the package step stopping on it at the end of the build.
+- The git calls of `./build.sh`'s build steps no longer read your global or system git configuration: your hooks, file
+  system monitor, commit signing, filters and URL rewrites stay out of them, as they already did for `fetch`.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 

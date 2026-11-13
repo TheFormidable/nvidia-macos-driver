@@ -1033,12 +1033,16 @@ x() {
 # /usr/local/include before the SDK's headers and its linker /usr/local/lib before the SDK's libraries: on an Intel Mac
 # that is Homebrew's prefix, so two Macs with different things in Homebrew could build different products. xcrun itself
 # answers --show-sdk-path with SDKROOT when it is set, so the kexts' scripts, which ask it, get this same folder.
+# The steps' own git calls (rev-parse, status, describe, cat-file and archive of this checkout or of a fetched tree; init,
+# clone, fetch, sparse-checkout and checkout of a pinned tree) read no configuration of the tester's: no global or
+# system file, so no hooks folder, file system monitor, signing, filters or URL rewrites of theirs act in a step, as
+# fetch keeps them out of build.sh's own (git_q). None of the calls commits or tags, so no identity is needed.
 step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
     -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
     -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
-    "JOBS=${JOBS:-$NM_JOBS}"
+    "JOBS=${JOBS:-$NM_JOBS}" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   [ -z "$STEP_SDK" ] || printf '%s\n' "SDKROOT=$STEP_SDK"
 }
 STEP_SDK=""; STEP_SDK_DONE=0
