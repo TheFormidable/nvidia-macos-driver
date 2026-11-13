@@ -236,6 +236,24 @@ case "$role" in
         # state/brew-install-fails-<formula>: the install fails after its dependencies were installed and linked, and
         # before the formula itself is (a build that failed)
         if [ -f "$S/brew-install-fails-$2" ]; then links "$2"; echo "Error: stand-in failure of brew install $2" >&2; exit 1; fi
+        # ctl/brew-block-<formula>: the install waits (a long build) until the file is gone, at most two minutes. It
+        # waits as the step stand-in does (STEPLIB_SH), with the shell's own timed read on a FIFO, so that a Ctrl-C is
+        # never taken for dealt with by a child that ended in the same moment
+        if [ -f "$SB/ctl/brew-block-$2" ]; then
+          w=0; lim=2400; nap="sleep 0.05"
+          if mkfifo "$SB/ctl/brew-nap-$$" 2>/dev/null && { exec 3<>"$SB/ctl/brew-nap-$$"; } 2>/dev/null; then
+            if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then nap="read -t 0.05 -u 3 _"; else nap="read -t 1 -u 3 _"; lim=120; fi
+          else
+            trap 'trap - INT; kill -INT $$' INT
+          fi
+          rm -f "$SB/ctl/brew-nap-$$"
+          echo $$ > "$SB/ctl/brew-pid-$2"; : > "$SB/ctl/brew-started-$2"
+          while [ -f "$SB/ctl/brew-block-$2" ]; do
+            w=$((w + 1)); [ "$w" -le "$lim" ] || { echo "stand-in brew: install $2 never released" >&2; exit 9; }
+            $nap || true
+          done
+          exec 3<&-
+        fi
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
         links "$2"
         # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
@@ -2145,7 +2163,7 @@ def arm_pylink():
     check("deps: python3 that the installs linked into the Python formula they added is unlinked once; opt stays; "
           "doctor and the Python environment still find that Python; the way back is printed", not p, (p, out[-1500:]))
     neg = pylink_sandbox("pylink-ours-neg", links)
-    neg.break_script('      deps_python3_back\n', "")
+    neg.break_script('      deps_python3_back; DEPS_PY3_UNDO=""\n', '      DEPS_PY3_UNDO=""\n')
     negative("deps that leaves the new python3 link", pylink_problems(neg, unlinked="python@3.14")[0])
 
     # 1b. a later deps whose install links that Python again (Homebrew links a dependency it has to upgrade) unlinks it
@@ -2249,7 +2267,7 @@ def arm_pylink():
     check("deps: an install that fails after an earlier one linked a Python stops deps and unlinks that Python first", not p, (p, out[-800:]))
     neg = pylink_sandbox("pylink-halfway-neg", links)
     (neg.state / "brew-install-fails-spirv-tools").write_text("")
-    neg.break_script('            { deps_python3_back; die "brew install $f failed"; }',
+    neg.break_script('            { deps_python3_back; DEPS_PY3_UNDO=""; die "brew install $f failed"; }',
                      '            die "brew install $f failed"')
     negative("deps that stops at a failed install with the Python of an earlier one still linked",
              pylink_problems(neg, unlinked="python@3.15", rc_ok=False, out_has=("brew install spirv-tools failed",))[0])
@@ -2292,6 +2310,50 @@ def arm_pylink():
     negative("deps that takes a formula installed before for this install's",
              pylink_problems(neg, unlinked=None, rc_ok=False, linked_to=str(neg.dir / "pyorg/bin/python3"),
                              out_has=("STOP: brew install glslang failed",))[0])
+
+    # 5d. Ctrl-C during the installs, after the first one linked a Python and while the second one runs: deps makes the
+    # same unlink before it says "interrupted" and ends with 130
+    def interrupted_problems(s):
+        (s.state / "brew-links-ninja").write_text(PY_LINKS.format(f="python@3.15").replace("python3.14", "python3.15"))
+        (s.ctl / "brew-block-pkgconf").write_text("")
+        s.clear()
+        pr = s.popen("deps", "-y")
+        try:
+            if not wait_for(s.ctl / "brew-started-pkgconf"):
+                stop(pr)
+                o, _ = pr.communicate()
+                return [f"the install of pkgconf never started (exit {pr.returncode}): {o[-600:]}"], o
+            os.killpg(pr.pid, signal.SIGINT)
+            try:
+                o, _ = pr.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                stop(pr)
+                o, _ = pr.communicate()
+                return ["deps did not stop after Ctrl-C"], o
+        finally:
+            (s.ctl / "brew-block-pkgconf").unlink(missing_ok=True)
+        q = []
+        if pr.returncode != 130:
+            q.append(f"exit {pr.returncode}, expected 130")
+        if "build.sh: interrupted" not in o:
+            q.append("no message that it was interrupted")
+        unl = [l for l in s.jlines() if l.startswith("brew unlink")]
+        if unl != ["brew unlink python@3.15"]:
+            q.append(f"brew unlink calls {unl}, expected ['brew unlink python@3.15']")
+        if os.path.lexists(s.dir / "brew/bin/python3"):
+            q.append(f"brew/bin/python3 is still there: {os.readlink(s.dir / 'brew/bin/python3')}")
+        u, i = o.find("unlinked python@3.15 again"), o.find("build.sh: interrupted")
+        if u < 0 or (i >= 0 and u > i):
+            q.append("the unlink's line is missing or comes after the message that it was interrupted")
+        if (s.work / "build.lock").exists():
+            q.append("the lock is still there")
+        return q, o
+    sb = pylink_sandbox("pylink-interrupt", {})
+    p, out = interrupted_problems(sb)
+    check("deps: Ctrl-C during an install after an earlier one linked a Python unlinks it, says interrupted, exits 130", not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-interrupt-neg", {})
+    neg.break_script('  if [ -n "$DEPS_PY3_UNDO" ]; then DEPS_PY3_UNDO=""; deps_python3_back || true; fi\n', "")
+    negative("an interrupt handler that leaves the Python linked", interrupted_problems(neg)[0])
 
     # 6. --dry-run and --no-install: no call of Homebrew at all; the dry run states the rule
     def quiet_problems(s, args, rc_zero):

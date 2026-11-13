@@ -134,7 +134,7 @@ carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Ho
 enlazado a una fórmula de Python que ellas añadieron o que un `deps` anterior de este directorio de trabajo
 desenlazó (las anota en `<directorio de trabajo>/tools/.nm-brew-unlinked` y quita la que vuelvas a enlazar tú),
 `deps` ejecuta `brew unlink` con esa fórmula al terminarlas (o
-al fallar una) e imprime una línea con la vuelta atrás (`brew link <fórmula>`); un `python3` que ya estaba (un enlace que no llevaba a ninguna parte no cuenta: tu shell lo saltaba, y Homebrew lo
+al fallar una, o si paras `deps` con Ctrl-C durante ellas) e imprime una línea con la vuelta atrás (`brew link <fórmula>`); un `python3` que ya estaba (un enlace que no llevaba a ninguna parte no cuenta: tu shell lo saltaba, y Homebrew lo
 reemplaza), o una fórmula de Python que ya tenías, se quedan como están. Un `brew install` que termina con error aunque su fórmula ya está instalada (Homebrew no
 enlazó un comando sobre un archivo tuyo que estaba en medio, y lo dice) no detiene `deps`: avisa y sigue, y sus
 últimas líneas dicen si aún falta algo. Después de instalar, `deps` nombra cada comando que ellas añadieron al `bin` de
