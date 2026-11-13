@@ -74,7 +74,12 @@ jobs:
       - name: Host tests
         run: python3 tools/run_all_tests.py -j 4
   kexts-mac:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple silicon and Intel, both macOS 15 (labels from GitHub's list of standard hosted runners)
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     continue-on-error: true
     steps:
@@ -102,6 +107,33 @@ jobs:
           OGKM="$W" bash build/accel_build_all.sh kexts/NVRM "$O/accel-all"
           bash build/build_agdc.sh kexts/NVRMAGDC "$O/agdc"
           bash kexts/NMSMN/build.sh "$O/nmsmn" 15.0
+      - name: No option of the build computer in the compile lines, no Linux kernel helper in NVRM
+        # An Intel Mac's clang takes -mfunction-return=thunk-extern when NVIDIA's makefiles ask, and NVRM then imports
+        # ___x86_return_thunk, which no macOS defines. The lists are the ones build_rm620.sh and build_kms620.sh compiled;
+        # imports.txt is build_nvrm.sh's `nm -u` of the linked NVRM.
+        run: |
+          W="$RUNNER_TEMP/rm620/ogkm-620.70.06"; O="$RUNNER_TEMP/kexts"; bad=0
+          for part in nvidia nvidia-modeset; do
+            f="$W/src/$part/_out/Darwin_x86_64/compile_cmds.sh"
+            [ -s "$f" ] || { echo "::error::$f is missing or empty"; bad=1; continue; }
+            hits=$(grep -cE -e '-mfunction-return|-mindirect-branch|-fcf-protection=(full|return)|-Wformat-(overflow|truncation)|-Wstack-usage' "$f" || true)
+            if [ "$hits" != 0 ]; then
+              echo "::error::$hits compile lines of $part carry an option of the build computer, for example:"
+              grep -oE -e '-mfunction-return[^ ]*|-mindirect-branch[^ ]*|-fcf-protection=(full|return)|-Wformat-(overflow|truncation)[^ ]*|-Wstack-usage[^ ]*' "$f" | sort | uniq -c
+              bad=1
+            fi
+            sum=$(sed -e "s|$RUNNER_TEMP|<tmp>|g" -e "s|$GITHUB_WORKSPACE|<repo>|g" "$f" | shasum -a 256 | cut -c1-64)
+            echo "compile lines of $part: $(wc -l < "$f" | tr -d ' ') lines, sha256 $sum (${{ matrix.runner }}, $(uname -m))"
+          done
+          if [ ! -s "$O/nvrm/imports.txt" ]; then
+            echo "::error::$O/nvrm/imports.txt is missing or empty"; bad=1
+          elif grep -qE '(^|[[:space:]])___x86_' "$O/nvrm/imports.txt"; then
+            grep -E '(^|[[:space:]])___x86_' "$O/nvrm/imports.txt" | sort | uniq -c
+            echo "::error::the linked NVRM imports a ___x86_ helper, which no macOS defines: it would not load"; bad=1
+          else
+            echo "NVRM imports $(wc -l < "$O/nvrm/imports.txt" | tr -d ' ') names, no ___x86_ helper among them"
+          fi
+          exit $bad
   plugin:
     runs-on: macos-26
     timeout-minutes: 30
