@@ -704,11 +704,17 @@ def main():
 
         # the controls above count only a program that built and whose checks failed: a change that breaks the build,
         # and a crash that is not a stand-in's assertion, must not pass for one
-        for tag, what, old, new in [
-                ("x", "a change that does not compile", "md->writeBytes((IOByteCount)dstOff,", "md->writeBytes((IOByteCount)dstOff +,"),
-                ("y", "a program that crashes outside the checks", "    if (t->tok) {\n", "    __builtin_trap();\n    if (t->tok) {\n")]:
-            ok, det = changed(tag, "rg", old, new)
-            arm(f"control: {what} is not counted as a control that failed", not ok and "the text to alter" not in str(det), det)
+        # (each must really end that way: a trap never reached would let its program pass and prove nothing)
+        for tag, what, old, new, ended in [
+                ("x", "a change that does not compile", "md->writeBytes((IOByteCount)dstOff,", "md->writeBytes((IOByteCount)dstOff +,",
+                 lambda c: c is None),
+                ("y", "a program that crashes outside the checks", "    if (t->tok) {\n", "    __builtin_trap();\n    if (t->tok) {\n",
+                 lambda c: c is not None and c < 0 and c != -1)]:
+            if rg.count(old) != 1:
+                arm(f"control: {what} is not counted as a control that failed", False, f"the text to alter is not in the rg piece once: {old[:80]}")
+                continue
+            c, o = build_run(d, "c" + tag, st, gr, rg.replace(old, new))
+            arm(f"control: {what} is not counted as a control that failed", ended(c) and not failed_as_intended(c, o), (c, o))
 
     print("PASS" if not FAILS else f"FAILED ({len(FAILS)})")
     return 1 if FAILS else 0
