@@ -31,7 +31,8 @@
 #NM_BASE_PACKAGE=~/Downloads/nullmoth-nvidia-2.9.tar.gz
 # its SHA-256 from the release page, checked before use
 #NM_BASE_PACKAGE_SHA256=
-# written to the package's VERSION (digits and dots)
+# written to the package's VERSION (digits and dots), which install.sh records as the installed version
+# (/Library/NullMoth/driver-version); unset: the version of CHANGELOG.md's first heading, the release this checkout is
 #NM_PACKAGE_VERSION=
 
 # --- mirrors (default: the URLs in build/pins.sh; the commit ids and SHA-256 are checked either way) ---------------

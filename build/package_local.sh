@@ -11,7 +11,8 @@
 #   <build out dir>  ./build.sh's out/ folder (kexts/, nvk/, xlate/, plugin/, nvencvt/, userland/, dlss-pkg/, ...)
 #   <package dir>    gets base/ (the unpacked base), pkgroot/ (the result) and the tarball
 # Environment: NM_BASE_PACKAGE_SHA256 (checked when set), NM_PACKAGE_VERSION (written to VERSION when set; install.sh
-# keeps only digits and dots), NM_PACKAGE_NAME (tarball name, default nullmoth-nvidia-local.tar.gz), NM_BUILD_INFO
+# keeps only digits and dots; ./build.sh package always sets it, by default to CHANGELOG.md's top release, and run
+# alone without it this keeps the base package's VERSION), NM_PACKAGE_NAME (tarball name, default nullmoth-nvidia-local.tar.gz), NM_BUILD_INFO
 # (a text file copied to NULLMOTH-LOCAL-BUILD.txt in the package).
 #
 # Every replaced file gets its SHA256SUMS line refreshed (check_package.sh does not compare hashes, install.sh does);
