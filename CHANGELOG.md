@@ -198,6 +198,16 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   that the wake itself asks for. The monitor also suspends only a running GPU and resumes or powers off only a
   suspended one, so a poll that a sleep and wake cut in two no longer switches the slot off under a running GPU, and a
   GPU whose wake failed is left alone.
+- Only WindowServer, running under a system account (user id below 500, the rule NVRM's client table already uses),
+  can take a compositor-class hold in the surface fence or NVAccel's pending marks and so delay another process's
+  flips, copied frames and page-offs for up to 2 s at a time. A program that merely named its executable
+  "WindowServer" no longer can; the real WindowServer is unaffected.
+- A surface-fence wait or look no longer hands back the writing process's pid or the state of its hold to a process
+  other than the writer. Whether a surface (or a given process) has a write pending can still be asked.
+- A process that failed channel registrations of the surface fence in a loop could flood the system log (its failure
+  count turned negative after 2^31 failures, after which every one was logged). The count is now read as unsigned and
+  only the first 8 failures since boot reach the system log; later ones go to the debug output, and
+  `debug.nvrm_fence_map_fail` and `debug.nvrm_fence_map_mismatch` count them all.
 
 #### Switches and reports
 - `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a
