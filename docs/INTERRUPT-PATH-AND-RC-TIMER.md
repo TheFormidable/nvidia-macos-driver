@@ -1,18 +1,23 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
 Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **None of it has run on a
-GPU yet.** The code compiles for macOS 15 and 26 and its locking logic is tested on the host
-(`tools/test_quiesce_gates.cpp`, `tools/test_irq_timer_wiring.py`). Every change below is **on by default**; each one
-that changes behaviour has a boot-arg that turns it off. The old spellings `nvrmbhthread=1` and `nvrmrctimer=1` are
-still accepted and mean the default.
+GPU yet.** Apple's compiler on a Mac with macOS 26 built an earlier state of this code; the later changes (the reuse of
+a work queue, the idle power-down monitor at stop, sleep and shutdown, the kext's reference on itself, the count of
+retired nano timer slots) were compiled only by this repository's cross-compile check. The kernel functions the code
+calls are checked against the export lists of macOS 15 and 26. The gates and the hold against the idle power-down
+monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
+`tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in the
+table below have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
+the order of the teardown, the hold against the idle power-down monitor, the kext staying loaded) have none. The old
+spellings `nvrmbhthread=1` and `nvrmrctimer=1` are still accepted and mean the default.
 
 | Boot-arg | Turns off | Use it when |
 |---|---|---|
 | `nvrmbhthread=0` | the bottom-half thread: `rm_isr_bh` runs on the work loop right after `rm_isr`, as in 2.9 | a hang with `debug.nvrm_bh_runs` frozen, or RM messages about lock ownership |
 | `nvrmrctimer=0` | the RC timer: the RM's 1 Hz list never runs, as in 2.9 | a "GPU has fallen off the bus" (Xid 79) that does not happen with it |
 | `nvrmnanowait=0` | the wait of a nano timer cancel or destroy for a callback that is running | `debug.nvrm_nano_wait_timeouts` grows |
-| `nvrmworkq=0` | the RM work queues: every RM work item gets a thread of its own and a flush waits for all of them, as in 2.9 | a hang with `debug.nvrm_wq_flush_slow` growing, or `debug.nvrm_wq_abandoned` above 0 |
-| `nvrmatomic=0` | the answers by context: every OS-layer function answers as in 2.9, whatever the context | a hang or panic in an RM call made with interrupts off, or `debug.nvrm_atomic_mode` -1 |
+| `nvrmworkq=0` | the RM work queues: every RM work item gets a thread of its own and a flush waits for all of them, as in 2.9 (the driver's own bounded waits at stop, shutdown and sleep stay, on that flush) | a hang with `debug.nvrm_wq_flush_slow` growing, or `debug.nvrm_wq_abandoned` above 0 |
+| `nvrmatomic=0` | the answers by context: every OS-layer function answers as in 2.9, whatever the context | a hang or panic in an RM call made with interrupts off (with `debug.nvrm_atomic_mode` -1 the old answers are already in force: the switch changes nothing) |
 
 All of them are read once, at the first use. All the counters below are read-only sysctls (`sysctl debug | grep nvrm_`),
 readable over SSH while the screen is frozen.
@@ -22,8 +27,8 @@ readable over SSH while the screen is frozen.
 Linux registers the GPU interrupt with `request_threaded_irq`: `rm_isr` runs in the hard interrupt and `rm_isr_bh` on
 the interrupt's own kernel thread. Here the primary filter only counts and time-stamps the MSI; `rm_isr` runs on the
 GPU's work-loop thread (`NVRM::interruptOccurred`), and `rm_isr_bh` on a thread of its own, one per GPU, named
-`NVRM bottom half` (it shows in spindumps). A bottom half that waits for the GPU lock, for example behind a long RM
-control from another process, then no longer delays the next `rm_isr`.
+`NVRM bottom half` (it shows in spindumps). A long bottom half (it runs with the GPU lock that `rm_isr` took for it)
+then no longer delays the next `rm_isr`.
 
 When `rm_isr` asks for a bottom half, it has handed the GPU lock over to it: only `rm_isr_bh` gives it back. So the
 request alone decides (as on Linux), and a requested bottom half is always run, also when the GPU stops at the same
@@ -53,7 +58,7 @@ was still inside `rm_isr`. Each GPU now has its own slot (8, one per possible ca
 | `debug.nvrm_bh_thread` | sysctl | GPUs whose bottom half runs on its own thread (1 with one card) |
 | `debug.nvrm_bh_runs` | sysctl | Bottom halves run |
 | `debug.nvrm_bh_wake_max_us` | sysctl | Longest wait between a bottom half's request and the start of its run: the cost of the hand-off, well under 1000 expected |
-| `debug.nvrm_bh_max_us` | sysctl | Longest bottom half, its wait for the GPU lock included |
+| `debug.nvrm_bh_max_us` | sysctl | Longest bottom half, microseconds |
 | `debug.nvrm_bh_over_1ms`, `debug.nvrm_bh_over_4ms` | sysctl | Bottom halves over 1 ms and over 4 ms |
 | `debug.nvrm_isr_count`, `debug.nvrm_isr_handled` | sysctl | MSIs taken, and those the RM claimed |
 | `debug.nvrm_isr_latency_max_us` | sysctl | Longest wait between an MSI and its `rm_isr` |
@@ -63,8 +68,10 @@ was still inside `rm_isr`. Each GPU now has its own slot (8, one per possible ca
 | `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet that ran out. Should stay 0 |
 | `debug.nvrm_bh_stuck` | sysctl | Bottom-half threads that did not exit within 5 s of the GPU's stop. Should stay 0 |
 
-How to read them: compare `debug.nvrm_isr_late_*` and `debug.nvrm_isr_latency_max_us` during a session that stuttered
-in 2.9 (4K playback, screen capture, a browser with video); they should be lower or equal. If something hangs and
+How to read them: 2.9 has none of these counters, so compare `debug.nvrm_isr_late_*` and
+`debug.nvrm_isr_latency_max_us` after the same session (one that stuttered in 2.9: 4K playback, screen capture, a
+browser with video) booted once as it is and once with `nvrmbhthread=0`; with the thread they should be lower or
+equal. If something hangs and
 `debug.nvrm_bh_runs` stops growing, boot with `nvrmbhthread=0` and say so in the report.
 
 ## The RC timer
@@ -86,9 +93,10 @@ by the user-space driver's own wait budget.
 
 Differences from Linux, on purpose: the tick re-arms whatever `rm_run_rc_callback` returns (Linux lets the timer die on
 the first refusal, such as a tick that lands during a power transition); and the driver pauses the timer itself before
-RM standby (sleep, RTD3 and the shutdown path) and resumes it only after a resume that worked, instead of leaving it to
-fire at a GPU without power. When the GPU stops, the timer is stopped by `rm_disable_adapter` and then let go of for
-good, before the GPU's state is freed: no tick can reach a GPU that is gone.
+RM standby (sleep, RTD3 and the shutdown path; it waits up to 2 s for a tick that is running) and resumes it only
+after a resume that worked, instead of leaving it to fire at a GPU without power. When the GPU stops, the timer is
+stopped by `rm_disable_adapter` (up to 10 s for a running tick) and then let go of for good, before the GPU's state is
+freed: no tick can reach a GPU that is gone.
 
 | Name | Kind | Meaning |
 |---|---|---|
@@ -126,7 +134,7 @@ Now:
 
 | Name | Kind | Meaning |
 |---|---|---|
-| `debug.nvrm_nano_slots` | sysctl | Timer slots made (tens) |
+| `debug.nvrm_nano_slots` | sysctl | Timer slots made, 32 at a time |
 | `debug.nvrm_nano_live` | sysctl | Timers in use; returns to its idle value after the apps quit |
 | `debug.nvrm_nano_fires` | sysctl | Callbacks run |
 | `debug.nvrm_nano_stale` | sysctl | Late callbacks turned away |
@@ -144,13 +152,14 @@ of one GPU ran in any order and at the same time, and a flush waited for every i
 global queue and, from the second start pass on, one queue per GPU, each with one worker thread (`nvrm-wq0` for the
 global queue, `nvrm-wq1`.. for GPUs): items run one at a time in the order they were queued, and a flush returns once
 everything queued before it has run. The RM's own flushes wait as long as they need to (each 5 s of waiting logs the
-item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step at system
-shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
+item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step in the full
+shutdown (`nvrmshutdown=full`), 5 s for the global queue before the GPU goes to standby (also on the default
+shutdown path, which puts the GPU in standby). A GPU queue whose bounded wait runs out is given up
 on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
 at a time, less one for each queue that was given up on; or no thread) its items go to the global queue; that is never
 a reason to fail its start. The queue of a GPU that stopped cleanly is used again by the next GPU that starts. Items
 the RM marks to be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on
-Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item.
+Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item; the driver's own bounded waits stay.
 
 | Name | Kind | Meaning |
 |---|---|---|
@@ -198,7 +207,8 @@ because each GPU has one such thread.
 
 ## Order of the teardown
 
-`stop()` and the full shutdown path (`nvrmshutdown=full`) take the adapter down in Linux's order: the GPU's work queue
+`stop()` and the full shutdown path (`nvrmshutdown=full`, taken only when no user client is open) take the adapter down in
+Linux's order: the GPU's work queue
 flushed (30 s at most in `stop()`, 2 s in the shutdown path), `rm_disable_adapter` (it stops the RC timer and masks the
 GPU's interrupts), the queue stopped, the interrupt source off and the gate settled (2 s), `rm_shutdown_adapter`, then
 the RC timer and the nano timers let go. A GPU that stops while it is suspended skips `rm_disable_adapter`: its RM is
@@ -234,8 +244,9 @@ the kernel does unload kexts: by itself, about a minute after the last object of
 that declined the card, a card that was unplugged), and when `kmutil unload` asks for it. So from the moment a start
 registers its first sysctl, NVRM.kext holds one reference on itself for the rest of the boot. With it the kernel
 refuses the unload before it terminates a service: `kmutil unload -b com.nullmoth.NVRM` fails with the kext in use and
-the display keeps running. Should the reference ever not be obtained, the kext's stop function refuses instead (logged
-as `no reference on this kext`); the code then stays, but the driver cannot start a card again before a restart.
+the display keeps running. Should the reference ever not be obtained (logged at that start as
+`no reference on this kext`), the kext's stop function refuses instead; the code then stays, but the driver cannot
+start a card again before a restart.
 
 A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
 and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
