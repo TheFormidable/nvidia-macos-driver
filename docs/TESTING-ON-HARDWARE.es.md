@@ -289,9 +289,10 @@ largas que miden este camino.
    - Mal: una línea que dice que la biblioteca de códecs instalada es una compilación sin la autoprueba de
      decodificación Blackwell y que se rechazó (REFUSED) en esta tarjeta: la biblioteca es más antigua que el plugin
      que tiene al lado. Compila las dos de la misma revisión e instala las dos.
-   - Ninguna línea: el proceso no lo pidió nunca (la tarjeta no es una RTX 50 por su id PCI, está puesto
-     `NVMTL_NVENCVT=0`, o la biblioteca no está instalada con root como propietario), o todavía no ha arrancado ningún
-     servicio de decodificación.
+   - Ninguna línea así (`log show` imprime entonces solo su encabezado y una línea que es la propia orden `log`, que
+     coincide con su propio filtro): el proceso no lo pidió nunca (el driver no informa la generación de la tarjeta
+     como Blackwell, está puesto `NVMTL_NVENCVT=0`, o la biblioteca no está instalada con root como propietario), o
+     todavía no ha arrancado ningún servicio de decodificación.
    - PASS pero un video roto: pon `NVMTL_NVENCVT=0` en `nvrm610.conf` para volver al decodificador de 2.9, y envía la
      línea con los datos del video.
 
