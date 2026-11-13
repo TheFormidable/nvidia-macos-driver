@@ -18,8 +18,9 @@
 # extension modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the
 # Translator, Rust) lies in W and loads only from /usr/lib, /System and W (and, for W/out, the driver's own folders
 # under /Library); what the package ships and this build made names macOS 15.0 or older as its minimum (LC_BUILD_VERSION
-# minos); no step log names /usr/local or /opt/homebrew; the checkout is unchanged; the package's VERSION, size,
-# SHA-256, files replaced against 2.9, and its SHA256SUMS checked as install.sh checks it.
+# minos), a kext binary, into which the linker writes no minimum, being counted apart; no step log names /usr/local or
+# /opt/homebrew; the checkout is unchanged; the package's VERSION, size, SHA-256, files replaced against 2.9, and its
+# SHA256SUMS checked as install.sh checks it.
 #
 # What it checks, once it has run: that the pinned sources and the repository alone make every component and a package
 # on a Mac whose /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several
@@ -45,12 +46,11 @@
 # tree after 3933ff6; a run with those corrections has not been seen yet.
 #
 # Time, as measured on this runner. From nothing (96bf32c): deps 3 h 53 min, then about 23 min of build before the
-# plugin stopped it. With the caches below restored (3933ff6): the four
-# restores 4 min 34 s, deps 40 s, fetch 45 s, the build of every component 30 min 20 s, the package 60 s, the host
-# tests 41 min 44 s, the whole job about 1 hour 29 minutes. A run from nothing with every step has not been made:
-# deps alone takes 3 h 53 min of the 340 minutes. Disk: the working directory held 7.3 GB at the end of the run of
-# 96bf32c, which made no package (sources 3.4 GB, tools 1.8 GB, build trees 1.1 GB, outputs 1.1 GB); df is printed at
-# the start, after deps and at the end.
+# plugin stopped it. With the caches below restored (3933ff6): the four restores 4 min 34 s, deps 40 s, fetch 45 s,
+# the build of every component 30 min 20 s, the package 60 s, the host tests 41 min 44 s, the whole job about 1 hour
+# 29 minutes. A run from nothing with every step has not been made: deps alone takes 3 h 53 min of the 340 minutes.
+# Disk: the working directory held 7.3 GB at the end of the run of 96bf32c, which made no package (sources 3.4 GB,
+# tools 1.8 GB, build trees 1.1 GB, outputs 1.1 GB); df is printed at the start, after deps and at the end.
 # Caches, each restored at the start and saved by its own step as soon as what it holds is complete:
 #   the toolchain (W/tools/toolchain): under the hash of build/toolchain.sh and build/pins.sh, followed by the hash of
 #     its stamps; the newest cache of the same files, or else of any, is restored, and build.sh's stamp of each tool
