@@ -366,4 +366,5 @@ falló se repite. `-v` muestra la salida de cada paso mientras se ejecuta.
 Además, cada push se compila desde cero en un Mac Intel de GitHub (macOS 15, sin tarjeta NVIDIA, sin instalar ni
 cargar nada): `.github/workflows/full-build.yml` ejecuta deps, doctor, fetch, build, package y test en una carpeta
 vacía y comprueba que Homebrew no se usó ni cambió. El resultado está en la pestaña Actions del repositorio, flujo
-full-build; si falla, su último paso muestra los registros.
+full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. Hasta que haya pasado una vez, su
+resultado no detiene ningún cambio.
