@@ -43,7 +43,7 @@ or the arm's own check given a broken result):
   bash32             nothing in the script that /bin/bash 3.2 or the BSD tools of macOS lack
 
 The shell is $BUILD_SH_BASH (default /bin/bash, macOS's bash 3.2 on a Mac). usage: test_toolchain_sh.py [arm ...]"""
-import hashlib, os, pathlib, platform, re, shutil, subprocess, sys, tempfile
+import hashlib, os, pathlib, platform, re, shlex, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REAL_SCRIPT = ROOT / "build" / "toolchain.sh"
@@ -220,7 +220,7 @@ esac
 # helpers of the script itself, at the head of the caller's PATH: they journal without touching HOME or TMPDIR
 # xcrun and security live in the sandbox's SYSBIN; those of the same name on the caller's PATH must never run
 SYSBIN_HELPERS = {
-    "xcrun": r'''rec xcrun "$@"; [ "$*" = "--sdk macosx --show-sdk-path" ] && echo '@SB@/sdk' ''',
+    "xcrun": r'''rec xcrun "$@"; [ "$*" = "--sdk macosx --show-sdk-path" ] && printf '%s\n' @SDK@ ''',
     "security": r'''rec security "$@"; printf -- '-----BEGIN CERTIFICATE-----\nc3RhbmQtaW4=\n-----END CERTIFICATE-----\n' ''',
 }
 HELPERS = {
@@ -264,7 +264,7 @@ class Sandbox:
             (sb / d).mkdir(parents=True, exist_ok=True)
         (sb / "control/os").write_text(os_name + "\n")
         (sb / "control/arch").write_text(arch + "\n")
-        sub = lambda t: t.replace("@SB@", str(sb)).replace("@REALPY@", sys.executable)
+        sub = lambda t: t.replace("@SDK@", shlex.quote(sdk_dir(self))).replace("@SB@", str(sb)).replace("@REALPY@", sys.executable)
         write(sb / "lib/step.sh", sub(STEP_SH), 0o755)
         write(sb / "lib/install.sh", sub(INSTALL_SH), 0o755)
         for n, t in TEMPLATES.items():
@@ -449,6 +449,27 @@ def developer_dir(sb):
     return str(sb.sb / "xcode")
 
 
+_MAC_SDK = []
+
+
+def sdk_dir(sb):
+    """the SDK the sandbox's xcrun answers with, which must reach every step as SDKROOT. On a Mac the recipes' /usr/bin
+    make and python3 are Apple's small programs, which look their tool up with the SDKROOT they are given: so there
+    it is the macOS SDK itself (what the real xcrun answers; asked once, without a SDKROOT or TOOLCHAINS of the
+    tester's), and the steps run as in a tester's build. Elsewhere, and on a Mac that names no SDK, a stand-in folder."""
+    if platform.system() == "Darwin":
+        if not _MAC_SDK:
+            env = {k: v for k, v in os.environ.items() if k not in ("SDKROOT", "TOOLCHAINS")}
+            try:
+                d = subprocess.run(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True, env=env).stdout.strip()
+            except OSError:
+                d = ""
+            _MAC_SDK.append(d if d and os.path.isdir(d) else "")
+        if _MAC_SDK[0]:
+            return _MAC_SDK[0]
+    return str(sb.sb / "sdk")
+
+
 def poison_env(sb):
     return dict(CC="/poison/bin/cc", CFLAGS="-DPOISON", LDFLAGS="-L/poison/lib", CPATH="/poison/include",
                 LIBRARY_PATH="/poison/lib", PKG_CONFIG_PATH="/poison/lib/pkgconfig", PYTHONPATH="/poison/py",
@@ -475,7 +496,7 @@ def leak_problems(sb):
             probs.append(f"{who}: HOME {env.get('HOME')}")
         if env.get("DEVELOPER_DIR") != developer_dir(sb):
             probs.append(f"{who}: DEVELOPER_DIR {env.get('DEVELOPER_DIR')}")
-        if env.get("SDKROOT") != str(sb.sb / "sdk"):
+        if env.get("SDKROOT") != sdk_dir(sb):
             probs.append(f"{who}: SDKROOT {env.get('SDKROOT')}")
         if env.get("MACOSX_DEPLOYMENT_TARGET") != "15.0":
             probs.append(f"{who}: MACOSX_DEPLOYMENT_TARGET {env.get('MACOSX_DEPLOYMENT_TARGET')}")
