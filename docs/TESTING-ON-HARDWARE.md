@@ -1,9 +1,11 @@
 # Testing release 3.0 on a card
 
-While [README.md](../README.md) opens with the notice "Work in progress: do not install this branch yet", nothing
-here is to be installed: this page is the check list for the day the notice is gone, and until then it is only to be
-read. Nothing in it has been seen on an NVIDIA card. Each "pass" below is what the code is written to show, not a
-result anyone has observed.
+This page is the check list for the first run of release 3.0 on a card. Nothing on it has been seen on an NVIDIA card:
+nothing built from this branch has been installed, loaded or run on one, so each "pass" below is what the code is
+written to show, not a result anyone has observed. What has run is the build: at commit 3933ff6, `./build.sh` built
+every component and staged a package on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel
+runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). [BUILDING.md](BUILDING.md) says what
+ran where.
 
 En español: [TESTING-ON-HARDWARE.es.md](TESTING-ON-HARDWARE.es.md).
 
@@ -79,9 +81,27 @@ restart. Take every test setting out again when its test is done.
 
    Note how long the desktop takes to come up after the picker, and the CPU use of WindowServer on an idle desktop
    and with a video playing (Activity Monitor).
-4. **The package.** From its `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes
-   nothing. Pass: its last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that
-   first.
+4. **The package.** Release 3.0 has no prebuilt package: build one from this branch ([BUILDING.md](BUILDING.md),
+   "Quick start"), with 2.9's release package as its base:
+
+   ```bash
+   ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
+   ```
+
+   It stages the package in `package/pkgroot` of its working directory and a tarball
+   `nullmoth-nvidia-local-<commit>.tar.gz`, installs nothing, and ends with the commands of this step and of
+   section 2, step 1. On the Intel Mac named at the top the package held 101 files (214 MB), and nothing outside the
+   working directory had changed after the build, so building does not touch the way back of step 1. The whole driver
+   has been built there with Xcode 26.5 on macOS 26.7, and on GitHub's runner with Xcode 26.3 (SDK 26.2, the newest
+   Xcode that runs on macOS 15); Xcode 26.0 to 26.2 have not been tried. On Apple silicon `./build.sh deps` takes its
+   tools from Homebrew, a path that has run only against stand-ins, and no whole build has run there. Everything
+   `./build.sh` builds is made for macOS 15.0 and later (the shader translator for 10.12 and later), so a package
+   built on macOS 26 is meant for macOS 15 too; the Apple class checks of section 2, step 3, decide on each macOS at
+   its first start. On that Mac the build tools took 46.5 minutes to build from nothing, the 17 components 5 minutes
+   41 seconds and the package 27 s, and the working directory then held about 8 GB.
+   Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. It has not
+   yet been run with a package that `./build.sh` made: on that Mac the package was staged and nothing more. Pass: its
+   last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that first.
 5. **Your settings file.** Read it before you install: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. The installer
    replaces the whole folder `/Library/GPUBundles/nvmtl` with the package's, and of your old file it puts back, at the
    end of the package's file, only the lines between `# --- my settings, kept on update ---` and

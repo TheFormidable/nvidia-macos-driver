@@ -1,10 +1,12 @@
 # Probar la versión 3.0 en una tarjeta
 
-Mientras [README.md](../README.md) empiece con el aviso "Work in progress: do not install this branch yet" (trabajo
-en curso: no instales todavía esta rama), aquí no hay nada que instalar: esta página es la lista de comprobaciones
-para el día en que el aviso desaparezca, y hasta entonces es solo para leer. Nada de lo que contiene se ha visto en
-una tarjeta NVIDIA. Cada "bien" de abajo es lo que el código está escrito para mostrar, no un resultado que alguien
-haya observado.
+Esta página es la lista de comprobaciones para la primera prueba de la versión 3.0 en una tarjeta. Nada de lo que
+contiene se ha visto en una tarjeta NVIDIA: nada compilado a partir de esta rama se ha instalado, cargado ni ejecutado
+en una, así que cada "bien" de abajo es lo que el código está escrito para mostrar, no un resultado que alguien haya
+observado. Lo que sí se ha ejecutado es la compilación: en el commit 3933ff6, `./build.sh` compiló todos los
+componentes y preparó un paquete en un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5) y en el ejecutor Intel de GitHub
+(macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2). [BUILDING.md](BUILDING.md) dice qué se ejecutó
+y dónde.
 
 In English: [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). La versión en inglés es la de referencia.
 
@@ -84,9 +86,28 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 
    Apunta cuánto tarda el escritorio en aparecer después del selector, y el uso de CPU de WindowServer con el
    escritorio en reposo y con un video en marcha (Monitor de Actividad).
-4. **El paquete.** Desde su `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia
-   nada. Bien: su última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo
-   primero.
+4. **El paquete.** La versión 3.0 no tiene paquete ya compilado: compila uno a partir de esta rama
+   ([BUILDING.md](BUILDING.md), "Quick start"), con el paquete de la versión 2.9 como base:
+
+   ```bash
+   ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
+   ```
+
+   Prepara el paquete en `package/pkgroot` de su directorio de trabajo y un archivo comprimido
+   `nullmoth-nvidia-local-<commit>.tar.gz`, no instala nada y termina con las órdenes de este paso y de la sección 2,
+   paso 1. En el Mac Intel nombrado arriba el paquete tenía 101 archivos (214 MB), y después de la compilación nada
+   había cambiado fuera del directorio de trabajo, así que compilar no toca la vuelta atrás del paso 1. El driver
+   entero se ha compilado allí con Xcode 26.5 en macOS 26.7, y en el ejecutor de GitHub con Xcode 26.3 (SDK 26.2, el
+   Xcode más nuevo que funciona en macOS 15); Xcode 26.0 a 26.2 no se han probado. En Apple silicon,
+   `./build.sh deps` toma sus herramientas de Homebrew, un camino que solo se ha ejecutado contra sustitutos, y allí no
+   se ha hecho ninguna compilación completa. Todo lo que compila `./build.sh` está hecho para macOS 15.0 y posteriores
+   (el traductor de shaders para 10.12 y posteriores), así que un paquete compilado en macOS 26 sirve también para
+   macOS 15; las comprobaciones de las clases de Apple de la sección 2, paso 3, deciden en cada macOS en su primer
+   arranque. En ese Mac las herramientas de compilación tardaron 46.5 minutos en compilarse desde cero, los 17
+   componentes 5 minutos 41 segundos y el paquete 27 s, y el directorio de trabajo ocupaba después unos 8 GB.
+   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Todavía
+   no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete y nada más. Bien: su
+   última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
 5. **Tu archivo de ajustes.** Léelo antes de instalar: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. El instalador
    reemplaza la carpeta `/Library/GPUBundles/nvmtl` entera por la del paquete, y de tu archivo anterior solo vuelve a
    poner, al final del archivo del paquete, las líneas que están entre `# --- my settings, kept on update ---` y
