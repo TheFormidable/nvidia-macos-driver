@@ -1329,6 +1329,69 @@ def arm_cargoconf():
              cargoconf_problems(('  for d in "$W" "$HERE"; do\n', '  for d in; do\n')))
 
 
+# Homebrew's spirv-llvm-translator is linked against Homebrew's llvm and belongs to no other LLVM. With NM_LLVM_PREFIX
+# naming an LLVM 22 that is not Homebrew's, every other tool present and Homebrew's translator installed, deps neither
+# takes that translator nor asks Homebrew anything: it builds the pinned one against the LLVM in use.
+ALL_BUT_LLVM = ("gpatch", "ninja", "cmake", "pkgconf", "glslang", "spirv-tools", "python@3.14")
+
+
+def ownllvm_problems(script_edit=None, brewtr=True):
+    """brewtr: Homebrew's spirv-llvm-translator is installed (then it must not be taken); without it, today's deps asked
+    Homebrew about its llvm to decide whether to install it"""
+    sb = Sandbox("ownllvm", formulas=ALL_BUT_LLVM + (("spirv-llvm-translator",) if brewtr else ()))
+    mine = sb.home / "llvm-22-of-mine"
+    sb.wrap(mine / "bin/llvm-config", "ver", "22.1.8")
+    (mine / "lib").mkdir(parents=True, exist_ok=True)
+    (mine / "lib/libclang.dylib").write_text("")
+    if script_edit:
+        sb.break_script(*script_edit)
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra={"NM_LLVM_PREFIX": str(mine)})
+    p = [] if rc == 0 else [f"deps exit {rc}: {out[-500:]}"]
+    calls = brew_calls(sb)
+    if calls:
+        p.append(f"Homebrew was called: {calls[:4]}")
+    conf = [l for l in sb.jlines() if l.startswith("cmake -S ")]
+    if not conf or f"-DLLVM_DIR={mine}/lib/cmake/llvm" not in conf[0]:
+        p.append(f"the pinned translator was not built against the LLVM in use: {conf[:1]}")
+    rc, out = sb.run("doctor", extra={"NM_LLVM_PREFIX": str(mine)})
+    if "ok       SPIRV-LLVM-Translator 22.1.0.0" not in out:
+        p.append("doctor does not take the translator built for the LLVM in use: "
+                 + "; ".join(l.strip() for l in out.splitlines() if "SPIRV-LLVM-Translator" in l))
+    return p
+
+
+def arm_ownllvm():
+    p = ownllvm_problems() + ownllvm_problems(brewtr=False)
+    check("an LLVM 22 that is not Homebrew's (NM_LLVM_PREFIX): deps calls no brew at all and builds the translator against it, "
+          "with Homebrew's translator installed or not", not p, p)
+    negative("Homebrew's translator taken whatever the LLVM in use",
+             ownllvm_problems(('  ! brew_llvm_chosen || brewtr=$(brew_opt spirv-llvm-translator)\n',
+                               '  brewtr=$(brew_opt spirv-llvm-translator)\n')))
+    negative("Homebrew asked for its translator whatever the LLVM in use",
+             ownllvm_problems(('[ "$nobrew" = 0 ] && { brew_llvm_chosen || case " ${want[*]-} " in *" llvm "*) true ;; *) false ;; esac; } && brew_may_ask',
+                               '[ "$nobrew" = 0 ] && brew_may_ask'), brewtr=False))
+    # the other side: Homebrew's llvm (the pinned major) still gets Homebrew's translator (arm deps proves it with the
+    # formulas it installs); a rule that never lets Homebrew's translator in fails there
+    def brewllvm_problems(script_edit=None):
+        sb = Sandbox("brewllvm", formulas=("cmake",))
+        if script_edit:
+            sb.break_script(*script_edit)
+        before = sb.listing(sb.home)
+        rc, out = sb.run("deps", "-y")
+        p = deps_problems(sb, rc, out, before)
+        if [l for l in sb.jlines() if l.startswith("cmake -S ")]:
+            p.append("the translator was built from source although Homebrew's fits Homebrew's llvm, the LLVM in use")
+        rc, out = sb.run("doctor")
+        if not re.search(r"^  ok       SPIRV-LLVM-Translator 22\.1\.0$", out, re.M):
+            p.append("doctor does not take Homebrew's translator for Homebrew's llvm")
+        return p
+    p = brewllvm_problems()
+    check("Homebrew's llvm (LLVM 22) still gets Homebrew's spirv-llvm-translator and nothing is built from source", not p, p)
+    negative("Homebrew's llvm without Homebrew's translator",
+             brewllvm_problems(('  [ -n "$LLVM_PREFIX" ] && [ -n "$BREW_PREFIX" ] && [ -d "$(brew_opt llvm)" ] || return 1\n', '  return 1\n')))
+
+
 def arm_deps(sb):
     before = sb.listing(sb.home)
     sb.clear()
@@ -3364,6 +3427,8 @@ def main():
                     timed("cargoconf", arm_cargoconf)
                 if want("spirvprefix"):
                     timed("spirvprefix", arm_spirvprefix)
+                if want("ownllvm"):
+                    timed("ownllvm", arm_ownllvm)
                 if want("sdkroot"):
                     timed("sdkdeps", arm_sdkdeps)
                     timed("nosdk", arm_nosdk)
