@@ -6,12 +6,13 @@
 yet, and nothing built from it has been installed or loaded. At commit 3933ff6, `./build.sh` built all 17 components
 of the driver with no warning on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5): the kernel extensions (NVRM,
 NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC), NVK, the Metal plugin, the shader translator, the video library and
-the other components; it then staged a package over the 2.9 release package there. It had built that Mac's build
-tools from an empty working directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found
-every one of the 506 kernel symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed
-have been fixed since. {{PENDING 5b}} On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3
-with the 26.2 SDK), at commit 3933ff6, the same build of all 17 components and the package succeeded, and the host
-tests passed (303 passed, 0 failed, 3 skipped, 9 not run, of 315). At commit 95811c2 the kernel extensions built on
+the other components; it then staged a package over the 2.9 release package there, and the host tests passed there
+(303 passed, 0 failed, 3 skipped, 9 not run, of 315). It had built that Mac's build tools from an empty working
+directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found every one of the 506 kernel
+symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed have been fixed since. On
+GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6, the
+build of all 17 components and the package succeeded, and the host tests passed (303 passed, 0 failed, 3 skipped,
+9 not run, of 315). At commit 95811c2 the kernel extensions built on
 GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has run on an Apple-silicon Mac, and the
 host tests have not passed whole on one. The check list for a first run on a card is
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).

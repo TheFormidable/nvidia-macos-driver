@@ -3,11 +3,12 @@
 > **Not yet run on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
 > At commit 3933ff6, `./build.sh` built every component of it, with build tools it had built from pinned sources, and
 > staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel runner
-> (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). The host tests pass on that runner
-> {{PENDING 5b}} ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been installed,
-> loaded or run on an NVIDIA card: whoever installs it first is testing it. Read
-> [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back to 2.9 at hand
-> ([CHANGELOG.md](CHANGELOG.md), "The ways back").
+> (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At that commit the host tests passed on both
+> ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been installed, loaded or run
+> on an NVIDIA card: whoever installs it first is testing it. Read
+> [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back to 2.9 at hand: the first
+> step of that page is a way back you have tried, and [CHANGELOG.md](CHANGELOG.md), "The ways back", gives the way
+> back from each change on its own.
 
 **What this branch is.** Release 2.9 of the driver with the changes being prepared as 3.0: the kernel knows which
 process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
