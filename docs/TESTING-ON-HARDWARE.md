@@ -94,8 +94,9 @@ restart. Take every test setting out again when its test is done.
    working directory had changed after the build, so building does not touch the way back of step 1. The whole driver
    has been built there with Xcode 26.5 on macOS 26.7, and on GitHub's runner with Xcode 26.3 (SDK 26.2, the newest
    Xcode that runs on macOS 15); Xcode 26.0 to 26.2 have not been tried. On Apple silicon `./build.sh deps` takes its
-   tools from Homebrew, a path that has run only against stand-ins, and no whole build has run there. Everything
-   `./build.sh` builds is made for macOS 15.0 and later (the shader translator for 10.12 and later), so a package
+   tools from Homebrew, a path that has run only against stand-ins, and no whole build has run there. Nothing
+   `./build.sh` builds asks for a macOS newer than 15.0: the shader translator is made for 10.12 and later, the two
+   DLSS cache programs for 12.0, everything else that names a minimum for 15.0, and the kexts name none. So a package
    built on macOS 26 is meant for macOS 15 too; the Apple class checks of section 2, step 3, decide on each macOS at
    its first start. On that Mac `./build.sh deps` took 46.5 minutes in an empty working directory at commit 650db45,
    downloads included; at commit 3933ff6 the build of the 17 components took 5 minutes 41 seconds and the package
