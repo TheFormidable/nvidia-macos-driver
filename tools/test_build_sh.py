@@ -2644,6 +2644,13 @@ def arm_vars(mac):
 # clang searches /usr/local/include and /usr/local/lib, Homebrew's on an Intel Mac, before the SDK); the caller's own
 # SDKROOT (it may name another platform's SDK) never reaches them; without an xcrun nothing is set and nothing fails.
 IOS_SDK = "/some/iPhoneOS.sdk"
+UNSET_LINE = "unset SDKROOT TOOLCHAINS\n"
+STEP_PATH_LINE = '  STEP_PATH="$TBIN:$VENV/bin:/usr/bin:/bin:/usr/sbin:/sbin"\n'
+# Apple's /usr/bin/make (and git, python3): a small program that finds the real tool through xcrun, which stops when
+# SDKROOT names an SDK that is not there
+APPLE_MAKE = ('#!/bin/sh\n'
+              'if [ -n "${SDKROOT:-}" ] && [ ! -d "$SDKROOT" ]; then echo "xcrun: error: SDK \\"$SDKROOT\\" cannot be located" >&2; exit 1; fi\n'
+              'echo "GNU Make 3.81"\n')
 
 
 def sdkstep_problems(mac, tag, extra=None):
@@ -2672,9 +2679,40 @@ def arm_sdkstep(mac):
         mac.break_script('  [ -z "$STEP_SDK" ] || printf \'%s\\n\' "SDKROOT=$STEP_SDK"\n', "")
         negative("a step_env that only removes SDKROOT (as before)", sdkstep_problems(mac, "c"))
     with mac.scratch():
+        mac.break_script(UNSET_LINE, "unset TOOLCHAINS\n")
         mac.break_script("env -u SDKROOT xcrun --sdk macosx --show-sdk-path", "xcrun --show-sdk-path")
         negative("an SDK asked of xcrun with the caller's SDKROOT in force (it names that SDK)",
                  sdkstep_problems(mac, "d", {"SDKROOT": IOS_SDK}))
+    # build.sh's own questions to the system's tools, before a step: in the clone the system folders of the step's
+    # PATH are preceded by one that holds a make like Apple's, which is asked for its version before rm (which fb is
+    # built on) is looked at
+    with mac.scratch():
+        d = mac.dir / "usrbin"
+        d.mkdir()
+        (d / "make").write_text(APPLE_MAKE)
+        (d / "make").chmod(0o755)
+        mac.break_script(STEP_PATH_LINE, STEP_PATH_LINE.replace("/usr/bin:", f"{d}:/usr/bin:"))
+        check("a caller's SDKROOT that names no SDK does not reach the make build.sh asks before a step (Apple's stops on it)",
+              not (q := sdkstep_problems(mac, "e", {"SDKROOT": IOS_SDK})), q)
+        mac.break_script(UNSET_LINE, "unset TOOLCHAINS\n")
+        q = sdkstep_problems(mac, "f", {"SDKROOT": IOS_SDK})
+        negative("a build.sh that keeps the caller's SDKROOT in its own environment (make is taken for missing: no step)",
+                 [x for x in q if "no step ran" in x and "make" in x])
+    with mac.scratch():
+        def toolchains_problems(tag):
+            mac.clear()
+            rc, out = mac.run("build", "fb", extra={"FB_DEFS": f"-DNM_TCS_{tag}=1", "TOOLCHAINS": "swift"})
+            steps = mac.steps()
+            bad = [f"{key}: TOOLCHAINS={env['TOOLCHAINS']}" for key, args, env in steps if "TOOLCHAINS" in env]
+            return bad or ([] if steps else [f"no step ran (exit {rc}): {out[-800:]}"])
+        check("a caller's TOOLCHAINS does not reach a step", not (q := toolchains_problems("a")), q)
+        rc, out = mac.run("doctor", extra={"TOOLCHAINS": "swift"})
+        check("doctor says that the caller's TOOLCHAINS is not passed on",
+              "default toolchain of the Xcode above (your TOOLCHAINS=swift is not passed on)" in out, out[-1500:])
+        rc, out = mac.run("env", extra={"TOOLCHAINS": "swift"})
+        check("./build.sh env tells a shell to drop TOOLCHAINS", re.search(r"^unset TOOLCHAINS ", out, re.M) is not None, out[-600:])
+        mac.break_script(UNSET_LINE, "unset SDKROOT\n")
+        negative("a build.sh that leaves the caller's TOOLCHAINS in place", toolchains_problems("b"))
 
 
 def sdkdeps_problems(script_edit=None):
@@ -2733,7 +2771,7 @@ def arm_nosdk():
     p = nosdk_problems()
     check("no xcrun (not a Mac): no SDKROOT is exported, the caller's included, and nothing fails", not p, p)
     negative("an SDK taken from the caller's SDKROOT when xcrun gives none",
-             nosdk_problems(('  STEP_SDK_DONE=1; STEP_SDK=""\n', '  STEP_SDK_DONE=1; STEP_SDK=${SDKROOT:-}\n')))
+             nosdk_problems(('  STEP_SDK_DONE=1; STEP_SDK=""\n', '  STEP_SDK_DONE=1; STEP_SDK=${CALLER_SDKROOT:-}\n')))
 
 
 def rebuilt(sb, *args, extra=None, edit=None):

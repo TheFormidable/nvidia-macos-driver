@@ -296,11 +296,14 @@ These are not settings: `build.sh` derives them, gives them to the build scripts
 <!-- end -->
 
 Every step also gets `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`,
-your own `SDKROOT` (it may name another platform's SDK; the step gets the macOS one, above), the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
+your own `SDKROOT` (it may name another platform's SDK; the step gets the macOS one, above) and `TOOLCHAINS` (it
+makes xcrun find another toolchain's compiler), the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
 `LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, and `HOMEBREW_PREFIX`,
 `HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY` removed from its environment: an exported `CC` breaks build_rm620.sh,
 `NM_TAHOE` selects the macOS 26 accelerator, and a login shell may point the others at a Homebrew of the other
-architecture. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
+architecture. Your `SDKROOT` and `TOOLCHAINS` do not reach `build.sh` itself either: Apple's `/usr/bin/git`, `make`
+and `python3` find the real tool through xcrun, which stops when `SDKROOT` names an SDK that is not there, and
+`build.sh` asks those tools questions before its first step. doctor names both when they are set. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
 build_plugin.sh, the original author's development scripts for trees in `~/nvmtl-build`) are not used: `build.sh`
 replaces those scripts.
 
