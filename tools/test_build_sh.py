@@ -200,6 +200,8 @@ case "$role" in
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
         links "$2"
+        # state/brew-install-fails-<formula>: the install fails after its dependencies were installed and linked
+        [ ! -f "$S/brew-install-fails-$2" ] || { echo "Error: stand-in failure of brew install $2" >&2; exit 1; }
         # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
         # versions of formulas (every 30 days of all of them), formulas nothing needs and dead links in the prefix
         [ -n "${HOMEBREW_NO_INSTALL_CLEANUP:-}" ] || rm -rf "$SB/brew/Cellar/yours/1.0"
@@ -1575,6 +1577,20 @@ def arm_pylink():
     negative("deps that stops when brew unlink fails",
              pylink_problems(neg, unlinked="python@3.14", linked_to="../Cellar/python@3.14/1.0/bin/python3",
                              out_has=("deps: everything required is present",))[0])
+
+    # 5b. an install fails after an earlier one of the same run linked a Python: deps stops, and unlinks it before
+    links = {"glslang": PY_LINKS.format(f="python@3.15").replace("python3.14", "python3.15")}
+    sb = pylink_sandbox("pylink-halfway", links)
+    (sb.state / "brew-install-fails-spirv-tools").write_text("")
+    p, out = pylink_problems(sb, unlinked="python@3.15", rc_ok=False,
+                             out_has=("brew unlink python@3.15", "brew install spirv-tools failed"))
+    check("deps: an install that fails after an earlier one linked a Python stops deps and unlinks that Python first", not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-halfway-neg", links)
+    (neg.state / "brew-install-fails-spirv-tools").write_text("")
+    neg.break_script('          { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }',
+                     '          die "brew install $f failed"')
+    negative("deps that stops at a failed install with the Python of an earlier one still linked",
+             pylink_problems(neg, unlinked="python@3.15", rc_ok=False, out_has=("brew install spirv-tools failed",))[0])
 
     # 6. --dry-run and --no-install: no call of Homebrew at all; the dry run states the rule
     def quiet_problems(s, args, rc_zero):
