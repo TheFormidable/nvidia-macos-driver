@@ -154,7 +154,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - The start-up waits for the displays, the arming of the accelerator and the boot raster measurement end as soon as
   what they wait for is there, instead of at the next whole second, and never later than before. Each phase is in
   `debug.nvrm_boot_*` and in the `nvrm-boot-timing` property. With `nvrmsettle=0` the bring-up can no longer begin
-  before the driver's start has finished (it waits at most 5 s). Way back: boot argument `-nvrmoldwaits`.
+  before the driver's start has finished (it waits at most 5 s). On a card that deliberately settles for more than 5 s
+  during start-up, lighting its display by hand in that window no longer counts the start against the safety that
+  turns the driver off after two starts that never lit a display. Way back: boot argument `-nvrmoldwaits`.
 - With Intel VT-d active (AppleVTD), the GPU is given bus addresses mapped through the DMA mapper, as the Linux driver
   does with an IOMMU, instead of physical addresses that the mapper translates to the wrong place. Every mapping is
   read back from the mapper before the GPU sees it, and the GPU is not started at all if a two-page self-test does not
