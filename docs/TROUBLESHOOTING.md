@@ -121,9 +121,10 @@ the earlier driver back and restarts. On another build it only writes those line
 of the install, and after a macOS update the refusal may be the update's doing. Where a display is lit and a user is
 logged in when it has put the driver back, it leaves the restart to that user: a desktop on another GPU, or Apple's
 firmware framebuffer on this card after an automatic login. A slow desktop without acceleration right after an install
-is that case: `/Library/NullMoth/lastgood.log` ends with
-`previous driver restored. A display is lit and a user is logged in, so the Mac is not restarted now`, and a restart
-brings the previous driver back. That job takes itself away at the first start after one where the new driver showed its
+is that case when `/Library/NullMoth/lastgood.log` ends with
+`previous driver restored. A display is lit and a user is logged in, so the Mac is not restarted now`: a restart
+brings the previous driver back. When the log says instead that the previous driver is not put back (another macOS
+build), nothing was restored. That job takes itself away at the first start after one where the new driver showed its
 display, and a first install has none: a refusal then (after a macOS update that changed a class, for example) ends
 every start the same way, without a desktop on the card or on Apple's slow one, until you boot with `nvlayout=0` or take
 the driver out (section 4). With AGDC refused the display runs without AppleGraphicsDeviceControl; with the accelerator
@@ -267,8 +268,8 @@ then freed at once, as in 2.9.
   When the framebuffer refused this macOS's classes (section 3), the driver gives none of the starts in this item or
   the one above a picture: the framebuffer that draws the firmware's picture with the driver off is built on the same
   classes. They have a picture only where OpenCore does not exclude IONDRVSupport (Apple's own firmware framebuffer
-  then draws it, slowly). A refusal that NVRM reads before it starts the card is not counted either, so those starts
-  never turn the driver off.
+  then draws it, slowly, when it still lies inside the card's memory window). A refusal that NVRM reads before it
+  starts the card is not counted either, so those starts never turn the driver off.
   Where the 1401 app's removal job exists, it still runs, with or without a picture; otherwise put `nvlayout=0` into
   OpenCore's `config.plist` over the network, or take the driver out (`uninstall.sh`, README.md, "Uninstall").
   Where OpenCore writes `boot-args` at each start (the 1401 install sets it up so), changing them with `nvram` does
