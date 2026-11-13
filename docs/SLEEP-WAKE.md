@@ -73,8 +73,9 @@ of this runs inside the system's power change ([INTERRUPT-PATH-AND-RC-TIMER.md](
 **The surface fence** ([SURFACE-FENCE.md](SURFACE-FENCE.md)). It is told about sleep before the user channels stop:
 every hold ends, NVAccel's waits for a frame go on at once, a reader in the Metal plugin falls back to the writer's
 busy tag for up to 10 ms as in 2.9, and new holds are refused until the wake (`debug.nvrm_fence_end_pm` grows by the
-holds that were in flight). Its views of the channels' pages are ordinary wired memory and survive the sleep. After a
-wake `debug.nvrm_fence_state` is 1 again and `debug.nvrm_fence_opens` grows; if the GPU did not resume, the state is
+holds that were in flight). Its views of the channels' pages are ordinary wired memory and survive the sleep.
+`debug.nvrm_fence_state` stays 1 through the sleep (the fence is only paused), and after the wake
+`debug.nvrm_fence_opens` grows again as holds are opened; if the GPU did not resume, the state is
 3 and the driver keeps 2.9's marks and tags until the next boot. A GPU that goes away while it is suspended
 (unplugged, or its driver stopped, during sleep or while its slot is powered off by `nvrtd3=1`) never wakes; the
 driver tells the fence so when that GPU stops, so that the fence does not stay closed for a second card
@@ -102,7 +103,7 @@ the same before and after a sleep with nothing else running. Not yet observed on
 | `debug.nvrm_pm_waited` | sysctl | RM calls that waited at the gate for a resume. |
 | `debug.nvrm_isr_count`, `debug.nvrm_isr_handled` | sysctl | GPU interrupts taken and claimed by RM. |
 | `nvrm-pm` | NVRM registry property | `running`, `suspended` or `lost (resume failed)`. |
-| `debug.nvrm_isr_skipped` | sysctl | GPU interrupts that arrived while the interrupt path was closed for sleep (not given to the RM). |
+| `debug.nvrm_isr_skipped` | sysctl | GPU interrupts that arrived while the interrupt path was closed (sleep, shutdown, stop) and were not given to the RM. |
 | `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet before standby that ran out. Should stay 0. |
 | `debug.nvrm_fence_end_pm`, `debug.nvrm_fence_state` | sysctl | Surface holds ended by a sleep; the fence's state (1 on, 3 off after a failed resume). |
 
