@@ -26,11 +26,21 @@ release every process uses both, chosen per wait:
   runs out in that gap with the work already done: that is a missed wake, and on a healthy machine
   `debug.nvrm_evt_user_missed` moves a little because of it. The late event shows at the thread's next call, and any
   answer that shows the event's count moved ends the run of missed wakes. Only sixteen missed wakes in a row with the
-  count standing still all the while mean the event is dead: then the process stops using the event and polls for
-  the rest of its life; it prints one line
-  (`nvrm: event wait OFF for this process (16 wakes in a row did not arrive) - waits poll as before`) and the kext
-  counts it in `debug.nvrm_evt_user_fallbacks`. A kext that cannot wait at all is detected at the first call and the
-  process polls, as before.
+  count standing still all the while mean that no event is being posted: then the process stops sleeping on the event
+  and polls; it prints one line
+  (`nvrm: event wait OFF for this process (16 wakes in a row did not arrive; it is tried again now and then) - waits
+  poll as before`) and the kext counts it in `debug.nvrm_evt_user_fallbacks`.
+- that is not for the rest of the process's life. The kext posts the event from a step that needs the GPU lock, and RM
+  holds that lock through some long calls (a display mode change, a display waking, a wake from sleep), so for some
+  tens of milliseconds work can complete while no event is posted, and sixteen missed wakes fit in that. So each
+  waiting thread of a process that went back to polling tries the event again after 256 of its own waits: it sleeps
+  on the event as before, and the first answer that shows events arrive puts the whole process back on the event, with
+  the line `nvrm: event wait back ON for this process - its wakes arrive again`. Four missed wakes in such a try end
+  it, and that thread then polls twice as many waits before its next try (up to 65536 waits). When the event never
+  comes back, a thread pays at most four 2 ms sleeps too many per try: 22 tries in its first million waits. The two
+  lines go to the application's standard error, the first eight of a process only.
+- a kext that cannot wait at all is detected at the first call and the process polls for the rest of its life, as
+  before; it is never tried again.
 
 ## The setting
 
@@ -51,8 +61,9 @@ launch it with `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` in its own environment: `
 plugin keep that process's own settings.
 
 `NVRM_GSUB_LOG=1` in the same file prints, when a channel closes, how many waits slept on the event (`event sleeps`),
-were woken by it, ran out, or slept on the copy queue's own semaphore (`chansleeps`), and whether the process went
-back to polling (`fellback`).
+were woken by it, ran out, or slept on the copy queue's own semaphore (`chansleeps`), how many times the process went
+back to polling (`fellback`), how many tries of the event its threads made while it polled (`trials`), and how many
+times the events came back (`back`).
 
 ## What the kext reports
 
@@ -75,13 +86,18 @@ Read these together, while an application that waits on the GPU is running:
   GPU jobs are normal. Almost all timeouts while `nvrm_evt_posts` keeps rising means events arrive late.
 - `nvrm_evt_user_missed` is the number of full 2 ms sleeps that ended on their timeout although the GPU work was
   already done. It should be small next to `nvrm_evt_woken`; a few are normal, for the reason given above.
-- `nvrm_evt_user_fallbacks` 0. The kext also prints
-  `NVRM-xnu: pid N went back to polling: its event wakes did not arrive (fd F)`, for the first eight fall-backs since
-  boot only (any process can send the note, so the output is bounded); the counter counts all of them. That line and
-  the two below go only to the kernel's debug output (`kprintf`: a serial console or a debugger), not to the log that
-  `log show` reads, so on an ordinary Mac only the counters show them. Only this counter above 0, together with the line
-  `nvrm: event wait OFF for this process (16 wakes in a row did not arrive)` in the application's output, means a
-  process stopped trusting the completion event.
+- `nvrm_evt_user_fallbacks` 0. It counts the times a process went back to polling, each time: a process whose events
+  came back and later stopped again is counted twice, and a try of the event that fails is not counted. The kext also
+  prints `NVRM-xnu: pid N went back to polling: its event wakes did not arrive (fd F)`, for the first eight fall-backs
+  since boot only (any process can send the note, so the output is bounded); the counter counts all of them. That line
+  and the two below go only to the kernel's debug output (`kprintf`: a serial console or a debugger), not to the log
+  that `log show` reads, so on an ordinary Mac only the counters show them. This counter above 0, together with the
+  line `nvrm: event wait OFF for this process (16 wakes in a row did not arrive; ...)` in the application's output,
+  means a process stopped sleeping on the completion event for a while. A rise of one or two around a display mode
+  change, a display waking or a wake from sleep, with `nvrm_evt_woken` rising again afterwards (and the line
+  `nvrm: event wait back ON for this process` after the first one), is the event coming back: the process sleeps on
+  it again. A counter that rises and `nvrm_evt_woken` that stays still while the GPU is busy means the events do not
+  come back.
 - `nvrm_evt_capped` 0 (more than 256 threads asleep at once otherwise).
 - `nvrm_evt_post_drain_stuck` 0. When a process closes, the kext waits for an RM event post that is still being
   delivered to it (microseconds, normally never) before it frees the connection. It waits twice: up to 200 ms when

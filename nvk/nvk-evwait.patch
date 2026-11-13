@@ -7,10 +7,10 @@ a byte-for-byte copy of kexts/NVRM/nvrm_evwait.h
 NVRM_EVENT_WAIT=0 in /Library/GPUBundles/nvmtl/nvrm610.conf turns the sleep off (polling as before).
 
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index 6c9cf32..2a61354 100644
+index 6c9cf32..393f859 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-@@ -257,7 +257,13 @@ nvkmd_nvrm_sync_get_type(struct nvkmd_nvrm_pdev *pdev);
+@@ -257,7 +257,14 @@ nvkmd_nvrm_sync_get_type(struct nvkmd_nvrm_pdev *pdev);
  
  /* G-SUB (b79), nvkmd_nvrm_ctx.c */
  enum { NVRM_GS_SUBMIT, NVRM_GS_ACQUIRE, NVRM_GS_CPUWAIT, NVRM_GS_SLOTWAIT, NVRM_GS_FIFOWAIT, NVRM_GS_DEFER,
@@ -18,14 +18,15 @@ index 6c9cf32..2a61354 100644
 +       NVRM_GS_REAPED, NVRM_GS_WAITS,
 +       /* the event wait (nvrm_evwait.h), one slot per NVRM_EVW_S_* in its order: sleeps on the event (any kext), of those
 +        * the ones an event ended and the ones that ran out (a kext that reports why), missed wakes, answers "too many
-+        * sleepers", this process giving up on events (non-zero: it polls), sleeps on a channel's own kernel wait */
++        * sleepers", this process going back to polling (each time: it can come back), sleeps on a channel's own kernel
++        * wait, trials of the event while polling after missed wakes, and the times the events came back */
 +       NVRM_GS_EVW_SLEEPS, NVRM_GS_EVW_WOKEN, NVRM_GS_EVW_TIMEOUT, NVRM_GS_EVW_MISSED, NVRM_GS_EVW_CAPPED,
-+       NVRM_GS_EVW_FALLBACK, NVRM_GS_EVW_CHAN_SLEEP,
++       NVRM_GS_EVW_FALLBACK, NVRM_GS_EVW_CHAN_SLEEP, NVRM_GS_EVW_TRIAL, NVRM_GS_EVW_BACK,
 +       NVRM_GS_N };
  bool nvkmd_nvrm_async_on(void);
  bool nvkmd_nvrm_diag_on(void);                                   /* r3-diag: NVK_DIAG=1 in nvrm610.conf */
  void nvkmd_nvrm_diag_dump(const char *why, const char *heads);   /* r3-diag: every channel's state */
-@@ -269,7 +275,12 @@ VkResult nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_ba
+@@ -269,7 +276,12 @@ VkResult nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_ba
  VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
                                   struct vk_object_base *log_obj);
  void nvkmd_nvrm_wait_backoff(int64_t waited_ns);
@@ -40,7 +41,7 @@ index 6c9cf32..2a61354 100644
  int64_t nvrm_xnu_wait_event(int fd, uint32_t seen, uint32_t timeout_us);
  bool nvkmd_nvrm_defer(struct nvkmd_dev *dev, void (*fn)(void *), void *arg);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 27f936c..71cd898 100644
+index 27f936c..2644259 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -5,6 +5,7 @@
@@ -51,7 +52,7 @@ index 27f936c..71cd898 100644
  #include <stdlib.h>
  #include "ctrl/ctrl0080/ctrl0080fifo.h" // NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES
  #include "ctrl/ctrl2080/ctrl2080gr.h" // NV2080_CTRL_CMD_GR_{GET_CTXSW_MODES,SET_CTXSW_PREEMPTION_MODE}
-@@ -197,12 +198,29 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
+@@ -197,12 +198,33 @@ nvkmd_nvrm_wait_backoff(int64_t waited_ns)
     usleep(200);
  }
  
@@ -82,20 +83,21 @@ index 27f936c..71cd898 100644
 + * BOUNDED: at most 2 ms per sleep, so a missing event costs latency, never a hang. The work shows complete before its
 + * event is posted, so a sleep can run out with the event on its way (a missed wake); the next answer that shows the
 + * count moved (woken, or moved before the call) ends the run. Sixteen in a row with the count standing still (a kext
-+ * that says why) mean the event is dead: polling for good, one line on stderr, a count in the kext; a kext that cannot
-+ * wait does so at its first refusal. A copy-engine-only channel has no event: see nvrm_evw_nvk_wait's first branch. */
++ * that says why) mean no event is being posted: the process polls, with one line on stderr and a count in the kext.
++ * That is not for good, because RM can hold back the event for some tens of milliseconds while work completes (a long
++ * call under the GPU lock: a mode set, a display waking, a wake from sleep): each thread tries the event again after
++ * 256 of its waits, then after twice as many each time the try fails (65536 at most), and an answer that shows events
++ * arrive puts the whole process back on them (nvrm_evw_quiet in nvrm_evwait.h). A kext that cannot wait polls for
++ * good at its first refusal. A copy-engine-only channel has no event: see nvrm_evw_nvk_wait's first branch. */
  static bool
  nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want, int *fd)
  {
-@@ -218,42 +236,154 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
+@@ -218,42 +240,166 @@ nvrm_evwait_pending(unsigned n, const uint32_t *slot, const uint32_t *gen, const
           *fd = nvkmd_nvrm_dev(s->dev)->osEvent;   /* b73: the device's one GRAPHICS event */
     }
     pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
--   return pending;
 +   return pending;   /* pending with *fd < 0: only channels without an event (copy engine) are still running */
- }
--void
--nvkmd_nvrm_wait_block(int64_t waited_ns, unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want)
++}
 +
 +/* What the callbacks of one round share: the completions the caller waits for, and what the round has seen. */
 +struct nvrm_evw_nvk {
@@ -109,8 +111,12 @@ index 27f936c..71cd898 100644
 +   bool refused;      /* selector 6 failed: the kext cannot wait on the event */
 +};
 +
-+/* The process gave up on the event (only ever 0 -> 1): it polls as 2.9 did from then on, wake from sleep included. */
++/* The process polls as 2.9 did while this is non-zero: NVRM_EVW_FB_DEAD (the kext cannot wait: for good) or
++ * NVRM_EVW_FB_QUIET (wakes stopped arriving: until a thread's trial shows they arrive again). */
 +static volatile int nvrm_evw_fell_back;
++/* FELL_BACK has been told to the kext and stderr since the events last came back; lines written to stderr */
++static int nvrm_evw_told;
++static unsigned nvrm_evw_lines;
 +/* Per thread: the event count its last kernel call returned and the running mean of its waits (nvrm_evwait.h). */
 +static __thread struct nvrm_evw_thread nvrm_evw_thr = { .seq_fd = -1 };
 +/* The longest wait the per-thread mean takes in. The mean is only compared with 1 ms, so a longer sample says nothing
@@ -121,15 +127,7 @@ index 27f936c..71cd898 100644
 +
 +static int
 +nvrm_evw_nvk_mode(void)
- {
--   static int on = -1;
--   /*: the event sleep is WindowServer's (b73: polling was 35% of its active CPU). An app waiting on its own work
--    * polls: GB7 with NVRM_EVENT_WAIT=0 = 92,487 vs 90,840 sleeping (Video +4%, Photo +3.7%, Horizon +2.5%) - a wake that
--    * arrives late, or a 2 ms timeout, is GPU idle time the app pays. NVRM_EVENT_WAIT=0/1 still forces either. */
--   if (on < 0) {
--      const char *e = nvmtl_cfg_getenv("NVRM_EVENT_WAIT");
--      if (e && e[0]) on = e[0] != '0';
--      else { const char *pn = getprogname(); on = pn && !strcmp(pn, "WindowServer"); }
++{
 +   static int mode = -1;
 +   int m = __atomic_load_n(&mode, __ATOMIC_ACQUIRE);
 +   if (m < 0) {
@@ -141,10 +139,7 @@ index 27f936c..71cd898 100644
 +                 m == NVRM_EVW_POLL ? "off (NVRM_EVENT_WAIT=0): waits poll"
 +                 : m == NVRM_EVW_EAGER ? "eager: waits sleep on the graphics completion event after 20 us"
 +                 : "adaptive: waits sleep on the graphics completion event once they have run 1 ms");
-    }
--   if (on == 0 || waited_ns < 20000 || n == 0) {
--      nvkmd_nvrm_wait_backoff(waited_ns);
--      return;
++   }
 +   return m;
 +}
 +
@@ -155,12 +150,22 @@ index 27f936c..71cd898 100644
 +   const bool pending = nvrm_evwait_pending(c->n, c->slot, c->gen, c->want, fd);
 +   if (*fd >= 0)
 +      c->fd = *fd;
-+   return pending;
-+}
+    return pending;
+ }
+-void
+-nvkmd_nvrm_wait_block(int64_t waited_ns, unsigned n, const uint32_t *slot, const uint32_t *gen, const uint64_t *want)
 +
 +static int
 +nvrm_evw_nvk_wait(void *p, int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out)
-+{
+ {
+-   static int on = -1;
+-   /*: the event sleep is WindowServer's (b73: polling was 35% of its active CPU). An app waiting on its own work
+-    * polls: GB7 with NVRM_EVENT_WAIT=0 = 92,487 vs 90,840 sleeping (Video +4%, Photo +3.7%, Horizon +2.5%) - a wake that
+-    * arrives late, or a 2 ms timeout, is GPU idle time the app pays. NVRM_EVENT_WAIT=0/1 still forces either. */
+-   if (on < 0) {
+-      const char *e = nvmtl_cfg_getenv("NVRM_EVENT_WAIT");
+-      if (e && e[0]) on = e[0] != '0';
+-      else { const char *pn = getprogname(); on = pn && !strcmp(pn, "WindowServer"); }
 +   struct nvrm_evw_nvk *c = p;
 +   /* No event for the channel still running (copy engine only). This is the place for a kernel wait of that
 +    * channel's own; there is none here, so the round takes a step of the polling backoff, as 2.9 did. */
@@ -171,11 +176,8 @@ index 27f936c..71cd898 100644
 +      c->refused = true;
 +      return -1;
     }
--   int fd;
--   if (!nvrm_evwait_pending(n, slot, gen, want, &fd))
--      return;   /* it just finished: the caller re-checks at once */
--   if (fd < 0) {
--      nvkmd_nvrm_wait_backoff(waited_ns);   /* copy-engine only: no graphics event to sleep on */
+-   if (on == 0 || waited_ns < 20000 || n == 0) {
+-      nvkmd_nvrm_wait_backoff(waited_ns);
 -      return;
 +   const unsigned why = nvrm_evw_reason_of(*out);
 +   if (why > NVRM_EVW_R_SPURIOUS) {
@@ -197,11 +199,11 @@ index 27f936c..71cd898 100644
 +       * into a run of system calls. WindowServer keeps 2.9's behaviour. */
 +      *out = nvrm_evw_pack(seen, NVRM_EVW_R_SPURIOUS);
     }
--   const int64_t seen = nvrm_xnu_wait_event(fd, 0, 0);   /* the count BEFORE the re-check */
--   if (seen < 0) {
--      if (on) fprintf(stderr, "nvrm: event wait OFF (the kext has no selector 6) - polling\n");
--      on = 0;
--      nvkmd_nvrm_wait_backoff(waited_ns);
+-   int fd;
+-   if (!nvrm_evwait_pending(n, slot, gen, want, &fd))
+-      return;   /* it just finished: the caller re-checks at once */
+-   if (fd < 0) {
+-      nvkmd_nvrm_wait_backoff(waited_ns);   /* copy-engine only: no graphics event to sleep on */
 +   return 0;
 +}
 +
@@ -212,12 +214,13 @@ index 27f936c..71cd898 100644
 +   nvkmd_nvrm_wait_backoff((int64_t)waited_ns);
 +}
 +
-+_Static_assert(NVRM_EVW_S_N == 7, "nvkmd_nvrm.h has one NVRM_GS_EVW_* slot for each NVRM_EVW_S_*");
++_Static_assert(NVRM_EVW_S_N == 9, "nvkmd_nvrm.h has one NVRM_GS_EVW_* slot for each NVRM_EVW_S_*");
 +static const unsigned nvrm_evw_nvk_counter[NVRM_EVW_S_N] = {
 +   [NVRM_EVW_S_SLEEP] = NVRM_GS_EVW_SLEEPS,     [NVRM_EVW_S_WOKEN] = NVRM_GS_EVW_WOKEN,
 +   [NVRM_EVW_S_TIMEOUT] = NVRM_GS_EVW_TIMEOUT,  [NVRM_EVW_S_MISSED] = NVRM_GS_EVW_MISSED,
 +   [NVRM_EVW_S_CAPPED] = NVRM_GS_EVW_CAPPED,    [NVRM_EVW_S_FELL_BACK] = NVRM_GS_EVW_FALLBACK,
-+   [NVRM_EVW_S_CHAN_SLEEP] = NVRM_GS_EVW_CHAN_SLEEP,
++   [NVRM_EVW_S_CHAN_SLEEP] = NVRM_GS_EVW_CHAN_SLEEP, [NVRM_EVW_S_TRIAL] = NVRM_GS_EVW_TRIAL,
++   [NVRM_EVW_S_BACK] = NVRM_GS_EVW_BACK,
 +};
 +
 +static void
@@ -230,13 +233,26 @@ index 27f936c..71cd898 100644
 +   if (what == NVRM_EVW_S_MISSED)
 +      nvrm_xnu_evt_note(c->fd, NVRM_EVW_NOTE_MISSED);
 +   if (what == NVRM_EVW_S_FELL_BACK) {
-+      /* two threads can give up in the same instant: say it once */
-+      static int told;
-+      if (__atomic_exchange_n(&told, 1, __ATOMIC_RELAXED) == 0) {
++      /* once each time the process goes back to polling; two threads can do it in the same instant: say it once.
++       * stderr gets the first eight lines of a process (with those of the events coming back), the kext every one. */
++      if (__atomic_exchange_n(&nvrm_evw_told, 1, __ATOMIC_RELAXED) == 0) {
 +         nvrm_xnu_evt_note(c->fd, NVRM_EVW_NOTE_FELL_BACK);
-+         fprintf(stderr, "nvrm: event wait OFF for this process (%s) - waits poll as before\n",
-+                 c->refused ? "the kext cannot wait on the event" : "16 wakes in a row did not arrive");
++         if (__atomic_fetch_add(&nvrm_evw_lines, 1, __ATOMIC_RELAXED) < 8)
++            fprintf(stderr, "nvrm: event wait OFF for this process (%s) - waits poll as before\n",
++                    c->refused ? "the kext cannot wait on the event"
++                               : "16 wakes in a row did not arrive; it is tried again now and then");
 +      }
+    }
+-   const int64_t seen = nvrm_xnu_wait_event(fd, 0, 0);   /* the count BEFORE the re-check */
+-   if (seen < 0) {
+-      if (on) fprintf(stderr, "nvrm: event wait OFF (the kext has no selector 6) - polling\n");
+-      on = 0;
+-      nvkmd_nvrm_wait_backoff(waited_ns);
+-      return;
++   if (what == NVRM_EVW_S_BACK) {
++      __atomic_store_n(&nvrm_evw_told, 0, __ATOMIC_RELAXED);
++      if (__atomic_fetch_add(&nvrm_evw_lines, 1, __ATOMIC_RELAXED) < 8)
++         fprintf(stderr, "nvrm: event wait back ON for this process - its wakes arrive again\n");
     }
 -   { static int said; if (!said++ && nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: event wait ON - waits sleep on graphics completion events (fd %d)\n", fd); }
 -   if (!nvrm_evwait_pending(n, slot, gen, want, &fd) || fd < 0)
@@ -271,13 +287,14 @@ index 27f936c..71cd898 100644
  }
  
  /* b73 (patch_evflush.py): the synchronous flush's sleep. true = slept on the device's graphics completion event, or
-@@ -558,10 +688,15 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -558,10 +704,17 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
     if (nvmtl_cfg_getenv("NVRM_GSUB_LOG") != NULL) {
        uint64_t st[1 + NVRM_GS_N];
        nvkmd_nvrm_gsub_stats(st, 1 + NVRM_GS_N);
 -      fprintf(stderr, "nvrm: G-SUB channel closed at seq %llu: submits %llu acquires %llu cpuwaits %llu slotwaits %llu fifowaits %llu deferred %llu reaped %llu waits %llu\n",
 +      fprintf(stderr, "nvrm: G-SUB channel closed at seq %llu: submits %llu acquires %llu cpuwaits %llu slotwaits %llu fifowaits %llu deferred %llu reaped %llu waits %llu"
-+                      " | event sleeps %llu woken %llu timeouts %llu missed %llu capped %llu fellback %llu chansleeps %llu\n",
++                      " | event sleeps %llu woken %llu timeouts %llu missed %llu capped %llu fellback %llu chansleeps %llu"
++                      " trials %llu back %llu\n",
                (unsigned long long)ctx->wSeq, (unsigned long long)st[1], (unsigned long long)st[2],
                (unsigned long long)st[3], (unsigned long long)st[4], (unsigned long long)st[5],
 -              (unsigned long long)st[6], (unsigned long long)st[7], (unsigned long long)st[8]);
@@ -285,7 +302,8 @@ index 27f936c..71cd898 100644
 +              (unsigned long long)st[1 + NVRM_GS_EVW_SLEEPS], (unsigned long long)st[1 + NVRM_GS_EVW_WOKEN],
 +              (unsigned long long)st[1 + NVRM_GS_EVW_TIMEOUT], (unsigned long long)st[1 + NVRM_GS_EVW_MISSED],
 +              (unsigned long long)st[1 + NVRM_GS_EVW_CAPPED], (unsigned long long)st[1 + NVRM_GS_EVW_FALLBACK],
-+              (unsigned long long)st[1 + NVRM_GS_EVW_CHAN_SLEEP]);
++              (unsigned long long)st[1 + NVRM_GS_EVW_CHAN_SLEEP], (unsigned long long)st[1 + NVRM_GS_EVW_TRIAL],
++              (unsigned long long)st[1 + NVRM_GS_EVW_BACK]);
     }
     nvkmd_nvrm_reap_deferred();
  }
@@ -307,10 +325,10 @@ index 7322b4c..b466cb7 100644
  
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
 new file mode 100644
-index 0000000..6ed44aa
+index 0000000..8951584
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,343 @@
 +/*
 + * NullMoth NVIDIA driver for macOS
 + * Copyright (c) 2026 NullMoth Systems.
@@ -331,8 +349,9 @@ index 0000000..6ed44aa
 +   behaves as 2.9 did. Selector 7 says which one it is: bit 1 (NVRM_EVW_CAP_REASON).
 +
 +   Selector 9, new (1 scalar input, no output): user space tells the kernel what it observed, so one sysctl shows it for
-+   the whole machine. in[0] = NVRM_EVW_NOTE_MISSED or NVRM_EVW_NOTE_FELL_BACK. A 2.9 kext answers "bad argument", which
-+   the caller ignores. */
++   the whole machine. in[0] = NVRM_EVW_NOTE_MISSED (one missed wake) or NVRM_EVW_NOTE_FELL_BACK (the process went back
++   to polling: once each time it does, so a process whose events came back and then stopped again says it twice). A 2.9
++   kext answers "bad argument", which the caller ignores. */
 +#ifndef NVRM_EVWAIT_H
 +#define NVRM_EVWAIT_H
 +#include <stdint.h>
@@ -380,7 +399,19 @@ index 0000000..6ed44aa
 +#define NVRM_EVW_LONG_NS         1000000ull    /* avg_ns at or above this: skip the yield phase (avg_ns says what it samples) */
 +#define NVRM_EVW_MAX_SLEEP_US    2000u         /* 2.9's bound: a missing event costs latency, never a hang */
 +#define NVRM_EVW_MIN_SLEEP_NS    100000ull     /* less time than this left before the caller's deadline: poll */
-+#define NVRM_EVW_MISS_LIMIT      16u           /* this many missed wakes in a row, the count never moving: polling for good */
++#define NVRM_EVW_MISS_LIMIT      16u           /* this many missed wakes in a row, the count never moving: the process polls
++                                                  (NVRM_EVW_FB_QUIET), and its threads try the event again now and then */
++#define NVRM_EVW_PAUSE_FIRST     256u          /* QUIET: waits a thread polls before its first trial of the event */
++#define NVRM_EVW_PAUSE_MAX       65536u        /* each trial that fails doubles the thread's pause, up to this */
++#define NVRM_EVW_TRIAL_MISSES    4u            /* the missed wake that ends a trial as a failure */
++
++/* The process flag (`fell_back` below). 0: waits may sleep on the event. Every non-zero value means "poll", and a reader
++   that only tests it for non-zero needs to know no more. */
++enum {
++    NVRM_EVW_FB_DEAD  = 1,   /* a kernel wait call failed: the event cannot be used, polling for good (2.9 did the same) */
++    NVRM_EVW_FB_QUIET = 2,   /* NVRM_EVW_MISS_LIMIT missed wakes: polling, but each thread now and then tries a few sleeps
++                                (a trial), and the first answer that proves events arrive clears the flag again */
++};
 +
 +/* NVRM_EVENT_WAIT: unset or empty -> the default for the process; "0" poll; "2" adaptive; anything else eager (2.9: `e[0] != '0'`). */
 +static inline int nvrm_evw_mode_parse(const char *env, int is_window_server)
@@ -400,6 +431,11 @@ index 0000000..6ed44aa
 +    int      seq_fd;           /* the event it belongs to, -1 none */
 +    int      seq_valid;
 +    unsigned misses;           /* missed wakes in a row on this thread */
++    /* While the process is QUIET (nvrm_evw_quiet, below): */
++    unsigned quiet_waits;      /* waits this thread began since the process went QUIET or since its last trial */
++    unsigned pause;            /* how many such waits it polls before its next trial; 0 = NVRM_EVW_PAUSE_FIRST */
++    int      trial;            /* 1: in a trial: this thread's rounds sleep on the event as if the flag were clear */
++    unsigned trial_misses;     /* missed wakes in this trial */
 +};
 +/* Call first in every wait round. Returns 1 when a new wait began (the previous one is folded into the mean).
 +   The sample is last_waited_ns, the time into the previous wait at which its last round began. It falls short of the
@@ -419,7 +455,8 @@ index 0000000..6ed44aa
 +    return fresh;
 +}
 +/* 1 = sleep on the event this round, 0 = one step of the 2.9 polling ladder.
-+   remain_ns: time left before the caller's own deadline (UINT64_MAX when there is none). fell_back: the process gave up on events. */
++   remain_ns: time left before the caller's own deadline (UINT64_MAX when there is none). fell_back: non-zero when this
++   round must poll (the process flag, as nvrm_evw_quiet lets this thread see it). */
 +static inline int nvrm_evw_should_sleep(int mode, uint64_t waited_ns, uint64_t avg_ns, uint64_t remain_ns, int fell_back)
 +{
 +    if (mode == NVRM_EVW_POLL || fell_back) return 0;
@@ -446,7 +483,7 @@ index 0000000..6ed44aa
 +
 +/* After a sleep (WOKEN, TIMEOUT), and after an answer that did not sleep because the count had moved (MOVED).
 +   done: after a TIMEOUT, the work this thread waited for was complete when the sleep returned; not looked at otherwise.
-+   Returns 1 when the process must fall back to polling; *missed says whether this sleep was a missed wake.
++   Returns 1 when the process must go back to polling (QUIET); *missed says whether this sleep was a missed wake.
 +   A missed wake is a full-length sleep that ended on its timeout, with the count where it was, although the work had
 +   finished. One alone proves nothing: the GPU makes a completion visible first (the semaphore release user space
 +   reads) and raises the event after it (the kext posts it only once the interrupt is serviced and RM has run), so a
@@ -468,10 +505,59 @@ index 0000000..6ed44aa
 +    return reason == NVRM_EVW_R_CAPPED || reason == NVRM_EVW_R_ABORTED || reason == NVRM_EVW_R_SPURIOUS;
 +}
 +
++/* Going back to polling after missed wakes is a pause, not the end. The event is posted by a bottom half that needs the
++   GPU lock, and RM holds that lock through long calls (a display mode change, a display waking, a wake from sleep): GPU
++   work keeps completing while no event is posted, and NVRM_EVW_MISS_LIMIT missed wakes take only some tens of
++   milliseconds of that. So a QUIET process polls, and each of its threads, counting in its own waits (no clock), tries
++   the event again once its pause has passed: in a trial its rounds sleep as if the flag were clear. The first answer
++   that proves events arrive (WOKEN, MOVED, or a capped or aborted answer whose count moved: nvrm_evw_round) clears the
++   flag for the whole process and resets this thread; the NVRM_EVW_TRIAL_MISSES-th missed wake of the trial ends it and
++   doubles this thread's pause (256 waits first, NVRM_EVW_PAUSE_MAX at most). A sleep that ran out with the work still
++   pending is neither. When events never come back, a thread pays at most NVRM_EVW_TRIAL_MISSES missed wakes (each at
++   most one NVRM_EVW_MAX_SLEEP_US sleep of latency) per trial: 22 trials in its first million waits after going QUIET
++   (pauses 256 to 32768 are 65280 waits and 8 trials, then one trial per 65536 waits). A failed kernel call (DEAD) never
++   gets a trial.
++
++   nvrm_evw_quiet: once per round, after nvrm_evw_begin (`fresh`: what it returned), with the flag as read now. Returns
++   the flag as this round must use it: 0 while this thread is in a trial of a QUIET process. *began: a trial starts now. */
++static inline int nvrm_evw_quiet(struct nvrm_evw_thread *t, int fresh, int flag, int *began)
++{
++    *began = 0;
++    if (flag == 0) {
++        if (t->trial || t->pause || t->quiet_waits) {
++            /* another thread brought the events back: this thread's trial and pause belonged to the quiet time, and its
++               run of missed wakes (those of a trial) starts again from 0 */
++            t->trial = 0; t->pause = 0; t->quiet_waits = 0; t->trial_misses = 0; t->misses = 0;
++        }
++        return 0;
++    }
++    if (flag != NVRM_EVW_FB_QUIET) { t->trial = 0; return flag; }
++    if (t->trial) return 0;
++    t->misses = 0;   /* a polling thread misses nothing; it must not leave QUIET one missed wake away from going back */
++    if (fresh) t->quiet_waits++;
++    if (t->quiet_waits < (t->pause ? t->pause : NVRM_EVW_PAUSE_FIRST)) return flag;
++    t->quiet_waits = 0; t->trial = 1; t->trial_misses = 0; *began = 1;
++    return 0;
++}
++/* A trial ended on its NVRM_EVW_TRIAL_MISSES-th missed wake: poll again, for twice as long. */
++static inline void nvrm_evw_trial_failed(struct nvrm_evw_thread *t)
++{
++    const unsigned p = t->pause ? t->pause : NVRM_EVW_PAUSE_FIRST;
++    t->pause = p >= NVRM_EVW_PAUSE_MAX / 2u ? NVRM_EVW_PAUSE_MAX : 2u * p;
++    t->trial = 0; t->trial_misses = 0; t->quiet_waits = 0; t->misses = 0;
++}
++/* An answer proved that events arrive: this thread's quiet state goes (the caller clears a QUIET flag). */
++static inline void nvrm_evw_events_back(struct nvrm_evw_thread *t)
++{
++    t->trial = 0; t->pause = 0; t->quiet_waits = 0; t->trial_misses = 0; t->misses = 0;
++}
++
 +/* One round of a wait loop, with the outside world behind four calls so the same code runs in NVK and in
 +   tools/test_evwait_loop.c. The caller's loop is unchanged: it checks its own condition, calls this, and checks again. */
 +enum { NVRM_EVW_S_SLEEP, NVRM_EVW_S_WOKEN, NVRM_EVW_S_TIMEOUT, NVRM_EVW_S_MISSED, NVRM_EVW_S_CAPPED, NVRM_EVW_S_FELL_BACK,
 +       NVRM_EVW_S_CHAN_SLEEP,   /* a sleep the wait callback found for a channel that has no event (fd < 0, below) */
++       NVRM_EVW_S_TRIAL,        /* a thread of a QUIET process began a trial of the event */
++       NVRM_EVW_S_BACK,         /* an answer proved that events arrive again: the QUIET flag was cleared */
 +       NVRM_EVW_S_N };
 +struct nvrm_evw_ops {
 +    /* 1 while the GPU work is not complete; *fd = the event to sleep on, -1 when the pending work is on a channel that
@@ -490,15 +576,38 @@ index 0000000..6ed44aa
 +                wait returns non-zero for every fd < 0: exactly 2.9, which polled these channels. */
 +    int  (*wait)(void *ctx, int fd, uint32_t seen, uint32_t timeout_us, uint64_t *out);
 +    void (*backoff)(void *ctx, uint64_t waited_ns);   /* one step of the 2.9 polling ladder */
-+    void (*stat)(void *ctx, int what);        /* NVRM_EVW_S_*: a counter; FELL_BACK and MISSED are also reported to the kernel */
++    void (*stat)(void *ctx, int what);        /* NVRM_EVW_S_*: a counter; FELL_BACK and MISSED are also reported to the kernel.
++                                                 FELL_BACK comes once each time the flag leaves 0, never for a failed trial */
 +};
++/* A kernel wait call failed: the event cannot be used, the process polls for good. FELL_BACK only when the flag was 0
++   (a process that was already QUIET has said so once). */
++static inline void nvrm_evw_dead(struct nvrm_evw_thread *t, volatile int *fell_back, const struct nvrm_evw_ops *ops, void *ctx)
++{
++    const int was = *fell_back;
++    *fell_back = NVRM_EVW_FB_DEAD;
++    t->trial = 0;
++    if (was == 0) ops->stat(ctx, NVRM_EVW_S_FELL_BACK);
++}
 +/* has_gpu_work: the wait has at least one GPU completion to wait for (2.9: `n != 0`).
-+   *fell_back: one flag for the process, set here when events are given up; only ever goes 0 -> 1. */
++   *fell_back: one flag for the process (NVRM_EVW_FB_*). Set to DEAD here when a kernel wait call fails, for good; to
++   QUIET when a thread reaches NVRM_EVW_MISS_LIMIT missed wakes; from QUIET back to 0 by an answer that proves events
++   arrive. Threads read it without a lock. The two changes that depend on what it holds are compare-and-swaps (0 to
++   QUIET, QUIET to 0), so a DEAD stored by another thread in between is never overwritten and never cleared, and of
++   two threads that go QUIET or bring the events back together only one says so; DEAD is a plain store, it wins
++   over anything. */
 +static inline void nvrm_evw_round(struct nvrm_evw_thread *t, int mode, uint64_t waited_ns, uint64_t remain_ns, int has_gpu_work,
 +                                  volatile int *fell_back, const struct nvrm_evw_ops *ops, void *ctx)
 +{
-+    (void)nvrm_evw_begin(t, waited_ns);
-+    if (!has_gpu_work || !nvrm_evw_should_sleep(mode, waited_ns, t->avg_ns, remain_ns, *fell_back)) { ops->backoff(ctx, waited_ns); return; }
++    const int fresh = nvrm_evw_begin(t, waited_ns);
++    int began = 0;
++    const int flag = nvrm_evw_quiet(t, fresh, *fell_back, &began);
++    if (began) {
++        /* a count remembered from before the quiet time could have moved since, and would end the trial at once on
++           an event long gone: the trial starts from a count it reads itself */
++        nvrm_evw_forget(t);
++        ops->stat(ctx, NVRM_EVW_S_TRIAL);
++    }
++    if (!has_gpu_work || !nvrm_evw_should_sleep(mode, waited_ns, t->avg_ns, remain_ns, flag)) { ops->backoff(ctx, waited_ns); return; }
 +    int fd = -1, fd2 = -1, have = 0;
 +    if (!ops->pending(ctx, &fd)) return;                       /* complete: the caller's check sees it */
 +    uint64_t out = 0;
@@ -518,13 +627,13 @@ index 0000000..6ed44aa
 +        /* The count is read BEFORE the completion is checked again: an event between the two moves the count, so the
 +           sleep below returns at once. A count remembered from this thread's last return is older still, so it is safe
 +           the same way and saves this call. */
-+        if (ops->wait(ctx, fd, 0, 0, &out) != 0) { *fell_back = 1; ops->stat(ctx, NVRM_EVW_S_FELL_BACK); ops->backoff(ctx, waited_ns); return; }
++        if (ops->wait(ctx, fd, 0, 0, &out) != 0) { nvrm_evw_dead(t, fell_back, ops, ctx); ops->backoff(ctx, waited_ns); return; }
 +        seen = nvrm_evw_seq(out);
 +        if (!ops->pending(ctx, &fd2)) { nvrm_evw_remember(t, fd, seen); return; }
 +        if (fd2 != fd) { nvrm_evw_forget(t); return; }         /* the wait moved to another device: start over next round */
 +    }
 +    const uint32_t us = nvrm_evw_timeout_us(mode, remain_ns);
-+    if (ops->wait(ctx, fd, seen, us, &out) != 0) { *fell_back = 1; nvrm_evw_forget(t); ops->stat(ctx, NVRM_EVW_S_FELL_BACK); ops->backoff(ctx, waited_ns); return; }
++    if (ops->wait(ctx, fd, seen, us, &out) != 0) { nvrm_evw_dead(t, fell_back, ops, ctx); nvrm_evw_forget(t); ops->backoff(ctx, waited_ns); return; }
 +    const unsigned why = nvrm_evw_reason_of(out);
 +    nvrm_evw_remember(t, fd, nvrm_evw_seq(out));
 +    if (why == NVRM_EVW_R_WOKEN || why == NVRM_EVW_R_TIMEOUT || why == NVRM_EVW_R_LEGACY) ops->stat(ctx, NVRM_EVW_S_SLEEP);
@@ -533,14 +642,32 @@ index 0000000..6ed44aa
 +    if (why == NVRM_EVW_R_CAPPED) ops->stat(ctx, NVRM_EVW_S_CAPPED);
 +    /* MOVED is not a sleep and takes no polling step, but a moved count is the late event of an earlier missed wake
 +       (or a newer one): nvrm_evw_account ends the run of missed wakes on it as on WOKEN. */
++    int proof = 0;
 +    if (why == NVRM_EVW_R_TIMEOUT || why == NVRM_EVW_R_WOKEN || why == NVRM_EVW_R_MOVED) {
 +        int missed = 0;
 +        const int done = why == NVRM_EVW_R_TIMEOUT ? !ops->pending(ctx, &fd2) : 0;
 +        const int give_up = nvrm_evw_account(t, why, done, us, &missed);
 +        if (missed) ops->stat(ctx, NVRM_EVW_S_MISSED);
-+        if (give_up && !*fell_back) { *fell_back = 1; ops->stat(ctx, NVRM_EVW_S_FELL_BACK); }
++        if (give_up) {
++            /* QUIET; and this thread's run starts again, so that it is not one missed wake from QUIET when events return */
++            t->misses = 0;
++            int was = 0;
++            if (__atomic_compare_exchange_n(fell_back, &was, NVRM_EVW_FB_QUIET, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++                ops->stat(ctx, NVRM_EVW_S_FELL_BACK);
++        } else if (missed && t->trial && ++t->trial_misses >= NVRM_EVW_TRIAL_MISSES) {
++            nvrm_evw_trial_failed(t);   /* not another FELL_BACK: the process never stopped polling */
++        }
++        proof = why != NVRM_EVW_R_TIMEOUT;
 +    } else if ((why == NVRM_EVW_R_CAPPED || why == NVRM_EVW_R_ABORTED) && nvrm_evw_seq(out) != seen) {
 +        t->misses = 0;   /* did not sleep its time, but the count moved all the same: the same proof that events arrive */
++        proof = 1;
++    }
++    if (proof) {
++        nvrm_evw_events_back(t);
++        int was = NVRM_EVW_FB_QUIET;
++        if (*fell_back == NVRM_EVW_FB_QUIET &&
++            __atomic_compare_exchange_n(fell_back, &was, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++            ops->stat(ctx, NVRM_EVW_S_BACK);
 +    }
 +    if (nvrm_evw_must_poll(why)) ops->backoff(ctx, waited_ns);
 +}
