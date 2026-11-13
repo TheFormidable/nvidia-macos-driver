@@ -11,12 +11,18 @@ file for macOS 26, a changed Homebrew listing, a file Homebrew keeps that change
 damaged package, a changed checkout, a step log naming Homebrew's prefix, a missing tool, a missing package). Also:
 the download of the base package refuses a file that is not the pinned one, the dry-run reader recognises the lines
 build.sh prints before it calls Homebrew, and the failure listing shows the logs' ends and their error lines.
+
+This test runs on testers' Macs too, so what the job may do there and a tester's suite must not is held off: the watch,
+a session of its own that would outlive a killed test, ends with this test's process (a guard, with its own arm); the
+reads run with a stand-in for Apple's /usr/bin/make, which the job starts with an empty developer folder; and neither
+this test's git nor the script's reads any git configuration of the tester's.
 Usage: test_ci_full_build.py [driver checkout]. Exit 2 with SKIP when this machine cannot make Mach-O files."""
 import hashlib
 import os
 import pathlib
 import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -128,6 +134,47 @@ def run(argv, env, cwd=None, timeout=120):
     return r.returncode, r.stdout + r.stderr
 
 
+def git_quiet(env):
+    """env for git without the tester's git: no configuration file of theirs (global, $XDG_CONFIG_HOME's, the
+    system's) and none of their GIT_* variables (a GIT_DIR would point git at another repository)"""
+    e = {k: v for k, v in env.items() if not k.startswith("GIT_")}
+    e.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return e
+
+
+# The watch the script starts (watch-loop) is a session of its own on purpose: it must outlive the job's step that
+# starts it. So it also outlives this test when the test is killed (the runner's time limit and Ctrl-C kill the test's
+# process group): it lists the machine's processes twice a second for as long as its pid file exists, which is for
+# good when the test was run by hand, and a watch the stall controls stopped (SIGSTOP) stays stopped even after the
+# runner deletes the folder. The guard is a small process of its own session as well: it notes every watch this test
+# starts and, once the test's process is gone, removes the pid file (every watch then ends by itself) and ends each of
+# those watches that is still there, also a stopped one. It names the folder only in its environment, so that the
+# test's own last check ("no watch is left running") does not see it.
+GUARD = r'''seen=" "
+while kill -0 "$NMT_PID" 2>/dev/null; do
+  p=$(sed -n 1p "$NMT_CI/brew-watch.pid" 2>/dev/null)
+  case "$p" in ""|*[!0-9]*) ;; *) case "$seen" in *" $p "*) ;; *) seen="$seen$p " ;; esac ;; esac
+  sleep 1
+done
+rm -f "$NMT_CI/brew-watch.pid"
+for p in $seen; do
+  case "$(ps -o command= -p "$p" 2>/dev/null)" in *"watch-loop $NMT_CI "*) kill -CONT "$p" 2>/dev/null; kill "$p" 2>/dev/null ;; esac
+done
+'''
+
+
+def guard(ci, pid):
+    """starts the guard of the watches in <ci> for as long as process <pid> lives"""
+    return subprocess.Popen(["/bin/sh", "-c", GUARD], env={"PATH": "/usr/bin:/bin", "NMT_PID": str(pid), "NMT_CI": str(ci)},
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def watches(ci):
+    """-> [(pid, state)] of the watch loops running for <ci>"""
+    r = subprocess.run(["ps", "-axo", "pid=,stat=,command="], capture_output=True, text=True).stdout
+    return [(int(l.split()[0]), l.split()[1]) for l in r.splitlines() if f"watch-loop {ci} " in l]
+
+
 class Scene:
     def __init__(self, tmp, mk):
         self.tmp, self.mk = tmp, mk
@@ -139,7 +186,7 @@ class Scene:
         g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"]
         # with no configuration but these settings: a tester's ~/.gitconfig may sign every commit (it would run their
         # signing program, and a failed signature fails the commit), name a template folder or start a file monitor
-        genv = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        genv = git_quiet(os.environ)
         subprocess.run(g + ["init", "-q", str(self.co)], check=True, env=genv)
         subprocess.run(g + ["-C", str(self.co), "add", "-A"], check=True, env=genv)
         subprocess.run(g + ["-C", str(self.co), "commit", "-q", "-m", "x"], check=True, env=genv)
@@ -148,8 +195,11 @@ class Scene:
         self.p = tmp / "usrlocal"          # Homebrew's prefix as an Intel Mac has it
         self.w = tmp / "work"              # the working directory
         self.ci = tmp / "ci"               # the job's own files
-        self.env = mk.env()
-        # NMCI_WATCH_MAX: a watch this test starts ends by itself within ten minutes, also when the test was killed
+        # the script's own git (prove's git status and rev-parse in this checkout) reads no configuration of the
+        # tester's either: a new HOME hides ~/.gitconfig, not $XDG_CONFIG_HOME/git/config or the system's file, and a
+        # core.fsmonitor there names a program that git status starts
+        self.env = git_quiet(mk.env())
+        # NMCI_WATCH_MAX: a watch this test starts ends by itself within ten minutes, whatever became of the test
         self.env.update(HOME=str(self.home), TMPDIR=str(tmp), LC_ALL="C", NMCI_WATCH_MAX="600")
         self.env.pop("GITHUB_ACTIONS", None)
         self.homebrew()
@@ -277,6 +327,7 @@ def main():
         print(f"FAIL {SCRIPT} is missing"); sys.exit(1)
     with tempfile.TemporaryDirectory() as d:
         tmp = pathlib.Path(d).resolve()
+        guard(tmp / "ci", os.getpid())   # before the first watch (the scene's job folder is tmp/ci)
         mk = Maker(tmp)
         try:
             sc = Scene(tmp, mk)
@@ -666,8 +717,27 @@ def main():
             rc == 0 and f"==== {w}/logs/toolchain/llvm.log (last 300" in o, o[:1500])
         # reads: every label printed, exit 0 although many reads cannot be made here (no Mac programs, Mach-O files that do
         # not run), nothing left behind in the working directory
+        # reads starts Apple's /usr/bin/make with an empty developer folder: what that small program of Apple's does
+        # there is the record GitHub's job wants, and on a tester's Mac it may be Apple's dialog that offers to install
+        # the command line tools. This test needs only that the read is made and labelled, so it runs a copy of the
+        # script whose make is a stand-in that notes its call (the only change)
+        make_read = 'env -i DEVELOPER_DIR="$scratch/empty-developer-dir" /usr/bin/make --version'
+        own = sc.script.read_text()
+        others = [l.strip() for l in own.splitlines() if "/usr/bin/make" in l and make_read not in l and not l.lstrip().startswith('rhead "')]
+        arm("reads starts Apple's make in one line only, the one this test hands a stand-in", own.count(make_read) == 1 and not others, others)
+        smake = tmp / "standin-make/make"
+        smake.parent.mkdir()
+        smake.write_text(f'#!/bin/sh\necho "DEVELOPER_DIR=$DEVELOPER_DIR $*" >> {shlex.quote(str(smake))}.calls\necho "GNU Make (the test\'s stand-in)"\n')
+        smake.chmod(0o755)
+        reads_script = sc.co / "build/ci_full_build_reads.sh"   # beside the script, which finds the checkout from its own place
+        with open(sc.co / ".git/info/exclude", "a") as ex:
+            ex.write("/build/ci_full_build_reads.sh\n")
+        reads_script.write_text(own.replace(make_read, make_read.replace("/usr/bin/make", shlex.quote(str(smake)))))
         before_w = sorted(str(x) for x in w.rglob("*"))
-        rc, o = run([sc.script, "reads", w], sc.env, timeout=300)
+        rc, o = run([reads_script, "reads", w], sc.env, timeout=300)
+        calls = (tmp / "standin-make/make.calls").read_text() if (tmp / "standin-make/make.calls").exists() else ""
+        arm("reads ran the stand-in make, with only the empty developer folder as its environment, and not Apple's",
+            calls == f"DEVELOPER_DIR={w}/reads-scratch/empty-developer-dir --version\n" and "GNU Make (the test's stand-in)" in o, (calls, o[-800:]))
         labels = ("otool -L <toolchain>/bin/cmake", "ssl.OPENSSL_VERSION", "llvm-config --targets-built", "glslangValidator --version",
                   "--variable pc_path pkg-config", "--cflags --libs SPIRV-Tools", "ls -l <workdir>/tools/bin", "mesa_clc",
                   "libvulkan_nouveau.dylib", "pyvenv.cfg", "LC_BUILD_VERSION", "DEVELOPER_DIR=<an empty folder> /usr/bin/make --version",
@@ -682,8 +752,52 @@ def main():
         arm("reads measures the home folder in the compiled files (the stand-in mesa_clc names the working directory under it)",
             "<workdir>/out/nvk-build/src/compiler/clc/mesa_clc" in o, o[-1500:])
         arm("reads writes nothing it leaves in the working directory", sorted(str(x) for x in w.rglob("*")) == before_w, "")
-        rc, o = run([sc.script, "reads", tmp / "nowhere"], sc.env, timeout=120)
+        rc, o = run([reads_script, "reads", tmp / "nowhere"], sc.env, timeout=120)
         arm("reads of a working directory that is not there: every read says why, exit 0", rc == 0 and o.count("could not be read: ") >= 15, o[-1500:])
+        reads_script.unlink()
+
+        # the script's git reads none of the tester's configuration: a core.fsmonitor in $XDG_CONFIG_HOME/git/config
+        # names a program that git status starts (prove's check of the checkout runs git status)
+        xdg = tmp / "xdg"
+        fsmon = tmp / "fsmonitor"
+        (xdg / "git").mkdir(parents=True)
+        fsmon.write_text(f'#!/bin/sh\necho "$*" >> {shlex.quote(str(fsmon))}.calls\n')
+        fsmon.chmod(0o755)
+        (xdg / "git/config").write_text(f"[core]\n\tfsmonitor = {fsmon}\n")
+        run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
+        rc_x, o_x = run([sc.script, "prove", w, sc.ci / "brew-before.txt", sc.ci, sc.p], dict(sc.env, XDG_CONFIG_HOME=str(xdg)), timeout=300)
+        ran = fsmon.with_name("fsmonitor.calls").exists()
+        subprocess.run(["git", "-C", str(sc.co), "status", "--porcelain"], capture_output=True,
+                       env=dict({k: v for k, v in sc.env.items() if not k.startswith("GIT_")}, XDG_CONFIG_HOME=str(xdg)))
+        arm("prove's git reads no git configuration of the tester's (a program that $XDG_CONFIG_HOME/git/config names for "
+            "core.fsmonitor is not started); control: the same git status with the tester's configuration starts it",
+            rc_x == 0 and not ran and fsmon.with_name("fsmonitor.calls").exists(), (rc_x, ran, o_x[-600:]))
+
+        # the guard (GUARD): a test that is killed leaves no watch running, also not one a stall control stopped
+        ci2 = tmp / "ci-guarded"
+        stands_for_test = subprocess.Popen(["sleep", "120"])
+        g = guard(ci2, stands_for_test.pid)
+        run([sc.script, "watch-start", ci2, sc.p], sc.env)
+        time.sleep(2.5)   # the guard reads the pid file once a second
+        started = watches(ci2)
+        for pid, _ in started:
+            os.kill(pid, signal.SIGSTOP)
+        stands_for_test.kill()
+        stands_for_test.wait()
+        try:
+            g.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            g.kill()
+        time.sleep(1)
+        left = watches(ci2)
+        arm("a killed test leaves no watch running: once its process is gone, its guard ends every watch it started, also a stopped one",
+            len(started) == 1 and not left and not (ci2 / "brew-watch.pid").exists(), (started, left))
+        for pid, _ in left:   # what the arm found, so that this test itself leaves nothing
+            for sg in (signal.SIGCONT, signal.SIGKILL):
+                try:
+                    os.kill(pid, sg)
+                except ProcessLookupError:
+                    pass
         # nothing of the watch is left running
         left = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
         arm("no watch is left running", str(sc.ci) not in left, "")
