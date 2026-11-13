@@ -33,7 +33,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time
+import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -62,6 +62,8 @@ def emit(line):
 
 def check(name, ok, detail=""):
     global fails
+    if _STOPPING.is_set():   # the test is being stopped: what the stopped runs gave is not a result
+        return ok
     emit(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""))
     with _LOCK:
         fails += 0 if ok else 1
@@ -116,6 +118,14 @@ case "$role" in
   patchnonew) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac   # changes files, cannot create one
               in=$(cat); case "$in" in *"--- /dev/null"*) echo "patch: cannot create files" >&2; exit 1 ;; esac
               case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
+  # macOS's patch as it treats a patch whose file is not there (the patch chains, for the stand-in trees): without -f
+  # it asks on /dev/tty, whatever its output goes to, and waits; here it records that it would have, and fails
+  patchask) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac
+            in=$(cat); case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@"; exit ;; esac
+            case " $* " in *" -f "*|*" --force "*) exit 0 ;; esac
+            rec patch-asked "$@"; exit 1 ;;
+  # build.sh's wait for a lock that has no owner yet: the run that made it writes its owner meanwhile
+  sleepowner) l=$(cat "$S/lockdir"); [ -f "$l/owner" ] || printf 'pid=%s\nstarted=x\ncommand=build\n' "$(cat "$S/livepid")" > "$l/owner" ;;
   uname)
     case "${1:-}" in
       -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
@@ -131,8 +141,13 @@ case "$role" in
       machdep.cpu.brand_string) echo "Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz" ;; *) exit 1 ;;
     esac ;;
   xcode-select)
-    [ -f "$S/xcode" ] || { echo "xcode-select: error: unable to get active developer directory" >&2; exit 2; }
-    case "${1:-}" in -p|--print-path) echo /Applications/Xcode.app/Contents/Developer ;; *) exit 1 ;; esac ;;
+    # like Apple's: DEVELOPER_DIR first, then the selected folder (state/devdir: one that may no longer be there), else
+    # the sandbox's Xcode.app once "Xcode is installed"
+    if [ -n "${DEVELOPER_DIR:-}" ]; then d=$DEVELOPER_DIR
+    elif [ -f "$S/devdir" ]; then d=$(cat "$S/devdir")
+    elif [ -f "$S/xcode" ]; then d=$SB/Xcode.app/Contents/Developer
+    else echo "xcode-select: error: unable to get active developer directory" >&2; exit 2; fi
+    case "${1:-}" in -p|--print-path) echo "$d" ;; *) exit 1 ;; esac ;;
   xcodebuild)
     [ -f "$S/xcode" ] || { echo "xcode-select: error: tool 'xcodebuild' requires Xcode" >&2; exit 1; }
     case "${1:-}" in -version) printf 'Xcode %s\nBuild version 17A400\n' "$(cat "$S/xcode")" ;; *) exit 1 ;; esac ;;
@@ -147,8 +162,10 @@ case "$role" in
       *) exit 0 ;;
     esac ;;
   brew)
-    # every call, whatever it asks: the three variables a login shell exports for a Homebrew
-    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
+    # every call, whatever it asks: the three variables a login shell exports for a Homebrew, the PATH Homebrew keeps
+    # for post-install steps and its "std" builds, and the two that make Homebrew's bin/brew take HOMEBREW_PATH as PATH
+    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}" \
+        "PATH=$PATH" "HOMEBREW_PATH=${HOMEBREW_PATH:-}" "HOMEBREW_BREW_FILE=${HOMEBREW_BREW_FILE:-}"
     case "${1:-}" in
       --version) echo "Homebrew 4.6.3" ;;
       --prefix) echo "$SB/brew" ;;
@@ -161,9 +178,12 @@ case "$role" in
           gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
         printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
       install)
-        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
+        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_NO_INSTALL_CLEANUP=${HOMEBREW_NO_INSTALL_CLEANUP:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
+        # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
+        # versions of formulas (every 30 days of all of them), formulas nothing needs and dead links in the prefix
+        [ -n "${HOMEBREW_NO_INSTALL_CLEANUP:-}" ] || rm -rf "$SB/brew/Cellar/yours/1.0"
         echo "==> Pouring $2" ;;
       *) echo "stand-in brew: '$1' is not something build.sh may do" >&2; exit 1 ;;
     esac ;;
@@ -174,6 +194,8 @@ case "$role" in
         case "${2:-}" in
           venv) d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
           pip) [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
+               # like pip: what it downloads is kept in ~/Library/Caches/pip unless PIP_CACHE_DIR or PIP_NO_CACHE_DIR says otherwise
+               [ -n "${PIP_NO_CACHE_DIR:-}" ] || { c=${PIP_CACHE_DIR:-$HOME/Library/Caches/pip}; mkdir -p "$c/http-v2" && : > "$c/http-v2/stand-in"; }
                mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
           *) exit 1 ;;
         esac ;;
@@ -342,6 +364,33 @@ def stop(pr):
         pass
 
 
+# The build.sh runs going on, in both threads. Each runs in its own session, so Ctrl-C at the terminal reaches only
+# this test: on Ctrl-C (or a crash) the main thread stops them all with what they started, and no new run starts, so
+# that the second thread ends at once instead of going through its remaining arms, and nothing outlives the test.
+_LIVE = set()
+_STOPPING = threading.Event()
+
+
+def track(pr):
+    with _LOCK:
+        _LIVE.add(pr)
+    return pr
+
+
+def stop_all():
+    _STOPPING.set()
+    with _LOCK:
+        live = list(_LIVE)
+    for pr in live:
+        if pr.poll() is None:   # not yet reaped: its process group is still the one it made
+            stop(pr)
+
+
+def not_stopping():
+    if _STOPPING.is_set():
+        raise KeyboardInterrupt("the test is being stopped")
+
+
 def git(*args, cwd=None, check_rc=True):
     r = subprocess.run([GIT, *map(str, args)], cwd=cwd, env=GENV, capture_output=True, text=True)
     if check_rc and r.returncode:
@@ -499,6 +548,8 @@ class Sandbox:
         (self.state / "brew-llvm").write_text("22.1.3\n")
         if xcode:
             (self.state / "xcode").write_text(xcode + "\n")
+        # the developer folder xcode-select names once Xcode is installed, with the xcrun build.sh looks for in it
+        self.wrap(self.dir / "Xcode.app/Contents/Developer/usr/bin/xcrun", "xcrun")
         sdk = self.dir / "sdk"
         for f in ("System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h", "usr/lib/libkmod.a",
                   "System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h"):
@@ -530,10 +581,13 @@ class Sandbox:
             self.wrap(self.dir / "brew/bin/brew", "brew")
             for f in formulas:
                 self.run_tool(self.dir / "brew/bin/brew", "install", f)
+            (self.dir / "brew/Cellar/yours/1.0").mkdir(parents=True, exist_ok=True)   # an older version of a formula of the tester's
         self.journal.write_text("")
 
     def wrap(self, path, role, version=None):
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():   # a link to a real tool (REAL_TOOLS): replaced, never written through
+            path.unlink()
         path.write_text(f'#!/bin/bash\nNMT_SB={self.dir} exec /bin/bash {LIB}/fake.sh {role} "$0" "$@"\n')
         path.chmod(0o755)
         if version:
@@ -559,16 +613,23 @@ class Sandbox:
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
         """./build.sh <args> from the checkout; returns (exit status, stdout+stderr)."""
         argv = [BASH, script or "./build.sh", *args]
+        not_stopping()
         # its own session, so that a run that never ends is stopped with everything it started (a step stand-in left
         # behind would keep running after the test)
-        pr = subprocess.Popen(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, start_new_session=True)
+        pr = track(subprocess.Popen(argv, cwd=cwd or self.co, env=self.env(extra, home), stdin=stdin, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True))
         try:
             out, err = pr.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             stop(pr)
             out, err = pr.communicate()
             return 124, f"{out}{err}\n[test: no result after {timeout} s; the run and what it started were stopped]"
+        except BaseException:   # Ctrl-C in this thread: the run is in a session of its own and would go on
+            stop(pr)
+            raise
+        finally:
+            with _LOCK:
+                _LIVE.discard(pr)
         return pr.returncode, out + err
 
     def popen(self, *args, extra=None, default_sigint=True):
@@ -576,9 +637,10 @@ class Sandbox:
         # build.sh would inherit and could not trap
         # (by a small exec wrapper, not preexec_fn, which is not safe while another thread runs)
         pre = [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])"]
-        return subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                start_new_session=True)
+        not_stopping()
+        return track(subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                      start_new_session=True))
 
     def jlines(self):
         return self.journal.read_text().splitlines() if self.journal.exists() else []
@@ -703,29 +765,47 @@ def arm_fresh():
     missing, exits 1, changes nothing; a dry run of everything ends without error and installs nothing."""
     bare = Sandbox("fresh-noxcode", xcode=None, brew=False)
 
-    def bare_problems():
+    def bare_problems(more=None, want="xcode-select", cmds=(("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm"))):
         p = []
         extra = {k: v.replace("<sb>", str(bare.dir)) for k, v in fresh_brew().items()}
+        extra.update(more or {})
         bare.clear()
         rc, out = bare.run("doctor", extra=extra)
         items = doctor_items(out)
         if rc != 1 or len(items) != 1 or not items[0].startswith("Xcode"):
             p.append(f"doctor: exit {rc}, missing {items}")
-        for args in (("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm")):
+        for args in cmds:
             rc, out = bare.run(*args, extra=extra)
-            if rc != 2 or "xcode-select" not in out:
-                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode: {out[-300:]}")
+            if rc != 2 or "xcode-select" not in out or want not in out:
+                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode ({want}): {out[-300:]}")
         if shim_runs(bare.jlines()):
-            p.append(f"ran what opens Apple's install dialog on such a Mac: {shim_runs(bare.jlines())[:4]}")
+            p.append(f"ran what opens Apple's install dialog on such a Mac, or fails there: {shim_runs(bare.jlines())[:4]}")
         if mutating(bare.jlines()):
             p.append(f"ran more than probes: {mutating(bare.jlines())[:3]}")
         return p
 
+    def gone_problems():
+        # an Xcode selected and then removed or renamed; and DEVELOPER_DIR naming a folder that is not there (two
+        # commands each: the stop is the same code for all of them, which the case without Xcode shows for four)
+        two = (("env",), ("--dry-run", "build", "rm"))
+        (bare.state / "devdir").write_text(f"{bare.dir}/Applications/Xcode-old.app/Contents/Developer\n")
+        p = bare_problems(want="does not exist", cmds=two)
+        (bare.state / "devdir").unlink()
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/Applications/Xcode-26.app"}, want="DEVELOPER_DIR", cmds=two)
+        (bare.dir / "half/usr/bin").mkdir(parents=True, exist_ok=True)
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="has no usr/bin/xcrun", cmds=two)
+        return p
+
     p = bare_problems()
     check("no Xcode: every command stops before git, make, python3 or xcrun; doctor names exactly Xcode", not p, p)
+    p = gone_problems()
+    check("a developer folder that is gone or has no xcrun (xcode-select, DEVELOPER_DIR): the same stop, naming it", not p, p)
     with bare.scratch():
-        bare.break_script('  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then',
-                          '  if false; then')
+        bare.break_script('    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi',
+                          '    if ! xcode-select -p >/dev/null 2>&1; then devp="none selected"; fi')
+        negative("only xcode-select's exit status checked (a folder that is gone passes; check_paths then runs git)", gone_problems())
+    with bare.scratch():
+        bare.break_script('  if [ "$CMD" != help ] && is_mac; then', '  if false; then')
         negative("no early stop without Xcode (check_paths then runs git)", bare_problems())
 
     sb = Sandbox("fresh", brew=False)
@@ -758,6 +838,10 @@ def arm_fresh():
 
     p, out = problems()
     check("fresh Mac with Xcode: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
+    rc, out = sb.run("doctor", extra=dict(extra, DEVELOPER_DIR=f"{sb.dir}/Xcode.app"))
+    items = doctor_items(out)
+    check("DEVELOPER_DIR naming an installed Xcode.app: doctor goes on and finds Xcode", rc == 1 and items and
+          not any(i.startswith("Xcode") for i in items) and "Xcode 26.1 at" in out, (rc, items, out[-400:]))
     with sb.scratch():
         sb.break_script('  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR', '  else d_note "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR')
         negative("doctor that forgets one missing tool", problems()[0])
@@ -928,14 +1012,20 @@ def arm_whichbrew():
 def arm_brewenv():
     """Every call build.sh makes to Homebrew drops HOMEBREW_PREFIX, HOMEBREW_CELLAR and HOMEBREW_REPOSITORY, whatever
     the caller exported: a tester's login shell exports them for a Homebrew of the other architecture, and inherited
-    they would send the chosen brew at the wrong installation. The stand-in brew records the three; a non-empty one fails."""
-    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
-    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY")
+    they would send the chosen brew at the wrong installation. It also runs with a fixed PATH (that Homebrew's bin, then
+    the system's folders) and without HOMEBREW_PATH and HOMEBREW_BREW_FILE: Homebrew keeps the caller's PATH for a
+    formula's post-install step and its "std" builds, where a login shell's other-architecture bin folder would come
+    first. The stand-in brew records them all; a non-empty one, or another PATH, fails."""
+    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew",
+              "HOMEBREW_PATH": "/opt/homebrew/bin:/usr/bin:/bin", "HOMEBREW_BREW_FILE": "/opt/homebrew/bin/brew"}
+    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY", "HOMEBREW_PATH", "HOMEBREW_BREW_FILE")
 
     def problems(sb):
         sb.clear()
-        sb.run("deps", "-y", extra=dict(poison))
+        extra = dict(poison, PATH=f"{sb.dir}/opt/homebrew/bin:" + sb.env()["PATH"])
+        sb.run("deps", "-y", extra=extra)
         calls = [l for l in sb.jlines() if l.startswith("brew-callenv")]
+        want_path = f"{sb.dir}/brew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         p = []
         if not calls:
             p.append("no brew call was recorded at all (the arm proves nothing)")
@@ -944,13 +1034,20 @@ def arm_brewenv():
                 k, _, v = tok.partition("=")
                 if k in keys and v:
                     p.append(f"{tok} reached brew (in {l.split()[0]})")
+                if k == "PATH" and v != want_path:
+                    p.append(f"brew ran with PATH={v}, not {want_path}")
         return p
 
     sb = Sandbox("brewenv")
-    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY, whatever the caller exported", not (p := problems(sb)), p)
+    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY/PATH/BREW_FILE and with a fixed PATH, whatever "
+          "the caller exported", not (p := problems(sb)), p)
     neg = Sandbox("brewenv-neg")
-    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
-    negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
+    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\',
+                     'env -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\')
+    negative("a run_brew that passes the three location variables through", problems(neg))
+    neg3 = Sandbox("brewenv-neg3")
+    neg3.break_script(' -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH "PATH=$(brew_path)" \\', ' \\')
+    negative("a run_brew that gives brew the caller's PATH and HOMEBREW_PATH (as before)", problems(neg3))
     around = ('  # formulas for what is missing\n', '  [ -z "$("$BREW" --prefix)" ] || true\n  # formulas for what is missing\n')
     neg2 = Sandbox("brewenv-neg2")
     neg2.break_script(*around)
@@ -1059,8 +1156,11 @@ def deps_problems(sb, rc, out, before):
     if other:
         p.append(f"brew was asked for something else: {other}")
     env = [l for l in j if l.startswith("brew-env")]
-    if not env or any("HOMEBREW_NO_AUTO_UPDATE=1" not in l or "HOMEBREW_NO_INSTALL_UPGRADE=1" not in l for l in env):
-        p.append(f"brew install ran without HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1: {env}")
+    if not env or any("HOMEBREW_NO_AUTO_UPDATE=1" not in l or "HOMEBREW_NO_INSTALL_UPGRADE=1" not in l
+                      or "HOMEBREW_NO_INSTALL_CLEANUP=1" not in l for l in env):
+        p.append(f"brew install ran without HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALL_CLEANUP=1: {env}")
+    if not (sb.dir / "brew/Cellar/yours/1.0").is_dir():
+        p.append("an older version of a formula of the tester's was removed (Homebrew's clean-up after an install)")
     if any(re.search(r"(^|\s)sudo(\s|$)", l) for l in j):
         p.append("a journal entry contains sudo")
     after = sb.listing(sb.home)
@@ -1077,6 +1177,31 @@ def deps_problems(sb, rc, out, before):
     if not [l for l in j if l.startswith("python3 -m pip install") and "--require-hashes" in l]:
         p.append("pip did not install with --require-hashes")
     return p
+
+
+def cargoconf_problems(script_edit=None):
+    """doctor names a cargo configuration in a folder above the working directory (here the home folder's own)."""
+    sb = Sandbox("cargoconf")
+    if script_edit:
+        sb.break_script(*script_edit)
+    p = []
+    rc, out = sb.run("doctor")
+    if "~/.cargo/config.toml applies to cargo's fetch and build of the translator" in out:
+        p.append("doctor names a ~/.cargo/config.toml that is not there")
+    (sb.home / ".cargo").mkdir()
+    (sb.home / ".cargo/config.toml").write_text('[profile.release]\ndebug = true\n')
+    rc, out = sb.run("doctor")
+    lines = [l for l in out.splitlines() if "~/.cargo/config.toml applies to cargo's fetch and build of the translator" in l]
+    if len(lines) != 1:
+        p.append(f"doctor does not name ~/.cargo/config.toml once: {lines}")
+    return p
+
+
+def arm_cargoconf():
+    p = cargoconf_problems()
+    check("doctor names a ~/.cargo/config.toml, which cargo reads for the translator under the working directory", not p, p)
+    negative("a doctor that does not look above the working directory for cargo's configuration",
+             cargoconf_problems(('  for d in "$W" "$HERE"; do\n', '  for d in; do\n')))
 
 
 def arm_deps(sb):
@@ -1101,6 +1226,19 @@ def arm_deps_control():
     before = sb.listing(sb.home)
     rc, out = sb.run("deps", "-y")
     negative("deps that asks Homebrew for a formula already installed", deps_problems(sb, rc, out, before))
+    sb = Sandbox("deps-neg2", formulas=("cmake",))
+    sb.break_script('PIP_CACHE_DIR="$TOOLS/pip-cache" ', '')
+    before = sb.listing(sb.home)
+    rc, out = sb.run("deps", "-y")
+    negative("pip with its own cache (~/Library/Caches/pip, outside the working directory)", deps_problems(sb, rc, out, before))
+    sb = Sandbox("deps-neg3", formulas=("cmake",))
+    sb.break_script('HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install', 'HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 -- install')
+    before = sb.listing(sb.home)
+    rc, out = sb.run("deps", "-y")
+    p = deps_problems(sb, rc, out, before)
+    negative("brew install followed by Homebrew's clean-up (HOMEBREW_NO_INSTALL_CLEANUP not set)", p)
+    check("control: that clean-up removes an older version of a formula of the tester's",
+          any("older version of a formula" in x for x in p), p)
 
 
 def llvm23_problems(sb, rc, out):
@@ -1842,7 +1980,9 @@ def arm_steps(mac):
         negative("python3 linked into tools/bin (the bare interpreter, not the environment)", python_problems(mac))
 
 
-def wait_for(path, timeout=60):
+def wait_for(path, timeout=300):
+    """Until <path> exists, at most as long as one run may take (Sandbox.run): a step starts only after build.sh's own
+    checks, which take many times longer under macOS's bash 3.2 on a Mac busy with other suites (run_all_tests -j 4)."""
     t0 = time.time()
     while not path.exists():
         if time.time() - t0 > timeout:
@@ -1935,7 +2075,7 @@ def concurrent_problems(sb):
         rc, out = sb.run("--force", "build", "airdis")
         (sb.ctl / "release-nmsmn").write_text("")
         try:
-            a_out, _ = a.communicate(timeout=120)
+            a_out, _ = a.communicate(timeout=300)
         except subprocess.TimeoutExpired:
             stop(a)
             a.communicate()
@@ -1966,6 +2106,57 @@ def arm_concurrent(mac):
         rc, out = mac.run("build", "airdis")
         check("a lock left by a run that is gone is taken over with a note", rc == 0 and "taking over the lock" in out
               and not lock.exists(), (rc, out[-400:]))
+
+    live = subprocess.Popen(["sleep", "300"])   # a process that is not build.sh
+    try:
+        def race_problems(s):
+            lk = s.work / "build.lock"
+            shutil.rmtree(lk, ignore_errors=True)
+            lk.mkdir()
+            (s.state / "lockdir").write_text(str(lk))
+            (s.state / "livepid").write_text(str(live.pid))
+            rc, out = s.run("build", "airdis")
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if rc == 2 and f"another build.sh run (pid {live.pid})" in out else [f"exit {rc}: {out[-300:]}"]
+
+        def reuse_problems(s):
+            lk = s.work / "build.lock"
+            shutil.rmtree(lk, ignore_errors=True)
+            lk.mkdir()
+            (lk / "owner").write_text(f"pid={live.pid}\nstarted=x\ncommand=build\n")
+            rc, out = s.run("build", "airdis")
+            ok = rc == 0 and "taking over the lock" in out and not lk.exists()
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if ok else [f"exit {rc}: {out[-300:]}"]
+
+        def ownerless_problems(s):
+            lk = s.work / "build.lock"
+            lk.mkdir()
+            rc, out = s.run("build", "airdis")
+            ok = rc == 0 and "taking over the lock" in out and not lk.exists()
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if ok else [f"exit {rc}: {out[-300:]}"]
+        with mac.scratch():
+            p = ownerless_problems(mac)
+            check("a lock without an owner that stays so (a run stopped before it wrote one) is taken over after a wait", not p, p)
+            mac.break_script('2>/dev/null | first_line || true)', '2>/dev/null | first_line)')
+            negative("reading the owner of a lock that has none under errexit (build.sh stopped there)", ownerless_problems(mac))
+        with mac.scratch():
+            mac.wrap(mac.bin / "sleep", "sleepowner")
+            p = race_problems(mac)
+            check("a lock whose owner appears a moment after (two runs started together): the second waits and stops", not p, p)
+            mac.break_script('    if [ -z "$pid" ] && [ "$waited" -lt 3 ]; then waited=$((waited + 1)); sleep 1; continue; fi\n', "")
+            negative("a lock without an owner taken over at once", race_problems(mac))
+        if shutil.which("ps"):
+            with mac.scratch():
+                os.symlink(shutil.which("ps"), mac.bin / "ps")
+                p = reuse_problems(mac)
+                check("a lock whose pid now belongs to another program (after a crash or a restart) is taken over", not p, p)
+                mac.break_script('  case "$(ps -p "$1" -o command= 2>/dev/null || true)" in *build.sh*) return 0 ;; esac\n  return 1\n', "")
+                negative("a lock kept by any live process with its pid", reuse_problems(mac))
+    finally:
+        live.kill()
+        live.wait()
     with mac.scratch():
         mac.break_script('while ! mkdir "$l" 2>/dev/null; do', 'while ! mkdir -p "$l" 2>/dev/null; do')
         mac.run("build")
@@ -2170,6 +2361,28 @@ def arm_test_cmd(mac):
         mac.break_script('  case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac\n', "")
         mac.break_script('| tee "$CUR_LOG" || rc=$?', '| tee "$CUR_LOG" || true')
         negative("test that ignores a failing host test", problems(mac))
+
+    # the patch chain is applied the way build_rm620.sh and build_nvrm.sh apply it, through tools/bin/patch; macOS's
+    # patch would wait at the terminal for an answer about every patch whose file is not in the first folder tried
+    def asked_problems(s):
+        s.clear()
+        rc, out = s.run("test")
+        p = []
+        asked = [l for l in s.jlines() if l.startswith("patch-asked")]
+        if asked:
+            p.append(f"patch was called without -f and would have waited for an answer: {asked[:2]}")
+        calls = [l for l in s.jlines() if l.startswith("patch ") and "--version" not in l and "--dry-run" in l]
+        if not calls:
+            p.append("the patch chain was not applied")
+        if rc != 0 or "patch chain: every patch applies" not in out:
+            p.append(f"exit {rc}: {out[-300:]}")
+        return p
+    with mac.scratch():
+        mac.wrap(mac.bin / "patch", "patchask", "patch 2.0-12u11-Apple")
+        p = asked_problems(mac)
+        check("test applies the patch chain through tools/bin/patch, which never waits for an answer", not p, p)
+        mac.break_script('exec %s -f "$@"', 'exec %s "$@"')
+        negative("tools/bin/patch without -f (macOS's patch asks at the terminal)", asked_problems(mac))
 
 
 def arm_package(mac):
@@ -2542,9 +2755,13 @@ def timed(name, fn, *args):
 
 
 def finish(worker):
-    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends)."""
-    if worker is not None and worker.ident:
-        worker.join()
+    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends); another
+    Ctrl-C while waiting stops its runs again instead of leaving it and the sandboxes behind."""
+    while worker is not None and worker.ident and worker.is_alive():
+        try:
+            worker.join(0.5)
+        except KeyboardInterrupt:
+            stop_all()
     return None
 
 
@@ -2558,6 +2775,7 @@ def main():
             print(f"SKIP: {t} is needed to imitate a Mac here")
             sys.exit(2)
     worker = None
+    errors = []
     try:
         if want("pins"):
             timed("pins", arm_pins)
@@ -2574,7 +2792,6 @@ def main():
         # beside the arms that build on one shared Mac (those stay in this thread: the interrupt arm sets the signal
         # handling, which only the main thread may). Most of the time is build.sh's own forks; two threads halve the
         # time the test needs on a loaded machine. NMT_SERIAL=1 runs everything in this thread.
-        errors = []
 
         def standalone():
             try:
@@ -2606,6 +2823,8 @@ def main():
                     timed("deps_control", arm_deps_control)
                 if want("llvm23"):
                     timed("llvm23", arm_llvm23)
+                if want("cargoconf"):
+                    timed("cargoconf", arm_cargoconf)
             except BaseException as e:   # reported after the join, as a failure
                 errors.append(e)
 
@@ -2631,8 +2850,15 @@ def main():
         worker = finish(worker)
         for e in errors:
             raise e
+    except BaseException as e:
+        stop_all()
+        raise
     finally:
         finish(worker)
+        if worker is not None:   # this thread failed first: what the other one raised is not lost
+            for e in errors:
+                if not isinstance(e, KeyboardInterrupt):
+                    traceback.print_exception(type(e), e, e.__traceback__)
         if os.environ.get("NMT_KEEP"):
             print(f"sandbox kept: {TMP}")
         else:
@@ -2642,4 +2868,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("interrupted: the runs were stopped and the sandboxes removed; no result", flush=True)
+        sys.exit(130)
