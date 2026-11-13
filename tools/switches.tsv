@@ -789,7 +789,7 @@ sysctl	debug.nvrm_evt_post_drain_waits	diag	read-only	3.0	-	client closes that w
 sysctl	debug.nvrm_evt_posts	diag	read-only	2.9	-	RM events posted to user clients
 sysctl	debug.nvrm_evt_slept	diag	read-only	3.0	-	event waits that slept
 sysctl	debug.nvrm_evt_timeouts	diag	read-only	3.0	-	event sleeps that ran to their timeout
-sysctl	debug.nvrm_evt_user_fallbacks	diag	read-only	3.0	-	user space: processes that went back to polling after missed wakes
+sysctl	debug.nvrm_evt_user_fallbacks	diag	read-only	3.0	-	user space: times a process went back to polling (missed wakes, or a kernel wait that failed)
 sysctl	debug.nvrm_evt_user_missed	diag	read-only	3.0	-	user space: sleeps that ran to their timeout although the GPU work was done
 sysctl	debug.nvrm_evt_waits	diag	read-only	2.9	-	user event waits
 sysctl	debug.nvrm_evt_woken	diag	read-only	3.0	-	event sleeps ended by an event

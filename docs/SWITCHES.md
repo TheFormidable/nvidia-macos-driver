@@ -849,7 +849,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_evt_posts` | diag | read-only | 2.9 | - | RM events posted to user clients | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_slept` | diag | read-only | 3.0 | - | event waits that slept | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_timeouts` | diag | read-only | 3.0 | - | event sleeps that ran to their timeout | kexts/NVRM/NVRM.cpp |
-| `debug.nvrm_evt_user_fallbacks` | diag | read-only | 3.0 | - | user space: processes that went back to polling after missed wakes | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_evt_user_fallbacks` | diag | read-only | 3.0 | - | user space: times a process went back to polling (missed wakes, or a kernel wait that failed) | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_user_missed` | diag | read-only | 3.0 | - | user space: sleeps that ran to their timeout although the GPU work was done | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_waits` | diag | read-only | 2.9 | - | user event waits | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_evt_woken` | diag | read-only | 3.0 | - | event sleeps ended by an event | kexts/NVRM/NVRM.cpp |
