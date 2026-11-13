@@ -130,12 +130,14 @@ An earlier `build.sh` gave the scripts `NULLMOTH_BUILD_ROOT=<workdir>/build`, so
 next `fetch` lays the sources out again (the downloads in `<workdir>/src` are reused). A `NULLMOTH_BUILD_ROOT` you set
 yourself is used as it is.
 
-`build.sh` itself writes nothing to your shell start files, `~/.cargo`, `~/.rustup`, `/Library` or `/usr/local`
-(on an Intel Mac, `/usr/local` is Homebrew's prefix, so the formulas Homebrew installs land there). A `RUSTUP_HOME` or
-`CARGO_HOME` from your shell is not used. cargo still reads the `.cargo/config.toml` of every folder above the one it
-works in, so with the working directory or the checkout inside your home folder your own `~/.cargo/config.toml` applies
-to the translator's fetch and build (its profile, linker and source settings change what is built); `doctor` names
-such a file. Nothing is written into the checkout.
+`build.sh` itself writes nothing to your shell start files, `~/.cargo`, `~/.rustup`, `/Library` or `/usr/local` (on an
+Intel Mac, `/usr/local` is Homebrew's prefix, so the formulas Homebrew installs land there). A `RUSTUP_HOME` or
+`CARGO_HOME` from your shell is not used, nor is a Rust you have elsewhere (in `~/.cargo`, for example): `doctor`
+reports Rust as missing until `deps` has put the pinned one into the working directory, and leaves yours alone. cargo
+still reads the `.cargo/config.toml` of every folder above the one it works in, so with the working directory or the
+checkout inside your home folder your own `~/.cargo/config.toml` applies to the translator's fetch and build (its
+profile, linker and source settings change what is built); `doctor` names such a file. Nothing is written into the
+checkout.
 
 All sources come from the pins in [build/pins.sh](../build/pins.sh): for each, its URL, the variable that replaces
 the URL with a mirror, the tag and the commit id (or the SHA-256 of a single file). A source that does not match its
