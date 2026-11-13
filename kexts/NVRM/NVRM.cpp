@@ -3879,6 +3879,20 @@ IOReturn NVRMUserClient::sEsc(OSObject *target, void *reference, IOExternalMetho
 }
 IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
 {
+    // A process's note about a channel it rebuilt or gave up on: counters only, and the power state back. It makes no RM
+    // call and reads nothing the connection's teardown changes: nvrm_chan_note_handle does atomic adds and stores on
+    // static counters, and fOwner (set at start, never cleared; the adapter's fPassDone and fGpuPm were never guarded by
+    // this connection's gate either) gives the power state. So it is answered before both gates below. Behind the power
+    // gate it waited out the whole GPU suspend and resume, so it could never report "suspended", and NVK, which sends it
+    // while it holds a channel's recovery lock, took a channel that only stood still for the sleep for a stalled one.
+    // Behind this connection's own gate it would wait just the same for any other escape of the connection (NVK sends
+    // every RM control of a device through one) that is parked at the power gate.
+    if (cmd == NVRM_ESC_CHAN_NOTE) {
+        if (!fOwner || fOwner->fPassDone < 2) return kIOReturnNotReady;
+        if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument;
+        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm);
+        return kIOReturnSuccess;
+    }
     Gate g(fGate);
     NvMapPendingScope pendingScope;   // a mapping-length slot never outlives this escape
     if (!fOwner || fOwner->fPassDone < 2) { static bool once; if (!once) { once = true; kprintf("NVRM-xnu: esc 0x%x refused: adapter not up (run nvrmctl go 2)\n", cmd); } return kIOReturnNotReady; }
@@ -3918,12 +3932,6 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
         if (!accel) return kIOReturnSuccess;
         const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVACCEL_SS_FN);
         if (sym) { accel->callPlatformFunction(sym, false, ss, (void *)current_task(), (void *)(uintptr_t)cmd, NULL); sym->release(); }
-        return kIOReturnSuccess;
-    }
-    case NVRM_ESC_CHAN_NOTE: {
-        // A process's note about a channel it rebuilt or gave up on: counters only, and the power state back.
-        if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument;
-        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm);
         return kIOReturnSuccess;
     }
     default: {
