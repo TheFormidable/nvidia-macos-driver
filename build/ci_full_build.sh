@@ -542,7 +542,7 @@ prove_loads() {
   b=$(grep -c . "$t/bad-tools.txt" || true)
   rd=$(grep -c . "$t/rust-dist.txt" || true)
   if [ "$rd" = 0 ]; then rd=""
-  else rd="; not counted: $rd search path(s) under $RUST_DIST_BUILD (Rust's build machine) that name no folder of this Mac, in the working directory's Rust toolchains: $(sed -e 's/: rpath .*//' -e 's|.*/||' "$t/rust-dist.txt" | LC_ALL=C sort -u | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"; fi
+  else rd="; not counted: $rd search path(s) under $RUST_DIST_BUILD (Rust's build machine) that name no folder of this Mac, in the working directory's Rust toolchains: $(sed -e 's/\(.*\): rpath .*/\1/' -e 's|.*/||' "$t/rust-dist.txt" | LC_ALL=C sort -u | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')"; fi
   if [ -n "$missing" ]; then fail "tools of the working directory that are not there:$missing"; fi
   if [ "$n" = 0 ]; then fail "Mach-O files of the working directory's tools (toolchain, Translator, Rust): none found"
   elif [ "$b" = 0 ]; then ok "Mach-O files of the working directory's tools (toolchain, Translator, Rust, mesa_clc): $n, every library they load and every folder they search lies in /usr/lib, /System or the working directory; among them$named$rd"
