@@ -11,8 +11,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked (the check now
 > asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). None of the changes
 > made to `build.sh` after that run has run on a Mac yet: the tool check per component, the choice of Homebrew and of
-> the tools taken from `PATH`, the layout of the working directory, rm's compile list, `fetch`'s git set-up and the
-> stop without Xcode were tested only against the stand-ins described next. It was written
+> the tools taken from `PATH`, the layout of the working directory, rm's compile list, `fetch`'s git set-up, the
+> stop without Xcode and the `patch` the scripts get (with `-f`) were tested only against the stand-ins described next. It was written
 > for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
 > Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
 > macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
@@ -99,7 +99,7 @@ folder that carries that mark.
 | `deps` | Homebrew's prefix, and Homebrew's own cache and logs (`~/Library/Caches/Homebrew`, `~/Library/Logs/Homebrew`) for the formulas it installs, after a yes. Its `brew info` questions keep Homebrew's formula list in `<workdir>/tools/homebrew-cache`; with `--offline` it asks none. Everything else in `<workdir>/tools` and `<workdir>/src` |
 | `fetch` | `<workdir>/src`, `<workdir>/build/...` (the layout below) and the translator's crates in `<workdir>/tools/cargo`. Its git runs without your git hooks (`core.hooksPath`), file system monitor and global attributes file, and its `git init` and `git clone` without your template folder (`init.templateDir`) |
 | `build`, `all`, `package` | `<workdir>` only, with one exception: when the checkout has uncommitted changes, the plugin, translator and video builds take them as a commit object made with `git stash create`, which is stored in the checkout's `.git` (on no branch; `git gc` removes it in time) |
-| `test` | `<workdir>/logs`; the host tests make temporary folders of their own and remove them |
+| `test` | `<workdir>/logs` and, once the NVIDIA tree is fetched, the links in `<workdir>/tools/bin` (the patch chain is applied with the build's own `patch`); the host tests make temporary folders of their own and remove them |
 | `clean` | Deletes inside `<workdir>` only |
 
 ### The working directory's layout
@@ -302,7 +302,7 @@ dependencies too) before the first step starts.
 
 | Component | Needs, besides Xcode | How build.sh tests it |
 |---|---|---|
-| `rm` | GNU make (Xcode's 3.81; only `make -n`); a `patch` that applies the kexts' chain with `-p1 --fuzz=0 --dry-run` and `--no-backup-if-mismatch` (macOS's `patch 2.0-12u11-Apple` does); `python3` 3.8 or later (f-strings; macOS's 3.9 does) | `make --version` says GNU Make; the patch applies a change in a temporary folder as the scripts call it; `python3 --version` on the step's PATH |
+| `rm` | GNU make (Xcode's 3.81; only `make -n`); a `patch` that applies the kexts' chain with `-p1 --fuzz=0 --dry-run` and `--no-backup-if-mismatch` (macOS's `patch 2.0-12u11-Apple` does; the scripts get it with `-f` added, below); `python3` 3.8 or later (f-strings; macOS's 3.9 does) | `make --version` says GNU Make; the patch applies a change in a temporary folder as the scripts call it; `python3 --version` on the step's PATH |
 | `kms` | GNU make, `python3` 3.8 or later | the same |
 | `nvrm` | `python3` 3.8 or later (rmcc.py: `subprocess.run(capture_output=, text=)`, 3.7); the same `patch` (the chain test against the pristine tree) | the same |
 | `fb`, `accel`, `agdc`, `nmsmn`, `ryzenadj`, `airdis`, `dlss`, `osver`, `plugin`, `selector` | nothing else | |
@@ -323,6 +323,12 @@ What `build.sh` does around the existing scripts, so that they no longer need th
 
 - Every path a script would take from the author's home folder is given explicitly: the NVIDIA trees, `OGKM` (the
   scripts default to `~/ogkm610`, the wrong tree), the output folders, Rust and the crate cache in the working directory.
+- The scripts' `patch` is `<workdir>/tools/bin/patch`, a two-line script that runs the chosen patch with `-f`.
+  macOS's patch asks a question on the terminal, wherever its output is sent, when a patch names a file that is not
+  there or looks applied already, and waits for the answer. build_rm620.sh and tools/test_patch_chain.sh try each
+  patch from the tree's root and then from `src/nvidia-modeset`, with patch's output sent to `/dev/null`, so without
+  `-f` the `rm` step would wait at the first NVKMS patch for an answer to a question nobody sees. With `-f` such a
+  try fails at once and the script tries the other folder; a change that looks applied fails instead of being reversed.
 - build_rm620.sh does not stop when compiles fail; `build.sh` reads its `failed: N of M` line and stops the step when
   N is not 0. Each time the `rm` step runs, its work tree is deleted first, so no old object or old patch set survives.
 - build_rm620.sh and build_kms620.sh end with exit 6 when the account name or the computer's short name occurs in the
@@ -470,7 +476,7 @@ real git against local repositories that stand in for the remotes, and a scratch
 component build script is replaced by a stand-in that records what it receives. It checks doctor on a Mac with
 nothing installed, deps with and without installing, fetch (and a tampered remote), offline, dry run, the build
 order, the variables every step gets, skipping and rebuilding, a failing step and its report, a failed script after
-an earlier good build, build_rm620.sh's exit 6, the step's python3, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
+an earlier good build, build_rm620.sh's exit 6, the step's python3, that the scripts' `patch` never waits for an answer at the terminal, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
 which of two Homebrews is used, that no tool of the other architecture's Homebrew is taken from `PATH`, that no brew
 call keeps the caller's `HOMEBREW_` variables, that `fetch` runs none of your git hooks, template or filters, that
 nothing opens Apple's install dialog on a Mac without Xcode, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
