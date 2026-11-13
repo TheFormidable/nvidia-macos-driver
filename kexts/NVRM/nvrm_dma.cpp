@@ -346,8 +346,20 @@ static bool dmaSelfTest(nv_dma_device *d)
     if (!b) return false;
     NvU64 va[2] = { 0, 0 }; nv_xnu_dmamap *m = NULL;
     const NV_STATUS st = dmaMap(d, b, 2 * PAGE_SIZE, nvrm_dma_bits(dmaBitsNow(), 0), false, va, 2, kKindTest, &m);
-    const bool ok = st == NV_OK && m && va[0] && va[1] && va[0] != va[1];
+    // The read-back alone cannot tell a translated address from an untranslated one: AppleVTD answers an address it
+    // holds no entry for with that same address. A command that the mapper did not translate would hand out the
+    // physical addresses and still read back, so the self-test also wants a bus address that is not the physical one.
+    bool translated = false;
+    if (st == NV_OK && m) {
+        for (unsigned k = 0; k < 2; k++) {
+            const addr64_t phys = b->getPhysicalSegment((IOByteCount)(k * PAGE_SIZE), NULL, kIOMemoryMapperNone);
+            if (phys && va[k] != (NvU64)phys) translated = true;
+        }
+    }
+    const bool ok = st == NV_OK && m && va[0] && va[1] && va[0] != va[1] && translated;
     if (ok) DLOG("DMA self-test: 2 pages mapped at bus 0x%llx, 0x%llx and read back from the mapper", va[0], va[1]);
+    else if (st == NV_OK && m && !translated)
+        DLOG("DMA self-test failed: the mapping gave the pages' physical addresses (0x%llx, 0x%llx), so nothing was translated", va[0], va[1]);
     else DLOG("DMA self-test failed (status 0x%x)", (unsigned)st);
     if (m) { nv_xnu_dmamap *t = dmaTake(m, 0, d, 1u << kKindTest); if (t) dmaUnmap(t); }
     b->release();
