@@ -11,17 +11,19 @@
 
 NM_PIN_SOURCES="OGKM620 OGKM610 MESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBKIT_CMBASE WEBKIT_VTDEC SPIRVLLVM SPIRVHEADERS"
 
-# NVIDIA open-gpu-kernel-modules 620.70.06, the RM core and NVKMS the kexts link. build/build_rm620.sh:8 and
-# build/build_kms620.sh:6 (NV_VERSION default), README.md (Build from source), NOTICE. The commit is the tag's peeled
-# commit on github.com (git ls-remote, 2026-11-12), the same one build/kext_check.sh pins as OGKM_SHA.
+# NVIDIA open-gpu-kernel-modules 620.70.06, the RM core and NVKMS the kexts link. build/build_rm620.sh and
+# build/build_kms620.sh (their NV_VERSION default, "V=${NV_VERSION:-620.70.06}"), README.md (Build from source),
+# NOTICE. The commit is the tag's peeled commit on github.com (git ls-remote, 2026-11-12), the same one
+# build/kext_check.sh pins as OGKM_SHA.
 NM_PIN_OGKM620_NAME="NVIDIA open-gpu-kernel-modules 620.70.06 (pristine; the kexts are built from it)"
 NM_PIN_OGKM620_URL=https://github.com/NVIDIA/open-gpu-kernel-modules.git
 NM_PIN_OGKM620_MIRROR=NM_OGKM_URL
 NM_PIN_OGKM620_REF=620.70.06
 NM_PIN_OGKM620_COMMIT=e6a2e01579fbbd1ca2ed43fef2ee2589e9bd8bd9
 
-# open-gpu-kernel-modules 610.57.04, the headers NVK and libnvencvt are built against. build/build_nvk.sh:4 (argument
-# 2), build/build_nvencvt.sh:30, vendor/nvenc/SOURCE ("Build inputs"). Peeled commit of the tag on github.com.
+# open-gpu-kernel-modules 610.57.04, the headers NVK and libnvencvt are built against. build/build_nvk.sh (its usage
+# line, argument 2), build/build_nvencvt.sh (its "fetch ogkm" line), vendor/nvenc/SOURCE ("Build inputs"). Peeled
+# commit of the tag on github.com.
 NM_PIN_OGKM610_NAME="NVIDIA open-gpu-kernel-modules 610.57.04 (headers for NVK and libnvencvt)"
 NM_PIN_OGKM610_URL=https://github.com/NVIDIA/open-gpu-kernel-modules.git
 NM_PIN_OGKM610_MIRROR=NM_OGKM_URL
@@ -58,22 +60,24 @@ NM_PIN_VKLOADER_MIRROR=NM_KHRONOS_URL
 NM_PIN_VKLOADER_REF=v1.4.367
 NM_PIN_VKLOADER_COMMIT=aa6dee8385afe4b2cc0152d086af2184743e16fd
 
-# NVIDIA open-gpu-doc (video class headers of libnvencvt): build/build_nvencvt.sh:31, vendor/nvenc/SOURCE. Commit only.
+# NVIDIA open-gpu-doc (video class headers of libnvencvt): build/build_nvencvt.sh ("fetch ogd"), vendor/nvenc/SOURCE.
+# Commit only.
 NM_PIN_OPENGPUDOC_NAME="NVIDIA open-gpu-doc (video class headers for libnvencvt)"
 NM_PIN_OPENGPUDOC_URL=https://github.com/NVIDIA/open-gpu-doc.git
 NM_PIN_OPENGPUDOC_MIRROR=NM_OPEN_GPU_DOC_URL
 NM_PIN_OPENGPUDOC_REF=
 NM_PIN_OPENGPUDOC_COMMIT=9fdf5c4062007929d9f4e6cbad9c9771fe61b880
 
-# RyzenAdj v0.19.0, built into the package's ryzenadj: tools/ryzenadj-macos/build.sh:6-7 (TAG, COMMIT; it refuses any
-# other HEAD), NOTICE.
+# RyzenAdj v0.19.0, built into the package's ryzenadj: tools/ryzenadj-macos/build.sh (its TAG= and COMMIT=
+# lines; it refuses any other HEAD), NOTICE.
 NM_PIN_RYZENADJ_NAME="RyzenAdj v0.19.0 (the package's ryzenadj)"
 NM_PIN_RYZENADJ_URL=https://github.com/FlyGoat/RyzenAdj.git
 NM_PIN_RYZENADJ_MIRROR=NM_RYZENADJ_URL
 NM_PIN_RYZENADJ_REF=v0.19.0
 NM_PIN_RYZENADJ_COMMIT=ea71739b4a3e1a0a624dfd1c9c268a31cb2a4182
 
-# Two WebKit SPI headers for libnvencvt at WebKit commit 3bfbc200: build/build_nvencvt.sh:34, vendor/nvenc/SOURCE.
+# Two WebKit SPI headers for libnvencvt at WebKit commit 3bfbc200: build/build_nvencvt.sh (its "webkit-spi" curl
+# line), vendor/nvenc/SOURCE.
 # build_nvencvt.sh fetches them with curl and checks nothing; these SHA-256 were taken from that URL on 2026-11-12.
 NM_PIN_WEBKIT_COMMIT=3bfbc200370710495ffa440abdd31b943c83ad7a
 NM_PIN_WEBKIT_CMBASE_NAME="WebKit CMBaseObjectSPI.h (libnvencvt)"
@@ -112,7 +116,7 @@ NM_PIN_SPIRVHEADERS_COMMIT=cb42dec3830d3ac67fa449ecdc0c0f73d5e74498
 #   The translator's crates: cargo checks each against translator/wrapper/Cargo.lock; "./build.sh fetch" runs
 #   "cargo fetch --locked" so that the build itself can run offline.
 
-# Rust. The release translator is built with rustc 1.98.1 (build/build_xlate_release.sh:26, NULLMOTH_RUST_VERSION
+# Rust. The release translator is built with rustc 1.98.1 (build/build_xlate_release.sh, its NULLMOTH_RUST_VERSION
 # default; "another version builds the same source into different bytes"); the same toolchain builds NVK's Rust
 # (Mesa meson.build:950 needs 1.85) and translator/translator/Cargo.toml says rust-version 1.87.
 NM_PIN_RUST_VERSION=1.98.1
