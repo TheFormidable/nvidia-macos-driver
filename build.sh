@@ -836,13 +836,13 @@ doctor() {   # prints; sets D_MISSING
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
     d_ok "macOS $v ($(mac_arch))"
-    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (on macOS $NM_PIN_TOOL_MACOS_MIN to 26.1 that is at most Xcode 26.3, with SDK 26.2, with which every component has been built); deps, build and package refuse this Mac"
+    ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (the newest Xcode that runs on macOS 15 is 26.3, with SDK 26.2, with which every component has been built); deps, build and package refuse this Mac"
     rosetta && d_note "this shell runs under Rosetta (uname -m says x86_64); build.sh takes the Mac's own processor, Apple silicon, for its choices"
     case "$(mac_arch)" in
       arm64) d_note "Apple silicon: by default deps takes the missing tools from Homebrew here. No whole build with build.sh has run on an Apple-silicon Mac yet (the kexts compile and link on GitHub's Apple-silicon runner); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. The RM and NVKMS are compiled with the commands an Apple-silicon Mac makes: the x86-only options NVIDIA's makefiles add when this Mac's compiler takes them are left out (build/nv_compile_lines.py)"
-              if [ "$(tools_from)" = source ]; then d_note "Intel: homebrew-core had no ready-made builds for Intel Macs when it was read on 2026-11-13; deps builds the missing tools from pinned sources in the working directory instead (46.5 minutes from an empty working directory on one 12-thread Intel Mac, LLVM about 30 of them; 3 hours 53 minutes on GitHub's 4-processor Intel runner)"
-              else d_note "Intel: homebrew-core had no ready-made builds for Intel Macs when it was read on 2026-11-13; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (not timed); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
+              if [ "$(tools_from)" = source ]; then d_note "Intel: homebrew-core had no ready-made builds for Intel Macs of the formulas deps installs when it was read on 2026-11-13; deps builds the missing tools from pinned sources in the working directory instead (46.5 minutes from an empty working directory on one 12-thread Intel Mac, LLVM about 30 of them; 3 hours 53 minutes on GitHub's 4-processor Intel runner)"
+              else d_note "Intel: homebrew-core had no ready-made builds for Intel Macs of the formulas deps installs when it was read on 2026-11-13; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (not timed); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
     esac
   else
     d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and a dry run of any command but deps work; building needs macOS with Xcode"
@@ -1416,9 +1416,9 @@ EOF
 # (NM_PIN_TC*) into <workdir>/tools/toolchain, and only those (or the user's own settings) are used: a copy Homebrew or
 # PATH offers does not count, and build.sh calls no brew at all. "homebrew": a tool that is there is used wherever it
 # is (a setting, the toolchain, Homebrew, PATH, as find_tools finds it), and a missing one comes from Homebrew's
-# formulas. "auto": source on an Intel Mac, for which homebrew-core had no ready-made builds when it was read on
-# 2026-11-13 (Homebrew would compile LLVM with every target, two Pythons and more into /usr/local), homebrew on Apple
-# silicon, which has them.
+# formulas. "auto": source on an Intel Mac, for which homebrew-core had no ready-made builds of these formulas when it
+# was read on 2026-11-13 (Homebrew would compile LLVM with every target, two Pythons and more into /usr/local),
+# homebrew on Apple silicon, which has them.
 tools_from() {
   case "$NM_TOOLS_FROM" in
     auto) if [ "$(mac_arch)" = x86_64 ]; then printf source; else printf homebrew; fi ;;
@@ -1428,7 +1428,7 @@ tools_from() {
 tools_from_why() {   # one sentence: which way missing tools come, and why
   local where; where=$(printf '%s' "$TC_PREFIX" | tilde)
   case "$NM_TOOLS_FROM:$(tools_from)" in
-    auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs on 2026-11-13)' "$where" ;;
+    auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs of these tools on 2026-11-13)' "$where" ;;
     auto:homebrew) printf "missing build tools come from Homebrew's ready-made builds (NM_TOOLS_FROM=auto on Apple silicon; NM_TOOLS_FROM=source builds them from pinned sources into %s instead)" "$where" ;;
     source:*) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=source)' "$where" ;;
     *) printf 'missing build tools come from Homebrew (NM_TOOLS_FROM=homebrew)' ;;
@@ -1456,7 +1456,7 @@ tc_needs() {
 # working directory at commit 650db45: what build/toolchain.sh prints as "<tool> ok (N s)", the build, the install
 # and the checks, without the download of its sources, which deps does before. The whole of that deps, the downloads,
 # the Python environment, the Translator and Rust included, took 46.5 minutes; on GitHub's Intel runner
-# (macos-15-intel: 4 processors, macOS 15) from nothing it took 3 hours 53 minutes (LLVM 2 hours 25 minutes). Sizes:
+# (macos-15-intel: 4 processors, macOS 15) from nothing it took 3 hours 53 minutes. Sizes:
 # that deps, which removes each build tree, left 1.1 GB of toolchain; a build by hand with every build tree kept used
 # 6.7 GB in all (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it). deps asks for TC_SPACE_GB
 # free.
@@ -1669,7 +1669,7 @@ cmd_deps() {
       say "This is an Intel Mac. homebrew-core had no ready-made builds (bottles) for Intel Macs of these formulas when it"
       say "was read on 2026-11-13, so Homebrew compiles each formula above, and what it needs, on this Mac. That has not"
       say "been timed; llvm@22 builds every LLVM target, and build.sh's own LLVM, with two, took about 30 minutes on one"
-      say "12-thread Intel Mac and 2 hours 25 minutes on GitHub's 4-processor one. Keep the Mac awake and on power."
+      say "12-thread Intel Mac. Keep the Mac awake and on power."
       say "NM_TOOLS_FROM=source (the default on an Intel Mac) builds the tools from pinned sources in the working directory instead."
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
@@ -2537,7 +2537,7 @@ main() {
   case "$CMD" in
     deps|build|package|all)
       if mac_too_old; then
-        die "this Mac runs macOS $(sw_vers -productVersion 2>/dev/null): the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (on macOS $NM_PIN_TOOL_MACOS_MIN to 26.1 that is at most Xcode 26.3, with SDK 26.2, with which every component has been built). Update macOS (the driver supports macOS 15 and 26), or build on another Mac"
+        die "this Mac runs macOS $(sw_vers -productVersion 2>/dev/null): the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later (the newest Xcode that runs on macOS 15 is 26.3, with SDK 26.2, with which every component has been built). Update macOS (the driver supports macOS 15 and 26), or build on another Mac"
       fi ;;
   esac
   [ "$NM_DRY_RUN" = 0 ] || say "(dry run: nothing is changed; the commands are printed)"

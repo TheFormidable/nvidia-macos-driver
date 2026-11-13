@@ -790,7 +790,7 @@ def main():
         # the lines of build.sh's own dry run on an imitated Intel Mac whose Homebrew has every formula (tools/test_build_sh.py's
         # nobrew_sandbox), shortened: the sentences that name Homebrew without calling it must not be taken for a call
         src_line = ("missing build tools are built by ./build.sh deps from pinned sources into /w/tools/toolchain, without Homebrew "
-                    "(NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs on 2026-11-13).\n")
+                    "(NM_TOOLS_FROM=auto on an Intel Mac: homebrew-core had no ready-made builds for Intel Macs of these tools on 2026-11-13).\n")
         rest = ("deps builds from pinned sources: ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm\n"
                 "  Nothing is installed outside the working directory and Homebrew is not used.\n"
                 "  note: NVK's patches need a patch that also creates files: put GNU patch on PATH as gpatch (Homebrew's formula is gpatch); deps does not build patch\n"
