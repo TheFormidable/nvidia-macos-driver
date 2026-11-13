@@ -1,11 +1,35 @@
 #!/usr/bin/env python3
 """Exercise production OpenGL descriptor reuse, encoder defaults and resource-cache lifetime without a GPU."""
+import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def vulkan_include():
+    """-> the folder that holds vulkan/vulkan.h. NM_VULKAN_INCLUDE first: when it is set it must be right, so a wrong
+    one fails the test (continuous integration sets it, and a skip there would hide the test). Unset: 2.9's place,
+    ~/Vulkan-Headers/include. Neither: the test is skipped (exit 2 and SKIP, as tools/run_all_tests.py counts it)."""
+    env = os.environ.get('NM_VULKAN_INCLUDE', '')
+    if env:
+        if not (pathlib.Path(env) / 'vulkan/vulkan.h').is_file():
+            print(f'FAIL: NM_VULKAN_INCLUDE={env} holds no vulkan/vulkan.h')
+            sys.exit(1)
+        return pathlib.Path(env)
+    home = pathlib.Path.home() / 'Vulkan-Headers/include'
+    if (home / 'vulkan/vulkan.h').is_file():
+        return home
+    print('SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h '
+          '(./build.sh test does, after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers')
+    sys.exit(2)
+
+
+VULKAN_INCLUDE = vulkan_include()
+
 vk = (ROOT / 'plugin/nvmtl_vk.c').read_text()
 objects = (ROOT / 'plugin/NVMTLObjects.m').read_text()
 header = (ROOT / 'plugin/NVMTLObjects.h').read_text()
@@ -250,7 +274,7 @@ int main(void) {
 
 with tempfile.TemporaryDirectory() as d:
     path = pathlib.Path(d)
-    includes = ['-I' + str(ROOT / 'plugin'), '-I' + str(pathlib.Path.home() / 'Vulkan-Headers/include')]
+    includes = ['-I' + str(ROOT / 'plugin'), '-I' + str(VULKAN_INCLUDE)]
     for name, code, objc in [('descriptors', fixture + mask + cache + checks, False), ('resources', resources, True),
                              ('defaults', state, False), ('bias', bias_check, False)]:
         src = path / (name + ('.m' if objc else '.c'))
