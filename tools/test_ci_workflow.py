@@ -4,7 +4,8 @@
 A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml as text (no YAML library needed) and
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
 clone, the scripts and tests the jobs name exist, the two jobs that gate do gate and get a full clone (their tests
-read older revisions), the host tests and the plugin get the Vulkan headers the release uses, and nothing uploads or
+read older revisions), the Mac kext job runs on Apple silicon and on Intel and checks what an Intel Mac's compiler can
+slip into a kext, the host tests and the plugin get the Vulkan headers the release uses, and nothing uploads or
 publishes. Each property has a control: the same check on a copy of the file with that one thing
 wrong has to fail.
 
@@ -94,6 +95,14 @@ def problems(y, root):
         if not re.search(r"path: build-out/ci-vulkan-headers\n\s*key: ci-vulkan-headers-\$\{\{ steps\.vkh\.outputs\.commit \}\}", j.get(name, "")) \
                 or "NM_PIN_CI_VKHEADERS_COMMIT" not in j.get(name, ""):
             out.append(f"{name} does not keep the Vulkan headers under the key of their pin")
+    mac = j.get("kexts-mac", "")
+    m = re.search(r"runner: \[([^\]]*)\]", mac)
+    if not m or {r.strip() for r in m.group(1).split(",")} != {"macos-15", "macos-15-intel"} or "runs-on: ${{ matrix.runner }}" not in mac:
+        out.append("kexts-mac does not run on both an Apple-silicon and an Intel runner (macos-15, macos-15-intel)")
+    if not all(s in mac for s in ("grep -cE -e '-mfunction-return|-mindirect-branch|-fcf-protection=(full|return)|",
+                                  'f="$W/src/$part/_out/Darwin_x86_64/compile_cmds.sh"', "for part in nvidia nvidia-modeset; do",
+                                  "grep -qE '(^|[[:space:]])___x86_' \"$O/nvrm/imports.txt\"", "shasum -a 256", "exit $bad")):
+        out.append("kexts-mac does not check its compile lines and NVRM's imports for what an Intel Mac's compiler adds")
     return out
 
 
@@ -147,6 +156,11 @@ control("sudo is caught", "run: bash build/ci_plugin.sh", "run: sudo bash build/
 control("host tests without the release's Vulkan headers are caught", '          echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"\n', "", "does not set NM_VULKAN_INCLUDE")
 control("the headers cached under a key that is not their pin are caught", "key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}",
         "key: ci-vulkan-headers-${{ hashFiles('build/ci_plugin.sh') }}", "under the key of their pin")
+control("the kext job on Apple silicon only is caught", "runner: [macos-15, macos-15-intel]", "runner: [macos-15]", "both an Apple-silicon and an Intel runner")
+control("the kext job without its check of NVRM's imports is caught", "if grep -qE '(^|[[:space:]])___x86_'", "if false",
+        "does not check its compile lines")
+control("the kext job that checks only the RM's compile lines is caught", "for part in nvidia nvidia-modeset; do", "for part in nvidia; do",
+        "does not check its compile lines")
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
 
 rel = compile_line((ROOT / "build/build_plugin_release.sh").read_text(), r"2>\.\./out/build\.err")
