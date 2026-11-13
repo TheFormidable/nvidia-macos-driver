@@ -10,6 +10,11 @@
 // far turn the driver off on the next start, exactly like -nvoff: the firmware's framebuffer gives a desktop, and the
 // install's recovery puts the previous driver back. Every check is a read, so all parts of the driver agree within a
 // boot; only NVRM's start counts. A variable that cannot be written (NVRAM not native) only means the guard never trips.
+// One failure is outside the guard: a framebuffer that refuses this macOS's classes (nvrmfb_layout.h). NVRM declines
+// the card before it counts, because turning the driver off could not light the screen (the driver-off framebuffer
+// refuses the same classes). After an install over an earlier driver, and on the macOS build of that install, the
+// install's fallback job reads that refusal on the PCI device and puts the earlier driver back; otherwise every start
+// ends without a desktop on the card until boot-arg nvlayout=0 or the driver is taken out.
 #pragma once
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IODeviceTreeSupport.h>

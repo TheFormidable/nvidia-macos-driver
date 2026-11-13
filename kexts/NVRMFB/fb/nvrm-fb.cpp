@@ -902,7 +902,11 @@ class NVRMFBClaim : public IOService
 public:
     // The claim is the first of this kext's classes to see the PCI device, before NVRM starts on it: it compares the
     // Apple framebuffer classes with this build and publishes the verdict there. When they differ every framebuffer of
-    // this kext would run on a misplaced base, so the claim steps aside too and leaves the category to Apple's own.
+    // this kext would run on a misplaced base, so the claim steps aside too. Nothing takes the category then on an
+    // installed system (its OpenCore setup excludes Apple's IONDRVSupport, and NVRMBootFB below refuses for the same
+    // reason): no desktop comes up on this card, NVRM declines it on the same verdict, and after an install over an
+    // earlier driver, on the macOS build of that install, the install's fallback job puts that driver back
+    // (package/install.sh, step 6b).
     IOService *probe(IOService *provider, SInt32 *score) override
     {
         if (!nvrmfbLayoutAllows(provider, "NVRMFBClaim")) return NULL;
@@ -910,8 +914,9 @@ public:
     }
     bool start(IOService *provider) override
     {
-        // With the driver off, leave the slot to IONDRVFramebuffer so the firmware's display stays lit while the
-        // removal runs. WAS: the claim held it anyway and the screen stayed dark until the second restart.
+        // With the driver off, leave the slot to NVRMBootFB below (or to IONDRVFramebuffer where IONDRVSupport is
+        // not excluded) so the firmware's display stays lit while the removal runs. WAS: the claim held it anyway and
+        // the screen stayed dark until the second restart.
         if (nvrm_driver_off()) return false;
         if (!IOService::start(provider)) return false;
         nvrmfbStayLoaded();
