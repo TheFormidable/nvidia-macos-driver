@@ -32,9 +32,11 @@ umask 022
 # a toolchain. build.sh builds with the macOS SDK and the default toolchain of the Xcode chosen, so the caller's are
 # taken out of its own environment here, before it runs anything, and are named by doctor. Not only the steps are
 # concerned: /usr/bin/git, make and python3 are small programs of Apple's that find the real tool through xcrun, and
-# xcrun stops when SDKROOT names an SDK that is not there (a line left in a shell profile from an older Xcode, or
-# another platform's SDK of an Xcode since removed). With such an SDKROOT left in place, build.sh's own questions to
-# those tools fail, and a build stops before its first step for want of a make that is there.
+# build.sh asks them questions before its first step. With an SDKROOT that named an SDK which was not there (as a
+# line left in a shell profile from an older Xcode does, or another platform's SDK of an Xcode since removed), a
+# build on a Mac stopped there, taking a make that was there for missing, and macOS was left with the marker of an
+# on-demand install of the command line tools. That xcrun cannot find such an SDK is the explanation taken, not one
+# a log shows in xcrun's own words.
 CALLER_SDKROOT=${SDKROOT:-}; CALLER_TOOLCHAINS=${TOOLCHAINS:-}
 unset SDKROOT TOOLCHAINS
 
@@ -847,15 +849,17 @@ doctor() {   # prints; sets D_MISSING
       elif ver_ge "$x" "$NM_PIN_TOOL_XCODE_MIN"; then d_ok "Xcode $x at $(xcode-select -p)"
       else d_old "Xcode $x: $NM_PIN_TOOL_XCODE_MIN or later is needed (the plugin uses the macOS 26 SDK)"; fi
       find_sdk; sdk=$STEP_SDK; v=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)
-      if [ -z "$sdk" ]; then d_missing "a macOS SDK (xcrun --show-sdk-path fails)"
+      if [ -z "$sdk" ]; then
+        d_missing "a macOS SDK (xcrun --show-sdk-path fails)"
+        [ -z "$CALLER_SDKROOT" ] || d_note "your SDKROOT=$CALLER_SDKROOT is not passed on: every step builds with the macOS SDK of the Xcode chosen (for another SDK choose its Xcode with DEVELOPER_DIR)"
       else
         ver_ge "${v:-0}" "$NM_PIN_TOOL_SDK_MIN" && d_ok "macOS SDK $v" || d_old "macOS SDK $v: $NM_PIN_TOOL_SDK_MIN or later"
-        d_note "every step builds with SDKROOT=$(printf '%s' "$sdk" | tilde) (the SDK of the Xcode above${CALLER_SDKROOT:+; your SDKROOT=$CALLER_SDKROOT is not passed on})"
-        [ -z "$CALLER_TOOLCHAINS" ] || d_note "every step builds with the default toolchain of the Xcode above (your TOOLCHAINS=$CALLER_TOOLCHAINS is not passed on)"
+        d_note "every step builds with SDKROOT=$(printf '%s' "$sdk" | tilde) (the SDK of the Xcode above${CALLER_SDKROOT:+; your SDKROOT=$CALLER_SDKROOT is not passed on: for another SDK choose its Xcode with DEVELOPER_DIR})"
         [ -f "$sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h" ] && d_ok "kernel headers in the SDK" || d_missing "Kernel.framework headers in $sdk (every kext compiles against them)"
         [ -f "$sdk/usr/lib/libkmod.a" ] && d_ok "libkmod.a in the SDK" || d_missing "usr/lib/libkmod.a in $sdk (every kext links it)"
         [ -f "$sdk/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] && d_ok "Metal 4 headers (plugin)" || d_missing "Metal/MTL4CommandQueue.h in $sdk (the plugin needs the macOS 26 SDK)"
       fi
+      [ -z "$CALLER_TOOLCHAINS" ] || d_note "every step builds with the default toolchain of the Xcode above (your TOOLCHAINS=$CALLER_TOOLCHAINS is not passed on)"
       for x in clang clang++ libtool lipo vtool otool nm strip install_name_tool dwarfdump codesign; do
         xcrun -f "$x" >/dev/null 2>&1 || have "$x" || d_missing "$x (Xcode)"
       done

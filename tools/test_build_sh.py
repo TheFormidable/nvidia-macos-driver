@@ -2674,10 +2674,25 @@ def arm_sdkstep(mac):
               f"export SDKROOT={mac.dir / 'sdk'}" in out and IOS_SDK not in out, out[-600:])
         rc, out = mac.run("doctor", extra={"SDKROOT": IOS_SDK})
         check("doctor names the SDK every step builds with, and that the caller's SDKROOT is not passed on",
-              re.search(r"^  note     every step builds with SDKROOT=\S*/sdk \(the SDK of the Xcode above; your SDKROOT=/some/iPhoneOS\.sdk is not passed on\)$",
-                        out, re.M) is not None, out[-1500:])
+              re.search(r"^  note     every step builds with SDKROOT=\S*/sdk \(the SDK of the Xcode above; your SDKROOT=/some/iPhoneOS\.sdk is not passed on: "
+                        r"for another SDK choose its Xcode with DEVELOPER_DIR\)$", out, re.M) is not None, out[-1500:])
         mac.break_script('  [ -z "$STEP_SDK" ] || printf \'%s\\n\' "SDKROOT=$STEP_SDK"\n', "")
         negative("a step_env that only removes SDKROOT (as before)", sdkstep_problems(mac, "c"))
+    # a Mac whose xcrun names no SDK: doctor still says what became of the caller's SDKROOT and TOOLCHAINS
+    with mac.scratch():
+        mac.break_script('  STEP_SDK=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-path 2>/dev/null | first_line || true)\n', '  STEP_SDK=""\n')
+        def unnamed():
+            rc, out = mac.run("doctor", extra={"SDKROOT": IOS_SDK, "TOOLCHAINS": "swift"})
+            p = [] if "a macOS SDK (xcrun --show-sdk-path fails)" in out else ["doctor found an SDK: " + out[-600:]]
+            if not re.search(r"^  note     your SDKROOT=/some/iPhoneOS\.sdk is not passed on: .* choose its Xcode with DEVELOPER_DIR\)$", out, re.M):
+                p.append("the caller's SDKROOT is not named")
+            if "(your TOOLCHAINS=swift is not passed on)" not in out:
+                p.append("the caller's TOOLCHAINS is not named")
+            return p
+        check("doctor on a Mac whose xcrun names no SDK still names the caller's SDKROOT and TOOLCHAINS, and the way to another SDK",
+              not (q := unnamed()), q)
+        mac.break_script('        [ -z "$CALLER_SDKROOT" ] || d_note "your SDKROOT=$CALLER_SDKROOT is not passed on: every step', '        : || d_note "every step')
+        negative("a doctor that names the caller's SDKROOT only beside an SDK it found", unnamed())
     with mac.scratch():
         mac.break_script(UNSET_LINE, "unset TOOLCHAINS\n")
         mac.break_script("env -u SDKROOT xcrun --sdk macosx --show-sdk-path", "xcrun --show-sdk-path")
