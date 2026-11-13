@@ -251,11 +251,15 @@ int main(int argc, char **argv)
 {
     if (argc > 1) g_seconds = std::atof(argv[1]);
     if (g_seconds <= 0) g_seconds = 1.0;
-    char why[200];
+    char why[300];
 
     Run run = scenario(Variant{}, g_seconds, false);
-    std::snprintf(why, sizeof why, "%ld violations in %ld sleeps in %.1f s (%ld suspends and resumes, %ld power-offs by the monitor)",
-                  run.bad, run.sleeps, run.seconds, run.path_runs, run.monitor_offs);
+    // a machine too busy for kMinSleeps in kPatience still passes on what it saw, and the line says that it saw less
+    int at = std::snprintf(why, sizeof why, "%ld violations in %ld sleeps in %.1f s (%ld suspends and resumes, %ld power-offs by the monitor)",
+                           run.bad, run.sleeps, run.seconds, run.path_runs, run.monitor_offs);
+    if (run.sleeps < kMinSleeps && at > 0 && (size_t)at < sizeof why)
+        std::snprintf(why + at, sizeof why - (size_t)at, "; fewer than the %ld sleeps asked for: the machine was busy, and this run shows less",
+                      kMinSleeps);
     check("the hold keeps the monitor out of every sleep and wake, and the monitor still powers the GPU off and on between them",
           run.bad == 0 && run.sleeps > 0 && run.monitor_offs > 0, why);
 
