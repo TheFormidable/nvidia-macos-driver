@@ -992,8 +992,9 @@ doctor() {   # prints; sets D_MISSING
   if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs the release tarball nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz (docs/BUILDING.md)"
   elif [ -d "$NM_BASE_PACKAGE" ]; then
     # an unpacked base says its release in VERSION, which the package step compares with the pin an hour later: here it
-    # costs one read. A tarball is not unpacked for this; the package step reads it there
-    v=$(sed -n 1p "$NM_BASE_PACKAGE/VERSION" 2>/dev/null || true)
+    # costs one read. A tarball is not unpacked for this; the package step reads it there. Only a plain file is read, and
+    # only its start: a pipe or a link to a device there would hold doctor up (the package step refuses either)
+    v=""; if [ -f "$NM_BASE_PACKAGE/VERSION" ]; then v=$(head -c 256 "$NM_BASE_PACKAGE/VERSION" 2>/dev/null | sed -n 1p || true); fi
     if [ "$v" = "$NM_PIN_BASE_RELEASE" ]; then d_ok "base package $NM_BASE_PACKAGE (release $v)"
     else d_missing "a base package of release $NM_PIN_BASE_RELEASE: $NM_BASE_PACKAGE is release ${v:-unknown (it has no VERSION)}, which the package step refuses"; fi
   elif [ -e "$NM_BASE_PACKAGE" ]; then d_ok "base package $NM_BASE_PACKAGE"; else d_missing "the base package $NM_BASE_PACKAGE"; fi
