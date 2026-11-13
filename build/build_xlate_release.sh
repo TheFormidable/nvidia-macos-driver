@@ -52,7 +52,9 @@ scp -q "$H:$R/out/libnvmtl_translate.dylib" "$H:$R/out/cargo.log" "$OUT/"
 D="$OUT/libnvmtl_translate.dylib"
 bash "$HERE/build/warn_ceiling.sh" translator "$(grep -c '^warning' "$OUT/cargo.log" || true)" "$OUT/cargo.log" || exit 4
 # strings reads the dylib on its standard input: given a Mach-O file by name, macOS's strings reads its sections only,
-# and the names a debug map would leave are in the symbol table's strings, outside every section.
-left=$(strings -a < "$D" | grep -cE '/Users/|/Volumes/' || true)
-[ "$left" = 0 ] || { echo "STOP: $left build machine path(s) left in the dylib"; strings -a < "$D" | grep -E '/Users/|/Volumes/' | sort -u | head -5; exit 5; }
+# and the names a debug map would leave are in the symbol table's strings, outside every section. Its output is kept
+# apart from grep's count, which is 0 also when strings itself failed and printed nothing.
+sl=$(strings -a < "$D") || { echo "STOP: strings could not read the dylib"; exit 5; }
+left=$(printf '%s\n' "$sl" | grep -cE '/Users/|/Volumes/' || true)
+[ "$left" = 0 ] || { echo "STOP: $left build machine path(s) left in the dylib"; printf '%s\n' "$sl" | grep -E '/Users/|/Volumes/' | sort -u | head -5; exit 5; }
 echo "libnvmtl_translate $(git -C "$HERE" rev-parse --short "$REV") sha $(shasum -a 256 "$D" | cut -c1-8) arch $(lipo -archs "$D") rustc $RV"
