@@ -113,6 +113,16 @@ own_dir() {
   local v=$1 m=$2 p c
   eval "p=\$$v"
   if [ -e "$p" ] && [ ! -d "$p" ]; then die "$v ($p) is not a folder"; fi
+  # the marker is written through (the stamps and records in the prefix's, an empty file in the others), so it must be
+  # what this script makes, never a link: a link would carry those writes to wherever it points. And of its kind: the
+  # prefix's a folder, the others a plain file
+  if [ -L "$p/$m" ]; then die "$v ($p): $m is a link, which build/toolchain.sh never makes: name a new or empty folder"; fi
+  if [ -e "$p/$m" ]; then
+    case "$m" in
+      .nm-toolchain) [ -d "$p/$m" ] || die "$v ($p): $m is not a folder, which build/toolchain.sh never makes: name a new or empty folder" ;;
+      *) [ -f "$p/$m" ] || die "$v ($p): $m is not a plain file, which build/toolchain.sh never makes: name a new or empty folder" ;;
+    esac
+  fi
   if [ -d "$p" ] && [ ! -e "$p/$m" ]; then
     c=$(ls -A "$p") || die "cannot read $v ($p)"
     [ -z "$c" ] || die "$v ($p) holds files and was not made by build/toolchain.sh (it has no $m): name a new or empty folder"

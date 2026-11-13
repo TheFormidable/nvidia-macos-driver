@@ -28,6 +28,7 @@ or the arm's own check given a broken result):
                      carry no version is only noted
   foreign            a prefix, work or log folder that holds files and has no marker of the script is refused, untouched
   link               the folders are judged where they really are: a prefix that is a link into the work folder is refused
+  markerlink         a marker (.nm-toolchain, .nm-toolchain-work, .nm-toolchain-logs) that is a link is refused, its target untouched
   record             a record line that is not a file of the prefix reached through real folders (.., absolute, through a
                      link out of the prefix or back into it) removes nothing and stops
   sysbin             xcrun and security come from SYSBIN, never from the caller's PATH
@@ -768,6 +769,47 @@ def main():
             (sb.sb / "empty").mkdir()
             rc, out, err = sb.run(["build", "ninja"], NM_TC_PREFIX=str(sb.sb / "empty"))
             check("an existing empty folder is taken as the prefix", rc == 0, err[-300:])
+
+        if arm("markerlink"):
+            # a marker that is a link: the stamps and records (prefix) and the empty marker file (work, logs) are written
+            # through it, so a link would carry those writes to wherever it points; it must be refused, the target untouched
+            def markerlink_problems(sb, var, marker, script=None):
+                d = sb.sb / ("m-" + var); d.mkdir()
+                out_dir = sb.sb / "outside"; out_dir.mkdir(exist_ok=True)
+                if marker == ".nm-toolchain":
+                    target = out_dir / "state"; write(target / "ninja", "not the script's\n")
+                else:
+                    target = out_dir / (var + ".txt"); target.write_text("not the script's\n")
+                before = tree_state(out_dir)
+                os.symlink(target, d / marker)
+                rc, out, err = sb.run(["build", "ninja"], script=script, **{var: str(d)})
+                p = []
+                if rc != 2 or "is a link" not in err: p.append(f"exit {rc}: {err.strip()[:300]!r}")
+                if diff_states(before, tree_state(out_dir)): p.append(f"outside changed: {diff_states(before, tree_state(out_dir))[:5]}")
+                return p
+            for var, marker in (("NM_TC_PREFIX", ".nm-toolchain"), ("NM_TC_WORK", ".nm-toolchain-work"),
+                                ("NM_TC_LOGS", ".nm-toolchain-logs")):
+                sb = sandbox()
+                p = markerlink_problems(sb, var, marker)
+                check(f"{var} whose {marker} is a link is refused, the link's target untouched", not p, p)
+                sb = sandbox()
+                p = markerlink_problems(sb, var, marker, mutate(sb, "marker-link", [('if [ -L "$p/$m" ]; then die', 'if false; then die')]))
+                control(f"a script without the marker-link test writes through {var}'s {marker}", p)
+            sb = sandbox()
+            d = sb.sb / "wrongkind"; (d / ".nm-toolchain").parent.mkdir(parents=True)
+            (d / ".nm-toolchain").write_text("a file, not the script's folder\n")
+            rc, out, err = sb.run(["build", "ninja"], NM_TC_PREFIX=str(d))
+            check("a prefix whose .nm-toolchain is a file is refused, the file untouched",
+                  rc == 2 and "is not a folder" in err and (d / ".nm-toolchain").read_text().startswith("a file"), (rc, err[-300:]))
+            sb = sandbox()
+            w = sb.sb / "wrongwork"; (w / ".nm-toolchain-work").mkdir(parents=True)
+            rc, out, err = sb.run(["build", "ninja"], NM_TC_WORK=str(w))
+            check("a work folder whose .nm-toolchain-work is a folder is refused", rc == 2 and "is not a plain file" in err, (rc, err[-300:]))
+            sb = sandbox()
+            w = sb.sb / "wrongwork2"; (w / ".nm-toolchain-work").mkdir(parents=True)
+            bad = mutate(sb, "marker-kind", [('      *) [ -f "$p/$m" ] || die', '      *) true || die')])
+            rc, out, err = sb.run(["build", "ninja"], script=bad, NM_TC_WORK=str(w))
+            control("a script without the kind test takes a work folder whose marker is a folder", [] if rc == 0 else ["refused"])
 
         if arm("link"):
             def link_problems(sb, script=None):
