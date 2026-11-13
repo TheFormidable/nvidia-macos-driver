@@ -4,6 +4,7 @@
 # Usage: build_kms620.sh <work dir> (the one build_rm620.sh filled).
 set -uo pipefail
 B=$(cd "${1:?work dir}" && pwd); JOBS=${JOBS:-6}; V=${NV_VERSION:-620.70.06}
+HERE=$(cd "$(dirname "$0")/.." && pwd)
 [ -f "$B/ogkm-$V/.nm-patches" ] || { echo "STOP: $B/ogkm-$V has no record of the patches applied to it; run build_rm620.sh in a new work dir"; exit 2; }
 cd "$B/ogkm-$V/src/nvidia-modeset" || exit 2
 O=_out/Darwin_x86_64; mkdir -p "$O"
@@ -12,13 +13,9 @@ O=_out/Darwin_x86_64; mkdir -p "$O"
 [ -z "$(ls -A "$O")" ] || { mv "$O" "$O.nm-aside" && mkdir -p "$O"; } || exit 2
 make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1 NV_BUILD_USER=build NV_BUILD_HOST=localhost 2>/dev/null > "$B/kms-make-n.txt"
 [ ! -d "$O.nm-aside" ] || { rm -rf "$O" && mv "$O.nm-aside" "$O"; } || exit 2
-grep " -c " "$B/kms-make-n.txt" | python3 -c '
-import sys
-for l in sys.stdin:
-    l = l.rstrip("\n")
-    cc, rest = l.split(" ", 1)
-    tool = {"cc": "clang", "c++": "clang++"}[cc]   # the DisplayPort library is C++
-    print(tool + " -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + rest.replace(" -mcmodel=kernel", "").replace(" -fno-pic", ""))' > "$O/compile_cmds.sh.new"
+# the same transform as the RM's, from the same file (the DisplayPort library is C++: c++ becomes clang++)
+grep " -c " "$B/kms-make-n.txt" | python3 -B "$HERE/build/nv_compile_lines.py" kms > "$O/compile_cmds.sh.new" \
+  || { echo "STOP: the modeset compile commands could not be made from $B/kms-make-n.txt"; rm -f "$O/compile_cmds.sh.new"; exit 2; }
 n=$(wc -l < "$O/compile_cmds.sh.new" | tr -d " ")
 if [ -f "$O/compile_cmds.sh" ] && [ "$n" -lt "$(wc -l < "$O/compile_cmds.sh")" ]; then
   echo "STOP: make -n listed $n modeset compile commands, fewer than the list there; kept that list. Run build_rm620.sh in a new work dir"

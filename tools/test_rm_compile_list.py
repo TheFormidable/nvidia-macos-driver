@@ -133,17 +133,19 @@ def repo(base, old, edit=None):
     """A copy of the scripts under test: build/ and kexts/NVRM (patches, the accel source) as build_rm620.sh expects.
     edit: (old text, new text) for build_rm620.sh, a control's broken copy."""
     r = base / ("repo-old" if old else "repo-edit" if edit else "repo")
+    # files that came after OLD: the old scripts neither have nor call them
+    later = ("build/rm_defines.sh", "build/nv_compile_lines.py")
     for rel in ("build/build_rm620.sh", "build/build_kms620.sh", "build/accel_build.sh", "build/rm_defines.sh",
-                "build/warn_ceiling.sh", "build/warnings.txt"):
+                "build/nv_compile_lines.py", "build/warn_ceiling.sh", "build/warnings.txt"):
         p = r / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        if old and rel != "build/rm_defines.sh":
+        if old and rel not in later:
             text = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD}:{rel}"], capture_output=True, text=True)
             if text.returncode != 0:
                 print(f"SKIP: the old scripts ({OLD}) are not in this clone: run from a full clone")
                 sys.exit(2)
             p.write_text(text.stdout)
-        elif not (old and rel == "build/rm_defines.sh"):
+        elif not (old and rel in later):
             shutil.copy2(ROOT / rel, p)
         if edit and rel == "build/build_rm620.sh":
             text = p.read_text()

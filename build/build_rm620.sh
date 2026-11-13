@@ -2,7 +2,9 @@
 # build_rm620.sh: NVIDIA's RM core 615.71.10 compiled for macOS (libnvkernel.a), the way the 610 archive was made:
 # NVIDIA's own Makefile dry-run with TARGET_OS=Darwin, then cc -> clang -mkernel, -DNV_DARWIN, -fcf-protection=branch,
 # without -mcmodel=kernel / -fno-pic, for macOS 15.0 like the kext that links it (built for the SDK's macOS instead, every
-# object drew a linker note against NVRM's 15.0 target). Four headers learn NV_DARWIN; the patch chain is applied first.
+# object drew a linker note against NVRM's 15.0 target), and without the options the Makefile adds only when the build
+# Mac's own compiler takes them (build/nv_compile_lines.py: the commands are an Apple-silicon Mac's on an Intel Mac too).
+# Four headers learn NV_DARWIN; the patch chain is applied first.
 # Usage: build_rm620.sh <work dir> <pristine open-gpu-kernel-modules-<version> tree>; the work dir gets ogkm-<version>.
 set -uo pipefail
 B=$(cd "${1:?work dir}" && pwd); V=${NV_VERSION:-620.70.06}
@@ -63,14 +65,9 @@ grep -E "^echo .*version\.h" "$B/make-n.txt" > "$B/pre.sh"; bash "$B/pre.sh"
 # NVIDIA's rule bakes user@host and the date into the identity string; the shipped string names no machine or person.
 printf '%s\n' 'const char  NVRM_ID[] = "nvidia id: NVIDIA UNIX Open Kernel Module for x86_64 '"$V"' Release Build (NullMoth Systems)";' \
   'const char *const pNVRM_ID =  NVRM_ID + 11;' > "$O/g_nvid_string.c"
-grep " -c " "$B/make-n.txt" | python3 -c '
-import sys
-for l in sys.stdin:
-    l = l.rstrip("\n")
-    assert l.startswith("cc "), l[:40]
-    l = "clang -arch x86_64 -mmacosx-version-min=15.0 -mkernel -DNV_DARWIN -fcf-protection=branch " + l[3:]
-    l = l.replace(" -mcmodel=kernel", "").replace(" -fno-pic", "")
-    print(l)' > "$O/compile_cmds.sh.new"
+# the compile commands for macOS, the same on an Intel and an Apple-silicon Mac (build/nv_compile_lines.py says why)
+grep " -c " "$B/make-n.txt" | python3 -B "$HERE/build/nv_compile_lines.py" rm > "$O/compile_cmds.sh.new" \
+  || { echo "STOP: the RM's compile commands could not be made from $B/make-n.txt"; rm -f "$O/compile_cmds.sh.new"; exit 2; }
 # never a shorter list than the one there: a list that lost commands would give the kexts the wrong -D flags
 n=$(wc -l < "$O/compile_cmds.sh.new")
 if [ -f "$O/compile_cmds.sh" ] && [ "$n" -lt "$(wc -l < "$O/compile_cmds.sh")" ]; then
