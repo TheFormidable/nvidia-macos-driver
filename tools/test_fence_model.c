@@ -67,6 +67,9 @@ static void say(const char *fmt, ...)
 #define IDX(h) ((h) & 0xFFFu)
 #define SLACK_US 400000ull      /* what a thread may be late by on a busy machine before a time check calls it a failure */
 #define WATCH_NS 50000000ull    /* how long a scene waits for its threads to be where it needs them (frame_watched) */
+/* The same before an application's CLOSE, after its GPU work: a fifth of the 100 ms the table gives such a hold before
+   it ends it and strikes its writer (NVF_CAP_CPU_MS), so that the wait never makes the scene's writer late. */
+#define WATCH_CLOSE_NS (NVF_CAP_CPU_MS * 1000000ull / 5u)
 
 /* ==== Part A: the sleep and the kick as steps, every interleaving ================================================== */
 
@@ -491,7 +494,7 @@ static unsigned long long hold_serial(unsigned long long owner, unsigned long lo
     k_unlock(NULL);
     return s;
 }
-static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt);
+static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt, unsigned long long boundNs);
 /* The producer noticed its channel's error (as NVK does) and rebuilt it: a clean notifier, and the kernel is told. */
 static void rebuild(struct producer *p)
 {
@@ -519,7 +522,7 @@ static void *producer_main(void *arg)
                application's: the GPU does not complete it before the producer sleeps on its own fence. */
             (void)arm1(p->owner, cookie, sid, p->handle, seq);
             serial = hold_serial(p->owner, cookie, sid);
-            if (p->flags & AUTO) { if (!frame_watched(p->watch, sid, serial, 0)) p->unwatched++; }
+            if (p->flags & AUTO) { if (!frame_watched(p->watch, sid, serial, 0, WATCH_NS)) p->unwatched++; }
             else atomic_store(&chGate[ci], 1);
             kick0 = atomic_load(&gKick);
             atomic_store(&chReadyAt[ci], now_ns() + (unsigned long long)p->workUs * 1000ull);
@@ -547,7 +550,7 @@ static void *producer_main(void *arg)
                 int ended;
                 while (!(ended = !hold_serial(p->owner, cookie, sid) && atomic_load(&gKick) >= kickAt) && now_ns() < until) pause_us(20);
                 if (!ended) p->unwatched++;
-            } else if (!frame_watched(p->watch, sid, serial, kickAt)) p->unwatched++;
+            } else if (!frame_watched(p->watch, sid, serial, kickAt, WATCH_CLOSE_NS)) p->unwatched++;
         }
         (void)close1(p->owner, cookie, sid);        /* the application publishes; the compositor's late CLOSE finds nothing */
     }
@@ -622,14 +625,14 @@ static const char *readers_said(unsigned n)
                               name[R[i].lastResult < 8 ? R[i].lastResult : 7], R[i].lastWaitedUs, (unsigned long)atomic_load(&R[i].a.sleeps));
     return s;
 }
-/* Waits (bounded by WATCH_NS) until every one of the first n readers that reads surface `sid` sleeps on the hold of
+/* Waits (at most boundNs) until every one of the first n readers that reads surface `sid` sleeps on the hold of
    `serial`: its latest sleep came after a look that saw that hold pending (only one hold of the surface is open at a
    time in the scenes that ask). Such a reader stays in that wait until the hold ends, and its next look is the end of
    a sleep: its answer is counted as found on an interrupt, a slice or a table change, never as a first look. With
    kickAt, only after interrupt number kickAt, and the sleep must have begun after the last interrupt. 0 = it ran out. */
-static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt)
+static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt, unsigned long long boundNs)
 {
-    const unsigned long long until = now_ns() + WATCH_NS;
+    const unsigned long long until = now_ns() + boundNs;
     for (;;) {
         const unsigned k = atomic_load(&gKick);
         unsigned ok = 0, of = 0;
@@ -735,7 +738,7 @@ static void scen_application(void)
     ready = readers_sum(4, NVRM_FENCE_R_READY);
     bad = readers_sum(4, NVRM_FENCE_R_TIMEOUT) + readers_sum(4, NVRM_FENCE_R_DEAD) + readers_sum(4, NVRM_FENCE_R_BUDGET);
     say("     300 frames of an application: its own fence waits ended READY %lu, BUDGET %lu, told to poll %lu, DEAD %lu;\n"
-        "     readers READY %lu; woken by a table change %llu; frames whose readers were not in place within 50 ms %lu,\n"
+        "     readers READY %lu; woken by a table change %llu; frames whose readers were not in place within 20 ms %lu,\n"
         "     completed before the producer slept %lu\n", P[0].seqReady, P[0].seqBudget, P[0].seqPending, P[0].seqDead,
         ready, Tb.stat[NVF_STAT_DONE_ON_STATE], P[0].unwatched, (unsigned long)atomic_load(&gateLate));
     T("an application's holds end at its CLOSE: its readers got READY, never TIMEOUT, DEAD or BUDGET", ready > 50 && bad == 0);
