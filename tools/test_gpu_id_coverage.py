@@ -49,7 +49,7 @@ def write_tables(d, amdgpu=AMDGPU, i915=I915, pciids=PCIIDS, ivpu=IVPU, amdxdna=
 
 
 def run(p):
-    return subprocess.run([sys.executable, "-I", str(CHECK), "--field", str(p / "field.json"),
+    return subprocess.run([sys.executable, "-I", "-B", str(CHECK), "--field", str(p / "field.json"),
                            "--pciids", str(p / "pciids.h"), "--i915", str(p / "i915.c"), "--xe", str(p / "xe.c"),
                            "--amdgpu", str(p / "amdgpu.c"), "--ivpu", str(p / "ivpu.c"), "--amdxdna", str(p / "amdxdna.c")],
                           capture_output=True, text=True)

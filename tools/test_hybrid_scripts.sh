@@ -4,7 +4,7 @@
 cd "$(dirname "$0")" || exit 1
 fails=0
 arm() { if [ "$2" = 1 ]; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails+1)); fi; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/test_hybrid_scripts.XXXXXX") || exit 2; trap 'rm -rf "$T"' EXIT
 
 # ---- the switch, against a stub nvram that holds boot-args in a file
 cat > "$T/nvram" <<'STUB'
