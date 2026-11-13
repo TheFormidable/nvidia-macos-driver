@@ -319,7 +319,8 @@ def chk_kick_note(p):
             and not re.search(r"\brec_note\s*\(|\bnvRm\w*\s*\(", held)
             and k.count("pthread_mutex_unlock(&nvrm_rec_mtx[R]);") == 1
             and order(k[j:], "pthread_mutex_unlock(&nvrm_rec_mtx[R]);", "if (kpdev != NULL) {",
-                      "rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);"))
+                      "rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);")
+            and not re.search(r"\brctx\b", k[j:]))   # once the mutex is released the context may be freed
 
 
 def chk_asleep(p):
@@ -427,6 +428,8 @@ CHECKS = [
     ("the sleep: the kick's note follows the unlock of the context mutex", chk_kick_note,
      "+   pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+   if (kpdev != NULL) {\n+      rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);\n",
      "+   rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);\n+   pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+   if (kpdev != NULL) {\n"),
+    ("the sleep: nothing of the context is read once the kick has released its mutex", chk_kick_note,
+     'doorbell rung again\\n", R);', 'doorbell rung again\\n", (unsigned)rctx->subPut);'),
     ("the sleep: a stall on a suspended GPU asks RM nothing and looks again", chk_asleep,
      "+   if (nvrm_rec_asleep(in.pm, in.changed, st->now, st->progNs, asleepSince))\n+      return NVRM_WHY_ASLEEP;\n+   ops->action(u, &in);\n",
      "+   ops->action(u, &in);\n+   if (nvrm_rec_asleep(in.pm, in.changed, st->now, st->progNs, asleepSince))\n+      return NVRM_WHY_ASLEEP;\n"),
