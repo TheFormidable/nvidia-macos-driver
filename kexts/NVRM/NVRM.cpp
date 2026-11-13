@@ -3887,10 +3887,16 @@ IOReturn NVRMUserClient::esc(uint32_t cmd, void *data, uint32_t size)
     // while it holds a channel's recovery lock, took a channel that only stood still for the sleep for a stalled one.
     // Behind this connection's own gate it would wait just the same for any other escape of the connection (NVK sends
     // every RM control of a device through one) that is parked at the power gate.
+    // The answer is "suspended" for as long as RM calls are held, which is longer than fGpuPm says: gpuResume marks the
+    // adapter running once the channels are restarted, but opens the power gate only after the NVKMS resume. A process
+    // told "running" in between would ask RM a question that waits for the gate, and then rebuild a channel that is
+    // running again. The gate flag is a plain bool written under the gate's lock and never freed; one load is enough.
     if (cmd == NVRM_ESC_CHAN_NOTE) {
         if (!fOwner || fOwner->fPassDone < 2) return kIOReturnNotReady;
         if (size != sizeof(struct NVRMChanNoteEsc)) return kIOReturnBadArgument;
-        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)fOwner->fGpuPm);
+        SInt32 pm = OSAddAtomic(0, &fOwner->fGpuPm);
+        if (pm == NVRM::kGpuPmRunning && __atomic_load_n(&gNvPmClosed, __ATOMIC_ACQUIRE)) pm = NVRM::kGpuPmSuspended;
+        nvrm_chan_note_handle((struct NVRMChanNoteEsc *)data, (uint32_t)pm);
         return kIOReturnSuccess;
     }
     Gate g(fGate);
