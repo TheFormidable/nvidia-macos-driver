@@ -190,19 +190,27 @@ cmd_watch_stop() {
   [ "$WATCH_HITS" = 0 ]
 }
 
-# deps-plan: the dry run of deps lists every command deps would run (build.sh prints each brew command it would start
-# and the "Homebrew formulas to install" line); before the toolchain's source way is in build.sh, deps on an Intel Mac
-# installs NVK's tools with Homebrew, which compiles for hours into /usr/local.
+# deps-plan: the dry run of deps lists every command deps would run. With tools from source (the default on an Intel
+# Mac) it starts with build.sh's sentence "missing build tools are built by ./build.sh deps from pinned sources into
+# <folder>, without Homebrew"; the Homebrew way prints no such sentence, and before an install it prints the "Homebrew
+# formulas to install" line and each brew command. The Homebrew way is refused even when it would install nothing (a
+# Mac whose Homebrew has every formula): this job is about the default, which takes nothing from Homebrew.
 cmd_deps_plan() {
-  local f=${1:-} hits
+  local f=${1:-} hits src
   [ -n "$f" ] && [ -f "$f" ] || usage
   hits=$(grep -nE 'Homebrew formulas to install|(^|[ /])brew (install|info|unlink|upgrade|link|tap|update)( |$)|run that installer|Type yes to run Homebrew' "$f" || true)
+  src=$(grep -cE '^missing build tools are built by \./build\.sh deps from pinned sources into .*, without Homebrew' "$f" || true)
   if [ -n "$hits" ]; then
     say "deps would call Homebrew on this Mac ($(printf '%s\n' "$hits" | wc -l | tr -d ' ') line(s) of its dry run):"
     printf '%s\n' "$hits" | sed -n 1,20p | sed 's/^/    /'
     return 1
   fi
-  say "deps's dry run names no Homebrew command ($(wc -l < "$f" | tr -d ' ') lines read)"
+  if [ "$src" = 0 ]; then
+    say "deps's dry run does not say that the tools are built from pinned sources without Homebrew (the Homebrew way: NM_TOOLS_FROM, or not an Intel Mac); its first lines:"
+    sed -n 1,5p "$f" | sed 's/^/    /'
+    return 1
+  fi
+  say "deps's dry run builds the tools from pinned sources and names no Homebrew command ($(wc -l < "$f" | tr -d ' ') lines read)"
 }
 
 cmd_toolchain_id() {
