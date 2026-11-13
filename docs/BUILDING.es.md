@@ -85,8 +85,10 @@ archivo global de atributos, y `git init` y `git clone` sin tu carpeta de planti
 escribe en la carpeta de Homebrew, en su caché (`~/Library/Caches/Homebrew`) y en sus registros
 (`~/Library/Logs/Homebrew`) al instalar, y mientras Homebrew compila una fórmula usa una carpeta en `/private/tmp` que
 borra al terminarla; sus preguntas `brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache` y pip
-guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. La tabla completa está en
-[BUILDING.md](BUILDING.md#what-each-command-writes).
+guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con
+`HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew no sigue la instalación con su limpieza propia, que borraría versiones
+anteriores de tus fórmulas (cada 30 días, de todas), fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de
+su prefijo. La tabla completa está en [BUILDING.md](BUILDING.md#what-each-command-writes).
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior
