@@ -150,7 +150,22 @@ extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NMXAccel, "0.1", _start, _stop) }
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVAccel, "0.1", _start, _stop) }
 #endif
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+// This kext never takes back much of what a started accelerator makes: its sysctls (its own data, linked into the
+// kernel's list), the notifiers for the framebuffers that publish later, thread calls kept for the boot (the headless
+// check, the asynchronous flips), all pointing into its code. The kernel unloads a kext with IOService classes by
+// itself, about a minute after its last object is gone (the GPU was unplugged, or the accelerator's start failed after
+// it made one of those), and when `kmutil unload` asks. So from the start of its first accelerator the kext holds one
+// reference on itself, never given back: the kernel then refuses the unload before it terminates anything. The stop
+// function refuses too, for the case that the reference was not obtained. A kext whose accelerator never started
+// (declined in probe or before the family's start succeeded) unloads as before.
+static volatile SInt32 gNvAccelStayLoaded;   // 0 nothing made yet; 1 the reference is held; 2 wanted, not obtained
+static void nvaccelStayLoaded(void)
+{
+    if (!OSCompareAndSwap(0, 2, &gNvAccelStayLoaded)) return;
+    // kmod_info.id is this kext's load tag (what OSKextGetCurrentLoadTag() returns; that one is in libkmod)
+    if (OSKextRetainKextWithLoadTag((OSKextLoadTag)kmod_info.id) == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gNvAccelStayLoaded);
+}
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return OSAddAtomic(0, &gNvAccelStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }
 
 class NVEventMachine : public IOAccelEventMachineFast2 {
     OSDeclareDefaultStructors(NVEventMachine)
@@ -867,6 +882,7 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
+            nvaccelStayLoaded();   // before the first notifier, thread call or sysctl that outlives this accelerator
             // Tells the Metal plugin that NVResource::pageoff waits for a surface WindowServer's GPU is still writing
             // (nvSurfWaitReady). Only then does the plugin mark WindowServer's surfaces newest in VRAM at commit; with an
             // accelerator that does not wait, that mark would let a CPU lock or a copied present read a surface before
@@ -874,7 +890,9 @@ public:
             setProperty("NVAccelSurfaceWait", 1ULL, 32);
 #ifndef NMX_ACCEL
             // Ask NVRM for its surface fence now, so the plugin learns early that this accelerator's waits read it.
-            // Refused here when NVRM's GPU start has not reached the fence yet: the waits ask again later.
+            // NVRM answers this before its own fence has started (the wait it hands out then finds nothing
+            // pending, without a lock), so a refusal here is an NVRM.kext of another release or boot-arg
+            // nvrmfence=0, never a matter of timing. Only an NVRM that is not found yet is left to the waits.
             // The NVIDIA accelerator only. An AMD/Intel one has no NVRM, and looking for one waits up to 100 ms for a
             // service that may never come, in a start() that must not wait (see "No waiting here" above).
             nvFenceAsk(locateNVRM());
@@ -1847,8 +1865,10 @@ static NVRMFenceWaitFn nvFenceAsk(IOService *nvrm)
             ALOG("surface fence: not offered by NVRM (yet) (0x%x) -- waits use the 2.9 marks; asked again at most once a second", (unsigned)r); }
         return nullptr;
     }
-    // The pointer points into NVRM.kext and is never dropped, so that kext must never unload. A kext cannot unload
-    // while one of its objects exists: one reference on the service that answered is taken here and never given back.
+    // The pointer points into NVRM.kext and is never dropped, so that kext must never unload. NVRM.kext holds a
+    // reference on itself from the GPU start that hands this function out; as a second safeguard (an NVRM.kext whose
+    // own reference could not be taken), and because a kext cannot unload while one of its objects exists, one
+    // reference on the service that answered is taken here and never given back.
     // (locateNVRM() already holds the NVRM it finds by matching that way; the one it finds among the PCI device's
     // clients with nvmultigpu=1 it does not hold at all.)
     static volatile UInt32 held;
@@ -1950,7 +1970,7 @@ NVACCEL_CNT(nvaccel_pageoff_locked_not_owner, gCntPoNotOwner, "page-offs with a 
 NVACCEL_CNT(nvaccel_pageoff_locked_pinned,    gCntPoPinned,   "page-offs with a pending surface that waited locked because the driver's own code held the lock");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_already,   gCntPoAlready,   "unlocked page-offs that found system memory already current after the wait and copied nothing");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-offs that copied although another page-off of the resource finished during the wait (that one may have read the GPU's memory too early)");
-NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation after the wait");
+NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation, or used another validity bit, after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
 // A DMA mapper (VT-d) that translates the GPU: the page-off copies through a staging buffer NVRM mapped ("nvSurfDma").
@@ -2049,6 +2069,7 @@ static bool gSysctlInstalled = false;
 static void nvaccelInstallSysctl(void)
 {
     if (gSysctlInstalled) return;
+    nvaccelStayLoaded();   // registered sysctls are never taken back: the kext must not unload from here on
 #ifdef NMX_ACCEL
     // only this one: the NVIDIA accelerator may be loaded too, and owns the debug.nvaccel* names
     sysctl_register_oid(&sysctl__debug_nmxaccel_headless);
@@ -2833,6 +2854,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             // or on the bit a plane's grant recorded (validBit()).
             volatile unsigned short *const v0 = *(unsigned short *volatile *)(r + 0x30);
             const bool wasCurrent = v0 && (v0[0] & validBit());
+            const unsigned short bitAtUnlock = validBit();   // the bit wasCurrent was read on
             const unsigned long long copies0 = nvaccel_pageoff_copies_started(&fPoCopies);
             void *const surf0 = surf; NVVidMemory *const vm0 = vm;
             retain(); holdRes.o = this;
@@ -2862,13 +2884,17 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             cache = *(void *volatile *)(r + 0xe0);
             vm = nvres_vidmem(this);
             surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
-            if (surf != surf0 || vm != vm0) OSAddAtomic64(1, &gCntPoChanged);
+            // A plane's first range may have been granted while the lock was free (the grant takes the same lock): the
+            // resource then marks another validity bit than the one wasCurrent was read on, and the two readings below
+            // would compare different bits. The copy is then made, as with the lock held all along (counted as changed).
+            const bool bitChanged = validBit() != bitAtUnlock;
+            if (surf != surf0 || vm != vm0 || bitChanged) OSAddAtomic64(1, &gCntPoChanged);
             // Another thread may have paged this resource off while the lock was free, and a CPU writer may have written
             // system memory since. When that page-off made this one's copy (it began after this wait had ended), or
             // the family itself made system memory current, copying again would put the GPU's pixels on top of
             // newer ones: report the page-off done and copy nothing. A copy that began before this wait ended may
             // have come too early, and is made again. The rules are in nvaccel_pageoff_recheck.h.
-            {   volatile unsigned short *const v1 = *(unsigned short *volatile *)(r + 0x30);
+            if (!bitChanged) {   volatile unsigned short *const v1 = *(unsigned short *volatile *)(r + 0x30);
                 const bool currentNow = v1 && (v1[0] & validBit());
                 if (nvaccel_pageoff_already_done(&fPoCopies, wasCurrent, currentNow, copies0, copies1)) { OSAddAtomic64(1, &gCntPoAlready); if (out) *out = true; return; }
                 if (currentNow && nvaccel_pageoff_copied_after(&fPoCopies, copies0)) OSAddAtomic64(1, &gCntPoRecopied); }
