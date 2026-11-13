@@ -15,6 +15,7 @@
 #endif
 #include <errno.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,16 +24,39 @@
 #include "nvrm_fence_table.h"
 
 static int fails;
-#define T(name, cond) do { if (!(cond)) { printf("FAIL %s\n", name); fails++; } else printf("ok   %s\n", name); } while (0)
-/* An arm that judges a time. When it fails it prints what was measured, and the failure is repeated with its numbers
-   at the end of the output, where a runner that keeps only the last lines of a failed test (tools/run_all_tests.py
-   keeps 1200 characters) still shows it. */
-static char recap[2048];
+/* Every arm that fails is repeated at the end of the output, where a runner that keeps only the last lines of a failed
+   test (tools/run_all_tests.py keeps 1200 characters) still shows it: an arm that judges a time with what it measured,
+   any other with the summary line of its scene (the counts most of those arms are made of), given once per scene. */
+static char recap[2048], scene[320], sceneRecapped[320];
 static void recap_add(const char *name, const char *measured)
 {
-    const size_t used = strlen(recap);
-    snprintf(recap + used, sizeof(recap) - used, "FAIL %.60s...\n     %s\n", name, measured);
+    size_t used = strlen(recap);
+    snprintf(recap + used, sizeof(recap) - used, "FAIL %.70s...\n", name);
+    used = strlen(recap);
+    if (measured != scene)
+        snprintf(recap + used, sizeof(recap) - used, "     %s\n", measured);
+    else if (scene[0] && strcmp(scene, sceneRecapped) != 0) {
+        snprintf(recap + used, sizeof(recap) - used, "     its scene: %s\n", scene);
+        memcpy(sceneRecapped, scene, sizeof(scene));
+    }
 }
+/* prints a scene's summary and keeps it, on one line, for the recap */
+static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void say(const char *fmt, ...)
+{
+    char s[sizeof(scene)];
+    size_t n = 0;
+    va_list ap;
+    va_start(ap, fmt); vsnprintf(s, sizeof(s), fmt, ap); va_end(ap);
+    fputs(s, stdout);
+    for (const char *p = s; *p && n + 1 < sizeof(scene); p++) {
+        const char c = *p == '\n' ? ' ' : *p;
+        if (c != ' ' || (n && scene[n - 1] != ' ')) scene[n++] = c;
+    }
+    while (n && scene[n - 1] == ' ') n--;
+    scene[n] = 0;
+}
+#define T(name, cond) do { if (!(cond)) { printf("FAIL %s\n", name); recap_add(name, scene); fails++; } else printf("ok   %s\n", name); } while (0)
 #define TM(name, cond, ...) do { \
         if (!(cond)) { char m_[400]; snprintf(m_, sizeof(m_), __VA_ARGS__); printf("FAIL %s\n     measured: %s\n", name, m_); \
                        recap_add(name, m_); fails++; } \
@@ -283,6 +307,7 @@ static const struct nvf_wait_ops KOPS = { k_lock, k_unlock, k_now, k_kickgen, k_
 
 static void world_reset(void)
 {
+    scene[0] = 0;                                     /* a scene's summary is not the next one's */
     for (unsigned i = 0; i < NVF_CHANS; i++) atomic_store(&chReadyAt[i], 0);
     if (atomic_load(&gpuRunning)) {                   /* no interrupt of the last scene may arrive in the next one */
         const unsigned long scans = atomic_load(&gpuScans);
@@ -565,8 +590,8 @@ static void scen_interrupts(void)
     readers_join(3);
     ready = readers_sum(3, NVRM_FENCE_R_READY);
     bad = readers_sum(3, NVRM_FENCE_R_TIMEOUT) + readers_sum(3, NVRM_FENCE_R_DEAD) + readers_sum(3, NVRM_FENCE_R_BUDGET) + readers_sum(3, NVRM_FENCE_R_ABORTED);
-    printf("     400 frames, GPU work 300 us, interrupts delivered: %lu waits ended READY; completions found on an interrupt %llu,\n"
-           "     on a slice %llu; longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
+    say("     400 frames, GPU work 300 us, interrupts delivered: %lu waits ended READY; completions found on an interrupt %llu,\n"
+        "     on a slice %llu; longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
     T("interrupts delivered: readers that waited got READY, never TIMEOUT, DEAD or BUDGET", ready > 100 && bad == 0);
     T("the interrupt is what woke them: ten times more completions found on an interrupt than on a slice",
       Tb.stat[NVF_STAT_DONE_ON_IRQ] > 50 && Tb.stat[NVF_STAT_DONE_ON_SLICE] * 10 <= Tb.stat[NVF_STAT_DONE_ON_IRQ]);
@@ -592,8 +617,8 @@ static void scen_no_interrupts(void)
     readers_join(3);
     ready = readers_sum(3, NVRM_FENCE_R_READY);
     bad = readers_sum(3, NVRM_FENCE_R_TIMEOUT) + readers_sum(3, NVRM_FENCE_R_DEAD) + readers_sum(3, NVRM_FENCE_R_BUDGET);
-    printf("     150 frames, no interrupt: %lu waits ended READY; completions found on an interrupt %llu, on a slice %llu;\n"
-           "     longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
+    say("     150 frames, no interrupt: %lu waits ended READY; completions found on an interrupt %llu, on a slice %llu;\n"
+        "     longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
     T("no interrupt at all: the slice still finds every completion (READY, never TIMEOUT)", IDX(P[0].handle) == 0 && ready > 30 && bad == 0);
     T("found on slices, not on interrupts", Tb.stat[NVF_STAT_DONE_ON_IRQ] == 0 && Tb.stat[NVF_STAT_DONE_ON_SLICE] > 20 && atomic_load(&gKick) == 0);
     T("control: so the comparison of the run with interrupts does fail without them",
@@ -619,9 +644,9 @@ static void scen_application(void)
     readers_join(4);
     ready = readers_sum(4, NVRM_FENCE_R_READY);
     bad = readers_sum(4, NVRM_FENCE_R_TIMEOUT) + readers_sum(4, NVRM_FENCE_R_DEAD) + readers_sum(4, NVRM_FENCE_R_BUDGET);
-    printf("     300 frames of an application: its own fence waits ended READY %lu, BUDGET %lu, told to poll %lu, DEAD %lu;\n"
-           "     readers READY %lu; woken by a table change %llu\n", P[0].seqReady, P[0].seqBudget, P[0].seqPending, P[0].seqDead,
-           ready, Tb.stat[NVF_STAT_DONE_ON_STATE]);
+    say("     300 frames of an application: its own fence waits ended READY %lu, BUDGET %lu, told to poll %lu, DEAD %lu;\n"
+        "     readers READY %lu; woken by a table change %llu\n", P[0].seqReady, P[0].seqBudget, P[0].seqPending, P[0].seqDead,
+        ready, Tb.stat[NVF_STAT_DONE_ON_STATE]);
     T("an application's holds end at its CLOSE: its readers got READY, never TIMEOUT, DEAD or BUDGET", ready > 50 && bad == 0);
     T("the producer slept in the kernel for its own fence and was woken (WAIT_SEQ READY)", P[0].seqReady > 200 && P[0].seqDead == 0 &&
       Tb.stat[NVF_STAT_SEQ_SLEPT] > 100);
@@ -755,10 +780,10 @@ static void scen_mixed(void)
         full += R[i].full; bad += R[i].badStatus;
         if (R[i].maxOverUs > over) over = R[i].maxOverUs;
     }
-    printf("     1 s of four producers and eight readers on six surfaces: %llu holds opened, %lu channel rebuilds; waits NONE %lu,\n"
-           "     READY %lu, DEAD %lu, TIMEOUT %lu, BUDGET %lu; latest return %llu us past its budget; strikes %llu\n",
-           opened, rebuilt, res[NVRM_FENCE_R_NONE], res[NVRM_FENCE_R_READY], res[NVRM_FENCE_R_DEAD], res[NVRM_FENCE_R_TIMEOUT],
-           res[NVRM_FENCE_R_BUDGET], over, Tb.stat[NVF_STAT_STRIKES]);
+    say("     1 s of four producers and eight readers on six surfaces: %llu holds opened, %lu channel rebuilds; waits NONE %lu,\n"
+        "     READY %lu, DEAD %lu, TIMEOUT %lu, BUDGET %lu; latest return %llu us past its budget; strikes %llu\n",
+        opened, rebuilt, res[NVRM_FENCE_R_NONE], res[NVRM_FENCE_R_READY], res[NVRM_FENCE_R_DEAD], res[NVRM_FENCE_R_TIMEOUT],
+        res[NVRM_FENCE_R_BUDGET], over, Tb.stat[NVF_STAT_STRIKES]);
     T("a mixed load ran: holds by the thousand, waits that slept, both faults rebuilt", opened > 1000 && res[NVRM_FENCE_R_READY] > 100 && rebuilt >= 2 &&
       Tb.stat[NVF_STAT_CHAN_REBINDS] == rebuilt);
     T("no wait was refused or answered with anything unknown", full == 0 && bad == 0 && res[NVRM_FENCE_R_PENDING] == 0 && res[NVRM_FENCE_R_ABORTED] == 0 && res[7] == 0);
@@ -796,7 +821,7 @@ int main(void)
     atomic_store(&gpuStop, 1);
     pthread_join(gpu, NULL);
     pthread_join(bh, NULL);
-    if (recap[0]) printf("\nthe time arms that failed, with what they measured:\n%s", recap);
+    if (recap[0]) printf("\nthe arms that failed, with what they measured or the summary of their scene:\n%s", recap);
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails ? 1 : 0;
 }
