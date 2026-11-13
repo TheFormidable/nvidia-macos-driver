@@ -25,6 +25,7 @@ terminal: the runner starts each test as a session of its own, without a termina
 stops what it started. Negative control: the same runner with the test in the runner's own session."""
 import sys
 sys.dont_write_bytecode = True   # run alone, this test writes none for its own imports either (python3 -B, from inside)
+import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os
 import pathlib
@@ -79,7 +80,9 @@ def leak_run(runner_text, prefix):
     any bytecode was written in the tree or there, sys.dont_write_bytecode as the test saw it, output). prefix: run with
     PYTHONPYCACHEPREFIX set to a folder of the scratch tree (sys.pycache_prefix, as Apple's python3 has one), else with none."""
     with tempfile.TemporaryDirectory() as d:
-        root = pathlib.Path(d)
+        # the real path: the runner starts its tests by their real paths, and Python names the bytecode after the path a
+        # module was imported by (on a Mac the temporary folder is under /var, a link to /private/var)
+        root = pathlib.Path(d).resolve()
         (root / "tools").mkdir()
         (root / "tools/run_all_tests.py").write_text(runner_text)
         (root / "tools/test_leak.py").write_text(LEAK)
@@ -161,7 +164,10 @@ pathlib.Path(__file__).resolve().parents[1].joinpath("env.json").write_text(json
 """
 DRIVER = {"NVMTL_X": "1", "NVK_Y": "1", "NVRM_Z": "1", "NAK_DEBUG": "print", "ELFHOST_PATH": "/x", "METAL2VULKAN_DUMP": "1",
           "MESA_LOG_FILE": "/x", "NVENCVT_LOG": "1", "NVDEC_SYNC": "1", "RR_FLAGS": "1", "DLSS_TRACE": "1",
-          "VK_ICD_FILENAMES": "/x", "DYLD_INSERT_LIBRARIES": "/x", "NVK_PATH": "/x"}
+          "VK_ICD_FILENAMES": "/x", "NVK_PATH": "/x"}
+# DYLD_INSERT_LIBRARIES is a driver name as well, but no program may be started with it naming a stand-in: macOS's dyld
+# stops every program that is not protected (Xcode's python3 is not) before it runs. The arm below asks the runner's own
+# function, in this process, instead.
 TESTERS = {"NVENCVT_HEADERS": "/h", "NVDEC_HEADERS": "/d", "NM_OGKM620": "/o", "NM_RMCC_CC": "cc", "CC": "cc", "CXX": "c++",
            "ZSTD": "/z", "BUILD_SH_BASH": "/bin/bash", "NVRM_PRISTINE_OGKM": "/p", "NVMTLX_NOT_OURS": "1"}
 
@@ -186,6 +192,22 @@ arm("what a test takes from the tester does (compilers, header folders, trees, z
     set(TESTERS) | {"HOME", "PATH", "TMPDIR"} <= seen, (sorted(set(TESTERS) - seen), out))
 scrub = "env = test_env(tmp, names)"
 arm("the runner builds each test's environment in one place", RUNNER.count(scrub) == 1)
+spec = importlib.util.spec_from_file_location("nm_runner_under_test", ROOT / "tools/run_all_tests.py")
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)   # defines only: the runner's main() runs only as a script
+names = frozenset(runner.driver_env_names())
+saved = os.environ.get("DYLD_INSERT_LIBRARIES")
+os.environ["DYLD_INSERT_LIBRARIES"] = "/x"   # this process is already running; only what it starts would read it
+try:
+    given, unscrubbed = runner.test_env("/x-tmp", names), runner.test_env("/x-tmp", frozenset())
+finally:
+    if saved is None:
+        del os.environ["DYLD_INSERT_LIBRARIES"]
+    else:
+        os.environ["DYLD_INSERT_LIBRARIES"] = saved
+arm("DYLD_INSERT_LIBRARIES, a driver name, is left out of a test's environment too",
+    "DYLD_INSERT_LIBRARIES" in names and "DYLD_INSERT_LIBRARIES" not in given, sorted(k for k in given if k.startswith("DYLD_")))
+arm("control: without the registry's names the runner would pass it on", unscrubbed.get("DYLD_INSERT_LIBRARIES") == "/x")
 seen, out = env_run(RUNNER.replace(scrub, 'env = dict(os.environ, TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")'))
 arm("control: with the tester's environment as it is, the driver's settings reach the test", set(DRIVER) <= seen, (sorted(set(DRIVER) - seen), out))
 knobs = (ROOT / "plugin/nvmtl_env_knobs.h").read_text()
