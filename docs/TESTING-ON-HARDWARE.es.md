@@ -51,14 +51,16 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
    `== 4. back up what is there now -> ...`; anótalo. También deja una tarea que se ejecuta en cada arranque: cuando el
    driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
-   WindowServer una y otra vez en la pantalla NVIDIA), la tarea devuelve todo desde esa carpeta y reinicia una vez. Se
-   borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un problema que
-   aparezca más tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece
+   WindowServer una y otra vez en la pantalla NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este
+   macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez;
+   `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Se borra sola en el primer arranque después de
+   uno que encendió la pantalla, así que no ayuda con un problema que aparezca más tarde. Ten claro cómo arrancarás
+   el Mac si el escritorio no aparece
    ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; las entradas de 1401 en el selector de arranque
    solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Configuración del Sistema, o Ajustes del
    Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
-   fallos de abajo dejan la imagen del firmware
-   o un escritorio congelado, y entonces los registros se leen por la red.
+   fallos de abajo dejan el Mac sin escritorio
+   o con el escritorio congelado, y entonces los registros se leen por la red.
    Bien: has arrancado el Mac una vez por esa vuelta atrás y has entrado por `ssh`. Mal: alguna de las dos no
    funciona; no sigas.
 2. **Un punto de partida limpio.** `nvram boot-args` muestra la línea `boot-args`: debe tener la línea de instalación
@@ -95,9 +97,12 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 1. **La tarjeta arrancó.** Instala y reinicia. Bien: la ventana de inicio de sesión aparece en la tarjeta NVIDIA;
    `kmutil showloaded --list-only | grep nullmoth` muestra cuatro líneas (NVRM, NVAccel, NVRMFB, NVRMAGDC), cinco
    en macOS 26, donde el instalador agrega su driver de audio `com.nullmoth.NMXAudio` para un controlador HD Audio;
-   `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: se queda la imagen del firmware
-   o la pantalla en negro. Por `ssh`, busca en el registro del kernel `NOT STARTING THE GPU` (la línea da el motivo)
-   y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos.
+   `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: no aparece la ventana de inicio
+   de sesión (la pantalla conserva la última imagen del arranque, o queda en negro), o el Mac se reinicia solo y
+   vuelve a arrancar con 2.9. En el primer caso busca, por `ssh`, en el registro del kernel `NOT STARTING THE GPU` (la
+   línea da el motivo) y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos. En el segundo,
+   `cat /Library/NullMoth/lastgood.log` dice por qué la tarea del instalador devolvió 2.9 (el paso 3 explica el
+   rechazo que puede nombrar); envía ese archivo con `sw_vers`.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -126,12 +131,17 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    - Mal: una línea empieza por `refused:` (nombra la clase y los dos tamaños). Lo que hace cada rechazo:
      - `nvrmfb-layout` rechazado, leído por NVRM antes de arrancar la tarjeta: el registro del kernel tiene
        `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` dice `declined: ...`,
-       se queda la imagen del firmware y el guardián de arranque no cuenta este arranque. `debug.nvrmfb_layout` no
-       existe (el framebuffer no arrancó).
+       y no aparece ningún escritorio: todos los framebuffers del driver están construidos sobre esas clases, también
+       el que muestra un escritorio con el driver apagado. El guardián de arranque no cuenta este arranque. La tarea
+       del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
+       minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log`,
+       devuelve el driver anterior y reinicia, así que vuelves a estar en 2.9 y ese archivo es lo que hay que enviar.
+       Sin la tarea (una primera instalación, o un driver que ya mostró su pantalla en un arranque anterior) no se
+       devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o quites el driver.
+       `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
      - El mismo rechazo leído solo después de que NVRM arrancara: `auto-go: NOT STARTING THE GPU: the framebuffer
-       refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Se queda la
-       imagen del firmware y este arranque sí cuenta: dos arranques así seguidos sin un escritorio que se mantenga
-       apagan el driver, y la tarea del instalador de la sección 1, paso 1, devuelve el driver anterior.
+       refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Tampoco aparece
+       ningún escritorio, este arranque sí cuenta, y la tarea del instalador hace lo mismo que arriba.
      - `nvaccel-layout` rechazado: `NVAccel: does not attach: ... the display runs without acceleration` y, de NVRM,
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` vale 6, no existe
        `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
@@ -141,9 +151,11 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
      - `nvagdc-layout` rechazado: `debug.nvrmfb_agdc` vale -6 y `debug.nvrmfb_agdc_layout` 2; el escritorio funciona
        sin AppleGraphicsDeviceControl, y el arranque cuenta como bueno.
 
-     Envía la salida de las tres órdenes con `sw_vers`. Después arranca una vez con `nvlayout=0` solo para ver si
+     Envía la salida de las tres órdenes con `sw_vers` (tras un rechazo del framebuffer que la tarea deshizo, envía
+     en su lugar `/Library/NullMoth/lastgood.log`). Después arranca una vez con `nvlayout=0` solo para ver si
      funciona lo demás (la comprobación se sigue haciendo, y su línea empieza entonces por
-     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque).
+     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si la
+     tarea ya devolvió 2.9, eso significa instalar de nuevo con `nvlayout=0` ya puesto en los argumentos de arranque.
 4. **Tiempo de arranque.** `sysctl debug | grep nvrm_boot_` da cada fase del arranque en milisegundos. Bien: el
    escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
    Mal: aparece más tarde, o 7 con una pantalla conectada; arranca una vez con `-nvrmoldwaits` y envía los dos juegos
