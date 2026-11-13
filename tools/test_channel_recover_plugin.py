@@ -16,7 +16,9 @@ This test holds what only the plugin's glue in plugin/nvmtl_vk.c and plugin/NVMT
   the loss       a dropped command buffer is not a loss: no g_state change, no nvmtl_vk_note_loss, no loss file; the
                  loss line names NVK's kind of loss when the statistics export exists
   the clock      the fence wait of nvmtl_vk_submit_finish is timed on awake time (CLOCK_UPTIME_RAW)
-  the uploads    an async texture upload whose copy was dropped is made again from its staging buffer
+  the uploads    an async texture upload whose copy was dropped is made again from its staging buffer, but only
+                 while the image is still in the layout that copy left (nothing used it for writing since), and
+                 never for an image that is being freed
   Metal          -1 completes the command buffer with an error and is not quarantined; the error completion closes the
                  surface fence holds first (nvmtl_busy_mark_done), so a hold armed on dropped work cannot stay open
 
@@ -128,9 +130,15 @@ def chk_uploads(vk):
     fin = body(vk, "static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)")
     redo = body(vk, "static void nvmtl_asyncup_redo(nvk_image *img, nvmtl_asyncup *au)")
     wr = body(vk, "int nvmtl_vk_image_write_region_level_layer(")
+    gone = body(vk, "static void nvmtl_vk_image_destroy_now(nvk_image *i)\n{")
+    guard = "if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {"
+    copy = "pvkCmdCopyBufferToImage(c.cb, (VkBuffer)au->stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &au->bic);"
     return ("if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);" in fin
             and fin.index("nvmtl_asyncup_redo(") < fin.index("nvmtl_vk_buffer_destroy(&au->stage);")
-            and "pvkCmdCopyBufferToImage(c.cb, (VkBuffer)au->stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &au->bic);" in redo
+            and copy in redo
+            and guard in redo and redo.index(guard) < redo.index("nvmtl_vk_cmd_begin(") < redo.index(copy)
+            and "static void nvmtl_vk_image_upload_drain(nvk_image *img) { nvmtl_asyncup_finish(NULL, nvmtl_asyncup_take(img)); }" in vk
+            and "nvmtl_vk_image_upload_drain(i);" in gone and "nvmtl_vk_image_upload_barrier(" not in gone
             and "nvmtl_vk_submit_wait_at(&c, " in redo
             and "au->bic = bic;" in wr and wr.index("au->bic = bic;") < wr.index("nvmtl_vk_submit_begin_at(c, &au->infl")
             and "nvmtl_asyncup_finish(nvmtl_asyncup_take(" not in vk)
@@ -202,6 +210,8 @@ run("the fence wait runs on awake time", chk_clock, (VK,), [
 run("an async texture upload whose copy was dropped is made again before its staging buffer goes", chk_uploads, (VK,), [
     ("the answer ignored", (sub(VK, "if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);", "nvmtl_vk_submit_finish(&au->infl);"),)),
     ("the region not kept", (sub(VK, "        au->bic = bic;", "       "),)),
+    ("made again over work that came after it", (sub(VK, "    if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {\n", "    if (0) {\n"),)),
+    ("made again for an image being freed", (sub(VK, "    nvmtl_vk_image_upload_drain(i);   // an async upload", "    nvmtl_vk_image_upload_barrier(i);   // an async upload"),)),
 ])
 run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed first", chk_metal, (EV,), [
     ("the holds closed after the marks", (sub(EV, "    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error\n    NSDictionary *marks = cb->_busyMarks;\n",

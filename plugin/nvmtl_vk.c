@@ -9181,11 +9181,12 @@ void nvmtl_vk_image_destroy(nvk_image *i)
     }
     nvmtl_vk_image_destroy_now(i);
 }
+static void nvmtl_vk_image_upload_drain(nvk_image *img);
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
     if (i->sparse) { free(i->sparse); i->sparse = NULL; }
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
-    nvmtl_vk_image_upload_barrier(i);   // an async upload must finish before we free this image's memory (#96)
+    nvmtl_vk_image_upload_drain(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
     nvmtl_dlss_views_drop((VkImage)i->img);   // DLSS's own views of this image go with it
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
@@ -9893,8 +9894,15 @@ static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
 // The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
 // the staging buffer, which still holds the bytes, and wait. The layouts are named explicitly rather than through
 // img_to: draws queued after the dropped copy may have sampled the image, and this copy must wait for them.
+// Only while the image is still in the layout the copy left it in: any other layout means that a render pass, a copy or
+// a storage use came after the copy, and such work may have written the image since; the old upload made again now would
+// overwrite what it wrote. The image then keeps what it holds, as when nothing finished the upload.
 static void nvmtl_asyncup_redo(nvk_image *img, nvmtl_asyncup *au)
 {
+    if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        nvlog("vk: tex upload async: the copy a channel rebuild dropped is not made again - the image was used since (layout %u), the image keeps what it held", img->layout);
+        return;
+    }
     nvk_cmdbuf c;
     if (nvmtl_vk_cmd_begin(NULL, &c)) { nvlog("vk: tex upload async: the copy a channel rebuild dropped cannot be made again (no command buffer) - the image keeps what it held"); return; }
     const VkImageSubresourceRange r = { nvmtl_barrier_aspect(img), 0, img->mips ? img->mips : 1, 0, img->layers ? img->layers : 1 };
@@ -9921,8 +9929,10 @@ static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
 }
-// Public guard for the consumers (readback, surface-out, migration, destroy): finish a pending upload first.
+// Public guard for the consumers (readback, surface-out, migration): finish a pending upload first.
 void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img)); }
+// The same for an image about to be freed: its upload is finished, and a copy a channel rebuild dropped is not made again.
+static void nvmtl_vk_image_upload_drain(nvk_image *img) { nvmtl_asyncup_finish(NULL, nvmtl_asyncup_take(img)); }
 
 int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level)
