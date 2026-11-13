@@ -1277,7 +1277,9 @@ cmd_deps() {
       # software) and old downloads. None of that is build.sh's to remove.
       for f in "${want[@]}"; do
         say "brew install $f"
-        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f" || die "brew install $f failed"
+        # an earlier install of this run may have linked a Python already: it is unlinked before the stop as well
+        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f" ||
+          { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }
       done
       deps_python3_back "$py3_before" "$kegs_before"
       shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""
