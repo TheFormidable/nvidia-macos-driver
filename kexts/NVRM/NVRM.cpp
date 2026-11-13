@@ -229,6 +229,7 @@ private:
     void rtd3Hold(uint32_t waitMs);
     void rtd3Release();
     bool rtd3Held();
+    bool rtd3PmIs(SInt32 want) { return OSAddAtomic(0, &fGpuPm) == want; }   // inside a monitor call: the GPU's state now
     volatile SInt32 fRtd3Hold = 0;       // 1 from setPowerState(0), or systemWillShutdown, until the wake
     thread_t     fRtd3Waker = THREAD_NULL;   // the thread inside the wake: its own call to switch the power resource on
     void pciSaveForSleep();
@@ -3033,11 +3034,17 @@ void NVRM::rtd3Arm()
     if (!OSCompareAndSwap(0, 1, &armed)) return;   // the first GPU only: nv_rtd3_arm() keeps the first calls it is given
     __atomic_store_n(&gNvRtd3Gpu, this, __ATOMIC_SEQ_CST);
     nv_gate_open(&gNvRtd3Gate);
+    // A poll's suspend and its power-off, or its power-on and its resume, are two calls, and a whole system sleep and
+    // wake can pass between them (the hold is given back at the end of the wake). So each call also looks at the GPU's
+    // state inside the gate: the suspend path only for a running GPU, the resume path and the power-off only for a
+    // suspended one. Without that, a power-off that came after the wake switched the slot off under a running GPU, and
+    // a resume ran the RM's resume on a GPU that was running. A GPU whose wake failed is left alone. Power-on is always
+    // allowed (it does nothing unless the resource is off). tools/test_rtd3_hold.cpp runs this against a model.
     const struct nv_rtd3_ops ops = {
         NULL, rtd3Heads, rtd3Clients,
-        [](void *) { if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held()) n->gpuSuspend(); rtd3Leave(); } },
-        [](void *) { if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held()) n->gpuResume(); rtd3Leave(); } },
-        [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held()) ok = nv_rtd3_power_off(rtd3Acpi(n)); rtd3Leave(); } return ok; },
+        [](void *) { if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmRunning)) n->gpuSuspend(); rtd3Leave(); } },
+        [](void *) { if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmSuspended)) n->gpuResume(); rtd3Leave(); } },
+        [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmSuspended)) ok = nv_rtd3_power_off(rtd3Acpi(n)); rtd3Leave(); } return ok; },
         [](void *) { int ok = 0; if (NVRM *n = rtd3Enter()) { if (!n->rtd3Held()) ok = nv_rtd3_power_on(rtd3Acpi(n)); rtd3Leave(); } return ok; },
     };
     nv_rtd3_arm(&ops);

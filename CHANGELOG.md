@@ -168,6 +168,24 @@ left set.
 - NVRM counts every Xid the RM logs (`debug.nvrm_xid_count`, `debug.nvrm_xid_last`) and what NVK did about faulted or
   stalled channels (`debug.nvrm_chan_*`). The kext only counts and answers the GPU's power state; no new switch.
 - The sleep line says how much VRAM the RM wrote to its save file during standby.
+- NVRM.kext keeps itself loaded once a start has got past the framebuffer's class check on a card. Nothing it
+  registers (sysctls, its work-queue thread, timers) was ever taken back, and the kernel unloads a driver by itself
+  about a minute after its last object is gone (a card the DMA check declined, an unplugged card): the next
+  `sysctl -a` then walked memory that was gone. `kmutil unload -b com.nullmoth.NVRM` is now refused with the kext in
+  use. Installing, updating and removing the driver are not affected (they take effect at the restart).
+- `nvrmctl go 2` after a second pass that failed once its interrupt source was set up is refused, instead of setting
+  up a second interrupt source over the first (the first was then never removed and delivered interrupts to freed
+  state when the GPU stopped).
+- With `nvrtd3=1`, stopping a GPU (unplug) first takes it away from the idle power-down monitor, which could otherwise
+  suspend or resume the GPU while it was being torn down, and went on calling into an object that had been freed.
+- With `nvrtd3=1`, system sleep and shutdown no longer race the idle power-down monitor. Its polls went on during both
+  and ran the GPU's own suspend and resume on another thread: the GPU could be suspended twice at once, resumed while
+  the system went to sleep (it then woke marked running on a slot that had lost power, and was not resumed), or have
+  its power resource switched off under the system's resume. The system now holds the GPU from the start of its sleep
+  until the end of its wake, and for good at shutdown; the monitor's calls do nothing meanwhile, except the power-on
+  that the wake itself asks for. The monitor also suspends only a running GPU and resumes or powers off only a
+  suspended one, so a poll that a sleep and wake cut in two no longer switches the slot off under a running GPU, and a
+  GPU whose wake failed is left alone.
 
 #### Switches and reports
 - `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a

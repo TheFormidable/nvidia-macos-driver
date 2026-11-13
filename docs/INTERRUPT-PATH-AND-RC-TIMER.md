@@ -219,7 +219,11 @@ nothing: a power-off it asks for fails, and the poll then counts the GPU idle fr
 power resource's switch-on that the wake itself asks for, through the monitor's call, before the GPU's resume. Without
 the hold a poll could suspend the GPU a second time while the system did, resume it while the system went to sleep
 (it then woke marked running on a slot that had lost power), or switch the power resource off under the system's
-resume.
+resume. The hold alone does not cover a poll that is cut in two: its suspend and its power-off (or its power-on and
+its resume) are separate calls, and a whole sleep and wake can pass between them. So each call also looks at the GPU's
+state: the suspend path runs only on a running GPU, the resume path and the power-off only on a suspended one, and a
+GPU whose wake failed is left alone. `tools/test_rtd3_hold.cpp` runs the hold and these checks against a model of the
+GPU, with a negative control for each.
 
 ## The kext stays loaded
 

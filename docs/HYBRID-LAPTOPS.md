@@ -223,7 +223,8 @@ per-process GPU-time figure is not published by the accelerator and is an open f
 ## Idle power-down
 
 The opt-in D3cold monitor (boot-args `nvrtd3=1` and `nvrtd3res=<ACPI path>`, `kexts/NVRM/nv_rtd3.cpp`) powers the GPU's
-power resource off after 60 s with no lit head and no client. On a hybrid laptop it now counts the right things:
+power resource off after 60 s with no lit head and no client. During system sleep and shutdown it does nothing: the
+system's own sleep and wake suspend and resume the GPU then. On a hybrid laptop it now counts the right things:
 
 - Clients include the user clients of the accelerator, where every Metal application attaches (before, only clients of the
   resource-manager service were counted, so a running app looked like an idle GPU).
