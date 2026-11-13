@@ -4,8 +4,9 @@ Status: written from a reading of this tree against NVIDIA's open kernel modules
 GPU yet.** Apple's compiler has built this code as it stands at commit 3933ff6, every change below included: on one
 Intel Mac (12 threads, macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4
 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
-export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
-`tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in the
+export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on
+the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`); `tools/test_irq_timer_wiring.py` checks the
+source text. Every change below is **on by default**; the five in the
 table below have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
 the order of the teardown, the hold against the idle power-down monitor, the kext staying loaded) have none. The old
 spellings `nvrmbhthread=1` and `nvrmrctimer=1` are still accepted and mean the default.
