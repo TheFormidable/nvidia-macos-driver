@@ -100,16 +100,19 @@ static void nv_rtd3_poll(thread_call_param_t, thread_call_param_t)
     thread_call_enter_delayed(g_call, dl);
 }
 
-extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops)
+// 1 when the poll was armed by this call; 0 when nothing will ever make a call through ops (nvrtd3 not 1, no nvrtd3res,
+// armed before, or no thread call), so the caller can close what it opened for those calls.
+extern "C" int nv_rtd3_arm(const struct nv_rtd3_ops *ops)
 {
     nv_rtd3_init();
-    if (!g_rtd3.enabled || !g_rtd3.have_resource || g_call) return;
+    if (!g_rtd3.enabled || !g_rtd3.have_resource || g_call) return 0;
     g_ops = *ops;
     g_call = thread_call_allocate(nv_rtd3_poll, nullptr);
-    if (!g_call) return;
+    if (!g_call) return 0;
     uint64_t dl; clock_interval_to_deadline(1000, kMillisecondScale, &dl);
     thread_call_enter_delayed(g_call, dl);
     kprintf("NVRM-xnu: RTD3 armed (idle %u s, resource %s)\n", NV_RTD3_IDLE_SECONDS, g_res);
+    return 1;
 }
 
 /* System wake: the resource must be on before the driver's own resume touches the GPU. */
