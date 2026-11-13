@@ -17,10 +17,12 @@ NVK_CHANNEL_RECOVER=0 runs the 2.9 code; NVK_FAULT_INJECT=<stall|fake|reset|mmu>
 Both are read from the environment or from /Library/GPUBundles/nvmtl/nvrm610.conf; a release build sees only the file.
 tools/test_channel_recover.py holds the wiring.
 A fault on any copy engine is a channel loss that is rebuilt: the upload channel of an RTX 50 card runs on copy
-engine 4, whose fault is Xid 71, and 2.9 lost the device on it. The patch also changes 2.9's nvrm610.conf reader
-(src/nouveau/vulkan/nvmtl_cfg.h): it keeps the last line that begins with a name, as the Metal plugin's reader
-does, where 2.9 kept the first, so a shipped line or a comment above the user's own line does not win in a process
-that loads NVK without the plugin; the header's comment lists where it still differs from the plugin's reader.
+engine 4, whose fault is Xid 71, and 2.9 lost the device on it. A channel that only copies replays all its work,
+the flush that was running included, and a fault inside that replayed work ends the device.
+The patch also changes 2.9's nvrm610.conf reader (src/nouveau/vulkan/nvmtl_cfg.h): it keeps the last line that
+begins with a name, as the Metal plugin's reader does, where 2.9 kept the first, so a shipped line or a comment
+above the user's own line does not win in a process that loads NVK without the plugin; the header's comment lists
+where it still differs from the plugin's reader.
 Leaving this patch out of the chain also brings back the first-line-wins reader.
 
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
@@ -3221,10 +3223,10 @@ index 0000000..35ee792
 +#endif
 +#endif
 diff --git a/src/nouveau/vulkan/nvmtl_cfg.h b/src/nouveau/vulkan/nvmtl_cfg.h
-index 462b2a7..ce554fe 100644
+index 462b2a7..14442c9 100644
 --- a/src/nouveau/vulkan/nvmtl_cfg.h
 +++ b/src/nouveau/vulkan/nvmtl_cfg.h
-@@ -1,27 +1,45 @@
+@@ -1,27 +1,46 @@
  /* r3-cfgall: every NVK/NVRM/NVMTL switch also reads /Library/GPUBundles/nvmtl/nvrm610.conf
 - * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang. */
 + * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang.
@@ -3232,12 +3234,13 @@ index 462b2a7..ce554fe 100644
 + * the user's own line no longer silently beats it, and a "# NAME=..." comment does not count, because the match
 + * must start a line. It differs from the plugin's reader (nvmtl_conf_read_file, plugin/NVMTLObjects.m) in four ways:
 + * - it looks only at the first 8191 bytes of the file, where the plugin reads the file whole, so a name whose only
-+ *   line sits past that point is not seen here;
++ *   line sits past that point is not seen here (nor one after a NUL byte, where this reader stops);
 + * - a line must begin with "NAME=" exactly: a line with blanks before the name or between the name and the "=" is
 + *   not taken here, where the plugin skips those blanks;
 + * - the value is everything up to the newline, a trailing CR or blanks included, where the plugin drops them (neither
 + *   reader drops blanks after the "=");
-+ * - the value keeps at most 63 bytes, where the plugin reads up to 511 bytes of a line.
++ * - the value keeps at most 63 bytes, where the plugin reads a line in pieces of up to 511 bytes and takes each
++ *   further piece of a longer line as a line of its own.
 + * The installed file is far shorter than 8191 bytes, and in a Metal process the plugin has already set the variable,
 + * so getenv answers before this reader is reached. */
  #ifndef NVMTL_CFG_H
