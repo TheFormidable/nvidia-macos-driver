@@ -78,10 +78,17 @@ def generation_bumps_on_every_head_change(src):
 
 
 def slot_scoped_to_escape(src):
-    m = re.search(r'IOReturn NVRMUserClient::esc\(uint32_t cmd, void \*data, uint32_t size\)\n\{\n    Gate g\(fGate\);\n(.*?)\n', src)
+    # The channel note may be answered before the gate: it maps nothing and calls no RM (it returns from its block).
+    m = re.search(r'IOReturn NVRMUserClient::esc\(uint32_t cmd, void \*data, uint32_t size\)\n\{\n'
+                  r'(?:(?:    //[^\n]*\n)*    if \(cmd == NVRM_ESC_CHAN_NOTE\) \{\n((?:        [^\n]*\n)*?)    \}\n)?'
+                  r'    Gate g\(fGate\);\n(.*?)\n', src)
+    note = m.group(1) if m and m.group(1) else ''
+    if m and not (note == '' or (re.search(r'\breturn kIOReturnSuccess;\n$', note)
+                                 and not re.search(r'\brm_\w+\s*\(|[Mm]ap\w*\s*\(', note))):
+        return False
     scope = re.search(r'struct NvMapPendingScope \{ NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} '
                       r'~NvMapPendingScope\(\) \{ mapPendingClearThread\(\); \} \};', src)
-    return bool(m and 'NvMapPendingScope pendingScope;' in m.group(1) and scope)
+    return bool(m and 'NvMapPendingScope pendingScope;' in m.group(2) and scope)
 
 
 arms = [
