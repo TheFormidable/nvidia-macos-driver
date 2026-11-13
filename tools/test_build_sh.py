@@ -2160,6 +2160,15 @@ def basepkg_problems(script_edit=None):
             what = version.strip() if version else "unknown (it has no VERSION)"
             if not [i for i in named if f"is release {what}, which the package step refuses" in i] or rc == 0:
                 p.append(f"a folder of release {what} is not named as a problem (exit {rc}): {named}")
+    # a VERSION that is not a plain file (here a pipe nothing writes to) is not read: doctor would wait for ever. The
+    # folder is named as of no known release
+    d = sb.home / "base-fifo"
+    d.mkdir()
+    os.mkfifo(d / "VERSION")
+    rc, out = sb.run("doctor", extra={"NM_BASE_PACKAGE": str(d)}, timeout=120)
+    named = [i for i in doctor_items(out) if "~/base-fifo is release unknown" in i]
+    if rc in (0, 124) or not named:
+        p.append(f"a base folder whose VERSION is a pipe: exit {rc}, named {named}: {out[-300:]}")
     tgz = sb.home / "nullmoth-nvidia-2.8.tar.gz"
     tgz.write_text("not a tarball: doctor must not open it\n")
     rc, out = sb.run("doctor", extra={"NM_BASE_PACKAGE": str(tgz)})
@@ -2177,6 +2186,9 @@ def arm_basepkg():
              basepkg_problems(('  elif [ -d "$NM_BASE_PACKAGE" ]; then\n', '  elif false; then\n')))
     negative("a doctor that reads a tarball as if it were a folder",
              basepkg_problems(('  elif [ -d "$NM_BASE_PACKAGE" ]; then\n', '  elif [ -e "$NM_BASE_PACKAGE" ]; then\n')))
+    negative("a doctor that reads whatever VERSION is",
+             basepkg_problems(('v=""; if [ -f "$NM_BASE_PACKAGE/VERSION" ]; then v=$(head -c 256 "$NM_BASE_PACKAGE/VERSION"',
+                               'v=""; if true; then v=$(cat "$NM_BASE_PACKAGE/VERSION"')))
 
 
 def arm_llvm23():
