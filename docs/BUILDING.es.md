@@ -82,8 +82,10 @@ crea un archivo temporal propio (y una carpeta a su lado para probar `patch`) en
 borra al terminar; `xcrun` guarda su caché de búsqueda (`xcrun_db`) en esa misma carpeta temporal, como hace siempre que
 se ejecuta una herramienta de Xcode. `fetch` ejecuta git sin tus hooks (`core.hooksPath`), sin monitor de archivos ni
 archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). `deps`
-escribe en la carpeta de Homebrew y en su caché (`~/Library/Caches/Homebrew`) al instalar, pero sus preguntas
-`brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache`. La tabla completa está en
+escribe en la carpeta de Homebrew, en su caché (`~/Library/Caches/Homebrew`) y en sus registros
+(`~/Library/Logs/Homebrew`) al instalar, y mientras Homebrew compila una fórmula usa una carpeta en `/private/tmp` que
+borra al terminarla; sus preguntas `brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache` y pip
+guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. La tabla completa está en
 [BUILDING.md](BUILDING.md#what-each-command-writes).
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
