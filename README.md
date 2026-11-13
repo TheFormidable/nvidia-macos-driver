@@ -164,7 +164,8 @@ kmutil showloaded --list-only | grep nullmoth
 system_profiler SPDisplaysDataType | head -20
 ```
 
-The first shows 4 lines; the second shows your GeForce with Metal: supported.
+The first shows 4 lines (5 on macOS 26 with an HD Audio controller, where the installer adds its audio driver,
+`com.nullmoth.NMXAudio`); the second shows your GeForce with Metal: supported.
 
 ## Dual boot
 
