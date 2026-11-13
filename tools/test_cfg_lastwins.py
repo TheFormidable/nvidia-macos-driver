@@ -14,7 +14,11 @@ controls WITHOUT changing the path the driver uses, builds a tiny C program arou
   - an empty file / no file at all                      -> no value
 
 The negative control is the reader BEFORE this change (reconstructed from the same hunk): it takes the first match
-and gives up at a comment, so it must get the first two cases wrong."""
+and gives up at a comment, so it must get the first two cases wrong.
+
+The driver's own file (/Library/GPUBundles/nvmtl/nvrm610.conf, which a machine with the driver installed has) is never
+opened: a header in which the redirection would leave a read of it is not built, and that is an arm of its own. A
+reader that does not compile fails the test; only a machine without a C compiler skips the part that runs it."""
 import os
 import pathlib
 import re
@@ -73,17 +77,30 @@ int main(int argc, char **argv)
 """
 
 
-def build(header_text, d):
-    """Write the header (its real path replaced by the test's) and the harness, compile, return the exe path or None."""
-    cc = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
-    if cc is None:
+def compiler():
+    return shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+
+
+def redirected(header_text):
+    """The header with the driver's conf path replaced by the test's, or None when that would leave a read of the real
+    file: the path must be there as one string literal, and none may be left afterwards."""
+    if header_text.count(REAL_PATH) != 1:
         return None
-    (d / "nvmtl_cfg.h").write_text(header_text.replace(REAL_PATH, "cfg_test_path()"))
+    out = header_text.replace(REAL_PATH, "cfg_test_path()")
+    return None if re.search(r'"[^"\n]*/Library/', out) else out
+
+
+def build(cc, header_text, d):
+    """Write the redirected header and the harness and compile them -> (the program or None, the compiler's words)."""
+    text = redirected(header_text)
+    if text is None:
+        return None, "the header does not name the driver's conf path as exactly one string literal: not built"
+    (d / "nvmtl_cfg.h").write_text(text)
     (d / "h.c").write_text(HARNESS)
     exe = d / "h"
     b = subprocess.run([cc, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-I", str(d), str(d / "h.c"),
                         "-o", str(exe)], capture_output=True, text=True)
-    return exe if b.returncode == 0 else None
+    return (exe, "") if b.returncode == 0 else (None, b.stderr)
 
 
 def lookup(exe, name, conf_text, d, write_file=True):
@@ -127,11 +144,20 @@ def main():
     arm("the new reader documents the 8191-byte limit it keeps (differs from the plugin, which reads the file whole)",
         "first 8191 bytes" in after and "reads the file whole" in after)
 
+    arm("the test can point the reader at its own file: the header names the driver's path once, as a string",
+        redirected(after) is not None and redirected(before) is not None)
+    arm("control: a header that reads the driver's path a second time is not built",
+        redirected(after + "\nstatic const char *second = " + REAL_PATH + ";\n") is None)
+
+    cc = compiler()
+    if cc is None:
+        print("SKIP the host reader test: no C compiler")
+        return fails
     with tempfile.TemporaryDirectory() as td:
         d = pathlib.Path(td)
-        exe = build(after, d)
+        exe, said = build(cc, after, d)
+        arm("the reader builds on the host with -Wall -Wextra -Werror", exe is not None, said)
         if exe is None:
-            print("SKIP the host reader test: no C compiler")
             return fails
         for desc, name, conf, expect, _ in CASES:
             got = lookup(exe, name, conf, d, write_file=conf is not None)
@@ -140,14 +166,15 @@ def main():
         # negative control: the reader before this change must get the first two cases wrong.
         oldd = d / "old"
         oldd.mkdir()
-        oldexe = build(before, oldd)
-        arm("the old reader still builds (negative control)", oldexe is not None)
+        oldexe, said = build(cc, before, oldd)
+        arm("the old reader still builds (negative control)", oldexe is not None, said)
         if oldexe is not None:
             for desc, name, conf, expect, is_first_two in CASES:
                 if not is_first_two:
                     continue
                 got = lookup(oldexe, name, conf, oldd, write_file=conf is not None)
-                arm(f"control: the old reader gets this wrong: {desc}", got != expect, f"old gave {got!r} (driver wants {expect!r})")
+                arm(f"control: the old reader gets this wrong: {desc}", got != expect,
+                    f"old gave {got!r} (driver wants {expect!r})")
     return fails
 
 
