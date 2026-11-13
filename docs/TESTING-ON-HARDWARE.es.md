@@ -30,7 +30,10 @@ cada tipo de fallo.
   `log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"'`. Una aplicación lanzada desde Terminal con
   `NVMTL_PROCESS_ENV=1` escribe `/tmp/nvmtl.log` (o `nvmtl.log` en su `$TMPDIR` cuando no puede escribir en `/tmp`).
   Todo paso de abajo que busca una línea "en `nvmtl.log`" necesita un lanzamiento así; para WindowServer, usa el
-  registro del sistema.
+  registro del sistema. Las líneas propias de NVK (`nvk-reason: E ...` y `nvk-reason: W ...`) siguen una regla propia:
+  sus errores y las dos líneas de una reconstrucción de canal (`nvrm channel slot N rebuilt after ...`,
+  `nvrm channel slot N not rebuilt: ...`) llegan al registro del sistema; sus demás avisos no, contengan las palabras
+  que contengan.
 - **NVK** (la capa Vulkan bajo el plugin) imprime sus líneas, que empiezan por `nvrm:`, en la salida de error de la
   aplicación: lanza la aplicación desde Terminal para verlas.
 
