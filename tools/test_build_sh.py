@@ -122,6 +122,8 @@ case "$role" in
             in=$(cat); case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@"; exit ;; esac
             case " $* " in *" -f "*|*" --force "*) exit 0 ;; esac
             rec patch-asked "$@"; exit 1 ;;
+  # build.sh's wait for a lock that has no owner yet: the run that made it writes its owner meanwhile
+  sleepowner) l=$(cat "$S/lockdir"); [ -f "$l/owner" ] || printf 'pid=%s\nstarted=x\ncommand=build\n' "$(cat "$S/livepid")" > "$l/owner" ;;
   uname)
     case "${1:-}" in
       -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
@@ -549,6 +551,8 @@ class Sandbox:
 
     def wrap(self, path, role, version=None):
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():   # a link to a real tool (REAL_TOOLS): replaced, never written through
+            path.unlink()
         path.write_text(f'#!/bin/bash\nNMT_SB={self.dir} exec /bin/bash {LIB}/fake.sh {role} "$0" "$@"\n')
         path.chmod(0o755)
         if version:
@@ -2014,6 +2018,57 @@ def arm_concurrent(mac):
         rc, out = mac.run("build", "airdis")
         check("a lock left by a run that is gone is taken over with a note", rc == 0 and "taking over the lock" in out
               and not lock.exists(), (rc, out[-400:]))
+
+    live = subprocess.Popen(["sleep", "300"])   # a process that is not build.sh
+    try:
+        def race_problems(s):
+            lk = s.work / "build.lock"
+            shutil.rmtree(lk, ignore_errors=True)
+            lk.mkdir()
+            (s.state / "lockdir").write_text(str(lk))
+            (s.state / "livepid").write_text(str(live.pid))
+            rc, out = s.run("build", "airdis")
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if rc == 2 and f"another build.sh run (pid {live.pid})" in out else [f"exit {rc}: {out[-300:]}"]
+
+        def reuse_problems(s):
+            lk = s.work / "build.lock"
+            shutil.rmtree(lk, ignore_errors=True)
+            lk.mkdir()
+            (lk / "owner").write_text(f"pid={live.pid}\nstarted=x\ncommand=build\n")
+            rc, out = s.run("build", "airdis")
+            ok = rc == 0 and "taking over the lock" in out and not lk.exists()
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if ok else [f"exit {rc}: {out[-300:]}"]
+
+        def ownerless_problems(s):
+            lk = s.work / "build.lock"
+            lk.mkdir()
+            rc, out = s.run("build", "airdis")
+            ok = rc == 0 and "taking over the lock" in out and not lk.exists()
+            shutil.rmtree(lk, ignore_errors=True)
+            return [] if ok else [f"exit {rc}: {out[-300:]}"]
+        with mac.scratch():
+            p = ownerless_problems(mac)
+            check("a lock without an owner that stays so (a run stopped before it wrote one) is taken over after a wait", not p, p)
+            mac.break_script('2>/dev/null | first_line || true)', '2>/dev/null | first_line)')
+            negative("reading the owner of a lock that has none under errexit (build.sh stopped there)", ownerless_problems(mac))
+        with mac.scratch():
+            mac.wrap(mac.bin / "sleep", "sleepowner")
+            p = race_problems(mac)
+            check("a lock whose owner appears a moment after (two runs started together): the second waits and stops", not p, p)
+            mac.break_script('    if [ -z "$pid" ] && [ "$waited" -lt 3 ]; then waited=$((waited + 1)); sleep 1; continue; fi\n', "")
+            negative("a lock without an owner taken over at once", race_problems(mac))
+        if shutil.which("ps"):
+            with mac.scratch():
+                os.symlink(shutil.which("ps"), mac.bin / "ps")
+                p = reuse_problems(mac)
+                check("a lock whose pid now belongs to another program (after a crash or a restart) is taken over", not p, p)
+                mac.break_script('  case "$(ps -p "$1" -o command= 2>/dev/null || true)" in *build.sh*) return 0 ;; esac\n  return 1\n', "")
+                negative("a lock kept by any live process with its pid", reuse_problems(mac))
+    finally:
+        live.kill()
+        live.wait()
     with mac.scratch():
         mac.break_script('while ! mkdir "$l" 2>/dev/null; do', 'while ! mkdir -p "$l" 2>/dev/null; do')
         mac.run("build")
