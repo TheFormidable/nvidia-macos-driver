@@ -1351,12 +1351,18 @@ TC_SPACE_GB=10
 tc_sh() { bash "$HERE/build/toolchain.sh" "$@"; }
 # A tool of the toolchain is taken (find_tools) only when its stamp is there: build/toolchain.sh writes it after the
 # tool's checks passed, so a half-installed tool is never taken. It is up to date when the stamp is "<pinned
-# commit(s)> <toolchain.sh id>"; otherwise deps builds it again.
+# commit(s)> <toolchain.sh id>", followed for a tool that has others' code linked into it (tc_linked) by "; with "
+# and their own such text; otherwise deps builds it again. So a new OpenSSL, zstd or xz (a moved pin, a raised recipe)
+# builds Python again, whose static libraries hold them, and a new SPIRV-Tools builds glslang again: without that
+# the moved pin would change nothing, since those are built only for the tool that links them.
 tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ] && printf '%s' "$TC_PREFIX${2:+/$2}"; return 0; }
+tc_linked() { case "$1" in python) echo "openssl zstd xz" ;; glslang) echo spirv-tools ;; *) echo "" ;; esac; }
 tc_want() {
-  local t=$1 c="" id
+  local t=$1 c="" id n w
   for id in $(tc_pins "$t"); do c="$c${c:++}$(pin "${id}_COMMIT")"; done
-  printf '%s %s' "$c" "$(MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0} tc_sh id "$t")"
+  w="$c $(MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0} tc_sh id "$t")"
+  for n in $(tc_linked "$t"); do w="$w; with $(tc_want "$n")"; done
+  printf '%s' "$w"
 }
 tc_current() { [ "$(cat "$TC_PREFIX/.nm-toolchain/$1" 2>/dev/null)" = "$(tc_want "$1")" ]; }
 tc_in() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }

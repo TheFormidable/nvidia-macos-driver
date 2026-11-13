@@ -100,8 +100,11 @@ lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiar
 Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio de trabajo, por defecto
 `~/nullmoth-build` (fuera del clon); las herramientas compiladas desde fuentes van a su `tools/toolchain`, sus
 carpetas de compilación a `tools/toolchain-build`, sus registros a `logs/toolchain` y sus fuentes verificadas a
-`src/git/tc-*.git` y `src/toolchain`. Ninguna de ellas se distribuye: la compilación de NVK tiene LLVM y SPIRV-Tools
-desactivados y solo `mesa_clc`, un programa que se usa al compilar, los enlaza. Solo las fórmulas de Homebrew
+`src/git/tc-*.git` y `src/toolchain`. El sello de cada herramienta (`tools/toolchain/.nm-toolchain/<herramienta>`)
+guarda su commit fijado y su receta: si cambian, `deps` vuelve a compilar esa herramienta y la que la lleva enlazada (Python
+después de OpenSSL, zstd o xz; glslang después de SPIRV-Tools), y ninguna otra. Ninguna de ellas se distribuye: la
+compilación de NVK tiene LLVM y SPIRV-Tools desactivados y solo `mesa_clc`, un programa que se usa al compilar, los
+enlaza. Solo las fórmulas de Homebrew
 (`NM_TOOLS_FROM=homebrew`) van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`. Un Rust que tengas en otro sitio (en
 `~/.cargo`, por ejemplo) no se usa ni se toca: `doctor` dice que falta Rust hasta que `deps` pone el fijado en el
