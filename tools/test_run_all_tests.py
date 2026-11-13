@@ -548,5 +548,97 @@ rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 1 ").replace("long_ones 
 arm("control: a runner that waits silently says nothing until the end", rc == 0 and "still running" not in out, out[-600:])
 
 
+# ---- a checkout without the history the tests' controls read: one note before the summary, only after a failure
+# Real git scenes in a scratch folder: a small repository with the three release tags, cloned with a file:// URL (no
+# network) shallow, whole, and whole without tags, and a copy without .git. Every git here reads no configuration of the
+# tester's (a ~/.gitconfig that signs every commit would fail the scene) and is handed no SDKROOT, TOOLCHAINS or
+# DEVELOPER_DIR of this test's.
+GIT_ENV = {k: v for k, v in CLEAN.items() if not k.startswith("GIT_")}
+GIT_ENV.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null",
+       "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false"]
+HISTORY = {"test_fails.py": "import sys\nprint('FAILS')\nsys.exit(1)\n", "test_passes.py": "print('PASS')\n"}
+note_call = "        note = history_note()\n"
+
+
+def git_scene(*args):
+    subprocess.run(GIT + list(args), env=GIT_ENV, check=True, capture_output=True, timeout=60)
+
+
+def history_scenes(d, runner_text):
+    """-> {scene: tree}: the repository with the tags (origin), its shallow clone, its whole clone, its whole clone
+    without tags, and a copy of it without .git"""
+    o = d / "origin"
+    (o / "tools").mkdir(parents=True)
+    git_scene("init", "-q", str(o))
+    for i, tag in enumerate(("v1.15.0", "v2.8.1", "v2.9")):
+        (o / "release.txt").write_text(tag + "\n")
+        git_scene("-C", str(o), "add", "-A")
+        git_scene("-C", str(o), "commit", "-q", "-m", tag)
+        git_scene("-C", str(o), "tag", tag)
+    (o / "tools/run_all_tests.py").write_text(runner_text)
+    for name, source in HISTORY.items():
+        (o / f"tools/{name}").write_text(source)
+    git_scene("-C", str(o), "add", "-A")
+    git_scene("-C", str(o), "commit", "-q", "-m", "the tests")
+    url = "file://" + str(o)
+    git_scene("clone", "-q", "--depth", "1", url, str(d / "shallow"))
+    git_scene("clone", "-q", url, str(d / "whole"))
+    git_scene("clone", "-q", "--no-tags", url, str(d / "notags"))
+    shutil.copytree(o, d / "archive", ignore=shutil.ignore_patterns(".git"))
+    return {n: d / n for n in ("shallow", "whole", "notags", "archive")}
+
+
+def history_run(tree, *names):
+    """-> (exit status, output lines) of the scene's runner on the named tests"""
+    r = subprocess.run([sys.executable, "-B", str(tree / "tools/run_all_tests.py"), *names], env=GIT_ENV, capture_output=True,
+                       text=True, timeout=120)
+    return r.returncode, (r.stdout + r.stderr).strip().splitlines()
+
+
+def notes(lines):
+    return [l for l in lines if l.startswith("note: ")]
+
+
+arm("the runner asks for its note in one place", RUNNER.count(note_call) == 1)
+with tempfile.TemporaryDirectory() as d:
+    sc = history_scenes(pathlib.Path(d).resolve(), RUNNER)
+    for scene, cause in (("shallow", "is a shallow clone"), ("notags", "lacks the tags v2.9, v2.8.1, v1.15.0"),
+                         ("archive", "is not a git checkout")):
+        rc, out = history_run(sc[scene], "test_fails", "test_passes")
+        arm(f"{scene}: after a failure, one note just before the summary names the cause ({cause}), and the exit status is 1",
+            rc == 1 and len(notes(out)) == 1 and out[-2] == notes(out)[0] and cause in out[-2]
+            and out[-1] == "1 passed, 1 failed, 0 skipped, 0 not run, of 2", (rc, out[-3:]))
+        rc, out = history_run(sc[scene], "test_passes")
+        arm(f"{scene}: without a failure, no note and exit status 0", rc == 0 and not notes(out), (rc, out[-3:]))
+    rc, out = history_run(sc["whole"], "test_fails", "test_passes")
+    arm("whole clone with the tags: no note after a failure", rc == 1 and not notes(out) and out[-1].startswith("1 passed, 1 failed"), out[-3:])
+    # the command a note names brings what the tests read
+    for scene, want in (("shallow", "git fetch --unshallow --tags"), ("notags", "git fetch --tags")):
+        rc, out = history_run(sc[scene], "test_fails")
+        cmd = re.findall(r"`([^`]+)`", notes(out)[0]) if notes(out) else []
+        arm(f"{scene}: the note names `{want}`", cmd == [want], out[-2:])
+        if cmd == [want]:
+            git_scene("-C", str(sc[scene]), *want.split()[1:])
+            rc, out = history_run(sc[scene], "test_fails")
+            arm(f"{scene}: after `{want}` the tags are there and no note is printed", rc == 1 and not notes(out), out[-3:])
+    rc, out = history_run(sc["archive"], "test_fails")
+    arm("the note in a tree without .git says to clone the whole repository", bool(notes(out)) and "git clone without --depth" in notes(out)[0], out[-2:])
+with tempfile.TemporaryDirectory() as d:
+    sc = history_scenes(pathlib.Path(d).resolve(), RUNNER.replace(note_call, "        note = ''\n"))
+    rc, out = history_run(sc["shallow"], "test_fails", "test_passes")
+    arm("control: the runner without the note says nothing in a shallow clone", rc == 1 and not notes(out), out[-3:])
+# with no git to ask, a checkout gives no note and the run ends as always
+with tempfile.TemporaryDirectory() as d:
+    sc = history_scenes(pathlib.Path(d).resolve(), RUNNER)
+    nogit = pathlib.Path(d) / "nogit-bin"
+    nogit.mkdir()
+    r = subprocess.run([sys.executable, "-B", str(sc["shallow"] / "tools/run_all_tests.py"), "test_fails", "test_passes"],
+                       env=dict(GIT_ENV, PATH=str(nogit)), capture_output=True, text=True, timeout=120)
+    out = (r.stdout + r.stderr).strip().splitlines()
+    arm("with no git on PATH a shallow clone gives no note, and the run ends with its summary and exit status 1",
+        r.returncode == 1 and not notes(out) and out[-1] == "1 passed, 1 failed, 0 skipped, 0 not run, of 2", out[-3:])
+
+
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
