@@ -21,8 +21,11 @@ comandos y opciones y la solución de problemas.
 >   3933ff6. En el flujo `ci`, de las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron
 >   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
 >   vacío con las herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17
->   componentes en 30 minutos 20 segundos y preparó el paquete en 60 segundos; después falló su paso `./build.sh test`,
->   y también sus comprobaciones de lo compilado.
+>   componentes en 30 minutos 20 segundos y preparó el paquete en 60 segundos. Su paso `./build.sh test` falló allí: el
+>   clon del trabajo no tenía historial, y 14 de las 315 pruebas leen revisiones anteriores (las mismas pruebas pasan
+>   desde un clon completo en el mismo tipo de máquina y en el Mac Intel). De sus doce comprobaciones de lo compilado
+>   pasaron once; la duodécima pedía a los seis kexts una versión mínima de macOS, que el enlazador no escribe en un
+>   kext. Las dos causas están corregidas en los commits posteriores a 3933ff6.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
 >   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
 >   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
@@ -237,7 +240,7 @@ siguiente reinicio trae la versión publicada.
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256. Cuando ya está Rust, descarga también los crates del traductor (`cargo fetch --locked`) para que su compilación funcione sin red |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
 | `package` | Prepara un paquete a partir de un paquete publicado (`--base-package`); necesita `--accel both` |
-| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch`. En un Mac, una ejecución deja unas dos docenas de informes de fallo en `~/Library/Logs/DiagnosticReports` (con nombres como ca, cb, oldv, resset): son de programas pequeños que las pruebas hacen fallar a propósito, y se pueden borrar |
+| `test` | La comparación de versiones fijadas, las pruebas (`tools/run_all_tests.py`) y la cadena de parches de NVRM. Las pruebas del plugin que compilan con las cabeceras de Vulkan reciben `NM_VULKAN_INCLUDE`: la tuya si la defines, si no el `include` del Mesa descargado (la carpeta con la que se compila el plugin de la versión publicada); una línea dice cuál, o que no hay ninguna hasta `./build.sh fetch`. Las pruebas necesitan un clon completo con las etiquetas de las versiones publicadas: algunas leen de git revisiones anteriores del código, y en un clon hecho con `--depth 1`, o en un archivo descargado, 14 de ellas fallan. En un Mac, una ejecución deja unas dos docenas de informes de fallo en `~/Library/Logs/DiagnosticReports` (con nombres como ca, cb, oldv, resset): son de programas pequeños que las pruebas hacen fallar a propósito, y se pueden borrar |
 | `env` | Imprime líneas `export` con todas las variables que `build.sh` pasa a los scripts (tu carpeta personal como `"$HOME/..."`; el resto de la salida la escribe como `~`) |
 | `clean [outputs\|sources\|tools\|all]` | Borra solo dentro del directorio de trabajo (por defecto `outputs`, que también borra las carpetas de compilación y las fuentes exportadas de las herramientas compiladas desde fuentes, no esas herramientas; `tools` las borra sin preguntar, y en un Mac Intel el siguiente `deps` las vuelve a compilar (`deps` desde un directorio de trabajo vacío tardó 46,5 minutos en el Mac Intel de arriba y 3 horas 53 minutos en la máquina Intel de GitHub); `all` pregunta antes) |
 | `help` | Comandos, componentes y ajustes |
@@ -456,5 +459,5 @@ una ejecución anterior las hizo (desde cero, en el commit 96bf32c, `deps` tard�
 ejecuta deps, doctor, fetch, build, package y test, y comprueba que Homebrew no se usó ni cambió y que todo lo
 compilado carga solo de macOS, de esa carpeta y de las carpetas del propio driver. El resultado está en la pestaña
 Actions del repositorio, flujo full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. En
-el commit 3933ff6 todos los pasos hasta `package` terminaron bien allí; después falló su paso `test`, y también sus
-comprobaciones de lo compilado. Hasta que haya pasado una vez, su resultado no detiene ningún cambio.
+el commit 3933ff6 todos los pasos hasta `package` terminaron bien allí; su paso `test` y una de sus comprobaciones
+fallaron, por las razones que da el aviso del principio. Hasta que haya pasado una vez, su resultado no detiene ningún cambio.

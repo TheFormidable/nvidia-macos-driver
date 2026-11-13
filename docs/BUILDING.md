@@ -20,8 +20,11 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   In the workflow `ci`, 303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there),
 >   `tools/test_build_sh.py` among them. The workflow `full-build`, which builds everything in an empty working
 >   directory with the tools restored from GitHub's cache, ran `deps`, `doctor` and `fetch`, built all 17 components
->   in 30 minutes 20 seconds and staged the package in 60 seconds; then its `./build.sh test` step failed, and so did
->   its checks of what was built.
+>   in 30 minutes 20 seconds and staged the package in 60 seconds. Its `./build.sh test` step failed there: the job's
+>   clone had no history, and 14 of the 315 tests read earlier revisions (the same tests pass from a full clone on the
+>   same kind of runner and on the Intel Mac). Eleven of its twelve checks of what was built passed; the twelfth asked
+>   the six kexts for a minimum macOS version, which the linker does not write into a kext. Both causes are corrected
+>   in the commits after 3933ff6.
 > - Only against stand-ins for macOS's tools, Xcode, Homebrew, rustup, the git remotes and each component's build
 >   script (`tools/test_build_sh.py`, on Linux and on that runner): `deps` taking its tools from Homebrew, which is what
 >   it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
@@ -200,7 +203,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 | `fetch` | Downloads the pinned sources into the working directory and verifies each commit id or SHA-256. Also fetches the translator's crates (`cargo fetch --locked`) once Rust is there, so that its build runs offline |
 | `build [component...]` | Builds the named components and what they need, or all of them. Names and groups: [Components](#components-and-their-order) |
 | `package` | Builds what is not up to date, then stages a package from a release package (`--base-package`) with every part this checkout builds replaced. Needs `--accel both` |
-| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch`. On a Mac a run leaves about two dozen crash reports in `~/Library/Logs/DiagnosticReports` (names such as ca, cb, oldv, resset): they are of small programs the tests make fail on purpose, and can be deleted |
+| `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch`. The host tests need a full clone with the release tags: some read earlier revisions of the source from git, and in a clone made with `--depth 1`, or in a downloaded archive, 14 of them fail. On a Mac a run leaves about two dozen crash reports in `~/Library/Logs/DiagnosticReports` (names such as ca, cb, oldv, resset): they are of small programs the tests make fail on purpose, and can be deleted |
 | `env` | Prints `export` lines for every variable `build.sh` gives the build scripts, to run one of them by hand with the same environment |
 | `clean [outputs\|sources\|tools\|all]` | Deletes inside the working directory only. `outputs` (the default): outputs, stamps, logs, the package, the RM work tree, and the build trees and exported sources of the tools built from source (not those tools). `sources`: the fetched sources (and the stamps). `tools`: everything under `<workdir>/tools`, the Python environment, Rust and the tools built from source included (and the stamps), without a question: on an Intel Mac the next `deps` builds those tools again (`deps` from an empty working directory took 46.5 minutes on the Intel Mac above and 3 hours 53 minutes on GitHub's Intel runner). `all`: everything except the mark, after a yes |
 | `help` | The commands, components and settings |
@@ -607,6 +610,6 @@ installed or loaded), with the tools built from source restored from GitHub's ca
 nothing, at commit 96bf32c, `deps` took 3 hours 53 minutes there): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build,
 package and test, then checks that Homebrew was neither used nor changed and that everything built loads only from macOS, that folder and
 the driver's own folders. Its result is under the repository's Actions tab, workflow full-build; when it fails or runs
-out of time, its last step prints the logs. At commit 3933ff6 every step up to `package` succeeded there, then its
-`test` step failed, and so did its checks of what was built. Until it has passed once, its result does not hold up a
+out of time, its last step prints the logs. At commit 3933ff6 every step up to `package` succeeded there; its `test`
+step and one of its checks failed, for the reasons the notice at the top gives. Until it has passed once, its result does not hold up a
 change.
