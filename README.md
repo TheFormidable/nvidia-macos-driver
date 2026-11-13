@@ -209,8 +209,8 @@ is skipped the next time. It never calls `sudo` and never installs the driver: a
 command to run yourself.
 
 On an Intel Mac Homebrew has no ready-made builds any more, so the first `./build.sh` builds the missing build tools
-(LLVM 22 above all) from pinned sources into its working directory, without Homebrew: about 70 minutes on one
-12-thread Intel Mac, and 10 GB of free space while it builds. On an Intel Mac build.sh does not use Homebrew, even
+(LLVM 22 above all) from pinned sources into its working directory, without Homebrew: up to about 70 minutes on
+one 12-thread Intel Mac, and 10 GB of free space while it builds. On an Intel Mac build.sh does not use Homebrew, even
 when it is installed. On Apple silicon it installs Homebrew's ready-made ones.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
