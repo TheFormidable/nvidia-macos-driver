@@ -30,6 +30,7 @@ extern "C" void nv_xnu_power_refresh(void);   // nv_xnu_power.cpp
 #include <mach/mach_time.h>
 #include <kern/sched_prim.h>
 #include <libkern/OSDebug.h>
+#include <libkern/OSKextLib.h>
 #include "nvrm_layout.h"
 
 extern "C" {
@@ -871,6 +872,36 @@ bool NVRM::start(IOService *provider)
     return ok;
 }
 
+// ---- staying loaded -------------------------------------------------------------------------------------------------
+// From the point of a GPU's start where this is called, the kext makes things the kernel or another kext keeps and that
+// are never taken back: sysctl OIDs (they are this kext's data, linked into the kernel's list), the global work queue's
+// thread, which sleeps in this kext's code between items, thread calls kept for the boot (the timers, the deferred
+// free, the idle power-down monitor), and functions other kexts call through a pointer without a link dependency on
+// this one (the surface fence's wait in NVAccel, the kernel interface NVRMFB uses). Every "never unregistered" in these
+// sources relies on the kext staying loaded, and nothing made it stay. The kernel unloads a kext by itself, a minute
+// after the registry has gone quiet, when no object of its classes exists: after a start that declined the card (the
+// DMA layer's sysctls are registered by then), or after the card was unplugged. `kmutil unload` asks for the same by
+// hand. The kernel's sysctl list then runs through memory that is gone or was reset to the file's contents, and a
+// second load starts a second global worker beside the first, which still sleeps on the same event.
+//
+// One reference on the kext itself, taken once and never given back, is what the kernel offers a kext for this: while
+// it is held, an unload, automatic or by hand, is refused before a service is terminated or a class unregistered. The
+// module's stop function refuses as well, for the case that the reference could not be taken; the kernel has
+// unregistered the classes by then, so that way the code stays mapped but the driver cannot start a card again before
+// a restart. A kext that never got this far unloads as before.
+// Installing, updating and removing the driver never unload it: each rebuilds the kernel collection and takes effect
+// at the restart it asks for.
+static volatile SInt32 gNvStayLoaded;   // 0 nothing made yet; 1 the reference is held; 2 it was wanted and not obtained
+static void nvrmStayLoaded(void)
+{
+    if (!OSCompareAndSwap(0, 2, &gNvStayLoaded)) return;
+    // kmod_info.id is this kext's load tag: the loader writes it there with the version (OSKextGetCurrentLoadTag()
+    // returns the same field, from libkmod's c_start.o, which this kext does not link: see the version line below).
+    const OSReturn r = OSKextRetainKextWithLoadTag((OSKextLoadTag)kmod_info.id);
+    if (r == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gNvStayLoaded);
+    else LOG("no reference on this kext (0x%x): only its stop function keeps it loaded", (unsigned)r);
+}
+
 bool NVRM::startGPU(IOService *provider)
 {
     if (nvrm_driver_off()) {
@@ -918,6 +949,8 @@ bool NVRM::startGPU(IOService *provider)
     // started: its untranslated addresses would go out on a translated bus. That is a decline, not a failed boot, and
     // nvrm-dma on the PCI device names the reason. Without a mapper nothing changes (the RM keeps physical addresses).
     // A start that returns false gets no stop(), so every false return from here on detaches first.
+    // The attach registers the first sysctls: from here on the kext has to stay loaded, also when this start declines.
+    nvrmStayLoaded();
     if (!fNv.dma_dev) fNv.dma_dev = nvrm_dma_attach(&fNv, OSDynamicCast(IOPCIDevice, provider));
     if (!fNv.dma_dev || nvrm_dma_mode_of(&fNv) == NVRM_DMA_REFUSE) {
         LOG("NOT STARTING THE GPU: %s. Not counted as a failed start.", fNv.dma_dev ? nvrm_dma_why(&fNv) : "no memory to record how its DMA reaches the bus");
@@ -2582,9 +2615,9 @@ void NVRM::stop(IOService *provider)
 {
     nvrm_power_stop();
     // Before anything is torn down: it makes no RM call, and whoever sleeps in a fence wait is woken and leaves.
-    // A GPU that stops while it is suspended (unplugged or unloaded during sleep, or while its slot is powered off)
-    // will not reach gpuResume() again, so the SUSPENDING it sent is answered here first: the fence wants one answer
-    // for each, and until it comes it refuses new holds, also for the cards that stay when this one goes.
+    // A GPU that stops while it is suspended (unplugged, or its driver terminated, during sleep or while its slot is
+    // powered off) will not reach gpuResume() again, so the SUSPENDING it sent is answered here first: the fence wants
+    // one answer for each, and until it comes it refuses new holds, also for the cards that stay when this one goes.
     if (OSCompareAndSwap(1, 0, &fFenceStarted)) {
         if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);
         nvrm_fence_stop();
@@ -2602,7 +2635,7 @@ void NVRM::stop(IOService *provider)
         IOLockUnlock(fUtilizationLock);
         if (haveState) {
             // Match the query lock order: PM admission, then the state lock.
-            // An unload during sleep waits for wake under the existing PM gate
+            // A stop during sleep waits for wake under the existing PM gate
             // contract; it must not send an RM free to a GPU still in standby.
             NvXnuPmUse pmUse;
             IOLockLock(fUtilizationLock);
@@ -3846,4 +3879,5 @@ IOReturn NVRMUserClient::sGo(OSObject *target, void *reference, IOExternalMethod
 }
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+// Refuses once the kext has made what must outlive every GPU (nvrmStayLoaded() says why and what comes before this).
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return OSAddAtomic(0, &gNvStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }

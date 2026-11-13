@@ -141,7 +141,7 @@ of one GPU ran in any order and at the same time, and a flush waited for every i
 global queue and, from the second start pass on, one queue per GPU, each with one worker thread (`nvrm-wq0` for the
 global queue, `nvrm-wq1`.. for GPUs): items run one at a time in the order they were queued, and a flush returns once
 everything queued before it has run. The RM's own flushes wait as long as they need to (each 5 s of waiting logs the
-item that is running); the driver's own waits are bounded: 30 s per step when the kext stops, 2 s per step at system
+item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step at system
 shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
 on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
 at a time, less one for each queue that was given up on; or no thread) its items go to the global queue; that is never
@@ -208,6 +208,22 @@ the GPU's suspend path, and later its resume path, which opens the interrupt gat
 through a gate of their own: `stop()` closes it and waits until no call is inside (30 s at most; a call that is still
 inside then keeps the GPU object alive and is logged). From then on the monitor has no GPU for the rest of the boot,
 also when another card is started later.
+
+## The kext stays loaded
+
+Nothing NVRM.kext registers is ever taken back: its sysctls (the kernel links them into its own list, but they are
+the kext's data), the worker thread of the global work queue, the thread calls behind the timers, and the functions
+NVAccel and NVRMFB call through pointers. That is only safe while the kext's code and data stay where they are, and
+the kernel does unload kexts: by itself, about a minute after the last object of a kext's classes is gone (a start
+that declined the card, a card that was unplugged), and when `kmutil unload` asks for it. So from the moment a start
+registers its first sysctl, NVRM.kext holds one reference on itself for the rest of the boot. With it the kernel
+refuses the unload before it terminates a service: `kmutil unload -b com.nullmoth.NVRM` fails with the kext in use and
+the display keeps running. Should the reference ever not be obtained, the kext's stop function refuses instead (logged
+as `no reference on this kext`); the code then stays, but the driver cannot start a card again before a restart.
+
+A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
+and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
+for, and none of them unloads the running kext. Not yet observed on hardware.
 
 ## The wait queue
 

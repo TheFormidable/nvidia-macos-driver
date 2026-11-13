@@ -17,6 +17,8 @@ None of it can run without the card, so what must hold is asserted on the source
 - the idle power-down monitor (nvrtd3=1), a thread call that is never stopped, is not handed the GPU object: each of
   its calls enters a gate first, and stop() closes that gate, waits until no call is inside and takes the GPU away
   before it tears anything down (right after the fence stop, which keeps its place);
+- the kext holds one reference on itself (never given back) before startGPU registers its first sysctl, and its
+  module stop function refuses from then on: nothing the kext registers is ever unregistered, so it must not unload;
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
   kernel's real_ncpus (at least 1) and os_get_cpu_number() stays 0;
 - no source names thread_call_cancel_wait (not exported to kexts); nv_destroy_nano_timer frees nothing (the slots are
@@ -177,6 +179,17 @@ def arms(src, others):
         and order(stop, [r"nvrm_fence_stop\s*\(\s*\)\s*;", r"\brtd3Detach\s*\(\s*\)\s*;", r"\bfUtilizationLock\b"])
         and order(stop, [r"\brtd3Detach\s*\(\s*\)\s*;", r"\bPMstop\s*\(", r"\bnv_xnu_wq_flush\s*\("]))
 
+    stay, sgpu = body(n, "nvrmStayLoaded"), body(n, "NVRM::startGPU")
+    arm("the kext stays loaded: a reference on itself before anything is registered, never given back, and a stop function that refuses from then on",
+        order(stay, [r"if\s*\(\s*!\s*OSCompareAndSwap\s*\(\s*0\s*,\s*2\s*,\s*&gNvStayLoaded\s*\)\s*\)\s*return\s*;",
+                     r"OSKextRetainKextWithLoadTag\s*\(\s*\(\s*OSKextLoadTag\s*\)\s*kmod_info\.id\s*\)",
+                     r"OSCompareAndSwap\s*\(\s*2\s*,\s*1\s*,\s*&gNvStayLoaded\s*\)"])
+        and "OSKextReleaseKextWithLoadTag" not in n
+        and order(sgpu, [r"\bnvrmStayLoaded\s*\(\s*\)\s*;", r"\bnvrm_dma_attach\s*\("])
+        and not re.search(r"sysctl_register_oid|nv_xnu_kcore_init|\w+_sysctls\w*\s*\(|\bnvrm_dma_attach\s*\(",
+                          sgpu[:sgpu.find("nvrmStayLoaded")] + body(n, "NVRM::probe") + body(n, "NVRM::start"))
+        and re.search(r"\b_stop\s*\([^)]*\)\s*\{\s*return\s+OSAddAtomic\s*\(\s*0\s*,\s*&gNvStayLoaded\s*\)\s*\?\s*KERN_FAILURE\s*:\s*KERN_SUCCESS\s*;", n))
+
     isr = body(os_, "os_is_isr")
     arm("os_is_isr() answers from the per-GPU slots, and the single global is gone from every kext source",
         re.search(r"nv_xnu_isr_threads\s*\[\s*i\s*\]\s*==\s*me", isr)
@@ -296,6 +309,17 @@ CONTROLS = [
      lambda s: broken(s, "nvrm", "    nv_gate_close(&gNvRtd3Gate);\n", "")),
     ("stop() that does not wait for the monitor", "the idle power-down monitor reaches",
      lambda s: broken(s, "nvrm", "{ IOSleep(10); out = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
+    ("startGPU registering before the kext holds itself", "the kext stays loaded",
+     lambda s: broken(broken(s, "nvrm", "    nvrmStayLoaded();\n", ""), "nvrm", "    nvrm_guard_count_start();\n", "    nvrm_guard_count_start();\n    nvrmStayLoaded();\n")),
+    ("a kext that never holds itself", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    nvrmStayLoaded();\n", "")),
+    ("a module stop function that always agrees", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "{ return OSAddAtomic(0, &gNvStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }", "{ return KERN_SUCCESS; }")),
+    ("the kext's reference given back", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    if (r == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gNvStayLoaded);",
+                      "    if (r == kOSReturnSuccess) { OSCompareAndSwap(2, 1, &gNvStayLoaded); OSKextReleaseKextWithLoadTag((OSKextLoadTag)kmod_info.id); }")),
+    ("a reference taken at every start", "the kext stays loaded",
+     lambda s: broken(s, "nvrm", "    if (!OSCompareAndSwap(0, 2, &gNvStayLoaded)) return;\n", "")),
     ("os_is_isr on one global again", "os_is_isr() answers",
      lambda s: broken(s, "os", "if (nv_xnu_isr_threads[i] == me)", "if (nv_xnu_isr_thread == me)")),
     ("a CPU count of 4 again", "os_get_cpu_count() is real_ncpus",
