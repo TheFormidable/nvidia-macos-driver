@@ -32,7 +32,8 @@ failure.
   application: start the application from Terminal to see them.
 
 Settings in `/Library/GPUBundles/nvmtl/nvrm610.conf` go into your own block at the end of the file, between
-`# --- my settings, kept on update ---` and `# --- end my settings ---`; the last line for a name wins, and a process
+`# --- my settings, kept on update ---` and `# --- end my settings ---` (section 1, step 5, says why and what an
+install keeps); the last line for a name wins, and a process
 reads the file when it starts (restart the application, or log out and in for WindowServer). Boot arguments go on the
 `boot-args` line of OpenCore's `config.plist` (README.md, "Wiring into an existing OpenCore setup") and need a
 restart. Take every test setting out again when its test is done.
@@ -41,7 +42,14 @@ restart. Take every test setting out again when its test is done.
 
 1. **A way back you have tried.** Keep the unpacked package of the release you install over (2.9) at hand: installing
    it again with its own `install.sh` puts every file back ([BUILDING.md](BUILDING.md), "Installing the result and
-   going back", which also says what `uninstall.sh` does and does not do). Know how you will start the Mac when the
+   going back", which also says what `uninstall.sh` does and does not do). Before it changes anything, the installer
+   copies what is installed now (the kexts, the plugin bundle, the folder `/Library/GPUBundles/nvmtl` with its
+   settings file, the kernel collection, the firmware) into a new folder `/Library/NullMoth/backup-<date>-<time>.<random>`,
+   whose name it prints on its line `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
+   each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
+   after WindowServer kept dying on the NVIDIA display), the job puts everything back from that folder and restarts
+   once. It removes itself at the first start after one that lit the display, so it does not help with a problem that
+   comes later. Know how you will start the Mac when the
    desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; the 1401 picker entries
    exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings, General, Sharing) and make
    sure you can reach the Mac over `ssh` from another computer: several failures below leave the firmware's picture
@@ -49,8 +57,9 @@ restart. Take every test setting out again when its test is done.
    Pass: you have started the Mac once by that way back, and logged in over `ssh`. Fail: either does not work; do not
    go on.
 2. **A clean starting point.** `nvram boot-args` shows the `boot-args` line: it should hold the install line of
-   README.md and nothing else of the driver's (`gfxrst=4` stays if WhateverGreen needs it). The own block of
-   `nvrm610.conf` should be empty. Remove what an earlier test left, restart, and check again.
+   README.md and nothing else of the driver's but settings you chose for the machine, such as `nvfbhidpi=1`
+   (`gfxrst=4` stays if WhateverGreen needs it). Your own block of `nvrm610.conf` (step 5) should hold no test
+   setting. Remove what an earlier test left, restart, and check again.
 3. **Numbers from 2.9.** On the release that runs now, save what the driver reports, to compare later:
 
    ```bash
@@ -61,7 +70,20 @@ restart. Take every test setting out again when its test is done.
    Note how long the desktop takes to come up after the picker, and the CPU use of WindowServer on an idle desktop
    and with a video playing (Activity Monitor).
 4. **The package.** From its `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes
-   nothing. Pass: it ends without refusing. Fail: it says what it refused; fix that first.
+   nothing. Pass: its last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that
+   first.
+5. **Your settings file.** Read it before you install: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. The installer
+   replaces the whole folder `/Library/GPUBundles/nvmtl` with the package's, and of your old file it puts back, at the
+   end of the package's file, only the lines between `# --- my settings, kept on update ---` and
+   `# --- end my settings ---` (each marker exactly so, on a line of its own), and of those only `NAME=value` lines
+   whose name starts with `NVMTL_`, `NVK_` or `NVRM_` and whose value holds nothing but letters, digits and
+   `. _ , = * -`. Every other line is replaced by the package's file: a file without the two markers (2.9's own has
+   none) comes out of the install as the package's file. A line whose name has none of the three prefixes is read by
+   nothing at all. Your old file is not lost: it is `nvmtl/nvrm610.conf` in the backup folder of step 1. To carry a
+   line of your own over, put it between the two markers: in the old file before you install (the installer then
+   keeps it), or in the new file afterwards. To see which of your lines are not the package's, compare your file with
+   the package's own, `Library/GPUBundles/nvmtl/nvrm610.conf` under its `pkgroot`. Going back to 2.9 by installing it
+   again keeps only that block too.
 
 ## 2. The first boot
 
