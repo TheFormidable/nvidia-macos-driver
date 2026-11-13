@@ -91,9 +91,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   `nvrm610.conf`. Like 2.9's `0`, it makes every process poll, WindowServer included, which costs WindowServer more
   CPU than both 2.9's default and this release's. See [docs/EVENT-WAIT.md](docs/EVENT-WAIT.md).
 - A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
-  ends only that channel, or makes no progress for 5 s, NVK builds a new channel, sends the channel-wide state again,
-  replays the submissions that had not started and drops the one that was running; a stalled channel's doorbell is
-  rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, an
+  ends only that channel, or makes no progress for 5 s in WindowServer (60 s in any other process), NVK builds a new
+  channel, sends the channel-wide state again, replays the submissions that had not started and drops the one that
+  was running; a stalled channel's doorbell is rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, an
   error that is not on the list of those that end only one channel, a fourth rebuild of one channel within 30 s) ends
   the device exactly as in 2.9. A Mac put to sleep with a game or
   WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for the
