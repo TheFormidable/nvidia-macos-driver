@@ -191,7 +191,7 @@ OPTION_VARS="NM_WORK NM_JOBS NM_ASSUME_YES NM_NO_INSTALL NM_OFFLINE NM_DRY_RUN N
 NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"
 # where outside things come from
 LOCATION_VARS="NM_OGKM_URL NM_MESA_URL NM_KHRONOS_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_RUSTUP_URL
-NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
+NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_SPIRV_TOOLS_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
 NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK NULLMOTH_BUILD_ROOT NULLMOTH_BUILD_HOST NM_LOCAL_HOST_PATH"
 # read by the existing build scripts and passed through when set (their defaults are the scripts' own)
 SCRIPT_VARS="NV_VERSION KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB MACOSX_DEPLOYMENT_TARGET NVK_PATH NVK_SYSROOT NVK_JOBS
@@ -646,8 +646,12 @@ find_tools() {
     PC_SPIRV_LLVM=$first/lib/pkgconfig
     [ ! -x "$first/bin/llvm-spirv" ] || T_LLVMSPIRV=$first/bin/llvm-spirv
   fi
+  # SPIRV-Tools, by its SPIRV-Tools.pc: NM_SPIRV_TOOLS_PREFIX (one that is not Homebrew's), then Homebrew's
   PC_SPIRV_TOOLS=""
-  p=$(brew_opt spirv-tools); [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] && PC_SPIRV_TOOLS=$p/lib/pkgconfig
+  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(brew_opt spirv-tools)"; do
+    [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] || continue
+    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break
+  done
   return 0
 }
 spirv_llvm_ok() {   # a SPIRV-LLVM-Translator of the chosen LLVM's major.minor was found
@@ -810,7 +814,10 @@ doctor() {   # prints; sets D_MISSING
   if [ -n "$PC_SPIRV_TOOLS" ]; then
     v=$(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc")
     ver_ge "$v" "$NM_PIN_TOOL_SPIRV_TOOLS_MIN" && d_ok "SPIRV-Tools $v" || d_old "SPIRV-Tools $v ($NM_PIN_TOOL_SPIRV_TOOLS_MIN or later)"
-  else d_missing "SPIRV-Tools $NM_PIN_TOOL_SPIRV_TOOLS_MIN or later (Homebrew spirv-tools)"; fi
+  else d_missing "SPIRV-Tools $NM_PIN_TOOL_SPIRV_TOOLS_MIN or later (Homebrew spirv-tools, or NM_SPIRV_TOOLS_PREFIX)"; fi
+  if [ -n "${NM_SPIRV_TOOLS_PREFIX:-}" ] && [ ! -f "$NM_SPIRV_TOOLS_PREFIX/lib/pkgconfig/SPIRV-Tools.pc" ]; then
+    d_note "NM_SPIRV_TOOLS_PREFIX names $NM_SPIRV_TOOLS_PREFIX, which has no lib/pkgconfig/SPIRV-Tools.pc: it is not used"
+  fi
   if [ -x "$RUST_BIN/rustc" ]; then
     v=$("$RUST_BIN/rustc" --version | version_of)
     [ "$v" = "$NM_PIN_RUST_VERSION" ] && d_ok "Rust $v ($RUST_BIN)" || d_old "Rust $v at $RUST_BIN, pinned $NM_PIN_RUST_VERSION"
