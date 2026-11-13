@@ -38,11 +38,12 @@
 # failed for reasons of the tests' own: tools/test_build_sh.py had not ended after 1200 s beside the other tests,
 # tools/test_dlss_fetch.sh wanted a zstd command, which macOS does not have, and the controls of
 # tools/test_rtd3_hold.cpp got one sleep in their fixed time on the loaded runner; tools/test_ci_full_build.py was
-# skipped, because Apple's linker refused its stand-in for libSystem.
+# skipped: the compiler's command that made its stand-in for libSystem failed (its words were not kept).
 # In 43429828046 and 43443873231 the tests left /private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 # and an xcodebuild result bundle behind, and in no run before: those were the runs in which tools/test_build_sh.py
-# handed Apple's own /usr/bin/make an SDKROOT that names no SDK. On a Mac with a desktop that marker is taken to
-# belong to the dialog that offers to install the command line tools (not seen: GitHub's log shows the file only).
+# handed Apple's own /usr/bin/make an SDKROOT that names no SDK, and the first two in which tools/test_toolchain_sh.py
+# ran its stand-in build past its first tool (its make gets an empty folder as SDKROOT). On a Mac with a desktop that
+# marker is taken to belong to the dialog that offers to install the command line tools (not seen: GitHub's log shows the file only).
 # Every job gates: one that fails turns the run red.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
 # Vulkan-Headers) are pinned in the scripts and build/pins.sh; none is copied into the repository or into an artifact.
@@ -123,9 +124,9 @@ jobs:
             echo "::error::a test that needs the Vulkan headers was skipped: NM_VULKAN_INCLUDE did not reach it"; exit 1
           fi
       - name: No test made macOS start an install of the command line tools
-        # Apple's small programs in /usr/bin (make, git, python3 and the rest) find the real tool through xcrun. Handed
-        # an SDKROOT that names no SDK they left the marker of an on-demand install of the command line tools in
-        # /private/tmp (see the header), which in front of a tester would be Apple's dialog. The runner lists what
+        # Apple's small programs in /usr/bin (make, git, python3 and the rest) find the real tool through xcrun. Runs in
+        # which they were handed an SDKROOT that names no SDK left the marker of an on-demand install of the command line
+        # tools in /private/tmp (see the header), which in front of a tester would be Apple's dialog. The runner lists what
         # appeared in the temporary folders, each entry with the tests that were running when it was first seen: the
         # marker fails the job, also when a test failed.
         if: ${{ !cancelled() }}
