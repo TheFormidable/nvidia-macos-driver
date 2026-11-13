@@ -3,7 +3,8 @@
 Status: the kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and macOS 26
 export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real threads.
 **None of it has been loaded or run on a Mac.** It is on by default. Boot-arg `nvrmfence=0` switches it off, and the
-driver then behaves as 2.9 did. Nothing of 2.9's surface sync was removed: it is what every fallback below lands on.
+driver's surface sync then behaves as 2.9's did ("The one switch" lists what still differs).
+Nothing of 2.9's surface sync was removed: it is what every fallback below lands on.
 
 ## What it is for
 
@@ -243,8 +244,10 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   `surface fences: kernel (NVRM fence v1, compositor)` when the fence
   is on and NVAccel reads the kernel's table; `surface fences: kernel (NVRM fence v1; NVAccel does not read it, so
   WindowServer keeps its pending marks)` when NVAccel does not; `surface fences: off (...)` with the reason (`NVK or
-  the kext answered 0x80000002: no fence there` for an older kext, an older NVK's answer, or `nvrmfence=0`); one line
-  per change. `surface fences: hold refused (0x8000000N) - that command buffer keeps the older tags and marks (N so
+  the kext answered 0x80000002: no fence there` for an older kext; `the kext's fence is not on for this process:
+  state S` for `nvrmfence=0` (S 0), a fence that stopped or switched itself off (3 or 2), or NVK's
+  `NVRM_ASYNC=0` (S 1); `request N answered off` when a later request is refused that way; an NVK without the fence
+  writes no line); one line per change. `surface fences: hold refused (0x8000000N) - that command buffer keeps the older tags and marks (N so
   far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up pid P's hold at its
   bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
   2000th).
@@ -275,9 +278,9 @@ counter says so.
 ## The one switch
 
 Boot-arg `nvrmfence=0`, read once when the first GPU starts (or when NVAccel asks first). With it
-`debug.nvrm_fence_state` is 0, every request on selector 12 is answered "off" before a page of the process is
-touched, NVAccel is refused the wait function with an answer that tells it the fence is off for the boot, and the
-kick returns at once. The plugin, NVK and NVAccel take their
+`debug.nvrm_fence_state` is 0, every request on selector 12 but QUERY (which reports state 0, not active) is answered
+"off" before a page of the process is touched, NVAccel is refused the wait function with an answer that tells it the
+fence is off for the boot, and the kick returns at once. The plugin, NVK and NVAccel take their
 2.9 paths for surface sync. There is no opt-in, no environment name and no writable sysctl. It is the first thing to
 try if anything about frames looks worse than in 2.9. `nvrm_fence_off_by_bootarg()` tells NVRM.kext's other parts
 that the fence is off for the whole boot, as opposed to not started yet.
@@ -288,9 +291,10 @@ differ from 2.9:
 - NVAccel writes one line, `surface fence: off for this boot (boot-arg nvrmfence=0) -- waits use the 2.9 marks; NVRM
   is not asked again`, and does not ask NVRM for the fence again before the next boot.
 - Every process that uses the GPU through NVK still opens its fence connection (one idle control connection per
-  process) and asks once; the answer is "off" and nothing more is sent on it.
-- NVK still writes two words of each channel's semaphore page, at 0xFF0 and 0xFF8, before each submission. Nothing
-  reads them.
+  process) and asks once (the answer: not active, state 0). Each channel it creates still sends one registration on
+  it, answered "off", and the Metal plugin asks again at most once a second while it has surfaces to draw.
+- NVK still writes the word at 0xFF0 of each channel's semaphore page before each submission, and the one at 0xFF8
+  when it registers the channel. Nothing reads them.
 - NVK's wait for a completion event and NVAccel's page-off without the accelerator lock are not part of the fence and
   have their own ways back: environment `NVRM_EVENT_WAIT=0` and boot-arg `nvaccel_pageoff_locked=1`.
 
@@ -492,7 +496,8 @@ Read with `sysctl debug.nvrm_fence_state` and so on.
 8. **Any `owners_distrusted`, or `state` 2.** Something systematically fails to complete or close; the log line
    names the surface, the pid and the state the hold was stuck in. The driver is on 2.9's behaviour for that process
    (or entirely, with `state` 2) until it restarts (or the machine does).
-9. **Way back.** Boot once with `nvrmfence=0`: `state` 0, 2.9's counters move again, behaviour is 2.9.
+9. **Way back.** Boot once with `nvrmfence=0`: `state` 0, 2.9's counters move again, surface sync is 2.9's ("The one
+   switch" says what still differs).
 10. **Cost.** The kick is one test, one atomic add and one more test, plus a wakeup when a reader sleeps; no counter
     shows it apart. `debug.nvrm_isr_latency_max_us` does not include it (it ends where the RM's handler starts).
     `debug.nvrm_bh_max_us` and `debug.nvrm_bh_over_1ms` do include the kick after each bottom half: compare them over
