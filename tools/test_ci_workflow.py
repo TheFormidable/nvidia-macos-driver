@@ -9,6 +9,11 @@ compiler can slip into a kext, the host tests and the plugin get the Vulkan head
 that needs them cannot pass by being skipped), and nothing uploads or publishes. Each property has a control: the
 same check on a copy of the file with that one thing wrong has to fail.
 
+.github/workflows/full-build.yml, the build from an empty folder, is held to the same rules (its actions pinned to the
+commits ci.yml uses, its Xcode step equal to ci.yml's) and to what it is for: one job on macos-15-intel with a timeout,
+the six build.sh commands in their order, the tools saved right after deps, its checks and its logs after a failure,
+nothing uploaded. It must also parse as YAML where python's yaml is installed.
+
 It also holds build/ci_plugin.sh to the compiler line of build/build_plugin_release.sh, which it copies: the release
 script runs on the build Mac over ssh and cannot run on a CI runner, and a copy drifts. And it holds the Vulkan headers
 of the automatic checks (build/ci_vulkan_headers.sh) to the Mesa commit the release takes its headers from, running the
@@ -205,6 +210,159 @@ control("the compile-line check that runs only after a good link is caught", "  
 arm("the Vulkan tests are found by what they read (four of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings", "test_opengl_perf"},
     " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
+
+
+def run_block(text, step):
+    """-> the lines of the `run: |` block of the step with this name, without their indentation ("" when not found)."""
+    m = re.search(r"^( *)- name: " + re.escape(step) + r"\n(.*?)(?=^\1- |\Z)", text, re.M | re.S)
+    r = re.search(r"^( *)run: \|\n((?:\1  .*\n|[ ]*\n)+)", m.group(2), re.M) if m else None
+    return "\n".join(l.strip() for l in r.group(2).splitlines()) if r else ""
+
+
+def action_pins(text):
+    """-> {owner/repo: {commits}} of the actions a workflow uses (actions/cache/save is actions/cache)."""
+    out = {}
+    for u in re.findall(r"^\s*-?\s*uses:\s*(\S+)", text, re.M):
+        name, _, ref = u.partition("@")
+        out.setdefault("/".join(name.split("/")[:2]), set()).add(ref)
+    return out
+
+
+XCODE_STEP = "Xcode 26 or later, as the release build needs"
+FB_COMMANDS = (('deps', r'\./build\.sh --yes --workdir "\$NMCI_WORK" deps$'),
+               ('doctor', r'\./build\.sh --workdir "\$NMCI_WORK" doctor\b'),
+               ('fetch', r'\./build\.sh --workdir "\$NMCI_WORK" fetch$'),
+               ('build', r'\./build\.sh --workdir "\$NMCI_WORK" --no-install build$'),
+               ('package', r'\./build\.sh --workdir "\$NMCI_WORK" --base-package "\$BASEPKG" package$'),
+               ('test', r'\./build\.sh --workdir "\$NMCI_WORK" test$'))
+
+
+def full_problems(fb, ci, root):
+    """the full build's workflow held to ci.yml's rules, and to what it is for."""
+    # ci.yml's rules for every workflow; its rules for its own four jobs do not apply here
+    ci_jobs = set(jobs(ci))
+    out = [p for p in problems(fb, root) if not any(re.search(r"\b" + re.escape(n) + r"\b", p) for n in ci_jobs)]
+    code = "\n".join(l for l in fb.splitlines() if not l.lstrip().startswith("#"))
+    ci_code = "\n".join(l for l in ci.splitlines() if not l.lstrip().startswith("#"))
+    have, want = action_pins(code), action_pins(ci_code)
+    for name, refs in sorted(have.items()):
+        if not refs <= want.get(name, set()):
+            out.append(f"{name}@{' '.join(sorted(refs))}: not the commit ci.yml pins ({' '.join(sorted(want.get(name, set()))) or 'ci.yml does not use it'})")
+    if re.search(r"upload|publish|deploy|\bgh\s|\bcurl\b.*-T\b|\bscp\b|\bssh\b", code, re.I):
+        out.append("the full build uploads or sends something (the package never leaves the runner)")
+    if not re.search(r"^on:\n  push:\n  workflow_dispatch:\n(?=\S)", code, re.M):
+        out.append("the full build does not run on every push and by hand (on: push, workflow_dispatch, nothing else)")
+    j = jobs(code)
+    if len(j) != 1:
+        out.append(f"the full build is not one job ({len(j)})")
+    t = next(iter(j.values()), "")
+    if not re.search(r"^    runs-on: macos-15-intel\n", t, re.M):
+        out.append("the full build does not run on macos-15-intel")
+    tm = re.search(r"^    timeout-minutes: (\d+)\n", t, re.M)
+    if not tm or not 0 < int(tm.group(1)) < 360:
+        out.append("the full build has no timeout below GitHub's 360 minutes")
+    coe = bool(re.search(r"^    continue-on-error: true\n", t, re.M))
+    said = "continue-on-error until it has been seen green once" in fb
+    if coe != said:
+        out.append("continue-on-error and the header's sentence about it disagree (it stays until the job has been seen green once, then both go)")
+    if not re.search(r"^concurrency:\n  group: [^\n]+\n  cancel-in-progress: false\n", code, re.M):
+        out.append("the full build's concurrency does not keep a running build (cancel-in-progress: false)")
+    if not run_block(fb, XCODE_STEP) or run_block(fb, XCODE_STEP) != run_block(ci, XCODE_STEP):
+        out.append(f"the step '{XCODE_STEP}' differs from ci.yml's (the two copies must stay equal)")
+    at, last = {}, -1
+    for word, rx in FB_COMMANDS:
+        m = re.search(r"^\s*(?:run: )?(?:rc=0; )?" + rx, code, re.M)
+        at[word] = m.start() if m else -1
+        if not m or m.start() < last:
+            out.append(f"the full build does not run ./build.sh {word} in its place (deps, doctor, fetch, --no-install build, package, test)")
+        last = m.start() if m else last
+    if "NM_BASE_PACKAGE_SHA256: ${{ steps.pins.outputs.basepkg_sha256 }}" not in code or "NM_PIN_CI_BASEPKG_SHA256=" not in code:
+        out.append("the package step is not given the pinned SHA-256 of the 2.9 package (NM_BASE_PACKAGE_SHA256)")
+    if re.search(r"uses: actions/cache@", code):
+        out.append("a cache saved by the action's own post step (actions/cache): the tools must be saved by an explicit save step")
+    saves = [m.start() for m in re.finditer(r"uses: actions/cache/save@\S+[^\n]*\n\s*with:\n\s*(?:#[^\n]*\n\s*)*path: \|\n[^\n]*\n[^\n]*nmw/tools/", code)]
+    if len(saves) != 2 or not all(at["deps"] < s < at["doctor"] for s in saves):
+        out.append("the tools are not saved by explicit save steps right after deps (before doctor)")
+    if not re.search(r"if: \$\{\{ always\(\) && steps\.tcid\.outputs\.id != ''", code):
+        out.append("the toolchain is not saved after a failed or cancelled deps")
+    if not re.search(r"if: \$\{\{ failure\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh logs ", code):
+        out.append("no last step that prints the logs when the build failed")
+    if not re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh prove ", code):
+        out.append("the checks of what the build did and did not do do not run (also after a failed step)")
+    if len(re.findall(r"\bdf -h\b", code)) != 3:
+        out.append("the free disk is not printed at the start, after deps and at the end (df -h three times)")
+    for s in sorted(set(re.findall(r"/bin/bash ((?:build|tools)/[\w./-]+\.sh)", code))):
+        if not (root / s).is_file():
+            out.append(f"{s}: named by the workflow and not in the tree")
+    return out
+
+
+fb_path = ROOT / ".github/workflows/full-build.yml"
+fb = fb_path.read_text()
+fp = full_problems(fb, y, ROOT)
+arm("full-build.yml is held to ci.yml's rules and builds what it says", not fp, "; ".join(fp))
+try:
+    import yaml
+    for f in (".github/workflows/ci.yml", ".github/workflows/full-build.yml"):
+        d = yaml.safe_load((ROOT / f).read_text())
+        arm(f"{f} parses as YAML, with its jobs", isinstance(d, dict) and bool(d.get("jobs")))
+except ImportError:
+    print("note: no python yaml here; the YAML parse was not checked")
+
+
+def fb_control(name, old, new, want, count=1, ci_text=None):
+    assert old in (fb if ci_text is None else ci_text), old
+    got = full_problems(fb.replace(old, new, count), y, ROOT) if ci_text is None else full_problems(fb, ci_text.replace(old, new, count), ROOT)
+    arm("control (full build): " + name, any(want in g for g in got), "; ".join(got) or "nothing reported")
+
+
+fb_control("an action on a moving tag is caught", "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", "actions/cache/restore@v6", "not pinned")
+fb_control("an action pinned to another commit than ci.yml's is caught", "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+           "actions/cache/restore@" + "1" * 40, "not the commit ci.yml pins")
+fb_control("an action ci.yml does not use is caught", "      - name: The logs of what failed\n",
+           "      - uses: someone/setup-thing@" + "2" * 40 + "\n      - name: The logs of what failed\n", "ci.yml does not use it")
+fb_control("a write permission is caught", "  contents: read\n", "  contents: write\n", "not read-only")
+fb_control("a secret is caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test", "run: K=${{ secrets.K }} ./build.sh --workdir \"$NMCI_WORK\" test", "secret")
+fb_control("an upload of the package is caught", "      - name: The logs of what failed\n",
+           "      - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - name: The logs of what failed\n", "upload")
+fb_control("a copy sent with scp is caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test", "run: ./build.sh --workdir \"$NMCI_WORK\" test && scp x y:", "uploads or sends")
+fb_control("pull_request_target is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request_target:\n", "pull_request_target")
+fb_control("a pull_request trigger is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n", "every push and by hand")
+fb_control("a script that does not exist is caught", "/bin/bash build/ci_full_build.sh logs", "/bin/bash build/ci_full_buld.sh logs", "not in the tree")
+fb_control("another runner is caught", "    runs-on: macos-15-intel\n", "    runs-on: macos-15\n", "macos-15-intel")
+fb_control("a second job is caught", "\n    steps:\n", "\n    steps:\n      - run: true\n  second:\n    runs-on: ubuntu-24.04\n    steps:\n", "not one job")
+fb_control("no timeout is caught", "    timeout-minutes: 340\n", "", "no timeout below")
+fb_control("GitHub's own limit as the timeout is caught", "    timeout-minutes: 340\n", "    timeout-minutes: 360\n", "no timeout below")
+fb_control("continue-on-error without the header's sentence is caught", "continue-on-error until it has been seen green once", "continue-on-error for now",
+           "disagree")
+fb_control("the sentence left after continue-on-error went is caught", "    continue-on-error: true\n", "", "disagree")
+fb_control("a concurrency that cancels the running build is caught", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "cancel-in-progress: false")
+fb_control("a checkout that keeps the token is caught", "          persist-credentials: false\n", "", "persist-credentials")
+fb_control("sudo is caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test", "run: sudo ./build.sh --workdir \"$NMCI_WORK\" test", "sudo")
+fb_control("an Xcode step changed here only is caught", "[ -n \"$best\" ] || { echo \"::error::no Xcode $min or later",
+           "[ -n \"$best\" ] || best=/Applications/Xcode.app; [ -n \"$best\" ] || { echo \"::error::no Xcode $min or later", "differs from ci.yml's")
+fb_control("an Xcode step changed in ci.yml only is caught", "[ -n \"$best\" ] || { echo \"::error::no Xcode $min or later",
+           "[ -n \"$best\" ] || best=/Applications/Xcode.app; [ -n \"$best\" ] || { echo \"::error::no Xcode $min or later", "differs from ci.yml's", ci_text=y)
+fb_control("the Xcode step dropped is caught", "      - name: " + XCODE_STEP + "\n", "      - name: Some Xcode\n", "differs from ci.yml's")
+fb_control("doctor dropped is caught", "rc=0; ./build.sh --workdir \"$NMCI_WORK\" doctor", "rc=0; true", "./build.sh doctor in its place")
+fb_control("fetch dropped is caught", "        run: ./build.sh --workdir \"$NMCI_WORK\" fetch\n", "        run: true\n", "./build.sh fetch in its place")
+fb_control("deps without --yes is caught", "run: ./build.sh --yes --workdir \"$NMCI_WORK\" deps", "run: ./build.sh --workdir \"$NMCI_WORK\" deps", "./build.sh deps in its place")
+fb_control("an installing build is caught", '"$NMCI_WORK" --no-install build', '"$NMCI_WORK" build', "./build.sh build in its place")
+fb_control("the package without its base is caught", "--base-package \"$BASEPKG\" package", "package", "./build.sh package in its place")
+fb_control("the tests dropped are caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test\n", "run: true\n", "./build.sh test in its place")
+fb_control("the package step without the pinned SHA-256 is caught", "          NM_BASE_PACKAGE_SHA256: ${{ steps.pins.outputs.basepkg_sha256 }}\n", "", "NM_BASE_PACKAGE_SHA256")
+fb_control("a cache saved by the action's post step is caught", "uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # WIRING",
+           "uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # WIRING", "explicit save step")
+fb_control("the toolchain saved only at the end is caught", "      - name: Save the toolchain (also after a failed or cancelled deps)\n",
+           "      - name: Later\n        run: ./build.sh --workdir \"$NMCI_WORK\" doctor\n      - name: Save the toolchain (also after a failed or cancelled deps)\n",
+           "right after deps")
+fb_control("the toolchain saved only after a good deps is caught", "if: ${{ always() && steps.tcid.outputs.id != ''", "if: ${{ success() && steps.tcid.outputs.id != ''",
+           "failed or cancelled deps")
+fb_control("the logs step dropped is caught", "        if: ${{ failure() }}\n", "", "prints the logs")
+fb_control("the checks run only after a good build is caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh prove",
+           "        run: /bin/bash build/ci_full_build.sh prove", "also after a failed step")
+fb_control("a df dropped is caught", "        run: df -h \"$RUNNER_TEMP\" /\n", "        run: true\n", "df -h three times")
+arm("control (full build): a name in a comment is not what it runs", full_problems(fb + "\n# /bin/bash build/no_such.sh ${{ secrets.X }} upload\n", y, ROOT) == [])
 
 rel = compile_line((ROOT / "build/build_plugin_release.sh").read_text(), r"2>\.\./out/build\.err")
 ci_text = (ROOT / "build/ci_plugin.sh").read_text()
