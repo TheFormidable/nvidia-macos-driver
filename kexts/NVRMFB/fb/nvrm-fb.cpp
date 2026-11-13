@@ -4579,7 +4579,9 @@ SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch, CTLFLAG_RW | CTLFLAG_LOCKED, &gF
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_auto, CTLFLAG_RW | CTLFLAG_LOCKED, &gFlipLatchAuto, 0, "1 = at 357 Hz and above latch mode 1 runs as 2 (deferred); 0 = always wait");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_deferred, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchDeferred, 0, "flips verified by the next submit instead of waited for");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_flip_latch_waits, CTLFLAG_RD | CTLFLAG_LOCKED, &gFlipLatchWaits, 0, "flips that waited for completion");
-SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED, &gGuardCleared, 0, "1 once the boot guard was cleared this boot");
+// CTLFLAG_KERN: NVRM reads this one from inside the kernel (sysctlbyname in a kext is kernel_sysctlbyname), and xnu
+// answers EPERM to a kernel caller for an OID without that flag. Without it NVRM never saw the display come up.
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_guard_cleared, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gGuardCleared, 0, "1 once the boot guard was cleared this boot");
 // Registered here and not with the other counters: those are registered from the first video-memory grant, which a
 // card with no display to light never makes, and the headless clear is exactly the case NVRM has to be able to read.
 static void fbGuardCleared(const char *why)
