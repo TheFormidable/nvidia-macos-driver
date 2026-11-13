@@ -29,8 +29,9 @@ comandos y opciones y la solución de problemas.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
 >   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
 >   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
-> - En ninguna parte: una compilación completa en Apple silicon (ver [Requisitos](#requisitos)), ni una compilación
->   de los commits de esta rama posteriores a 3933ff6 en ninguno de los dos Mac.
+> - En ninguna parte cuando se escribió este aviso (2026-11-13): una compilación completa en Apple silicon (ver
+>   [Requisitos](#requisitos)), ni una compilación de los commits de esta rama posteriores a 3933ff6 en ninguno de
+>   los dos Mac.
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
 > funcionan `doctor`, `fetch`, `test`, `env` y la prueba en seco de cualquier comando salvo `deps`. Un paso todavía
