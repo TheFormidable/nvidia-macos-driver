@@ -175,6 +175,15 @@ static void rules()
    (pinned to one processor, with and without the thread sanitizer). Yielding there, a second holds about two thousand
    cycles on one processor, and as many as before on four. */
 static const double kIdleBound = 10.0;   // seconds
+// The gate scenario's verdict is read from how many close/open CYCLES ran, not from wall-clock time. A loaded machine
+// turns over the same cycles, only slower, so a control catches its violation as surely as on an idle one; a run that
+// ends on the clock after as few as two cycles (seen once on a loaded machine) could miss it. The scenario runs until
+// it has turned over at least this many cycles AND waited the asked time; a violation ends it at once (a control needs
+// no more than one), and a safety cap many times the asked time keeps even a very slow machine from running away.
+static const long kMinCycles = 300;     // far more than the handful a loaded machine once managed, yet quick when idle
+static const double kMaxStretch = 30.0;
+static const long kMinTimers = 300;     // the generation scenario's floor, read the same way: callbacks run, not time
+static const long kMinRounds = 50;      // the bottom-half scenario's floor: start/stop rounds, not time
 struct GateRun { long bad, cycles, open_tries, turned_away; };
 static GateRun gate_scenario(const GateOps &ops, double seconds)
 {
@@ -208,7 +217,7 @@ static GateRun gate_scenario(const GateOps &ops, double seconds)
     const auto t0 = Clock::now();
     long cycles = 0;
     std::mt19937 r(12345);
-    while (!elapsed(t0, seconds)) {
+    for (;;) {
         era++;                                   // odd: a close is on its way
         nv_gate_close(&g);
         const auto closed_at = Clock::now();
@@ -224,6 +233,9 @@ static GateRun gate_scenario(const GateOps &ops, double seconds)
         era++;                                   // even: open, and it stays open until the next odd number
         for (int i = (int)(r() % 200); i > 0; i--) std::this_thread::yield();
         cycles++;
+        if (bad.load() > 0) break;                                 // a violation is proof enough; do not wait on the clock
+        if (cycles >= kMinCycles && elapsed(t0, seconds)) break;   // enough cycles turned over AND the asked time waited
+        if (elapsed(t0, seconds * kMaxStretch)) break;             // safety cap: never run away, however slow the machine
     }
     stop.store(1);
     for (auto &t : th) t.join();
@@ -242,14 +254,17 @@ struct Shot { int slot; unsigned long long token; long id; };
 static long gen_scenario(int (*enter)(NvXnuGen *, unsigned long long), double seconds, long *reused)
 {
     const int kSlots = 2;
+    const unsigned kPerOwner = 4096;
     Slot slots[kSlots];
-    std::vector<Payload> pool(4096);   // never freed: a "released" payload is one marked dead, so a late read is defined
+    // One region per owner, never freed: a "released" payload is one marked dead, so a late read is defined. The regions
+    // do not overlap, so a payload one owner still has a live callback on is never repurposed by the other owner (which
+    // would change its id or alive flag under that callback and read as a violation that is the test's, not the gate's).
+    std::vector<Payload> pool((size_t)kSlots * kPerOwner);
     std::mutex mbx;
     std::vector<Shot> mail;
     std::atomic<int> stop{0};
     std::atomic<long> bad{0}, ran{0};
     std::atomic<long> next_id{1};
-    std::atomic<unsigned> pool_at{0};
 
     auto timer = [&] {
         std::mt19937 r(std::random_device{}());
@@ -274,8 +289,10 @@ static long gen_scenario(int (*enter)(NvXnuGen *, unsigned long long), double se
     auto owner = [&](int k) {
         std::mt19937 r(std::random_device{}() + (unsigned)k);
         Slot &sl = slots[k];
+        const unsigned base = (unsigned)k * kPerOwner;
+        unsigned pa = 0;
         while (!stop.load()) {
-            Payload *p = &pool[pool_at++ % pool.size()];
+            Payload *p = &pool[base + (pa++ % kPerOwner)];
             p->id.store(next_id++);
             p->alive.store(1);
             sl.payload.store(p);
@@ -299,8 +316,16 @@ static long gen_scenario(int (*enter)(NvXnuGen *, unsigned long long), double se
     std::vector<std::thread> th;
     for (int i = 0; i < 2; i++) th.emplace_back(timer);
     for (int k = 0; k < kSlots; k++) th.emplace_back(owner, k);
+    // As with the gate scenario, the verdict is read from how many callbacks RAN, not from wall-clock time: a loaded
+    // machine runs the same callbacks, only slower. A violation ends it at once (a control needs one); otherwise it waits
+    // until enough callbacks have run and the asked time has passed, under a safety cap.
     const auto t0 = Clock::now();
-    while (!elapsed(t0, seconds)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (bad.load() > 0) break;
+        if (ran.load() >= kMinTimers && elapsed(t0, seconds)) break;
+        if (elapsed(t0, seconds * kMaxStretch)) break;
+    }
     stop.store(1);
     for (auto &t : th) t.join();
     *reused = next_id.load() - 1;
@@ -317,7 +342,7 @@ static long bh_scenario(int (*next)(NvXnuBh *), double seconds, long *rounds_out
     long bad = 0, rounds = 0;
     const auto t0 = Clock::now();
     std::mt19937 r(777);
-    while (!elapsed(t0, seconds)) {
+    for (;;) {
         std::mutex lock;
         std::condition_variable cv;
         NvXnuBh bh = {};
@@ -381,6 +406,11 @@ static long bh_scenario(int (*next)(NvXnuBh *), double seconds, long *rounds_out
         }
         worker.join();
         rounds++;
+        // the verdict is read from start/stop ROUNDS, not wall-clock time (a loaded machine runs the same rounds, only
+        // slower); a dropped run ends it at once, otherwise it waits for enough rounds and the asked time, under a cap
+        if (bad > 0) break;
+        if (rounds >= kMinRounds && elapsed(t0, seconds)) break;
+        if (elapsed(t0, seconds * kMaxStretch)) break;
     }
     *rounds_out = rounds;
     return bad + (rounds == 0 ? 1 : 0);
