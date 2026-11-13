@@ -25,6 +25,7 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tarfile
@@ -127,6 +128,40 @@ class Maker:
             raise RuntimeError(r.stderr)
         out.chmod(0o755)
         return out
+
+    def kext(self, out, minos="15.0", keep_version=False):
+        """a kext's binary as Apple's linker makes one: Mach-O file type MH_KEXT_BUNDLE, no minimum macOS version
+        (keep_version: it keeps the one the compiler asked for). Neither ld64.lld nor a plain -bundle link makes that
+        file type, so a bundle is linked and rewritten here, the same way on a Mac and elsewhere."""
+        out = self.make(out, "bundle", loads=(), minos=minos)
+        macho_rewrite(out, MH_KEXT_BUNDLE, keep_version)
+        return out
+
+
+MH_KEXT_BUNDLE = 0x0b
+VERSION_CMDS = (0x32, 0x24)   # LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX
+
+
+def macho_rewrite(path, filetype=None, keep_version=False):
+    """a thin 64-bit Mach-O file given another file type (None: its own), and without its minimum macOS version
+    (unless keep_version): the version commands are taken out of the load commands, the others move up in their
+    order, ncmds and sizeofcmds are corrected and the bytes freed at the end of the commands are zeroed."""
+    b = bytearray(pathlib.Path(path).read_bytes())
+    magic, _, _, ft, ncmds, sizeofcmds = struct.unpack_from("<6I", b, 0)
+    if magic != 0xfeedfacf:
+        raise RuntimeError(f"{path}: not a thin 64-bit Mach-O file")
+    cmds, at = [], 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<2I", b, at)
+        if not keep_version and cmd in VERSION_CMDS:
+            at += size
+            continue
+        cmds.append(bytes(b[at:at + size]))
+        at += size
+    body = b"".join(cmds)
+    b[32:32 + sizeofcmds] = body + bytes(sizeofcmds - len(body))
+    struct.pack_into("<3I", b, 12, ft if filetype is None else filetype, len(cmds), len(body))
+    pathlib.Path(path).write_bytes(bytes(b))
 
 
 # ------------------------------------------------------------------------------------------------ the scene
@@ -737,6 +772,44 @@ def main():
         new = r / "Library/NullMoth/dlss/nm_unzstd"
         control("a shipped file built for macOS 26 is caught", "minos 26.0",
                 lambda: (mk.make(new, "bundle", minos="26.0"), write_sums(r)), lambda: (mk.make(new, "bundle", minos="12.0"), write_sums(r)))
+        # kexts: Apple's linker writes no minimum macOS version into a kext's binary (neither the full build's nor 2.9's
+        # name one). The scene's kexts are made as that linker makes them (Maker.kext); first, that they read as such.
+        def otool(*a):
+            return subprocess.run(["otool", *map(str, a)], capture_output=True, text=True, env=mk.env()).stdout
+        def cmds(f):
+            return [l.split()[1] for l in otool("-l", f).splitlines() if l.split()[:1] == ["cmd"]]
+        kb, kk = mk.make(tmp / "kx/plain", "bundle", loads=(), minos="15.0"), mk.kext(tmp / "kx/kext")
+        arm("a kext made here reads as the linker makes one: otool -hv says KEXTBUNDLE, otool -l lists no version command and every "
+            "other command of the bundle it was made from, in its order",
+            "KEXTBUNDLE" in otool("-hv", kk) and "LC_BUILD_VERSION" in cmds(kb)
+            and cmds(kk) == [c for c in cmds(kb) if c not in ("LC_BUILD_VERSION", "LC_VERSION_MIN_MACOSX")],
+            (otool("-hv", kk), cmds(kb), cmds(kk)))
+        shutil.rmtree(tmp / "kx")
+        base = w / "package/base/pkgroot"
+        kx_new = r / "Library/Extensions/NVRM.kext/Contents/MacOS/NVRM"         # made by this build, not in the base package
+        kx_old = "Library/NullMoth/kexts/NMHDA.kext/Contents/MacOS/NMHDA"         # carried over unchanged
+        mk.kext(base / kx_old)
+        write_sums(base)
+        (r / kx_old).parent.mkdir(parents=True)
+        shutil.copy2(base / kx_old, r / kx_old)
+        mk.kext(kx_new)
+        write_sums(r)
+        rc, o = sc.prove()
+        arm("a kext this build made that names no minimum macOS version passes, counted apart from the versions, with the reason",
+            rc == 0 and "this build made: 3, minos 12.0 x1, 15.0 x1, and 1 kext, which names none (the linker writes none into a kext): "
+            "no file needs a macOS newer than 15.0" in o, "\n".join(failures(o)) or o)
+        arm("a kext carried over unchanged from the base package is counted apart on that side",
+            "(carried over unchanged from the base package: 2, minos 13.0 x1, and 1 kext, which names none)" in o, o)
+        control("a kext that names macOS 26.0 is caught", "NVRM.kext/Contents/MacOS/NVRM: minos 26.0",
+                lambda: (mk.kext(kx_new, minos="26.0", keep_version=True), write_sums(r)), lambda: (mk.kext(kx_new), write_sums(r)))
+        nv = r / "Library/NullMoth/video/libnew.dylib"
+        control("a file that is not a kext and names no minimum macOS version is still caught", "libnew.dylib: no minimum macOS version",
+                lambda: (mk.make(nv, "dylib"), macho_rewrite(nv), write_sums(r)), lambda: (nv.unlink(), write_sums(r)))
+        shutil.rmtree(r / "Library/Extensions")
+        shutil.rmtree(r / "Library/NullMoth/kexts")
+        shutil.rmtree(base / "Library/NullMoth/kexts")
+        write_sums(base)
+        write_sums(r)
         control("a damaged package is caught", "--strict -c SHA256SUMS in the package fails", lambda: (r / "VERSION").write_text("3.1\n"),
                 lambda: (r / "VERSION").write_text("3.0\n"))
         control("a changed checkout is caught", "git status --porcelain prints 1", lambda: (sc.co / "build/pins.sh").write_text("NM_PIN_X=2\n"),
