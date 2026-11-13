@@ -2,7 +2,9 @@
 """package/fw_fetch.sh: the GSP firmware comes from NVIDIA's own driver package, verified by SHA-256, never from ours.
 
 Arms (named sentences) run against a fake makeself .run whose pins are swapped in through FW_TEST_PINS (non-root only).
-Needs Python 3.14 (compression.zstd) and clang (builds the Zstandard decoder the package ships)."""
+Needs clang (builds the Zstandard decoder the package ships). The .run's payload is compressed with Python's own
+Zstandard where there is one (3.14 and later); an older Python (Apple's python3) puts it into a frame of stored
+blocks instead (tools/zstd_stored.py), which the decoder reads the same way."""
 import hashlib
 import io
 import os
@@ -11,10 +13,18 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from compression import zstd
+try:
+    from compression.zstd import compress as zstd_frame
+except ImportError:
+    sys.dont_write_bytecode = True   # the module beside this file is read, never compiled into the checkout
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from zstd_stored import frame as zstd_frame
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 fails = 0
+if os.geteuid() == 0:   # fw_fetch.sh takes FW_TEST_PINS from no one who is root: it would fetch NVIDIA's real package
+    print("SKIP: run as a normal user (as root the script reads its real pins, not this test's)")
+    sys.exit(2)
 
 
 def check(name, ok, extra=""):
@@ -41,7 +51,7 @@ def make_run(path, files):
         ti = tarfile.TarInfo("README")
         ti.size = 3
         t.addfile(ti, io.BytesIO(b"abc"))
-    payload = zstd.compress(buf.getvalue())
+    payload = zstd_frame(buf.getvalue())
     header = b"#!/bin/sh\n# fake makeself header\nskip=5\nexit 0\n"
     with open(path, "wb") as f:
         f.write(header + payload)

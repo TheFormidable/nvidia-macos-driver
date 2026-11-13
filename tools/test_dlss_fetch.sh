@@ -16,12 +16,23 @@ t() { if "$@"; then echo 0; else echo 1; fi; }
 
 F=$W/files; mkdir -p "$F" "$W/tools"
 printf 'dlss runtime\n' > "$F/dlss.so"; printf 'dlssd runtime\n' > "$F/dlssd.so"; printf 'dlssg runtime\n' > "$F/dlssg.so"
-# stand-in for NVIDIA's makeself .run: a shell header with skip=N, then a zstd-compressed tar (as the real one is)
-ZSTD=${ZSTD:-$(command -v zstd || echo /opt/homebrew/bin/zstd)}   # only the fixture needs the compressor; the script under test never does
-[ -x "$ZSTD" ] || { echo "test needs a zstd command (set ZSTD=) to build its fixture"; exit 2; }
+# stand-in for NVIDIA's makeself .run: a shell header with skip=N, then a tar as Zstandard (as the real one is). The
+# script under test only decodes; the fixture needs an encoder, and macOS brings none. With ZSTD=<a zstd command> the
+# tar is compressed as NVIDIA's is; without, it goes into a frame of stored blocks (tools/zstd_stored.py), which is
+# Zstandard to every decoder.
+if [ -n "${ZSTD:-}" ]; then
+  [ -x "$ZSTD" ] || { echo "ZSTD=$ZSTD is not a program"; exit 2; }
+  pack() { "$ZSTD" -q -c; }
+else
+  pack() { python3 -I -B "$ROOT/tools/zstd_stored.py"; }
+fi
 mkdir -p "$W/payload" && printf 'ngx core\n' > "$W/payload/libnvidia-ngx.so.620.70.06" && printf 'other\n' > "$W/payload/other.bin"
-{ printf '#!/bin/sh\n# makeself stand-in\nCRCsum=0\nskip=6\n'; printf 'exit 1\n'; tar -C "$W/payload" -cf - . | "$ZSTD" -q -c; } > "$F/driver.run"
+{ printf '#!/bin/sh\n# makeself stand-in\nCRCsum=0\nskip=6\n'; printf 'exit 1\n'; tar -C "$W/payload" -cf - . | pack; } > "$F/driver.run"
 clang -O1 -DZSTD_DISABLE_ASM -o "$W/tools/nm_unzstd" "$ROOT/dlss/nm_unzstd.c" "$ROOT"/dlss/zstd/common/*.c "$ROOT"/dlss/zstd/decompress/*.c || { echo "cannot build nm_unzstd"; exit 2; }
+# the payload must read back with the decoder the script uses: a fixture that does not would fail every arm below for a
+# reason of this test's own
+tail -n +6 "$F/driver.run" | "$W/tools/nm_unzstd" | tar -tf - 2>/dev/null | grep -q 'libnvidia-ngx\.so\.620\.70\.06$' ||
+  { echo "FAIL the fixture's payload does not read back as Zstandard (ZSTD=${ZSTD:-not set})"; exit 1; }
 python3 -I -B - "$F" <<'PY'   # -I ignores PYTHONDONTWRITEBYTECODE: -B keeps the bytecode of what it imports unwritten
 import sys, zipfile
 z = zipfile.ZipFile(sys.argv[1] + "/nvjitlink.whl", "w")
