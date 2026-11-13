@@ -45,6 +45,11 @@ Downloaded on the user's Mac, never shipped: NVIDIA's DLSS runtimes (SDK 310.9.1
 (one file from NVIDIA's Linux 620.70.06 package) and `libnvJitLink` (from NVIDIA's PyPI wheel). `package/dlss_fetch.sh` pins
 each by SHA-256, asks before downloading, and installs them root-owned. They stay under NVIDIA's licences.
 
+Downloaded on the building Mac, never shipped: the build tools `./build.sh deps` builds from pinned sources on an Intel
+Mac (ninja, CMake, OpenSSL, zstd, xz, CPython, pkgconf, SPIRV-Headers, SPIRV-Tools, glslang, LLVM with clang; `build/pins.sh`,
+`NM_PIN_TC*`). Nothing of them reaches the package: NVK's own build has LLVM and SPIRV-Tools turned off, and only the
+native `mesa_clc`, a program run during the build, links them.
+
 No closed NVIDIA library is in the package. `libnvencvt` talks to the card through the RM interface of the open
 modules and the open-gpu-doc class headers.
 

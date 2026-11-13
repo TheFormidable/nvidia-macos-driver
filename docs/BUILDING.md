@@ -43,14 +43,27 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 - A git clone of this repository (not a downloaded archive): the plugin, translator and video library are built from
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
-- Homebrew, for NVK, the Vulkan loader and the translator only (see [Tools each component needs](#tools-each-component-needs)):
-  every other component builds with Xcode and what macOS has. When Homebrew is missing, `./build.sh deps` explains how
-  to install it and offers to run its official installer, but only after you type `yes` (`--yes` does not count for this).
-- Free disk space: not measured on a Mac yet. The NVIDIA trees, Mesa, LLVM from Homebrew and the NVK build together
-  take several gigabytes.
-- Time, on an **Intel Mac**: Homebrew no longer has ready-made builds (bottles) of these formulas for Intel Macs, so
-  `deps` has Homebrew compile each missing one here. LLVM 22 alone takes hours and tens of gigabytes while it builds.
-  `deps` says so before it asks. On Apple silicon Homebrew installs ready-made builds. To compile, Homebrew also needs
+- The build tools of NVK, the Vulkan loader and the translator (see [Tools each component needs](#tools-each-component-needs)):
+  every other component builds with Xcode and what macOS has. A tool you already have is used wherever it is (a
+  setting such as `NM_LLVM_PREFIX`, Homebrew, `PATH`). A missing one comes from where `NM_TOOLS_FROM` says:
+  - On an **Intel Mac** (`auto` there means `source`), `./build.sh deps` builds ninja, CMake, Python 3.14 (with the
+    OpenSSL, zstd and xz it needs), pkgconf, SPIRV-Tools, glslang and LLVM 22 with clang from pinned sources with
+    `build/toolchain.sh`, into `<workdir>/tools/toolchain`. **Homebrew is not needed** and nothing is installed outside
+    the working directory. Homebrew has no ready-made builds (bottles) for Intel Macs any more: through Homebrew,
+    `deps` would compile about twenty-five formulas for hours into `/usr/local` and change your `python3`.
+    The only thing it does not build is GNU patch, which NVK's patches need when macOS's `patch` cannot create files:
+    put it on `PATH` as `gpatch` (Homebrew's formula is `gpatch`); `deps` says so.
+  - On **Apple silicon** (`auto` there means `homebrew`), `deps` installs Homebrew's ready-made formulas. When Homebrew
+    is missing, it explains how to install it and offers to run its official installer, but only after you type `yes`
+    (`--yes` does not count for this). `NM_TOOLS_FROM=source` builds them as on an Intel Mac instead.
+- Time and disk for the tools built from source, measured on one 12-thread Intel Mac: about 70 minutes in all (the
+  downloads 11 minutes, LLVM alone 34), 6.7 GB with every build tree kept (sources 3.2 GB, build trees 2.4 GB, the
+  installed tools 1.1 GB). `deps` asks for 10 GB free before it starts LLVM and says how much is free when there is
+  less. Keep the Mac awake and on power: a tool whose build is interrupted (Ctrl-C, sleep, power) is built again from
+  the beginning by the next `./build.sh deps`, and LLVM is the long one. A tool that fails stops `deps` with its log
+  named; the next `deps` starts at that tool. The NVIDIA trees, Mesa and the NVK build take several gigabytes more.
+- Time with `NM_TOOLS_FROM=homebrew` on an Intel Mac: Homebrew compiles each missing formula here; LLVM 22 alone takes
+  hours and tens of gigabytes while it builds, and `deps` says so before it asks. To compile, Homebrew also needs
   Apple's command line tools besides Xcode, as new as this macOS: without them it stops at the first formula with
   `Xcode alone is not sufficient` or `Your Command Line Tools are too outdated`. `xcode-select --install` installs them,
   Software Update updates them; `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` shows the version you have.
@@ -90,12 +103,13 @@ folder that carries that mark.
 | What | Where |
 |---|---|
 | Homebrew formulas, only the missing ones: `gpatch` (only when no `patch` here does what the scripts need), `ninja`, `cmake`, `pkgconf`, `glslang`, `spirv-tools`, `llvm@22` (or `llvm` while Homebrew's is 22), `python@3.14`, and `spirv-llvm-translator` only while Homebrew's `llvm` is 22 | Homebrew's own prefix (`/opt/homebrew` on Apple silicon, `/usr/local` on Intel). Nothing you already have is upgraded or removed by `build.sh`; Homebrew itself may upgrade an outdated dependency of a formula it installs, and the prompt says so. Homebrew also installs what these formulas need and links the commands of those that are not keg-only (`llvm@22` is keg-only) into its `bin`, which macOS's default `PATH` puts before `/usr/bin` on an Intel Mac; with today's formulas that includes `python@3.15`, which `llvm@22` needs to build and which would become the `python3` of a shell with that `PATH` (the build itself takes `python@3.14`, from Homebrew's `opt` folder). So when the installs give Homebrew's `bin` a `python3` it did not have, as a link into a Python formula they added, `deps` runs `brew unlink` on that formula once they are done (or one of them fails) and prints a line with the way back (`brew link <formula>`); a `python3` that was there before, or a Python formula you already had, is left as it is. After the installs `deps` names each command they added to Homebrew's `bin` that macOS also has in `/usr/bin`, `/bin`, `/usr/sbin` or `/sbin`, with the `brew unlink` that puts it back. A dry run states this rule and calls no `brew` at all. Each `brew install` runs with `HOMEBREW_NO_INSTALL_CLEANUP=1`, so Homebrew does not follow it with its own clean-up (older versions of what it installed or upgraded and, every 30 days, of every formula, then formulas nothing needs any more, dead links and empty folders in its prefix, old downloads): an upgraded dependency keeps its older version |
+| With `NM_TOOLS_FROM=source` (the default on an Intel Mac), the missing build tools, built from pinned sources by `build/toolchain.sh` for this Mac's processor and for macOS 15.0 and later (`MACOSX_DEPLOYMENT_TARGET`). Each tool's stamp in `.nm-toolchain/` holds its pinned commit and recipe; a changed pin or recipe rebuilds that tool only, and a tool without its stamp is not used. Every program and library they install links only macOS's own libraries and the toolchain's: `build/toolchain.sh` checks it before it writes the stamp | `<workdir>/tools/toolchain`; build trees in `<workdir>/tools/toolchain-build` (each removed once its tool's checks pass), logs in `<workdir>/logs/toolchain`, verified sources in `<workdir>/src/git/tc-*.git` and `<workdir>/src/toolchain` |
 | SPIRV-LLVM-Translator v22.1.8 for LLVM 22, built from source when no matching one is found (Homebrew's follows its current LLVM, 23 today) | `<workdir>/tools/spirv-llvm-translator`; its sources in `<workdir>/src`, its log `<workdir>/logs/spirv-llvm-translator.log` |
 | Python packages for Mesa (meson 1.12.1, mako, MarkupSafe, PyYAML, packaging), each checked against its SHA-256 | `<workdir>/tools/venv`; pip's download cache in `<workdir>/tools/pip-cache` (not `~/Library/Caches/pip`) |
 | Rust 1.98.1 with the x86_64-apple-darwin target, bindgen-cli 0.73.2, cbindgen 0.29.4 (rustup-init 1.29.3, SHA-256 checked, run with `--no-modify-path`) | `<workdir>/tools/rustup` (RUSTUP_HOME), `<workdir>/tools/cargo` (CARGO_HOME) |
 | Links to exactly the tools the build may use; the first folder on every step's PATH, followed by the Python environment's `bin` (Homebrew's `bin` never is on it) | `<workdir>/tools/bin` |
 | `ssh`, `rsync`, `scp` that act on this Mac (see [Components](#components-and-their-order)) | `<workdir>/tools/host` |
-| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers | `<workdir>/src`, and `<workdir>/build/...` in the layout the build scripts already expect (see below) |
+| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers; with `NM_TOOLS_FROM=source`, by `deps` and only for the tools it builds: ninja 1.13.2 (v1.13.2, 3441b633c2fe), CMake 4.4.5 (v4.4.5, aa4fae824a02), OpenSSL 3.5.9 (openssl-3.5.9, 45e844fa2a14), zstd 1.5.7 (v1.5.7, f8745da6ff1a), xz 5.8.4 (v5.8.4, d3e650e63c11), CPython 3.14.10 (v3.14.10, b703b2c5e704), pkgconf 2.5.1 (pkgconf-2.5.1, 4fc570f91d9d), Khronos SPIRV-Headers vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, 496543121ce6), Khronos SPIRV-Tools vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, ef96ed763b43), Khronos glslang 16.6.0 (16.6.0, e1b562a8bed2), LLVM 22.1.8 with clang (llvmorg-22.1.8, ca7933e47d3a). None of those is shipped: NVK's own build has LLVM and SPIRV-Tools turned off, and only the native `mesa_clc`, a build-time program, links them | `<workdir>/src`, and `<workdir>/build/...` in the layout the build scripts already expect (see below) |
 | Outputs | `<workdir>/out` (kexts in `out/kexts`, NVK in `out/nvk`, and so on) |
 | One log per step, one stamp per step, failure reports | `<workdir>/logs`, `<workdir>/stamps`, `<workdir>/reports` |
 | The staged package and its tarball | `<workdir>/package/pkgroot`, `<workdir>/package/nullmoth-nvidia-local-<commit>.tar.gz` |
@@ -105,7 +119,7 @@ folder that carries that mark.
 | Command | Writes |
 |---|---|
 | `doctor`, `env`, `help`, and every command with `--dry-run` | Nothing of yours. Each makes one temporary file of its own in your temporary folder (`$TMPDIR`), with a scratch folder beside it for the patch test, and removes them when it ends; `xcrun` keeps its lookup cache (`xcrun_db`) in that same per-user temporary folder, as it does whenever any Xcode tool is run. They read the Mac (`sw_vers`, `sysctl`, `xcode-select -p` before anything else, `xcodebuild -version`, `xcrun`, `file` on each tool taken from `PATH`, each chosen tool's `--version`), the checkout (`git status` without refreshing its index; a dry run never records local changes with `git stash create`) and the working directory. They never run `brew info` or `brew install`: a dry run of `deps` names `llvm@22` without asking Homebrew which LLVM formula it has |
-| `deps` | Homebrew's prefix, and Homebrew's own cache and logs (`~/Library/Caches/Homebrew`, `~/Library/Logs/Homebrew`) for the formulas it installs, after a yes; while it compiles one, its build folder is in `/private/tmp` (Homebrew's `HOMEBREW_TEMP`) and is removed when that formula is done. Its `brew info` questions keep Homebrew's formula list in `<workdir>/tools/homebrew-cache`; with `--offline` or `--no-install` it asks none. Everything else in `<workdir>/tools` and `<workdir>/src`, apart from the temporary files that the compilers, pip and cargo make in your temporary folder (`$TMPDIR`) and remove (cargo keeps its build folder there when an install fails, and says where) |
+| `deps` | With `NM_TOOLS_FROM=source`: `<workdir>` only, and it calls no `brew` at all. With Homebrew: Homebrew's prefix, and Homebrew's own cache and logs (`~/Library/Caches/Homebrew`, `~/Library/Logs/Homebrew`) for the formulas it installs, after a yes; while it compiles one, its build folder is in `/private/tmp` (Homebrew's `HOMEBREW_TEMP`) and is removed when that formula is done. Its `brew info` questions keep Homebrew's formula list in `<workdir>/tools/homebrew-cache`; with `--offline` or `--no-install` it asks none. Everything else in `<workdir>/tools` and `<workdir>/src`, apart from the temporary files that the compilers, pip and cargo make in your temporary folder (`$TMPDIR`) and remove (cargo keeps its build folder there when an install fails, and says where) |
 | `fetch` | `<workdir>/src`, `<workdir>/build/...` (the layout below) and the translator's crates in `<workdir>/tools/cargo`. Its git runs without your git hooks (`core.hooksPath`), file system monitor and global attributes file, and its `git init` and `git clone` without your template folder (`init.templateDir`) |
 | `build`, `all`, `package` | `<workdir>` only, with one exception: when the checkout has uncommitted changes, the plugin, translator and video builds take them as a commit object made with `git stash create`, which is stored in the checkout's `.git` (on no branch; `git gc` removes it in time) |
 | `test` | `<workdir>/logs` and, once the NVIDIA tree is fetched, the links in `<workdir>/tools/bin` (the patch chain is applied with the build's own `patch`); the host tests make temporary folders of their own and remove them |
@@ -131,7 +145,7 @@ next `fetch` lays the sources out again (the downloads in `<workdir>/src` are re
 yourself is used as it is.
 
 `build.sh` itself writes nothing to your shell start files, `~/.cargo`, `~/.rustup`, `/Library` or `/usr/local` (on an
-Intel Mac, `/usr/local` is Homebrew's prefix, so the formulas Homebrew installs land there). A `RUSTUP_HOME` or
+Intel Mac, `/usr/local` is Homebrew's prefix, so the formulas Homebrew installs with `NM_TOOLS_FROM=homebrew` land there). A `RUSTUP_HOME` or
 `CARGO_HOME` from your shell is not used, nor is a Rust you have elsewhere (in `~/.cargo`, for example): `doctor`
 reports Rust as missing until `deps` has put the pinned one into the working directory, and leaves yours alone. cargo
 still reads the `.cargo/config.toml` of every folder above the one it works in, so with the working directory or the
@@ -206,6 +220,18 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_WEBKIT_SPI_URL` | the URL in build/pins.sh | A folder (URL) holding `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` |
 | `NM_SPIRV_LLVM_URL` | the URL in build/pins.sh | A mirror of SPIRV-LLVM-Translator (deps builds it for LLVM 22) |
 | `NM_SPIRV_HEADERS_URL` | the URL in build/pins.sh | A mirror of SPIRV-Headers |
+| `NM_TOOLS_FROM` | `auto` | Where `deps` gets a build tool that is missing (one that is there is used wherever it is): `source` builds it with `build/toolchain.sh` from the pinned sources into `<workdir>/tools/toolchain`, without Homebrew; `homebrew` installs Homebrew's formula; `auto` is `source` on an Intel Mac (Homebrew has no ready-made builds for it) and `homebrew` on Apple silicon. Any other value stops `build.sh` |
+| `NM_TC_NINJA_URL` | the URL in build/pins.sh | A mirror of ninja (v1.13.2), a source deps builds the toolchain from |
+| `NM_TC_CMAKE_URL` | the URL in build/pins.sh | A mirror of CMake (v4.4.5), a source deps builds the toolchain from |
+| `NM_TC_OPENSSL_URL` | the URL in build/pins.sh | A mirror of OpenSSL (openssl-3.5.9), a source deps builds the toolchain from |
+| `NM_TC_ZSTD_URL` | the URL in build/pins.sh | A mirror of zstd (v1.5.7), a source deps builds the toolchain from |
+| `NM_TC_XZ_URL` | the URL in build/pins.sh | A mirror of xz (v5.8.4), a source deps builds the toolchain from |
+| `NM_TC_PYTHON_URL` | the URL in build/pins.sh | A mirror of CPython (v3.14.10), a source deps builds the toolchain from |
+| `NM_TC_PKGCONF_URL` | the URL in build/pins.sh | A mirror of pkgconf (pkgconf-2.5.1), a source deps builds the toolchain from |
+| `NM_TC_SPIRVHEADERS_URL` | the URL in build/pins.sh | A mirror of SPIRV-Headers (for the toolchain's SPIRV-Tools) (vulkan-sdk-1.4.363.0), a source deps builds the toolchain from |
+| `NM_TC_SPIRVTOOLS_URL` | the URL in build/pins.sh | A mirror of SPIRV-Tools (vulkan-sdk-1.4.363.0), a source deps builds the toolchain from |
+| `NM_TC_GLSLANG_URL` | the URL in build/pins.sh | A mirror of glslang (16.6.0), a source deps builds the toolchain from |
+| `NM_TC_LLVM_URL` | the URL in build/pins.sh | A mirror of llvm-project (llvmorg-22.1.8), a source deps builds the toolchain from |
 | `NM_RUSTUP_URL` | static.rust-lang.org, rustup 1.29.3 | Where `rustup-init` is downloaded from (its SHA-256 is checked either way) |
 | `RUSTUP_DIST_SERVER` | rustup's | Where rustup downloads the toolchain from |
 | `DEVELOPER_DIR` | the selected Xcode | An Xcode other than the one `xcode-select` selects |
@@ -473,6 +499,11 @@ restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brin
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |
 | a step stops at a warning ceiling (`warn_ceiling`) | The ceilings in build/warnings.txt are 0: a compiler or linker other than the release's may print a new warning | Report it with the report file and your Xcode version |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | A Homebrew library (often libelf in /usr/local on Intel) was linked | Report it with the report file |
+| `STOP: step 'toolchain-<tool>' failed` (deps, `NM_TOOLS_FROM=source`) | `build/toolchain.sh` could not build or check that tool; its log is `<workdir>/logs/toolchain/<tool>.log` | Read the log's last lines; run `./build.sh deps` again after a fix: it starts at that tool, the ones before it are kept |
+| `... links <library>, which is neither the system's nor the toolchain's` (in a toolchain log) | A tool picked up a library from another folder, usually Homebrew's `/usr/local` on an Intel Mac; the stamp is not written, so the tool is not used | Report it with the report file; the library named is what leaked |
+| `... is built for macOS N and later, above MACOSX_DEPLOYMENT_TARGET` (in a toolchain log) | A tool was built for a newer macOS than the build's oldest (15.0), so NVK's link would warn | Report it with the report file |
+| deps was interrupted while LLVM built (Ctrl-C, sleep, power) | The half-built tree is not resumed | Run `./build.sh deps` again: LLVM is built again from an empty build tree (34 minutes on one 12-thread Intel Mac); keep the Mac awake |
+| `building LLVM needs about 10 GB free` | Not enough free space where the working directory is | Make room, or choose a working directory on another disk with `--workdir` |
 | `the base package does not match its own SHA256SUMS` | The release package is damaged or changed | Download it again |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` with `--accel 15` or `26` | Use `--accel both` |
 | the summary says the plugin was built from "the working tree ... with its uncommitted changes" | Your checkout has local changes | Expected; untracked files are not part of that build |

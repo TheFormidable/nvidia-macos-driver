@@ -14,6 +14,11 @@ driver. None of that can happen here, so this runs the real build.sh against sta
     environment and creates the file build.sh expects; the original text stays below the stand-in's first lines, so the
     pin comparison still reads it. The stand-in can be told to fail or to wait.
   * the pins of the outside sources are rewritten, in the clone only, to the commits of the stand-in remotes.
+  * build/toolchain.sh is a stand-in too ("toolchain" in fake.sh): it records each build with its NM_TC_* settings,
+    needs the source trees and earlier tools a real build needs, lays out what build.sh looks for and writes the stamp.
+    Every sandbox runs with NM_TOOLS_FROM=homebrew unless an arm says otherwise: the arms written before the source way
+    are about Homebrew's behaviour. The source-way arms ("source"), NM_LLVM_PREFIX with Homebrew's translator
+    ("ownllvm") and SDKROOT ("sdkroot") set what they test.
 
 The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /usr/local and /opt/homebrew
 before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew";
@@ -33,7 +38,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
+import hashlib, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -290,6 +295,45 @@ case "$role" in
         else echo "Bourne-Again shell script text executable, ASCII text"; fi ;;
   otool) printf '%s:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n' "${2:-x}"; cat "$S/otool-extra" 2>/dev/null ;;
   sudo) echo "stand-in sudo: build.sh must never call sudo" >&2; exit 1 ;;
+  df) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk1s1 976490576 1 %s 50%% /\n' "$(cat "$S/df-kb" 2>/dev/null || echo 500000000)" ;;
+  toolchain)
+    # build/toolchain.sh: list, id (state/tc-recipe-<tool> raises a recipe number), build (records the call and its
+    # NM_TC_* settings, needs the source trees and the earlier tools, lays out what build.sh looks for, writes the
+    # stamp NM_TC_STAMP; ctl/tc-fail-<tool> makes that tool fail with its log)
+    tcs="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
+    case "${1:-}" in
+      list) printf '%s\n' $tcs ;;
+      id) echo "$2 recipe $(cat "$S/tc-recipe-$2" 2>/dev/null || echo 2) Darwin-$(cat "$S/arch") macos${MACOSX_DEPLOYMENT_TARGET:-15.0}" ;;
+      build) shift
+        P=$NM_TC_PREFIX
+        for t in "$@"; do
+          rec toolchain-build "$t" "NM_TC_PREFIX=$NM_TC_PREFIX" "NM_TC_SRC=$NM_TC_SRC" "NM_TC_WORK=$NM_TC_WORK" "NM_TC_LOGS=$NM_TC_LOGS" \
+              "NM_TC_JOBS=$NM_TC_JOBS" "NM_TC_MESON=$NM_TC_MESON" "NM_TC_STAMP=$NM_TC_STAMP" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET-UNSET}"
+          mkdir -p "$NM_TC_LOGS" "$NM_TC_WORK" "$P/.nm-toolchain"; L=$NM_TC_LOGS/$t.log; echo "build $t" > "$L"
+          [ -d "$NM_TC_SRC/$t" ] || { echo "STOP: $t: its source tree $NM_TC_SRC/$t is missing" >&2; exit 2; }
+          [ "$t" != spirv-tools ] || [ -d "$NM_TC_SRC/spirv-headers" ] || { echo "STOP: no spirv-headers" >&2; exit 2; }
+          case "$t" in cmake|pkgconf|xz|spirv-tools|glslang|llvm) [ -s "$P/.nm-toolchain/ninja" ] || { echo "STOP: $t needs the toolchain's ninja" >&2; exit 2; } ;; esac
+          case "$t" in xz|spirv-tools|glslang|llvm) [ -s "$P/.nm-toolchain/cmake" ] || { echo "STOP: $t needs the toolchain's cmake" >&2; exit 2; } ;; esac
+          case "$t" in python) for d in openssl zstd xz; do [ -s "$P/.nm-toolchain/$d" ] || { echo "STOP: python needs $d" >&2; exit 2; }; done ;; esac
+          case "$t" in pkgconf) [ -x "$NM_TC_MESON" ] || { echo "STOP: pkgconf needs meson ($NM_TC_MESON)" >&2; exit 2; } ;; esac
+          rm -f "$P/.nm-toolchain/$t"
+          echo "toolchain: building $t (log: $L)"
+          if [ -f "$SB/ctl/tc-fail-$t" ]; then echo "error: STANDIN-TC-FAILURE in $t" >> "$L"; echo "toolchain: $t FAILED (log: $L)" >&2; exit 1; fi
+          case "$t" in
+            ninja) mkwrap "$P/bin/ninja" ver "1.13.2" ;;
+            cmake) mkwrap "$P/bin/cmake" cmake "cmake version 4.4.5" ;;
+            openssl|zstd|xz) mkdir -p "$P/build-deps/lib"; : > "$P/build-deps/lib/lib$t.a" ;;
+            python) mkwrap "$P/python/bin/python3.14" py "3.14.10" ;;
+            pkgconf) mkwrap "$P/bin/pkgconf" ver "2.5.1"; mkwrap "$P/bin/pkg-config" ver "2.5.1" ;;
+            spirv-tools) mkdir -p "$P/lib/pkgconfig"; printf 'Name: SPIRV-Tools\nVersion: 2026.4.1\n' > "$P/lib/pkgconfig/SPIRV-Tools.pc" ;;
+            glslang) mkwrap "$P/bin/glslang" ver "Glslang Version: 11:16.6.0"; mkwrap "$P/bin/glslangValidator" ver "Glslang Version: 11:16.6.0" ;;
+            llvm) mkwrap "$P/llvm/bin/llvm-config" ver "22.1.8"; mkdir -p "$P/llvm/lib"; : > "$P/llvm/lib/libclang.dylib" ;;
+          esac
+          printf '%s\n' "${NM_TC_STAMP:-$t}" > "$P/.nm-toolchain/$t"
+          echo "toolchain: $t ok (1 s)"
+        done ;;
+      *) echo "usage" >&2; exit 2 ;;
+    esac ;;
   plain) : ;;
   *) echo "fake.sh: unknown role $role" >&2; exit 1 ;;
 esac
@@ -376,7 +420,7 @@ REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", 
               "chmod", "date", "mktemp", "dirname", "basename", "wc", "paste", "cmp", "diff", "tee", "env", "kill", "sleep",
               "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
               "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more", "readlink"]
-STANDINS = {"uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
+STANDINS = {"df": "df", "uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
             "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo",
             "strings": "strings"}
 PLAIN = ["codesign", "plutil", "ditto", "md5", "xattr", "lipo", "vtool", "nm", "dwarfdump", "kmutil", "clang",
@@ -462,6 +506,16 @@ bad_bindgen = ['0.72.0', '0.73.0', '0.73.1']
 """
 
 
+# the toolchain's sources (build/pins.sh NM_PIN_TC*): repository under github.com and the pinned tag
+TC_REPOS = {"TCNINJA": ("ninja-build/ninja.git", "v1.13.2"), "TCCMAKE": ("Kitware/CMake.git", "v4.4.5"),
+            "TCOPENSSL": ("openssl/openssl.git", "openssl-3.5.9"), "TCZSTD": ("facebook/zstd.git", "v1.5.7"),
+            "TCXZ": ("tukaani-project/xz.git", "v5.8.4"), "TCPYTHON": ("python/cpython.git", "v3.14.10"),
+            "TCPKGCONF": ("pkgconf/pkgconf.git", "pkgconf-2.5.1"),
+            "TCSPIRVHEADERS": ("KhronosGroup/SPIRV-Headers.git", "vulkan-sdk-1.4.363.0"),
+            "TCSPIRVTOOLS": ("KhronosGroup/SPIRV-Tools.git", "vulkan-sdk-1.4.363.0"),
+            "TCGLSLANG": ("KhronosGroup/glslang.git", "16.6.0"), "TCLLVM": ("llvm/llvm-project.git", "llvmorg-22.1.8")}
+
+
 def make_remotes(root, tamper=False):
     """Stand-ins for every remote build.sh fetches from, laid out by URL; returns {pin id: commit} and the file hashes."""
     gh = root / "github.com"
@@ -496,6 +550,12 @@ def make_remotes(root, tamper=False):
     _, commits["SPIRVLLVM"] = make_repo(gh / "KhronosGroup/SPIRV-LLVM-Translator.git",
                                         {"spirv-headers-tag.conf": commits["SPIRVHEADERS"] + "\n", "CMakeLists.txt": "# stand-in\n" + salt},
                                         tags=["v22.1.8"])
+    for pid, (path, tag) in TC_REPOS.items():
+        if pid == "TCSPIRVHEADERS":   # the same repository as SPIRVHEADERS, which the translator's pin names by commit
+            git("tag", tag, commits["SPIRVHEADERS"], cwd=gh / "KhronosGroup/SPIRV-Headers.git")
+            commits[pid] = commits["SPIRVHEADERS"]
+            continue
+        _, commits[pid] = make_repo(gh / path, {"README": f"stand-in source of {pid}\n" + salt}, tags=[tag])
     _, commits["RYZENADJ"] = make_repo(gh / "FlyGoat/RyzenAdj.git", {"main.c": "int main(void){return 0;}\n" + salt}, tags=["v0.19.0"])
     www = root / "www/raw.githubusercontent.com/WebKit/WebKit"
     sums = {}
@@ -554,6 +614,13 @@ def build_template():
         p = TPL / rel
         p.write_text(f'#!/bin/bash\n# stand-in written by tools/test_build_sh.py; the original text below never runs\n'
                      f'exec /bin/bash "$NMT_LIB/steplib.sh" {key} "$0" "$@"\n' + p.read_text())
+    for pid in TC_REPOS:
+        replace_pin = pin_value(pins, f"NM_PIN_{pid}_COMMIT")
+        p = TPL / "build/pins.sh"
+        p.write_text(p.read_text().replace(replace_pin, commits[pid]))
+    p = TPL / "build/toolchain.sh"
+    p.write_text('#!/bin/bash\n# stand-in written by tools/test_build_sh.py; the original text below never runs\n'
+                 'exec /bin/bash "$NMT_LIB/fake.sh" toolchain "$0" "$@"\n' + p.read_text())
     git("init", "-q", "-b", "main", TPL)
     git("add", "-A", cwd=TPL)
     git("commit", "-qm", "scratch copy", cwd=TPL)
@@ -564,7 +631,10 @@ class Sandbox:
     """One imitated Mac: <dir>/home (HOME, with the checkout in home/src), <dir>/bin (PATH), <dir>/brew (Homebrew)."""
 
     def __init__(self, name, arch="x86_64", macos="15.7.1", xcode="26.1", brew=True, formulas=(), checkout_dir="src/nvidia-macos-driver",
-                 remotes=None, cpu=None):
+                 remotes=None, cpu=None, tools_from="homebrew"):
+        # tools_from: NM_TOOLS_FROM in every run's environment. The arms written before the source way existed are about
+        # Homebrew's behaviour and say so (homebrew); None leaves it unset (auto), as a tester's Mac has it
+        self.tools_from = tools_from
         self.dir = TMP / "sb" / name
         shutil.rmtree(self.dir, ignore_errors=True)
         self.home = self.dir / "home"
@@ -645,6 +715,8 @@ class Sandbox:
         # find the real one in /opt/homebrew or /usr/local before the stand-in on PATH, and install into it.
         if self.has_brew:
             e["NM_BREW"] = str(self.dir / "brew/bin/brew")
+        if self.tools_from:
+            e["NM_TOOLS_FROM"] = self.tools_from
         e.update(extra or {})
         if not e.get("NM_BREW") and HOST_BREW and not self.has_brew:
             raise RuntimeError(f"an imitated Mac without Homebrew cannot run here without NM_BREW: build.sh would find {HOST_BREW[0]}")
@@ -1297,7 +1369,7 @@ def arm_spirvprefix():
     p = spirvprefix_problems()
     check("NM_SPIRV_TOOLS_PREFIX names a SPIRV-Tools that is not Homebrew's: doctor takes it and deps installs none", not p, p)
     negative("SPIRV-Tools looked for in Homebrew only (the setting is ignored)",
-             spirvprefix_problems(script_edit=('  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(brew_opt spirv-tools)"; do',
+             spirvprefix_problems(script_edit=('  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(tc_path spirv-tools)" "$(brew_opt spirv-tools)"; do',
                                                '  for p in "$(brew_opt spirv-tools)"; do')))
     negative("a prefix taken without looking for its SPIRV-Tools.pc",
              spirvprefix_problems(script_edit=('    [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] || continue\n    PC_SPIRV_TOOLS=$p/lib/pkgconfig; break',
@@ -1390,6 +1462,233 @@ def arm_ownllvm():
     check("Homebrew's llvm (LLVM 22) still gets Homebrew's spirv-llvm-translator and nothing is built from source", not p, p)
     negative("Homebrew's llvm without Homebrew's translator",
              brewllvm_problems(('  [ -n "$LLVM_PREFIX" ] && [ -n "$BREW_PREFIX" ] && [ -d "$(brew_opt llvm)" ] || return 1\n', '  return 1\n')))
+
+
+# ------------------------------------------------------------------------------------------- the source way (NM_TOOLS_FROM)
+# build/toolchain.sh is a stand-in (FAKE_SH "toolchain"): its calls are journalled as "toolchain-build <tool> <settings>",
+# it needs the source trees and the earlier tools a real build needs, and it lays out what build.sh looks for.
+TC_ORDER = ["ninja", "cmake", "openssl", "zstd", "xz", "python", "pkgconf", "spirv-tools", "glslang", "llvm"]
+TC_PIN = {"ninja": ["TCNINJA"], "cmake": ["TCCMAKE"], "openssl": ["TCOPENSSL"], "zstd": ["TCZSTD"], "xz": ["TCXZ"],
+          "python": ["TCPYTHON"], "pkgconf": ["TCPKGCONF"], "spirv-tools": ["TCSPIRVTOOLS", "TCSPIRVHEADERS"],
+          "glslang": ["TCGLSLANG"], "llvm": ["TCLLVM"]}
+
+
+def tc_builds(sb):
+    """[(tool, {setting: value})] of the toolchain builds the last runs made, in order"""
+    out = []
+    for l in sb.jlines():
+        if l.startswith("toolchain-build "):
+            parts = shlex.split(l)
+            out.append((parts[1], dict(a.split("=", 1) for a in parts[2:])))
+    return out
+
+
+def tc_stamp_want(sb, tool, recipe=2):
+    pins = (sb.co / "build/pins.sh").read_text()
+    commits = "+".join(pin_value(pins, f"NM_PIN_{p}_COMMIT") for p in TC_PIN[tool])
+    return f"{commits} {tool} recipe {recipe} Darwin-x86_64 macos15.0"
+
+
+def source_sandbox(name, **kw):
+    """an Intel Mac without Homebrew, NM_TOOLS_FROM unset (auto), with GNU patch on PATH as gpatch"""
+    kw.setdefault("brew", False)
+    sb = Sandbox(name, tools_from=None, **kw)
+    sb.wrap(sb.bin / "gpatch", "patch", "GNU patch 2.8")
+    return sb
+
+
+def source_deps_problems(sb, rc, out, before, want=TC_ORDER):
+    p = []
+    if rc != 0:
+        p.append(f"exit {rc}")
+    if brew_calls(sb):
+        p.append(f"Homebrew was called: {brew_calls(sb)[:3]}")
+    if re.search(r"Homebrew is not installed|official installer|brew\.sh", out):
+        p.append("deps speaks of installing Homebrew")
+    built = tc_builds(sb)
+    if [t for t, _ in built] != want:
+        p.append(f"built {[t for t, _ in built]}, expected {want} in that order")
+    w = sb.work
+    for t, s in built:
+        exp = {"NM_TC_PREFIX": f"{w}/tools/toolchain", "NM_TC_SRC": f"{w}/src/toolchain", "NM_TC_WORK": f"{w}/tools/toolchain-build",
+               "NM_TC_LOGS": f"{w}/logs/toolchain", "NM_TC_MESON": f"{w}/tools/venv/bin/meson", "NM_TC_STAMP": tc_stamp_want(sb, t),
+               "MACOSX_DEPLOYMENT_TARGET": "15.0"}
+        bad = {k: s.get(k) for k, v in exp.items() if s.get(k) != v}
+        if bad:
+            p.append(f"{t} was built with {bad}")
+        stamp = w / "tools/toolchain/.nm-toolchain" / t
+        if not stamp.exists() or stamp.read_text().strip() != exp["NM_TC_STAMP"]:
+            p.append(f"the stamp of {t} is not '{exp['NM_TC_STAMP']}'")
+    outside = [x for x in diff_listing(before, sb.listing(sb.home)) if not x.startswith("nullmoth-build/")]
+    if outside:
+        p.append(f"written outside the working directory: {outside[:6]}")
+    for f in (".profile", ".zshrc", ".bash_profile", ".zprofile", ".cargo", ".rustup"):
+        if (sb.home / f).exists():
+            p.append(f"~/{f} was written")
+    if rc == 0 and "deps: everything required is present" not in out:
+        p.append("deps does not end with everything present")
+    return p
+
+
+def arm_source():
+    """an Intel Mac without Homebrew: deps builds every tool from the pinned sources, in order, into the working
+    directory, with no brew call; a second deps builds nothing; doctor is content"""
+    def run(edit=None, tag=""):
+        sb = source_sandbox("src" + tag)
+        if edit:
+            sb.break_script(*edit)
+        before = sb.listing(sb.home)
+        sb.clear()
+        rc, out = sb.run("deps", "-y")
+        return sb, source_deps_problems(sb, rc, out, before), out
+    sb, p, out = run()
+    check("source way on an Intel Mac without Homebrew: deps builds the ten tools in order with the interface's settings and "
+          "stamps, calls no brew, offers no Homebrew, writes nothing outside the working directory, ends with everything present",
+          not p, (p, out[-1500:]))
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    again = tc_builds(sb) + [(l, {}) for l in mutating(sb.jlines()) if l.startswith("git fetch")]
+    check("a second deps builds and fetches nothing", rc == 0 and not again, (rc, again[:4], out[-500:]))
+    rc, out = sb.run("doctor")
+    check("doctor after it: everything required is present, missing tools would come from the pinned sources",
+          rc == 0 and "missing build tools are built by ./build.sh deps from pinned sources" in out and "Homebrew (https://brew.sh)" not in out,
+          out[-1200:])
+    # one tool's id or pin changes: that tool alone is built again (a changed pin is imitated by the stamp's commit part,
+    # which is what deps compares)
+    (sb.state / "tc-recipe-glslang").write_text("3\n")
+    st = sb.work / "tools/toolchain/.nm-toolchain/pkgconf"
+    st.write_text("0" * 40 + st.read_text().split(" ", 1)[1])
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    got = [t for t, _ in tc_builds(sb)]
+    check("a raised recipe of glslang and a changed pin of pkgconf: deps builds those two again, nothing else",
+          rc == 0 and got == ["pkgconf", "glslang"], (got, out[-600:]))
+    # a tool whose stamp is missing (half-installed) is not taken
+    (sb.work / "tools/toolchain/.nm-toolchain/glslang").unlink()
+    rc, out = sb.run("doctor")
+    ok = re.search(r"^  MISSING  glslangValidator .*\(\./build\.sh deps builds it\)", out, re.M) is not None
+    check("a toolchain glslang without its stamp is not taken: doctor says MISSING, deps builds it", ok, out[-1200:])
+    with sb.scratch():
+        sb.break_script('tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ] && printf', 'tc_path() { [ -e "$TC_PREFIX" ] && printf')
+        rc, out = sb.run("doctor")
+        negative("find_tools that takes a toolchain tool without its stamp",
+                 [] if re.search(r"^  MISSING  glslangValidator", out, re.M) else ["taken"])
+    sb2, p2, out2 = run(edit=('TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"',
+                              'TC_ORDER="ninja cmake openssl zstd xz python pkgconf glslang spirv-tools llvm"'), tag="-neg1")
+    negative("a toolchain built out of order (glslang before SPIRV-Tools)", p2)
+    sb3, p3, out3 = run(edit=('  if [ "$(tools_from)" = source ]; then deps_source "$missing_xcode"; return 0; fi\n', ''), tag="-neg2")
+    negative("deps that goes the Homebrew way on an Intel Mac", p3)
+
+
+def arm_source_some():
+    """Homebrew's ninja, cmake, pkgconf, glslang, SPIRV-Tools and Python are there, LLVM is not, NM_TOOLS_FROM=source:
+    deps builds exactly LLVM and the toolchain's own ninja and cmake (not Homebrew's) and calls no brew"""
+    def run(edit=None, tag=""):
+        sb = Sandbox("srcsome" + tag, tools_from="source",
+                     formulas=("gpatch", "ninja", "cmake", "pkgconf", "glslang", "spirv-tools", "python@3.14"))
+        (sb.state / "brew-llvm").write_text("23.1.5\n")
+        if edit:
+            sb.break_script(*edit)
+        before = sb.listing(sb.home)
+        sb.clear()
+        rc, out = sb.run("deps", "-y")
+        return source_deps_problems(sb, rc, out, before, want=["ninja", "cmake", "llvm"]), out
+    p, out = run()
+    check("only LLVM missing: deps builds ninja, cmake (though Homebrew's are there) and llvm, nothing else, and no brew call",
+          not p, (p, out[-1200:]))
+    p, out = run(edit=('  for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done\n', '', 2), tag="-neg")
+    negative("a toolchain that builds LLVM with the ninja and cmake it found elsewhere", p)
+
+
+def arm_source_fail():
+    """a tool that fails stops deps as a failed step does; the next deps starts at that tool"""
+    sb = source_sandbox("srcfail")
+    (sb.ctl / "tc-fail-spirv-tools").write_text("")
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    got = [t for t, _ in tc_builds(sb)]
+    ok = (rc == 1 and "STOP: step 'toolchain-spirv-tools' failed" in out and "logs/toolchain/spirv-tools.log" in out
+          and "STANDIN-TC-FAILURE" in out and "report file:" in out and got[-1] == "spirv-tools" and "llvm" not in got)
+    check("a failing SPIRV-Tools build: exit 1, its log named and quoted, a report file, nothing after it built", ok, (rc, got, out[-1200:]))
+    (sb.ctl / "tc-fail-spirv-tools").unlink()
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    got = [t for t, _ in tc_builds(sb)]
+    check("the next deps starts at SPIRV-Tools", rc == 0 and got == ["spirv-tools", "glslang", "llvm"], (rc, got, out[-600:]))
+
+
+def arm_source_modes():
+    """dry run, --no-install, --offline, too little space, a working directory with a blank, the pins, the modes"""
+    sb = source_sandbox("srcmodes")
+    sb.clear()
+    rc, out = sb.run("--dry-run", "deps")
+    ok = (rc == 0 and not tc_builds(sb) and not mutating(sb.jlines())
+          and re.search(r"^    env NM_TC_PREFIX=\S+/tools/toolchain NM_TC_SRC=\S+ NM_TC_WORK=\S+ NM_TC_LOGS=\S+ .*NM_TC_STAMP=.* bash build/toolchain.sh build llvm$", out, re.M)
+          and re.search(r"^  fetch    LLVM .* from https://github\.com/llvm/llvm-project\.git", out, re.M))
+    check("--dry-run deps prints the fetches and the build/toolchain.sh commands with their settings, runs nothing", bool(ok), out[-1500:])
+    sb.clear()
+    rc, out = sb.run("deps", "--no-install", "-y")
+    check("deps --no-install builds nothing and says so", not tc_builds(sb) and "not building (--no-install)" in out
+          and not mutating(sb.jlines()), out[-800:])
+    sb.clear()
+    rc, out = sb.run("deps", "--offline", "-y")
+    ok = not tc_builds(sb) and not [l for l in sb.jlines() if l.startswith("git fetch")] and "offline: the sources of ninja cmake" in out
+    check("--offline with no sources fetched: names them, builds and fetches nothing", ok, out[-800:])
+    (sb.state / "df-kb").write_text(str(3 * 1024 * 1024) + "\n")
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    ok = rc == 2 and "needs about 10 GB free" in out and "3 GB are free" in out and not [l for l in sb.jlines() if l.startswith("git ") and " fetch " in l]
+    check("too little free space for LLVM: deps stops before any fetch with the numbers", ok, (rc, out[-500:]))
+    (sb.state / "df-kb").unlink()
+    (sb.ctl / "tc-fail-ninja").write_text("")
+    sb.clear()
+    sb.run("deps", "-y")   # fetches every source, then ninja fails
+    (sb.ctl / "tc-fail-ninja").unlink()
+    sb.clear()
+    rc, out = sb.run("deps", "--offline", "-y")
+    got = [t for t, _ in tc_builds(sb)]
+    check("--offline with the sources fetched: builds the tools, fetches nothing (pkgconf waits for the Python environment, "
+          "which cannot be filled offline)",
+          got == ["ninja", "cmake", "openssl", "zstd", "xz", "python", "spirv-tools", "glslang", "llvm"]
+          and "pkgconf is built with meson" in out and not [l for l in sb.jlines() if l.startswith("git fetch")], (got, out[-600:]))
+    wd = str(sb.home / "my build")
+    sb.clear()
+    rc, out = sb.run("--workdir", wd, "deps", "-y")
+    check("a working directory with a blank: deps stops at the start with one line naming it, nothing fetched or built",
+          rc == 2 and "contains a space" in out and not tc_builds(sb) and not os.path.exists(wd), (rc, out[-400:]))
+    # NM_TOOLS_FROM on each processor
+    def mode(arch, value):
+        s = Sandbox(f"mode-{arch}-{value or 'unset'}", cpu=arch, arch=arch, tools_from=value, formulas=("cmake",))
+        rc, out = s.run("--dry-run", "deps")
+        return ("source" if "deps builds from pinned sources:" in out else
+                "homebrew" if "Homebrew formulas to install" in out else f"neither (exit {rc}: {out[-300:]})"), out
+    res = {(a, v): mode(a, v) for a in ("x86_64", "arm64") for v in (None, "source", "homebrew")}
+    want = {("x86_64", None): "source", ("arm64", None): "homebrew", ("x86_64", "source"): "source",
+            ("arm64", "source"): "source", ("x86_64", "homebrew"): "homebrew", ("arm64", "homebrew"): "homebrew"}
+    bad = {k: res[k][0] for k in want if res[k][0] != want[k]}
+    check("NM_TOOLS_FROM: auto is source on an Intel Mac and homebrew on Apple silicon; source and homebrew forced on each", not bad, bad)
+    check("the Homebrew way on an Intel Mac keeps its warning about hours of compiling and points to NM_TOOLS_FROM=source",
+          "compiles each formula above" in res[("x86_64", "homebrew")][1] and "NM_TOOLS_FROM=source" in res[("x86_64", "homebrew")][1],
+          res[("x86_64", "homebrew")][1][-800:])
+    rc, out = sb.run("doctor", extra={"NM_TOOLS_FROM": "brew"})
+    check("an unknown NM_TOOLS_FROM stops with one line that names the three", rc == 2 and
+          "NM_TOOLS_FROM must be auto, source or homebrew (got 'brew')" in out, (rc, out[-300:]))
+    with sb.scratch():
+        sb.break_script('    auto) if [ "$(mac_arch)" = x86_64 ]; then printf source; else printf homebrew; fi ;;',
+                        '    auto) printf homebrew ;;')
+        rc, out = sb.run("--dry-run", "deps")
+        negative("auto that means Homebrew on an Intel Mac", [] if "deps builds from pinned sources:" in out else ["homebrew"])
+    # the pins: LLVM's tag of NM_PIN_TOOL_LLVM_MAJOR, Python's of NM_PIN_TOOL_PYTHON_TESTS_MIN
+    with sb.scratch():
+        pins = sb.co / "build/pins.sh"
+        pins.write_text(pins.read_text().replace("NM_PIN_TCLLVM_REF=llvmorg-22.1.8", "NM_PIN_TCLLVM_REF=llvmorg-21.1.8")
+                        .replace("NM_PIN_TCPYTHON_REF=v3.14.10", "NM_PIN_TCPYTHON_REF=v3.13.9"))
+        rc, out = sb.run("doctor")
+        check("a toolchain LLVM pin of another major and a Python pin of another minor: two pin FAIL lines",
+              "pin FAIL  LLVM (toolchain) = llvmorg-21.1.8" in out and "pin FAIL  Python (toolchain) = v3.13.9" in out, out[-1500:])
+        sb.break_script('    "llvmorg-$NM_PIN_TOOL_LLVM_MAJOR".*) say', '    *) say')
+        rc, out = sb.run("doctor")
+        negative("a pin check that takes any LLVM tag", [] if "pin FAIL  LLVM (toolchain)" in out else ["passed"])
 
 
 def arm_deps(sb):
@@ -3040,8 +3339,7 @@ def arm_clean(mac):
         p = old_layout_problems(mac, {"NULLMOTH_BUILD_ROOT": str(mac.work / "build")})
         check("clean keeps <work>/build/build when NULLMOTH_BUILD_ROOT is <work>/build", not p, p)
         # the scratch above puts build.sh back when it ends
-        mac.break_script("    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\"\n             old_layout_rm ;;",
-                         "    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\" ;;")
+        mac.break_script("             old_layout_rm ;;\n    sources)", "             ;;\n    sources)")   # outputs without old_layout_rm
         negative("clean that leaves the old <work>/build/build", old_layout_problems(mac))
         other = mac.home / "notours"
         other.mkdir()
@@ -3211,7 +3509,8 @@ def scan_problems(files):
 
 
 def arm_scan():
-    names = ["build.sh", "build/pins.sh", "build/local_build_host.sh", "build/package_local.sh", "build/build_plugin_dev.sh"]
+    names = ["build.sh", "build/pins.sh", "build/local_build_host.sh", "build/package_local.sh", "build/build_plugin_dev.sh",
+             "build/toolchain.sh"]
     bs = (ROOT / "build.sh").read_text()
     sourced = re.findall(r"^\s*(?:source|\.)\s+(\S+)", bs, re.M)
     check("build.sh sources no other file (build/pins.sh and the configuration file are read as data)", not sourced, sourced)
@@ -3429,6 +3728,11 @@ def main():
                     timed("spirvprefix", arm_spirvprefix)
                 if want("ownllvm"):
                     timed("ownllvm", arm_ownllvm)
+                if want("source"):
+                    timed("source", arm_source)
+                    timed("source_some", arm_source_some)
+                    timed("source_fail", arm_source_fail)
+                    timed("source_modes", arm_source_modes)
                 if want("sdkroot"):
                     timed("sdkdeps", arm_sdkdeps)
                     timed("nosdk", arm_nosdk)

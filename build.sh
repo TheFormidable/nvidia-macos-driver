@@ -7,8 +7,8 @@
 #   all            examine the Mac, install what is missing (after asking), fetch the pinned sources, build every
 #                  component in order, stage a package (when a base package is given), print a summary
 #   doctor         examine only: what is present, missing or too old; changes nothing; exit 1 if something required is missing
-#   deps           install what is missing (Homebrew formulas, a Python venv, Rust), all under the working directory
-#                  except the Homebrew formulas
+#   deps           install what is missing (a Python venv, Rust, and the build tools: built from pinned sources into the
+#                  working directory on an Intel Mac, Homebrew formulas on Apple silicon; NM_TOOLS_FROM chooses)
 #   fetch          download the pinned sources and verify them (commit ids and SHA-256 from build/pins.sh)
 #   build [component...]   build the named components (and what they need), or all of them; "./build.sh help" lists them
 #   package        stage a package directory that package/install.sh accepts (needs a release package as the base)
@@ -181,6 +181,14 @@ check_pins() {
     "v$NM_PIN_TOOL_LLVM_MAJOR".*) say "  pin ok    SPIRV-LLVM-Translator = $NM_PIN_SPIRVLLVM_REF (LLVM $NM_PIN_TOOL_LLVM_MAJOR)" ;;
     *) say "  pin FAIL  SPIRV-LLVM-Translator = $NM_PIN_SPIRVLLVM_REF, but LLVM is $NM_PIN_TOOL_LLVM_MAJOR (Mesa needs the same major.minor)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
   esac
+  case "$NM_PIN_TCLLVM_REF" in
+    "llvmorg-$NM_PIN_TOOL_LLVM_MAJOR".*) say "  pin ok    LLVM (toolchain) = $NM_PIN_TCLLVM_REF (LLVM $NM_PIN_TOOL_LLVM_MAJOR)" ;;
+    *) say "  pin FAIL  LLVM (toolchain) = $NM_PIN_TCLLVM_REF, but LLVM is $NM_PIN_TOOL_LLVM_MAJOR (NM_PIN_TOOL_LLVM_MAJOR)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
+  esac
+  case "$NM_PIN_TCPYTHON_REF" in
+    "v$NM_PIN_TOOL_PYTHON_TESTS_MIN".*) say "  pin ok    Python (toolchain) = $NM_PIN_TCPYTHON_REF (Python $NM_PIN_TOOL_PYTHON_TESTS_MIN)" ;;
+    *) say "  pin FAIL  Python (toolchain) = $NM_PIN_TCPYTHON_REF, but the Python wanted is $NM_PIN_TOOL_PYTHON_TESTS_MIN (NM_PIN_TOOL_PYTHON_TESTS_MIN)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
+  esac
   pin_agree "Rust (translator)" "$NM_PIN_RUST_VERSION" build/build_xlate_release.sh "RV=\${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}"
   return 0
 }
@@ -188,11 +196,13 @@ check_pins() {
 # ---------------------------------------------------------------------------------------------------------- settings
 # Every setting: name, default, meaning. Precedence: built-in default < configuration file < environment < option.
 OPTION_VARS="NM_WORK NM_JOBS NM_ASSUME_YES NM_NO_INSTALL NM_OFFLINE NM_DRY_RUN NM_FLAVOUR NM_ACCEL NM_VERBOSE NM_FORCE
-NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"
+NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION NM_TOOLS_FROM"
 # where outside things come from
 LOCATION_VARS="NM_OGKM_URL NM_MESA_URL NM_KHRONOS_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_RUSTUP_URL
 NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_SPIRV_TOOLS_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
-NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK NULLMOTH_BUILD_ROOT NULLMOTH_BUILD_HOST NM_LOCAL_HOST_PATH"
+NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK NULLMOTH_BUILD_ROOT NULLMOTH_BUILD_HOST NM_LOCAL_HOST_PATH
+NM_TC_NINJA_URL NM_TC_CMAKE_URL NM_TC_OPENSSL_URL NM_TC_ZSTD_URL NM_TC_XZ_URL NM_TC_PYTHON_URL NM_TC_PKGCONF_URL
+NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL"
 # read by the existing build scripts and passed through when set (their defaults are the scripts' own)
 SCRIPT_VARS="NV_VERSION KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB MACOSX_DEPLOYMENT_TARGET NVK_PATH NVK_SYSROOT NVK_JOBS
 NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS PKG_CONFIG_PATH LIBCLANG_PATH JOBS
@@ -251,7 +261,7 @@ set_defaults() {
   NM_WORK=${NM_WORK%/}
   : "${NM_JOBS:=$(ncpu)}"
   : "${NM_ASSUME_YES:=0}" "${NM_NO_INSTALL:=0}" "${NM_OFFLINE:=0}" "${NM_DRY_RUN:=0}" "${NM_VERBOSE:=0}" "${NM_FORCE:=0}"
-  : "${NM_FLAVOUR:=release}" "${NM_ACCEL:=both}"
+  : "${NM_FLAVOUR:=release}" "${NM_ACCEL:=both}" "${NM_TOOLS_FROM:=auto}"
   # The version a package records (install.sh writes it to /Library/NullMoth/driver-version, which the app's update
   # check and Send logs read): unless one is set, the release this checkout is, CHANGELOG.md's top heading. Without it a
   # package kept its base package's VERSION, and an install of this checkout was recorded as that older release.
@@ -260,6 +270,7 @@ set_defaults() {
   case "$NM_JOBS" in ''|*[!0-9]*|0) die "the job count must be a positive number (got '$NM_JOBS')" ;; esac
   case "$NM_FLAVOUR" in release|dev) ;; *) die "--flavour must be release or dev (got '$NM_FLAVOUR')" ;; esac
   case "$NM_ACCEL" in 15|26|both) ;; *) die "--accel must be 15, 26 or both (got '$NM_ACCEL')" ;; esac
+  case "$NM_TOOLS_FROM" in auto|source|homebrew) ;; *) die "NM_TOOLS_FROM must be auto, source or homebrew (got '$NM_TOOLS_FROM')" ;; esac
   local b; for b in NM_ASSUME_YES NM_NO_INSTALL NM_OFFLINE NM_DRY_RUN NM_VERBOSE NM_FORCE; do
     eval "case \"\$$b\" in 0|1) ;; yes|true) $b=1 ;; no|false|'') $b=0 ;; *) die \"$b must be 0 or 1\" ;; esac"
   done
@@ -300,6 +311,8 @@ derive_paths() {
   # always under the working directory: a RUSTUP_HOME or CARGO_HOME from your shell (~/.rustup, ~/.cargo) is not used
   RUSTUP_DIR=$TOOLS/rustup
   SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator
+  # the tools deps builds from pinned sources (NM_TOOLS_FROM): build/toolchain.sh's prefix, work and log folders
+  TC_PREFIX=$TOOLS/toolchain; TC_WORK=$TOOLS/toolchain-build; TC_LOGS=$LOGS/toolchain; TC_SRC=$SRC/toolchain
   CARGO_DIR=$TOOLS/cargo
   BUILD_HOST=${NULLMOTH_BUILD_HOST:-$LOCAL_HOST}
   case "$(mac_arch)" in arm64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
@@ -610,8 +623,9 @@ pc_version() { [ ! -f "$1" ] || sed -n 's/^Version:[[:space:]]*//p' "$1" | first
 find_tools() {
   find_brew
   local cands=() p v
-  # Python 3.10 or newer: NM_PYTHON, Homebrew python@3.14 and older, then PATH
-  for p in "${NM_PYTHON:-}" "$(brew_opt python@3.14)/bin/python3.14" "$(brew_opt python@3.13)/bin/python3.13" \
+  # Each tool: the user's own setting, the toolchain deps builds (only a tool with its stamp: tc_path), Homebrew, PATH.
+  # Python 3.10 or newer: NM_PYTHON, the toolchain's, Homebrew python@3.14 and older, then PATH
+  for p in "${NM_PYTHON:-}" "$(tc_path python python/bin/python3.14)" "$(brew_opt python@3.14)/bin/python3.14" "$(brew_opt python@3.13)/bin/python3.13" \
            "$(brew_opt python@3.12)/bin/python3.12" "$(brew_opt python@3.11)/bin/python3.11" "$(brew_opt python@3.10)/bin/python3.10" \
            "$(path_tool python3)"; do cands+=( "$p" ); done
   T_PYTHON=$(pick "$NM_PIN_TOOL_PYTHON_MIN" --version "${cands[@]}")
@@ -624,18 +638,18 @@ find_tools() {
     if patch_works "$p" new; then T_PATCH=$p; PATCH_NEW=1; break; fi
     [ -n "$T_PATCH" ] || ! patch_works "$p" || T_PATCH=$p
   done
-  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(path_tool ninja)")
-  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(path_tool cmake)")
-  T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(path_tool pkg-config)")
+  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(tc_path ninja bin/ninja)" "$(brew_opt ninja)/bin/ninja" "$(path_tool ninja)")
+  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(tc_path cmake bin/cmake)" "$(brew_opt cmake)/bin/cmake" "$(path_tool cmake)")
+  T_PKGCONFIG=$(pick "" "" "$(tc_path pkgconf bin/pkg-config)" "$(brew_opt pkgconf)/bin/pkg-config" "$(path_tool pkg-config)")
   T_GLSLANG=""
-  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(path_tool glslangValidator)"; do
+  for p in "$(tc_path glslang bin/glslangValidator)" "$(brew_opt glslang)/bin/glslangValidator" "$(path_tool glslangValidator)"; do
     [ -n "$p" ] && [ -x "$p" ] || continue
     v=$(glslang_version "$p" || true)
     [ -n "$v" ] && ver_ge "$v" "$NM_PIN_TOOL_GLSLANG_MIN" && { T_GLSLANG=$p; break; }
   done
   # LLVM 22 (its libraries build the native mesa_clc; NVK itself is compiled by Xcode's clang)
   LLVM_PREFIX=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""; LIBCLANG_DIR=""
-  for p in "${NM_LLVM_PREFIX:-}" "$(brew_opt "llvm@$NM_PIN_TOOL_LLVM_MAJOR")" "$(brew_opt llvm)"; do
+  for p in "${NM_LLVM_PREFIX:-}" "$(tc_path llvm llvm)" "$(brew_opt "llvm@$NM_PIN_TOOL_LLVM_MAJOR")" "$(brew_opt llvm)"; do
     [ -n "$p" ] && [ -x "$p/bin/llvm-config" ] || continue
     case "$("$p/bin/llvm-config" --version 2>/dev/null)" in "$NM_PIN_TOOL_LLVM_MAJOR".*) LLVM_PREFIX=$p; break ;; esac
   done
@@ -659,9 +673,9 @@ find_tools() {
     PC_SPIRV_LLVM=$first/lib/pkgconfig
     [ ! -x "$first/bin/llvm-spirv" ] || T_LLVMSPIRV=$first/bin/llvm-spirv
   fi
-  # SPIRV-Tools, by its SPIRV-Tools.pc: NM_SPIRV_TOOLS_PREFIX (one that is not Homebrew's), then Homebrew's
+  # SPIRV-Tools, by its SPIRV-Tools.pc: NM_SPIRV_TOOLS_PREFIX (one that is not Homebrew's), the toolchain's, then Homebrew's
   PC_SPIRV_TOOLS=""
-  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(brew_opt spirv-tools)"; do
+  for p in "${NM_SPIRV_TOOLS_PREFIX:-}" "$(tc_path spirv-tools)" "$(brew_opt spirv-tools)"; do
     [ -n "$p" ] && [ -f "$p/lib/pkgconfig/SPIRV-Tools.pc" ] || continue
     PC_SPIRV_TOOLS=$p/lib/pkgconfig; break
   done
@@ -735,7 +749,8 @@ doctor() {   # prints; sets D_MISSING
     case "$(mac_arch)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. The RM and NVKMS are compiled with the commands an Apple-silicon Mac makes: the x86-only options NVIDIA's makefiles add when this Mac's compiler takes them are left out (build/nv_compile_lines.py)"
-              d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps compiles each missing formula here (LLVM: hours)" ;;
+              if [ "$(tools_from)" = source ]; then d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps builds the missing tools from pinned sources in the working directory instead (about 70 minutes on one 12-thread Intel Mac, LLVM most of it)"
+              else d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (LLVM: hours); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
     esac
   else
     d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and --dry-run work; building needs macOS with Xcode"
@@ -790,9 +805,11 @@ doctor() {   # prints; sets D_MISSING
   fi
   say "== build tools (\"./build.sh deps\" installs the missing ones)"
   find_tools
+  d_note "$(tools_from_why)"
   if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"
     [ -z "$BREW_OTHER" ] || d_note "a second Homebrew is at $BREW_OTHER; build.sh uses $BREW, the one of this Mac's processor ($(mac_arch)). NM_BREW=$BREW_OTHER makes it use the other"
   elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
+  elif [ "$(tools_from)" = source ]; then :   # not needed: deps builds the missing tools itself
   elif [ -n "$BREW_OTHER" ]; then d_missing "Homebrew for this Mac's processor ($(mac_arch))"
     d_note "a second Homebrew is at $BREW_OTHER, but its formulas are built for the other architecture and this build cannot link them, so it is not used on its own. NM_BREW=$BREW_OTHER uses it anyway"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
@@ -801,8 +818,8 @@ doctor() {   # prints; sets D_MISSING
     sdk=$(foreign_reason "$v"); [ -z "$sdk" ] || d_note "$x on PATH ($v) is not used: $sdk"
   done
   if [ -n "$T_PATCH" ]; then d_ok "patch $T_PATCH ($("$T_PATCH" --version 2>/dev/null | first_line)): applies the kexts' patch chain as build_rm620.sh calls it"
-    [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain (Homebrew gpatch; nvk only)"
-  else d_missing "a patch that applies the patch chains as the scripts call it (-p1 --fuzz=0 --dry-run, --no-backup-if-mismatch, -s -d): Homebrew gpatch (rm, nvrm, nvk)"; fi
+    [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain ($(tc_patch_hint); nvk only)"
+  else d_missing "a patch that applies the patch chains as the scripts call it (-p1 --fuzz=0 --dry-run, --no-backup-if-mismatch, -s -d): $(tc_patch_hint) (rm, nvrm, nvk)"; fi
   x=$(kext_python)
   if [ -n "$x" ]; then d_ok "Python $("$x" --version 2>&1 | version_of) ($x) for rm, kms, nvrm (needs $NM_PIN_TOOL_PYTHON_KEXT_MIN or later)"
   else d_missing "Python $NM_PIN_TOOL_PYTHON_KEXT_MIN or later as python3 for rm, kms and nvrm (macOS's own, from Xcode, is enough)"; fi
@@ -813,18 +830,18 @@ doctor() {   # prints; sets D_MISSING
     v=$("$T_PYTHON" --version 2>&1 | version_of)
     d_ok "Python $v ($T_PYTHON) for NVK's Python environment"
     ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" || d_note "Python $NM_PIN_TOOL_PYTHON_TESTS_MIN is needed by one host test (tools/test_fw_fetch.py); the build needs $NM_PIN_TOOL_PYTHON_MIN"
-  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later (Homebrew $NM_PIN_TOOL_PYTHON_FORMULA) for NVK's Python environment (nvk only); macOS's python3 is 3.9"; fi
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later ($(tc_hint "$NM_PIN_TOOL_PYTHON_FORMULA")) for NVK's Python environment (nvk only); macOS's python3 is 3.9"; fi
   x=$(venv_python)
   if [ -n "$x" ] && [ -x "$VENV/bin/meson" ]; then
     v=$("$VENV/bin/meson" --version 2>/dev/null)
     ver_ge "$v" "$NM_PIN_TOOL_MESON_MIN" && d_ok "meson $v and Mesa's Python modules in $VENV" || d_old "meson $v in $VENV"
   else d_missing "the Python environment $VENV (meson, mako, PyYAML, packaging)"; fi
-  [ -n "$T_NINJA" ] && d_ok "ninja $("$T_NINJA" --version)" || d_missing "ninja $NM_PIN_TOOL_NINJA_MIN or later"
-  [ -n "$T_CMAKE" ] && d_ok "cmake $("$T_CMAKE" --version | first_line | version_of)" || d_missing "cmake $NM_PIN_TOOL_CMAKE_MIN or later"
-  [ -n "$T_PKGCONFIG" ] && d_ok "pkg-config $T_PKGCONFIG" || d_missing "pkg-config (Homebrew pkgconf)"
-  [ -n "$T_GLSLANG" ] && d_ok "glslangValidator $(glslang_version "$T_GLSLANG")" || d_missing "glslangValidator $NM_PIN_TOOL_GLSLANG_MIN or later (Homebrew glslang)"
+  [ -n "$T_NINJA" ] && d_ok "ninja $("$T_NINJA" --version)" || d_missing "ninja $NM_PIN_TOOL_NINJA_MIN or later ($(tc_hint ninja))"
+  [ -n "$T_CMAKE" ] && d_ok "cmake $("$T_CMAKE" --version | first_line | version_of)" || d_missing "cmake $NM_PIN_TOOL_CMAKE_MIN or later ($(tc_hint cmake))"
+  [ -n "$T_PKGCONFIG" ] && d_ok "pkg-config $T_PKGCONFIG" || d_missing "pkg-config ($(tc_hint pkgconf))"
+  [ -n "$T_GLSLANG" ] && d_ok "glslangValidator $(glslang_version "$T_GLSLANG")" || d_missing "glslangValidator $NM_PIN_TOOL_GLSLANG_MIN or later ($(tc_hint glslang))"
   if [ -n "$LLVM_PREFIX" ]; then d_ok "LLVM $("$T_LLVMCONFIG" --version) at $LLVM_PREFIX"
-  else d_missing "LLVM $NM_PIN_TOOL_LLVM_MAJOR.x with clang libraries (Homebrew llvm@$NM_PIN_TOOL_LLVM_MAJOR, or NM_LLVM_PREFIX)"; fi
+  else d_missing "LLVM $NM_PIN_TOOL_LLVM_MAJOR.x with clang libraries ($(tc_hint "llvm@$NM_PIN_TOOL_LLVM_MAJOR"), or NM_LLVM_PREFIX)"; fi
   if [ -n "$PC_SPIRV_LLVM" ]; then
     v=$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")
     if [ -n "$LLVM_PREFIX" ]; then
@@ -835,7 +852,7 @@ doctor() {   # prints; sets D_MISSING
   if [ -n "$PC_SPIRV_TOOLS" ]; then
     v=$(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc")
     ver_ge "$v" "$NM_PIN_TOOL_SPIRV_TOOLS_MIN" && d_ok "SPIRV-Tools $v" || d_old "SPIRV-Tools $v ($NM_PIN_TOOL_SPIRV_TOOLS_MIN or later)"
-  else d_missing "SPIRV-Tools $NM_PIN_TOOL_SPIRV_TOOLS_MIN or later (Homebrew spirv-tools, or NM_SPIRV_TOOLS_PREFIX)"; fi
+  else d_missing "SPIRV-Tools $NM_PIN_TOOL_SPIRV_TOOLS_MIN or later ($(tc_hint spirv-tools), or NM_SPIRV_TOOLS_PREFIX)"; fi
   if [ -n "${NM_SPIRV_TOOLS_PREFIX:-}" ] && [ ! -f "$NM_SPIRV_TOOLS_PREFIX/lib/pkgconfig/SPIRV-Tools.pc" ]; then
     d_note "NM_SPIRV_TOOLS_PREFIX names $NM_SPIRV_TOOLS_PREFIX, which has no lib/pkgconfig/SPIRV-Tools.pc: it is not used"
   fi
@@ -1218,12 +1235,182 @@ EOF
   done
   printf '%s' "$out"
 }
+# ---------------------------------------------------------------------------------------------------------- toolchain
+# NM_TOOLS_FROM says where deps gets a build tool that is MISSING (one that is there is used wherever it is: a setting,
+# the toolchain, Homebrew, PATH, as find_tools finds it). "source": build/toolchain.sh builds it from the pinned sources
+# (NM_PIN_TC*) into <workdir>/tools/toolchain, without Homebrew. "homebrew": Homebrew's formulas. "auto": source on an
+# Intel Mac, for which homebrew-core has no ready-made builds (Homebrew would compile LLVM, two Pythons and more for
+# hours into /usr/local), homebrew on Apple silicon, which has them.
+tools_from() {
+  case "$NM_TOOLS_FROM" in
+    auto) if [ "$(mac_arch)" = x86_64 ]; then printf source; else printf homebrew; fi ;;
+    *) printf '%s' "$NM_TOOLS_FROM" ;;
+  esac
+}
+tools_from_why() {   # one sentence: which way missing tools come, and why
+  local where; where=$(printf '%s' "$TC_PREFIX" | tilde)
+  case "$NM_TOOLS_FROM:$(tools_from)" in
+    auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac: Homebrew has no ready-made builds for Intel Macs)' "$where" ;;
+    auto:homebrew) printf "missing build tools come from Homebrew's ready-made builds (NM_TOOLS_FROM=auto on Apple silicon; NM_TOOLS_FROM=source builds them from pinned sources into %s instead)" "$where" ;;
+    source:*) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=source)' "$where" ;;
+    *) printf 'missing build tools come from Homebrew (NM_TOOLS_FROM=homebrew)' ;;
+  esac
+}
+tc_hint() {   # <Homebrew formula>: where doctor says a missing tool comes from
+  if [ "$(tools_from)" = source ]; then printf './build.sh deps builds it'; else printf 'Homebrew %s' "$1"; fi
+}
+tc_patch_hint() {   # patch is not built: GNU patch on PATH as gpatch, or Homebrew's
+  if [ "$(tools_from)" = source ]; then printf 'GNU patch on PATH as gpatch; Homebrew'"'"'s formula is gpatch'; else printf 'Homebrew gpatch'; fi
+}
+# The tools build/toolchain.sh builds, in its order, the pins of each one's sources (spirv-tools also needs the headers),
+# the folder of each source tree under TC_SRC, and the toolchain's own tools each build runs with.
+TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
+TC_PREFIX=""; TC_WORK=""; TC_LOGS=""; TC_SRC=""; TC_PLAN=""; TC_OFFLINE_MISSING=""
+tc_pins() { case "$1" in spirv-tools) echo "TCSPIRVTOOLS TCSPIRVHEADERS" ;; *) printf 'TC%s\n' "$(printf '%s' "$1" | tr 'a-z' 'A-Z')" ;; esac; }
+tc_dir() { case "$1" in TCSPIRVHEADERS) echo spirv-headers ;; TCSPIRVTOOLS) echo spirv-tools ;; *) printf '%s\n' "${1#TC}" | tr 'A-Z' 'a-z' ;; esac; }
+tc_needs() {
+  case "$1" in
+    cmake|pkgconf) echo ninja ;; xz|spirv-tools|llvm) echo "ninja cmake" ;; glslang) echo "ninja cmake spirv-tools" ;;
+    python) echo "openssl zstd xz" ;; *) echo "" ;;
+  esac
+}
+# Times of one 12-thread Intel Mac building each tool (handoff record of the by-hand build: SPIRV-Tools at -j2, LLVM
+# at -j10), in seconds; the downloads took about 11 minutes more. Sizes: 6.7 GB in all with every build tree kept
+# (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it); deps asks for TC_SPACE_GB free.
+tc_seconds() {
+  case "$1" in ninja) echo 36 ;; cmake) echo 440 ;; openssl) echo 53 ;; zstd) echo 6 ;; xz) echo 11 ;; python) echo 104 ;;
+    pkgconf) echo 7 ;; spirv-tools) echo 771 ;; glslang) echo 71 ;; llvm) echo 2040 ;; *) echo 0 ;; esac
+}
+TC_SPACE_GB=10
+tc_sh() { bash "$HERE/build/toolchain.sh" "$@"; }
+# A tool of the toolchain is taken (find_tools) only when its stamp is there: build/toolchain.sh writes it after the
+# tool's checks passed, so a half-installed tool is never taken. It is up to date when the stamp is "<pinned
+# commit(s)> <toolchain.sh id>"; otherwise deps builds it again.
+tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ] && printf '%s' "$TC_PREFIX${2:+/$2}"; return 0; }
+tc_want() {
+  local t=$1 c="" id
+  for id in $(tc_pins "$t"); do c="$c${c:++}$(pin "${id}_COMMIT")"; done
+  printf '%s %s' "$c" "$(MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0} tc_sh id "$t")"
+}
+tc_current() { [ "$(cat "$TC_PREFIX/.nm-toolchain/$1" 2>/dev/null)" = "$(tc_want "$1")" ]; }
+tc_in() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
+tc_fetched() {   # <tool>: its sources are in the bare repositories (an offline deps builds only those)
+  local id; for id in $(tc_pins "$1"); do git_q -C "$GITDIR/tc-$(tc_dir "$id").git" cat-file -e "$(pin "${id}_COMMIT")^{commit}" 2>/dev/null || return 1; done
+}
+# TC_PLAN: what deps builds, in order. A tool is built when find_tools found none good enough (the conditions that put a
+# formula on the Homebrew list) or when the one it found is the toolchain's own and not up to date; then the toolchain's
+# ninja and cmake when a tool to be built runs them and they are not up to date (one tested path, whatever other ninja
+# or cmake the Mac has), and openssl, zstd and xz only for python. Offline, a tool whose sources are not fetched yet is
+# left out with what needs it.
+tc_mine() { case "$1" in "$TC_PREFIX"/*) return 0 ;; esac; return 1; }
+tc_plan() {
+  local want="" t n plan="" pyv
+  pyv=$( { [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of; } || true)
+  { [ -n "$T_PYTHON" ] && ver_ge "${pyv:-0}" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" && ! { tc_mine "$T_PYTHON" && ! tc_current python; }; } || want="$want python"
+  { [ -n "$T_NINJA" ] && ! { tc_mine "$T_NINJA" && ! tc_current ninja; }; } || want="$want ninja"
+  { [ -n "$T_CMAKE" ] && ! { tc_mine "$T_CMAKE" && ! tc_current cmake; }; } || want="$want cmake"
+  { [ -n "$T_PKGCONFIG" ] && ! { tc_mine "$T_PKGCONFIG" && ! tc_current pkgconf; }; } || want="$want pkgconf"
+  { [ -n "$T_GLSLANG" ] && ! { tc_mine "$T_GLSLANG" && ! tc_current glslang; }; } || want="$want glslang"
+  { [ -n "$PC_SPIRV_TOOLS" ] && ! { tc_mine "$PC_SPIRV_TOOLS" && ! tc_current spirv-tools; }; } || want="$want spirv-tools"
+  { [ -n "$LLVM_PREFIX" ] && ! { tc_mine "$LLVM_PREFIX" && ! tc_current llvm; }; } || want="$want llvm"
+  # what those need, of the toolchain's own, when it is not up to date
+  for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done
+  for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done
+  for t in $TC_ORDER; do tc_in "$t" "$want" && plan="$plan $t"; done
+  TC_PLAN=${plan# }; TC_OFFLINE_MISSING=""
+  if [ "$NM_OFFLINE" = 1 ]; then
+    plan=""
+    for t in $TC_PLAN; do
+      if ! tc_fetched "$t"; then TC_OFFLINE_MISSING="$TC_OFFLINE_MISSING $t"; continue; fi
+      for n in $(tc_needs "$t"); do tc_in "$n" "$TC_OFFLINE_MISSING" && { TC_OFFLINE_MISSING="$TC_OFFLINE_MISSING $t"; continue 2; }; done
+      plan="$plan $t"
+    done
+    TC_PLAN=${plan# }; TC_OFFLINE_MISSING=${TC_OFFLINE_MISSING# }
+  fi
+}
+tc_env() {   # <tool>: the settings build/toolchain.sh is run with (docs: the interface in its header)
+  printf '%s\n' "NM_TC_PREFIX=$TC_PREFIX" "NM_TC_SRC=$TC_SRC" "NM_TC_WORK=$TC_WORK" "NM_TC_LOGS=$TC_LOGS" "NM_TC_JOBS=$NM_JOBS" \
+    "NM_TC_MESON=$VENV/bin/meson" "NM_TC_STAMP=$(tc_want "$1")" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}"
+}
+tc_free_kb() {   # free space, in KB, of the file system the working directory is on (or will be on)
+  local d=$W; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
+  df -Pk "$d" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+tc_fetch() {   # <tool>: its pinned sources, verified, as plain trees in TC_SRC
+  local id; for id in $(tc_pins "$1"); do
+    fetch_bare "$id" "$GITDIR/tc-$(tc_dir "$id").git"; export_tree "$id" "$GITDIR/tc-$(tc_dir "$id").git" "$TC_SRC/$(tc_dir "$id")"
+  done
+}
+tc_build() {   # <tool>...: build each, in order; a failure stops deps as a failed step does (fail_step)
+  local t l e
+  for t in "$@"; do
+    e=(); while IFS= read -r l; do e+=( "$l" ); done < <(tc_env "$t")
+    if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd env "${e[@]}" bash build/toolchain.sh build "$t")"; continue; fi
+    CUR_STEP=toolchain-$t; CUR_LOG=$TC_LOGS/$t.log
+    mkdir -p "$TOOLS"
+    # toolchain.sh writes the tool's log itself and prints one line per tool; its STOP lines and the last lines of a
+    # failed command go to stderr, which reaches the terminal too
+    env "${e[@]}" bash "$HERE/build/toolchain.sh" build "$t" || fail_step "toolchain-$t" $?
+    CUR_STEP=""
+  done
+}
+deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means source
+  local missing_xcode=$1 t s=0 first="" second="" kb
+  say "$(tools_from_why)."
+  if [ -z "$T_PATCH" ] || [ "$PATCH_NEW" != 1 ]; then
+    say "  note: NVK's patches need a patch that also creates files: put GNU patch on PATH as gpatch (Homebrew's formula is gpatch); deps does not build patch"
+  fi
+  tc_plan
+  for t in $TC_PLAN; do s=$((s + $(tc_seconds "$t"))); case "$t" in pkgconf|spirv-tools|glslang|llvm) second="$second $t" ;; *) first="$first $t" ;; esac; done
+  [ -z "$TC_OFFLINE_MISSING" ] || warn "offline: the sources of$(printf ' %s' $TC_OFFLINE_MISSING) are not fetched yet; they are not built (run ./build.sh deps with the network)"
+  if [ -z "$TC_PLAN" ]; then say "toolchain: nothing to build ($(printf '%s' "$TC_PREFIX" | tilde))"
+  else
+    say "deps builds from pinned sources: $TC_PLAN"
+    say "  into $(printf '%s' "$TC_PREFIX" | tilde) (sources in $(printf '%s' "$TC_SRC" | tilde), build trees in $(printf '%s' "$TC_WORK" | tilde), logs in $(printf '%s' "$TC_LOGS" | tilde))."
+    say "  Nothing is installed outside the working directory and Homebrew is not used."
+    say "  On one 12-thread Intel Mac this took about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 34)') plus about 11 minutes of downloads,"
+    say "  and needs up to $TC_SPACE_GB GB of free space while it builds (6.7 GB measured with every build tree kept). Keep the"
+    say "  Mac awake and on power: an interrupted tool is built again from the beginning by the next ./build.sh deps."
+  fi
+  if [ -n "$TC_PLAN" ]; then
+    if [ "$NM_NO_INSTALL" = 1 ]; then say "not building (--no-install)"; first=""; second=""
+    elif [ "$NM_DRY_RUN" = 0 ] && ! ask "Build them now?"; then say "not built; the build needs them"; first=""; second=""
+    else
+      if tc_in llvm "$TC_PLAN" && [ "$NM_DRY_RUN" = 0 ]; then
+        kb=$(tc_free_kb || true)
+        [ -z "$kb" ] || [ "$kb" -ge $((TC_SPACE_GB * 1024 * 1024)) ] || die "building LLVM needs about $TC_SPACE_GB GB free where the working directory is, and $((kb / 1024 / 1024)) GB are free: make room, or choose another place with --workdir"
+      fi
+      say "toolchain sources:"
+      for t in $TC_PLAN; do tc_fetch "$t"; done
+    fi
+  fi
+  [ -z "$first" ] || tc_build $first
+  find_tools
+  deps_python
+  find_tools
+  if tc_in pkgconf "$second" && [ "$NM_DRY_RUN" = 0 ] && [ ! -x "$VENV/bin/meson" ]; then
+    warn "pkgconf is built with meson from the Python environment $(printf '%s' "$VENV" | tilde), which is not there yet: not built now"
+    second=$(printf ' %s' $second | sed 's/ pkgconf / /; s/ pkgconf$//')
+  fi
+  [ -z "$second" ] || tc_build $second
+  find_tools
+  deps_spirv_llvm
+  deps_rust
+  if [ "$NM_DRY_RUN" = 1 ]; then say "deps: dry run; the commands above would run, nothing was built or installed"; return 0; fi
+  make_tool_links
+  say ""
+  doctor >/dev/null 2>&1 || true
+  if [ "$missing_xcode" = 1 ]; then die "Xcode is still missing (see above)"; fi
+  if [ "$D_MISSING" != 0 ]; then say "deps: still missing:"; printf '%s' "$D_LINES"; exit 1; fi
+  say "deps: everything required is present"
+}
 cmd_deps() {
   is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
   find_tools
   local missing_xcode=0 f want=() llvmf nobrew=0
   xcode-select -p >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 || missing_xcode=1
   if [ "$missing_xcode" = 1 ]; then warn "Xcode is missing or not selected"; xcode_help; fi
+  if [ "$(tools_from)" = source ]; then deps_source "$missing_xcode"; return 0; fi
   # Homebrew
   if [ -z "$BREW" ] && [ -n "${NM_BREW:-}" ]; then
     die "NM_BREW names $NM_BREW, which is not an executable brew: correct the setting, or remove it and build.sh looks in Homebrew's usual places"
@@ -1284,6 +1471,7 @@ cmd_deps() {
       say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
       say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
       say "one to several hours and tens of gigabytes of free space while it builds. Keep the Mac awake and on power."
+      say "NM_TOOLS_FROM=source (the default on an Intel Mac) builds the tools from pinned sources in the working directory instead."
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
@@ -1384,7 +1572,7 @@ deps_python() {
     say "Python environment: $VENV (up to date)"; return 0
   fi
   if [ -z "$T_PYTHON" ] && [ "$NM_DRY_RUN" = 1 ]; then
-    say "    <Python from Homebrew $NM_PIN_TOOL_PYTHON_FORMULA> -m venv $(q "$VENV"); pip install --require-hashes --no-deps -r <requirements>"; return 0
+    say "    <Python $([ "$(tools_from)" = source ] && echo "of the toolchain" || echo "from Homebrew $NM_PIN_TOOL_PYTHON_FORMULA")> -m venv $(q "$VENV"); pip install --require-hashes --no-deps -r <requirements>"; return 0
   fi
   [ -n "$T_PYTHON" ] || { warn "no Python $NM_PIN_TOOL_PYTHON_MIN or later: the Python environment cannot be made yet"; return 0; }
   if [ "$NM_NO_INSTALL" = 1 ]; then say "not creating $VENV (--no-install)"; return 0; fi
@@ -1532,6 +1720,14 @@ tree_hash() {   # contents of the checkout's files under the given paths (tracke
   rm -f "$t"
 }
 TOOLS_ID=""
+tc_used_stamps() {   # the stamps of the toolchain's tools NVK uses, when it uses any: a rebuilt one rebuilds NVK
+  local t p
+  for t in python pkgconf spirv-tools glslang llvm; do
+    case "$t" in python) p=$T_PYTHON ;; pkgconf) p=$T_PKGCONFIG ;; spirv-tools) p=$PC_SPIRV_TOOLS ;; glslang) p=$T_GLSLANG ;; llvm) p=$LLVM_PREFIX ;; esac
+    if [ -n "$p" ] && tc_mine "$p"; then say "toolchain $t $(cat "$TC_PREFIX/.nm-toolchain/$t" 2>/dev/null)"; fi
+  done
+  return 0
+}
 tools_id() {   # what the compilers are: part of every stamp
   [ -n "$TOOLS_ID" ] && { printf '%s' "$TOOLS_ID"; return; }
   TOOLS_ID="host $(uname -m)"   # the process's architecture (not mac_arch): under Rosetta the compilers run as x86_64
@@ -1551,7 +1747,8 @@ recipe() {   # <component>: everything its output depends on, as text
   say "tools $(tools_id)"
   case " $C_TOOLS " in *" nvk "*)
     say "llvm $([ -n "$T_LLVMCONFIG" ] && "$T_LLVMCONFIG" --version 2>/dev/null) spirv-llvm $(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc" 2>/dev/null) spirv-tools $(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc" 2>/dev/null)"
-    say "glslang $([ -n "$T_GLSLANG" ] && "$T_GLSLANG" --version 2>/dev/null | first_line) meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version)" ;;
+    say "glslang $([ -n "$T_GLSLANG" ] && "$T_GLSLANG" --version 2>/dev/null | first_line) meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version)"
+    tc_used_stamps ;;
   esac
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
@@ -1961,7 +2158,8 @@ print_env() {
   say "export NM_BUILD_INFO=$(qh "$PKGDIR/build-info.txt")"
   say "# -- mirrors (empty = the URL in build/pins.sh)"
   for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL \
-           NM_RUSTUP_URL RUSTUP_DIST_SERVER; do
+           NM_RUSTUP_URL RUSTUP_DIST_SERVER NM_TC_NINJA_URL NM_TC_CMAKE_URL NM_TC_OPENSSL_URL NM_TC_ZSTD_URL NM_TC_XZ_URL \
+           NM_TC_PYTHON_URL NM_TC_PKGCONF_URL NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL; do
     eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- not used by build.sh: STEPS and NM_REV (build_release_inputs.sh, which build.sh replaces), X and RELEASE"
@@ -1977,7 +2175,8 @@ cmd_clean() {
   [ -d "$W" ] || { say "nothing to clean: $W does not exist"; return 0; }
   [ -f "$W/$MARKER" ] || die "$W has no $MARKER marker; build.sh deletes nothing there"
   case "$what" in
-    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt"
+    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt" \
+                     "$TC_WORK" "$TC_SRC"   # the toolchain's build trees and exported sources; the toolchain stays with the tools
              old_layout_rm ;;
     sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS"
              old_layout_rm ;;
