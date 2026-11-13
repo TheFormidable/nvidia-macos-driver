@@ -225,7 +225,18 @@ then freed at once, as in 2.9.
 - If the screen is black even at the picker, or the Mac starts only from a USB stick you no longer have: boot into
   macOS Recovery (the driver cannot run there), open **Terminal**, run
   `nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then restart into macOS. The Mac removes the driver by
-  itself, with no picture needed, and restarts clean. This is the same removal the picker entry runs.
+  itself, with no picture needed, and restarts clean. This is the same removal the picker entry runs; it is done by
+  a job that the 1401 app installs. A driver installed from source with `package/install.sh` alone has no such job:
+  there the flag only keeps every part of the driver off at each start (the firmware's picture), until
+  `sudo nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove` or the next run of `install.sh` clears it.
+- Over the network (Remote Login on, from another computer): the same
+  `sudo nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then `sudo shutdown -r now`, gives the next
+  starts the firmware's picture. Without it, two starts in a row whose display never came up turn the driver off by
+  themselves; after an install over an earlier driver, `install.sh`'s job then puts that driver back and restarts.
+  Where OpenCore writes `boot-args` at each start (the 1401 install sets it up so), changing them with `nvram` does
+  not last: `-nvoff`, or a boot argument taken away, has to go into OpenCore's `config.plist`. Once an accelerator
+  has started, NVAccel.kext (like NVRM.kext) holds itself loaded until the next restart: unloading it by hand does
+  not work.
 - Boot logo: earlier versions could add `NullMothLogo.efi` to OpenCore. It is no longer part of the driver; installing,
   updating or removing the driver takes its entry and file out. If the picker never appears on an EFI that still has
   it, disable that entry in the EFI configuration from another operating system.
