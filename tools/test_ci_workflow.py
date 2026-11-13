@@ -105,6 +105,9 @@ def problems(y, root):
     xc = mac.find('echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"')
     if xc < 0 or "s/^NM_PIN_TOOL_XCODE_MIN=" not in mac or xc > mac.find("run: bash build/kext_check.sh"):
         out.append("kexts-mac does not select an Xcode the release accepts (NM_PIN_TOOL_XCODE_MIN) before it builds")
+    if not re.search(r"name: NVIDIA RM core and NVKMS for macOS\n\s*id: rm\n", mac) \
+            or not re.search(r"name: No option of the build computer.*?\n\s*if: \$\{\{ !cancelled\(\) && steps\.rm\.outcome == 'success' \}\}\n", mac, re.S):
+        out.append("kexts-mac does not check its compile lines whenever the RM and NVKMS were compiled (also after a failed link)")
     m = re.search(r"runner: \[([^\]]*)\]", mac)
     if not m or {r.strip() for r in m.group(1).split(",")} != {"macos-15", "macos-15-intel"} or "runs-on: ${{ matrix.runner }}" not in mac:
         out.append("kexts-mac does not run on both an Apple-silicon and an Intel runner (macos-15, macos-15-intel)")
@@ -184,6 +187,8 @@ control("host tests that pass with the Vulkan tests skipped are caught",
         "is skipped")
 control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
 control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
+control("the compile-line check that runs only after a good link is caught", "        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}\n", "",
+        "whenever the RM and NVKMS were compiled")
 arm("the Vulkan tests are found by what they read (four of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings", "test_opengl_perf"},
     " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
