@@ -18,7 +18,8 @@ and x86_64 code). Run it from a full clone: negative controls read older revisio
 Each test gets a temporary folder of its own as TMPDIR, deleted when it ends, so that what a test leaves behind in its
 temporary files does not pile up in the system's; and no test writes Python bytecode, neither into the checkout nor
 anywhere else (Apple's python3 would otherwise put it under ~/Library/Caches/com.apple.python, its sys.pycache_prefix).
-What a test leaves in the system's temporary folders instead is listed at the end. Each test runs in a session of its
+What a test leaves in the system's temporary folders instead is listed at the end, each entry with the tests that were
+running when it was first seen there (the folders are listed again whenever a test ends). Each test runs in a session of its
 own with no terminal and nothing on its standard input, so nothing it starts can ask for a password or an answer there;
 at its time limit, or when the run is interrupted, the test is stopped with everything it started. A test stopped at
 its limit is a failure that shows the end of what it had printed, as any other: a Python test prints unbuffered
@@ -73,6 +74,10 @@ KEEP_ENV = {"HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "NVRM_PRISTINE_OGKM", "N
 RUNNING = set()          # the tests' process groups, stopped when the run is interrupted
 RUNNING_LOCK = threading.Lock()
 OWN_TMPS = set()         # the temporary folders this runner made for its tests (realpath), not left by a test
+ACTIVE = set()           # the names of the tests running now
+FIRST_SEEN = {}          # (folder, name) of a temporary folder's entry -> the tests that were running when it was first seen
+KNOWN = set()            # the entries of the temporary folders seen so far
+SEEN_LOCK = threading.Lock()
 
 
 class Result:
@@ -152,6 +157,19 @@ def temp_listing():
     return seen
 
 
+def note_new(ended=None):
+    """lists the temporary folders again and notes, for every entry not seen before, which tests are running: the
+    one that has just ended (`ended`, which then no longer counts as running) and the ones beside it. An entry was made
+    after the list before this one, and a list is made whenever a test ends, so its maker is among them (or is another
+    program)."""
+    with SEEN_LOCK:
+        now = temp_listing()
+        for e in now - KNOWN:
+            FIRST_SEEN[e] = sorted(ACTIVE)
+        KNOWN.update(now)
+        ACTIVE.discard(ended)
+
+
 def c_command(path, out):
     """-> (argv, cwd) from the header's build line, or None. The line is written for the repository root when it names the
     file as tools/<file>, and for tools/ otherwise."""
@@ -228,15 +246,19 @@ def main(argv):
     signal.signal(signal.SIGTERM, interrupted)
     names = frozenset(driver_env_names())
     before = temp_listing()
+    KNOWN.update(before)
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
     took = {}
 
     def timed_one(p):
         t0 = time.monotonic()
+        with SEEN_LOCK:
+            ACTIVE.add(p.name)
         try:
             return run_one(p, names)
         finally:
             took[p.name] = time.monotonic() - t0
+            note_new(p.name)
     try:
         results = list(pool.map(timed_one, tests))
     except KeyboardInterrupt:
@@ -255,11 +277,12 @@ def main(argv):
     for n, d in by["norun"]:
         print(f"not run {n}: {d}")
     # a test's own folder is deleted after it; what appeared beside it escaped it (a bare mktemp on macOS ignores TMPDIR).
-    # Which test made it cannot be told when tests run side by side, and another program may have made it meanwhile, so
-    # it is listed and does not fail the run.
+    # Which test made it can be narrowed to the ones running when it was first seen, not told for sure when tests run
+    # side by side, and another program may have made it meanwhile, so it is listed and does not fail the run.
     for root, n in sorted(temp_listing() - before):
         if os.path.join(root, n) not in OWN_TMPS:   # only the runner's own, by path: a test may name its folder alike
-            print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")
+            who = ", ".join(FIRST_SEEN.get((root, n), ())) or "none: it appeared after the last test had ended"
+            print(f"left in {root} during the run (by a test, or by another program meanwhile; first seen while these ran: {who}): {n}")
     slow = sorted(((t, n) for n, t in took.items() if t >= SLOW), reverse=True)
     if slow:
         print(f"took {SLOW} s or more: " + ", ".join(f"{n} {t:.0f} s" for t, n in slow))
