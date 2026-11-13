@@ -166,7 +166,14 @@ static void rules()
    The closer's wait for idle has a bound, as every such wait in the kernel has, and running into it is a violation: a
    closed gate empties as soon as the enterers inside have had the processor once. Without the bound the first control
    below did not end on a machine with one processor: its enter ignores `closed`, the closer only gets to look while
-   all three enterers are switched out, and they are switched out inside the gate nearly every time. */
+   all three enterers are switched out, and they are switched out inside the gate nearly every time.
+
+   An enterer that is turned away gives up the processor before it tries again, as a handler that is turned away
+   returns instead of trying again at once. On one processor an enterer that tried again at once ran out its whole time
+   slice against the closed gate, and so did the next one, every time the closer yielded: about two close and open
+   cycles fitted in a second, and the second control below went uncaught in three runs of eight at the default length
+   (pinned to one processor, with and without the thread sanitizer). Yielding there, a second holds about two thousand
+   cycles on one processor, and as many as before on four. */
 static const double kIdleBound = 10.0;   // seconds
 struct GateRun { long bad, cycles, open_tries, turned_away; };
 static GateRun gate_scenario(const GateOps &ops, double seconds)
@@ -193,7 +200,7 @@ static GateRun gate_scenario(const GateOps &ops, double seconds)
                 users--;
                 nv_gate_leave(&g);
                 entered++;
-            }
+            } else std::this_thread::yield();
         }
     };
     std::vector<std::thread> th;
