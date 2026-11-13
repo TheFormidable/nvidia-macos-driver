@@ -144,11 +144,19 @@ static atomic_int gpuRunning, gpuStop;                       /* the GPU thread a
 static atomic_ulong gpuScans;
 static atomic_uint bhPending;
 
+/* The kernel's clock is mach_absolute_time() in nanoseconds (nvfNowNs in nvrm_fence.cpp). On macOS that is
+   CLOCK_UPTIME_RAW, which is also the clock the relative waits of q_timedwait count in. CLOCK_MONOTONIC is not:
+   Apple's C library makes it the wall clock minus the boot time, in whole microseconds, so it follows every
+   correction the system makes to the time of day. */
 static unsigned long long now_ns(void)
 {
+#ifdef __APPLE__
+    return (unsigned long long)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
+#endif
 }
 static void pause_us(unsigned us)
 {
@@ -158,7 +166,7 @@ static void pause_us(unsigned us)
 
 static void q_wakeup(void) { pthread_mutex_lock(&Q); qEpoch++; pthread_cond_broadcast(&QC); pthread_mutex_unlock(&Q); }
 
-/* The queue's condition variable waits until a point on the monotonic clock, the clock of every deadline here. Linux
+/* The queue's condition variable waits until a point on now_ns()'s clock, the clock of every deadline here. Linux
    binds the variable to that clock (pthread_condattr_setclock). macOS has no such call and its absolute waits run on
    the wall clock, so there the wait is given as the time left until the deadline, measured again on every call: an
    early return is then only one more pass of the caller's loop. Called with Q held; 1 = the deadline has passed. */
