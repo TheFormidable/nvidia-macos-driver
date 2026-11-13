@@ -28,7 +28,8 @@ panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted 
 - start, stop, sleep, wake and a closing connection are safe in any order; the lock and the table are never freed;
 - an exiting process gives back the fence state of all its connections through the same path as one closing
   connection, and a request from a thread of an exiting process adds nothing (asked under the lock);
-- the lock order is written down where the lock is declared; every log line is rate-limited and says "fence";
+- the lock order is written down where the lock is declared; every log line is rate-limited and says "fence", and a
+  failure any process can repeat reaches IOLog only 8 times a boot (an unsigned count), later ones kprintf only;
 - the table header includes nothing but the ABI header and defines only static inline functions.
 
 Each arm has a negative control: the same check on the text with that one thing broken must fail.
@@ -423,10 +424,14 @@ def arms(src, header, table, mem):
         all(s in note for s in ("a leaf", "gate -> gFLock", "accelerator lock -> gFLock", "never the other way round", "Under it:", "Before it:", "After it:",
                                 "takes no lock at all")))
     logs = re.findall(r'\bIOLog\s*\(\s*"([^"]*)"', src)
-    arm("every log line names the fence, and each kind is rate-limited: by the table, or the first 8 and every 256th here",
-        len(logs) == count(code, r"\bIOLog\s*\(") == 5 and all(s.startswith("NVRM-xnu: fence: ") and s.endswith("\\n") for s in logs)
+    kpr = re.findall(r'\bkprintf\s*\(\s*"([^"]*)"', src)
+    arm("every log line names the fence, and each kind is rate-limited: by the table, or (a failure any process can repeat) "
+        "the first 8 since boot to IOLog with an unsigned count and every later one to kprintf only",
+        len(logs) == count(code, r"\bIOLog\s*\(") == 5 and all(s.startswith("NVRM-xnu: fence: ") and s.endswith("\\n") for s in logs + kpr)
         and sorted(n for n, x in fn.items() if re.search(r"\bIOLog\s*\(", x)) == ["nvfLog", "nvfMapFailed"]
-        and re.search(r"\bn\s*=\s*OSIncrementAtomic\s*\(\s*&gFMapLogs\s*\)\s*;\s*if\s*\(\s*n\s*<\s*8\s*\|\|\s*\(\s*\(\s*n\s*\+\s*1\s*\)\s*&\s*0xFF\s*\)\s*==\s*0\s*\)\s*IOLog\s*\(", b("nvfMapFailed")) is not None)
+        and sorted(n for n, x in fn.items() if re.search(r"\bkprintf\s*\(", x)) == ["nvfMapFailed"] and len(kpr) == 1
+        and re.search(r"\bconst\s+UInt32\s+n\s*=\s*\(\s*UInt32\s*\)\s*OSIncrementAtomic\s*\(\s*&gFMapLogs\s*\)\s*;\s*if\s*\(\s*n\s*<\s*8\s*\)\s*IOLog\s*\([^;]*\)\s*;\s*else\s+kprintf\s*\(",
+                      b("nvfMapFailed")) is not None)
 
     # ---- the table header -------------------------------------------------------------------------------------------
     tcode = code_only(table)
@@ -614,6 +619,12 @@ CONTROLS = [
     ("the lock order is not written down", "the lock order is written down", "cpp", lambda s: broken(s, ORDER_NOTE, "")),
     ("a log line that is not rate-limited", "every log line names the fence", "cpp", lambda s: broken(s, PM_LOST, PM_LOST + '                IOLog("NVRM-xnu: fence: the GPU did not come back\\n");\n')),
     ("a log line that does not say where it comes from", "every log line names the fence", "cpp", lambda s: broken(s, '"NVRM-xnu: fence: pid %d: %s - this channel', '"NVRM-xnu: pid %d: %s - this channel')),
+    ("the failure count is signed again", "every log line names the fence", "cpp",
+     lambda s: broken(s, "    const UInt32 n = (UInt32)OSIncrementAtomic(&gFMapLogs);\n", "    const SInt32 n = OSIncrementAtomic(&gFMapLogs);\n")),
+    ("every 256th failure reaches IOLog again", "every log line names the fence", "cpp",
+     lambda s: broken(s, "    if (n < 8)\n        IOLog(", "    if (n < 8 || ((n + 1) & 0xFF) == 0)\n        IOLog(")),
+    ("the later failures go to IOLog too", "every log line names the fence", "cpp",
+     lambda s: broken(s, "    else\n        kprintf(", "    else\n        IOLog(")),
     ("the table header takes a system header", "the table header includes only", "table", lambda s: broken(s, '#include "nvrm_fence_abi.h"\n', '#include "nvrm_fence_abi.h"\n#include <string.h>\n')),
     ("a function of the table header that is not inline", "the table header includes only", "table",
      lambda s: broken(s, "static inline unsigned nvf_bucket(unsigned sid)", "unsigned nvf_bucket(unsigned sid)")),

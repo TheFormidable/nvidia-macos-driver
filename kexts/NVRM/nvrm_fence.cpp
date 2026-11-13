@@ -90,7 +90,7 @@ static volatile SInt32 gFState = 3;          // debug.nvrm_fence_state
 static volatile SInt32 gFAccel;              // 1 once NVAccel fetched the function table
 static volatile SInt32 gFBoot;               // the boot-arg: 0 not read yet, 1 on, 2 nvrmfence=0
 static volatile SInt32 gFSysctls;            // 1 once the sysctls are registered
-static volatile SInt32 gFMapLogs;            // mapping failures logged so far (rate limit)
+static volatile SInt32 gFMapLogs;            // mapping failures so far, read as unsigned (which of them reach IOLog)
 static volatile SInt64 gFNextOwner;          // owner ids handed out
 static unsigned gFChangesSeen;               // under gFLock: gT.changes at the last unlock
 static unsigned gFCards, gFSuspended;        // under gFLock: GPUs started; of those, GPUs between SUSPENDING and RESUMED
@@ -386,12 +386,18 @@ static void nvfTake(unsigned ci, IOMemoryDescriptor **sem, IOMemoryDescriptor **
     gFMap[ci].probe0 = 0; gFMap[ci].errOff = 0; gFMap[ci].errBase = 0;
 }
 
+// Any process can fail a CHAN_ADD as often as it likes, so only the first 8 failures since boot reach the system log;
+// every later one goes to kprintf only (serial or debug output), and debug.nvrm_fence_map_fail and _map_mismatch count
+// them all. Unsigned: a signed count would turn negative after 2^31 failures and pass "n < 8" on every call.
 static void nvfMapFailed(const char *what)
 {
-    const SInt32 n = OSIncrementAtomic(&gFMapLogs);
-    if (n < 8 || ((n + 1) & 0xFF) == 0)
+    const UInt32 n = (UInt32)OSIncrementAtomic(&gFMapLogs);
+    if (n < 8)
         IOLog("NVRM-xnu: fence: pid %d: %s - this channel is not watched (its surfaces keep the older surface sync)\n",
               proc_selfpid(), what);
+    else
+        kprintf("NVRM-xnu: fence: pid %d: %s - this channel is not watched (its surfaces keep the older surface sync)\n",
+                proc_selfpid(), what);
 }
 
 // ---- what the wait loop needs --------------------------------------------------------------------------------------
