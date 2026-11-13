@@ -700,8 +700,8 @@ d_note()    { say "  note     $1"; }
 d_warn()    { say "  WARNING  $1"; }
 
 doctor() {   # prints; sets D_MISSING
-  D_MISSING=0; D_LINES=""
-  local v x sdk
+  D_MISSING=0; D_LINES=""; D_CARGO_SEEN=""
+  local v x sdk d
   say "== host"
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
@@ -826,6 +826,18 @@ doctor() {   # prints; sets D_MISSING
   source_status
   say "== things that can stop a build on another Mac"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
+  # cargo reads the .cargo/config.toml of every folder above the one it works in, before its own CARGO_HOME's: the
+  # translator is fetched from the checkout and built under the working directory, so with either inside the home
+  # folder the tester's own ~/.cargo/config.toml applies to it. Nothing turns that off; doctor names the files.
+  for d in "$W" "$HERE"; do
+    while [ -n "$d" ]; do
+      d=${d%/*}
+      for x in "$d/.cargo/config.toml" "$d/.cargo/config"; do
+        [ ! -f "$x" ] || case "$D_CARGO_SEEN" in *"|$x|"*) ;; *) D_CARGO_SEEN="$D_CARGO_SEEN|$x|"
+          d_note "$(printf '%s' "$x" | tilde) applies to cargo's fetch and build of the translator (cargo reads the configuration in every folder above the one it works in): its profile, linker and source settings change what is built" ;; esac
+      done
+    done
+  done
   if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
   fi
