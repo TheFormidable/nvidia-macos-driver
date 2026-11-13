@@ -4,7 +4,7 @@
 The rules themselves are tested by tools/test_evwait_policy.c and tools/test_evwait_loop.c, and the patch's copy of the
 header by tools/test_shared_headers.py. This test reads the patch and holds what only the glue can get wrong:
 
-  the chain     nvk-evwait is applied by the default 2.9 build, after the upstream-fix patches, and before the later
+  the chain     nvk-evwait is applied by the default 3.0 build, after the upstream-fix patches, and before the later
                 patches that rewrite the same wait
   one round     NVK's wait round is the header's nvrm_evw_round with four callbacks; the fence wait (vkWaitForFences)
                 passes the time left before its deadline, the channel's own wait none, and both go through the same
@@ -190,10 +190,10 @@ arm("nvk/nvk-evwait.patch exists", bool(patch))
 
 # --- the chain -------------------------------------------------------------------------------------------------------
 m = re.search(r"(?ms)^case \$REL in\n.*?^esac$", SCRIPT.read_text())
-r = subprocess.run(["bash", "-c", 'REL=2.9; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
+r = subprocess.run(["bash", "-c", 'REL=3.0; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
                     m.group(0)], capture_output=True, text=True) if m else None
 chain = r.stdout.split() if r and r.returncode == 0 else []
-arm("the default 2.9 chain applies nvk-evwait, after nvk-nak-sched-main", "nvk-evwait" in chain
+arm("the default 3.0 chain applies nvk-evwait, after nvk-nak-sched-main", "nvk-evwait" in chain
     and "nvk-nak-sched-main" in chain and chain.index("nvk-nak-sched-main") < chain.index("nvk-evwait"), " ".join(chain[-5:]))
 arm("the patches that rewrite the same wait come after it", all(chain.index(p) > chain.index("nvk-evwait")
     for p in ("nvk-fence", "nvk-channel-recover") if p in chain and "nvk-evwait" in chain))

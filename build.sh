@@ -1580,7 +1580,7 @@ run_component() {
       lines_to_array < <(passthru NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS)
       x "${STEP_ENV[@]}" "NVK_PATH=${NVK_PATH:-$TBIN}" "PKG_CONFIG_PATH=$(nvk_pkg_config_path)" "LIBCLANG_PATH=${LIBCLANG_PATH:-$LIBCLANG_DIR}" \
         "NVK_JOBS=${NVK_JOBS:-$NM_JOBS}" "RUSTUP_HOME=$RUSTUP_DIR" "CARGO_HOME=$CARGO_DIR" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" \
-        ${ARR[@]+"${ARR[@]}"} bash "$HERE/build/build_nvk.sh" "$MESA" "$OGKM610" "$O/nvk-build" 2.9
+        ${ARR[@]+"${ARR[@]}"} bash "$HERE/build/build_nvk.sh" "$MESA" "$OGKM610" "$O/nvk-build" 3.0
       [ "$NM_DRY_RUN" = 1 ] || { [ ! -d "$O/nvk-build/host" ] || printf '%s\n' "$hostid" > "$O/nvk-build/host/.nm-host-id"; }
       x mkdir -p "$O/nvk"
       x cp "$O/nvk-build/libvulkan_nouveau.dylib" "$O/nvk-build/BUILD.txt" "$O/nvk/"
