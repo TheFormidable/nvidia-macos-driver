@@ -79,7 +79,8 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   left to that user; a display on the refused card, which only Apple's firmware framebuffer can draw, does not hold it
   back, even after an automatic login). The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout`
   and `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler
-  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for all three checks: boot argument `nvlayout=0`.
+  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. Way back for
+  all three checks: boot argument `nvlayout=0`.
 
 #### Applications and games
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
