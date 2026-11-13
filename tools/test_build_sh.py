@@ -49,6 +49,9 @@ ONLY = sys.argv[1:]
 # A Homebrew of the machine this test runs on, in the two places build.sh looks at before PATH. An imitated Mac must
 # never reach it: "deps --yes" would install formulas on the tester's own Mac.
 HOST_BREW = [b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if os.path.exists(b)]
+# On a Mac the system's own make, python3 and git (/usr/bin) are small programs of Apple's that find the real tool
+# through xcrun and xcodebuild, in the developer folder and SDK that DEVELOPER_DIR, SDKROOT and TOOLCHAINS name.
+APPLE_TOOLS = sys.platform == "darwin"
 
 
 # The arms run in two threads (see main): each arm's lines are kept and printed together when it ends.
@@ -78,6 +81,20 @@ def check(name, ok, detail=""):
 def negative(name, problems):
     """A negative control: the broken script must make the arm's check report something."""
     return check(f"control: {name}", bool(problems), "the check found nothing wrong with the broken script")
+
+
+def negative_without_apple_tools(name, problems_of):
+    """A negative control whose broken script lets a caller's SDKROOT, TOOLCHAINS or DEVELOPER_DIR that names nothing
+    reach what build.sh itself asks the system's make, python3 and git. On a Mac those are Apple's (APPLE_TOOLS): with
+    an SDKROOT that names no SDK they were seen, on two Macs of GitHub's, to start xcodebuild and to leave Apple's
+    marker of an install of the command line tools on demand
+    (/private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress), which on a Mac with a desktop comes
+    with Apple's dialog. The other two variables reach the same programs. So such a control runs only where the
+    system's tools are not Apple's; on a Mac it is named and left out. problems_of: the runs, not yet made."""
+    if APPLE_TOOLS:
+        emit(f"left out on a Mac, where it would hand Apple's own tools a setting that names nothing: control: {name}")
+        return True
+    return negative(name, problems_of())
 
 
 # ------------------------------------------------------------------------------------------------- stand-in library
@@ -689,8 +706,10 @@ class Sandbox:
             if p:
                 os.symlink(p, self.bin / t)
         os.symlink(BASH, self.bin / "bash")
+        # the real git, without the three variables an arm may have set to something that names nothing: where git is
+        # Apple's (APPLE_TOOLS) they would reach xcrun; git itself reads none of them
         (self.bin / "git").write_text(f'#!/bin/bash\n{{ printf git; for a in "$@"; do printf " %q" "$a"; done; echo; }} >> {self.journal}\n'
-                                      f'exec {GIT} "$@"\n')
+                                      f'unset SDKROOT TOOLCHAINS DEVELOPER_DIR\nexec {GIT} "$@"\n')
         (self.bin / "git").chmod(0o755)
         for name_, role in STANDINS.items():
             self.wrap(self.bin / name_, role)
@@ -940,7 +959,7 @@ def arm_fresh():
     with bare.scratch():
         bare.break_script('    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi',
                           '    if ! xcode-select -p >/dev/null 2>&1; then devp="none selected"; fi')
-        negative("only xcode-select's exit status checked (a folder that is gone passes; check_paths then runs git)", gone_problems())
+        negative_without_apple_tools("only xcode-select's exit status checked (a folder that is gone passes; check_paths then runs git)", gone_problems)
     with bare.scratch():
         bare.break_script('  if [ "$CMD" != help ] && is_mac; then', '  if false; then')
         negative("no early stop without Xcode (check_paths then runs git)", bare_problems())
@@ -2696,8 +2715,8 @@ def arm_sdkstep(mac):
     with mac.scratch():
         mac.break_script(UNSET_LINE, "unset TOOLCHAINS\n")
         mac.break_script("env -u SDKROOT xcrun --sdk macosx --show-sdk-path", "xcrun --show-sdk-path")
-        negative("an SDK asked of xcrun with the caller's SDKROOT in force (it names that SDK)",
-                 sdkstep_problems(mac, "d", {"SDKROOT": IOS_SDK}))
+        negative_without_apple_tools("an SDK asked of xcrun with the caller's SDKROOT in force (it names that SDK)",
+                                     lambda: sdkstep_problems(mac, "d", {"SDKROOT": IOS_SDK}))
     # build.sh's own questions to the system's tools, before a step: in the clone the system folders of the step's
     # PATH are preceded by one that holds a make like Apple's, which is asked for its version before rm (which fb is
     # built on) is looked at
@@ -2710,9 +2729,8 @@ def arm_sdkstep(mac):
         check("a caller's SDKROOT that names no SDK does not reach the make build.sh asks before a step (Apple's stops on it)",
               not (q := sdkstep_problems(mac, "e", {"SDKROOT": IOS_SDK})), q)
         mac.break_script(UNSET_LINE, "unset TOOLCHAINS\n")
-        q = sdkstep_problems(mac, "f", {"SDKROOT": IOS_SDK})
-        negative("a build.sh that keeps the caller's SDKROOT in its own environment (make is taken for missing: no step)",
-                 [x for x in q if "no step ran" in x and "make" in x])
+        negative_without_apple_tools("a build.sh that keeps the caller's SDKROOT in its own environment (make is taken for missing: no step)",
+                                     lambda: [x for x in sdkstep_problems(mac, "f", {"SDKROOT": IOS_SDK}) if "no step ran" in x and "make" in x])
     with mac.scratch():
         def toolchains_problems(tag):
             mac.clear()
@@ -2727,7 +2745,7 @@ def arm_sdkstep(mac):
         rc, out = mac.run("env", extra={"TOOLCHAINS": "swift"})
         check("./build.sh env tells a shell to drop TOOLCHAINS", re.search(r"^unset TOOLCHAINS ", out, re.M) is not None, out[-600:])
         mac.break_script(UNSET_LINE, "unset SDKROOT\n")
-        negative("a build.sh that leaves the caller's TOOLCHAINS in place", toolchains_problems("b"))
+        negative_without_apple_tools("a build.sh that leaves the caller's TOOLCHAINS in place", lambda: toolchains_problems("b"))
 
 
 def sdkdeps_problems(script_edit=None):
