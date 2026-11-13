@@ -190,7 +190,8 @@ cd nvidia-macos-driver
 ```
 
 `./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac, offers to install
-the missing Homebrew formulas (only those; nothing is upgraded), makes a Python environment and a Rust toolchain
+the missing Homebrew formulas with the Homebrew of the Mac's own processor (only those; `build.sh` upgrades nothing,
+though Homebrew may upgrade an outdated dependency of a formula it installs), makes a Python environment and a Rust toolchain
 inside its working directory (`~/nullmoth-build` by default, never inside the checkout), downloads NVIDIA's
 `open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
 checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the plugin, the
