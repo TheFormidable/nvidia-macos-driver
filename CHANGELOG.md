@@ -341,6 +341,8 @@ has proven itself, renewed with a reason otherwise.
   your `SDKROOT` reaches `build.sh` itself: with an `SDKROOT` that named an SDK which was not there, a build stopped
   before its first step. doctor names the way to another SDK: its Xcode, with
   `DEVELOPER_DIR`.
+  Your `SDKROOT` and `TOOLCHAINS` no longer reach `build.sh` itself either: with an `SDKROOT` that names an SDK
+  which is not there, Apple's `make` and `python3` fail, and a build stopped before its first step.
 - `./build.sh deps` with Homebrew: a `brew install` that ends with an error only because a file of yours was in the
   way of one of its links (a `python3` from python.org's installer, say) no longer stops it; it warns and goes on.
   A Python formula that `deps` unlinked (so that your shell's `python3` stays the one it was) is unlinked again
@@ -349,6 +351,8 @@ has proven itself, renewed with a reason otherwise.
   2.9 at once, instead of the package step stopping on it at the end of the build.
 - The git calls of `./build.sh`'s build steps no longer read your global or system git configuration: your hooks, file
   system monitor, commit signing, filters and URL rewrites stay out of them, as they already did for `fetch`.
+  system monitor, commit signing, filters and URL rewrites stay out of them (`fetch` already kept your hooks, file
+  system monitor, attributes file and template folder out of its own).
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 
