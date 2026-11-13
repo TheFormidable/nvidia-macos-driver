@@ -1054,17 +1054,31 @@ ask() {   # <question>: yes with --yes; otherwise a y/N answer from the terminal
   return 1
 }
 # developer_dir_problem: nothing when the developer folder Apple's tools use (DEVELOPER_DIR when it is set, otherwise
-# the one xcode-select -p names) is there with its xcrun; otherwise what is wrong with it. The folder of an Xcode removed
-# or renamed after it was selected, a DEVELOPER_DIR with a wrong path, and command line tools that a macOS update left
-# without xcrun all fail this test, the one Apple's tools make themselves ("missing xcrun at: <folder>/usr/bin/xcrun").
+# the one xcode-select -p names) is there and holds Apple's tools; otherwise what is wrong with it. The folder of an
+# Xcode removed or renamed after it was selected, a DEVELOPER_DIR with a wrong path, and command line tools that a
+# macOS update removed all fail this test, and Apple's tools then all fail with "invalid active developer path".
+# What is looked for is what a whole Xcode and whole command line tools hold (developer_dir_whole): usr/lib/libxcrun.dylib,
+# which /usr/bin/xcrun loads, or one of usr/bin/xcodebuild, usr/bin/git and usr/bin/make. NOT usr/bin/xcrun alone,
+# although Apple's message names that path ("missing xcrun at: <folder>/usr/bin/xcrun"): neither Xcode 26.5 nor the
+# command line tools 26.6 have that file (their folders were listed on a Mac, 2026-11-13); xcrun is /usr/bin/xcrun
+# there and nowhere else, so a test for usr/bin/xcrun refuses a whole Xcode and nothing can be built with it. A folder
+# of an older layout that does have its usr/bin/xcrun passes as well. Any one of the five is enough: a folder taken
+# for whole that is not only fails later with Apple's own message, where a whole one taken for broken stops everything.
+developer_dir_whole() {   # <folder>
+  local f
+  for f in usr/lib/libxcrun.dylib usr/bin/xcodebuild usr/bin/xcrun usr/bin/git usr/bin/make; do
+    if [ -e "$1/$f" ]; then return 0; fi
+  done
+  return 1
+}
 developer_dir_problem() {
   local d from
   if [ -n "${DEVELOPER_DIR:-}" ]; then d=$DEVELOPER_DIR; from=DEVELOPER_DIR
   else d=$(xcode-select -p 2>/dev/null || true); from="xcode-select -p"; fi
   [ -n "$d" ] || { printf 'no developer folder (%s names none)' "$from"; return 0; }
-  [ -x "$d/usr/bin/xcrun" ] || [ -x "$d/Contents/Developer/usr/bin/xcrun" ] || \
+  developer_dir_whole "$d" || developer_dir_whole "$d/Contents/Developer" || \
     printf 'the developer folder %s names, %s, %s' "$from" "$(printf '%s' "$d" | tilde)" \
-      "$(if [ -d "$d" ]; then echo "has no usr/bin/xcrun (not a whole Xcode or command line tools)"; else echo "does not exist (an Xcode removed or renamed after it was selected?)"; fi)"
+      "$(if [ -d "$d" ]; then echo "holds none of Apple's tools (not a whole Xcode or command line tools)"; else echo "does not exist (an Xcode removed or renamed after it was selected?)"; fi)"
   return 0
 }
 xcode_help() {
