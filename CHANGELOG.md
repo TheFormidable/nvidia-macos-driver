@@ -82,29 +82,28 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
   event, as WindowServer already did, and a thread whose waits run longer than about 2 ms sleeps almost at once;
   waits shorter than 1 ms are unchanged. A process whose wake-ups do not arrive goes back to polling by itself; an
-  event that merely arrives late (the GPU shows a completion just before its event) no longer counts towards that, so
-  a game or compositor that waits at a steady cadence keeps sleeping. A process whose event wakes stop arriving for a
-  moment (a display mode change, a display waking, a wake from sleep) no longer polls until it exits: each of its
-  threads tries the event again after a pause (256 of its waits, doubled after each failed try up to 65536), and the
-  first wake that arrives puts the whole process back on the event; only a kext that cannot wait at all keeps a
-  process polling for good. Way back: `NVRM_EVENT_WAIT=0` in
+  event that merely arrives late (the GPU shows a completion just before its event) does not count towards that, so
+  a game or compositor that waits at a steady cadence keeps sleeping. Going back to polling is not for the life of
+  the process, because wake-ups can stop for a moment (a display mode change, a display waking, a wake from sleep):
+  each of its threads tries the event again after a pause (256 of its waits, doubled after each failed try up to
+  65536), and the first wake that arrives puts the whole process back on the event. Only a kext that cannot wait at
+  all keeps a process polling for good. Way back: `NVRM_EVENT_WAIT=0` in
   `nvrm610.conf`. Like 2.9's `0`, it makes every process poll, WindowServer included, which costs WindowServer more
   CPU than both 2.9's default and this release's. See [docs/EVENT-WAIT.md](docs/EVENT-WAIT.md).
 - A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
   ends only that channel, or makes no progress for 5 s in WindowServer (60 s in any other process), NVK builds a new
-  channel, sends the channel-wide state again, replays the submissions that had not started and drops the one that
-  was running; a stalled channel's doorbell is rung again first. A fault on any copy engine, not only the first three,
-  is rebuilt like this: on an RTX 50 (Blackwell) card the channel NVK uses for uploads runs on copy engine 4, whose
-  fault the hardware reports as Xid 71, and that fault used to lose the device as it did in 2.9; a copy channel that
-  faults again inside the work its rebuild replayed ends the device at once. A fault the GPU cannot recover from this
-  way (firmware, bus, memory errors, a failed wake, an error that is not on the list of those that end only one
-  channel, a fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a
-  game or WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for
-  the sleep: the kext answers NVK's channel note without waiting for the GPU's resume and reports the GPU as suspended
-  until it lets RM calls through again, NVK sends no escape while it holds a channel's lock, and a stall seen while
-  the GPU is suspended restarts the no-progress budget instead of rebuilding, at every sleep, for up to 360 s of
-  awake time per sleep. Way back: `NVK_CHANNEL_RECOVER=0` in
-  `nvrm610.conf`. See [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
+  channel, sends the channel-wide state again, replays the submissions that had not started and drops the one that was
+  running; a stalled channel's doorbell is rung again first. A fault on any copy engine is rebuilt like this too: on
+  an RTX 50 (Blackwell) card the channel NVK uses for uploads runs on copy engine 4, whose fault the hardware reports
+  as Xid 71. A copy channel replays all of its work instead of dropping any, and one that faults again inside the work
+  its rebuild replayed ends the device at once. A fault the GPU cannot recover from this way (firmware, bus, memory
+  errors, a failed wake, an error that is not on the list of those that end only one channel, a fourth rebuild of one
+  channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a game or WindowServer waiting on
+  the GPU no longer loses the device or rebuilds a channel that was only stopped for the sleep: the kext answers NVK's
+  channel note without waiting for the GPU's resume and reports the GPU as suspended until it lets RM calls through
+  again, NVK sends no escape while it holds a channel's lock, and a stall seen while the GPU is suspended restarts the
+  no-progress budget instead of rebuilding, at every sleep, for up to 360 s of awake time per sleep. Way back:
+  `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf`. See [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
 - After such a recovery the Metal command buffer whose work was dropped completes with an error instead of as success,
   and the process keeps its device; the plugin no longer waits for, and counts, the completion record such a command
   buffer can never write (eight of those used to switch command-pool reuse off for the process). A device loss that
@@ -220,20 +219,17 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   that the wake itself asks for. The monitor also suspends only a running GPU and resumes or powers off only a
   suspended one, so a poll that a sleep and wake cut in two no longer switches the slot off under a running GPU, and a
   GPU whose wake failed is left alone.
-- On a machine without the idle power-down monitor (no `nvrtd3=1`, the default), the monitor's gate is now closed for
-  the whole boot instead of being left open with nothing behind it. No behaviour changes.
-- When NVRM declines a card early (the framebuffer refused this macOS's Apple classes), NVAccel stops waiting at once
-  and logs `NVRM declined this card ... (nvrm-layout: ...)` instead of holding the card's matching for the full 30 s.
+- When NVRM declines a card early (the framebuffer refused this macOS's Apple classes), NVAccel does not hold the
+  card's matching for its 30 s wait: it stops at once and logs `NVRM declined this card ... (nvrm-layout: ...)`.
 - Only WindowServer, running under a system account (user id below 500, the rule NVRM's client table already uses),
   can take a compositor-class hold in the surface fence or NVAccel's pending marks and so delay another process's
-  flips, copied frames and page-offs for up to 2 s at a time. A program that merely named its executable
-  "WindowServer" no longer can; the real WindowServer is unaffected.
-- A surface-fence wait or look no longer hands back the writing process's pid or the state of its hold to a process
-  other than the writer. Whether a surface (or a given process) has a write pending can still be asked.
-- A process that failed channel registrations of the surface fence in a loop could flood the system log (its failure
-  count turned negative after 2^31 failures, after which every one was logged). The count is now read as unsigned and
-  only the first 8 failures since boot reach the system log; later ones go to the debug output, and
-  `debug.nvrm_fence_map_fail` and `debug.nvrm_fence_map_mismatch` count them all.
+  flips, copied frames and page-offs for up to 2 s at a time. A program that merely names its executable
+  "WindowServer" cannot; the real WindowServer is unaffected.
+- A surface-fence wait or look hands the writing process's pid and the state of its hold back only to the writer
+  itself. Whether a surface (or a given process) has a write pending can be asked by any process.
+- A process that fails channel registrations of the surface fence in a loop cannot flood the system log: only the
+  first 8 failures since boot reach it; later ones go to the debug output, and `debug.nvrm_fence_map_fail` and
+  `debug.nvrm_fence_map_mismatch` count them all.
 
 #### Switches and reports
 - `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a
