@@ -291,6 +291,9 @@ record_tool_files() {   # <tool>: what is new since BEFORE was listed
 }
 
 # ---------------------------------------------------------------------------------------------------------- recipes
+# copy_tree <source tree> <folder>: a copy to build in, writable by its owner whatever the source tree's modes (cp keeps
+# them: a read-only tree would give a copy the build cannot write into, and one the next build could not remove)
+copy_tree() { x cp -RP "$1" "$2"; x chmod -R u+w "$2"; }
 # Each recipe builds in $B (an empty folder in the work folder) and installs into the prefix. What each project could
 # find on the machine by itself is either given or turned off, and the comments say which and why.
 
@@ -299,7 +302,7 @@ record_tool_files() {   # <tool>: what is new since BEFORE was listed
 # the environment, which the clean environment does not have.
 recipe_ninja() {
   pick_python ninja; clean_env "$PYDIR"
-  x cp -RP "$SRC/ninja" "$B/ninja"
+  copy_tree "$SRC/ninja" "$B/ninja"
   xin "$B/ninja" "${CLEAN[@]}" "$PY" configure.py --bootstrap
   x mkdir -p "$P/bin"
   x cp "$B/ninja/ninja" "$P/bin/ninja"
@@ -317,7 +320,7 @@ recipe_cmake() {
   local tls=()
   is_darwin || tls=(-DCMAKE_USE_OPENSSL=OFF)
   clean_env; cmake_ignore
-  x cp -RP "$SRC/cmake" "$B/cmake"
+  copy_tree "$SRC/cmake" "$B/cmake"
   xin "$B/cmake" "${CLEAN[@]}" ./bootstrap "--prefix=$P" "--parallel=$JOBS" --no-qt-gui \
     -- "${CMAKE_COMMON[@]}" -DBUILD_TESTING=OFF ${tls[@]+"${tls[@]}"}
   xin "$B/cmake" "${CLEAN[@]}" make -j "$JOBS"
@@ -343,7 +346,7 @@ recipe_openssl() {
     esac
   fi
   clean_env
-  x cp -RP "$SRC/openssl" "$B/openssl"
+  copy_tree "$SRC/openssl" "$B/openssl"
   xin "$B/openssl" "${CLEAN[@]}" perl ./Configure ${target[@]+"${target[@]}"} no-shared no-tests \
     "--prefix=$P/build-deps" "--openssldir=$P/ssl" --libdir=lib
   xin "$B/openssl" "${CLEAN[@]}" make -j "$JOBS"
@@ -373,7 +376,7 @@ check_openssl() {
 # and lz4).
 recipe_zstd() {
   clean_env
-  x cp -RP "$SRC/zstd" "$B/zstd"
+  copy_tree "$SRC/zstd" "$B/zstd"
   xin "$B/zstd" "${CLEAN[@]}" make -C lib -j "$JOBS" libzstd.a
   xin "$B/zstd" "${CLEAN[@]}" make -C lib install-static install-includes "PREFIX=$P/build-deps"
 }
@@ -402,7 +405,7 @@ recipe_python() {
   done
   rm -rf "${P:?}/python"
   clean_env
-  x cp -RP "$SRC/python" "$B/cpython"
+  copy_tree "$SRC/python" "$B/cpython"
   xin "$B/cpython" "${CLEAN[@]}" ./configure "--prefix=$P/python" "--with-openssl=$bd" --with-ensurepip=install \
     "LIBZSTD_CFLAGS=-I$bd/include" "LIBZSTD_LIBS=$bd/lib/libzstd.a" "LIBLZMA_CFLAGS=-I$bd/include" "LIBLZMA_LIBS=$bd/lib/liblzma.a"
   xin "$B/cpython" "${CLEAN[@]}" make -j "$JOBS"

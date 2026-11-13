@@ -974,6 +974,32 @@ def main():
             control("a script with LLVM's exceptions off is caught", mac_problems(sb, mutate(sb, "eh-off", [(
                 "-DLLVM_ENABLE_EH=ON", "-DLLVM_ENABLE_EH=OFF")])))
 
+            # a read-only source tree: cp keeps the modes, so without more the copy would be one the build cannot write
+            # into (as any user but root) and the next build could not remove. The kept copies must be writable.
+            def ro_problems(sb, script=None):
+                for d, _, fs in os.walk(sb.src / "zstd"):
+                    for f in fs:
+                        os.chmod(os.path.join(d, f), 0o444)
+                    os.chmod(d, 0o555)
+                try:
+                    rc, out, err = sb.run(["build", "zstd"], script=script, NM_TC_KEEP="1")
+                finally:
+                    for d, _, fs in os.walk(sb.src / "zstd"):
+                        os.chmod(d, 0o755)
+                p = [] if rc == 0 else [f"exit {rc}: {err[-300:]}"]
+                for d, _, fs in os.walk(sb.work / "zstd"):
+                    for x in [d] + [os.path.join(d, f) for f in fs]:
+                        if not os.lstat(x).st_mode & 0o200:
+                            p.append(f"{x} is not writable by its owner")
+                return p[:5]
+            sb = sandbox()
+            p = ro_problems(sb)
+            check("a read-only source tree gives a build copy its owner can write into and remove", not p, p)
+            sb = sandbox()
+            control("a script whose copies keep the source's read-only modes",
+                    ro_problems(sb, mutate(sb, "ro", [('copy_tree() { x cp -RP "$1" "$2"; x chmod -R u+w "$2"; }',
+                                                       'copy_tree() { x cp -RP "$1" "$2"; }')])))
+
         if arm("id"):
             sb = sandbox()
             ids = {t: sb.run(["id", t])[1].strip() for t in TOOLS}
