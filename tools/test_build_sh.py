@@ -1711,6 +1711,28 @@ def arm_source():
     rc, got, out = linked_round(sb)
     check("a raised recipe of openssl and of spirv-tools: deps builds openssl, python, spirv-tools and glslang again, nothing else",
           rc == 0 and got == ["openssl", "python", "spirv-tools", "glslang"], (got, out[-600:]))
+    # a new LLVM of the toolchain (its recipe raised): LLVM is built again, and the translator with it, because the
+    # translator's note is the LLVM's stamp
+    rec = sb.work / "tools/spirv-llvm-translator/.nm-llvm"
+    stamp = sb.work / "tools/toolchain/.nm-toolchain/llvm"
+    p = [] if rec.exists() and rec.read_text() == stamp.read_text() else [f"the note {rec.read_text() if rec.exists() else None!r} is not the LLVM stamp {stamp.read_text()!r}"]
+    (sb.state / "tc-recipe-llvm").write_text("3\n")
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    got = [t for t, _ in tc_builds(sb)]
+    conf = [l for l in sb.jlines() if l.startswith("cmake -S ")]
+    if rc != 0 or got != ["llvm"] or len(conf) != 1:
+        p.append(f"after a raised LLVM recipe: exit {rc}, toolchain builds {got}, translator configured {len(conf)} time(s)")
+    if not rec.exists() or rec.read_text() != stamp.read_text():
+        p.append("the note was not brought up to the new LLVM stamp")
+    check("source way: the translator notes the toolchain LLVM's stamp, and a rebuilt LLVM builds it again", not p, (p, out[-600:]))
+    sbr, _, _ = run(edit=('  if tc_mine "$LLVM_PREFIX"; then cat "$TC_PREFIX/.nm-toolchain/llvm" 2>/dev/null || true\n',
+                          '  if false; then :\n'), tag="-neg-note")
+    (sbr.state / "tc-recipe-llvm").write_text("3\n")
+    sbr.clear()
+    sbr.run("deps", "-y")
+    negative("a translator noted by the LLVM's version and place alone, which a rebuilt toolchain LLVM keeps",
+             [] if [l for l in sbr.jlines() if l.startswith("cmake -S ")] else ["not built again"])
     sbl, pl, _ = run(edit=('tc_linked() { case "$1" in python) echo "openssl zstd xz" ;; glslang) echo spirv-tools ;; *) echo "" ;; esac; }',
                            'tc_linked() { echo ""; }'), tag="-neg-linked")
     rc, got, out = linked_round(sbl)
@@ -2076,6 +2098,41 @@ def llvm23_problems(sb, rc, out):
     return p
 
 
+def translator_llvm_problems(sb):
+    """sb: deps built the translator against Homebrew's llvm@22 (22.1.3)"""
+    p = []
+    rec = sb.work / "tools/spirv-llvm-translator/.nm-llvm"
+    want = f"22.1.3 {sb.dir / 'brew/opt/llvm@22'}\n"
+    if not rec.exists() or rec.read_text() != want:
+        p.append(f"the note is {rec.read_text() if rec.exists() else 'missing'!r}, expected {want!r}")
+    def builds(extra=None):
+        sb.clear()
+        rc, out = sb.run("deps", "-y", extra=extra)
+        return rc, [l for l in sb.jlines() if l.startswith("cmake -S ")], out
+    if rec.exists():
+        rec.unlink()
+    rc, conf, out = builds()
+    if rc != 0 or len(conf) != 1 or "built against another LLVM, or before build.sh noted which" not in out:
+        p.append(f"a translator without the note was not built again: exit {rc}, {conf}")
+    mine = sb.home / "llvm-22-elsewhere"
+    sb.wrap(mine / "bin/llvm-config", "ver", "22.1.3")
+    (mine / "lib").mkdir(parents=True, exist_ok=True)
+    (mine / "lib/libclang.dylib").write_text("")
+    extra = {"NM_LLVM_PREFIX": str(mine)}
+    rc, out = sb.run("doctor", extra=extra)
+    if "was not built against the LLVM at" not in out:
+        p.append("doctor does not say that the translator was built against another LLVM")
+    rc, conf, out = builds(extra)
+    if rc != 0 or len(conf) != 1 or f"-DLLVM_DIR={mine}/lib/cmake/llvm" not in conf[0]:
+        p.append(f"another LLVM of the same version: the translator was not built again against it: exit {rc}, {conf}")
+    if rec.exists() and rec.read_text() != f"22.1.3 {mine}\n":
+        p.append(f"the note after that build is {rec.read_text()!r}")
+    rc, conf, out = builds(extra)
+    if rc != 0 or conf:
+        p.append(f"a third deps with the same LLVM built the translator again: exit {rc}, {conf}")
+    return p
+
+
 def arm_llvm23():
     sb = Sandbox("llvm23", formulas=("cmake",))
     (sb.state / "brew-llvm").write_text("23.1.5\n")
@@ -2091,6 +2148,17 @@ def arm_llvm23():
     sb.clear()
     rc, out = sb.run("deps", "-y")
     check("deps a second time does not build the translator again", not [l for l in sb.jlines() if l.startswith("cmake -S")], out[-400:])
+    # the translator belongs to the LLVM it was built against: deps notes which, and builds it again for another LLVM
+    # (here one of the same version elsewhere, NM_LLVM_PREFIX) and once for a translator built before it noted that
+    p = translator_llvm_problems(sb)
+    check("SPIRV-LLVM-Translator: deps notes the LLVM it was built against and builds it again without that note or for "
+          "another LLVM of the same version; doctor says why first", not p, p)
+    neg = Sandbox("llvm23-rec-neg", formulas=("cmake",))
+    (neg.state / "brew-llvm").write_text("23.1.5\n")
+    (neg.state / "brew-llvm22").write_text("")
+    neg.run("deps", "-y")
+    neg.break_script("  ! spirv_llvm_stale\n}\n", "  return 0\n}\n")
+    negative("a translator judged by its version alone", translator_llvm_problems(neg))
     bad = Sandbox("llvm23-pin", formulas=("cmake",))
     (bad.state / "brew-llvm").write_text("23.1.5\n")
     (bad.state / "brew-llvm22").write_text("")
