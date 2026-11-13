@@ -54,6 +54,10 @@ extern "C" int nv_rtd3_may_off(int rm_suspended, int heads_lit, int clients, uns
 
 extern "C" int nv_rtd3_reachable(void) { nv_rtd3_init(); return nv_rtd3_gpu_reachable(&g_rtd3); }
 
+// Both record the result in the monitor's state (nv_rtd3_off_done / nv_rtd3_on_done) before they return, inside the call
+// that NVRM.cpp makes through its gate: once that gate is idle, the state says what the slot has. NVRM.cpp's hold at
+// system sleep relies on it (it waits for the gate, then reads the GPU's state); the poll records the same result
+// again after the call, which changes nothing.
 extern "C" int nv_rtd3_power_off(IOACPIPlatformDevice *acpi)
 {
     nv_rtd3_init();
@@ -79,11 +83,13 @@ extern "C" int nv_rtd3_power_on(IOACPIPlatformDevice *acpi)
 static thread_call_t g_call;
 static struct nv_rtd3_ops g_ops;
 static unsigned g_idle;
-static volatile int g_stop;
 
+// Never stopped: it is armed once per boot and lives as long as the kext, which stays loaded. A GPU that stops is
+// taken away from it in NVRM.cpp (rtd3Detach), which waits for a call that is inside; there is no disarm here, because
+// thread_call_free() returns at once for a call that is running (the kernel frees it when that run ends), so it could
+// not tell when the last poll was out, and a poll could re-arm the call after it was freed.
 static void nv_rtd3_poll(thread_call_param_t, thread_call_param_t)
 {
-    if (g_stop) return;
     const unsigned period_ms = g_rtd3.state == NV_RTD3_ON ? 1000 : 250;
     int r = nv_rtd3_tick(&g_rtd3, &g_ops, &g_idle, 1);
     if (r == NV_RTD3_TICK_POWERED_OFF) kprintf("NVRM-xnu: RTD3 GPU powered off after %u s idle\n", NV_RTD3_IDLE_SECONDS);
@@ -91,7 +97,7 @@ static void nv_rtd3_poll(thread_call_param_t, thread_call_param_t)
     else if (r == NV_RTD3_TICK_WOKE) kprintf("NVRM-xnu: RTD3 GPU powered on for a client\n");
     else if (r == NV_RTD3_TICK_WAKE_FAILED) kprintf("NVRM-xnu: RTD3 power-on FAILED, the GPU stays unreachable\n");
     uint64_t dl; clock_interval_to_deadline(period_ms, kMillisecondScale, &dl);
-    if (!g_stop) thread_call_enter_delayed(g_call, dl);
+    thread_call_enter_delayed(g_call, dl);
 }
 
 extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops)
@@ -104,18 +110,6 @@ extern "C" void nv_rtd3_arm(const struct nv_rtd3_ops *ops)
     uint64_t dl; clock_interval_to_deadline(1000, kMillisecondScale, &dl);
     thread_call_enter_delayed(g_call, dl);
     kprintf("NVRM-xnu: RTD3 armed (idle %u s, resource %s)\n", NV_RTD3_IDLE_SECONDS, g_res);
-}
-
-extern "C" void nv_rtd3_disarm(void)
-{
-    g_stop = 1;
-    // thread_call_cancel_wait is not exported to kexts (a kext that names it cannot be linked into the kernel collection):
-    // cancel, and retry the free until a tick that was already running is out. The tick never re-arms once g_stop is set.
-    if (g_call) {
-        thread_call_cancel(g_call);
-        for (int i = 0; i < 100 && !thread_call_free(g_call); i++) { IOSleep(10); thread_call_cancel(g_call); }
-        g_call = nullptr;
-    }
 }
 
 /* System wake: the resource must be on before the driver's own resume touches the GPU. */
