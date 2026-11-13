@@ -13,8 +13,8 @@ hands strings the file on its standard input.
 This test runs the real script as ./build.sh does, through build/local_build_host.sh, in a checkout of its own in a
 temporary folder, with stand-ins for the Rust toolchain and for the Mac's strip, install_name_tool, codesign, strings
 and lipo:
-  cargo    records what it was started with and writes a "dylib" that carries a debug map; without the setting it
-           writes the two warning lines cargo 1.98.1 wrote on that Mac
+  cargo    records what it was started with and writes a "dylib" that carries a debug map (for one scene a map
+           with very many names); without the setting it writes the two warning lines cargo 1.98.1 wrote on that Mac
   strip    removes the debug map, as strip -S does, or leaves it (the check's own case)
   strings  reads the part before the symbol table of a file it is given by name, and every byte of its standard input
 Nothing outside the temporary folder is written.
@@ -27,6 +27,7 @@ SCRIPT = ROOT / "build" / "build_xlate_release.sh"
 HOST = "nullmoth-local-build"
 SETTING = "CARGO_HOME=$CH CARGO_PROFILE_RELEASE_STRIP=none"   # the script's export line on the build host
 MAP = "OSO /Users/builder/nmw/build/xlate-release/target/x86_64-apple-darwin/release/deps/nvmtl_translate.o"
+MANY = 20000   # more names than a pipe holds: the scene of the check's five lines
 fails = 0
 
 
@@ -82,6 +83,7 @@ class Scene:
              '[ -n "$t" ] || { echo "error: stand-in cargo: no --target-dir" >&2; exit 101; }\n'
              'mkdir -p "$t/x86_64-apple-darwin/release"\n'
              f'printf \'%s\\n\' "the translator\'s code and data" "==SYMBOL TABLE==" "{MAP}" > "$t/x86_64-apple-darwin/release/libnvmtl_translate.dylib"\n'
+             f'[ ! -e "$d/many-objects" ] || awk \'BEGIN {{ for (i = 0; i < {MANY}; i++) printf "{MAP.rsplit("/", 1)[0]}/crate%05d.o\\n", i }}\' >> "$t/x86_64-apple-darwin/release/libnvmtl_translate.dylib"\n'
              'echo "   Compiling nvmtl_translate v0.1.0 (/src/wrapper)" >&2\n'
              'case "${CARGO_PROFILE_RELEASE_STRIP-}" in\n'
              '  none|false) ;;\n'   # rustc is not asked to strip: rust-objcopy is not started
@@ -118,12 +120,14 @@ class Scene:
         return dict(l.split("=", 1) for l in f.read_text().splitlines()) if f.exists() else {}
 
 
-def scene(script_text=None, strip_leaves=False):
+def scene(script_text=None, strip_leaves=False, many=False):
     tmp = Path(tempfile.mkdtemp(prefix="xlate-release-"))
     made.append(tmp)   # before the scene is made, so that a scene that cannot be made is removed too
     s = Scene(tmp, script_text)
     if strip_leaves:
         (s.tb / "strip-leaves-the-map").write_text("")
+    if many:
+        (s.tb / "many-objects").write_text("")
     return s
 
 
@@ -166,6 +170,18 @@ try:
     rc, out = s.run()
     check("a strings that fails stops the script: what it did not print is not taken for a dylib without paths",
           rc == 5 and "STOP: strings could not read the dylib" in out, (rc, out[-600:]))
+
+    s = scene(strip_leaves=True, many=True)
+    rc, out = s.run()
+    shown = [l for l in out.splitlines() if l.startswith("OSO ")]
+    check(f"a debug map of {MANY + 1} names stops the script with its own status and shows five of them",
+          rc == 5 and f"STOP: {MANY + 1} build machine path(s) left in the dylib" in out and len(shown) == 5, (rc, len(shown), out[-600:]))
+    five = "| sort -u | sed -n 1,5p;"
+    assert src.count(five) == 1, "control: the command that shows the five lines is not in the script once"
+    s = scene(src.replace(five, "| sort -u | head -5;"), strip_leaves=True, many=True)
+    rc, out = s.run()
+    check("negative control: with head for the five lines, sort is cut off while it still writes and the script ends with sort's status",
+          rc not in (0, 5) and f"STOP: {MANY + 1} build machine path(s) left in the dylib" in out, (rc, out[-600:]))
 finally:
     for t in made:
         shutil.rmtree(t, ignore_errors=True)
