@@ -83,6 +83,7 @@ class Scene:
              '[ -n "$t" ] || { echo "error: stand-in cargo: no --target-dir" >&2; exit 101; }\n'
              'mkdir -p "$t/x86_64-apple-darwin/release"\n'
              f'printf \'%s\\n\' "the translator\'s code and data" "==SYMBOL TABLE==" "{MAP}" > "$t/x86_64-apple-darwin/release/libnvmtl_translate.dylib"\n'
+             f'[ ! -e "$d/map-repeated" ] || printf \'%s\\n\' "{MAP}" "{MAP}" >> "$t/x86_64-apple-darwin/release/libnvmtl_translate.dylib"\n'
              f'[ ! -e "$d/many-objects" ] || awk \'BEGIN {{ for (i = 0; i < {MANY}; i++) printf "{MAP.rsplit("/", 1)[0]}/crate%05d.o\\n", i }}\' >> "$t/x86_64-apple-darwin/release/libnvmtl_translate.dylib"\n'
              'echo "   Compiling nvmtl_translate v0.1.0 (/src/wrapper)" >&2\n'
              'case "${CARGO_PROFILE_RELEASE_STRIP-}" in\n'
@@ -120,7 +121,7 @@ class Scene:
         return dict(l.split("=", 1) for l in f.read_text().splitlines()) if f.exists() else {}
 
 
-def scene(script_text=None, strip_leaves=False, many=False):
+def scene(script_text=None, strip_leaves=False, many=False, repeated=False):
     tmp = Path(tempfile.mkdtemp(prefix="xlate-release-"))
     made.append(tmp)   # before the scene is made, so that a scene that cannot be made is removed too
     s = Scene(tmp, script_text)
@@ -128,6 +129,8 @@ def scene(script_text=None, strip_leaves=False, many=False):
         (s.tb / "strip-leaves-the-map").write_text("")
     if many:
         (s.tb / "many-objects").write_text("")
+    if repeated:
+        (s.tb / "map-repeated").write_text("")
     return s
 
 
@@ -170,6 +173,11 @@ try:
     rc, out = s.run()
     check("a strings that fails stops the script: what it did not print is not taken for a dylib without paths",
           rc == 5 and "STOP: strings could not read the dylib" in out, (rc, out[-600:]))
+
+    s = scene(strip_leaves=True, repeated=True)
+    rc, out = s.run()
+    check("a path that occurs three times in the dylib is counted once, as it is shown",
+          rc == 5 and "STOP: 1 build machine path(s) left in the dylib" in out and out.count(MAP) == 1, (rc, out[-600:]))
 
     s = scene(strip_leaves=True, many=True)
     rc, out = s.run()
