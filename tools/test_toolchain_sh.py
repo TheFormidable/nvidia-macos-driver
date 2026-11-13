@@ -866,6 +866,28 @@ def main():
             rc, out, err = sb.run(["build", "ninja"], NM_TC_PREFIX=str(sb.sb / "plink/tc"))
             check("a prefix below a link is created at its real place and used",
                   rc == 0 and (sb.sb / "real-prefix/tc/bin/ninja").exists(), err[-300:])
+            # a colon splits PATH and pkgconf's search path, a semicolon CMake's lists, and pkgconf reads quotes and
+            # backslashes in a .pc file's paths as quoting: such a folder, named or reached through a link, is refused
+            def chars_problems(sb, script=None):
+                p = []
+                for ch in (":", ";", "'", '"', "\\", "$", "`"):
+                    d = sb.sb / f"x{ch}y"
+                    rc, out, err = sb.run(["build", "ninja"], script=script, NM_TC_PREFIX=str(d / "p"))
+                    if rc != 2 or "contains one of" not in err or len(err.strip().splitlines()) != 1 or d.exists():
+                        p.append(f"{ch!r}: exit {rc}, {err.strip()[:160]!r}")
+                (sb.sb / "r:eal").mkdir()
+                os.symlink(sb.sb / "r:eal", sb.sb / "plain-link")
+                rc, out, err = sb.run(["build", "ninja"], script=script, NM_TC_LOGS=str(sb.sb / "plain-link/logs"))
+                if rc != 2 or "contains one of" not in err or (sb.sb / "r:eal/logs").exists():
+                    p.append(f"through a link: exit {rc}, {err.strip()[:160]!r}")
+                return p
+            sb = sandbox()
+            p = chars_problems(sb)
+            check("a folder with : ; ' \" \\ $ or ` in its path, also reached through a link, is refused before anything is made", not p, p)
+            sb = sandbox()
+            control("a script without the character test takes such folders",
+                    chars_problems(sb, mutate(sb, "chars", [('  case "$p" in *[:\\;\\\'\\"\\\\\\$\\`]*)', '  case "$p" in *@@@*)'),
+                                                            ('  case "$r" in *[:\\;\\\'\\"\\\\\\$\\`]*)', '  case "$r" in *@@@*)')])))
 
         if arm("record"):
             cases = [("..", "../outside.txt", None), ("absolute", "@SB@/outside.txt", None),

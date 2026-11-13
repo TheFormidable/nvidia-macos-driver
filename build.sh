@@ -338,6 +338,9 @@ check_paths() {
   case "$NM_WORK" in /*) ;; '') path_problem "the working directory may not be /" ;; *) path_problem "the working directory must be an absolute path (got $NM_WORK)" ;; esac
   case "$NM_WORK/" in */./*|*/../*) path_problem "the working directory may not contain . or .. parts (got $NM_WORK)" ;; esac
   case "$NM_WORK" in *[$ws]*) path_problem "the working directory contains a space ($NM_WORK): the release scripts' commands split on it" ;; esac
+  # tools/bin is the first folder of every step's PATH and the toolchain's pkg-config searches its own lib/pkgconfig:
+  # a colon splits both, a semicolon CMake's lists, and pkg-config reads quotes and backslashes in its paths as quoting
+  case "$NM_WORK" in *[:\;\'\"\\\$\`]*) path_problem "the working directory contains one of : ; ' \" \\ \$ \` ($NM_WORK): PATH and the search paths of the build tools split on them or read them as quoting" ;; esac
   case "$NM_WORK/" in "$HERE/"*) path_problem "the working directory $NM_WORK is inside the checkout; choose one outside it (default ~/nullmoth-build)" ;; esac
   [ -z "$NM_WORK" ] || case "$HERE/" in "$NM_WORK/"*) path_problem "the checkout is inside the working directory $NM_WORK; choose another working directory" ;; esac
   local rh; rh=$(absolute_path "${HOME:-/}")

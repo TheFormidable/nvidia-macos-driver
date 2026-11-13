@@ -43,7 +43,8 @@ comandos y opciones y la solución de problemas.
   Lo mismo ocurre si la carpeta de desarrollo que indican `DEVELOPER_DIR` o `xcode-select -p` no existe o no contiene
   las herramientas de Apple (un Xcode borrado o renombrado después de seleccionarlo): todas fallarían.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
-  carpeta personal no pueden contener espacios.
+  carpeta personal no pueden contener espacios, y la del directorio de trabajo tampoco `:` `;` `'` `"` `\` `$` ni una
+  comilla invertida.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
 - Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor: de dónde salen lo dice
   `NM_TOOLS_FROM`. En un
@@ -187,7 +188,7 @@ archivo y el archivo sobre el valor por defecto. El archivo se lee, nunca se eje
 <!-- reference: options -->
 | Opción | Variable | Por defecto | Significado |
 |---|---|---|---|
-| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Directorio de trabajo; fuera del clon y sin espacios |
+| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Directorio de trabajo; fuera del clon, sin espacios, sin `: ; ' " \ $` ni comilla invertida |
 | `-j N`, `--jobs N` | `NM_JOBS` | número de núcleos | Trabajos de compilación en paralelo |
 | `-y`, `--yes` | `NM_ASSUME_YES` | `0` | Responder sí a las preguntas de `build.sh` (nunca al instalador de Homebrew) |
 | `--no-install` | `NM_NO_INSTALL` | `0` | No instalar nada; decir qué falta |
@@ -320,6 +321,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | Mensaje o síntoma | Causa | Qué hacer |
 |---|---|---|
 | `STOP: the working directory contains a space` (o la ruta del clon, o la carpeta personal) | Los scripts de publicación y build_nvk.sh separan por espacios | Usa `--workdir` con una ruta sin espacios; mueve el clon |
+| `STOP: the working directory contains one of : ; ' " \ $` (o una comilla invertida) | El `PATH` y las rutas de búsqueda de las herramientas se separan por los dos puntos (las de CMake por el punto y coma), y pkg-config lee las comillas y barras invertidas de sus rutas como comillas | Usa `--workdir` con una ruta sin ellos |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 necesita macOS 15.6 o posterior | Actualiza macOS o compila en otro Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` apunta a las herramientas de línea de comandos | Instala Xcode 26 y ejecuta `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
 | `STOP: the developer folder xcode-select -p names, ..., does not exist` (o `holds none of Apple's tools`, o `DEVELOPER_DIR names`) | El Xcode seleccionado se borró o se renombró, `DEVELOPER_DIR` indica una carpeta equivocada, o una actualización de macOS dejó incompletas las herramientas de línea de comandos | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` con el Xcode que tengas, o corrige o quita `DEVELOPER_DIR` |

@@ -1835,6 +1835,21 @@ def arm_source_modes():
     rc, out = sb.run("--workdir", wd, "deps", "-y")
     check("a working directory with a blank: deps stops at the start with one line naming it, nothing fetched or built",
           rc == 2 and "contains a space" in out and not tc_builds(sb) and not os.path.exists(wd), (rc, out[-400:]))
+    # a colon would split every step's PATH and the toolchain's pkg-config search path, a quote its answers
+    def chars_problems():
+        p = []
+        for ch in (":", ";", "'", '"', "\\", "$", "`"):
+            wd = str(sb.home / f"my{ch}build")
+            sb.clear()
+            rc, out = sb.run("--workdir", wd, "deps", "-y")
+            if rc != 2 or "contains one of" not in out or tc_builds(sb) or os.path.exists(wd):
+                p.append(f"{ch!r}: exit {rc}, {out[-200:]!r}")
+        return p
+    p = chars_problems()
+    check("a working directory with : ; ' \" \\ $ or `: deps stops at the start with one line naming it, nothing fetched or built", not p, p)
+    with sb.scratch():
+        sb.break_script('  case "$NM_WORK" in *[:', '  case "$NM_WORK" in *[@')
+        negative("a build.sh that takes a working directory with a colon", [x for x in chars_problems() if x.startswith("':'")])
     # NM_TOOLS_FROM on each processor
     def mode(arch, value):
         s = Sandbox(f"mode-{arch}-{value or 'unset'}", cpu=arch, arch=arch, tools_from=value, formulas=("cmake",))

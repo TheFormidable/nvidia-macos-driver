@@ -93,7 +93,10 @@ real_path() {
   [ "$p" != / ] || p=""
   printf '%s%s\n' "$p" "$rest"
 }
-# need_dir <variable>: an absolute folder without spaces or "." parts, set to where it really is (nothing is created)
+# need_dir <variable>: an absolute folder without spaces, the characters below or "." parts, set to where it really is
+# (nothing is created). A colon splits PATH and pkgconf's search path, a semicolon CMake's lists, and pkgconf reads
+# quotes and backslashes in a .pc file's paths as shell quoting: a prefix with one of them gives a pkg-config that finds
+# nothing or answers -I without the folder.
 need_dir() {
   local v=$1 p r ws
   eval "p=\${$v:-}"
@@ -101,9 +104,11 @@ need_dir() {
   ws=$(printf ' \t\n')
   case "$p" in /) die "$v may not be /" ;; /*) ;; *) die "$v must be an absolute path (got $p)" ;; esac
   case "$p" in *[$ws]*) die "$v contains a space ($p): the build systems of these tools split their commands on it" ;; esac
+  case "$p" in *[:\;\'\"\\\$\`]*) die "$v contains one of : ; ' \" \\ \$ \` ($p): search paths split on them and pkgconf reads them as quoting" ;; esac
   case "$p/" in */./*|*/../*) die "$v may not contain . or .. parts (got $p)" ;; esac
   r=$(real_path "$p") || die "cannot find where $v ($p) really is"
   case "$r" in ''|/) die "$v ($p) is really /" ;; *[$ws]*) die "$v ($p) is really $r, which contains a space" ;; esac
+  case "$r" in *[:\;\'\"\\\$\`]*) die "$v ($p) is really $r, which contains one of : ; ' \" \\ \$ \`" ;; esac
   eval "$v=\$r"
 }
 # own_dir <variable> <marker>: a folder this script may write into, overwrite in and remove from. It may be missing or
