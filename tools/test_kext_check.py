@@ -49,9 +49,36 @@ for rel in CHECKED:
     m = missing(p.read_text(), chk) if p.is_file() else ["(the script is gone)"]
     arm(f"every compile flag of {rel} is in the check", not m, " ".join(m))
 arm("control: a flag the check does not have is caught", missing('clang++ -fapple-kext -DNEW_THING -c x.cpp', chk) == ["-DNEW_THING"])
+
+# Apple's clang adds these warning groups to every kext compile (-mkernel / -fapple-kext); this machine's clang does
+# not, so the check must carry them itself or it passes what stops the owner's build at its zero ceiling. missing()
+# does not require them (a build script does not write them; Apple's driver adds them), so a dedicated arm asks that
+# each is in KEXT_FLAGS and in the two compile lines that do not use KEXT_FLAGS (NMDRM, NVPrimarySelector).
+MACWARN = ["-Werror=implicit-function-declaration", "-Warray-bounds", "-Warray-bounds-pointer-arithmetic",
+           "-Wbuiltin-memcpy-chk-size", "-Wconditional-uninitialized", "-Wempty-body", "-Wimplicit-int-conversion",
+           "-Wmemset-transposed-args", "-Wreturn-stack-address", "-Wshadow", "-Wshorten-64-to-32", "-Wsign-conversion",
+           "-Wsizeof-pointer-memaccess", "-Wvla"]
+
+
+def macwarn_missing(block):
+    return [f for f in MACWARN if not re.search(r"(?<![\w=-])" + re.escape(f) + r"(?![\w=-])", block)]
+
+
+mac_def = re.search(r"MACWARN=\(([^)]*)\)", chk)
+kf = re.search(r"KEXT_FLAGS=\(([^)]*)\)", chk, re.S)
+nmdrm_line = re.search(r'one "NMDRM/nmdrm\.cpp".*?-c "\$K/NMDRM/nmdrm\.cpp"', chk, re.S)
+prim_line = re.search(r'one "NVPrimarySelector/.*?-c "\$K/NVPrimarySelector/NVPrimarySelector\.cpp"', chk, re.S)
+arm("the check carries every warning group Apple's clang adds, in KEXT_FLAGS and the hand-written NMDRM and NVPrimarySelector lines",
+    bool(mac_def) and not macwarn_missing(mac_def.group(1))
+    and bool(kf) and '"${MACWARN[@]}"' in kf.group(1)
+    and bool(nmdrm_line) and '"${MACWARN[@]}"' in nmdrm_line.group(0)
+    and bool(prim_line) and '"${MACWARN[@]}"' in prim_line.group(0),
+    " ".join(macwarn_missing(mac_def.group(1)) if mac_def else ["no MACWARN"]))
+arm("control: dropping -Wshadow from the warning groups is caught",
+    bool(mac_def) and macwarn_missing(mac_def.group(1).replace("-Wshadow", "", 1)) == ["-Wshadow"])
 arm("control: a flag in a comment is not a flag", missing('# clang++ -DNEW_THING\nclang++ -fapple-kext -c x.cpp', chk) == [])
 arm("control: a warning flag, an -U and an optimisation level the check does not have are caught",
-    missing('clang++ -Wall -Wshadow -UNEW_THING -Oz -O2 -c x.cpp', chk) == ["-Oz", "-UNEW_THING", "-Wshadow"])
+    missing('clang++ -Wall -Wfloat-equal -UNEW_THING -Oz -O2 -c x.cpp', chk) == ["-Oz", "-UNEW_THING", "-Wfloat-equal"])
 
 # every kext with a build script is either compiled by the check or named as not checked
 built = {p.parent.name for p in (ROOT / "kexts").glob("*/build.sh")} | {"NVRM", "NVAccel", "NVRMFB", "NVRMAGDC", "NVPrimarySelector"}

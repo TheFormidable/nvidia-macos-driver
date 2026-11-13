@@ -246,6 +246,24 @@ def arms(src, others):
     arm("the quiesce waits ask nv_quiesce_may_sleep() (the kernel's preemption_enabled()), never nvx_can_block()",
         re.search(r"nv_quiesce_may_sleep\s*\(\s*void\s*\)\s*\{\s*return\s+preemption_enabled\s*\(\s*\)", q)
         and re.search(r"nv_quiesce_may_sleep\s*\(", body(t, "nv_xnu_wait_idle_until")) and "nvx_can_block" not in t)
+    # The closing side of each timer: it invalidates the generation, cancels the pending call, waits for a callback that
+    # is already running, and cancels once more a call the callback may have armed before it saw the new generation.
+    # Nothing checked this shape or that the stop, sleep and detach paths actually run it, so a later edit could leave a
+    # tick or a nano callback firing at a GPU that is gone or without power, with every test still green.
+    arm("nv_xnu_rc_quiesce invalidates the generation, cancels, waits, then cancels again",
+        order(body(t, "nv_xnu_rc_quiesce"),
+              [r"nv_gen_invalidate\s*\(\s*&rc->gate", r"thread_call_cancel\s*\(\s*rc->call",
+               r"nv_xnu_wait_idle\s*\(", r"thread_call_cancel\s*\(\s*rc->call"]))
+    arm("nv_xnu_nano_quiesce invalidates the generation, cancels, waits, then cancels again",
+        order(body(t, "nv_xnu_nano_quiesce"),
+              [r"nv_gen_invalidate\s*\(\s*&t->gate", r"thread_call_cancel\s*\(\s*t->call",
+               r"nv_xnu_wait_idle_until\s*\(", r"thread_call_cancel\s*\(\s*t->call"]))
+    arm("nv_stop_rc_timer, nv_xnu_rc_suspend and nv_xnu_rc_detach each quiesce the RC timer",
+        all(re.search(r"nv_xnu_rc_quiesce\s*\(", body(t, f))
+            for f in ("nv_stop_rc_timer", "nv_xnu_rc_suspend", "nv_xnu_rc_detach")))
+    arm("nv_xnu_nano_end and nv_cancel_nano_timer each quiesce the nano timer",
+        all(re.search(r"nv_xnu_nano_quiesce\s*\(", body(t, f))
+            for f in ("nv_xnu_nano_end", "nv_cancel_nano_timer")))
     start = body(t, "nv_start_nano_timer")
     arm("a nano timer's deadline is computed in 64-bit nanoseconds",
         re.search(r"nanoseconds_to_absolutetime\s*\(\s*timens\s*,", start) and "clock_interval_to_deadline" not in start)
@@ -394,6 +412,32 @@ CONTROLS = [
      lambda s: broken(s, "timers", "if (nv_gen_current(&rc->gate) == token) nv_xnu_rc_arm(rc, token);", "nv_xnu_rc_arm(rc, nv_gen_current(&rc->gate));")),
     ("the timer wait asking nvx_can_block", "the quiesce waits ask",
      lambda s: broken(s, "timers", "    if (nv_quiesce_may_sleep()) {\n        while", "    if (nvx_can_block()) {\n        while")),
+    # T1: the RC quiesce drops the generation invalidate, so a tick armed before it still matches and reaches the RM.
+    ("the RC quiesce without its generation invalidate", "nv_xnu_rc_quiesce invalidates",
+     lambda s: broken(s, "timers", "    nv_gen_invalidate(&rc->gate);\n", "")),
+    # T2: the RC quiesce drops the cancel after the wait, so a re-armed tick is left pending.
+    ("the RC quiesce without its second cancel", "nv_xnu_rc_quiesce invalidates",
+     lambda s: broken(s, "timers", "    }\n    thread_call_cancel(rc->call);", "    }")),
+    # T4: the nano quiesce drops the generation invalidate.
+    ("the nano quiesce without its generation invalidate", "nv_xnu_nano_quiesce invalidates",
+     lambda s: broken(s, "timers", "    nv_gen_invalidate(&t->gate);\n", "")),
+    # T3: nv_stop_rc_timer never quiesces, so a tick can still be inside when the RM disables the adapter.
+    ("the RC stop without its quiesce", "nv_stop_rc_timer, nv_xnu_rc_suspend",
+     lambda s: broken(s, "timers", "    nv_xnu_rc_set_armed(rc, 0);\n    nv_xnu_rc_quiesce(rc, 10000);\n    return 0;",
+                      "    nv_xnu_rc_set_armed(rc, 0);\n    return 0;")),
+    # T5: nv_xnu_rc_suspend never quiesces, so a tick can run on a GPU in standby.
+    ("the RC suspend without its quiesce", "nv_stop_rc_timer, nv_xnu_rc_suspend",
+     lambda s: broken(s, "timers", "    nv_xnu_rc_quiesce(rc, 2000);\n", "")),
+    # detach: nv_xnu_rc_detach never quiesces, so a tick can run after the slot is let go.
+    ("the RC detach without its quiesce", "nv_stop_rc_timer, nv_xnu_rc_suspend",
+     lambda s: broken(s, "timers", "    if (rc->call) nv_xnu_rc_quiesce(rc, 10000);\n", "")),
+    # nano_end: the live-timer teardown never quiesces, so a nano callback can run after the slot is freed or reused.
+    ("the nano end without its quiesce", "nv_xnu_nano_end and nv_cancel_nano_timer",
+     lambda s: broken(s, "timers", "    const bool idle = nv_xnu_nano_quiesce(t, deadline);\n",
+                      "    const bool idle = true;\n")),
+    # cancel: nv_cancel_nano_timer never quiesces.
+    ("the nano cancel without its quiesce", "nv_xnu_nano_end and nv_cancel_nano_timer",
+     lambda s: broken(s, "timers", "    nv_xnu_nano_quiesce(t, nv_xnu_deadline_ms(2000));\n", "")),
     ("nv_quiesce_may_sleep built on nvx_can_block", "the quiesce waits ask",
      lambda s: broken(s, "quiesce", "return preemption_enabled() ? 1 : 0;", "return nvx_can_block() ? 1 : 0;")),
     ("the 32-bit microsecond deadline back", "a nano timer's deadline",
