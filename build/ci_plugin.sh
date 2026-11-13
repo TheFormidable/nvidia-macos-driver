@@ -4,8 +4,9 @@
 # together). For continuous integration and for anybody who wants to know that plugin/ still compiles before a full
 # build. It needs:
 #   - the macOS 26 SDK (Xcode 26): plugin/NVMTLMetal4.m imports <Metal/MTL4CommandQueue.h>;
-#   - the Vulkan headers: NM_VULKAN_INCLUDE=<dir holding vulkan/vulkan.h>, or they are downloaded at the commit
-#     build_vulkan_loader.sh pins (KhronosGroup/Vulkan-Headers, Apache-2.0). Nothing downloaded ships.
+#   - the Vulkan headers the release compiles it against (Mesa's include/ at the pinned commit): NM_VULKAN_INCLUDE=<dir
+#     holding vulkan/vulkan.h>, or build/ci_vulkan_headers.sh downloads the same bytes (KhronosGroup/Vulkan-Headers,
+#     Apache-2.0, at the commit build/pins.sh pins beside Mesa's). Nothing downloaded ships.
 # It does not build the translator or NVK, so the result is a compile and link check, not a driver to install.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -14,18 +15,7 @@ OUT=${1:-$HERE/build-out/ci-plugin}; mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 SDK=$(xcrun --show-sdk-path) || exit 2
 [ -f "$SDK/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] \
   || { echo "STOP: $SDK has no Metal 4 headers; select Xcode 26 (the plugin is built against the macOS 26 SDK for macOS 15)"; exit 3; }
-INC=${NM_VULKAN_INCLUDE:-}
-if [ -z "$INC" ]; then
-  SHA=$(sed -n 's/^HEADERS_SHA=\([0-9a-f]\{40\}\).*/\1/p' "$HERE/build/build_vulkan_loader.sh")
-  [ -n "$SHA" ] || { echo "STOP: build_vulkan_loader.sh names no HEADERS_SHA"; exit 2; }
-  D=$OUT/Vulkan-Headers
-  if [ ! -f "$D/include/vulkan/vulkan.h" ]; then
-    rm -rf "$D"; git init -q "$D" && git -C "$D" remote add origin https://github.com/KhronosGroup/Vulkan-Headers \
-      && git -C "$D" fetch -q --depth 1 origin "$SHA" && git -C "$D" checkout -q FETCH_HEAD || { echo "STOP: cannot fetch Vulkan-Headers $SHA"; exit 2; }
-    [ "$(git -C "$D" rev-parse HEAD)" = "$SHA" ] || { echo "STOP: Vulkan-Headers is not at $SHA"; exit 2; }
-  fi
-  INC=$D/include
-fi
+INC=$(bash "$HERE/build/ci_vulkan_headers.sh") || { echo "STOP: no Vulkan headers (build/ci_vulkan_headers.sh)"; exit 2; }
 [ -f "$INC/vulkan/vulkan.h" ] || { echo "STOP: no vulkan/vulkan.h under $INC"; exit 2; }
 cd "$HERE/plugin" || exit 2
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -bundle -fobjc-arc -O1 -DNVMTL_RELEASE=1 \

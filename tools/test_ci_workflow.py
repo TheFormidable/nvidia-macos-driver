@@ -4,15 +4,22 @@
 A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml as text (no YAML library needed) and
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
 clone, the scripts and tests the jobs name exist, the two jobs that gate do gate and get a full clone (their tests
-read older revisions), and nothing uploads or publishes. Each property has a control: the same check on a copy of the file with that one thing
+read older revisions), the host tests and the plugin get the Vulkan headers the release uses, and nothing uploads or
+publishes. Each property has a control: the same check on a copy of the file with that one thing
 wrong has to fail.
 
 It also holds build/ci_plugin.sh to the compiler line of build/build_plugin_release.sh, which it copies: the release
-script runs on the build Mac over ssh and cannot run on a CI runner, and a copy drifts.
+script runs on the build Mac over ssh and cannot run on a CI runner, and a copy drifts. And it holds the Vulkan headers
+of the automatic checks (build/ci_vulkan_headers.sh) to the Mesa commit the release takes its headers from, running the
+script on copies of build/pins.sh (it stops before any download when the two pins disagree).
 Usage: test_ci_workflow.py [driver checkout]"""
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1]
 FAILS = []
@@ -79,6 +86,14 @@ def problems(y, root):
     host = j.get("host-tests", "")
     if "fetch-depth: 0" not in host or not re.search(r"run: python3 tools/run_all_tests\.py -j \d+\s*$", host, re.M):
         out.append("host-tests does not run every test from a full clone")
+    # the four tests that compile against vulkan/vulkan.h skip without headers: the job must hand them the release's
+    hv = re.search(r"^\s*d=\$\(bash build/ci_vulkan_headers\.sh\)\n\s*echo \"NM_VULKAN_INCLUDE=\$d\" >> \"\$GITHUB_ENV\"", host, re.M)
+    if not hv or hv.start() > host.find("tools/run_all_tests.py"):
+        out.append("host-tests does not set NM_VULKAN_INCLUDE from build/ci_vulkan_headers.sh before the tests")
+    for name in ("host-tests", "plugin"):
+        if not re.search(r"path: build-out/ci-vulkan-headers\n\s*key: ci-vulkan-headers-\$\{\{ steps\.vkh\.outputs\.commit \}\}", j.get(name, "")) \
+                or "NM_PIN_CI_VKHEADERS_COMMIT" not in j.get(name, ""):
+            out.append(f"{name} does not keep the Vulkan headers under the key of their pin")
     return out
 
 
@@ -129,6 +144,9 @@ control("a checkout that keeps the token is caught", "          persist-credenti
 control("the kext check dropped from the Linux job is caught", "        run: bash build/kext_check.sh\n      - name: Switch registry", "        run: true\n      - name: Switch registry",
         "does not run the kext check")
 control("sudo is caught", "run: bash build/ci_plugin.sh", "run: sudo bash build/ci_plugin.sh", "sudo")
+control("host tests without the release's Vulkan headers are caught", '          echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"\n', "", "does not set NM_VULKAN_INCLUDE")
+control("the headers cached under a key that is not their pin are caught", "key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}",
+        "key: ci-vulkan-headers-${{ hashFiles('build/ci_plugin.sh') }}", "under the key of their pin")
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
 
 rel = compile_line((ROOT / "build/build_plugin_release.sh").read_text(), r"2>\.\./out/build\.err")
@@ -141,7 +159,50 @@ arm("control: a source file added to the release line is caught",
     compile_line((ROOT / "build/build_plugin_release.sh").read_text().replace("NVMTLDevice.m ", "NVMTLDevice.m nvmtl_new.c "), r"2>\.\./out/build\.err") != ci)
 arm("it holds the plugin to its warning ceiling and to macOS 15, as the release script does",
     'warn_ceiling.sh" plugin' in ci_text and '[ "$minos" = 15.0 ]' in ci_text)
-arm("its Vulkan headers are the commit build_vulkan_loader.sh pins",
-    "HEADERS_SHA" in ci_text and bool(re.search(r"^HEADERS_SHA=[0-9a-f]{40}$", (ROOT / "build/build_vulkan_loader.sh").read_text(), re.M)))
+arm("its Vulkan headers come from build/ci_vulkan_headers.sh, and from nothing else",
+    'INC=$(bash "$HERE/build/ci_vulkan_headers.sh")' in ci_text and "git " not in ci_text and "HEADERS_SHA" not in ci_text)
+
+
+def pins(text):
+    return {m.group(1): m.group(2) for m in re.finditer(r"^(NM_PIN_[A-Z0-9_]+)=(\S*)$", text, re.M)}
+
+
+pins_text = (ROOT / "build/pins.sh").read_text()
+P = pins(pins_text)
+arm("build/pins.sh pins the checks' Vulkan-Headers beside the Mesa commit they were compared with, and that is the release's Mesa",
+    bool(re.fullmatch(r"[0-9a-f]{40}", P.get("NM_PIN_CI_VKHEADERS_COMMIT", ""))) and P.get("NM_PIN_CI_VKHEADERS_MESA") == P.get("NM_PIN_MESA_COMMIT")
+    and len(P.get("NM_PIN_MESA_COMMIT", "")) == 40, f"{P.get('NM_PIN_CI_VKHEADERS_MESA')} vs {P.get('NM_PIN_MESA_COMMIT')}")
+
+
+def headers_script(pins_text, env_include=None):
+    """runs build/ci_vulkan_headers.sh in a copy of the tree with this pins.sh; -> (exit code, stdout, stderr). It must
+    never get as far as a download here: every case below stops before one or is answered by NM_VULKAN_INCLUDE."""
+    with tempfile.TemporaryDirectory() as d:
+        (pathlib.Path(d) / "build").mkdir()
+        shutil.copy(ROOT / "build/ci_vulkan_headers.sh", pathlib.Path(d) / "build")
+        (pathlib.Path(d) / "build/pins.sh").write_text(pins_text)
+        env = {k: v for k, v in os.environ.items() if k != "NM_VULKAN_INCLUDE"}
+        if env_include is not None:
+            env["NM_VULKAN_INCLUDE"] = env_include
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        r = subprocess.run(["bash", str(pathlib.Path(d) / "build/ci_vulkan_headers.sh"), str(pathlib.Path(d) / "work")],
+                           capture_output=True, text=True, env=env, timeout=60)
+        return r.returncode, r.stdout, r.stderr
+
+
+moved = pins_text.replace("NM_PIN_MESA_COMMIT=" + P.get("NM_PIN_MESA_COMMIT", "x"), "NM_PIN_MESA_COMMIT=" + "1" * 40)
+rc, out, err = headers_script(moved)
+arm("control: a Mesa pin moved without comparing the headers again stops the script, before any download",
+    rc == 2 and out == "" and "compared with Mesa" in err and not pins(moved).get("NM_PIN_CI_VKHEADERS_MESA") == pins(moved).get("NM_PIN_MESA_COMMIT"),
+    (rc, err[-200:]))
+rc, out, err = headers_script(re.sub(r"^NM_PIN_CI_VKHEADERS_COMMIT=.*\n", "", pins_text, flags=re.M))
+arm("control: a pins.sh without the checks' Vulkan-Headers pin stops it", rc == 2 and out == "" and "does not name" in err, (rc, err[-200:]))
+with tempfile.TemporaryDirectory() as inc:
+    (pathlib.Path(inc) / "vulkan").mkdir()
+    rc_empty, out_empty, _ = headers_script(pins_text, inc)
+    (pathlib.Path(inc) / "vulkan/vulkan.h").write_text("/* stand-in */\n")
+    rc, out, err = headers_script(pins_text, inc)
+arm("NM_VULKAN_INCLUDE is taken as it is, and the folder is all the script prints", rc == 0 and out == inc + "\n", (rc, out, err[-200:]))
+arm("control: NM_VULKAN_INCLUDE without vulkan/vulkan.h stops it", rc_empty == 2 and out_empty == "")
 print(f"{len(FAILS)} failed")
 sys.exit(1 if FAILS else 0)
