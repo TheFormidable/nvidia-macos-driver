@@ -28,7 +28,9 @@ failure.
   log, with the prefix `NullMoth:`: `log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"'`. An
   application started from Terminal with `NVMTL_PROCESS_ENV=1` writes `/tmp/nvmtl.log` (or `nvmtl.log` in its
   `$TMPDIR` when `/tmp` is not writable for it). Every step below that looks for a line "in `nvmtl.log`" needs such a
-  launch; for WindowServer, use the system log.
+  launch; for WindowServer, use the system log. NVK's own lines (`nvk-reason: E ...` and `nvk-reason: W ...`) follow
+  a rule of their own: its errors and the two lines of a channel rebuild (`nvrm channel slot N rebuilt after ...`,
+  `nvrm channel slot N not rebuilt: ...`) reach the system log, its other warnings do not, whatever words they contain.
 - **NVK** (the Vulkan layer under the plugin) prints its lines, which start with `nvrm:`, on the standard error of the
   application: start the application from Terminal to see them.
 
