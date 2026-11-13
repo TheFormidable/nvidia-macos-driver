@@ -1147,6 +1147,8 @@ cmd_deps() {
   fi
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
+    say "Homebrew also installs what they need, and links the commands of each into $BREW_PREFIX/bin: a shell that has"
+    say "that folder before /usr/bin then finds them first (python3 too, when one of them needs Homebrew's newest Python)."
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs; the older version stays, as Homebrew's"
     say "own clean-up after an install is turned off for these installs (HOMEBREW_NO_INSTALL_CLEANUP=1)."
     if [ "$(mac_arch)" = x86_64 ]; then
