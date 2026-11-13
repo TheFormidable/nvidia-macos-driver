@@ -180,7 +180,9 @@ restart. Take every test setting out again when its test is done.
    afterwards `sysctl debug | grep nvaccel_pageoff` shows `nvaccel_pageoff_unlocked_wait` 1,
    `nvaccel_pageoff_unlocked_waits` higher than before the recording, `nvaccel_pageoff_unlocked_standdown` 0 and
    `nvaccel_pageoff_unlocked_wait_max_us` not above 2000000 (2 s) by more than the moment it takes to get the lock
-   back. Fail: the desktop freezes and stays frozen. Over `ssh`
+   back. `nvaccel_pageoff_unlocked_already`, `_recopied` and `_changed` above 0 are not a failure: each counts a
+   page-off that found, after the wait, that the resource had moved on (another copy, another surface or memory, or
+   another validity bit) and acted on what it found. Fail: the desktop freezes and stays frozen. Over `ssh`
    run `sudo spindump` while it is frozen (it samples every process, WindowServer and kernel_task included, and says
    where it wrote its file), then restart, boot with `nvaccel_pageoff_locked=1` and repeat the test. A freeze that
    this boot argument cures is the case described here: send the spindump, `sysctl debug | grep nvaccel_pageoff`
@@ -194,7 +196,8 @@ restart. Take every test setting out again when its test is done.
    away.
 3. **A process that dies.** Step 6 of the same list: `kill -9` a Metal application mid-frame, then stop one
    with `kill -STOP` and continue it with `kill -CONT`. Pass: no stall of the desktop; at most one hitch of up to
-   100 ms for the stopped one. Fail: the desktop stalls, or `debug.nvrm_fence_state` becomes 2.
+   100 ms for the stopped one, which adds one to `debug.nvrm_fence_expired_cpu` and one to
+   `debug.nvrm_fence_strikes` (expected here, unlike in step 2). Fail: the desktop stalls, or `debug.nvrm_fence_state` becomes 2.
 
 ### Two-plane surfaces
 

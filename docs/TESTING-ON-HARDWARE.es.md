@@ -186,7 +186,10 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    escritorio se congela para siempre. Bien: no se congela, y después `sysctl debug | grep nvaccel_pageoff` muestra
    `nvaccel_pageoff_unlocked_wait` 1, `nvaccel_pageoff_unlocked_waits` mayor que antes de la grabación,
    `nvaccel_pageoff_unlocked_standdown` 0 y `nvaccel_pageoff_unlocked_wait_max_us` no por encima de 2000000 (2 s)
-   más allá del momento que cuesta recuperar el cerrojo. Mal: el escritorio se congela y sigue congelado. Por `ssh`
+   más allá del momento que cuesta recuperar el cerrojo. `nvaccel_pageoff_unlocked_already`, `_recopied` y
+   `_changed` por encima de 0 no son un fallo: cada uno cuenta un page-off que, tras la espera, vio que el recurso
+   había cambiado (otra copia, otra superficie u otra memoria, u otro bit de validez) y actuó según lo que vio. Mal: el
+   escritorio se congela y sigue congelado. Por `ssh`
    ejecuta `sudo spindump` mientras está congelado (muestrea todos los procesos, WindowServer y kernel_task incluidos,
    y dice dónde escribió su archivo); después reinicia, arranca con `nvaccel_pageoff_locked=1` y repite la prueba. Un
    congelamiento que este argumento cura es el caso descrito aquí: envía el spindump,
@@ -201,7 +204,8 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    esos contadores por encima de 0; arranca una vez con `nvrmfence=0` y di si desaparece.
 3. **Un proceso que muere.** Punto 6 de la misma lista: `kill -9` a una aplicación Metal en mitad de un fotograma,
    después detén otra con `kill -STOP` y reanúdala con `kill -CONT`. Bien: el escritorio no se atasca; como mucho un
-   tirón de hasta 100 ms por la detenida. Mal: el escritorio se atasca, o `debug.nvrm_fence_state` pasa a 2.
+   tirón de hasta 100 ms por la detenida, que suma uno a `debug.nvrm_fence_expired_cpu` y uno a
+   `debug.nvrm_fence_strikes` (aquí es lo esperado, a diferencia del punto 2). Mal: el escritorio se atasca, o `debug.nvrm_fence_state` pasa a 2.
 
 ### Superficies de dos planos
 
