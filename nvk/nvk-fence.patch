@@ -7,6 +7,8 @@ an event sleep in the kernel on that channel's semaphore, and provides the call 
 The numbers and structs are in nvkmd/nvrm/nvrm_fence_abi.h, a byte-for-byte copy of kexts/NVRM/nvrm_fence_abi.h
 (tools/test_shared_headers.py compares them; tools/test_fence_wiring_nvk.py holds the wiring).
 A kext without the fence, or booted with nvrmfence=0, leaves every process on the 2.9 surface marks.
+The NVRMFenceWait comment now also says that, to a user-space caller, ownerPid and state come back 0 when the
+writer is another process (the kernel no longer tells one process which process writes a surface it names).
 
 diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
 index 537e791..f87935f 100644
@@ -657,7 +659,7 @@ index b466cb7..61b65ab 100644
  int
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h
 new file mode 100644
-index 0000000..6c78324
+index 0000000..9187f98
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_fence_abi.h
 @@ -0,0 +1,145 @@
@@ -770,8 +772,8 @@ index 0000000..6c78324
 +    unsigned pid;                    /* in  WAIT: 0 = any writer, else only that process's holds */
 +    unsigned timeoutMs;              /* in */
 +    unsigned result;                 /* out: NVRM_FENCE_R_* */
-+    unsigned ownerPid;               /* out: pid of the first writer waited for, 0 = none */
-+    unsigned state;                  /* out: NVRM_FENCE_E_* of that writer's hold when last seen */
++    unsigned ownerPid;               /* out: pid of the first writer waited for, 0 = none; to a user-space caller also 0 when the writer is another process */
++    unsigned state;                  /* out: NVRM_FENCE_E_* of that writer's hold when last seen; 0 to a user-space caller whose ownerPid came back 0 */
 +    unsigned blockers;               /* out: most holds this wait had in front of it at once */
 +};
 +struct NVRMFenceReq {                /* 96 bytes; the same struct in and out */

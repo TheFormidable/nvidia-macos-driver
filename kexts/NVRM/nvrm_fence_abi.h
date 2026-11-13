@@ -107,8 +107,8 @@ struct NVRMFenceWait {               /* 48 bytes */
     unsigned pid;                    /* in  WAIT: 0 = any writer, else only that process's holds */
     unsigned timeoutMs;              /* in */
     unsigned result;                 /* out: NVRM_FENCE_R_* */
-    unsigned ownerPid;               /* out: pid of the first writer waited for, 0 = none */
-    unsigned state;                  /* out: NVRM_FENCE_E_* of that writer's hold when last seen */
+    unsigned ownerPid;               /* out: pid of the first writer waited for, 0 = none; to a user-space caller also 0 when the writer is another process */
+    unsigned state;                  /* out: NVRM_FENCE_E_* of that writer's hold when last seen; 0 to a user-space caller whose ownerPid came back 0 */
     unsigned blockers;               /* out: most holds this wait had in front of it at once */
 };
 struct NVRMFenceReq {                /* 96 bytes; the same struct in and out */
