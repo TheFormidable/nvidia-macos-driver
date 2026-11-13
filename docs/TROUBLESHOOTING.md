@@ -9,17 +9,22 @@ stick made by an old 1401 keeps the old problem until you make it again.
 
 The changes of release 3.0 and the way back from each are in [CHANGELOG.md](../CHANGELOG.md); what to check on a
 card that runs it for the first time is in [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). Problems building the
-driver from source are in [BUILDING.md](BUILDING.md), "When a build fails"; two more are here:
+driver from source are in [BUILDING.md](BUILDING.md), "When a build fails"; three more are here:
 
 - `./build.sh deps` prints rustup's warning "default toolchain implicitly overridden" twice. That is expected: build.sh
   installs Rust with no default toolchain and names the pinned version itself. Nothing to do.
 - The translator's step stops with `STOP: translator has ... compiler warnings, more than its ceiling of 0`, after a
-  warning that stripping debug info with `rust-objcopy` failed. build.sh tells cargo not to strip, but a cargo configuration
-  outside the checkout can bring that strip back for the translator's build scripts and procedural macros: a
-  `[profile.release.package."*"]`, `[profile.release.package.<name>]` or `[profile.release.build-override]` table with
+  warning that stripping debug info with `rust-objcopy` failed. build.sh tells cargo not to strip, but a cargo
+  configuration outside the checkout can bring that strip back for the translator's build scripts and procedural macros:
+  a `[profile.release.package."*"]`, `[profile.release.package.<name>]` or `[profile.release.build-override]` table with
   its own `strip`, in a `.cargo/config.toml` of any folder above the checkout or the working directory (your own
-  `~/.cargo/config.toml` when either is inside your home folder). `./build.sh doctor` names every such file it finds;
-  take the `strip` out of that table. A `strip` in `[profile.release]` itself does not do this.
+  `~/.cargo/config.toml` when either is inside your home folder). `./build.sh doctor` names every cargo configuration
+  file it finds in those folders; take the `strip` out of that table. A `strip` in `[profile.release]` itself does not
+  do this.
+- After `./build.sh test` on a Mac, `~/Library/Logs/DiagnosticReports` holds about two dozen new crash reports of small
+  programs with names such as ca, cb, cc, ck, ta, tb, td, oldv, resset and t. That is expected: the tests' controls
+  make these programs fail on purpose (an abort or a failed assert that the control expects), and macOS records each
+  one. Every run of the host tests on a Mac leaves them; they are harmless and can be deleted.
 
 ---
 
