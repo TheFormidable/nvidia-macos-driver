@@ -327,7 +327,7 @@ has proven itself, renewed with a reason otherwise.
 - On an Intel Mac `./build.sh deps` no longer needs Homebrew: it builds the missing build tools (ninja, CMake, Python
   3.14 with its OpenSSL, zstd and xz, pkgconf, SPIRV-Tools, glslang, LLVM 22 with clang) from pinned sources with
   `build/toolchain.sh` into the working directory, for macOS 15.0 and later, and checks that each links only macOS's
-  libraries and its own. About 70 minutes and 10 GB of free space on one 12-thread Intel Mac. `NM_TOOLS_FROM`
+  libraries and its own. Up to about 70 minutes and 10 GB of free space on one 12-thread Intel Mac. `NM_TOOLS_FROM`
   (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon. On an Intel
   Mac build.sh does not use Homebrew, even when it is installed: with tools from source only the toolchain's tools
   and your own settings are used, and no `brew` is called. With `homebrew` a tool you already have is used as before. Homebrew's SPIRV-LLVM-Translator is now taken only with Homebrew's own `llvm`; with

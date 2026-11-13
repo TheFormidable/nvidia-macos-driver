@@ -1682,6 +1682,11 @@ def arm_source():
     check("source way on an Intel Mac without Homebrew: deps builds the ten tools in order with the interface's settings and "
           "stamps, calls no brew, offers no Homebrew, writes nothing outside the working directory, ends with everything present",
           not p, (p, out[-1500:]))
+    # the per-tool times were measured partly at reduced parallelism: their sum is an upper figure, and deps says so
+    def estimate_problems(text):
+        return [] if re.search(r"^  On one 12-thread Intel Mac this takes up to about \d+ minutes", text, re.M) else ["no upper figure"]
+    check("deps states its time for the tools as an upper figure (up to about N minutes)", not estimate_problems(out), out[:1500])
+    negative("a time stated as the time it takes", estimate_problems(out.replace("this takes up to about", "this took about")))
     sb.clear()
     rc, out = sb.run("deps", "-y")
     again = tc_builds(sb) + [(l, {}) for l in mutating(sb.jlines()) if l.startswith("git fetch")]
