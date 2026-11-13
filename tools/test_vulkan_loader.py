@@ -110,11 +110,11 @@ class Scene:
 
     def temp_names(self):
         """the names of the temporary folders the script's cmake was given as the loader's install prefix"""
-        return sorted({m.group(1) for c in self.calls for m in [re.search(r"-DCMAKE_INSTALL_PREFIX=\S*/([^/\s]+)/loader(\s|$)", c)] if m})
+        return sorted({m.group(1).rsplit("/", 1)[-1] for c in self.calls for m in [re.search(r"-DCMAKE_INSTALL_PREFIX=(.*)/loader$", c)] if m})
 
 
 def scene(script_text=None, by_link=False):
-    tmp = Path(tempfile.mkdtemp(prefix="vulkan-loader-"))
+    tmp = Path(tempfile.mkdtemp(prefix="vulkan loader-"))   # a blank in every path the script is given
     made.append(tmp)   # before the scene is made, so that a scene that cannot be made is removed too
     s = Scene(tmp, script_text)
     if by_link:   # the temporary folder is reached through a link, and CMake names it by its real path
