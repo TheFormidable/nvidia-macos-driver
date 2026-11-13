@@ -351,8 +351,8 @@ fb_control("an installing build is caught", '"$NMCI_WORK" --no-install build', '
 fb_control("the package without its base is caught", "--base-package \"$BASEPKG\" package", "package", "./build.sh package in its place")
 fb_control("the tests dropped are caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test\n", "run: true\n", "./build.sh test in its place")
 fb_control("the package step without the pinned SHA-256 is caught", "          NM_BASE_PACKAGE_SHA256: ${{ steps.pins.outputs.basepkg_sha256 }}\n", "", "NM_BASE_PACKAGE_SHA256")
-fb_control("a cache saved by the action's post step is caught", "uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # WIRING",
-           "uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # WIRING", "explicit save step")
+fb_control("a cache saved by the action's post step is caught", "uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # build.sh's toolchain",
+           "uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0\n        with:\n          # build.sh's toolchain", "explicit save step")
 fb_control("the toolchain saved only at the end is caught", "      - name: Save the toolchain (also after a failed or cancelled deps)\n",
            "      - name: Later\n        run: ./build.sh --workdir \"$NMCI_WORK\" doctor\n      - name: Save the toolchain (also after a failed or cancelled deps)\n",
            "right after deps")

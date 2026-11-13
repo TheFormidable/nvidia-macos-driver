@@ -107,7 +107,7 @@ jobs:
         id: tc
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
         with:
-          # WIRING: the toolchain's place in the working directory, from the plan for deps' source way (not yet in build.sh)
+          # build.sh's toolchain (build/toolchain.sh's prefix) with the stamps of its finished tools in .nm-toolchain
           path: |
             ${{ runner.temp }}/nmw/.nullmoth-build-workdir
             ${{ runner.temp }}/nmw/tools/toolchain
@@ -130,8 +130,8 @@ jobs:
         id: src
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
         with:
-          # WIRING: the toolchain's exported source trees (src/toolchain) are left out: they are made again from the
-          # repositories in a minute, and are 3 GB
+          # the repositories in src/git (the toolchain's tc-<tool>.git among them); the toolchain's source trees exported
+          # from them (src/toolchain) are left out: they are made again from the repositories in a minute, and are 3 GB
           path: |
             ${{ runner.temp }}/nmw/.nullmoth-build-workdir
             ${{ runner.temp }}/nmw/src
@@ -169,7 +169,7 @@ jobs:
         if: ${{ always() && steps.tcid.outputs.id != '' && format('{0}-{1}', steps.tc.outputs.cache-primary-key, steps.tcid.outputs.id) != steps.tc.outputs.cache-matched-key }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
         with:
-          # WIRING: the toolchain's place, as in "Restore the toolchain"
+          # the toolchain's place, as in "Restore the toolchain"
           path: |
             ${{ runner.temp }}/nmw/.nullmoth-build-workdir
             ${{ runner.temp }}/nmw/tools/toolchain
