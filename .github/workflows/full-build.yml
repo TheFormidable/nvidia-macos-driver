@@ -226,5 +226,7 @@ jobs:
           df -h "$RUNNER_TEMP" /
           [ ! -d "$NMCI_WORK" ] || du -sh "$NMCI_WORK" "$NMCI_WORK"/* "$NMCI_WORK"/tools/* 2>/dev/null || true
       - name: The logs of what failed
-        if: ${{ failure() }}
+        # also after the job's timeout, which GitHub counts as cancelled, not failed (a first run that runs out of time
+        # while it builds LLVM shows where it was)
+        if: ${{ failure() || cancelled() }}
         run: /bin/bash build/ci_full_build.sh logs "$NMCI_WORK"

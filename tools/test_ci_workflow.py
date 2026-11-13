@@ -285,8 +285,8 @@ def full_problems(fb, ci, root):
         out.append("the tools are not saved by explicit save steps right after deps (before doctor)")
     if not re.search(r"if: \$\{\{ always\(\) && steps\.tcid\.outputs\.id != ''", code):
         out.append("the toolchain is not saved after a failed or cancelled deps")
-    if not re.search(r"if: \$\{\{ failure\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh logs ", code):
-        out.append("no last step that prints the logs when the build failed")
+    if not re.search(r"if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh logs ", code):
+        out.append("no last step that prints the logs when the build failed or ran out of time")
     if not re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh prove ", code):
         out.append("the checks of what the build did and did not do do not run (also after a failed step)")
     if len(re.findall(r"\bdf -h\b", code)) != 3:
@@ -358,7 +358,8 @@ fb_control("the toolchain saved only at the end is caught", "      - name: Save 
            "right after deps")
 fb_control("the toolchain saved only after a good deps is caught", "if: ${{ always() && steps.tcid.outputs.id != ''", "if: ${{ success() && steps.tcid.outputs.id != ''",
            "failed or cancelled deps")
-fb_control("the logs step dropped is caught", "        if: ${{ failure() }}\n", "", "prints the logs")
+fb_control("the logs step dropped is caught", "        if: ${{ failure() || cancelled() }}\n", "", "prints the logs")
+fb_control("logs that are not shown after the job's timeout are caught", "if: ${{ failure() || cancelled() }}", "if: ${{ failure() }}", "ran out of time")
 fb_control("the checks run only after a good build is caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh prove",
            "        run: /bin/bash build/ci_full_build.sh prove", "also after a failed step")
 fb_control("a df dropped is caught", "        run: df -h \"$RUNNER_TEMP\" /\n", "        run: true\n", "df -h three times")
