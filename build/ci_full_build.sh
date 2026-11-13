@@ -25,6 +25,13 @@
 #   ci_full_build.sh logs <workdir>
 #       for a failed run: the end of the newest logs, the newest failure report, and every line of every log that
 #       says "error:" or "STOP:".
+#   ci_full_build.sh reads <workdir>
+#       what only a Mac can show, printed as labelled blocks for a reader of the log (no check: it always exits 0,
+#       and a read that cannot be made says "could not be read: <why>"): how the toolchain's tools were built, what
+#       Apple's /usr/bin programs do with an empty developer folder, what the package's tarball carries (owners,
+#       AppleDouble entries, extended attributes, the account name, signatures), and how often the build machine's
+#       home folder and working directory appear in the compiled files. It writes only a scratch folder under the
+#       working directory, which it removes.
 #
 # Written for the /bin/bash 3.2 of macOS and its BSD tools. Mach-O files are read with otool (Xcode's; elsewhere any
 # otool that prints the same, such as llvm-otool, put on PATH under that name). It writes only the files and folders
@@ -568,6 +575,126 @@ cmd_logs() {
   return 0
 }
 
+# ---------------------------------------------------------------------------------------------------------- reads
+rhead() { say ""; say "---- $*"; }
+cannot() { say "could not be read: $*"; }
+# rrun <label> <program> <arguments...>: the program's output, or why it could not run
+rrun() {
+  local l=$1; shift
+  rhead "$l"
+  if [ ! -x "$1" ] && ! command -v "$1" > /dev/null 2>&1; then cannot "$1 is not there"; return 0; fi
+  "$@" 2>&1 | sed -n 1,60p
+  say "(exit ${PIPESTATUS[0]})"
+}
+cmd_reads() {
+  local w=${1:-} pr r pkg f g u n home wr scratch v
+  [ -n "$w" ] || usage
+  pr=$(tc_prefix "$w"); r=$w/package/pkgroot
+  wr=$(cd "$w" 2>/dev/null && pwd -P) || wr=$w
+  home=${HOME:-}
+  say "== reads of the build in $w (a record, not a check)"
+  # a. the toolchain, as built here
+  rrun "otool -L <toolchain>/bin/cmake (expected: /usr/lib/libcurl.4.dylib, nothing under /usr/local or /opt)" otool -L "$pr/bin/cmake"
+  rrun "the toolchain's Python: ssl.OPENSSL_VERSION" "$pr/python/bin/python3.14" -c 'import ssl, sys; print(ssl.OPENSSL_VERSION); print(sys.version)'
+  rrun "llvm-config --targets-built" "$pr/llvm/bin/llvm-config" --targets-built
+  rhead "glslangValidator --version (first 3 lines)"
+  if [ -x "$pr/bin/glslangValidator" ]; then "$pr/bin/glslangValidator" --version 2>&1 | sed -n 1,3p; else cannot "$pr/bin/glslangValidator is not there"; fi
+  rrun "the toolchain's pkg-config --variable pc_path pkg-config" "$pr/bin/pkg-config" --variable pc_path pkg-config
+  rhead "the toolchain's pkg-config --cflags --libs SPIRV-Tools (empty environment)"
+  if [ -x "$pr/bin/pkg-config" ]; then env -i PATH=/usr/bin:/bin "$pr/bin/pkg-config" --cflags --libs SPIRV-Tools 2>&1; say "(exit $?)"
+  else cannot "$pr/bin/pkg-config is not there"; fi
+  rhead "ls -l <workdir>/tools/bin"
+  if [ -d "$w/tools/bin" ]; then ls -l "$w/tools/bin" 2>&1 | sed "s|$wr|<workdir>|g; s|$w|<workdir>|g"; else cannot "$w/tools/bin is not there"; fi
+  f=$(find "$w/out" -type f -name mesa_clc 2>/dev/null | LC_ALL=C sort | sed -n 1p)
+  if [ -n "$f" ]; then rrun "otool -L ${f#"$w"/}" otool -L "$f"; else rhead "otool -L mesa_clc"; cannot "no mesa_clc under $w/out"; fi
+  f=$(find "$w/out" -type f -name libvulkan_nouveau.dylib 2>/dev/null | LC_ALL=C sort | sed -n 1p)
+  if [ -n "$f" ]; then rrun "otool -L ${f#"$w"/}" otool -L "$f"; else rhead "otool -L libvulkan_nouveau.dylib"; cannot "no libvulkan_nouveau.dylib under $w/out"; fi
+  rhead "the Python environment's pyvenv.cfg: first line and home"
+  if [ -f "$w/tools/venv/pyvenv.cfg" ]; then sed -n 1p "$w/tools/venv/pyvenv.cfg"; grep '^home' "$w/tools/venv/pyvenv.cfg" || say "(no home line)"
+  else cannot "$w/tools/venv/pyvenv.cfg is not there"; fi
+  rhead "otool -l <toolchain>/bin/ninja: LC_BUILD_VERSION"
+  if [ -f "$pr/bin/ninja" ]; then otool -l "$pr/bin/ninja" 2>&1 | grep -A4 LC_BUILD_VERSION || say "(no LC_BUILD_VERSION)"; else cannot "$pr/bin/ninja is not there"; fi
+  # b. Apple's stand-in programs in /usr/bin with a developer folder that holds nothing
+  rhead "env -i DEVELOPER_DIR=<an empty folder> /usr/bin/make --version"
+  scratch=$w/reads-scratch; rm -rf "$scratch"
+  if [ ! -d "$w" ]; then cannot "$w is not there"
+  elif ! mkdir -p "$scratch/empty-developer-dir"; then cannot "cannot make $scratch"
+  else env -i DEVELOPER_DIR="$scratch/empty-developer-dir" /usr/bin/make --version < /dev/null 2>&1 | sed -n 1,10p; say "exit ${PIPESTATUS[0]}"; fi
+  rm -rf "$scratch"
+  rrun "xcode-select -p" xcode-select -p
+  # c. the tarball ./build.sh package wrote
+  pkg=$(ls -t "$w"/package/*.tar.gz 2>/dev/null | sed -n 1p)
+  rrun "tar --version" tar --version
+  rhead "the tarball: size and SHA-256"
+  if [ -z "$pkg" ]; then
+    cannot "no tarball in $w/package"
+    for v in "owner/group of every header (tar tvzf)" "AppleDouble (._) entries" "LIBARCHIVE.xattr / SCHILY.xattr records" \
+             "how often the account name occurs in the archive"; do rhead "$v"; cannot "no tarball in $w/package"; done
+  else
+    say "$(basename "$pkg"): $(size_of "$pkg") bytes, sha256 $(sha256_file "$pkg")"
+    rhead "owner/group of every header (tar tvzf)"
+    # bsdtar prints "mode links owner group size ...", GNU tar "mode owner/group size ..."
+    tar tvzf "$pkg" 2>&1 | awk '{ if ($2 ~ /\//) print $2; else print $3 "/" $4 }' | sort | uniq -c
+    rhead "AppleDouble (._) entries"
+    tar tzf "$pkg" 2>/dev/null | grep -c -E '(^|/)\._' || true
+    rhead "LIBARCHIVE.xattr / SCHILY.xattr records"
+    gzip -dc "$pkg" 2>/dev/null | strings -a | grep -c -E 'LIBARCHIVE\.xattr|SCHILY\.xattr' || true
+    u=$(id -un 2>/dev/null || true)
+    rhead "how often the account name ($u) occurs in the archive"
+    if [ -n "$u" ]; then gzip -dc "$pkg" 2>/dev/null | strings -a | grep -c -F "$u" || true; else cannot "id -un printed nothing"; fi
+  fi
+  if [ ! -d "$r" ]; then
+    for v in "text files of pkgroot that hold the home folder" VERSION NULLMOTH-LOCAL-BUILD.txt "links in pkgroot" "set-uid and set-gid files in pkgroot" \
+             "codesign -dv of each kext and of the four user-space products" "xattr -lr pkgroot: attributes and how many files carry each"; do
+      rhead "$v"; cannot "no staged package ($r)"
+    done
+  else
+    rhead "text files of pkgroot that hold the home folder"
+    if [ -n "$home" ]; then grep -rlI -F -e "$home" "$r" 2>/dev/null | sed "s|^$r/||" | sed -n 1,20p; say "(end of list)"; else cannot "HOME is not set"; fi
+    rhead "VERSION"; cat "$r/VERSION" 2>&1
+    rhead "NULLMOTH-LOCAL-BUILD.txt"; sed "s|$home|~|g" "$r/NULLMOTH-LOCAL-BUILD.txt" 2>&1
+    rhead "links in pkgroot"; find "$r" -type l -exec ls -l {} \; 2>&1 | sed "s|$r/||g"; say "(end of list)"
+    rhead "set-uid and set-gid files in pkgroot"; find "$r" \( -perm -4000 -o -perm -2000 \) -print 2>&1 | sed "s|$r/||"; say "(end of list)"
+    rhead "codesign -dv of each kext and of the four user-space products"
+    if ! command -v codesign > /dev/null 2>&1; then cannot "codesign is not there"
+    else
+      for f in $(cd "$r" && find Library -name '*.kext' -type d -prune 2>/dev/null | LC_ALL=C sort) Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib \
+               Library/GPUBundles/nvmtl/libnvmtl_translate.dylib Library/GPUBundles/NVMTLDriver.bundle Library/NullMoth/boost/nvmtl-boost; do
+        say "== $f"
+        if [ -e "$r/$f" ]; then codesign -dv "$r/$f" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier)|not signed' || say "(none of those lines)"
+        else cannot "$f is not in the package"; fi
+      done
+    fi
+    rhead "xattr -lr pkgroot: attributes and how many files carry each"
+    if command -v xattr > /dev/null 2>&1; then xattr -lr "$r" 2>/dev/null | cut -d: -f2 | sort | uniq -c; say "(end of list)"; else cannot "xattr is not there"; fi
+  fi
+  # d. how much of the build machine's paths the compiled files carry (a measurement)
+  rhead "the home folder and the working directory in the compiled files (strings -a), per Mach-O file with a count above 0"
+  if [ -z "$home" ]; then cannot "HOME is not set"
+  elif [ ! -d "$w/out" ] && [ ! -d "$r" ]; then cannot "neither $w/out nor a staged package is there"
+  elif ! command -v strings > /dev/null 2>&1; then cannot "strings is not there"
+  else
+    scratch=$w/reads-scratch; rm -rf "$scratch"; mkdir -p "$scratch" 2>/dev/null || { cannot "cannot make $scratch"; return 0; }
+    { machos "$w/out"; [ ! -d "$r" ] || machos "$r"; } > "$scratch/machos.txt"
+    : > "$scratch/counts.txt"
+    while IFS= read -r f; do
+      n=$(strings -a "$f" 2>/dev/null | grep -c -F "$home" || true)
+      g=$(strings -a "$f" 2>/dev/null | grep -c -F -e "$w" -e "$wr" || true)
+      [ "${n:-0}" = 0 ] && [ "${g:-0}" = 0 ] || printf '%s %s %s\n' "${n:-0}" "${g:-0}" "$f" >> "$scratch/counts.txt"
+    done < "$scratch/machos.txt"
+    say "$(grep -c . "$scratch/machos.txt" || true) Mach-O files read, $(grep -c . "$scratch/counts.txt" || true) with a count above 0 (home folder, working directory, file):"
+    sort -rn "$scratch/counts.txt" | sed "s|$wr|<workdir>|; s|$w|<workdir>|; s|$home|~|" | sed -n 1,200p
+    sort -rn "$scratch/counts.txt" | sed -n 1,3p | while read -r n g f; do
+      say "== ${f#"$w"/}: five lines"
+      strings -a "$f" 2>/dev/null | grep -F "$home" | sed -n 1,5p | sed "s|$home|~|g"
+    done
+    rm -rf "$scratch"
+  fi
+  say ""
+  say "== end of the reads"
+  return 0
+}
+
 case "${1:-}" in
   basepkg) shift; cmd_basepkg "$@" ;;
   brew-state) shift; cmd_brew_state "$@" ;;
@@ -578,5 +705,6 @@ case "${1:-}" in
   toolchain-id) shift; cmd_toolchain_id "$@" ;;
   prove) shift; cmd_prove "$@" ;;
   logs) shift; cmd_logs "$@" ;;
+  reads) shift; cmd_reads "$@" ;;
   *) usage ;;
 esac

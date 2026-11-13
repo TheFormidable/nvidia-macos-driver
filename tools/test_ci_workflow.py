@@ -297,6 +297,9 @@ def full_problems(fb, ci, root):
         out.append("no last step that prints the logs when the build failed or ran out of time")
     if not re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh prove ", code):
         out.append("the checks of what the build did and did not do do not run (also after a failed step)")
+    m = re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: /bin/bash build/ci_full_build\.sh reads \"\$NMCI_WORK\" \|\| echo ", code)
+    if not m or code.find("ci_full_build.sh prove ") > m.start() or code.find("ci_full_build.sh prove ") < 0:
+        out.append("the reads only a Mac can make are not printed after the checks, also after a failed step, without failing the job")
     if len(re.findall(r"\bdf -h\b", code)) != 3:
         out.append("the free disk is not printed at the start, after deps and at the end (df -h three times)")
     for s in sorted(set(re.findall(r"/bin/bash ((?:build|tools)/[\w./-]+\.sh)", code))):
@@ -374,6 +377,9 @@ fb_control("the logs step dropped is caught", "        if: ${{ failure() || canc
 fb_control("logs that are not shown after the job's timeout are caught", "if: ${{ failure() || cancelled() }}", "if: ${{ failure() }}", "ran out of time")
 fb_control("the checks run only after a good build is caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh prove",
            "        run: /bin/bash build/ci_full_build.sh prove", "also after a failed step")
+fb_control("reads that can fail the job are caught", 'reads "$NMCI_WORK" || echo "the reads ended early (exit $?)"', 'reads "$NMCI_WORK"', "without failing the job")
+fb_control("reads only after a good build are caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh reads",
+           "        run: /bin/bash build/ci_full_build.sh reads", "also after a failed step")
 fb_control("a df dropped is caught", "        run: df -h \"$RUNNER_TEMP\" /\n", "        run: true\n", "df -h three times")
 arm("control (full build): a name in a comment is not what it runs", full_problems(fb + "\n# /bin/bash build/no_such.sh ${{ secrets.X }} upload\n", y, ROOT) == [])
 
