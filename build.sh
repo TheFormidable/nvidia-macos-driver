@@ -833,7 +833,7 @@ doctor() {   # prints; sets D_MISSING
     v=$("$RUST_BIN/rustc" --version | version_of)
     [ "$v" = "$NM_PIN_RUST_VERSION" ] && d_ok "Rust $v ($RUST_BIN)" || d_old "Rust $v at $RUST_BIN, pinned $NM_PIN_RUST_VERSION"
     [ -d "$("$RUST_BIN/rustc" --print target-libdir --target x86_64-apple-darwin 2>/dev/null)" ] && d_ok "Rust target x86_64-apple-darwin" || d_missing "Rust target x86_64-apple-darwin"
-  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR (installed by rustup into the working directory)"; fi
+  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR (installed by rustup into the working directory; a Rust elsewhere, such as one in ~/.cargo, is neither used nor touched)"; fi
   for x in bindgen:"$NM_PIN_BINDGEN_VERSION" cbindgen:"$NM_PIN_CBINDGEN_VERSION"; do
     if [ -x "$CARGO_DIR/bin/${x%%:*}" ]; then
       v=$("$CARGO_DIR/bin/${x%%:*}" --version 2>/dev/null | version_of)
