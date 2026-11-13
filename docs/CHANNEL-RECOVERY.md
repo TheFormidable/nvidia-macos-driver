@@ -14,7 +14,8 @@ in WindowServer the session ended. The GPU itself was fine; only the faulting ch
 
 A GPU fault on one channel no longer ends the application's Metal device. When a wait finds that its channel faulted
 with an exception that ends only that channel (Xid 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109), or that the channel
-made no progress for `NVRM_FLUSH_TIMEOUT_MS` (default 5 s), NVK builds a new channel beside the old one, frees the
+made no progress for `NVRM_FLUSH_TIMEOUT_MS` (when it is not set, the Metal plugin sets it to 5 s in WindowServer
+and 60 s in every other process), NVK builds a new channel beside the old one, frees the
 old one, and continues on the new one with the same semaphore and command ring: the channel-wide state (objects,
 descriptor heaps, shader local memory) is sent again, the submissions that had not started are replayed, and the one
 that was running is dropped. A dropped submission is reported complete, and the plugin can ask whether a fence's
@@ -103,13 +104,15 @@ build ONLY as lines of `/Library/GPUBundles/nvmtl/nvrm610.conf` (root-owned); th
 development build or with `NVMTL_PROCESS_ENV=1`.
 
 - `NVK_CHANNEL_RECOVER=0` turns all of it off: no doorbell ring, no rebuild, no extra lock, the 2.9 code runs. Any
-  other value, or none, leaves it on.
+  other value, or none, leaves it on. It is also off with `NVRM_ASYNC=0` (NVK's older synchronous submission).
 - `NVK_FAULT_INJECT=<mode>:<n>[:<process name>]` is a test hook, once per process, on the n-th submission of the first
   graphics queue. Modes: `stall` (that submission is not announced to the GPU: the doorbell ring has to find it),
   `fake` (the channel is reported faulted while it is healthy: the whole rebuild runs against the real driver),
   `reset` (RM resets the channel: a real channel error), `mmu` (one extra command-buffer entry at an unmapped address:
-  a real MMU fault). It never acts in WindowServer or loginwindow unless that name is given as the third field, e.g.
-  `NVK_FAULT_INJECT=fake:2000:WindowServer`. Remove the line afterwards.
+  a real MMU fault). As a line of `nvrm610.conf` it acts in every Metal process that starts after it, once in each;
+  with a third field it acts only in the process of that name (the file name of the program, for an app the file in
+  its `Contents/MacOS` folder). It never acts in WindowServer or loginwindow unless that name is given as the third
+  field, e.g. `NVK_FAULT_INJECT=fake:2000:WindowServer`. Remove the line afterwards.
 - `NVMTL_DROP_REPORT=0`: see the plugin section above.
 
 Statistics per process: `nvmtl_nvk_recover_stats_v1` (re-rings, rebuilds by level, flushes dropped and replayed,
@@ -142,13 +145,16 @@ rebuild gives up (`debug.nvrm_chan_last_why` 6) and the application loses its de
 
 1. After boot and after an hour of desktop, a game and a video: `debug.nvrm_chan_*` all 0. This is the check that the
    new code changes nothing on a healthy GPU.
-2. `NVK_FAULT_INJECT=stall:300` for a throwaway Metal app (in `nvrm610.conf`, and restart the app): a hitch of half a
-   budget, then normal running; `debug.nvrm_chan_kicks` 1, `debug.nvrm_chan_injected` 1, nothing dropped.
-3. `NVK_FAULT_INJECT=fake:300`: one wrong or missing frame and the app goes on; `debug.nvrm_chan_recovered` 1,
-   `debug.nvrm_chan_dropped` 1, `debug.nvrm_chan_gave_up` 0. If `gave_up` is 1, `debug.nvrm_chan_last_why` says which
-   RM call refused (5 build, 6 free).
-4. `NVK_FAULT_INJECT=reset:300`, then `mmu:300`: `debug.nvrm_xid_count` rises (43, then 31 or 32),
-   `debug.nvrm_chan_last_xid` matches, and the outcome is that of step 3. Another app and the desktop must not notice.
+2. `NVK_FAULT_INJECT=stall:300:<the app's process name>` for a throwaway Metal app (in `nvrm610.conf`, and restart
+   the app; without the third field every Metal process started afterwards gets the stall too): a hitch of half the
+   budget (30 s in an application), then normal running; `debug.nvrm_chan_kicks` 1, `debug.nvrm_chan_injected` 1,
+   nothing dropped.
+3. `NVK_FAULT_INJECT=fake:300:<the app's process name>`: one wrong or missing frame and the app goes on;
+   `debug.nvrm_chan_recovered` 1, `debug.nvrm_chan_dropped` 1, `debug.nvrm_chan_gave_up` 0. If `gave_up` is 1,
+   `debug.nvrm_chan_last_why` says which RM call refused (5 build, 6 free).
+4. `NVK_FAULT_INJECT=reset:300:<the app's process name>`, then `mmu:300:<the app's process name>`:
+   `debug.nvrm_xid_count` rises (43, then 31 or 32), `debug.nvrm_chan_last_xid` matches, and the outcome is that of
+   step 3. Another app and the desktop must not notice.
 5. Only after that, WindowServer: `NVK_FAULT_INJECT=fake:2000:WindowServer`, log out and in; one glitch and the session
    stays up. If the desktop freezes afterwards, repeat with `NVMTL_DROP_REPORT=0` and report which behaves. Remove both
    lines afterwards.
