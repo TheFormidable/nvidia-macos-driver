@@ -395,18 +395,33 @@ def main():
         # deps-plan: the lines build.sh prints before it calls Homebrew
         arm("build.sh still prints the lines deps-plan looks for before a Homebrew install",
             "Homebrew formulas to install (only these;" in bsh and '$BREW install $f"; done' in bsh, "")
+        # the lines of build.sh's own dry run on an imitated Intel Mac whose Homebrew has every formula (tools/test_build_sh.py's
+        # nobrew_sandbox), shortened: the sentences that name Homebrew without calling it must not be taken for a call
+        src_line = ("missing build tools are built by ./build.sh deps from pinned sources into /w/tools/toolchain, without Homebrew "
+                    "(NM_TOOLS_FROM=auto on an Intel Mac: Homebrew has no ready-made builds for Intel Macs).\n")
+        rest = ("deps builds from pinned sources: ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm\n"
+                "  Nothing is installed outside the working directory and Homebrew is not used.\n"
+                "  note: NVK's patches need a patch that also creates files: put GNU patch on PATH as gpatch (Homebrew's formula is gpatch); deps does not build patch\n"
+                "    env NM_TC_PREFIX=/w/tools/toolchain bash build/toolchain.sh build llvm\n"
+                "SPIRV-LLVM-Translator v22.1.8 for LLVM 22: Homebrew has none that matches; it is built from source into /w/tools/spirv-llvm-translator (a few minutes)\n"
+                "deps: dry run; the commands above would run, nothing was built or installed\n")
         plan = tmp / "plan.txt"
-        plan.write_text("Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ninja llvm@22\n"
+        plan.write_text(src_line + "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ninja llvm@22\n"
                         "    env -u HOMEBREW_PREFIX PATH=/usr/local/bin:/usr/bin HOMEBREW_NO_AUTO_UPDATE=1 /usr/local/bin/brew install ninja\n")
         rc, o = run([sc.script, "deps-plan", plan], sc.env)
         arm("control: a dry run of deps that would install formulas is refused", rc == 1 and "would call Homebrew" in o, o)
-        plan.write_text("    /usr/local/bin/brew unlink <formula>   (with the same environment; only if ...)\n")
+        plan.write_text(src_line + "    /usr/local/bin/brew unlink <formula>   (with the same environment; only if ...)\n")
         rc, o = run([sc.script, "deps-plan", plan], sc.env)
-        arm("control: a dry run of deps that would unlink a formula is refused", rc == 1, o)
-        plan.write_text("deps: build/toolchain.sh build ninja cmake llvm (NM_TC_PREFIX=...)\nGNU patch is needed as gpatch on PATH; Homebrew's formula is gpatch\n"
-                        "deps: dry run; the commands above would run, nothing was installed\n")
+        arm("control: a dry run of deps that would unlink a formula is refused", rc == 1 and "would call Homebrew" in o, o)
+        arm("build.sh still says the sentence deps-plan wants from the source way",
+            "auto:source) printf 'missing build tools are built by ./build.sh deps from pinned sources into %s, without Homebrew (NM_TOOLS_FROM=auto on an Intel Mac" in bsh, "")
+        plan.write_text("(dry run: nothing is changed; the commands are printed)\n" + src_line + rest)
         rc, o = run([sc.script, "deps-plan", plan], sc.env)
         arm("a dry run of deps that builds the tools from source passes", rc == 0 and "names no Homebrew command" in o, o)
+        # NM_TOOLS_FROM=homebrew on a Mac whose Homebrew has every formula: nothing to install, and still not the default way
+        plan.write_text("(dry run: nothing is changed; the commands are printed)\n" + rest.replace("deps builds from pinned sources: ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm\n", ""))
+        rc, o = run([sc.script, "deps-plan", plan], sc.env)
+        arm("control: the Homebrew way that would install nothing is refused too", rc == 1 and "does not say that the tools are built from pinned sources" in o, o)
 
         # basepkg, against a pins.sh of this test's own (it never reaches the network: the URL is a closed local port)
         blob = tmp / "dl/nullmoth-nvidia-2.9.tar.gz"
