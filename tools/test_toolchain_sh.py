@@ -43,7 +43,7 @@ or the arm's own check given a broken result):
   bash32             nothing in the script that /bin/bash 3.2 or the BSD tools of macOS lack
 
 The shell is $BUILD_SH_BASH (default /bin/bash, macOS's bash 3.2 on a Mac). usage: test_toolchain_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, subprocess, sys, tempfile
+import hashlib, os, pathlib, platform, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REAL_SCRIPT = ROOT / "build" / "toolchain.sh"
@@ -58,8 +58,24 @@ fails = 0
 def check(name, ok, detail=""):
     global fails
     print(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1200]}]" if detail and not ok else ""), flush=True)
+    if not ok:   # a failed build: the end of the log its STOP line names, which says why (the detail ends at the command)
+        for path, lines in failed_logs(str(detail)):
+            print(f"    last {len(lines)} lines of {path}:", flush=True)
+            for l in lines:
+                print("      " + l, flush=True)
     fails += 0 if ok else 1
     return ok
+
+
+def failed_logs(text):
+    """[(log, its last 40 lines)] of every "full log: <path>" in a failure's text whose file is there"""
+    out = []
+    for path in dict.fromkeys(re.findall(r"full log: (\S+)", text)):
+        try:
+            out.append((path, pathlib.Path(path).read_text(errors="replace").splitlines()[-40:]))
+        except OSError:
+            pass
+    return out
 
 
 def control(name, problems):
@@ -414,10 +430,23 @@ ALLOWED_STEP_ENV = {"HOME", "USER", "LANG", "TMPDIR", "PATH", "PYTHONDONTWRITEBY
 POISONED = ["CC", "CFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "PYTHONPATH", "HOMEBREW_PREFIX"]
 
 
+def developer_dir(sb):
+    """the DEVELOPER_DIR the poisoned build is given, which must reach every step. On a Mac, /usr/bin/python3 and
+    /usr/bin/make (which the recipes run before the toolchain has its own Python, and for cmake, OpenSSL, zstd and
+    CPython) are Apple's small programs that run the tool of that name in the developer folder DEVELOPER_DIR names, as
+    are cc, c++, ar, ranlib, ld, libtool, strip, install_name_tool, otool and lipo: so on a Mac it is the real developer
+    folder (xcode-select -p), and the defaults run as on a tester's Mac. Elsewhere a stand-in folder."""
+    if platform.system() == "Darwin":
+        d = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, text=True).stdout.strip()
+        if d and os.path.isdir(d):
+            return d
+    return str(sb.sb / "xcode")
+
+
 def poison_env(sb):
     return dict(CC="/poison/bin/cc", CFLAGS="-DPOISON", LDFLAGS="-L/poison/lib", CPATH="/poison/include",
                 LIBRARY_PATH="/poison/lib", PKG_CONFIG_PATH="/poison/lib/pkgconfig", PYTHONPATH="/poison/py",
-                HOMEBREW_PREFIX="/poison", SDKROOT="/poison/sdk", DEVELOPER_DIR=str(sb.sb / "xcode"),
+                HOMEBREW_PREFIX="/poison", SDKROOT="/poison/sdk", DEVELOPER_DIR=developer_dir(sb),
                 PATH=f"{sb.sb}/poison/bin:{sb.sb}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 NM_TC_PYTHON=None if os.access("/usr/bin/python3", os.X_OK) else sys.executable,
                 NM_TC_STAMP="stamp-text-from-caller")
@@ -438,7 +467,7 @@ def leak_problems(sb):
             probs.append(f"{who}: PATH {env.get('PATH')}")
         if env.get("HOME") != work_home:
             probs.append(f"{who}: HOME {env.get('HOME')}")
-        if env.get("DEVELOPER_DIR") != str(sb.sb / "xcode"):
+        if env.get("DEVELOPER_DIR") != developer_dir(sb):
             probs.append(f"{who}: DEVELOPER_DIR {env.get('DEVELOPER_DIR')}")
         if env.get("SDKROOT") != str(sb.sb / "sdk"):
             probs.append(f"{who}: SDKROOT {env.get('SDKROOT')}")
@@ -581,6 +610,11 @@ def main():
             probs, err = fail_case(sb)
             check("a failing step: exit 1, its last lines and log named, no stamp, nothing built after it", not probs,
                   (probs, err[-800:]))
+            tails = failed_logs(err)
+            check("a failed build's own FAIL line can show the end of the log its STOP line names",
+                  len(tails) == 1 and tails[0][0] == str(sb.logs / "xz.log") and any("STANDIN-FAILURE-MARKER" in l for l in tails[0][1]),
+                  (tails, err[-400:]))
+            control("a failure text that names no log gives no log to show", failed_logs(err.replace("full log:", "log:")) == [] and ["none"])
             sb = sandbox()
             bad = mutate(sb, "early-stamp", [('rm -f "$STATE/$t"\n', 'printf "early\\n" > "$STATE/$t"\n')])
             probs, err = fail_case(sb, bad)
