@@ -4,7 +4,7 @@
 cd "$(dirname "$0")/.." || exit 1
 fails=0
 arm() { if [ "$2" = 1 ]; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails+1)); fi; }
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d "${TMPDIR:-/tmp}/test_dmc_fetch.XXXXXX") || exit 2; trap 'rm -rf "$T"' EXIT
 [ "$(id -u)" = 0 ] && { echo "skip: tests may not replace the pins as root"; exit 0; }
 mkdir "$T/src"; for f in tgl_dmc_ver2_12.bin adlp_dmc_ver2_16.bin mtl_dmc.bin; do head -c 4000 /dev/urandom > "$T/src/$f"; done
 cat > "$T/pins" <<PINS

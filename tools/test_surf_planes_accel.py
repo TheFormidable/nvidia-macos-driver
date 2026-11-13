@@ -490,7 +490,7 @@ def build_run(d, name, st, gr, rg):
     src = HARNESS.replace("@@STAGING@@", st).replace("@@GRANT@@", gr).replace("@@RANGED@@", rg)
     (d / f"{name}.cpp").write_text(src)
     b = subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-parameter",
-                        "-Wno-unused-variable", "-Wno-unused-but-set-variable", "-Wno-format-extra-args", "-Wno-class-memaccess",
+                        "-Wno-unused-variable", "-Wno-unused-but-set-variable", "-Wno-format-extra-args",
                         f"-I{R / 'kexts/NVRM'}", f"-I{R / 'kexts/NVRM/accel'}", str(d / f"{name}.cpp"), "-o", str(d / name)],
                        capture_output=True, text=True)
     if b.returncode != 0:
@@ -500,6 +500,17 @@ def build_run(d, name, st, gr, rg):
     except subprocess.TimeoutExpired:
         return -1, "did not finish within 60 s"
     return r.returncode, r.stdout + r.stderr[-800:]
+
+
+def failed_as_intended(code, out):
+    """A control's program counts as failing only when it was built, ran, and its own checks said so: exit 1 with a FAIL
+    line, or a stand-in's assertion (the abort of an assert() names itself as one with glibc and with Apple's libc). A
+    program that did not build (code None), ran past its time limit (-1) or crashed in some other way proves nothing
+    about the change the control made."""
+    if code is None or code == -1:
+        return False
+    lines = (out or "").splitlines()
+    return (code == 1 and any(l.startswith("FAIL ") for l in lines)) or (code < 0 and "Assertion" in (out or ""))
 
 
 def pageoff(src):
@@ -665,7 +676,7 @@ def main():
                 return False, f"the text to alter is not in the {piece} piece once: {old[:80]}"
             texts[piece] = texts[piece].replace(old, new)
             c, o = build_run(d, "c" + tag, texts["st"], texts["gr"], texts["rg"])
-            return c is not None and c != 0, o
+            return failed_as_intended(c, o), (o if c is not None else "the control's program did not build: " + (o or ""))
 
         for tag, piece, what, old, new in [
             ("a", "rg", "the plane written at offset 0", "md->writeBytes((IOByteCount)dstOff,", "md->writeBytes((IOByteCount)0,"),
@@ -690,6 +701,20 @@ def main():
         ]:
             ok, det = changed(tag, piece, old, new)
             arm(f"control: {what} fails the host program", ok, det)
+
+        # the controls above count only a program that built and whose checks failed: a change that breaks the build,
+        # and a crash that is not a stand-in's assertion, must not pass for one
+        # (each must really end that way: a trap never reached would let its program pass and prove nothing)
+        for tag, what, old, new, ended in [
+                ("x", "a change that does not compile", "md->writeBytes((IOByteCount)dstOff,", "md->writeBytes((IOByteCount)dstOff +,",
+                 lambda c: c is None),
+                ("y", "a program that crashes outside the checks", "    if (t->tok) {\n", "    __builtin_trap();\n    if (t->tok) {\n",
+                 lambda c: c is not None and c < 0 and c != -1)]:
+            if rg.count(old) != 1:
+                arm(f"control: {what} is not counted as a control that failed", False, f"the text to alter is not in the rg piece once: {old[:80]}")
+                continue
+            c, o = build_run(d, "c" + tag, st, gr, rg.replace(old, new))
+            arm(f"control: {what} is not counted as a control that failed", ended(c) and not failed_as_intended(c, o), (c, o))
 
     print("PASS" if not FAILS else f"FAILED ({len(FAILS)})")
     return 1 if FAILS else 0

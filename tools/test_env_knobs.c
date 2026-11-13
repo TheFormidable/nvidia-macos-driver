@@ -22,8 +22,26 @@ static void fresh(void)
     setenv("NVMTLX_NOT_OURS", "1", 1); setenv("MY_PATH_LIKE", "kept", 1);
 }
 
+/* The counts below are of the variables this test sets: a tester whose own environment holds driver knobs (set for an
+   installed driver, or by a shell profile) would otherwise add them to every count. */
+static unsigned forget_testers_knobs(void)
+{
+    unsigned n = 0;
+    for (char **e = environ; e && *e; ) {
+        const char *eq = strchr(*e, '=');
+        if (!nvmtl_env_knob_prefixed(*e) || !eq || eq - *e >= 256) { e++; continue; }
+        char name[256];
+        memcpy(name, *e, (size_t)(eq - *e)); name[eq - *e] = 0;
+        unsetenv(name); n++;
+        e = environ;   /* unsetenv moved the vector: start again */
+    }
+    return n;
+}
+
 int main(void)
 {
+    unsigned inherited = forget_testers_knobs();
+    if (inherited) printf("(%u driver variables of the tester's environment set aside first)\n", inherited);
     fresh();
     unsigned n = nvmtl_release_forget_env(environ);
     arm("without the opt-in, a release plugin forgets every inherited NVMTL_/NVK_/NAK_/NVRM_ knob",
@@ -88,7 +106,9 @@ int main(void)
     unsetenv("ELFHOST_PATH");
 
     /* library paths: a release plugin loads only root-owned files in root-only folders */
-    arm("a root-owned library path in a root-only folder is allowed", nvmtl_code_path_allowed("/usr/lib/libSystem.B.dylib") || nvmtl_code_path_allowed("/bin/sh"));
+    /* a file, not a link: macOS 11 and later keep libSystem only in the shared cache, and on Linux /bin/sh is a link */
+    arm("a root-owned library path in a root-only folder is allowed", nvmtl_code_path_allowed("/usr/lib/libSystem.B.dylib")
+        || nvmtl_code_path_allowed("/bin/sh") || nvmtl_code_path_allowed("/usr/bin/env"));
     char tmpl[] = "/tmp/nvmtl-knob-XXXXXX"; int tfd = mkstemp(tmpl); if (tfd >= 0) close(tfd);
     arm("negative control: a user-owned file is refused", getuid() == 0 || !nvmtl_code_path_allowed(tmpl));
     unlink(tmpl);
