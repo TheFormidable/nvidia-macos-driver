@@ -44,16 +44,20 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
 - The build tools of NVK, the Vulkan loader and the translator (see [Tools each component needs](#tools-each-component-needs)):
-  every other component builds with Xcode and what macOS has. A tool you already have is used wherever it is (a
-  setting such as `NM_LLVM_PREFIX`, Homebrew, `PATH`). A missing one comes from where `NM_TOOLS_FROM` says:
+  every other component builds with Xcode and what macOS has. Where they come from is what `NM_TOOLS_FROM` says:
   - On an **Intel Mac** (`auto` there means `source`), `./build.sh deps` builds ninja, CMake, Python 3.14 (with the
     OpenSSL, zstd and xz it needs), pkgconf, SPIRV-Tools, glslang and LLVM 22 with clang from pinned sources with
     `build/toolchain.sh`, into `<workdir>/tools/toolchain`. **Homebrew is not needed** and nothing is installed outside
-    the working directory. Homebrew has no ready-made builds (bottles) for Intel Macs any more: through Homebrew,
-    `deps` would compile about twenty-five formulas for hours into `/usr/local` and change your `python3`.
+    the working directory. On an Intel Mac build.sh does not use Homebrew, even when it is installed: a copy of one of
+    these tools that Homebrew or `PATH` offers is not used (`doctor` names it), and `build.sh` calls no `brew`. Only
+    your own settings (`NM_PYTHON`, `NM_LLVM_PREFIX`, `NM_SPIRV_TOOLS_PREFIX`, `PKG_CONFIG_PATH`, `LIBCLANG_PATH`,
+    `NVK_PATH`) are taken instead, and `doctor` says that they are yours. Homebrew has no ready-made builds (bottles)
+    for Intel Macs any more: through Homebrew, `deps` would compile about twenty-five formulas for hours into
+    `/usr/local` and change your `python3`.
     The only thing it does not build is GNU patch, which NVK's patches need when macOS's `patch` cannot create files:
     put it on `PATH` as `gpatch` (Homebrew's formula is `gpatch`); `deps` says so.
-  - On **Apple silicon** (`auto` there means `homebrew`), `deps` installs Homebrew's ready-made formulas. When Homebrew
+  - On **Apple silicon** (`auto` there means `homebrew`), a tool you already have is used wherever it is (a setting
+    such as `NM_LLVM_PREFIX`, Homebrew, `PATH`), and `deps` installs a missing one from Homebrew's ready-made formulas. When Homebrew
     is missing, it explains how to install it and offers to run its official installer, but only after you type `yes`
     (`--yes` does not count for this). `NM_TOOLS_FROM=source` builds them as on an Intel Mac instead.
 - Time and disk for the tools built from source, measured on one 12-thread Intel Mac: about 70 minutes in all (the
@@ -220,7 +224,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_WEBKIT_SPI_URL` | the URL in build/pins.sh | A folder (URL) holding `CMBaseObjectSPI.h` and `VTVideoDecoderSPI.h` |
 | `NM_SPIRV_LLVM_URL` | the URL in build/pins.sh | A mirror of SPIRV-LLVM-Translator (deps builds it for LLVM 22) |
 | `NM_SPIRV_HEADERS_URL` | the URL in build/pins.sh | A mirror of SPIRV-Headers |
-| `NM_TOOLS_FROM` | `auto` | Where `deps` gets a build tool that is missing (one that is there is used wherever it is): `source` builds it with `build/toolchain.sh` from the pinned sources into `<workdir>/tools/toolchain`, without Homebrew; `homebrew` installs Homebrew's formula; `auto` is `source` on an Intel Mac (Homebrew has no ready-made builds for it) and `homebrew` on Apple silicon. Any other value stops `build.sh` |
+| `NM_TOOLS_FROM` | `auto` | Where the build tools come from: `source` builds them with `build/toolchain.sh` from the pinned sources into `<workdir>/tools/toolchain` and uses only those (or your own settings): a copy Homebrew or `PATH` offers is not used, and no `brew` is called; `homebrew` uses a tool that is there wherever it is and installs Homebrew's formula for a missing one; `auto` is `source` on an Intel Mac (Homebrew has no ready-made builds for it) and `homebrew` on Apple silicon. Any other value stops `build.sh` |
 | `NM_TC_NINJA_URL` | the URL in build/pins.sh | A mirror of ninja (v1.13.2), a source deps builds the toolchain from |
 | `NM_TC_CMAKE_URL` | the URL in build/pins.sh | A mirror of CMake (v4.4.5), a source deps builds the toolchain from |
 | `NM_TC_OPENSSL_URL` | the URL in build/pins.sh | A mirror of OpenSSL (openssl-3.5.9), a source deps builds the toolchain from |

@@ -45,14 +45,18 @@ comandos y opciones y la solución de problemas.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
-- Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor. Una que ya tengas se usa donde esté
-  (un ajuste como `NM_LLVM_PREFIX`, Homebrew, el `PATH`); una que falte sale de donde diga `NM_TOOLS_FROM`. En un
+- Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor: de dónde salen lo dice
+  `NM_TOOLS_FROM`. En un
   **Mac Intel** (`auto` es allí `source`), `./build.sh deps` compila ninja, CMake, Python 3.14 (con OpenSSL, zstd y xz),
   pkgconf, SPIRV-Tools, glslang y LLVM 22 con clang desde fuentes fijadas con `build/toolchain.sh`, en
   `<directorio de trabajo>/tools/toolchain`: **no hace falta Homebrew** y nada se instala fuera del directorio de
-  trabajo. Solo GNU patch no se compila: si el `patch` de macOS no puede crear archivos (los parches de NVK lo
+  trabajo. En un Mac Intel build.sh no usa Homebrew, aunque esté instalado: una copia de esas herramientas que
+  ofrezcan Homebrew o el `PATH` no se usa (`doctor` la nombra) y no se llama a `brew`; solo tus propios ajustes
+  (`NM_PYTHON`, `NM_LLVM_PREFIX`, `NM_SPIRV_TOOLS_PREFIX`, `PKG_CONFIG_PATH`, `LIBCLANG_PATH`, `NVK_PATH`) se toman en
+  su lugar, y `doctor` dice que son tuyos. Solo GNU patch no se compila: si el `patch` de macOS no puede crear archivos (los parches de NVK lo
   necesitan), pon GNU patch en el `PATH` como `gpatch` (la fórmula de Homebrew es `gpatch`); `deps` lo dice. En
-  **Apple silicon** (`auto` es allí `homebrew`) `deps` instala las fórmulas listas de Homebrew.
+  **Apple silicon** (`auto` es allí `homebrew`) una herramienta que ya tengas se usa donde esté (un ajuste como
+  `NM_LLVM_PREFIX`, Homebrew, el `PATH`) y `deps` instala la que falte de las fórmulas listas de Homebrew.
 - Homebrew (solo con `NM_TOOLS_FROM=homebrew`, el valor de `auto` en Apple silicon), para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
   airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
   bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
@@ -208,7 +212,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_WEBKIT_SPI_URL` | Carpeta (URL) con las dos cabeceras de WebKit |
 | `NM_SPIRV_LLVM_URL` | Réplica de SPIRV-LLVM-Translator (deps lo compila para LLVM 22) |
 | `NM_SPIRV_HEADERS_URL` | Réplica de SPIRV-Headers |
-| `NM_TOOLS_FROM` | De dónde saca `deps` una herramienta de compilación que falta (la que ya está se usa donde esté): `source` la compila con `build/toolchain.sh` desde las fuentes fijadas en `<workdir>/tools/toolchain`, sin Homebrew; `homebrew` instala la fórmula de Homebrew; `auto` (por defecto) es `source` en un Mac Intel (Homebrew no tiene compilaciones listas para él) y `homebrew` en Apple silicon. Otro valor detiene `build.sh` |
+| `NM_TOOLS_FROM` | De dónde salen las herramientas de compilación: `source` las compila con `build/toolchain.sh` desde las fuentes fijadas en `<workdir>/tools/toolchain` y usa solo esas (o tus propios ajustes): una copia que ofrezcan Homebrew o el `PATH` no se usa y no se llama a `brew`; `homebrew` usa la que ya está donde esté e instala la fórmula de Homebrew para la que falte; `auto` (por defecto) es `source` en un Mac Intel (Homebrew no tiene compilaciones listas para él) y `homebrew` en Apple silicon. Otro valor detiene `build.sh` |
 | `NM_TC_NINJA_URL` | Réplica de ninja (v1.13.2), fuente de las herramientas que compila deps |
 | `NM_TC_CMAKE_URL` | Réplica de CMake (v4.4.5), fuente de las herramientas que compila deps |
 | `NM_TC_OPENSSL_URL` | Réplica de OpenSSL (openssl-3.5.9), fuente de las herramientas que compila deps |
