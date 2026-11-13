@@ -120,7 +120,11 @@ the driver out (section 4). With AGDC refused the display runs without AppleGrap
 accelerator refused (`NVAccel: Apple class layout refused: ...` in the log) the desktop runs without acceleration.
 Report the line (after a restart by itself, `/Library/NullMoth/lastgood.log`) with `sw_vers`. `nvlayout=0` in the
 boot arguments starts them anyway (the check still runs and logs `overridden (nvlayout=0): ...`), at the risk the
-check exists for (a crash or a frozen desktop); use it only to confirm. `nvrmfb-layout-vtables` and
+check exists for (a crash or a frozen desktop); use it only to confirm. `nvlayout=0` changes the verdict, not the
+looking: the kexts read Apple's class tables either way (the boot argument is read afterwards, only to decide what to
+do with what they found), and the firmware framebuffer that shows the desktop with the driver off reads the same
+tables, so `nvlayout=0` is not a way back from a crash that happens while those tables are read; the way back from
+such a crash is to take the driver out and put the previous one back (section 4). `nvrmfb-layout-vtables` and
 `nvaccel-layout-vtables` never stop anything: a `differ:` or `not compared:` line on a Mac whose display works is
 worth a report with the macOS build.
 
