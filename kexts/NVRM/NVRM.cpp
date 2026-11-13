@@ -286,7 +286,9 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_isr_handled, CTLFLAG_RD, (int64_t *)&gNvIsrHa
 //   debug.nvrm_isr_late_1ms, _4ms  such waits longer than 1 ms and 4 ms
 //   debug.nvrm_isr_during_bh       MSIs that arrived while a bottom half was still running
 //   debug.nvrm_bh_runs             bottom halves run
-//   debug.nvrm_bh_max_us           longest bottom half, its wait for the GPU lock included
+//   debug.nvrm_bh_max_us           longest bottom half: its own run (rm_isr_bh and the fence kick), which holds the GPU
+//                                  lock rm_isr handed over, so no wait for that lock is in it (the wait for the thread
+//                                  is nvrm_bh_wake_max_us)
 //   debug.nvrm_bh_over_1ms, _4ms   bottom halves longer than 1 ms and 4 ms
 //   debug.nvrm_bh_thread           GPUs whose bottom half runs on its own thread
 //   debug.nvrm_bh_wake_max_us      longest wait between a bottom half's request and the start of its run on that thread
