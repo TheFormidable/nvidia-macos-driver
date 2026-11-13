@@ -5,7 +5,7 @@ The kernel half (nvrm_fence.cpp, the table and its host test) and the plugin hal
 tools/test_fence_plugin.c) are tested where they live; the patch's copy of the header by tools/test_shared_headers.py.
 This test reads the patch and holds what only NVK's glue can get wrong:
 
-  the chain      nvk-fence is applied by the default 2.9 build, after nvk-evwait and before the channel rebuild
+  the chain      nvk-fence is applied by the default 3.0 build, after nvk-evwait and before the channel rebuild
   the seam       the event wait's loop is not edited: only the wait callback's branch for a channel without an event
                  changes, to a WAIT_SEQ on that channel's own semaphore, and only a real sleep or a real completion
                  is reported as one (anything else is a polling step and quiets that channel for a while); the kernel
@@ -282,10 +282,10 @@ arm("nvk/nvk-fence.patch exists", bool(patch))
 
 # --- the chain -------------------------------------------------------------------------------------------------------
 m = re.search(r"(?ms)^case \$REL in\n.*?^esac$", SCRIPT.read_text())
-r = subprocess.run(["bash", "-c", 'REL=2.9; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
+r = subprocess.run(["bash", "-c", 'REL=3.0; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
                     m.group(0)], capture_output=True, text=True) if m else None
 chain = r.stdout.split() if r and r.returncode == 0 else []
-arm("the default 2.9 chain applies nvk-fence, after nvk-evwait", "nvk-fence" in chain and "nvk-evwait" in chain
+arm("the default 3.0 chain applies nvk-fence, after nvk-evwait", "nvk-fence" in chain and "nvk-evwait" in chain
     and chain.index("nvk-evwait") < chain.index("nvk-fence"), " ".join(chain[-5:]))
 arm("the channel rebuild, which calls the rebind, comes after it", "nvk-channel-recover" not in chain
     or ("nvk-fence" in chain and chain.index("nvk-channel-recover") > chain.index("nvk-fence")))

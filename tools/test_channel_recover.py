@@ -6,7 +6,7 @@ are in the patch's nvkmd/nvrm/nvkmd_nvrm_recover.h and are host-tested by its nv
 test extracts from the patch, builds and runs. The patch's copy of nvrm_chan_note_abi.h is compared with the kext's by
 tools/test_shared_headers.py. This test reads the patch and holds what only NVK's glue can get wrong:
 
-  the chain      nvk-channel-recover is applied by the default 2.9 build, after nvk-evwait and nvk-fence (the
+  the chain      nvk-channel-recover is applied by the default 3.0 build, after nvk-evwait and nvk-fence (the
                  rebuild calls the fence's rebind); the patch header reads as text to BSD patch
   the switches   NVK_CHANNEL_RECOVER is read through nvmtl_cfg_getenv (the environment, or nvrm610.conf, which is
                  all a release build sees) and only "0" turns it off; NVK_FAULT_INJECT the same way
@@ -373,10 +373,10 @@ patch = PATCH.read_text() if PATCH.exists() else ""
 arm("nvk/nvk-channel-recover.patch exists", bool(patch))
 
 m = re.search(r"(?ms)^case \$REL in\n.*?^esac$", SCRIPT.read_text())
-r = subprocess.run(["bash", "-c", 'REL=2.9; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
+r = subprocess.run(["bash", "-c", 'REL=3.0; NVK=x; FIXES=; CHAIN=; BASE=; eval "$1" >/dev/null; printf "%s" "$CHAIN"', "_",
                     m.group(0)], capture_output=True, text=True) if m else None
 chain = r.stdout.split() if r and r.returncode == 0 else []
-arm("the default 2.9 chain applies nvk-channel-recover, after nvk-evwait and nvk-fence",
+arm("the default 3.0 chain applies nvk-channel-recover, after nvk-evwait and nvk-fence",
     all(x in chain for x in ("nvk-evwait", "nvk-fence", "nvk-channel-recover"))
     and chain.index("nvk-evwait") < chain.index("nvk-fence") < chain.index("nvk-channel-recover"), " ".join(chain[-5:]))
 head = patch.split("\ndiff --git ", 1)[0]

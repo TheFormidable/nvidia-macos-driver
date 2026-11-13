@@ -2063,6 +2063,33 @@ def arm_steps(mac):
         mac.clear()
         mac.run("--force", "build", "rm", "nvk")
         negative("python3 linked into tools/bin (the bare interpreter, not the environment)", python_problems(mac))
+    with mac.scratch():
+        p = nvk_release_problems(mac)
+        check("the NVK step builds build_nvk.sh's current release (its default), and so does build_release_inputs.sh", not p, p)
+    with mac.scratch():
+        mac.break_script('"$O/nvk-build" 3.0', '"$O/nvk-build" 2.9')
+        negative("build.sh that asks for release 2.9's NVK chain", nvk_release_problems(mac))
+
+
+def nvk_release_problems(sb):
+    """build_nvk.sh builds the chain of the release it is given; 2.9 is release 2.9's chain, without this branch's
+    patches, and its BUILD.txt says "release 2.9". The library build.sh makes must be the current release's."""
+    sb.clear()
+    sb.run("--force", "build", "nvk")
+    m = re.search(r"\bREL=\$\{4:-([\w.]+)\}", (sb.co / "build/build_nvk.sh").read_text())
+    cur = m.group(1) if m else None
+    args = [a for k, a, _ in sb.steps() if k == "nvk"]
+    p = []
+    if not cur:
+        p.append("build_nvk.sh has no default release (REL=${4:-...})")
+    if not args:
+        p.append("no nvk step ran")
+    elif len(args[-1]) != 4 or args[-1][3] != cur:
+        p.append(f"build.sh runs build_nvk.sh with {args[-1][3:]}, not its current release {cur}")
+    rel = (sb.co / "build/build_release_inputs.sh").read_text()
+    if not re.search(r'build_nvk\.sh" "\$MESA" "\$OGKM610" "\$OUT/nvk-build" ' + re.escape(cur or "?") + r" \|\|", rel):
+        p.append(f"build_release_inputs.sh does not ask build_nvk.sh for release {cur}")
+    return p
 
 
 def wait_for(path, timeout=300):
