@@ -38,6 +38,53 @@ def windowserver():
     return subprocess.check_output(["pgrep", "-x", "WindowServer"], text=True).strip()
 
 
+# The driver counts, in debug.nvrm_evt_clients, the kernel connections that have slept on the GPU completion
+# event at least once. The count is sticky per connection (NVRM.cpp, fEvtEverSlept 0 -> 1), so a connection that
+# already slept once never increments it again: WindowServer and any other long-running GPU client were counted
+# soon after boot and do not move it during a probe. A freshly launched probe opens its own device connection, so
+# the count moving across that probe's lifetime is attributable to the probe itself. That is how a run proves the
+# wait policy it asked for actually took effect, without depending on any line the driver prints.
+EVT_CLIENTS_SYSCTL = "debug.nvrm_evt_clients"
+
+
+def read_evt_clients():
+    """The current debug.nvrm_evt_clients, or None when the sysctl is absent (an older kext without it)."""
+    try:
+        out = subprocess.run(["sysctl", "-n", EVT_CLIENTS_SYSCTL], capture_output=True, text=True)
+    except OSError:
+        return None
+    if out.returncode != 0:
+        return None
+    text = out.stdout.strip()
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def verify_policy(policy, before, after):
+    """Decide whether a compute/image probe ran under the policy it was asked to. Returns (ok, reason).
+
+    before/after are debug.nvrm_evt_clients around the probe, or None when it could not be read. An `event`
+    probe must have made its own connection sleep (the count moves up by at least one); a `poll` probe must not
+    have slept at all (the count does not move). When the counter is unavailable the policy cannot be proven,
+    which is a failure to verify, not a pass."""
+    if before is None or after is None:
+        return False, "cannot verify: " + EVT_CLIENTS_SYSCTL + " is not available (needs this driver's kext)"
+    delta = after - before
+    if delta < 0:
+        return False, EVT_CLIENTS_SYSCTL + " went backwards by " + str(-delta) + " (counter reset mid-run)"
+    if policy == "event":
+        if delta < 1:
+            return False, "event-wait probe never slept on the GPU event (" + EVT_CLIENTS_SYSCTL + " did not move)"
+        return True, "slept (" + EVT_CLIENTS_SYSCTL + " +" + str(delta) + ")"
+    if policy == "poll":
+        if delta != 0:
+            return False, "poll probe slept on the GPU event (" + EVT_CLIENTS_SYSCTL + " moved by " + str(delta) + ")"
+        return True, "did not sleep (" + EVT_CLIENTS_SYSCTL + " unchanged)"
+    return False, "unknown policy " + repr(policy)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="new directory for samples and local logs")
@@ -70,19 +117,23 @@ def main():
             command = [binary, mode]
             if policy is not None:
                 command.append("NVRM_EVENT_WAIT=" + ("1" if policy == "event" else "0"))
+            clients_before = read_evt_clients() if mode in ("compute", "image") else None
             try:
                 proc = subprocess.run(command, capture_output=True, text=True, timeout=55, env=environment)
             except subprocess.TimeoutExpired as error:
                 (args.output / (label + ".timeout.txt")).write_text(str(error))
                 raise RuntimeError("probe timed out; stop before more GPU work") from error
+            clients_after = read_evt_clients() if mode in ("compute", "image") else None
             (args.output / (label + ".stderr.txt")).write_text(proc.stderr)
             if proc.returncode or "implemented in both" in proc.stderr or windowserver() != initial_windowserver:
                 raise RuntimeError("probe failed or WindowServer restarted; inspect " + label)
             data = json.loads(proc.stdout)
             if mode in ("compute", "image"):
-                enabled = "event wait ON" in proc.stderr
-                if enabled != (policy == "event") or "event wait OFF" in proc.stderr:
-                    raise RuntimeError("requested wait policy was not verified: " + label)
+                ok, reason = verify_policy(policy, clients_before, clients_after)
+                data.update(evt_clients_before=clients_before, evt_clients_after=clients_after,
+                            policy_verified=ok, policy_verification=reason)
+                if not ok:
+                    raise RuntimeError("requested wait policy was not verified: " + label + ": " + reason)
             if mode in ("compute", "events") and data.get("verified") is not True:
                 raise RuntimeError("data verification failed: " + label)
             if mode == "transfer" and not all(t["verified"] for t in data["tests"]):
