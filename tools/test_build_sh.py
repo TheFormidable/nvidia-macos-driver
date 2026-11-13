@@ -548,8 +548,11 @@ class Sandbox:
         (self.state / "brew-llvm").write_text("22.1.3\n")
         if xcode:
             (self.state / "xcode").write_text(xcode + "\n")
-        # the developer folder xcode-select names once Xcode is installed, with the xcrun build.sh looks for in it
-        self.wrap(self.dir / "Xcode.app/Contents/Developer/usr/bin/xcrun", "xcrun")
+        # the developer folder xcode-select names once Xcode is installed, holding what Xcode 26.5 holds of the files
+        # build.sh looks for (XCODE_26_5; listed on a Mac). It has no usr/bin/xcrun: xcrun is /usr/bin/xcrun alone
+        for f in XCODE_26_5:
+            (self.dir / "Xcode.app/Contents/Developer" / f).parent.mkdir(parents=True, exist_ok=True)
+            (self.dir / "Xcode.app/Contents/Developer" / f).write_text("")
         sdk = self.dir / "sdk"
         for f in ("System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h", "usr/lib/libkmod.a",
                   "System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h"):
@@ -744,6 +747,11 @@ def under(path, roots):
 
 
 # ------------------------------------------------------------------------------------------------- arms
+# What a developer folder holds of the files build.sh looks for, as listed on a Mac with Xcode 26.5 and the command line
+# tools 26.6 (2026-11-13). Neither has usr/bin/xcrun, the file Apple's own message names
+# ("missing xcrun at: <folder>/usr/bin/xcrun"); both have usr/lib/libxcrun.dylib, which /usr/bin/xcrun loads.
+XCODE_26_5 = ("usr/lib/libxcrun.dylib", "usr/bin/xcodebuild", "usr/bin/git", "usr/bin/make")
+CLT_26_6 = ("usr/lib/libxcrun.dylib", "usr/bin/git", "usr/bin/make", "usr/bin/clang")
 # what a stand-in of Apple's /usr/bin shims records when it runs: on a Mac without the command line tools each opens the
 # dialog that offers to install them
 SHIMS = ("git", "make", "python3", "xcrun", "xcodebuild")
@@ -793,13 +801,13 @@ def arm_fresh():
         (bare.state / "devdir").unlink()
         p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/Applications/Xcode-26.app"}, want="DEVELOPER_DIR", cmds=two)
         (bare.dir / "half/usr/bin").mkdir(parents=True, exist_ok=True)
-        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="has no usr/bin/xcrun", cmds=two)
+        p += bare_problems({"DEVELOPER_DIR": f"{bare.dir}/half"}, want="holds none of Apple's tools", cmds=two)
         return p
 
     p = bare_problems()
     check("no Xcode: every command stops before git, make, python3 or xcrun; doctor names exactly Xcode", not p, p)
     p = gone_problems()
-    check("a developer folder that is gone or has no xcrun (xcode-select, DEVELOPER_DIR): the same stop, naming it", not p, p)
+    check("a developer folder that is gone or holds none of Apple's tools (xcode-select, DEVELOPER_DIR): the same stop, naming it", not p, p)
     with bare.scratch():
         bare.break_script('    if ! xcode-select -p >/dev/null 2>&1 && [ -z "${DEVELOPER_DIR:-}" ]; then devp="none selected"; else devp=$(developer_dir_problem); fi',
                           '    if ! xcode-select -p >/dev/null 2>&1; then devp="none selected"; fi')
@@ -811,6 +819,31 @@ def arm_fresh():
     sb = Sandbox("fresh", brew=False)
     extra = {k: v.replace("<sb>", str(sb.dir)) for k, v in fresh_brew().items()}
     want = [k for k in FRESH_MISSING if k != "Xcode"]
+
+    def layout_problems():
+        # every developer folder that is whole is taken for whole: the two a Mac has today, the application itself as
+        # DEVELOPER_DIR, and a folder of the older layout, whose xcrun is inside it
+        p = []
+        for name, files in (("Xcode 26.5", XCODE_26_5), ("the command line tools 26.6", CLT_26_6),
+                            ("Xcode.app as DEVELOPER_DIR", tuple("Contents/Developer/" + f for f in XCODE_26_5)),
+                            ("a folder with its own usr/bin/xcrun", ("usr/bin/xcrun",))):
+            d = sb.dir / "layouts" / name.replace(" ", "-")
+            for f in files:
+                (d / f).parent.mkdir(parents=True, exist_ok=True)
+                (d / f).write_text("")
+            sb.clear()
+            rc, out = sb.run("env", extra=dict(extra, DEVELOPER_DIR=str(d)))
+            if rc != 0 or "developer folder" in out:
+                p.append(f"{name}: exit {rc}: {out[-300:]}")
+        return p
+
+    p = layout_problems()
+    check("the developer folders of Xcode 26.5 and of the command line tools 26.6 (no usr/bin/xcrun in either) are taken "
+          "for whole, and so is one with its own xcrun", not p, p)
+    with sb.scratch():
+        sb.break_script('  developer_dir_whole "$d" || developer_dir_whole "$d/Contents/Developer" || \\',
+                        '  [ -x "$d/usr/bin/xcrun" ] || [ -x "$d/Contents/Developer/usr/bin/xcrun" ] || \\')
+        negative("a test for usr/bin/xcrun alone refuses the Xcode and the command line tools a Mac has", layout_problems())
 
     def problems(script_note=""):
         before = sb.listing(sb.dir, skip=("tmp",))
