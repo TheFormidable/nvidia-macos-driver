@@ -6,34 +6,51 @@ an installable package. It never uses `sudo` and never installs the driver; at t
 
 En español: [BUILDING.es.md](BUILDING.es.md).
 
-> **Written and tested without a Mac.** `./build.sh` has run on one Mac (Intel, macOS 26.7, Xcode 26.5) only in part:
-> `doctor`, `env`, `--dry-run` and `fetch` ran, and it built the plugin, the video library (and the RM on the way) and
-> the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked (the check now
-> asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). None of the changes
-> made to `build.sh` after that run has run on a Mac yet: the tool check per component, the choice of Homebrew and of
-> the tools taken from `PATH`, the layout of the working directory, rm's compile list, `fetch`'s git set-up, the
-> stop without Xcode (also for a developer folder that is gone), the `patch` the scripts get (with `-f`) and the `PATH`
-> brew is given were tested only against the stand-ins described next. It was written
-> for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
-> Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
-> macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
-> translator have not been built by it, and no package has been staged with it. What that means for the first run:
-> expect a step to stop on something no stand-in imitated (an Xcode or Homebrew detail, a formula name, a compiler
-> warning). Run `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report
-> file to attach to an issue (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a
-> half-built result behind as finished, so after the fix the next run continues from that step. The component scripts
-> themselves have been run by hand on the owner's Intel Mac (macOS 26.7, Xcode 26.5) for the kexts, the RM and the
-> plugin; what that showed about a short account name is handled (see the `rm` row of
-> [Troubleshooting](#troubleshooting)).
+> **What has run, and where.** Nothing built from this branch has been installed, loaded or run on an NVIDIA card, and
+> no package made by `./build.sh package` has been installed. What has run:
+>
+> - On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5). At commit 650db45, `./build.sh deps` started from an empty
+>   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
+>   commit 3933ff6, with those tools kept, `deps`, `doctor` and `fetch` succeeded, `./build.sh --no-install build` built
+>   all 17 components in 5 minutes 41 seconds with no warning, and `package` staged a package on release 2.9 in
+>   27 seconds. Nothing outside the working directory changed. The host tests have not run whole on that Mac at that
+>   commit. {{PENDING 5b}}
+> - On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6.
+>   303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there), `tools/test_build_sh.py`
+>   among them. The workflow that builds everything in an empty working directory, with the tools restored from
+>   GitHub's cache, ran `deps`, `doctor` and `fetch`, built all 17 components in 30 minutes 20 seconds and staged the
+>   package in 60 seconds; the result of its `./build.sh test` and of its checks of what was built is not stated
+>   here. {{PENDING full-test}} {{PENDING full-prove}}
+> - Only against stand-ins for macOS's tools, Xcode, Homebrew, rustup, the git remotes and each component's build
+>   script (`tools/test_build_sh.py`, on Linux and on that runner): `deps` taking its tools from Homebrew, which is what
+>   it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
+> - Nowhere: a whole build on Apple silicon (see [Requirements](#requirements)), and a build of this branch's commits
+>   after 3933ff6 on either Mac. {{PENDING 5c}}
+>
+> `build.sh` is written for macOS's `/bin/bash` 3.2 and its BSD tools. On a system other than macOS only `doctor`,
+> `fetch`, `test`, `env` and a dry run of any command but `deps` work. A step can still stop on something neither the
+> stand-ins nor these two Macs showed (another Xcode or SDK, a formula name, a compiler warning). Run
+> `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report file to
+> attach to an issue (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a half-built
+> result behind as finished, so after the fix the next run continues from that step.
 
 ## Requirements
 
 - A Mac with macOS 15.6 or later, Intel or Apple silicon. Xcode 26 does not run on older systems, so `deps`, `build`,
-  `package` and `all` refuse them at the start. Apple silicon is supported as a build host (the release scripts
-  default to an Apple-silicon Rust toolchain); every part is built for x86_64, the architecture the driver runs on.
+  `package` and `all` refuse them at the start. Every part is built for x86_64, the architecture the driver runs on.
   An Intel Mac compiles NVIDIA's RM and NVKMS with exactly the commands an Apple-silicon Mac uses (see
   [byte-identical results](#what-is-not-automated-and-why)).
-- **Xcode 26 or later**, the full Xcode, selected with `xcode-select`. The command line tools alone are not enough:
+  Apple silicon is meant to work as a build host (the release scripts default to an Apple-silicon Rust toolchain), but
+  no whole build with `build.sh` has run on one: there `deps` takes its tools from Homebrew, a way that has run only
+  against stand-ins. GitHub's Apple-silicon runner compiles and links the kexts, and at commit 95811c2 they had the
+  same bytes as on its Intel runner. The host tests have not passed whole on Apple silicon: their last run that got a
+  runner, at an earlier commit, passed 298 of 312 with 2 failures, in arms that have passed on the Intel runner since
+  commit ef2a216, and GitHub has had no Apple-silicon runner free at any push after it.
+- **Xcode 26 or later**, the full Xcode, selected with `xcode-select`. Whole builds have succeeded with two of them,
+  both at commit 3933ff6: Xcode 26.5 (SDK 26.5) on the Intel Mac above, and Xcode 26.3 (SDK 26.2) on GitHub's Intel
+  runner. Xcode 26.3 is the newest Xcode that runs on macOS 15.6 to 26.1 (Xcode 26.4.1, 26.5 and 26.6 need macOS 26.2
+  or later), and with an SDK older than 26.4 the plugin compiles a part of its own that the 26.5 SDK leaves out.
+  Xcode 26.0 to 26.2 have not been tried. The command line tools alone are not enough:
   the plugin imports Metal 4 headers (`Metal/MTL4CommandQueue.h`) that only the macOS 26 SDK has. No Kernel Debug Kit
   is needed: no build step reads one. On a Mac with neither Xcode nor the command line tools, every command but
   `help` stops at once with the instructions (`doctor` names Xcode as the one thing missing): macOS's `git`, `make`,
@@ -52,23 +69,30 @@ En español: [BUILDING.es.md](BUILDING.es.md).
     the working directory. On an Intel Mac build.sh does not use Homebrew, even when it is installed: a copy of one of
     these tools that Homebrew or `PATH` offers is not used (`doctor` names it), and `build.sh` calls no `brew`. Only
     your own settings (`NM_PYTHON`, `NM_LLVM_PREFIX`, `NM_SPIRV_TOOLS_PREFIX`, `PKG_CONFIG_PATH`, `LIBCLANG_PATH`,
-    `NVK_PATH`) are taken instead, and `doctor` says that they are yours. Homebrew has no ready-made builds (bottles)
-    for Intel Macs any more: through Homebrew, `deps` would compile about twenty-five formulas for hours into
-    `/usr/local` and change your `python3`.
+    `NVK_PATH`) are taken instead, and `doctor` says that they are yours. Homebrew's formulas for these tools had no
+    ready-made builds (bottles) for Intel Macs when homebrew-core was read on 2026-11-13: through Homebrew, `deps`
+    would have each of them and what they need compiled into `/usr/local`, and could change your `python3`. That way
+    has run only against stand-ins.
     The only thing it does not build is GNU patch, which NVK's patches need when macOS's `patch` cannot create files:
     put it on `PATH` as `gpatch` (Homebrew's formula is `gpatch`); `deps` says so.
   - On **Apple silicon** (`auto` there means `homebrew`), a tool you already have is used wherever it is (a setting
     such as `NM_LLVM_PREFIX`, Homebrew, `PATH`), and `deps` installs a missing one from Homebrew's ready-made formulas. When Homebrew
     is missing, it explains how to install it and offers to run its official installer, but only after you type `yes`
-    (`--yes` does not count for this). `NM_TOOLS_FROM=source` builds them as on an Intel Mac instead.
-- Time and disk for the tools built from source, measured on one 12-thread Intel Mac: up to about 70 minutes in all (the
-  downloads 11 minutes, LLVM alone 34), 6.7 GB with every build tree kept (sources 3.2 GB, build trees 2.4 GB, the
-  installed tools 1.1 GB). `deps` asks for 10 GB free before it starts LLVM and says how much is free when there is
-  less. Keep the Mac awake and on power: a tool whose build is interrupted (Ctrl-C, sleep, power) is built again from
-  the beginning by the next `./build.sh deps`, and LLVM is the long one. A tool that fails stops `deps` with its log
-  named; the next `deps` starts at that tool. The NVIDIA trees, Mesa and the NVK build take several gigabytes more.
-- Time with `NM_TOOLS_FROM=homebrew` on an Intel Mac: Homebrew compiles each missing formula here; LLVM 22 alone takes
-  hours and tens of gigabytes while it builds, and `deps` says so before it asks. To compile, Homebrew also needs
+    (`--yes` does not count for this). `NM_TOOLS_FROM=source` builds them as on an Intel Mac instead. This way has
+    run only against the stand-ins of `tools/test_build_sh.py`, never on an Apple-silicon Mac.
+- Time and disk, as measured with `build.sh`. On the Intel Mac above, `deps` from an empty working directory took
+  46.5 minutes, downloads included (building LLVM about 30 of them), and 49 seconds when the tools were already
+  there; `fetch` took 40 seconds, `build` of all 17 components 5 minutes 41 seconds, `package` 27 seconds. On
+  GitHub's Intel runner, `deps` from nothing took 3 hours 53 minutes; with the tools restored from its cache, `deps`
+  took 40 seconds, `build` 30 minutes 20 seconds and `package` 60 seconds. `deps` leaves the tools built from source
+  (1.1 GB: each build tree is removed once its tool's checks pass), Rust (515 MB) and its crates (97 MB). After a
+  whole build and package the working directory on the Intel Mac held about 8 GB (sources 3.4 GB, tools 1.8 GB,
+  build trees 1.2 GB, outputs 1.1 GB, the package 492 MB). `deps` asks for 10 GB free before it starts LLVM and says
+  how much is free when there is less. Keep the Mac awake and on power: a tool whose build is interrupted (Ctrl-C,
+  sleep, power) is built again from the beginning by the next `./build.sh deps`, and LLVM is the long one. A tool
+  that fails stops `deps` with its log named; the next `deps` starts at that tool.
+- Time with `NM_TOOLS_FROM=homebrew` on an Intel Mac: Homebrew compiles each missing formula here, LLVM 22 the
+  longest; no such run has been timed, and `deps` warns before it asks. To compile, Homebrew also needs
   Apple's command line tools besides Xcode, as new as this macOS: without them it stops at the first formula with
   `Xcode alone is not sufficient` or `Your Command Line Tools are too outdated`. `xcode-select --install` installs them,
   Software Update updates them; `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` shows the version you have.
@@ -144,9 +168,9 @@ a folder `build` under it, with names they fix themselves:
 | `<workdir>/build/nvencvt-headers`, `<workdir>/build/nvencvt` | NVENC headers and the libnvencvt build | build_nvencvt.sh |
 | `<workdir>/build/plugin-release`, `plugin-dev`, `xlate-release` | Copies of the plugin and translator sources and their builds | build_plugin_*.sh, build_xlate_release.sh |
 
-An earlier `build.sh` gave the scripts `NULLMOTH_BUILD_ROOT=<workdir>/build`, so these folders were in
-`<workdir>/build/build/...`. Nothing uses that folder now: `./build.sh clean` (or `clean sources`) deletes it, and the
-next `fetch` lays the sources out again (the downloads in `<workdir>/src` are reused). A `NULLMOTH_BUILD_ROOT` you set
+A working directory used by an older `build.sh` can hold these folders in `<workdir>/build/build/...`. Nothing uses
+that folder: `./build.sh clean` (or `clean sources`) deletes it, and the next `fetch` lays the sources out again (the
+downloads in `<workdir>/src` are reused). A `NULLMOTH_BUILD_ROOT` you set
 yourself is used as it is.
 
 `build.sh` itself writes nothing to your shell start files, `~/.cargo`, `~/.rustup`, `/Library` or `/usr/local` (on an
@@ -177,7 +201,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 | `package` | Builds what is not up to date, then stages a package from a release package (`--base-package`) with every part this checkout builds replaced. Needs `--accel both` |
 | `test` | The pin comparison, the host tests (`tools/run_all_tests.py`) and, once the NVIDIA tree is fetched, the NVRM patch chain against it. Exit 1 when any of them fails. The plugin's tests that compile against Vulkan's headers get `NM_VULKAN_INCLUDE`: yours when you set it, otherwise the fetched Mesa's `include` (the folder the release plugin is compiled against); one line says which, or that there are none until `./build.sh fetch` |
 | `env` | Prints `export` lines for every variable `build.sh` gives the build scripts, to run one of them by hand with the same environment |
-| `clean [outputs\|sources\|tools\|all]` | Deletes inside the working directory only. `outputs` (the default): outputs, stamps, logs, the package, the RM work tree, and the build trees and exported sources of the tools built from source (not those tools). `sources`: the fetched sources (and the stamps). `tools`: everything under `<workdir>/tools`, the Python environment, Rust and the tools built from source included (and the stamps), without a question: on an Intel Mac the next `deps` builds those tools again, which takes about an hour. `all`: everything except the mark, after a yes |
+| `clean [outputs\|sources\|tools\|all]` | Deletes inside the working directory only. `outputs` (the default): outputs, stamps, logs, the package, the RM work tree, and the build trees and exported sources of the tools built from source (not those tools). `sources`: the fetched sources (and the stamps). `tools`: everything under `<workdir>/tools`, the Python environment, Rust and the tools built from source included (and the stamps), without a question: on an Intel Mac the next `deps` builds those tools again, which took 46.5 minutes on the Intel Mac above and 3 hours 53 minutes on GitHub's Intel runner. `all`: everything except the mark, after a yes |
 | `help` | The commands, components and settings |
 <!-- end -->
 
@@ -215,8 +239,8 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 <!-- reference: variables -->
 | Variable | Default | Meaning |
 |---|---|---|
-| `NM_BASE_PACKAGE_SHA256` | none | The base package's SHA-256 from the release page; checked before it is used |
-| `NM_PACKAGE_VERSION` | the version of CHANGELOG.md's first heading (`3.0`) | Written to the package's `VERSION`. install.sh keeps only digits and dots and records it in `/Library/NullMoth/driver-version` (so `package` stops on a value with anything else: `3.0rc1` would be recorded as `3.01`), the installed version the app's update check and Send logs read. Before, the package kept its base package's `VERSION`, so this checkout installed was recorded as that release (2.9). `package` stops when the heading is not a version and this is not set |
+| `NM_BASE_PACKAGE_SHA256` | none | The base package's SHA-256 from the release page (for release 2.9 it is also `NM_PIN_CI_BASEPKG_SHA256` in build/pins.sh); checked before it is used |
+| `NM_PACKAGE_VERSION` | the version of CHANGELOG.md's first heading (`3.0`) | Written to the package's `VERSION`. install.sh keeps only digits and dots and records it in `/Library/NullMoth/driver-version` (so `package` stops on a value with anything else: `3.0rc1` would be recorded as `3.01`), the installed version the app's update check and Send logs read. The base package's own `VERSION` is not kept, so an installed tester build is not recorded as that release (2.9). `package` stops when the heading is not a version and this is not set |
 | `NM_OGKM_URL` | the URL in build/pins.sh | A mirror of NVIDIA's open-gpu-kernel-modules (both trees) |
 | `NM_MESA_URL` | the URL in build/pins.sh | A mirror of Mesa; any clone that has the pinned commit works |
 | `NM_KHRONOS_URL` | the URL in build/pins.sh | A URL prefix that holds `Vulkan-Headers` and `Vulkan-Loader`. Set by you, it is also what the loader build clones from; unset, the loader is built from the verified copies in `<workdir>/src/khronos` |
@@ -242,8 +266,8 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `DEVELOPER_DIR` | the selected Xcode | An Xcode other than the one `xcode-select` selects |
 | `NM_BREW` | found | The `brew` to use. When set, it is the only Homebrew considered, whatever its architecture. Unset, `build.sh` uses the Homebrew of the Mac's processor only (`/usr/local` on Intel, `/opt/homebrew` on Apple silicon, also from a shell under Rosetta), and otherwise a `brew` on `PATH` only when it resolves into that same prefix (a wrapper in no Homebrew prefix, or one that resolves into the other architecture's prefix, is not taken). A Homebrew of the other architecture, whose formulas are built for the other processor and cannot be linked here, is named by `doctor` but used only when `NM_BREW` points at it. Every `brew` call runs with `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY`, `HOMEBREW_PATH` and `HOMEBREW_BREW_FILE` cleared and with `PATH` set to that Homebrew's `bin` followed by `/usr/bin:/bin:/usr/sbin:/sbin`, so a login shell's settings for another Homebrew cannot redirect it: Homebrew keeps the caller's `PATH` for a formula's post-install step and some of its builds, where that Homebrew's programs would otherwise come first. A tool taken from `PATH` (`python3`, `patch`, `gpatch`, `ninja`, `cmake`, `pkg-config`, `glslangValidator`) is left out when it belongs to the Homebrew of the other architecture (its file, after its symlinks, is there; or its `#!` interpreter is; or `file` says it is a Mach-O program without this processor's code); `doctor` says which and why |
 | `NM_PYTHON` | found | A Python 3.10 or newer to make the virtual environment with |
-| `NM_LLVM_PREFIX` | Homebrew's `llvm@22` or `llvm` | An LLVM 22.x with its clang libraries, when Homebrew has none |
-| `NM_SPIRV_TOOLS_PREFIX` | Homebrew's `spirv-tools` | A SPIRV-Tools 2024.1 or newer that is not Homebrew's: the prefix whose `lib/pkgconfig` holds `SPIRV-Tools.pc` |
+| `NM_LLVM_PREFIX` | the toolchain's LLVM; with `NM_TOOLS_FROM=homebrew` also Homebrew's `llvm@22` or `llvm` | An LLVM 22.x with its clang libraries, taken before those |
+| `NM_SPIRV_TOOLS_PREFIX` | the toolchain's; with `NM_TOOLS_FROM=homebrew` also Homebrew's `spirv-tools` | A SPIRV-Tools 2024.1 or newer that is not Homebrew's: the prefix whose `lib/pkgconfig` holds `SPIRV-Tools.pc` |
 | `NM_OGKM620_PRISTINE` | fetched | An unpacked NVIDIA 620.70.06 tree to use instead of fetching (checked by its `version.mk`) |
 | `NM_OGKM620` | `<workdir>/build/rm620/ogkm-620.70.06` | A 620.70.06 tree whose RM and modeset archives are already built: the `rm` and `kms` steps are then skipped |
 | `NM_OGKM610` | fetched | An unpacked NVIDIA 610.57.04 tree to use instead of fetching |
@@ -335,7 +359,7 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `osver` | libnvmtl_osver.dylib | build/build_osver.sh | |
 | `nvk` | NVK, the Vulkan driver (libvulkan_nouveau.dylib) | build/build_nvk.sh | |
 | `boost` | nvmtl-boost | tools/nvmtl-boost/build.sh | nvk |
-| `vulkan` | the Khronos Vulkan loader | build/build_vulkan_loader.sh | |
+| `vulkan` | the Khronos Vulkan loader v1.4.367, which the package offers to applications (`vulkan-for-apps.sh`); not the plugin's own loader | build/build_vulkan_loader.sh | |
 | `plugin` | the Metal plugin (NVMTLDriver) | build/build_plugin_release.sh, or build/build_plugin_dev.sh with `--flavour dev` | |
 | `xlate` | the shader translator (libnvmtl_translate.dylib) | build/build_xlate_release.sh | |
 | `nvencvt` | libnvencvt.dylib (video) | build/build_nvencvt.sh | rm |
@@ -358,19 +382,19 @@ dependencies too) before the first step starts.
 | `nvrm` | `python3` 3.8 or later (rmcc.py: `subprocess.run(capture_output=, text=)`, 3.7); the same `patch` (the chain test against the pristine tree) | the same |
 | `fb`, `accel`, `agdc`, `nmsmn`, `ryzenadj`, `airdis`, `dlss`, `osver`, `plugin`, `selector` | nothing else | |
 | `nvencvt` | `python3` 3.8 or later on the build Mac's PATH (`NM_LOCAL_HOST_PATH`, default `/usr/bin:/bin:/usr/sbin:/sbin`) | `python3 --version` there |
-| `vulkan` | cmake 3.22.1 or later and ninja | Homebrew's or on PATH |
+| `vulkan` | cmake 3.22.1 or later and ninja | `--version`; the toolchain's, and with `NM_TOOLS_FROM=homebrew` also Homebrew's or one on PATH |
 | `xlate` | Rust 1.98.1 in the working directory | `deps` installs it |
 | `nvk` (and `boost`, built from it) | Python 3.10 or later (Mesa's meson.build) with meson, mako, PyYAML, packaging in `<workdir>/tools/venv`; LLVM 22 with its clang libraries; SPIRV-LLVM-Translator for LLVM 22; SPIRV-Tools; glslang; pkg-config; Rust with bindgen and cbindgen; a `patch` that also creates files (NVK's chain adds files; Homebrew `gpatch` when macOS's cannot) | each one, as `doctor` shows |
 
-`deps` installs `gpatch` only when no `patch` found passes both tests. 3.8 is the oldest Python the kext and video
-scripts were run with; nothing in them needs 3.10.
+`deps` installs `gpatch` only when no `patch` found passes both tests. The oldest Python the kext and video scripts
+have been run with is macOS's own `python3` (3.9 with Xcode); nothing in them needs 3.10.
 
 They are built in the order of the table. Groups: `all` (the seventeen components above the optional ones), `kexts`
 (rm to nmsmn) and `userland` (airdis to nvencvt). The kext order is fixed: build_rm620.sh copies the pristine NVIDIA
 tree, applies the patches in kexts/NVRM/patches and writes the command lines every later kext step reads back;
 build_kms620.sh builds in the same tree; NVRM links both archives; NVRMFB and NVAccel compile against the patched tree.
 
-What `build.sh` does around the existing scripts, so that they no longer need the original author's machine:
+What `build.sh` does around the existing scripts, so that they do not need the original author's machine:
 
 - Every path a script would take from the author's home folder is given explicitly: the NVIDIA trees, `OGKM` (the
   scripts default to `~/ogkm610`, the wrong tree), the output folders, Rust and the crate cache in the working directory.
@@ -429,7 +453,7 @@ owner a moment later).
 
 `build.sh` never installs anything. A package cannot be made from this repository alone: install.sh refuses a
 package without `nullmoth-runtime-check`, and the plugin bundle's Info.plist, `nvmtl-allow.txt`, `air-runtime`, the
-video libraries, the Vulkan loader 1.4.362 and a few configuration files have no source here
+video libraries, the plugin's own Vulkan loader (1.4.362) and a few configuration files have no source here
 ([PROVENANCE.md](PROVENANCE.md)). The release itself starts each package from the previous one. So
 `./build.sh package` does the same: with a release package as the base (`--base-package`, a
 `nullmoth-nvidia-2.9.tar.gz` from Releases or its unpacked `pkgroot`), `build/package_local.sh` checks the base
@@ -444,6 +468,10 @@ package's integrity, not who built it, so it accepts this one. The tarball's hea
 account that built it, and it carries none of your Mac's extended attributes (the quarantine mark of a downloaded
 base names your browser), so it can be passed on. The ryzenadj built here has another SHA-256 than the
 one the 1401 app pins, so the app will not install it; the driver is not affected.
+
+No package made by `./build.sh package` has been installed on any Mac, and nothing built from this branch has been
+loaded or run on an NVIDIA card: whoever installs one first is testing it. The sizes of Apple's IOKit classes on
+macOS 26.7 have not been measured either; the kexts compare them with their own when they start (the layout check).
 
 Install it yourself, as for a release (read [README.md](../README.md), "Install — by hand", first: OpenCore must be
 set up):
@@ -485,7 +513,7 @@ restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brin
 | The GSP firmware | install.sh downloads NVIDIA's firmware at install time, not at build time |
 | `nmkbl`, `nmhda` | They need Lilu, VirtualSMC and MacKernelSDK at the revisions the EFI uses, which no script records; give them with the three variables |
 | Signing with a real identity | Releases are signed by their maintainer. In a tester package the NVK, translator and other libraries are signed ad hoc, and a kext is signed ad hoc where the base package's copy was signed |
-| Byte-identical results | The release's Xcode version is recorded nowhere. The compile commands of NVIDIA's RM and NVKMS are the same on an Intel and on an Apple-silicon Mac: NVIDIA's makefiles ask the build Mac's compiler which x86-only hardening options it takes, and `build/nv_compile_lines.py` leaves out whatever that adds, so an Intel Mac compiles with the release's commands (its build log names what was left out) |
+| Byte-identical results | The release's Xcode version is recorded nowhere, so a build here cannot be compared with the release. What has been compared: on the Intel Mac named at the top, NVK's library had the same bytes in three builds (one with tools built by hand, then at commits 650db45 and 3933ff6), and NVRM.kext's binary and the plugin had the same bytes at those two commits (the plugin with the 26.5 SDK, which leaves out its part for older SDKs); at commit 95811c2 the kexts built on GitHub's Intel and Apple-silicon runners had the same bytes. Not compared: the other kexts, the translator (its rustc options differ between those two commits), the video library, and anything between that Mac and GitHub's runners. The Vulkan loader's CMake compiles a configuration folder into the library, and build_vulkan_loader.sh sets it to `/etc` (`-DSYSCONFDIR=/etc`) instead of its temporary install folder: with that option two builds on one Intel Mac had the same bytes. {{PENDING 5c}} The compile commands of NVIDIA's RM and NVKMS are the same on an Intel and on an Apple-silicon Mac: NVIDIA's makefiles ask the build Mac's compiler which x86-only hardening options it takes, and `build/nv_compile_lines.py` leaves out whatever that adds, so an Intel Mac compiles with the release's commands (its build log names what was left out) |
 
 ## Troubleshooting
 
@@ -512,11 +540,12 @@ restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brin
 | `STOP: NVRM.kext imports ___x86_return_thunk, which no macOS defines` (or another kext, or another `___x86_`, `___fentry__` or `mcount` name; the step ends with exit 7) | The kext was compiled with an option made for the Linux kernel, whose helper no macOS has: it would link and never load. It stops before anything is packaged | With `KMS_ARCHIVE` set, it names an NVKMS archive built with other commands: unset it. Otherwise build again in a new work folder (`--workdir`); if it stays, report it with the report file |
 | `build_rm620.sh reported compile failures` | A compile of NVIDIA's RM failed; build_rm620.sh itself would not stop | Read the `failed:` lines in `logs/rm.log` |
 | a step stops at a warning ceiling (`warn_ceiling`) | The ceilings in build/warnings.txt are 0: a compiler or linker other than the release's may print a new warning | Report it with the report file and your Xcode version |
-| `libvulkan_nouveau.dylib loads a library from outside macOS` | A Homebrew library (often libelf in /usr/local on Intel) was linked | Report it with the report file |
+| `libvulkan_nouveau.dylib loads a library from outside macOS` | A library from outside macOS (Homebrew's, for one) was linked | Report it with the report file |
 | `STOP: step 'toolchain-<tool>' failed` (deps, `NM_TOOLS_FROM=source`) | `build/toolchain.sh` could not build or check that tool; its log is `<workdir>/logs/toolchain/<tool>.log` | Read the log's last lines; run `./build.sh deps` again after a fix: it starts at that tool, the ones before it are kept |
 | `... links <library>, which is neither the system's nor the toolchain's`, or `... is a link to <path>, which is neither ...` (in a toolchain log) | A tool picked up a library from another folder, usually Homebrew's `/usr/local` on an Intel Mac, or installed a link that leads there; the stamp is not written, so the tool is not used | Report it with the report file; the library named is what leaked |
 | `... is built for macOS N and later, above MACOSX_DEPLOYMENT_TARGET` (in a toolchain log) | A tool was built for a newer macOS than the build's oldest (15.0), so NVK's link would warn | Report it with the report file |
-| deps was interrupted while LLVM built (Ctrl-C, sleep, power) | The half-built tree is not resumed | Run `./build.sh deps` again: LLVM is built again from an empty build tree (34 minutes on one 12-thread Intel Mac); keep the Mac awake |
+| deps was interrupted while LLVM built (Ctrl-C, sleep, power) | The half-built tree is not resumed | Run `./build.sh deps` again: LLVM is built again from an empty build tree (about 30 minutes on the Intel Mac named at the top); keep the Mac awake |
+| `deps` prints rustup's warning `default toolchain implicitly overridden` twice | rustup prints it while `deps` installs the pinned Rust; a good run on the Intel Mac named at the top printed it too | Nothing: it is expected |
 | `building LLVM needs about 10 GB free` | Not enough free space where the working directory is | Make room, or choose a working directory on another disk with `--workdir` |
 | `the base package does not match its own SHA256SUMS` | The release package is damaged or changed | Download it again |
 | `the base package is release <x>, not 2.9` | `package` stages onto release 2.9 only: another release's files that have no source here would ship under this build's version | Use `nullmoth-nvidia-2.9.tar.gz` from Releases |
@@ -549,7 +578,8 @@ skipped and the failed one runs again. `-v` shows a step's output while it runs.
 
 ## How it is tested
 
-`tools/test_build_sh.py` runs the real `build.sh` on a Linux machine in a sandbox that imitates a Mac: stand-ins for
+`tools/test_build_sh.py` runs the real `build.sh` in a sandbox that imitates a Mac, on Linux and on GitHub's Intel
+runner: stand-ins for
 `sw_vers`, `uname`, `xcode-select`, `xcodebuild`, `xcrun`, `brew`, `rustup`, `cargo`, `python3` and the other tools,
 real git against local repositories that stand in for the remotes, and a scratch copy of this tree in which every
 component build script is replaced by a stand-in that records what it receives. It checks doctor on a Mac with
@@ -565,13 +595,17 @@ two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `en
 and the pins against the scripts that use them; each part has at least one control that breaks `build.sh` (or its
 input) on purpose and shows the check then fails. It runs `build.sh` under `/bin/bash`, or the bash named by
 `BUILD_SH_BASH`, and says so when that is not bash 3.2, the `/bin/bash` of macOS; it has passed under GNU bash
-3.2.48 and 5.2 on Linux, and once on the owner's Intel Mac, at a commit before the last changes to `build.sh` (the
-Homebrew of the other architecture, the tools taken from `PATH`, `fetch`'s git set-up, the stop without Xcode). `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
+3.2.48 and 5.2 on Linux, and under macOS's `/bin/bash` on GitHub's Intel runner at commit 3933ff6 (it has not run on
+the Intel Mac at that commit). {{PENDING 5b}} `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
 build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
-folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
-the first run on a Mac will show.
-In addition, every push is built from nothing on an Intel Mac of GitHub's (macOS 15, no NVIDIA card, nothing installed
-or loaded): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build, package and test in an empty folder,
-then checks that Homebrew was neither used nor changed and that everything built loads only from macOS, that folder and
+folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What these tests cannot show is how a real Xcode, Homebrew and compiler behave: the whole builds on the two Macs
+named at the top have shown it for Xcode 26.3 and 26.5, and no run on a Mac has used Homebrew.
+
+In addition, every push is built in an empty working directory on GitHub's Intel runner (no NVIDIA card, nothing
+installed or loaded), with the tools built from source restored from GitHub's cache once a run has made them (from
+nothing, `deps` took 3 hours 53 minutes there): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build,
+package and test, then checks that Homebrew was neither used nor changed and that everything built loads only from macOS, that folder and
 the driver's own folders. Its result is under the repository's Actions tab, workflow full-build; when it fails or runs
-out of time, its last step prints the logs. Until it has passed once, its result does not hold up a change.
+out of time, its last step prints the logs. At commit 3933ff6 every step up to `package` succeeded; the result of its
+`test` step and of its checks is not stated here. {{PENDING full-test}} {{PENDING full-prove}} Until it has passed once,
+its result does not hold up a change.
