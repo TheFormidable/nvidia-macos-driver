@@ -83,7 +83,11 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   event, as WindowServer already did, and a thread whose waits run longer than about 2 ms sleeps almost at once;
   waits shorter than 1 ms are unchanged. A process whose wake-ups do not arrive goes back to polling by itself; an
   event that merely arrives late (the GPU shows a completion just before its event) no longer counts towards that, so
-  a game or compositor that waits at a steady cadence keeps sleeping. Way back: `NVRM_EVENT_WAIT=0` in
+  a game or compositor that waits at a steady cadence keeps sleeping. A process whose event wakes stop arriving for a
+  moment (a display mode change, a display waking, a wake from sleep) no longer polls until it exits: each of its
+  threads tries the event again after a pause (256 of its waits, doubled after each failed try up to 65536), and the
+  first wake that arrives puts the whole process back on the event; only a kext that cannot wait at all keeps a
+  process polling for good. Way back: `NVRM_EVENT_WAIT=0` in
   `nvrm610.conf`. Like 2.9's `0`, it makes every process poll, WindowServer included, which costs WindowServer more
   CPU than both 2.9's default and this release's. See [docs/EVENT-WAIT.md](docs/EVENT-WAIT.md).
 - A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
