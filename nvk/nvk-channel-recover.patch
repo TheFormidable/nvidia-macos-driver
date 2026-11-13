@@ -7,6 +7,8 @@ replayed, and the one that was running dropped (the CPU stores its sequence numb
 fences answer "did not run" through nvmtl_nvk_fence_dropped_v1). Before that, a stalled wait rings the doorbell again
 at half the budget. A fault inside replayed work drops everything in flight. Only channel exceptions and stalls are
 rebuilt, at most 3 times in 30 s per channel; every other loss ends exactly as 2.9 ended, plus one line naming it.
+A system sleep is not a fault: while the kext reports the GPU suspended for a sleep or wake, a stalled wait looks
+again instead of rebuilding (for at most 30 s of awake time), and no escape is made with a channel's mutex held.
 The pure part is nvkmd/nvrm/nvkmd_nvrm_recover.h, with its host test nvkmd_nvrm_recover_test.c beside it.
 nvkmd/nvrm/nvrm_chan_note_abi.h is a byte-for-byte copy of kexts/NVRM/nvrm_chan_note_abi.h (escape 0xE8: counters in
 the kext and the adapter's power state; a kext without it fails the escape once and is not asked again).
@@ -154,7 +156,7 @@ index 26dec3e..521cf71 100644
 + * non-zero: it has no such escape (an older kext, which hands it to the RM and gets it refused). */
 +int nvRmApiChanNote(NvRmApi *api, struct NVRMChanNoteEsc *e);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index 36e74e5..94502ab 100644
+index 36e74e5..38a6bf9 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 @@ -18,6 +18,7 @@
@@ -189,7 +191,7 @@ index 36e74e5..94502ab 100644
  };
  extern struct nvkmd_nvrm_slot nvkmd_nvrm_slots[NVRM_CTX_MAX];
  extern pthread_mutex_t nvkmd_nvrm_gsub_mtx;
-@@ -207,6 +225,18 @@ struct nvkmd_nvrm_exec_ctx {
+@@ -207,6 +225,19 @@ struct nvkmd_nvrm_exec_ctx {
     uint32_t *segStart;                    // first push dword not yet handed to the GPFIFO
     uint64_t slotSeq[NVRM_CMD_SLOTS];      // the wSeq whose release ends each slot (0 = never used)
     uint64_t slotPut[NVRM_CMD_SLOTS];      // gpPut just after that release's GPFIFO entry
@@ -205,10 +207,11 @@ index 36e74e5..94502ab 100644
 +   bool reinitBroken;                     // a host copy of channel state could not be kept: never rebuilt
 +   struct { uint32_t *dw; uint32_t n; } reinit[NVKMD_REINIT_COUNT];   // host copies of the channel-wide state
 +   struct nvkmd_mem *recPrologue;         // the GPU copy of them the last rebuild ran; freed at the next or at destroy
++   int64_t recAsleepNs;                   // awake time of the first "GPU suspended" answer a rebuild got, 0 none
  };
  
  NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
-@@ -219,6 +249,48 @@ NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
+@@ -219,6 +250,48 @@ NVKMD_DECL_SUBCLASS(ctx, nvrm_exec);
   * its kchan is 0, so its surfaces use the 2.9 marks from now on. Either way the channel itself is unaffected. */
  bool nvkmd_nvrm_fence_chan_rebind(struct nvkmd_nvrm_exec_ctx *ctx);
  
@@ -257,7 +260,7 @@ index 36e74e5..94502ab 100644
  struct nvkmd_nvrm_bind_ctx {
     struct nvkmd_ctx base;
  };
-@@ -239,6 +311,7 @@ struct nvkmd_nvrm_sync {
+@@ -239,6 +312,7 @@ struct nvkmd_nvrm_sync {
      * (VK_SYNC_WAIT_PENDING); pend = submitted GPU signals not yet seen complete. Guarded by nvkmd_nvrm_gsub_mtx. */
     uint64_t pending;
     uint32_t npend;
@@ -265,7 +268,7 @@ index 36e74e5..94502ab 100644
     struct nvkmd_nvrm_sync_pend {
        uint32_t slot;
        uint32_t gen;
-@@ -285,6 +358,12 @@ void nvkmd_nvrm_gsub_stats(uint64_t *out, unsigned n);   /* exported: the plugin
+@@ -285,6 +359,12 @@ void nvkmd_nvrm_gsub_stats(uint64_t *out, unsigned n);   /* exported: the plugin
  long nvkmd_nvrm_flush_timeout_ms(void);
  void nvkmd_nvrm_gsub_count(unsigned which);
  bool nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq);   /* caller holds nvkmd_nvrm_gsub_mtx */
@@ -853,10 +856,10 @@ index 0c79274..f00ea86 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..6e60a3a
+index 0000000..ea62272
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,1009 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1228,14 +1231,21 @@ index 0000000..6e60a3a
 +   if (still)
 +      r->kickVal = __atomic_load_n(r->sem, __ATOMIC_ACQUIRE);
 +   pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++   /* The device's pdev outlives every context of it, so it is taken under the mutex and used after: the note is an
++    * escape, and an escape may wait in the kernel (a kext older than the early answer holds it while the GPU sleeps),
++    * which must never happen with the context mutex held. */
++   struct nvkmd_nvrm_pdev *kpdev = NULL;
 +   if (still) {
 +      rec_doorbell(rctx, (uint32_t)rctx->subPut);
 +      rec_stat_add(REC_ST_KICKS, 1);
-+      rec_note(nvkmd_nvrm_pdev(rctx->base.dev->pdev), NVRM_CN_KICK, 0, 0, 0, 0, NULL);
++      kpdev = nvkmd_nvrm_pdev(rctx->base.dev->pdev);
++   }
++   pthread_mutex_unlock(&nvrm_rec_mtx[R]);
++   if (kpdev != NULL) {
++      rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);
 +      if (nvkmd_nvrm_diag_on())
 +         fprintf(stderr, "nvrm: channel slot %u made no progress for half the stall budget - doorbell rung again\n", R);
 +   }
-+   pthread_mutex_unlock(&nvrm_rec_mtx[R]);
 +}
 +
 +/* ── steps 2 and 3 of the ladder: the rebuild ──────────────────────────────────────────────────────────────────────────────────── */
@@ -1271,6 +1281,14 @@ index 0000000..6e60a3a
 +   int32_t pm = -1;
 +   (void)rec_note(j->pdev, NVRM_CN_QUERY, 0, 0, 0, 0, &pm);
 +   in->pm = pm;
++}
++
++/* An RM control: during a GPU suspend and resume it waits in the kernel until the resume, so it is asked only when
++ * the power state did not already decide (nvrm_rec_execute). */
++static void
++rec_op_action(void *u, struct nvrm_rec_inputs *in)
++{
++   struct rec_job *j = u;
 +   struct NvRmApi rm;
 +   nvkmd_nvrm_dev_api_ctl(j->pdev, &rm);
 +   NV2080_CTRL_GPU_GET_RECOVERY_ACTION_PARAMS ap;
@@ -1455,6 +1473,7 @@ index 0000000..6e60a3a
 +
 +static const struct nvrm_rec_ops nvrm_rec_rm_ops = {
 +   .inputs = rec_op_inputs,
++   .action = rec_op_action,
 +   .read_sem = rec_op_read_sem,
 +   .build = rec_op_build,
 +   .discard = rec_op_discard,
@@ -1542,6 +1561,8 @@ index 0000000..6e60a3a
 +   return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel made no progress within NVRM_FLUSH_TIMEOUT_MS");
 +}
 +
++/* ASLEEP is never final (and never reaches here: nvrm_rec_run gives the claim back before), nor are BUSY, DYING,
++ * ROOT_ALIVE and GAVE_UP_BEFORE. */
 +static bool
 +rec_why_is_final(enum nvrm_rec_why w)
 +{
@@ -1665,7 +1686,22 @@ index 0000000..6e60a3a
 +      memcpy(st.stamps, r->rebuildNs, sizeof(st.stamps));
 +      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
 +      st.now = t0;
-+      why = nvrm_rec_execute(&nvrm_rec_rm_ops, &job, &st, &kind, &level, &plan);
++      why = nvrm_rec_execute(&nvrm_rec_rm_ops, &job, &st, &ctx->recAsleepNs, &kind, &level, &plan);
++   }
++
++   if (why == NVRM_WHY_ASLEEP) {
++      /* the GPU is suspended for a system sleep or wake: the channel stands still on purpose, and nothing was asked of
++       * RM, built or freed. The claim is given back and the waiter looks again with a fresh stall clock, as while
++       * another thread rebuilds; nothing is counted, reported or remembered as given up. */
++      pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
++      if (r->ctx == ctx && r->gen == rgen)
++         r->recovering = false;
++      pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
++      if (nvkmd_nvrm_diag_on())
++         fprintf(stderr, "nvrm: channel slot %u stands still while the GPU is suspended for a sleep or wake - waiting again\n", R);
++      nvrm_rec_held--;
++      pthread_mutex_unlock(&nvrm_rec_mtx[R]);
++      return VK_SUCCESS;
 +   }
 +
 +   if (why != NVRM_WHY_OK) {
@@ -1835,10 +1871,10 @@ index 0000000..6e60a3a
 +}
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
 new file mode 100644
-index 0000000..49dd2fd
+index 0000000..3d5845a
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,434 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1871,6 +1907,7 @@ index 0000000..49dd2fd
 +#define NVRM_REC_WINDOW_NS     30000000000ll
 +#define NVRM_REC_DROPS         8              /* dropped sequence ranges remembered per channel slot */
 +#define NVRM_REC_CHAIN         4              /* SEM_ACQUIRE hops followed to the channel that blocks a wait */
++#define NVRM_REC_ASLEEP_NS     30000000000ll  /* awake time a channel's "GPU suspended" answers are believed for */
 +
 +/* The kind of loss. Only CHANNEL and STALL are rebuilt; every other kind ends as 2.9 ended, with its name logged. */
 +enum nvrm_rec_kind { NVRM_LOSS_NONE = 0, NVRM_LOSS_CHANNEL = 1, NVRM_LOSS_STALL = 2, NVRM_LOSS_MEMORY = 3,
@@ -1879,7 +1916,7 @@ index 0000000..49dd2fd
 +enum nvrm_rec_why  { NVRM_WHY_OK = 0, NVRM_WHY_OFF = 1, NVRM_WHY_KIND = 2, NVRM_WHY_BUDGET = 3, NVRM_WHY_PLAN = 4,
 +                     NVRM_WHY_BUILD = 5, NVRM_WHY_FREE = 6, NVRM_WHY_COPY_REFAULT = 7, NVRM_WHY_BUSY = 8,
 +                     NVRM_WHY_DYING = 9, NVRM_WHY_SHAPE = 10, NVRM_WHY_BLOBS = 11, NVRM_WHY_ROOT_ALIVE = 12,
-+                     NVRM_WHY_GAVE_UP_BEFORE = 13 };
++                     NVRM_WHY_GAVE_UP_BEFORE = 13, NVRM_WHY_ASLEEP = 14 };
 +/* REPLAY: drop the flush that was running, replay the rest. REPLAY_ALL: drop nothing (a copy-only context: copies are
 + * idempotent and carry state that later work needs). DROP_ALL: the channel faulted again inside the work an earlier
 + * rebuild replayed, so that work is the cause: drop everything in flight. */
@@ -1900,7 +1937,8 @@ index 0000000..49dd2fd
 +                                    "old channel could not be freed", "copy channel faulted in replayed work",
 +                                    "another recovery is stuck", "channel is being destroyed",
 +                                    "channel shape not rebuildable", "channel state not captured",
-+                                    "the channel it waits on is still progressing", "gave up before" };
++                                    "the channel it waits on is still progressing", "gave up before",
++                                    "the GPU is suspended for a sleep or wake" };
 +   return w < sizeof(n) / sizeof(n[0]) ? n[w] : "?";
 +}
 +
@@ -1915,6 +1953,7 @@ index 0000000..49dd2fd
 +   uint32_t action;      /* its answer; 0 = no action needed */
 +};
 +
++#define NVRM_REC_PM_SUSPENDED      1u      /* NVRM_CN_PM_SUSPENDED: a system sleep or wake is under way */
 +#define NVRM_REC_PM_LOST           2u      /* NVRM_CN_PM_LOST: the adapter did not come back from sleep */
 +#define NVRM_REC_RC_GPU_IS_LOST    0x0Fu   /* NV_ERR_GPU_IS_LOST */
 +#define NVRM_REC_RC_FULLCHIP_RESET 0x10u   /* NV_ERR_GPU_IN_FULLCHIP_RESET */
@@ -1953,6 +1992,26 @@ index 0000000..49dd2fd
 +      }
 +   }
 +   return NVRM_LOSS_NONE;
++}
++
++/* A channel that stands still because the GPU is suspended for a system sleep or wake is not stalled: the kext stops
++ * every user channel and holds every RM call from the start of the suspend to the end of the resume, while the awake
++ * clock of the stall budget goes on running. So a stall (nothing changed in the error notifier) on a GPU the kext
++ * calls suspended is answered "look again", without asking RM anything (RM calls wait for the resume). *since is the
++ * awake time of the first such answer for this channel, 0 none; any other answer clears it. The answer is believed
++ * for NVRM_REC_ASLEEP_NS of awake time only: a GPU that stays suspended (a resume that never comes) must not keep a
++ * waiter looking forever at work that cannot finish, so after that the normal sequence runs, which then waits for the
++ * resume inside RM as it always did. An unknown power state (-1: an older kext) is never "suspended". */
++static inline bool
++nvrm_rec_asleep(int32_t pm, uint32_t changed, int64_t now, int64_t *since)
++{
++   if (pm < 0 || (uint32_t)pm != NVRM_REC_PM_SUSPENDED || changed) {
++      *since = 0;
++      return false;
++   }
++   if (*since == 0)
++      *since = now != 0 ? now : 1;
++   return now - *since < NVRM_REC_ASLEEP_NS;
 +}
 +
 +/* ── the rebuild budget: at most NVRM_REC_MAX_REBUILDS inside NVRM_REC_WINDOW_NS; a stamp of 0 is an unused one ─── */
@@ -2180,7 +2239,8 @@ index 0000000..49dd2fd
 +};
 +
 +struct nvrm_rec_ops {
-+   void     (*inputs)(void *u, struct nvrm_rec_inputs *in);   /* the notifier, the kext's power state, RM's action */
++   void     (*inputs)(void *u, struct nvrm_rec_inputs *in);   /* the notifier and the kext's power state */
++   void     (*action)(void *u, struct nvrm_rec_inputs *in);   /* RM's recovery action (an RM call) */
 +   uint64_t (*read_sem)(void *u);
 +   int      (*build)(void *u);                                /* the new channel and the prologue buffer; 0 = ok */
 +   void     (*discard)(void *u);                              /* destroy what build made */
@@ -2190,19 +2250,26 @@ index 0000000..49dd2fd
 +   void     (*start)(void *u, const struct nvrm_rec_plan *p); /* GPPut and the doorbell */
 +};
 +
-+/* Classify, check the budget, choose the level, plan, build, free the old channel, plan again with the final
++/* The inputs, then: a stall on a suspended GPU is ASLEEP (nvrm_rec_asleep; *asleepSince is the channel's stamp, kept
++ * by the caller), which asks RM nothing, builds nothing and is not final: the waiter looks again. Otherwise RM's
++ * action, classify, check the budget, choose the level, plan, build, free the old channel, plan again with the final
 + * semaphore, adopt, start. A refusal before free_old changes nothing; a failed build cleans up after itself; a failed
 + * free_old is followed by discard and nothing else. After free_old nothing can fail: the plan that held for the
 + * semaphore before it holds for any later value (fewer flushes remain), and adopt and start are memory writes.
 + * *kind and *level are set as far as the sequence got; *plan is the plan that was adopted. */
 +static inline enum nvrm_rec_why
-+nvrm_rec_execute(const struct nvrm_rec_ops *ops, void *u, const struct nvrm_rec_state *st,
++nvrm_rec_execute(const struct nvrm_rec_ops *ops, void *u, const struct nvrm_rec_state *st, int64_t *asleepSince,
 +                 enum nvrm_rec_kind *kind, enum nvrm_rec_level *level, struct nvrm_rec_plan *plan)
 +{
 +   struct nvrm_rec_inputs in;
 +   memset(&in, 0, sizeof(in));
 +   in.pm = -1;
 +   ops->inputs(u, &in);
++   *kind = NVRM_LOSS_NONE;
++   *level = NVRM_REC_REPLAY;
++   if (nvrm_rec_asleep(in.pm, in.changed, st->now, asleepSince))
++      return NVRM_WHY_ASLEEP;
++   ops->action(u, &in);
 +   enum nvrm_rec_kind k = nvrm_rec_classify(&in);
 +   if (k == NVRM_LOSS_NONE && !in.changed)
 +      k = NVRM_LOSS_STALL;
@@ -2244,10 +2311,10 @@ index 0000000..49dd2fd
 +#endif /* NVKMD_NVRM_RECOVER_H */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 new file mode 100644
-index 0000000..6ae76fa
+index 0000000..7f8b277
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,631 @@
 +/* Host test of nvkmd_nvrm_recover.h (the pure part of rebuilding a channel). Not built by meson. From this directory:
 + *   cc -std=c11 -O1 -g -Wall -Wextra -Werror -I. nvkmd_nvrm_recover_test.c -o /tmp/nvkmd_nvrm_recover_test && /tmp/nvkmd_nvrm_recover_test
 + * (add -fsanitize=address,undefined where the compiler has a runtime for them). Exit 0 = every arm passed.
@@ -2650,13 +2717,14 @@ index 0000000..6ae76fa
 +
 +static void f_note(struct fake *f, char c) { if (f->n < sizeof(f->log) - 1) f->log[f->n++] = c; f->log[f->n] = 0; }
 +static void f_inputs(void *u, struct nvrm_rec_inputs *in) { struct fake *f = u; f_note(f, 'i'); *in = f->in; }
++static void f_action(void *u, struct nvrm_rec_inputs *in) { (void)in; f_note(u, 'r'); }
 +static uint64_t f_sem(void *u) { struct fake *f = u; f_note(f, 's'); uint64_t v = f->sem[f->semReads < 1 ? 0 : 1]; f->semReads++; return v; }
 +static int f_build(void *u) { struct fake *f = u; f_note(f, 'b'); return f->buildRc; }
 +static void f_discard(void *u) { f_note(u, 'd'); }
 +static int f_free(void *u) { struct fake *f = u; f_note(f, 'f'); return f->freeRc; }
 +static void f_adopt(void *u, const struct nvrm_rec_ring *r, const struct nvrm_rec_plan *p) { struct fake *f = u; (void)r; f_note(f, 'a'); f->adopted = *p; }
 +static void f_start(void *u, const struct nvrm_rec_plan *p) { (void)p; f_note(u, 't'); }
-+static const struct nvrm_rec_ops fops = { f_inputs, f_sem, f_build, f_discard, f_free, f_adopt, f_start };
++static const struct nvrm_rec_ops fops = { f_inputs, f_action, f_sem, f_build, f_discard, f_free, f_adopt, f_start };
 +
 +static void
 +state_ring(struct nvrm_rec_state *st, uint64_t S, uint64_t F)
@@ -2677,6 +2745,8 @@ index 0000000..6ae76fa
 +   st->now = 1000000000000ll;
 +}
 +
++static int64_t asleep;   /* the channel's "GPU suspended" stamp, as nvrm_rec_run keeps it across runs */
++
 +static enum nvrm_rec_why
 +run(struct fake *f, const struct nvrm_rec_state *st, enum nvrm_rec_kind *k, enum nvrm_rec_level *lv)
 +{
@@ -2684,7 +2754,7 @@ index 0000000..6ae76fa
 +   f->n = 0;
 +   f->log[0] = 0;
 +   f->semReads = 0;
-+   return nvrm_rec_execute(&fops, f, st, k, lv, &p);
++   return nvrm_rec_execute(&fops, f, st, &asleep, k, lv, &p);
 +}
 +
 +static void
@@ -2701,37 +2771,37 @@ index 0000000..6ae76fa
 +   f.in.pm = -1;
 +   f.sem[0] = 10;
 +   f.sem[1] = 11;
-+   arm("execute: a channel fault runs inputs, sem, build, free, sem, adopt, start in that order",
-+       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "isbfsat") == 0 && k == NVRM_LOSS_CHANNEL &&
++   arm("execute: a channel fault runs inputs, action, sem, build, free, sem, adopt, start in that order",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "irsbfsat") == 0 && k == NVRM_LOSS_CHANNEL &&
 +       lv == NVRM_REC_REPLAY);
 +   arm("execute: the adopted plan uses the semaphore read after the free",
 +       f.adopted.S == 11 && f.adopted.dropLo == 12 && f.adopted.dropHi == 12 && f.adopted.keepLo == 13);
 +   f.in.xid = 120;
-+   arm("execute: a non-recoverable kind never builds", run(&f, &st, &k, &lv) == NVRM_WHY_KIND && strcmp(f.log, "i") == 0 &&
++   arm("execute: a non-recoverable kind never builds", run(&f, &st, &k, &lv) == NVRM_WHY_KIND && strcmp(f.log, "ir") == 0 &&
 +       k == NVRM_LOSS_GSP);
 +   f.in.xid = 13;
 +   for (unsigned i = 0; i < NVRM_REC_MAX_REBUILDS; i++)
 +      st.stamps[i] = st.now - 1000 - i;
-+   arm("execute: an exhausted budget never builds", run(&f, &st, &k, &lv) == NVRM_WHY_BUDGET && strcmp(f.log, "i") == 0);
++   arm("execute: an exhausted budget never builds", run(&f, &st, &k, &lv) == NVRM_WHY_BUDGET && strcmp(f.log, "ir") == 0);
 +   memset(st.stamps, 0, sizeof(st.stamps));
 +   st.ring.slotSeq[2] = 0;   /* flush 13 lost its record */
-+   arm("execute: a refused plan never builds", run(&f, &st, &k, &lv) == NVRM_WHY_PLAN && strcmp(f.log, "is") == 0);
++   arm("execute: a refused plan never builds", run(&f, &st, &k, &lv) == NVRM_WHY_PLAN && strcmp(f.log, "irs") == 0);
 +   state_ring(&st, 10, 15);
 +   st.copyOnly = true;
 +   st.replayedThrough = 12;
 +   arm("execute: a copy-only refault never builds",
-+       run(&f, &st, &k, &lv) == NVRM_WHY_COPY_REFAULT && strcmp(f.log, "is") == 0);
++       run(&f, &st, &k, &lv) == NVRM_WHY_COPY_REFAULT && strcmp(f.log, "irs") == 0);
 +   st.replayedThrough = 10;
 +   arm("execute: copy-only replays everything", run(&f, &st, &k, &lv) == NVRM_WHY_OK && lv == NVRM_REC_REPLAY_ALL &&
 +       f.adopted.dropLo > f.adopted.dropHi && f.adopted.keepLo == 12);
 +   st.copyOnly = false;
 +   f.buildRc = -1;
 +   arm("execute: a failed build never frees the old channel", run(&f, &st, &k, &lv) == NVRM_WHY_BUILD &&
-+       strcmp(f.log, "isb") == 0);
++       strcmp(f.log, "irsb") == 0);
 +   f.buildRc = 0;
 +   f.freeRc = -1;
 +   arm("execute: a failed free discards the new channel and adopts nothing",
-+       run(&f, &st, &k, &lv) == NVRM_WHY_FREE && strcmp(f.log, "isbfd") == 0);
++       run(&f, &st, &k, &lv) == NVRM_WHY_FREE && strcmp(f.log, "irsbfd") == 0);
 +   f.freeRc = 0;
 +   st.replayedThrough = 12;
 +   arm("execute: DROP_ALL exactly when the semaphore is below the replayed work on a graphics context",
@@ -2756,6 +2826,75 @@ index 0000000..6ae76fa
 +      startAfterAdopt = startAfterAdopt && a != NULL && s == a + 1 && s[1] == 0;
 +   }
 +   arm("execute: start always directly follows adopt, and nothing follows start", startAfterAdopt);
++}
++
++/* ── a stall while the GPU is suspended for a sleep or wake ── */
++static void
++test_asleep(void)
++{
++   struct nvrm_rec_state st;
++   struct fake f;
++   enum nvrm_rec_kind k;
++   enum nvrm_rec_level lv;
++   memset(&f, 0, sizeof(f));
++   state_ring(&st, 10, 15);
++   f.sem[0] = 10;
++   f.sem[1] = 10;
++   const int64_t T = st.now;
++   f.in.pm = 1;   /* NVRM_CN_PM_SUSPENDED */
++   asleep = 0;
++   arm("asleep: a stall on a suspended GPU looks again: no RM action, no semaphore read, no build, no free",
++       run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && strcmp(f.log, "i") == 0 && k == NVRM_LOSS_NONE && asleep == T);
++   f.in.pm = 0;   /* control: the same stall on a running GPU */
++   arm("asleep: control: the same stall on a running GPU is rebuilt, and the stamp is cleared",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "irsbfsat") == 0 && k == NVRM_LOSS_STALL && asleep == 0);
++   f.in.pm = -1;
++   arm("asleep: an older kext (power state unknown) gets the sequence it always had",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "irsbfsat") == 0 && k == NVRM_LOSS_STALL && asleep == 0);
++   f.in.pm = 1;
++   f.in.changed = 1;
++   f.in.xid = 13;
++   arm("asleep: a changed error notifier on a suspended GPU is not a stall: RM is asked and the fault rebuilt as before",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strncmp(f.log, "ir", 2) == 0 && k == NVRM_LOSS_CHANNEL && asleep == 0);
++   f.in.changed = 0;
++   f.in.xid = 0;
++   f.in.pm = 2;   /* NVRM_CN_PM_LOST: the wake failed */
++   arm("asleep: a GPU that did not come back is a lost resume, never looked at again",
++       run(&f, &st, &k, &lv) == NVRM_WHY_KIND && k == NVRM_LOSS_RESUME && asleep == 0);
++
++   /* the bound: a GPU that stays suspended */
++   f.in.pm = 1;
++   asleep = 0;
++   st.now = T;
++   bool looks = run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP;
++   for (int64_t dt = 5000000000ll; dt < NVRM_REC_ASLEEP_NS; dt += 5000000000ll) {   /* one look per 5 s budget */
++      st.now = T + dt;
++      looks = looks && run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && asleep == T;
++   }
++   st.now = T + NVRM_REC_ASLEEP_NS - 1;
++   looks = looks && run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP;
++   arm("asleep: every look inside NVRM_REC_ASLEEP_NS of the first suspended answer looks again, the stamp kept", looks);
++   st.now = T + NVRM_REC_ASLEEP_NS;
++   arm("asleep: once NVRM_REC_ASLEEP_NS of awake time has passed, the normal sequence runs (RM asked, stall rebuilt)",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && strcmp(f.log, "irsbfsat") == 0 && k == NVRM_LOSS_STALL && asleep == T);
++   st.now = T + 3 * NVRM_REC_ASLEEP_NS;
++   arm("asleep: and keeps running it while the GPU stays suspended", run(&f, &st, &k, &lv) == NVRM_WHY_OK && asleep == T);
++   asleep = 0;   /* control: a caller that forgot the stamp between looks */
++   arm("asleep: control: without the kept stamp the same late look would look again (the stamp is what ends it)",
++       run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP);
++   f.in.pm = 0;
++   st.now = T + 4 * NVRM_REC_ASLEEP_NS;
++   run(&f, &st, &k, &lv);
++   f.in.pm = 1;
++   arm("asleep: a running answer clears the stamp, so the next sleep gets its own NVRM_REC_ASLEEP_NS",
++       asleep == 0 && run(&f, &st, &k, &lv) == NVRM_WHY_ASLEEP && asleep == st.now);
++
++   int64_t s0 = 0;
++   arm("asleep: the pure rule: suspended and unchanged only, and an awake clock of 0 still sets a stamp",
++       nvrm_rec_asleep(1, 0, 0, &s0) && s0 == 1 && !nvrm_rec_asleep(1, 1, 5, &s0) && s0 == 0 &&
++       !nvrm_rec_asleep(0, 0, 5, &s0) && !nvrm_rec_asleep(-1, 0, 5, &s0) && !nvrm_rec_asleep(2, 0, 5, &s0) && s0 == 0);
++   arm("asleep: the reason has a name", strcmp(nvrm_rec_why_name(NVRM_WHY_ASLEEP), "?") != 0);
++   asleep = 0;
 +}
 +
 +/* ── controls: the checkers must refuse a damaged result ── */
@@ -2802,6 +2941,7 @@ index 0000000..6ae76fa
 +   test_root();
 +   test_drops();
 +   test_execute();
++   test_asleep();
 +   test_controls();
 +   printf("%u ok, %u failed\n", oks, fails);
 +   return fails ? 1 : 0;

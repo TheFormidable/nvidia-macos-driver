@@ -23,6 +23,9 @@ tools/test_shared_headers.py. This test reads the patch and holds what only NVK'
                  of the context's own semaphore page, 64 bits, as the kernel fence reads it
   the kext       the channel note goes through the existing escape path with the header's number (no new selector,
                  no kext file in the patch); a kext that does not answer is asked once and never again
+  the sleep      no escape is made with a context mutex held by the kick: its note follows the unlock; a stall on a
+                 GPU the kext calls suspended asks RM nothing (the inputs make no RM call, the action comes after the
+                 suspended test) and gives the claim back and the mutex up without counting, reporting or giving up
   the exports    nvmtl_nvk_fence_dropped_v1 and nvmtl_nvk_recover_stats_v1 with the signatures of the contract,
                  default visibility, declared in nvkmd.h
   the 2.9 path   the 2.9 verdicts are kept as functions and are what the hooks call with recovery off
@@ -306,6 +309,37 @@ def chk_kext(p):
             and "IOConnectCall" not in "".join(added(p, f) for f in files))
 
 
+def chk_kick_note(p):
+    k = body(newfile(p, REC_C), "nvkmd_nvrm_slot_kick")
+    i, j = k.find("pthread_mutex_trylock(&nvrm_rec_mtx[R])"), k.find("pthread_mutex_unlock(&nvrm_rec_mtx[R]);")
+    held = k[i:j] if 0 <= i < j else ""
+    return (bool(held) and "rec_doorbell(rctx, (uint32_t)rctx->subPut);" in held
+            and "kpdev = nvkmd_nvrm_pdev(rctx->base.dev->pdev);" in held
+            and not re.search(r"\brec_note\s*\(|\bnvRm\w*\s*\(", held)
+            and k.count("pthread_mutex_unlock(&nvrm_rec_mtx[R]);") == 1
+            and order(k[j:], "pthread_mutex_unlock(&nvrm_rec_mtx[R]);", "if (kpdev != NULL) {",
+                      "rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);"))
+
+
+def chk_asleep(p):
+    rc, h = newfile(p, REC_C), newfile(p, REC_H)
+    ex, inp, act = body(h, "nvrm_rec_execute"), body(rc, "rec_op_inputs"), body(rc, "rec_op_action")
+    run = body(rc, "nvrm_rec_run")
+    i = run.find("if (why == NVRM_WHY_ASLEEP) {")
+    blk = run[i:run.find("\n   }\n", i)] if i >= 0 else ""
+    fin = body(rc, "rec_why_is_final")
+    return (order(ex, "ops->inputs(u, &in);", "if (nvrm_rec_asleep(in.pm, in.changed, st->now, asleepSince))",
+                  "return NVRM_WHY_ASLEEP;", "ops->action(u, &in);", "nvrm_rec_classify(&in)")
+            and "rec_note(j->pdev, NVRM_CN_QUERY, 0, 0, 0, 0, &pm);" in inp and "nvRm" not in inp
+            and "NV2080_CTRL_CMD_GPU_GET_RECOVERY_ACTION" in act and ".action = rec_op_action," in rc
+            and "&ctx->recAsleepNs" in run and bool(blk)
+            and order(run, "nvrm_rec_execute(", "if (why == NVRM_WHY_ASLEEP) {", "if (why != NVRM_WHY_OK) {")
+            and order(blk, "r->recovering = false;", "nvrm_rec_held--;", "pthread_mutex_unlock(&nvrm_rec_mtx[R]);",
+                      "return VK_SUCCESS;")
+            and not re.search(r"rec_fail|rec_stat_|gaveUp|faulted|rec_note|nvRm", blk)
+            and bool(fin) and "NVRM_WHY_ASLEEP" not in fin.split("{", 1)[-1])
+
+
 def chk_exports(p):
     rc, sy, kh = newfile(p, REC_C), added(p, SYNC_C), added(p, NVKMD_H)
     return ('__attribute__((visibility("default"))) unsigned\nnvmtl_nvk_recover_stats_v1(uint64_t *out, unsigned n)' in rc
@@ -389,6 +423,17 @@ CHECKS = [
      "         __atomic_store_n(sem, p->dropHi, __ATOMIC_RELEASE);", "         __atomic_store_n(sem, p->dropLo, __ATOMIC_RELEASE);"),
     ("the kext: escape 0xE8 through the existing path, no selector, a kext without it is asked once", chk_kext,
      "   if (pdev == NULL || __atomic_load_n(&nvrm_rec_kext, __ATOMIC_ACQUIRE) == 2)", "   if (pdev == NULL)"),
+    ("the sleep: the kick's note follows the unlock of the context mutex", chk_kick_note,
+     "+   pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+   if (kpdev != NULL) {\n+      rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);\n",
+     "+   rec_note(kpdev, NVRM_CN_KICK, 0, 0, 0, 0, NULL);\n+   pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+   if (kpdev != NULL) {\n"),
+    ("the sleep: a stall on a suspended GPU asks RM nothing and looks again", chk_asleep,
+     "+   if (nvrm_rec_asleep(in.pm, in.changed, st->now, asleepSince))\n+      return NVRM_WHY_ASLEEP;\n+   ops->action(u, &in);\n",
+     "+   ops->action(u, &in);\n+   if (nvrm_rec_asleep(in.pm, in.changed, st->now, asleepSince))\n+      return NVRM_WHY_ASLEEP;\n"),
+    ("the sleep: the look-again path counts nothing as given up", chk_asleep,
+     "+      nvrm_rec_held--;\n+      pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+      return VK_SUCCESS;\n+   }\n",
+     "+      rec_stat_add(REC_ST_GAVE_UP, 1);\n+      nvrm_rec_held--;\n+      pthread_mutex_unlock(&nvrm_rec_mtx[R]);\n+      return VK_SUCCESS;\n+   }\n"),
+    ("the sleep: the look-again reason is not final", chk_asleep,
+     "+   return w == NVRM_WHY_KIND ||", "+   return w == NVRM_WHY_ASLEEP || w == NVRM_WHY_KIND ||"),
     ("the exports: the two functions of the contract, default visibility, declared in nvkmd.h", chk_exports,
      "+nvmtl_nvk_fence_dropped_v1(VkDevice device, VkFence fence)\n+{", "+nvmtl_nvk_fence_dropped_v1(VkFence fence, VkDevice device)\n+{"),
     ("the 2.9 path: with recovery off the hooks run the kept 2.9 verdicts", chk_off_is_29,
@@ -428,5 +473,13 @@ else:
         run2 = subprocess.run(["./t2"], cwd=d, capture_output=True, text=True) if b2.returncode == 0 else None
         arm("control: the host test fails a header whose plan replays the flush that was running",
             broken != hdr and run2 is not None and run2.returncode != 0)
+        # control: and a header that believes "suspended" for ever (no bound on the looking)
+        broken = hdr.replace("return now - *since < NVRM_REC_ASLEEP_NS;", "return true;")
+        (dd / "nvkmd_nvrm_recover.h").write_text(broken)
+        b3 = subprocess.run([cc, "-std=c11", "-O1", "-w", "-I.", "nvkmd_nvrm_recover_test.c", "-o", "t3"], cwd=d,
+                            capture_output=True, text=True)
+        run3 = subprocess.run(["./t3"], cwd=d, capture_output=True, text=True) if b3.returncode == 0 else None
+        arm("control: the host test fails a header that looks again for as long as the GPU stays suspended",
+            broken != hdr and run3 is not None and run3.returncode != 0 and "asleep: once" in run3.stdout)
 
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)
