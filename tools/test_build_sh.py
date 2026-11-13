@@ -114,20 +114,30 @@ triple() { case "$(cat "$S/arch")" in arm64) echo aarch64-apple-darwin ;; *) ech
 # links <name>: what Homebrew links into <prefix>/bin when it installs <name>, the commands of what it installs with it
 # included (state/brew-links-<name>: lines "<formula> <command>"). Each command is a program in that formula's keg
 # (Cellar/<formula>/1.0/bin), opt/<formula> leads to the keg when the formula has no opt folder yet, and bin/<command>
-# becomes a link into the keg, as Homebrew makes it, unless a working one is there (a dead link is replaced, as Homebrew
-# does with a link into its Cellar that leads nowhere)
+# becomes a link into the keg, as Homebrew makes it. A dead link is replaced, as Homebrew does with a link that leads
+# nowhere; anything else in the way (a file, a link that leads somewhere) is left and the link is refused, as Homebrew's
+# Keg#link does: the install goes on and brew ends with exit 1 (conflict=1), the formulas installed all the same. A
+# formula all of whose commands were linked gets Homebrew's record of a linked keg, var/homebrew/linked/<formula>
+conflict=0
 links() {
-  local f n k b=$SB/brew/bin
+  local f n k b=$SB/brew/bin bad=" " seen=" "
   [ -f "$S/brew-links-$1" ] || return 0
   while read -r f n; do
     [ -n "$n" ] || continue
-    k=$SB/brew/Cellar/$f/1.0
+    k=$SB/brew/Cellar/$f/1.0; seen="$seen$f "
     [ -e "$k/bin/$n" ] || mkwrap "$k/bin/$n" plain
     [ -e "$SB/brew/opt/$f" ] || { mkdir -p "$SB/brew/opt"; rm -f "$SB/brew/opt/$f"; ln -s "../Cellar/$f/1.0" "$SB/brew/opt/$f"; }
     mkdir -p "$b"
     if [ -L "$b/$n" ] && [ ! -e "$b/$n" ]; then rm -f "$b/$n"; fi
-    [ -e "$b/$n" ] || ln -s "../Cellar/$f/1.0/bin/$n" "$b/$n"
+    if [ -L "$b/$n" ] && [ "$(readlink "$b/$n")" = "../Cellar/$f/1.0/bin/$n" ]; then :
+    elif [ -e "$b/$n" ] || [ -L "$b/$n" ]; then
+      echo "Error: Could not symlink bin/$n" >&2; echo "Target $b/$n already exists." >&2; conflict=1; bad="$bad$f "
+    else ln -s "../Cellar/$f/1.0/bin/$n" "$b/$n"; fi
   done < "$S/brew-links-$1"
+  for f in $seen; do
+    case "$bad" in *" $f "*) continue ;; esac
+    mkdir -p "$SB/brew/var/homebrew/linked"; rm -f "$SB/brew/var/homebrew/linked/$f"; ln -s "../../../Cellar/$f/1.0" "$SB/brew/var/homebrew/linked/$f"
+  done
 }
 formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
   local p=$SB/brew/opt/$1
@@ -223,14 +233,16 @@ case "$role" in
       install)
         rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_NO_INSTALL_CLEANUP=${HOMEBREW_NO_INSTALL_CLEANUP:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
+        # state/brew-install-fails-<formula>: the install fails after its dependencies were installed and linked, and
+        # before the formula itself is (a build that failed)
+        if [ -f "$S/brew-install-fails-$2" ]; then links "$2"; echo "Error: stand-in failure of brew install $2" >&2; exit 1; fi
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
         links "$2"
-        # state/brew-install-fails-<formula>: the install fails after its dependencies were installed and linked
-        [ ! -f "$S/brew-install-fails-$2" ] || { echo "Error: stand-in failure of brew install $2" >&2; exit 1; }
         # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
         # versions of formulas (every 30 days of all of them), formulas nothing needs and dead links in the prefix
         [ -n "${HOMEBREW_NO_INSTALL_CLEANUP:-}" ] || rm -rf "$SB/brew/Cellar/yours/1.0"
-        echo "==> Pouring $2" ;;
+        echo "==> Pouring $2"
+        [ "$conflict" = 0 ] || { echo "Error: The \`brew link\` step did not complete successfully" >&2; exit 1; } ;;
       # like Homebrew's Keg#unlink: the links in the prefix that lead into the formula's keg go; the keg and opt/<formula>
       # stay. state/brew-unlink-fails makes it fail
       unlink)
@@ -240,6 +252,7 @@ case "$role" in
           [ -L "$l" ] || continue
           case "$(readlink "$l")" in "../Cellar/$2/"*) rm -f "$l"; n=$((n + 1)) ;; esac
         done
+        rm -f "$SB/brew/var/homebrew/linked/$2"
         echo "Unlinking $SB/brew/Cellar/$2/1.0... $n symlinks removed." ;;
       *) echo "stand-in brew: '$1' is not something build.sh may do" >&2; exit 1 ;;
     esac ;;
@@ -2193,6 +2206,45 @@ def arm_pylink():
                      '          die "brew install $f failed"')
     negative("deps that stops at a failed install with the Python of an earlier one still linked",
              pylink_problems(neg, unlinked="python@3.15", rc_ok=False, out_has=("brew install spirv-tools failed",))[0])
+
+    # 5c. Homebrew ends an install with exit 1 when only a link failed: a python3 of the tester's (here a link to
+    # python.org's, which resolves) was in the way of the Python that came with glslang. The formula is installed: deps
+    # warns and goes on, the tester's python3 untouched and nothing unlinked (it was there before)
+    py_links = {"glslang": PY_LINKS.format(f="python@3.15").replace("python3.14", "python3.15")}
+
+    def conflict_sandbox(name, old_keg=False):
+        s = pylink_sandbox(name, py_links)
+        (s.dir / "pyorg/bin").mkdir(parents=True)
+        (s.dir / "pyorg/bin/python3").write_text("")
+        (s.dir / "brew/bin/python3").symlink_to(s.dir / "pyorg/bin/python3")
+        if old_keg:   # an older glslang in the Cellar, without its opt link: installed before this run
+            (s.dir / "brew/Cellar/glslang/0.9").mkdir(parents=True)
+        return s
+    conflict_out = ("brew install glslang ended with an error, but glslang is installed", "nothing of yours was replaced",
+                    "deps: everything required is present")
+    sb = conflict_sandbox("pylink-conflict")
+    p, out = pylink_problems(sb, unlinked=None, linked_to=str(sb.dir / "pyorg/bin/python3"), out_has=conflict_out)
+    if "The `brew link` step did not complete successfully" not in out:
+        p.append("the stand-in Homebrew did not refuse the link")
+    if not (sb.dir / "brew/opt/glslang").is_dir() or not (sb.dir / "brew/opt/spirv-tools").is_dir():
+        p.append("deps did not go on to install the formulas after glslang")
+    check("deps: brew install that ends with exit 1 because a file of the tester's was in the way of a link, the formula "
+          "installed: a warning, deps goes on, the tester's python3 stays", not p, (p, out[-1000:]))
+    neg = conflict_sandbox("pylink-conflict-neg")
+    neg.break_script('          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n', "          false ||\n")
+    negative("deps that stops at every exit status of brew install",
+             pylink_problems(neg, unlinked=None, linked_to=str(neg.dir / "pyorg/bin/python3"), out_has=conflict_out)[0])
+    sb = conflict_sandbox("pylink-conflict-old", old_keg=True)
+    p, out = pylink_problems(sb, unlinked=None, rc_ok=False, linked_to=str(sb.dir / "pyorg/bin/python3"),
+                             out_has=("STOP: brew install glslang failed",), out_lacks=("ended with an error, but",))
+    check("deps: the same failure of a formula that was installed before this run (its install cannot be told apart) stops deps",
+          not p, (p, out[-800:]))
+    neg = conflict_sandbox("pylink-conflict-old-neg", old_keg=True)
+    neg.break_script('          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n',
+                     '          brew_installed "$f" ||\n')
+    negative("deps that takes a formula installed before for this install's",
+             pylink_problems(neg, unlinked=None, rc_ok=False, linked_to=str(neg.dir / "pyorg/bin/python3"),
+                             out_has=("STOP: brew install glslang failed",))[0])
 
     # 6. --dry-run and --no-install: no call of Homebrew at all; the dry run states the rule
     def quiet_problems(s, args, rc_zero):

@@ -133,7 +133,9 @@ compilarse y que pasaría a ser el `python3` de una shell con ese `PATH` (la com
 carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Homebrew un `python3` que no tenía,
 enlazado a una fórmula de Python que ellas añadieron, `deps` ejecuta `brew unlink` con esa fórmula al terminarlas (o
 al fallar una) e imprime una línea con la vuelta atrás (`brew link <fórmula>`); un `python3` que ya estaba, o una fórmula de Python que
-ya tenías, se quedan como están. Después de instalar, `deps` nombra cada comando que ellas añadieron al `bin` de
+ya tenías, se quedan como están. Un `brew install` que termina con error aunque su fórmula ya está instalada (Homebrew no
+enlazó un comando sobre un archivo tuyo que estaba en medio, y lo dice) no detiene `deps`: avisa y sigue, y sus
+últimas líneas dicen si aún falta algo. Después de instalar, `deps` nombra cada comando que ellas añadieron al `bin` de
 Homebrew y que macOS también tiene en `/usr/bin`, `/bin`, `/usr/sbin` o `/sbin`, con el `brew unlink` que lo devuelve.
 Una prueba en seco (`--dry-run`) dice esta regla y no llama a `brew`. La tabla completa está en
 [BUILDING.md](BUILDING.md#what-each-command-writes).

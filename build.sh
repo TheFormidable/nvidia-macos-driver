@@ -1578,7 +1578,7 @@ cmd_deps() {
       # what the user's shell finds before the installs, to tell afterwards what they changed (deps_python3_back,
       # deps_shadowed). The unlink comes after the last install: an install of a later formula links a dependency
       # only when it installs or upgrades that dependency, which an unlinked formula installed minutes before is not.
-      local bin_before kegs_before py3_before=0 shadowed
+      local bin_before kegs_before py3_before=0 shadowed NL=$'\n'
       bin_before=$(brew_bin_names); kegs_before=$(brew_kegs)
       [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=1
       # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
@@ -1587,9 +1587,15 @@ cmd_deps() {
       # software) and old downloads. None of that is build.sh's to remove.
       for f in "${want[@]}"; do
         say "brew install $f"
-        # an earlier install of this run may have linked a Python already: it is unlinked before the stop as well
-        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f" ||
-          { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }
+        if ! run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 -- install "$f"; then
+          # Homebrew also ends with exit 1 when the formula was installed and only a link into its bin failed, because a
+          # file of the same name was in the way (a python3 of python.org's installer, say; Homebrew replaces none). deps
+          # stops only when the formula is not installed now, or was installed before, so that this install cannot be
+          # told from the old one. An earlier install of this run may have linked a Python: it is unlinked before the stop
+          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||
+            { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }
+          warn "brew install $f ended with an error, but $f is installed: Homebrew's own message above says what it could not do (often a link into $BREW_PREFIX/bin that a file of yours was in the way of; nothing of yours was replaced). deps goes on; its last lines say whether anything is still missing"
+        fi
       done
       deps_python3_back "$py3_before" "$kegs_before"
       shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""
