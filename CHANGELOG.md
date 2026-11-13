@@ -336,8 +336,9 @@ has proven itself, renewed with a reason otherwise.
   the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
   searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel
   Macs with different things in Homebrew could build different drivers. `./build.sh env` prints it and doctor names it.
-  Your `SDKROOT` and `TOOLCHAINS` no longer reach `build.sh` itself either: with an `SDKROOT` that names an SDK
-  which is not there, Apple's `make` and `python3` fail, and a build stopped before its first step.
+  Your `TOOLCHAINS` (it makes xcrun pick another toolchain's compiler) no longer reaches the steps, and neither it nor
+  your `SDKROOT` reaches `build.sh` itself: with an `SDKROOT` that names an SDK which is not there, Apple's `make`
+  and `python3` fail, and a build stopped before its first step.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 
