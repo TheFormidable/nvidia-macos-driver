@@ -202,6 +202,7 @@ check_pins() {
     *) say "  pin FAIL  Python (toolchain) = $NM_PIN_TCPYTHON_REF, but the Python wanted is $NM_PIN_TOOL_PYTHON_TESTS_MIN (NM_PIN_TOOL_PYTHON_TESTS_MIN)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
   esac
   pin_agree "Rust (translator)" "$NM_PIN_RUST_VERSION" build/build_xlate_release.sh "RV=\${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}"
+  pin_agree "base package release" "$NM_PIN_BASE_RELEASE" build/package_local.sh "BASE_RELEASE=$NM_PIN_BASE_RELEASE "
   return 0
 }
 
@@ -988,7 +989,7 @@ doctor() {   # prints; sets D_MISSING
   if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
   fi
-  if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs a release tarball (docs/BUILDING.md)"
+  if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs the release tarball nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz (docs/BUILDING.md)"
   elif [ -e "$NM_BASE_PACKAGE" ]; then d_ok "base package $NM_BASE_PACKAGE"; else d_missing "the base package $NM_BASE_PACKAGE"; fi
   [ "$NM_OFFLINE" = 1 ] && d_note "offline: NVK cannot be built (meson downloads six Rust crates into each fresh Mesa tree)"
   say ""
@@ -2213,7 +2214,7 @@ cmd_build() {
   for c in $list; do build_component "$c"; done
 }
 cmd_package() {
-  [ -n "${NM_BASE_PACKAGE:-}" ] || die "package needs a release package as its base: --base-package nullmoth-nvidia-<version>.tar.gz (or NM_BASE_PACKAGE). Why: install.sh needs files that have no source in this repository (nullmoth-runtime-check, nvmtl-allow.txt, the plugin bundle's Info.plist, air-runtime, ...); docs/BUILDING.md explains"
+  [ -n "${NM_BASE_PACKAGE:-}" ] || die "package needs the release package $NM_PIN_BASE_RELEASE as its base: --base-package nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz (or NM_BASE_PACKAGE). Why: install.sh needs files that have no source in this repository (nullmoth-runtime-check, nvmtl-allow.txt, the plugin bundle's Info.plist, air-runtime, ...); docs/BUILDING.md explains"
   [ -e "$NM_BASE_PACKAGE" ] || [ "$NM_DRY_RUN" = 1 ] || die "the base package $NM_BASE_PACKAGE does not exist"
   [ "$NM_ACCEL" = both ] || die "a package must carry NVAccel for macOS 15 and 26 (install.sh checks both); build with --accel both"
   [ -n "$NM_PACKAGE_VERSION" ] || die "the package's version is read from the first heading of CHANGELOG.md (\"## <version>\"), and that heading is not a version: set NM_PACKAGE_VERSION to the version the install should record"
@@ -2385,8 +2386,8 @@ cmd_all() {
     summary; say "package:     $(printf '%s' "$PKGDIR/pkgroot" | tilde)"; [ "$NM_DRY_RUN" = 1 ] || install_hint
   else
     summary
-    say "package:     not staged: no base package. A package needs a release tarball as its base (docs/BUILDING.md):"
-    say "             ./build.sh --base-package ~/Downloads/nullmoth-nvidia-<version>.tar.gz package"
+    say "package:     not staged: no base package. A package needs the release tarball $NM_PIN_BASE_RELEASE as its base (docs/BUILDING.md):"
+    say "             ./build.sh --base-package ~/Downloads/nullmoth-nvidia-$NM_PIN_BASE_RELEASE.tar.gz package"
   fi
 }
 
