@@ -980,15 +980,14 @@ static VkBool32 VKAPI_PTR nvmtl_vkmsg_cb(VkDebugUtilsMessageSeverityFlagBitsEXT 
     uint64_t rep; int full;
     if (!nvmtl_vkmsg_budget(nvmtl_vkmsg_key(id, m), &rep, &full)) return VK_FALSE;
     const char *b = strrchr(id, '/'); b = b ? b + 1 : id;
-    char t[600]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
+    // 584: the longest note below (54 characters) still fits in the 640 of nvlog_every's line
+    char t[584]; snprintf(t, sizeof t, "nvk-reason: %s %s: %s", (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "E" : "W", b, m);
     for (char *c = t; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
-    extern const char *nvmtl_log_path(void);
-    FILE *f = fopen(nvmtl_log_path(), "a");
-    if (f) {
-        if (rep) fprintf(f, "pid %d NVMTL: %s   [logged %llu times now%s]\n", getpid(), t, (unsigned long long)rep, full ? ", table full" : "");
-        else     fprintf(f, "pid %d NVMTL: %s%s\n", getpid(), t, full ? "   [table full]" : "");
-        fclose(f);
-    }
+    // The plugin's log rule places the line (nvlog_line): a release build writes the file only for a process started with
+    // NVMTL_PROCESS_ENV=1 and sends NVK's errors and its channel-rebuild lines to the system log (nvmtl_log_failure.h);
+    // a debug build does both for every line. nvlog_every, because the budget above already limits repeats.
+    if (rep) nvlog_every("%s   [logged %llu times now%s]", t, (unsigned long long)rep, full ? ", table full" : "");
+    else     nvlog_every("%s%s", t, full ? "   [table full]" : "");
     return VK_FALSE;
 }
 static int nvmtl_vkmsg_off_by_env(void) { const char *e = getenv("NVMTL_NVK_MESSAGES"); return e && !strcmp(e, "0"); }
