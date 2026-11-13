@@ -30,7 +30,7 @@ CH=${NULLMOTH_CARGO_HOME:-\$HOME/nvmtl-build/cargo-home}
 # CARGO_PROFILE_RELEASE_STRIP=none: a release build makes rustc strip every crate it links (-C strip=debuginfo, cargo's
 # default) with Rust's own rust-objcopy, which finds Rust's libLLVM only when rustup's proxies start it. Started from the
 # toolchain's own folder, as here, it aborts each time: the build still ends, with a warning that the ceiling below
-# stops on, and macOS writes a crash report for each abort. The strip -S below removes the same debug map from the
+# stops on, and macOS keeps crash reports of it. The strip -S below removes the same debug map from the
 # dylib, so cargo is told to leave its own strip out and rust-objcopy is never started.
 ssh "$H" "set -e
   TB=$RB
