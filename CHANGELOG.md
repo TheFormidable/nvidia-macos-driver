@@ -315,6 +315,14 @@ has proven itself, renewed with a reason otherwise.
   then jumped to a function that only Linux has. NVIDIA's RM and display code are now compiled with the same commands
   on every Mac, those of the Apple-silicon Mac the releases are built on, and a kext that imports such a function
   stops the build instead of being packaged.
+- Building the shader translator stopped on an Intel Mac at its warning ceiling. The release script starts cargo from
+  the Rust toolchain's own folder, and the strip that rustc then asks of Rust's `rust-objcopy` aborted for every crate
+  it linked: that program finds Rust's libLLVM only when rustup's proxies start it. The script now tells cargo to
+  leave that strip out (its own `strip -S` already removed the same debug map), and its check that the dylib names no
+  build machine path reads every byte of the file, where macOS's `strings` read only its sections.
+- With an SDK older than 26.4 (Xcode 26.3 and earlier, the newest a Mac with macOS 15 runs) the plugin's device class
+  now declares `supportsPlacementSparse` itself: `MTLDevice` declares it from the 26.4 SDK on, and a build with
+  Xcode 26.3 stopped there. With the 26.4 SDK or a later one nothing changes.
 - `tools/switches.tsv` is the registry of every switch, and `tools/test_switch_registry.py` fails when the source
   reads a name it does not have. A switch added from now on cannot be an opt-in or a writable sysctl: the test says
   what it may be instead (an opt-out of a default path with a review release, a test hook that does nothing unset, a

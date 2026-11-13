@@ -823,6 +823,15 @@ static uint64_t nvmtl_rt_gate_working_set(uint64_t ws)
     if (!said++) nvlog("working set: answered %lld MB instead of %llu MB while ray tracing is available (NVMTL_WS_RT_GATE_MB)", floor_mb, (unsigned long long)(ws >> 20));
     return (uint64_t)floor_mb << 20;
 }
+// MTLDevice declares supportsPlacementSparse from the macOS 26.4 SDK on, and the @dynamic below needs a declaration to
+// stand on. With an older SDK (Xcode 26.3 and earlier, the newest a Mac with macOS 15 runs) the class declares the same
+// read-only property itself; with the 26.4 SDK or a later one nothing is added and the protocol's declaration is the
+// one in force. @dynamic makes no code either way: the accessor is whatever the Metal framework of the running macOS has.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED < 260400
+@interface NVMTLDevice ()
+@property (readonly) BOOL supportsPlacementSparse;
+@end
+#endif
 @implementation NVMTLDevice
 @dynamic depth24Stencil8PixelFormatSupported, headless, location, locationNumber, lowPower, maxArgumentBufferSamplerCount, maxTransferRate, peerCount, peerGroupID, peerIndex, registryID, removable, sparseTileSizeInBytes, supportsPlacementSparse;
 + (void)load {
