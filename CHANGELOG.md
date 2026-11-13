@@ -320,6 +320,12 @@ has proven itself, renewed with a reason otherwise.
   it linked: that program finds Rust's libLLVM only when rustup's proxies start it. The script now tells cargo to
   leave that strip out (its own `strip -S` already removed the same debug map), and its check that the dylib names no
   build machine path reads every byte of the file, where macOS's `strings` read only its sections.
+- The Vulkan loader that `package/vulkan-for-apps.sh` offers to applications is built and installed in a temporary
+  folder, and the loader's CMake compiled that folder's `etc` into the library as a folder to look in for manifests
+  and settings: the library carried the folder's name, looked there on every Mac, and two builds of the same source
+  on one Mac had different bytes, with 2.9's script too. The script now gives CMake `-DSYSCONFDIR=/etc`: the library
+  still looks in `/etc`, two builds on one Mac have the same bytes, and a library that names the temporary folder
+  stops the build before it is copied out.
 - With an SDK older than 26.4 (Xcode 26.3 and earlier, the newest a Mac with macOS 15 runs) the plugin's device class
   now declares `supportsPlacementSparse` itself: `MTLDevice` declares it from the 26.4 SDK on, and a build with
   Xcode 26.3 stopped there. With the 26.4 SDK or a later one nothing changes.
