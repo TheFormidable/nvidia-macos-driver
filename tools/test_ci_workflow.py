@@ -24,7 +24,7 @@ import tempfile
 
 ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1]
 FAILS = []
-GATES = ("kexts-linux", "host-tests", "plugin")
+GATES = ("kexts-linux", "host-tests", "plugin", "kexts-mac")
 
 
 def arm(name, ok, detail=""):
@@ -118,6 +118,9 @@ def problems(y, root):
                                   'f="$W/src/$part/_out/Darwin_x86_64/compile_cmds.sh"', "for part in nvidia nvidia-modeset; do",
                                   "grep -qE '(^|[[:space:]])___x86_' \"$O/nvrm/imports.txt\"", "shasum -a 256", "exit $bad")):
         out.append("kexts-mac does not check its compile lines and NVRM's imports for what an Intel Mac's compiler adds")
+    # macOS's make leaves a space for every option the compiler refused: the two runners' lines differ in spacing
+    if '"$f" | tr -s \' \' > "$cut"' not in mac or 'sum=$(shasum -a 256 < "$cut"' not in mac:
+        out.append("kexts-mac does not take the checksum of its compile lines with runs of spaces squeezed (the two runners' would differ)")
     return out
 
 
@@ -178,6 +181,10 @@ control("the plugin job made non-gating is caught", "    runs-on: macos-26\n    
 control("host tests without the release's Vulkan headers are caught", '          echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"\n', "", "does not set NM_VULKAN_INCLUDE")
 control("the headers cached under a key that is not their pin are caught", "key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}",
         "key: ci-vulkan-headers-${{ hashFiles('build/ci_plugin.sh') }}", "under the key of their pin")
+control("the Mac kext job made non-gating is caught", "    timeout-minutes: 90\n    steps:\n", "    timeout-minutes: 90\n    continue-on-error: true\n    steps:\n",
+        "kexts-mac no longer gates")
+control("a checksum of the compile lines as make spaced them is caught", """"$f" | tr -s ' ' > "$cut\"""", """"$f" > "$cut\"""",
+        "runs of spaces squeezed")
 control("the kext job on Apple silicon only is caught", "runner: [macos-15, macos-15-intel]", "runner: [macos-15]", "both an Apple-silicon and an Intel runner")
 control("the kext job without its check of NVRM's imports is caught", "if grep -qE '(^|[[:space:]])___x86_'", "if false",
         "does not check its compile lines")
