@@ -362,3 +362,8 @@ personal aparece como `~`. Léelo antes de publicarlo.
 Para reportar un fallo: abre un issue, di qué comando ejecutaste y adjunta el archivo de informe. Corrige lo que
 indique el mensaje o la tabla de arriba y ejecuta el mismo comando otra vez: los pasos terminados se saltan y el que
 falló se repite. `-v` muestra la salida de cada paso mientras se ejecuta.
+
+Además, cada push se compila desde cero en un Mac Intel de GitHub (macOS 15, sin tarjeta NVIDIA, sin instalar ni
+cargar nada): `.github/workflows/full-build.yml` ejecuta deps, doctor, fetch, build, package y test en una carpeta
+vacía y comprueba que Homebrew no se usó ni cambió. El resultado está en la pestaña Actions del repositorio, flujo
+full-build; si falla, su último paso muestra los registros.

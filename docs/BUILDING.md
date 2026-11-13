@@ -566,3 +566,7 @@ Homebrew of the other architecture, the tools taken from `PATH`, `fetch`'s git s
 build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
 folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
 the first run on a Mac will show.
+In addition, every push is built from nothing on an Intel Mac of GitHub's (macOS 15, no NVIDIA card, nothing installed
+or loaded): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build, package and test in an empty folder,
+then checks that Homebrew was neither used nor changed and that everything built loads only from macOS and that folder.
+Its result is under the repository's Actions tab, workflow full-build; when it fails, its last step prints the logs.
