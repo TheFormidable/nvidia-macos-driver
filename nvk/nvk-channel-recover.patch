@@ -279,7 +279,7 @@ index 36e74e5..94502ab 100644
  VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
                                   struct vk_object_base *log_obj);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 63e9929..da57638 100644
+index 0c79274..f00ea86 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -674,7 +674,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
