@@ -9,7 +9,10 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > **Written and tested without a Mac.** `./build.sh` has run on one Mac (Intel, macOS 26.7, Xcode 26.5) only in part:
 > `doctor`, `env`, `--dry-run` and `fetch` ran, and it built the plugin, the video library (and the RM on the way) and
 > the small tools; the kexts stopped at its check for GNU patch and Python 3.10, which that Mac lacked (the check now
-> asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). It was written
+> asks only for what the kexts use: see [Tools each component needs](#tools-each-component-needs)). None of the changes
+> made to `build.sh` after that run has run on a Mac yet: the tool check per component, the choice of Homebrew and of
+> the tools taken from `PATH`, the layout of the working directory, rm's compile list, `fetch`'s git set-up and the
+> stop without Xcode were tested only against the stand-ins described next. It was written
 > for macOS's `/bin/bash` 3.2 and its BSD tools, and tested on Linux against stand-ins for macOS's tools, Xcode,
 > Homebrew, rustup, the git remotes and each component's build script (`tools/test_build_sh.py`). On a system other than
 > macOS only `doctor`, `fetch`, `test`, `env` and `--dry-run` work. `deps` has not installed anything real, NVK and the
@@ -28,7 +31,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   default to an Apple-silicon Rust toolchain); every part is built for x86_64, the architecture the driver runs on.
 - **Xcode 26 or later**, the full Xcode, selected with `xcode-select`. The command line tools alone are not enough:
   the plugin imports Metal 4 headers (`Metal/MTL4CommandQueue.h`) that only the macOS 26 SDK has. No Kernel Debug Kit
-  is needed: no build step reads one.
+  is needed: no build step reads one. On a Mac with neither Xcode nor the command line tools, every command but
+  `help` stops at once with the instructions (`doctor` names Xcode as the one thing missing): macOS's `git`, `make`,
+  `python3` and `xcrun` are then stand-ins that offer to install the command line tools, and none of them is run.
 - A git clone of this repository (not a downloaded archive): the plugin, translator and video library are built from
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
@@ -53,7 +58,8 @@ cd nvidia-macos-driver
 ./build.sh
 ```
 
-`./build.sh doctor` changes nothing: it prints what this Mac has, what is missing and what is too old, and exits 1
+`./build.sh doctor` changes nothing of yours (it writes only what [What each command writes](#what-each-command-writes)
+lists for it: a temporary file of its own and xcrun's cache): it prints what this Mac has, what is missing and what is too old, and exits 1
 when something required is missing. `./build.sh` (the same as `./build.sh all`) runs doctor, installs what is
 missing after asking, fetches the pinned sources, builds every component and prints a summary. Run it again after a
 change: steps whose inputs did not change are skipped.
@@ -89,9 +95,9 @@ folder that carries that mark.
 
 | Command | Writes |
 |---|---|
-| `doctor`, `env`, `help`, and every command with `--dry-run` | Nothing. They read the Mac (`sw_vers`, `sysctl`, `xcode-select -p`, `xcodebuild -version`, `xcrun`, each tool's `--version`), the checkout (`git status` without refreshing its index; a dry run never records local changes with `git stash create`) and the working directory. They never run `brew info` or `brew install`: a dry run of `deps` names `llvm@22` without asking Homebrew which LLVM formula it has |
+| `doctor`, `env`, `help`, and every command with `--dry-run` | Nothing of yours. Each makes one temporary file of its own in your temporary folder (`$TMPDIR`), with a scratch folder beside it for the patch test, and removes them when it ends; `xcrun` keeps its lookup cache (`xcrun_db`) in that same per-user temporary folder, as it does whenever any Xcode tool is run. They read the Mac (`sw_vers`, `sysctl`, `xcode-select -p` before anything else, `xcodebuild -version`, `xcrun`, `file` on each tool taken from `PATH`, each chosen tool's `--version`), the checkout (`git status` without refreshing its index; a dry run never records local changes with `git stash create`) and the working directory. They never run `brew info` or `brew install`: a dry run of `deps` names `llvm@22` without asking Homebrew which LLVM formula it has |
 | `deps` | Homebrew's prefix, and Homebrew's own cache and logs (`~/Library/Caches/Homebrew`, `~/Library/Logs/Homebrew`) for the formulas it installs, after a yes. Its `brew info` questions keep Homebrew's formula list in `<workdir>/tools/homebrew-cache`; with `--offline` it asks none. Everything else in `<workdir>/tools` and `<workdir>/src` |
-| `fetch` | `<workdir>/src`, `<workdir>/build/...` (the layout below) and the translator's crates in `<workdir>/tools/cargo` |
+| `fetch` | `<workdir>/src`, `<workdir>/build/...` (the layout below) and the translator's crates in `<workdir>/tools/cargo`. Its git runs without your git hooks (`core.hooksPath`), file system monitor and global attributes file, and its `git init` and `git clone` without your template folder (`init.templateDir`) |
 | `build`, `all`, `package` | `<workdir>` only, with one exception: when the checkout has uncommitted changes, the plugin, translator and video builds take them as a commit object made with `git stash create`, which is stored in the checkout's `.git` (on no branch; `git gc` removes it in time) |
 | `test` | `<workdir>/logs`; the host tests make temporary folders of their own and remove them |
 | `clean` | Deletes inside `<workdir>` only |
@@ -131,7 +137,7 @@ fetch and build (`./build.sh doctor` prints the comparison).
 | Command | What it does |
 |---|---|
 | `all` | The default when no command is given. doctor, then deps when something is missing (unless `--no-install`), fetch, build every component, package when a base package is given, and a summary |
-| `doctor` | Examines only: the Mac, Xcode and its SDK, every tool and its version, the pins against the scripts, the sources fetched so far, and things that stop a build on some Macs. Changes nothing. Exit 1 when something required is missing or too old |
+| `doctor` | Examines only: the Mac, Xcode and its SDK, every tool and its version, the pins against the scripts, the sources fetched so far, and things that stop a build on some Macs. Changes nothing of yours ([What each command writes](#what-each-command-writes)). Exit 1 when something required is missing or too old |
 | `deps` | Installs what is missing: Homebrew formulas (after a yes, or `--yes`), SPIRV-LLVM-Translator for LLVM 22, the Python environment and Rust (the last three in the working directory). Explains how to install Xcode, which no script can do |
 | `fetch` | Downloads the pinned sources into the working directory and verifies each commit id or SHA-256. Also fetches the translator's crates (`cargo fetch --locked`) once Rust is there, so that its build runs offline |
 | `build [component...]` | Builds the named components and what they need, or all of them. Names and groups: [Components](#components-and-their-order) |
@@ -189,7 +195,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_RUSTUP_URL` | static.rust-lang.org, rustup 1.29.3 | Where `rustup-init` is downloaded from (its SHA-256 is checked either way) |
 | `RUSTUP_DIST_SERVER` | rustup's | Where rustup downloads the toolchain from |
 | `DEVELOPER_DIR` | the selected Xcode | An Xcode other than the one `xcode-select` selects |
-| `NM_BREW` | found | The `brew` to use. When set, it is the only Homebrew considered, whatever its architecture. Unset, `build.sh` uses the Homebrew of the Mac's processor only (`/usr/local` on Intel, `/opt/homebrew` on Apple silicon, also from a shell under Rosetta), and otherwise a `brew` on `PATH` only when it resolves into that same prefix (a wrapper in no Homebrew prefix, or one that resolves into the other architecture's prefix, is not taken). A Homebrew of the other architecture, whose formulas are built for the other processor and cannot be linked here, is named by `doctor` but used only when `NM_BREW` points at it. Every `brew` call runs with `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` and `HOMEBREW_REPOSITORY` cleared, so a login shell's settings for another Homebrew cannot redirect it |
+| `NM_BREW` | found | The `brew` to use. When set, it is the only Homebrew considered, whatever its architecture. Unset, `build.sh` uses the Homebrew of the Mac's processor only (`/usr/local` on Intel, `/opt/homebrew` on Apple silicon, also from a shell under Rosetta), and otherwise a `brew` on `PATH` only when it resolves into that same prefix (a wrapper in no Homebrew prefix, or one that resolves into the other architecture's prefix, is not taken). A Homebrew of the other architecture, whose formulas are built for the other processor and cannot be linked here, is named by `doctor` but used only when `NM_BREW` points at it. Every `brew` call runs with `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` and `HOMEBREW_REPOSITORY` cleared, so a login shell's settings for another Homebrew cannot redirect it. A tool taken from `PATH` (`python3`, `patch`, `gpatch`, `ninja`, `cmake`, `pkg-config`, `glslangValidator`) is left out when it belongs to the Homebrew of the other architecture (its file, after its symlinks, is there; or its `#!` interpreter is; or `file` says it is a Mach-O program without this processor's code); `doctor` says which and why |
 | `NM_PYTHON` | found | A Python 3.10 or newer to make the virtual environment with |
 | `NM_LLVM_PREFIX` | Homebrew's `llvm@22` or `llvm` | An LLVM 22.x with its clang libraries, when Homebrew has none |
 | `NM_OGKM620_PRISTINE` | fetched | An unpacked NVIDIA 620.70.06 tree to use instead of fetching (checked by its `version.mk`) |
@@ -217,7 +223,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NVK_EXTRA_PATCHES` | none | build_nvk.sh: patches applied after the chain |
 | `NVK_SKIP_PATCHES` | none | build_nvk.sh: patches of the chain to leave out (the result is then not the release's) |
 | `NVK_REF_EXPORTS` | none | build_nvk.sh: a file of exports to compare with |
-| `PKG_CONFIG_PATH` | SPIRV-LLVM-Translator, SPIRV-Tools and LLVM | Yours is put after these (pkg-config takes the first match, and Homebrew's translator follows its current LLVM) |
+| `PKG_CONFIG_PATH` | SPIRV-LLVM-Translator, SPIRV-Tools and LLVM | Yours is put after these (pkg-config takes the first match, and Homebrew's translator follows its current LLVM), without its folders inside the other architecture's Homebrew |
 | `LIBCLANG_PATH` | LLVM's `lib` | bindgen's libclang |
 | `JOBS` | `NM_JOBS` | build_rm620.sh and build_kms620.sh: make jobs |
 | `NULLMOTH_RUST_VERSION` | `1.98.1` | build_xlate_release.sh: the Rust version expected; another one builds different bytes, and `build.sh` warns |
@@ -242,9 +248,12 @@ These are not settings: `build.sh` derives them, gives them to the build scripts
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | the tarball name and the build description `build/package_local.sh` puts in the package |
 <!-- end -->
 
-Every step also gets `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE` and
-`SDKROOT` removed from its environment: an exported `CC` breaks build_rm620.sh, and `NM_TAHOE` selects the macOS 26
-accelerator. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
+Every step also gets `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`,
+`SDKROOT`, the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
+`LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, and `HOMEBREW_PREFIX`,
+`HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY` removed from its environment: an exported `CC` breaks build_rm620.sh,
+`NM_TAHOE` selects the macOS 26 accelerator, and a login shell may point the others at a Homebrew of the other
+architecture. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
 build_plugin.sh, the original author's development scripts for trees in `~/nvmtl-build`) are not used: `build.sh`
 replaces those scripts.
 
@@ -462,14 +471,17 @@ component build script is replaced by a stand-in that records what it receives. 
 nothing installed, deps with and without installing, fetch (and a tampered remote), offline, dry run, the build
 order, the variables every step gets, skipping and rebuilding, a failing step and its report, a failed script after
 an earlier good build, build_rm620.sh's exit 6, the step's python3, SPIRV-LLVM-Translator when Homebrew's LLVM is 23,
-which of two Homebrews is used, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
+which of two Homebrews is used, that no tool of the other architecture's Homebrew is taken from `PATH`, that no brew
+call keeps the caller's `HOMEBREW_` variables, that `fetch` runs none of your git hooks, template or filters, that
+nothing opens Apple's install dialog on a Mac without Xcode, what a Mac with Xcode alone builds and what stops before the first step, that doctor,
 dry runs and env write nothing (Homebrew's cache included) and print no home path,
 an interrupted run,
 two runs at once, paths with spaces, Apple silicon and an unsupported macOS, `env`, this document against the script,
 and the pins against the scripts that use them; each part has at least one control that breaks `build.sh` (or its
 input) on purpose and shows the check then fails. It runs `build.sh` under `/bin/bash`, or the bash named by
 `BUILD_SH_BASH`, and says so when that is not bash 3.2, the `/bin/bash` of macOS; it has passed under GNU bash
-3.2.48 and 5.2 on Linux, and has not been run on a Mac. `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
+3.2.48 and 5.2 on Linux, and once on the owner's Intel Mac, at a commit before the last changes to `build.sh` (the
+Homebrew of the other architecture, the tools taken from `PATH`, `fetch`'s git set-up, the stop without Xcode). `tools/test_rm_compile_list.py` runs the real build_rm620.sh,
 build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make and patch): a second run in a built
 folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check takes whole words. What it cannot show is how the real Xcode, Homebrew and compilers behave: that is what
 the first run on a Mac will show.

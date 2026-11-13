@@ -9,7 +9,11 @@ comandos y opciones y la solución de problemas.
 > **Escrito y probado sin un Mac.** `./build.sh` se ha ejecutado en un solo Mac (Intel, macOS 26.7, Xcode 26.5), y solo
 > en parte: funcionaron `doctor`, `env`, `--dry-run` y `fetch`, y compiló el plugin, la biblioteca de vídeo (y el RM por
 > el camino) y las herramientas pequeñas; los kexts se detuvieron en su comprobación de GNU patch y Python 3.10, que ese
-> Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
+> Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Ninguno de los cambios hechos en `build.sh`
+> después de esa ejecución se ha ejecutado aún en un Mac: la comprobación de herramientas por componente, la elección
+> de Homebrew y de las herramientas que toma del `PATH`, la organización del directorio de trabajo, la lista de
+> compilación del RM, la configuración de git de `fetch` y la parada sin Xcode solo se probaron contra los sustitutos.
+> Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
 > sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
 > (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
 > `--dry-run`. `deps` no ha instalado nada real, no ha compilado NVK ni el traductor y no ha preparado ningún paquete.
@@ -29,7 +33,9 @@ comandos y opciones y la solución de problemas.
   x86_64, la arquitectura en la que funciona el driver.
 - **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Las herramientas de línea de comandos
   solas no bastan: el plugin usa cabeceras de Metal 4 que solo tiene el SDK de macOS 26. No hace falta ningún Kernel
-  Debug Kit.
+  Debug Kit. En un Mac sin Xcode ni herramientas de línea de comandos, todos los comandos salvo `help` se detienen al
+  empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
+  de macOS son entonces sustitutos que ofrecen instalar las herramientas de línea de comandos, y no se ejecuta ninguno.
 - Un clon git de este repositorio (no un archivo descargado). La ruta del clon, la del directorio de trabajo y la de tu
   carpeta personal no pueden contener espacios.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
@@ -54,7 +60,8 @@ cd nvidia-macos-driver
 ./build.sh
 ```
 
-`./build.sh doctor` no cambia nada: muestra lo que este Mac tiene, lo que falta y lo que es demasiado antiguo, y
+`./build.sh doctor` no cambia nada tuyo (solo escribe un archivo temporal propio y la caché de `xcrun`; ver más
+abajo): muestra lo que este Mac tiene, lo que falta y lo que es demasiado antiguo, y
 termina con código 1 si falta algo necesario. `./build.sh` (lo mismo que `./build.sh all`) ejecuta doctor, instala lo
 que falta después de preguntar, descarga las fuentes fijadas, compila todos los componentes e imprime un resumen. Si
 lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiaron se saltan.
@@ -63,8 +70,12 @@ Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio 
 `~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`.
 
-`doctor`, `env`, `help` y cualquier comando con `--dry-run` no escriben nada: no ejecutan `brew info` ni
-`brew install`, leen el clon sin actualizar su índice y no guardan cambios locales con `git stash create`. `deps`
+`doctor`, `env`, `help` y cualquier comando con `--dry-run` no escriben nada tuyo: no ejecutan `brew info` ni
+`brew install`, leen el clon sin actualizar su índice y no guardan cambios locales con `git stash create`. Cada uno
+crea un archivo temporal propio (y una carpeta a su lado para probar `patch`) en tu carpeta temporal (`$TMPDIR`) y los
+borra al terminar; `xcrun` guarda su caché de búsqueda (`xcrun_db`) en esa misma carpeta temporal, como hace siempre que
+se ejecuta una herramienta de Xcode. `fetch` ejecuta git sin tus hooks (`core.hooksPath`), sin monitor de archivos ni
+archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). `deps`
 escribe en la carpeta de Homebrew y en su caché (`~/Library/Caches/Homebrew`) al instalar, pero sus preguntas
 `brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache`. La tabla completa está en
 [BUILDING.md](BUILDING.md#what-each-command-writes).
@@ -95,7 +106,7 @@ misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`
 | Comando | Qué hace |
 |---|---|
 | `all` | Por defecto. doctor, deps si falta algo (salvo con `--no-install`), fetch, compilar todo, el paquete si hay paquete base, y un resumen |
-| `doctor` | Solo examina; no cambia nada. Código 1 si falta algo necesario o es demasiado antiguo |
+| `doctor` | Solo examina; no cambia nada tuyo. Código 1 si falta algo necesario o es demasiado antiguo |
 | `deps` | Instala lo que falta: fórmulas de Homebrew (después de un sí, o `--yes`), SPIRV-LLVM-Translator para LLVM 22, el entorno de Python y Rust (estos tres en el directorio de trabajo) |
 | `fetch` | Descarga las fuentes fijadas y verifica cada commit o SHA-256 |
 | `build [componente...]` | Compila los componentes indicados y lo que necesitan, o todos |
@@ -150,7 +161,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
-| `NM_BREW` | El `brew` que se usa. Si se indica, es el único Homebrew que se considera, sea cual sea su arquitectura. Sin él, `build.sh` usa solo el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), y si no, un `brew` del `PATH` solo cuando se resuelve dentro de ese mismo prefijo (un envoltorio que no está en ningún prefijo de Homebrew, o uno que se resuelve en el prefijo de la otra arquitectura, no se toma). Un Homebrew de la otra arquitectura, cuyas fórmulas están compiladas para el otro procesador y no se pueden enlazar aquí, lo nombra `doctor` pero solo se usa si `NM_BREW` lo indica. Cada llamada a `brew` se ejecuta con `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` y `HOMEBREW_REPOSITORY` sin definir, para que la configuración de otro Homebrew en la shell no pueda redirigirla |
+| `NM_BREW` | El `brew` que se usa. Si se indica, es el único Homebrew que se considera, sea cual sea su arquitectura. Sin él, `build.sh` usa solo el Homebrew del procesador del Mac (`/usr/local` en Intel, `/opt/homebrew` en Apple silicon, también desde una shell bajo Rosetta), y si no, un `brew` del `PATH` solo cuando se resuelve dentro de ese mismo prefijo (un envoltorio que no está en ningún prefijo de Homebrew, o uno que se resuelve en el prefijo de la otra arquitectura, no se toma). Un Homebrew de la otra arquitectura, cuyas fórmulas están compiladas para el otro procesador y no se pueden enlazar aquí, lo nombra `doctor` pero solo se usa si `NM_BREW` lo indica. Cada llamada a `brew` se ejecuta con `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR` y `HOMEBREW_REPOSITORY` sin definir, para que la configuración de otro Homebrew en la shell no pueda redirigirla. Una herramienta tomada del `PATH` (`python3`, `patch`, `gpatch`, `ninja`, `cmake`, `pkg-config`, `glslangValidator`) se descarta si pertenece al Homebrew de la otra arquitectura (su archivo, tras seguir sus enlaces, está allí; o lo está su intérprete `#!`; o `file` dice que es un programa Mach-O sin código de este procesador); `doctor` dice cuál y por qué |
 | `NM_PYTHON` | Un Python 3.10 o posterior para el entorno virtual |
 | `NM_LLVM_PREFIX` | Un LLVM 22.x con sus bibliotecas de clang |
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
@@ -178,7 +189,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NVK_EXTRA_PATCHES` | build_nvk.sh |
 | `NVK_SKIP_PATCHES` | build_nvk.sh |
 | `NVK_REF_EXPORTS` | build_nvk.sh |
-| `PKG_CONFIG_PATH` | Se pone detrás del que arma `build.sh` |
+| `PKG_CONFIG_PATH` | Se pone detrás del que arma `build.sh`, sin sus carpetas dentro del Homebrew de la otra arquitectura |
 | `LIBCLANG_PATH` | libclang para bindgen |
 | `JOBS` | build_rm620.sh y build_kms620.sh |
 | `NULLMOTH_RUST_VERSION` | build_xlate_release.sh (por defecto 1.98.1) |
