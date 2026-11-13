@@ -161,7 +161,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_seq_slept, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_fence_seq_refused, CTLFLAG_RD | CTLFLAG_LOCKED, NVF_STAT(SEQ_REFUSED), "of those, told to poll: the channel raises no interrupt");
 
 // Once per boot, also when the layer is switched off, so that state 0 can be read. Never unregistered: NVRM.kext is not
-// unloaded while the system runs, like every other debug.nvrm_* sysctl.
+// unloaded while the system runs (NVRM.cpp, nvrmStayLoaded()), like every other debug.nvrm_* sysctl.
 static void nvfSysctls(void)
 {
     if (!OSCompareAndSwap(0, 1, (volatile UInt32 *)&gFSysctls)) return;
