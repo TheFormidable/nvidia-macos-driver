@@ -258,8 +258,9 @@ static void nvaccelLayoutSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_layout_pure);
 }
 
-/* false: a class of the accelerator family has another size in this macOS than in this build, or one of its vtables
-   reads shorter, and nvlayout=0 is absent: the caller's probe returns NULL. Thread context with no lock held (a probe).
+/* false: a class of the accelerator family has another size in this macOS than in this build, and nvlayout=0 is absent
+   (a vtable length, shorter or longer, never refuses): the caller's probe returns NULL. Thread context with no lock
+   held (a probe).
    self: the instance being probed; its own vtable (its first word, which only the constructor wrote) is read for the
    pure-slot count, and only after the verdict allowed it. kext: "NVAccel" or the flavour's name, for the log. */
 static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provider, const char *kext)
@@ -308,7 +309,7 @@ static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provide
 #endif
     };
     const unsigned nVts = sizeof vts / sizeof vts[0];
-    // The lengths, read for the report; only the tables that read the same or shorter are handed on. Every caller
+    // The lengths, read for the report; only the tables that read the same length are handed on. Every caller
     // reads them into its own buffer (constant tables of a few hundred words), so no caller publishes a line that
     // another one is still writing.
     NvLayoutVt mayRefuse[sizeof vts / sizeof vts[0]];
