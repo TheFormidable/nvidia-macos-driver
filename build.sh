@@ -36,10 +36,12 @@ MARKER=.nullmoth-build-workdir
 LOCAL_HOST=nullmoth-local-build
 
 # ---------------------------------------------------------------------------------------------------------- messages
-say()  { printf '%s\n' "$*"; }
-note() { printf 'note: %s\n' "$*"; }
-warn() { printf 'WARNING: %s\n' "$*" >&2; }
-die()  { printf 'STOP: %s\n' "$*" >&2; exit 2; }
+# Everything build.sh prints writes the home folder as ~ (its path contains the account name, and testers paste this
+# output into bug reports); has_home keeps the common case, a line without it, free of a subprocess.
+say()  { if has_home "$*"; then printf '%s\n' "$*" | tilde; else printf '%s\n' "$*"; fi; }
+note() { say "note: $*"; }
+warn() { say "WARNING: $*" >&2; }
+die()  { say "STOP: $*" >&2; exit 2; }
 hr()   { say "---------------------------------------------------------------------------------------------------"; }
 q() {   # a value quoted for a shell
   case "$1" in
@@ -49,19 +51,58 @@ q() {   # a value quoted for a shell
   esac
 }
 qcmd() { local a out=""; for a in "$@"; do out="$out $(q "$a")"; done; printf '%s\n' "${out# }"; }
-tilde() {   # the home folder written as ~ (report files and summaries a tester may post)
-  # both spellings: $HOME as set, and the same folder with its symbolic links resolved, which is how the working
-  # directory is stored (a home under /var or /tmp is /private/var or /private/tmp once resolved)
-  local ph=""
-  if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
-    ph=$(cd "$HOME" 2>/dev/null && pwd -P) || ph=""
-    awk -v h="$HOME" -v p="$ph" 'function rep(s, x,   i, o) { o = ""; while ((i = index(s, x)) > 0) { o = o substr(s, 1, i - 1) "~"; s = substr(s, i + length(x)) } return o s }
-      { if (p != "" && p != "/" && p != h) $0 = rep($0, p); print rep($0, h) }'
-  else cat; fi
+# The home folder in both spellings: $HOME as set, and the same folder with its symbolic links resolved, which is how the
+# working directory is stored (a home under /var or /tmp is /private/var or /private/tmp once resolved).
+TILDE_H=""; TILDE_P=""
+if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
+  TILDE_H=$HOME
+  TILDE_P=$(cd "$HOME" 2>/dev/null && pwd -P) || TILDE_P=""
+  case "$TILDE_P" in /|"$TILDE_H") TILDE_P="" ;; esac
+fi
+has_home() {
+  [ -n "$TILDE_H" ] || return 1
+  case "$1" in *"$TILDE_H"*) return 0 ;; esac
+  if [ -n "$TILDE_P" ]; then case "$1" in *"$TILDE_P"*) return 0 ;; esac; fi
+  return 1
+}
+home_as() {   # <text>: stdin with the home folder written as <text>, where it is a whole path: /Users/ana/x and /Users/ana
+  # become ~/x and ~, /Users/anabel and /x/Users/ana stay as they are
+  [ -n "$TILDE_H" ] || { cat; return 0; }
+  awk -v h="$TILDE_H" -v p="$TILDE_P" -v t="$1" '
+    function rep(s, x,   i, o, a, b) {
+      o = ""
+      while ((i = index(s, x)) > 0) {
+        a = (i > 1) ? substr(s, i - 1, 1) : ""; b = substr(s, i + length(x), 1)
+        if (a !~ /[A-Za-z0-9._-]/ && b !~ /[A-Za-z0-9._-]/) o = o substr(s, 1, i - 1) t
+        else o = o substr(s, 1, i - 1 + length(x))
+        s = substr(s, i + length(x))
+      }
+      return o s
+    }
+    { if (p != "") $0 = rep($0, p); print rep($0, h) }'
+}
+tilde() { home_as "~"; }   # report files, summaries, everything a person reads
+qh() {   # a value quoted for a shell, with the home folder as "$HOME": an env line that works when pasted, without the account name
+  has_home "$1" || { q "$1"; return 0; }
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"$`]/\\&/g' | home_as '$HOME')"
 }
 
 # ---------------------------------------------------------------------------------------------------------- small tools
 is_mac() { [ "$(uname -s)" = Darwin ]; }
+# mac_arch: the processor of this Mac, arm64 or x86_64; every choice that depends on it (which Homebrew, the Rust host,
+# the Intel notes) asks here. uname -m answers for this process: a shell running under Rosetta on Apple silicon says
+# x86_64. hw.optional.arm64 is 1 on Apple silicon whatever the process, and does not exist on an Intel Mac.
+MAC_ARCH=""
+mac_arch() {
+  if [ -z "$MAC_ARCH" ]; then
+    case "$(uname -m)" in
+      arm64|aarch64) MAC_ARCH=arm64 ;;
+      *) if is_mac && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then MAC_ARCH=arm64; else MAC_ARCH=x86_64; fi ;;
+    esac
+  fi
+  printf '%s' "$MAC_ARCH"
+}
+rosetta() { [ "$(mac_arch)" = arm64 ] && [ "$(uname -m)" = x86_64 ]; }   # this shell is an Intel process on Apple silicon
 # Xcode 26 (the macOS 26 SDK the plugin needs) does not run on a macOS older than NM_PIN_TOOL_MACOS_MIN
 mac_too_old() { is_mac && ! ver_ge "$(sw_vers -productVersion 2>/dev/null || echo 0)" "$NM_PIN_TOOL_MACOS_MIN"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -219,10 +260,12 @@ set_defaults() {
   fi
 }
 
-# Paths everything else uses. NULLMOTH_BUILD_ROOT is the folder the existing scripts default their trees under.
+# Paths everything else uses. NULLMOTH_BUILD_ROOT is the folder the existing scripts default their trees under: they
+# put them in its subfolder "build" (build/rm620, build/ogkm620, build/gpu-src, build/nvencvt-headers, build/plugin-*,
+# build/xlate-release), so it is the working directory itself and the trees land in <work>/build/..., not deeper.
 derive_paths() {
   W=$NM_WORK
-  R=${NULLMOTH_BUILD_ROOT:-$W/build}
+  R=${NULLMOTH_BUILD_ROOT:-$W}
   O=$W/out
   SRC=$W/src
   TOOLS=$W/tools
@@ -248,7 +291,7 @@ derive_paths() {
   SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator
   CARGO_DIR=$TOOLS/cargo
   BUILD_HOST=${NULLMOTH_BUILD_HOST:-$LOCAL_HOST}
-  case "$(uname -m)" in arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
+  case "$(mac_arch)" in arm64) HOST_TRIPLE=aarch64-apple-darwin ;; *) HOST_TRIPLE=x86_64-apple-darwin ;; esac
   RUST_BIN=${NULLMOTH_RUST_BIN:-$RUSTUP_DIR/toolchains/$NM_PIN_RUST_VERSION-$HOST_TRIPLE/bin}
   # the Python environment's own bin folder, not a link to its python3: Python finds its environment from the folder of
   # the path it was started by (pyvenv.cfg one level up), so a python3 linked from tools/bin is the bare interpreter
@@ -340,7 +383,7 @@ write_report() {   # <step> <exit status> <log or ''>
     say "settings:     flavour=$NM_FLAVOUR accel=$NM_ACCEL jobs=$NM_JOBS offline=$NM_OFFLINE workdir=$W"
     hr; say "machine"
     if is_mac; then
-      say "macOS $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null)), $(uname -m), $(sysctl -n hw.model 2>/dev/null)"
+      say "macOS $(sw_vers -productVersion 2>/dev/null) ($(sw_vers -buildVersion 2>/dev/null)), $(mac_arch)$(rosetta && echo ' (this shell under Rosetta)'), $(sysctl -n hw.model 2>/dev/null)"
       say "cpu: $(sysctl -n machdep.cpu.brand_string 2>/dev/null), $(ncpu) cores, memory $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 )) GB"
     else
       say "$(uname -srm)"
@@ -349,8 +392,8 @@ write_report() {   # <step> <exit status> <log or ''>
     hr; say "checkout"
     say "commit: $(git -C "$HERE" rev-parse HEAD 2>/dev/null) ($(git -C "$HERE" log -1 --format=%s 2>/dev/null | cut -c1-80))"
     say "branch: $(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    local ch; ch=$(git -C "$HERE" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$ch" = 0 ]; then say "local changes: none"; else say "local changes: $ch file(s):"; git -C "$HERE" status --porcelain 2>/dev/null | sed -n 1,40p; fi
+    local ch; ch=$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$ch" = 0 ]; then say "local changes: none"; else say "local changes: $ch file(s):"; GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain 2>/dev/null | sed -n 1,40p; fi
     hr; say "pins (build/pins.sh)"
     grep -E '^NM_PIN_[A-Z0-9_]*(_REF|_COMMIT|_SHA256|_VERSION|_MIN|_MAJOR)=' "$PINS_FILE" || true
     hr; say "variables the build passes to the scripts"; print_env 2>/dev/null | grep '^export ' || true
@@ -383,32 +426,149 @@ on_err() {
   [ -n "$rep" ] && say "report file: $(printf '%s' "$rep" | tilde)" >&2
   exit "$rc"
 }
-on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -f "$TMPF" "$TMPF".* 2>/dev/null || true; }
+on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -rf "$TMPF" "$TMPF".* 2>/dev/null || true; }
 on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during step $CUR_STEP}" >&2; release_lock; exit 130; }
 
 # ---------------------------------------------------------------------------------------------------------- tools
-BREW=""; BREW_PREFIX=""
-# NM_BREW, when set, is the only Homebrew considered: a setting that names a brew which is not there is not answered
-# with another one found elsewhere (the test suite relies on this to keep the Homebrew of the machine it runs on out
-# of its imitated Macs). Without it: the two places Homebrew installs itself to, then PATH.
+BREW=""; BREW_PREFIX=""; BREW_OTHER=""
+# The two places Homebrew installs itself to, the one of this Mac's processor FIRST: /opt/homebrew on Apple silicon,
+# /usr/local on Intel. A Mac can carry both, and the second can be a Homebrew of the OTHER architecture: an Intel Mac
+# may have an Apple-silicon Homebrew in /opt/homebrew (software that runs ARM code on Intel installs one), an
+# Apple-silicon Mac an Intel Homebrew in /usr/local under Rosetta. Only the Homebrew of this processor builds formulas
+# this build can link against, so only it is used without being told; a Homebrew of the other architecture is recorded
+# as BREW_OTHER (doctor names it and how to choose it) but is never used on its own. First token = native, second = other.
+brew_places() { if [ "$(mac_arch)" = arm64 ]; then echo "/opt/homebrew/bin/brew /usr/local/bin/brew"; else echo "/usr/local/bin/brew /opt/homebrew/bin/brew"; fi; }
+# Resolve a path through its symlinks (macOS has no "readlink -f") and canonicalise it, so a brew found on PATH can be
+# judged by the prefix its real file sits in, not by where the command happened to be on PATH. A wrapper script is not
+# run to find out where it leads (a wrapper may do anything): only its own location, after following symlinks, is read.
+resolve_path() {
+  local p=$1 t n=0
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do t=$(readlink "$p" 2>/dev/null) || break; case "$t" in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac; n=$((n + 1)); done
+  local d; d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1; printf '%s/%s' "$d" "$(basename "$p")"
+}
+# NM_BREW, when set, is the only Homebrew considered (trusted as named, whatever its architecture): a setting that names
+# a brew which is not there is not answered with another one found elsewhere (the test suite relies on this to keep the
+# Homebrew of the machine it runs on out of its imitated Macs). Without it: the processor's own place; then a brew on
+# PATH, but only when it resolves into that same prefix (a wrapper in no Homebrew prefix, or a brew that resolves into
+# the other architecture's prefix, is not taken). A Homebrew of the other architecture that was seen is kept in BREW_OTHER.
 find_brew() {
-  BREW=""; BREW_PREFIX=""
-  local c
+  BREW=""; BREW_PREFIX=""; BREW_OTHER=""
+  local places native other c r
   if [ -n "${NM_BREW:-}" ]; then
     if [ -f "$NM_BREW" ] && [ -x "$NM_BREW" ]; then BREW=$NM_BREW; fi
   else
-    for c in /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null || true)"; do
-      [ -n "$c" ] && [ -x "$c" ] && { BREW=$c; break; }
-    done
+    places=$(brew_places); native=${places%% *}; other=${places##* }
+    [ -f "$native" ] && [ -x "$native" ] && BREW=$native
+    [ -n "$other" ] && [ -f "$other" ] && [ -x "$other" ] && BREW_OTHER=$other
+    if [ -z "$BREW" ]; then
+      c=$(command -v brew 2>/dev/null || true)
+      if [ -n "$c" ] && [ -x "$c" ]; then
+        r=$(resolve_path "$c" 2>/dev/null || true)
+        case "$r" in
+          "${native%/bin/brew}"/*) BREW=$c ;;
+          "${other%/bin/brew}"/*)  [ -n "$BREW_OTHER" ] || BREW_OTHER=$c ;;
+        esac
+      fi
+    fi
   fi
   [ -n "$BREW" ] && BREW_PREFIX=$(cd "$(dirname "$BREW")/.." && pwd -P)
   return 0
 }
 brew_opt() { printf '%s/opt/%s' "${BREW_PREFIX:-/nonexistent-homebrew}" "$1"; }   # a path that never exists without Homebrew
 
+# A tool build.sh takes from PATH (python3, gpatch, patch, ninja, cmake, pkg-config, glslangValidator) must be a program
+# of this Mac's processor that is not part of a Homebrew of the other architecture: a tester's login shell can put that
+# Homebrew's bin folder before /usr/local/bin, and its programs and libraries are of the other architecture. A candidate
+# is judged without being run (a wrapper may do anything). foreign_areas: where that Homebrew keeps its programs; all
+# of /opt/homebrew on an Intel Mac, but only Homebrew's own folders of /usr/local on Apple silicon, where /usr/local/bin
+# also holds programs of other origins (Homebrew's links there resolve into Cellar). Nothing when NM_BREW chose that
+# Homebrew: its tools are then the wanted ones.
+foreign_areas() {
+  local places other
+  places=$(brew_places); other=${places##* }; other=${other%/bin/brew}
+  [ -d "$other" ] && other=$(cd "$other" 2>/dev/null && pwd -P) || return 0
+  [ "$other" != "$BREW_PREFIX" ] || return 0
+  if [ "$(mac_arch)" = x86_64 ]; then printf '%s\n' "$other"
+  else printf '%s\n' "$other/Cellar" "$other/opt" "$other/Caskroom" "$other/Homebrew"; fi
+}
+# foreign_search_dir <dir>: a folder for a search path (PKG_CONFIG_PATH) inside the other architecture's prefix. Stricter
+# than for programs: on Apple silicon /usr/local/lib/pkgconfig holds an Intel Homebrew's files as links, so the whole
+# prefix counts there once a Homebrew is installed in it.
+foreign_search_dir() {
+  local places other d=$1
+  places=$(brew_places); other=${places##* }; other=${other%/bin/brew}
+  [ "$(mac_arch)" = x86_64 ] || [ -x "$other/bin/brew" ] || return 1
+  [ ! -d "$other" ] || other=$(cd "$other" 2>/dev/null && pwd -P) || return 1
+  [ "$other" != "$BREW_PREFIX" ] || return 1
+  [ ! -d "$d" ] || d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  case "$d/" in "$other"/*) return 0 ;; esac
+  return 1
+}
+in_foreign_area() { local a; while IFS= read -r a; do case "$1" in "$a"/*) return 0 ;; esac; done < <(foreign_areas); return 1; }
+# foreign_reason <path>: why that program is not taken, or nothing: its file (after its symlinks) lies in the other
+# architecture's Homebrew; or it is a script whose #! interpreter (also one named through /usr/bin/env) lies there; or
+# "file" says it is a Mach-O program without this processor's code (a universal one carries it; "file" is part of macOS
+# itself, not one of the command line tools' stand-ins, and without it this last test is skipped)
+foreign_reason() {
+  local c=$1 r a b i d
+  [ -n "$c" ] && [ -f "$c" ] || return 0
+  r=$(resolve_path "$c" 2>/dev/null) || r=$c
+  if in_foreign_area "$r"; then printf 'it is %s, part of the Homebrew of the other architecture' "$r"; return 0; fi
+  if have file && d=$(file -b "$r" 2>/dev/null); then
+    case "$d" in
+      Mach-O*) case "$(mac_arch)" in arm64) case "$d" in *arm64*) return 0 ;; esac ;; *) case "$d" in *x86_64*) return 0 ;; esac ;; esac
+               printf 'it is a program for another processor (%s)' "$d"; return 0 ;;
+    esac
+  fi
+  [ "$(LC_ALL=C head -c 2 "$r" 2>/dev/null)" = '#!' ] || return 0
+  read -r a b _ <<EOF
+$(LC_ALL=C head -n 1 "$r" 2>/dev/null | LC_ALL=C tr -d '\r' | sed 's/^#![[:space:]]*/#!/')
+EOF
+  a=${a#\#!}
+  case "$a" in */env) case "$b" in ''|-*) i="" ;; *) i=$(command -v "$b" 2>/dev/null || true) ;; esac ;; *) i=$a ;; esac
+  [ -n "$i" ] && [ -e "$i" ] || return 0
+  i=$(resolve_path "$i" 2>/dev/null) || return 0
+  if in_foreign_area "$i"; then printf 'it is a script run by %s, part of the Homebrew of the other architecture' "$i"; fi
+  return 0
+}
+# path_tool <name>: the program of that name on PATH, or nothing when there is none or foreign_reason rejects it
+path_tool() {
+  local c; c=$(command -v "$1" 2>/dev/null) || return 0
+  case "$c" in /*) ;; *) return 0 ;; esac
+  [ -n "$(foreign_reason "$c")" ] || printf '%s' "$c"
+}
+PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator"
+
 # Each tool: the path the build will use ("" when none fits) and a status line. Homebrew's bin folder is never put on
 # the build's PATH: tools/bin gets a link to each chosen tool, so nothing else from Homebrew can leak into the build.
-T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""
+# patch_works <patch> [new]: does it apply, without a question, a change (and with "new" also a new file) in git's form
+# the way the scripts do: build_rm620.sh and tools/test_patch_chain.sh "-p1 --fuzz=0 --dry-run" then "-p1 --fuzz=0
+# --no-backup-if-mismatch" (changes only), build_nvk.sh "-p1 -s --no-backup-if-mismatch -d <dir>" (NVK's chain also
+# creates files). It works in a temporary folder, removed at once.
+patch_works() {
+  local p=$1 d=${TMPF:-/nonexistent}.patch ok=1
+  [ -n "${TMPF:-}" ] || return 1
+  rm -rf "$d"; mkdir -p "$d/t/a" || return 1
+  printf 'one\ntwo\nthree\n' > "$d/t/a/f.txt"
+  printf '%s\n' 'diff --git a/a/f.txt b/a/f.txt' '--- a/a/f.txt' '+++ b/a/f.txt' '@@ -1,3 +1,3 @@' ' one' '-two' '+TWO' ' three' > "$d/c.patch"
+  [ "${2:-}" != new ] || printf '%s\n' 'diff --git a/a/new.txt b/a/new.txt' 'new file mode 100644' '--- /dev/null' '+++ b/a/new.txt' \
+    '@@ -0,0 +1 @@' '+new' >> "$d/c.patch"
+  ( cd "$d/t" && "$p" -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\ntwo\nthree')" ] && [ ! -e "$d/t/a/new.txt" ] || ok=0
+  [ "$ok" = 1 ] && "$p" -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\nTWO\nthree')" ] || ok=0
+  [ "$ok" = 1 ] && { [ "${2:-}" != new ] || [ "$(cat "$d/t/a/new.txt" 2>/dev/null)" = new ]; } || ok=0
+  [ "$ok" = 1 ] && [ -z "$(find "$d/t" -name '*.orig' -o -name '*.rej')" ] || ok=0
+  rm -rf "$d"
+  [ "$ok" = 1 ]
+}
+# kext_python: the python3 a kext step finds on its PATH (the Python environment's once deps made it, else macOS's),
+# when it is new enough for build_rm620.sh, build_kms620.sh and rmcc.py; host_python: the one libnvencvt's build
+# runs on the build Mac (this one: NM_LOCAL_HOST_PATH)
+python_at_least() { local v; [ -n "$1" ] && v=$("$1" --version 2>&1 | version_of) && [ -n "$v" ] && ver_ge "$v" "$2"; }
+kext_python() { local p; p=$(PATH=$STEP_PATH command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
+host_python() { local p; p=$(PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
+PATCH_NEW=0; T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""
 LLVM_PREFIX=""; PC_SPIRV_LLVM=""; PC_SPIRV_TOOLS=""; LIBCLANG_DIR=""
 pick() {   # <min version or ''> <version command arg> <candidates...>: the first executable at least that new
   local min=$1 arg=$2 c v; shift 2
@@ -430,18 +590,22 @@ find_tools() {
   # Python 3.10 or newer: NM_PYTHON, Homebrew python@3.14 and older, then PATH
   for p in "${NM_PYTHON:-}" "$(brew_opt python@3.14)/bin/python3.14" "$(brew_opt python@3.13)/bin/python3.13" \
            "$(brew_opt python@3.12)/bin/python3.12" "$(brew_opt python@3.11)/bin/python3.11" "$(brew_opt python@3.10)/bin/python3.10" \
-           "$(command -v python3 2>/dev/null || true)"; do cands+=( "$p" ); done
+           "$(path_tool python3)"; do cands+=( "$p" ); done
   T_PYTHON=$(pick "$NM_PIN_TOOL_PYTHON_MIN" --version "${cands[@]}")
-  # GNU patch: the scripts pass --no-backup-if-mismatch
-  T_PATCH=""
-  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(command -v gpatch 2>/dev/null || true)" "$(command -v patch 2>/dev/null || true)"; do
-    [ -n "$p" ] && [ -x "$p" ] && case "$("$p" --version 2>/dev/null | first_line)" in *'GNU patch'*) true ;; *) false ;; esac && { T_PATCH=$p; break; }
+  # a patch that applies the patch chains the way the scripts call it (patch_works); macOS's own applies the kexts' chain.
+  # gpatch first only because deps installed it for a Mac whose patch did not. PATCH_NEW: it also creates files (NVK)
+  T_PATCH=""; PATCH_NEW=0
+  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(path_tool gpatch)" \
+           "$(path_tool patch)"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    if patch_works "$p" new; then T_PATCH=$p; PATCH_NEW=1; break; fi
+    [ -n "$T_PATCH" ] || ! patch_works "$p" || T_PATCH=$p
   done
-  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(command -v ninja 2>/dev/null || true)")
-  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(command -v cmake 2>/dev/null || true)")
-  T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(command -v pkg-config 2>/dev/null || true)")
+  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(path_tool ninja)")
+  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(path_tool cmake)")
+  T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(path_tool pkg-config)")
   T_GLSLANG=""
-  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(command -v glslangValidator 2>/dev/null || true)"; do
+  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(path_tool glslangValidator)"; do
     [ -n "$p" ] && [ -x "$p" ] || continue
     v=$(glslang_version "$p" || true)
     [ -n "$v" ] && ver_ge "$v" "$NM_PIN_TOOL_GLSLANG_MIN" && { T_GLSLANG=$p; break; }
@@ -508,7 +672,8 @@ tool_versions() {   # one line per tool, for doctor and the report
   say "rustc:        $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version 2>/dev/null || echo "none at $RUST_BIN")"
   say "bindgen:      $([ -x "$CARGO_DIR/bin/bindgen" ] && "$CARGO_DIR/bin/bindgen" --version 2>/dev/null || echo none)"
   say "cbindgen:     $([ -x "$CARGO_DIR/bin/cbindgen" ] && "$CARGO_DIR/bin/cbindgen" --version 2>/dev/null || echo none)"
-  say "brew:         ${BREW:-none} $([ -n "$BREW" ] && "$BREW" --version 2>/dev/null | first_line)"
+  # not "brew --version": Homebrew finds its version with git describe --dirty, which may rewrite its own git index
+  say "brew:         ${BREW:-none}$([ -n "$BREW" ] && echo " (prefix $BREW_PREFIX)")"
   return 0
 }
 
@@ -528,9 +693,10 @@ doctor() {   # prints; sets D_MISSING
   say "== host"
   if is_mac; then
     v=$(sw_vers -productVersion 2>/dev/null || echo 0)
-    d_ok "macOS $v ($(uname -m))"
+    d_ok "macOS $v ($(mac_arch))"
     ver_ge "$v" "$NM_PIN_TOOL_MACOS_MIN" || d_old "macOS $v: the build needs Xcode $NM_PIN_TOOL_XCODE_MIN, which runs on macOS $NM_PIN_TOOL_MACOS_MIN or later; deps, build and package refuse this Mac"
-    case "$(uname -m)" in
+    rosetta && d_note "this shell runs under Rosetta (uname -m says x86_64); build.sh takes the Mac's own processor, Apple silicon, for its choices"
+    case "$(mac_arch)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not"
               d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps compiles each missing formula here (LLVM: hours)" ;;
@@ -543,7 +709,7 @@ doctor() {   # prints; sets D_MISSING
   if [ -n "$PATH_PROBLEMS" ]; then printf '%s' "$PATH_PROBLEMS" | while IFS= read -r x; do [ -n "$x" ] && say "  REFUSED  $x"; done; D_MISSING=$((D_MISSING + 1)); D_LINES="$D_LINES  - a path problem (above)
 "; fi
   if git -C "$HERE" rev-parse HEAD >/dev/null 2>&1; then
-    x=$(git -C "$HERE" status --porcelain | wc -l | tr -d ' ')
+    x=$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain | wc -l | tr -d ' ')   # without refreshing the checkout's index
     d_ok "checkout $HERE at $(git -C "$HERE" rev-parse --short HEAD)$([ "$x" != 0 ] && echo ", $x changed file(s): the build uses them")"
   fi
   d_note "working directory $W$([ -f "$W/$MARKER" ] && echo ' (exists)' || echo ' (created on the first fetch or build)')"
@@ -588,14 +754,29 @@ doctor() {   # prints; sets D_MISSING
   say "== build tools (\"./build.sh deps\" installs the missing ones)"
   find_tools
   if [ -n "$BREW" ]; then d_ok "Homebrew $BREW"
+    [ -z "$BREW_OTHER" ] || d_note "a second Homebrew is at $BREW_OTHER; build.sh uses $BREW, the one of this Mac's processor ($(mac_arch)). NM_BREW=$BREW_OTHER makes it use the other"
   elif [ -n "${NM_BREW:-}" ]; then d_missing "Homebrew: NM_BREW names $NM_BREW, which is not an executable brew (no other Homebrew is looked for while NM_BREW is set)"
+  elif [ -n "$BREW_OTHER" ]; then d_missing "Homebrew for this Mac's processor ($(mac_arch))"
+    d_note "a second Homebrew is at $BREW_OTHER, but its formulas are built for the other architecture and this build cannot link them, so it is not used on its own. NM_BREW=$BREW_OTHER uses it anyway"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
-  [ -n "$T_PATCH" ] && d_ok "GNU patch $T_PATCH" || d_missing "GNU patch (Homebrew gpatch): the scripts pass --no-backup-if-mismatch"
+  for x in $PATH_TOOL_NAMES; do
+    v=$(command -v "$x" 2>/dev/null || true); case "$v" in /*) ;; *) continue ;; esac
+    sdk=$(foreign_reason "$v"); [ -z "$sdk" ] || d_note "$x on PATH ($v) is not used: $sdk"
+  done
+  if [ -n "$T_PATCH" ]; then d_ok "patch $T_PATCH ($("$T_PATCH" --version 2>/dev/null | first_line)): applies the kexts' patch chain as build_rm620.sh calls it"
+    [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain (Homebrew gpatch; nvk only)"
+  else d_missing "a patch that applies the patch chains as the scripts call it (-p1 --fuzz=0 --dry-run, --no-backup-if-mismatch, -s -d): Homebrew gpatch (rm, nvrm, nvk)"; fi
+  x=$(kext_python)
+  if [ -n "$x" ]; then d_ok "Python $("$x" --version 2>&1 | version_of) ($x) for rm, kms, nvrm (needs $NM_PIN_TOOL_PYTHON_KEXT_MIN or later)"
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_KEXT_MIN or later as python3 for rm, kms and nvrm (macOS's own, from Xcode, is enough)"; fi
+  x=$(host_python)
+  if [ -n "$x" ]; then d_ok "Python $("$x" --version 2>&1 | version_of) ($x) for nvencvt"
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_KEXT_MIN or later as python3 in ${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} for nvencvt"; fi
   if [ -n "$T_PYTHON" ]; then
     v=$("$T_PYTHON" --version 2>&1 | version_of)
-    d_ok "Python $v ($T_PYTHON)"
+    d_ok "Python $v ($T_PYTHON) for NVK's Python environment"
     ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN" || d_note "Python $NM_PIN_TOOL_PYTHON_TESTS_MIN is needed by one host test (tools/test_fw_fetch.py); the build needs $NM_PIN_TOOL_PYTHON_MIN"
-  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later (Homebrew $NM_PIN_TOOL_PYTHON_FORMULA); macOS's python3 is 3.9"; fi
+  else d_missing "Python $NM_PIN_TOOL_PYTHON_MIN or later (Homebrew $NM_PIN_TOOL_PYTHON_FORMULA) for NVK's Python environment (nvk only); macOS's python3 is 3.9"; fi
   x=$(venv_python)
   if [ -n "$x" ] && [ -x "$VENV/bin/meson" ]; then
     v=$("$VENV/bin/meson" --version 2>/dev/null)
@@ -632,12 +813,8 @@ doctor() {   # prints; sets D_MISSING
   say "== sources (\"./build.sh fetch\")"
   source_status
   say "== things that can stop a build on another Mac"
-  x=$(id -un 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_note "your account name '$x' is short: build_rm620.sh and build_kms620.sh stop (exit 6) when it occurs inside any word of NVIDIA's archive; build.sh then looks again for it as a whole word and goes on when there is none (the log says so)"
-  x=$(hostname -s 2>/dev/null || true)
-  [ "${#x}" -ge 5 ] || d_note "the computer's short name '$x' is short: the same check looks for it, and build.sh looks again the same way (System Settings > General > Sharing > Local hostname)"
   for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
-  if is_mac && [ "$(uname -m)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
+  if is_mac && [ "$(mac_arch)" = x86_64 ] && { [ -e /usr/local/lib/libelf.dylib ] || [ -e /usr/local/lib/libelf.a ]; }; then
     d_warn "/usr/local/lib holds a libelf: the NVK link may pick it up; build.sh stops if the result loads anything from /usr/local"
   fi
   if [ -z "${NM_BASE_PACKAGE:-}" ]; then d_note "no base package (NM_BASE_PACKAGE): everything builds, but \"package\" needs a release tarball (docs/BUILDING.md)"
@@ -645,7 +822,7 @@ doctor() {   # prints; sets D_MISSING
   [ "$NM_OFFLINE" = 1 ] && d_note "offline: NVK cannot be built (meson downloads six Rust crates into each fresh Mesa tree)"
   say ""
   if [ "$D_MISSING" = 0 ]; then say "doctor: everything required is present"
-  else say "doctor: $D_MISSING thing(s) missing or too old:"; printf '%s' "$D_LINES"; fi
+  else say "doctor: $D_MISSING thing(s) missing or too old:"; printf '%s' "$D_LINES" | tilde; fi
   return 0
 }
 
@@ -667,9 +844,16 @@ x() {
   x_status "$@" || rc=$?
   [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"
 }
-# The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables.
+# The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables, and
+# none of the search-path variables a compiler or build system reads (PKG_CONFIG_PATH, PKG_CONFIG_LIBDIR, CMAKE_PREFIX_PATH,
+# LIBRARY_PATH, CPATH and clang's per-language include paths) nor a Homebrew's own HOMEBREW_PREFIX/CELLAR/REPOSITORY:
+# dropped here so a tester's login shell, which may point them into a Homebrew of the other architecture, cannot
+# reach a step. A step that needs one is given it explicitly afterwards (the NVK step sets its own PKG_CONFIG_PATH), and
+# a later assignment overrides the -u, so those keep working.
 step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
+    -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
+    -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
     "JOBS=${JOBS:-$NM_JOBS}"
 }
@@ -679,7 +863,12 @@ make_step_env() { STEP_ENV=(); local l; while IFS= read -r l; do STEP_ENV+=( "$l
 passthru() { local v; for v in "$@"; do eval "[ -n \"\${$v+x}\" ] && printf '%s\n' \"$v=\${$v}\"" || true; done; }
 
 # ---------------------------------------------------------------------------------------------------------- fetch
-git_q() { git -c advice.detachedHead=false -c init.defaultBranch=nm "$@"; }
+# git for the sources build.sh fetches: the tester's own git set-up stays out. No hooks (a global core.hooksPath would run
+# its post-checkout in every clone; a hook may download or install anything), no file system monitor, no global
+# attributes file (the pinned repositories mark no file for a filter; a global one could send every file through
+# git-lfs or another filter), and git init / clone get an empty template (init.templateDir would copy hooks and files).
+git_q() { git -c advice.detachedHead=false -c init.defaultBranch=nm -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              -c core.attributesFile=/dev/null "$@"; }
 mirror_url() {   # <pin id>: the mirror variable's value, or the pinned URL
   local mv url
   mv=$(pin "$1_MIRROR"); url=$(pin "$1_URL")
@@ -701,7 +890,7 @@ fetch_bare() {
   if [ "$NM_DRY_RUN" = 1 ]; then
     say "    git init --bare $(q "$repo"); git fetch --depth 1 $(q "$url") $([ -n "$ref" ] && echo "refs/tags/$ref" || echo "$commit")"; return 0
   fi
-  [ -d "$repo" ] || git_q init -q --bare "$repo"
+  [ -d "$repo" ] || git_q init -q --bare --template= "$repo"
   if [ -n "$ref" ]; then
     git_q -C "$repo" fetch -q --depth 1 "$url" "+refs/tags/$ref:refs/tags/$ref" || die "could not fetch $ref from $url"
     got=$(git_q -C "$repo" rev-parse "refs/tags/$ref^{commit}")
@@ -739,7 +928,7 @@ checkout_clone() {
   say "  checkout $commit -> $dir"
   if [ -e "$dir" ]; then in_workdir "$dir" || die "$dir exists, is outside the working directory and is not a clean checkout at $commit"; safe_rm "$dir"; fi
   [ "$NM_DRY_RUN" = 1 ] && { say "    git clone --no-checkout file://$repo $(q "$dir"); git checkout $commit"; return 0; }
-  git_q clone -q --no-checkout "file://$repo" "$dir"
+  git_q clone -q --no-checkout --template= "file://$repo" "$dir"
   if [ $# -gt 0 ]; then git_q -C "$dir" sparse-checkout set "$@"; fi
   git_q -C "$dir" checkout -q --detach "$commit"
 }
@@ -835,7 +1024,7 @@ check_mesa_requirements() {
 ask() {   # <question>: yes with --yes; otherwise a y/N answer from the terminal; no terminal = no
   [ "$NM_ASSUME_YES" = 1 ] && { say "$1 [y/N] yes (--yes)"; return 0; }
   if [ -t 0 ] && [ -r /dev/tty ]; then
-    local a; printf '%s [y/N] ' "$1"; read -r a < /dev/tty || a=
+    local a; printf '%s [y/N] ' "$(printf '%s' "$1" | tilde)"; read -r a < /dev/tty || a=
     case "$a" in y|Y|yes|YES|Yes) return 0 ;; esac
   else say "$1 [y/N] no (no terminal; run with --yes to agree)"; fi
   return 1
@@ -852,8 +1041,27 @@ Xcode cannot be installed by a script. Do this once:
 Then run ./build.sh doctor again.
 EOF
 }
-brew_llvm_is_pinned() { local j; j=$("$BREW" info --json=v2 llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
-brew_formula_exists() { "$BREW" info --json=v2 "$1" >/dev/null 2>&1; }
+# Every call to Homebrew goes through here. The tester's login shell may export HOMEBREW_PREFIX, HOMEBREW_CELLAR and
+# HOMEBREW_REPOSITORY for a Homebrew of the other architecture (that Homebrew's shellenv sets them); inherited, they
+# would make the brew build.sh chose read the wrong prefix and act on the wrong installation. So each call drops the
+# three, and runs with HOMEBREW_NO_AUTO_UPDATE=1 and no environment hints. Extra per-call variables (a cache in the
+# working directory, the install flags) are given as NAME=value arguments before "--"; the brew arguments follow it.
+run_brew() {
+  local kv=()
+  while [ $# -gt 0 ] && [ "$1" != -- ]; do kv+=( "$1" ); shift; done
+  [ "${1:-}" = -- ] && shift
+  env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
+      HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 ${kv[@]+"${kv[@]}"} "$BREW" "$@"
+}
+# "brew info" downloads Homebrew's formula list into its cache (~/Library/Caches/Homebrew unless HOMEBREW_CACHE says
+# otherwise). Only deps asks it, never during a dry run or offline, and with a cache in the working directory.
+brew_info() {
+  mkdir -p "$TOOLS/homebrew-cache"
+  run_brew "HOMEBREW_CACHE=$TOOLS/homebrew-cache" -- info --json=v2 "$1"
+}
+brew_llvm_is_pinned() { local j; j=$(brew_info llvm 2>/dev/null || true); printf '%s\n' "$j" | grep -c "\"stable\": *\"$NM_PIN_TOOL_LLVM_MAJOR\." >/dev/null; }
+brew_formula_exists() { brew_info "$1" >/dev/null 2>&1; }
+brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }
 brew_installed() { [ -d "$BREW_PREFIX/opt/$1" ]; }
 cmd_deps() {
   is_mac || die "deps installs Mac tools; this is $(uname -s). On this machine only doctor, fetch, test, env and --dry-run work"
@@ -868,7 +1076,8 @@ cmd_deps() {
   if [ -z "$BREW" ]; then
     say "Homebrew is not installed. build.sh uses it for: $NM_PIN_BREW_FORMULAS."
     say "Its official installer is: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-    say "It asks for your password itself and installs into $([ "$(uname -m)" = arm64 ] && echo /opt/homebrew || echo /usr/local)."
+    # Homebrew's installer chooses its place by the architecture of the shell that runs it (uname -m), not the Mac's
+    say "It asks for your password itself and installs into $([ "$(uname -m)" = arm64 ] && echo /opt/homebrew || echo /usr/local)$(rosetta && echo ' (this shell runs under Rosetta: that is the Intel Homebrew; open a Terminal without Rosetta for the native one)')."
     if [ "$NM_DRY_RUN" = 1 ]; then
       say "    (dry run: build.sh would ask you to type yes, then run that installer)"; nobrew=1
     elif [ "$NM_NO_INSTALL" = 1 ] || [ "$NM_OFFLINE" = 1 ]; then die "Homebrew is missing (not installed: --no-install or --offline)"
@@ -880,7 +1089,7 @@ cmd_deps() {
     else die "Homebrew is missing; install it from https://brew.sh (build.sh runs its installer only after a typed yes at a terminal)"; fi
   fi
   # formulas for what is missing
-  [ -n "$T_PATCH" ] || want+=( gpatch )
+  [ -n "$T_PATCH" ] && [ "$PATCH_NEW" = 1 ] || want+=( gpatch )
   [ -n "$T_NINJA" ] || want+=( ninja )
   [ -n "$T_CMAKE" ] || want+=( cmake )
   [ -n "$T_PKGCONFIG" ] || want+=( pkgconf )
@@ -888,11 +1097,11 @@ cmd_deps() {
   [ -n "$PC_SPIRV_TOOLS" ] || want+=( spirv-tools )
   [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of | { read -r v; ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"; } || want+=( "$NM_PIN_TOOL_PYTHON_FORMULA" )
   # a dry run does not ask Homebrew which LLVM formula it has: "brew info" may download Homebrew's formula list into
-  # its cache, outside the working directory, and a dry run changes nothing
+  # its cache, outside the working directory, and a dry run changes nothing. Offline it cannot download it.
   if [ -z "$LLVM_PREFIX" ] && [ "$nobrew" = 1 ]; then want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
-  elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then
+  elif [ -z "$LLVM_PREFIX" ] && ! brew_may_ask; then
     want+=( "llvm@$NM_PIN_TOOL_LLVM_MAJOR" )
-    say "    (dry run: Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
+    say "    ($([ "$NM_DRY_RUN" = 1 ] && echo "dry run" || echo offline): Homebrew is not asked; when it has no llvm@$NM_PIN_TOOL_LLVM_MAJOR, deps installs llvm if that is LLVM $NM_PIN_TOOL_LLVM_MAJOR)"
   elif [ -z "$LLVM_PREFIX" ]; then
     llvmf=""
     if brew_formula_exists "llvm@$NM_PIN_TOOL_LLVM_MAJOR"; then llvmf=llvm@$NM_PIN_TOOL_LLVM_MAJOR
@@ -902,25 +1111,24 @@ cmd_deps() {
   fi
   # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22. Otherwise
   # deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
-  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && [ "$NM_DRY_RUN" = 0 ] && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
+  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && brew_may_ask && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
     want+=( spirv-llvm-translator )
   fi
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
     say "Homebrew itself may upgrade an outdated dependency of a formula it installs."
-    if [ "$(uname -m)" = x86_64 ]; then
+    if [ "$(mac_arch)" = x86_64 ]; then
       say "This is an Intel Mac. homebrew-core carries no ready-made builds (bottles) for Intel Macs any more (checked"
       say "2026-11-12), so Homebrew compiles each formula above, and what it needs, on this Mac. llvm@22 alone can take"
       say "one to several hours and tens of gigabytes of free space while it builds. Keep the Mac awake and on power."
     fi
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
-    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 brew install $f"; done
+    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 $BREW install $f"; done
     elif ask "Install them now?"; then
       for f in "${want[@]}"; do
         say "brew install $f"
-        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_ENV_HINTS=1 \
-          "$BREW" install "$f" || die "brew install $f failed"
+        run_brew HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 -- install "$f" || die "brew install $f failed"
       done
     else say "not installed; the build needs them"; fi
     find_tools
@@ -1069,10 +1277,10 @@ comp_info() {
   C_DEPS=""; C_SRC=""; C_VARS=""; C_PINS=""; C_OUT=""; C_TOOLS="xcode"; C_DESC=""
   case "$1" in
     rm)    C_DESC="NVIDIA's RM core for macOS (libnvkernel.a), patched with kexts/NVRM/patches"
-           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode patch python"
+           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode make patch python"
            C_OUT="$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" ;;
     kms)   C_DESC="NVIDIA's modeset core for macOS (libnvkms.a)"; C_DEPS="rm"
-           C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode python"
+           C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode make python"
            C_OUT="$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
     nvrm)  C_DESC="NVRM.kext"; C_DEPS="rm kms"
            C_SRC="build/build_nvrm.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_PINS="OGKM620_"; C_TOOLS="xcode python patch"
@@ -1095,7 +1303,7 @@ comp_info() {
            C_SRC="build/build_nvk.sh build/gen_nvk_rust_crates.py nvk licenses/nvk-rust-crates.txt"
            C_VARS="NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS NVK_JOBS NVK_PATH PKG_CONFIG_PATH LIBCLANG_PATH NM_MESA_GIT NM_OGKM610"
            C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR= SPIRVLLVM_ SPIRVHEADERS_"
-           C_TOOLS="xcode patch python nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
+           C_TOOLS="xcode patch nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
     vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
            C_OUT="$O/vulkan-loader/libvulkan.1.dylib" ;;
@@ -1105,7 +1313,7 @@ comp_info() {
            C_VARS="NULLMOTH_BUILD_HOST NULLMOTH_RUST_VERSION NULLMOTH_RUST_BIN NULLMOTH_CARGO_HOME"; C_PINS="RUST_VERSION="; C_TOOLS="xcode rust"; C_OUT="$O/xlate/libnvmtl_translate.dylib" ;;
     nvencvt) C_DESC="libnvencvt.dylib (video)"; C_DEPS="rm"
            C_SRC="build/build_nvencvt.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt vendor/nvenc tools/nvencvt_header_abi.py tools/nvk_header_abi.py"
-           C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
+           C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_TOOLS="xcode hostpython"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
     nmkbl) C_DESC="NMKbdBacklight.kext (optional; needs Lilu, VirtualSMC, MacKernelSDK)"; C_SRC="kexts/NMKbdBacklight build/check_kext_libraries.sh"
@@ -1132,7 +1340,7 @@ tree_hash() {   # contents of the checkout's files under the given paths (tracke
 TOOLS_ID=""
 tools_id() {   # what the compilers are: part of every stamp
   [ -n "$TOOLS_ID" ] && { printf '%s' "$TOOLS_ID"; return; }
-  TOOLS_ID="host $(uname -m)"
+  TOOLS_ID="host $(uname -m)"   # the process's architecture (not mac_arch): under Rosetta the compilers run as x86_64
   if is_mac; then
     TOOLS_ID="$TOOLS_ID; xcode $( { xcodebuild -version 2>/dev/null || true; } | tr '\n' ' '); sdk $(xcrun --show-sdk-version 2>/dev/null || true)"
     TOOLS_ID="$TOOLS_ID; clang $( { xcrun clang --version 2>/dev/null || true; } | first_line); ld $( { xcrun ld -v 2>&1 || true; } | first_line)"
@@ -1154,8 +1362,17 @@ recipe() {   # <component>: everything its output depends on, as text
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
-  for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none)"; done
+  for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"; done
   return 0
+}
+# dep_outputs_id <component>: the content of what a dependent takes from it. A rebuild with the same recipe (--force)
+# leaves the same stamp but new files: rm's archive, and the compile list whose osapi.c command gives the kexts their
+# -D flags. Every component that reads them is then built again.
+dep_outputs_id() {
+  ( comp_info "$1"
+    local f; for f in "$C_OUT" $([ "$1" = rm ] && printf '%s' "$OGKM620/src/nvidia/_out/Darwin_x86_64/compile_cmds.sh"); do
+      sha256_file "$f" 2>/dev/null | cut -c1-16 || echo none
+    done | tr '\n' ' ' )
 }
 
 STATUS_LINES=""
@@ -1214,34 +1431,15 @@ lines_to_array() { ARR=(); local l; while IFS= read -r l; do [ -n "$l" ] && ARR+
 REV=""; REV_NOTE=""
 source_rev() {   # the revision the git-archive based scripts build: HEAD, or the working tree as a commit object
   [ -n "$REV" ] && return 0
-  if [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ]; then REV=$(git -C "$HERE" rev-parse HEAD); REV_NOTE="commit $REV"
+  if [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$HERE" status --porcelain --untracked-files=no)" ]; then REV=$(git -C "$HERE" rev-parse HEAD); REV_NOTE="commit $REV"
+  elif [ "$NM_DRY_RUN" = 1 ]; then   # git stash create would write a commit object into the checkout
+    REV="<the working tree as a commit object>"; REV_NOTE="the working tree of $(git -C "$HERE" rev-parse --short HEAD) with its uncommitted changes"
   else
     REV=$(GIT_AUTHOR_NAME=build.sh GIT_AUTHOR_EMAIL=build@localhost GIT_COMMITTER_NAME=build.sh GIT_COMMITTER_EMAIL=build@localhost \
           git -C "$HERE" stash create "build.sh: working tree" 2>/dev/null || true)
     [ -n "$REV" ] || die "could not record the working tree's changes for the plugin, translator and video builds (git stash create)"
     REV_NOTE="the working tree of $(git -C "$HERE" rev-parse --short HEAD) with its uncommitted changes (as commit object $REV; untracked files are not part of it)"
   fi
-}
-# build_rm620.sh and build_kms620.sh end by looking for the account name and the computer's short name anywhere in the
-# archive, as a substring, and exit 6 when they find one. A short account name is found inside ordinary words of
-# NVIDIA's own strings (an account "ana" in "banana"); it stopped every RM build on the owner's Mac, after the archive
-# was complete. personal_recheck <archive> looks for the two names as whole words (what a path, user@host or a name in
-# an identity string would be); only when there is none is the archive accepted, and the log says what the scripts
-# matched and why it was accepted.
-personal_recheck() {
-  local a=$1 u h re n
-  [ -f "$a" ] || { say "personal-string recheck: $a is missing" >> "$CUR_LOG"; return 1; }
-  u=$(id -un 2>/dev/null || true); h=$(hostname -s 2>/dev/null || true)
-  re="${u}${u:+${h:+|}}${h}"
-  [ -n "$re" ] || return 1
-  n=$(strings -a "$a" | grep -ciE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" || true)
-  if [ "${n:-0}" = 0 ]; then
-    say "personal strings: the script's substring match (exit 6) found '$re' only inside other words; as whole words: 0. Accepted." >> "$CUR_LOG"
-    return 0
-  fi
-  { say "personal strings: '$re' occurs $n time(s) as a whole word in $a, for example:"
-    strings -a "$a" | grep -iE "(^|[^[:alnum:]])(${re})([^[:alnum:]]|$)" | sed -n 1,3p; } >> "$CUR_LOG" 2>&1 || true
-  return 1
 }
 run_component() {
   local n=$1 m
@@ -1250,16 +1448,15 @@ run_component() {
     rm)
       [ ! -e "$RMWORK" ] || { in_workdir "$RMWORK" || die "$RMWORK is outside the working directory; build.sh rebuilds it from scratch only inside"; safe_rm "$RMWORK"; }
       x mkdir -p "$RMWORK"
+      # exit 6: the archive names this account or computer as a whole word (the script says how to see where)
       m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_rm620.sh" "$RMWORK" "$PRISTINE" || m=$?
-      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" || return 6
-      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m"
+      [ "$m" = 0 ] || return "$m"
       # build_rm620.sh archives whatever objects exist and exits 0 when compiles fail; its "failed:" line says so
       [ "$NM_DRY_RUN" = 1 ] || grep -q '^failed: 0 of ' "$CUR_LOG" || { say "build_rm620.sh reported compile failures (it does not stop on them): see 'failed:' above" | tee -a "$CUR_LOG"; return 3; }
       ;;
     kms)
       m=0; x_status "${STEP_ENV[@]}" "NV_VERSION=$NM_PIN_OGKM620_REF" bash "$HERE/build/build_kms620.sh" "$RMWORK" || m=$?
-      [ "$m" != 6 ] || personal_recheck "$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" || return 6
-      [ "$m" = 6 ] || [ "$m" = 0 ] || return "$m" ;;
+      [ "$m" = 0 ] || return "$m" ;;
     nvrm)
       lines_to_array < <(passthru KMS_ARCHIVE RE)
       x "${STEP_ENV[@]}" "NVRM_PRISTINE_OGKM=$PRISTINE" ${ARR[@]+"${ARR[@]}"} bash "$HERE/build/build_nvrm.sh" "$HERE/kexts/NVRM" "$OGKM620" "$O/kexts/nvrm" ;;
@@ -1349,7 +1546,13 @@ nvk_pkg_config_path() {
   # yours after these: pkg-config takes the first LLVMSPIRVLib.pc it finds, and a PKG_CONFIG_PATH that names
   # Homebrew's lib/pkgconfig (common in a shell set up for development) holds the translator for Homebrew's current
   # LLVM, which Mesa refuses with LLVM 22
-  [ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"
+  # and without the folders of a Homebrew of the other architecture (its libraries cannot be linked into this build)
+  local d rest=${PKG_CONFIG_PATH:-}
+  while [ -n "$rest" ]; do
+    d=${rest%%:*}; case "$rest" in *:*) rest=${rest#*:} ;; *) rest="" ;; esac
+    [ -n "$d" ] && ! foreign_search_dir "$d" || continue
+    p="${p:+$p:}$d"
+  done
   printf '%s' "$p"
 }
 package_name() { printf 'nullmoth-nvidia-local-%s.tar.gz' "$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"; }
@@ -1364,7 +1567,7 @@ write_build_info() {
     say "sources:    $REV_NOTE"
     say "flavour:    $NM_FLAVOUR (plugin $([ "$NM_FLAVOUR" = dev ] && echo 'with diagnostics' || echo 'as released'))"
     say "base:       $(basename "$NM_BASE_PACKAGE")"
-    say "host:       $(uname -m) $(is_mac && sw_vers -productVersion 2>/dev/null)"
+    say "host:       $(mac_arch) $(is_mac && sw_vers -productVersion 2>/dev/null)"
     say "tools:      $(tools_id)"
     say "pins:"; grep -E '^NM_PIN_[A-Z0-9_]*(_REF|_COMMIT|_SHA256)=' "$PINS_FILE" | sed 's/^/  /'
   } | tilde > "$PKGDIR/build-info.txt"
@@ -1377,21 +1580,43 @@ prepare_build() {   # what every build command needs before its first step
   if [ "$NM_DRY_RUN" = 0 ]; then make_tool_links; fi
   derive_paths
 }
+# What each component's scripts really need beyond Xcode (C_TOOLS; docs/BUILDING.md has the table): each tool is
+# tested for what the scripts do with it, not for a brand.
+#   make        rm, kms: NVIDIA's makefiles, only "make -n" (GNU make; Xcode's 3.81)
+#   patch       rm, nvrm (the patch chain test), nvk (which also creates files): see patch_works
+#   python      rm, kms, nvrm: python3 on the step's PATH, NM_PIN_TOOL_PYTHON_KEXT_MIN or later (macOS's 3.9 passes)
+#   hostpython  nvencvt: python3 on the build Mac's PATH, the same minimum
+#   cmake       vulkan: cmake and ninja
+#   rust        xlate, nvk: Rust in the working directory
+#   nvk         nvk: the Python environment (Python 3.10+, meson), LLVM 22, SPIRV-LLVM-Translator, SPIRV-Tools, glslang,
+#               bindgen, cbindgen
 need_tools_for() {   # stop early, naming what a component needs and does not have
   local n=$1 miss=""
   [ "$NM_DRY_RUN" = 1 ] && return 0
   comp_info "$n"
   case " $C_TOOLS " in *" xcode "*) xcrun --show-sdk-path >/dev/null 2>&1 || miss="$miss Xcode" ;; esac
-  case " $C_TOOLS " in *" patch "*) [ -n "$T_PATCH" ] || miss="$miss GNU-patch" ;; esac
-  case " $C_TOOLS " in *" python "*) [ -n "$T_PYTHON" ] || miss="$miss Python-3.10" ;; esac
+  case " $C_TOOLS " in *" make "*) case "$(PATH=$STEP_PATH make --version 2>/dev/null || true)" in *"GNU Make"*) ;; *) miss="$miss GNU-make" ;; esac ;; esac
+  case " $C_TOOLS " in *" patch "*) [ -n "$T_PATCH" ] || miss="$miss a-patch-that-applies-the-chains(gpatch)" ;; esac
+  case " $C_TOOLS " in *" nvk "*) [ "$PATCH_NEW" = 1 ] || miss="$miss a-patch-that-creates-files(gpatch)" ;; esac
+  case " $C_TOOLS " in *" python "*) [ -n "$(kext_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN" ;; esac
+  case " $C_TOOLS " in *" hostpython "*) [ "$BUILD_HOST" != "$LOCAL_HOST" ] || [ -n "$(host_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN(build-Mac)" ;; esac
   case " $C_TOOLS " in *" cmake "*) { [ -n "$T_CMAKE" ] && [ -n "$T_NINJA" ]; } || miss="$miss cmake/ninja" ;; esac
   case " $C_TOOLS " in *" rust "*) [ -x "$RUST_BIN/rustc" ] || miss="$miss Rust-$NM_PIN_RUST_VERSION" ;; esac
   case " $C_TOOLS " in *" nvk "*)
-    [ -x "$VENV/bin/meson" ] || miss="$miss meson(venv)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
+    [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
     spirv_llvm_ok || miss="$miss SPIRV-LLVM-Translator-$NM_PIN_TOOL_LLVM_MAJOR"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
     [ -n "$T_GLSLANG" ] || miss="$miss glslang"; [ -x "$CARGO_DIR/bin/bindgen" ] || miss="$miss bindgen"; [ -x "$CARGO_DIR/bin/cbindgen" ] || miss="$miss cbindgen" ;;
   esac
   [ -z "$miss" ] || die "$n needs:$miss (./build.sh doctor shows details; ./build.sh deps installs them)"
+}
+# with_deps <component...>: the components and every one they need, in build order, without those not built here
+with_deps() {
+  local out=" " c d
+  add_dep() { case "$out" in *" $1 "*) return 0 ;; esac; comp_info "$1"; local ds=$C_DEPS d2; for d2 in $ds; do add_dep "$d2"; done; out="$out$1 "; }
+  for c in "$@"; do add_dep "$c"; done
+  for c in $ALL_COMPONENTS $EXTRA_COMPONENTS; do
+    case "$out" in *" $c "*) component_skip "$c" >/dev/null || printf '%s ' "$c" ;; esac
+  done
 }
 need_sources_for() {
   local n=$1
@@ -1428,7 +1653,8 @@ cmd_build() {
   [ $# -gt 0 ] || set -- all
   list=$(expand_components "$@")
   say "== building: $list($NM_FLAVOUR flavour, NVAccel for macOS $(accel_majors | sed 's/ / and /'), $NM_JOBS jobs, working directory $W)"
-  for c in $list; do need_tools_for "$c"; need_sources_for "$c"; done
+  # every component that will be built, the ones pulled in as dependencies too, before the first step runs
+  for c in $(with_deps $list); do need_tools_for "$c"; need_sources_for "$c"; done
   for c in $list; do build_component "$c"; done
 }
 cmd_package() {
@@ -1436,14 +1662,14 @@ cmd_package() {
   [ -e "$NM_BASE_PACKAGE" ] || [ "$NM_DRY_RUN" = 1 ] || die "the base package $NM_BASE_PACKAGE does not exist"
   [ "$NM_ACCEL" = both ] || die "a package must carry NVAccel for macOS 15 and 26 (install.sh checks both); build with --accel both"
   prepare_build
-  local c; for c in $ALL_COMPONENTS; do need_tools_for "$c"; need_sources_for "$c"; done
+  local c; for c in $(with_deps $ALL_COMPONENTS); do need_tools_for "$c"; need_sources_for "$c"; done
   build_component package
 }
 
 # ---------------------------------------------------------------------------------------------------------- test
 cmd_test() {
   local py rc=0 last
-  py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(command -v python3 || true)}; }
+  py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(path_tool python3)}; }
   [ -n "$py" ] || die "no python3"
   say "== pins"; check_pins
   say "== host tests: $(qcmd "$py" tools/run_all_tests.py -j "$NM_JOBS")"
@@ -1477,62 +1703,67 @@ print_env() {
   say "# (each script also gets CC, CXX, CFLAGS, CPPFLAGS, LDFLAGS, NM_TAHOE removed; build.sh shows its exact"
   say "#  command lines with: ./build.sh --dry-run --force build <component>)"
   say "# -- settings"
-  for v in $OPTION_VARS; do eval "say \"export $v=\$(q \"\${$v:-}\")\""; done
+  for v in $OPTION_VARS; do eval "say \"export $v=\$(qh \"\${$v:-}\")\""; done
   say "# -- where the build keeps and finds things"
-  say "export NULLMOTH_BUILD_ROOT=$(q "$R")"
-  say "export NM_OGKM620_PRISTINE=$(q "$PRISTINE")"
-  say "export NM_OGKM620=$(q "$OGKM620")"
-  say "export OGKM=$(q "$OGKM620")"
-  say "export NVRM_PRISTINE_OGKM=$(q "$PRISTINE")"
-  say "export NM_OGKM610=$(q "$OGKM610")"
-  say "export NM_MESA_GIT=$(q "$MESA")"
-  say "export NM_KHRONOS_URL=$(q "${NM_KHRONOS_URL:-file://$KHRONOS}")"
-  say "export NULLMOTH_BUILD_HOST=$(q "$BUILD_HOST")"
+  say "export NULLMOTH_BUILD_ROOT=$(qh "$R")"
+  say "export NM_OGKM620_PRISTINE=$(qh "$PRISTINE")"
+  say "export NM_OGKM620=$(qh "$OGKM620")"
+  say "export OGKM=$(qh "$OGKM620")"
+  say "export NVRM_PRISTINE_OGKM=$(qh "$PRISTINE")"
+  say "export NM_OGKM610=$(qh "$OGKM610")"
+  say "export NM_MESA_GIT=$(qh "$MESA")"
+  say "export NM_KHRONOS_URL=$(qh "${NM_KHRONOS_URL:-file://$KHRONOS}")"
+  say "export NULLMOTH_BUILD_HOST=$(qh "$BUILD_HOST")"
   if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then
-    say "export NM_LOCAL_BUILD_HOST=$(q "$LOCAL_HOST")   # build/local_build_host.sh serves it; PATH starts with tools/host"
+    say "export NM_LOCAL_BUILD_HOST=$(qh "$LOCAL_HOST")   # build/local_build_host.sh serves it; PATH starts with tools/host"
     say "# NM_LOCAL_HOST_PATH: the PATH of a command run on that host (default /usr/bin:/bin:/usr/sbin:/sbin)"
   fi
   if [ "$NM_OFFLINE" = 1 ]; then say "export CARGO_NET_OFFLINE=true"; else say "# CARGO_NET_OFFLINE=true with --offline"; fi
-  say "export NULLMOTH_RUST_VERSION=$(q "${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}")"
-  say "export NULLMOTH_RUST_BIN=$(q "$RUST_BIN")"
-  say "export NULLMOTH_CARGO_HOME=$(q "${NULLMOTH_CARGO_HOME:-$CARGO_DIR}")"
-  say "export RUSTUP_HOME=$(q "$RUSTUP_DIR")"
-  say "export CARGO_HOME=$(q "$CARGO_DIR")"
-  say "export RUSTUP_TOOLCHAIN=$(q "$NM_PIN_RUST_VERSION")"
-  say "export NVK_PATH=$(q "${NVK_PATH:-$TBIN}")"
-  say "export PKG_CONFIG_PATH=$(q "$(nvk_pkg_config_path)")"
-  say "export LIBCLANG_PATH=$(q "${LIBCLANG_PATH:-$LIBCLANG_DIR}")"
-  say "export NVK_JOBS=$(q "${NVK_JOBS:-$NM_JOBS}")"
-  say "export JOBS=$(q "${JOBS:-$NM_JOBS}")"
-  say "export NV_VERSION=$(q "$NM_PIN_OGKM620_REF")"
-  say "export MACOSX_DEPLOYMENT_TARGET=$(q "${MACOSX_DEPLOYMENT_TARGET:-15.0}")"
+  say "export NULLMOTH_RUST_VERSION=$(qh "${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}")"
+  say "export NULLMOTH_RUST_BIN=$(qh "$RUST_BIN")"
+  say "export NULLMOTH_CARGO_HOME=$(qh "${NULLMOTH_CARGO_HOME:-$CARGO_DIR}")"
+  say "export RUSTUP_HOME=$(qh "$RUSTUP_DIR")"
+  say "export CARGO_HOME=$(qh "$CARGO_DIR")"
+  say "export RUSTUP_TOOLCHAIN=$(qh "$NM_PIN_RUST_VERSION")"
+  say "export NVK_PATH=$(qh "${NVK_PATH:-$TBIN}")"
+  say "export PKG_CONFIG_PATH=$(qh "$(nvk_pkg_config_path)")"
+  say "export LIBCLANG_PATH=$(qh "${LIBCLANG_PATH:-$LIBCLANG_DIR}")"
+  say "export NVK_JOBS=$(qh "${NVK_JOBS:-$NM_JOBS}")"
+  say "export JOBS=$(qh "${JOBS:-$NM_JOBS}")"
+  say "export NV_VERSION=$(qh "$NM_PIN_OGKM620_REF")"
+  say "export MACOSX_DEPLOYMENT_TARGET=$(qh "${MACOSX_DEPLOYMENT_TARGET:-15.0}")"
   say "export PYTHONDONTWRITEBYTECODE=1"
-  if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(q "$THOST:$STEP_PATH")"; else say "export PATH=$(q "$STEP_PATH")"; fi
+  if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(qh "$THOST:$STEP_PATH")"; else say "export PATH=$(qh "$STEP_PATH")"; fi
   say "# -- read by the build scripts; passed on only when you set them (empty = the script's own default)"
   for v in KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB NVK_SYSROOT NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS DEVELOPER_DIR \
            NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK; do
-    eval "if [ -n \"\${$v+x}\" ]; then say \"export $v=\$(q \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
+    eval "if [ -n \"\${$v+x}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- package (build/package_local.sh)"
-  say "export NM_PACKAGE_NAME=$(q "$(package_name)")"
-  say "export NM_BUILD_INFO=$(q "$PKGDIR/build-info.txt")"
+  say "export NM_PACKAGE_NAME=$(qh "$(package_name)")"
+  say "export NM_BUILD_INFO=$(qh "$PKGDIR/build-info.txt")"
   say "# -- mirrors (empty = the URL in build/pins.sh)"
   for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL \
            NM_RUSTUP_URL RUSTUP_DIST_SERVER; do
-    eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(q \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
+    eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- not used by build.sh: STEPS and NM_REV (build_release_inputs.sh, which build.sh replaces), X and RELEASE"
   say "#    (build_xlate.sh and build_plugin.sh, the original author's development scripts for trees in ~/nvmtl-build)"
 }
 
 # ---------------------------------------------------------------------------------------------------------- clean
+# Before NULLMOTH_BUILD_ROOT defaulted to the working directory, the trees were in <work>/build/build; nothing uses
+# that folder now.
+old_layout_rm() { [ -n "${NULLMOTH_BUILD_ROOT:-}" ] || [ ! -e "$W/build/build" ] || safe_rm "$W/build/build"; }
 cmd_clean() {
   local what=${1:-outputs}
   [ -d "$W" ] || { say "nothing to clean: $W does not exist"; return 0; }
   [ -f "$W/$MARKER" ] || die "$W has no $MARKER marker; build.sh deletes nothing there"
   case "$what" in
-    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt" ;;
-    sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS" ;;
+    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt"
+             old_layout_rm ;;
+    sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS"
+             old_layout_rm ;;
     tools)   safe_rm "$TOOLS" "$STAMPS" ;;
     all)     ask "Delete everything in $W (sources, tools, outputs)?" || { say "nothing deleted"; return 0; }
              local p; for p in "$W"/* "$W"/.[!.]*; do [ -e "$p" ] || continue; [ "$p" = "$W/$MARKER" ] || [ "$p" = "$W/build.lock" ] || safe_rm "$p"; done ;;
@@ -1643,6 +1874,21 @@ main() {
   trap on_exit EXIT
   trap on_signal INT TERM
   TMPF=$(mktemp "${TMPDIR:-/tmp}/nullmoth-build.XXXXXX")
+  # On a Mac with neither Xcode nor its command line tools, /usr/bin/git, make, python3, xcrun and xcodebuild are Apple's
+  # stand-ins, and the first one that runs opens a dialog offering to install the command line tools. So before any of
+  # them runs (check_paths runs git, doctor make and python3): xcode-select -p, which opens nothing, says whether there
+  # is a developer folder; without one every command but help stops here, doctor with its usual summary.
+  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then
+    if [ "$CMD" = doctor ]; then
+      say "== Xcode (cannot be installed by a script)"
+      say "  MISSING  Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected; nothing else was checked: without it macOS offers to install its command line tools whenever git, make or python3 runs)"
+      xcode_help; say ""
+      say "doctor: 1 thing(s) missing or too old:"; say "  - Xcode $NM_PIN_TOOL_XCODE_MIN or later (none selected)"
+      trap - ERR; exit 1
+    fi
+    xcode_help >&2
+    die "no Xcode is selected (xcode-select -p fails), so nothing was run: macOS would offer to install its command line tools at the first git, make or python3"
+  fi
   case "$CMD" in
     help) cmd_help; return 0 ;;
     env) check_paths; print_env; return 0 ;;

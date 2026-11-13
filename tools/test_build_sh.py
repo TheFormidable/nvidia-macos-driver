@@ -15,11 +15,16 @@ driver. None of that can happen here, so this runs the real build.sh against sta
     pin comparison still reads it. The stand-in can be told to fail or to wait.
   * the pins of the outside sources are rewritten, in the clone only, to the commits of the stand-in remotes.
 
-The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /opt/homebrew and /usr/local
-before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew").
+The imitated Macs never see a Homebrew of the machine the test runs on: build.sh looks in /usr/local and /opt/homebrew
+before PATH, so every run names the stand-in through NM_BREW, which makes build.sh look nowhere else (arm "hostbrew";
+arm "whichbrew" moves those two places into the sandbox, in its clone of build.sh only).
 
 Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
-  doctor on a fresh Mac; no Homebrew of this machine is reached; deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
+  doctor on a fresh Mac, without Xcode (nothing that opens Apple's install dialog runs) and with it; no Homebrew of
+  this machine is reached; which of two Homebrews (Intel, Apple silicon,
+  Rosetta); no tool of the other architecture's Homebrew taken from PATH ("pathtools"); what an Xcode-only Mac builds, tools tested for what they do, dependencies checked first ("needs");
+  doctor, dry runs and env write nothing ("readonly"); no home path in what a tester pastes ("nohome");
+  deps --yes; --no-install; fetch, and a tampered remote; fetch and the tester's git hooks, template and filters; --offline; --dry-run; the build order;
   the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
   interrupted run; two runs at once and a stale lock; paths with a space; Apple silicon and an unsupported macOS;
   "env"; clean; docs/BUILDING.md and docs/BUILDING.es.md against the script; build/pins.sh against the scripts and
@@ -28,7 +33,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
+import hashlib, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -41,10 +46,25 @@ ONLY = sys.argv[1:]
 HOST_BREW = [b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if os.path.exists(b)]
 
 
+# The arms run in two threads (see main): each arm's lines are kept and printed together when it ends.
+_LOCK = threading.Lock()
+_TLS = threading.local()
+
+
+def emit(line):
+    buf = getattr(_TLS, "buf", None)
+    if buf is None:
+        with _LOCK:
+            print(line, flush=True)
+    else:
+        buf.append(line)
+
+
 def check(name, ok, detail=""):
     global fails
-    print(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""), flush=True)
-    fails += 0 if ok else 1
+    emit(("ok   " if ok else "FAIL ") + name + (f"  [{str(detail)[:1500]}]" if detail and not ok else ""))
+    with _LOCK:
+        fails += 0 if ok else 1
     return ok
 
 
@@ -70,7 +90,7 @@ triple() { case "$(cat "$S/arch")" in arm64) echo aarch64-apple-darwin ;; *) ech
 formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
   local p=$SB/brew/opt/$1
   case "$1" in
-    gpatch) mkwrap "$p/bin/gpatch" ver "GNU patch 2.8" ;;
+    gpatch) mkwrap "$p/bin/gpatch" patch "GNU patch 2.8" ;;
     ninja) mkwrap "$p/bin/ninja" ver "1.13.1" ;;
     cmake) mkwrap "$p/bin/cmake" cmake "cmake version 4.1.2" ;;
     pkgconf) mkwrap "$p/bin/pkg-config" ver "2.5.1" ;;
@@ -85,6 +105,17 @@ formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
 }
 case "$role" in
   ver) case "${1:-}" in --version|-version|-v|version) cat "$self.version" ;; esac ;;
+  # a patch that works: build.sh's own test of a patch (a/f.txt in a temporary folder) is applied by the real patch of
+  # the machine running the test; the patch chains are not applied to the stand-in NVIDIA trees (accepted, as before).
+  # And one that does not take the options the scripts pass, as a patch older than macOS's might not
+  patch) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac
+         in=$(cat); case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
+  patchold) case "${1:-}" in --version) cat "$self.version" ;; esac
+            case " $* " in *" --no-backup-if-mismatch "*|*" --fuzz=0 "*) echo "patch: unrecognized option" >&2; exit 2 ;; esac
+            exec "$(cat "$LIB/realpatch")" "$@" ;;
+  patchnonew) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac   # changes files, cannot create one
+              in=$(cat); case "$in" in *"--- /dev/null"*) echo "patch: cannot create files" >&2; exit 1 ;; esac
+              case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
   uname)
     case "${1:-}" in
       -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
@@ -96,6 +127,7 @@ case "$role" in
     [ "${1:-}" = -n ] && shift
     case "${1:-}" in
       hw.ncpu) echo 8 ;; hw.model) echo MacPro7,1 ;; hw.memsize) echo 34359738368 ;;
+      hw.optional.arm64) [ "$(cat "$S/cpu")" = arm64 ] || { echo "sysctl: unknown oid 'hw.optional.arm64'" >&2; exit 1; }; echo 1 ;;
       machdep.cpu.brand_string) echo "Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz" ;; *) exit 1 ;;
     esac ;;
   xcode-select)
@@ -115,16 +147,21 @@ case "$role" in
       *) exit 0 ;;
     esac ;;
   brew)
+    # every call, whatever it asks: the three variables a login shell exports for a Homebrew
+    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
     case "${1:-}" in
       --version) echo "Homebrew 4.6.3" ;;
       --prefix) echo "$SB/brew" ;;
       info)
+        # like Homebrew: the formula list is downloaded into its cache, ~/Library/Caches/Homebrew unless HOMEBREW_CACHE is set
+        c=${HOMEBREW_CACHE:-$HOME/Library/Caches/Homebrew}/api; mkdir -p "$c" && echo "{}" > "$c/formula.jws.json"
+        rec brew-info "HOMEBREW_CACHE=${HOMEBREW_CACHE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         f=${3:-}
         case "$f" in llvm) v=$(cat "$S/brew-llvm") ;; llvm@22) [ -f "$S/brew-llvm22" ] || exit 1; v=22.1.3 ;;
           gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
         printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
       install)
-        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}"
+        rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
         echo "==> Pouring $2" ;;
@@ -187,6 +224,12 @@ case "$role" in
       *) exit 1 ;;
     esac ;;
   strings) cat "${@: -1}" ;;   # the stand-in archives are text
+  # macOS's "file": a program with a <path>.arch beside it is a Mach-O of that architecture (two words: universal)
+  file) f=${@: -1}
+        if [ -f "$f.arch" ]; then a=$(cat "$f.arch")
+          case "$a" in *" "*) echo "Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64]" ;;
+                       *) echo "Mach-O 64-bit executable $a" ;; esac
+        else echo "Bourne-Again shell script text executable, ASCII text"; fi ;;
   otool) printf '%s:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n' "${2:-x}"; cat "$S/otool-extra" 2>/dev/null ;;
   sudo) echo "stand-in sudo: build.sh must never call sudo" >&2; exit 1 ;;
   plain) : ;;
@@ -216,26 +259,34 @@ printf '%s\n' "$@" > "$f.args"
 echo "stand-in for $key: started"
 # told to wait: until released, until the test takes the block away (or its sandbox is gone), at most two minutes;
 # a stand-in that outlives its run must not wait for ever
+# (a bash 4 or later waits with its own "read -t" on a FIFO that never delivers, instead of starting a sleep every 50 ms:
+# 2400 forks are slow on a loaded machine; bash 3.2 cannot time out a read in less than a second, so it keeps sleep)
 if [ -f "$SB/ctl/block-$key" ]; then
-  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0
+  echo $$ > "$SB/ctl/pid-$key"; : > "$SB/ctl/started-$key"; w=0; nap="sleep 0.05"
+  if [ "${BASH_VERSINFO[0]}" -ge 4 ] && mkfifo "$SB/ctl/nap-$$" 2>/dev/null; then
+    exec 3<>"$SB/ctl/nap-$$"; rm -f "$SB/ctl/nap-$$"; nap="read -t 0.05 -u 3 _"
+  fi
   while [ ! -f "$SB/ctl/release-$key" ] && [ -f "$SB/ctl/block-$key" ]; do
     w=$((w + 1)); [ "$w" -le 2400 ] || { echo "stand-in for $key: never released"; exit 9; }
-    sleep 0.05
+    $nap || true
   done
+  exec 3<&-
 fi
 if [ -f "$SB/ctl/fail-$key" ]; then echo "error: the compiler stopped in $key (stand-in failure)"; echo "make: *** [all] Error 1"; exit 7; fi
 mk() { mkdir -p "${1%/*}"; printf 'built by the stand-in for %s\n' "$key" > "$1"; }
+# like NVIDIA's archives (libtool records each member's time): a rebuild of rm or kms is never byte-identical
+mknew() { mk "$1"; printf 'build %s-%s\n' "$$" "$RANDOM" >> "$1"; }
 case $key in
-  rm) mk "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
-  kms) mk "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
+  rm) mknew "$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a"; echo "failed: 0 of 1234" ;;
+  kms) mknew "$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
 esac
-# the end of build_rm620.sh / build_kms620.sh when their substring search finds the account or host name: the archive is
+# the end of build_rm620.sh / build_kms620.sh when their whole-word search finds the account or host name: the archive is
 # written, then exit 6 (ctl/personal-<key> holds the archive's text)
 case $key in
   rm|kms) if [ -f "$SB/ctl/personal-$key" ]; then
             a=$1/ogkm-$NV_VERSION/src/nvidia/_out/Darwin_x86_64/libnvkernel.a
             [ $key = kms ] && a=$1/ogkm-$NV_VERSION/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a
-            cp "$SB/ctl/personal-$key" "$a"; echo "STOP: 1 personal string(s) in ${a##*/}"; exit 6
+            cp "$SB/ctl/personal-$key" "$a"; echo "STOP: 1 string(s) in ${a##*/} name this account or computer as a word"; exit 6
           fi ;;
 esac
 case $key in
@@ -266,7 +317,7 @@ echo "stand-in for $key: done"
 REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "ls", "ln",
               "chmod", "date", "mktemp", "dirname", "basename", "wc", "paste", "cmp", "diff", "tee", "env", "kill", "sleep",
               "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
-              "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more"]
+              "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more", "readlink"]
 STANDINS = {"uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
             "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo",
             "strings": "strings"}
@@ -386,6 +437,7 @@ def build_template():
     LIB.mkdir(parents=True)
     (LIB / "fake.sh").write_text(FAKE_SH)
     (LIB / "steplib.sh").write_text(STEPLIB_SH)
+    (LIB / "realpatch").write_text(shutil.which("patch") or "/usr/bin/patch")
     commits, sums, ri = make_remotes(REMOTES)
     names = subprocess.run([GIT, "ls-files", "-z", "-c", "-o", "--exclude-standard"], cwd=ROOT, capture_output=True,
                            env=GENV).stdout.decode().split("\0")
@@ -426,7 +478,7 @@ class Sandbox:
     """One imitated Mac: <dir>/home (HOME, with the checkout in home/src), <dir>/bin (PATH), <dir>/brew (Homebrew)."""
 
     def __init__(self, name, arch="x86_64", macos="15.7.1", xcode="26.1", brew=True, formulas=(), checkout_dir="src/nvidia-macos-driver",
-                 remotes=None):
+                 remotes=None, cpu=None):
         self.dir = TMP / "sb" / name
         shutil.rmtree(self.dir, ignore_errors=True)
         self.home = self.dir / "home"
@@ -440,7 +492,8 @@ class Sandbox:
         self.co = self.home / checkout_dir
         self.co.parent.mkdir(parents=True, exist_ok=True)
         git("clone", "-q", TPL, self.co)
-        (self.state / "arch").write_text(arch + "\n")
+        (self.state / "arch").write_text(arch + "\n")      # what uname -m says (the process)
+        (self.state / "cpu").write_text((cpu or arch) + "\n")   # the Mac's processor (sysctl hw.optional.arm64)
         (self.state / "macos").write_text(macos + "\n")
         (self.state / "sdk").write_text("26.1\n")
         (self.state / "brew-llvm").write_text("22.1.3\n")
@@ -470,7 +523,7 @@ class Sandbox:
         for name_ in PLAIN:
             self.wrap(self.bin / name_, "plain")
         self.wrap(self.bin / "python3", "py", "3.9.6")                  # macOS's own python3
-        self.wrap(self.bin / "patch", "ver", "patch 2.0-12u11-Apple")   # macOS's patch is not GNU patch
+        self.wrap(self.bin / "patch", "patch", "patch 2.0-12u11-Apple")   # macOS's patch: not GNU's, and it applies the chains
         self.wrap(self.bin / "make", "ver", "GNU Make 3.81")
         self.has_brew = brew
         if brew:
@@ -498,9 +551,9 @@ class Sandbox:
         # find the real one in /opt/homebrew or /usr/local before the stand-in on PATH, and install into it.
         if self.has_brew:
             e["NM_BREW"] = str(self.dir / "brew/bin/brew")
-        elif HOST_BREW:
-            raise RuntimeError(f"an imitated Mac without Homebrew cannot run here: build.sh would find {HOST_BREW[0]}")
         e.update(extra or {})
+        if not e.get("NM_BREW") and HOST_BREW and not self.has_brew:
+            raise RuntimeError(f"an imitated Mac without Homebrew cannot run here without NM_BREW: build.sh would find {HOST_BREW[0]}")
         return e
 
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
@@ -521,10 +574,11 @@ class Sandbox:
     def popen(self, *args, extra=None, default_sigint=True):
         # Ctrl-C reaches build.sh even when this test was started with SIGINT ignored (nohup, "&" in a script), which
         # build.sh would inherit and could not trap
-        pre = (lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)) if default_sigint else None
-        return subprocess.Popen([BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
-                                preexec_fn=pre)
+        # (by a small exec wrapper, not preexec_fn, which is not safe while another thread runs)
+        pre = [sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])"]
+        return subprocess.Popen([*(pre if default_sigint else []), BASH, "./build.sh", *args], cwd=self.co, env=self.env(extra),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
 
     def jlines(self):
         return self.journal.read_text().splitlines() if self.journal.exists() else []
@@ -603,7 +657,7 @@ def want(name):
 # ------------------------------------------------------------------------------------------------- what is expected
 ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "vulkan",
          "plugin", "xlate", "nvencvt"]
-FRESH_MISSING = ["Xcode", "Homebrew", "GNU patch", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
+FRESH_MISSING = ["Xcode", "Homebrew", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
                  "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
 MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
                       r"|python[0-9.]* -m (venv|pip)|step |sudo|git (init|fetch|clone|checkout|archive|update-ref|tag|stash|config|sparse-checkout|symbolic-ref))")
@@ -628,27 +682,70 @@ def under(path, roots):
 
 
 # ------------------------------------------------------------------------------------------------- arms
+# what a stand-in of Apple's /usr/bin shims records when it runs: on a Mac without the command line tools each opens the
+# dialog that offers to install them
+SHIMS = ("git", "make", "python3", "xcrun", "xcodebuild")
+
+
+def shim_runs(lines):
+    return [l for l in lines if l.split(" ", 1)[0] in SHIMS]
+
+
+def fresh_brew():
+    """On a machine with a Homebrew of its own, build.sh without NM_BREW would find it: there the imitated Mac without
+    Homebrew names a brew that is not there, and doctor's "NM_BREW names ..." line stands for its "Homebrew" line."""
+    return {"NM_BREW": "<sb>/no-brew/bin/brew"} if HOST_BREW else {}
+
+
 def arm_fresh():
-    """doctor on a Mac with nothing installed: names exactly what is missing, exits 1, changes nothing."""
-    if HOST_BREW:
-        print(f"skip fresh-machine arm: this machine has {HOST_BREW[0]}, which build.sh finds when NM_BREW is not set")
-        return
-    sb = Sandbox("fresh", xcode=None, brew=False)
+    """A Mac with nothing installed. Without Xcode (no developer folder): every command stops before it runs git, make,
+    python3, xcrun or xcodebuild, doctor naming exactly Xcode. With Xcode and nothing else: doctor names exactly what is
+    missing, exits 1, changes nothing; a dry run of everything ends without error and installs nothing."""
+    bare = Sandbox("fresh-noxcode", xcode=None, brew=False)
+
+    def bare_problems():
+        p = []
+        extra = {k: v.replace("<sb>", str(bare.dir)) for k, v in fresh_brew().items()}
+        bare.clear()
+        rc, out = bare.run("doctor", extra=extra)
+        items = doctor_items(out)
+        if rc != 1 or len(items) != 1 or not items[0].startswith("Xcode"):
+            p.append(f"doctor: exit {rc}, missing {items}")
+        for args in (("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm")):
+            rc, out = bare.run(*args, extra=extra)
+            if rc != 2 or "xcode-select" not in out:
+                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode: {out[-300:]}")
+        if shim_runs(bare.jlines()):
+            p.append(f"ran what opens Apple's install dialog on such a Mac: {shim_runs(bare.jlines())[:4]}")
+        if mutating(bare.jlines()):
+            p.append(f"ran more than probes: {mutating(bare.jlines())[:3]}")
+        return p
+
+    p = bare_problems()
+    check("no Xcode: every command stops before git, make, python3 or xcrun; doctor names exactly Xcode", not p, p)
+    with bare.scratch():
+        bare.break_script('  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then',
+                          '  if false; then')
+        negative("no early stop without Xcode (check_paths then runs git)", bare_problems())
+
+    sb = Sandbox("fresh", brew=False)
+    extra = {k: v.replace("<sb>", str(sb.dir)) for k, v in fresh_brew().items()}
+    want = [k for k in FRESH_MISSING if k != "Xcode"]
 
     def problems(script_note=""):
         before = sb.listing(sb.dir, skip=("tmp",))
         sb.clear()
-        rc, out = sb.run("doctor")
+        rc, out = sb.run("doctor", extra=extra)
         p = []
         if rc != 1:
             p.append(f"exit {rc}, not 1")
         items = doctor_items(out)
-        for k in FRESH_MISSING:
+        for k in want:
             n = sum(1 for i in items if re.match(re.escape(k) + r"\b", i))
             if n != 1:
                 p.append(f"'{k}' named {n} times in the missing list")
-        if len(items) != len(FRESH_MISSING):
-            p.append(f"{len(items)} items missing, expected {len(FRESH_MISSING)}: {items}")
+        if len(items) != len(want):
+            p.append(f"{len(items)} items missing, expected {len(want)}: {items}")
         if mutating(sb.jlines()):
             p.append(f"doctor ran more than probes: {mutating(sb.jlines())}")
         after = sb.listing(sb.dir, skip=("tmp",))
@@ -660,13 +757,21 @@ def arm_fresh():
         return p, out
 
     p, out = problems()
-    check("fresh Mac: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
+    check("fresh Mac with Xcode: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
     with sb.scratch():
         sb.break_script('  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR', '  else d_note "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR')
         negative("doctor that forgets one missing tool", problems()[0])
-    rc, out = sb.run("--dry-run", "all")
-    check("fresh Mac: a dry run of everything ends without error and installs nothing", rc == 0 and not mutating(sb.jlines()),
+    rc, out = sb.run("--dry-run", "all", extra=extra)
+    if HOST_BREW:   # deps stops at once when NM_BREW names no brew; that it installs nothing is what is left to check
+        ok = rc == 2 and "NM_BREW names" in out and not mutating(sb.jlines())
+    else:
+        ok = rc == 0 and not mutating(sb.jlines())
+    check("fresh Mac with Xcode: a dry run of everything ends as it should and installs nothing", ok,
           f"exit {rc} {mutating(sb.jlines())[:3]} {out[-600:]}")
+
+
+BREW_PLACES_LINE = ('brew_places() { if [ "$(mac_arch)" = arm64 ]; then echo "/opt/homebrew/bin/brew /usr/local/bin/brew"; '
+                    'else echo "/usr/local/bin/brew /opt/homebrew/bin/brew"; fi; }')
 
 
 def arm_hostbrew():
@@ -681,7 +786,7 @@ def arm_hostbrew():
     host.write_text(f'#!/bin/bash\nprintf "%s\\n" "$*" >> "{calls}"\n'
                     f'case "${{1:-}}" in --version) echo "Homebrew 4.6.3" ;; --prefix) echo "{sb.dir}/hostbrew" ;; *) exit 1 ;; esac\n')
     host.chmod(0o755)
-    sb.break_script("    for c in /opt/homebrew/bin/brew /usr/local/bin/brew ", f'    for c in "{host}" "{host}" ')
+    sb.break_script(BREW_PLACES_LINE, f'brew_places() {{ echo "{host} {host}"; }}')
     standin = str(sb.dir / "brew/bin/brew")
 
     def reached():
@@ -733,7 +838,213 @@ def arm_hostbrew():
     negative("a build.sh that falls back to the usual places when NM_BREW names no brew", missing_problems())
 
 
-DEPS_WANT = ["gpatch", "ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
+def whichbrew_problems(arch, cpu, places, want_brew, want_other, nm_brew="", script_edit=None, path_brew=None):
+    """doctor without NM_BREW on a Mac whose Homebrew(s) sit at <places>: which one does build.sh take, and does it name
+    the other? In the clone only, build.sh's two fixed places are moved under the sandbox, to recording stand-ins.
+    want_brew is the brew (relative to the sandbox) doctor must use, or None when none of this processor is present and
+    doctor must report Homebrew missing. path_brew puts a brew only on PATH (not at a fixed place): ("wrapper",) a plain
+    script in no Homebrew prefix, ("other",) a symlink that resolves into the other architecture's prefix."""
+    sb = Sandbox(f"which-{arch}-{cpu}-{len(places)}" + ("-nm" if nm_brew else "") + ("-x" if script_edit else "")
+                 + ("-" + path_brew[0] if path_brew else ""), arch=arch, cpu=cpu)
+    (sb.dir / "brew/bin/brew").unlink()   # the usual stand-in on PATH: not here, so PATH offers no third Homebrew
+    bs = sb.co / "build.sh"
+    t = bs.read_text()
+    if script_edit:
+        assert script_edit[0] in t, script_edit[0]
+        t = t.replace(*script_edit)
+    for fixed in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        t = t.replace(fixed, f"{sb.dir}{fixed}")
+    left = re.findall(r"/(?:opt/homebrew|usr/local)/bin/brew", t.replace(str(sb.dir) + "/", "<sb>"))
+    if left:
+        return [f"the clone's build.sh still names a Homebrew of this machine: {left}"]
+    bs.write_text(t)
+    for pl in places:
+        sb.wrap(sb.dir / pl.lstrip("/"), "brew")
+    if path_brew:
+        onpath = sb.bin / "brew"   # sb.bin is first on PATH, so this is what "command -v brew" finds
+        if path_brew[0] == "wrapper":
+            onpath.write_text('#!/bin/bash\necho "stand-in wrapper brew: was run" >&2\nexit 3\n')   # a run of it is a failure
+            onpath.chmod(0o755)
+        elif path_brew[0] == "other":
+            other_prefix = "/opt/homebrew" if arch == "x86_64" else "/usr/local"   # the prefix of the OTHER architecture
+            target = sb.dir / other_prefix.lstrip("/") / "Homebrew/bin/brew"       # a real brew deep in that prefix, not at its bin/brew
+            sb.wrap(target, "brew")
+            onpath.symlink_to(target)
+    extra = {"NM_BREW": str(sb.dir) + nm_brew if nm_brew else ""}
+    rc, out = sb.run("doctor", extra=extra)
+    p = []
+    items = doctor_items(out)
+    if want_brew is None:
+        if re.search(r"\bok\s+Homebrew ", out):
+            p.append(f"doctor took a Homebrew where none of this processor is present: {[l.strip() for l in out.splitlines() if 'Homebrew' in l][:3]}")
+        if not [i for i in items if "Homebrew" in i]:
+            p.append(f"doctor does not report Homebrew as missing: {items}")
+    else:
+        want = f"ok       Homebrew {sb.dir}{want_brew}"
+        if want not in out:
+            p.append(f"doctor: {[l.strip() for l in out.splitlines() if 'Homebrew' in l][:3]}, expected {want_brew}")
+    note = [l for l in out.splitlines() if "a second Homebrew" in l]
+    if want_other and not (note and f"{sb.dir}{want_other}" in note[0] and f"NM_BREW={sb.dir}{want_other}" in note[0]):
+        p.append(f"doctor does not name the other Homebrew {want_other} and NM_BREW: {note}")
+    if not want_other and note:
+        p.append(f"doctor names a second Homebrew where there is none to choose: {note}")
+    return p
+
+
+def arm_whichbrew():
+    both = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+    for arch, cpu, places, use, other, what in (
+            ("x86_64", "x86_64", both, "/usr/local/bin/brew", "/opt/homebrew/bin/brew", "an Intel Mac with both: /usr/local"),
+            ("arm64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew", "Apple silicon with both: /opt/homebrew"),
+            ("x86_64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew", "Apple silicon, shell under Rosetta: /opt/homebrew")):
+        p = whichbrew_problems(arch, cpu, places, use, other)
+        check(f"Homebrew of the Mac's processor first, the other named with NM_BREW: {what}", not p, p)
+    # The other architecture's Homebrew alone is NOT a Homebrew this build can use: it is reported missing and named.
+    p = whichbrew_problems("x86_64", "x86_64", ["/opt/homebrew/bin/brew"], None, "/opt/homebrew/bin/brew")
+    check("an Intel Mac with only an Apple-silicon Homebrew: none is used on its own, doctor names it and NM_BREW", not p, p)
+    p = whichbrew_problems("arm64", "arm64", ["/usr/local/bin/brew"], None, "/usr/local/bin/brew")
+    check("Apple silicon with only an Intel Homebrew: none is used on its own, doctor names it and NM_BREW", not p, p)
+    p = whichbrew_problems("x86_64", "x86_64", both, "/opt/homebrew/bin/brew", None, nm_brew="/opt/homebrew/bin/brew")
+    check("NM_BREW names the other one: only that one is used", not p, p)
+    # A brew reachable only through PATH: taken only when it resolves into this processor's own prefix.
+    p = whichbrew_problems("x86_64", "x86_64", [], None, None, path_brew=("wrapper",))
+    check("a brew on PATH that is a wrapper in no Homebrew prefix is not taken", not p, p)
+    p = whichbrew_problems("x86_64", "x86_64", [], None, "/bin/brew", path_brew=("other",))
+    check("a brew on PATH that resolves into the other architecture's prefix is not used on its own, but is named", not p, p)
+    negative("the other architecture's Homebrew used when the processor's own place is empty (the old fallback)",
+             whichbrew_problems("x86_64", "x86_64", ["/opt/homebrew/bin/brew"], None, "/opt/homebrew/bin/brew",
+                                script_edit=('    [ -f "$native" ] && [ -x "$native" ] && BREW=$native',
+                                             '    [ -f "$native" ] && [ -x "$native" ] && BREW=$native\n    [ -n "$BREW" ] || { [ -f "$other" ] && [ -x "$other" ] && BREW=$other; }')))
+    negative("a PATH brew taken wherever it resolves (no prefix rule)",
+             whichbrew_problems("x86_64", "x86_64", [], None, None, path_brew=("wrapper",),
+                                script_edit=('        case "$r" in\n          "${native%/bin/brew}"/*) BREW=$c ;;',
+                                             '        case "x$r" in\n          x*) BREW=$c ;;\n          "${native%/bin/brew}"/*) BREW=$c ;;')))
+    negative("the processor taken from uname -m only (a shell under Rosetta counts as Intel)",
+             whichbrew_problems("x86_64", "arm64", both, "/opt/homebrew/bin/brew", "/usr/local/bin/brew",
+                                script_edit=('      *) if is_mac && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then MAC_ARCH=arm64;',
+                                             '      *) if false; then MAC_ARCH=arm64;')))
+
+
+def arm_brewenv():
+    """Every call build.sh makes to Homebrew drops HOMEBREW_PREFIX, HOMEBREW_CELLAR and HOMEBREW_REPOSITORY, whatever
+    the caller exported: a tester's login shell exports them for a Homebrew of the other architecture, and inherited
+    they would send the chosen brew at the wrong installation. The stand-in brew records the three; a non-empty one fails."""
+    poison = {"HOMEBREW_PREFIX": "/opt/homebrew", "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
+    keys = ("HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY")
+
+    def problems(sb):
+        sb.clear()
+        sb.run("deps", "-y", extra=dict(poison))
+        calls = [l for l in sb.jlines() if l.startswith("brew-callenv")]
+        p = []
+        if not calls:
+            p.append("no brew call was recorded at all (the arm proves nothing)")
+        for l in calls:
+            for tok in l.split():
+                k, _, v = tok.partition("=")
+                if k in keys and v:
+                    p.append(f"{tok} reached brew (in {l.split()[0]})")
+        return p
+
+    sb = Sandbox("brewenv")
+    check("every brew call runs without HOMEBREW_PREFIX/CELLAR/REPOSITORY, whatever the caller exported", not (p := problems(sb)), p)
+    neg = Sandbox("brewenv-neg")
+    neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
+    negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
+    around = ('  # formulas for what is missing\n', '  [ -z "$("$BREW" --prefix)" ] || true\n  # formulas for what is missing\n')
+    neg2 = Sandbox("brewenv-neg2")
+    neg2.break_script(*around)
+    negative("a brew call in deps that goes around run_brew", problems(neg2))
+    # and by the text: run_brew's own line is the only one of build.sh that runs $BREW
+    def direct_calls(text):
+        out = []
+        for n, line in enumerate(text.splitlines(), 1):
+            code = re.sub(r"(^|\s)#.*$", "", line)
+            if re.search(r'(?<![\w-])"?\$\{?BREW\}?"?\s+(?:-|[a-z])', code) and 'HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1' not in code:
+                out.append(f"{n}: {line.strip()[:120]}")
+        return out
+    text = (ROOT / "build.sh").read_text()
+    check("build.sh runs Homebrew only through run_brew (no other line runs $BREW)", not direct_calls(text), direct_calls(text))
+    assert around[0] in text
+    negative("a line that runs \"$BREW\" --prefix directly", direct_calls(text.replace(*around)))
+
+
+def pathtools_problems(arch, script_edit=None):
+    """doctor on a Mac whose PATH puts a Homebrew of the other architecture first (an Intel Mac: an Apple-silicon one in
+    /opt/homebrew; Apple silicon: an Intel one in /usr/local). No tool of that Homebrew is taken from PATH, by where its
+    file resolves to or by the interpreter its #! names, and no program that "file" calls a Mach-O of the other
+    processor; a universal program, and on Apple silicon an ordinary /usr/local/bin program, still are. In the clone
+    only, build.sh's two fixed Homebrew places are moved into the sandbox."""
+    sb = Sandbox(f"pathtools-{arch}" + ("-x" if script_edit else ""), arch=arch)
+    bs = sb.co / "build.sh"
+    t = bs.read_text()
+    if script_edit:
+        assert script_edit[0] in t, script_edit[0]
+        t = t.replace(*script_edit)
+    for fixed in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        t = t.replace(fixed, f"{sb.dir}{fixed}")
+    bs.write_text(t)
+    other = sb.dir / ("opt/homebrew" if arch == "x86_64" else "usr/local")
+    sb.wrap(other / "bin/brew", "brew")   # that Homebrew itself (never used: NM_BREW names the stand-in of this processor)
+    obin = other / "bin"
+    cellar = other / "Cellar"
+    for tool, role, ver in (("ninja", "ver", "1.13.1"), ("python3.13", "py", "3.13.9")):
+        real = cellar / tool / "1" / "bin" / tool
+        sb.wrap(real, role, ver)
+        (obin / tool).symlink_to(real)
+    (obin / "python3").symlink_to(obin / "python3.13")
+    elsewhere = sb.dir / "elsewhere/bin"
+    elsewhere.mkdir(parents=True)
+    # a script run by that Homebrew's python
+    (elsewhere / "pkg-config").write_text(f"#!{obin}/python3\nprint('2.5.1')\n")
+    (elsewhere / "pkg-config").chmod(0o755)
+    # a script that names that python through env (found on PATH, which has that Homebrew first)
+    (elsewhere / "cmake").write_text("#! /usr/bin/env python3\nprint('cmake version 4.1.2')\n")
+    (elsewhere / "cmake").chmod(0o755)
+    # a Mach-O of the other processor, and a universal one (that one is taken)
+    sb.wrap(elsewhere / "glslangValidator", "ver", "Glslang Version: 11:16.0.0")
+    (elsewhere / "glslangValidator.arch").write_text("arm64\n" if arch == "x86_64" else "x86_64\n")
+    sb.wrap(elsewhere / "gpatch", "patch", "GNU patch 2.8")
+    (elsewhere / "gpatch.arch").write_text("x86_64 arm64\n")
+    sb.wrap(sb.bin / "file", "file")
+    keep = []
+    if arch == "arm64":   # an ordinary program in /usr/local/bin, not Homebrew's, on Apple silicon: taken
+        sb.wrap(obin / "cmake", "cmake", "cmake version 4.1.2")
+        keep.append(("cmake", f"{obin}/cmake"))
+    path = ":".join([str(obin), str(elsewhere), str(sb.bin), str(sb.dir / "brew/bin")])
+    rc, out = sb.run("doctor", extra={"PATH": path})
+    p = []
+    items = doctor_items(out)
+    for want in ("ninja", "pkg-config", "glslangValidator", "Python 3.10"):
+        if not [i for i in items if i.startswith(want)]:
+            p.append(f"{want} of the other architecture taken: missing list {items}")
+    if arch == "x86_64" and not [i for i in items if i.startswith("cmake")]:
+        p.append(f"a cmake whose #! names that Homebrew's python through env was taken: {items}")
+    if f"ok       patch {elsewhere}/gpatch" not in out:
+        p.append(f"the universal gpatch was not taken: {[l.strip() for l in out.splitlines() if 'patch' in l][:3]}")
+    for tool, at in keep:
+        if [i for i in items if i.startswith(tool)] or f"ok       {tool}" not in out:
+            p.append(f"the ordinary {at} was not taken: {[l.strip() for l in out.splitlines() if tool in l][:3]}")
+    notes = [l for l in out.splitlines() if "on PATH (" in l and "is not used" in l]
+    for tool in ("ninja", "pkg-config", "glslangValidator", "python3"):
+        if not [l for l in notes if l.strip().startswith(f"note     {tool} on PATH")]:
+            p.append(f"doctor does not say why {tool} on PATH is not used: {notes}")
+    return p
+
+
+def arm_pathtools():
+    for arch in ("x86_64", "arm64"):
+        p = pathtools_problems(arch)
+        check(f"no tool of the other architecture's Homebrew is taken from PATH ({arch})", not p, p)
+    negative("PATH tools taken without asking where they belong (the old command -v)",
+             pathtools_problems("x86_64", script_edit=('  [ -n "$(foreign_reason "$c")" ] || printf', '  printf')))
+    negative("no Mach-O test (a program of the other processor outside any Homebrew is taken)",
+             pathtools_problems("x86_64", script_edit=('  if have file && d=$(file -b "$r" 2>/dev/null); then', '  if false; then')))
+    negative("no #! test (a script run by that Homebrew's python is taken)",
+             pathtools_problems("x86_64", script_edit=("  [ \"$(LC_ALL=C head -c 2 \"$r\" 2>/dev/null)\" = '#!' ] || return 0", "  return 0")))
+
+
+DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
 
 
 def deps_problems(sb, rc, out, before):
@@ -862,7 +1173,7 @@ def noinstall_problems(sb, args, extra=None):
 def arm_noinstall():
     sb = Sandbox("noinst")
     p, out = noinstall_problems(sb, ["deps", "--no-install", "-y"])
-    ok = not p and "not installing (--no-install)" in out and "gpatch" in out
+    ok = not p and "not installing (--no-install)" in out and "ninja" in out
     check("deps --no-install --yes: says what is missing, installs nothing, exits non-zero", ok, (p, out[-800:]))
     p, out = noinstall_problems(sb, ["deps", "-y"], extra={"NM_NO_INSTALL": "1"})
     check("NM_NO_INSTALL=1 in the environment does the same", not p, (p, out[-500:]))
@@ -874,6 +1185,65 @@ def arm_noinstall():
     with sb.scratch():
         sb.break_script('if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"', 'if false; then say "not installing (--no-install)"')
         negative("deps that ignores --no-install", noinstall_problems(sb, ["deps", "--no-install", "-y"])[0])
+
+
+XCODE_ONLY = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "plugin", "nvencvt"]
+
+
+def needs_problems(sb, args, want_steps, want_stop=None):
+    """--no-install build <args> on a Mac with Xcode, macOS's patch and python3, and nothing from Homebrew"""
+    sb.clear()
+    rc, out = sb.run("--no-install", "build", *args)
+    keys = sb.step_keys()
+    p = []
+    if want_stop:
+        if rc == 0 or want_stop not in out:
+            p.append(f"build {' '.join(args)}: exit {rc}, expected a stop naming {want_stop!r}: {out[-300:]}")
+    elif rc != 0:
+        p.append(f"build {' '.join(args)}: exit {rc}: {out[-400:]}")
+    if keys != want_steps:
+        p.append(f"build {' '.join(args)} ran {keys}, expected {want_steps}")
+    return p
+
+
+def arm_needs():
+    sb = Sandbox("xonly")
+    rc, out = sb.run("fetch")
+    if rc != 0:
+        check("fetch for the Xcode-only Mac", False, out[-400:])
+        return
+    p = needs_problems(sb, XCODE_ONLY, XCODE_ONLY)
+    check("Xcode with macOS's patch and python3 builds rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj, airdis, dlss, osver, "
+          "plugin and nvencvt", not p, p)
+    for comp, need in (("vulkan", "cmake/ninja"), ("xlate", "Rust-"), ("nvk", "LLVM-")):
+        p = needs_problems(sb, [comp], [], want_stop=f"{comp} needs:")
+        check(f"{comp} stops before any step, naming what it needs ({need})", not p, p)
+    with sb.scratch():
+        sb.break_script("""    [ -n "$p" ] && [ -x "$p" ] || continue\n""",
+                        """    [ -n "$p" ] && [ -x "$p" ] || continue\n    case "$("$p" --version 2>/dev/null | first_line)" in *'GNU patch'*) ;; *) continue ;; esac\n""")
+        negative("a patch chosen by its name (GNU patch) instead of by what it does", needs_problems(sb, ["rm"], ["rm"]))
+    with sb.scratch():
+        sb.wrap(sb.bin / "patch", "patchold", "patch 2.5")
+        p = needs_problems(sb, ["kexts"], [], want_stop="rm needs: a-patch-that-applies-the-chains")
+        rc, out = sb.run("doctor")
+        if "MISSING  a patch that applies the patch chains" not in out:
+            p.append("doctor does not say that the patch found does not apply the chains")
+        check("a patch that does not take the scripts' options: build stops before rm, doctor says so", not p, p)
+    with sb.scratch():
+        sb.wrap(sb.bin / "patch", "patchnonew", "patch 2.0-12u11-Apple")
+        p = needs_problems(sb, ["--force", "rm", "nvrm"], ["rm", "kms", "nvrm"])
+        p += needs_problems(sb, ["nvk"], [], want_stop="a-patch-that-creates-files")
+        rc, out = sb.run("--no-install", "deps")
+        if "gpatch" not in out:
+            p.append("deps does not name gpatch for NVK")
+        check("a patch that changes files but cannot create one: the kexts build, nvk stops, deps names gpatch", not p, p)
+    with sb.scratch():
+        (sb.co / "build/pins.sh").write_text((sb.co / "build/pins.sh").read_text().replace("NM_PIN_TOOL_PYTHON_KEXT_MIN=3.8", "NM_PIN_TOOL_PYTHON_KEXT_MIN=99"))
+        p = needs_problems(sb, ["nvencvt"], [], want_stop="rm needs: python3-99")
+        check("build nvencvt checks rm, which it pulls in, before the first step (a Python too old for rm stops it)", not p, p)
+        sb.break_script("  for c in $(with_deps $list); do need_tools_for", "  for c in $list; do need_tools_for")
+        negative("a check of the named components only (rm, pulled in by nvencvt, built with what it lacks)",
+                 needs_problems(sb, ["nvencvt"], [], want_stop="rm needs: python3-99"))
 
 
 FETCH_WANT = [("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/620.70.06"),
@@ -901,14 +1271,16 @@ def fetch_problems(sb, commits):
     for f in ("CMBaseObjectSPI.h", "VTVideoDecoderSPI.h"):
         if not any(f"raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/" in l and f in l for l in curls):
             p.append(f"{f} not downloaded from the pinned URL")
-    pristine = sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06/version.mk"
+    pristine = sb.work / "build/ogkm620/open-gpu-kernel-modules-620.70.06/version.mk"
     if not pristine.exists() or "620.70.06" not in pristine.read_text():
         p.append("the 620.70.06 tree was not exported")
-    mesa = sb.work / "build/build/gpu-src/mesa"
+    mesa = sb.work / "build/gpu-src/mesa"
     if not mesa.is_dir() or git("rev-parse", "HEAD", cwd=mesa, check_rc=False) != commits["MESA"]:
         p.append("the Mesa clone is not at the pinned commit")
     if not any(l.startswith("cargo fetch --locked") for l in j):
         p.append("the translator's crates were not fetched (cargo fetch --locked)")
+    if (sb.work / "build/build").exists():
+        p.append("the trees are laid out in <work>/build/build (NULLMOTH_BUILD_ROOT one folder too deep)")
     return p, out
 
 
@@ -916,6 +1288,9 @@ def arm_fetch(sb, commits):
     with sb.scratch():
         sb.break_script('fetch -q --depth 1 "$url" "+refs/tags/$ref:refs/tags/$ref"', 'fetch -q --depth 1 "$url" "+refs/heads/main:refs/tags/$ref"')
         negative("fetch that asks for a branch instead of the pinned tag", fetch_problems(sb, commits)[0])
+    with sb.scratch():
+        sb.break_script("R=${NULLMOTH_BUILD_ROOT:-$W}", "R=${NULLMOTH_BUILD_ROOT:-$W/build}")
+        negative("NULLMOTH_BUILD_ROOT=<work>/build (the trees in <work>/build/build, as before)", fetch_problems(sb, commits)[0])
     p, out = fetch_problems(sb, commits)
     check("fetch asks for every pinned ref at its pinned URL, verifies and lays out the sources", not p, (p, out[-1200:]))
     sb.clear()
@@ -932,11 +1307,57 @@ def tamper_problems(sb, extra=None, what="620.70.06"):
         p.append("a tampered source was accepted (exit 0)")
     if "the pin is" not in out:
         p.append("no message naming the pin")
-    if what == "620.70.06" and (sb.work / "build/build/ogkm620/open-gpu-kernel-modules-620.70.06").exists():
+    if what == "620.70.06" and (sb.work / "build/ogkm620/open-gpu-kernel-modules-620.70.06").exists():
         p.append("the tampered tree was exported anyway")
     if what == "webkit" and (sb.work / "src/webkit-spi/CMBaseObjectSPI.h").exists():
         p.append("the tampered header was kept")
     return p, out
+
+
+def githooks_problems(sb):
+    """./build.sh fetch on a Mac whose global git set-up has a hooks folder, a template folder and an attributes file
+    that sends every file through a filter: none of them may act in what fetch makes (each leaves a mark when it does)."""
+    marks = sb.dir / "git-marks"
+    shutil.rmtree(marks, ignore_errors=True)
+    marks.mkdir()
+    hooks, tpl = sb.dir / "git-hooks", sb.dir / "git-template"
+    for d, what in ((hooks, "core.hooksPath"), (tpl / "hooks", "init.templateDir")):
+        d.mkdir(parents=True, exist_ok=True)
+        for h in ("post-checkout", "post-merge", "reference-transaction"):
+            (d / h).write_text(f'#!/bin/sh\n: > "{marks}/{h} hook of {what}"\n')
+            (d / h).chmod(0o755)
+    (tpl / "nm-template-mark").write_text("copied from init.templateDir\n")
+    attrs = sb.dir / "git-attributes"
+    attrs.write_text("* filter=nmmark\n")
+    filt = sb.dir / "git-filter"
+    filt.write_text(f'#!/bin/sh\n: > "{marks}/filter"\ncat\n')
+    filt.chmod(0o755)
+    cfg = sb.dir / "gitconfig"
+    base = cfg.read_text().split("# --- githooks\n")[0]
+    cfg.write_text(base + "# --- githooks\n" + f"[core]\n\thooksPath = {hooks}\n\tattributesFile = {attrs}\n[init]\n\ttemplateDir = {tpl}\n"
+                   f"[filter \"nmmark\"]\n\tsmudge = {filt}\n\tclean = {filt}\n")
+    if sb.work.exists():
+        shutil.rmtree(sb.work)
+    rc, out = sb.run("fetch")
+    p = []
+    if rc != 0:
+        p.append(f"fetch: exit {rc}: {out[-400:]}")
+    p += [f"{m.name} acted" for m in sorted(marks.iterdir())]
+    p += [f"the template was copied into {str(m.parent.relative_to(sb.work))}" for m in sb.work.rglob("nm-template-mark")]
+    cfg.write_text(base)
+    return p
+
+
+def arm_githooks():
+    sb = Sandbox("githooks")
+    p = githooks_problems(sb)
+    check("fetch runs none of the tester's git hooks, template or filters", not p, p)
+    with sb.scratch():
+        sb.break_script(" -c core.hooksPath=/dev/null -c core.fsmonitor=false \\\n              -c core.attributesFile=/dev/null", "")
+        negative("git without the hooks, monitor and attributes settings", githooks_problems(sb))
+    with sb.scratch():
+        sb.break_script(" --template= ", " ", count=2)
+        negative("git init and clone without an empty template", githooks_problems(sb))
 
 
 def arm_tamper():
@@ -1020,9 +1441,61 @@ def arm_dryrun(mac):
     with mac.scratch():
         mac.break_script('  if [ "$NM_DRY_RUN" = 1 ]; then say "    $(qcmd "$@")"; return 0; fi\n', '')
         negative("a dry run that runs the commands", dry_problems(mac, ["-n", "--force", "build", "fb"])[0])
+    def dirty_problems(s):
+        (s.co / "README.md").write_text((s.co / "README.md").read_text() + "a local change\n")
+        p, out = dry_problems(s, ["-n", "--force", "build", "plugin", "xlate"])
+        if "build_plugin_release.sh" not in out:
+            p.append(f"the plugin step was not printed: {out[-300:]}")
+        return p
+    with mac.scratch():
+        p = dirty_problems(mac)
+        check("-n build plugin in a checkout with local changes writes nothing into it (no git stash create)", not p, p)
+    with mac.scratch():
+        mac.break_script('  elif [ "$NM_DRY_RUN" = 1 ]; then   # git stash create', '  elif false; then   # git stash create')
+        negative("a dry run that records the working tree with git stash create", dirty_problems(mac))
     with sb.scratch():
-        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && [ "$NM_DRY_RUN" = 1 ]; then', 'elif false; then')
+        sb.break_script('elif [ -z "$LLVM_PREFIX" ] && ! brew_may_ask; then', 'elif false; then')
         negative("a dry run that asks Homebrew for its LLVM formulas", dry_problems(sb, ["--dry-run", "all"])[0])
+
+
+def readonly_problems(sb):
+    """doctor, the dry runs and env on a Mac with Homebrew and nothing installed: nothing written anywhere (the stand-in
+    brew writes Homebrew's cache when "info" runs, as the real one does); deps afterwards: its "brew info" keeps the
+    cache inside the working directory."""
+    p = []
+    for args in (["doctor"], ["--dry-run", "all"], ["-n", "deps"], ["-n", "build", "rm"], ["env"], ["--offline", "-n", "deps"]):
+        before = sb.listing(sb.dir, skip=("journal",))
+        sb.journal.write_text("")
+        rc, out = sb.run(*args)
+        after = sb.listing(sb.dir, skip=("journal",))
+        d = [x for x in diff_listing(before, after) if x != "journal"]
+        if d:
+            p.append(f"{' '.join(args)} wrote {d[:4]}")
+        asked = [l for l in sb.jlines() if l.startswith("brew-info")]
+        if asked:
+            p.append(f"{' '.join(args)} asked brew info ({len(asked)} times)")
+    sb.clear()
+    rc, out = sb.run("-y", "deps")
+    cache = sb.home / "Library/Caches/Homebrew"
+    if cache.exists():
+        p.append("deps let brew info write ~/Library/Caches/Homebrew")
+    asked = [l for l in sb.jlines() if l.startswith("brew-info")]
+    if not asked:
+        p.append("deps never asked brew info (the test does not see the LLVM formula choice)")
+    if any(f"HOMEBREW_CACHE={sb.work}/tools/homebrew-cache" not in l for l in asked):
+        p.append(f"brew info without a cache in the working directory: {asked[:2]}")
+    return p
+
+
+def arm_readonly():
+    p = readonly_problems(Sandbox("ro"))
+    check("doctor, --dry-run, -n deps, -n build and env never run brew info; deps gives it a cache in the working directory", not p, p)
+    sb = Sandbox("ro-x")
+    sb.break_script('brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }', 'brew_may_ask() { true; }')
+    sb.break_script('run_brew "HOMEBREW_CACHE=$TOOLS/homebrew-cache" -- info', 'run_brew -- info')
+    p = readonly_problems(sb)
+    negative("dry runs that ask brew info, with Homebrew's own cache (as before)",
+             [x for x in p if "asked brew info" in x or "Library/Caches/Homebrew" in x or "without a cache" in x])
 
 
 def order_problems(sb, args, expect):
@@ -1104,6 +1577,30 @@ def arm_vars(mac):
         mac.clear()
         mac.run("build", "fb", extra={"CC": "/usr/local/bin/gcc-14"})
         negative("a CC from the user's shell left in the step's environment", vars_problems(mac))
+    # A login shell may point the compiler and build-system search paths at a Homebrew of the other architecture; no
+    # step may inherit them.
+    leak = {"CMAKE_PREFIX_PATH": "/opt/homebrew/lib/cmake", "LIBRARY_PATH": "/opt/homebrew/lib",
+            "CPATH": "/opt/homebrew/include", "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig",
+            "C_INCLUDE_PATH": "/opt/homebrew/include", "CPLUS_INCLUDE_PATH": "/opt/homebrew/include",
+            "OBJC_INCLUDE_PATH": "/opt/homebrew/include", "PKG_CONFIG_LIBDIR": "/opt/homebrew/lib/pkgconfig",
+            "LDFLAGS": "-L/opt/homebrew/lib", "CPPFLAGS": "-I/opt/homebrew/include", "HOMEBREW_PREFIX": "/opt/homebrew",
+            "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
+
+    def leak_problems(tag):
+        mac.clear()
+        e = dict(leak); e["FB_DEFS"] = f"-DNM_LEAK_{tag}=1"   # a fresh value each call so fb really re-runs
+        mac.run("build", "fb", extra=e)
+        steps = mac.steps()
+        bad = [f"{key}: {v}={env[v]} inherited from the caller" for key, args, env in steps for v in leak if v in env]
+        return bad or ([] if steps else ["no step ran"])
+
+    with mac.scratch():
+        check("a step inherits no compiler search path, LDFLAGS/CPPFLAGS or HOMEBREW_ variable from the caller", not (q := leak_problems("a")), q)
+        mac.break_script("-u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \\", "\\")
+        negative("a step_env that keeps the caller's search-path variables", leak_problems("b"))
+    with mac.scratch():
+        mac.break_script("    -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\\n", "")
+        negative("a step_env that keeps clang's include paths and the caller's HOMEBREW_ variables", leak_problems("c"))
 
 
 def rebuilt(sb, *args, extra=None, edit=None):
@@ -1113,6 +1610,15 @@ def rebuilt(sb, *args, extra=None, edit=None):
     sb.clear()
     rc, out = sb.run("build", *args, extra=extra)
     return rc, sb.step_keys(), out
+
+
+def rm_again_problems(sb):
+    rc, keys, out = rebuilt(sb, "--force", "rm")
+    if keys != ["rm"]:
+        return [f"--force build rm ran {keys}"]
+    rc, keys, out = rebuilt(sb)
+    want = ["kms", "nvrm", "fb", "accel", "nvencvt"]
+    return [] if keys == want else [f"after rm was built again, build ran {keys}, expected {want}"]
 
 
 def arm_stamps(mac):
@@ -1147,6 +1653,13 @@ def arm_stamps(mac):
         check("a missing output re-runs its step", keys == ["osver"], keys)
         rc, keys, _ = rebuilt(mac, "--force", "agdc")
         check("--force re-runs the named step even when it is up to date", keys == ["agdc"], keys)
+        p = rm_again_problems(mac)
+        check("rm built again (--force build rm): the next build re-runs everything that reads its flags or links its archive", not p, p)
+    with mac.scratch():
+        mac.break_script('$(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"',
+                         '$(sha256_file "$STAMPS/$d" 2>/dev/null || echo none)"')
+        rebuilt(mac)
+        negative("stamps that follow only the dependency's recipe, not its new archive", rm_again_problems(mac))
     with mac.scratch():
         mac.break_script("""  for v in $C_VARS; do eval "say \\"var $v=\\${$v:-}\\""; done\n""", "")
         rebuilt(mac)
@@ -1216,8 +1729,7 @@ def arm_failure(mac):
         mac.break_script('  CUR_STEP=""\n  exit 1\n}', '  CUR_STEP=""\n  return 0\n}')
         negative("a failed step that does not stop the run", failure_problems(mac, home=link)[0])
     with mac.scratch():
-        mac.break_script("tilde() {   # the home folder written as ~ (report files and summaries a tester may post)\n",
-                         "tilde() { cat; return 0\n")
+        mac.break_script('tilde() { home_as "~"; }', 'tilde() { cat; }')
         failure_problems(mac, home=link)
         negative("a report that keeps the home path", report_problems(mac, link))
 
@@ -1239,19 +1751,19 @@ def stale_problems(sb):
     return p, out
 
 
-def personal_problems(sb, text, accept):
-    """build_rm620.sh's exit 6 for the account or host name: accepted only when no whole word matches."""
+def personal_problems(sb, text):
+    """build_rm620.sh's exit 6 (the archive names the account or computer as a word; the script judges whole words
+    itself): the step stops, rm is not stamped, and nothing builds on the archive."""
     (sb.ctl / "personal-rm").write_text(text)
     sb.clear()
-    rc, out = sb.run("--force", "build", "rm")
+    rc, out = sb.run("--force", "build", "rm", "fb")
     (sb.ctl / "personal-rm").unlink()
-    log = (sb.work / "logs/rm.log").read_text() if (sb.work / "logs/rm.log").exists() else ""
     p = []
-    if accept and (rc != 0 or "Accepted." not in log or not (sb.work / "stamps/rm").exists()):
-        p.append(f"a name found only inside other words stopped the build (exit {rc})")
-    if not accept and (rc == 0 or (sb.work / "stamps/rm").exists() or "as a whole word" not in log):
-        p.append(f"a whole-word account name in the archive was accepted (exit {rc})")
-    return p, out + log[-600:]
+    if rc == 0 or (sb.work / "stamps/rm").exists() or "fb" in sb.step_keys():
+        p.append(f"build_rm620.sh's exit 6 was accepted (exit {rc}, steps {sb.step_keys()})")
+    if "name this account or computer" not in out:
+        p.append("the script's reason is not shown")
+    return p, out
 
 
 def python_problems(sb):
@@ -1276,9 +1788,10 @@ def python_problems(sb):
 
 
 def pkgconfig_problems(sb):
-    """a PKG_CONFIG_PATH from the tester's shell comes after build.sh's: pkg-config takes the first LLVMSPIRVLib.pc"""
+    """a PKG_CONFIG_PATH from the tester's shell comes after build.sh's (pkg-config takes the first LLVMSPIRVLib.pc), and
+    without the folders of the other architecture's Homebrew (this imitated Mac is an Intel one: /opt/homebrew)"""
     sb.clear()
-    sb.run("--force", "build", "nvk", extra={"PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig"})
+    sb.run("--force", "build", "nvk", extra={"PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig"})
     envs = [e for k, _, e in sb.steps() if k == "nvk"]
     if not envs:
         return ["nvk did not run"]
@@ -1286,35 +1799,35 @@ def pkgconfig_problems(sb):
     p = []
     if not os.path.isfile(os.path.join(parts[0], "LLVMSPIRVLib.pc")):
         p.append(f"the first PKG_CONFIG_PATH entry is not the chosen SPIRV-LLVM-Translator: {parts[:2]}")
-    if "/opt/homebrew/lib/pkgconfig" not in parts:
+    if "/usr/local/lib/pkgconfig" not in parts:
         p.append("the tester's PKG_CONFIG_PATH was dropped")
+    if "/opt/homebrew/lib/pkgconfig" in parts:
+        p.append(f"the other architecture's Homebrew reached the NVK step: {parts}")
     return p
 
 
 def arm_steps(mac):
     with mac.scratch():
         p = pkgconfig_problems(mac)
-        check("a PKG_CONFIG_PATH from the shell is kept but put after the translator build.sh chose", not p, p)
+        check("a PKG_CONFIG_PATH from the shell is kept after the translator build.sh chose, without the other Homebrew", not p, p)
     with mac.scratch():
-        mac.break_script('[ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"',
-                         '[ -z "${PKG_CONFIG_PATH:-}" ] || p="$PKG_CONFIG_PATH${p:+:$p}"')
+        mac.break_script('    p="${p:+$p:}$d"', '    p="$d${p:+:$p}"')
         negative("the shell's PKG_CONFIG_PATH first", pkgconfig_problems(mac))
+    with mac.scratch():
+        mac.break_script('    [ -n "$d" ] && ! foreign_search_dir "$d" || continue', '    [ -n "$d" ] || continue')
+        negative("the shell's PKG_CONFIG_PATH kept whole (the other architecture's Homebrew included)", pkgconfig_problems(mac))
     with mac.scratch():
         p, out = stale_problems(mac)
         check("a build script that fails stops its step, even when a previous build left an output behind", not p, (p, out[-700:]))
     with mac.scratch():
         mac.break_script('  [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"\n}', '  return "$rc"\n}')
         negative("a step that goes on after its build script failed", stale_problems(mac)[0])
-    acct = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip() or "root"
     with mac.scratch():
-        p, out = personal_problems(mac, f"Most {acct}ly the GPU stopped\n", accept=True)
-        check("build_rm620.sh's exit 6 for the account name inside another word is checked again and accepted",
-              not p, (p, out[-900:]))
-        p, out = personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)
-        check("an account name as a whole word (a home path) still stops the build", not p, (p, out[-900:]))
+        p, out = personal_problems(mac, "/Users/someone/src/nv.c\n")
+        check("build_rm620.sh's exit 6 (a name as a whole word) stops the build", not p, (p, out[-900:]))
     with mac.scratch():
-        mac.break_script('  if [ "${n:-0}" = 0 ]; then', '  if true; then')
-        negative("a recheck that accepts a whole-word account name", personal_problems(mac, f"/Users/{acct}/src/nv.c\n", accept=False)[0])
+        mac.break_script('      [ "$m" = 0 ] || return "$m"\n      # build_rm620.sh archives', '      [ "$m" = 0 ] || [ "$m" = 6 ] || return "$m"\n      # build_rm620.sh archives')
+        negative("a build that accepts build_rm620.sh's exit 6", personal_problems(mac, "/Users/someone/src/nv.c\n")[0])
     with mac.scratch():
         mac.clear()
         mac.run("--force", "build", "rm", "nvk")
@@ -1517,7 +2030,7 @@ def arm_deps_ok(sb, rc):
 def arm_hosts(commits):
     sb = Sandbox("arm", arch="arm64", formulas=DEPS_WANT + ["cmake"])
     with sb.scratch():
-        sb.break_script("arm64|aarch64) HOST_TRIPLE=aarch64-apple-darwin", "arm64|aarch64) HOST_TRIPLE=x86_64-apple-darwin")
+        sb.break_script("arm64) HOST_TRIPLE=aarch64-apple-darwin", "arm64) HOST_TRIPLE=x86_64-apple-darwin")
         sb.clear()
         rc, out = sb.run("deps", "-y")
         negative("an Apple-silicon Mac taken for an Intel one", [] if arm_deps_ok(sb, rc) else ["no aarch64 rustup"])
@@ -1598,8 +2111,48 @@ def arm_env(mac):
     p = env_problems(mac, steps)
     check("env prints export lines bash can evaluate, with the values the steps receive", not p, p)
     with mac.scratch():
-        mac.break_script('say "export OGKM=$(q "$OGKM620")"', 'say "export OGKM=$(q "$PRISTINE")"')
+        mac.break_script('say "export OGKM=$(qh "$OGKM620")"', 'say "export OGKM=$(qh "$PRISTINE")"')
         negative("env that prints another OGKM than the build uses", env_problems(mac, steps))
+
+
+def nohome_problems(sb):
+    """what a tester pastes names no home folder (it contains the account name): doctor, dry runs, env, progress, the
+    summary, a STOP line and the report. Run with HOME spelled through a link, so that both spellings occur."""
+    link = sb.dir / "homelink"
+    if not link.exists():
+        os.symlink(sb.home, link)
+    spellings = {str(sb.home), os.path.realpath(sb.home), str(link)}
+    p = []
+    runs = [("doctor",), ("--dry-run", "all"), ("-n", "--force", "build", "fb"), ("-n", "deps"), ("env",), ("build",), ("--force", "build", "agdc")]
+    (sb.ctl / "fail-agdc").write_text("")
+    try:
+        for args in runs:
+            sb.clear()
+            rc, out = sb.run(*args, home=link)
+            hits = [l for l in out.splitlines() if any(h in l for h in spellings)]
+            if hits:
+                p.append(f"{' '.join(args)} prints the home folder: {hits[:2]}")
+            if args == ("env",):
+                if not re.search(r'^export NM_WORK="\$HOME/nullmoth-build"$', out, re.M):
+                    p.append(f"env does not write the working directory as \"$HOME/...\": {[l for l in out.splitlines() if 'NM_WORK=' in l]}")
+            if args == ("--force", "build", "agdc"):
+                reps = sorted((sb.work / "reports").glob("failure-agdc-*.txt"))
+                t = reps[-1].read_text() if reps else ""
+                if not t or any(h in t for h in spellings):
+                    p.append("the failure report is missing or names the home folder")
+    finally:
+        (sb.ctl / "fail-agdc").unlink()
+    return p
+
+
+def arm_nohome(mac):
+    with mac.scratch():
+        p = nohome_problems(mac)
+        check("doctor, dry runs, env, progress, summary, STOP lines and the report write the home folder as ~ (env: \"$HOME/...\")", not p, p)
+    with mac.scratch():
+        mac.break_script("""say()  { if has_home "$*"; then printf '%s\\n' "$*" | tilde; else printf '%s\\n' "$*"; fi; }""",
+                         """say()  { printf '%s\\n' "$*"; }""")
+        negative("output with the home folder written out (only the summary and the report used ~)", nohome_problems(mac))
 
 
 def arm_test_cmd(mac):
@@ -1661,6 +2214,24 @@ def arm_clean(mac):
         check("clean all --yes leaves only the marker", rc == 0 and left == [".nullmoth-build-workdir"], left)
         p = outside_problems(mac)
         check("clean never deletes outside the working directory (NULLMOTH_BUILD_ROOT elsewhere)", not p, p)
+
+        def old_layout_problems(s, extra=None):
+            old = s.work / "build/build/ogkm620/x"
+            old.parent.mkdir(parents=True, exist_ok=True)
+            old.write_text("x")
+            rc, out = s.run("clean", extra=extra)
+            gone = not (s.work / "build/build").exists()
+            if extra:   # a NULLMOTH_BUILD_ROOT the tester set: their folder, kept
+                return [] if not gone and rc == 0 else [f"clean deleted <work>/build/build although NULLMOTH_BUILD_ROOT names it (exit {rc})"]
+            return [] if gone and rc == 0 else [f"clean left the old <work>/build/build (exit {rc}): {out[-200:]}"]
+        p = old_layout_problems(mac)
+        check("clean deletes the <work>/build/build an earlier build.sh left", not p, p)
+        p = old_layout_problems(mac, {"NULLMOTH_BUILD_ROOT": str(mac.work / "build")})
+        check("clean keeps <work>/build/build when NULLMOTH_BUILD_ROOT is <work>/build", not p, p)
+        # the scratch above puts build.sh back when it ends
+        mac.break_script("    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\"\n             old_layout_rm ;;",
+                         "    outputs) safe_rm \"$O\" \"$STAMPS\" \"$LOGS\" \"$PKGDIR\" \"$RMWORK\" \"$R/build/plugin-release\" \"$R/build/plugin-dev\" \"$R/build/xlate-release\" \"$R/build/nvencvt\" ;;")
+        negative("clean that leaves the old <work>/build/build", old_layout_problems(mac))
         other = mac.home / "notours"
         other.mkdir()
         (other / "keep").write_text("x")
@@ -1849,6 +2420,32 @@ def arm_scan():
     check("control: bash -n rejects a broken script", r.returncode != 0)
 
 
+def frameworks(text):
+    return set(re.findall(r"-framework\s+(\w+)", text))
+
+
+def plugin_link_problems(texts):
+    """build/build_plugin.sh links the plugin with every framework the release and development scripts link it with:
+    without IOKit and CoreFoundation its link stops on 13 undefined IOKit symbols (seen with Xcode 26.5)."""
+    have = frameworks(texts["build/build_plugin.sh"])
+    p = []
+    for other in ("build/build_plugin_release.sh", "build/build_plugin_dev.sh"):
+        miss = frameworks(texts[other]) - have
+        if miss:
+            p.append(f"build/build_plugin.sh lacks {sorted(miss)}, which {other} links")
+    return p
+
+
+def arm_plugin_link():
+    names = ("build/build_plugin.sh", "build/build_plugin_release.sh", "build/build_plugin_dev.sh")
+    texts = {n: (ROOT / n).read_text() for n in names}
+    p = plugin_link_problems(texts)
+    check("build/build_plugin.sh links IOKit and CoreFoundation like the release and development scripts", not p, p)
+    old = dict(texts)
+    old["build/build_plugin.sh"] = texts["build/build_plugin.sh"].replace(" -framework IOKit -framework CoreFoundation", "")
+    negative("the link line of v2.9 (no -framework IOKit)", plugin_link_problems(old))
+
+
 # ------------------------------------------------------------------------------------------------- documents
 def script_names(text):
     """The commands, options and settable variables build.sh defines (from its text)."""
@@ -1929,56 +2526,113 @@ def arm_docs():
 
 
 # ------------------------------------------------------------------------------------------------- main
+def timed(name, fn, *args):
+    """Run one arm and print its lines together; with NMT_TIMES=1 also how long it took."""
+    t0 = time.monotonic()
+    _TLS.buf = []
+    try:
+        return fn(*args)
+    finally:
+        lines, _TLS.buf = _TLS.buf, None
+        if os.environ.get("NMT_TIMES"):
+            lines.append(f"time {name}: {time.monotonic() - t0:.1f} s")
+        with _LOCK:
+            for l in lines:
+                print(l, flush=True)
+
+
+def finish(worker):
+    """Wait for the second thread of arms, if it was started (the sandboxes are removed only after it ends)."""
+    if worker is not None and worker.ident:
+        worker.join()
+    return None
+
+
 def main():
     v = subprocess.run([BASH, "-c", 'echo "$BASH_VERSION"'], capture_output=True, text=True).stdout.strip()
     print(f"build.sh runs under {BASH} (bash {v})")
     if not v.startswith("3.2"):
         print(f"note: this is not bash 3.2, the /bin/bash of macOS; set BUILD_SH_BASH to a bash 3.2 to test what a Mac runs")
-    for t in ("git", "shasum", "perl", "tar"):
+    for t in ("git", "shasum", "perl", "tar", "patch"):
         if not shutil.which(t):
             print(f"SKIP: {t} is needed to imitate a Mac here")
             sys.exit(2)
+    worker = None
     try:
         if want("pins"):
-            arm_pins()
+            timed("pins", arm_pins)
         if want("scan"):
-            arm_scan()
+            timed("scan", arm_scan)
         if want("docs"):
-            arm_docs()
-        commits = build_template()
+            timed("docs", arm_docs)
+        if want("plugin"):
+            timed("plugin_link", arm_plugin_link)
+        commits = timed("template", build_template)
         if want("pins"):
-            arm_pins_script()
-        if want("fresh"):
-            arm_fresh()
-        if want("hostbrew"):
-            arm_hostbrew()
-        if want("noinstall"):
-            arm_noinstall()
-        if want("tamper"):
-            arm_tamper()
-        if want("space"):
-            arm_space()
-        if want("hosts"):
-            arm_hosts(commits)
-        if want("deps"):
-            arm_deps_control()
-        if want("llvm23"):
-            arm_llvm23()
+            timed("pins_script", arm_pins_script)
+        # Each arm below makes its own imitated Mac and shares nothing with the others, so they run in a second thread
+        # beside the arms that build on one shared Mac (those stay in this thread: the interrupt arm sets the signal
+        # handling, which only the main thread may). Most of the time is build.sh's own forks; two threads halve the
+        # time the test needs on a loaded machine. NMT_SERIAL=1 runs everything in this thread.
+        errors = []
+
+        def standalone():
+            try:
+                if want("fresh"):
+                    timed("fresh", arm_fresh)
+                if want("hostbrew"):
+                    timed("hostbrew", arm_hostbrew)
+                if want("whichbrew"):
+                    timed("whichbrew", arm_whichbrew)
+                if want("brewenv"):
+                    timed("brewenv", arm_brewenv)
+                if want("pathtools"):
+                    timed("pathtools", arm_pathtools)
+                if want("readonly"):
+                    timed("readonly", arm_readonly)
+                if want("noinstall"):
+                    timed("noinstall", arm_noinstall)
+                if want("needs"):
+                    timed("needs", arm_needs)
+                if want("tamper"):
+                    timed("tamper", arm_tamper)
+                if want("githooks"):
+                    timed("githooks", arm_githooks)
+                if want("space"):
+                    timed("space", arm_space)
+                if want("hosts"):
+                    timed("hosts", arm_hosts, commits)
+                if want("deps"):
+                    timed("deps_control", arm_deps_control)
+                if want("llvm23"):
+                    timed("llvm23", arm_llvm23)
+            except BaseException as e:   # reported after the join, as a failure
+                errors.append(e)
+
+        worker = threading.Thread(target=standalone, name="standalone arms")
+        if os.environ.get("NMT_SERIAL"):
+            standalone()
+        else:
+            worker.start()
         mac_arms = ["deps", "fetch", "offline", "dryrun", "order", "vars", "env", "stamps", "failure", "steps", "interrupt", "concurrent",
-                    "test", "package", "clean"]
+                    "test", "package", "nohome", "clean"]
         if any(want(a) for a in mac_arms):
             mac = Sandbox("mac", formulas=("cmake",))
-            arm_deps(mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
-            arm_fetch(mac, commits)
+            timed("deps", arm_deps, mac)     # the arms below build on what deps, fetch and the full build leave in this sandbox
+            timed("fetch", arm_fetch, mac, commits)
             if want("offline"):
-                arm_offline(mac)
-            arm_order(mac)
+                timed("offline", arm_offline, mac)
+            timed("order", arm_order, mac)
             for name, fn in (("dryrun", arm_dryrun), ("vars", arm_vars), ("env", arm_env), ("stamps", arm_stamps),
                              ("failure", arm_failure), ("steps", arm_steps), ("interrupt", arm_interrupt), ("concurrent", arm_concurrent),
-                             ("test", arm_test_cmd), ("package", arm_package), ("clean", arm_clean)):
+                             ("test", arm_test_cmd), ("package", arm_package), ("nohome", arm_nohome), ("clean", arm_clean)):
                 if want(name):
-                    fn(mac)
+                    timed(name, fn, mac)
+        worker = finish(worker)
+        for e in errors:
+            raise e
     finally:
+        finish(worker)
         if os.environ.get("NMT_KEEP"):
             print(f"sandbox kept: {TMP}")
         else:
