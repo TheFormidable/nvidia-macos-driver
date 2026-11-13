@@ -703,6 +703,20 @@ def main():
             sb = sandbox()
             control("a script that refuses every link a tool installed",
                     inside_links_problems(mutate(sb, "all-links", [('next if index("$r/", "$root/") == 0 || ', 'next if ')])))
+            # the same with the prefix given through a link (on a Mac /tmp is /private/tmp, and a home or working folder
+            # can be one): the links are judged against the prefix's real place, so those into it still pass
+            def linked_prefix_problems(script=None):
+                s = sandbox()
+                (s.sb / "control/links").write_text("spirv-tools lib/libok-standin.dylib libSPIRV-Tools-shared.dylib\n")
+                (s.sb.parent / f"{s.sb.name}-link").symlink_to(s.sb)
+                rc, out, err = s.run(["build", "ninja", "cmake", "spirv-tools"], script=script,
+                                     NM_TC_PREFIX=str(s.sb.parent / f"{s.sb.name}-link/prefix"))
+                return [] if rc == 0 and s.stamp("spirv-tools") is not None else [f"exit {rc}: {(out + err)[-600:]}"]
+            probs = linked_prefix_problems()
+            check("a prefix given through a link: the links a tool installed into it pass its checks", not probs, probs)
+            sb = sandbox()
+            control("a script that keeps the prefix as it was spelled",
+                    linked_prefix_problems(mutate(sb, "prefix-as-spelled", [('  eval "$v=\\$r"\n', '')])))
             sb = sandbox()
             sb.run(["build", "ninja", "cmake", "spirv-tools"])
             rc, out, err = sb.run(["check", "ninja", "spirv-tools"], NM_TC_WORK=None, NM_TC_LOGS=None, NM_TC_SRC=None)
