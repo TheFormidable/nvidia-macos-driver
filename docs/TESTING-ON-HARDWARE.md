@@ -45,8 +45,9 @@ restart. Take every test setting out again when its test is done.
    it again with its own `install.sh` puts every file back ([BUILDING.md](BUILDING.md), "Installing the result and
    going back", which also says what `uninstall.sh` does and does not do). Before it changes anything, the installer
    copies what is installed now (the kexts, the plugin bundle, the folder `/Library/GPUBundles/nvmtl` with its
-   settings file, the kernel collection, the firmware) into a new folder `/Library/NullMoth/backup-<date>-<time>.<random>`,
-   whose name it prints on its line `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
+   settings file, the kernel collection, the firmware) into a new folder
+   `/Library/NullMoth/backup-<date>-<time>.<random>`, whose name it prints on its line
+   `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
    each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
    after WindowServer kept dying on the NVIDIA display), the job puts everything back from that folder and restarts
    once. It removes itself at the first start after one that lit the display, so it does not help with a problem that
@@ -91,9 +92,9 @@ restart. Take every test setting out again when its test is done.
 1. **The card started.** Install, restart. Pass: the login window comes up on the NVIDIA card;
    `kmutil showloaded --list-only | grep nullmoth` shows four lines (NVRM, NVAccel, NVRMFB, NVRMAGDC), five on
    macOS 26 where the installer adds its audio driver `com.nullmoth.NMXAudio` for an HD Audio controller;
-   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: the firmware's picture stays or the screen is black. Over `ssh`, look in the
-   kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on with steps 3 and 5 below, which tell
-   the reasons apart.
+   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: the firmware's picture stays or
+   the screen is black. Over `ssh`, look in the kernel log for `NOT STARTING THE GPU` (the line gives the reason)
+   and go on with steps 3 and 5 below, which tell the reasons apart.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
@@ -159,8 +160,9 @@ restart. Take every test setting out again when its test is done.
 
    Pass: `nvrm_wq_mode` 1, `nvrm_atomic_mode` 1, `nvrm_bh_thread` and `nvrm_rc_armed` 1 with one card,
    `nvrm_rc_ticks` about ten higher the second time, `nvrm_nano_wait_timeouts` and `nvrm_nano_retired` 0 (a retired
-   slot is one the driver stopped reusing because a timer callback could still be running in it). Fail: -1 in either mode (a worker
-   or a self-test did not start), 0 in a count, or ticks standing still; send the values and the `NVRM-xnu:` lines
+   slot is one the driver stopped reusing because a timer callback could still be running in it). Fail: -1 in either
+   mode (a worker or a self-test did not start), 0 in a count, or ticks standing still; send
+   the values and the `NVRM-xnu:` lines
    ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md) has every value).
 7. **The surface fence after login.** Follow step 1 of [SURFACE-FENCE.md](SURFACE-FENCE.md), "What to look at on the
    card". Pass: `debug.nvrm_fence_state` 1, `debug.nvrm_fence_accel` 1, `debug.nvrm_fence_map_fail` and
@@ -197,7 +199,8 @@ restart. Take every test setting out again when its test is done.
 3. **A process that dies.** Step 6 of the same list: `kill -9` a Metal application mid-frame, then stop one
    with `kill -STOP` and continue it with `kill -CONT`. Pass: no stall of the desktop; at most one hitch of up to
    100 ms for the stopped one, which adds one to `debug.nvrm_fence_expired_cpu` and one to
-   `debug.nvrm_fence_strikes` (expected here, unlike in step 2). Fail: the desktop stalls, or `debug.nvrm_fence_state` becomes 2.
+   `debug.nvrm_fence_strikes` (expected here, unlike in step 2). Fail: the desktop stalls, or `debug.nvrm_fence_state`
+   becomes 2.
 
 ### Two-plane surfaces
 
