@@ -15,9 +15,16 @@ run at the build step, where those exist. Needs a Mac with the Xcode command lin
 and x86_64 code). Run it from a full clone: negative controls read older revisions of the source.
 
 Each test gets a temporary folder of its own as TMPDIR, deleted when it ends, so that what a test leaves behind in its
-temporary files does not pile up in the system's; and no test writes Python bytecode into the checkout. Each test runs
-in a session of its own with no terminal and nothing on its standard input, so nothing it starts can ask for a password
-or an answer there; at its time limit, or when the run is interrupted, the test is stopped with everything it started."""
+temporary files does not pile up in the system's; and no test writes Python bytecode, neither into the checkout nor
+anywhere else (Apple's python3 would otherwise put it under ~/Library/Caches/com.apple.python, its sys.pycache_prefix).
+What a test leaves in the system's temporary folders instead is listed at the end. Each test runs in a session of its
+own with no terminal and nothing on its standard input, so nothing it starts can ask for a password or an answer there;
+at its time limit, or when the run is interrupted, the test is stopped with everything it started.
+
+No test sees the driver's own settings of the tester's environment (a Mac with the driver installed often exports
+some): every variable with a prefix of the plugin's knobs and every name tools/switches.tsv lists as read from the
+environment is left out, except the standard ones and NVRM_PRISTINE_OGKM (a source tree a test may be pointed at).
+What a test is meant to take from the tester stays: CC, CXX, ZSTD, BUILD_SH_BASH, NVENCVT_HEADERS, NVDEC_HEADERS, NM_*."""
 import concurrent.futures
 import os
 import re
@@ -41,6 +48,10 @@ NEEDS_INPUT = {
 }
 BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+\S+")
 TIMEOUT = 600
+# the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
+KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_", "MESA_", "NIR_", "RADV_", "ACO_")
+# listed in switches.tsv because the driver reads them too, and still the tester's to give
+KEEP_ENV = {"HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "NVRM_PRISTINE_OGKM"}
 RUNNING = set()          # the tests' process groups, stopped when the run is interrupted
 RUNNING_LOCK = threading.Lock()
 
@@ -81,6 +92,33 @@ def run(argv, cwd, env):
     return Result(p.returncode, out, err)
 
 
+def driver_env_names():
+    """every name tools/switches.tsv lists as an environment variable the driver or its build reads"""
+    try:
+        rows = (TOOLS / "switches.tsv").read_text().splitlines()
+    except OSError:
+        return set()
+    return {r.split("\t")[1] for r in rows if r.startswith(("env\t", "build\t"))}
+
+
+def test_env(tmp, names):
+    """the tester's environment without the driver's settings, with the test's own TMPDIR and no bytecode"""
+    env = {k: v for k, v in os.environ.items() if k in KEEP_ENV or not (k.startswith(KNOB_PREFIXES) or k in names)}
+    env.update(TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")
+    return env
+
+
+def temp_listing():
+    """-> {(folder, name)} of the system's temporary folders: the one this runner was given and /tmp"""
+    seen = set()
+    for root in {os.path.realpath(tempfile.gettempdir()), os.path.realpath("/tmp")}:
+        try:
+            seen |= {(root, n) for n in os.listdir(root)}
+        except OSError:
+            pass
+    return seen
+
+
 def c_command(path, out):
     """-> (argv, cwd) from the header's build line, or None. The line is written for the repository root when it names the
     file as tools/<file>, and for tools/ otherwise."""
@@ -98,13 +136,13 @@ def c_command(path, out):
     return None
 
 
-def run_one(path):
+def run_one(path, names=frozenset()):
     """-> (name, state, detail): state is ok, FAIL, skip or norun."""
     name = path.name
     if name in NEEDS_INPUT:
         return name, "norun", NEEDS_INPUT[name]
     tmp = tempfile.mkdtemp(prefix="nmtest-")
-    env = dict(os.environ, TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")
+    env = test_env(tmp, names)
     try:
         if path.suffix == ".py":
             r = run([sys.executable, str(path)], ROOT, env)
@@ -147,9 +185,11 @@ def main(argv):
     def interrupted(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
+    names = frozenset(driver_env_names())
+    before = temp_listing()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
     try:
-        results = list(pool.map(run_one, tests))
+        results = list(pool.map(lambda p: run_one(p, names), tests))
     except KeyboardInterrupt:
         pool.shutdown(wait=False, cancel_futures=True)
         with RUNNING_LOCK:
@@ -165,6 +205,12 @@ def main(argv):
         print(f"skip {n}: {d}")
     for n, d in by["norun"]:
         print(f"not run {n}: {d}")
+    # a test's own folder is deleted after it; what appeared beside it escaped it (a bare mktemp on macOS ignores TMPDIR).
+    # Which test made it cannot be told when tests run side by side, and another program may have made it meanwhile, so
+    # it is listed and does not fail the run.
+    for root, n in sorted(temp_listing() - before):
+        if not n.startswith("nmtest-"):
+            print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")
     print(f"{len(by['ok'])} passed, {len(by['FAIL'])} failed, {len(by['skip'])} skipped, {len(by['norun'])} not run, of {len(results)}")
     return 1 if by["FAIL"] else 0
 
