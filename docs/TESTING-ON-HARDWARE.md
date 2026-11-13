@@ -143,25 +143,31 @@ restart. Take every test setting out again when its test is done.
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
    Fail: it comes up later, or 7 with a display connected; boot once with `-nvrmoldwaits` and send both sets of
    numbers.
-5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode`. Pass: 0 on a machine without VT-d (or with the DMAR table dropped),
-   and every other `debug.nvrm_dma_*` counter 0. With VT-d on, 1 or 2: follow
+5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode` and `ioreg -l -w0 | grep nvrm-dma`, once, so that the report says
+   which mode ran. Pass: on a machine without VT-d (or with the DMAR table dropped) `debug.nvrm_dma_mode: 0` and
+   `"nvrm-dma" = "none (bus address = physical address)"`: the DMA layer then passes every address through as 2.9
+   did, and every other `debug.nvrm_dma_*` counter stays 0 (`nvrm_dma_refused` too, unless the RM asks for a peer or
+   device-register mapping, which is refused in every mode). With VT-d on, 1 or 2: follow
    [DMA-IOMMU.md](DMA-IOMMU.md), "Checking a VT-d machine". Fail: 3 means the driver did not start the card behind
    the mapper (the log line `NVRM-xnu: DMA: refused:` says why); send it.
 6. **The RM's helpers.** Read twice, ten seconds apart:
 
    ```bash
    sysctl debug.nvrm_wq_mode debug.nvrm_atomic_mode debug.nvrm_bh_thread debug.nvrm_rc_armed debug.nvrm_rc_ticks \
-          debug.nvrm_nano_wait_timeouts
+          debug.nvrm_nano_wait_timeouts debug.nvrm_nano_retired
    ```
 
    Pass: `nvrm_wq_mode` 1, `nvrm_atomic_mode` 1, `nvrm_bh_thread` and `nvrm_rc_armed` 1 with one card,
-   `nvrm_rc_ticks` about ten higher the second time, `nvrm_nano_wait_timeouts` 0. Fail: -1 in either mode (a worker
+   `nvrm_rc_ticks` about ten higher the second time, `nvrm_nano_wait_timeouts` and `nvrm_nano_retired` 0 (a retired
+   slot is one the driver stopped reusing because a timer callback could still be running in it). Fail: -1 in either mode (a worker
    or a self-test did not start), 0 in a count, or ticks standing still; send the values and the `NVRM-xnu:` lines
    ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md) has every value).
 7. **The surface fence after login.** Follow step 1 of [SURFACE-FENCE.md](SURFACE-FENCE.md), "What to look at on the
    card". Pass: `debug.nvrm_fence_state` 1, `debug.nvrm_fence_accel` 1, `debug.nvrm_fence_map_fail` and
-   `debug.nvrm_fence_map_mismatch` 0. This is the first time a channel is ever registered with the fence. Fail: any
-   other value; send the `NVRM-xnu: fence:` lines.
+   `debug.nvrm_fence_map_mismatch` 0. This is the first time a channel is ever registered with the fence. An
+   application started from Terminal with `NVMTL_PROCESS_ENV=1` writes `surface fences: kernel (NVRM fence v1,
+   compositor)` in its `nvmtl.log`; `surface fences: off (...)` says in the parentheses why it is not used
+   (TROUBLESHOOTING.md lists the reasons). Fail: any other value; send the `NVRM-xnu: fence:` lines.
 8. **Channels.** `sysctl debug | grep nvrm_chan_`. Pass: all 0. Fail: anything else on a desktop that has done
    nothing yet; send it with `sysctl debug.nvrm_xid_count`.
 

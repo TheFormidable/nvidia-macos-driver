@@ -148,25 +148,32 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
    Mal: aparece más tarde, o 7 con una pantalla conectada; arranca una vez con `-nvrmoldwaits` y envía los dos juegos
    de números.
-5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode`. Bien: 0 en una máquina sin VT-d (o con la tabla DMAR quitada), y
-   todos los demás contadores `debug.nvrm_dma_*` a 0. Con VT-d activo, 1 o 2: sigue [DMA-IOMMU.md](DMA-IOMMU.md),
+5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode` e `ioreg -l -w0 | grep nvrm-dma`, una vez, para que el informe diga
+   qué modo funcionó. Bien: en una máquina sin VT-d (o con la tabla DMAR quitada) `debug.nvrm_dma_mode: 0` y
+   `"nvrm-dma" = "none (bus address = physical address)"`: la capa de DMA deja pasar entonces cada dirección tal
+   cual, como 2.9, y todos los demás contadores `debug.nvrm_dma_*` se quedan en 0 (`nvrm_dma_refused` también, salvo
+   que el RM pida una asignación entre pares o de registros de un dispositivo, que se rechaza en todos los modos). Con
+   VT-d activo, 1 o 2: sigue [DMA-IOMMU.md](DMA-IOMMU.md),
    "Checking a VT-d machine". Mal: 3 significa que el driver no arrancó la tarjeta detrás del mapeador (la línea
    `NVRM-xnu: DMA: refused:` dice por qué); envíala.
 6. **Los ayudantes del RM.** Lee dos veces, con diez segundos de diferencia:
 
    ```bash
    sysctl debug.nvrm_wq_mode debug.nvrm_atomic_mode debug.nvrm_bh_thread debug.nvrm_rc_armed debug.nvrm_rc_ticks \
-          debug.nvrm_nano_wait_timeouts
+          debug.nvrm_nano_wait_timeouts debug.nvrm_nano_retired
    ```
 
    Bien: `nvrm_wq_mode` 1, `nvrm_atomic_mode` 1, `nvrm_bh_thread` y `nvrm_rc_armed` 1 con una tarjeta,
-   `nvrm_rc_ticks` unos diez más la segunda vez, `nvrm_nano_wait_timeouts` 0. Mal: -1 en uno de los dos modos (un
+   `nvrm_rc_ticks` unos diez más la segunda vez, `nvrm_nano_wait_timeouts` y `nvrm_nano_retired` 0 (un espacio
+   retirado es uno que el driver dejó de reutilizar porque una llamada de un temporizador podía seguir dentro). Mal: -1 en uno de los dos modos (un
    trabajador o una autoprueba no arrancó), 0 en una cuenta, o los ticks parados; envía los valores y las líneas
    `NVRM-xnu:` ([INTERRUPT-PATH-AND-RC-TIMER.md](INTERRUPT-PATH-AND-RC-TIMER.md) explica cada valor).
 7. **La valla de superficies tras iniciar sesión.** Sigue el punto 1 de [SURFACE-FENCE.md](SURFACE-FENCE.md), "What to
    look at on the card". Bien: `debug.nvrm_fence_state` 1, `debug.nvrm_fence_accel` 1, `debug.nvrm_fence_map_fail` y
-   `debug.nvrm_fence_map_mismatch` 0. Es la primera vez que un canal se registra en la valla. Mal: cualquier otro
-   valor; envía las líneas `NVRM-xnu: fence:`.
+   `debug.nvrm_fence_map_mismatch` 0. Es la primera vez que un canal se registra en la valla. Una aplicación lanzada
+   desde Terminal con `NVMTL_PROCESS_ENV=1` escribe `surface fences: kernel (NVRM fence v1, compositor)` en su
+   `nvmtl.log`; `surface fences: off (...)` dice entre paréntesis por qué no se usa (TROUBLESHOOTING.md enumera los
+   motivos). Mal: cualquier otro valor; envía las líneas `NVRM-xnu: fence:`.
 8. **Canales.** `sysctl debug | grep nvrm_chan_`. Bien: todo 0. Mal: cualquier otra cosa en un escritorio que todavía
    no ha hecho nada; envíalo con `sysctl debug.nvrm_xid_count`.
 
