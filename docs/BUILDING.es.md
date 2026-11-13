@@ -94,14 +94,21 @@ se ejecuta una herramienta de Xcode. `fetch` ejecuta git sin tus hooks (`core.ho
 archivo global de atributos, y `git init` y `git clone` sin tu carpeta de plantilla (`init.templateDir`). `deps`
 escribe en la carpeta de Homebrew, en su caché (`~/Library/Caches/Homebrew`) y en sus registros
 (`~/Library/Logs/Homebrew`) al instalar, y mientras Homebrew compila una fórmula usa una carpeta en `/private/tmp` que
-borra al terminarla; sus preguntas `brew info` usan una caché en `<directorio de trabajo>/tools/homebrew-cache` y pip
-guarda sus descargas en `<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con
-`HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew no sigue la instalación con su limpieza propia, que borraría versiones
-anteriores de tus fórmulas (cada 30 días, de todas), fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de
-su prefijo. Homebrew instala también lo que esas fórmulas necesitan y enlaza en su `bin` los comandos de las que no son
-keg-only (`llvm@22` lo es); hoy eso incluye `python@3.15`, que `llvm@22` necesita para compilarse y que pasa a ser el
-`python3` de una shell que tenga el `bin` de Homebrew antes de `/usr/bin` (la compilación usa `python@3.14`). La tabla
-completa está en [BUILDING.md](BUILDING.md#what-each-command-writes).
+borra al terminarla; sus preguntas `brew info` (ninguna con `--offline` o `--no-install`) usan una caché en
+`<directorio de trabajo>/tools/homebrew-cache` y pip guarda sus descargas en
+`<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con `HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew
+no sigue la instalación con su limpieza propia, que borraría versiones anteriores de tus fórmulas (cada 30 días, de todas),
+fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de su prefijo. Homebrew instala también lo que esas
+fórmulas necesitan y enlaza en su `bin` los comandos de las que no son keg-only (`llvm@22` lo es), que el `PATH` por
+defecto de macOS pone antes de `/usr/bin` en un Mac Intel; hoy eso incluye `python@3.15`, que `llvm@22` necesita para
+compilarse y que pasaría a ser el `python3` de una shell con ese `PATH` (la compilación usa `python@3.14`, desde la
+carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Homebrew un `python3` que no tenía,
+enlazado a una fórmula de Python que ellas añadieron, `deps` ejecuta `brew unlink` con esa fórmula al terminarlas e
+imprime una línea con la vuelta atrás (`brew link <fórmula>`); un `python3` que ya estaba, o una fórmula de Python que
+ya tenías, se quedan como están. Después de instalar, `deps` nombra cada comando que el `bin` de Homebrew tiene
+entonces y que macOS también tiene en `/usr/bin`, `/bin`, `/usr/sbin` o `/sbin`, con el `brew unlink` que lo devuelve.
+Una prueba en seco (`--dry-run`) dice esta regla y no llama a `brew`. La tabla completa está en
+[BUILDING.md](BUILDING.md#what-each-command-writes).
 
 Los scripts de 2.9 ponen sus árboles en `<directorio de trabajo>/build/...` con nombres que fijan ellos mismos; por
 eso el árbol NVIDIA **610.57.04** está en `build/ogkm620/open-gpu-kernel-modules-610.57.04`. Un `build.sh` anterior

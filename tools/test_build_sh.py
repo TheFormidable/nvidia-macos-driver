@@ -89,6 +89,24 @@ mkwrap() {   # <path> <role> [version text]
   if [ $# -ge 3 ]; then printf '%s\n' "$3" > "$1.version"; fi
 }
 triple() { case "$(cat "$S/arch")" in arm64) echo aarch64-apple-darwin ;; *) echo x86_64-apple-darwin ;; esac; }
+# links <name>: what Homebrew links into <prefix>/bin when it installs <name>, the commands of what it installs with it
+# included (state/brew-links-<name>: lines "<formula> <command>"). Each command is a program in that formula's keg
+# (Cellar/<formula>/1.0/bin), opt/<formula> leads to the keg when the formula has no opt folder yet, and bin/<command>
+# becomes a link into the keg, as Homebrew makes it, unless a working one is there (a dead link is replaced, as Homebrew
+# does with a link into its Cellar that leads nowhere)
+links() {
+  local f n k b=$SB/brew/bin
+  [ -f "$S/brew-links-$1" ] || return 0
+  while read -r f n; do
+    [ -n "$n" ] || continue
+    k=$SB/brew/Cellar/$f/1.0
+    [ -e "$k/bin/$n" ] || mkwrap "$k/bin/$n" plain
+    [ -e "$SB/brew/opt/$f" ] || { mkdir -p "$SB/brew/opt"; rm -f "$SB/brew/opt/$f"; ln -s "../Cellar/$f/1.0" "$SB/brew/opt/$f"; }
+    mkdir -p "$b"
+    if [ -L "$b/$n" ] && [ ! -e "$b/$n" ]; then rm -f "$b/$n"; fi
+    [ -e "$b/$n" ] || ln -s "../Cellar/$f/1.0/bin/$n" "$b/$n"
+  done < "$S/brew-links-$1"
+}
 formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
   local p=$SB/brew/opt/$1
   case "$1" in
@@ -181,10 +199,21 @@ case "$role" in
         rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_NO_INSTALL_CLEANUP=${HOMEBREW_NO_INSTALL_CLEANUP:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         [ $# = 2 ] || { echo "stand-in brew: install takes one formula" >&2; exit 1; }
         formula "$2" || { echo "Error: No available formula with the name \"$2\"" >&2; exit 1; }
+        links "$2"
         # like Homebrew: unless HOMEBREW_NO_INSTALL_CLEANUP is set, an install ends with its clean-up, which removes older
         # versions of formulas (every 30 days of all of them), formulas nothing needs and dead links in the prefix
         [ -n "${HOMEBREW_NO_INSTALL_CLEANUP:-}" ] || rm -rf "$SB/brew/Cellar/yours/1.0"
         echo "==> Pouring $2" ;;
+      # like Homebrew's Keg#unlink: the links in the prefix that lead into the formula's keg go; the keg and opt/<formula>
+      # stay. state/brew-unlink-fails makes it fail
+      unlink)
+        [ $# = 2 ] || { echo "stand-in brew: unlink takes one formula" >&2; exit 1; }
+        [ ! -f "$S/brew-unlink-fails" ] || { echo "Error: stand-in failure of brew unlink $2" >&2; exit 1; }
+        n=0; for l in "$SB/brew/bin"/*; do
+          [ -L "$l" ] || continue
+          case "$(readlink "$l")" in "../Cellar/$2/"*) rm -f "$l"; n=$((n + 1)) ;; esac
+        done
+        echo "Unlinking $SB/brew/Cellar/$2/1.0... $n symlinks removed." ;;
       *) echo "stand-in brew: '$1' is not something build.sh may do" >&2; exit 1 ;;
     esac ;;
   py)
@@ -1408,6 +1437,187 @@ def arm_noinstall():
     with sb.scratch():
         sb.break_script('if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"', 'if false; then say "not installing (--no-install)"')
         negative("deps that ignores --no-install", noinstall_problems(sb, ["deps", "--no-install", "-y"])[0])
+
+
+# deps and the python3 of the tester's shell. On an Intel Mac /usr/local/bin, Homebrew's bin, comes before /usr/bin in
+# macOS's default PATH, and Homebrew links the commands of what it installs there, dependencies included: python3, pip3
+# and the rest from homebrew-core's default Python. deps unlinks that formula again when, and only when, the installs
+# gave <prefix>/bin a python3 it did not have, as a link into a Python formula these installs added; after the
+# installs it names each other command of macOS that such a shell then finds in Homebrew first. The stand-in Homebrew
+# links what state/brew-links-<formula> says when it installs <formula> (FAKE_SH: links), and its unlink removes the
+# links into a keg and leaves the keg and opt/<formula>.
+PY_LINKS = "{f} python3\n{f} pip3\n{f} python3.14\n"
+
+
+def in_system(name):
+    return any(os.path.lexists(os.path.join(d, name)) for d in SYSTEM_DIRS)
+
+
+def brew_calls(sb):
+    """Every call of the stand-in Homebrew, whatever it was asked (it records brew-callenv on each)."""
+    return [l for l in sb.jlines() if l.split(" ", 1)[0] in ("brew", "brew-callenv", "brew-info", "brew-env")]
+
+
+def pylink_sandbox(name, links=None, formulas=("cmake",), dead_python3=False, unlink_fails=False):
+    sb = Sandbox(name, formulas=formulas)
+    for formula, text in (links or {}).items():
+        (sb.state / f"brew-links-{formula}").write_text(text)
+    if dead_python3:   # a python3 of the tester's in Homebrew's bin before deps: a link into a keg that is gone
+        (sb.dir / "brew/bin/python3").symlink_to("../Cellar/python@3.14/0.9/bin/python3")
+    if unlink_fails:
+        (sb.state / "brew-unlink-fails").write_text("")
+    return sb
+
+
+def pylink_problems(sb, args=("deps", "-y"), unlinked=None, linked_to=None, out_has=(), out_lacks=(), rc_ok=True):
+    """Run deps; unlinked: the one formula deps must unlink, or None for no unlink; linked_to: where brew/bin/python3
+    must then lead (None: there is none)."""
+    sb.clear()
+    rc, out = sb.run(*args)
+    p = []
+    if rc_ok and rc != 0:
+        p.append(f"exit {rc}")
+    unl = [l for l in sb.jlines() if l.startswith("brew unlink")]
+    want = [f"brew unlink {unlinked}"] if unlinked else []
+    if unl != want:
+        p.append(f"brew unlink calls {unl}, expected {want}")
+    py3 = sb.dir / "brew/bin/python3"
+    now = os.readlink(py3) if py3.is_symlink() else None
+    if (now is None) != (linked_to is None) or (linked_to and linked_to not in (now or "")):
+        p.append(f"brew/bin/python3 leads to {now}, expected {linked_to}")
+    for s in out_has:
+        if s not in out:
+            p.append(f"the output lacks: {s}")
+    for s in out_lacks:
+        if s in out:
+            p.append(f"the output has: {s}")
+    if not (sb.dir / "brew/Cellar/yours/1.0").is_dir():
+        p.append("an older version of a formula of the tester's was removed")
+    return p, out
+
+
+def arm_pylink():
+    # 1. the link is new and ours: unlinked once, opt stays, doctor and the Python environment still find Python
+    links = {"python@3.14": PY_LINKS.format(f="python@3.14")}
+    sb = pylink_sandbox("pylink-ours", links)
+    p, out = pylink_problems(sb, unlinked="python@3.14",
+                             out_has=("build.sh unlinked python@3.14 again (brew unlink python@3.14)", "brew link python@3.14",
+                                      "deps: everything required is present"))
+    opt = sb.dir / "brew/opt/python@3.14/bin/python3.14"
+    if not opt.exists():
+        p.append("opt/python@3.14 is gone")
+    for n in ("python3", "pip3", "python3.14"):
+        if os.path.lexists(sb.dir / "brew/bin" / n):
+            p.append(f"brew/bin/{n} is still linked")
+    rc, dout = sb.run("doctor")
+    if rc != 0 or f"Python 3.14.0 ({opt}) for NVK's Python environment" not in dout:
+        p.append(f"doctor does not find Homebrew's Python through opt (exit {rc}): {dout[-600:]}")
+    venv = sb.work / "tools/venv"
+    cfg = (venv / "pyvenv.cfg").read_text() if (venv / "pyvenv.cfg").exists() else ""
+    r = subprocess.run([str(venv / "bin/python3"), "--version"], env=sb.env(), capture_output=True, text=True)
+    if r.returncode != 0 or "3.14" not in r.stdout or f"home = {opt.parent}" not in cfg:
+        p.append(f"the Python environment does not run through opt: {r.returncode} {r.stdout} {r.stderr} {cfg}")
+    check("deps: python3 that the installs linked into the Python formula they added is unlinked once; opt stays; "
+          "doctor and the Python environment still find that Python; the way back is printed", not p, (p, out[-1500:]))
+    neg = pylink_sandbox("pylink-ours-neg", links)
+    neg.break_script('      deps_python3_back "$py3_before" "$kegs_before"\n', "")
+    negative("deps that leaves the new python3 link", pylink_problems(neg, unlinked="python@3.14")[0])
+
+    # 2. the same when the Python arrives as a dependency of another formula of the list (llvm@22 needs homebrew-core's
+    # default Python, python@3.15 today, to build), not as the formula deps asked for
+    links = {"glslang": PY_LINKS.format(f="python@3.15").replace("python3.14", "python3.15")}
+    sb = pylink_sandbox("pylink-dep", links)
+    p, _ = pylink_problems(sb, unlinked="python@3.15", out_has=("brew link python@3.15",))
+    check("deps: a python3 linked by a Python formula that came as a dependency of the list is unlinked as well", not p, p)
+    neg = pylink_sandbox("pylink-dep-neg", links)
+    neg.break_script('  case "$f" in python|python@*) ;; *) return 0 ;; esac\n', '  case "$f" in python@3.14) ;; *) return 0 ;; esac\n')
+    negative("a rule that only knows the Python formula deps asked for", pylink_problems(neg, unlinked="python@3.15")[0])
+
+    # 3. a python3 was there before (here a dead link of the tester's, which Homebrew replaces): no unlink
+    links = {"python@3.14": PY_LINKS.format(f="python@3.14")}
+    sb = pylink_sandbox("pylink-before", links, dead_python3=True)
+    p, _ = pylink_problems(sb, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3", out_lacks=("brew link python@3.14",))
+    check("deps: no unlink when Homebrew's bin had a python3 before the installs", not p, p)
+    neg = pylink_sandbox("pylink-before-neg", links, dead_python3=True)
+    neg.break_script('[ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=1', '[ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=0')
+    negative("deps that forgets that python3 was there before",
+             pylink_problems(neg, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")[0])
+
+    # 4. the Python formula was not in this run's list: the tester had it, and an install linked it (Homebrew links a
+    # dependency again when it upgrades it): no unlink, and the list names python3 when macOS has one
+    links = {"glslang": "python@3.14 python3\n"}
+    sb = pylink_sandbox("pylink-notours", links, formulas=("cmake", "python@3.14"))
+    line = f"a shell that has {sb.dir / 'brew/bin'} before /usr/bin now finds Homebrew's python3 first; brew unlink python@3.14 puts each back"
+    p, out = pylink_problems(sb, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3",
+                             out_has=(line,) if in_system("python3") else ())
+    if re.search(r"^Homebrew formulas to install.*python@3\.14", out, re.M):
+        p.append("python@3.14 was in the list")
+    check("deps: no unlink of a Python formula the tester already had" + ("; the list names its python3" if in_system("python3") else ""),
+          not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-notours-neg", links, formulas=("cmake", "python@3.14"))
+    neg.break_script('  case "$NL$2$NL" in *"$NL$f$NL"*) return 0 ;; esac\n', "")
+    negative("deps that unlinks a Python formula the tester already had",
+             pylink_problems(neg, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")[0])
+
+    # 5. the unlink fails: deps says so and ends as it would have
+    links = {"python@3.14": PY_LINKS.format(f="python@3.14")}
+    sb = pylink_sandbox("pylink-fails", links, unlink_fails=True)
+    p, out = pylink_problems(sb, unlinked="python@3.14", linked_to="../Cellar/python@3.14/1.0/bin/python3",
+                             out_has=("python3: brew unlink python@3.14 failed", "deps goes on", "deps: everything required is present"))
+    check("deps: a failed brew unlink is reported and deps ends as it would have", not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-fails-neg", links, unlink_fails=True)
+    neg.break_script('  if run_brew -- unlink "$f"; then\n', '  run_brew -- unlink "$f"\n  if true; then\n')
+    negative("deps that stops when brew unlink fails",
+             pylink_problems(neg, unlinked="python@3.14", linked_to="../Cellar/python@3.14/1.0/bin/python3",
+                             out_has=("deps: everything required is present",))[0])
+
+    # 6. --dry-run and --no-install: no call of Homebrew at all; the dry run states the rule
+    def quiet_problems(s, args, rc_zero):
+        s.clear()
+        rc, out = s.run(*args)
+        q = []
+        if brew_calls(s):
+            q.append(f"Homebrew was called: {brew_calls(s)[:3]}")
+        if (rc == 0) != rc_zero:
+            q.append(f"exit {rc}")
+        if "--dry-run" in args and "unlink <formula>" not in out:
+            q.append("the dry run does not state the unlink")
+        return q
+    sb = pylink_sandbox("pylink-quiet", {"python@3.14": PY_LINKS.format(f="python@3.14")})
+    p = quiet_problems(sb, ("--dry-run", "deps", "-y"), True)
+    check("deps --dry-run: no call of Homebrew, the unlink rule stated", not p, p)
+    p = quiet_problems(sb, ("deps", "--no-install", "-y"), False)
+    check("deps --no-install: no call of Homebrew at all (not even brew info)", not p, p)
+    with sb.scratch():
+        sb.break_script('brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ] && [ "$NM_NO_INSTALL" = 0 ]; }',
+                        'brew_may_ask() { [ "$NM_DRY_RUN" = 0 ] && [ "$NM_OFFLINE" = 0 ]; }')
+        negative("deps --no-install that asks brew info", quiet_problems(sb, ("deps", "--no-install", "-y"), False))
+    with sb.scratch():
+        sb.break_script('    elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"', '    elif false; then for f in "${want[@]}"')
+        negative("a dry run of deps that installs", quiet_problems(sb, ("--dry-run", "deps", "-y"), True))
+
+    # 7. the list of commands macOS has that Homebrew's bin now shadows, and that it can never fail deps
+    links = {"glslang": "glslang nmt-homebrew-only\nglslang env\n"}   # a name no system folder has, and one every system has
+    line = "now finds Homebrew's env first; brew unlink glslang puts each back"
+    if in_system("env"):
+        sb = pylink_sandbox("pylink-list", links)
+        p, out = pylink_problems(sb, unlinked=None, out_has=(f"a shell that has {sb.dir / 'brew/bin'} before /usr/bin {line}",),
+                                 out_lacks=("nmt-homebrew-only",))
+        check("deps names the commands of macOS that Homebrew's bin now comes first with, and the formula to unlink", not p, (p, out[-800:]))
+        with sb.scratch():
+            sb.break_script("    for d in /usr/bin /bin /usr/sbin /sbin; do\n", "    for d in /nonexistent; do\n")
+            negative("deps without the list", pylink_problems(sb, unlinked=None, out_has=(line,))[0])
+        sb = pylink_sandbox("pylink-list-err", links)
+        sb.break_script("awk '{ print $1 }' | LC_ALL=C sort -u) || return 1", "awk '{ print $1 }' | LC_ALL=C sort -u --no-such-option) || return 1")
+        p, out = pylink_problems(sb, unlinked=None, out_has=("deps: everything required is present",), out_lacks=("now finds",))
+        check("a failure while making that list prints nothing and does not fail deps", not p, (p, out[-800:]))
+        sb = pylink_sandbox("pylink-list-err-neg", links)
+        sb.break_script("awk '{ print $1 }' | LC_ALL=C sort -u) || return 1", "awk '{ print $1 }' | LC_ALL=C sort -u --no-such-option) || return 1")
+        sb.break_script('      shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""', '      shadowed=$(deps_shadowed "$bin_before" 2>/dev/null)')
+        negative("a list whose failure reaches deps",
+                 pylink_problems(sb, unlinked=None, out_has=("deps: everything required is present",), out_lacks=("now finds",))[0])
+    else:
+        emit("skip: this machine has no env in /usr/bin, /bin, /usr/sbin or /sbin, which the list arm imitates macOS's with")
 
 
 XCODE_ONLY = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "plugin", "nvencvt"]
@@ -2967,6 +3177,8 @@ def main():
                     timed("readonly", arm_readonly)
                 if want("noinstall"):
                     timed("noinstall", arm_noinstall)
+                if want("pylink"):
+                    timed("pylink", arm_pylink)
                 if want("needs"):
                     timed("needs", arm_needs)
                 if want("tamper"):
