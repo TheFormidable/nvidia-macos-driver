@@ -342,6 +342,25 @@ allowed() {
   if [ "$4" = 1 ]; then case "$1" in /Library/GPUBundles/*|/Library/NullMoth/*) return 0 ;; esac; fi
   return 1
 }
+# Rust's distribution ships a search path of the machine Rust itself was built on in programs of its own (rust-lld has
+# $RUST_DIST_BUILD/<host>/llvm/lib beside @loader_path/../lib). No step of this build put it there.
+RUST_DIST_BUILD=/Users/runner/work/rust/rust/build
+# rust_dist_rpaths <workdir> <real workdir> <scratch>: moves those search paths out of bad-tools.txt into rust-dist.txt,
+# for the files of the working directory's Rust toolchains only and only while no folder of that name is on this Mac: it
+# then searches nothing. The same path in any other tool, or one that is there, stays a finding.
+rust_dist_rpaths() {
+  local w=$1 wr=$2 t=$3 l d
+  : > "$t/rust-dist.txt"; : > "$t/bad-tools.kept"
+  while IFS= read -r l; do
+    d=${l##*: rpath }
+    case "$l" in
+      "$w/tools/rustup/toolchains/"*": rpath $RUST_DIST_BUILD/"*|"$wr/tools/rustup/toolchains/"*": rpath $RUST_DIST_BUILD/"*)
+        if [ ! -e "$d" ]; then printf '%s\n' "$l" >> "$t/rust-dist.txt"; continue; fi ;;
+    esac
+    printf '%s\n' "$l" >> "$t/bad-tools.kept"
+  done < "$t/bad-tools.txt"
+  mv "$t/bad-tools.kept" "$t/bad-tools.txt"
+}
 # check_loads <list file> <workdir> <real workdir> <package folders 0|1> <bad lines file>: every library each file
 # loads and every folder it searches (LC_RPATH); appends "<file>: loads|rpath <path>" for each that is not allowed
 check_loads() {
@@ -474,7 +493,7 @@ $name: not in tools/bin"
 }
 
 prove_loads() {
-  local w=$1 wr=$2 t=$3 n b pr named missing f g
+  local w=$1 wr=$2 t=$3 n b pr named missing f g rd
   : > "$t/bad-out.txt"; : > "$t/bad-tools.txt"
   if [ ! -d "$w/out" ]; then skipped "the Mach-O files under $w/out: no such folder"
   else
@@ -505,10 +524,14 @@ prove_loads() {
   if [ -n "$g" ]; then named="$named mesa_clc"; grep -qxF "$g" "$t/tools.txt" || printf '%s\n' "$g" >> "$t/tools.txt"; else missing="$missing mesa_clc (under out/)"; fi
   n=$(grep -c . "$t/tools.txt" || true)
   check_loads "$t/tools.txt" "$w" "$wr" 0 "$t/bad-tools.txt"
+  rust_dist_rpaths "$w" "$wr" "$t"
   b=$(grep -c . "$t/bad-tools.txt" || true)
+  rd=$(grep -c . "$t/rust-dist.txt" || true)
+  if [ "$rd" = 0 ]; then rd=""
+  else rd="; not counted: $rd search path(s) under $RUST_DIST_BUILD, the machine Rust was built on, which Rust's distribution ships in its own$(sed -e 's/: rpath .*//' -e 's|.*/| |' "$t/rust-dist.txt" | LC_ALL=C sort -u | tr -d '\n') and which name no folder of this Mac"; fi
   if [ -n "$missing" ]; then fail "tools of the working directory that are not there:$missing"; fi
   if [ "$n" = 0 ]; then fail "Mach-O files of the working directory's tools (toolchain, Translator, Rust): none found"
-  elif [ "$b" = 0 ]; then ok "Mach-O files of the working directory's tools (toolchain, Translator, Rust, mesa_clc): $n, every library they load and every folder they search lies in /usr/lib, /System or the working directory; among them$named"
+  elif [ "$b" = 0 ]; then ok "Mach-O files of the working directory's tools (toolchain, Translator, Rust, mesa_clc): $n, every library they load and every folder they search lies in /usr/lib, /System or the working directory; among them$named$rd"
   else fail "Mach-O files of the working directory's tools: $n, $b load(s) or search path(s) outside /usr/lib, /System and the working directory:"; indent 30 < "$t/bad-tools.txt"; fi
 }
 
