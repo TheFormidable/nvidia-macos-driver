@@ -338,7 +338,7 @@ has proven itself, renewed with a reason otherwise.
   Macs with different things in Homebrew could build different drivers. `./build.sh env` prints it and doctor names it.
   Your `TOOLCHAINS` (it makes xcrun pick another toolchain's compiler) no longer reaches the steps, and neither it nor
   your `SDKROOT` reaches `build.sh` itself: with an `SDKROOT` that named an SDK which was not there, a build stopped
-  before its first step, taking Apple's `make` for missing. doctor names the way to another SDK: its Xcode, with
+  before its first step. doctor names the way to another SDK: its Xcode, with
   `DEVELOPER_DIR`.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
