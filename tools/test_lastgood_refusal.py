@@ -321,12 +321,23 @@ def untouched(r):
             and not r.marker and not r.restarted)
 
 
-DATE = re.compile(r"\w{3} \w{3} +\d+ \d{2}:\d{2}:\d{2} \w+ \d{4}")
+# What `date` prints at the start of each log line. The zone is a name where the zone has one (UTC, CET) and a
+# number where it has none: "-05" in Bogota, "+0530" in Kolkata.
+DATE = re.compile(r"\w{3} \w{3} +\d+ \d{2}:\d{2}:\d{2} [\w+-]+ \d{4}")
 
 
 def dedate(text):
     """The log with the timestamp of each line replaced, so two runs a second apart compare equal."""
     return DATE.sub("<date>", text)
+
+
+arm("the differential's date pattern knows a zone written as a name and one written as a number",
+    all(dedate(f"{stamp} previous driver restored; restarting") == "<date> previous driver restored; restarting"
+        for stamp in ("Fri Nov 13 07:46:02 UTC 2026", "Fri Nov 13 02:46:02 -05 2026", "Fri Nov 13 13:16:02 +0530 2026",
+                      "Sun Nov  1 02:46:02 CET 2026")))
+arm("control: a pattern that takes the zone for a word leaves Bogota's stamp in the log (two runs a second apart "
+    "then differ)",
+    re.sub(r"\w{3} \w{3} +\d+ \d{2}:\d{2}:\d{2} \w+ \d{4}", "<date>", "Fri Nov 13 02:46:02 -05 2026 x") != "<date> x")
 
 
 def changing(r):
