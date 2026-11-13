@@ -25,7 +25,9 @@ No test sees the driver's own settings of the tester's environment (a Mac with t
 some): every variable with a prefix of the plugin's knobs and every name tools/switches.tsv lists as read from the
 environment is left out, except the standard ones and NVRM_PRISTINE_OGKM (a source tree a test may be pointed at).
 What a test is meant to take from the tester stays: CC, CXX, ZSTD, BUILD_SH_BASH, NVENCVT_HEADERS, NVDEC_HEADERS, NM_*."""
-import concurrent.futures
+import sys
+sys.dont_write_bytecode = True   # nor the runner itself, for what it imports from here on (python3 -B, but from inside)
+import concurrent.futures  # noqa: E402
 import os
 import re
 import shlex
@@ -33,7 +35,6 @@ import shutil
 import signal
 import subprocess
 import threading
-import sys
 import tempfile
 from pathlib import Path
 
