@@ -24,7 +24,16 @@
 #   NM_TC_JOBS (default: the number of CPUs), NM_TC_MESON (meson, for pkgconf only), NM_TC_PYTHON (a Python 3 for the
 #   build scripts of ninja, SPIRV-Tools, glslang and LLVM; default the toolchain's own once it exists, else
 #   /usr/bin/python3), NM_TC_STAMP (the text of a finished tool's stamp; default its id), NM_TC_KEEP.
+#   MACOSX_DEPLOYMENT_TARGET (on a Mac; default 15.0, as in build.sh's steps): the oldest macOS the tools must run on.
+#   It is part of every id, and every Mach-O file a tool installs is checked against it.
 # Nothing else of the caller's environment reaches a build command, and nothing is written outside the four folders.
+#
+# What this script removes or overwrites is its own only. A prefix, work or log folder that already exists, is not
+# empty and was not made by this script (the prefix has .nm-toolchain/, the work folder .nm-toolchain-work, the log
+# folder .nm-toolchain-logs) is refused before anything is written; the folders are judged by where they really are
+# (pwd -P), so a link does not get past the rules; a record of installed files with a line that is not a file of the
+# prefix reached through its real folders stops the build before anything is removed. xcrun and security are run from
+# /usr/bin, never through the caller's PATH.
 #
 # Written for the /bin/bash 3.2 of macOS and its BSD tools. It also runs on Linux, so that the portable recipes and the
 # host test (tools/test_toolchain_sh.py) can run there; the steps that exist only on a Mac (xcrun, security, otool,
@@ -45,50 +54,91 @@ TOOLS="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
 # one a native shell needs.
 recipe_number() {
   case "$1" in
-    ninja) echo 1 ;; cmake) echo 1 ;; openssl) echo 1 ;; zstd) echo 1 ;; xz) echo 1 ;; python) echo 1 ;;
-    pkgconf) echo 1 ;; spirv-tools) echo 1 ;; glslang) echo 1 ;; llvm) echo 1 ;;
+    ninja) echo 2 ;; cmake) echo 2 ;; openssl) echo 2 ;; zstd) echo 2 ;; xz) echo 2 ;; python) echo 2 ;;
+    pkgconf) echo 2 ;; spirv-tools) echo 2 ;; glslang) echo 2 ;; llvm) echo 2 ;;
     *) return 1 ;;
   esac
 }
 known_tool() { case " $TOOLS " in *" $1 "*) return 0 ;; esac; return 1; }
-tool_id() { printf '%s recipe %s %s-%s\n' "$1" "$(recipe_number "$1")" "$(uname -s)" "$(uname -m)"; }
+# On a Mac the oldest macOS the tools are built for is part of the id too.
+tool_id() {
+  local dt=""
+  if is_darwin; then dt=" macos$(macos_min)"; fi
+  printf '%s recipe %s %s-%s%s\n' "$1" "$(recipe_number "$1")" "$(uname -s)" "$(uname -m)" "$dt"
+}
 
 is_darwin() { [ "$(uname -s)" = Darwin ]; }
+macos_min() {
+  local v=${MACOSX_DEPLOYMENT_TARGET:-15.0}
+  case "$v" in [0-9]*) ;; *) die "MACOSX_DEPLOYMENT_TARGET must be a macOS version such as 15.0 (got $v)" ;; esac
+  case "$v" in *[!0-9.]*|*..*|*.) die "MACOSX_DEPLOYMENT_TARGET must be a macOS version such as 15.0 (got $v)" ;; esac
+  printf '%s\n' "$v"
+}
+# The fixed place of the macOS helpers xcrun and security: never looked up through the caller's PATH.
+SYSBIN=/usr/bin
 ncpu() { sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2; }
 # the extension of a shared library on this system (LLVM's layout check)
 shlib_ext() { if is_darwin; then echo dylib; else echo so; fi; }
 
 # ---------------------------------------------------------------------------------------------------------- settings
-# need_dir <variable> [create]: an absolute folder without spaces or "." parts; with "create", made when missing
+# real_path <path>: where a path really is, also before it exists: the nearest existing folder above it, resolved with
+# pwd -P, plus the rest
+real_path() {
+  local p=$1 rest=""
+  while [ ! -d "$p" ]; do
+    rest="/${p##*/}$rest"; p=${p%/*}
+    [ -n "$p" ] || p=/
+  done
+  p=$(cd "$p" && pwd -P) || return 1
+  [ "$p" != / ] || p=""
+  printf '%s%s\n' "$p" "$rest"
+}
+# need_dir <variable>: an absolute folder without spaces or "." parts, set to where it really is (nothing is created)
 need_dir() {
-  local v=$1 p ws
+  local v=$1 p r ws
   eval "p=\${$v:-}"
   [ -n "$p" ] || die "$v is not set (build.sh sets it; see the head of build/toolchain.sh)"
   ws=$(printf ' \t\n')
   case "$p" in /) die "$v may not be /" ;; /*) ;; *) die "$v must be an absolute path (got $p)" ;; esac
   case "$p" in *[$ws]*) die "$v contains a space ($p): the build systems of these tools split their commands on it" ;; esac
   case "$p/" in */./*|*/../*) die "$v may not contain . or .. parts (got $p)" ;; esac
-  if [ "${2:-}" = create ]; then mkdir -p "$p" || die "cannot create $v ($p)"
-  else [ -d "$p" ] || die "$v names $p, which is not a folder"; fi
-  p=$(cd "$p" && pwd -P)
-  eval "$v=\$p"
+  r=$(real_path "$p") || die "cannot find where $v ($p) really is"
+  case "$r" in ''|/) die "$v ($p) is really /" ;; *[$ws]*) die "$v ($p) is really $r, which contains a space" ;; esac
+  eval "$v=\$r"
+}
+# own_dir <variable> <marker>: a folder this script may write into, overwrite in and remove from. It may be missing or
+# empty; one that holds something must carry the marker this script leaves in the folders it makes (a home folder, a
+# shared prefix such as /usr/local or a log folder with other files is refused before anything is written).
+own_dir() {
+  local v=$1 m=$2 p c
+  eval "p=\$$v"
+  if [ -e "$p" ] && [ ! -d "$p" ]; then die "$v ($p) is not a folder"; fi
+  if [ -d "$p" ] && [ ! -e "$p/$m" ]; then
+    c=$(ls -A "$p") || die "cannot read $v ($p)"
+    [ -z "$c" ] || die "$v ($p) holds files and was not made by build/toolchain.sh (it has no $m): name a new or empty folder"
+  fi
+  mkdir -p "$p" || die "cannot create $v ($p)"
 }
 setup_build() {
-  need_dir NM_TC_PREFIX create; need_dir NM_TC_SRC; need_dir NM_TC_WORK create; need_dir NM_TC_LOGS create
+  need_dir NM_TC_PREFIX; need_dir NM_TC_SRC; need_dir NM_TC_WORK; need_dir NM_TC_LOGS
   P=$NM_TC_PREFIX; SRC=$NM_TC_SRC; WORK=$NM_TC_WORK; LOGS=$NM_TC_LOGS
   local a b
   for a in P SRC WORK LOGS; do for b in P SRC WORK LOGS; do
     [ "$a" = "$b" ] && continue
     eval "case \"\$$a/\" in \"\$$b/\"*) die \"NM_TC_ folders may not lie inside one another: \$$a is inside \$$b\" ;; esac"
   done; done
+  [ -d "$SRC" ] || die "NM_TC_SRC names $SRC, which is not a folder"
   JOBS=${NM_TC_JOBS:-$(ncpu)}
   case "$JOBS" in ''|*[!0-9]*|0) die "NM_TC_JOBS must be a positive number (got $JOBS)" ;; esac
+  own_dir NM_TC_PREFIX .nm-toolchain; own_dir NM_TC_WORK .nm-toolchain-work; own_dir NM_TC_LOGS .nm-toolchain-logs
+  mkdir -p "$P/.nm-toolchain"; : > "$WORK/.nm-toolchain-work"; : > "$LOGS/.nm-toolchain-logs"
   W_HOME=$WORK/home; W_TMP=$WORK/tmp
-  mkdir -p "$W_HOME" "$W_TMP" "$P/.nm-toolchain"
+  mkdir -p "$W_HOME" "$W_TMP"
   # this script's own helpers (sort may spill to a temporary file) write there too, not to the caller's TMPDIR
   TMPDIR=$W_TMP; export TMPDIR
-  SDK=""
+  SDK=""; DT=""
   if is_darwin; then
+    DT=$(macos_min)
     # Apple's clang, when the /usr/bin shim picks the SDK itself, also searches /usr/local/include and /usr/local/lib:
     # on an Intel Mac that is Homebrew's prefix, so a build could take Homebrew's headers and libraries without anyone
     # asking. With SDKROOT given explicitly it does not.
@@ -98,13 +148,15 @@ setup_build() {
 }
 setup_check() {
   need_dir NM_TC_PREFIX
-  P=$NM_TC_PREFIX; SDK=""
+  P=$NM_TC_PREFIX; SDK=""; DT=""
+  [ -d "$P" ] || die "NM_TC_PREFIX names $P, which is not a folder"
+  if is_darwin; then DT=$(macos_min); fi
 }
 
 # ---------------------------------------------------------------------------------------------------------- clean env
 # Every build command runs as "env -i" plus this list: a home folder and a temporary folder in the work folder (so that
 # caches, pip's configuration and what a tool writes "to the home folder" stay there), the toolchain's bin first on a
-# PATH of the system's own folders, the SDK, and the Xcode the caller chose. Nothing else: no CC, CFLAGS, LDFLAGS,
+# PATH of the system's own folders, the SDK, the oldest macOS to build for, and the Xcode the caller chose. Nothing else: no CC, CFLAGS, LDFLAGS,
 # CPATH, LIBRARY_PATH, PKG_CONFIG_PATH, PYTHONPATH, no Homebrew variables. Python writes no bytecode, so that the
 # scripts the builds run from the source trees leave those trees as they are.
 clean_env() {   # [extra PATH folder]: sets CLEAN
@@ -113,13 +165,14 @@ clean_env() {   # [extra PATH folder]: sets CLEAN
   path="$path:/usr/bin:/bin:/usr/sbin:/sbin"
   CLEAN=(env -i "HOME=$W_HOME" "USER=${USER:-$(id -un)}" LANG=C "TMPDIR=$W_TMP" "PATH=$path" PYTHONDONTWRITEBYTECODE=1)
   [ -z "$SDK" ] || CLEAN+=("SDKROOT=$SDK")
+  [ -z "$DT" ] || CLEAN+=("MACOSX_DEPLOYMENT_TARGET=$DT")
   [ -z "${DEVELOPER_DIR:-}" ] || CLEAN+=("DEVELOPER_DIR=$DEVELOPER_DIR")
 }
-# a helper (xcrun, security) run the same way, before any tool exists
+# a helper of macOS (xcrun, security) run the same way, before any tool exists, from its fixed place
 clean_run() {
   local e=(env -i "HOME=$W_HOME" "USER=${USER:-$(id -un)}" LANG=C "TMPDIR=$W_TMP" PATH=/usr/bin:/bin:/usr/sbin:/sbin)
   [ -z "${DEVELOPER_DIR:-}" ] || e+=("DEVELOPER_DIR=$DEVELOPER_DIR")
-  "${e[@]}" "$(command -v "$1")" "${@:2}"
+  "${e[@]}" "$SYSBIN/$1" "${@:2}"
 }
 # The Python for build scripts. Its own folder joins PATH only when it is the toolchain's: a Python of another prefix
 # (Homebrew's /usr/local/bin) would bring that prefix's other programs with it.
@@ -178,13 +231,34 @@ STATE=""   # $P/.nm-toolchain
 prefix_listing() {   # every file and link under the prefix, relative, sorted
   ( cd "$P" && find . \( -type f -o -type l \) ! -path './.nm-toolchain/*' | sed 's|^\./||' | LC_ALL=C sort )
 }
+# A record names files under the prefix by relative paths, and every folder on the way is a real folder (the listing
+# that wrote it does not follow links). A line that names anything else (an absolute path, a "." or ".." part, the
+# stamps, a file reached through a link, even one that points back into the prefix) means the record was changed or
+# broken: nothing is removed, and the build stops.
+record_damaged() {   # <record> <line number> <line>
+  die "the record is damaged: $1 line $2 names \"$3\", which is not a file of the prefix $P. Nothing was removed; remove that prefix (or name another NM_TC_PREFIX) and build again"
+}
+check_record() {   # <record>
+  local rec=$1 rel n=0 d r
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    n=$((n + 1))
+    case "/$rel/" in //|*/../*|*/./*|/.nm-toolchain/*|///*) record_damaged "$rec" "$n" "$rel" ;; esac
+    case "$rel" in /*) record_damaged "$rec" "$n" "$rel" ;; esac
+    d=$P/$rel; d=${d%/*}
+    if [ -d "$d" ]; then
+      r=$(cd "$d" && pwd -P) || record_damaged "$rec" "$n" "$rel"
+      [ "$r" = "$d" ] || record_damaged "$rec" "$n" "$rel"
+    elif [ -e "$d" ] || [ -L "$d" ]; then
+      record_damaged "$rec" "$n" "$rel"
+    fi
+  done < "$rec"
+}
 forget_tool_files() {   # <tool>: remove what its record lists, then empty folders
-  local rec=$STATE/$1.files rel
+  local rec=$STATE/$1.files rel d
   [ -f "$rec" ] || return 0
-  local d
-  while IFS= read -r rel; do
-    case "$rel" in ''|/*|..|../*|*/../*|*/..|.nm-toolchain/*) continue ;; esac
-    rm -f "$P/$rel"
+  check_record "$rec"
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    rm -f "${P:?}/${rel:?}"
     # the folders it leaves empty go too; a folder that still holds something (another tool's files) stays
     d=$rel
     while case "$d" in */*) true ;; *) false ;; esac; do
@@ -205,39 +279,44 @@ record_tool_files() {   # <tool>: what is new since BEFORE was listed
 # Each recipe builds in $B (an empty folder in the work folder) and installs into the prefix. What each project could
 # find on the machine by itself is either given or turned off, and the comments say which and why.
 
-# ninja 1.13.2: its own bootstrap (a Python script and the C++ compiler); configure.py builds out of tree when run from
-# another folder. It reads CXX, CFLAGS, CXXFLAGS and LDFLAGS from the environment, which the clean environment does not
-# have.
+# ninja 1.13.2: its own bootstrap (a Python script and the C++ compiler), run in a copy of the tree as on the Mac (the
+# bootstrap writes its objects and the program next to configure.py). It reads CXX, CFLAGS, CXXFLAGS and LDFLAGS from
+# the environment, which the clean environment does not have.
 recipe_ninja() {
   pick_python ninja; clean_env "$PYDIR"
-  xin "$B" "${CLEAN[@]}" "$PY" "$SRC/ninja/configure.py" --bootstrap
+  x cp -RP "$SRC/ninja" "$B/ninja"
+  xin "$B/ninja" "${CLEAN[@]}" "$PY" configure.py --bootstrap
   x mkdir -p "$P/bin"
-  x cp "$B/ninja" "$P/bin/ninja"
+  x cp "$B/ninja/ninja" "$P/bin/ninja"
   x chmod 755 "$P/bin/ninja"
 }
 check_ninja() { need_file bin/ninja; answers bin/ninja --version; }
 
-# cmake 4.4.5: its bootstrap, out of tree, generating for ninja. Every third-party library is the copy bundled with
-# CMake (--no-system-libs: on macOS the bootstrap would otherwise take the system's curl), so nothing is looked up on the
-# machine; the bundled curl gets no TLS library (CMAKE_USE_OPENSSL=OFF: this cmake downloads nothing, and OpenSSL is not
-# built yet); no curses dialog (ccmake), no Qt dialog, no tests.
+# cmake 4.4.5: its bootstrap and make, in a copy of the tree, as on the Mac. The bootstrap takes the system's curl, zlib
+# and iconv on macOS (it links /usr/lib/libcurl.4.dylib, libz and libiconv: the system's own, which the checks accept)
+# and CMake's bundled copies of the rest. No Qt dialog (it would look for Qt), no tests. The Mac also passed
+# CMAKE_USE_OPENSSL=ON with its own OpenSSL, which macOS's curl does not use; here OpenSSL is built after cmake, so
+# CMake's default on macOS (off) stays. Off a Mac, the bundled curl gets no TLS library (CMAKE_USE_OPENSSL=OFF), so
+# that a trial on Linux needs no OpenSSL headers.
 recipe_cmake() {
-  need_program cmake ninja "build ninja first"
+  local tls=()
+  is_darwin || tls=(-DCMAKE_USE_OPENSSL=OFF)
   clean_env; cmake_ignore
-  xin "$B" "${CLEAN[@]}" "$SRC/cmake/bootstrap" "--prefix=$P" "--parallel=$JOBS" --generator=Ninja --no-system-libs --no-qt-gui \
-    -- "${CMAKE_COMMON[@]}" -DCMAKE_USE_OPENSSL=OFF -DBUILD_CursesDialog=OFF -DBUILD_QtDialog=OFF -DBUILD_TESTING=OFF
-  x "${CLEAN[@]}" ninja -C "$B" -j "$JOBS"
-  x "${CLEAN[@]}" ninja -C "$B" install
+  x cp -RP "$SRC/cmake" "$B/cmake"
+  xin "$B/cmake" "${CLEAN[@]}" ./bootstrap "--prefix=$P" "--parallel=$JOBS" --no-qt-gui \
+    -- "${CMAKE_COMMON[@]}" -DBUILD_TESTING=OFF ${tls[@]+"${tls[@]}"}
+  xin "$B/cmake" "${CLEAN[@]}" make -j "$JOBS"
+  xin "$B/cmake" "${CLEAN[@]}" make install
 }
 check_cmake() {
   need_file bin/cmake; need_file bin/ctest; need_file bin/cpack; need_glob share 'cmake-*'
   answers bin/cmake --version; answers bin/ctest --version; answers bin/cpack --version
 }
 
-# OpenSSL 3.5.9, static, only so that Python has ssl and hashlib (pip and meson's downloads need them). Out of tree.
-# The Configure target is this Mac's processor (darwin64-x86_64-cc or darwin64-arm64-cc). Turned off: shared libraries
-# and loadable modules (the providers are built into libcrypto, so there is no module folder to find at run time), the
-# openssl program, the documentation and the tests. zlib, brotli and zstd compression and kTLS are off by default.
+# OpenSSL 3.5.9, static, only so that Python has ssl and hashlib (pip and meson's downloads need them). In a copy of the
+# tree, as on the Mac. The Configure target is this Mac's processor (darwin64-x86_64-cc or darwin64-arm64-cc). Turned
+# off: shared libraries and the tests; install_sw installs no documentation. zlib, brotli and zstd compression and kTLS
+# are off by default.
 # OPENSSLDIR is $P/ssl: that is where this OpenSSL, and so this Python, looks for cert.pem by default.
 # cert.pem is the macOS system roots (read from the system keychain with "security", which only reads).
 recipe_openssl() {
@@ -249,10 +328,11 @@ recipe_openssl() {
     esac
   fi
   clean_env
-  xin "$B" "${CLEAN[@]}" perl "$SRC/openssl/Configure" ${target[@]+"${target[@]}"} no-shared no-module no-apps no-docs no-tests \
+  x cp -RP "$SRC/openssl" "$B/openssl"
+  xin "$B/openssl" "${CLEAN[@]}" perl ./Configure ${target[@]+"${target[@]}"} no-shared no-tests \
     "--prefix=$P/build-deps" "--openssldir=$P/ssl" --libdir=lib
-  xin "$B" "${CLEAN[@]}" make -j "$JOBS"
-  xin "$B" "${CLEAN[@]}" make install_sw
+  xin "$B/openssl" "${CLEAN[@]}" make -j "$JOBS"
+  xin "$B/openssl" "${CLEAN[@]}" make install_sw
   x mkdir -p "$P/ssl"
   if is_darwin; then
     logline "+ security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > $P/ssl/cert.pem"
@@ -273,43 +353,43 @@ check_openssl() {
   grep -q 'BEGIN CERTIFICATE' "$P/ssl/cert.pem" 2>/dev/null || bad "ssl/cert.pem holds no certificate"
 }
 
-# zstd 1.5.7, static, only for Python's compression.zstd (the driver's tests import it). Its CMake project, out of tree:
-# the library only, no programs (they would look for zlib, lzma and lz4), no tests, no shared library.
+# zstd 1.5.7, static, only for Python's compression.zstd (the driver's tests import it). Its own Makefile in lib/, in a
+# copy of the tree, as on the Mac: the static library and the headers only (no programs, which would look for zlib, lzma
+# and lz4).
 recipe_zstd() {
-  cmake_project "$SRC/zstd/build/cmake" "$P/build-deps" \
-    -DZSTD_BUILD_STATIC=ON -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF
+  clean_env
+  x cp -RP "$SRC/zstd" "$B/zstd"
+  xin "$B/zstd" "${CLEAN[@]}" make -C lib -j "$JOBS" libzstd.a
+  xin "$B/zstd" "${CLEAN[@]}" make -C lib install-static install-includes "PREFIX=$P/build-deps"
 }
 check_zstd() { need_file build-deps/lib/libzstd.a; need_file build-deps/include/zstd.h; }
 
 # xz 5.8.4, static liblzma only, for Python's lzma (tools/test_igfx_trace.py imports it; the macOS SDK has no lzma.h).
-# No translations (they would look for libintl), none of the programs, no documentation, no tests.
+# No translations (they would look for libintl), none of the programs or scripts, no documentation, no tests.
 recipe_xz() {
   cmake_project "$SRC/xz" "$P/build-deps" \
     -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DXZ_NLS=OFF -DXZ_TOOL_XZ=OFF -DXZ_TOOL_XZDEC=OFF -DXZ_TOOL_LZMADEC=OFF \
-    -DXZ_TOOL_LZMAINFO=OFF -DXZ_DOC=OFF
+    -DXZ_TOOL_LZMAINFO=OFF -DXZ_TOOL_SCRIPTS=OFF -DXZ_DOC=OFF
 }
 check_xz() { need_file build-deps/lib/liblzma.a; need_file build-deps/include/lzma.h; }
 
 # Python 3.14.10 into $P/python. CPython's build imports modules from its source tree with -E (bytecode would be
 # written there), so it is built in a copy of the tree in the work folder. Static libpython, no framework.
-# Given: OpenSSL, zstd and liblzma from build-deps (static, so nothing outside the toolchain is loaded at run time).
-# From the SDK: zlib, bz2, sqlite3, libffi (configure looks for it under $SDKROOT), uuid. The bundled expat and the
-# bundled mpdecimal (not a Homebrew one). pkg-config is not asked at all (--with-pkg-config=no).
-# Turned off, nobody here needs them and each would be looked up on the machine: readline, curses, tkinter, dbm and
-# gdbm (py_cv_module_<name>=n/a), libintl, the test modules. pip is installed from the wheel inside the source.
+# The Mac's configure line. Given: OpenSSL, zstd and liblzma from build-deps (static, so nothing outside the toolchain
+# is loaded at run time). From the SDK (with SDKROOT set, the compiler sees nothing in /usr/local): zlib, bz2, sqlite3,
+# libffi, uuid, readline (macOS's libedit), curses and dbm. Bundled: expat and mpdecimal. tkinter and gdbm are not built
+# (the SDK has neither Tcl/Tk headers nor gdbm), which nobody here needs. pip is installed from the wheel inside the
+# source.
 recipe_python() {
   local bd=$P/build-deps f
   for f in lib/libssl.a lib/libzstd.a lib/liblzma.a include/zstd.h include/lzma.h; do
     [ -f "$bd/$f" ] || die "python is built with OpenSSL, zstd and xz from $bd, and $bd/$f is missing: build openssl, zstd and xz first"
   done
-  rm -rf "$P/python"
+  rm -rf "${P:?}/python"
   clean_env
   x cp -RP "$SRC/python" "$B/cpython"
   xin "$B/cpython" "${CLEAN[@]}" ./configure "--prefix=$P/python" "--with-openssl=$bd" --with-ensurepip=install \
-    --with-pkg-config=no --without-readline --without-system-libmpdec --disable-test-modules \
-    "LIBZSTD_CFLAGS=-I$bd/include" "LIBZSTD_LIBS=$bd/lib/libzstd.a" "LIBLZMA_CFLAGS=-I$bd/include" "LIBLZMA_LIBS=$bd/lib/liblzma.a" \
-    py_cv_module_readline=n/a py_cv_module__curses=n/a py_cv_module__curses_panel=n/a py_cv_module__tkinter=n/a \
-    py_cv_module__dbm=n/a py_cv_module__gdbm=n/a ac_cv_lib_intl_textdomain=no ac_cv_header_libintl_h=no
+    "LIBZSTD_CFLAGS=-I$bd/include" "LIBZSTD_LIBS=$bd/lib/libzstd.a" "LIBLZMA_CFLAGS=-I$bd/include" "LIBLZMA_LIBS=$bd/lib/liblzma.a"
   xin "$B/cpython" "${CLEAN[@]}" make -j "$JOBS"
   xin "$B/cpython" "${CLEAN[@]}" make install
 }
@@ -344,13 +424,24 @@ recipe_pkgconf() {
   [ -e "$P/bin/pkg-config" ] || x ln -s pkgconf "$P/bin/pkg-config"
 }
 check_pkgconf() {
-  need_file bin/pkgconf; need_file bin/pkg-config
+  local v out d
+  need_file bin/pkgconf; need_file bin/pkg-config; [ -e "$P/bin/pkgconf" ] || return 0
   answers bin/pkgconf --version; answers bin/pkg-config --version
+  # the folders whose -I and -L pkgconf leaves out of its answers must not be the toolchain's own
+  for v in pc_system_includedirs pc_system_libdirs; do
+    out=$(cd / && env -i "$P/bin/pkgconf" --variable "$v" pkg-config 2>&1) || { bad "pkgconf --variable $v pkg-config fails: $out"; continue; }
+    [ -n "$out" ] || { bad "pkgconf --variable $v pkg-config prints nothing"; continue; }
+    for d in $(printf '%s\n' "$out" | tr ':' ' '); do
+      case "$d/" in "$P/"*) bad "pkgconf's $v holds $d, inside the toolchain: it would leave the toolchain's own -I and -L out of every answer" ;; esac
+    done
+    cnote "pkgconf $v: $out"
+  done
 }
 
-# SPIRV-Headers at the commit SPIRV-Tools' DEPS names, installed into the prefix, then SPIRV-Tools, shared like
-# Homebrew's (Mesa's mesa_clc links it). Absolute install names, so that whatever links it later needs no rpath.
-# No tests (they would download googletest, effcee and re2), no warnings as errors (a newer clang than theirs adds some).
+# SPIRV-Headers at the commit SPIRV-Tools' DEPS names, installed into the prefix, then SPIRV-Tools with its default
+# libraries, as on the Mac: static libraries (SPIRV-Tools.pc names them, so Mesa's mesa_clc links them in) and the one
+# shared libSPIRV-Tools-shared, with an absolute install name. No tests (they would download googletest, effcee and
+# re2), no warnings as errors (a newer clang than theirs adds some).
 recipe_spirv_tools() {
   pick_python spirv-tools
   [ -f "$SRC/spirv-headers/include/spirv/unified1/spirv.h" ] || die "spirv-tools needs SPIRV-Headers in $SRC/spirv-headers"
@@ -358,21 +449,35 @@ recipe_spirv_tools() {
   cmake_project "$SRC/spirv-headers" "$P" -DSPIRV_HEADERS_ENABLE_TESTS=OFF -DSPIRV_HEADERS_ENABLE_INSTALL=ON
   B_SUB=tools
   cmake_project "$SRC/spirv-tools" "$P" "-DSPIRV-Headers_SOURCE_DIR=$SRC/spirv-headers" -DSPIRV_SKIP_TESTS=ON \
-    -DSPIRV_WERROR=OFF -DBUILD_SHARED_LIBS=ON -DSPIRV_TOOLS_BUILD_STATIC=OFF "-DPython3_EXECUTABLE=$PY"
+    -DSPIRV_WERROR=OFF "-DPython3_EXECUTABLE=$PY"
 }
 check_spirv_tools() {
   local p
   need_file lib/pkgconfig/SPIRV-Tools.pc; need_file include/spirv-tools/libspirv.h; need_file include/spirv/unified1/spirv.h
   grep -q '^Version: *[0-9]' "$P/lib/pkgconfig/SPIRV-Tools.pc" 2>/dev/null || bad "lib/pkgconfig/SPIRV-Tools.pc has no Version line"
   for p in spirv-as spirv-dis spirv-val spirv-opt spirv-link; do need_file "bin/$p"; [ ! -e "$P/bin/$p" ] || answers "bin/$p" --version; done
+  # what Mesa's build asks: the toolchain's pkg-config, from an empty environment, must give the toolchain's folders
+  if [ -x "$P/bin/pkg-config" ] && [ -f "$P/lib/pkgconfig/SPIRV-Tools.pc" ]; then
+    pc_answer "--cflags SPIRV-Tools" "-I$P/include"
+    pc_answer "--libs SPIRV-Tools" "-L$P/lib -lSPIRV-Tools-opt -lSPIRV-Tools -lSPIRV-Tools-link"
+  else
+    cnote "pkg-config --cflags SPIRV-Tools not asked: the toolchain has no pkg-config"
+  fi
+}
+pc_answer() {   # <arguments> <expected answer>: what the toolchain's pkg-config prints, blanks folded
+  local out
+  # shellcheck disable=SC2086
+  out=$(cd / && env -i "$P/bin/pkg-config" $1 2>&1) || { bad "pkg-config $1 fails: $out"; return 0; }
+  out=$(printf '%s\n' "$out" | tr -s ' \t\n' '   ' | sed 's/^ //; s/ $//')
+  if [ "$out" = "$2" ]; then cnote "pkg-config $1: $out"; else bad "pkg-config $1 prints \"$out\", not \"$2\""; fi
 }
 
-# glslang 16.6.0 against the SPIRV-Tools above (ALLOW_EXTERNAL_SPIRV_TOOLS, ENABLE_OPT), not the copy its External
-# folder would fetch (BUILD_EXTERNAL=OFF). Static libraries: only the program is used. No tests.
+# glslang 16.6.0 against the SPIRV-Tools above (ALLOW_EXTERNAL_SPIRV_TOOLS, ENABLE_OPT), as on the Mac; the exported
+# tree has no External/spirv-tools, so nothing else is found. Static libraries: only the program is used. No tests.
 recipe_glslang() {
   pick_python glslang
   [ -f "$P/lib/pkgconfig/SPIRV-Tools.pc" ] || die "glslang is built against the toolchain's SPIRV-Tools: build spirv-tools first"
-  cmake_project "$SRC/glslang" "$P" -DBUILD_EXTERNAL=OFF -DALLOW_EXTERNAL_SPIRV_TOOLS=ON -DENABLE_OPT=ON -DGLSLANG_TESTS=OFF \
+  cmake_project "$SRC/glslang" "$P" -DALLOW_EXTERNAL_SPIRV_TOOLS=ON -DENABLE_OPT=ON -DGLSLANG_TESTS=OFF \
     "-DPython3_EXECUTABLE=$PY"
   [ -e "$P/bin/glslangValidator" ] || x ln -s glslang "$P/bin/glslangValidator"
 }
@@ -388,17 +493,18 @@ check_glslang() {
 # shared library against this LLVM and Mesa's mesa_clc links both: with a static LLVM there would be two copies in one
 # program), and libclang for bindgen. Absolute install names (CMAKE_INSTALL_NAME_DIR; LLVM leaves @rpath out once
 # CMAKE_INSTALL_RPATH is set): the Translator and mesa_clc are built by other build systems that add no rpath.
-# Targets: this Mac's own (host: mesa_clc only turns OpenCL C into SPIR-V and bindgen parses headers for this Mac) and
-# SPIRV (Mesa compiles for spirv64-unknown-unknown; Homebrew's LLVM, which the release was built with, has it).
-# RTTI on and exceptions off, as in Homebrew's LLVM. Turned off, each would be looked up on the machine: zstd, libxml2,
-# libedit, libffi, z3, libcurl, cpp-httplib, libpfm; zlib comes from the SDK. No static analyzer, tests, examples,
-# benchmarks, documentation or language bindings.
+# Targets: this Mac's own (host: mesa_clc only turns OpenCL C into SPIR-V and bindgen parses headers for this Mac; on
+# an Intel Mac host is X86, the target the Mac built with) and SPIRV (Mesa compiles for spirv64-unknown-unknown).
+# "host" instead of X86 so that the same line serves Apple silicon. RTTI and exceptions on, as on the Mac whose NVK
+# build proved this LLVM with build.sh's Translator and Mesa's mesa_clc (Homebrew's LLVM has exceptions off).
+# Turned off, each would be looked up on the machine: zstd, libxml2, libedit, libffi, z3, libcurl, cpp-httplib, libpfm;
+# zlib comes from the SDK. No static analyzer, tests, examples, benchmarks, documentation or language bindings.
 recipe_llvm() {
   pick_python llvm
-  rm -rf "$P/llvm"
+  rm -rf "${P:?}/llvm"
   cmake_project "$SRC/llvm/llvm" "$P/llvm" \
     -DLLVM_ENABLE_PROJECTS=clang "-DLLVM_TARGETS_TO_BUILD=host;SPIRV" \
-    -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON -DCLANG_LINK_CLANG_DYLIB=ON -DLLVM_ENABLE_RTTI=ON -DLLVM_ENABLE_EH=OFF \
+    -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON -DCLANG_LINK_CLANG_DYLIB=ON -DLLVM_ENABLE_RTTI=ON -DLLVM_ENABLE_EH=ON \
     -DCLANG_ENABLE_STATIC_ANALYZER=OFF \
     -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF \
     -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF -DLLVM_ENABLE_BINDINGS=OFF \
@@ -456,28 +562,53 @@ answers() {   # <program, relative> [arguments]: started from / with an empty en
   else cnote "$p $*: $(printf '%s\n' "$out" | sed -n 1p)"; fi
 }
 # On macOS, every Mach-O file the tool installed may name only the system's libraries and the toolchain's own: a
-# library of a Homebrew (or of any other folder) that a build picked up would tie the toolchain to it.
-macho_files() {   # <record file>: the Mach-O files among the regular files it lists
+# library of a Homebrew (or of any other folder) that a build picked up would tie the toolchain to it. And each must run
+# on the oldest macOS asked for: its minimum version (LC_BUILD_VERSION's minos, or LC_VERSION_MIN_MACOSX) not above it.
+# A static library is judged by its first member that has one (what a program linked from it would be told by ld).
+macho_minos() {   # <file>: the first minimum macOS version otool -l shows, or nothing
+  # awk stops at the first answer; otool, writing an archive's other members into a closed pipe, is stopped then too,
+  # which is not a failure
+  { otool -l "$1" 2>/dev/null || true; } | awk '
+    $1 == "cmd" { c = $2 }
+    c == "LC_BUILD_VERSION" && $1 == "minos" { print $2; exit }
+    c == "LC_VERSION_MIN_MACOSX" && $1 == "version" { print $2; exit }'
+}
+version_above() {   # <a> <b>: a is a later version than b
+  awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, "."); if (m > n) n = m
+    for (i = 1; i <= n; i++) { if ((x[i] + 0) > (y[i] + 0)) exit 0; if ((x[i] + 0) < (y[i] + 0)) exit 1 } exit 1 }'
+}
+macho_files() {   # <record file>: "m <file>" for each Mach-O file, "a <file>" for each static library it lists
   perl -e '
     my $root = shift;
     while (my $rel = <STDIN>) {
       chomp $rel; my $f = "$root/$rel";
       next if -l $f || ! -f $f;
-      open(my $h, "<", $f) or next; binmode $h; my $m = ""; read($h, $m, 4); close $h;
-      print "$rel\n" if $m =~ /^(\xfe\xed\xfa[\xce\xcf]|[\xce\xcf]\xfa\xed\xfe|\xca\xfe\xba[\xbe\xbf])$/;
+      open(my $h, "<", $f) or next; binmode $h; my $m = ""; read($h, $m, 8); close $h;
+      if (substr($m, 0, 4) =~ /^(\xfe\xed\xfa[\xce\xcf]|[\xce\xcf]\xfa\xed\xfe|\xca\xfe\xba[\xbe\xbf])$/) { print "m $rel\n" }
+      elsif ($m eq "!<arch>\n") { print "a $rel\n" }
     }' "$P" < "$1"
 }
 check_libraries() {   # <tool>
-  local rec=$P/.nm-toolchain/$1.files rel lib n=0
+  local rec=$P/.nm-toolchain/$1.files kind rel lib n=0 na=0 mo
   is_darwin || return 0
   [ -f "$rec" ] || { bad "no record of the files $1 installed (build it with this script)"; return 0; }
-  while IFS= read -r rel; do
+  while read -r kind rel; do
+    mo=$(macho_minos "$P/$rel")
+    if [ "$kind" = a ]; then
+      # a static library names no libraries; one whose members carry no version (assembler output) is only noted
+      na=$((na + 1))
+      if [ -z "$mo" ]; then cnote "$P/$rel: otool -l shows no minimum macOS version in its members"
+      elif version_above "$mo" "$DT"; then bad "$P/$rel is built for macOS $mo and later, above MACOSX_DEPLOYMENT_TARGET $DT"; fi
+      continue
+    fi
     n=$((n + 1))
     while IFS= read -r lib; do
       case "$lib" in /usr/lib/*|/System/Library/*|"$P"/*) ;; *) bad "$P/$rel links $lib, which is neither the system's nor the toolchain's" ;; esac
     done < <(otool -L "$P/$rel" 2>/dev/null | sed -n 's/^[[:space:]][[:space:]]*\([^ ][^ ]*\) (.*/\1/p')
+    if [ -z "$mo" ]; then bad "$P/$rel: otool -l shows no minimum macOS version"
+    elif version_above "$mo" "$DT"; then bad "$P/$rel is built for macOS $mo and later, above MACOSX_DEPLOYMENT_TARGET $DT"; fi
   done < <(macho_files "$rec")
-  cnote "$n Mach-O files of $1 name only /usr/lib, /System/Library and $P"
+  cnote "$n Mach-O files of $1 name only /usr/lib, /System/Library and $P, and they and its $na static libraries run on macOS $DT"
 }
 run_checks() {   # <tool>: CHECK_BAD counts the failures
   CHECK_BAD=0
@@ -499,14 +630,14 @@ build_one() {
   local t=$1 t0 t1 stamp
   CUR_TOOL=$t; STATE=$P/.nm-toolchain; LOG=$LOGS/$t.log; B=$WORK/$t; B_SUB=""; PYDIR=""
   rm -f "$STATE/$t"
-  : > "$LOG"
+  rm -f "$LOG"; : > "$LOG"
   logline "build/toolchain.sh build $t: $(tool_id "$t"), $(date -u +%Y-%m-%dT%H:%M:%SZ), $(uname -s) $(uname -m), $JOBS jobs"
   logline "prefix $P, sources $SRC/$t, build folder $B${SDK:+, SDK $SDK}"
   [ -d "$SRC/$t" ] || die "$t: its source tree $SRC/$t is missing (build.sh fetches it)"
   say "toolchain: building $t (log: $LOG)"
   t0=$(date +%s)
   forget_tool_files "$t"
-  rm -rf "$B"; mkdir -p "$B"
+  rm -rf "${B:?}"; mkdir -p "$B"
   BEFORE=$WORK/.$t.before
   prefix_listing > "$BEFORE"
   case "$t" in
@@ -530,7 +661,7 @@ build_one() {
   printf '%s\n' "$stamp" > "$STATE/$t"
   t1=$(date +%s)
   logline "---- done in $((t1 - t0)) s; stamp: $stamp"
-  if [ "${NM_TC_KEEP:-0}" = 1 ]; then logline "build folder kept: $B"; else rm -rf "$B"; fi
+  if [ "${NM_TC_KEEP:-0}" = 1 ]; then logline "build folder kept: $B"; else rm -rf "${B:?}"; fi
   say "toolchain: $t ok ($((t1 - t0)) s)"
   CUR_TOOL=""
 }
