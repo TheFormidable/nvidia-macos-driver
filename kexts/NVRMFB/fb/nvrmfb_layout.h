@@ -139,8 +139,9 @@ SYSCTL_INT(_debug, OID_AUTO, nvrmfb_layout_vtables, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_layout_vtdiff, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvrmfbLayoutVtDiff, 0,
            "Apple vtables whose length differs from this build; reported, never a reason to refuse");
 
-/* Registered only by an instance that started and stays (the claim, a framebuffer), never by a kext that declined:
-   a kext with no instance may be unloaded, and a registered sysctl must not outlive its code. */
+/* Registered only by an instance that started (the claim, a framebuffer) after it made the kext hold a reference on
+   itself (nvrmfbStayLoaded() in nvrm-fb.cpp), never by a kext that declined: a kext without that reference may be
+   unloaded, and a registered sysctl must not outlive its code. */
 static void nvrmfbLayoutSysctls(void)
 {
     static volatile UInt32 once;
