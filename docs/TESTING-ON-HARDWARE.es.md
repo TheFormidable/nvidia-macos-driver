@@ -18,9 +18,10 @@ cada tipo de fallo.
 
 ## Dónde escribe el driver
 
-- **Kernel**: `log show --last boot --predicate 'process == "kernel"'`. Las líneas de NVRM empiezan por `NVRM-xnu:`,
+- **Kernel**: `log show --last boot --predicate 'process == "kernel"'` (cada `log show --last boot` tarda cerca de
+  un minuto). Las líneas de NVRM empiezan por `NVRM-xnu:`,
   las del framebuffer por `NVRM-fb:`, las del acelerador por `NVAccel:`. Los contadores son sysctl bajo `debug.`
-  (`sysctl debug | grep nvrm_` y `sysctl debug | grep nvaccel_`).
+  (`sysctl debug | grep nvrm_`, `sysctl debug | grep nvrmfb_` y `sysctl debug | grep nvaccel_`).
 - **El plugin Metal** (lo que cada aplicación y WindowServer hacen con Metal): un paquete compilado con `./build.sh`
   lleva el plugin de versión final (release), que escribe su propio registro, `nvmtl.log`, solo para un proceso
   lanzado con `NVMTL_PROCESS_ENV=1` en su entorno (no como root). Para cualquier otro proceso, WindowServer incluido,
@@ -68,7 +69,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 
    ```bash
    sw_vers > ~/before-3.0.txt; nvram boot-args >> ~/before-3.0.txt
-   sysctl debug | grep -e nvrm_ -e nvaccel_ >> ~/before-3.0.txt
+   sysctl debug | grep -e nvrm -e nvaccel >> ~/before-3.0.txt
    ```
 
    Apunta cuánto tarda el escritorio en aparecer después del selector, y el uso de CPU de WindowServer con el
@@ -315,7 +316,7 @@ CHANGELOG.md, "The ways back", y SWITCHES.md dicen qué devuelve cada una en det
 - `sw_vers`, la tarjeta y `nvram boot-args`.
 - `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
 - Tu bloque de `/Library/GPUBundles/nvmtl/nvrm610.conf`.
-- `sysctl debug | grep -e nvrm_ -e nvaccel_`, tomado mientras o justo después de que aparezca el problema, y lo mismo
+- `sysctl debug | grep -e nvrm -e nvaccel`, tomado mientras o justo después de que aparezca el problema, y lo mismo
   de 2.9 (`~/before-3.0.txt`).
 - El registro del kernel del arranque: `log show --last boot --predicate 'process == "kernel"' > ~/kernel.txt`.
 - Las líneas de fallo del plugin:
