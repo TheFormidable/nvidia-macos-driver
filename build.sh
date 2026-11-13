@@ -491,6 +491,19 @@ foreign_areas() {
   if [ "$(mac_arch)" = x86_64 ]; then printf '%s\n' "$other"
   else printf '%s\n' "$other/Cellar" "$other/opt" "$other/Caskroom" "$other/Homebrew"; fi
 }
+# foreign_search_dir <dir>: a folder for a search path (PKG_CONFIG_PATH) inside the other architecture's prefix. Stricter
+# than for programs: on Apple silicon /usr/local/lib/pkgconfig holds an Intel Homebrew's files as links, so the whole
+# prefix counts there once a Homebrew is installed in it.
+foreign_search_dir() {
+  local places other d=$1
+  places=$(brew_places); other=${places##* }; other=${other%/bin/brew}
+  [ "$(mac_arch)" = x86_64 ] || [ -x "$other/bin/brew" ] || return 1
+  [ ! -d "$other" ] || other=$(cd "$other" 2>/dev/null && pwd -P) || return 1
+  [ "$other" != "$BREW_PREFIX" ] || return 1
+  [ ! -d "$d" ] || d=$(cd "$d" 2>/dev/null && pwd -P) || return 1
+  case "$d/" in "$other"/*) return 0 ;; esac
+  return 1
+}
 in_foreign_area() { local a; while IFS= read -r a; do case "$1" in "$a"/*) return 0 ;; esac; done < <(foreign_areas); return 1; }
 # foreign_reason <path>: why that program is not taken, or nothing: its file (after its symlinks) lies in the other
 # architecture's Homebrew; or it is a script whose #! interpreter (also one named through /usr/bin/env) lies there; or
@@ -832,13 +845,15 @@ x() {
   [ "$rc" = 0 ] || fail_step "${CUR_STEP:-unknown}" "$rc"
 }
 # The environment every step's script gets: a fixed PATH (tools/bin first, Homebrew never), no compiler variables, and
-# none of the search-path variables a compiler or build system reads (PKG_CONFIG_PATH, CMAKE_PREFIX_PATH, LIBRARY_PATH,
-# CPATH): dropped here so a tester's login shell, which may point them into a Homebrew of the other architecture, cannot
+# none of the search-path variables a compiler or build system reads (PKG_CONFIG_PATH, PKG_CONFIG_LIBDIR, CMAKE_PREFIX_PATH,
+# LIBRARY_PATH, CPATH and clang's per-language include paths) nor a Homebrew's own HOMEBREW_PREFIX/CELLAR/REPOSITORY:
+# dropped here so a tester's login shell, which may point them into a Homebrew of the other architecture, cannot
 # reach a step. A step that needs one is given it explicitly afterwards (the NVK step sets its own PKG_CONFIG_PATH), and
 # a later assignment overrides the -u, so those keep working.
 step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
     -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
+    -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
     "JOBS=${JOBS:-$NM_JOBS}"
 }
@@ -1526,7 +1541,13 @@ nvk_pkg_config_path() {
   # yours after these: pkg-config takes the first LLVMSPIRVLib.pc it finds, and a PKG_CONFIG_PATH that names
   # Homebrew's lib/pkgconfig (common in a shell set up for development) holds the translator for Homebrew's current
   # LLVM, which Mesa refuses with LLVM 22
-  [ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"
+  # and without the folders of a Homebrew of the other architecture (its libraries cannot be linked into this build)
+  local d rest=${PKG_CONFIG_PATH:-}
+  while [ -n "$rest" ]; do
+    d=${rest%%:*}; case "$rest" in *:*) rest=${rest#*:} ;; *) rest="" ;; esac
+    [ -n "$d" ] && ! foreign_search_dir "$d" || continue
+    p="${p:+$p:}$d"
+  done
   printf '%s' "$p"
 }
 package_name() { printf 'nullmoth-nvidia-local-%s.tar.gz' "$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"; }

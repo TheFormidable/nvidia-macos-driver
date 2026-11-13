@@ -1464,7 +1464,11 @@ def arm_vars(mac):
     # A login shell may point the compiler and build-system search paths at a Homebrew of the other architecture; no
     # step may inherit them.
     leak = {"CMAKE_PREFIX_PATH": "/opt/homebrew/lib/cmake", "LIBRARY_PATH": "/opt/homebrew/lib",
-            "CPATH": "/opt/homebrew/include", "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig"}
+            "CPATH": "/opt/homebrew/include", "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig",
+            "C_INCLUDE_PATH": "/opt/homebrew/include", "CPLUS_INCLUDE_PATH": "/opt/homebrew/include",
+            "OBJC_INCLUDE_PATH": "/opt/homebrew/include", "PKG_CONFIG_LIBDIR": "/opt/homebrew/lib/pkgconfig",
+            "LDFLAGS": "-L/opt/homebrew/lib", "CPPFLAGS": "-I/opt/homebrew/include", "HOMEBREW_PREFIX": "/opt/homebrew",
+            "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
 
     def leak_problems(tag):
         mac.clear()
@@ -1475,9 +1479,12 @@ def arm_vars(mac):
         return bad or ([] if steps else ["no step ran"])
 
     with mac.scratch():
-        check("a step inherits no PKG_CONFIG_PATH/CMAKE_PREFIX_PATH/LIBRARY_PATH/CPATH from the caller", not (q := leak_problems("a")), q)
+        check("a step inherits no compiler search path, LDFLAGS/CPPFLAGS or HOMEBREW_ variable from the caller", not (q := leak_problems("a")), q)
         mac.break_script("-u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \\", "\\")
         negative("a step_env that keeps the caller's search-path variables", leak_problems("b"))
+    with mac.scratch():
+        mac.break_script("    -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\\n", "")
+        negative("a step_env that keeps clang's include paths and the caller's HOMEBREW_ variables", leak_problems("c"))
 
 
 def rebuilt(sb, *args, extra=None, edit=None):
@@ -1665,9 +1672,10 @@ def python_problems(sb):
 
 
 def pkgconfig_problems(sb):
-    """a PKG_CONFIG_PATH from the tester's shell comes after build.sh's: pkg-config takes the first LLVMSPIRVLib.pc"""
+    """a PKG_CONFIG_PATH from the tester's shell comes after build.sh's (pkg-config takes the first LLVMSPIRVLib.pc), and
+    without the folders of the other architecture's Homebrew (this imitated Mac is an Intel one: /opt/homebrew)"""
     sb.clear()
-    sb.run("--force", "build", "nvk", extra={"PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig"})
+    sb.run("--force", "build", "nvk", extra={"PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig"})
     envs = [e for k, _, e in sb.steps() if k == "nvk"]
     if not envs:
         return ["nvk did not run"]
@@ -1675,19 +1683,23 @@ def pkgconfig_problems(sb):
     p = []
     if not os.path.isfile(os.path.join(parts[0], "LLVMSPIRVLib.pc")):
         p.append(f"the first PKG_CONFIG_PATH entry is not the chosen SPIRV-LLVM-Translator: {parts[:2]}")
-    if "/opt/homebrew/lib/pkgconfig" not in parts:
+    if "/usr/local/lib/pkgconfig" not in parts:
         p.append("the tester's PKG_CONFIG_PATH was dropped")
+    if "/opt/homebrew/lib/pkgconfig" in parts:
+        p.append(f"the other architecture's Homebrew reached the NVK step: {parts}")
     return p
 
 
 def arm_steps(mac):
     with mac.scratch():
         p = pkgconfig_problems(mac)
-        check("a PKG_CONFIG_PATH from the shell is kept but put after the translator build.sh chose", not p, p)
+        check("a PKG_CONFIG_PATH from the shell is kept after the translator build.sh chose, without the other Homebrew", not p, p)
     with mac.scratch():
-        mac.break_script('[ -z "${PKG_CONFIG_PATH:-}" ] || p="${p:+$p:}$PKG_CONFIG_PATH"',
-                         '[ -z "${PKG_CONFIG_PATH:-}" ] || p="$PKG_CONFIG_PATH${p:+:$p}"')
+        mac.break_script('    p="${p:+$p:}$d"', '    p="$d${p:+:$p}"')
         negative("the shell's PKG_CONFIG_PATH first", pkgconfig_problems(mac))
+    with mac.scratch():
+        mac.break_script('    [ -n "$d" ] && ! foreign_search_dir "$d" || continue', '    [ -n "$d" ] || continue')
+        negative("the shell's PKG_CONFIG_PATH kept whole (the other architecture's Homebrew included)", pkgconfig_problems(mac))
     with mac.scratch():
         p, out = stale_problems(mac)
         check("a build script that fails stops its step, even when a previous build left an output behind", not p, (p, out[-700:]))
