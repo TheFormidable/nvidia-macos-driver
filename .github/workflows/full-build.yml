@@ -10,18 +10,21 @@
 #   ./build.sh --workdir W test
 # and then build/ci_full_build.sh prove, one line per check with its number: Homebrew was not used and not changed
 # (/usr/local/bin, opt and Cellar listed before and after; no file of Homebrew's own folders changed; no brew process
-# in a list of the processes taken twice a second; build.sh never made its folder for Homebrew's cache); every tool the
-# steps use lies in W; every Mach-O file under W/out and every tool of W (ninja, cmake, python3.14 and its extension
-# modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the Translator, Rust)
-# loads only from /usr/lib, /System and W; what the package ships and this build made runs on macOS 15.0 (minos); no
-# step log names /usr/local; the checkout is unchanged; the package's VERSION, size, SHA-256, files replaced against
-# 2.9, and its SHA256SUMS checked as install.sh checks it.
+# in a list of the processes taken twice a second, by a watch that must have run to the end without a gap; build.sh
+# never made its folder for Homebrew's cache); every link build.sh makes in W/tools/bin is there and leads into W or to
+# macOS's own /usr/bin and /bin; every Mach-O file under W/out and every tool of W (ninja, cmake, python3.14 and its
+# extension modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the
+# Translator, Rust) lies in W and loads only from /usr/lib, /System and W (and, for W/out, the driver's own folders
+# under /Library); what the package ships and this build made names macOS 15.0 or older as its minimum (LC_BUILD_VERSION
+# minos); no step log names /usr/local or /opt/homebrew; the checkout is unchanged; the package's VERSION, size,
+# SHA-256, files replaced against 2.9, and its SHA256SUMS checked as install.sh checks it.
 #
-# What it proves: that the pinned sources and the repository alone make every component and a package on a Mac whose
-# /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several Xcodes. What it
-# does not prove: anything on macOS 26 or on the owner's hardware (this is macOS 15 on GitHub's), anything with an
-# NVIDIA card (there is none), anything about installing or loading the driver (nothing is installed or loaded), and
-# nothing about the package's contents beyond the checks above. The package is not uploaded: it never leaves the runner.
+# What it checks, once it has run: that the pinned sources and the repository alone make every component and a package
+# on a Mac whose /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several
+# Xcodes. What it cannot show: anything on macOS 26 or on the owner's hardware (this is macOS 15 on GitHub's), anything
+# with an NVIDIA card (there is none), anything about installing or loading the driver (nothing is installed or loaded),
+# a brew command shorter than half a second that changes no file, and nothing about the package's contents beyond the
+# checks above. The package is not uploaded: it never leaves the runner.
 #
 # A job gates once it has been seen green on GitHub's runners (the rule of ci.yml): this one is marked
 # continue-on-error until it has been seen green once: then delete that line.
@@ -51,8 +54,9 @@
 # hold it to /usr/lib, /System and W. W/out is never cached: the driver is always built with the Xcode of this run.
 #
 # Actions are pinned to the commits ci.yml uses. The one download of this file's own, the 2.9 package, is pinned with
-# its size and SHA-256 in build/pins.sh. The token can read the repository and nothing else; no step uses a secret or
-# uploads anything.
+# its size and SHA-256 in build/pins.sh. The token can read the repository and nothing else; no step uses a secret, and
+# nothing leaves the runner but the caches above (GitHub's cache of this repository: tools, sources, the 2.9 package as
+# downloaded), never what this build made.
 name: full-build
 on:
   push:

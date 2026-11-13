@@ -568,5 +568,6 @@ folder keeps the compile list complete and the kexts' -D flags the same, and the
 the first run on a Mac will show.
 In addition, every push is built from nothing on an Intel Mac of GitHub's (macOS 15, no NVIDIA card, nothing installed
 or loaded): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build, package and test in an empty folder,
-then checks that Homebrew was neither used nor changed and that everything built loads only from macOS and that folder.
-Its result is under the repository's Actions tab, workflow full-build; when it fails, its last step prints the logs.
+then checks that Homebrew was neither used nor changed and that everything built loads only from macOS, that folder and
+the driver's own folders. Its result is under the repository's Actions tab, workflow full-build; when it fails or runs
+out of time, its last step prints the logs. Until it has passed once, its result does not hold up a change.
