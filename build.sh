@@ -476,6 +476,56 @@ find_brew() {
 }
 brew_opt() { printf '%s/opt/%s' "${BREW_PREFIX:-/nonexistent-homebrew}" "$1"; }   # a path that never exists without Homebrew
 
+# A tool build.sh takes from PATH (python3, gpatch, patch, ninja, cmake, pkg-config, glslangValidator) must be a program
+# of this Mac's processor that is not part of a Homebrew of the other architecture: a tester's login shell can put that
+# Homebrew's bin folder before /usr/local/bin, and its programs and libraries are of the other architecture. A candidate
+# is judged without being run (a wrapper may do anything). foreign_areas: where that Homebrew keeps its programs; all
+# of /opt/homebrew on an Intel Mac, but only Homebrew's own folders of /usr/local on Apple silicon, where /usr/local/bin
+# also holds programs of other origins (Homebrew's links there resolve into Cellar). Nothing when NM_BREW chose that
+# Homebrew: its tools are then the wanted ones.
+foreign_areas() {
+  local places other
+  places=$(brew_places); other=${places##* }; other=${other%/bin/brew}
+  [ -d "$other" ] && other=$(cd "$other" 2>/dev/null && pwd -P) || return 0
+  [ "$other" != "$BREW_PREFIX" ] || return 0
+  if [ "$(mac_arch)" = x86_64 ]; then printf '%s\n' "$other"
+  else printf '%s\n' "$other/Cellar" "$other/opt" "$other/Caskroom" "$other/Homebrew"; fi
+}
+in_foreign_area() { local a; while IFS= read -r a; do case "$1" in "$a"/*) return 0 ;; esac; done < <(foreign_areas); return 1; }
+# foreign_reason <path>: why that program is not taken, or nothing: its file (after its symlinks) lies in the other
+# architecture's Homebrew; or it is a script whose #! interpreter (also one named through /usr/bin/env) lies there; or
+# "file" says it is a Mach-O program without this processor's code (a universal one carries it; "file" is part of macOS
+# itself, not one of the command line tools' stand-ins, and without it this last test is skipped)
+foreign_reason() {
+  local c=$1 r a b i d
+  [ -n "$c" ] && [ -f "$c" ] || return 0
+  r=$(resolve_path "$c" 2>/dev/null) || r=$c
+  if in_foreign_area "$r"; then printf 'it is %s, part of the Homebrew of the other architecture' "$r"; return 0; fi
+  if have file && d=$(file -b "$r" 2>/dev/null); then
+    case "$d" in
+      Mach-O*) case "$(mac_arch)" in arm64) case "$d" in *arm64*) return 0 ;; esac ;; *) case "$d" in *x86_64*) return 0 ;; esac ;; esac
+               printf 'it is a program for another processor (%s)' "$d"; return 0 ;;
+    esac
+  fi
+  [ "$(LC_ALL=C head -c 2 "$r" 2>/dev/null)" = '#!' ] || return 0
+  read -r a b _ <<EOF
+$(LC_ALL=C head -n 1 "$r" 2>/dev/null | LC_ALL=C tr -d '\r' | sed 's/^#![[:space:]]*/#!/')
+EOF
+  a=${a#\#!}
+  case "$a" in */env) case "$b" in ''|-*) i="" ;; *) i=$(command -v "$b" 2>/dev/null || true) ;; esac ;; *) i=$a ;; esac
+  [ -n "$i" ] && [ -e "$i" ] || return 0
+  i=$(resolve_path "$i" 2>/dev/null) || return 0
+  if in_foreign_area "$i"; then printf 'it is a script run by %s, part of the Homebrew of the other architecture' "$i"; fi
+  return 0
+}
+# path_tool <name>: the program of that name on PATH, or nothing when there is none or foreign_reason rejects it
+path_tool() {
+  local c; c=$(command -v "$1" 2>/dev/null) || return 0
+  case "$c" in /*) ;; *) return 0 ;; esac
+  [ -n "$(foreign_reason "$c")" ] || printf '%s' "$c"
+}
+PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator"
+
 # Each tool: the path the build will use ("" when none fits) and a status line. Homebrew's bin folder is never put on
 # the build's PATH: tools/bin gets a link to each chosen tool, so nothing else from Homebrew can leak into the build.
 # patch_works <patch> [new]: does it apply, without a question, a change (and with "new" also a new file) in git's form
@@ -527,22 +577,22 @@ find_tools() {
   # Python 3.10 or newer: NM_PYTHON, Homebrew python@3.14 and older, then PATH
   for p in "${NM_PYTHON:-}" "$(brew_opt python@3.14)/bin/python3.14" "$(brew_opt python@3.13)/bin/python3.13" \
            "$(brew_opt python@3.12)/bin/python3.12" "$(brew_opt python@3.11)/bin/python3.11" "$(brew_opt python@3.10)/bin/python3.10" \
-           "$(command -v python3 2>/dev/null || true)"; do cands+=( "$p" ); done
+           "$(path_tool python3)"; do cands+=( "$p" ); done
   T_PYTHON=$(pick "$NM_PIN_TOOL_PYTHON_MIN" --version "${cands[@]}")
   # a patch that applies the patch chains the way the scripts call it (patch_works); macOS's own applies the kexts' chain.
   # gpatch first only because deps installed it for a Mac whose patch did not. PATCH_NEW: it also creates files (NVK)
   T_PATCH=""; PATCH_NEW=0
-  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(command -v gpatch 2>/dev/null || true)" \
-           "$(command -v patch 2>/dev/null || true)"; do
+  for p in "$(brew_opt gpatch)/bin/gpatch" "$(brew_opt gpatch)/libexec/gnubin/patch" "$(path_tool gpatch)" \
+           "$(path_tool patch)"; do
     [ -n "$p" ] && [ -x "$p" ] || continue
     if patch_works "$p" new; then T_PATCH=$p; PATCH_NEW=1; break; fi
     [ -n "$T_PATCH" ] || ! patch_works "$p" || T_PATCH=$p
   done
-  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(command -v ninja 2>/dev/null || true)")
-  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(command -v cmake 2>/dev/null || true)")
-  T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(command -v pkg-config 2>/dev/null || true)")
+  T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(brew_opt ninja)/bin/ninja" "$(path_tool ninja)")
+  T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(brew_opt cmake)/bin/cmake" "$(path_tool cmake)")
+  T_PKGCONFIG=$(pick "" "" "$(brew_opt pkgconf)/bin/pkg-config" "$(path_tool pkg-config)")
   T_GLSLANG=""
-  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(command -v glslangValidator 2>/dev/null || true)"; do
+  for p in "$(brew_opt glslang)/bin/glslangValidator" "$(path_tool glslangValidator)"; do
     [ -n "$p" ] && [ -x "$p" ] || continue
     v=$(glslang_version "$p" || true)
     [ -n "$v" ] && ver_ge "$v" "$NM_PIN_TOOL_GLSLANG_MIN" && { T_GLSLANG=$p; break; }
@@ -696,6 +746,10 @@ doctor() {   # prints; sets D_MISSING
   elif [ -n "$BREW_OTHER" ]; then d_missing "Homebrew for this Mac's processor ($(mac_arch))"
     d_note "a second Homebrew is at $BREW_OTHER, but its formulas are built for the other architecture and this build cannot link them, so it is not used on its own. NM_BREW=$BREW_OTHER uses it anyway"
   elif is_mac; then d_missing "Homebrew (https://brew.sh): build.sh offers to run its official installer"; fi
+  for x in $PATH_TOOL_NAMES; do
+    v=$(command -v "$x" 2>/dev/null || true); case "$v" in /*) ;; *) continue ;; esac
+    sdk=$(foreign_reason "$v"); [ -z "$sdk" ] || d_note "$x on PATH ($v) is not used: $sdk"
+  done
   if [ -n "$T_PATCH" ]; then d_ok "patch $T_PATCH ($("$T_PATCH" --version 2>/dev/null | first_line)): applies the kexts' patch chain as build_rm620.sh calls it"
     [ "$PATCH_NEW" = 1 ] || d_missing "a patch that also creates files, for NVK's chain (Homebrew gpatch; nvk only)"
   else d_missing "a patch that applies the patch chains as the scripts call it (-p1 --fuzz=0 --dry-run, --no-backup-if-mismatch, -s -d): Homebrew gpatch (rm, nvrm, nvk)"; fi
@@ -1589,7 +1643,7 @@ cmd_package() {
 # ---------------------------------------------------------------------------------------------------------- test
 cmd_test() {
   local py rc=0 last
-  py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(command -v python3 || true)}; }
+  py=$(venv_python); [ -n "$py" ] || { find_tools; py=${T_PYTHON:-$(path_tool python3)}; }
   [ -n "$py" ] || die "no python3"
   say "== pins"; check_pins
   say "== host tests: $(qcmd "$py" tools/run_all_tests.py -j "$NM_JOBS")"

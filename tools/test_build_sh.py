@@ -21,7 +21,7 @@ arm "whichbrew" moves those two places into the sandbox, in its clone of build.s
 
 Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
   doctor on a fresh Mac; no Homebrew of this machine is reached; which of two Homebrews (Intel, Apple silicon,
-  Rosetta); what an Xcode-only Mac builds, tools tested for what they do, dependencies checked first ("needs");
+  Rosetta); no tool of the other architecture's Homebrew taken from PATH ("pathtools"); what an Xcode-only Mac builds, tools tested for what they do, dependencies checked first ("needs");
   doctor, dry runs and env write nothing ("readonly"); no home path in what a tester pastes ("nohome");
   deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
   the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
@@ -206,6 +206,12 @@ case "$role" in
       *) exit 1 ;;
     esac ;;
   strings) cat "${@: -1}" ;;   # the stand-in archives are text
+  # macOS's "file": a program with a <path>.arch beside it is a Mach-O of that architecture (two words: universal)
+  file) f=${@: -1}
+        if [ -f "$f.arch" ]; then a=$(cat "$f.arch")
+          case "$a" in *" "*) echo "Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64]" ;;
+                       *) echo "Mach-O 64-bit executable $a" ;; esac
+        else echo "Bourne-Again shell script text executable, ASCII text"; fi ;;
   otool) printf '%s:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n' "${2:-x}"; cat "$S/otool-extra" 2>/dev/null ;;
   sudo) echo "stand-in sudo: build.sh must never call sudo" >&2; exit 1 ;;
   plain) : ;;
@@ -873,6 +879,81 @@ def arm_brewenv():
     neg = Sandbox("brewenv-neg")
     neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
     negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
+
+
+def pathtools_problems(arch, script_edit=None):
+    """doctor on a Mac whose PATH puts a Homebrew of the other architecture first (an Intel Mac: an Apple-silicon one in
+    /opt/homebrew; Apple silicon: an Intel one in /usr/local). No tool of that Homebrew is taken from PATH, by where its
+    file resolves to or by the interpreter its #! names, and no program that "file" calls a Mach-O of the other
+    processor; a universal program, and on Apple silicon an ordinary /usr/local/bin program, still are. In the clone
+    only, build.sh's two fixed Homebrew places are moved into the sandbox."""
+    sb = Sandbox(f"pathtools-{arch}" + ("-x" if script_edit else ""), arch=arch)
+    bs = sb.co / "build.sh"
+    t = bs.read_text()
+    if script_edit:
+        assert script_edit[0] in t, script_edit[0]
+        t = t.replace(*script_edit)
+    for fixed in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        t = t.replace(fixed, f"{sb.dir}{fixed}")
+    bs.write_text(t)
+    other = sb.dir / ("opt/homebrew" if arch == "x86_64" else "usr/local")
+    sb.wrap(other / "bin/brew", "brew")   # that Homebrew itself (never used: NM_BREW names the stand-in of this processor)
+    obin = other / "bin"
+    cellar = other / "Cellar"
+    for tool, role, ver in (("ninja", "ver", "1.13.1"), ("python3.13", "py", "3.13.9")):
+        real = cellar / tool / "1" / "bin" / tool
+        sb.wrap(real, role, ver)
+        (obin / tool).symlink_to(real)
+    (obin / "python3").symlink_to(obin / "python3.13")
+    elsewhere = sb.dir / "elsewhere/bin"
+    elsewhere.mkdir(parents=True)
+    # a script run by that Homebrew's python
+    (elsewhere / "pkg-config").write_text(f"#!{obin}/python3\nprint('2.5.1')\n")
+    (elsewhere / "pkg-config").chmod(0o755)
+    # a script that names that python through env (found on PATH, which has that Homebrew first)
+    (elsewhere / "cmake").write_text("#! /usr/bin/env python3\nprint('cmake version 4.1.2')\n")
+    (elsewhere / "cmake").chmod(0o755)
+    # a Mach-O of the other processor, and a universal one (that one is taken)
+    sb.wrap(elsewhere / "glslangValidator", "ver", "Glslang Version: 11:16.0.0")
+    (elsewhere / "glslangValidator.arch").write_text("arm64\n" if arch == "x86_64" else "x86_64\n")
+    sb.wrap(elsewhere / "gpatch", "patch", "GNU patch 2.8")
+    (elsewhere / "gpatch.arch").write_text("x86_64 arm64\n")
+    sb.wrap(sb.bin / "file", "file")
+    keep = []
+    if arch == "arm64":   # an ordinary program in /usr/local/bin, not Homebrew's, on Apple silicon: taken
+        sb.wrap(obin / "cmake", "cmake", "cmake version 4.1.2")
+        keep.append(("cmake", f"{obin}/cmake"))
+    path = ":".join([str(obin), str(elsewhere), str(sb.bin), str(sb.dir / "brew/bin")])
+    rc, out = sb.run("doctor", extra={"PATH": path})
+    p = []
+    items = doctor_items(out)
+    for want in ("ninja", "pkg-config", "glslangValidator", "Python 3.10"):
+        if not [i for i in items if i.startswith(want)]:
+            p.append(f"{want} of the other architecture taken: missing list {items}")
+    if arch == "x86_64" and not [i for i in items if i.startswith("cmake")]:
+        p.append(f"a cmake whose #! names that Homebrew's python through env was taken: {items}")
+    if f"ok       patch {elsewhere}/gpatch" not in out:
+        p.append(f"the universal gpatch was not taken: {[l.strip() for l in out.splitlines() if 'patch' in l][:3]}")
+    for tool, at in keep:
+        if [i for i in items if i.startswith(tool)] or f"ok       {tool}" not in out:
+            p.append(f"the ordinary {at} was not taken: {[l.strip() for l in out.splitlines() if tool in l][:3]}")
+    notes = [l for l in out.splitlines() if "on PATH (" in l and "is not used" in l]
+    for tool in ("ninja", "pkg-config", "glslangValidator", "python3"):
+        if not [l for l in notes if l.strip().startswith(f"note     {tool} on PATH")]:
+            p.append(f"doctor does not say why {tool} on PATH is not used: {notes}")
+    return p
+
+
+def arm_pathtools():
+    for arch in ("x86_64", "arm64"):
+        p = pathtools_problems(arch)
+        check(f"no tool of the other architecture's Homebrew is taken from PATH ({arch})", not p, p)
+    negative("PATH tools taken without asking where they belong (the old command -v)",
+             pathtools_problems("x86_64", script_edit=('  [ -n "$(foreign_reason "$c")" ] || printf', '  printf')))
+    negative("no Mach-O test (a program of the other processor outside any Homebrew is taken)",
+             pathtools_problems("x86_64", script_edit=('  if have file && d=$(file -b "$r" 2>/dev/null); then', '  if false; then')))
+    negative("no #! test (a script run by that Homebrew's python is taken)",
+             pathtools_problems("x86_64", script_edit=("  [ \"$(LC_ALL=C head -c 2 \"$r\" 2>/dev/null)\" = '#!' ] || return 0", "  return 0")))
 
 
 DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
@@ -2328,6 +2409,8 @@ def main():
             arm_whichbrew()
         if want("brewenv"):
             arm_brewenv()
+        if want("pathtools"):
+            arm_pathtools()
         if want("readonly"):
             arm_readonly()
         if want("noinstall"):
