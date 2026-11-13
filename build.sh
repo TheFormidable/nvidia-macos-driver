@@ -710,7 +710,7 @@ doctor() {   # prints; sets D_MISSING
     rosetta && d_note "this shell runs under Rosetta (uname -m says x86_64); build.sh takes the Mac's own processor, Apple silicon, for its choices"
     case "$(mac_arch)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
-      x86_64) d_note "Intel: supported. NVIDIA's make -n probes the host compiler for x86-only hardening flags, so the RM archive may carry flags a release built on Apple silicon does not"
+      x86_64) d_note "Intel: supported. The RM and NVKMS are compiled with the commands an Apple-silicon Mac makes: the x86-only options NVIDIA's makefiles add when this Mac's compiler takes them are left out (build/nv_compile_lines.py)"
               d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps compiles each missing formula here (LLVM: hours)" ;;
     esac
   else

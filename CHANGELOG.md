@@ -300,6 +300,11 @@ has proven itself, renewed with a reason otherwise.
   skippable step, and can stage a package from a release package. It never uses `sudo` and never installs the driver.
   Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
   so the first runs may stop on something its tests did not imitate. See [docs/BUILDING.md](docs/BUILDING.md) ([en español](docs/BUILDING.es.md)).
+- Building the kexts on an Intel Mac, with 2.9's scripts too, made an NVRM.kext that macOS cannot load: NVIDIA's
+  makefiles gave the display code an x86-only option because the Mac's own compiler accepted it, and every return
+  then jumped to a function that only Linux has. NVIDIA's RM and display code are now compiled with the same commands
+  on every Mac, those of the Apple-silicon Mac the releases are built on, and a kext that imports such a function
+  stops the build instead of being packaged.
 - `tools/switches.tsv` is the registry of every switch, and `tools/test_switch_registry.py` fails when the source
   reads a name it does not have. A switch added from now on cannot be an opt-in or a writable sysctl: the test says
   what it may be instead (an opt-out of a default path with a review release, a test hook that does nothing unset, a

@@ -32,7 +32,9 @@ comandos y opciones y la solución de problemas.
 
 - Un Mac con macOS 15.6 o posterior, Intel o Apple silicon. Xcode 26 no funciona en sistemas anteriores, así que
   `deps`, `build`, `package` y `all` los rechazan al empezar. Apple silicon sirve para compilar; todo se compila para
-  x86_64, la arquitectura en la que funciona el driver.
+  x86_64, la arquitectura en la que funciona el driver. Un Mac Intel compila el RM y NVKMS de NVIDIA con exactamente
+  los mismos comandos que un Mac con Apple silicon: los Makefiles de NVIDIA preguntan al compilador del Mac qué
+  opciones de protección solo para x86 acepta, y `build/nv_compile_lines.py` quita lo que eso añade.
 - **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Las herramientas de línea de comandos
   solas no bastan: el plugin usa cabeceras de Metal 4 que solo tiene el SDK de macOS 26. No hace falta ningún Kernel
   Debug Kit. En un Mac sin Xcode ni herramientas de línea de comandos, todos los comandos salvo `help` se detienen al
@@ -282,6 +284,7 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 | `offline: NVK needs the network` | meson descarga seis crates de Rust en cada compilación de NVK | Compila NVK con red |
 | `<componente> needs: ...` (por ejemplo `a-patch-that-applies-the-chains(gpatch)`, `python3-3.8`, `cmake/ninja`) | Falta una herramienta que usa ese componente o uno que necesita, o no hace lo que le piden los scripts; no se compiló nada | `./build.sh doctor` dice cuál; `./build.sh deps` la instala |
 | rm o kms terminan con código 6 | build_rm620.sh y build_kms620.sh se detienen si el archivo de NVIDIA contiene la ruta de tu carpeta personal, tu nombre de cuenta seguido de `@`, o `@` y el nombre corto del equipo: la compilación los filtró. Como palabra suelta solo se informa (una línea `note:` en el registro), porque el texto de NVIDIA tiene palabras como user, admin o test | El registro da la orden que muestra esas líneas. Infórmalo con el archivo de informe (las líneas te nombran: léelas antes de publicarlas) |
+| `STOP: NVRM.kext imports ___x86_return_thunk, which no macOS defines` (u otro kext, u otro nombre `___x86_`, `___fentry__` o `mcount`; el paso termina con código 7) | El kext se compiló con una opción hecha para el kernel de Linux, cuya función auxiliar no existe en macOS: enlazaría y nunca cargaría. Se detiene antes de empaquetar nada | Si `KMS_ARCHIVE` está definida, apunta a un archivo de NVKMS compilado con otros comandos: quítala. Si no, compila de nuevo en otra carpeta de trabajo (`--workdir`); si sigue, repórtalo con el archivo de informe |
 | `build_rm620.sh reported compile failures` | Falló una compilación del RM de NVIDIA | Lee las líneas `failed:` en `logs/rm.log` |
 | un paso se detiene en un límite de avisos (`warn_ceiling`) | Los límites de build/warnings.txt son 0: otro Xcode puede dar un aviso nuevo | Repórtalo con el archivo de informe y tu versión de Xcode |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de Homebrew (a menudo libelf en /usr/local en Intel) | Repórtalo con el archivo de informe |
