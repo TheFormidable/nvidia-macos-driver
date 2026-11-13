@@ -120,6 +120,7 @@ class Scene:
 
 def scene(script_text=None, strip_leaves=False):
     tmp = Path(tempfile.mkdtemp(prefix="xlate-release-"))
+    made.append(tmp)   # before the scene is made, so that a scene that cannot be made is removed too
     s = Scene(tmp, script_text)
     if strip_leaves:
         (s.tb / "strip-leaves-the-map").write_text("")
@@ -129,7 +130,7 @@ def scene(script_text=None, strip_leaves=False):
 src = SCRIPT.read_text()
 made = []
 try:
-    s = scene(); made.append(s.tmp)
+    s = scene()
     rc, out = s.run()
     rec = s.record()
     check("the translator's script ends well: no warning in cargo's log, the dylib copied out",
@@ -143,24 +144,24 @@ try:
     check("the script's own strip -S took the debug map out of the dylib", d.is_file() and MAP not in d.read_text(), d.read_text() if d.is_file() else "no dylib")
 
     assert src.count(SETTING) == 1, "control: the export line with the setting is not in the script once"
-    s = scene(src.replace(SETTING, "CARGO_HOME=$CH")); made.append(s.tmp)
+    s = scene(src.replace(SETTING, "CARGO_HOME=$CH"))
     rc, out = s.run()
     check("negative control: without the setting the script stops on the translator's warning ceiling, as it did on the Intel Mac",
           rc == 4 and "STOP: translator has 2 compiler warnings, more than its ceiling of 0" in out and s.record().get("strip") == "<unset>"
           and "warning: stripping debug info with `rust-objcopy` failed: signal: 6 (SIGABRT)" in out, (rc, out[-600:], s.record()))
 
-    s = scene(strip_leaves=True); made.append(s.tmp)
+    s = scene(strip_leaves=True)
     rc, out = s.run()
     check("a debug map left in the dylib stops the script: its names are read although they are in no section",
           rc == 5 and "STOP: 1 build machine path(s) left in the dylib" in out and MAP in out, (rc, out[-600:]))
     by_name = src.replace('strings -a < "$D"', 'strings -a "$D"')
     assert src.count('strings -a < "$D"') == 1 and by_name != src, "control: the read of the dylib is not in the script"
-    s = scene(by_name, strip_leaves=True); made.append(s.tmp)
+    s = scene(by_name, strip_leaves=True)
     rc, out = s.run()
     check("negative control: a script that hands strings the file by name does not see the debug map and ends well",
           rc == 0 and "build machine path" not in out, (rc, out[-600:]))
 
-    s = scene(); made.append(s.tmp)
+    s = scene()
     tool(s.bin / "strings", 'echo "strings: cannot read" >&2; exit 1\n')
     rc, out = s.run()
     check("a strings that fails stops the script: what it did not print is not taken for a dylib without paths",
