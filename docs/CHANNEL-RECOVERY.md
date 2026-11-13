@@ -123,11 +123,13 @@ waits are: a wait that is in progress when the machine sleeps continues after wa
 channel is not rung again or rebuilt merely because the machine slept. Application timeouts (`vkWaitForFences`) are
 still measured on the ordinary clock. With `NVK_CHANNEL_RECOVER=0` the budget is on the ordinary clock, as in 2.9.
 
-A stall without a fault is seen by the surface fence at its own bound (2 s, a strike against the process) and by NVK
-at half its budget (doorbell) and at the whole budget (rebuild). Three such stalls inside the fence's forgiveness
-window make the kext distrust that process for surface sync (it falls back to the 2.9 marks) even though NVK recovered
-each of them. `debug.nvrm_fence_owners_distrusted` > 0 after injected stalls is therefore expected. A rebuilt channel
-keeps its semaphore page, so the kernel keeps reading completions from the same page; NVK re-points the kernel at the
+A stall without a fault is seen by the surface fence at its own bound (2 s; when a reader waited on the stalled hold,
+a strike against that connection) and by NVK at half its budget (doorbell) and at the whole budget (rebuild). Three
+such strikes, each after the penalty window of the one before (10 s, then 20 s) and less than 10 minutes apart, make
+the kext distrust that connection for surface sync (its process falls back to the 2.9 marks) even though NVK
+recovered each stall ([SURFACE-FENCE.md](SURFACE-FENCE.md), "Nobody waits forever").
+`debug.nvrm_fence_owners_distrusted` > 0 after injected stalls is therefore expected. A rebuilt channel keeps its
+semaphore page, so the kernel keeps reading completions from the same page; NVK re-points the kernel at the
 new error notifier (`debug.nvrm_fence_chan_rebinds` counts it), or, if the kernel refuses, deletes the registration
 and the process uses the 2.9 marks. The value of a dropped submission is written into that semaphore by NVK, so a hold
 armed on it ends.
