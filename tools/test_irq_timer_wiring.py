@@ -18,7 +18,9 @@ None of it can run without the card, so what must hold is asserted on the source
   its calls enters a gate first, and stop() closes that gate, waits until no call is inside and takes the GPU away
   before it tears anything down (right after the fence stop, which keeps its place); system sleep (until the wake)
   and shutdown (for good) hold the GPU against it, after waiting for a call that is inside, and each of its calls
-  does nothing while the GPU is held, except the power resource's switch-on that the wake itself asks for;
+  does nothing while the GPU is held, except the power resource's switch-on that the wake itself asks for; and each
+  looks at the GPU's state as well (suspend only a running GPU, resume and power off only a suspended one), because a
+  sleep and a wake can pass between the two calls of one poll (tools/test_rtd3_hold.cpp runs this under threads);
 - the kext holds one reference on itself (never given back) before startGPU registers its first sysctl, and its
   module stop function refuses from then on: nothing the kext registers is ever unregistered, so it must not unload;
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
@@ -189,13 +191,21 @@ def arms(src, others):
                     r"nv_rtd3_before_system_resume\s*\(\s*\)", r"\bgpuResume\s*\(\s*\)", r"fRtd3Waker\s*=\s*THREAD_NULL\s*;",
                     r"if\s*\(\s*ordinal\s*!=\s*0\s*\)\s*rtd3Release\s*\(\s*\)\s*;"])
         and order(sws, [r"\brtd3Hold\s*\(\s*\d+\s*\)\s*;", r"\bkernel_thread_start\s*\("]) and "rtd3Release" not in sws
-        and len(re.findall(r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*\)", rarm)) == 4
+        and len(re.findall(r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*(?:\)|&&)", rarm)) == 4
         and order(rhold, [r"OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fRtd3Hold\s*\)", r"gNvRtd3Gpu\b[^;]*!=\s*this\s*\)\s*return\s*;",
                           r"nv_quiesce_may_sleep\s*\(", r"nv_gate_idle\s*\(\s*&gNvRtd3Gate\s*\)"])
         and "nvx_can_block" not in rhold
         and re.search(r"OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&fRtd3Hold\s*\)", body(n, "NVRM::rtd3Release"))
         and re.search(r"OSAddAtomic\s*\(\s*0\s*,\s*&fRtd3Hold\s*\)\s*!=\s*0\s*&&\s*current_thread\s*\(\s*\)\s*!=\s*fRtd3Waker",
                       body(n, "NVRM::rtd3Held")))
+
+    held = r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*&&\s*n\s*->\s*rtd3PmIs\s*\(\s*kGpuPm(Running|Suspended)\s*\)\s*\)\s*"
+    guards = re.findall(held + r"(?:ok\s*=\s*|n\s*->\s*)?(\w+)\s*\(", rarm)
+    arm("the monitor's suspend runs only on a running GPU, its resume and power-off only on a suspended one (a sleep and a "
+        "wake can pass between the two calls of a poll), and the state is read inside the gate",
+        sorted(guards) == sorted([("Running", "gpuSuspend"), ("Suspended", "gpuResume"), ("Suspended", "nv_rtd3_power_off")])
+        and re.search(r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*\)\s*ok\s*=\s*nv_rtd3_power_on\s*\(", rarm)
+        and re.search(r"bool\s+rtd3PmIs\s*\(\s*SInt32\s+want\s*\)\s*\{\s*return\s+OSAddAtomic\s*\(\s*0\s*,\s*&fGpuPm\s*\)\s*==\s*want\s*;\s*\}", n))
 
     stay, sgpu = body(n, "nvrmStayLoaded"), body(n, "NVRM::startGPU")
     arm("the kext stays loaded: a reference on itself before anything is registered, never given back, and a stop function that refuses from then on",
@@ -344,7 +354,13 @@ CONTROLS = [
     ("a shutdown that leaves the GPU to the monitor", "system sleep and shutdown hold the GPU",
      lambda s: broken(s, "nvrm", "        rtd3Hold(8000);", "       ")),
     ("a monitor suspend that ignores the hold", "system sleep and shutdown hold the GPU",
-     lambda s: broken(s, "nvrm", "if (!n->rtd3Held()) n->gpuSuspend();", "n->gpuSuspend();")),
+     lambda s: broken(s, "nvrm", "if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmRunning)) n->gpuSuspend();", "if (n->rtd3PmIs(kGpuPmRunning)) n->gpuSuspend();")),
+    ("a monitor power-off that looks only at the hold", "the monitor's suspend runs only on a running GPU",
+     lambda s: broken(s, "nvrm", "if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmSuspended)) ok = nv_rtd3_power_off(", "if (!n->rtd3Held()) ok = nv_rtd3_power_off(")),
+    ("a monitor resume that looks only at the hold", "the monitor's suspend runs only on a running GPU",
+     lambda s: broken(s, "nvrm", "if (!n->rtd3Held() && n->rtd3PmIs(kGpuPmSuspended)) n->gpuResume();", "if (!n->rtd3Held()) n->gpuResume();")),
+    ("a monitor suspend that runs on a suspended GPU", "the monitor's suspend runs only on a running GPU",
+     lambda s: broken(s, "nvrm", "n->rtd3PmIs(kGpuPmRunning)) n->gpuSuspend();", "n->rtd3PmIs(kGpuPmSuspended)) n->gpuSuspend();")),
     ("a hold that does not wait for the call inside", "system sleep and shutdown hold the GPU",
      lambda s: broken(s, "nvrm", "{ IOSleep(10); idle = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
     ("a hold that the waking thread cannot pass", "system sleep and shutdown hold the GPU",
