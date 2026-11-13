@@ -152,13 +152,14 @@ of one GPU ran in any order and at the same time, and a flush waited for every i
 global queue and, from the second start pass on, one queue per GPU, each with one worker thread (`nvrm-wq0` for the
 global queue, `nvrm-wq1`.. for GPUs): items run one at a time in the order they were queued, and a flush returns once
 everything queued before it has run. The RM's own flushes wait as long as they need to (each 5 s of waiting logs the
-item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step at system
-shutdown, 5 s for the global queue before the GPU goes to standby. A GPU queue whose bounded wait runs out is given up
+item that is running); the driver's own waits are bounded: 30 s per step when a GPU is stopped, 2 s per step in the full
+shutdown (`nvrmshutdown=full`), 5 s for the global queue before the GPU goes to standby (also on the default
+shutdown path, which puts the GPU in standby). A GPU queue whose bounded wait runs out is given up
 on: the teardown goes on, and later flushes of that queue return at once. If a GPU cannot get a queue of its own (four
 at a time, less one for each queue that was given up on; or no thread) its items go to the global queue; that is never
 a reason to fail its start. The queue of a GPU that stopped cleanly is used again by the next GPU that starts. Items
 the RM marks to be dropped during an unload are dropped only while a GPU is being taken down or put to sleep, as on
-Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item.
+Linux, not while it wakes up. `nvrmworkq=0` brings back the thread per item; the driver's own bounded waits stay.
 
 | Name | Kind | Meaning |
 |---|---|---|
@@ -206,7 +207,8 @@ because each GPU has one such thread.
 
 ## Order of the teardown
 
-`stop()` and the full shutdown path (`nvrmshutdown=full`) take the adapter down in Linux's order: the GPU's work queue
+`stop()` and the full shutdown path (`nvrmshutdown=full`, taken only when no user client is open) take the adapter down in
+Linux's order: the GPU's work queue
 flushed (30 s at most in `stop()`, 2 s in the shutdown path), `rm_disable_adapter` (it stops the RC timer and masks the
 GPU's interrupts), the queue stopped, the interrupt source off and the gate settled (2 s), `rm_shutdown_adapter`, then
 the RC timer and the nano timers let go. A GPU that stops while it is suspended skips `rm_disable_adapter`: its RM is
@@ -242,8 +244,9 @@ the kernel does unload kexts: by itself, about a minute after the last object of
 that declined the card, a card that was unplugged), and when `kmutil unload` asks for it. So from the moment a start
 registers its first sysctl, NVRM.kext holds one reference on itself for the rest of the boot. With it the kernel
 refuses the unload before it terminates a service: `kmutil unload -b com.nullmoth.NVRM` fails with the kext in use and
-the display keeps running. Should the reference ever not be obtained, the kext's stop function refuses instead (logged
-as `no reference on this kext`); the code then stays, but the driver cannot start a card again before a restart.
+the display keeps running. Should the reference ever not be obtained (logged at that start as
+`no reference on this kext`), the kext's stop function refuses instead; the code then stays, but the driver cannot
+start a card again before a restart.
 
 A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
 and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
