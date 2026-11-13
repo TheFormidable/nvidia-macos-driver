@@ -198,6 +198,10 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   that the wake itself asks for. The monitor also suspends only a running GPU and resumes or powers off only a
   suspended one, so a poll that a sleep and wake cut in two no longer switches the slot off under a running GPU, and a
   GPU whose wake failed is left alone.
+- On a machine without the idle power-down monitor (no `nvrtd3=1`, the default), the monitor's gate is now closed for
+  the whole boot instead of being left open with nothing behind it. No behaviour changes.
+- When NVRM declines a card early (the framebuffer refused this macOS's Apple classes), NVAccel stops waiting at once
+  and logs `NVRM declined this card ... (nvrm-layout: ...)` instead of holding the card's matching for the full 30 s.
 - Only WindowServer, running under a system account (user id below 500, the rule NVRM's client table already uses),
   can take a compositor-class hold in the surface fence or NVAccel's pending marks and so delay another process's
   flips, copied frames and page-offs for up to 2 s at a time. A program that merely named its executable
