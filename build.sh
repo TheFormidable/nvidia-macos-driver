@@ -1369,23 +1369,23 @@ comp_info() {
   C_DEPS=""; C_SRC=""; C_VARS=""; C_PINS=""; C_OUT=""; C_TOOLS="xcode"; C_DESC=""
   case "$1" in
     rm)    C_DESC="NVIDIA's RM core for macOS (libnvkernel.a), patched with kexts/NVRM/patches"
-           C_SRC="build/build_rm620.sh kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode make patch python"
+           C_SRC="build/build_rm620.sh build/nv_compile_lines.py kexts/NVRM/patches"; C_VARS="NV_VERSION NM_OGKM620_PRISTINE"; C_PINS="OGKM620_"; C_TOOLS="xcode make patch python"
            C_OUT="$OGKM620/src/nvidia/_out/Darwin_x86_64/libnvkernel.a" ;;
     kms)   C_DESC="NVIDIA's modeset core for macOS (libnvkms.a)"; C_DEPS="rm"
-           C_SRC="build/build_kms620.sh"; C_VARS="NV_VERSION"; C_TOOLS="xcode make python"
+           C_SRC="build/build_kms620.sh build/nv_compile_lines.py"; C_VARS="NV_VERSION"; C_TOOLS="xcode make python"
            C_OUT="$OGKM620/src/nvidia-modeset/_out/Darwin_x86_64/libnvkms.a" ;;
     nvrm)  C_DESC="NVRM.kext"; C_DEPS="rm kms"
-           C_SRC="build/build_nvrm.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_PINS="OGKM620_"; C_TOOLS="xcode python patch"
+           C_SRC="build/build_nvrm.sh build/kext_link_imports.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM tools/test_patch_chain.sh"; C_VARS="KMS_ARCHIVE RE"; C_PINS="OGKM620_"; C_TOOLS="xcode python patch"
            C_OUT="$O/kexts/nvrm/NVRM.kext/Contents/MacOS/NVRM" ;;
     fb)    C_DESC="NVRMFB.kext"; C_DEPS="rm"
-           C_SRC="build/fb_build.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRMFB"; C_VARS="MINVER FB_DEFS"
+           C_SRC="build/fb_build.sh build/kext_link_imports.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRMFB"; C_VARS="MINVER FB_DEFS"
            C_OUT="$O/kexts/fb/NVRMFB.kext/Contents/MacOS/NVRMFB" ;;
     accel) C_DESC="NVAccel.kext for macOS $(accel_majors | sed 's/ / and /')"; C_DEPS="rm"
-           C_SRC="build/accel_build.sh build/accel_build_all.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM"; C_VARS="RE NM_ACCEL MACOSX_DEPLOYMENT_TARGET"
+           C_SRC="build/accel_build.sh build/accel_build_all.sh build/kext_link_imports.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRM"; C_VARS="RE NM_ACCEL MACOSX_DEPLOYMENT_TARGET"
            C_OUT="$O/accel-all/$(accel_majors | sed 's/ .*//')/NVAccel.kext/Contents/MacOS/NVAccel" ;;
-    agdc)  C_DESC="NVRMAGDC.kext"; C_SRC="build/build_agdc.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRMAGDC"
+    agdc)  C_DESC="NVRMAGDC.kext"; C_SRC="build/build_agdc.sh build/kext_link_imports.sh build/warn_ceiling.sh build/warnings.txt kexts/NVRMAGDC"
            C_OUT="$O/kexts/agdc/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" ;;
-    nmsmn) C_DESC="NMSMN.kext (carried in the package)"; C_SRC="kexts/NMSMN build/warn_ceiling.sh build/warnings.txt"
+    nmsmn) C_DESC="NMSMN.kext (carried in the package)"; C_SRC="kexts/NMSMN build/kext_link_imports.sh build/warn_ceiling.sh build/warnings.txt"
            C_OUT="$O/kexts/nmsmn/NMSMN.kext/Contents/MacOS/NMSMN" ;;
     ryzenadj) C_DESC="ryzenadj (carried in the package)"; C_SRC="tools/ryzenadj-macos"; C_PINS="RYZENADJ_"; C_OUT="$O/ryzenadj/ryzenadj" ;;
     airdis) C_DESC="nvmtl-air-dis (the plugin's AIR decoder)"; C_SRC="build/build_air_dis.sh plugin/air_dis.c"; C_OUT="$O/userland/nvmtl-air-dis" ;;
