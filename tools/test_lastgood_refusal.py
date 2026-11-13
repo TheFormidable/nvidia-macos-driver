@@ -10,9 +10,10 @@ and never ran its restore. NVRM writes the refusal on the PCI device (nvrm-layou
 reads it there, every five seconds for four minutes, because the kexts can start after the job does.
 
 The job is lifted out of install.sh, filled in the way the installer fills it, and run against fake ioreg, nvram, ditto,
-sleep and shutdown with every path of it moved into a folder of the test's. Nothing of it runs unless every path it
-names lies in that folder (the job removes kexts and restarts the Mac). The negative control is the same job without its
-look at the registry, which must leave the refused driver in place."""
+sleep and shutdown with every path of it moved into a folder of the test's. The job removes kexts and restarts the Mac,
+so nothing of it runs unless every path it names lies in that folder, its PATH holds that folder only, and the real rm,
+cp and mkdir it reaches there refuse an argument that is not under the folder. The negative control is the same job
+without its look at the registry, which must leave the refused driver in place."""
 import os
 import pathlib
 import re
@@ -104,8 +105,19 @@ def redirect(job, fake, t):
     return text
 
 
-# the real tools the job and the fakes may use; they only ever get paths under the test's folder
-REAL = ("rm", "cp", "mkdir", "cut", "grep", "date", "cat")
+# The real tools the job and the fakes may use. The three that change files are reached through a guard that refuses
+# an argument outside the test's folder (a path the job builds while it runs is not seen by redirect()).
+REAL = ("cut", "grep", "date", "cat")
+GUARDED = ("rm", "cp", "mkdir")
+GUARD = r'''#!/bin/bash
+for a in "$@"; do
+  case "$a" in
+    */../*|*/..) echo "REFUSED a path with ..: @NAME@ $*" >> "$T/calls"; exit 97;;
+    -*|"$T"/*) ;;
+    *) echo "REFUSED outside the test's folder: @NAME@ $*" >> "$T/calls"; exit 97;;
+  esac
+done
+exec "@REAL@" "$@"'''
 
 FAKES = {
     # what `ioreg -l -w0` prints: the file the test wrote (and may write again between two looks)
@@ -150,7 +162,7 @@ class Result:
     pass
 
 
-def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True):
+def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
     line that changes the fake NVRAM during it."""
@@ -163,11 +175,15 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True):
             p = fake / name
             p.write_text(body + "\n")
             p.chmod(p.stat().st_mode | stat.S_IXUSR)
-        for name in REAL:
+        for name in REAL + GUARDED:
             real = shutil.which(name, path="/usr/bin:/bin")
             if not real:
                 raise Unsafe(f"no {name} in /usr/bin or /bin")
-            (fake / name).symlink_to(real)
+            if name in GUARDED:
+                (fake / name).write_text(GUARD.replace("@NAME@", name).replace("@REAL@", real) + "\n")
+                (fake / name).chmod(0o755)
+            else:
+                (fake / name).symlink_to(real)
         text = redirect(job, fake, t)
         lib = t / "Library"
         bk = t / INSTALLER["BK"].lstrip("/")
@@ -208,6 +224,7 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True):
         def read(path):
             return path.read_text() if path.exists() else ""
         r.rc, r.err = p.returncode, p.stderr
+        r.fake = fake if keep else None
         r.log = read(lib / "NullMoth/lastgood.log")
         r.calls = read(t / "calls")
         r.sleeps = int(read(t / "sleep.n") or 0)
@@ -222,7 +239,8 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True):
         r.job_gone = not plist.exists() and not script.exists()
         r.restarted = "shutdown -r now" in r.calls
     finally:
-        shutil.rmtree(t, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(t, ignore_errors=True)
     return r
 
 
@@ -336,6 +354,23 @@ for what, bad in (("its PATH line changed", job.replace(PATH_LINE, "PATH=/bin:/u
         arm(f"control: a job that would reach this machine is not run ({what})", True)
     except AssertionError as e:
         arm(f"control: a job that would reach this machine is not run ({what})", False, e)
+# the guard in front of the real rm, cp and mkdir: a path outside the test's folder is refused, one inside is done
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, keep=True)
+try:
+    t = r.fake.parent
+    env = {"T": str(t), "PATH": str(r.fake)}
+    (t / "inside").mkdir()
+    out = subprocess.run([str(r.fake / "rm"), "-rf", "/nonexistent-outside-the-test"], env=env, capture_output=True)
+    arm("control: the real rm is not handed a path outside the test's folder", out.returncode == 97
+        and "REFUSED outside the test's folder: rm" in (t / "calls").read_text(), out)
+    out = subprocess.run([str(r.fake / "mkdir"), "-p", f"{t}/../outside"], env=env, capture_output=True)
+    arm("  nor mkdir one that only starts there by name", out.returncode == 97
+        and not (t.parent / "outside").exists(), out)
+    out = subprocess.run([str(r.fake / "rm"), "-rf", str(t / "inside")], env=env, capture_output=True)
+    arm("  and a path inside it is removed", out.returncode == 0 and not (t / "inside").exists(), out)
+finally:
+    shutil.rmtree(r.fake.parent, ignore_errors=True)
+
 try:
     live = template(src).replace("\\$(date)", "$(date)", 1)
     if live == template(src):
