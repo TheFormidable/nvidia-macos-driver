@@ -50,6 +50,7 @@ def skip(why):
 
 # ------------------------------------------------------------------------------------------------ making Mach-O files
 LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
+RUST_DIST = "/Users/runner/work/rust/rust/build"   # the machine Rust is built on, as Rust's distribution names it
 OLDEST = "12.0"      # the oldest macOS a file of this test is made for (the base package's nm_unzstd)
 
 
@@ -258,6 +259,9 @@ class Scene:
         rs = w / "tools/rustup/toolchains/1.98.1-x86_64-apple-darwin/bin"
         for b in ("rustc", "cargo"):
             mk.make(rs / b, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",))
+        # Rust's rust-lld as its distribution ships it: beside its own lib folder it searches one of Rust's build machine
+        self.rust_lld = rs.parent / "lib/rustlib/x86_64-apple-darwin/bin/rust-lld"
+        mk.make(self.rust_lld, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib", RUST_DIST + "/x86_64-apple-darwin/llvm/lib"))
         (tc / "bin/pkg-config").symlink_to("pkgconf")
         (tc / "bin/glslangValidator").symlink_to("glslang")
         tb = w / "tools/bin"
@@ -308,10 +312,10 @@ class Scene:
         rc, out = run([self.script, "watch-start", self.ci, self.p], self.env)
         assert rc == 0, out
 
-    def prove(self, watch=True):
+    def prove(self, watch=True, script=None):
         if watch and not (self.ci / "brew-watch.pid").exists():
             run([self.script, "watch-start", self.ci, self.p], self.env)
-        return run([self.script, "prove", self.w, self.ci / "brew-before.txt", self.ci, self.p], self.env, timeout=300)
+        return run([script or self.script, "prove", self.w, self.ci / "brew-before.txt", self.ci, self.p], self.env, timeout=300)
 
 
 def seen_then_exit(ci):
@@ -644,6 +648,35 @@ def main():
         control("a tool that searches Homebrew's lib folder (LC_RPATH) is caught", "rpath /usr/local/lib",
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("/usr/local/lib",)),
                 lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))
+        # Rust's rust-lld searches a folder of the machine Rust was built on: the first prove above passed with it
+        arm("the search path of Rust's build machine in Rust's own rust-lld is not a finding, and the tools' line says how many it left out",
+            f"not counted: 1 search path(s) under {RUST_DIST}" in out and "ships in its own rust-lld and which name no folder of this Mac" in out, out)
+        control("the same search path in a tool that is not Rust's own is caught", f"rpath {RUST_DIST}/x86_64-apple-darwin/llvm/lib",
+                lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=(RUST_DIST + "/x86_64-apple-darwin/llvm/lib",)),
+                lambda: mk.make(bg, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib",)))
+        # a folder of that name that IS on this Mac would be searched. No test makes /Users/runner/...: a copy of the
+        # script whose name for Rust's build machine is a folder of this test shows both sides (the name is its only change)
+        named_line = f"RUST_DIST_BUILD={RUST_DIST}\n"
+        own = sc.script.read_text()
+        here = tmp / "rust-build-machine"
+        dist_script = sc.co / "build/ci_full_build_rustdist.sh"
+        with open(sc.co / ".git/info/exclude", "a") as ex:
+            ex.write("/build/ci_full_build_rustdist.sh\n")
+        dist_script.write_text(own.replace(named_line, f"RUST_DIST_BUILD={shlex.quote(str(here))}\n"))
+        arm("the script names Rust's build machine in one line, the one this test's copy changes", own.count(named_line) == 1, own.count(named_line))
+        mk.make(sc.rust_lld, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib", str(here / "x86_64-apple-darwin/llvm/lib")))
+        try:
+            rc, o = sc.prove(script=dist_script)
+            arm("a search path of Rust's build machine that names no folder here is left out", rc == 0 and "not counted: 1 search path(s)" in o,
+                "\n".join(failures(o)) or o)
+            (here / "x86_64-apple-darwin/llvm/lib").mkdir(parents=True)
+            rc, o = sc.prove(script=dist_script)
+            arm("control: once a folder of that name is on this Mac, the search path is a finding",
+                rc == 1 and any(f"rust-lld: rpath {here}/x86_64-apple-darwin/llvm/lib" in b for b in failures(o)), o)
+        finally:
+            shutil.rmtree(here, ignore_errors=True)
+            dist_script.unlink()
+            mk.make(sc.rust_lld, "bundle", ("/usr/lib/libSystem.B.dylib",), rpaths=("@loader_path/../lib", RUST_DIST + "/x86_64-apple-darwin/llvm/lib"))
         r = w / "package/pkgroot"
         tbz = w / "package/nullmoth-nvidia-local-abc1234.tar.gz"
         control("a staged package without its tarball is caught", "no tarball", lambda: tbz.rename(tmp / "tb.away"), lambda: (tmp / "tb.away").rename(tbz))
