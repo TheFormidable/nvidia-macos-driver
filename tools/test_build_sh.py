@@ -1534,6 +1534,65 @@ def arm_ownllvm():
              brewllvm_problems(('  [ -n "$LLVM_PREFIX" ] && [ -n "$BREW_PREFIX" ] && [ -d "$(brew_opt llvm)" ] || return 1\n', '  return 1\n')))
 
 
+# Every tool already there, none of it Homebrew's: the tester's settings (NM_PYTHON, NM_LLVM_PREFIX,
+# NM_SPIRV_TOOLS_PREFIX), the toolchain an earlier deps built (ninja, cmake, pkgconf, glslang), macOS's patch. With
+# NM_TOOLS_FROM=homebrew and a Homebrew present, deps calls no brew at all, not even "brew info": each call it can make
+# comes after it knows that a tool is missing and that Homebrew could be the one to give it. The stand-in Homebrew
+# records every call (brew_calls). deps runs twice: the first builds the pinned translator against the LLVM of the
+# settings, the second finds everything.
+def settings_sandbox(name, script_edit=None):
+    sb = Sandbox(name)
+    sb.work.mkdir(parents=True)
+    (sb.work / ".nullmoth-build-workdir").write_text("made by the test\n")
+    tc = sb.work / "tools/toolchain"
+    sb.wrap(tc / "bin/ninja", "ver", "1.13.2")
+    sb.wrap(tc / "bin/cmake", "cmake", "cmake version 4.4.5")
+    sb.wrap(tc / "bin/pkg-config", "ver", "2.5.1")
+    sb.wrap(tc / "bin/glslangValidator", "ver", "Glslang Version: 11:16.6.0")
+    (tc / ".nm-toolchain").mkdir(parents=True)
+    for tool in ("ninja", "cmake", "pkgconf", "glslang"):
+        (tc / ".nm-toolchain" / tool).write_text(f"{tool} built by an earlier deps\n")
+    mine = sb.home / "mine"
+    sb.wrap(mine / "llvm/bin/llvm-config", "ver", "22.1.8")
+    (mine / "llvm/lib").mkdir(parents=True)
+    (mine / "llvm/lib/libclang.dylib").write_text("")
+    (mine / "spirv-tools/lib/pkgconfig").mkdir(parents=True)
+    (mine / "spirv-tools/lib/pkgconfig/SPIRV-Tools.pc").write_text("Name: SPIRV-Tools\nVersion: 2026.4.1\n")
+    sb.wrap(mine / "python/bin/python3.14", "py", "3.14.10")
+    if script_edit:
+        sb.break_script(*script_edit)
+    return sb, {"NM_PYTHON": str(mine / "python/bin/python3.14"), "NM_LLVM_PREFIX": str(mine / "llvm"),
+                "NM_SPIRV_TOOLS_PREFIX": str(mine / "spirv-tools")}
+
+
+def settings_problems(script_edit=None):
+    sb, extra = settings_sandbox("settings", script_edit)
+    p = []
+    for n in (1, 2):
+        sb.clear()
+        rc, out = sb.run("deps", "-y", extra=extra)
+        if rc != 0 or "deps: everything required is present" not in out:
+            p.append(f"deps run {n}: exit {rc}: {out[-600:]}")
+        if brew_calls(sb):
+            p.append(f"deps run {n} called Homebrew: {brew_calls(sb)[:4]}")
+        if n == 1 and not [l for l in sb.jlines() if l.startswith("cmake -S ")]:
+            p.append("the first deps did not build the translator")
+        if "Homebrew formulas to install" in out:
+            p.append(f"deps run {n} lists Homebrew formulas to install")
+    return p
+
+
+def arm_settings():
+    p = settings_problems()
+    check("every tool from the tester's settings and the toolchain, none from Homebrew: deps calls no brew at all, "
+          "not even brew info, in its first run (it builds the translator) and its second", not p, p)
+    negative("deps that asks Homebrew about its llvm while the LLVM in use is not Homebrew's",
+             settings_problems(('[ "$nobrew" = 0 ] && { brew_llvm_chosen || case " ${want[*]-} " in *" llvm "*) true ;; *) false ;; esac; } && brew_may_ask',
+                                '[ "$nobrew" = 0 ] && brew_may_ask')))
+    negative("deps that asks Homebrew before it knows that a tool is missing",
+             settings_problems(('  # formulas for what is missing\n', '  brew_llvm_is_pinned || true\n')))
+
+
 # ------------------------------------------------------------------------------------------- the source way (NM_TOOLS_FROM)
 # build/toolchain.sh is a stand-in (FAKE_SH "toolchain"): its calls are journalled as "toolchain-build <tool> <settings>",
 # it needs the source trees and the earlier tools a real build needs, and it lays out what build.sh looks for.
@@ -4203,6 +4262,8 @@ def main():
                     timed("spirvprefix", arm_spirvprefix)
                 if want("ownllvm"):
                     timed("ownllvm", arm_ownllvm)
+                if want("settings"):
+                    timed("settings", arm_settings)
                 if want("source"):
                     timed("source", arm_source)
                     timed("source_some", arm_source_some)
