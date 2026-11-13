@@ -1931,7 +1931,9 @@ def arm_steps(mac):
         negative("python3 linked into tools/bin (the bare interpreter, not the environment)", python_problems(mac))
 
 
-def wait_for(path, timeout=60):
+def wait_for(path, timeout=300):
+    """Until <path> exists, at most as long as one run may take (Sandbox.run): a step starts only after build.sh's own
+    checks, which take many times longer under macOS's bash 3.2 on a Mac busy with other suites (run_all_tests -j 4)."""
     t0 = time.time()
     while not path.exists():
         if time.time() - t0 > timeout:
@@ -2024,7 +2026,7 @@ def concurrent_problems(sb):
         rc, out = sb.run("--force", "build", "airdis")
         (sb.ctl / "release-nmsmn").write_text("")
         try:
-            a_out, _ = a.communicate(timeout=120)
+            a_out, _ = a.communicate(timeout=300)
         except subprocess.TimeoutExpired:
             stop(a)
             a.communicate()
