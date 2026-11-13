@@ -395,7 +395,7 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_clients, CTLFLAG_RD, (int64_t *)&gNvEvtCl
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_post_drain_waits, CTLFLAG_RD, (int64_t *)&gNvEvtDrainWaits, "client closes that waited for an event post in flight");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_post_drain_stuck, CTLFLAG_RD, (int64_t *)&gNvEvtDrainStuck, "connections kept, not freed, because an event post never finished");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_user_missed, CTLFLAG_RD, (int64_t *)&gNvEvtUserMissed, "user space: sleeps that ran to their timeout although the GPU work was done");
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_user_fallbacks, CTLFLAG_RD, (int64_t *)&gNvEvtUserFellBack, "user space: processes that went back to polling after missed wakes");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_evt_user_fallbacks, CTLFLAG_RD, (int64_t *)&gNvEvtUserFellBack, "user space: times a process went back to polling (missed wakes, or a kernel wait that failed)");
 
 // System sleep gate, the nv_system_pm_lock of kernel-open/nvidia/nv.c. Linux freezes user space before suspend and
 // still takes that lock in every ioctl; macOS freezes nothing, so on wake WindowServer and Metal apps called into RM
