@@ -3,10 +3,10 @@
 
 A workflow file is code nobody runs locally. This reads .github/workflows/ci.yml as text (no YAML library needed) and
 holds the properties that matter: every action is pinned to a commit, the token is read-only and is not left in the
-clone, the scripts and tests the jobs name exist, the two jobs that gate do gate and get a full clone (their tests
-read older revisions), the Mac kext job runs on Apple silicon and on Intel and checks what an Intel Mac's compiler can
-slip into a kext, the host tests and the plugin get the Vulkan headers the release uses, and nothing uploads or
-publishes. Each property has a control: the same check on a copy of the file with that one thing
+clone, the scripts and tests the jobs name exist, the jobs that gate do gate (the two that run tests get a full clone:
+their tests read older revisions), the Mac kext job runs on Apple silicon and on Intel and checks what an Intel Mac's
+compiler can slip into a kext, the host tests and the plugin get the Vulkan headers the release uses, and nothing
+uploads or publishes. Each property has a control: the same check on a copy of the file with that one thing
 wrong has to fail.
 
 It also holds build/ci_plugin.sh to the compiler line of build/build_plugin_release.sh, which it copies: the release
@@ -24,7 +24,7 @@ import tempfile
 
 ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1]
 FAILS = []
-GATES = ("kexts-linux", "host-tests")
+GATES = ("kexts-linux", "host-tests", "plugin")
 
 
 def arm(name, ok, detail=""):
@@ -153,6 +153,8 @@ control("a checkout that keeps the token is caught", "          persist-credenti
 control("the kext check dropped from the Linux job is caught", "        run: bash build/kext_check.sh\n      - name: Switch registry", "        run: true\n      - name: Switch registry",
         "does not run the kext check")
 control("sudo is caught", "run: bash build/ci_plugin.sh", "run: sudo bash build/ci_plugin.sh", "sudo")
+control("the plugin job made non-gating is caught", "    runs-on: macos-26\n    timeout-minutes: 30\n", "    runs-on: macos-26\n    timeout-minutes: 30\n    continue-on-error: true\n",
+        "plugin no longer gates")
 control("host tests without the release's Vulkan headers are caught", '          echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"\n', "", "does not set NM_VULKAN_INCLUDE")
 control("the headers cached under a key that is not their pin are caught", "key: ci-vulkan-headers-${{ steps.vkh.outputs.commit }}",
         "key: ci-vulkan-headers-${{ hashFiles('build/ci_plugin.sh') }}", "under the key of their pin")
