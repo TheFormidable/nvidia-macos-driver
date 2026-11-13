@@ -1,7 +1,8 @@
 # Channel recovery: a GPU fault costs the frames in flight, not the device
 
-Status: NVK's part, the kext's part and the Metal plugin's part compile when cross-built for macOS on another system
-(not yet with Apple's own compiler), and their pure logic runs in host tests. **None of it has been loaded or run on a
+Status: the kext's part and the Metal plugin's part have been compiled and linked with Apple's own toolchain on one
+Mac (an earlier state of this branch); NVK's part has only been cross-built for macOS on another system. Their pure
+logic runs in host tests. **None of it has been loaded or run on a
 Mac, and no rebuild of a real channel has been seen.** It is
 on by default. `NVK_CHANNEL_RECOVER=0` in `/Library/GPUBundles/nvmtl/nvrm610.conf` switches it off, and NVK then runs
 the 2.9 code.
