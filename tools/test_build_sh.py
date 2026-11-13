@@ -949,7 +949,8 @@ def arm_hostbrew():
         rc, out = sb.run("doctor", extra=extra)
         if f"Homebrew {standin}" not in out:
             p.append(f"doctor does not name the stand-in Homebrew: {[l for l in out.splitlines() if 'Homebrew' in l][:3]}")
-        rc, out = sb.run("deps", "--no-install", "-y", extra=extra)
+        # a deps that installs: with --no-install it asks Homebrew nothing (brew_may_ask), and the arm would prove nothing
+        rc, out = sb.run("deps", "-y", extra=extra)
         if not [l for l in sb.jlines() if l.startswith("brew ")]:
             p.append("deps did not ask the stand-in Homebrew anything")
         if reached():
@@ -1121,6 +1122,8 @@ def arm_brewenv():
         out = []
         for n, line in enumerate(text.splitlines(), 1):
             code = re.sub(r"(^|\s)#.*$", "", line)
+            if re.match(r"\s*say\s", code):   # a sentence that shows a command, as the dry run does, runs nothing
+                continue
             if re.search(r'(?<![\w-])"?\$\{?BREW\}?"?\s+(?:-|[a-z])', code) and 'HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1' not in code:
                 out.append(f"{n}: {line.strip()[:120]}")
         return out
