@@ -131,6 +131,8 @@ case "$role" in
       *) exit 0 ;;
     esac ;;
   brew)
+    # every call, whatever it asks: the three variables a login shell exports for a Homebrew
+    rec brew-callenv "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
     case "${1:-}" in
       --version) echo "Homebrew 4.6.3" ;;
       --prefix) echo "$SB/brew" ;;
@@ -863,7 +865,7 @@ def arm_brewenv():
     def problems(sb):
         sb.clear()
         sb.run("deps", "-y", extra=dict(poison))
-        calls = [l for l in sb.jlines() if l.startswith("brew-info") or l.startswith("brew-env")]
+        calls = [l for l in sb.jlines() if l.startswith("brew-callenv")]
         p = []
         if not calls:
             p.append("no brew call was recorded at all (the arm proves nothing)")
@@ -879,6 +881,22 @@ def arm_brewenv():
     neg = Sandbox("brewenv-neg")
     neg.break_script('env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\', 'env \\')
     negative("a run_brew that passes the three variables through (no env -u)", problems(neg))
+    around = ('  # formulas for what is missing\n', '  [ -z "$("$BREW" --prefix)" ] || true\n  # formulas for what is missing\n')
+    neg2 = Sandbox("brewenv-neg2")
+    neg2.break_script(*around)
+    negative("a brew call in deps that goes around run_brew", problems(neg2))
+    # and by the text: run_brew's own line is the only one of build.sh that runs $BREW
+    def direct_calls(text):
+        out = []
+        for n, line in enumerate(text.splitlines(), 1):
+            code = re.sub(r"(^|\s)#.*$", "", line)
+            if re.search(r'(?<![\w-])"?\$\{?BREW\}?"?\s+(?:-|[a-z])', code) and 'HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1' not in code:
+                out.append(f"{n}: {line.strip()[:120]}")
+        return out
+    text = (ROOT / "build.sh").read_text()
+    check("build.sh runs Homebrew only through run_brew (no other line runs $BREW)", not direct_calls(text), direct_calls(text))
+    assert around[0] in text
+    negative("a line that runs \"$BREW\" --prefix directly", direct_calls(text.replace(*around)))
 
 
 def pathtools_problems(arch, script_edit=None):
