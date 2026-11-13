@@ -13,10 +13,31 @@
 #include <libkern/OSAtomic.h>
 #define FBLOG(fmt, ...) IOLog("NVRM-agdc: " fmt "\n", ##__VA_ARGS__)
 #include <mach/kmod.h>
+#include <libkern/OSKextLib.h>
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
 extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVRMAGDC, "0.1", _start, _stop) }
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
-extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
+// Staying loaded. The loader takes its sysctls back in stop(), and the kernel waits there for a handler that is still
+// running, but not the worker those sysctls start (gAgdcCall). stop() can leave it running: it waits at most 2 s for it,
+// and it cannot see a run the kernel has already taken off the queue that has not counted itself busy yet (the cancel
+// then reports nothing to cancel, and the free of a running call only defers the free of the call itself). The loader
+// is the kext's only object while no device-control object was created, so the kernel may unload the kext a minute
+// after that stop (it does so by itself once no object of its classes exists; `kmutil unload` asks for the same at
+// once) with the worker still in its code. So the loader's start, before it registers the sysctls, makes the kext
+// hold one reference on itself, never given back: an unload is then refused before anything is terminated. The stop
+// function refuses too, for the case that the reference could not be taken. A loader that declines (driver off) comes
+// before it and leaves a kext that unloads as before.
+static volatile SInt32 gAgdcStayLoaded;   // 0 nothing made yet; 1 the reference is held; 2 it was wanted and not obtained
+static void nvdaAgdcStayLoaded(void)
+{
+    if (!OSCompareAndSwap(0, 2, &gAgdcStayLoaded)) return;
+    // kmod_info.id is this kext's load tag: the loader writes it there (OSKextGetCurrentLoadTag() returns the same field,
+    // from libkmod's c_start.o, which this kext does not link)
+    const OSReturn r = OSKextRetainKextWithLoadTag((OSKextLoadTag)kmod_info.id);
+    if (r == kOSReturnSuccess) OSCompareAndSwap(2, 1, &gAgdcStayLoaded);
+    else FBLOG("no reference on this kext (0x%x): only its stop function keeps it loaded", (unsigned)r);
+}
+extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return OSAddAtomic(0, &gAgdcStayLoaded) ? KERN_FAILURE : KERN_SUCCESS; }
 #include "AppleGraphicsDeviceControl_re.h"
 #include "nvrm-agdc-k5.h"
 #include "nvrm_layout.h"
@@ -340,6 +361,7 @@ bool NVDAGDCLoader::start(IOService *provider)
 {
     { if (nvrm_driver_off()) return false; }
     if (!IOService::start(provider)) return false;
+    nvdaAgdcStayLoaded();   // before the sysctls: a write to debug.nvrmfb_agdc starts the worker, which can outlive stop()
     nvdaAgdcInstallSysctl(); FBLOG("loaded; idle until `sysctl debug.nvrmfb_agdc=1`"); return true;
 }
 void NVDAGDCLoader::stop(IOService *provider)
