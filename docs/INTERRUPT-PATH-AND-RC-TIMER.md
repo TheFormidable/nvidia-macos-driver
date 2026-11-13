@@ -1,18 +1,23 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
 Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **None of it has run on a
-GPU yet.** The code compiles for macOS 15 and 26 and its locking logic is tested on the host
-(`tools/test_quiesce_gates.cpp`, `tools/test_irq_timer_wiring.py`). Every change below is **on by default**; each one
-that changes behaviour has a boot-arg that turns it off. The old spellings `nvrmbhthread=1` and `nvrmrctimer=1` are
-still accepted and mean the default.
+GPU yet.** Apple's compiler on a Mac with macOS 26 built an earlier state of this code; the later changes (the reuse of
+a work queue, the idle power-down monitor at stop, sleep and shutdown, the kext's reference on itself, the count of
+retired nano timer slots) were compiled only by this repository's cross-compile check. The kernel functions the code
+calls are checked against the export lists of macOS 15 and 26. The gates and the hold against the idle power-down
+monitor are run with threads on the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`);
+`tools/test_irq_timer_wiring.py` checks the source text. Every change below is **on by default**; the five in this
+table have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
+the order of the teardown, the hold against the idle power-down monitor, the kext staying loaded) have none. The old
+spellings `nvrmbhthread=1` and `nvrmrctimer=1` are still accepted and mean the default.
 
 | Boot-arg | Turns off | Use it when |
 |---|---|---|
 | `nvrmbhthread=0` | the bottom-half thread: `rm_isr_bh` runs on the work loop right after `rm_isr`, as in 2.9 | a hang with `debug.nvrm_bh_runs` frozen, or RM messages about lock ownership |
 | `nvrmrctimer=0` | the RC timer: the RM's 1 Hz list never runs, as in 2.9 | a "GPU has fallen off the bus" (Xid 79) that does not happen with it |
 | `nvrmnanowait=0` | the wait of a nano timer cancel or destroy for a callback that is running | `debug.nvrm_nano_wait_timeouts` grows |
-| `nvrmworkq=0` | the RM work queues: every RM work item gets a thread of its own and a flush waits for all of them, as in 2.9 | a hang with `debug.nvrm_wq_flush_slow` growing, or `debug.nvrm_wq_abandoned` above 0 |
-| `nvrmatomic=0` | the answers by context: every OS-layer function answers as in 2.9, whatever the context | a hang or panic in an RM call made with interrupts off, or `debug.nvrm_atomic_mode` -1 |
+| `nvrmworkq=0` | the RM work queues: every RM work item gets a thread of its own and a flush waits for all of them, as in 2.9 (the driver's own bounded waits at stop, shutdown and sleep stay, on that flush) | a hang with `debug.nvrm_wq_flush_slow` growing, or `debug.nvrm_wq_abandoned` above 0 |
+| `nvrmatomic=0` | the answers by context: every OS-layer function answers as in 2.9, whatever the context | a hang or panic in an RM call made with interrupts off (with `debug.nvrm_atomic_mode` -1 the old answers are already in force: the switch changes nothing) |
 
 All of them are read once, at the first use. All the counters below are read-only sysctls (`sysctl debug | grep nvrm_`),
 readable over SSH while the screen is frozen.
