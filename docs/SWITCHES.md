@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 5 | 1 | 54 | 410 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 347 |  |  |  | 368 |
+| sysctl |  | 5 | 4 | 12 |  |  | 348 |  |  |  | 369 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -729,6 +729,7 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_layout_pure` | diag | read-only | 3.0 | - | functions the accelerator base leaves pure that NVAccel does not implement (expected 0; counted only) | kexts/NVRM/accel/nvaccel_layout.h |
 | `debug.nvaccel_layout_vtables` | diag | read-only | 3.0 | - | accelerator family vtables NVAccel read by length (0: not compared on this kernel) | kexts/NVRM/accel/nvaccel_layout.h |
 | `debug.nvaccel_layout_vtlong` | diag | read-only | 3.0 | - | vtables that read longer than this build; reported, never a reason to refuse | kexts/NVRM/accel/nvaccel_layout.h |
+| `debug.nvaccel_layout_vtshort` | diag | read-only | 3.0 | - | vtables that read shorter than this build; reported, never a reason to refuse | kexts/NVRM/accel/nvaccel_layout.h |
 | `debug.nvaccel_map_commit` | diag | read-only | 2.9 | - | GPU page-table commits (MAP_MEMORY_DMA ok) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_free` | diag | read-only | 2.9 | - | GPU VA ranges freed (nvAccelGpuVaFree) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_release` | diag | read-only | 2.9 | - | GPU page-table releases (UNMAP_ONLY) | kexts/NVRM/accel/nvrm-accel.cpp |

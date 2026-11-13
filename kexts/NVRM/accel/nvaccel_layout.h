@@ -37,22 +37,28 @@
  *   gained functions is caught elsewhere anyway: this kext's classes add no virtual function of their own (the test
  *   holds that), so they would be shorter than their parent, and the collection builder rejects a kext for that
  *   ("Malformed vtable") before any of this runs.
- *   A vtable that reads SHORTER REFUSES (unless nvlayout=0). Decision, and why it cannot fire on a macOS that is fine:
- *     - the reading does not depend on what follows the table: it stops at a null word INSIDE the expected count;
- *     - an Apple vtable has no null slot: a pure function is a pointer to __cxa_pure_virtual, the family uses single
- *       inheritance only (no secondary table, no offset words in the slots), and the pointers are fixed up when the
- *       collection is loaded, before any kext runs;
- *     - the same reading must first come out exactly equal on IOService (the calibration), else no table is compared;
- *     - the expected counts are Apple's own on macOS 15 and were found unchanged on 26.
- *   So a shorter reading means the base lost functions or the reconstruction has slots Apple's class does not have:
- *   every later slot of the driver's class is then one or more off, the driver calls wrong functions, and the
- *   collection builder does NOT catch it (a child longer than its parent is accepted). That is a panic waiting to
- *   happen, which is exactly what this check exists to turn into "no acceleration".
+ *   A vtable that reads SHORTER is also REPORTED and refuses nothing. The decision (argued here, and the reason this
+ *   file differs from the design, which let a length difference refuse): a shorter reading cannot be told apart, on
+ *   this machine, from a false alarm, so it must not take acceleration away on its own.
+ *     - It would be a real problem if Apple's base truly lost a virtual function: every later slot of the driver's
+ *       class is then one off and the driver calls the wrong function, and the kernel-collection builder does NOT
+ *       catch it (it accepts a child longer than its parent). A class size does not catch it either: adding or
+ *       removing a virtual function does not change sizeof. So nothing fires on a shorter reading.
+ *     - But the very same shorter reading appears with nothing wrong when the expected count is one too high for the
+ *       macOS in front of us: the family's headers are reconstructed by hand, the counts for macOS 26 were read from
+ *       a single kernel debug kit, and a point release of 15 or 26 can lay a reserved slot out differently. A refusal
+ *       would then remove acceleration from a Mac that is fine. Nobody here can read a running kernel collection to
+ *       rule that out, so the false-alarm cost (no acceleration for every such user) decides: a length, short or
+ *       long, is reported only, and only a class size refuses. This matches the framebuffer kext, where no length
+ *       refuses, and the rule that a false refusal must not cost a working machine its acceleration.
+ *   Both directions are published (property "nvaccel-layout-vtables", debug.nvaccel_layout_vtlong / _vtshort, a log
+ *   line), so a first boot still shows whether the family's tables read the way this build expects.
  *   Pure slots left (a function the base leaves pure and NVAccel does not implement) are counted only.
  *
  * The evaluation whose verdict can refuse is handed the sizes, the IOService calibration and only the tables that read
- * the same length or shorter: a table that reads longer cannot reach it. Its own text therefore counts only those
- * tables; the property "nvaccel-layout-vtables" and debug.nvaccel_layout_vtlong show the others.
+ * the SAME length: a table that reads shorter or longer cannot reach it, so only a class size ever refuses. Its own
+ * text therefore counts only the tables that read the same; the property "nvaccel-layout-vtables" and
+ * debug.nvaccel_layout_vtlong / _vtshort show the ones that differ.
  *
  * Who asks: NVAccel::probe, after its device gate and before IOGraphicsAccelerator2::probe. On a refusal the probe
  * returns NULL and IOKit drops the instance, the path every accelerator start that returns false takes. Nothing of
@@ -88,7 +94,8 @@ static inline void nvaccelVtPair(NvLayoutOut *o, const NvLayoutVt *vt, int r, in
 }
 
 /* Read the lengths, write the line, and copy into mayRefuse (room for cap entries) the tables that may reach the
- * verdict: those that read the same length or shorter. A table that reads longer, or cannot be read, is never copied.
+ * verdict: those that read the SAME length. A table that reads shorter or longer, or that cannot be read, is never
+ * copied, so a vtable length never refuses -- only a class size does (see the header comment).
  * When IOService does not read exactly its expected length, no other table is read and nothing is copied.
  * Returns the number of entries copied. Each table is read once here; the evaluation reads the copied ones again
  * (constant data, so it sees what this saw).
@@ -120,7 +127,7 @@ static inline unsigned nvaccelVtReport(NvaccelVtReport *rep, const NvLayoutVt *i
         rep->compared++;
         if (r[i] < 0) rep->shorter++;
         if (r[i] > 0) rep->longer++;
-        if (r[i] <= 0 && mayRefuse && n < cap) mayRefuse[n++] = vts[i];
+        if (r[i] == 0 && mayRefuse && n < cap) mayRefuse[n++] = vts[i];
     }
     nvLayoutPutS(&o, !rep->compared ? "not compared: " : (rep->shorter || rep->longer) ? "differ: " : "same: ");
     for (unsigned i = 0; i < m; i++) {
@@ -129,7 +136,7 @@ static inline unsigned nvaccelVtReport(NvaccelVtReport *rep, const NvLayoutVt *i
     }
     nvLayoutPutS(&o, " (virtual functions: this macOS/the driver)");
     if (rep->longer) nvLayoutPutS(&o, "; longer: reported only, not a reason to refuse");
-    if (rep->shorter) nvLayoutPutS(&o, "; shorter: refuses (see nvaccel-layout)");
+    if (rep->shorter) nvLayoutPutS(&o, "; shorter: reported only, not a reason to refuse");
     return n;
 }
 
@@ -219,7 +226,7 @@ NVL_VTABLE(IOAccelLegacyDisplayMachine, "__ZTV27IOAccelLegacyDisplayMachine");
 static NvLayoutOnce gNvaccelLayout;
 /* what debug.nvaccel_layout* read: every caller writes the same values after the evaluation */
 static int gNvaccelLayoutState, gNvaccelLayoutClasses, gNvaccelLayoutVtables, gNvaccelLayoutBad, gNvaccelLayoutVtLong,
-           gNvaccelLayoutPure;
+           gNvaccelLayoutVtShort, gNvaccelLayoutPure;
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutState, 0,
            "Apple class layout seen by NVAccel: 0 not run, 1 ok, 2 refused, 3 overridden (nvlayout=0), 4 unknown");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_classes, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutClasses, 0,
@@ -227,9 +234,11 @@ SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_classes, CTLFLAG_RD | CTLFLAG_LOCKED
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_vtables, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutVtables, 0,
            "accelerator family vtables NVAccel read by length (0: not compared on this kernel)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_bad, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutBad, 0,
-           "differences that refuse: class sizes plus vtables that read shorter");
+           "class sizes that differ from this build (the only difference that refuses; a vtable length never does)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_vtlong, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutVtLong, 0,
            "vtables that read longer than this build; reported, never a reason to refuse");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_vtshort, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutVtShort, 0,
+           "vtables that read shorter than this build; reported, never a reason to refuse");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_layout_pure, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvaccelLayoutPure, 0,
            "functions the accelerator base leaves pure that NVAccel does not implement (expected 0; counted only)");
 
@@ -245,6 +254,7 @@ static void nvaccelLayoutSysctls(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_layout_vtables);
     sysctl_register_oid(&sysctl__debug_nvaccel_layout_bad);
     sysctl_register_oid(&sysctl__debug_nvaccel_layout_vtlong);
+    sysctl_register_oid(&sysctl__debug_nvaccel_layout_vtshort);
     sysctl_register_oid(&sysctl__debug_nvaccel_layout_pure);
 }
 
@@ -314,8 +324,9 @@ static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provide
     gNvaccelLayoutState = (int)st;
     gNvaccelLayoutClasses = (int)t->classes;
     gNvaccelLayoutVtables = (int)vt.compared;
-    gNvaccelLayoutBad = (int)(t->sizeBad + t->vtBad);
+    gNvaccelLayoutBad = (int)(t->sizeBad + t->vtBad);   // vtBad is 0: only same-length tables reach the verdict
     gNvaccelLayoutVtLong = (int)vt.longer;
+    gNvaccelLayoutVtShort = (int)vt.shorter;
     // Pure slots: only when the verdict lets the instance live and IOGraphicsAccelerator2's table read exactly its
     // expected length, so both tables hold at least that many slots. Never called through, only compared.
     if (st != kNvLayoutRefused && self && vt.calibrated && nvLayoutVtCmp(vts[0].slots, vts[0].built, nullptr) == 0) {
@@ -336,8 +347,8 @@ static bool nvaccelLayoutAllows(IOGraphicsAccelerator2 *self, IOService *provide
         OSSafeReleaseNULL(had);
     }
     if (st == kNvLayoutRefused)
-        IOLog("%s: does not attach: an accelerator family class has another size or fewer virtual functions than in "
-              "this build (boot-arg nvlayout=0 attaches anyway); the display runs without acceleration\n", who);
+        IOLog("%s: does not attach: an accelerator family class has another size than in this build "
+              "(boot-arg nvlayout=0 attaches anyway); the display runs without acceleration\n", who);
     return st != kNvLayoutRefused;
 }
 #endif /* KERNEL */

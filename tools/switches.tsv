@@ -669,6 +669,7 @@ sysctl	debug.nvaccel_layout_classes	diag	read-only	3.0	-	accelerator family clas
 sysctl	debug.nvaccel_layout_pure	diag	read-only	3.0	-	functions the accelerator base leaves pure that NVAccel does not implement (expected 0; counted only)
 sysctl	debug.nvaccel_layout_vtables	diag	read-only	3.0	-	accelerator family vtables NVAccel read by length (0: not compared on this kernel)
 sysctl	debug.nvaccel_layout_vtlong	diag	read-only	3.0	-	vtables that read longer than this build; reported, never a reason to refuse
+sysctl	debug.nvaccel_layout_vtshort	diag	read-only	3.0	-	vtables that read shorter than this build; reported, never a reason to refuse
 sysctl	debug.nvaccel_map_commit	diag	read-only	2.9	-	GPU page-table commits (MAP_MEMORY_DMA ok)
 sysctl	debug.nvaccel_map_free	diag	read-only	2.9	-	GPU VA ranges freed (nvAccelGpuVaFree)
 sysctl	debug.nvaccel_map_release	diag	read-only	2.9	-	GPU page-table releases (UNMAP_ONLY)
