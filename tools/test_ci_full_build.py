@@ -151,7 +151,8 @@ def git_quiet(env):
 # those watches that is still there, also a stopped one. It names the folder only in its environment, so that the
 # test's own last check ("no watch is left running") does not see it.
 GUARD = r'''seen=" "
-while kill -0 "$NMT_PID" 2>/dev/null; do
+# a killed test that its parent has not reaped yet is a zombie, which kill -0 still finds: that one is gone too
+while kill -0 "$NMT_PID" 2>/dev/null && case "$(ps -o stat= -p "$NMT_PID" 2>/dev/null)" in *Z*) false ;; *) true ;; esac; do
   p=$(sed -n 1p "$NMT_CI/brew-watch.pid" 2>/dev/null)
   case "$p" in ""|*[!0-9]*) ;; *) case "$seen" in *" $p "*) ;; *) seen="$seen$p " ;; esac ;; esac
   sleep 1
@@ -782,15 +783,15 @@ def main():
         started = watches(ci2)
         for pid, _ in started:
             os.kill(pid, signal.SIGSTOP)
-        stands_for_test.kill()
-        stands_for_test.wait()
+        stands_for_test.kill()   # not reaped until the guard is done: a killed test whose parent has not waited for it yet
         try:
             g.wait(timeout=15)
         except subprocess.TimeoutExpired:
             g.kill()
+        stands_for_test.wait()
         time.sleep(1)
         left = watches(ci2)
-        arm("a killed test leaves no watch running: once its process is gone, its guard ends every watch it started, also a stopped one",
+        arm("a killed test leaves no watch running: once its process is gone (also while it is an unreaped zombie), its guard ends every watch it started, also a stopped one",
             len(started) == 1 and not left and not (ci2 / "brew-watch.pid").exists(), (started, left))
         for pid, _ in left:   # what the arm found, so that this test itself leaves nothing
             for sg in (signal.SIGCONT, signal.SIGKILL):
