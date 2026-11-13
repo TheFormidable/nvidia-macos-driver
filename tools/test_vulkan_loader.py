@@ -14,6 +14,8 @@ own:
            program that resolves links names it); installing the loader writes a "dylib" that carries SYSCONFDIR
   lipo, vtool   print what the real ones print for an x86_64 library built for macOS 15
   strings  prints what it reads
+  mktemp   makes the folder in TMPDIR: on a Mac a bare mktemp -d was seen to make it in the user's own temporary folder,
+           not in the TMPDIR it was given, which would take the script's folder out of the test's
 Nothing outside the test's temporary folder is written.
 usage: test_vulkan_loader.py"""
 import re, shutil, subprocess, sys, tempfile
@@ -91,6 +93,8 @@ class Scene:
         tool(self.bin / "vtool", '[ "$1" = -show-build ] && [ -f "$2" ] || { echo "stand-in vtool: unexpected: $*" >&2; exit 64; }\n'
              'printf \'%s\\n\' "$2:" "Load command 10" "      cmd LC_BUILD_VERSION" "  cmdsize 32" " platform MACOS" "    minos 15.0" "      sdk 26.5" "   ntools 1"\n')
         tool(self.bin / "strings", '[ "$1" = -a ] && shift\nif [ $# -gt 0 ]; then cat "$1"; else cat; fi\n')
+        tool(self.bin / "mktemp", '[ "$*" = -d ] || { echo "stand-in mktemp: unexpected: $*" >&2; exit 64; }\n'
+             'PATH=/usr/bin:/bin\nexec mktemp -d "$TMPDIR/tmp.XXXXXXXXXX"\n')
 
     def run(self):
         self.runs += 1
@@ -142,7 +146,9 @@ try:
           sum(c.startswith("git clone ") and f"--branch {TAG} file://{s.tmp}/khronos/{n} " in c for c in s.calls for n in SHA) == 2, s.calls)
     check("the library names /etc and not the temporary folder it was built in",
           lib is not None and len(names) == 1 and names[0] not in lib and "/etc\n" in lib, (names, lib))
-    check("the temporary folder is gone when the script ends", list(s.t.iterdir()) == [], list(s.t.iterdir()))
+    check("the script's temporary folder is made in the TMPDIR it is given, and is gone when the script ends",
+          len(conf) == 1 and len(names) == 1 and conf[0].endswith(f"-DCMAKE_INSTALL_PREFIX={s.t}/{names[0]}/loader") and list(s.t.iterdir()) == [],
+          (conf, list(s.t.iterdir())))
     first = (m.group(1) if m else None, names)
     rc, out = s.run()
     m = re.fullmatch(rf"Vulkan-Loader {re.escape(TAG)} {SHA['Vulkan-Loader']} sha256 ([0-9a-f]{{64}})", last(out))
