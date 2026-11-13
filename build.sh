@@ -643,12 +643,14 @@ find_tools() {
     T_LLVMCONFIG=$LLVM_PREFIX/bin/llvm-config
     LIBCLANG_DIR=$LLVM_PREFIX/lib
   fi
-  # SPIRV-LLVM-Translator: its .pc must have LLVM's major.minor. The one deps builds, then Homebrew's (which follows
-  # Homebrew's current llvm), then one inside the LLVM prefix; the first that matches LLVM, else the first found
+  # SPIRV-LLVM-Translator: its .pc must have LLVM's major.minor. The one deps builds, then Homebrew's (only when the
+  # LLVM in use is Homebrew's llvm, the one it is linked against: brew_llvm_chosen), then one inside the LLVM prefix;
+  # the first that matches LLVM, else the first found
   PC_SPIRV_LLVM=""; T_LLVMSPIRV=""
-  local first="" mm=""
+  local first="" mm="" brewtr=""
   [ -z "$T_LLVMCONFIG" ] || mm=$("$T_LLVMCONFIG" --version 2>/dev/null | cut -d. -f1-2)
-  for p in "$SPIRVLLVM_PREFIX" "$(brew_opt spirv-llvm-translator)" "$LLVM_PREFIX"; do
+  ! brew_llvm_chosen || brewtr=$(brew_opt spirv-llvm-translator)
+  for p in "$SPIRVLLVM_PREFIX" "$brewtr" "$LLVM_PREFIX"; do
     [ -n "$p" ] && [ -f "$p/lib/pkgconfig/LLVMSPIRVLib.pc" ] || continue
     [ -n "$first" ] || first=$p
     if [ -n "$mm" ]; then case "$(pc_version "$p/lib/pkgconfig/LLVMSPIRVLib.pc")" in "$mm"|"$mm".*) first=$p; break ;; esac; fi
@@ -664,6 +666,13 @@ find_tools() {
     PC_SPIRV_TOOLS=$p/lib/pkgconfig; break
   done
   return 0
+}
+# Homebrew's spirv-llvm-translator is linked against the libLLVM of Homebrew's llvm formula and belongs to no other LLVM:
+# with the user's own LLVM (NM_LLVM_PREFIX), llvm@22 or the toolchain's, mesa_clc would hold two copies of LLVM.
+# brew_llvm_chosen: the LLVM in use is that formula's (the same folder as <Homebrew>/opt/llvm, however it is named).
+brew_llvm_chosen() {
+  [ -n "$LLVM_PREFIX" ] && [ -n "$BREW_PREFIX" ] && [ -d "$(brew_opt llvm)" ] || return 1
+  [ "$(cd "$LLVM_PREFIX" 2>/dev/null && pwd -P)" = "$(cd "$(brew_opt llvm)" 2>/dev/null && pwd -P)" ]
 }
 spirv_llvm_ok() {   # a SPIRV-LLVM-Translator of the chosen LLVM's major.minor was found
   local mm
@@ -1255,9 +1264,10 @@ cmd_deps() {
     else warn "Homebrew has no LLVM $NM_PIN_TOOL_LLVM_MAJOR formula today: install LLVM $NM_PIN_TOOL_LLVM_MAJOR.x yourself (with its clang libraries) and set NM_LLVM_PREFIX to it"; fi
     [ -z "$llvmf" ] || want+=( "$llvmf" )
   fi
-  # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22. Otherwise
-  # deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
-  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && brew_may_ask && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
+  # Homebrew's spirv-llvm-translator is built against its current llvm: it fits only while that is LLVM 22, and only
+  # when that llvm is the one in use or installed now (brew_llvm_chosen); Homebrew is not even asked otherwise.
+  # Otherwise deps_spirv_llvm builds the pinned one below, once LLVM 22, cmake and ninja are there.
+  if ! spirv_llvm_ok && [ "$nobrew" = 0 ] && { brew_llvm_chosen || case " ${want[*]-} " in *" llvm "*) true ;; *) false ;; esac; } && brew_may_ask && ! brew_installed spirv-llvm-translator && brew_llvm_is_pinned; then
     want+=( spirv-llvm-translator )
   fi
   if [ ${#want[@]} -gt 0 ]; then
@@ -1319,7 +1329,11 @@ deps_spirv_llvm() {
   local src=$SRC/SPIRV-LLVM-Translator hdr=$SRC/SPIRV-Headers bld=$TOOLS/spirv-llvm-translator-build pre=$SPIRVLLVM_PREFIX
   local tpath="$TBIN:/usr/bin:/bin:/usr/sbin:/sbin" conf
   if spirv_llvm_ok; then say "SPIRV-LLVM-Translator: $PC_SPIRV_LLVM (matches LLVM $(llvm_version))"; return 0; fi
-  say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (a few minutes)"
+  if [ -z "$LLVM_PREFIX" ] || brew_llvm_chosen; then
+    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (a few minutes)"
+  else
+    say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (Homebrew's belongs to Homebrew's llvm only): it is built from source into $pre (a few minutes)"
+  fi
   if [ "$NM_NO_INSTALL" = 1 ]; then say "not building it (--no-install)"; return 0; fi
   if [ "$NM_DRY_RUN" = 1 ]; then
     say "    git fetch $(mirror_url SPIRVLLVM) refs/tags/$NM_PIN_SPIRVLLVM_REF; git fetch $(mirror_url SPIRVHEADERS) $NM_PIN_SPIRVHEADERS_COMMIT"
