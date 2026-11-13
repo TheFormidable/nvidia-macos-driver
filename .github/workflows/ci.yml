@@ -86,7 +86,15 @@ jobs:
           d=$(bash build/ci_vulkan_headers.sh)
           echo "NM_VULKAN_INCLUDE=$d" >> "$GITHUB_ENV"
       - name: Host tests
-        run: python3 tools/run_all_tests.py -j 4
+        # The runner counts a skipped test as no failure. The tests that compile against vulkan/vulkan.h (the ones that
+        # read NM_VULKAN_INCLUDE) skip only when no headers reach them, and here the step above gave them: a skip of one
+        # of them fails the job, whatever kept the variable from it.
+        run: |
+          set -o pipefail
+          python3 tools/run_all_tests.py -j 4 | tee "$RUNNER_TEMP/tests.txt"
+          if grep -E '^skip (test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf)\.py:' "$RUNNER_TEMP/tests.txt"; then
+            echo "::error::a test that needs the Vulkan headers was skipped: NM_VULKAN_INCLUDE did not reach it"; exit 1
+          fi
   kexts-mac:
     strategy:
       fail-fast: false
