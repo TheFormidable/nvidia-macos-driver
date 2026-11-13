@@ -1,0 +1,230 @@
+# The whole driver built from an empty folder on an Intel Mac of GitHub's, at every push and by hand (Actions, full-build,
+# Run workflow): "anybody can build it" shown on a Mac nobody here prepared. The job types what docs/BUILDING.md tells a
+# tester, in a new working directory W under the runner's temporary folder:
+#   ./build.sh --yes --workdir W deps          default settings: on an Intel Mac NVK's tools are built from pinned
+#                                              sources into W, with no Homebrew call (a dry run checks that first)
+#   ./build.sh --workdir W doctor              nothing may be MISSING
+#   ./build.sh --workdir W fetch
+#   ./build.sh --workdir W --no-install build  every component
+#   ./build.sh --workdir W --base-package <the 2.9 release package> package
+#   ./build.sh --workdir W test
+# and then build/ci_full_build.sh prove, one line per check with its number: Homebrew was not used and not changed
+# (/usr/local/bin, opt and Cellar listed before and after; no file of Homebrew's own folders changed; no brew process
+# in a list of the processes taken twice a second; build.sh never made its folder for Homebrew's cache); every tool the
+# steps use lies in W; every Mach-O file under W/out and every tool of W (ninja, cmake, python3.14 and its extension
+# modules, pkgconf, the spirv programs, glslang, llvm-config, libLLVM, libclang-cpp, mesa_clc, the Translator, Rust)
+# loads only from /usr/lib, /System and W; what the package ships and this build made runs on macOS 15.0 (minos); no
+# step log names /usr/local; the checkout is unchanged; the package's VERSION, size, SHA-256, files replaced against
+# 2.9, and its SHA256SUMS checked as install.sh checks it.
+#
+# What it proves: that the pinned sources and the repository alone make every component and a package on a Mac whose
+# /usr/local is a full Homebrew (the surroundings a build must take nothing from) and which has several Xcodes. What it
+# does not prove: anything on macOS 26 or on the owner's hardware (this is macOS 15 on GitHub's), anything with an
+# NVIDIA card (there is none), anything about installing or loading the driver (nothing is installed or loaded), and
+# nothing about the package's contents beyond the checks above. The package is not uploaded: it never leaves the runner.
+#
+# A job gates once it has been seen green on GitHub's runners (the rule of ci.yml): this one is marked
+# continue-on-error until it has been seen green once: then delete that line.
+#
+# Time, estimated from one 12-thread Intel Mac's records (toolchain about 70 min, LLVM 34 of them at -j10; kexts and
+# plugin 85 s; NVK 219 s) scaled to the runner's 4 CPUs: a first run about 4 hours (the toolchain 2.5, Rust, bindgen,
+# cbindgen and the Translator 0.3, the driver 0.5, the host tests 0.5), a run with the tools cached about 1 hour. Disk,
+# from the same records: about 12 GB at the most (the toolchain's sources 3.2 GB, LLVM's build tree 1 GB while it builds,
+# the installed tools 1.1 GB, Rust 0.6 GB, the driver's sources 1 GB, NVK's build 1 GB, the RM's build and the package),
+# printed with df at the start, after deps and at the end.
+# Caches, each restored at the start and saved by its own step as soon as what it holds is complete:
+#   the toolchain (W/tools/toolchain): under the hash of build/toolchain.sh and build/pins.sh, followed by the hash of
+#     its stamps; the newest cache of the same files, or else of any, is restored, and build.sh's stamp of each tool
+#     ("<pinned commit> <recipe id>") decides what is built again. Saved after deps whenever a tool was finished, also
+#     when deps failed or was cancelled, so that a failure after LLVM does not cost LLVM again.
+#   the rest of what deps makes (the Python environment, Rust with bindgen and cbindgen, the SPIRV-LLVM-Translator):
+#     only under the exact hash of build.sh, build/pins.sh and build/toolchain.sh, because build.sh takes these as
+#     they are when they exist (a Rust of the pinned version is not asked for its bindgen's version).
+#   the fetched sources (W/src, the git repositories): under the hash of build/pins.sh, or the newest older one; fetch
+#     checks every commit and fetches what is missing.
+#   the 2.9 package: under its SHA-256, which is checked again before every use.
+# A tool restored from a cache made with another Xcode is used as it is: its stamp names the pinned commit, the recipe,
+# the processor and the oldest macOS, not the Xcode, as on a tester's Mac after an Xcode update; the checks above still
+# hold it to /usr/lib, /System and W. W/out is never cached: the driver is always built with the Xcode of this run.
+#
+# Actions are pinned to the commits ci.yml uses. The one download of this file's own, the 2.9 package, is pinned with
+# its size and SHA-256 in build/pins.sh. The token can read the repository and nothing else; no step uses a secret or
+# uploads anything.
+name: full-build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # one run at a time per branch, the newest push waiting: a run that is building LLVM for the first time is not cancelled
+  group: full-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  intel-from-nothing:
+    runs-on: macos-15-intel
+    timeout-minutes: 340
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The run's folders, and the free disk at the start
+        run: |
+          echo "NMCI_WORK=$RUNNER_TEMP/nmw" >> "$GITHUB_ENV"
+          echo "NMCI=$RUNNER_TEMP/nm-ci" >> "$GITHUB_ENV"
+          [ ! -e "$RUNNER_TEMP/nmw" ] || { echo "::error::$RUNNER_TEMP/nmw exists before the build"; exit 1; }
+          df -h "$RUNNER_TEMP" /
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; sw_vers
+      - name: Xcode 26 or later, as the release build needs
+        # the same commands as ci.yml's kexts-mac job (tools/test_ci_workflow.py holds the two copies equal)
+        run: |
+          min=$(sed -n 's/^NM_PIN_TOOL_XCODE_MIN=\([0-9][0-9.]*\)$/\1/p' build/pins.sh)
+          num() { local a b c; IFS=. read -r a b c <<< "$1"; echo $(( ${a:-0} * 1000000 + ${b:-0} * 1000 + ${c:-0} )); }
+          [ -n "$min" ] || { echo "::error::build/pins.sh names no NM_PIN_TOOL_XCODE_MIN"; exit 1; }
+          best=; bestn=0
+          for x in /Applications/Xcode_*.app; do
+            v=${x#/Applications/Xcode_}; v=${v%.app}
+            [[ "$v" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || continue
+            n=$(num "$v")
+            if [ "$n" -ge "$(num "$min")" ] && [ "$n" -gt "$bestn" ]; then best=$x; bestn=$n; fi
+          done
+          [ -n "$best" ] || { echo "::error::no Xcode $min or later on this runner (the release build needs one)"; ls -d /Applications/Xcode*.app; exit 1; }
+          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$best/Contents/Developer" xcodebuild -version
+          echo "SDK $(DEVELOPER_DIR="$best/Contents/Developer" xcrun --show-sdk-version), $(DEVELOPER_DIR="$best/Contents/Developer" xcrun clang --version | head -1)"
+      - name: Homebrew as it is before the build, and a watch for brew processes
+        run: |
+          /bin/bash build/ci_full_build.sh brew-state "$NMCI/brew-before.txt" /usr/local
+          /bin/bash build/ci_full_build.sh watch-start "$NMCI" /usr/local
+      - name: The pinned 2.9 package (build/pins.sh)
+        id: pins
+        run: echo "basepkg_sha256=$(sed -n 's/^NM_PIN_CI_BASEPKG_SHA256=\([0-9a-f]\{64\}\)$/\1/p' build/pins.sh)" >> "$GITHUB_OUTPUT"
+      - name: Restore the toolchain
+        id: tc
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          # WIRING: the toolchain's place in the working directory, from the plan for deps' source way (not yet in build.sh)
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/tools/toolchain
+          key: fb-tc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/toolchain.sh', 'build/pins.sh') }}
+          restore-keys: |
+            fb-tc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/toolchain.sh', 'build/pins.sh') }}-
+            fb-tc-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore the Python environment, Rust and the Translator
+        id: rest
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/tools/venv
+            ${{ runner.temp }}/nmw/tools/rustup
+            ${{ runner.temp }}/nmw/tools/cargo
+            ${{ runner.temp }}/nmw/tools/spirv-llvm-translator
+          key: fb-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.sh', 'build/pins.sh', 'build/toolchain.sh') }}
+      - name: Restore the fetched sources
+        id: src
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          # WIRING: the toolchain's exported source trees (src/toolchain) are left out: they are made again from the
+          # repositories in a minute, and are 3 GB
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/src
+            !${{ runner.temp }}/nmw/src/toolchain
+          key: fb-src-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/pins.sh') }}
+          restore-keys: |
+            fb-src-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore the 2.9 package
+        id: base
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          path: ${{ runner.temp }}/nm-basepkg
+          key: fb-basepkg-${{ steps.pins.outputs.basepkg_sha256 }}
+      - name: The 2.9 package, its size and SHA-256 checked against the pin
+        id: basepkg
+        run: echo "path=$(/bin/bash build/ci_full_build.sh basepkg "$RUNNER_TEMP/nm-basepkg")" >> "$GITHUB_OUTPUT"
+      - name: Save the 2.9 package
+        if: ${{ steps.basepkg.outcome == 'success' && steps.base.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          path: ${{ runner.temp }}/nm-basepkg
+          key: ${{ steps.base.outputs.cache-primary-key }}
+      - name: deps would call no Homebrew command (its dry run)
+        run: |
+          ./build.sh --dry-run --yes --workdir "$NMCI_WORK" deps 2>&1 | tee "$NMCI/deps-plan.txt"
+          /bin/bash build/ci_full_build.sh deps-plan "$NMCI/deps-plan.txt"
+      - name: ./build.sh --yes deps
+        id: deps
+        run: ./build.sh --yes --workdir "$NMCI_WORK" deps
+      - name: Which tools the toolchain holds now
+        id: tcid
+        if: ${{ always() && steps.deps.outcome != 'skipped' }}
+        run: echo "id=$(/bin/bash build/ci_full_build.sh toolchain-id "$NMCI_WORK")" >> "$GITHUB_OUTPUT"
+      - name: Save the toolchain (also after a failed or cancelled deps)
+        if: ${{ always() && steps.tcid.outputs.id != '' && format('{0}-{1}', steps.tc.outputs.cache-primary-key, steps.tcid.outputs.id) != steps.tc.outputs.cache-matched-key }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          # WIRING: the toolchain's place, as in "Restore the toolchain"
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/tools/toolchain
+          key: ${{ steps.tc.outputs.cache-primary-key }}-${{ steps.tcid.outputs.id }}
+      - name: Save the Python environment, Rust and the Translator
+        if: ${{ steps.deps.outcome == 'success' && steps.rest.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/tools/venv
+            ${{ runner.temp }}/nmw/tools/rustup
+            ${{ runner.temp }}/nmw/tools/cargo
+            ${{ runner.temp }}/nmw/tools/spirv-llvm-translator
+          key: ${{ steps.rest.outputs.cache-primary-key }}
+      - name: Free disk after deps
+        if: ${{ always() && steps.deps.outcome != 'skipped' }}
+        run: df -h "$RUNNER_TEMP" /
+      - name: ./build.sh doctor (nothing MISSING)
+        run: |
+          rc=0; ./build.sh --workdir "$NMCI_WORK" doctor > "$NMCI/doctor.txt" 2>&1 || rc=$?
+          cat "$NMCI/doctor.txt"
+          n=$(grep -c 'MISSING' "$NMCI/doctor.txt" || true)
+          echo "doctor after deps: exit $rc, $n line(s) that say MISSING"
+          [ "$rc" = 0 ] && [ "$n" = 0 ]
+      - name: ./build.sh fetch
+        id: fetch
+        run: ./build.sh --workdir "$NMCI_WORK" fetch
+      - name: Save the fetched sources
+        if: ${{ steps.fetch.outcome == 'success' && steps.src.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/nmw/.nullmoth-build-workdir
+            ${{ runner.temp }}/nmw/src
+            !${{ runner.temp }}/nmw/src/toolchain
+          key: ${{ steps.src.outputs.cache-primary-key }}
+      - name: ./build.sh --no-install build (every component)
+        run: ./build.sh --workdir "$NMCI_WORK" --no-install build
+      - name: ./build.sh package (on the 2.9 release package)
+        env:
+          NM_BASE_PACKAGE_SHA256: ${{ steps.pins.outputs.basepkg_sha256 }}
+          BASEPKG: ${{ steps.basepkg.outputs.path }}
+        run: ./build.sh --workdir "$NMCI_WORK" --base-package "$BASEPKG" package
+      - name: ./build.sh test
+        run: ./build.sh --workdir "$NMCI_WORK" test
+      - name: What the build did and did not do
+        # also after a failed step: what it can still check is worth seeing, and what it cannot is said
+        if: ${{ !cancelled() }}
+        run: /bin/bash build/ci_full_build.sh prove "$NMCI_WORK" "$NMCI/brew-before.txt" "$NMCI" /usr/local
+      - name: Free disk and the working directory's size at the end
+        if: ${{ always() }}
+        run: |
+          df -h "$RUNNER_TEMP" /
+          [ ! -d "$NMCI_WORK" ] || du -sh "$NMCI_WORK" "$NMCI_WORK"/* "$NMCI_WORK"/tools/* 2>/dev/null || true
+      - name: The logs of what failed
+        if: ${{ failure() }}
+        run: /bin/bash build/ci_full_build.sh logs "$NMCI_WORK"
