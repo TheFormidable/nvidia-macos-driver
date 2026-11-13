@@ -932,17 +932,20 @@ bool NVRM::startGPU(IOService *provider)
     // NVRMFB's verdict on the Apple framebuffer classes of this macOS (nvrm_layout.h). Every way the driver has of
     // lighting this card's display is a subclass of them, the framebuffer that shows the desktop with the driver off
     // included, so when the framebuffer refuses nothing of this driver can show a picture on this macOS, and a
-    // started card would be a GPU with no display. The OpenCore setup excludes Apple's own firmware framebuffer
-    // (IONDRVSupport, README.md), so no desktop comes up on this card at this start or at any later start of this
-    // driver; the Mac still boots and can be reached over the network. Declined here, before the boot guard counts
-    // this start: a driver that the guard turned off would refuse the same classes and leave the screen just as dark,
-    // so two counted starts would only put two dark starts before the way back. That way back is the install's
-    // fallback job (package/install.sh, step 6b): after an install over an earlier driver, and until the start after
-    // the first one that lit the display, it reads the nvrm-layout property written below and restores the driver
-    // that the install replaced, while the Mac still runs the macOS build of that install (that driver ran there; on
-    // another build the job only records the refusal). Without it (a first install, or a macOS update after that
-    // trial) every start ends like this one. nvlayout=0 makes the framebuffer publish "overridden" instead, and both
-    // start as before.
+    // started card would be a GPU with no display. What the screen then shows depends on the OpenCore setup. Where it
+    // excludes Apple's own firmware framebuffer (IONDRVSupport, README.md), nothing takes the card's framebuffer slot
+    // and no desktop comes up on this card at this start or at any later start of this driver; the Mac still boots and
+    // can be reached over the network. Where IONDRVSupport is not excluded, Apple's IONDRVFramebuffer takes the slot
+    // once NVRMFB's claim has stepped aside and shows a slow desktop without acceleration on the firmware's picture,
+    // if that picture still lies inside the card's apertures (if not, the screen stays dark there too). Declined here,
+    // before the boot guard counts this start: a driver that the guard turned off would refuse the same classes and
+    // leave the screen as it is now, so two counted starts would only put two such starts before the way back. That
+    // way back is the install's fallback job (package/install.sh, step 6b): after an install over an earlier driver,
+    // and until the start after the first one that lit the display, it reads the nvrm-layout property written below
+    // and restores the driver that the install replaced, while the Mac still runs the macOS build of that install
+    // (that driver ran there; on another build the job only records the refusal). Without it (a first install, or a
+    // macOS update after that trial) every start ends like this one. nvlayout=0 makes the framebuffer publish
+    // "overridden" instead, and both start as before.
     // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
     // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
     // logs the same from its side. A verdict published later is read again just before go(2).
@@ -957,10 +960,10 @@ bool NVRM::startGPU(IOService *provider)
         if (gNvLayoutFb == kNvLayoutRefused) {
             provider->setProperty("nvrm-layout", "declined: the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
             LOG("NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS (its Apple classes differ from the ones it "
-                "was built for), so no desktop comes up on this card. Not counted as a failed start. After an install "
-                "over an earlier driver on this macOS build, the install's fallback job reads this refusal and puts "
-                "that driver back; otherwise nothing changes at the next start. Boot-arg nvlayout=0 starts the card "
-                "anyway.");
+                "was built for), so this driver shows nothing on this card. Not counted as a failed start. After an "
+                "install over an earlier driver on this macOS build, the install's fallback job reads this refusal and "
+                "puts that driver back; otherwise nothing changes at the next start. Boot-arg nvlayout=0 starts the "
+                "card anyway.");
             return false;
         }
     }
@@ -1460,10 +1463,11 @@ void NVRM::autoGo(void *p0, wait_result_t)
     { thread_t hw = THREAD_NULL; s->retain();
       if (kernel_thread_start(&NVRM::headWatch, s, &hw) == KERN_SUCCESS) thread_deallocate(hw); else s->release(); }
     // The framebuffer may have published its verdict after startGPU read it (kexts loaded on their own rather than
-    // from one collection). A refusal now still keeps the card as the firmware left it, and no desktop comes up on it
-    // (see startGPU). This boot's start stays counted; the install's fallback job reads the nvrm-layout property
-    // written below, as for the early refusal. Without that job two such boots switch the driver off through the boot
-    // guard, which does not bring a desktop either: the driver-off framebuffer refuses the same classes.
+    // from one collection). A refusal now still keeps the card as the firmware left it, and this driver shows nothing
+    // on it (see startGPU for what the screen shows then). This boot's start stays counted; the install's fallback job
+    // reads the nvrm-layout property written below, as for the early refusal. Without that job two such boots switch
+    // the driver off through the boot guard, which does not change the picture either: the driver-off framebuffer
+    // refuses the same classes.
     {
         char text[200];
         gNvLayoutFb = (unsigned)nvrmPeerLayout(s->fPCI, "nvrmfb-layout", text, sizeof text);
