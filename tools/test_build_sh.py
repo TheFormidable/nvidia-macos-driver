@@ -1495,10 +1495,15 @@ def tc_builds(sb):
     return out
 
 
+# the tools whose code another has linked in: their stamp text follows that tool's own, after "; with "
+TC_LINKED = {"python": ["openssl", "zstd", "xz"], "glslang": ["spirv-tools"]}
+
+
 def tc_stamp_want(sb, tool, recipe=2):
     pins = (sb.co / "build/pins.sh").read_text()
     commits = "+".join(pin_value(pins, f"NM_PIN_{p}_COMMIT") for p in TC_PIN[tool])
-    return f"{commits} {tool} recipe {recipe} Darwin-x86_64 macos15.0"
+    return f"{commits} {tool} recipe {recipe} Darwin-x86_64 macos15.0" + "".join(
+        "; with " + tc_stamp_want(sb, n) for n in TC_LINKED.get(tool, []))
 
 
 def source_sandbox(name, **kw):
@@ -1575,6 +1580,22 @@ def arm_source():
     got = [t for t, _ in tc_builds(sb)]
     check("a raised recipe of glslang and a changed pin of pkgconf: deps builds those two again, nothing else",
           rc == 0 and got == ["pkgconf", "glslang"], (got, out[-600:]))
+    # a new OpenSSL (its recipe raised) and a new SPIRV-Tools: each is built again with the tool that has it linked in
+    # (Python, glslang), and nothing else; the control's build.sh forgets what is linked into what
+    def linked_round(s):
+        (s.state / "tc-recipe-openssl").write_text("3\n")
+        (s.state / "tc-recipe-spirv-tools").write_text("3\n")
+        s.clear()
+        rc, out = s.run("deps", "-y")
+        return rc, [t for t, _ in tc_builds(s)], out
+    rc, got, out = linked_round(sb)
+    check("a raised recipe of openssl and of spirv-tools: deps builds openssl, python, spirv-tools and glslang again, nothing else",
+          rc == 0 and got == ["openssl", "python", "spirv-tools", "glslang"], (got, out[-600:]))
+    sbl, pl, _ = run(edit=('tc_linked() { case "$1" in python) echo "openssl zstd xz" ;; glslang) echo spirv-tools ;; *) echo "" ;; esac; }',
+                           'tc_linked() { echo ""; }'), tag="-neg-linked")
+    rc, got, out = linked_round(sbl)
+    negative("a toolchain that does not build Python and glslang again after what they link",
+             [] if got == ["openssl", "python", "spirv-tools", "glslang"] else [f"built {got}"])
     # a tool whose stamp is missing (half-installed) is not taken
     (sb.work / "tools/toolchain/.nm-toolchain/glslang").unlink()
     rc, out = sb.run("doctor")
