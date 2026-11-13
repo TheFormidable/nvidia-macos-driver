@@ -17,9 +17,10 @@ failure.
 
 ## Where the driver writes
 
-- **Kernel**: `log show --last boot --predicate 'process == "kernel"'`. NVRM's lines start with `NVRM-xnu:`, the
+- **Kernel**: `log show --last boot --predicate 'process == "kernel"'` (every `log show --last boot` takes about a
+  minute). NVRM's lines start with `NVRM-xnu:`, the
   framebuffer's with `NVRM-fb:`, the accelerator's with `NVAccel:`. The counters are sysctls under `debug.`
-  (`sysctl debug | grep nvrm_` and `sysctl debug | grep nvaccel_`).
+  (`sysctl debug | grep nvrm_`, `sysctl debug | grep nvrmfb_` and `sysctl debug | grep nvaccel_`).
 - **The Metal plugin** (what each application and WindowServer do with Metal): a package built with `./build.sh`
   carries the release plugin, which writes its own log, `nvmtl.log`, only for a process started with
   `NVMTL_PROCESS_ENV=1` in its environment (not as root). For every other process, WindowServer included, only the
@@ -64,7 +65,7 @@ restart. Take every test setting out again when its test is done.
 
    ```bash
    sw_vers > ~/before-3.0.txt; nvram boot-args >> ~/before-3.0.txt
-   sysctl debug | grep -e nvrm_ -e nvaccel_ >> ~/before-3.0.txt
+   sysctl debug | grep -e nvrm -e nvaccel >> ~/before-3.0.txt
    ```
 
    Note how long the desktop takes to come up after the picker, and the CPU use of WindowServer on an idle desktop
@@ -301,7 +302,7 @@ CHANGELOG.md, "The ways back", and SWITCHES.md say what each one restores in ful
 - `sw_vers`, the card, and `nvram boot-args`.
 - `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
 - Your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf`.
-- `sysctl debug | grep -e nvrm_ -e nvaccel_`, taken while or right after the problem shows, and the same from 2.9
+- `sysctl debug | grep -e nvrm -e nvaccel`, taken while or right after the problem shows, and the same from 2.9
   (`~/before-3.0.txt`).
 - The kernel log of the boot: `log show --last boot --predicate 'process == "kernel"' > ~/kernel.txt`.
 - The plugin's failure lines: `log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"' > ~/nullmoth.txt`.
