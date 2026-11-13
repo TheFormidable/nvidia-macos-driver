@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """test_nv_compile_lines.py: the RM core's and NVKMS's compile commands are the same on an Intel and on an Apple-silicon
-Mac.
+Mac, and a kext that imports a helper of a Linux-kernel compiler option stops the build.
 
 NVIDIA's Makefiles ask the build computer's compiler (with no -arch) which hardening options it takes. An Intel Mac's
 clang took -mfunction-return=thunk-extern for NVKMS, every return became a jump to ___x86_return_thunk, and NVRM.kext,
 which no macOS kernel can then link, was built without a word. build/nv_compile_lines.py now makes the commands of
-build_rm620.sh and build_kms620.sh.
+build_rm620.sh and build_kms620.sh, and build/kext_link_imports.sh stops a link that imports such a name.
 
 The recorded lines in tools/fixtures/nv_make_n are real "make -n TARGET_OS=Darwin TARGET_ARCH=x86_64 NV_VERBOSE=1"
 output of NVIDIA's two Makefiles (open-gpu-kernel-modules 620.70.06 with kexts/NVRM/patches applied), three lines per
@@ -21,14 +21,19 @@ recorded with that name. Over the whole lists (1121 RM and 225 NVKMS commands) t
 Arms: the three recordings give the same commands; they are, byte for byte, what the transform before this change made
 of the Apple-silicon recording (an Apple-silicon Mac's build does not change); 2.9's own choices are there; the Intel
 recording gets a note naming what was left out, the Apple-silicon one none; an unexpected compiler stops; both scripts
-call the one file and stop when it fails.
+call the one file and stop when it fails. The link stop fires on an import list with ___x86_return_thunk (Apple's nm
+format) and with ___x86_indirect_thunk_r11 (llvm-nm's), is quiet on a clean list, and stops on an empty or missing
+list; every kext link script runs it.
 Controls: the transform as it was at 3a27af8 (read with git show) lets -mfunction-return=thunk-extern through and makes
-the Intel and Apple-silicon commands differ; the new transform without its -mfunction-return rule makes them differ."""
+the Intel and Apple-silicon commands differ; the new transform without its -mfunction-return rule makes them differ; a
+copy of the stop without its thunk rows lets the thunk list pass."""
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -102,6 +107,11 @@ def line_problems(comp, lines):
     return p
 
 
+def run_stop(script, text, name="NVRM.kext", arg="-"):
+    p = subprocess.run(["bash", str(script), arg, name], input=text, capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+
+
 def main():
     mod = load()
     for comp in ("rm", "kms"):
@@ -146,6 +156,38 @@ def main():
               len(calls) == 1 and f'nv_compile_lines.py" {comp} > "$O/compile_cmds.sh.new"' in calls[0] and calls[0].rstrip().endswith("\\")
               and "python3 -c" not in s and "STOP:" in s.split(calls[0], 1)[1].splitlines()[1], calls)
 
+    stop = ROOT / "build/kext_link_imports.sh"
+    clean = "_IOLog\n__ZN9IOService5startEPS_\n___stack_chk_fail\n_rm_isr\n"
+    rc, out = run_stop(stop, clean + "___x86_return_thunk\n")
+    check("the link stop: ___x86_return_thunk in Apple's nm -u format stops (exit 7) with a STOP line naming it and the kext",
+          rc == 7 and "STOP: NVRM.kext imports ___x86_return_thunk" in out and "-mfunction-return" in out, (rc, out))
+    rc, out = run_stop(stop, "                 U _IOLog\n                 U ___x86_indirect_thunk_r11\n")
+    check("the link stop: ___x86_indirect_thunk_r11 in llvm-nm's format stops (exit 7)", rc == 7 and "___x86_indirect_thunk_r11" in out, (rc, out))
+    rc, out = run_stop(stop, clean)
+    check("the link stop: a clean list passes (exit 0, nothing printed)", rc == 0 and out == "", (rc, out))
+    rc, out = run_stop(stop, "")
+    check("the link stop: an empty list stops (exit 2)", rc == 2 and "STOP:" in out, (rc, out))
+    rc, out = run_stop(stop, "", arg="/nonexistent/imports.txt")
+    check("the link stop: a missing list stops (exit 2)", rc == 2 and "STOP:" in out, (rc, out))
+    tmp = Path(tempfile.mkdtemp(prefix="nvlines-"))
+    try:
+        broken = tmp / "kext_link_imports.sh"
+        s = stop.read_text()
+        s2 = "\n".join(l for l in s.splitlines() if not l.startswith(("^___x86", "TABLE='^___x86"))).replace("^___fentry__", "TABLE='^___fentry__", 1)
+        broken.write_text(s2 + "\n")
+        rc, out = run_stop(broken, clean + "___x86_return_thunk\n")
+        negative("the stop without its thunk rows lets ___x86_return_thunk pass (exit 0)", rc == 0 and out == "")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    s = (ROOT / "build/build_nvrm.sh").read_text()
+    i, j = s.find('> "$OUT/imports.txt"'), s.find('kext_link_imports.sh" "$OUT/imports.txt" NVRM.kext || exit 7')
+    check("build_nvrm.sh runs the stop on imports.txt right after writing it, and stops (exit 7)", 0 < i < j, (i, j))
+    for script, binary in (("build/fb_build.sh", "NVRMFB"), ("build/accel_build.sh", "NVAccel"), ("build/build_agdc.sh", "NVRMAGDC"),
+                           ("kexts/NMSMN/build.sh", "$NAME")):
+        lines = [l for l in (ROOT / script).read_text().splitlines() if "kext_link_imports.sh" in l and not l.lstrip().startswith("#")]
+        check(f"{script} pipes nm -u of its linked {binary} to the stop and stops (exit 7)",
+              len(lines) == 1 and lines[0].startswith(f'xcrun nm -u "') and f"MacOS/{binary}\" | bash " in lines[0]
+              and "|| exit 7" in lines[0], lines)
     print(f"{fails} failed" if fails else "all passed")
     return 1 if fails else 0
 

@@ -13,5 +13,6 @@ xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -mkernel -nost
 bash "$(dirname "$0")/warn_ceiling.sh" nvrmagdc "$(grep -c ': warning:' "$B/cc.err")" "$B/cc.err" || exit 4
 xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$B/k1.o" -o "$B/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" 2>"$B/ld.err" || { head "$B/ld.err"; exit 1; }
 bash "$(dirname "$0")/warn_ceiling.sh" nvrmagdc-link "$(grep -c 'warning' "$B/ld.err")" "$B/ld.err" || exit 4
+xcrun nm -u "$B/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" | bash "$(dirname "$0")/kext_link_imports.sh" - NVRMAGDC.kext || exit 7   # a name no macOS defines
 cp "$D/Info.plist" "$B/NVRMAGDC.kext/Contents/Info.plist"
 echo "NVRMAGDC $(md5 -q "$B/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC") $(dwarfdump --uuid "$B/NVRMAGDC.kext/Contents/MacOS/NVRMAGDC" | awk '{print $2}')"

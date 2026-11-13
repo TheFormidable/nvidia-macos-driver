@@ -20,5 +20,6 @@ bash "$(dirname "$0")/warn_ceiling.sh" nvrmfb "$(grep -c ': warning:' "$OUT/fb.e
 xcrun clang++ -arch x86_64 -mmacosx-version-min=${MINVER:-15.0} -fapple-kext -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext "$OUT/nvrm-fb.o" \
   -o "$OUT/NVRMFB.kext/Contents/MacOS/NVRMFB" 2>"$OUT/fbld.err" || { head "$OUT/fbld.err"; exit 1; }
 bash "$(dirname "$0")/warn_ceiling.sh" nvrmfb-link "$(grep -c 'warning' "$OUT/fbld.err")" "$OUT/fbld.err" || exit 4
+xcrun nm -u "$OUT/NVRMFB.kext/Contents/MacOS/NVRMFB" | bash "$(dirname "$0")/kext_link_imports.sh" - NVRMFB.kext || exit 7   # a name no macOS defines
 cp "$SRC/NVRMFB/fb/Info.plist" "$OUT/NVRMFB.kext/Contents/Info.plist"
 echo "NVRMFB $(md5 -q "$OUT/NVRMFB.kext/Contents/MacOS/NVRMFB") $(stat -f %z "$OUT/NVRMFB.kext/Contents/MacOS/NVRMFB") B, warnings $(grep -c ': warning:' "$OUT/fb.err")"
