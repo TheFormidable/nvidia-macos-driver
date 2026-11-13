@@ -204,6 +204,8 @@ arm("control: a prefix the plugin adds is caught", sorted(re.findall(r'strncmp\(
 ESCAPE = """import os, pathlib
 # as a bare mktemp on macOS does: the folder lands in the system's temporary folder, not in the TMPDIR given
 pathlib.Path(os.environ["TMPDIR"]).parent.joinpath("escaped-%d" % os.getpid()).mkdir()
+# and one named like the runner's own folders, which only the runner's own may hide
+pathlib.Path(os.environ["TMPDIR"]).parent.joinpath("nmtest-escaped-%d" % os.getpid()).mkdir()
 """
 
 
@@ -220,12 +222,22 @@ def escape_run(runner_text):
 
 
 rc, out, there = escape_run(RUNNER)
-lines = [l for l in out.splitlines() if l.startswith("left in ")]
+# only what appeared in the scratch tree's own temporary folder: /tmp is shared, and while this test runs other programs
+# (a runner beside it among them) make and remove folders there
+lines = [l for l in out.splitlines() if l.startswith("left in ") and "systmp during the run" in l]
 arm("a folder a test made beside its own temporary folder is listed at the end, and the run is not failed for it",
     rc == 0 and any("systmp during the run" in l and l.endswith(tuple(there)) and "escaped-" in l for l in lines), (there, out))
-arm("the test's own temporary folder is not listed (it is gone)", not any(l.rsplit(": ", 1)[-1].startswith("nmtest-") for l in lines) and not any(n.startswith("nmtest-") for n in there), out)
+arm("a folder it made with a name like the runner's own is listed too", any(l.rsplit(": ", 1)[-1].startswith("nmtest-escaped-") for l in lines), out)
+arm("the test's own temporary folder is not listed (it is gone)",
+    not any(re.fullmatch(r"nmtest-(?!escaped-).*", l.rsplit(": ", 1)[-1]) for l in lines)
+    and not any(re.fullmatch(r"nmtest-(?!escaped-).*", n) for n in there), out)
 report = '            print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")\n'
 arm("the runner lists what appeared in one place", RUNNER.count(report) == 1)
+own = "        if os.path.join(root, n) not in OWN_TMPS:"
+arm("the runner leaves out of the list only the folders it made itself", RUNNER.count(own) == 1)
+rc, out, there = escape_run(RUNNER.replace(own, '        if not n.startswith("nmtest-"):'))
+arm("control: leaving out every name like the runner's own hides the second folder",
+    not any("nmtest-escaped-" in l for l in out.splitlines()) and any(n.startswith("nmtest-escaped-") for n in there), out)
 rc, out, there = escape_run(RUNNER.replace(report, "            pass\n"))
 arm("control: without the list the escaped folder goes unnoticed", rc == 0 and any(n.startswith("escaped-") for n in there)
     and not any("escaped-" in l for l in out.splitlines()), out)
