@@ -103,8 +103,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    se ha hecho ninguna compilación completa. Todo lo que compila `./build.sh` está hecho para macOS 15.0 y posteriores
    (el traductor de shaders para 10.12 y posteriores), así que un paquete compilado en macOS 26 sirve también para
    macOS 15; las comprobaciones de las clases de Apple de la sección 2, paso 3, deciden en cada macOS en su primer
-   arranque. En ese Mac las herramientas de compilación tardaron 46.5 minutos en compilarse desde cero, los 17
-   componentes 5 minutos 41 segundos y el paquete 27 s, y el directorio de trabajo ocupaba después unos 8 GB.
+   arranque. En ese Mac `./build.sh deps` tardó 46.5 minutos en un directorio de trabajo vacío, la compilación de los
+   17 componentes 5 minutos 41 segundos y el paquete 27 segundos, y el directorio de trabajo ocupaba después unos
+   8 GB.
    Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Todavía
    no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete y nada más. Bien: su
    última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
