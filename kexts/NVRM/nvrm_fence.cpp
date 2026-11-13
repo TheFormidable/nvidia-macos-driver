@@ -661,6 +661,9 @@ void nvrm_fence_user(volatile UInt64 *ownerId, const volatile SInt32 *closing, s
         if (!w->id) { r->status = NVRM_FENCE_ST_BAD_ARG; break; }
         struct nvf_query q = { w->id, w->planes & 0xFFu, w->pid, r->flags & NVRM_FENCE_F_COMPOSITOR, 0, 0 };
         r->status = nvf_wait(&gT, &gFOps, NULL, &q, w->timeoutMs, (r->flags & NVRM_FENCE_F_LOOK) != 0, 1, w);
+        // Any process may ask about any surface id, so the writer's pid and the state of its hold go back only when
+        // the writer is the caller itself. Whether something is pending (the result) is the answer and stays.
+        if (w->ownerPid != (unsigned)proc_selfpid()) { w->ownerPid = 0; w->state = 0; }
         break;
     }
     case NVRM_FENCE_OP_WAIT_SEQ: {

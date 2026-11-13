@@ -23,7 +23,8 @@ panic, a hang or a lost wakeup on the owner's machine, so each rule is asserted 
   read a different one later; a rebuilt channel's new notifier is pinned before the lock, swapped under it only when
   the table agreed, and the old one is let go after it;
 - every request but QUERY and CHAN_DEL is answered "off" before a page is touched unless the layer is on; a compositor
-  hold is WindowServer's; a request racing the close of its connection adds nothing;
+  hold is WindowServer's; a request racing the close of its connection adds nothing; a user WAIT or LOOK gets the
+  writer's pid and hold state back only when the writer is the caller;
 - user waits can be interrupted; NVAccel's cannot, look at compositor holds only, and take no lock when there is none;
 - start, stop, sleep, wake and a closing connection are safe in any order; the lock and the table are never freed;
 - an exiting process gives back the fence state of all its connections through the same path as one closing
@@ -378,6 +379,15 @@ def arms(src, header, table, mem):
         and re.search(r"nvf_wait_seq\s*\(\s*&gT\s*,\s*&gFOps\s*,\s*NULL\s*,\s*\*ownerId\s*,\s*w->id\s*,\s*w->seq\s*,\s*w->timeoutMs\s*,\s*1\s*,\s*w\s*\)", user) is not None
         and re.search(r"return\s+nvf_wait\s*\(\s*&gT\s*,\s*&gFOps\s*,\s*NULL\s*,\s*&q\s*,\s*w->timeoutMs\s*,\s*\(\s*flags\s*&\s*NVRM_FENCE_F_LOOK\s*\)\s*!=\s*0\s*,\s*0\s*,\s*w\s*\)\s*;", kw) is not None
         and count(code, r"\bnvf_wait\s*\(") == 2 and count(code, r"\bnvf_wait_seq\s*\(") == 1)
+    wcase = re.search(r"case\s+NVRM_FENCE_OP_WAIT\s*:\s*\{", user)
+    wbody = body_at(user, wcase.end() - 1) if wcase else ""
+    arm("a user WAIT or LOOK tells the writer's pid and hold state only to the writer itself: both are cleared after the wait otherwise",
+        order(wbody, [r"\bnvf_wait\s*\(", r"if\s*\(\s*w->ownerPid\s*!=\s*\(\s*unsigned\s*\)\s*proc_selfpid\s*\(\s*\)\s*\)\s*\{\s*w->ownerPid\s*=\s*0\s*;\s*w->state\s*=\s*0\s*;\s*\}",
+                      r"\bbreak\s*;"])
+        and count(wbody, r"\bnvf_wait\s*\(") == 1 and count(wbody, r"w->ownerPid\s*=(?!=)") == 1 and count(wbody, r"w->state\s*=(?!=)") == 1
+        # NVAccel's waits and the host tests read both from the table's wait itself: it still fills them
+        and [squash(x) for x in re.findall(r"w->ownerPid\s*=(?!=)[^;]*;", functions(code_only(table)).get("nvf_wait", ""))]
+            == ["w->ownerPid = 0;", "w->ownerPid = v.firstPid;"])
     arm("NVAccel's wait answers \"nothing pending\" without the lock when the layer is not on or no compositor hold is alive, and looks at compositor holds only",
         order(kw, [r"w->result\s*=\s*NVRM_FENCE_R_NONE\s*;", r"if\s*\(\s*gFState\s*!=\s*1\s*\|\|\s*!\s*gT\.liveCompositor\s*\|\|\s*!\s*w->id\s*\)\s*return\s+NVRM_FENCE_ST_OK\s*;",
                    r"\bq\s*=\s*\{\s*w->id\s*,\s*w->planes\s*&\s*0xFFu\s*,\s*w->pid\s*,\s*NVRM_FENCE_F_COMPOSITOR\s*,\s*0\s*,\s*0\s*\}\s*;", r"\bnvf_wait\s*\("])
@@ -603,6 +613,15 @@ CONTROLS = [
     ("a wait gives a connection an owner number", "only CHAN_ADD and OPEN", "cpp", lambda s: broken(s, "nvf_wait_seq(&gT, &gFOps, NULL, *ownerId,", "nvf_wait_seq(&gT, &gFOps, NULL, nvfOwner(ownerId),")),
     ("NVAccel's wait can be interrupted", "user waits can be interrupted", "cpp", lambda s: broken(s, KWAIT, KWAIT.replace("!= 0, 0, w)", "!= 0, 1, w)"))),
     ("a user wait cannot be interrupted", "user waits can be interrupted", "cpp", lambda s: broken(s, "w->timeoutMs, 1, w);\n        break;\n    }\n    default", "w->timeoutMs, 0, w);\n        break;\n    }\n    default")),
+    ("a user WAIT hands back another process's pid and state", "a user WAIT or LOOK tells", "cpp",
+     lambda s: broken(s, "        if (w->ownerPid != (unsigned)proc_selfpid()) { w->ownerPid = 0; w->state = 0; }\n", "")),
+    ("a user WAIT clears only the pid", "a user WAIT or LOOK tells", "cpp",
+     lambda s: broken(s, "{ w->ownerPid = 0; w->state = 0; }", "{ w->ownerPid = 0; }")),
+    ("a user WAIT clears before the wait fills them", "a user WAIT or LOOK tells", "cpp",
+     lambda s: moved(s, "        if (w->ownerPid != (unsigned)proc_selfpid()) { w->ownerPid = 0; w->state = 0; }\n",
+                     "        if (!w->id) { r->status = NVRM_FENCE_ST_BAD_ARG; break; }\n")),
+    ("the clearing moved into the table's wait", "a user WAIT or LOOK tells", "table",
+     lambda s: broken(s, "    w->waitedUs = (now - t0) / 1000ull;\n    return status;\n}\n\n/* A producer", "    w->ownerPid = 0;\n    w->waitedUs = (now - t0) / 1000ull;\n    return status;\n}\n\n/* A producer")),
     ("NVAccel's wait always takes the lock", "NVAccel's wait answers", "cpp", lambda s: broken(s, SHORTCUT, "    if (!w->id) return NVRM_FENCE_ST_OK;\n")),
     ("NVAccel's wait looks at every hold", "NVAccel's wait answers", "cpp", lambda s: broken(s, "w->pid, NVRM_FENCE_F_COMPOSITOR, 0, 0 };", "w->pid, flags & NVRM_FENCE_F_COMPOSITOR, 0, 0 };")),
     ("sleep and wake touch the lock before the first start", "before the first start nothing here touches the lock", "cpp", lambda s: broken(s, PM_GUARD, "void nvrm_fence_pm(int what)\n{\n")),

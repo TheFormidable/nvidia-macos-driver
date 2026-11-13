@@ -256,8 +256,8 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   state S` for `nvrmfence=0` (S 0), a fence that stopped or switched itself off (3 or 2), or NVK's
   `NVRM_ASYNC=0` (S 1); `request N answered off` when a later request is refused that way; an NVK without the fence
   writes no line); one line per change. `surface fences: hold refused (0x8000000N) - that command buffer keeps the older tags and marks (N so
-  far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up pid P's hold at its
-  bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
+  far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up the hold of pid P (the
+  writer the tag names) at its bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
   2000th).
 - **Cost.** One OPEN (two for 9 to 16 surfaces), one ARM per part that is the last writer of a surface (two when it is
   the last writer of more than 8), one CLOSE per
@@ -462,6 +462,9 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   holds and for 2.9's marks alike. The name alone is the executable's file name, which any user can give a program;
   a user account cannot run as a system account without an administrator. The bounds are: no hold, of either kind,
   delays anybody past them.
+- Any process can still learn whether a surface id has a writer pending right now (a look answers PENDING or NONE):
+  a reader asks by id, which is inherent to the design. The writer's pid and the state of its hold are told only to
+  the writer itself; any other caller gets 0 for both.
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
   behaviour, and eight distrusted connections (one process can supply them one after another) switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.

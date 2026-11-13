@@ -20,7 +20,8 @@ the program name), so what runs here is the production text. What is proven:
 Negative controls: the same program built from a copy with one line of the production text changed must fail (the
 thread's record not cleared before a refusal; the partial refusal's CLOSE left out; a covered pending mark sent; a
 refused mark remembered as taken; the marks of an NVK without the entry routed; a reader's wait judged without the
-time the kernel kept it; a wait asked for a tag that names no writer).
+time the kernel kept it; a wait asked for a tag that names no writer; the bound's log line printing the pid the
+kernel answers, which is 0 for another process's hold).
 """
 import os, pathlib, re, subprocess, sys, tempfile
 
@@ -43,6 +44,7 @@ block = src[block_start:src.index('\n}\n', src.index('uint32_t nvmtl_vk_surface_
 arm = cut(src, 'void nvmtl_vk_fence_arm(const nvmtl_fence_hold *h, uint32_t part, const nvmtl_inflight *f)')
 
 prelude = r'''
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +62,7 @@ static uint64_t fake_now = 5000000000ull;
 static const char *fake_name = "app";
 #define getprogname() (fake_name)
 static unsigned logs; static char lastlog[256];
-static void nvlog(const char *f, ...) { logs++; snprintf(lastlog, sizeof lastlog, "%s", f); }
+static void nvlog(const char *f, ...) { va_list ap; va_start(ap, f); logs++; vsnprintf(lastlog, sizeof lastlog, f, ap); va_end(ap); }
 static VkDevice g_dev;
 static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
 struct nvmtl_inflight { void *c; VkFence fence; };
@@ -87,7 +89,8 @@ static uint32_t nvk(VkDevice d, uint32_t op, uint32_t flags, uint64_t cookie, ui
     if (op == NVMTL_FENCE_OP_WAIT && planes) c->planes[0] = planes[0];
     if (op == NVMTL_FENCE_OP_QUERY) { if (!q_status) { out[0] = q_active; out[1] = q_accel; } return q_status; }
     if (op == NVMTL_FENCE_OP_OPEN) return nopen < 4 ? open_answer[nopen++] : 0;
-    if (op == NVMTL_FENCE_OP_WAIT && !other_status) { out[0] = wait_result; out[1] = wait_us; out[2] = pid; }
+    /* the kernel tells a writer's pid and hold state only to the writer itself: a reader gets 0 for both */
+    if (op == NVMTL_FENCE_OP_WAIT && !other_status) { out[0] = wait_result; out[1] = wait_us; out[2] = 0; out[3] = 0; }
     return other_status;
 }
 static uint32_t marks[64][2]; static unsigned nmarks; static uint32_t mark_answer;
@@ -260,6 +263,7 @@ int main(int argc, char **argv)
     wait_us = NVMTL_FENCE_POLL_US; T("wait: DEAD after the poll's time ends it", nvmtl_vk_fence_wait(900, 1, 321) == 1);
     wait_result = NVMTL_FENCE_R_TIMEOUT; wait_us = 20000; logs = 0;
     T("wait: TIMEOUT after 20 ms ends it, logged", nvmtl_vk_fence_wait(900, 1, 321) == 1 && logs == 1);
+    T("wait: the bound's log line names the writer from the tag, not the pid the kernel keeps to itself", strstr(lastlog, "hold of pid 321 ") != NULL);
     wait_us = 300; T("wait: TIMEOUT for a reader that came at the bound falls through, logged too", nvmtl_vk_fence_wait(900, 1, 321) == 0 && logs == 2);
     wait_result = NVMTL_FENCE_R_BUDGET; wait_us = NVMTL_FENCE_WAIT_MS * 1000u; T("wait: BUDGET (two seconds) ends it", nvmtl_vk_fence_wait(900, 1, 321) == 1);
     wait_result = NVMTL_FENCE_R_ABORTED; T("wait: ABORTED falls through to the poll, whatever the time", nvmtl_vk_fence_wait(900, 1, 321) == 0);
@@ -309,6 +313,8 @@ with tempfile.TemporaryDirectory() as d:
         ('a clear is sent for a mark the kernel refused', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, st);', 'nvmtl_fence_mark_sent(&g_fence_legacy, surfaceID, 0);'),
         ('the marks of an NVK without the fence entry are routed', 'if (!pnvk_fence) return pnvk_surface_dirty(g_dev, surfaceID, mark);', ''),
         ('a reader\'s wait is judged without the time the kernel kept it', 'return nvmtl_fence_wait_handled(st, out[0], out[1]);', 'return nvmtl_fence_wait_handled(st, out[0], ~0u);'),
+        ('the bound\'s log line prints the pid the kernel answers (0 for another process)', 'nvlog("surface fences: surface %u - the kernel gave up the hold of pid %u',
+         'nvlog("surface fences: surface %u - the kernel gave up the hold of pid %u (the writer the tag names) at its bound after %u us (%u so far)", sid, out[2], out[1], b);'),
         ('a wait is asked for a tag that names no writer', 'if (!sid || !pid || !nvmtl_vk_fence_ready(0)) return 0;', 'if (!sid || !nvmtl_vk_fence_ready(0)) return 0;'),
     ]
     for what, line, replacement in controls:
