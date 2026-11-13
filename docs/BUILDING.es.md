@@ -281,7 +281,7 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 | `NM_LOCAL_BUILD_HOST` | el nombre que atiende `build/local_build_host.sh` |
 | `CARGO_NET_OFFLINE` | `true` con `--offline` |
 | `PYTHONDONTWRITEBYTECODE` | `1` |
-| `SDKROOT` | el SDK de macOS del Xcode elegido (`xcrun --sdk macosx --show-sdk-path`), nunca el tuyo; también para compilar SPIRV-LLVM-Translator y para pip. Sin él, el clang de Apple busca en `/usr/local/include` y `/usr/local/lib` (el Homebrew de un Mac Intel) antes que en el SDK. No se pone donde no hay xcrun |
+| `SDKROOT` | el SDK de macOS del Xcode elegido (`xcrun --sdk macosx --show-sdk-path`), nunca el tuyo; también para compilar SPIRV-LLVM-Translator y para pip. Sin él, el clang de Apple busca en `/usr/local/include` y `/usr/local/lib` (el Homebrew de un Mac Intel) antes que en el SDK. No se pone donde no hay xcrun. Tu `SDKROOT` y tu `TOOLCHAINS` tampoco llegan al propio `build.sh`: el `git`, el `make` y el `python3` de `/usr/bin` buscan la herramienta real con xcrun, que se detiene si `SDKROOT` nombra un SDK que no existe; doctor los nombra cuando están puestos |
 | `PATH` | `<workdir>/tools/host`, `<workdir>/tools/bin`, `<workdir>/tools/venv/bin`, `/usr/bin:/bin:/usr/sbin:/sbin` |
 | `NM_PACKAGE_NAME`, `NM_BUILD_INFO` | nombre del paquete y descripción de la compilación |
 <!-- end -->

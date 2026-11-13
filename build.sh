@@ -28,6 +28,16 @@
 set -Eeu -o pipefail
 umask 022
 
+# SDKROOT and TOOLCHAINS are the two variables Apple's developer tools take from the environment to choose an SDK and
+# a toolchain. build.sh builds with the macOS SDK and the default toolchain of the Xcode chosen, so the caller's are
+# taken out of its own environment here, before it runs anything, and are named by doctor. Not only the steps are
+# concerned: /usr/bin/git, make and python3 are small programs of Apple's that find the real tool through xcrun, and
+# xcrun stops when SDKROOT names an SDK that is not there (a line left in a shell profile from an older Xcode, or
+# another platform's SDK of an Xcode since removed). With such an SDKROOT left in place, build.sh's own questions to
+# those tools fail, and a build stops before its first step for want of a make that is there.
+CALLER_SDKROOT=${SDKROOT:-}; CALLER_TOOLCHAINS=${TOOLCHAINS:-}
+unset SDKROOT TOOLCHAINS
+
 case "$0" in */*) NM_HERE_DIR=${0%/*} ;; *) NM_HERE_DIR=. ;; esac
 HERE=$(cd "$NM_HERE_DIR" && pwd -P)
 SELF="$HERE/build.sh"
@@ -840,7 +850,8 @@ doctor() {   # prints; sets D_MISSING
       if [ -z "$sdk" ]; then d_missing "a macOS SDK (xcrun --show-sdk-path fails)"
       else
         ver_ge "${v:-0}" "$NM_PIN_TOOL_SDK_MIN" && d_ok "macOS SDK $v" || d_old "macOS SDK $v: $NM_PIN_TOOL_SDK_MIN or later"
-        d_note "every step builds with SDKROOT=$(printf '%s' "$sdk" | tilde) (the SDK of the Xcode above${SDKROOT:+; your SDKROOT=$SDKROOT is not passed on})"
+        d_note "every step builds with SDKROOT=$(printf '%s' "$sdk" | tilde) (the SDK of the Xcode above${CALLER_SDKROOT:+; your SDKROOT=$CALLER_SDKROOT is not passed on})"
+        [ -z "$CALLER_TOOLCHAINS" ] || d_note "every step builds with the default toolchain of the Xcode above (your TOOLCHAINS=$CALLER_TOOLCHAINS is not passed on)"
         [ -f "$sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h" ] && d_ok "kernel headers in the SDK" || d_missing "Kernel.framework headers in $sdk (every kext compiles against them)"
         [ -f "$sdk/usr/lib/libkmod.a" ] && d_ok "libkmod.a in the SDK" || d_missing "usr/lib/libkmod.a in $sdk (every kext links it)"
         [ -f "$sdk/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] && d_ok "Metal 4 headers (plugin)" || d_missing "Metal/MTL4CommandQueue.h in $sdk (the plugin needs the macOS 26 SDK)"
@@ -2229,6 +2240,7 @@ print_env() {
   find_sdk
   if [ -n "$STEP_SDK" ]; then say "export SDKROOT=$(qh "$STEP_SDK")   # the macOS SDK of the Xcode chosen; yours is not passed"
   else say "unset SDKROOT   # no xcrun here: no SDK"; fi
+  say "unset TOOLCHAINS   # yours is not passed: the steps build with the default toolchain"
   say "export PYTHONDONTWRITEBYTECODE=1"
   if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(qh "$THOST:$STEP_PATH")"; else say "export PATH=$(qh "$STEP_PATH")"; fi
   say "# -- read by the build scripts; passed on only when you set them (empty = the script's own default)"
