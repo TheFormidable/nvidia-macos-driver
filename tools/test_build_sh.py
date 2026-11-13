@@ -85,11 +85,11 @@ def negative(name, problems):
 
 def negative_without_apple_tools(name, problems_of):
     """A negative control whose broken script lets a caller's SDKROOT, TOOLCHAINS or DEVELOPER_DIR that names nothing
-    reach what build.sh itself asks the system's make, python3 and git. On a Mac those are Apple's (APPLE_TOOLS): with
-    an SDKROOT that names no SDK they were seen, on two Macs of GitHub's, to start xcodebuild and to leave Apple's
-    marker of an install of the command line tools on demand
-    (/private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress), which on a Mac with a desktop comes
-    with Apple's dialog. The other two variables reach the same programs. So such a control runs only where the
+    reach what build.sh itself asks the system's make, python3 and git. On a Mac those are Apple's (APPLE_TOOLS): the
+    two runs on GitHub's Macs in which they were handed an SDKROOT that names no SDK were the two that left xcodebuild's
+    result bundles and Apple's marker of an install of the command line tools on demand
+    (/private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress), which on a Mac with a desktop is taken
+    to come with Apple's dialog. The other two variables reach the same programs. So such a control runs only where the
     system's tools are not Apple's; on a Mac it is named and left out. problems_of: the runs, not yet made."""
     if APPLE_TOOLS:
         emit(f"left out on a Mac, where it would hand Apple's own tools a setting that names nothing: control: {name}")
