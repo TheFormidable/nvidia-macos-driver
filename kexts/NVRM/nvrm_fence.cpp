@@ -29,6 +29,7 @@
 #include <pexpert/pexpert.h>
 extern "C" {
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <sys/sysctl.h>
 }
 #include "nvrm_fence.h"
@@ -440,11 +441,13 @@ static UInt64 nvfOwner(volatile UInt64 *ownerId)
 }
 
 // The test NVAccel makes for its mark escape: compositor-class holds delay WindowServer's own flips, so only
-// WindowServer may take them.
+// WindowServer may take them. The name alone is what the executable file is called, which any user can choose, so the
+// caller must also run as a system account (uid < 500: root and _windowserver, the rule NVRM's client table uses).
 static bool nvfCallerIsWindowServer(void)
 {
     static const char want[] = "WindowServer";
     char name[32];
+    if (kauth_getuid() >= 500) return false;
     name[0] = 0;
     proc_selfname(name, (int)sizeof(name));
     for (unsigned i = 0; i < sizeof(want); i++) if (name[i] != want[i]) return false;
