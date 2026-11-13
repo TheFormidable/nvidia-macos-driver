@@ -594,26 +594,44 @@ def main():
         nosid.unlink()
         arm("control: a watch started in the step's own process group dies with it and is not taken for none seen",
             rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
-        def stall(resume):
+        def stall(resume, secs, script=None):
+            """a watch held up for `secs` seconds (SIGSTOP), then prove: with `resume` the watch lists again first"""
             run([sc.script, "watch-start", sc.ci, sc.p], sc.env)
             wp = int((sc.ci / "brew-watch.pid").read_text().split()[0])
             os.kill(wp, signal.SIGSTOP)
-            time.sleep(12)
+            time.sleep(secs)
             if resume:
                 n0, end = lists(), time.time() + 60
                 os.kill(wp, signal.SIGCONT)
                 while lists() == n0 and time.time() < end:   # the next list is the one that carries the gap
                     time.sleep(0.2)
-            r = sc.prove(watch=False)
+            r = sc.prove(watch=False, script=script)
             try:
                 os.kill(wp, signal.SIGCONT)   # a stopped watch gets prove's SIGTERM only now
             except ProcessLookupError:
                 pass
             return r
-        rc, o = stall(True)
-        arm("control: a watch that made no list for 12 s is not taken for none seen", rc == 1 and any("made no list for" in l for l in lines(o, "NOT CHECKED")), o)
-        rc, o = stall(False)
-        arm("control: a watch that stopped listing before the end is not taken for none seen",
+
+        def pause_printed(o):
+            """the seconds of the longest pause, if prove's ok line of the watch names it with the time it ended"""
+            m = re.search(r"brew processes seen: 0 \(\d+ lists of the processes over \d+ s, at most (\d+) s apart \(the longest pause ended \d\d:\d\d:\d\dZ\)",
+                          "\n".join(lines(o, "ok")))
+            return int(m.group(1)) if m else -1
+        # a busy machine holds the watch up for some seconds (a four-processor runner did, for 11 s): that is printed, not
+        # failed. A watch that stood still for longer than the script's limit, a minute, is "not checked".
+        rc, o = stall(True, 12)
+        arm("a watch that the machine held up for 12 s is not failed for it: prove prints the pause and the time it ended",
+            rc == 0 and pause_printed(o) >= 12, o)
+        rc, o = stall(False, 4)
+        arm("the time between the watch's last list and prove is a pause like the others (4 s here): printed, not failed",
+            rc == 0 and pause_printed(o) >= 4, o)
+        gap10 = variant("gap10", ("WATCH_GAP=60\n", "WATCH_GAP=10\n"))   # the limit lowered, so that 12 s are past it
+        rc, o = stall(True, 12, gap10)
+        arm("control: a watch that stood still for longer than the limit is not taken for none seen (the line says until when)",
+            rc == 1 and any(re.search(r"made no list for \d+ s at one time, until \d\d:\d\d:\d\dZ", l) for l in lines(o, "NOT CHECKED")), o)
+        rc, o = stall(False, 12, gap10)
+        gap10.unlink()
+        arm("control: a watch whose last list is older than the limit is not taken for none seen",
             rc == 1 and any("last list is" in l for l in lines(o, "NOT CHECKED")), o)
 
         control("a tool taken from Homebrew is caught", "lie outside the working directory",

@@ -167,12 +167,15 @@ brew_own_folders() {
 # when the job ends (it finds those processes by a variable of the job's environment); whether it also stops a step's
 # background processes when that step ends is not shown here. So the loop is started in a session of its own (perl's
 # setsid: macOS has no setsid command) where perl is there, and prove checks rather than assumes: a watch that is not
-# running at the end, made no list for more than WATCH_GAP seconds at a time, or stopped listing before prove, is
-# "not checked" (which fails the job), never "0 seen".
+# running at the end, that made no list, or that stood still for more than WATCH_GAP seconds at one time (between two
+# lists, or between its last list and prove) is "not checked" (which fails the job), never "0 seen".
+# A shorter pause is the machine's and not the watch's: a runner with four slow processors, busy with a whole build,
+# makes its lists 0.7 s apart on average and now and then some seconds apart (eleven, once in forty minutes). prove
+# prints the longest pause and the time it ended, so that the reader sees how fine the net was and which step ran then.
 # Being outside every process group, it is not ended with whatever started it: it ends when watch-stop or prove
 # removes its pid file, when the folder of that file is gone, and by itself after NMCI_WATCH_MAX seconds (eight hours
 # when unset, more than any job runs), so that one whose starter was killed does not list processes for ever.
-WATCH_GAP=10
+WATCH_GAP=60
 cmd_watch_start() {
   local dir=${1:-} p pid i
   [ -n "$dir" ] || usage
@@ -183,7 +186,7 @@ cmd_watch_start() {
     case "$p" in *[[:space:]]*) stop "watch-start: a prefix with a blank cannot be told apart in a list of processes: '$p'" ;; esac
   done
   mkdir -p "$dir" || stop "cannot make $dir"
-  : > "$dir/brew-watch.txt"; printf '0 0 0 0\n' > "$dir/brew-watch.count"
+  : > "$dir/brew-watch.txt"; printf '0 0 0 0 -\n' > "$dir/brew-watch.count"
   printf 'starting\n' > "$dir/brew-watch.pid"   # the loop runs while this file exists
   if [ -x /usr/bin/perl ]; then
     nohup /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or exit 127' /bin/bash "$SELF" watch-loop "$dir" "$@" > /dev/null 2>&1 < /dev/null &
@@ -202,7 +205,7 @@ cmd_watch_start() {
   say "watching for brew processes (pid $pid), twice a second, until watch-stop"
 }
 cmd_watch_loop() {
-  local dir=$1 n=0 t0 t prev gap=0
+  local dir=$1 n=0 t0 t prev gap=0 gapend=-
   shift
   local max=${NMCI_WATCH_MAX:-28800}
   case "$max" in ''|*[!0-9]*) max=28800 ;; esac
@@ -225,16 +228,17 @@ cmd_watch_loop() {
         if (hit) print "homebrew " c
         else if (c ~ /(^|\/)brew( |$)/) print "other " c }' >> "$dir/brew-watch.txt"
     n=$((n + 1)); t=$(date +%s)
-    if [ $((t - prev)) -gt "$gap" ]; then gap=$((t - prev)); fi
+    if [ $((t - prev)) -gt "$gap" ]; then gap=$((t - prev)); gapend=$(date -u +%H:%M:%SZ); fi
     prev=$t
-    # lists made, seconds since the start, the longest time between two lists, the time of the last list
-    printf '%s %s %s %s\n' "$n" "$((t - t0))" "$gap" "$t" > "$dir/brew-watch.count.new" && mv -f "$dir/brew-watch.count.new" "$dir/brew-watch.count"
+    # lists made, seconds since the start, the longest time between two lists, the time of the last list, and the
+    # time of day (UTC) at which that longest pause ended
+    printf '%s %s %s %s %s\n' "$n" "$((t - t0))" "$gap" "$t" "$gapend" > "$dir/brew-watch.count.new" && mv -f "$dir/brew-watch.count.new" "$dir/brew-watch.count"
     sleep 0.5
   done
 }
 WATCH_SUMMARY=""; WATCH_HITS=-1; WATCH_OTHER=0
 watch_stop() {   # <dir>: stops the watch; sets WATCH_HITS (-1: it did not watch to the end) and WATCH_SUMMARY
-  local dir=$1 pid alive=0 n s g last now
+  local dir=$1 pid alive=0 n s g last ge now
   pid=$(sed -n 1p "$dir/brew-watch.pid" 2>/dev/null || true)
   # a process that ended and was not yet reaped (state Z) still answers kill -0. Only this folder's watch is taken
   # for alive and stopped: after a watch that ended without removing its file (killed with its step, a restart of the
@@ -243,8 +247,8 @@ watch_stop() {   # <dir>: stops the watch; sets WATCH_HITS (-1: it did not watch
     case "$(ps -o command= -p "$pid" 2>/dev/null)" in *"watch-loop $dir "*) kill -0 "$pid" 2>/dev/null && alive=1 ;; esac ;; esac ;; esac
   rm -f "$dir/brew-watch.pid"
   if [ "$alive" = 1 ]; then kill "$pid" 2>/dev/null || true; fi
-  read -r n s g last < "$dir/brew-watch.count" 2>/dev/null || true
-  n=${n:-0}; s=${s:-0}; g=${g:-0}; last=${last:-0}; now=$(date +%s)
+  read -r n s g last ge < "$dir/brew-watch.count" 2>/dev/null || true
+  n=${n:-0}; s=${s:-0}; g=${g:-0}; last=${last:-0}; ge=${ge:--}; now=$(date +%s)
   WATCH_OTHER=$(grep '^other ' "$dir/brew-watch.txt" 2>/dev/null | sort -u | wc -l | tr -d ' ')
   WATCH_HITS=$(grep '^homebrew ' "$dir/brew-watch.txt" 2>/dev/null | sort -u | wc -l | tr -d ' ')
   if [ "$alive" = 0 ]; then
@@ -252,11 +256,15 @@ watch_stop() {   # <dir>: stops the watch; sets WATCH_HITS (-1: it did not watch
   elif [ "$n" = 0 ]; then
     WATCH_HITS=-1; WATCH_SUMMARY="the watch made no list"
   elif [ "$g" -gt "$WATCH_GAP" ]; then
-    WATCH_HITS=-1; WATCH_SUMMARY="the watch made no list for $g s at one time ($n lists over $s s)"
+    WATCH_HITS=-1; WATCH_SUMMARY="the watch made no list for $g s at one time, until $ge ($n lists over $s s)"
   elif [ $((now - last)) -gt "$WATCH_GAP" ]; then
     WATCH_HITS=-1; WATCH_SUMMARY="the watch's last list is $((now - last)) s old ($n lists over $s s)"
   else
+    # the time since the last list is a pause like the others
+    if [ $((now - last)) -gt "$g" ]; then g=$((now - last)); ge=$(date -u +%H:%M:%SZ); fi
     WATCH_SUMMARY="$n lists of the processes over $s s, at most $g s apart"
+    # two lists a second or two apart are the loop's own pace on a busy machine; a longer pause is named with its time
+    if [ "$g" -gt 2 ] && [ "$ge" != - ]; then WATCH_SUMMARY="$WATCH_SUMMARY (the longest pause ended $ge)"; fi
   fi
 }
 cmd_watch_stop() {
@@ -451,8 +459,8 @@ prove_homebrew() {
     fail "brew processes seen: $WATCH_HITS ($WATCH_SUMMARY):"
     grep '^homebrew ' "$wd/brew-watch.txt" | sort -u | indent 20
   fi
-  say "      (not shown, and not showable without root: a brew command that ends within half a second and changes no file,"
-  say "      such as brew --prefix, passes between two lists of the watch and leaves nothing behind)"
+  say "      (not shown, and not showable without root: a brew command that changes no file and is over between two lists"
+  say "      of the watch leaves nothing behind: brew --prefix, which ends within half a second, or any within a pause)"
 }
 
 # The tools the steps run: tools/bin (build.sh links each chosen tool there and puts it first on every step's PATH; its
