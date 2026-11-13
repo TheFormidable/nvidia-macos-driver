@@ -59,7 +59,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
    WindowServer una y otra vez en la pantalla NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este
    macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez (tras un rechazo te deja
-   a ti el reinicio cuando hay una pantalla encendida y has iniciado sesión: sección 2, paso 1);
+   a ti el reinicio cuando otra GPU muestra una pantalla y has iniciado sesión: sección 2, paso 1);
    `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Tras un rechazo solo lo hace mientras el Mac
    siga en la compilación de macOS en la que se instaló, así que no actualices macOS entre la instalación y estas
    pruebas. Se borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un
@@ -124,12 +124,12 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    Ejecútalas en el escritorio que apareció tras la instalación. La primera nombra `NVRMNVDAFramebuffer` cuando el
    driver dibuja la pantalla (bien) e `IONDRVFramebuffer` cuando lo hace el framebuffer de firmware de Apple (mal: el
    driver rechazó la tarjeta, el paso 3 dice por qué). La segunda dice qué hizo entonces la tarea del instalador. En
-   un Mac así, o bien reinició sola a 2.9 a los pocos segundos del arranque, antes de que nadie iniciara sesión (el
-   archivo termina con `previous driver restored; restarting`; tras ese reinicio la primera orden nombra el
-   framebuffer de 2.9, así que lee el archivo), o bien, tras un inicio de sesión automático, devolvió los archivos de
-   2.9 y te dejó a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous driver
-   starts at the next restart`). En los dos casos 2.9 vuelve en el siguiente arranque; envía el archivo con
-   `sw_vers`.
+   un Mac así reinicia sola a 2.9 a los pocos segundos del arranque, también tras un inicio de sesión automático: el
+   archivo termina con `previous driver restored; restarting`, o, si ya habías iniciado sesión en el escritorio lento
+   de Apple, con `... the previous driver is back; restarting`. Tras ese reinicio la primera orden nombra el
+   framebuffer de 2.9, así que lee el archivo. Solo cuando otra GPU muestra una pantalla y has iniciado sesión te deja
+   a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous driver starts at the
+   next restart`). Envía el archivo con `sw_vers`.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -165,9 +165,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
        minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log` y,
        en la compilación de macOS en la que se instaló, devuelve el driver anterior y reinicia, así que vuelves a
-       estar en 2.9 y ese archivo es lo que hay que enviar (solo cuando hay una pantalla encendida y has iniciado
-       sesión, en otra GPU o en el framebuffer de firmware de Apple tras un inicio de sesión automático, te deja a ti
-       el reinicio, y el archivo lo dice). Sin la tarea (una primera
+       estar en 2.9 y ese archivo es lo que hay que enviar (solo cuando otra GPU muestra una pantalla y has iniciado
+       sesión te deja a ti el reinicio, y el archivo lo dice; el framebuffer de firmware de Apple en esta tarjeta no
+       detiene el reinicio, ni siquiera tras un inicio de sesión automático). Sin la tarea (una primera
        instalación, o cuando la tarea ya se borró sola en el arranque siguiente a uno que encendió la pantalla), o en
        otra compilación de macOS, no se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o
        quites el driver. `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).

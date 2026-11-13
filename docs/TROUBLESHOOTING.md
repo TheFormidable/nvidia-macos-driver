@@ -118,17 +118,19 @@ lies inside the card's memory window, the screen stays dark there too).
 five seconds during the first four minutes of a start; when it finds it, it copies the `nvrm-layout` and `nvrmfb-layout`
 lines into `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts
 the earlier driver back and restarts. On another build it only writes those lines: the earlier driver ran on the build
-of the install, and after a macOS update the refusal may be the update's doing. Where a display is lit and a user is
-logged in when it has put the driver back, it leaves the restart to that user: a desktop on another GPU, or Apple's
-firmware framebuffer on this card after an automatic login. A slow desktop without acceleration right after an install
-is that case when `/Library/NullMoth/lastgood.log` ends with
-`previous driver restored. A display is lit and a user is logged in, so the Mac is not restarted now`: a restart
-brings the previous driver back. When the log says instead that the previous driver is not put back (another macOS
-build), nothing was restored. That job takes itself away at the first start after one where the new driver showed its
-display, and a first install has none: a refusal then (after a macOS update that changed a class, for example) ends
-every start the same way, without a desktop on the card or on Apple's slow one, until you boot with `nvlayout=0` or take
-the driver out (section 4). With AGDC refused the display runs without AppleGraphicsDeviceControl; with the accelerator
-refused (`NVAccel: Apple class layout refused: ...` in the log) the desktop runs without acceleration.
+of the install, and after a macOS update the refusal may be the update's doing. Where another GPU shows a display
+and a user is logged in when it has put the driver back, it leaves the restart to that user: the log then ends with
+`previous driver restored. A display is lit and a user is logged in, so the Mac is not restarted now`, and a restart
+brings the previous driver back. A display on this card does not hold the restart back, since only Apple's firmware
+framebuffer can draw it then: after an automatic login onto Apple's slow desktop the Mac restarts as well, and the
+log's last line says `The only lit display is on the card whose driver was refused ... restarting`. A slow desktop
+without acceleration that stays after an install means that nothing was put back: the log says that the previous
+driver is not put back (another macOS build), or there is no such job. That job takes itself away at the first start
+after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS update
+that changed a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow
+one, until you boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
+AppleGraphicsDeviceControl; with the accelerator refused (`NVAccel: Apple class layout refused: ...` in the log) the
+desktop runs without acceleration.
 Report the line (after a restart by itself, `/Library/NullMoth/lastgood.log`) with `sw_vers`. `nvlayout=0` in the
 boot arguments starts them anyway (the check still runs and logs `overridden (nvlayout=0): ...`), at the risk the
 check exists for (a crash or a frozen desktop); use it only to confirm. `nvlayout=0` changes the verdict, not the

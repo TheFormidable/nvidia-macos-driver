@@ -943,9 +943,11 @@ bool NVRM::startGPU(IOService *provider)
     // way back is the install's fallback job (package/install.sh, step 6b): after an install over an earlier driver,
     // and until the start after the first one that lit the display, it reads the nvrm-layout property written below
     // and restores the driver that the install replaced, while the Mac still runs the macOS build of that install
-    // (that driver ran there; on another build the job only records the refusal). Without it (a first install, or a
-    // macOS update after that trial) every start ends like this one. nvlayout=0 makes the framebuffer publish
-    // "overridden" instead, and both start as before.
+    // (that driver ran there; on another build the job only records the refusal), then restarts the Mac: a display
+    // under this PCI device does not hold the restart back, since only Apple's firmware framebuffer can draw it, and
+    // only a display on another GPU with a user logged in leaves the restart to that user. Without it (a first
+    // install, or a macOS update after that trial) every start ends like this one. nvlayout=0 makes the framebuffer
+    // publish "overridden" instead, and both start as before.
     // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
     // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
     // logs the same from its side. A verdict published later is read again just before go(2).
