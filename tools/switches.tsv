@@ -571,7 +571,7 @@ bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / A
 bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
 bootarg	nvhud	diag	unset	2.9	-	observes only
 bootarg	nvhwvbl	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
-bootarg	nvlayout	escape	on (nvlayout=0: a difference is logged and the kext starts anyway, as 2.9 did without looking)	3.0	3.2	Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update.
+bootarg	nvlayout	escape	on (nvlayout=0: the layout is still checked and any difference logged, but it no longer stops the start; 2.9 did not check at all)	3.0	3.2	Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update.
 bootarg	nvmaxbpc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvmultigpu	setting	unset	2.9	-	More than one NVIDIA card (experimental): Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below.
 bootarg	nvoffbar	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
@@ -589,11 +589,11 @@ bootarg	nvrmholdcap	dev	unset	2.9	-	unreviewed
 bootarg	nvrmmapowner	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	nvrmnanowait	escape	on (nvrmnanowait=0: a cancel does not wait, as in 2.9)	3.0	3.2	Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does.
 bootarg	nvrmnvpcf	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
-bootarg	nvrmrctimer	escape	on (nvrmrctimer=0: no timer, as in 2.9)	3.0	3.2	The RM's once-a-second timer runs, so its periodic work (robust-channel recovery, the check for a lost GPU) happens.
+bootarg	nvrmrctimer	escape	on (nvrmrctimer=0: no timer, as in 2.9)	3.0	3.2	The RM's once-a-second timer runs, so its periodic work (the check that the GPU is still on the bus, the video encoder's session statistics) happens.
 bootarg	nvrmsettle	dev	unset	2.9	-	unreviewed
 bootarg	nvrmshutdown	dev	unset	2.9	-	unreviewed
 bootarg	nvrmtgp	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
-bootarg	nvrmworkq	escape	on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9)	3.0	3.2	The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and unload wait for it.
+bootarg	nvrmworkq	escape	on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9)	3.0	3.2	The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and the stop of a GPU wait for it.
 bootarg	nvrtd3	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvrtd3res	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvselector	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
