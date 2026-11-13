@@ -4,7 +4,7 @@
 The tests are separate programs (Python scripts, C and C++ files with their build line in the header comment, shell
 scripts), and nothing ran them all: seven of them had been failing unnoticed because the code they lift pieces from had
 moved on. This runs each one, prints the failures with the end of their output (the last 1200 characters, or the last N
-with --tail N), and exits 1 if any failed.
+with --tail N), names the tests that took half a minute or more, and exits 1 if any failed.
 
   Python   tools/test_*.py, run as they are.
   C, C++   tools/test_*.c and .cpp whose header names their build ("cc <flags> <file> -o /tmp/x && /tmp/x"): built into a
@@ -20,7 +20,9 @@ temporary files does not pile up in the system's; and no test writes Python byte
 anywhere else (Apple's python3 would otherwise put it under ~/Library/Caches/com.apple.python, its sys.pycache_prefix).
 What a test leaves in the system's temporary folders instead is listed at the end. Each test runs in a session of its
 own with no terminal and nothing on its standard input, so nothing it starts can ask for a password or an answer there;
-at its time limit, or when the run is interrupted, the test is stopped with everything it started.
+at its time limit, or when the run is interrupted, the test is stopped with everything it started. A test stopped at
+its limit is a failure that shows the end of what it had printed, as any other: a Python test prints unbuffered
+(PYTHONUNBUFFERED), so that its last line is the last thing it did.
 
 No test sees the driver's own settings of the tester's environment (a Mac with the driver installed often exports
 some): every variable with a prefix of the plugin's knobs and every name tools/switches.tsv lists as read from the
@@ -38,6 +40,7 @@ import signal
 import subprocess
 import threading
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,11 +55,15 @@ NEEDS_INPUT = {
 BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+\S+")
 TIMEOUT = 600
 TAIL = 1200              # characters of a failed test's output that are printed (--tail)
+SKIP_REASON = 400        # characters of a skipped test's last line that are printed: its reason, with the path or message in it
+SLOW = 30                # seconds from which a test is named at the end with the time it took
 # A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
 # real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
-# 376 s alone on an Intel Mac with 12 CPUs and grows under load with -j 4, so the general 600 s is too tight for it.
+# 376 s alone on an Intel Mac with 12 CPUs, grows under load with -j 4, and had not ended after 1200 s beside the
+# other tests on an Intel Mac with 4, so the general 600 s is too tight for it. Each of its own runs of the script has
+# a limit of its own, so the hour is room for a slow Mac, not for a hang.
 # The limit is per test name; every other test keeps TIMEOUT.
-PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}
+PER_TEST_TIMEOUT = {"test_build_sh.py": 3600}
 # the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
 KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_", "MESA_", "NIR_", "RADV_", "ACO_")
 # listed in switches.tsv because the driver reads them too (or may come to be listed there, as NM_VULKAN_INCLUDE, which
@@ -73,6 +80,18 @@ class Result:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+class TimedOut(Exception):
+    """a program passed its time limit and was stopped; out is what it had printed until then"""
+    def __init__(self, out):
+        super().__init__("no result within the limit")
+        self.out = out
+
+
+def as_text(x):
+    """what communicate gave or left in its exception: text, bytes (always, in the exception) or nothing"""
+    return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+
+
 def stop(p):
     try:
         os.killpg(p.pid, signal.SIGKILL)
@@ -83,7 +102,7 @@ def stop(p):
 def run(argv, cwd, env, timeout=TIMEOUT):
     """subprocess.run, but the program is a session of its own (no controlling terminal) with /dev/null as its input, and
     at the limit it is stopped with everything it started: killing only the test would leave its children running, still
-    writing into the temporary folder that is deleted next."""
+    writing into the temporary folder that is deleted next. At the limit: TimedOut, with what the program had printed."""
     p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, start_new_session=True)
     with RUNNING_LOCK:
@@ -93,10 +112,11 @@ def run(argv, cwd, env, timeout=TIMEOUT):
     except subprocess.TimeoutExpired:
         stop(p)
         try:
-            p.communicate(timeout=10)
-        except subprocess.TimeoutExpired:   # something that left the session still holds the output open
+            out, err = p.communicate(timeout=10)   # communicate keeps what it had read before the limit
+        except subprocess.TimeoutExpired as e:     # something that left the session still holds the output open
             p.kill()
-        raise
+            out, err = e.stdout, e.stderr
+        raise TimedOut(as_text(out) + as_text(err)) from None
     finally:
         with RUNNING_LOCK:
             RUNNING.discard(p)
@@ -117,6 +137,7 @@ def test_env(tmp, names):
     """the tester's environment without the driver's settings, with the test's own TMPDIR and no bytecode"""
     env = {k: v for k, v in os.environ.items() if k in KEEP_ENV or not (k.startswith(KNOB_PREFIXES) or k in names)}
     env.update(TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")
+    env["PYTHONUNBUFFERED"] = "1"   # what a test stopped at its limit had printed is then in the pipe, not in its buffer
     return env
 
 
@@ -174,15 +195,16 @@ def run_one(path, names=frozenset()):
             if b.returncode:
                 return name, "FAIL", "does not build:\n" + (b.stdout + b.stderr)[-TAIL:]
             r = run([str(t / "t")], cmd[1], env, limit)
-    except subprocess.TimeoutExpired:
-        return name, "FAIL", f"no result after {limit} s"
+    except TimedOut as e:
+        return name, "FAIL", f"no result after {limit} s" + (", stopped; the end of what it had printed:\n" + e.out[-TAIL:] if e.out.strip()
+                                                             else ", stopped; it had printed nothing")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     out = (r.stdout + r.stderr)
     if r.returncode == 0:
         return name, "ok", ""
     if r.returncode == 2 and "SKIP" in out:
-        return name, "skip", out.strip().splitlines()[-1][:200]
+        return name, "skip", out.strip().splitlines()[-1][:SKIP_REASON]
     return name, "FAIL", f"exit {r.returncode}\n" + out[-TAIL:]
 
 
@@ -207,8 +229,16 @@ def main(argv):
     names = frozenset(driver_env_names())
     before = temp_listing()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    took = {}
+
+    def timed_one(p):
+        t0 = time.monotonic()
+        try:
+            return run_one(p, names)
+        finally:
+            took[p.name] = time.monotonic() - t0
     try:
-        results = list(pool.map(lambda p: run_one(p, names), tests))
+        results = list(pool.map(timed_one, tests))
     except KeyboardInterrupt:
         pool.shutdown(wait=False, cancel_futures=True)
         with RUNNING_LOCK:
@@ -230,6 +260,9 @@ def main(argv):
     for root, n in sorted(temp_listing() - before):
         if os.path.join(root, n) not in OWN_TMPS:   # only the runner's own, by path: a test may name its folder alike
             print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")
+    slow = sorted(((t, n) for n, t in took.items() if t >= SLOW), reverse=True)
+    if slow:
+        print(f"took {SLOW} s or more: " + ", ".join(f"{n} {t:.0f} s" for t, n in slow))
     print(f"{len(by['ok'])} passed, {len(by['FAIL'])} failed, {len(by['skip'])} skipped, {len(by['norun'])} not run, of {len(results)}")
     return 1 if by["FAIL"] else 0
 
