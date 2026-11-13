@@ -55,6 +55,7 @@ KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_",
 KEEP_ENV = {"HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "NVRM_PRISTINE_OGKM"}
 RUNNING = set()          # the tests' process groups, stopped when the run is interrupted
 RUNNING_LOCK = threading.Lock()
+OWN_TMPS = set()         # the temporary folders this runner made for its tests (realpath), not left by a test
 
 
 class Result:
@@ -143,6 +144,7 @@ def run_one(path, names=frozenset()):
     if name in NEEDS_INPUT:
         return name, "norun", NEEDS_INPUT[name]
     tmp = tempfile.mkdtemp(prefix="nmtest-")
+    OWN_TMPS.add(os.path.realpath(tmp))
     env = test_env(tmp, names)
     try:
         if path.suffix == ".py":
@@ -210,7 +212,7 @@ def main(argv):
     # Which test made it cannot be told when tests run side by side, and another program may have made it meanwhile, so
     # it is listed and does not fail the run.
     for root, n in sorted(temp_listing() - before):
-        if not n.startswith("nmtest-"):
+        if os.path.join(root, n) not in OWN_TMPS:   # only the runner's own, by path: a test may name its folder alike
             print(f"left in {root} during the run (by a test, or by another program meanwhile): {n}")
     print(f"{len(by['ok'])} passed, {len(by['FAIL'])} failed, {len(by['skip'])} skipped, {len(by['norun'])} not run, of {len(results)}")
     return 1 if by["FAIL"] else 0
