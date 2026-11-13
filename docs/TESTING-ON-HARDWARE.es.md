@@ -34,7 +34,8 @@ cada tipo de fallo.
   aplicación: lanza la aplicación desde Terminal para verlas.
 
 Los ajustes de `/Library/GPUBundles/nvmtl/nvrm610.conf` van en tu propio bloque al final del archivo, entre
-`# --- my settings, kept on update ---` y `# --- end my settings ---`; gana la última línea de cada nombre, y un
+`# --- my settings, kept on update ---` y `# --- end my settings ---` (la sección 1, paso 5, dice por qué y qué
+conserva una instalación); gana la última línea de cada nombre, y un
 proceso lee el archivo al arrancar (reinicia la aplicación, o cierra sesión y vuelve a entrar para WindowServer). Los
 argumentos de arranque van en la línea `boot-args` del `config.plist` de OpenCore (README.md, "Wiring into an existing
 OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termines su prueba.
@@ -44,7 +45,14 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 1. **Una vuelta atrás que hayas probado.** Ten a mano el paquete descomprimido de la versión sobre la que instalas
    (2.9): instalarlo de nuevo con su propio `install.sh` devuelve cada archivo a su sitio
    ([BUILDING.md](BUILDING.md), "Installing the result and going back", que también dice qué hace y qué no hace
-   `uninstall.sh`). Ten claro cómo arrancarás el Mac si el escritorio no aparece
+   `uninstall.sh`). Antes de cambiar nada, el instalador copia lo que está instalado ahora (las kexts, el bundle del
+   plugin, la carpeta `/Library/GPUBundles/nvmtl` con su archivo de ajustes, la colección del kernel, el firmware) en
+   una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
+   `== 4. back up what is there now -> ...`; anótalo. También deja una tarea que se ejecuta en cada arranque: cuando el
+   driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
+   WindowServer una y otra vez en la pantalla NVIDIA), la tarea devuelve todo desde esa carpeta y reinicia una vez. Se
+   borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un problema que
+   aparezca más tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece
    ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; las entradas de 1401 en el selector de arranque
    solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Configuración del Sistema, o Ajustes del
    Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
@@ -53,8 +61,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    Bien: has arrancado el Mac una vez por esa vuelta atrás y has entrado por `ssh`. Mal: alguna de las dos no
    funciona; no sigas.
 2. **Un punto de partida limpio.** `nvram boot-args` muestra la línea `boot-args`: debe tener la línea de instalación
-   de README.md y nada más del driver (`gfxrst=4` se queda si WhateverGreen lo necesita). Tu bloque de `nvrm610.conf`
-   debe estar vacío. Quita lo que dejó una prueba anterior, reinicia y vuelve a comprobarlo.
+   de README.md y nada más del driver salvo los ajustes que elegiste para la máquina, como `nvfbhidpi=1` (`gfxrst=4`
+   se queda si WhateverGreen lo necesita). Tu bloque de `nvrm610.conf` (paso 5) no debe tener ningún ajuste de
+   prueba. Quita lo que dejó una prueba anterior, reinicia y vuelve a comprobarlo.
 3. **Números de 2.9.** En la versión que funciona ahora, guarda lo que informa el driver, para comparar después:
 
    ```bash
@@ -65,7 +74,20 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    Apunta cuánto tarda el escritorio en aparecer después del selector, y el uso de CPU de WindowServer con el
    escritorio en reposo y con un video en marcha (Monitor de Actividad).
 4. **El paquete.** Desde su `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia
-   nada. Bien: termina sin rechazar nada. Mal: dice qué rechazó; arréglalo primero.
+   nada. Bien: su última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo
+   primero.
+5. **Tu archivo de ajustes.** Léelo antes de instalar: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. El instalador
+   reemplaza la carpeta `/Library/GPUBundles/nvmtl` entera por la del paquete, y de tu archivo anterior solo vuelve a
+   poner, al final del archivo del paquete, las líneas que están entre `# --- my settings, kept on update ---` y
+   `# --- end my settings ---` (cada marca escrita exactamente así, sola en su línea), y de ellas solo las líneas
+   `NOMBRE=valor` cuyo nombre empieza por `NVMTL_`, `NVK_` o `NVRM_` y cuyo valor solo tiene letras, dígitos y
+   `. _ , = * -`. Todas las demás líneas se reemplazan por el archivo del paquete: un archivo sin las dos marcas (el
+   de 2.9 no las tiene) sale de la instalación igual al archivo del paquete. Una línea cuyo nombre no tiene ninguno de
+   los tres prefijos no la lee nadie. Tu archivo anterior no se pierde: es `nvmtl/nvrm610.conf` dentro de la carpeta
+   de respaldo del paso 1. Para conservar una línea tuya, ponla entre las dos marcas: en el archivo anterior antes de
+   instalar (el instalador la conserva), o en el archivo nuevo después. Para ver cuáles de tus líneas no son del
+   paquete, compara tu archivo con el del paquete, `Library/GPUBundles/nvmtl/nvrm610.conf` dentro de su `pkgroot`.
+   Volver a 2.9 instalándola de nuevo también conserva solo ese bloque.
 
 ## 2. El primer arranque
 
