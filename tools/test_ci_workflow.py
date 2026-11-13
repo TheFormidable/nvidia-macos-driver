@@ -302,6 +302,10 @@ def full_problems(fb, ci, root):
     tm = re.search(r"^    timeout-minutes: (\d+)\n", t, re.M)
     if not tm or not 0 < int(tm.group(1)) < 360:
         out.append("the full build has no timeout below GitHub's 360 minutes")
+    # actions/checkout clones one commit without tags unless told otherwise, and ./build.sh test runs the tests whose
+    # controls read older revisions and release tags from git
+    if not re.search(r"^ +fetch-depth: 0\b", t, re.M):
+        out.append("the full build's checkout is not a full clone (fetch-depth: 0): the tests' controls read older revisions and tags")
     coe = bool(re.search(r"^    continue-on-error: true\n", t, re.M))
     said = "continue-on-error until it has been seen green once" in fb
     if coe != said:
@@ -422,6 +426,9 @@ fb_control("reads that can fail the job are caught", 'reads "$NMCI_WORK" || echo
 fb_control("reads only after a good build are caught", "        if: ${{ !cancelled() }}\n        run: /bin/bash build/ci_full_build.sh reads",
            "        run: /bin/bash build/ci_full_build.sh reads", "also after a failed step")
 fb_control("a df dropped is caught", "        run: df -h \"$RUNNER_TEMP\" /\n", "        run: true\n", "df -h three times")
+fb_control("a shallow clone is caught", "          fetch-depth: 0          # ./build.sh test", "          fetch-depth: 1          # ./build.sh test", "not a full clone")
+fb_control("a checkout without fetch-depth is caught", "          fetch-depth: 0          # ./build.sh test runs controls that read older revisions and tags\n", "",
+           "not a full clone")
 arm("control (full build): a name in a comment is not what it runs", full_problems(fb + "\n# /bin/bash build/no_such.sh ${{ secrets.X }} upload\n", y, ROOT) == [])
 
 rel = compile_line((ROOT / "build/build_plugin_release.sh").read_text(), r"2>\.\./out/build\.err")
