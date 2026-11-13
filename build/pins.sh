@@ -147,6 +147,10 @@ NM_PIN_TOOL_MACOS_MIN=15.6
 NM_PIN_TOOL_MAKE_MIN=3.80
 # Python: Mesa meson.build:1155 ">= 3.10". tools/test_fw_fetch.py needs 3.14 (compression.zstd), so 3.14 is installed.
 NM_PIN_TOOL_PYTHON_MIN=3.10
+# Python for the kexts and libnvencvt (build_rm620.sh, build_kms620.sh, kexts/NVRM/rmcc.py, tools/nvencvt_header_abi.py):
+# their newest needs are f-strings (3.6) and subprocess.run(capture_output=, text=) (3.7); 3.8 is the oldest they were
+# run with. macOS's own python3 (3.9 with Xcode) is enough; only NVK needs 3.10.
+NM_PIN_TOOL_PYTHON_KEXT_MIN=3.8
 NM_PIN_TOOL_PYTHON_TESTS_MIN=3.14
 NM_PIN_TOOL_PYTHON_FORMULA=python@3.14
 # meson: Mesa meson.build:940-942 (1.7.0 with Rust). ninja: meson's own minimum (1.8.2).
