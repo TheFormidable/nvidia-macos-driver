@@ -1,7 +1,8 @@
 #!/bin/bash
 # ci_full_build.sh: the checks of the full build from an empty working directory (.github/workflows/full-build.yml),
 # which runs on an Intel Mac of GitHub's exactly what docs/BUILDING.md tells a tester to type. Every command also runs
-# by hand on a Mac, with the same result:
+# by hand on a Mac, but watch-start leaves a process of its own running until watch-stop or prove, and the read of
+# Apple's make with an empty developer folder is made only in GitHub's job (GITHUB_ACTIONS=true):
 #
 #   ci_full_build.sh basepkg <dir>
 #       the 2.9 release package that "./build.sh package" starts from, in <dir>: downloaded once from the URL pinned in
@@ -15,7 +16,9 @@
 #       a watch in the background that lists the running processes twice a second and keeps every one that is
 #       Homebrew's brew: a process whose program, or whose script when the program is a shell, is <prefix>/bin/brew
 #       or lies in <prefix>/Homebrew or <prefix>/Library/Homebrew (prefixes: /usr/local and /opt/homebrew, Homebrew's
-#       two places, when none is given). Its record and pid file are in <dir>.
+#       two places, when none is given). Its record and pid file are in <dir>. watch-stop and prove stop only the
+#       watch that was started for <dir>, written as watch-start was given it: a pid file that names any other
+#       process (the watch ended and its number was given to another program) is removed and nothing is stopped.
 #   ci_full_build.sh deps-plan <file>
 #       reads the output of "./build.sh --dry-run deps" in <file>: exit 1 when deps would call Homebrew.
 #   ci_full_build.sh toolchain-id <workdir>
@@ -30,7 +33,8 @@
 #   ci_full_build.sh reads <workdir>
 #       what only a Mac can show, printed as labelled blocks for a reader of the log (no check: it always exits 0,
 #       and a read that cannot be made says "could not be read: <why>"): how the toolchain's tools were built, what
-#       Apple's /usr/bin programs do with an empty developer folder, what the package's tarball carries (owners,
+#       Apple's own make does with an empty developer folder (in GitHub's job only: on a Mac with a desktop that
+#       may be Apple's offer to install the command line tools), what the package's tarball carries (owners,
 #       AppleDouble entries, extended attributes, the account name, signatures), and how often the build machine's
 #       home folder and working directory appear in the compiled files. It writes only a scratch folder under the
 #       working directory, which it removes.
@@ -232,8 +236,11 @@ WATCH_SUMMARY=""; WATCH_HITS=-1; WATCH_OTHER=0
 watch_stop() {   # <dir>: stops the watch; sets WATCH_HITS (-1: it did not watch to the end) and WATCH_SUMMARY
   local dir=$1 pid alive=0 n s g last now
   pid=$(sed -n 1p "$dir/brew-watch.pid" 2>/dev/null || true)
-  # a process that ended and was not yet reaped (state Z) still answers kill -0
-  case "$pid" in ''|*[!0-9]*) ;; *) case "$(ps -o stat= -p "$pid" 2>/dev/null)" in ''|Z*|*Z*) ;; *) kill -0 "$pid" 2>/dev/null && alive=1 ;; esac ;; esac
+  # a process that ended and was not yet reaped (state Z) still answers kill -0. Only this folder's watch is taken
+  # for alive and stopped: after a watch that ended without removing its file (killed with its step, a restart of the
+  # Mac), the number in the file may be another program's by now
+  case "$pid" in ''|*[!0-9]*) ;; *) case "$(ps -o stat= -p "$pid" 2>/dev/null)" in ''|Z*|*Z*) ;; *)
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in *"watch-loop $dir "*) kill -0 "$pid" 2>/dev/null && alive=1 ;; esac ;; esac ;; esac
   rm -f "$dir/brew-watch.pid"
   if [ "$alive" = 1 ]; then kill "$pid" 2>/dev/null || true; fi
   read -r n s g last < "$dir/brew-watch.count" 2>/dev/null || true
@@ -652,6 +659,7 @@ cmd_reads() {
   rhead "env -i DEVELOPER_DIR=<an empty folder> /usr/bin/make --version"
   scratch=$w/reads-scratch; rm -rf "$scratch"
   if [ ! -d "$w" ]; then cannot "$w is not there"
+  elif [ "${GITHUB_ACTIONS:-}" != true ]; then cannot "made only in GitHub's job (on a Mac with a desktop it may be Apple's offer to install the command line tools)"
   elif ! mkdir -p "$scratch/empty-developer-dir"; then cannot "cannot make $scratch"
   else env -i DEVELOPER_DIR="$scratch/empty-developer-dir" /usr/bin/make --version < /dev/null 2>&1 | sed -n 1,10p; say "exit ${PIPESTATUS[0]}"; fi
   rm -rf "$scratch"

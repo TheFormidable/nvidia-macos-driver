@@ -535,6 +535,31 @@ def main():
         rc, o = sc.prove(watch=False)
         arm("control: a watch that is not running is not taken for none seen", rc == 1 and any("the watch was not running" in l for l in lines(o, "NOT CHECKED")), o)
 
+        # a pid file whose watch is gone (it died with its step, the Mac restarted) names by now whatever program got
+        # that number: watch-stop and prove must not stop it
+        def stale_pid_file(script):
+            """-> whether a program of the tester's whose pid the file holds is still running after watch-stop, and
+            watch-stop's exit status and output"""
+            other = subprocess.Popen(["sleep", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                (sc.ci / "brew-watch.pid").write_text(f"{other.pid}\n")
+                rc, o = run([script, "watch-stop", sc.ci], sc.env)
+                try:
+                    other.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+                return other.poll() is None, rc, o
+            finally:
+                other.kill()
+                other.wait()
+        left, rc, o = stale_pid_file(sc.script)
+        arm("watch-stop does not stop a process that is not this folder's watch, whatever number the pid file holds",
+            left and rc == 1 and "the watch was not running at the end" in o and not (sc.ci / "brew-watch.pid").exists(), (left, rc, o))
+        anypid = variant("anypid", ('in *"watch-loop $dir "*) kill -0 "$pid"', 'in *) kill -0 "$pid"'))
+        left, rc, o = stale_pid_file(anypid)
+        anypid.unlink()
+        arm("control: a watch-stop that takes any live process with that number for the watch stops the tester's program", not left, (left, rc, o))
+
         # the watch must outlive the step that starts it: a step's process group killed when the step ends leaves it running
         def start_as_step(script):
             st = subprocess.Popen([BASH, str(script), "watch-start", sc.ci, sc.p], env=sc.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -756,9 +781,15 @@ def main():
             ex.write("/build/ci_full_build_reads.sh\n")
         reads_script.write_text(own.replace(make_read, make_read.replace("/usr/bin/make", shlex.quote(str(smake)))))
         before_w = sorted(str(x) for x in w.rglob("*"))
+        # outside GitHub's job the read is not made at all
         rc, o = run([reads_script, "reads", w], sc.env, timeout=300)
+        arm("reads does not start Apple's make outside GitHub's job, and says so",
+            rc == 0 and not (tmp / "standin-make/make.calls").exists() and "could not be read: made only in GitHub's job" in o
+            and sorted(str(x) for x in w.rglob("*")) == before_w, o[-800:])
+        github = dict(sc.env, GITHUB_ACTIONS="true")
+        rc, o = run([reads_script, "reads", w], github, timeout=300)
         calls = (tmp / "standin-make/make.calls").read_text() if (tmp / "standin-make/make.calls").exists() else ""
-        arm("reads ran the stand-in make, with only the empty developer folder as its environment, and not Apple's",
+        arm("in GitHub's job reads ran the stand-in make, with only the empty developer folder as its environment, and not Apple's",
             calls == f"DEVELOPER_DIR={w}/reads-scratch/empty-developer-dir --version\n" and "GNU Make (the test's stand-in)" in o, (calls, o[-800:]))
         labels = ("otool -L <toolchain>/bin/cmake", "ssl.OPENSSL_VERSION", "llvm-config --targets-built", "glslangValidator --version",
                   "--variable pc_path pkg-config", "--cflags --libs SPIRV-Tools", "ls -l <workdir>/tools/bin", "mesa_clc",
@@ -774,7 +805,7 @@ def main():
         arm("reads measures the home folder in the compiled files (the stand-in mesa_clc names the working directory under it)",
             "<workdir>/out/nvk-build/src/compiler/clc/mesa_clc" in o, o[-1500:])
         arm("reads writes nothing it leaves in the working directory", sorted(str(x) for x in w.rglob("*")) == before_w, "")
-        rc, o = run([reads_script, "reads", tmp / "nowhere"], sc.env, timeout=120)
+        rc, o = run([reads_script, "reads", tmp / "nowhere"], github, timeout=120)
         arm("reads of a working directory that is not there: every read says why, exit 0", rc == 0 and o.count("could not be read: ") >= 15, o[-1500:])
         reads_script.unlink()
 
