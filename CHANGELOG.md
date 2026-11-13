@@ -93,8 +93,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - A GPU fault on one channel no longer ends the application's Metal device. When a channel faults with an error that
   ends only that channel, or makes no progress for 5 s, NVK builds a new channel, sends the channel-wide state again,
   replays the submissions that had not started and drops the one that was running; a stalled channel's doorbell is
-  rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, a
-  fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a game or
+  rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, an
+  error that is not on the list of those that end only one channel, a fourth rebuild of one channel within 30 s) ends
+  the device exactly as in 2.9. A Mac put to sleep with a game or
   WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for the
   sleep: the kext answers NVK's channel note without waiting for the GPU's resume and reports the GPU as suspended
   until it lets RM calls through again, NVK sends no escape while it holds a channel's lock, and a stall seen while
