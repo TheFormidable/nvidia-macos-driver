@@ -190,8 +190,9 @@ cd nvidia-macos-driver
 ```
 
 `./build.sh doctor` says what this Mac has, lacks or has too old. `./build.sh` examines the Mac, offers to install
-the missing Homebrew formulas with the Homebrew of the Mac's own processor (only those; `build.sh` upgrades nothing,
-though Homebrew may upgrade an outdated dependency of a formula it installs), makes a Python environment and a Rust toolchain
+the missing Homebrew formulas with the Homebrew of the Mac's own processor (only those, and what Homebrew installs for
+them; `build.sh` upgrades and removes nothing, though Homebrew may upgrade an outdated dependency of a formula it
+installs), makes a Python environment and a Rust toolchain
 inside its working directory (`~/nullmoth-build` by default, never inside the checkout), downloads NVIDIA's
 `open-gpu-kernel-modules` 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, the Vulkan loader and the other pinned sources,
 checks each against the commit id or SHA-256 in `build/pins.sh`, and builds the kexts, NVK, the plugin, the
@@ -200,7 +201,8 @@ is skipped the next time. It never calls `sudo` and never installs the driver: a
 command to run yourself.
 
 On an Intel Mac the first `./build.sh` takes hours: Homebrew has no ready-made builds for Intel Macs any more, so it
-compiles each missing formula (LLVM 22 above all) on the Mac. On Apple silicon it installs ready-made ones.
+compiles each missing formula (LLVM 22 above all) on the Mac, and for that it also needs Apple's command line tools
+(`xcode-select --install`) besides Xcode. On Apple silicon it installs ready-made ones.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
 repository, so a package is the release's with every part this checkout builds replaced):
