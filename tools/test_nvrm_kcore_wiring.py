@@ -5,7 +5,8 @@ way they have to be, read from the source text.
 The pure logic is tested on the host (test_nvrm_workq_logic.c, test_nvrm_atomic_pool.c, test_nvrm_itree.c). What can
 go wrong around it is the wiring: a GPU start that fails because it got no queue of its own, an adapter shut down while
 its items still run, a flush that a teardown waits on for ever, a log line or an allocation under a lock taken with
-interrupts off, a stub left in front of the real function, a switch that is not on by default. Each arm below reads the
+interrupts off, a stub left in front of the real function, a switch that is not on by default, a check of the GPUs'
+memory windows that sees only the first card. Each arm below reads the
 files as they are; the controls at the end change one thing in a copy and require the arm to fail.
 Usage: test_nvrm_kcore_wiring.py [driver checkout]"""
 import pathlib
@@ -182,6 +183,14 @@ def problems(src):
     sus = body(nvrm, "void NVRM::gpuSuspend(") or ""
     if not (0 <= sus.find("nv_xnu_wq_flush(NULL, false, 5000)") < sus.find("rm_power_management(")):
         out.append("gpuSuspend() does not flush the global queue, at most 5 s, before RM standby")
+    # The question "is this range inside a GPU's windows" covers every started card (the surface fence refuses such a
+    # page; with nvmultigpu=1 a second card's windows were not seen), the primary first, through the device table.
+    isg = body(osx2, 'bool nv_pm_is_gpu(NvU64 start, NvU64 size)') or ""
+    if not (re.search(r"nv_state_t\s*\*\s*nv\s*=\s*nv_xnu_gpu_state\s*\(\s*\)\s*;", isg)
+            and re.search(r"for\s*\(\s*unsigned\s+g\s*=\s*0\s*;\s*nv\s*&&\s*g\s*<=\s*8\s*;\s*nv\s*=\s*nv_xnu_gpu_state_at\s*\(\s*g\s*\+\+\s*\)\s*\)", isg)
+            and re.search(r"nv_state_t\s*\*\s*nv_xnu_gpu_state_at\s*\(\s*unsigned\s+index\s*\)\s*;", osx2)
+            and re.search(r"extern\s+\"C\"\s+nv_state_t\s*\*\s*nv_xnu_gpu_state_at\s*\(\s*unsigned\s+index\s*\)\s*\{\s*NVRM\s*\*\s*s\s*=\s*gNVRMTab\.at\s*\(\s*index\s*\)", nvrm)):
+        out.append("nv_pm_is_gpu does not look at the windows of every started card")
     return out
 
 
@@ -260,6 +269,9 @@ def main():
     control("a thread per work item again", "os-xnu2.cpp", "// os_queue_work_item, os_flush_work_queue",
             "NV_STATUS NV_API_CALL os_queue_work_item(struct os_work_queue *q, void *i) { return 0; }\n// x",
             "os-xnu2.cpp still defines os_queue_work_item")
+    control("a window check that sees only the primary card", "os-xnu2.cpp",
+            "for (unsigned g = 0; nv && g <= 8; nv = nv_xnu_gpu_state_at(g++))", "for (unsigned g = 0; nv && g < 1; g++)",
+            "nv_pm_is_gpu does not look at the windows of every started card")
     print(("\n%d failed" % len(FAILS)) if FAILS else "\nall passed")
     return 1 if FAILS else 0
 
