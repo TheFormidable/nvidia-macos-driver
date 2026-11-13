@@ -54,12 +54,14 @@ extern "C" {
  * preemption off, so it does two atomic stores and nothing else: no IOLock, no allocation, no IOLog, no wakeup.
  * Safe before nvrm_chan_note_sysctls() and at any time until the kext unloads. */
 void nvrm_chan_note_xid(uint32_t xid);
-/* The escape's body, from the user client's escape switch on the caller's thread. `e` is the kernel's copy of the
- * record and the caller has checked that the escape's size is exactly sizeof(struct NVRMChanNoteEsc); `pm` is the
- * adapter's power state as NVRM_CN_PM_*. For an unknown version or `what` it leaves `status` 0 and writes nothing;
- * otherwise it counts by `what` (bounded), fills pm, xidCount, xidLast and sets status NVRM_CN_OK. Atomics only: no
- * lock, no RM call, never sleeps. The caller answers kIOReturnSuccess either way; the record is copied back as for
- * every escape. */
+/* The escape's body, at the top of the user client's escape, before the connection's gate and the power gate, on the
+ * caller's thread, so that it answers during a GPU suspend and resume. `e` is the kernel's copy of the record and the
+ * caller has checked that the escape's size is exactly sizeof(struct NVRMChanNoteEsc); `pm` is the power state the kext
+ * reports for this adapter as NVRM_CN_PM_*, which reads SUSPENDED for as long as the kext holds RM calls for a sleep or
+ * wake - longer than the adapter's own running flag is clear. For an unknown version or `what` it leaves `status` 0 and
+ * writes nothing; otherwise it counts by `what` (bounded), fills pm, xidCount, xidLast and sets status NVRM_CN_OK.
+ * Atomics only: no lock, no RM call, never sleeps. The caller answers kIOReturnSuccess either way; the record is copied
+ * back as for every escape. */
 void nvrm_chan_note_handle(struct NVRMChanNoteEsc *e, uint32_t pm);
 /* Registers the read-only sysctls. Thread context, from the kext's sysctl registration block; a second call does
  * nothing. They stay registered until the kext unloads. */

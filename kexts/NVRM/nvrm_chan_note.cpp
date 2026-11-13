@@ -46,8 +46,11 @@ extern "C" void nvrm_chan_note_xid(uint32_t xid)
     nvrm_cn_xid(&gCn, xid);
 }
 
-// The escape's body, on the calling process's thread under its connection's gate. The caller checked the size and
-// copied the record into the kernel; the record is read once and answered in place. Atomics only, never sleeps.
+// The escape's body, on the calling process's thread, before its connection's gate and the power gate: it must
+// answer during a GPU suspend and resume, so it can run beside any other escape or the close of the same
+// connection, and two notes of one connection can run at once. It touches only the static counters and the
+// caller's own copy of the record. The caller checked the size and copied the record into the kernel; the record is
+// read once and answered in place. Atomics only, never sleeps.
 extern "C" void nvrm_chan_note_handle(struct NVRMChanNoteEsc *e, uint32_t pm)
 {
     if (!e) return;
