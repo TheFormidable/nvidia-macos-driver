@@ -130,9 +130,11 @@ go on (their answer says "given up"), and the connection that owns it gets a str
 - At the third strike the connection is distrusted: its new holds are refused. The holds it already has stay, because
   their surfaces were taken out of the older mechanism when they were opened; each ends by completion, its close or
   the penalty bound the strike set.
-  That process is back on 2.9's marks and tags until it is restarted. Three stalls that were each recovered (for
-  example three channel rebuilds after injected faults within those 10 minutes) are enough, so
-  `owners_distrusted` above 0 after such a test is expected and not a second problem.
+  That process is back on 2.9's marks and tags until it is restarted. Three stalls without a fault that were each recovered (for
+  example three channel rebuilds after injected stalls within those 10 minutes) are enough when a reader waited on
+  them and each came after the penalty window of the one before (10 s, then 20 s); a fault the channel reports in its
+  notifier ends the holds without a strike. So `owners_distrusted` above 0 after such a test is expected and not a
+  second problem.
 - When eight connections have been distrusted since boot, the layer switches itself off until the next boot
   (`state` 2) and everything is 2.9. A WindowServer that crashes in a loop therefore ends in 2.9's behaviour, not in
   a hang.
@@ -178,9 +180,10 @@ close, before the RM frees anything of it (NVRM.kext's `clientClose` calls `nvrm
 process exits" below). After every interrupt the work loop serves, whatever the RM answered,
 and after every bottom half, the fence is kicked so that waits on finished work end at once.
 
-**NVK** registers every channel it submits on with the kernel when the channel is created: it gives the kernel the
+**NVK** registers every channel that takes one of its asynchronous submission slots (all of them unless `NVRM_ASYNC=0`
+or the slots run out) with the kernel when the channel is created: it gives the kernel the
 address of the channel's semaphore page and of its error notifier, writes a probe value, and asks the kernel to
-confirm it sees a second value written after the registration. Only then does the kernel read that channel. Before
+confirm it sees a second value written after the registration. Only then does the kernel arm anything on that channel. Before
 each submission reaches the GPU, NVK writes the submission's number at offset 0xFF0 of the same page, so the kernel
 can tell a writer whose GPU work is still running from a writer that is stuck. When a channel is destroyed NVK
 deletes the registration before it frees either page. A channel the kernel will not watch keeps working; while it
@@ -196,8 +199,9 @@ later.
 
 NVAccel asks NVRM for the fence's wait function (platform function `nvFenceOps`) when the accelerator starts. NVRM
 hands it out as soon as it is asked, also before its own fence has started on the GPU's start-up thread: until then
-a wait finds nothing pending, without taking a lock. When NVAccel has not found NVRM yet, or NVRM refuses, its waits
-ask again, never more than once a second (for `nvrmfence=0` see "The one switch"). `debug.nvaccel_surface_fence`
+a wait finds nothing pending, without taking a lock. When NVRM refuses, its waits ask again, never more than once
+a second (for `nvrmfence=0` see "The one switch"); until NVAccel has found NVRM they do not ask, and the first wait
+after it has found it asks. `debug.nvaccel_surface_fence`
 turns 1 when it has the function (one log line `surface fence: NVRM's fence v1`). The function is fetched once for
 all GPUs and used for the rest of the boot; NVAccel keeps one reference on the NVRM that answered so that NVRM.kext
 stays loaded under it. The accelerator built for AMD and Intel GPUs never looks for NVRM.
@@ -255,7 +259,8 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   far)`: the first eight and then every 2000th. `surface fences: surface S - the kernel gave up pid P's hold at its
   bound after U us`: the kernel ended a hold the reader waited for at its safety bound (first eight, then every
   2000th).
-- **Cost.** One OPEN (two for 9 to 16 surfaces), one ARM per part that is the last writer of a surface, one CLOSE per
+- **Cost.** One OPEN (two for 9 to 16 surfaces), one ARM per part that is the last writer of a surface (two when it is
+  the last writer of more than 8), one CLOSE per
   command buffer (WindowServer: plus one per surface), only for command buffers that write an IOSurface. While the
   fence is off, one QUERY a second at most.
 
@@ -366,7 +371,7 @@ boot" unless it says "now".
 | `owners_distrusted` | connections refused after three strikes | 0 |
 | `close_gpu_agree` | armed holds closed with the kernel seeing their work complete | grows with application drawing |
 | `close_gpu_behind` | armed holds closed before the kernel saw their work complete | 0 or a handful |
-| `wait_max_us` | longest wait that slept, microseconds | below 2,000,000 |
+| `wait_max_us` | longest wait that slept, microseconds | 2,000,000 at most, plus the timer's lateness |
 | `wait_lt1ms`, `wait_lt10ms`, `wait_lt100ms`, `wait_ge100ms` | waits that slept under 1 ms, 1 to 10 ms, 10 to 100 ms, 100 ms or more | `wait_ge100ms` says how often 2.9 would have gone on with an unfinished frame |
 | `seq_waits` | producer waits for its own channel | grows with uploads on the copy queue |
 | `seq_slept` | of those, slept in the kernel | those whose work was not done yet |
@@ -413,7 +418,7 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   close; the kernel stops reading them, since no hold is armed on them and new ones are refused.
 - **The layer switches itself off** (`state` 2, eight distrusted connections). New holds are refused at once, and
   every hold that still exists ends at that moment: the readers waiting on them are told the hold was given up.
-  NVAccel stops asking the fence and is on 2.9's marks; a plugin reader that was told so polls the writer's busy tag
+  NVAccel's waits find nothing in the fence from then on and use 2.9's marks; a plugin reader that was told so polls the writer's busy tag
   as 2.9 did (unless the kernel had already kept it 10 ms), and later readers are answered "off" and use the tag.
   Not covered: work those holds stood for may still be running on the GPU, so a reader can then see an unfinished
   frame, as after a wait that reached its bound. (A single distrusted connection is different: its existing holds stay
@@ -454,7 +459,7 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
   compositor by accident; it is not a security boundary. The bounds are: no hold, of either kind, delays anybody
   past them.
 - A hostile local process can fill its own quotas or the 256 sleeper places and push others back to 2.9's
-  behaviour, and eight such processes can switch the layer off for the boot. It cannot make another process wait
+  behaviour, and eight distrusted connections (one process can supply them one after another) switch the layer off for the boot. It cannot make another process wait
   longer than the bounds.
 - A process that registers a channel and frees or unmaps the page without deleting the registration keeps that page
   wired until its connection closes, and more than the page: macOS cannot take the freed memory apart while the
