@@ -171,8 +171,17 @@ jobs:
               grep -oE -e '-mfunction-return[^ ]*|-mindirect-branch[^ ]*|-fcf-protection=(full|return)|-Wformat-(overflow|truncation)[^ ]*|-Wstack-usage[^ ]*' "$f" | sort | uniq -c
               bad=1
             fi
-            sum=$(sed -e "s|$RUNNER_TEMP|<tmp>|g" -e "s|$GITHUB_WORKSPACE|<repo>|g" "$f" | shasum -a 256 | cut -c1-64)
+            cut="$RUNNER_TEMP/$part.lines"
+            sed -e "s|$RUNNER_TEMP|<tmp>|g" -e "s|$GITHUB_WORKSPACE|<repo>|g" "$f" > "$cut"
+            sum=$(shasum -a 256 < "$cut" | cut -c1-64)
             echo "compile lines of $part: $(wc -l < "$f" | tr -d ' ') lines, sha256 $sum (${{ matrix.runner }}, $(uname -m))"
+            # What the checksum is made of, for when the two runs' checksums differ: the same lines in sorted order (a
+            # different order only), how many times each option occurs, and the first line as it is.
+            echo "::group::what the compile lines of $part are made of"
+            echo "sorted: sha256 $(LC_ALL=C sort "$cut" | shasum -a 256 | cut -c1-64)"
+            tr ' ' '\n' < "$cut" | grep -e '^-' | LC_ALL=C sort | uniq -c | awk '{ print $1, $2 }'
+            echo "first line: $(head -1 "$cut")"
+            echo "::endgroup::"
           done
           if [ ! -s "$O/nvrm/imports.txt" ]; then
             echo "::error::$O/nvrm/imports.txt is missing or empty"; bad=1

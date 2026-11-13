@@ -25,8 +25,9 @@
 
 static int fails;
 /* Every arm that fails is repeated at the end of the output, where a runner that keeps only the last lines of a failed
-   test (tools/run_all_tests.py keeps 1200 characters unless --tail says more) still shows it: an arm that judges a time with what it measured,
-   any other with the summary line of its scene (the counts most of those arms are made of), given once per scene. */
+   test (tools/run_all_tests.py keeps 1200 characters unless --tail says more) still shows it: an arm that judges a
+   time with what it measured, any other with the summary line of its scene (the counts most of those arms are made
+   of), given once per scene. */
 static char recap[2048], scene[320], sceneRecapped[320];
 static void recap_add(const char *name, const char *measured)
 {
