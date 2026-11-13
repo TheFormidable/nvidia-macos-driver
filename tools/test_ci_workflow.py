@@ -105,6 +105,16 @@ def problems(y, root):
     if not sk or set(sk.group(1).split("|")) != vulkan_tests(root):
         out.append("host-tests does not fail when a test that needs the Vulkan headers is skipped (the list must be the tests that read "
                    f"NM_VULKAN_INCLUDE: {' '.join(sorted(vulkan_tests(root)))})")
+    # a test must not make macOS start an install of the command line tools: the marker the runner lists fails the
+    # job, in a step that also runs after a failed test, and its pattern finds the line the runner prints
+    od = re.search(r"if: \$\{\{ !cancelled\(\) \}\}\n\s*run: \|\n(?:.*\n)*?\s*if grep -E '(\^left in [^'\n]*installondemand[^'\n]*)' "
+                   r"\"\$RUNNER_TEMP/tests\.txt\"; then\n\s*echo \"::error::[^\"\n]*\"; exit 1\n\s*fi\n", host)
+    line = re.search(r'print\(f"(left in \{root\} during the run [^"\n]*: \{n\})"\)', (root / "tools/run_all_tests.py").read_text())
+    shown = line.group(1).replace("{root}", "/private/tmp").replace("{who}", "test_a.py, test_b.py") \
+        .replace("{n}", ".com.apple.dt.CommandLineTools.installondemand.in-progress") if line else ""
+    if not od or not shown or not re.search(od.group(1), shown) or re.search(od.group(1), shown.replace("installondemand", "other")):
+        out.append("host-tests does not fail when a test left the marker of an on-demand install of the command line tools "
+                   "(a step that also runs after a failed test, with a pattern that finds the runner's line for the marker and no other)")
     # the four tests that compile against vulkan/vulkan.h skip without headers: the job must hand them the release's
     hv = re.search(r"^\s*d=\$\(bash build/ci_vulkan_headers\.sh\)\n\s*echo \"NM_VULKAN_INCLUDE=\$d\" >> \"\$GITHUB_ENV\"", host, re.M)
     if not hv or hv.start() > host.find("tools/run_all_tests.py"):
@@ -180,12 +190,12 @@ control("the count check dropped is caught", "          grep -qx '5 passed, 0 fa
 control("a shallow clone for the host tests is caught", "fetch-depth: 0          # negative controls", "fetch-depth: 1          # negative controls", "every test from a full clone")
 control("a shallow clone for the registry test is caught", "fetch-depth: 0          # the registry test", "fetch-depth: 2          # the registry test", "kexts-linux has no full clone")
 control("the Linux job made non-gating is caught", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    continue-on-error: true\n", "kexts-linux no longer gates")
-control("the host tests made non-gating are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n",
-        "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n    continue-on-error: true\n", "host-tests no longer gates")
+control("the host tests made non-gating are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 80\n",
+        "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 80\n    continue-on-error: true\n", "host-tests no longer gates")
 HOST_RUNNERS = "        # Apple silicon and Intel, as the kext job below: the tests must hold on both\n        runner: [macos-15, macos-15-intel]\n"
 control("the host tests on Apple silicon only are caught", HOST_RUNNERS, HOST_RUNNERS.replace("[macos-15, macos-15-intel]", "[macos-15]"),
         "host-tests does not run on both")
-control("the host tests on one runner by name are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 45\n", "    runs-on: macos-15\n    timeout-minutes: 45\n",
+control("the host tests on one runner by name are caught", "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 80\n", "    runs-on: macos-15\n    timeout-minutes: 80\n",
         "host-tests does not run on both")
 control("host tests that are cancelled when the other runner's fail are caught", "    strategy:\n      fail-fast: false\n      matrix:\n" + HOST_RUNNERS,
         "    strategy:\n      matrix:\n" + HOST_RUNNERS, "host-tests does not run on both")
@@ -218,6 +228,15 @@ control("host tests that pass with the Vulkan tests skipped are caught",
         "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings",
         "is skipped")
 control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
+ONDEMAND = "(the line above names the tests that were running)\"; exit 1\n"
+control("a check for the on-demand install's marker that only prints is caught", ONDEMAND, ONDEMAND.replace("; exit 1", ""), "on-demand install")
+control("a check for the marker that is not made after a failed test is caught",
+        "        if: ${{ !cancelled() }}\n        run: |\n          [ -f \"$RUNNER_TEMP/tests.txt\" ]", "        run: |\n          [ -f \"$RUNNER_TEMP/tests.txt\" ]",
+        "on-demand install")
+control("a pattern that finds every entry the tests left is caught", "'^left in .*: \\.com\\.apple\\.dt\\.CommandLineTools\\.installondemand'",
+        "'^left in .*installondemand|^left in '", "on-demand install")
+control("a pattern for another line than the runner's is caught", "'^left in .*: \\.com\\.apple\\.dt\\.CommandLineTools\\.installondemand'",
+        "'^left behind: \\.com\\.apple\\.dt\\.CommandLineTools\\.installondemand'", "on-demand install")
 control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
 control("the compile-line check that runs only after a good link is caught", "        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}\n", "",
         "whenever the RM and NVKMS were compiled")

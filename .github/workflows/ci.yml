@@ -10,7 +10,9 @@
 #                 rather than skips when they are wrong). The kexts are x86_64, so a tester's Mac is an Intel one, and
 #                 an Intel Mac differs where the tests of the build script look: its Homebrew is in /usr/local/bin, on
 #                 every shell's PATH. Each runner's job runs to its end and gates: a failing host test must not go
-#                 unnoticed.
+#                 unnoticed. The Intel runner has four slow processors, and tools/test_build_sh.py alone may take most
+#                 of an hour beside the other tests there (the runner gives that test an hour), so the job has 80
+#                 minutes. A test that made macOS start an on-demand install of the command line tools fails the job.
 #   kexts-mac     the real kext builds with Xcode, once on an Apple-silicon runner and once on an Intel one: NVIDIA's
 #                 RM core and NVKMS, then NVRM, NVRMFB, NVAccel (15 and 26), NVRMAGDC and NMSMN linked. Catches what a
 #                 compile cannot: a duplicate or missing definition at link. NVIDIA's makefiles ask the compiler of the
@@ -30,9 +32,17 @@
 # runners' compile lines hold the same words in the same order and differed in spaces only: the make of macOS (GNU
 # make 3.81) leaves a space where the compiler refused an option NVIDIA's makefile asked it about, so the checksum
 # is taken with runs of spaces squeezed.
-# host-tests red in every run so far: in 43419906041, 299 of 312 tests passed, the four that compile against the
-# Vulkan headers among them, and tools/test_toolchain_sh.py failed (its stand-in build stops at its first tool on a
-# Mac).
+# host-tests red in every run so far. On the Apple-silicon runner, in 43419906041, 299 of 312 tests passed, the four
+# that compile against the Vulkan headers among them, and tools/test_toolchain_sh.py failed (its stand-in build stops
+# at its first tool on a Mac). On the Intel runner, whose first run was 43443873231, 298 of 314 passed and three
+# failed for reasons of the tests' own: tools/test_build_sh.py had not ended after 1200 s beside the other tests,
+# tools/test_dlss_fetch.sh wanted a zstd command, which macOS does not have, and the controls of
+# tools/test_rtd3_hold.cpp got one sleep in their fixed time on the loaded runner; tools/test_ci_full_build.py was
+# skipped, because Apple's linker refused its stand-in for libSystem.
+# In 43429828046 and 43443873231 the tests left /private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+# and an xcodebuild result bundle behind, and in no run before: those were the runs in which tools/test_build_sh.py
+# handed Apple's own /usr/bin/make an SDKROOT that names no SDK. On a Mac with a desktop that marker is taken to
+# belong to the dialog that offers to install the command line tools (not seen: GitHub's log shows the file only).
 # Every job gates: one that fails turns the run red.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
 # Vulkan-Headers) are pinned in the scripts and build/pins.sh; none is copied into the repository or into an artifact.
@@ -80,7 +90,7 @@ jobs:
         # Apple silicon and Intel, as the kext job below: the tests must hold on both
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
@@ -102,12 +112,29 @@ jobs:
         # read NM_VULKAN_INCLUDE) skip only when no headers reach them, and here the step above gave them: a skip of one
         # of them fails the job, whatever kept the variable from it. --tail 20000: a failed test's output is printed
         # whole (up to 20000 characters), not only its last 1200, so that the log of a run shows which arm failed.
+        # NMT_TIMES: tools/test_build_sh.py prints how long each of its groups took, so that a run in which it was
+        # stopped at its limit shows where the time went.
+        env:
+          NMT_TIMES: "1"
         run: |
           set -o pipefail
           python3 tools/run_all_tests.py -j 4 --tail 20000 | tee "$RUNNER_TEMP/tests.txt"
           if grep -E '^skip (test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf)\.py:' "$RUNNER_TEMP/tests.txt"; then
             echo "::error::a test that needs the Vulkan headers was skipped: NM_VULKAN_INCLUDE did not reach it"; exit 1
           fi
+      - name: No test made macOS start an install of the command line tools
+        # Apple's small programs in /usr/bin (make, git, python3 and the rest) find the real tool through xcrun. Handed
+        # an SDKROOT that names no SDK they left the marker of an on-demand install of the command line tools in
+        # /private/tmp (see the header), which in front of a tester would be Apple's dialog. The runner lists what
+        # appeared in the temporary folders, each entry with the tests that were running when it was first seen: the
+        # marker fails the job, also when a test failed.
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f "$RUNNER_TEMP/tests.txt" ] || { echo "the tests did not run"; exit 0; }
+          if grep -E '^left in .*: \.com\.apple\.dt\.CommandLineTools\.installondemand' "$RUNNER_TEMP/tests.txt"; then
+            echo "::error::a test made macOS start an on-demand install of the command line tools (the line above names the tests that were running)"; exit 1
+          fi
+          echo "no marker of an on-demand install was left in the temporary folders"
   kexts-mac:
     strategy:
       fail-fast: false
