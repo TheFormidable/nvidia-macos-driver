@@ -23,7 +23,8 @@ import sys
 ROOT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1]
 SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".inc", ".m", ".mm"}
 # a call with a string literal as its first argument; the wrappers are NVRM's (NVRM.cpp)
-CALL = re.compile(r"\b(sysctlbyname|nvrmSysR|nvrmSysW)\s*\(\s*([^,()]*)")
+WRAPPERS = ("nvrmSysR", "nvrmSysW")
+CALL = re.compile(r"\b(sysctlbyname|" + "|".join(WRAPPERS) + r")\s*\(\s*([^,()]*)")
 LITERAL = re.compile(r'"([A-Za-z0-9_.]+)"\s*$')
 # the declarations the kexts use: SYSCTL_<KIND>(_debug, OID_AUTO, name, access, ...)
 DECL = re.compile(r"\bSYSCTL_[A-Z_]+\s*\(\s*_debug\s*,\s*OID_AUTO\s*,\s*(\w+)\s*,([^,]*),")
@@ -38,13 +39,15 @@ def arm(name, ok, detail=""):
 
 
 def strip_comments(text):
-    """C and C++ comments out, string literals kept (a name inside a comment is not a call)."""
+    """C and C++ comments out, string and character literals kept (a name inside a comment is not a call). A
+    character literal is read as one so that '"' does not open a string and make a later "//" inside a real string
+    look like a comment that hides the rest of its line."""
     out, i, n = [], 0, len(text)
     while i < n:
         c = text[i]
-        if c == '"':
+        if c in "\"'":
             j = i + 1
-            while j < n and text[j] != '"':
+            while j < n and text[j] != c and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
             out.append(text[i:j + 1]); i = j + 1
         elif text.startswith("//", i):
@@ -66,7 +69,9 @@ def survey(sources):
             before = text[max(0, m.start() - 12):m.start()]
             if arg.startswith("const char") or re.search(r"\bint\s+$", before):
                 continue   # the function's own declaration or definition, not a call
-            if m.group(1) == "sysctlbyname" and arg in ("n", "name"):
+            line = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+            if m.group(1) == "sysctlbyname" and arg in ("n", "name") and re.search(
+                    r"\bstatic\s+int\s+(" + "|".join(WRAPPERS) + r")\s*\(", line):
                 continue   # the two wrappers hand their own parameter on; their callers are read instead
             lit = LITERAL.match(arg)
             if not lit:
@@ -115,7 +120,7 @@ arm(f"each of the {len(ours)} debug.* names a kext reads or writes from the kern
 print("     names: " + ", ".join(ours) + "; Apple's: " + ", ".join(sorted(n for n in reads if not n.startswith("debug."))))
 
 # ---- each check fires
-GOOD = {"a.cpp": 'static int r(const char *n, int *v) { return sysctlbyname(n, v, 0, 0, 0); }\n'
+GOOD = {"a.cpp": 'static int nvrmSysR(const char *n, int *v) { return sysctlbyname(n, v, 0, 0, 0); }\n'
                  'void f() { int v; nvrmSysR("debug.one", &v); nvrmSysW("debug.two", 1); }\n',
         "b.cpp": 'SYSCTL_INT(_debug, OID_AUTO, one, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &g, 0, "x");\n'
                  'SYSCTL_PROC(_debug, OID_AUTO, two, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,\n'
@@ -127,8 +132,16 @@ arm("  a read-only OID declared without CTLFLAG_KERN is reported (the 2.9 declar
 m = dict(GOOD); m["b.cpp"] = m["b.cpp"].replace("CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN", "CTLFLAG_RW | CTLFLAG_LOCKED")
 arm("  and so is one declared over two lines", any("debug.two" in b and "EPERM" in b for b in problems(m)[0]),
     problems(m)[0])
-m = dict(GOOD); m["b.cpp"] = m["b.cpp"].replace("| CTLFLAG_KERN, &g", ", &g") + "// CTLFLAG_KERN one\n"
-arm("  the flag in a comment does not count", any("debug.one" in b for b in problems(m)[0]), problems(m)[0])
+m = dict(GOOD); m["b.cpp"] = m["b.cpp"].replace("| CTLFLAG_KERN, &g", "/* | CTLFLAG_KERN */, &g")
+arm("  the flag in a comment does not count", m != GOOD and any("debug.one" in b and "EPERM" in b
+                                                               for b in problems(m)[0]), problems(m)[0])
+m = dict(GOOD); m["a.cpp"] += 'static int other(const char *n, int *v) { return sysctlbyname(n, v, 0, 0, 0); }\n'
+arm("  a wrapper this test does not know is refused (its callers would not be read)",
+    any("not a literal" in b and "sysctlbyname(n" in b for b in problems(m)[0]), problems(m)[0])
+m = dict(GOOD); m["a.cpp"] += ("static const char q = '\"';\n"
+                               'void g() { int v; const char *u = "a//b"; nvrmSysR("debug.five", &v); }\n')
+arm("  a call after a character literal '\"' and a string holding // is still read",
+    any("debug.five" in b and "0 declarations" in b for b in problems(m)[0]), problems(m)[0])
 m = dict(GOOD); m["a.cpp"] += 'void g() { int v; nvrmSysR("debug.three", &v); }\n'
 arm("  a name with no declaration is reported", any("debug.three" in b and "0 declarations" in b for b in problems(m)[0]),
     problems(m)[0])
