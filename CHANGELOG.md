@@ -331,7 +331,8 @@ has proven itself, renewed with a reason otherwise.
   (`auto`, `source`, `homebrew`) chooses; `auto` keeps Homebrew's ready-made builds on Apple silicon. On an Intel
   Mac build.sh does not use Homebrew, even when it is installed: with tools from source only the toolchain's tools
   and your own settings are used, and no `brew` is called. With `homebrew` a tool you already have is used as before. Homebrew's SPIRV-LLVM-Translator is now taken only with Homebrew's own `llvm`; with
-  any other LLVM the pinned translator is built against it.
+  any other LLVM the pinned translator is built against it, and built again (a few minutes) when the LLVM in use changes;
+  a translator built before `deps` noted its LLVM is built once more.
 - Every step of `./build.sh`, its SPIRV-LLVM-Translator build and its pip now get `SDKROOT` set to the macOS SDK of
   the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
   searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel

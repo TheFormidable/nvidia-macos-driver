@@ -728,12 +728,25 @@ brew_llvm_chosen() {
   [ -n "$LLVM_PREFIX" ] && [ -n "$BREW_PREFIX" ] && [ -d "$(brew_opt llvm)" ] || return 1
   [ "$(cd "$LLVM_PREFIX" 2>/dev/null && pwd -P)" = "$(cd "$(brew_opt llvm)" 2>/dev/null && pwd -P)" ]
 }
-spirv_llvm_ok() {   # a SPIRV-LLVM-Translator of the chosen LLVM's major.minor was found
+# build.sh's own SPIRV-LLVM-Translator (SPIRVLLVM_PREFIX) is linked against the libraries of one LLVM and belongs to it
+# alone. After a build deps notes which in <prefix>/.nm-llvm: the toolchain's stamp text when that LLVM is the
+# toolchain's (a new pin or recipe rebuilds LLVM and changes it), else the LLVM's version and prefix. spirv_llvm_for:
+# that text for the LLVM in use. spirv_llvm_stale: the translator found is build.sh's own and its note is missing (built
+# before deps noted it) or names another LLVM
+spirv_llvm_for() {
+  if tc_mine "$LLVM_PREFIX"; then cat "$TC_PREFIX/.nm-toolchain/llvm" 2>/dev/null || true
+  else printf '%s %s\n' "$(llvm_version)" "$LLVM_PREFIX"; fi
+}
+spirv_llvm_stale() {
+  [ -n "$PC_SPIRV_LLVM" ] && [ "$PC_SPIRV_LLVM" = "$SPIRVLLVM_PREFIX/lib/pkgconfig" ] || return 1
+  [ "$(cat "$SPIRVLLVM_PREFIX/.nm-llvm" 2>/dev/null || true)" != "$(spirv_llvm_for)" ]
+}
+spirv_llvm_ok() {   # a SPIRV-LLVM-Translator of the chosen LLVM's major.minor was found, and build.sh's own was built against it
   local mm
   [ -n "$PC_SPIRV_LLVM" ] && [ -n "$T_LLVMCONFIG" ] || return 1
   mm=$("$T_LLVMCONFIG" --version 2>/dev/null | cut -d. -f1-2)
-  case "$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")" in "$mm"|"$mm".*) return 0 ;; esac
-  return 1
+  case "$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")" in "$mm"|"$mm".*) ;; *) return 1 ;; esac
+  ! spirv_llvm_stale
 }
 llvm_version() { [ -z "$T_LLVMCONFIG" ] || "$T_LLVMCONFIG" --version 2>/dev/null || true; }
 venv_python() { [ -x "$VENV/bin/python3" ] && printf '%s' "$VENV/bin/python3"; return 0; }
@@ -934,7 +947,8 @@ doctor() {   # prints; sets D_MISSING
     v=$(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc")
     if [ -n "$LLVM_PREFIX" ]; then
       x=$("$T_LLVMCONFIG" --version | cut -d. -f1-2)
-      case "$v" in "$x"|"$x".*) d_ok "SPIRV-LLVM-Translator $v" ;; *) d_old "SPIRV-LLVM-Translator $v does not match LLVM $x (Mesa needs the same major.minor; deps builds $NM_PIN_SPIRVLLVM_REF into $SPIRVLLVM_PREFIX)" ;; esac
+      if spirv_llvm_stale; then d_old "SPIRV-LLVM-Translator $v in $SPIRVLLVM_PREFIX was not built against the LLVM at $LLVM_PREFIX (deps builds it again)"
+      else case "$v" in "$x"|"$x".*) d_ok "SPIRV-LLVM-Translator $v" ;; *) d_old "SPIRV-LLVM-Translator $v does not match LLVM $x (Mesa needs the same major.minor; deps builds $NM_PIN_SPIRVLLVM_REF into $SPIRVLLVM_PREFIX)" ;; esac; fi
     else d_note "SPIRV-LLVM-Translator $v (LLVM $NM_PIN_TOOL_LLVM_MAJOR missing)"; fi
   else d_missing "SPIRV-LLVM-Translator for LLVM $NM_PIN_TOOL_LLVM_MAJOR (deps builds $NM_PIN_SPIRVLLVM_REF into $SPIRVLLVM_PREFIX)"; fi
   if [ -n "$PC_SPIRV_TOOLS" ]; then
@@ -1661,7 +1675,9 @@ deps_spirv_llvm() {
   local src=$SRC/SPIRV-LLVM-Translator hdr=$SRC/SPIRV-Headers bld=$TOOLS/spirv-llvm-translator-build pre=$SPIRVLLVM_PREFIX
   local tpath="$TBIN:/usr/bin:/bin:/usr/sbin:/sbin" conf
   if spirv_llvm_ok; then say "SPIRV-LLVM-Translator: $PC_SPIRV_LLVM (matches LLVM $(llvm_version))"; return 0; fi
-  if [ -z "$LLVM_PREFIX" ] || brew_llvm_chosen; then
+  if [ -n "$LLVM_PREFIX" ] && spirv_llvm_stale; then
+    say "SPIRV-LLVM-Translator in $pre: it was built against another LLVM, or before build.sh noted which; it is built again for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (a few minutes)"
+  elif [ -z "$LLVM_PREFIX" ] || brew_llvm_chosen; then
     say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for LLVM $NM_PIN_TOOL_LLVM_MAJOR: Homebrew has none that matches; it is built from source into $pre (a few minutes)"
   else
     say "SPIRV-LLVM-Translator $NM_PIN_SPIRVLLVM_REF for the LLVM at $(printf '%s' "$LLVM_PREFIX" | tilde) (Homebrew's belongs to Homebrew's llvm only): it is built from source into $pre (a few minutes)"
@@ -1698,6 +1714,7 @@ deps_spirv_llvm() {
   x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
   x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --install "$bld"
   [ -f "$pre/lib/pkgconfig/LLVMSPIRVLib.pc" ] || { say "the install left no $pre/lib/pkgconfig/LLVMSPIRVLib.pc" >> "$CUR_LOG"; fail_step spirv-llvm-translator 1; }
+  spirv_llvm_for > "$pre/.nm-llvm"
   CUR_STEP=""
   find_tools
   spirv_llvm_ok || warn "the SPIRV-LLVM-Translator just built says $(pc_version "$pre/lib/pkgconfig/LLVMSPIRVLib.pc"), LLVM is $(llvm_version)"
