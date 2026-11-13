@@ -102,23 +102,23 @@ with `ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'` and `sysctl
 debug.nvrmfb_layout_classes debug.nvrmfb_layout_vtables debug.nvrmfb_layout_vtdiff debug.nvrmfb_agdc
 debug.nvrmfb_agdc_layout debug.nvaccel_layout`. On a good boot `nvrmfb-layout` reads `ok: 3 classes, vtables not
 compared; macOS ...` and `nvagdc-layout` reads `ok: 1 class, vtables not compared; macOS ...`. A line that starts
-with `refused:` names the class and both sizes: that macOS lays the class out differently from the headers the
-driver was built with, and the kext did not start on it so that nothing writes over Apple's memory. With NVRMFB
-refused, NVRM does not start the GPU and no desktop comes up on the card, at that start or at any later one: every
-framebuffer of the driver is built on those classes, the one that shows a desktop with the driver off included
+with `refused:` names the class and both sizes: that macOS lays the class out differently from the headers the driver
+was built with, and the kext did not start on it so that nothing writes over Apple's memory. With NVRMFB refused,
+NVRM does not start the GPU and no desktop comes up on the card, at that start or at any later start of this driver:
+every framebuffer of the driver is built on those classes, the one that shows a desktop with the driver off included
 (section 4), and the OpenCore setup excludes Apple's own. The Mac can be reached over the network. After an install
 over an earlier driver, `install.sh`'s fallback job looks for this refusal every five seconds during the first four
 minutes of a start; when it finds it, it copies the `nvrm-layout` and `nvrmfb-layout` lines into
-`/Library/NullMoth/lastgood.log`, puts the earlier driver back and restarts. That job exists only until the new driver
-has shown its display at one start, and a first install has none: a refusal then (after a macOS update that changed a
-class, for example) ends every start without a desktop until you boot with `nvlayout=0` or take the driver out
-(section 4). With AGDC refused the display runs without AppleGraphicsDeviceControl; with the accelerator refused
-(`NVAccel: Apple class layout refused: ...` in the log) the desktop runs without acceleration. Report the line (after
-a restart by itself, `/Library/NullMoth/lastgood.log`) with
-`sw_vers`. `nvlayout=0` in the boot arguments starts them anyway (the check still runs and logs
-`overridden (nvlayout=0): ...`), at the risk the check exists for (a crash or a frozen desktop); use it only to
-confirm. `nvrmfb-layout-vtables` and `nvaccel-layout-vtables` never stop anything: a `differ:` or `not compared:`
-line on a Mac whose display works is worth a report with the macOS build.
+`/Library/NullMoth/lastgood.log`, puts the earlier driver back and restarts. That job takes itself away at the first
+start after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS
+update that changed a class, for example) ends every start without a desktop until you boot with `nvlayout=0` or take
+the driver out (section 4). With AGDC refused the display runs without AppleGraphicsDeviceControl; with the
+accelerator refused (`NVAccel: Apple class layout refused: ...` in the log) the desktop runs without acceleration.
+Report the line (after a restart by itself, `/Library/NullMoth/lastgood.log`) with `sw_vers`. `nvlayout=0` in the
+boot arguments starts them anyway (the check still runs and logs `overridden (nvlayout=0): ...`), at the risk the
+check exists for (a crash or a frozen desktop); use it only to confirm. `nvrmfb-layout-vtables` and
+`nvaccel-layout-vtables` never stop anything: a `differ:` or `not compared:` line on a Mac whose display works is
+worth a report with the macOS build.
 
 **VT-d (a DMA mapper) is on.** `sysctl debug.nvrm_dma_mode` says which case the machine is in
 ([DMA-IOMMU.md](DMA-IOMMU.md)).
@@ -242,9 +242,11 @@ then freed at once, as in 2.9.
   `sudo nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then `sudo shutdown -r now`, gives the next
   starts the firmware's picture. Without it, two starts in a row whose display never came up turn the driver off by
   themselves; after an install over an earlier driver, `install.sh`'s job then puts that driver back and restarts.
-  None of these starts has a picture when the framebuffer refused this macOS's classes (section 3): the framebuffer
-  that draws the firmware's picture with the driver off is built on the same classes. Where the 1401 app's removal
-  job exists, it still runs, without a picture.
+  When the framebuffer refused this macOS's classes (section 3), none of the starts in this item or the one above has
+  a picture: the framebuffer that draws the firmware's picture with the driver off is built on the same classes. A
+  refusal that NVRM reads before it starts the card is not counted either, so those starts never turn the driver off.
+  Where the 1401 app's removal job exists, it still runs, without a picture; otherwise put `nvlayout=0` into
+  OpenCore's `config.plist` over the network, or take the driver out (`uninstall.sh`, README.md, "Uninstall").
   Where OpenCore writes `boot-args` at each start (the 1401 install sets it up so), changing them with `nvram` does
   not last: `-nvoff`, or a boot argument taken away, has to go into OpenCore's `config.plist`. Once an accelerator
   has started, NVAccel.kext (like NVRM.kext) holds itself loaded until the next restart: unloading it by hand does
