@@ -168,8 +168,8 @@ Mesa `90a959eb` (the mesa-26.3.0-rc3 tag; 2.8 and 2.8.1 used `17ca6174`) with, i
 `build/build_nvk.sh <mesa git> <610.57.04 tree> <out> [2.9|2.8]` does all of it: it exports Mesa `90a959eb` (26.3.0-rc3; `2.8` exports `17ca6174`) with `git archive`,
 applies the header patch and the chain above (and copies the two hwrt headers), builds `mesa_clc` and `vtn_bindgen2` from that same tree (tools from another Mesa
 revision deserialize NVK's internal shaders as garbage), cross-builds `libvulkan_nouveau.dylib` for x86_64 and prints its
-LC_UUID and export count, and what was left out of or added to the chain, if anything. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (no hubfix, boost, rated-tdp
-or gps-maxpower patches; `nvk/release-2.8/nvk-fixes-after-def16.patch`). Rebuilding 2.8 gives the shipped library byte for byte
+LC_UUID and export count, and what was left out of or added to the chain, if anything. The `2.8` argument builds the set the 2.8 / 2.8.1 package was made from (`nvk-macos`,
+`nvk/release-2.8/nvk-fixes-after-def16.patch`, `nvk-620-kernel`, `nvk-recycle`, `nvk-slab` and `nvk-slabdef` only). Rebuilding 2.8 gives the shipped library byte for byte
 except the 16 LC_UUID bytes: the linker derives the UUID from the unstripped file, which records the absolute path of every
 object, so a different build directory gives a different UUID. `build/nvk_compare.py` states exactly which bytes differ.
 The NAK changes under `nvk/speed267` are already contained in `nvk-macos.patch`; the scripts there record how they were made.
