@@ -20,10 +20,11 @@ before PATH, so every run names the stand-in through NM_BREW, which makes build.
 arm "whichbrew" moves those two places into the sandbox, in its clone of build.sh only).
 
 Arms (each with a negative control: the same check on a scratch copy of build.sh broken on purpose must fail):
-  doctor on a fresh Mac; no Homebrew of this machine is reached; which of two Homebrews (Intel, Apple silicon,
+  doctor on a fresh Mac, without Xcode (nothing that opens Apple's install dialog runs) and with it; no Homebrew of
+  this machine is reached; which of two Homebrews (Intel, Apple silicon,
   Rosetta); no tool of the other architecture's Homebrew taken from PATH ("pathtools"); what an Xcode-only Mac builds, tools tested for what they do, dependencies checked first ("needs");
   doctor, dry runs and env write nothing ("readonly"); no home path in what a tester pastes ("nohome");
-  deps --yes; --no-install; fetch, and a tampered remote; --offline; --dry-run; the build order;
+  deps --yes; --no-install; fetch, and a tampered remote; fetch and the tester's git hooks, template and filters; --offline; --dry-run; the build order;
   the variables every step receives; skipping and rebuilding by stamp; a failing step and its report file; an
   interrupted run; two runs at once and a stale lock; paths with a space; Apple silicon and an unsupported macOS;
   "env"; clean; docs/BUILDING.md and docs/BUILDING.es.md against the script; build/pins.sh against the scripts and
@@ -529,9 +530,9 @@ class Sandbox:
         # find the real one in /opt/homebrew or /usr/local before the stand-in on PATH, and install into it.
         if self.has_brew:
             e["NM_BREW"] = str(self.dir / "brew/bin/brew")
-        elif HOST_BREW:
-            raise RuntimeError(f"an imitated Mac without Homebrew cannot run here: build.sh would find {HOST_BREW[0]}")
         e.update(extra or {})
+        if not e.get("NM_BREW") and HOST_BREW and not self.has_brew:
+            raise RuntimeError(f"an imitated Mac without Homebrew cannot run here without NM_BREW: build.sh would find {HOST_BREW[0]}")
         return e
 
     def run(self, *args, extra=None, cwd=None, home=None, script=None, timeout=300, stdin=subprocess.DEVNULL):
@@ -659,27 +660,70 @@ def under(path, roots):
 
 
 # ------------------------------------------------------------------------------------------------- arms
+# what a stand-in of Apple's /usr/bin shims records when it runs: on a Mac without the command line tools each opens the
+# dialog that offers to install them
+SHIMS = ("git", "make", "python3", "xcrun", "xcodebuild")
+
+
+def shim_runs(lines):
+    return [l for l in lines if l.split(" ", 1)[0] in SHIMS]
+
+
+def fresh_brew():
+    """On a machine with a Homebrew of its own, build.sh without NM_BREW would find it: there the imitated Mac without
+    Homebrew names a brew that is not there, and doctor's "NM_BREW names ..." line stands for its "Homebrew" line."""
+    return {"NM_BREW": "<sb>/no-brew/bin/brew"} if HOST_BREW else {}
+
+
 def arm_fresh():
-    """doctor on a Mac with nothing installed: names exactly what is missing, exits 1, changes nothing."""
-    if HOST_BREW:
-        print(f"skip fresh-machine arm: this machine has {HOST_BREW[0]}, which build.sh finds when NM_BREW is not set")
-        return
-    sb = Sandbox("fresh", xcode=None, brew=False)
+    """A Mac with nothing installed. Without Xcode (no developer folder): every command stops before it runs git, make,
+    python3, xcrun or xcodebuild, doctor naming exactly Xcode. With Xcode and nothing else: doctor names exactly what is
+    missing, exits 1, changes nothing; a dry run of everything ends without error and installs nothing."""
+    bare = Sandbox("fresh-noxcode", xcode=None, brew=False)
+
+    def bare_problems():
+        p = []
+        extra = {k: v.replace("<sb>", str(bare.dir)) for k, v in fresh_brew().items()}
+        bare.clear()
+        rc, out = bare.run("doctor", extra=extra)
+        items = doctor_items(out)
+        if rc != 1 or len(items) != 1 or not items[0].startswith("Xcode"):
+            p.append(f"doctor: exit {rc}, missing {items}")
+        for args in (("env",), ("--dry-run", "all"), ("fetch",), ("--dry-run", "build", "rm")):
+            rc, out = bare.run(*args, extra=extra)
+            if rc != 2 or "xcode-select" not in out:
+                p.append(f"{' '.join(args)}: exit {rc}, not the stop for a missing Xcode: {out[-300:]}")
+        if shim_runs(bare.jlines()):
+            p.append(f"ran what opens Apple's install dialog on such a Mac: {shim_runs(bare.jlines())[:4]}")
+        if mutating(bare.jlines()):
+            p.append(f"ran more than probes: {mutating(bare.jlines())[:3]}")
+        return p
+
+    p = bare_problems()
+    check("no Xcode: every command stops before git, make, python3 or xcrun; doctor names exactly Xcode", not p, p)
+    with bare.scratch():
+        bare.break_script('  if [ "$CMD" != help ] && is_mac && ! xcode-select -p >/dev/null 2>&1; then',
+                          '  if false; then')
+        negative("no early stop without Xcode (check_paths then runs git)", bare_problems())
+
+    sb = Sandbox("fresh", brew=False)
+    extra = {k: v.replace("<sb>", str(sb.dir)) for k, v in fresh_brew().items()}
+    want = [k for k in FRESH_MISSING if k != "Xcode"]
 
     def problems(script_note=""):
         before = sb.listing(sb.dir, skip=("tmp",))
         sb.clear()
-        rc, out = sb.run("doctor")
+        rc, out = sb.run("doctor", extra=extra)
         p = []
         if rc != 1:
             p.append(f"exit {rc}, not 1")
         items = doctor_items(out)
-        for k in FRESH_MISSING:
+        for k in want:
             n = sum(1 for i in items if re.match(re.escape(k) + r"\b", i))
             if n != 1:
                 p.append(f"'{k}' named {n} times in the missing list")
-        if len(items) != len(FRESH_MISSING):
-            p.append(f"{len(items)} items missing, expected {len(FRESH_MISSING)}: {items}")
+        if len(items) != len(want):
+            p.append(f"{len(items)} items missing, expected {len(want)}: {items}")
         if mutating(sb.jlines()):
             p.append(f"doctor ran more than probes: {mutating(sb.jlines())}")
         after = sb.listing(sb.dir, skip=("tmp",))
@@ -691,12 +735,16 @@ def arm_fresh():
         return p, out
 
     p, out = problems()
-    check("fresh Mac: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
+    check("fresh Mac with Xcode: doctor names exactly what is missing, exits 1, runs only probes, writes nothing", not p, p or out[-800:])
     with sb.scratch():
         sb.break_script('  else d_missing "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR', '  else d_note "Rust $NM_PIN_RUST_VERSION in $RUSTUP_DIR')
         negative("doctor that forgets one missing tool", problems()[0])
-    rc, out = sb.run("--dry-run", "all")
-    check("fresh Mac: a dry run of everything ends without error and installs nothing", rc == 0 and not mutating(sb.jlines()),
+    rc, out = sb.run("--dry-run", "all", extra=extra)
+    if HOST_BREW:   # deps stops at once when NM_BREW names no brew; that it installs nothing is what is left to check
+        ok = rc == 2 and "NM_BREW names" in out and not mutating(sb.jlines())
+    else:
+        ok = rc == 0 and not mutating(sb.jlines())
+    check("fresh Mac with Xcode: a dry run of everything ends as it should and installs nothing", ok,
           f"exit {rc} {mutating(sb.jlines())[:3]} {out[-600:]}")
 
 
