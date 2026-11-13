@@ -67,13 +67,15 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   compares the size of IOFramebuffer, IOGraphicsDevice and IODisplayParameterHandler; NVRMAGDC the size of
   AppleGraphicsDeviceControl. On a different size the kext does not start (NVRMFB) or does not create its
   device-control object (NVRMAGDC, `debug.nvrmfb_agdc` = -6) and says which class differs, instead of running on a
-  misplaced base. When NVRMFB refuses, NVRM does not start the card and no desktop comes up on it, since every
-  framebuffer of the driver is built on those classes and the OpenCore setup excludes Apple's own; that is not
-  counted as a failed start. After an install over an earlier driver, while the installer's fallback job is still
-  there (until the start after the first one that showed the display), the job finds the refusal at that start, keeps
-  it (the class and both sizes) in `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the
-  install was made on, puts the earlier driver back and restarts (where another GPU shows a desktop and a user is
-  logged in, the restart is left to that user). The verdicts are on the GPU's PCI device as `nvrmfb-layout`,
+  misplaced base. When NVRMFB refuses, NVRM does not start the card and the driver shows nothing on it, since every
+  framebuffer of the driver is built on those classes; that is not counted as a failed start. With the OpenCore setup
+  of README.md, which excludes Apple's IONDRVSupport, no desktop comes up on the card; where IONDRVSupport is not
+  excluded, Apple's firmware framebuffer takes the card and shows a slow desktop without acceleration. After an
+  install over an earlier driver, while the installer's fallback job is still there (until the start after the first
+  one that showed the display), the job finds the refusal at that start, keeps it (the class and both sizes) in
+  `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts the
+  earlier driver back and restarts (where a display is lit and a user is logged in, on another GPU or on Apple's
+  firmware framebuffer after an automatic login, the restart is left to that user). The verdicts are on the GPU's PCI device as `nvrmfb-layout`,
   `nvagdc-layout` and `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and
   IODisplayParameterHandler have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason
   to refuse. Way back for all three checks: boot argument `nvlayout=0`.

@@ -422,10 +422,13 @@ backup: it removes the driver. With the 1401 app, "1401: Remove NVIDIA driver" i
 back as it was before the app's install.
 
 Installing a tester build over a release leaves the same fallback job a release install leaves: if this build's
-framebuffer refuses the running macOS's Apple classes so that no desktop comes up on the card, the job puts the
+framebuffer refuses the running macOS's Apple classes so that the driver shows nothing on the card, the job puts the
 release back and restarts the Mac by itself during the first few minutes of a start (see
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md), the layout-refusal entry). A Mac that restarts by itself onto the release
-after you installed a tester build has met that case.
+after you installed a tester build has met that case. So has one whose OpenCore does not exclude IONDRVSupport and that
+logs in by itself: Apple's firmware framebuffer shows a slow desktop without acceleration on the card, the job puts the
+release's files back and leaves the restart to you (`/Library/NullMoth/lastgood.log` says so), and the next restart
+brings the release.
 
 ## What is not automated, and why
 
