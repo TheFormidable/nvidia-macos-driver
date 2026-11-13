@@ -811,6 +811,28 @@ def main():
             and "== end of the reads" in o, (rc, miss, o[-1500:]))
         arm("reads measures the home folder in the compiled files (the stand-in mesa_clc names the working directory under it)",
             "<workdir>/out/nvk-build/src/compiler/clc/mesa_clc" in o, o[-1500:])
+        # mesa_clc names the working directory only in its load commands. Apple's strings reads only the sections of a
+        # Mach-O file it is given by name, also with -a, and a load command is in none; of its standard input it reads
+        # every byte. The stand-in here does the same in the plainest way: nothing of a named file, all of its input
+        real_strings = shutil.which("strings")
+        if real_strings:
+            sstr = tmp / "standin-strings/strings"
+            sstr.parent.mkdir()
+            sstr.write_text('#!/bin/sh\nfor a in "$@"; do case "$a" in -*) ;; *) exit 0 ;; esac; done\n' f'exec {shlex.quote(real_strings)} "$@"\n')
+            sstr.chmod(0o755)
+            named = dict(sc.env, PATH=str(sstr.parent) + os.pathsep + sc.env["PATH"])
+            clc = "<workdir>/out/nvk-build/src/compiler/clc/mesa_clc"
+            rc, o = run([reads_script, "reads", w], named, timeout=300)
+            arm("reads finds a path that only a load command holds, also where strings reads only the sections of a file it is given by name",
+                rc == 0 and clc in o, o[-600:])
+            good = reads_script.read_text()
+            by_name = good.replace('strings -a < "$f"', 'strings -a "$f"')
+            assert good.count('strings -a < "$f"') == 3, "the control's text is not in the script three times"
+            reads_script.write_text(by_name)
+            rc, o = run([reads_script, "reads", w], named, timeout=300)
+            arm("control: a reads that gives strings the file's name finds no path there",
+                rc == 0 and clc not in o and " 0 with a count above 0" in o, o[-600:])
+            reads_script.write_text(good)
         arm("reads writes nothing it leaves in the working directory", sorted(str(x) for x in w.rglob("*")) == before_w, "")
         rc, o = run([reads_script, "reads", tmp / "nowhere"], github, timeout=120)
         arm("reads of a working directory that is not there: every read says why, exit 0", rc == 0 and o.count("could not be read: ") >= 15, o[-1500:])

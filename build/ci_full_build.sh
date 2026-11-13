@@ -710,8 +710,10 @@ cmd_reads() {
     rhead "xattr -lr pkgroot: attributes and how many files carry each"
     if command -v xattr > /dev/null 2>&1; then xattr -lr "$r" 2>/dev/null | cut -d: -f2 | sort | uniq -c; say "(end of list)"; else cannot "xattr is not there"; fi
   fi
-  # d. how much of the build machine's paths the compiled files carry (a measurement)
-  rhead "the home folder and the working directory in the compiled files (strings -a), per Mach-O file with a count above 0"
+  # d. how much of the build machine's paths the compiled files carry (a measurement). Each file is handed to strings
+  # on its standard input: given a Mach-O file by name, Apple's strings reads only its sections, also with -a, and
+  # the names in its load commands (the libraries it loads, its run paths, its own name) are in none
+  rhead "the home folder and the working directory in the compiled files (strings over every byte, load commands too), per Mach-O file with a count above 0"
   if [ -z "$home" ]; then cannot "HOME is not set"
   elif [ ! -d "$w/out" ] && [ ! -d "$r" ]; then cannot "neither $w/out nor a staged package is there"
   elif ! command -v strings > /dev/null 2>&1; then cannot "strings is not there"
@@ -720,15 +722,15 @@ cmd_reads() {
     { machos "$w/out"; [ ! -d "$r" ] || machos "$r"; } > "$scratch/machos.txt"
     : > "$scratch/counts.txt"
     while IFS= read -r f; do
-      n=$(strings -a "$f" 2>/dev/null | grep -c -F "$home" || true)
-      g=$(strings -a "$f" 2>/dev/null | grep -c -F -e "$w" -e "$wr" || true)
+      n=$(strings -a < "$f" 2>/dev/null | grep -c -F "$home" || true)
+      g=$(strings -a < "$f" 2>/dev/null | grep -c -F -e "$w" -e "$wr" || true)
       [ "${n:-0}" = 0 ] && [ "${g:-0}" = 0 ] || printf '%s %s %s\n' "${n:-0}" "${g:-0}" "$f" >> "$scratch/counts.txt"
     done < "$scratch/machos.txt"
     say "$(grep -c . "$scratch/machos.txt" || true) Mach-O files read, $(grep -c . "$scratch/counts.txt" || true) with a count above 0 (home folder, working directory, file):"
     sort -rn "$scratch/counts.txt" | sed "s|$wr|<workdir>|; s|$w|<workdir>|; s|$home|~|" | sed -n 1,200p
     sort -rn "$scratch/counts.txt" | sed -n 1,3p | while read -r n g f; do
       say "== ${f#"$w"/}: five lines"
-      strings -a "$f" 2>/dev/null | grep -F "$home" | sed -n 1,5p | sed "s|$home|~|g"
+      strings -a < "$f" 2>/dev/null | grep -F "$home" | sed -n 1,5p | sed "s|$home|~|g"
     done
     rm -rf "$scratch"
   fi
