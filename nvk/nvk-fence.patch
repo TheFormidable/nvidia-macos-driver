@@ -7,8 +7,8 @@ an event sleep in the kernel on that channel's semaphore, and provides the call 
 The numbers and structs are in nvkmd/nvrm/nvrm_fence_abi.h, a byte-for-byte copy of kexts/NVRM/nvrm_fence_abi.h
 (tools/test_shared_headers.py compares them; tools/test_fence_wiring_nvk.py holds the wiring).
 A kext without the fence, or booted with nvrmfence=0, leaves every process on the 2.9 surface marks.
-The NVRMFenceWait comment now also says that, to a user-space caller, ownerPid and state come back 0 when the
-writer is another process (the kernel no longer tells one process which process writes a surface it names).
+To a caller in user space, a WAIT answers ownerPid and state 0 when the surface's writer is another process: the
+kernel does not tell one process which process writes a surface it names.
 
 diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
 index 537e791..f87935f 100644
