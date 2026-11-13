@@ -16,7 +16,9 @@ None of it can run without the card, so what must hold is asserted on the source
   source nor the work loop is ever made over an existing one (the first stayed registered, with nothing to remove it);
 - the idle power-down monitor (nvrtd3=1), a thread call that is never stopped, is not handed the GPU object: each of
   its calls enters a gate first, and stop() closes that gate, waits until no call is inside and takes the GPU away
-  before it tears anything down (right after the fence stop, which keeps its place);
+  before it tears anything down (right after the fence stop, which keeps its place); system sleep (until the wake)
+  and shutdown (for good) hold the GPU against it, after waiting for a call that is inside, and each of its calls
+  does nothing while the GPU is held, except the power resource's switch-on that the wake itself asks for;
 - the kext holds one reference on itself (never given back) before startGPU registers its first sysctl, and its
   module stop function refuses from then on: nothing the kext registers is ever unregistered, so it must not unload;
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
@@ -179,6 +181,22 @@ def arms(src, others):
         and order(stop, [r"nvrm_fence_stop\s*\(\s*\)\s*;", r"\brtd3Detach\s*\(\s*\)\s*;", r"\bfUtilizationLock\b"])
         and order(stop, [r"\brtd3Detach\s*\(\s*\)\s*;", r"\bPMstop\s*\(", r"\bnv_xnu_wq_flush\s*\("]))
 
+    sps, sws, rhold = body(n, "NVRM::setPowerState"), body(n, "NVRM::systemWillShutdown"), body(n, "NVRM::rtd3Hold")
+    arm("system sleep and shutdown hold the GPU against the idle power-down monitor: before the suspend, until the wake; "
+        "every monitor call does nothing while it is held, but the wake's own",
+        order(sps, [r"if\s*\(\s*ordinal\s*==\s*0\s*\)\s*rtd3Hold\s*\(\s*\d+\s*\)\s*;", r"OSAddAtomic\s*\(\s*0\s*,\s*&fGpuPm\s*\)",
+                    r"\bgpuSuspend\s*\(\s*\)", r"fRtd3Waker\s*=\s*current_thread\s*\(\s*\)\s*;",
+                    r"nv_rtd3_before_system_resume\s*\(\s*\)", r"\bgpuResume\s*\(\s*\)", r"fRtd3Waker\s*=\s*THREAD_NULL\s*;",
+                    r"if\s*\(\s*ordinal\s*!=\s*0\s*\)\s*rtd3Release\s*\(\s*\)\s*;"])
+        and order(sws, [r"\brtd3Hold\s*\(\s*\d+\s*\)\s*;", r"\bkernel_thread_start\s*\("]) and "rtd3Release" not in sws
+        and len(re.findall(r"if\s*\(\s*!\s*n\s*->\s*rtd3Held\s*\(\s*\)\s*\)", rarm)) == 4
+        and order(rhold, [r"OSCompareAndSwap\s*\(\s*0\s*,\s*1\s*,\s*&fRtd3Hold\s*\)", r"gNvRtd3Gpu\b[^;]*!=\s*this\s*\)\s*return\s*;",
+                          r"nv_quiesce_may_sleep\s*\(", r"nv_gate_idle\s*\(\s*&gNvRtd3Gate\s*\)"])
+        and "nvx_can_block" not in rhold
+        and re.search(r"OSCompareAndSwap\s*\(\s*1\s*,\s*0\s*,\s*&fRtd3Hold\s*\)", body(n, "NVRM::rtd3Release"))
+        and re.search(r"OSAddAtomic\s*\(\s*0\s*,\s*&fRtd3Hold\s*\)\s*!=\s*0\s*&&\s*current_thread\s*\(\s*\)\s*!=\s*fRtd3Waker",
+                      body(n, "NVRM::rtd3Held")))
+
     stay, sgpu = body(n, "nvrmStayLoaded"), body(n, "NVRM::startGPU")
     arm("the kext stays loaded: a reference on itself before anything is registered, never given back, and a stop function that refuses from then on",
         order(stay, [r"if\s*\(\s*!\s*OSCompareAndSwap\s*\(\s*0\s*,\s*2\s*,\s*&gNvStayLoaded\s*\)\s*\)\s*return\s*;",
@@ -313,6 +331,24 @@ CONTROLS = [
      lambda s: broken(s, "nvrm", "    nv_gate_close(&gNvRtd3Gate);\n", "")),
     ("stop() that does not wait for the monitor", "the idle power-down monitor reaches",
      lambda s: broken(s, "nvrm", "{ IOSleep(10); out = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
+    ("a system sleep that leaves the GPU to the monitor", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "    if (ordinal == 0) rtd3Hold(30000);\n", "")),
+    ("a hold taken only after the state was read", "system sleep and shutdown hold the GPU",
+     lambda s: broken(broken(s, "nvrm", "    if (ordinal == 0) rtd3Hold(30000);\n", ""), "nvrm",
+                      "    if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();",
+                      "    if (ordinal == 0) rtd3Hold(30000);\n    if (ordinal == 0 && pm == kGpuPmRunning && fAdapter) gpuSuspend();")),
+    ("a wake that never gives the GPU back", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "    if (ordinal != 0) rtd3Release();\n", "")),
+    ("a wake whose own switch-on is refused", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "        fRtd3Waker = current_thread();", "       ")),
+    ("a shutdown that leaves the GPU to the monitor", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "        rtd3Hold(8000);", "       ")),
+    ("a monitor suspend that ignores the hold", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "if (!n->rtd3Held()) n->gpuSuspend();", "n->gpuSuspend();")),
+    ("a hold that does not wait for the call inside", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "{ IOSleep(10); idle = nv_gate_idle(&gNvRtd3Gate); }", "{ IOSleep(10); }")),
+    ("a hold that the waking thread cannot pass", "system sleep and shutdown hold the GPU",
+     lambda s: broken(s, "nvrm", "OSAddAtomic(0, &fRtd3Hold) != 0 && current_thread() != fRtd3Waker", "OSAddAtomic(0, &fRtd3Hold) != 0")),
     ("startGPU registering before the kext holds itself", "the kext stays loaded",
      lambda s: broken(broken(s, "nvrm", "    nvrmStayLoaded();\n", ""), "nvrm", "    nvrm_guard_count_start();\n", "    nvrm_guard_count_start();\n    nvrmStayLoaded();\n")),
     ("a kext that never holds itself", "the kext stays loaded",
