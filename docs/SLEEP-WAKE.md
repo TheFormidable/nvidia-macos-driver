@@ -76,9 +76,9 @@ busy tag for up to 10 ms as in 2.9, and new holds are refused until the wake (`d
 holds that were in flight). Its views of the channels' pages are ordinary wired memory and survive the sleep. After a
 wake `debug.nvrm_fence_state` is 1 again and `debug.nvrm_fence_opens` grows; if the GPU did not resume, the state is
 3 and the driver keeps 2.9's marks and tags until the next boot. A GPU that goes away while it is suspended
-(unplugged or unloaded during sleep, or while its slot is powered off by `nvrtd3=1`) never wakes; the driver tells the
-fence so when that GPU stops, so that the fence does not stay closed for a second card (`nvmultigpu=1`) or for a card
-that is started later.
+(unplugged, or its driver stopped, during sleep or while its slot is powered off by `nvrtd3=1`) never wakes; the
+driver tells the fence so when that GPU stops, so that the fence does not stay closed for a second card
+(`nvmultigpu=1`) or for a card that is started later.
 
 **Waits that span the sleep.** NVK's no-progress budget (`NVRM_FLUSH_TIMEOUT_MS`) and the Metal plugin's fence wait
 (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) are measured in awake time

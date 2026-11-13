@@ -104,7 +104,7 @@ void nvrm_fence_pid_gone(int pid);
  * by its boot-arg, also before the first start; false otherwise. NVRM answers a false with kIOReturnOffline when
  * nvrm_fence_off_by_bootarg() is true (NVAccel then stops asking for this boot) and with kIOReturnUnsupported
  * otherwise (NVAccel asks again later); either way NVAccel keeps its own waits. The pointer stays
- * valid until NVRM.kext unloads, which cannot happen while NVAccel is matched on it. o->wait() takes only the fence
+ * valid for the rest of the boot: NVRM.kext holds a reference on itself and is not unloaded. o->wait() takes only the fence
  * lock, cannot be interrupted, is never refused for the number of sleepers, and may sleep up to w->timeoutMs. */
 bool nvrm_fence_kernel_ops(struct NVRMFenceKernelOps *o);
 

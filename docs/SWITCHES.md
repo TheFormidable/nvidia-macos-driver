@@ -932,6 +932,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_nano_fires` | diag | read-only | 3.0 | - | nano timer callbacks run | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_leaked` | diag | read-only | 3.0 | - | nano timers left when their GPU stopped | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_live` | diag | read-only | 3.0 | - | nano timers in use | kexts/NVRM/nv_xnu_timers.cpp |
+| `debug.nvrm_nano_retired` | diag | read-only | 3.0 | - | nano timer slots taken out of use for good | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_slots` | diag | read-only | 3.0 | - | nano timer slots made | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_stale` | diag | read-only | 3.0 | - | late nano timer callbacks turned away | kexts/NVRM/nv_xnu_timers.cpp |
 | `debug.nvrm_nano_wait_timeouts` | diag | read-only | 3.0 | - | nano timer waits that ran out | kexts/NVRM/nv_xnu_timers.cpp |

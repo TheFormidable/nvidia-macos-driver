@@ -56,8 +56,8 @@ extern "C" void nvrm_chan_note_handle(struct NVRMChanNoteEsc *e, uint32_t pm)
 
 // Once, from NVRM's sysctl registration block (thread context); a second call does nothing. Never unregistered, like
 // every other debug.nvrm_* sysctl: the OIDs and the counters they point at are static data of NVRM.kext, which stays
-// loaded until shutdown (the RM's global work queue thread is started once per boot and never stopped, so the kext's
-// code is in use for as long as the system runs).
+// loaded until shutdown (it holds a reference on itself from the first start that registers anything: NVRM.cpp,
+// nvrmStayLoaded()).
 extern "C" void nvrm_chan_note_sysctls(void)
 {
     if (!OSCompareAndSwap(0, 1, &gCnSysctls)) return;
