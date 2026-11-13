@@ -58,7 +58,11 @@ reused and shaders are compiled again once.
 
 NVK is compiled against the 610.57.04 open kernel module headers with the NVOS change in `nvk/ogkm-nvos-620.patch`; the
 kernel module is built from 620.70.06. `tools/nvk_header_abi.py` compares, between module versions, every struct and
-constant in the 135 headers the NVRM backend preprocesses to, restricted to the 198 names the backend sources use.
+constant in the 135 headers the NVRM backend preprocesses to, restricted to the 198 names the backend sources use. Those counts are of the 2.9 backend; the channel rebuild of this
+release added eight names (`NV2080_CTRL_CMD_GPU_GET_RECOVERY_ACTION` and its parameters, `NV906F_CTRL_CMD_RESET_CHANNEL`
+with its parameters and `_REASON_VERIF`, and the status codes `NV_ERR_GPU_IN_FULLCHIP_RESET`, `NV_ERR_RESET_REQUIRED`,
+`NV_ERR_GPU_IS_LOST`), whose definitions are the same in 610.57.04 and 620.70.06 when compared by hand; the tool has not
+been run again over the new backend.
 
 | compared with 620.70.06 | structs differing | structs missing | defines differing | defines missing |
 |---|---|---|---|---|
