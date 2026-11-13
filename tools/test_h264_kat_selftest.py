@@ -502,8 +502,18 @@ int main(int argc, char **argv)
 '''
 
 # ---- the headers ----
+# Looked for, in order: $NVENCVT_HEADERS, the folder build.sh fetches them into ($NULLMOTH_BUILD_ROOT/build/
+# nvencvt-headers when that is set, else ~/nullmoth-build/build/nvencvt-headers, build.sh's default working directory),
+# and the older ~/nvencvt-headers. A build made with --workdir or NM_WORK elsewhere is not visible from a test, so the
+# skip message names the variable to set.
+hdr_candidates = [os.environ.get('NVENCVT_HEADERS', '')]
+_build_root = os.environ.get('NULLMOTH_BUILD_ROOT')
+if _build_root:
+    hdr_candidates.append(str(pathlib.Path(_build_root) / 'build/nvencvt-headers'))
+hdr_candidates += [str(pathlib.Path.home() / 'nullmoth-build/build/nvencvt-headers'),
+                   str(pathlib.Path.home() / 'nvencvt-headers')]
 hdr = None
-for c in (os.environ.get('NVENCVT_HEADERS', ''), str(pathlib.Path.home() / 'nvencvt-headers')):
+for c in hdr_candidates:
     if c and all((pathlib.Path(c) / p).exists() for p in ('ogkm/src/common/sdk/nvidia/inc/nvtypes.h',
                                                            'ogkm/src/nvidia/arch/nvalloc/unix/include/nv-ioctl.h',
                                                            'ogd/classes/video/nvdec_drv.h')):
@@ -511,7 +521,9 @@ for c in (os.environ.get('NVENCVT_HEADERS', ''), str(pathlib.Path.home() / 'nven
         break
 cc = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
 if not hdr:
-    print('SKIP: the NVIDIA headers (ogkm/ and ogd/, see vendor/nvenc/SOURCE) were not found; set NVENCVT_HEADERS'); sys.exit(2)
+    print('SKIP: the NVIDIA headers (ogkm/ and ogd/, see vendor/nvenc/SOURCE) were not found in NVENCVT_HEADERS, '
+          '$NULLMOTH_BUILD_ROOT/build/nvencvt-headers or ~/nullmoth-build/build/nvencvt-headers; set NVENCVT_HEADERS, '
+          'or NULLMOTH_BUILD_ROOT if the build used --workdir or NM_WORK elsewhere'); sys.exit(2)
 if not cc:
     print('SKIP: no C compiler'); sys.exit(2)
 

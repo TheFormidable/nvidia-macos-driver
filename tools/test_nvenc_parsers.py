@@ -79,10 +79,22 @@ int main(void) {
 for k, v in (('SCAL', scaling_hostile), ('RPS', hevc_rps_overflow), ('HRD', hevc_hrd_spin), ('PPSID', hevc_pps_bad_id),
              ('SPSID', hevc_sps_bad_id), ('H264', h264_sps_huge)):
     hevc_prog = hevc_prog.replace('@%s@' % k, arr(v)); h264_prog = h264_prog.replace('@%s@' % k, arr(v))
-dirs = [os.environ.get('NVDEC_HEADERS', ''), str(pathlib.Path.home() / 'nvencvt-headers/ogd/classes/video')]
+# Looked for, in order: $NVDEC_HEADERS, the classes/video folder inside the headers build.sh fetches
+# ($NULLMOTH_BUILD_ROOT/build/nvencvt-headers, else ~/nullmoth-build/build/nvencvt-headers by default), and the older
+# ~/nvencvt-headers. A build made with --workdir or NM_WORK elsewhere is not visible from a test; the skip names the
+# variable to set.
+dirs = [os.environ.get('NVDEC_HEADERS', '')]
+_build_root = os.environ.get('NULLMOTH_BUILD_ROOT')
+if _build_root:
+    dirs.append(str(pathlib.Path(_build_root) / 'build/nvencvt-headers/ogd/classes/video'))
+dirs += [str(pathlib.Path.home() / 'nullmoth-build/build/nvencvt-headers/ogd/classes/video'),
+         str(pathlib.Path.home() / 'nvencvt-headers/ogd/classes/video')]
 hdr = next((d for d in dirs if d and (pathlib.Path(d) / 'nvdec_drv.h').exists()), None)
 if not hdr:
-    print('SKIP: nvdec_drv.h (open-gpu-doc classes/video) not found; set NVDEC_HEADERS'); sys.exit(2)
+    print('SKIP: nvdec_drv.h (open-gpu-doc classes/video) not found in NVDEC_HEADERS, '
+          '$NULLMOTH_BUILD_ROOT/build/nvencvt-headers/ogd/classes/video or '
+          '~/nullmoth-build/build/nvencvt-headers/ogd/classes/video; set NVDEC_HEADERS, '
+          'or NULLMOTH_BUILD_ROOT if the build used --workdir or NM_WORK elsewhere'); sys.exit(2)
 bad = 0
 with tempfile.TemporaryDirectory() as d:
     d = pathlib.Path(d)
