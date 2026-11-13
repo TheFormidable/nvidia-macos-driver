@@ -25,7 +25,7 @@
 
 static int fails;
 /* Every arm that fails is repeated at the end of the output, where a runner that keeps only the last lines of a failed
-   test (tools/run_all_tests.py keeps 1200 characters) still shows it: an arm that judges a time with what it measured,
+   test (tools/run_all_tests.py keeps 1200 characters unless --tail says more) still shows it: an arm that judges a time with what it measured,
    any other with the summary line of its scene (the counts most of those arms are made of), given once per scene. */
 static char recap[2048], scene[320], sceneRecapped[320];
 static void recap_add(const char *name, const char *measured)
@@ -66,6 +66,7 @@ static void say(const char *fmt, ...)
 #define AUTO  NVRM_FENCE_F_AUTO
 #define IDX(h) ((h) & 0xFFFu)
 #define SLACK_US 400000ull      /* what a thread may be late by on a busy machine before a time check calls it a failure */
+#define WATCH_NS 50000000ull    /* how long a scene waits for its threads to be where it needs them (frame_watched) */
 
 /* ==== Part A: the sleep and the kick as steps, every interleaving ================================================== */
 
@@ -164,6 +165,8 @@ static unsigned long qEpoch;                                 /* under Q: ++ per 
 #define GPU_CHANS 16u
 static atomic_ullong chDone[NVF_CHANS], chFlushed[NVF_CHANS], chTarget[NVF_CHANS], chReadyAt[NVF_CHANS];
 static atomic_int chFaulted[NVF_CHANS], chIrq[NVF_CHANS];
+static atomic_int chGate[NVF_CHANS];                         /* set: the GPU holds this channel's work until its producer sleeps */
+static atomic_ulong gateLate;                                /* work the GPU completed because that wait ran out (WATCH_NS) */
 static atomic_int gpuRunning, gpuStop;                       /* the GPU thread and its bottom half (Part C) */
 static atomic_ulong gpuScans;
 static atomic_uint bhPending;
@@ -257,6 +260,13 @@ struct actor {
     void (*hook)(struct actor *a, int where);
     unsigned long timedOut, lost;     /* sleeps the deadline ended; of those, ones that began with a generation already moved */
     unsigned long long lateNs;        /* the most a sleep that the deadline ended came back after that deadline */
+    /* For the scenes that decide who finds a completion (frame_watched): a reader's query, and what its latest sleep
+       was a sleep on: the holds opened up to sleptSnap, looked at after interrupt number sleptKick. A producer's
+       `gate` is opened by its first sleep (the GPU does not complete that channel's work before). */
+    const struct nvf_query *q;
+    atomic_ullong sleptSnap;
+    atomic_uint sleptKick;
+    atomic_int *gate;
 };
 
 static int announce(int abortable)
@@ -283,6 +293,8 @@ static int k_sleep(void *c, unsigned k, unsigned g, unsigned long long deadlineN
     if (!announced && !announce(abortable)) return NVF_SLEEP_FULL;
     moved = atomic_load(&gKick) != k || atomic_load(&gGen) != g;       /* the test's own note; the kernel has no such line */
     atomic_fetch_add(&a->sleeps, 1);
+    if (a->q) { atomic_store(&a->sleptKick, k); atomic_store(&a->sleptSnap, a->q->snap); }
+    if (a->gate) atomic_store(a->gate, 0);
     pthread_mutex_lock(&Q);                                                                     /* thread_block */
     for (;;) {
         if (abortable && atomic_load(&a->abort)) { r = NVF_SLEEP_ABORTED; break; }
@@ -319,8 +331,9 @@ static void world_reset(void)
     gSleepersMax = 256;
     for (unsigned i = 0; i < NVF_CHANS; i++) {
         atomic_store(&chDone[i], 0); atomic_store(&chFlushed[i], 0); atomic_store(&chTarget[i], 0);
-        atomic_store(&chReadyAt[i], 0); atomic_store(&chFaulted[i], 0); atomic_store(&chIrq[i], 1);
+        atomic_store(&chReadyAt[i], 0); atomic_store(&chFaulted[i], 0); atomic_store(&chIrq[i], 1); atomic_store(&chGate[i], 0);
     }
+    atomic_store(&gateLate, 0);
 }
 /* CHAN_ADD + CHAN_VERIFY for a new channel; 0 = refused */
 static unsigned chan_new(unsigned long long owner, unsigned pid)
@@ -329,7 +342,7 @@ static unsigned chan_new(unsigned long long owner, unsigned pid)
     k_lock(NULL);
     if (nvf_chan_add(&Tb, owner, pid, 0, &h) == OK) {
         atomic_store(&chDone[IDX(h)], 0); atomic_store(&chFlushed[IDX(h)], 0); atomic_store(&chTarget[IDX(h)], 0);
-        atomic_store(&chReadyAt[IDX(h)], 0); atomic_store(&chFaulted[IDX(h)], 0);
+        atomic_store(&chReadyAt[IDX(h)], 0); atomic_store(&chFaulted[IDX(h)], 0); atomic_store(&chGate[IDX(h)], 0);
         if (nvf_chan_verify(&Tb, owner, h, 1, &fi) != OK) h = 0;
     }
     k_unlock(NULL);
@@ -418,6 +431,11 @@ static void part_b(void)
 
 /* ==== Part C: threads ============================================================================================== */
 
+/* Where an arm counts who found a completion (a sleeper woken by the interrupt, by its slice, or by a CLOSE), the scene
+   puts its threads in place before the GPU or the producer acts (frame_watched), so that the count is the table's
+   doing and not the scheduler's: on a runner whose short sleeps last a millisecond, the readers otherwise found the
+   frames complete at their first look, and the channel without interrupts was never judged. */
+
 /* The GPU: finishes the work a producer submitted when its time has come, stores the completion value and raises the
    interrupt. The interrupt is two kicks, from two threads, as in the driver (interrupt path, then the bottom half). */
 static void *gpu_main(void *arg)
@@ -428,6 +446,10 @@ static void *gpu_main(void *arg)
         for (unsigned ci = 0; ci < GPU_CHANS; ci++) {
             unsigned long long at = atomic_load(&chReadyAt[ci]);
             if (!at || t < at || atomic_load(&chFaulted[ci])) continue;      /* a faulted channel completes nothing */
+            if (atomic_load(&chGate[ci])) {
+                if (t - at < WATCH_NS) continue;
+                atomic_store(&chGate[ci], 0); atomic_fetch_add(&gateLate, 1);
+            }
             atomic_store(&chDone[ci], atomic_load(&chTarget[ci]));
             (void)atomic_compare_exchange_strong(&chReadyAt[ci], &at, 0);     /* stays set if more was submitted meanwhile */
             if (atomic_load(&chIrq[ci])) { k_kick(); atomic_fetch_add(&bhPending, 1); }
@@ -454,7 +476,22 @@ struct producer {
     unsigned sid[4], nsid, iters, workUs;
     atomic_int stop;
     unsigned long opened, refused, seqReady, seqBudget, seqPending, seqDead, rebuilt;
+    unsigned watch;                       /* the first `watch` readers are where the frame needs them (frame_watched) */
+    unsigned long unwatched;              /* frames on which a wait of frame_watched ran out */
 };
+/* The serial of the hold (owner, cookie, sid), 0 when it has ended; "has it ended" is all the second form asks. */
+static unsigned long long hold_serial(unsigned long long owner, unsigned long long cookie, unsigned sid)
+{
+    unsigned long long s = 0;
+    int oi, ei;
+    k_lock(NULL);
+    oi = nvf_owner_find(&Tb, owner);
+    ei = oi < 0 ? -1 : nvf_find(&Tb, (unsigned)oi, cookie, sid);
+    if (ei >= 0) s = Tb.e[ei].serial;
+    k_unlock(NULL);
+    return s;
+}
+static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt);
 /* The producer noticed its channel's error (as NVK does) and rebuilt it: a clean notifier, and the kernel is told. */
 static void rebuild(struct producer *p)
 {
@@ -470,11 +507,26 @@ static void *producer_main(void *arg)
     for (unsigned i = 0; (!p->iters || i < p->iters) && !atomic_load(&p->stop); i++) {
         const unsigned sid = p->sid[i % p->nsid];
         const unsigned long long cookie = ++p->cookie, seq = ++p->seq;
+        unsigned long long serial = 0;
+        unsigned kick0 = 0;
         if (open1(p->owner, p->pid, cookie, sid, p->flags) != OK) { p->refused++; p->seq--; pause_us(200); continue; }
         p->opened++;
         atomic_store(&chFlushed[ci], seq); atomic_store(&chTarget[ci], seq);       /* the flush: work for the GPU */
-        atomic_store(&chReadyAt[ci], now_ns() + (unsigned long long)p->workUs * 1000ull);
-        (void)arm1(p->owner, cookie, sid, p->handle, seq);
+        if (p->watch) {
+            /* Who finds the completion is part of what the scene tests, so it is not left to the machine's scheduler.
+               The compositor's frame: its work reaches the GPU only once every reader of the surface sleeps on it, so
+               the completion is found by a sleeper (woken by the interrupt, or by its slice where none comes). The
+               application's: the GPU does not complete it before the producer sleeps on its own fence. */
+            (void)arm1(p->owner, cookie, sid, p->handle, seq);
+            serial = hold_serial(p->owner, cookie, sid);
+            if (p->flags & AUTO) { if (!frame_watched(p->watch, sid, serial, 0)) p->unwatched++; }
+            else atomic_store(&chGate[ci], 1);
+            kick0 = atomic_load(&gKick);
+            atomic_store(&chReadyAt[ci], now_ns() + (unsigned long long)p->workUs * 1000ull);
+        } else {
+            atomic_store(&chReadyAt[ci], now_ns() + (unsigned long long)p->workUs * 1000ull);
+            (void)arm1(p->owner, cookie, sid, p->handle, seq);
+        }
         while (atomic_load(&chDone[ci]) < seq && !atomic_load(&p->stop)) {
             struct NVRMFenceWait w;
             if (atomic_load(&chFaulted[ci])) { rebuild(p); continue; }
@@ -484,6 +536,18 @@ static void *producer_main(void *arg)
             if (w.result == NVRM_FENCE_R_BUDGET) p->seqBudget++;
             else if (w.result == NVRM_FENCE_R_PENDING) { p->seqPending++; pause_us(100); }   /* the kernel will not sleep on it: poll */
             else if (w.result == NVRM_FENCE_R_DEAD) { p->seqDead++; pause_us(50); }
+        }
+        if (p->watch && !atomic_load(&p->stop)) {
+            /* Both of the interrupt's kicks have arrived (with interrupts), and then: the compositor's hold has been
+               ended by the reader that found its completion, before the late CLOSE could; the application's readers
+               sleep on its hold again, after the interrupt, so its CLOSE is what wakes them. */
+            const unsigned kickAt = atomic_load(&chIrq[ci]) ? kick0 + 2u : 0u;
+            if (p->flags & AUTO) {
+                const unsigned long long until = now_ns() + WATCH_NS;
+                int ended;
+                while (!(ended = !hold_serial(p->owner, cookie, sid) && atomic_load(&gKick) >= kickAt) && now_ns() < until) pause_us(20);
+                if (!ended) p->unwatched++;
+            } else if (!frame_watched(p->watch, sid, serial, kickAt)) p->unwatched++;
         }
         (void)close1(p->owner, cookie, sid);        /* the application publishes; the compositor's late CLOSE finds nothing */
     }
@@ -509,6 +573,7 @@ static void *reader_main(void *arg)
         unsigned st;
         r->seed = r->seed * 1103515245u + 12345u;
         q.sid = r->sid[(r->seed >> 16) % r->nsid]; q.flags = r->flags;
+        r->a.q = &q;
         st = nvf_wait(&Tb, &KOPS, &r->a, &q, r->timeoutMs, 0, 1, &w);
         if (st == NVRM_FENCE_ST_FULL) r->full++; else if (st != OK) r->badStatus++;
         if (w.result < 8) r->res[w.result]++;
@@ -557,6 +622,27 @@ static const char *readers_said(unsigned n)
                               name[R[i].lastResult < 8 ? R[i].lastResult : 7], R[i].lastWaitedUs, (unsigned long)atomic_load(&R[i].a.sleeps));
     return s;
 }
+/* Waits (bounded by WATCH_NS) until every one of the first n readers that reads surface `sid` sleeps on the hold of
+   `serial`: its latest sleep came after a look that saw that hold pending (only one hold of the surface is open at a
+   time in the scenes that ask). Such a reader stays in that wait until the hold ends, and its next look is the end of
+   a sleep: its answer is counted as found on an interrupt, a slice or a table change, never as a first look. With
+   kickAt, only after interrupt number kickAt, and the sleep must have begun after the last interrupt. 0 = it ran out. */
+static int frame_watched(unsigned n, unsigned sid, unsigned long long serial, unsigned kickAt)
+{
+    const unsigned long long until = now_ns() + WATCH_NS;
+    for (;;) {
+        const unsigned k = atomic_load(&gKick);
+        unsigned ok = 0, of = 0;
+        for (unsigned i = 0; i < n; i++) {
+            if (R[i].sid[0] != sid) continue;
+            of++;
+            if (atomic_load(&R[i].a.sleptSnap) >= serial && (!kickAt || atomic_load(&R[i].a.sleptKick) == k)) ok++;
+        }
+        if (serial && ok == of && k >= kickAt) return 1;
+        if (now_ns() > until) return 0;
+        pause_us(20);
+    }
+}
 /* waits (bounded) until every one of the first n readers has gone to sleep at least `times` times */
 static int readers_asleep(unsigned n, unsigned long times)
 {
@@ -569,13 +655,15 @@ static int readers_asleep(unsigned n, unsigned long times)
         pause_us(100);
     }
 }
+/* `watch`: the first `watch` readers, already started, take part in every frame (producer_main) */
 static void producer_start(unsigned i, unsigned long long owner, unsigned pid, unsigned flags, unsigned sidA, unsigned sidB,
-                           unsigned iters, unsigned workUs)
+                           unsigned iters, unsigned workUs, unsigned watch)
 {
     memset(&P[i], 0, sizeof(P[i]));
     P[i].owner = owner; P[i].pid = pid; P[i].flags = flags; P[i].sid[0] = sidA; P[i].sid[1] = sidB; P[i].nsid = sidB ? 2 : 1;
-    P[i].iters = iters; P[i].workUs = workUs;
+    P[i].iters = iters; P[i].workUs = workUs; P[i].watch = watch;
     P[i].handle = chan_new(owner, pid);
+    if (watch && !(flags & AUTO)) P[i].a.gate = &chGate[IDX(P[i].handle)];
     pthread_create(&P[i].th, NULL, producer_main, &P[i]);
 }
 
@@ -583,15 +671,16 @@ static void scen_interrupts(void)
 {
     unsigned long ready, bad;
     world_reset();
-    producer_start(0, 1, 11, COMP | AUTO, 7, 0, 400, 300);
     readers_start(3, 7, 0, 0, 2000, 0, 20);
+    producer_start(0, 1, 11, COMP | AUTO, 7, 0, 400, 300, 3);
     pthread_join(P[0].th, NULL);
     for (unsigned i = 0; i < 3; i++) atomic_store(&R[i].stop, 1);
     readers_join(3);
     ready = readers_sum(3, NVRM_FENCE_R_READY);
     bad = readers_sum(3, NVRM_FENCE_R_TIMEOUT) + readers_sum(3, NVRM_FENCE_R_DEAD) + readers_sum(3, NVRM_FENCE_R_BUDGET) + readers_sum(3, NVRM_FENCE_R_ABORTED);
     say("     400 frames, GPU work 300 us, interrupts delivered: %lu waits ended READY; completions found on an interrupt %llu,\n"
-        "     on a slice %llu; longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
+        "     on a slice %llu; longest wait %llu us; frames whose readers were not in place within 50 ms %lu\n", ready,
+        Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3), P[0].unwatched);
     T("interrupts delivered: readers that waited got READY, never TIMEOUT, DEAD or BUDGET", ready > 100 && bad == 0);
     T("the interrupt is what woke them: ten times more completions found on an interrupt than on a slice",
       Tb.stat[NVF_STAT_DONE_ON_IRQ] > 50 && Tb.stat[NVF_STAT_DONE_ON_SLICE] * 10 <= Tb.stat[NVF_STAT_DONE_ON_IRQ]);
@@ -610,15 +699,16 @@ static void scen_no_interrupts(void)
     unsigned st;
     world_reset();
     atomic_store(&chIrq[0], 0);                       /* the first channel's completions raise no interrupt */
-    producer_start(0, 1, 11, COMP | AUTO, 7, 0, 150, 300);
     readers_start(3, 7, 0, 0, 2000, 0, 20);
+    producer_start(0, 1, 11, COMP | AUTO, 7, 0, 150, 300, 3);
     pthread_join(P[0].th, NULL);
     for (unsigned i = 0; i < 3; i++) atomic_store(&R[i].stop, 1);
     readers_join(3);
     ready = readers_sum(3, NVRM_FENCE_R_READY);
     bad = readers_sum(3, NVRM_FENCE_R_TIMEOUT) + readers_sum(3, NVRM_FENCE_R_DEAD) + readers_sum(3, NVRM_FENCE_R_BUDGET);
     say("     150 frames, no interrupt: %lu waits ended READY; completions found on an interrupt %llu, on a slice %llu;\n"
-        "     longest wait %llu us\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ], Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3));
+        "     longest wait %llu us; frames whose readers were not in place within 50 ms %lu\n", ready, Tb.stat[NVF_STAT_DONE_ON_IRQ],
+        Tb.stat[NVF_STAT_DONE_ON_SLICE], readers_max(3), P[0].unwatched);
     T("no interrupt at all: the slice still finds every completion (READY, never TIMEOUT)", IDX(P[0].handle) == 0 && ready > 30 && bad == 0);
     T("found on slices, not on interrupts", Tb.stat[NVF_STAT_DONE_ON_IRQ] == 0 && Tb.stat[NVF_STAT_DONE_ON_SLICE] > 20 && atomic_load(&gKick) == 0);
     T("control: so the comparison of the run with interrupts does fail without them",
@@ -637,16 +727,17 @@ static void scen_application(void)
 {
     unsigned long ready, bad;
     world_reset();
-    producer_start(0, 1, 11, 0, 7, 8, 300, 300);      /* an application: waits for its own fence, then publishes */
     readers_start(4, 7, 8, 0, 2000, 0, 20);
+    producer_start(0, 1, 11, 0, 7, 8, 300, 300, 4);   /* an application: waits for its own fence, then publishes */
     pthread_join(P[0].th, NULL);
     for (unsigned i = 0; i < 4; i++) atomic_store(&R[i].stop, 1);
     readers_join(4);
     ready = readers_sum(4, NVRM_FENCE_R_READY);
     bad = readers_sum(4, NVRM_FENCE_R_TIMEOUT) + readers_sum(4, NVRM_FENCE_R_DEAD) + readers_sum(4, NVRM_FENCE_R_BUDGET);
     say("     300 frames of an application: its own fence waits ended READY %lu, BUDGET %lu, told to poll %lu, DEAD %lu;\n"
-        "     readers READY %lu; woken by a table change %llu\n", P[0].seqReady, P[0].seqBudget, P[0].seqPending, P[0].seqDead,
-        ready, Tb.stat[NVF_STAT_DONE_ON_STATE]);
+        "     readers READY %lu; woken by a table change %llu; frames whose readers were not in place within 50 ms %lu,\n"
+        "     completed before the producer slept %lu\n", P[0].seqReady, P[0].seqBudget, P[0].seqPending, P[0].seqDead,
+        ready, Tb.stat[NVF_STAT_DONE_ON_STATE], P[0].unwatched, (unsigned long)atomic_load(&gateLate));
     T("an application's holds end at its CLOSE: its readers got READY, never TIMEOUT, DEAD or BUDGET", ready > 50 && bad == 0);
     T("the producer slept in the kernel for its own fence and was woken (WAIT_SEQ READY)", P[0].seqReady > 200 && P[0].seqDead == 0 &&
       Tb.stat[NVF_STAT_SEQ_SLEPT] > 100);
@@ -751,10 +842,10 @@ static void scen_mixed(void)
     unsigned long long over = 0, opened = 0;
     unsigned long res[8] = { 0 }, full = 0, bad = 0, rebuilt = 0;
     world_reset();
-    producer_start(0, 1, 11, COMP | AUTO, 21, 22, 0, 200);
-    producer_start(1, 2, 12, COMP | AUTO, 23, 22, 0, 400);
-    producer_start(2, 3, 13, 0, 24, 25, 0, 300);
-    producer_start(3, 4, 14, 0, 26, 25, 0, 500);
+    producer_start(0, 1, 11, COMP | AUTO, 21, 22, 0, 200, 0);
+    producer_start(1, 2, 12, COMP | AUTO, 23, 22, 0, 400, 0);
+    producer_start(2, 3, 13, 0, 24, 25, 0, 300, 0);
+    producer_start(3, 4, 14, 0, 26, 25, 0, 500, 0);
     memset(R, 0, sizeof(R));
     for (unsigned i = 0; i < NR; i++) {
         memcpy(R[i].sid, sids, sizeof(sids)); R[i].nsid = 6; R[i].seed = 1000 + i;
@@ -769,7 +860,7 @@ static void scen_mixed(void)
     atomic_store(&P[1].stop, 1); pthread_join(P[1].th, NULL);          /* a connection goes away and a new one takes its place */
     opened += P[1].opened;
     owner_gone(2);
-    producer_start(1, 9, 12, COMP | AUTO, 23, 22, 0, 400);
+    producer_start(1, 9, 12, COMP | AUTO, 23, 22, 0, 400, 0);
     pause_us(450000);
     for (unsigned i = 0; i < NP; i++) atomic_store(&P[i].stop, 1);
     for (unsigned i = 0; i < NP; i++) { pthread_join(P[i].th, NULL); opened += P[i].opened; rebuilt += P[i].rebuilt; }
