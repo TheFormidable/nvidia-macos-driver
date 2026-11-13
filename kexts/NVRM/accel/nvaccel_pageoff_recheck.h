@@ -1,3 +1,9 @@
+/*
+ * NullMoth NVIDIA driver for macOS
+ * Copyright (c) 2026 NullMoth Systems.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 /* nvaccel_pageoff_recheck.h - after a page-off waited without the accelerator lock: is its copy still to be made?
 
    NVResource::pageoff copies a surface's pixels from the GPU's memory to system memory. By default it waits for the GPU
