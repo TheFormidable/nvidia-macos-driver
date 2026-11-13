@@ -51,7 +51,7 @@ for rel in CHECKED:
 arm("control: a flag the check does not have is caught", missing('clang++ -fapple-kext -DNEW_THING -c x.cpp', chk) == ["-DNEW_THING"])
 
 # Apple's clang adds these warning groups to every kext compile (-mkernel / -fapple-kext); this machine's clang does
-# not, so the check must carry them itself or it passes what stops the owner's build at its zero ceiling. missing()
+# not, so the check must carry them itself or it passes what stops the build on a Mac at its zero ceiling. missing()
 # does not require them (a build script does not write them; Apple's driver adds them), so a dedicated arm asks that
 # each is in KEXT_FLAGS and in the two compile lines that do not use KEXT_FLAGS (NMDRM, NVPrimarySelector).
 MACWARN = ["-Werror=implicit-function-declaration", "-Warray-bounds", "-Warray-bounds-pointer-arithmetic",

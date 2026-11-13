@@ -51,8 +51,8 @@ BUILD_LINE = re.compile(r"(?:^|[\s*/])(cc|c\+\+|clang|clang\+\+)\s+(.*?)\s+&&\s+
 TIMEOUT = 600
 # A few tests legitimately run far longer than the rest; they get their own limit, not a general rise that would let a
 # real hang in another test sit for longer. test_build_sh.py builds and exercises the one-command build script: it took
-# 376 s alone on the owner's Mac and grows under load with -j 4, so the general 600 s is too tight for it. The limit is
-# per test name; every other test keeps TIMEOUT.
+# 376 s alone on an Intel Mac with 12 CPUs and grows under load with -j 4, so the general 600 s is too tight for it.
+# The limit is per test name; every other test keeps TIMEOUT.
 PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}
 # the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
 KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_", "MESA_", "NIR_", "RADV_", "ACO_")
