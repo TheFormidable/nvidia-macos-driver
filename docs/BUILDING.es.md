@@ -78,7 +78,10 @@ lo vuelves a ejecutar después de un cambio, los pasos cuyas entradas no cambiar
 
 Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio de trabajo, por defecto
 `~/nullmoth-build` (fuera del clon). Solo las fórmulas de Homebrew van a la carpeta de Homebrew. Nada se escribe en
-tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`.
+tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`. Pero cargo lee el `.cargo/config.toml` de cada
+carpeta por encima de aquella en la que trabaja: con el directorio de trabajo o el clon dentro de tu carpeta personal,
+tu `~/.cargo/config.toml` se aplica a la descarga y la compilación del traductor (sus ajustes de perfil, enlazador y
+fuentes cambian lo que se compila), y `doctor` lo nombra.
 
 `doctor`, `env`, `help` y cualquier comando con `--dry-run` no escriben nada tuyo: no ejecutan `brew info` ni
 `brew install`, leen el clon sin actualizar su índice y no guardan cambios locales con `git stash create`. Cada uno

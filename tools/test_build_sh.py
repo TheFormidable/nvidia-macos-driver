@@ -1179,6 +1179,31 @@ def deps_problems(sb, rc, out, before):
     return p
 
 
+def cargoconf_problems(script_edit=None):
+    """doctor names a cargo configuration in a folder above the working directory (here the home folder's own)."""
+    sb = Sandbox("cargoconf")
+    if script_edit:
+        sb.break_script(*script_edit)
+    p = []
+    rc, out = sb.run("doctor")
+    if "~/.cargo/config.toml applies to cargo's fetch and build of the translator" in out:
+        p.append("doctor names a ~/.cargo/config.toml that is not there")
+    (sb.home / ".cargo").mkdir()
+    (sb.home / ".cargo/config.toml").write_text('[profile.release]\ndebug = true\n')
+    rc, out = sb.run("doctor")
+    lines = [l for l in out.splitlines() if "~/.cargo/config.toml applies to cargo's fetch and build of the translator" in l]
+    if len(lines) != 1:
+        p.append(f"doctor does not name ~/.cargo/config.toml once: {lines}")
+    return p
+
+
+def arm_cargoconf():
+    p = cargoconf_problems()
+    check("doctor names a ~/.cargo/config.toml, which cargo reads for the translator under the working directory", not p, p)
+    negative("a doctor that does not look above the working directory for cargo's configuration",
+             cargoconf_problems(('  for d in "$W" "$HERE"; do\n', '  for d in; do\n')))
+
+
 def arm_deps(sb):
     before = sb.listing(sb.home)
     sb.clear()
@@ -2798,6 +2823,8 @@ def main():
                     timed("deps_control", arm_deps_control)
                 if want("llvm23"):
                     timed("llvm23", arm_llvm23)
+                if want("cargoconf"):
+                    timed("cargoconf", arm_cargoconf)
             except BaseException as e:   # reported after the join, as a failure
                 errors.append(e)
 
