@@ -120,7 +120,7 @@ struct IOBufferMemoryDescriptor : IOMemoryDescriptor {
     IOReturn complete() { assert(!dead && prepared > 0); tr("complete %d", id); prepared--; return 0; }
     void release() { assert(!dead); tr("release %d", id); if (--rc == 0) dead = true; }
 };
-// NVRM as nvrm_dma.cpp answers "nvSurfDma" (wip/dma), with switches for what can go wrong
+// NVRM as nvrm_dma.cpp answers "nvSurfDma", with switches for what can go wrong
 struct NVRMSurfDma;
 struct IOService {
     explicit IOService(const char *n) : name(n) {}

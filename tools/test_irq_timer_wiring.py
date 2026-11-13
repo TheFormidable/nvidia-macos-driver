@@ -413,20 +413,20 @@ CONTROLS = [
      lambda s: broken(s, "timers", "if (nv_gen_current(&rc->gate) == token) nv_xnu_rc_arm(rc, token);", "nv_xnu_rc_arm(rc, nv_gen_current(&rc->gate));")),
     ("the timer wait asking nvx_can_block", "the quiesce waits ask",
      lambda s: broken(s, "timers", "    if (nv_quiesce_may_sleep()) {\n        while", "    if (nvx_can_block()) {\n        while")),
-    # T1: the RC quiesce drops the generation invalidate, so a tick armed before it still matches and reaches the RM.
+    # The RC quiesce drops the generation invalidate, so a tick armed before it still matches and reaches the RM.
     ("the RC quiesce without its generation invalidate", "nv_xnu_rc_quiesce invalidates",
      lambda s: broken(s, "timers", "    nv_gen_invalidate(&rc->gate);\n", "")),
-    # T2: the RC quiesce drops the cancel after the wait, so a re-armed tick is left pending.
+    # The RC quiesce drops the cancel after the wait, so a re-armed tick is left pending.
     ("the RC quiesce without its second cancel", "nv_xnu_rc_quiesce invalidates",
      lambda s: broken(s, "timers", "    }\n    thread_call_cancel(rc->call);", "    }")),
-    # T4: the nano quiesce drops the generation invalidate.
+    # The nano quiesce drops the generation invalidate.
     ("the nano quiesce without its generation invalidate", "nv_xnu_nano_quiesce invalidates",
      lambda s: broken(s, "timers", "    nv_gen_invalidate(&t->gate);\n", "")),
-    # T3: nv_stop_rc_timer never quiesces, so a tick can still be inside when the RM disables the adapter.
+    # nv_stop_rc_timer never quiesces, so a tick can still be inside when the RM disables the adapter.
     ("the RC stop without its quiesce", "nv_stop_rc_timer, nv_xnu_rc_suspend",
      lambda s: broken(s, "timers", "    nv_xnu_rc_set_armed(rc, 0);\n    nv_xnu_rc_quiesce(rc, 10000);\n    return 0;",
                       "    nv_xnu_rc_set_armed(rc, 0);\n    return 0;")),
-    # T5: nv_xnu_rc_suspend never quiesces, so a tick can run on a GPU in standby.
+    # nv_xnu_rc_suspend never quiesces, so a tick can run on a GPU in standby.
     ("the RC suspend without its quiesce", "nv_stop_rc_timer, nv_xnu_rc_suspend",
      lambda s: broken(s, "timers", "    nv_xnu_rc_quiesce(rc, 2000);\n", "")),
     # detach: nv_xnu_rc_detach never quiesces, so a tick can run after the slot is let go.

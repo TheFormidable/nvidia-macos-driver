@@ -13,7 +13,7 @@ NM_PIN_SOURCES="OGKM620 OGKM610 MESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBK
 
 # NVIDIA open-gpu-kernel-modules 620.70.06, the RM core and NVKMS the kexts link. build/build_rm620.sh:8 and
 # build/build_kms620.sh:6 (NV_VERSION default), README.md (Build from source), NOTICE. The commit is the tag's peeled
-# commit on github.com (git ls-remote, 2026-11-12), the same one wip/hygiene's build/kext_check.sh pins as OGKM_SHA.
+# commit on github.com (git ls-remote, 2026-11-12), the same one build/kext_check.sh pins as OGKM_SHA.
 NM_PIN_OGKM620_NAME="NVIDIA open-gpu-kernel-modules 620.70.06 (pristine; the kexts are built from it)"
 NM_PIN_OGKM620_URL=https://github.com/NVIDIA/open-gpu-kernel-modules.git
 NM_PIN_OGKM620_MIRROR=NM_OGKM_URL

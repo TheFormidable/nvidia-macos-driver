@@ -287,29 +287,29 @@ def main():
             "nv_xnu_wq_flush(NULL, false, 30000);", "gpuSuspend() does not flush")
     control("a flush that waits on an abandoned queue", "nv_xnu_kcore.cpp",
             "    if (q->abandoned) { wq_unlock(q, s); return NV_ERR_TIMEOUT; }\n", "", "a flush of an abandoned queue waits")
-    # K1: the worker drops the flush wake. Then every flush sleeps out its 5 s slices instead of being woken when the
+    # The worker drops the flush wake. Then every flush sleeps out its 5 s slices instead of being woken when the
     # queue drains.
     control("the worker without its flush wake", "nv_xnu_kcore.cpp",
             "        if (q->core.flush_waiters) thread_wakeup(&q->core.done_seq);\n", "",
             "wq_worker does not wake a flush waiter after completing an item")
-    # K2: os_queue_work_item drops the first region's wake. An item queued while the worker is parked never runs, and
+    # os_queue_work_item drops the first region's wake. An item queued while the worker is parked never runs, and
     # the next unbounded flush never returns.
     control("the enqueue without its wake", "nv_xnu_kcore.cpp",
             "        if (q->idle) thread_wakeup(&q->core.head);\n", "",
             "os_queue_work_item does not wake the parked worker after enqueuing an item")
-    # K3: the worker leaves without waking a stop waiter. nv_xnu_wq_gpu_down then loses up to about 5 s per stop (its
+    # The worker leaves without waking a stop waiter. nv_xnu_wq_gpu_down then loses up to about 5 s per stop (its
     # slices are 5 s), not the whole cap.
     control("the worker without its stop wake", "nv_xnu_kcore.cpp", "    thread_wakeup(&q->alive);\n", "",
             "wq_worker does not wake a stop waiter before it leaves")
-    # K5: the flush drops the cap test, so the 30 s / 2 s / 5 s bounds of stop, shutdown and sleep all disappear.
+    # The flush drops the cap test, so the 30 s / 2 s / 5 s bounds of stop, shutdown and sleep all disappear.
     control("the flush without its cap test", "nv_xnu_kcore.cpp",
             "            if (cap_ms && waited_ms >= cap_ms) { st = NV_ERR_TIMEOUT; break; }\n", "",
             "nv_xnu_wq_flush does not bound its wait by cap_ms before sleeping")
-    # K4: gpu_down never sets the queue stopping, so the worker never leaves and gpu_down runs to its cap.
+    # gpu_down never sets the queue stopping, so the worker never leaves and gpu_down runs to its cap.
     control("the stop that never asks the worker to stop", "nv_xnu_kcore.cpp",
             "    if (q->core.state == NVWQ_RUN) q->core.state = NVWQ_STOPPING;\n", "",
             "nv_xnu_wq_gpu_down does not ask the worker to stop and wake it before it waits")
-    # A2: heap frees made where blocking is not allowed pile on the deferred list and are never freed.
+    # Heap frees made where blocking is not allowed pile on the deferred list and are never freed.
     control("the deferred free never scheduled", "nv_xnu_kcore.cpp",
             "    if (!__atomic_exchange_n(&nvx_dfree_pending, 1, __ATOMIC_ACQ_REL)) thread_call_enter(nvx_dfree_call);\n",
             "    (void)__atomic_exchange_n(&nvx_dfree_pending, 1, __ATOMIC_ACQ_REL);\n",

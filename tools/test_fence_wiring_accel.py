@@ -252,7 +252,7 @@ int main() {
         gClock += 5000ull * 1000000; nvSurfWaitReady(9); nvSurfIsPending(9); ok &= gAsks == 2;
         check("a refusing NVRM is asked again at most once a second, and not at all once it answered", ok);
     }
-    // B2: the pointer leads into NVRM.kext for the rest of the boot: the NVRM that answered is held, once, and a
+    // The pointer leads into NVRM.kext for the rest of the boot: the NVRM that answered is held, once, and a
     // second accelerator's start (which calls nvFenceAsk directly) neither asks nor holds again
     {
         bool ok = gNVRM.retains == 1;

@@ -341,12 +341,12 @@ for name, m, rule in [
      "-nvrmoldwaits is read once, in startGPU"),
     ("control: the raster early exit taken under -nvrmoldwaits too", mutated("!fOldWaits && nvrmRasterHeadIdle(", "nvrmRasterHeadIdle("),
      "the raster early exit is skipped under -nvrmoldwaits"),
-    # S1: the wait for start() to return is deleted; the LOG line after it still names fStartReturned before go(2).
+    # The wait for start() to return is deleted; the LOG line after it still names fStartReturned before go(2).
     ("control: the wait for start() to return removed from autoGo",
      mutated("        while (!OSAddAtomic(0, &s->fStartReturned) && waited < kNvrmStartGateMaxMs) "
              "{ IOSleep(kNvrmStartGateStepMs); waited += kNvrmStartGateStepMs; }\n", ""),
      "autoGo waits for fStartReturned before go(2)"),
-    # S2: the late framebuffer-layout refusal is disabled; the string "nvrmfb-layout" stays in the nvrmPeerLayout call.
+    # The late framebuffer-layout refusal is disabled; the string "nvrmfb-layout" stays in the nvrmPeerLayout call.
     ("control: the late framebuffer-layout refusal disabled",
      mutated('if (gNvLayoutFb == kNvLayoutRefused) {\n            LOG("auto-go: NOT STARTING THE GPU',
              'if (0 && gNvLayoutFb == kNvLayoutRefused) {\n            LOG("auto-go: NOT STARTING THE GPU'),
