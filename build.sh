@@ -1456,9 +1456,10 @@ tc_needs() {
 # working directory at commit 650db45: what build/toolchain.sh prints as "<tool> ok (N s)", the build, the install
 # and the checks, without the download of its sources, which deps does before. The whole of that deps, the downloads,
 # the Python environment, the Translator and Rust included, took 46.5 minutes; on GitHub's Intel runner
-# (macos-15-intel: 4 processors, macOS 15) from nothing it took 3 hours 53 minutes (LLVM 2 hours 25 minutes). Sizes: that deps, which removes each build tree,
-# left 1.1 GB of toolchain; a build by hand with every build tree kept used 6.7 GB in all (sources 3.2 GB, build trees
-# 2.4 GB, installed 1.1 GB, LLVM 605 MB of it). deps asks for TC_SPACE_GB free.
+# (macos-15-intel: 4 processors, macOS 15) from nothing it took 3 hours 53 minutes (LLVM 2 hours 25 minutes). Sizes:
+# that deps, which removes each build tree, left 1.1 GB of toolchain; a build by hand with every build tree kept used
+# 6.7 GB in all (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it). deps asks for TC_SPACE_GB
+# free.
 tc_seconds() {
   case "$1" in ninja) echo 37 ;; cmake) echo 421 ;; openssl) echo 45 ;; zstd) echo 5 ;; xz) echo 11 ;; python) echo 108 ;;
     pkgconf) echo 4 ;; spirv-tools) echo 119 ;; glslang) echo 21 ;; llvm) echo 1776 ;; *) echo 0 ;; esac
