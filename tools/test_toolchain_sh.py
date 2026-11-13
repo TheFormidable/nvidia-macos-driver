@@ -153,6 +153,13 @@ Cflags: -I$p/include"; mk include/spirv-tools/libspirv.h
         mk lib/cmake/llvm/LLVMConfig.cmake; mk lib/cmake/clang/ClangConfig.cmake
         mk lib/clang/22/include/opencl-c.h; mk lib/clang/22/include/opencl-c-base.h ;;
 esac
+# control/links: "<tool> <file> <target>" lines, a link the install of that tool also leaves
+if [ -f "$SB/control/links" ]; then
+  while read -r lt lf ld; do
+    [ "$lt" = "$t" ] || continue
+    mkdir -p "$(dirname "$p/$lf")"; ln -s "$ld" "$p/$lf"
+  done < "$SB/control/links"
+fi
 '''
 
 TEMPLATES = {
@@ -665,6 +672,12 @@ def main():
                  ["libSPIRV-Tools-shared.dylib", "/usr/local/opt/zstd/lib/libzstd.1.dylib"], [("  is_darwin || return 0\n  [ -f \"$rec\" ]", "  return 0\n  [ -f \"$rec\" ]")]),
                 ("an @rpath library in otool -L", lambda s: (s.sb / "control/rpath").write_text("libSPIRV-Tools-shared.dylib\n"),
                  ["@rpath/libLLVM.dylib"], [("/usr/lib/*|/System/Library/*|\"$P\"/*) ;;", "*) ;;")]),
+                ("a link it installed that leads out of the prefix", lambda s: (s.sb / "control/links").write_text(
+                    "spirv-tools lib/libz-standin.dylib /usr/local/opt/zlib/lib/libz.1.dylib\n"
+                    "spirv-tools lib/libok-standin.dylib libSPIRV-Tools-shared.dylib\n"
+                    "spirv-tools lib/libsys-standin.dylib /usr/lib/libz.1.dylib\n"),
+                 ["lib/libz-standin.dylib is a link to /usr/local/opt/zlib/lib/libz.1.dylib"],
+                 [("  done < <(links_out \"$rec\")\n", "  done < <(true)\n")]),
             ]
             for what, setup, words, muts in cases:
                 sb = sandbox()
@@ -674,6 +687,19 @@ def main():
                 bad = mutate(sb, "check", muts)
                 probs, err = check_case(sb, setup, script=bad)
                 control(f"a script without that check stamps the tool despite {what}", probs)
+            # links that lead into the prefix (directly or through another link) or into /usr/lib pass
+            def inside_links_problems(script=None):
+                s = sandbox()
+                (s.sb / "control/links").write_text("spirv-tools lib/libok-standin.dylib libSPIRV-Tools-shared.dylib\n"
+                                                    "spirv-tools lib/libok2-standin.dylib ../lib/./libok-standin.dylib\n"
+                                                    "spirv-tools lib/libsys-standin.dylib /usr/lib/libz.1.dylib\n")
+                rc, out, err = s.run(["build", "ninja", "cmake", "spirv-tools"], script=script)
+                return [] if rc == 0 and s.stamp("spirv-tools") is not None else [f"exit {rc}: {err[-600:]}"]
+            probs = inside_links_problems()
+            check("links a tool installed that lead into the prefix or /usr/lib pass its checks", not probs, probs)
+            sb = sandbox()
+            control("a script that refuses every link a tool installed",
+                    inside_links_problems(mutate(sb, "all-links", [('next if index("$r/", "$root/") == 0 || ', 'next if ')])))
             sb = sandbox()
             sb.run(["build", "ninja", "cmake", "spirv-tools"])
             rc, out, err = sb.run(["check", "ninja", "spirv-tools"], NM_TC_WORK=None, NM_TC_LOGS=None, NM_TC_SRC=None)
