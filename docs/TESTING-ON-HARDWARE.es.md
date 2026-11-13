@@ -260,7 +260,9 @@ largas que miden este camino.
    esperas dormidas acaban despertadas; `nvrm_evt_user_missed` pequeño al lado de `nvrm_evt_woken`;
    `nvrm_evt_user_fallbacks` y `nvrm_evt_capped` 0; el uso de CPU de la aplicación menor que con 2.9 o igual, y los
    fotogramas por segundo iguales. Mal: más tirones o más CPU que con 2.9, o `nvrm_evt_user_fallbacks` por encima de
-   0. Lanza la aplicación una vez desde Terminal con `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` delante de su orden y
+   0 (esto vale para diez minutos sin ningún cambio de pantalla; si entre medias la pantalla o el Mac se duermen, una
+   subida suya seguida de nuevas subidas de `nvrm_evt_woken` es el proceso que vuelve al evento, no un fallo). Lanza
+   la aplicación una vez desde Terminal con `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` delante de su orden y
    compara ([EVENT-WAIT.md](EVENT-WAIT.md) explica cada número).
 2. **Un fallo de GPU que la aplicación sobrevive.** Sigue [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md), "What to look at
    on the machine", en su orden: primero una hora de uso normal con todos los contadores `debug.nvrm_chan_*` a 0,
