@@ -323,6 +323,10 @@ has proven itself, renewed with a reason otherwise.
   or one only one of the two systems exports, fails the check instead of failing to load on a user's Mac.
 - `.github/workflows/ci.yml` runs that check, the host tests and the Mac builds on every push once Actions are enabled
   for the repository.
+- Every step of `./build.sh`, its SPIRV-LLVM-Translator build and its pip now get `SDKROOT` set to the macOS SDK of
+  the Xcode chosen (your own `SDKROOT` is still not passed on). Before, `SDKROOT` was removed, and Apple's clang then
+  searched `/usr/local/include` and `/usr/local/lib`, Homebrew's folders on an Intel Mac, before the SDK: two Intel
+  Macs with different things in Homebrew could build different drivers. `./build.sh env` prints it and doctor names it.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 

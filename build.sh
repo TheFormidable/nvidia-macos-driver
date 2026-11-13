@@ -753,10 +753,11 @@ doctor() {   # prints; sets D_MISSING
       if [ -z "$x" ]; then d_missing "full Xcode $NM_PIN_TOOL_XCODE_MIN or later: only the command line tools are selected ($(xcode-select -p))"
       elif ver_ge "$x" "$NM_PIN_TOOL_XCODE_MIN"; then d_ok "Xcode $x at $(xcode-select -p)"
       else d_old "Xcode $x: $NM_PIN_TOOL_XCODE_MIN or later is needed (the plugin uses the macOS 26 SDK)"; fi
-      sdk=$(xcrun --show-sdk-path 2>/dev/null || true); v=$(xcrun --show-sdk-version 2>/dev/null || true)
+      find_sdk; sdk=$STEP_SDK; v=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)
       if [ -z "$sdk" ]; then d_missing "a macOS SDK (xcrun --show-sdk-path fails)"
       else
         ver_ge "${v:-0}" "$NM_PIN_TOOL_SDK_MIN" && d_ok "macOS SDK $v" || d_old "macOS SDK $v: $NM_PIN_TOOL_SDK_MIN or later"
+        d_note "every step builds with SDKROOT=$(printf '%s' "$sdk" | tilde) (the SDK of the Xcode above${SDKROOT:+; your SDKROOT=$SDKROOT is not passed on})"
         [ -f "$sdk/System/Library/Frameworks/Kernel.framework/Headers/IOKit/IOLib.h" ] && d_ok "kernel headers in the SDK" || d_missing "Kernel.framework headers in $sdk (every kext compiles against them)"
         [ -f "$sdk/usr/lib/libkmod.a" ] && d_ok "libkmod.a in the SDK" || d_missing "usr/lib/libkmod.a in $sdk (every kext links it)"
         [ -f "$sdk/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] && d_ok "Metal 4 headers (plugin)" || d_missing "Metal/MTL4CommandQueue.h in $sdk (the plugin needs the macOS 26 SDK)"
@@ -892,15 +893,29 @@ x() {
 # dropped here so a tester's login shell, which may point them into a Homebrew of the other architecture, cannot
 # reach a step. A step that needs one is given it explicitly afterwards (the NVK step sets its own PKG_CONFIG_PATH), and
 # a later assignment overrides the -u, so those keep working.
+# SDKROOT is the one exception: the caller's is dropped (it may name another platform's SDK), and every step gets the
+# macOS SDK of the Xcode chosen (DEVELOPER_DIR or xcode-select), as xcrun names it. Without SDKROOT, Apple's clang searches
+# /usr/local/include before the SDK's headers and its linker /usr/local/lib before the SDK's libraries: on an Intel Mac
+# that is Homebrew's prefix, so two Macs with different things in Homebrew could build different products. xcrun itself
+# answers --show-sdk-path with SDKROOT when it is set, so the kexts' scripts, which ask it, get this same folder.
 step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
     -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
     -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
     "JOBS=${JOBS:-$NM_JOBS}"
+  [ -z "$STEP_SDK" ] || printf '%s\n' "SDKROOT=$STEP_SDK"
+}
+STEP_SDK=""; STEP_SDK_DONE=0
+find_sdk() {   # sets STEP_SDK: the macOS SDK every step gets as SDKROOT; nothing where there is no xcrun (not a Mac)
+  [ "$STEP_SDK_DONE" = 0 ] || return 0
+  STEP_SDK_DONE=1; STEP_SDK=""
+  have xcrun || return 0
+  STEP_SDK=$(env -u SDKROOT xcrun --sdk macosx --show-sdk-path 2>/dev/null | first_line || true)
+  [ -n "$STEP_SDK" ] && [ -d "$STEP_SDK" ] || STEP_SDK=""
 }
 STEP_ENV=()
-make_step_env() { STEP_ENV=(); local l; while IFS= read -r l; do STEP_ENV+=( "$l" ); done < <(step_env); }
+make_step_env() { find_sdk; STEP_ENV=(); local l; while IFS= read -r l; do STEP_ENV+=( "$l" ); done < <(step_env); }
 # variables passed through only when set
 passthru() { local v; for v in "$@"; do eval "[ -n \"\${$v+x}\" ] && printf '%s\n' \"$v=\${$v}\"" || true; done; }
 
@@ -1329,12 +1344,13 @@ deps_spirv_llvm() {
   [ ! -e "$bld" ] || safe_rm "$bld"
   [ ! -e "$pre" ] || safe_rm "$pre"
   say "building SPIRV-LLVM-Translator (log: $(printf '%s' "$CUR_LOG" | tilde))"
-  x env "PATH=$tpath" "$T_CMAKE" -S "$src" -B "$bld" -G Ninja "-DCMAKE_MAKE_PROGRAM=$T_NINJA" -DCMAKE_BUILD_TYPE=Release \
+  find_sdk   # the SDK as SDKROOT, as for every step (step_env), never the caller's
+  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S "$src" -B "$bld" -G Ninja "-DCMAKE_MAKE_PROGRAM=$T_NINJA" -DCMAKE_BUILD_TYPE=Release \
     "-DCMAKE_INSTALL_PREFIX=$pre" -DCMAKE_INSTALL_LIBDIR=lib "-DCMAKE_INSTALL_NAME_DIR=$pre/lib" "-DCMAKE_INSTALL_RPATH=$pre/lib" \
     -DBUILD_SHARED_LIBS=ON -DCCACHE_ALLOWED=OFF -DLLVM_BUILD_TOOLS=ON -DLLVM_SPIRV_INCLUDE_TESTS=OFF \
     "-DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm" "-DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=$hdr"
-  x env "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
-  x env "PATH=$tpath" "$T_CMAKE" --install "$bld"
+  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
+  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --install "$bld"
   [ -f "$pre/lib/pkgconfig/LLVMSPIRVLib.pc" ] || { say "the install left no $pre/lib/pkgconfig/LLVMSPIRVLib.pc" >> "$CUR_LOG"; fail_step spirv-llvm-translator 1; }
   CUR_STEP=""
   find_tools
@@ -1363,10 +1379,11 @@ deps_python() {
   if [ "$NM_DRY_RUN" = 1 ]; then say "    $(q "$T_PYTHON") -m venv $(q "$VENV"); pip install --require-hashes --no-deps -r <requirements>"; return 0; fi
   [ ! -d "$VENV" ] || safe_rm "$VENV"
   mkdir -p "$TOOLS"
-  "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
+  find_sdk   # a package pip builds from source compiles with the SDK as SDKROOT, as every step does (step_env)
+  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
   write_requirements > "$TOOLS/requirements.txt"
   # pip keeps what it downloads in ~/Library/Caches/pip unless told otherwise: that cache is the working directory's too
-  PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
+  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
     || die "pip could not install the pinned packages (see above)"
   write_requirements | sha256_stdin > "$VENV/.nm-requirements"
   : "$want_new"
@@ -1915,6 +1932,9 @@ print_env() {
   say "export JOBS=$(qh "${JOBS:-$NM_JOBS}")"
   say "export NV_VERSION=$(qh "$NM_PIN_OGKM620_REF")"
   say "export MACOSX_DEPLOYMENT_TARGET=$(qh "${MACOSX_DEPLOYMENT_TARGET:-15.0}")"
+  find_sdk
+  if [ -n "$STEP_SDK" ]; then say "export SDKROOT=$(qh "$STEP_SDK")   # the macOS SDK of the Xcode chosen; yours is not passed"
+  else say "unset SDKROOT   # no xcrun here: no SDK"; fi
   say "export PYTHONDONTWRITEBYTECODE=1"
   if [ "$BUILD_HOST" = "$LOCAL_HOST" ]; then say "export PATH=$(qh "$THOST:$STEP_PATH")"; else say "export PATH=$(qh "$STEP_PATH")"; fi
   say "# -- read by the build scripts; passed on only when you set them (empty = the script's own default)"
