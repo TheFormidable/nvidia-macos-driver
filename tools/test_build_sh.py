@@ -1665,7 +1665,7 @@ def nobrew_problems(sb):
 
 
 def arm_source_some():
-    """22c: on an Intel Mac whose Homebrew offers ninja, cmake, pkgconf, python3, gpatch and more, the source way takes
+    """on an Intel Mac whose Homebrew offers ninja, cmake, pkgconf, python3, gpatch and more, the source way takes
     nothing from it: deps builds all ten tools, tools/bin leads to none of Homebrew's, no brew is called, the NVK step's
     pkg-config is the toolchain's. With NM_TOOLS_FROM=homebrew the same Mac uses Homebrew's as before."""
     sb = nobrew_sandbox("")
