@@ -65,7 +65,7 @@ comandos y opciones y la solución de problemas.
   el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
   pregunta que nadie ve. Si falta Homebrew, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
-- Tiempo y disco de las herramientas compiladas desde fuentes, medidos en un Mac Intel de 12 hilos: unos 70 minutos en
+- Tiempo y disco de las herramientas compiladas desde fuentes, medidos en un Mac Intel de 12 hilos: hasta unos 70 minutos en
   total (11 de descargas, 34 solo LLVM) y 6,7 GB con todas las carpetas de compilación (fuentes 3,2 GB, compilación
   2,4 GB, herramientas instaladas 1,1 GB). `deps` pide 10 GB libres antes de empezar LLVM y dice cuánto queda libre si
   hay menos. Mantén el Mac despierto y enchufado: una herramienta interrumpida (Ctrl-C, reposo, corte) se vuelve a

@@ -838,7 +838,7 @@ doctor() {   # prints; sets D_MISSING
     case "$(mac_arch)" in
       arm64) d_note "Apple silicon: supported (the release build Mac is one); every part is built for x86_64" ;;
       x86_64) d_note "Intel: supported. The RM and NVKMS are compiled with the commands an Apple-silicon Mac makes: the x86-only options NVIDIA's makefiles add when this Mac's compiler takes them are left out (build/nv_compile_lines.py)"
-              if [ "$(tools_from)" = source ]; then d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps builds the missing tools from pinned sources in the working directory instead (about 70 minutes on one 12-thread Intel Mac, LLVM most of it)"
+              if [ "$(tools_from)" = source ]; then d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; deps builds the missing tools from pinned sources in the working directory instead (up to about 70 minutes on one 12-thread Intel Mac, LLVM most of it)"
               else d_note "Intel: Homebrew has no ready-made builds for Intel Macs any more; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (LLVM: hours); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
     esac
   else
@@ -1410,8 +1410,10 @@ tc_needs() {
   esac
 }
 # Times of one 12-thread Intel Mac building each tool (the record of its by-hand build: SPIRV-Tools at -j2, LLVM
-# at -j10), in seconds; the downloads took about 11 minutes more. Sizes: 6.7 GB in all with every build tree kept
-# (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it); deps asks for TC_SPACE_GB free.
+# at -j10), in seconds; the downloads took about 11 minutes more. Those two ran at reduced parallelism beside each
+# other, and deps builds one tool after another at NM_JOBS: the sum is an upper figure ("up to about"). Sizes: 6.7 GB
+# in all with every build tree kept (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it); deps
+# asks for TC_SPACE_GB free.
 tc_seconds() {
   case "$1" in ninja) echo 36 ;; cmake) echo 440 ;; openssl) echo 53 ;; zstd) echo 6 ;; xz) echo 11 ;; python) echo 104 ;;
     pkgconf) echo 7 ;; spirv-tools) echo 771 ;; glslang) echo 71 ;; llvm) echo 2040 ;; *) echo 0 ;; esac
@@ -1516,7 +1518,7 @@ deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means sourc
     say "deps builds from pinned sources: $TC_PLAN"
     say "  into $(printf '%s' "$TC_PREFIX" | tilde) (sources in $(printf '%s' "$TC_SRC" | tilde), build trees in $(printf '%s' "$TC_WORK" | tilde), logs in $(printf '%s' "$TC_LOGS" | tilde))."
     say "  Nothing is installed outside the working directory and Homebrew is not used."
-    say "  On one 12-thread Intel Mac this took about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 34)') plus about 11 minutes of downloads,"
+    say "  On one 12-thread Intel Mac this takes up to about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 34)') plus about 11 minutes of downloads,"
     say "  and needs up to $TC_SPACE_GB GB of free space while it builds (6.7 GB measured with every build tree kept). Keep the"
     say "  Mac awake and on power: an interrupted tool is built again from the beginning by the next ./build.sh deps."
   fi

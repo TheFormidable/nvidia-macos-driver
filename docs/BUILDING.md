@@ -61,7 +61,7 @@ En español: [BUILDING.es.md](BUILDING.es.md).
     such as `NM_LLVM_PREFIX`, Homebrew, `PATH`), and `deps` installs a missing one from Homebrew's ready-made formulas. When Homebrew
     is missing, it explains how to install it and offers to run its official installer, but only after you type `yes`
     (`--yes` does not count for this). `NM_TOOLS_FROM=source` builds them as on an Intel Mac instead.
-- Time and disk for the tools built from source, measured on one 12-thread Intel Mac: about 70 minutes in all (the
+- Time and disk for the tools built from source, measured on one 12-thread Intel Mac: up to about 70 minutes in all (the
   downloads 11 minutes, LLVM alone 34), 6.7 GB with every build tree kept (sources 3.2 GB, build trees 2.4 GB, the
   installed tools 1.1 GB). `deps` asks for 10 GB free before it starts LLVM and says how much is free when there is
   less. Keep the Mac awake and on power: a tool whose build is interrupted (Ctrl-C, sleep, power) is built again from
