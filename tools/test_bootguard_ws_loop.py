@@ -111,12 +111,22 @@ class Unredirected(Exception):
     pass
 
 
+# Every absolute path that names a place this machine has, so that one the job did not move stands out. The fakes come
+# first on PATH, but a file operation (rm, cp, ...) is given its path as an argument and does not go through PATH: a job
+# line that named a real /Library or /System path would act on it with the real tool, whatever PATH held. The three
+# lines below are redirected into the test's folder; any other such path left in the job is refused rather than run.
+ABS = re.compile(r"/(?:Library|Users|System|Volumes|Applications|Network|private|usr|opt|etc|var|tmp|bin|sbin|dev|cores)"
+                 r"(?![A-Za-z0-9_])[^\s\"';)]*")
+
+
 def redirect(job, fake, t, dr):
     """The job with its PATH, log and report folder pointed at the test's. The job runs nvram and shutdown -r now: when
     a line moved and the fakes would not come first, nothing runs (the real ones would reach this Mac's NVRAM and restart
-    it when the tests run as root)."""
+    it when the tests run as root). Any absolute path the job names past these redirects (a file operation does not go
+    through PATH) is refused, so a job changed to touch a real /Library or /System path is not run."""
     text = job
-    for old, new in (("PATH=/usr/bin:/bin:/usr/sbin:/sbin", f"PATH={fake}:/usr/bin:/bin:/usr/sbin:/sbin"),
+    mine = f"PATH={fake}:/usr/bin:/bin:/usr/sbin:/sbin"
+    for old, new in (("PATH=/usr/bin:/bin:/usr/sbin:/sbin", mine),
                      ("LOG=/Library/NullMoth/bootguard.log", f"LOG={t}/bootguard.log"),
                      ("DR=/Library/Logs/DiagnosticReports", f"DR={dr}")):
         if text.count(old) != 1:
@@ -127,6 +137,20 @@ def redirect(job, fake, t, dr):
     for prog in FAKES:
         if re.search(rf"(^|[^\w.-])/(usr/)?s?bin/{prog}\b", text):
             raise Unredirected(f"the job names /…/{prog} by its full path, past the fakes")
+    # the PATH line (holds /usr/bin etc. by design, after the fakes) and the shebang are the job's only system paths
+    # that are not a bug; everything else must have been moved under the test's folder (or be /dev/null, or the one
+    # read of /dev/console's owner through the fake stat).
+    for n, line in enumerate(text.split("\n"), 1):
+        if line == mine or (n == 1 and line == "#!/bin/bash"):
+            continue
+        for m in ABS.finditer(line):
+            if m.start() and line[m.start() - 1] not in " \t\"'=(>;|&:":
+                continue   # inside a longer path, which the match that started it has judged
+            if m.group(0) == "/dev/null" or m.group(0).startswith(f"{t}/") or m.group(0).startswith(f"{dr}/"):
+                continue
+            if m.group(0) == "/dev/console" and line[:m.start()].endswith("stat -f %Su "):
+                continue   # only asked who owns it, of the fake stat; any other use is refused
+            raise Unredirected(f"the job names {m.group(0)!r}, a path this test did not move under its folder")
     return text
 
 
@@ -197,7 +221,8 @@ else:
 
 # a job whose PATH line moved, or that names nvram by its full path, is not run at all
 for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
-                  ("it calls /usr/sbin/nvram", job.replace("nvram -d", "/usr/sbin/nvram -d", 1))):
+                  ("it calls /usr/sbin/nvram", job.replace("nvram -d", "/usr/sbin/nvram -d", 1)),
+                  ("it names a real /Library path for a file operation", job.replace("shutdown -r now", "rm -rf /Library/NullMoth; shutdown -r now"))):
     try:
         redirect(bad, pathlib.Path("/nonexistent/bin"), pathlib.Path("/nonexistent"), pathlib.Path("/nonexistent/dr"))
         arm(f"control: a job that would reach the real nvram and shutdown is refused ({what})", False, "it would have run")
