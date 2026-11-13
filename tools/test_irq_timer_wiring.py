@@ -22,8 +22,8 @@ None of it can run without the card, so what must hold is asserted on the source
 - os_is_isr() answers from the per-GPU slots; the single global is gone from every source; os_get_cpu_count() is the
   kernel's real_ncpus (at least 1) and os_get_cpu_number() stays 0;
 - no source names thread_call_cancel_wait (not exported to kexts); nv_destroy_nano_timer frees nothing (the slots are
-  type-stable); a nano or RC callback reaches the RM only after its generation matched, and the RC tick re-arms only
-  with the generation it ran with;
+  type-stable), and a slot it does not put back is counted; a nano or RC callback reaches the RM only after its
+  generation matched, and the RC tick re-arms only with the generation it ran with;
 - the waits of the quiesce (irqSettle, the timer waits) ask nv_quiesce_may_sleep(), the kernel's own
   preemption_enabled(), and never nvx_can_block();
 - a nano timer's deadline is computed in 64-bit nanoseconds (the old 32-bit microsecond count ran out at 71 minutes);
@@ -203,6 +203,10 @@ def arms(src, others):
     destroy = body(t, "nv_destroy_nano_timer") + body(t, "nv_xnu_nano_end") + body(t, "nv_xnu_nano_quiesce")
     arm("nv_destroy_nano_timer frees nothing: no kern_os_free, IOFree or thread_call_free on the way",
         destroy and not re.search(r"\b(kern_os_free|IOFree|thread_call_free)\s*\(", destroy))
+    arm("a nano timer that ends puts its slot back or counts it as taken out of use for good, nothing in between",
+        re.search(r"if\s*\(\s*idle\s*&&\s*!\s*quarantine\s*\)\s*nv_xnu_nano_free\s*\(\s*t\s*\)\s*;\s*else\s+cnt\s*\(\s*&gNanoRetired\s*\)\s*;",
+                  body(t, "nv_xnu_nano_end"))
+        and re.search(r"SYSCTL_QUAD\s*\(\s*_debug\s*,\s*OID_AUTO\s*,\s*nvrm_nano_retired\s*,[^;]*&gNanoRetired\s*,", t))
     fire = body(t, "nv_xnu_nano_fire")
     arm("a nano timer callback reaches the RM only after its generation matched, and checks it once more after reading the slot",
         order(fire, [r"if\s*\(\s*!\s*nv_gen_enter\s*\(\s*&t->gate\s*,\s*token\s*\)\s*\)\s*\{[^}]*return\s*;", r"nv_gen_current\s*\(\s*&t->gate\s*\)\s*==\s*token",
@@ -328,6 +332,8 @@ CONTROLS = [
      lambda s: broken(s, "os", "os_get_cpu_number(void) { NV_XNU_TRC; return 0; }", "os_get_cpu_number(void) { NV_XNU_TRC; return cpu_number(); }")),
     ("destroy frees the slot", "nv_destroy_nano_timer frees nothing",
      lambda s: broken(s, "timers", "    if (idle && !quarantine) nv_xnu_nano_free(t);", "    if (idle && !quarantine) nv_xnu_nano_free(t); else IOFree(t, sizeof *t);")),
+    ("a slot kept out of use without a count", "a nano timer that ends puts its slot back or counts it",
+     lambda s: broken(s, "timers", "    else cnt(&gNanoRetired);\n", "")),
     ("a nano callback without the generation check", "a nano timer callback reaches",
      lambda s: broken(s, "timers", "    if (!nv_gen_enter(&t->gate, token)) { cnt(&gNanoStale); return; }", "    nv_gen_enter(&t->gate, nv_gen_current(&t->gate));")),
     ("a nano callback without the second check", "a nano timer callback reaches",
