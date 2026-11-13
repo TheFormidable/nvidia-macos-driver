@@ -2382,6 +2382,97 @@ def arm_pylink():
     neg.break_script('      for n in $(brew_unlinked_names); do ! brew_linked "$n" || brew_unlinked_drop "$n"; done\n', "")
     negative("deps that keeps a formula the tester linked in the record", again_problems(neg, user_links=True)[0])
 
+    # 1c. the record is build.sh's own file in the working directory: a link in its place is never read or written
+    # through (a file elsewhere stays as it was), only names of Python formulas installed now are kept, and a record
+    # that cannot be rewritten is reported without stopping deps
+    def record_sandbox(name, text=None, link_to=None, user_linked=False):
+        s = pylink_sandbox(name, links, formulas=("cmake", "python@3.14") if user_linked else ("cmake",))
+        if user_linked:   # brew link python@3.14 by the tester: Homebrew's record of a linked keg
+            lk = s.dir / "brew/var/homebrew/linked/python@3.14"
+            if not lk.is_symlink():
+                lk.parent.mkdir(parents=True, exist_ok=True)
+                lk.symlink_to("../../../Cellar/python@3.14/1.0")
+        (s.work / "tools").mkdir(parents=True)
+        (s.work / ".nullmoth-build-workdir").write_text("made by build.sh\n")
+        r = s.work / "tools/.nm-brew-unlinked"
+        if link_to is not None:
+            link_to.write_text(text)
+            r.symlink_to(link_to)
+        elif text is not None:
+            r.write_text(text)
+        return s, r
+
+    def record_link_problems(s, r, outside, before, unlinked, want_record):
+        q, o = pylink_problems(s, unlinked=unlinked)
+        if outside.read_text() != before:
+            q.append(f"a file outside the working directory, linked in the record's place, was changed: {outside.read_text()!r}")
+        now = None if not os.path.lexists(r) else ("link" if r.is_symlink() else r.read_text())
+        if now != want_record:
+            q.append(f"the record is {now!r}, expected {want_record!r}")
+        return q, o
+
+    def record_links(name, edits=()):
+        q = []
+        s, r = record_sandbox(name + "-add", "keep me\n", link_to=pathlib.Path(TMP / "sb" / f"{name}-outside-add.txt"))
+        for old, new in edits:
+            s.break_script(old, new)
+        q += record_link_problems(s, r, TMP / "sb" / f"{name}-outside-add.txt", "keep me\n", "python@3.14", "python@3.14\n")[0]
+        s, r = record_sandbox(name + "-drop", "keep me\npython@3.14\n", link_to=pathlib.Path(TMP / "sb" / f"{name}-outside-drop.txt"),
+                              user_linked=True)
+        for old, new in edits:
+            s.break_script(old, new)
+        q += record_link_problems(s, r, TMP / "sb" / f"{name}-outside-drop.txt", "keep me\npython@3.14\n", None, "link")[0]
+        return q
+    p = record_links("pylink-record-link")
+    check("deps: a link in the record's place is neither read nor written through; the new record replaces it", not p, p)
+    negative("a record read through a link and written in place",
+             record_links("pylink-record-link-neg", edits=(
+                 ('  [ -f "$f" ] && [ ! -L "$f" ] && [ -r "$f" ] || return 0\n', '  [ -f "$f" ] || return 0\n'),
+                 ('printf \'%s\\n\' "$1" > "$t" && mv -f "$t" "$f"; }', 'printf \'%s\\n\' "$1" > "$f"; }'))))
+
+    def record_names_problems(name, edits=()):
+        s, r = record_sandbox(name, "x\n*\npython@3.14 x\n../../python@3.14\npython@3.99\n" + "python@3.14\n" * 3 +
+                              "".join(f"python@3.{i}\n" for i in range(200, 2200)))
+        for old, new in edits:
+            s.break_script(old, new)
+        q, o = pylink_problems(s, unlinked="python@3.14")
+        now = r.read_text() if r.is_file() else None
+        if now != "python@3.14\n":
+            q.append(f"the record after deps is {(now or '')[:200]!r}, expected only 'python@3.14'")
+        return q, o
+    p, out = record_names_problems("pylink-record-names")
+    check("deps: the record keeps only names of Python formulas installed now, each once", not p, (p, out[-600:]))
+    negative("a record whose every line is kept", record_names_problems(
+        "pylink-record-names-neg", edits=(('    [ -d "$BREW_PREFIX/opt/$n" ] || continue\n', ''),
+                                          ('    case "$n" in *[!a-z0-9@.]*) continue ;; esac\n', ''),
+                                          ('    case "$n" in python|python@[0-9]*) ;; *) continue ;; esac\n', '')))[0])
+
+    def record_frozen_problems(name, edits=()):
+        # the tester linked the formula, so deps drops it from the record and has to rewrite it, and cannot
+        s, r = record_sandbox(name, "python@3.14\n", user_linked=True)
+        for old, new in edits:
+            s.break_script(old, new)
+        # a file that cannot be replaced or removed: immutable (chattr +i, as root on Linux; chflags uchg, its owner on a Mac)
+        freeze = (["chflags", "uchg"], ["chflags", "nouchg"]) if sys.platform == "darwin" else (["chattr", "+i"], ["chattr", "-i"])
+        if (sys.platform != "darwin" and os.geteuid() != 0) or not shutil.which(freeze[0][0]) or \
+                subprocess.run([*freeze[0], str(r)], capture_output=True).returncode != 0:
+            return None, ""
+        try:
+            q, o = pylink_problems(s, unlinked=None, out_has=("WARNING: could not", "deps: everything required is present"))
+        finally:
+            subprocess.run([*freeze[1], str(r)], capture_output=True)
+        return q, o
+    p, out = record_frozen_problems("pylink-record-frozen")
+    if p is None:
+        emit("skip: this machine cannot make a file that its user cannot replace (chattr as root on Linux, chflags on a Mac)")
+    else:
+        check("deps: a record it cannot rewrite is reported, and deps goes on", not p, (p, out[-600:]))
+        negative("a record whose rewrite failure stops deps", record_frozen_problems(
+            "pylink-record-frozen-neg", edits=(('    { mkdir -p "$TOOLS" && printf \'%s\\n\' "$1" > "$t" && mv -f "$t" "$f"; } 2>/dev/null || { rm -f "$t" 2>/dev/null || true; warn "could not write $f"; }\n',
+                                                '    mkdir -p "$TOOLS" && printf \'%s\\n\' "$1" > "$t" && mv -f "$t" "$f"\n'),
+                                               ('    { [ ! -e "$f" ] || rm -f "$f"; } 2>/dev/null || warn "could not remove $f"\n',
+                                                '    [ ! -e "$f" ] || rm -f "$f"\n')))[0] or ["skipped"])
+
     # 2. the same when the Python arrives as a dependency of another formula of the list (llvm@22 needs homebrew-core's
     # default Python, python@3.15 today, to build), not as the formula deps asked for
     links = {"glslang": PY_LINKS.format(f="python@3.15").replace("python3.14", "python3.15")}
