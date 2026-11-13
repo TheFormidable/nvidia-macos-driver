@@ -2817,7 +2817,7 @@ index 0000000..d2288b6
 +       f.adopted.dropLo > f.adopted.dropHi && f.adopted.keepLo == 12);
 +   f.in.xid = 71;   /* a copy-engine fault on this card's upload channel, which runs on copy engine 4 */
 +   st.replayedThrough = 12;
-+   arm("execute: a copy-engine refault ends inside the budget with COPY_REFAULT, not device loss",
++   arm("execute: a refault on copy engine 4 is a channel loss given up with COPY_REFAULT, and never builds",
 +       run(&f, &st, &k, &lv) == NVRM_WHY_COPY_REFAULT && k == NVRM_LOSS_CHANNEL && strcmp(f.log, "irs") == 0);
 +   st.replayedThrough = 10;
 +   arm("execute: a copy-engine fault that does not refault rebuilds the copy-only channel",
