@@ -221,9 +221,9 @@ On an Intel Mac the first `./build.sh` builds the missing build tools (LLVM 22 a
 empty working directory `deps` took 46.5 minutes on that Intel Mac (building LLVM about 30 of them) and `fetch`
 40 seconds there, and `deps` took 3 hours 53 minutes on GitHub's Intel runner; it needs 10 GB of free space while LLVM
 builds. In a later run on that Mac with those tools kept, `deps` took 49 seconds, the build of all 17 components
-5 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon `deps` installs Homebrew's ready-made tools instead. That
-path has run only against a stand-in for Homebrew: no whole build with `build.sh` has run on an Apple-silicon Mac, and
-the host tests have not passed whole on one. GitHub's Apple-silicon runner compiles and links the kexts; at commit
+5 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon
+`deps` installs Homebrew's ready-made tools instead. That path has run only against a stand-in for Homebrew: no whole
+build with `build.sh` has run on an Apple-silicon Mac, and the host tests have not passed whole on one. GitHub's Apple-silicon runner compiles and links the kexts; at commit
 95811c2 they had the same bytes as the kexts built on GitHub's Intel runner.
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
