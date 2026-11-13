@@ -553,9 +553,9 @@ prove_loads() {
 # base package does not have) must run on macOS 15.0: the minimum it names (LC_BUILD_VERSION minos, or
 # LC_VERSION_MIN_MACOSX) at most 15.0, and a file that names none fails. A kext binary (Mach-O file type 0x0b,
 # MH_KEXT_BUNDLE) is the exception: Apple's linker writes no minimum into a kext (NVRM, linked with
-# -mmacosx-version-min=15.0, names none, and none of the twelve kexts of the 2.9 package names one), so a kext that names
-# none is counted apart; a kext that does name one is held to 15.0 as any other file. A fat file is never taken for a
-# kext. The files carried over unchanged from the base package are counted apart.
+# -mmacosx-version-min=15.0, names none, and none of the twelve kexts of the 2.9 package names one), so a kext that
+# names none is counted apart; a kext that does name one is held to 15.0 as any other file. A fat file is never taken
+# for a kext. The files carried over unchanged from the base package are counted apart.
 sums_hash() { awk -v r="$2" '{ q = substr($0, 67); if (q == r || q == "./" r) { print substr($0, 1, 64); exit } }' "$1" 2>/dev/null; }
 base_dir() { local b; b=$(find "$1/package/base" -maxdepth 3 -type f -name install.sh 2>/dev/null | sed -n 1p); [ -n "$b" ] && dirname "$b"; return 0; }
 # minos_list <file of versions> <kexts that name none>: "minos 12.0 x1, 15.0 x2, and 6 kexts, which name none"
