@@ -544,7 +544,8 @@ PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator"
 # patch_works <patch> [new]: does it apply, without a question, a change (and with "new" also a new file) in git's form
 # the way the scripts do: build_rm620.sh and tools/test_patch_chain.sh "-p1 --fuzz=0 --dry-run" then "-p1 --fuzz=0
 # --no-backup-if-mismatch" (changes only), build_nvk.sh "-p1 -s --no-backup-if-mismatch -d <dir>" (NVK's chain also
-# creates files). It works in a temporary folder, removed at once.
+# creates files). It works in a temporary folder, removed at once. Each call carries -f, as tools/bin/patch adds it to
+# every call of the scripts (make_tool_links).
 patch_works() {
   local p=$1 d=${TMPF:-/nonexistent}.patch ok=1
   [ -n "${TMPF:-}" ] || return 1
@@ -553,9 +554,9 @@ patch_works() {
   printf '%s\n' 'diff --git a/a/f.txt b/a/f.txt' '--- a/a/f.txt' '+++ b/a/f.txt' '@@ -1,3 +1,3 @@' ' one' '-two' '+TWO' ' three' > "$d/c.patch"
   [ "${2:-}" != new ] || printf '%s\n' 'diff --git a/a/new.txt b/a/new.txt' 'new file mode 100644' '--- /dev/null' '+++ b/a/new.txt' \
     '@@ -0,0 +1 @@' '+new' >> "$d/c.patch"
-  ( cd "$d/t" && "$p" -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
+  ( cd "$d/t" && "$p" -f -p1 --fuzz=0 --dry-run < "$d/c.patch" ) > /dev/null 2>&1 || ok=0
   [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\ntwo\nthree')" ] && [ ! -e "$d/t/a/new.txt" ] || ok=0
-  [ "$ok" = 1 ] && "$p" -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
+  [ "$ok" = 1 ] && "$p" -f -p1 -s --fuzz=0 --no-backup-if-mismatch -d "$d/t" < "$d/c.patch" > /dev/null 2>&1 || ok=0
   [ "$ok" = 1 ] && [ "$(cat "$d/t/a/f.txt")" = "$(printf 'one\nTWO\nthree')" ] || ok=0
   [ "$ok" = 1 ] && { [ "${2:-}" != new ] || [ "$(cat "$d/t/a/new.txt" 2>/dev/null)" = new ]; } || ok=0
   [ "$ok" = 1 ] && [ -z "$(find "$d/t" -name '*.orig' -o -name '*.rej')" ] || ok=0
@@ -1249,11 +1250,19 @@ deps_rust() {
   env "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_CBINDGEN_VERSION" cbindgen || die "cargo install cbindgen failed"
 }
 # tools/bin: one link per tool the build may take from outside Xcode; it is the first folder on every step's PATH.
+# tools/bin/patch is not a link but a two-line script that runs the chosen patch with -f. macOS's patch asks a question
+# and waits for the answer on the terminal (/dev/tty, wherever its output goes) when a patch names a file that is not
+# there or looks applied already. build_rm620.sh and tools/test_patch_chain.sh try every patch in two folders with their
+# output sent to /dev/null, so without -f the rm step stopped at a question nobody could see. With -f no patch asks:
+# a missing file is skipped and counted as failed, a change that looks applied is not reversed, and patch exits 1, so
+# the scripts go on to the next folder or stop. GNU patch reads -f the same way.
 make_tool_links() {
   mkdir -p "$TBIN" "$THOST"
   local l
   for l in "$TBIN"/*; do [ -L "$l" ] && rm -f "$l"; done
-  [ -n "$T_PATCH" ] && ln -s "$T_PATCH" "$TBIN/patch"
+  rm -f "$TBIN/patch"
+  [ -z "$T_PATCH" ] || { printf '#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec %s -f "$@"\n' \
+                           "$(q "$T_PATCH")" > "$TBIN/patch" && chmod 755 "$TBIN/patch"; }
   [ -n "$T_NINJA" ] && ln -s "$T_NINJA" "$TBIN/ninja"
   [ -n "$T_CMAKE" ] && ln -s "$T_CMAKE" "$TBIN/cmake"
   [ -n "$T_PKGCONFIG" ] && ln -s "$T_PKGCONFIG" "$TBIN/pkg-config"
@@ -1681,9 +1690,12 @@ cmd_test() {
   case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac
   # the runner leaves this one to build_nvrm.sh; with the fetched pristine tree it can run here
   local pc="not run (no pristine $NM_PIN_OGKM620_REF tree yet: ./build.sh fetch)"
-  if [ -f "$PRISTINE/version.mk" ]; then
+  # with the patch the build uses (tools/bin/patch, which never asks: make_tool_links) and the steps' PATH
+  [ ! -f "$PRISTINE/version.mk" ] || { find_tools; make_tool_links; }
+  if [ -f "$PRISTINE/version.mk" ] && [ -z "$T_PATCH" ]; then pc="not run (no patch that applies the chains: ./build.sh doctor)"
+  elif [ -f "$PRISTINE/version.mk" ]; then
     say "== the kexts/NVRM patch chain against $PRISTINE"
-    if ( cd "$HERE" && env "PATH=$TBIN:$PATH" bash tools/test_patch_chain.sh "$PRISTINE" ) > "$LOGS/test-patch-chain.log" 2>&1; then
+    if ( cd "$HERE" && env "PATH=$STEP_PATH" bash tools/test_patch_chain.sh "$PRISTINE" ) > "$LOGS/test-patch-chain.log" 2>&1; then
       pc="every patch applies with --fuzz=0"
     else pc="FAILED (see $(printf '%s' "$LOGS/test-patch-chain.log" | tilde))"; rc=1; fi
   fi

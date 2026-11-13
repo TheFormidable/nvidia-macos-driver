@@ -12,7 +12,8 @@ comandos y opciones y la solución de problemas.
 > Mac no tenía (la comprobación ahora pide solo lo que usan los kexts). Ninguno de los cambios hechos en `build.sh`
 > después de esa ejecución se ha ejecutado aún en un Mac: la comprobación de herramientas por componente, la elección
 > de Homebrew y de las herramientas que toma del `PATH`, la organización del directorio de trabajo, la lista de
-> compilación del RM, la configuración de git de `fetch` y la parada sin Xcode solo se probaron contra los sustitutos.
+> compilación del RM, la configuración de git de `fetch`, la parada sin Xcode y el `patch` que reciben los scripts (con
+> `-f`) solo se probaron contra los sustitutos.
 > Está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD, y se probó en Linux contra
 > sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de compilación
 > (`tools/test_build_sh.py`). En un sistema que no es macOS solo funcionan `doctor`, `fetch`, `test`, `env` y
@@ -41,7 +42,10 @@ comandos y opciones y la solución de problemas.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
 - Homebrew, solo para NVK, el cargador de Vulkan y el traductor: rm, kms, nvrm, fb, accel, agdc, nmsmn, ryzenadj,
   airdis, dlss, osver, el plugin y nvencvt se compilan con Xcode y lo que trae macOS (su `patch` y su `python3` 3.9
-  bastan; [tabla](BUILDING.md#tools-each-component-needs)). Si falta, `./build.sh deps` explica cómo instalarlo y
+  bastan; [tabla](BUILDING.md#tools-each-component-needs)). Los scripts reciben ese `patch` con `-f` añadido
+  (`<directorio de trabajo>/tools/bin/patch`): sin él, el `patch` de macOS pregunta en el terminal cuando no encuentra
+  el archivo de un parche, aunque su salida vaya a otro sitio, y el paso `rm` se quedaría esperando una respuesta a una
+  pregunta que nadie ve. Si falta, `./build.sh deps` explica cómo instalarlo y
   ofrece ejecutar su instalador oficial, pero solo después de que escribas `yes` (`--yes` no cuenta para esto).
 - Tiempo, en un **Mac Intel**: Homebrew ya no tiene compilaciones listas (bottles) de estas fórmulas para Mac Intel, así
   que `deps` hace que Homebrew compile aquí cada una que falte. Solo LLVM 22 tarda horas y ocupa decenas de gigabytes

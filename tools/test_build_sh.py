@@ -116,6 +116,12 @@ case "$role" in
   patchnonew) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac   # changes files, cannot create one
               in=$(cat); case "$in" in *"--- /dev/null"*) echo "patch: cannot create files" >&2; exit 1 ;; esac
               case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@" ;; esac ;;
+  # macOS's patch as it treats a patch whose file is not there (the patch chains, for the stand-in trees): without -f
+  # it asks on /dev/tty, whatever its output goes to, and waits; here it records that it would have, and fails
+  patchask) case "${1:-}" in --version) cat "$self.version"; exit 0 ;; esac
+            in=$(cat); case "$in" in *"diff --git a/a/f.txt"*) printf '%s\n' "$in" | "$(cat "$LIB/realpatch")" "$@"; exit ;; esac
+            case " $* " in *" -f "*|*" --force "*) exit 0 ;; esac
+            rec patch-asked "$@"; exit 1 ;;
   uname)
     case "${1:-}" in
       -s|'') cat "$S/os" 2>/dev/null || echo Darwin ;; -m|-p) cat "$S/arch" ;; -r) echo 24.6.0 ;;
@@ -2170,6 +2176,28 @@ def arm_test_cmd(mac):
         mac.break_script('  case "$last" in *" 0 failed,"*) ;; *) rc=1 ;; esac\n', "")
         mac.break_script('| tee "$CUR_LOG" || rc=$?', '| tee "$CUR_LOG" || true')
         negative("test that ignores a failing host test", problems(mac))
+
+    # the patch chain is applied the way build_rm620.sh and build_nvrm.sh apply it, through tools/bin/patch; macOS's
+    # patch would wait at the terminal for an answer about every patch whose file is not in the first folder tried
+    def asked_problems(s):
+        s.clear()
+        rc, out = s.run("test")
+        p = []
+        asked = [l for l in s.jlines() if l.startswith("patch-asked")]
+        if asked:
+            p.append(f"patch was called without -f and would have waited for an answer: {asked[:2]}")
+        calls = [l for l in s.jlines() if l.startswith("patch ") and "--version" not in l and "--dry-run" in l]
+        if not calls:
+            p.append("the patch chain was not applied")
+        if rc != 0 or "patch chain: every patch applies" not in out:
+            p.append(f"exit {rc}: {out[-300:]}")
+        return p
+    with mac.scratch():
+        mac.wrap(mac.bin / "patch", "patchask", "patch 2.0-12u11-Apple")
+        p = asked_problems(mac)
+        check("test applies the patch chain through tools/bin/patch, which never waits for an answer", not p, p)
+        mac.break_script('exec %s -f "$@"', 'exec %s "$@"')
+        negative("tools/bin/patch without -f (macOS's patch asks at the terminal)", asked_problems(mac))
 
 
 def arm_package(mac):
