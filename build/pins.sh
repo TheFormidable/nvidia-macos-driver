@@ -165,7 +165,7 @@ NM_PIN_TOOL_SDK_MIN=26.0
 NM_PIN_TOOL_MACOS_MIN=15.6
 # GNU make: open-gpu-kernel-modules utils.mk:210-218 needs 3.80 (macOS ships 3.81). Only "make -n" runs.
 NM_PIN_TOOL_MAKE_MIN=3.80
-# Python: Mesa meson.build:1155 ">= 3.10". tools/test_fw_fetch.py needs 3.14 (compression.zstd), so 3.14 is installed.
+# Python: Mesa meson.build:1155 ">= 3.10". 3.14 is installed: its compression.zstd is what tools/test_fw_fetch.py uses first.
 NM_PIN_TOOL_PYTHON_MIN=3.10
 # Python for the kexts and libnvencvt (build_rm620.sh, build_kms620.sh, kexts/NVRM/rmcc.py, tools/nvencvt_header_abi.py):
 # their newest needs are f-strings (3.6) and subprocess.run(capture_output=, text=) (3.7); 3.8 is the oldest they were
@@ -217,7 +217,7 @@ NM_PIN_TCOPENSSL_URL=https://github.com/openssl/openssl.git
 NM_PIN_TCOPENSSL_MIRROR=NM_TC_OPENSSL_URL
 NM_PIN_TCOPENSSL_REF=openssl-3.5.9
 NM_PIN_TCOPENSSL_COMMIT=45e844fa2a14ec92d146bd8f5778ac130b6625fb
-# zstd 1.5.7, static, only inside Python: compression.zstd, which tools/test_fw_fetch.py imports. Homebrew's version.
+# zstd 1.5.7, static, only inside Python: compression.zstd, which tools/test_fw_fetch.py uses where present. Homebrew's version.
 NM_PIN_TCZSTD_NAME="zstd 1.5.7 (toolchain, for Python)"
 NM_PIN_TCZSTD_URL=https://github.com/facebook/zstd.git
 NM_PIN_TCZSTD_MIRROR=NM_TC_ZSTD_URL
