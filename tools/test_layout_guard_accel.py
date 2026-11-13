@@ -4,11 +4,12 @@ difference.
 
 A false refusal removes acceleration from a Mac that works; a missed one leaves the driver's fields on Apple's or its
 virtual calls one slot off. So only what can be read without doubt may refuse:
-  - a class size, which the kernel states through OSMetaClass::getClassSize();
-  - a vtable that reads SHORTER than this build expects (the reading stops at a null entry inside the expected count,
-    which an Apple table does not have, and only after the same reading came out exactly right on IOService).
-A vtable that reads LONGER refuses nothing: whether a null word follows a table of another kext in the running kernel
-collection is not something the kext can ask. It is reported (property, read-only sysctl, log line).
+  - a class size, which the kernel states through OSMetaClass::getClassSize().
+A vtable LENGTH never refuses, in either direction. A table that reads LONGER rests on a trailing null word the kext
+cannot read in the running kernel collection; a table that reads SHORTER could be a real shrink but, just as well, a
+hand-reconstructed count that is one too high for this macOS point release, which no read here can tell apart. A false
+refusal would cost a working Mac its acceleration, so both directions are only reported (property, read-only sysctls
+debug.nvaccel_layout_vtlong / _vtshort, a log line). Only the SAME-length tables reach the verdict.
 What this checks, on the source text and with the host compiler:
   - every vtable the check reads is named exactly ("__ZTV" + length + name), is the base of one of the kext's own
     classes, and is one of the tables each build already imports (the macOS 26 ones only under NM_TAHOE);
@@ -20,9 +21,10 @@ What this checks, on the source text and with the host compiler:
   - the evaluation that returns the verdict is handed only the tables the report let through, the function returns on
     that verdict alone, nothing else computes a verdict, and the lengths have their own property and log line;
   - no class of the kext adds a virtual function (its tables are exactly as long as this build's bases);
-  - on the pure part, compiled from the kext's own headers: a table that reads longer never reaches the verdict, one
-    that reads shorter does and refuses, nothing is read when IOService does not come out equal, no word past the
-    expected end is read, the output array and the text are never overrun, and no line reads as a verdict.
+  - on the pure part, compiled from the kext's own headers: a table that reads longer or shorter never reaches the
+    verdict (only same-length tables do, so a size alone refuses), nothing is read when IOService does not come out
+    equal, no word past the expected end is read, the output array and the text are never overrun, and no line reads
+    as a verdict.
 Each group has a negative control on a changed copy of the text."""
 import pathlib
 import re
@@ -206,7 +208,7 @@ def ctor_problems(acc):
 
 
 LAYOUT_SYSCTLS = ("nvaccel_layout", "nvaccel_layout_classes", "nvaccel_layout_vtables", "nvaccel_layout_bad",
-                  "nvaccel_layout_vtlong", "nvaccel_layout_pure")
+                  "nvaccel_layout_vtlong", "nvaccel_layout_vtshort", "nvaccel_layout_pure")
 
 
 def sysctl_problems(layout_h, acc):
@@ -239,7 +241,7 @@ def sysctl_problems(layout_h, acc):
 
 
 def verdict_problems(layout_h):
-    """Only a size or a shorter table may refuse; a table that reads longer must not reach the verdict."""
+    """Only a class size may refuse; no vtable length reaches the verdict (shorter and longer are reported only)."""
     out = []
     src = strip_comments(layout_h)
     calls = call_args(src, "nvLayoutEvaluateOnce")
@@ -262,12 +264,13 @@ def verdict_problems(layout_h):
     if returns != ["true", "st != kNvLayoutRefused"]:
         out.append("nvaccelLayoutAllows returns on something other than the verdict: " + " | ".join(returns))
     rep = block(src, "static inline unsigned nvaccelVtReport(")
-    if rep.count("mayRefuse[n++] = vts[i];") != 1 or "if (r[i] <= 0 && mayRefuse && n < cap) mayRefuse[n++] = vts[i];" not in rep:
-        out.append("nvaccelVtReport does not copy exactly the tables that read the same or shorter")
+    if rep.count("mayRefuse[n++] = vts[i];") != 1 or "if (r[i] == 0 && mayRefuse && n < cap) mayRefuse[n++] = vts[i];" not in rep:
+        out.append("nvaccelVtReport does not copy exactly the tables that read the same length")
     for need, what in (('provider->setProperty("nvaccel-layout", gNvaccelLayout.run.text);', "nvaccel-layout is not the verdict text"),
                        ('provider->setProperty("nvaccel-layout-vtables", vt.text);', "the lengths are not published as nvaccel-layout-vtables"),
                        ('IOLog("%s: Apple vtable lengths %s\\n", who, vt.text);', "the lengths are not logged"),
                        ("gNvaccelLayoutVtLong = (int)vt.longer;", "debug.nvaccel_layout_vtlong is not the number of longer tables"),
+                       ("gNvaccelLayoutVtShort = (int)vt.shorter;", "debug.nvaccel_layout_vtshort is not the number of shorter tables"),
                        ("gNvaccelLayoutVtables = (int)vt.compared;", "debug.nvaccel_layout_vtables is not the number of tables read")):
         if allows.count(need) != 1:
             out.append(what)
@@ -355,21 +358,32 @@ int main()
     o = run(allLong);
     assert(o.rep.longer == 5 && o.n == 0 && nvLayoutVerdict(&o.t, false) == kNvLayoutOk);
 
-    // a table that ends early: handed on, the verdict refuses, nvlayout=0 overrides
+    // a table that ends early: reported, never handed on, the verdict stays ok (only a size could refuse)
     const int shorter[6] = { 266, 350, 78, 69, 57, 318 };
     o = run(shorter);
-    assert(o.rep.shorter == 1 && o.rep.longer == 0 && o.n == 5);
-    assert(nvLayoutVerdict(&o.t, false) == kNvLayoutRefused && nvLayoutVerdict(&o.t, true) == kNvLayoutOverridden);
-    assert(o.t.firstKind == kNvLayoutDiffVtShort && !strcmp(o.t.firstName, "IOAccelResource2"));
-    assert(strstr(o.rep.text, "IOAccelResource2 78/79") && strstr(o.rep.text, "; shorter: refuses (see nvaccel-layout)"));
-    char text[200];
-    nvLayoutText(text, sizeof text, kNvLayoutRefused, &o.t, "25B78", "25.1.0");
-    assert(nvLayoutTextRefused(text) && strstr(text, "IOAccelResource2 has 78 virtual functions in this macOS, 79 in the driver"));
-    // one longer and one shorter: the shorter decides, the longer is still not handed on
+    assert(o.rep.compared == 5 && o.rep.shorter == 1 && o.rep.longer == 0 && o.n == 4);
+    for (unsigned i = 0; i < o.n; i++) assert(strcmp(o.may[i].name, "IOAccelResource2") != 0);
+    assert(nvLayoutVerdict(&o.t, false) == kNvLayoutOk && o.t.vtBad == 0 && o.t.vtables == 4 && o.t.firstKind == kNvLayoutDiffNone);
+    assert(strstr(o.rep.text, "differ: IOGraphicsAccelerator2 350/350, IOAccelResource2 78/79"));
+    assert(strstr(o.rep.text, UNITS "; shorter: reported only, not a reason to refuse"));
+    assert(nvLayoutTextState(o.rep.text) == kNvLayoutNotRun && !nvLayoutTextRefused(o.rep.text));
+    // one longer and one shorter: neither is handed on, the verdict is still ok
     const int both[6] = { 266, 351, 79, 1, 57, 318 };
     o = run(both);
-    assert(o.rep.shorter == 1 && o.rep.longer == 1 && o.n == 4 && nvLayoutVerdict(&o.t, false) == kNvLayoutRefused);
-    assert(!strcmp(o.t.firstName, "IOAccelVidMemory"));
+    assert(o.rep.shorter == 1 && o.rep.longer == 1 && o.n == 3 && nvLayoutVerdict(&o.t, false) == kNvLayoutOk);
+    assert(o.t.vtBad == 0 && o.t.firstKind == kNvLayoutDiffNone);
+    assert(strstr(o.rep.text, UNITS "; longer: reported only, not a reason to refuse"));
+    assert(strstr(o.rep.text, "; shorter: reported only, not a reason to refuse"));
+    // a class SIZE that differs is the one thing that still refuses, and nvlayout=0 overrides it
+    {   NvLayoutTally t; nvLayoutTallyInit(&t);
+        const NvLayoutRow row = { "IOGraphicsAccelerator2", "IOAccelerator", 0xdd8 };
+        const NvLayoutSeen seen = { true, 0xde8, "IOAccelerator" };
+        nvLayoutRow(&row, &seen, &t);
+        assert(t.sizeBad == 1 && nvLayoutVerdict(&t, false) == kNvLayoutRefused && nvLayoutVerdict(&t, true) == kNvLayoutOverridden);
+        char text[200];
+        nvLayoutText(text, sizeof text, kNvLayoutRefused, &t, "25B78", "25.1.0");
+        assert(nvLayoutTextRefused(text) && strstr(text, "IOGraphicsAccelerator2 is 0xde8 bytes in this macOS, 0xdd8 in the driver"));
+    }
 
     // IOService does not read as built: nothing else is read, nothing is handed on, sizes alone decide
     const int calLong[6] = { 270, 300, 1, 1, 1, 1 };
@@ -448,7 +462,7 @@ int main()
         assert(strlen(g.rep.text) == sizeof g.rep.text - 1);
         for (unsigned i = 0; i < sizeof g.guard; i++) assert(g.guard[i] == 0x5a);
     }
-    puts("longer is a report, shorter refuses, nothing is read without the IOService self-check");
+    puts("lengths are a report, only a class size refuses, nothing is read without the IOService self-check");
     return 0;
 }
 '''
@@ -466,9 +480,9 @@ def main():
     pr = ctor_problems(acc)
     arm("NVAccel's constructor stores only zeros", not pr, "; ".join(pr))
     pr = sysctl_problems(lay, acc)
-    arm("the six layout sysctls are read-only and registered once, from the accelerator's sysctl list", not pr, "; ".join(pr))
+    arm("the seven layout sysctls are read-only and registered once, from the accelerator's sysctl list", not pr, "; ".join(pr))
     pr = verdict_problems(lay)
-    arm("only sizes and tables that read the same or shorter reach the verdict; the lengths have their own outputs", not pr, "; ".join(pr))
+    arm("only sizes reach the verdict; a vtable length (shorter or longer) is reported only, with its own outputs", not pr, "; ".join(pr))
     pr = virtual_problems(acc, stubs)
     arm("no class of the kext adds a virtual function", not pr, "; ".join(pr))
 
@@ -516,9 +530,12 @@ def main():
         any("handed something other" in x for x in verdict_problems(lay.replace(
             "                                                  mayRefuse, nMay, ioService.slots, ioService.built);",
             "                                                  vts, nVts, ioService.slots, ioService.built);"))))
-    arm("control: a report that lets a longer table through is caught",
-        any("same or shorter" in x for x in verdict_problems(lay.replace(
-            "if (r[i] <= 0 && mayRefuse && n < cap)", "if (r[i] != 2 && mayRefuse && n < cap)"))))
+    arm("control: a report that lets a longer or shorter table through is caught",
+        any("same length" in x for x in verdict_problems(lay.replace(
+            "if (r[i] == 0 && mayRefuse && n < cap)", "if (r[i] != 2 && mayRefuse && n < cap)"))))
+    arm("control: a report that lets a shorter table through is caught",
+        any("same length" in x for x in verdict_problems(lay.replace(
+            "if (r[i] == 0 && mayRefuse && n < cap)", "if (r[i] <= 0 && mayRefuse && n < cap)"))))
     arm("control: a refusal on the longer count is caught",
         any("other than the verdict" in x for x in verdict_problems(lay.replace(
             "    gNvaccelLayoutState = (int)st;\n", "    if (vt.longer) return false;\n    gNvaccelLayoutState = (int)st;\n"))))
@@ -551,15 +568,15 @@ def main():
             return res.returncode, res.stderr[-600:]
 
         code, err = pure("t", ROOT / "kexts/NVRM/accel")
-        arm("the kext's own headers on the host: longer is a report, shorter refuses, IOService is the self-check", code == 0, err)
+        arm("the kext's own headers on the host: lengths are a report, only a class size refuses, IOService is the self-check", code == 0, err)
         (d / "nvrm_layout.h").write_text((ROOT / "kexts/NVRM/nvrm_layout.h").read_text())
         for tag, old, new, what in (
-                ("a", "if (r[i] <= 0 && mayRefuse && n < cap)", "if (r[i] != 2 && mayRefuse && n < cap)",
-                 "a report that hands on a longer table"),
-                ("b", "if (r[i] <= 0 && mayRefuse && n < cap)", "if (r[i] == 0 && mayRefuse && n < cap)",
-                 "a report that keeps a shorter table from the verdict"),
+                ("a", "if (r[i] == 0 && mayRefuse && n < cap)", "if (r[i] != 2 && mayRefuse && n < cap)",
+                 "a report that hands on a longer or shorter table"),
+                ("b", "if (r[i] == 0 && mayRefuse && n < cap)", "if (r[i] <= 0 && mayRefuse && n < cap)",
+                 "a report that lets a shorter table refuse"),
                 ("c", "    if (cal != 0) {\n", "    if (cal == 2) {\n", "a report that reads the tables without the IOService self-check"),
-                ("d", "if (r[i] <= 0 && mayRefuse && n < cap)", "if (r[i] <= 0 && mayRefuse && n <= cap)", "a report that writes one entry past its output array")):
+                ("d", "if (r[i] == 0 && mayRefuse && n < cap)", "if (r[i] == 0 && mayRefuse && n <= cap)", "a report that writes one entry past its output array")):
             sub = d / ("bad" + tag)
             (sub / "accel").mkdir(parents=True)
             changed = LAY.read_text().replace(old, new)

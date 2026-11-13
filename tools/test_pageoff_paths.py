@@ -19,7 +19,7 @@ Each arm is one path and states what the family's caller finds afterwards: who h
 and given back, the owner record, what was copied from where, what the page-off answered, the counters, the references.
 Negative controls: v2.9's page-off (7412cdd, with the unlocked wait switched on as its opt-in did) fails the arms about
 the lock that cannot be taken back, the resource everybody let go of, the copy another thread made, the family's bit
-and the driver's own lock, and passes the two about paths that did not change; fourteen altered copies of today's
+and the driver's own lock, and passes the two about paths that did not change; fifteen altered copies of today's
 source each fail the arm about them.
    python3 tools/test_pageoff_paths.py"""
 import pathlib, subprocess, sys, tempfile
@@ -362,6 +362,12 @@ int main() {
         check("bit 0 set during the wait says nothing about a plane that uses bit 1: the page-off copies, and sets the plane's bit",
               sane(c, T1) && gCopies == 1 && c.out && !gCntPoAlready && (VALID[0] & 2) && RES->rc == 1);
     }
+    {   setup(); gPending = true; VALID[0] = 2;      // the family keeps this resource on bit 1, and system memory reads current on it
+        gDuringWait = [] { RES->fRangeOff = 4096; RES->fRangeLen = 2048; RES->fValidBit = 2; };   // a plane's first grant, while the lock is free
+        Call c = familyPageoff(T1);
+        check("a plane's range granted during the wait: the bit read before it (bit 0) and after it (the plane's) are not compared, and the copy is made",
+              sane(c, T1) && gCopies == 1 && c.out && !gCntPoAlready && gCntPoChanged == 1 && gFamilyPageoffs == 0 && gRangedFails == 0 && RES->rc == 1);
+    }
     // ---- what the unlocked wait must survive ----
     {   setup(); gPending = true;
         gDuringWait = [] { raw<IOLock *>(A, 0x88) = nullptr; };   // the accelerator is torn down: its lock is gone
@@ -429,6 +435,7 @@ PLANE_NO_FAMILY = "a plane's resource the driver cannot copy itself"
 PLANE_NO_FAMILY_LATE = "a plane's resource the driver can no longer copy after the wait"
 PLANE_BIT = "the family makes a plane's own bit current during the wait"
 PLANE_BIT0 = "bit 0 set during the wait says nothing about a plane"
+PLANE_LATE_GRANT = "a plane's range granted during the wait"
 NO_RELOCK = "the lock cannot be taken back"
 ORPHAN = "everybody else lets go of the resource during the wait"
 ACCEL_GONE = "everybody else lets go of the accelerator during the wait"
@@ -469,6 +476,8 @@ CONTROLS = [   # what, which piece, [(the text to alter, its replacement), ...],
      [("(v0[0] & validBit())", "(v0[0] & 1u)"), ("(v1[0] & validBit())", "(v1[0] & 1u)")], PLANE_BIT),
     ("bit 0 read after the wait whatever the resource (a copy skipped on another plane's bit)", "head",
      [("(v1[0] & validBit())", "(v1[0] & 1u)")], PLANE_BIT0),
+    ("the two readings compared although the resource's bit changed during the wait", "head",
+     [("            if (!bitChanged) {   volatile unsigned short *const v1 =", "            {   volatile unsigned short *const v1 =")], PLANE_LATE_GRANT),
 ]
 with tempfile.TemporaryDirectory() as tmp:
     res, log = run_fixture(h, lk, sd, tmp, "real") if h and lk and sd else (None, "pieces of the source were not found")
@@ -476,7 +485,7 @@ with tempfile.TemporaryDirectory() as tmp:
         arm("the lifted page-off compiles and runs on the host", False, log)
         res = {}
     else:
-        arm("the lifted page-off compiles and runs on the host (22 paths)", len(res) == 22, log)
+        arm("the lifted page-off compiles and runs on the host (23 paths)", len(res) == 23, log)
         for n, ok in res.items():
             arm("path: " + n, ok, log)
     for what, piece, changes, target in CONTROLS:
