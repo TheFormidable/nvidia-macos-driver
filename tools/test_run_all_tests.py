@@ -436,10 +436,11 @@ arm("control: without its own limit test_build_sh.py is held to the general limi
 
 
 # ---- a test stopped at its limit: the end of what it had printed is shown, and the slow tests are named
-def scratch_run(runner_text, tests, *opts):
-    """Run the scratch tests {name: source} under the runner with a general limit of 2 s. -> (exit status, output)."""
-    text = runner_text.replace("TIMEOUT = 600", "TIMEOUT = 2")
-    assert text.count("TIMEOUT = 2\n") == 1
+def scratch_run(runner_text, tests, *opts, limit=2):
+    """Run the scratch tests {name: source} under the runner with a general limit of 2 s (or `limit`). -> (exit status,
+    output)."""
+    text = runner_text.replace("TIMEOUT = 600", f"TIMEOUT = {limit}")
+    assert text.count(f"TIMEOUT = {limit}\n") == 1
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         (root / "tools").mkdir()
@@ -531,15 +532,19 @@ arm("control: read strictly, those bytes end the whole run with Python's error a
     rc == 1 and "UnicodeDecodeError" in out and "passed" not in out, out[-600:])
 
 # ---- a test that runs long is named while the run goes on, not only in the summary at its end
-LONG = {"test_long_one.py": "import time\ntime.sleep(1.7)\nprint('PASS')\n", "test_short_one.py": "print('PASS')\n"}
+# (an interval of one second and a test of four: a loaded machine may be late with a line, and may take a second over
+# the short test, which is then named as well and rightly; what is held is what the lines that are there say)
+LONG = {"test_long_one.py": "import time\ntime.sleep(4)\nprint('PASS')\n", "test_short_one.py": "print('PASS')\n"}
 still_at = "STILL = 300 "
 arm("the runner names its interval for a long test in one place", RUNNER.count(still_at) == 1)
-rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 0.5 "), LONG)
+rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 1 "), LONG, limit=60)
 during = [l for l in out.splitlines() if l.startswith("still running: ")]
-arm("every interval the tests running that long are named with their times, and only those",
-    rc == 0 and len(during) >= 2 and all(re.fullmatch(r"still running: test_long_one\.py \(\d+ s\)", l) for l in during)
+named = [re.findall(r"(\S+) \((\d+) s\)", l) for l in during]
+arm("every interval the tests that have run that long are named with their times, and none that has run for less",
+    rc == 0 and sum(1 for l in named if any(n == "test_long_one.py" for n, _ in l)) >= 2 and all(named)
+    and all(int(s) >= 1 for l in named for _, s in l)
     and "2 passed, 0 failed, 0 skipped, 0 not run, of 2" in out.splitlines(), out[-600:])
-rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 0.5 ").replace("long_ones = sorted(", "long_ones = [] and sorted("), LONG)
+rc, out = scratch_run(RUNNER.replace(still_at, "STILL = 1 ").replace("long_ones = sorted(", "long_ones = [] and sorted("), LONG, limit=60)
 arm("control: a runner that waits silently says nothing until the end", rc == 0 and "still running" not in out, out[-600:])
 
 
