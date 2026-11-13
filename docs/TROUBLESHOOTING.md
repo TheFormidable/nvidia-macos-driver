@@ -71,8 +71,9 @@ and rebuilds the final collection from permanent installation paths.
 
 ### The new paths of release 3.0
 
-Every change of 3.0 is on by default and has one way back to the 2.9 behaviour (the table "The ways back" in
-[CHANGELOG.md](../CHANGELOG.md)). Use a way back to find out whether a new path is behind a problem, then report what
+Every change of 3.0 is on by default. Each risky change has one way back to the 2.9 behaviour (the table "The ways
+back" in [CHANGELOG.md](../CHANGELOG.md)); several default-on changes have none, and the way back from those is to
+reinstall 2.9 (and `-nvrmnopm` / `-nvrmnoshutdown` for the power paths). Use a way back to find out whether a new path is behind a problem, then report what
 you saw with it and without it. A boot argument needs a restart; a line in `nvrm610.conf` goes into your own block at
 the end of the file and acts on the processes started after it (log out and in for WindowServer).
 
