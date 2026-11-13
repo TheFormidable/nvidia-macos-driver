@@ -190,7 +190,9 @@ U=$(nm -m "$D" | grep '(undefined)' | grep -v weak | grep 'dynamically looked up
 [ -z "$U" ] || { echo "STOP: unresolved strong references (dlopen fails in WindowServer):"; echo "$U"; exit 5; }
 cp "$D" "$OUT/libvulkan_nouveau.dylib"; strip -S "$OUT/libvulkan_nouveau.dylib"
 nm -gU "$OUT/libvulkan_nouveau.dylib" | awk '{print $3}' | sort > "$OUT/exports.txt"
-UUID=$(otool -l "$OUT/libvulkan_nouveau.dylib" | awk '/uuid/{print $2; exit}')
+# The listing is read to its end. A reader that leaves at the first match can kill otool while it is still writing, and
+# under pipefail and errexit that stops the script here, after the build, with status 141 and no message.
+UUID=$(otool -l "$OUT/libvulkan_nouveau.dylib" | awk '/uuid/ && !n++ {print $2}')
 # BUILD.txt is all the release build (build_release_inputs.sh) shows and records of this script; the rest of what is
 # printed here goes to a log there. A library built with a patch left out or added (a variable still set from a fault
 # hunt is enough) must not look like the default one in that record, so the line ends with what differs.
