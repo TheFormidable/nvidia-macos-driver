@@ -155,6 +155,44 @@ int main(void)
     for (int i = 0; i < 100; i++) fb |= nvrm_evw_account(&t, NVRM_EVW_R_LEGACY, 1, 2000, &missed);
     T("a 2.9 kext never trips the fallback", !fb && t.misses == 0);
     T("capped, aborted and spurious returns poll one step", nvrm_evw_must_poll(NVRM_EVW_R_CAPPED) && nvrm_evw_must_poll(NVRM_EVW_R_ABORTED) && nvrm_evw_must_poll(NVRM_EVW_R_SPURIOUS) && !nvrm_evw_must_poll(NVRM_EVW_R_WOKEN) && !nvrm_evw_must_poll(NVRM_EVW_R_TIMEOUT) && !nvrm_evw_must_poll(NVRM_EVW_R_LEGACY));
+    /* going QUIET is a pause: the per-thread trial state (nvrm_evw_quiet, nvrm_evw_trial_failed, nvrm_evw_events_back) */
+    T("the process flag: DEAD and QUIET are two non-zero values, and both poll",
+      NVRM_EVW_FB_DEAD != 0 && NVRM_EVW_FB_QUIET != 0 && NVRM_EVW_FB_DEAD != NVRM_EVW_FB_QUIET
+      && !nvrm_evw_should_sleep(NVRM_EVW_ADAPT, 5000000, 5000000, UINT64_MAX, NVRM_EVW_FB_QUIET)
+      && !nvrm_evw_should_sleep(NVRM_EVW_EAGER, 5000000, 0, UINT64_MAX, NVRM_EVW_FB_DEAD));
+    int began = 0, view = 0, at_trial = 0;
+    memset(&t, 0, sizeof t);
+    for (int i = 1; i <= 1000 && !at_trial; i++) {
+        view = nvrm_evw_quiet(&t, 0, NVRM_EVW_FB_QUIET, &began);         /* a round that is not a new wait */
+        if (began || view != NVRM_EVW_FB_QUIET) at_trial = -1;
+        view = nvrm_evw_quiet(&t, 1, NVRM_EVW_FB_QUIET, &began);         /* the first round of a new wait */
+        if (began) at_trial = i;
+    }
+    T("QUIET: a thread polls 256 of its waits (only new waits count), then its trial begins and it sees the flag clear",
+      at_trial == (int)NVRM_EVW_PAUSE_FIRST && view == 0 && t.trial == 1 && t.quiet_waits == 0
+      && nvrm_evw_quiet(&t, 1, NVRM_EVW_FB_QUIET, &began) == 0 && !began);
+    unsigned pauses_ok = 1, p = NVRM_EVW_PAUSE_FIRST;
+    for (int k = 0; k < 12; k++) {
+        nvrm_evw_trial_failed(&t);
+        p = p * 2 > NVRM_EVW_PAUSE_MAX ? NVRM_EVW_PAUSE_MAX : p * 2;
+        if (t.pause != p || t.trial || t.quiet_waits || t.trial_misses || t.misses) pauses_ok = 0;
+    }
+    T("a failed trial doubles the thread's pause, 512 up to 65536 and no further", pauses_ok && t.pause == NVRM_EVW_PAUSE_MAX);
+    t.misses = 9;
+    (void)nvrm_evw_quiet(&t, 0, NVRM_EVW_FB_QUIET, &began);
+    T("a thread that polls while QUIET carries no run of missed wakes", t.misses == 0);
+    t.trial = 1; t.trial_misses = 2; t.misses = 2; t.quiet_waits = 5;
+    T("the flag seen clear with trial or pause state: the state goes, and the run restarts from 0",
+      nvrm_evw_quiet(&t, 1, 0, &began) == 0 && !began && t.trial == 0 && t.pause == 0 && t.quiet_waits == 0 && t.trial_misses == 0 && t.misses == 0);
+    t.misses = 15;
+    T("control: the flag seen clear by a thread with no such state leaves its run alone (sixteen in a row still count)",
+      nvrm_evw_quiet(&t, 1, 0, &began) == 0 && t.misses == 15);
+    memset(&t, 0, sizeof t); began = 0; int dead_trials = 0;
+    for (int i = 0; i < 1000000; i++) { if (nvrm_evw_quiet(&t, 1, NVRM_EVW_FB_DEAD, &began) != NVRM_EVW_FB_DEAD || began) dead_trials++; }
+    T("DEAD: a million new waits and never a trial", dead_trials == 0 && t.trial == 0);
+    t.trial = 1; t.pause = 4096; t.quiet_waits = 3; t.trial_misses = 1; t.misses = 1;
+    nvrm_evw_events_back(&t);
+    T("events back: the thread's pause, trial and runs are reset", !t.trial && !t.pause && !t.quiet_waits && !t.trial_misses && !t.misses);
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails != 0;
 }

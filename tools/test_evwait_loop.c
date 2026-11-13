@@ -1,9 +1,10 @@
 /* test_evwait_loop.c - nvrm_evw_round (kexts/NVRM/nvrm_evwait.h) against a stand-in for the kernel's selector 6, with real
    threads, and against a scripted world for the parts that need no clock. Proves: no wake is lost when events are
    delivered (the stand-in kernel sees every sleep that begins on a count its awaited event has already moved past);
-   events that arrive late, after the work shows complete, never switch the process to polling; a card whose events
-   never arrive costs at most the 2 ms bound per sleep and ends in polling; a full kernel does not spin; a channel with
-   no event goes through the same wait callback and can never switch the process to polling.
+   events that arrive late, after the work shows complete, never switch the process to polling; dead events cost at most
+   the 2 ms bound per sleep and end in polling, with a trial now and then, and events that come back are slept on again
+   (arms "invariant 1:" to "5:", whose controls are tools/test_evwait_quiet.py); a full kernel does not spin; a channel
+   with no event goes through the same wait callback and can never switch the process to polling.
    What timing cannot decide is not asserted: with the completion visible before its event (as on the GPU), a sleep can
    run out between the two, so the count of missed wakes in the threaded arms is printed, not required to be 0.
    Build and run anywhere:
@@ -114,9 +115,10 @@ static void after_round(struct waiter *w, const struct nvrm_evw_thread *t, unsig
     }
     *prev = t->misses;
 }
-/* run up to `jobs` waits in `mode`, each job taking delay_us on the GPU thread; with until_fallback, stop after the job
-   during which the process gave up on the event. Returns the number of jobs waited for. */
-static int run(int mode, int jobs, int delay_us, int until_fallback, struct waiter *w, struct nvrm_evw_thread *t)
+/* run up to `jobs` waits in `mode`, each job taking delay_us on the GPU thread; with until 1, stop after the job during
+   which the process gave up on the event; with until 2, after the job during which its flag came back to 0. Returns
+   the number of jobs waited for. */
+static int run(int mode, int jobs, int delay_us, int until, struct waiter *w, struct nvrm_evw_thread *t)
 {
     pthread_t g; unsigned prev = t->misses; uint64_t last_job = 0; int i;
     memset(w, 0, sizeof *w); done_seq = 0; kseq = 0; kposted = 0; gpu_jobs = jobs; gpu_delay_us = delay_us; gpu_stop = 0; gpu_go = 0;
@@ -125,7 +127,7 @@ static int run(int mode, int jobs, int delay_us, int until_fallback, struct wait
         w->want = (uint64_t)i; gpu_go = (uint64_t)i;
         const uint64_t t0 = now_ns();
         while (done_seq < w->want) { nvrm_evw_round(t, mode, now_ns() - t0, UINT64_MAX, 1, &fell_back, &ops, w); after_round(w, t, &prev, &last_job); }
-        if (until_fallback && fell_back) break;
+        if ((until == 1 && fell_back) || (until == 2 && !fell_back)) break;
     }
     gpu_stop = 1;      /* the GPU thread waits for no job the waiter will not ask for */
     pthread_join(g, NULL);
@@ -271,7 +273,7 @@ static void missed_control(void)
     memset(&t, 0, sizeof t); t.seq_fd = -1; nvrm_evw_remember(&t, 3, 0);
     while (!fb && rounds < 100) { memset(&f, 0, sizeof f); nvrm_evw_round(&t, NVRM_EVW_ADAPT, LONG_WAIT, UINT64_MAX, 1, &fb, &fops, &f); missed += f.stats[NVRM_EVW_S_MISSED]; rounds++; }
     T("control: on a real event the same full-length timeouts with the work complete are missed wakes, and sixteen fall back",
-      fb == 1 && missed == NVRM_EVW_MISS_LIMIT && rounds == NVRM_EVW_MISS_LIMIT);
+      fb == NVRM_EVW_FB_QUIET && missed == NVRM_EVW_MISS_LIMIT && rounds == NVRM_EVW_MISS_LIMIT && t.misses == 0);
 }
 
 /* A lost wake made on purpose, and the real round in the same place: no clock, no thread. The work completes and its
@@ -358,12 +360,176 @@ static void late_scripted(void)
     T("late events, eager mode (WindowServer): the same", jobs == 1000 && !fb && l.missed == 1000 && l.max_run == 1);
     jobs = late_events(NVRM_EVW_ADAPT, 1, 1000, &l, &fb);
     T("control: the same script with every moved count hidden from the round falls back, at the sixteenth missed wake",
-      fb && l.fellback == 1 && l.missed == NVRM_EVW_MISS_LIMIT && l.max_run == NVRM_EVW_MISS_LIMIT && jobs == NVRM_EVW_MISS_LIMIT);
+      fb == NVRM_EVW_FB_QUIET && l.fellback == 1 && l.missed == NVRM_EVW_MISS_LIMIT && l.max_run == NVRM_EVW_MISS_LIMIT - 1
+      && jobs == NVRM_EVW_MISS_LIMIT);
     jobs = late_events(NVRM_EVW_ADAPT, 2, 1000, &l, &fb);
     T("late events seen by an aborted call: never a fallback, the run never above 1",
       jobs == 1000 && !fb && l.missed == 500 && l.max_run == 1 && l.backoffs == 500);
     jobs = late_events(NVRM_EVW_ADAPT, 3, 1000, &l, &fb);
     T("late events seen by a capped call: the same", jobs == 1000 && !fb && l.missed == 500 && l.max_run == 1 && l.backoffs == 500);
+}
+
+/* ---- part 3: going QUIET after missed wakes, and coming back (scripted: no clock, no thread) ----
+   A wait is two or more rounds: one inside the spin (a polling step that leaves the work running), then rounds 5 ms in,
+   where a polling step finds the work complete and a sleep ends with it complete: woken by its event when the world
+   delivers events, run out with the count where it was (a missed wake) when it does not. */
+struct qw {
+    int busy, events, rc;
+    uint32_t count;
+    unsigned calls, sleeps, backoffs, stats[NVRM_EVW_S_N];
+    unsigned round_sleeps, round_backoffs, bad_rounds;   /* invariant 1, per round and in all */
+    uint32_t max_us;
+};
+static int q_pending(void *ctx, int *fd) { struct qw *q = ctx; *fd = 3; return q->busy; }
+static int q_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
+{
+    struct qw *q = ctx; (void)fd;
+    q->calls++;
+    if (q->rc) return q->rc;
+    if (us == 0) { *out = nvrm_evw_pack(q->count, NVRM_EVW_R_COUNT); return 0; }
+    if (us > q->max_us) q->max_us = us;
+    if (q->count != seen) { *out = nvrm_evw_pack(q->count, NVRM_EVW_R_MOVED); return 0; }
+    q->sleeps++; q->round_sleeps++;
+    q->busy = 0;                                         /* the work completes during the sleep */
+    if (q->events) { q->count++; *out = nvrm_evw_pack(q->count, NVRM_EVW_R_WOKEN); }
+    else *out = nvrm_evw_pack(q->count, NVRM_EVW_R_TIMEOUT);
+    return 0;
+}
+static void q_backoff(void *ctx, uint64_t waited) { struct qw *q = ctx; q->backoffs++; q->round_backoffs++; if (waited) q->busy = 0; }
+static void q_stat(void *ctx, int what) { struct qw *q = ctx; q->stats[what]++; }
+static const struct nvrm_evw_ops qops = { q_pending, q_wait, q_backoff, q_stat };
+static void q_init(struct qw *q, struct nvrm_evw_thread *t) { memset(q, 0, sizeof *q); memset(t, 0, sizeof *t); t->seq_fd = -1; }
+/* one wait. Invariant 1 per round: one polling step, or one sleep (of at most the bound: max_us), or the work found
+   complete; anything else (no step and no sleep with the work still running, two sleeps) is a bad round, and so is a
+   wait that has not ended after 64 rounds */
+static void q_wait1(struct qw *q, struct nvrm_evw_thread *t, int mode, volatile int *fb)
+{
+    q->busy = 1;
+    unsigned r = 0;
+    for (; q->busy && r < 64; r++) {
+        q->round_sleeps = q->round_backoffs = 0;
+        nvrm_evw_round(t, mode, r == 0 ? 0 : LONG_WAIT + r, UINT64_MAX, 1, fb, &qops, q);
+        if (q->round_sleeps > 1 || q->round_sleeps + q->round_backoffs > 1 || (q->busy && q->round_sleeps + q->round_backoffs == 0)) q->bad_rounds++;
+    }
+    if (q->busy) q->bad_rounds++;
+}
+static unsigned q_waits(struct qw *q, struct nvrm_evw_thread *t, int mode, volatile int *fb, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) q_wait1(q, t, mode, fb);
+    return n;
+}
+/* what invariant 3 expects, worked out from the rules alone: after going QUIET at its 16th wait, the thread counts its
+   waits; trial i begins at the wait where the count reaches pause i (256, doubled after each failed trial, at most
+   65536) and lasts that wait and 3 more (one missed wake each); the count starts again after it. */
+static void q_expect(unsigned long waits_after, unsigned *trials, unsigned *sleeps)
+{
+    unsigned long end = 0, p = NVRM_EVW_PAUSE_FIRST;
+    *trials = 0; *sleeps = 0;
+    while (end + p <= waits_after) {
+        const unsigned long start = end + p, left = waits_after - start + 1;
+        ++*trials; *sleeps += left < NVRM_EVW_TRIAL_MISSES ? (unsigned)left : NVRM_EVW_TRIAL_MISSES;
+        end = start + NVRM_EVW_TRIAL_MISSES - 1;
+        p = p * 2 > NVRM_EVW_PAUSE_MAX ? NVRM_EVW_PAUSE_MAX : p * 2;
+    }
+}
+static unsigned inv1_bad; static uint32_t inv1_max_us;
+static void inv1_note(const struct qw *q) { inv1_bad += q->bad_rounds; if (q->max_us > inv1_max_us) inv1_max_us = q->max_us; }
+
+static void quiet_scripted(void)
+{
+    struct qw q, q2; struct nvrm_evw_thread t, t2; volatile int fb = 0;
+
+    /* invariant 3: events that never come back. One thread, one million waits. */
+    q_init(&q, &t); fb = 0;
+    const unsigned long N = 1000000;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, NVRM_EVW_MISS_LIMIT);
+    const unsigned tripped = fb == NVRM_EVW_FB_QUIET && q.sleeps == NVRM_EVW_MISS_LIMIT;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, (unsigned)(N - NVRM_EVW_MISS_LIMIT));
+    unsigned want_trials = 0, want_sleeps = 0;
+    q_expect(N - NVRM_EVW_MISS_LIMIT, &want_trials, &want_sleeps);
+    const unsigned trial_sleeps = q.sleeps - NVRM_EVW_MISS_LIMIT;
+    printf("     events never back: %lu waits, %u sleeps (%u to go quiet, %u in %u trials; expected %u in %u), %u fell back, %u back\n",
+           N, q.sleeps, NVRM_EVW_MISS_LIMIT, trial_sleeps, q.stats[NVRM_EVW_S_TRIAL], want_sleeps, want_trials,
+           q.stats[NVRM_EVW_S_FELL_BACK], q.stats[NVRM_EVW_S_BACK]);
+    T("invariant 3: events never come back: a million waits, the trials' sleeps 4 per trial with pauses doubling to the cap"
+      " (22 trials, 88 sleeps), FELL_BACK once, still polling",
+      tripped && q.stats[NVRM_EVW_S_TRIAL] == want_trials && trial_sleeps == want_sleeps && want_trials == 22 && want_sleeps == 88
+      && trial_sleeps <= NVRM_EVW_TRIAL_MISSES * q.stats[NVRM_EVW_S_TRIAL] && q.stats[NVRM_EVW_S_MISSED] == q.sleeps
+      && q.stats[NVRM_EVW_S_FELL_BACK] == 1 && q.stats[NVRM_EVW_S_BACK] == 0 && fb == NVRM_EVW_FB_QUIET && t.pause == NVRM_EVW_PAUSE_MAX);
+    inv1_note(&q);
+
+    /* the same thread once events return: within its pause plus one sleep of the trial, the flag is clear */
+    q.events = 1; const unsigned s0 = q.sleeps; unsigned n = 0;
+    while (fb && n < 2 * NVRM_EVW_PAUSE_MAX) { q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb); n++; }
+    T("events back after the million: the flag clears within one pause (65536 waits) and the first trial sleep",
+      !fb && n <= NVRM_EVW_PAUSE_MAX && q.sleeps == s0 + 1 && q.stats[NVRM_EVW_S_BACK] == 1 && t.pause == 0 && t.trial == 0);
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, 100);
+    T("and from then on every wait sleeps and is woken", !fb && q.sleeps == s0 + 101 && q.stats[NVRM_EVW_S_WOKEN] == 101);
+    inv1_note(&q);
+
+    /* invariant 4: a failed wait call: polling for good, no trial, no call into the kernel, whatever follows */
+    q_init(&q, &t); fb = 0; q.rc = -1;
+    q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb);
+    const unsigned calls = q.calls;
+    q.rc = 0; q.events = 1;
+    q_waits(&q, &t, NVRM_EVW_EAGER, &fb, 300000);
+    T("invariant 4: a failed wait call: polling for good (DEAD), no trial in 300000 waits with events that would work",
+      fb == NVRM_EVW_FB_DEAD && calls == 1 && q.calls == 1 && q.sleeps == 0 && q.stats[NVRM_EVW_S_TRIAL] == 0
+      && q.stats[NVRM_EVW_S_FELL_BACK] == 1 && q.stats[NVRM_EVW_S_BACK] == 0);
+    inv1_note(&q);
+    /* the same failure in the middle of a trial of a QUIET process: DEAD, and not said again */
+    q_init(&q, &t); fb = 0;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, NVRM_EVW_MISS_LIMIT + NVRM_EVW_PAUSE_FIRST);
+    const int in_trial = t.trial && fb == NVRM_EVW_FB_QUIET;
+    q.rc = -1; q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb); q.rc = 0; q.events = 1;
+    const unsigned c2 = q.calls;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, 100000);
+    T("a wait call that fails during a trial: DEAD for good, FELL_BACK still once",
+      in_trial && fb == NVRM_EVW_FB_DEAD && q.calls == c2 && q.stats[NVRM_EVW_S_FELL_BACK] == 1 && q.stats[NVRM_EVW_S_TRIAL] == 1);
+    inv1_note(&q);
+
+    /* invariant 5: two threads. A trips the rule and polls a while; B, whose waits began in the quiet time, comes to its
+       trial and is woken; A then sleeps again, and one missed wake does not make it trip. */
+    q_init(&q, &t); q_init(&q2, &t2); fb = 0;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, NVRM_EVW_MISS_LIMIT);
+    const int a_tripped = fb == NVRM_EVW_FB_QUIET && t.misses == 0;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, 100);                     /* A polls: it now carries a count of quiet waits */
+    q2.events = 1; unsigned nb = 0;
+    while (fb && nb < 4 * NVRM_EVW_PAUSE_FIRST) { q_wait1(&q2, &t2, NVRM_EVW_ADAPT, &fb); nb++; }
+    /* B's very first wait is not counted (nvrm_evw_begin sees no earlier wait), so its trial is its 257th */
+    const int b_back = !fb && nb == NVRM_EVW_PAUSE_FIRST + 1 && q2.stats[NVRM_EVW_S_BACK] == 1 && q2.sleeps == 1;
+    const unsigned a_sleeps = q.sleeps;
+    q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb);                          /* A's events still do not come: a missed wake */
+    T("invariant 5: B's trial brings the events back; A, which tripped the rule, sleeps again and one missed wake does not trip it",
+      a_tripped && b_back && q.sleeps == a_sleeps + 1 && q.stats[NVRM_EVW_S_MISSED] == NVRM_EVW_MISS_LIMIT + 1 && !fb
+      && t.misses == 1 && t.quiet_waits == 0 && t.pause == 0 && t.trial == 0);
+    /* and the rule is whole again for A: it takes sixteen in a row, and the process says FELL_BACK a second time */
+    unsigned more = 1;
+    while (!fb && more < 64) { q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb); more++; }
+    T("after that, A goes QUIET again at exactly its sixteenth missed wake in a row, and FELL_BACK is said again",
+      fb == NVRM_EVW_FB_QUIET && more == NVRM_EVW_MISS_LIMIT && q.stats[NVRM_EVW_S_FELL_BACK] == 2);
+    inv1_note(&q); inv1_note(&q2);
+    /* the same with A in the middle of its own trial (three missed wakes into it) when B brings the events back */
+    q_init(&q, &t); q_init(&q2, &t2); fb = 0;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, NVRM_EVW_MISS_LIMIT + NVRM_EVW_PAUSE_FIRST + 2);
+    const int a_trial3 = t.trial && t.trial_misses == 3 && t.misses == 3;
+    q2.events = 1; nb = 0;
+    while (fb && nb < 4 * NVRM_EVW_PAUSE_FIRST) { q_wait1(&q2, &t2, NVRM_EVW_ADAPT, &fb); nb++; }
+    q_wait1(&q, &t, NVRM_EVW_ADAPT, &fb);
+    T("A three missed wakes into a trial when B brings the events back: its trial ends and its run restarts at the next miss",
+      a_trial3 && !fb && t.trial == 0 && t.misses == 1 && t.trial_misses == 0 && q.stats[NVRM_EVW_S_FELL_BACK] == 1);
+    inv1_note(&q); inv1_note(&q2);
+
+    /* a failed trial is not reported as another fallback; a capped or aborted answer whose count moved is a proof too */
+    q_init(&q, &t); fb = 0;
+    q_waits(&q, &t, NVRM_EVW_ADAPT, &fb, NVRM_EVW_MISS_LIMIT + NVRM_EVW_PAUSE_FIRST + 3);
+    T("a failed trial: the pause doubles, the process keeps polling, no second FELL_BACK",
+      fb == NVRM_EVW_FB_QUIET && t.trial == 0 && t.pause == 2 * NVRM_EVW_PAUSE_FIRST && q.stats[NVRM_EVW_S_FELL_BACK] == 1
+      && q.stats[NVRM_EVW_S_TRIAL] == 1 && q.stats[NVRM_EVW_S_MISSED] == NVRM_EVW_MISS_LIMIT + NVRM_EVW_TRIAL_MISSES);
+    inv1_note(&q);
+
+    T("invariant 1: through going quiet, trials, failed trials, events coming back and a dead call, every round is one "
+      "polling step or one sleep of at most 2 ms, and every wait ends with its work", inv1_bad == 0 && inv1_max_us == NVRM_EVW_MAX_SLEEP_US);
 }
 
 int main(void)
@@ -373,6 +539,7 @@ int main(void)
     missed_control();
     lost_control();
     late_scripted();
+    quiet_scripted();
     /* 1. events delivered, jobs of 3 ms: the waits sleep and are woken. A sleep that runs out in the instant between a
           job's completion and its event is a missed wake (printed, not asserted: on any machine it can happen); what
           is asserted is that no wake is lost, that such a miss is never followed by another unless the in-order
@@ -401,13 +568,29 @@ int main(void)
     const int jobs = run(NVRM_EVW_ADAPT, 400, 2500, 1, &w, &t);
     const uint64_t took = now_ns() - a;
     printf("     dropped: sleeps %u timeouts %u missed %u fell_back %u backoffs %u, %.1f ms for %d jobs of 2.5 ms\n", w.stats[NVRM_EVW_S_SLEEP], w.stats[NVRM_EVW_S_TIMEOUT], w.stats[NVRM_EVW_S_MISSED], w.stats[NVRM_EVW_S_FELL_BACK], w.backoffs, (double)took / 1e6, jobs);
-    T("dropped events: the process falls back to polling, once", fell_back && w.stats[NVRM_EVW_S_FELL_BACK] == 1 && w.stats[NVRM_EVW_S_MISSED] == NVRM_EVW_MISS_LIMIT
-      && w.max_run == NVRM_EVW_MISS_LIMIT);
+    T("dropped events: the process falls back to polling, once", fell_back == NVRM_EVW_FB_QUIET && w.stats[NVRM_EVW_S_FELL_BACK] == 1
+      && w.stats[NVRM_EVW_S_MISSED] == NVRM_EVW_MISS_LIMIT && w.max_run == NVRM_EVW_MISS_LIMIT - 1 && t.misses == 0);
     T("dropped events: no sleep is asked to last longer than 2 ms", kmax_us == NVRM_EVW_MAX_SLEEP_US);
     T("dropped events: the whole run is not held up (well under a second over the work itself)", took < (uint64_t)jobs * 2500000ull + 1000000000ull);
     const unsigned sleeps_after = w.stats[NVRM_EVW_S_SLEEP];
     run(NVRM_EVW_ADAPT, 10, 2500, 0, &w, &t);
-    T("after the fallback nothing sleeps on the event", w.stats[NVRM_EVW_S_SLEEP] == 0 && sleeps_after > 0);
+    T("after the fallback nothing sleeps on the event, for the length of the thread's pause", w.stats[NVRM_EVW_S_SLEEP] == 0 && sleeps_after > 0
+      && w.stats[NVRM_EVW_S_TRIAL] == 0);
+    /* invariant 2: events that stop and come back, against the stand-in kernel. WindowServer's mode, which sleeps after
+       20 us: the events stop (jobs of 2.5 ms, so that a sleep can run out), the process goes QUIET; they come back
+       (jobs of 0.5 ms): within the thread's first pause and its first trial sleep the process sleeps on events again. */
+    memset(&t, 0, sizeof t); t.seq_fd = -1; fell_back = 0; kdrop = 1;
+    run(NVRM_EVW_EAGER, 400, 2500, 1, &w, &t);
+    const int went_quiet = fell_back == NVRM_EVW_FB_QUIET;
+    kdrop = 0;
+    const int back_after = run(NVRM_EVW_EAGER, 2 * NVRM_EVW_PAUSE_FIRST, 500, 2, &w, &t);
+    printf("     events back: quiet %d, back after %d jobs, trials %u, back %u, woken %u\n", went_quiet, back_after,
+           w.stats[NVRM_EVW_S_TRIAL], w.stats[NVRM_EVW_S_BACK], w.stats[NVRM_EVW_S_WOKEN]);
+    T("invariant 2: events stop and come back: the busy thread has the process sleeping on events again within its pause "
+      "(256 waits) and its trial", went_quiet && !fell_back && back_after <= (int)(NVRM_EVW_PAUSE_FIRST + NVRM_EVW_TRIAL_MISSES)
+      && w.stats[NVRM_EVW_S_BACK] == 1 && w.stats[NVRM_EVW_S_TRIAL] == 1 && w.lost == 0);
+    run(NVRM_EVW_EAGER, 40, 500, 0, &w, &t);
+    T("and then its waits sleep and are woken, with no fallback", !fell_back && w.stats[NVRM_EVW_S_WOKEN] >= 20 && w.lost == 0);
     /* 4. the kernel at its sleeper ceiling: one polling step per round, never a tight loop */
     memset(&t, 0, sizeof t); t.seq_fd = -1; fell_back = 0; kdrop = 0; kcapped = 1;
     run(NVRM_EVW_ADAPT, 10, 3000, 0, &w, &t);
@@ -419,7 +602,7 @@ int main(void)
     /* 6. no event at all (the call fails): polling, as 2.9 */
     memset(&t, 0, sizeof t); t.seq_fd = -1; klegacy = 0; kfail = 1;
     run(NVRM_EVW_ADAPT, 5, 3000, 0, &w, &t);
-    T("no usable event: falls back at the first failed call", fell_back && w.stats[NVRM_EVW_S_SLEEP] == 0);
+    T("no usable event: falls back at the first failed call, for good", fell_back == NVRM_EVW_FB_DEAD && w.stats[NVRM_EVW_S_SLEEP] == 0);
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails != 0;
 }
