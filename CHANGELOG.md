@@ -90,7 +90,12 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   ends only that channel, or makes no progress for 5 s, NVK builds a new channel, sends the channel-wide state again,
   replays the submissions that had not started and drops the one that was running; a stalled channel's doorbell is
   rung again first. A fault the GPU cannot recover from this way (firmware, bus, memory errors, a failed wake, a
-  fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. Way back: `NVK_CHANNEL_RECOVER=0` in
+  fourth rebuild of one channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a game or
+  WindowServer waiting on the GPU no longer loses the device or rebuilds a channel that was only stopped for the
+  sleep: the kext answers NVK's channel note without waiting for the GPU's resume and reports the GPU as suspended
+  until it lets RM calls through again, NVK sends no escape while it holds a channel's lock, and a stall seen while
+  the GPU is suspended restarts the no-progress budget instead of rebuilding, at every sleep, for up to 360 s of
+  awake time per sleep. Way back: `NVK_CHANNEL_RECOVER=0` in
   `nvrm610.conf`. See [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
 - After such a recovery the Metal command buffer whose work was dropped completes with an error instead of as success,
   and the process keeps its device; the plugin no longer waits for, and counts, the completion record such a command
