@@ -2139,11 +2139,57 @@ def arm_pylink():
     r = subprocess.run([str(venv / "bin/python3"), "--version"], env=sb.env(), capture_output=True, text=True)
     if r.returncode != 0 or "3.14" not in r.stdout or f"home = {opt.parent}" not in cfg:
         p.append(f"the Python environment does not run through opt: {r.returncode} {r.stdout} {r.stderr} {cfg}")
+    record = sb.work / "tools/.nm-brew-unlinked"
+    if not record.exists() or record.read_text() != "python@3.14\n":
+        p.append(f"the record of unlinked formulas is not 'python@3.14': {record.read_text() if record.exists() else 'missing'}")
     check("deps: python3 that the installs linked into the Python formula they added is unlinked once; opt stays; "
           "doctor and the Python environment still find that Python; the way back is printed", not p, (p, out[-1500:]))
     neg = pylink_sandbox("pylink-ours-neg", links)
-    neg.break_script('      deps_python3_back "$py3_before" "$kegs_before"\n', "")
+    neg.break_script('      deps_python3_back\n', "")
     negative("deps that leaves the new python3 link", pylink_problems(neg, unlinked="python@3.14")[0])
+
+    # 1b. a later deps whose install links that Python again (Homebrew links a dependency it has to upgrade) unlinks it
+    # again: the formula is installed now, but the record in the working directory says it is deps' doing. A formula the
+    # tester linked between the two runs is dropped from the record and left linked; clean tools removes the record
+    def again_problems(s, user_links=False):
+        s.clear()
+        rc, out = s.run("deps", "-y")
+        q = [] if rc == 0 else [f"first deps: exit {rc}: {out[-400:]}"]
+        if user_links:   # brew link python@3.14 by the tester: the links and Homebrew's record of a linked keg
+            (s.dir / "brew/bin/python3").symlink_to("../Cellar/python@3.14/1.0/bin/python3")
+            (s.dir / "brew/var/homebrew/linked/python@3.14").symlink_to("../../../Cellar/python@3.14/1.0")
+        shutil.rmtree(s.dir / "brew/opt/ninja")   # ninja is missing again; its install links python@3.14
+        (s.state / "brew-links-ninja").write_text("python@3.14 python3\n")
+        if user_links:
+            r, o = pylink_problems(s, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")
+        else:
+            r, o = pylink_problems(s, unlinked="python@3.14",
+                                   out_has=("which an earlier ./build.sh deps of this working directory had unlinked",))
+        q += r
+        if not [l for l in s.jlines() if l == "brew install ninja"]:
+            q.append("the second deps did not install ninja")
+        rec = s.work / "tools/.nm-brew-unlinked"
+        if user_links and rec.exists() and "python@3.14" in rec.read_text().split():
+            q.append(f"the record still names the formula the tester linked: {rec.read_text()!r}")
+        if not user_links and (not rec.exists() or rec.read_text() != "python@3.14\n"):
+            q.append(f"the record after the second unlink: {rec.read_text() if rec.exists() else 'missing'}")
+        return q, o
+    sb = pylink_sandbox("pylink-again", links)
+    p, out = again_problems(sb)
+    rc, cout = sb.run("clean", "tools")
+    if (sb.work / "tools/.nm-brew-unlinked").exists():
+        p.append(f"clean tools left the record (exit {rc})")
+    check("deps: a later install that links again a Python formula an earlier deps unlinked is followed by its unlink; "
+          "clean tools removes the record", not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-again-neg", links)
+    neg.break_script('    brew_unlinked_add "$f"\n', "")
+    negative("deps that does not record what it unlinked", again_problems(neg)[0])
+    sb = pylink_sandbox("pylink-again-user", links)
+    p, out = again_problems(sb, user_links=True)
+    check("deps: a formula the tester linked after deps unlinked it is dropped from the record and stays linked", not p, (p, out[-800:]))
+    neg = pylink_sandbox("pylink-again-user-neg", links)
+    neg.break_script('      for n in $(brew_unlinked_names); do ! brew_linked "$n" || brew_unlinked_drop "$n"; done\n', "")
+    negative("deps that keeps a formula the tester linked in the record", again_problems(neg, user_links=True)[0])
 
     # 2. the same when the Python arrives as a dependency of another formula of the list (llvm@22 needs homebrew-core's
     # default Python, python@3.15 today, to build), not as the formula deps asked for
@@ -2161,7 +2207,7 @@ def arm_pylink():
     p, _ = pylink_problems(sb, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3", out_lacks=("brew link python@3.14",))
     check("deps: no unlink when Homebrew's bin had a python3 before the installs", not p, p)
     neg = pylink_sandbox("pylink-before-neg", links, dead_python3=True)
-    neg.break_script('[ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=1', '[ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=0')
+    neg.break_script('[ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1', '[ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=0')
     negative("deps that forgets that python3 was there before",
              pylink_problems(neg, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")[0])
 
@@ -2177,7 +2223,7 @@ def arm_pylink():
     check("deps: no unlink of a Python formula the tester already had" + ("; the list names its python3" if in_system("python3") else ""),
           not p, (p, out[-800:]))
     neg = pylink_sandbox("pylink-notours-neg", links, formulas=("cmake", "python@3.14"))
-    neg.break_script('  case "$NL$2$NL" in *"$NL$f$NL"*) return 0 ;; esac\n', "")
+    neg.break_script('    *"$NL$f$NL"*) brew_unlinked_has "$f" || return 0;', '    *"$NL$f$NL"*) true;')
     negative("deps that unlinks a Python formula the tester already had",
              pylink_problems(neg, unlinked=None, linked_to="../Cellar/python@3.14/1.0/bin/python3")[0])
 
@@ -2202,8 +2248,8 @@ def arm_pylink():
     check("deps: an install that fails after an earlier one linked a Python stops deps and unlinks that Python first", not p, (p, out[-800:]))
     neg = pylink_sandbox("pylink-halfway-neg", links)
     (neg.state / "brew-install-fails-spirv-tools").write_text("")
-    neg.break_script('          { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }',
-                     '          die "brew install $f failed"')
+    neg.break_script('            { deps_python3_back; die "brew install $f failed"; }',
+                     '            die "brew install $f failed"')
     negative("deps that stops at a failed install with the Python of an earlier one still linked",
              pylink_problems(neg, unlinked="python@3.15", rc_ok=False, out_has=("brew install spirv-tools failed",))[0])
 
@@ -2231,7 +2277,7 @@ def arm_pylink():
     check("deps: brew install that ends with exit 1 because a file of the tester's was in the way of a link, the formula "
           "installed: a warning, deps goes on, the tester's python3 stays", not p, (p, out[-1000:]))
     neg = conflict_sandbox("pylink-conflict-neg")
-    neg.break_script('          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n', "          false ||\n")
+    neg.break_script('          case "$NL$DEPS_KEGS_BEFORE$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n', "          false ||\n")
     negative("deps that stops at every exit status of brew install",
              pylink_problems(neg, unlinked=None, linked_to=str(neg.dir / "pyorg/bin/python3"), out_has=conflict_out)[0])
     sb = conflict_sandbox("pylink-conflict-old", old_keg=True)
@@ -2240,7 +2286,7 @@ def arm_pylink():
     check("deps: the same failure of a formula that was installed before this run (its install cannot be told apart) stops deps",
           not p, (p, out[-800:]))
     neg = conflict_sandbox("pylink-conflict-old-neg", old_keg=True)
-    neg.break_script('          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n',
+    neg.break_script('          case "$NL$DEPS_KEGS_BEFORE$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||\n',
                      '          brew_installed "$f" ||\n')
     negative("deps that takes a formula installed before for this install's",
              pylink_problems(neg, unlinked=None, rc_ok=False, linked_to=str(neg.dir / "pyorg/bin/python3"),

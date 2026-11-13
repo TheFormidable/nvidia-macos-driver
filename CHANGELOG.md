@@ -342,6 +342,8 @@ has proven itself, renewed with a reason otherwise.
   `DEVELOPER_DIR`.
 - `./build.sh deps` with Homebrew: a `brew install` that ends with an error only because a file of yours was in the
   way of one of its links (a `python3` from python.org's installer, say) no longer stops it; it warns and goes on.
+  A Python formula that `deps` unlinked (so that your shell's `python3` stays the one it was) is unlinked again
+  when a later `deps` links it once more as a dependency of another formula.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 

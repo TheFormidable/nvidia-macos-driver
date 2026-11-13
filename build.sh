@@ -1278,17 +1278,47 @@ keg_of() {
   case "$r" in "$BREW_PREFIX/Cellar/"?*/*) r=${r#"$BREW_PREFIX/Cellar/"}; printf '%s' "${r%%/*}" ;; esac
   return 0
 }
-# deps_python3_back <0|1: <prefix>/bin had a python3 before the installs> <the formulas installed before them>: when
-# the installs gave <prefix>/bin a python3, as a link into a Python formula that they installed, that formula is
-# unlinked again. A python3 that was there before is the user's, and so is a formula they already had: those stay.
+# The formulas an earlier deps of this working directory unlinked (one name per line, written when the unlink
+# succeeded). Such a formula is installed, so a later deps no longer sees it as one its installs add; but when a later
+# install links it again (Homebrew links a dependency it has to upgrade), it is still deps' doing. A name is dropped
+# when deps finds that formula linked before its installs: the user linked it on purpose. clean tools removes the file.
+brew_unlinked_file() { printf '%s/.nm-brew-unlinked' "$TOOLS"; }
+brew_unlinked_names() { cat "$(brew_unlinked_file)" 2>/dev/null || true; }
+brew_unlinked_has() { local NL=$'\n'; case "$NL$(brew_unlinked_names)$NL" in *"$NL$1$NL"*) return 0 ;; esac; return 1; }
+brew_unlinked_add() {
+  brew_unlinked_has "$1" && return 0
+  { mkdir -p "$TOOLS" && printf '%s\n' "$1" >> "$(brew_unlinked_file)"; } 2>/dev/null || warn "could not note $1 in $(brew_unlinked_file)"
+  return 0
+}
+brew_unlinked_drop() {
+  local n rest=""
+  while IFS= read -r n; do [ -z "$n" ] || [ "$n" = "$1" ] || rest="$rest$n"$'\n'; done <<EOF
+$(brew_unlinked_names)
+EOF
+  if [ -n "$rest" ]; then printf '%s' "$rest" > "$(brew_unlinked_file)"; else rm -f "$(brew_unlinked_file)"; fi
+}
+# brew_linked <formula>: Homebrew counts it as linked (its record var/homebrew/linked/<formula>, which brew link writes
+# and brew unlink removes), or <prefix>/bin/python3 leads into its keg
+brew_linked() { [ -L "$BREW_PREFIX/var/homebrew/linked/$1" ] || [ "$(keg_of "$BREW_PREFIX/bin/python3")" = "$1" ]; }
+# What cmd_deps saw before its installs: DEPS_PY3_BEFORE 1 when <prefix>/bin had a python3, DEPS_KEGS_BEFORE the
+# formulas installed then.
+DEPS_PY3_BEFORE=1; DEPS_KEGS_BEFORE=""
+# deps_python3_back: when the installs gave <prefix>/bin a python3 that it did not have before, as a link into a Python
+# formula that these installs added or that an earlier deps of this working directory unlinked, that formula is
+# unlinked again. A python3 that was there before is the user's, and so is any other formula they already had: those
+# stay.
 deps_python3_back() {
-  local f NL=$'\n'
-  [ "$1" = 0 ] && [ -L "$BREW_PREFIX/bin/python3" ] || return 0
+  local f how NL=$'\n'
+  [ "$DEPS_PY3_BEFORE" = 0 ] && [ -L "$BREW_PREFIX/bin/python3" ] || return 0
   f=$(keg_of "$BREW_PREFIX/bin/python3")
   case "$f" in python|python@*) ;; *) return 0 ;; esac
-  case "$NL$2$NL" in *"$NL$f$NL"*) return 0 ;; esac
+  case "$NL$DEPS_KEGS_BEFORE$NL" in
+    *"$NL$f$NL"*) brew_unlinked_has "$f" || return 0; how="which an earlier ./build.sh deps of this working directory had unlinked" ;;
+    *) how="which these installs added" ;;
+  esac
   if run_brew -- unlink "$f"; then
-    say "python3: Homebrew had linked $BREW_PREFIX/bin/python3, which was not there before, into $f, which these installs added; build.sh unlinked $f again (brew unlink $f), so your shell runs the python3 it ran before. $f stays installed and is reached through $BREW_PREFIX/opt/$f; brew doctor lists it among the unlinked kegs and advises brew link, which is only needed if you want it as python3, and a later brew install or upgrade that has to upgrade it as a dependency of another formula links it again (brew unlink $f undoes that). To have it as python3 after all: brew link $f"
+    brew_unlinked_add "$f"
+    say "python3: Homebrew had linked $BREW_PREFIX/bin/python3, which was not there before, into $f, $how; build.sh unlinked $f again (brew unlink $f), so your shell runs the python3 it ran before. $f stays installed and is reached through $BREW_PREFIX/opt/$f; brew doctor lists it among the unlinked kegs and advises brew link, which is only needed if you want it as python3, and a later brew install or upgrade that has to upgrade it as a dependency of another formula links it again (brew unlink $f undoes that). To have it as python3 after all: brew link $f"
   else
     say "python3: brew unlink $f failed, so a shell that has $BREW_PREFIX/bin before /usr/bin now runs Homebrew's python3 ($f) instead of the one it ran before; brew unlink $f puts that back. deps goes on"
   fi
@@ -1573,14 +1603,15 @@ cmd_deps() {
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not installing (--no-install)"
     elif [ "$NM_OFFLINE" = 1 ]; then say "not installing (--offline)"
     elif [ "$NM_DRY_RUN" = 1 ]; then for f in "${want[@]}"; do say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 HOMEBREW_NO_INSTALL_CLEANUP=1 $BREW install $f"; done
-      say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 $BREW unlink <formula>   (only if $BREW_PREFIX/bin/python3, absent now, then links into a Python formula those installs added)"
+      say "    env -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY -u HOMEBREW_BREW_FILE -u HOMEBREW_PATH PATH=$(brew_path) HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 $BREW unlink <formula>   (only if $BREW_PREFIX/bin/python3, absent now, then links into a Python formula those installs added or an earlier deps of this working directory unlinked)"
     elif ask "Install them now?"; then
       # what the user's shell finds before the installs, to tell afterwards what they changed (deps_python3_back,
       # deps_shadowed). The unlink comes after the last install: an install of a later formula links a dependency
       # only when it installs or upgrades that dependency, which an unlinked formula installed minutes before is not.
-      local bin_before kegs_before py3_before=0 shadowed NL=$'\n'
-      bin_before=$(brew_bin_names); kegs_before=$(brew_kegs)
-      [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || py3_before=1
+      local bin_before shadowed n NL=$'\n'
+      bin_before=$(brew_bin_names); DEPS_KEGS_BEFORE=$(brew_kegs)
+      DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] && [ ! -L "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1
+      for n in $(brew_unlinked_names); do ! brew_linked "$n" || brew_unlinked_drop "$n"; done
       # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
       # installed or upgraded and, when the last clean-up is 30 days old, of every formula, then the formulas nothing needs
       # any more, dead links and empty folders in the prefix (on an Intel Mac that is /usr/local, shared with other
@@ -1592,12 +1623,12 @@ cmd_deps() {
           # file of the same name was in the way (a python3 of python.org's installer, say; Homebrew replaces none). deps
           # stops only when the formula is not installed now, or was installed before, so that this install cannot be
           # told from the old one. An earlier install of this run may have linked a Python: it is unlinked before the stop
-          case "$NL$kegs_before$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||
-            { deps_python3_back "$py3_before" "$kegs_before"; die "brew install $f failed"; }
+          case "$NL$DEPS_KEGS_BEFORE$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||
+            { deps_python3_back; die "brew install $f failed"; }
           warn "brew install $f ended with an error, but $f is installed: Homebrew's own message above says what it could not do (often a link into $BREW_PREFIX/bin that a file of yours was in the way of; nothing of yours was replaced). deps goes on; its last lines say whether anything is still missing"
         fi
       done
-      deps_python3_back "$py3_before" "$kegs_before"
+      deps_python3_back
       shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""
       [ -z "$shadowed" ] || say "$shadowed"
     else say "not installed; the build needs them"; fi
