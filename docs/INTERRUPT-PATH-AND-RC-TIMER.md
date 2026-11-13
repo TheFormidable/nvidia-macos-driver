@@ -216,7 +216,9 @@ in standby. When the system's 8 s bound for the shutdown runs out, the interrupt
 closed anyway, whatever the shutdown thread is doing.
 
 Before any of that, right after the surface fence is stopped, `stop()` takes the GPU away from the idle power-down
-monitor (`nvrtd3=1`). That monitor is a timer that is never stopped; when the GPU has been idle for a minute it runs
+monitor (`nvrtd3=1`). Without `nvrtd3=1`, or with it but no `nvrtd3res`, there is no monitor: the first GPU's start
+opens the gate and closes it again at once, so sleep, shutdown and `stop()` find no GPU of theirs there.
+That monitor is a timer that is never stopped; when the GPU has been idle for a minute it runs
 the GPU's suspend path, and later its resume path, which opens the interrupt gate again. Its calls reach the GPU only
 through a gate of their own: `stop()` closes it and waits until no call is inside (30 s at most; a call that is still
 inside then keeps the GPU object alive and is logged). From then on the monitor has no GPU for the rest of the boot,
