@@ -76,7 +76,7 @@ RUNNING_LOCK = threading.Lock()
 OWN_TMPS = set()         # the temporary folders this runner made for its tests (realpath), not left by a test
 ACTIVE = set()           # the names of the tests running now
 FIRST_SEEN = {}          # (folder, name) of a temporary folder's entry -> the tests that were running when it was first seen
-KNOWN = set()            # the entries of the temporary folders seen so far
+KNOWN = set()            # the entries of the temporary folders at the last list
 SEEN_LOCK = threading.Lock()
 
 
@@ -160,14 +160,16 @@ def temp_listing():
 
 
 def note_new(ended=None):
-    """lists the temporary folders again and notes, for every entry not seen before, which tests are running: the
-    one that has just ended (`ended`, which then no longer counts as running) and the ones beside it. An entry was made
-    after the list before this one, and a list is made whenever a test ends, so its maker is among them (or is another
-    program)."""
+    """lists the temporary folders again and notes, for every entry that was not there at the list before, which tests
+    are running: the one that has just ended (`ended`, which then no longer counts as running) and the ones beside it. An
+    entry was made after the list before this one, and a list is made whenever a test ends, so its maker is among them
+    (or is another program, such as one a test left running). An entry that went away and was made again is noted
+    again: the tests that made the first one need not have made the one that is left."""
     with SEEN_LOCK:
         now = temp_listing()
         for e in now - KNOWN:
             FIRST_SEEN[e] = sorted(ACTIVE)
+        KNOWN.clear()
         KNOWN.update(now)
         ACTIVE.discard(ended)
 
