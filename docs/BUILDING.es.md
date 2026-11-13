@@ -131,7 +131,9 @@ fórmulas necesitan y enlaza en su `bin` los comandos de las que no son keg-only
 defecto de macOS pone antes de `/usr/bin` en un Mac Intel; hoy eso incluye `python@3.15`, que `llvm@22` necesita para
 compilarse y que pasaría a ser el `python3` de una shell con ese `PATH` (la compilación usa `python@3.14`, desde la
 carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Homebrew un `python3` que no tenía,
-enlazado a una fórmula de Python que ellas añadieron, `deps` ejecuta `brew unlink` con esa fórmula al terminarlas (o
+enlazado a una fórmula de Python que ellas añadieron o que un `deps` anterior de este directorio de trabajo
+desenlazó (las anota en `<directorio de trabajo>/tools/.nm-brew-unlinked` y quita la que vuelvas a enlazar tú),
+`deps` ejecuta `brew unlink` con esa fórmula al terminarlas (o
 al fallar una) e imprime una línea con la vuelta atrás (`brew link <fórmula>`); un `python3` que ya estaba, o una fórmula de Python que
 ya tenías, se quedan como están. Un `brew install` que termina con error aunque su fórmula ya está instalada (Homebrew no
 enlazó un comando sobre un archivo tuyo que estaba en medio, y lo dice) no detiene `deps`: avisa y sigue, y sus
