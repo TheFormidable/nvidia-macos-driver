@@ -1340,7 +1340,7 @@ tc_needs() {
     python) echo "openssl zstd xz" ;; *) echo "" ;;
   esac
 }
-# Times of one 12-thread Intel Mac building each tool (handoff record of the by-hand build: SPIRV-Tools at -j2, LLVM
+# Times of one 12-thread Intel Mac building each tool (the record of its by-hand build: SPIRV-Tools at -j2, LLVM
 # at -j10), in seconds; the downloads took about 11 minutes more. Sizes: 6.7 GB in all with every build tree kept
 # (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it); deps asks for TC_SPACE_GB free.
 tc_seconds() {
