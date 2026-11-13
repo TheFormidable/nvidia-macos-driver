@@ -51,7 +51,9 @@ sources() {
   done
   for f in "$src"/*.c; do
     [ -f "$f" ] || continue; s=$(basename "$f")
-    say "$code" | grep -q -F "\"\$SRC/$s\"" || { say "FAIL NVRM/$s is compiled by nothing in build/build_nvrm.sh (the kext would be built without it): add its compile line"; bad=1; }
+    # (not `say "$code" | grep -q`: this script runs under pipefail, grep -q leaves at its first match, and a writer that
+    # is still writing then dies of SIGPIPE, which made a compiled source read as "compiled by nothing" now and then)
+    case "$code" in *"\"\$SRC/$s\""*) ;; *) say "FAIL NVRM/$s is compiled by nothing in build/build_nvrm.sh (the kext would be built without it): add its compile line"; bad=1;; esac
   done
   return $bad
 }
@@ -149,7 +151,7 @@ done
 RMCC_CC=; [ $MAC = 1 ] || RMCC_CC="${CC[*]}"
 for f in "$SRC"/*.c; do
   s=$(basename "$f")
-  if grep -v '^[[:space:]]*#' "$HERE/build/build_nvrm.sh" | grep -F "\"\$SRC/$s\"" | grep -q 'rmcc\.py'; then
+  if grep -v '^[[:space:]]*#' "$HERE/build/build_nvrm.sh" | grep -F "\"\$SRC/$s\"" | grep 'rmcc\.py' > /dev/null; then
     # an RM-internal file: build_nvrm.sh gives it the RM's own command line for osapi.c (kexts/NVRM/rmcc.py), and so does this
     OGKM="$T" NM_RMCC_CC="$RMCC_CC" python3 -B "$SRC/rmcc.py" "$f" "$O/nvrm-${s%.c}.o" 2>"$O/nvrm-${s%.c}.err"
     unit $? "NVRM/$s (the RM's compile line)" nvrm "nvrm-${s%.c}"

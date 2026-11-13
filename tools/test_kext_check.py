@@ -157,6 +157,14 @@ arm("the import check is one run over every kernel, and a failure of it fails th
     len(re.findall(r"^python3 -B \"\$HERE/tools/kext_imports\.py\" .*\|\| rc=1$", chk, re.M)) == 1 and "--xnu-tag \"$tag\"" in chk and "--exports \"$d\"" in chk)
 arm("downloads are pinned to a commit", bool(re.search(r"^OGKM_SHA=[0-9a-f]{40}\b", chk, re.M) and re.search(r"^MKSDK_SHA=[0-9a-f]{40}\b", chk, re.M))
     and all(re.search(rf'"{re.escape(t)}": "[0-9a-f]{{40}}"', imp) for t in tags), " ".join(tags))
+# the check runs under pipefail. A pipeline whose last command leaves at its first match (grep -q) fails now and then:
+# the command before it is still writing, dies of SIGPIPE, and pipefail reports that as "no match"
+EARLY = re.compile(r"\|\s*grep\b[^|;&]*\s(-[A-Za-z]*q[A-Za-z]*|--quiet|--silent)(?![\w-])")
+early = [l.strip()[:90] for l in chk.splitlines() if not l.lstrip().startswith("#") and EARLY.search(l)]
+arm("under pipefail, no pipeline of the check ends in a grep that leaves at its first match", "pipefail" in chk and not early, " | ".join(early))
+arm("control: such a pipeline is seen, however its options are written",
+    all(EARLY.search(l) for l in ('say "$code" | grep -q -F "x" || bad=1', "a | grep -F x | grep -Fq 'y'", "a | grep --quiet y"))
+    and not EARLY.search("a | grep -F x | grep 'y' > /dev/null") and not EARLY.search('grep -q x "$file"'))
 arm("nothing the check needs is written for a newer bash than a Mac has", not re.search(r"\bdeclare -A\b|\bmapfile\b|\breadarray\b|\$\{\w+,,\}|\$\{\w+\^\^\}|&>>|\|&", chk))
 r = subprocess.run([sys.executable, "-B", str(ROOT / "tools/kext_imports.py"), "--selftest"], capture_output=True, text=True)
 arm("the import classifier fires (kext_imports.py --selftest)", r.returncode == 0 and "0 failed" in r.stdout, r.stdout[-300:])
