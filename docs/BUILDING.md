@@ -47,7 +47,10 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   take several gigabytes.
 - Time, on an **Intel Mac**: Homebrew no longer has ready-made builds (bottles) of these formulas for Intel Macs, so
   `deps` has Homebrew compile each missing one here. LLVM 22 alone takes hours and tens of gigabytes while it builds.
-  `deps` says so before it asks. On Apple silicon Homebrew installs ready-made builds.
+  `deps` says so before it asks. On Apple silicon Homebrew installs ready-made builds. To compile, Homebrew also needs
+  Apple's command line tools besides Xcode, as new as this macOS: without them it stops at the first formula with
+  `Xcode alone is not sufficient` or `Your Command Line Tools are too outdated`. `xcode-select --install` installs them,
+  Software Update updates them; `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` shows the version you have.
 
 ## Quick start
 
