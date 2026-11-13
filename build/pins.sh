@@ -28,7 +28,8 @@ NM_PIN_OGKM610_MIRROR=NM_OGKM_URL
 NM_PIN_OGKM610_REF=610.57.04
 NM_PIN_OGKM610_COMMIT=e4a5faa2567f28c8eabe0ebb6422b6d0abcf37eb
 
-# Mesa mesa-26.3.0-rc3: nvk/MESA_BASE holds its first 8 digits (build/build_nvk.sh:43,49); NOTICE names
+# Mesa mesa-26.3.0-rc3: nvk/MESA_BASE holds its first 8 digits, which build/build_nvk.sh reads (BASE=$(cat
+# "$NVK/MESA_BASE"); its 2.9 case keeps release 2.9's commit whatever this pin becomes); NOTICE names
 # gitlab.freedesktop.org. Any clone with the commit works (for example a GitHub mirror through NM_MESA_URL).
 NM_PIN_MESA_NAME="Mesa 26.3.0-rc3 (NVK's base; its include/ is the plugin's Vulkan headers)"
 NM_PIN_MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
@@ -44,7 +45,7 @@ NM_PIN_MESA_COMMIT=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
 NM_PIN_CI_VKHEADERS_COMMIT=6802bb4733b63ed5efd3adb308a6c885ef180ea1
 NM_PIN_CI_VKHEADERS_MESA=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
 
-# Khronos Vulkan-Headers and Vulkan-Loader v1.4.367: build/build_vulkan_loader.sh:9-11 (TAG, HEADERS_SHA, LOADER_SHA),
+# Khronos Vulkan-Headers and Vulkan-Loader v1.4.367: build/build_vulkan_loader.sh (TAG=, LOADER_SHA=, HEADERS_SHA=),
 # NOTICE. The mirror variable is a base URL (".../KhronosGroup"); build_vulkan_loader.sh reads the same variable.
 NM_PIN_VKHEADERS_NAME="Khronos Vulkan-Headers v1.4.367 (for the Vulkan loader)"
 NM_PIN_VKHEADERS_URL=https://github.com/KhronosGroup/Vulkan-Headers
@@ -106,7 +107,8 @@ NM_PIN_SPIRVHEADERS_COMMIT=cb42dec3830d3ac67fa449ecdc0c0f73d5e74498
 # Not fetched by build.sh, listed so that every download of a build is named somewhere:
 #   Mesa's six Rust crates for NAK (paste 1.0.14, proc-macro2 1.0.86, quote 1.0.35, rustc-hash 2.1.1, syn 2.0.87,
 #   unicode-ident 1.0.12): meson downloads them from static.crates.io during every NVK build and checks each against
-#   the source_hash in Mesa's subprojects/*.wrap; licenses/nvk-rust-crates.txt must match them (build_nvk.sh:179-180).
+#   the source_hash in Mesa's subprojects/*.wrap; licenses/nvk-rust-crates.txt must match them (build_nvk.sh, the
+#   cmp against that file).
 #   The translator's crates: cargo checks each against translator/wrapper/Cargo.lock; "./build.sh fetch" runs
 #   "cargo fetch --locked" so that the build itself can run offline.
 
@@ -122,15 +124,15 @@ NM_PIN_RUSTUP_MIRROR=NM_RUSTUP_URL
 NM_PIN_RUSTUP_SHA256_X86_64=bc107f1fb0228de7fa32413c89c1b305cea9cd256e94b01150cd054128145429
 NM_PIN_RUSTUP_SHA256_AARCH64=63752a1919a3a4793173ec70f8f212621a7ce38ba6a246095984482f4de20f9f
 # bindgen and cbindgen for NAK, installed with "cargo install --locked" (crates.io checksums). Mesa meson.build:955-970:
-# bindgen 0.71.1 or newer, not 0.72.0, 0.73.0, 0.73.1; src/nouveau/nil/meson.build: cbindgen 0.28 or newer. The
-# versions are the ones the team's NVK cross-build check uses (0.73.2, 0.29.4).
+# bindgen 0.71.1 or newer, not 0.72.0, 0.73.0, 0.73.1; src/nouveau/nil/meson.build: cbindgen 0.28 or newer. 0.73.2
+# and 0.29.4 meet those bounds.
 NM_PIN_BINDGEN_VERSION=0.73.2
 NM_PIN_BINDGEN_BAD="0.72.0 0.73.0 0.73.1"
 NM_PIN_CBINDGEN_VERSION=0.29.4
 
 # Python packages for Mesa's build, installed into the workdir's virtual environment with pip --require-hashes.
 # Mesa meson.build:1160-1209 needs mako, PyYAML and packaging; meson.build:940-942 needs meson 1.7.0 or newer when
-# Rust is used (NVK); 1.12.1 is the version the team's NVK cross-build check configures Mesa 26.3 with.
+# Rust is used (NVK); 1.12.1 meets that.
 # Hashes from pypi.org (2026-11-12): the source archive and the macOS wheels for CPython 3.10 to 3.14.
 NM_PIN_PY_PACKAGES="MESON MAKO MARKUPSAFE PYYAML PACKAGING"
 NM_PIN_PY_MESON="meson==1.12.1"
@@ -166,9 +168,9 @@ NM_PIN_TOOL_MESON_MIN=1.7.0
 NM_PIN_TOOL_NINJA_MIN=1.8.2
 # cmake: cmake_minimum_required(VERSION 3.22.1) in Vulkan-Loader and Vulkan-Headers v1.4.367 CMakeLists.txt.
 NM_PIN_TOOL_CMAKE_MIN=3.22.1
-# LLVM 22 for the native mesa_clc/vtn_bindgen2 build: build/build_nvk.sh:31 ("LLVM 22.1.x"); nvk-macos.patch includes
-# <clang/Options/OptionUtils.h>, a clang 22 header. SPIRV-LLVM-Translator must have the same major.minor
-# (Mesa meson.build:2071-2082); SPIRV-Tools 2024.1 or newer (meson.build:2087-2094).
+# LLVM 22 for the native mesa_clc/vtn_bindgen2 build: build/build_nvk.sh (its NVK_PATH comment: "LLVM 22.1.x");
+# nvk-macos.patch includes <clang/Options/OptionUtils.h>, a clang 22 header. SPIRV-LLVM-Translator must have the same
+# major.minor (Mesa meson.build:2071-2082); SPIRV-Tools 2024.1 or newer (meson.build:2087-2094).
 NM_PIN_TOOL_LLVM_MAJOR=22
 NM_PIN_TOOL_SPIRV_TOOLS_MIN=2024.1
 # glslangValidator 12.2: Mesa meson.build:734-758 when BVH shaders are built, which nvk-macos.patch turns on for NVK.
