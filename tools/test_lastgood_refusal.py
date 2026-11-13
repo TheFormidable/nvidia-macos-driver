@@ -3,10 +3,11 @@
 
 NVRMFB compares the sizes of Apple's framebuffer classes on the running macOS with the ones it was built for. When they
 differ NVRM declines the card before the kernel's boot guard counts the start, and every framebuffer of the driver
-refuses for the same reason, the one that shows the desktop with the driver off included. The install excludes Apple's
-own firmware framebuffer, so no desktop comes up at that start or at any later one, and the guard, which only counts
-starts that began, never turns anything off: the job that restores the previous driver only looked at the guard's count
-and never ran its restore. NVRM writes the refusal on the PCI device (nvrm-layout = "declined ..."), and the job now
+refuses for the same reason, the one that shows the desktop with the driver off included. Where the OpenCore setup
+excludes Apple's own firmware framebuffer, no desktop comes up at that start or at any later one; where it does not,
+Apple's firmware framebuffer takes the card and shows a slow desktop without acceleration. Either way the guard, which
+only counts starts that began, never turns anything off: the job that restores the previous driver only looked at the
+guard's count and never ran its restore. NVRM writes the refusal on the PCI device (nvrm-layout = "declined ..."), and the job now
 reads it there, every five seconds for four minutes, because the kexts can start after the job does.
 
 The job is lifted out of install.sh, filled in the way the installer fills it, and run against fake ioreg, nvram, ditto,
@@ -18,8 +19,8 @@ without its look at the registry, which must leave the refused driver in place.
 Two conditions belong to the refusal alone. The previous driver is put back only on the macOS build the install was
 made on: it was running there, so it fits; after a macOS update the refusal may be the update's doing, and the driver
 that was replaced has no such check. And the Mac is restarted at once unless someone may be working: a display is
-connected to another GPU's framebuffer and a user owns the console. Then the files are put back and the restart is
-left to the user. The job's older rule (two starts in a row without a display) is compared with 2.9's job and must not
+connected to some framebuffer (another GPU's, or Apple's firmware framebuffer on the same card) and a user owns the
+console. Then the files are put back and the restart is left to the user. The job's older rule (two starts in a row without a display) is compared with 2.9's job and must not
 change."""
 import os
 import pathlib
@@ -201,6 +202,12 @@ FB_OK = '    | |   "nvrmfb-layout" = "ok: 3 classes, vtables not compared; macOS
 OTHER_FB = ('+-o AppleIntelFramebuffer@0  <class AppleIntelFramebuffer, id 0x1000004d2, registered, matched, active, '
             'busy 0 (9 ms), retain 14>\n')
 OTHER_DISPLAY = ('+-o display0  <class IODisplayConnect, id 0x1000004e0, registered, matched, active, busy 0 (2 ms), '
+                 'retain 6>\n')
+# the same two on a Mac whose OpenCore does not exclude IONDRVSupport: once the driver's framebuffer has refused, Apple's
+# firmware framebuffer holds the NVIDIA card itself and gets a display once WindowServer opens it
+APPLE_FB = ('+-o .Display_boot  <class IONDRVFramebuffer, id 0x1000004f1, registered, matched, active, busy 0 (3 ms), '
+            'retain 12>\n')
+APPLE_DISPLAY = ('+-o display0  <class IODisplayConnect, id 0x1000004f8, registered, matched, active, busy 0 (1 ms), '
                  'retain 6>\n')
 NAMES = ("NVRM", "NVAccel", "NVRMFB", "NVRMAGDC")
 
@@ -435,12 +442,13 @@ r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, osbuild="25H100")
 arm("  (two starts in a row without a display restore on any build, as before: that rule is 2.9's and is not changed)",
     restored(r), show(r))
 
-# ---- the restart after a refusal: at once, unless someone may be working at a desktop another GPU shows
+# ---- the restart after a refusal: at once, unless someone may be working at a desktop (a lit display, a user)
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays=OTHER_DISPLAY, console="tester")
 arm("a refusal while a user is logged in and another GPU shows a display: the previous driver is put back and the "
     "Mac is not restarted", put_back(r) and not r.restarted and r.rc == 0, show(r))
-arm("  and the log says that the restart is left to the user", "not restarted now" in r.log
-    and "starts at the next restart" in r.log and "restarting" not in r.log, r.log)
+arm("  and the log says that the restart is left to the user, without naming whose display it is",
+    "not restarted now" in r.log and "starts at the next restart" in r.log and "restarting" not in r.log
+    and "A display is lit and a user is logged in" in r.log and "another GPU" not in r.log, r.log)
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays=OTHER_DISPLAY, console="root")
 arm("  at the login window of such a Mac it restarts", restored(r), show(r))
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=OTHER_FB, displays="", console="tester")
@@ -456,8 +464,9 @@ arm("  a display on another GPU and a console whose owner cannot be read: put ba
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), displays="ioreg: could not be reached\n", console="tester")
 arm("  any other text from ioreg is not a display: the Mac restarts", restored(r), show(r))
 
-# ---- the usual Mac: one display, on the NVIDIA card, so nothing can show a picture after a refusal. In every
-# order of the job, the kexts and the login it gets the previous driver back and restarts.
+# ---- the usual Mac: one display, on the NVIDIA card, and an OpenCore setup that excludes IONDRVSupport, so nothing
+# can show a picture after a refusal. In every order of the job, the kexts and the login it gets the previous driver
+# back and restarts.
 for label, kw in (
         ("the refusal at the job's first look, at the login window", dict(registry=FB_REFUSED + ioreg_line(EARLY))),
         ("the refusal at the first look, a user logged in by itself", dict(registry=FB_REFUSED + ioreg_line(EARLY),
@@ -475,6 +484,21 @@ for label, kw in (
     r = run(job, **kw)
     arm(f"a Mac with its one display on the card gets the previous driver back and restarts: {label}", restored(r),
         show(r))
+
+# ---- the same Mac where OpenCore does not exclude IONDRVSupport: Apple's firmware framebuffer takes the card after the
+# refusal and WindowServer brings the login window up on it. The job cannot tell that display from another GPU's, and
+# does not try: at the login window it restarts, after an automatic login it leaves the restart to the user.
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays=APPLE_DISPLAY, console="root")
+arm("Apple's firmware framebuffer on the card shows the login window: the previous driver is put back and the Mac "
+    "restarts", restored(r), show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays="", console="root")
+arm("  before WindowServer has opened it (no display yet): the same", restored(r), show(r))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), fbs=APPLE_FB, displays=APPLE_DISPLAY, console="tester")
+arm("  a user logged in by itself on that desktop: the previous driver is put back, the restart is left to the user",
+    put_back(r) and not r.restarted and r.rc == 0, show(r))
+arm("    and the log line holds for that desktop too (a display is lit, a user is logged in; no other GPU named)",
+    "A display is lit and a user is logged in" in r.log and "starts at the next restart" in r.log
+    and "another GPU" not in r.log, r.log)
 
 # ---- what must not look like a refusal
 r = run(job, registry=FB_REFUSED)

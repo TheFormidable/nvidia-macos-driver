@@ -193,7 +193,8 @@ p, log, calls = run(job, pids=loop, crashes=0)
 arm("a WindowServer seen as four processes counts as a loop even with no reports", "nv-starts=%02" in calls, log + calls)
 
 # a framebuffer that refused this macOS's classes: NVRM declined the card, and a WindowServer that stays up (with no
-# display, or on another GPU's) is not a good start of this driver. The texts are the ones NVRM writes.
+# display, on another GPU's, or on Apple's firmware framebuffer where OpenCore does not exclude IONDRVSupport) is not a
+# good start of this driver. The texts are the ones NVRM writes.
 LOOK = "      if ioreg -l -w0 2>/dev/null | grep -q '\"nvrm-layout\" = \"declined'; then\n"
 written = re.findall(r'setProperty\("nvrm-layout",\s*"([^"]*)"\)', (ROOT / "kexts/NVRM/NVRM.cpp").read_text())
 arm("NVRM writes its refusal on the PCI device, early and late", len(written) == 2, written)
