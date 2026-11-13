@@ -106,6 +106,7 @@ uint64_t mach_absolute_time(void);
 uint64_t mach_continuous_time(void);
 void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 void proc_selfname(char *buf, int size);
+uid_t kauth_getuid(void);
 }
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
@@ -2363,13 +2364,15 @@ static bool nvAccelRestoreParkedForDirty(NVResource *res, NVVidMemory *vm, unsig
         vm->fBytes == bytes && vm->fAllocationCookie == cookie && !vm->fParkHandle;
 }
 // The marks arrive through NVK's surface escape (NVRM_ESC_SURF_DIRTY with plane NVRM_SS_PLANE_GPU_MARK | pending): the
-// WindowServer sandbox denies sysctl writes. Only WindowServer's own marks are taken, so no other process can hold a swap.
+// WindowServer sandbox denies sysctl writes. Only WindowServer's own marks are taken, so no other process can hold a swap:
+// the process name is the executable's file name, which any user can choose, so the caller must also run as a system
+// account (uid < 500: root and _windowserver, the rule NVRM's client table uses).
 static unsigned nvSurfGpuEscape(const struct NVRMSurfShareEsc *p)
 {
     if (!gSurfGpuOn) return NVRM_SS_OFF;
     char nm[32] = { 0 };
     proc_selfname(nm, sizeof nm);
-    if (strcmp(nm, "WindowServer")) return NVRM_SS_OFF;
+    if (strcmp(nm, "WindowServer") || kauth_getuid() >= 500) return NVRM_SS_OFF;
     if (p->surfaceID) nvSurfMark(p->surfaceID, (p->plane & 1u) != 0);
     return 0;
 }
