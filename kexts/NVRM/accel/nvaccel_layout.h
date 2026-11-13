@@ -37,9 +37,8 @@
  *   gained functions is caught elsewhere anyway: this kext's classes add no virtual function of their own (the test
  *   holds that), so they would be shorter than their parent, and the collection builder rejects a kext for that
  *   ("Malformed vtable") before any of this runs.
- *   A vtable that reads SHORTER is also REPORTED and refuses nothing. The decision (argued here, and the reason this
- *   file differs from the design, which let a length difference refuse): a shorter reading cannot be told apart, on
- *   this machine, from a false alarm, so it must not take acceleration away on its own.
+ *   A vtable that reads SHORTER is also REPORTED and refuses nothing. The decision, argued below: a shorter reading
+ *   cannot be told apart, on this machine, from a false alarm, so it must not take acceleration away on its own.
  *     - It would be a real problem if Apple's base truly lost a virtual function: every later slot of the driver's
  *       class is then one off and the driver calls the wrong function, and the kernel-collection builder does NOT
  *       catch it (it accepts a child longer than its parent). A class size does not catch it either: adding or
