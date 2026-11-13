@@ -42,7 +42,7 @@
 # In 43429828046 and 43443873231 the tests left /private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 # and an xcodebuild result bundle behind, and in no run before: those were the runs in which tools/test_build_sh.py
 # handed Apple's own /usr/bin/make an SDKROOT that names no SDK, and the first two in which tools/test_toolchain_sh.py
-# ran its stand-in build past its first tool (its make gets an empty folder as SDKROOT). On a Mac with a desktop that
+# ran its stand-in build past its first tool (its make then got an empty folder as SDKROOT). On a Mac with a desktop that
 # marker is taken to belong to the dialog that offers to install the command line tools (not seen: GitHub's log shows the file only).
 # Every job gates: one that fails turns the run red.
 # Actions are pinned to a commit. Downloads (NVIDIA open-gpu-kernel-modules, MacKernelSDK, xnu's export lists,
