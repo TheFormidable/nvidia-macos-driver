@@ -89,25 +89,56 @@ restart. Take every test setting out again when its test is done.
 ## 2. The first boot
 
 1. **The card started.** Install, restart. Pass: the login window comes up on the NVIDIA card;
-   `kmutil showloaded --list-only | grep nullmoth` shows four lines; `system_profiler SPDisplaysDataType` shows the
-   GeForce with Metal supported. Fail: the firmware's picture stays or the screen is black. Over `ssh`, look in the
+   `kmutil showloaded --list-only | grep nullmoth` shows four lines (NVRM, NVAccel, NVRMFB, NVRMAGDC), five on
+   macOS 26 where the installer adds its audio driver `com.nullmoth.NMXAudio` for an HD Audio controller;
+   `system_profiler SPDisplaysDataType` shows the GeForce with Metal supported. Fail: the firmware's picture stays or the screen is black. Over `ssh`, look in the
    kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on with steps 3 and 5 below, which tell
    the reasons apart.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
-3. **The Apple class checks.** On each macOS you have (15 and 26), the first boot is the test that matters:
+3. **The Apple class checks.** Nobody has compared the sizes of Apple's classes that this build was made for with
+   the ones your macOS registers: on each macOS you have (15 and 26) the first start is that comparison, and it is the
+   test that matters. Right after it (over `ssh` if the screen did not come up):
 
    ```bash
    ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'
-   sysctl debug.nvrmfb_layout debug.nvrmfb_agdc debug.nvaccel_layout debug.nvaccel_layout_bad
+   sysctl debug.nvrmfb_layout debug.nvrmfb_layout_vtdiff debug.nvrmfb_agdc debug.nvrmfb_agdc_layout \
+          debug.nvaccel_layout debug.nvaccel_layout_bad debug.nvaccel_layout_vtlong debug.nvaccel_layout_vtshort
+   log show --last boot --predicate 'eventMessage CONTAINS "Apple class layout" OR eventMessage CONTAINS "Apple vtable lengths"'
    ```
 
-   Pass: `nvrmfb-layout`, `nvagdc-layout` and `nvaccel-layout` each start with `ok:`; `debug.nvaccel_layout` is 1 and
-   `debug.nvaccel_layout_bad` 0. A `differ:` or `not compared:` line in `nvrmfb-layout-vtables` or
-   `nvaccel-layout-vtables` is not a failure, but send it with `sw_vers`. Fail: a line starts with `refused:`. Send
-   it with `sw_vers`; then boot once with `nvlayout=0` only to see whether the rest works, and take it out again
-   (TROUBLESHOOTING.md has what each refusal means and what that boot risks).
+   `sysctl` prints `unknown oid` for a name that no kext registered, goes on with the others and then exits with the
+   number of unknown names; the `log show` takes about a minute. What the code is written to show:
+   - Pass: `nvrmfb-layout` reads `ok: 3 classes, vtables not compared; macOS <build> (Darwin <version>)`,
+     `nvagdc-layout` `ok: 1 class, vtables not compared; macOS ...`, and `nvaccel-layout` starts with `ok:` and
+     the number of classes and vtables it compared; there is no `nvrm-layout` line (NVRM writes one only when it
+     declines). `debug.nvrmfb_layout`, `debug.nvrmfb_agdc`, `debug.nvrmfb_agdc_layout` and `debug.nvaccel_layout`
+     are 1 and `debug.nvaccel_layout_bad` is 0. A `differ:` or `not compared:` line in `nvrmfb-layout-vtables` or
+     `nvaccel-layout-vtables`, or `debug.nvrmfb_layout_vtdiff`, `debug.nvaccel_layout_vtlong` or
+     `debug.nvaccel_layout_vtshort` above 0, is not a failure (a vtable length is reported, never a reason to
+     refuse), but send it with `sw_vers`.
+   - Fail: a line starts with `refused:` (it names the class and both sizes). What each refusal does:
+     - `nvrmfb-layout` refused, read by NVRM before it started the card: the kernel log has
+       `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` reads `declined: ...`,
+       the firmware's picture stays and the boot guard does not count this start. `debug.nvrmfb_layout` does not
+       exist (the framebuffer did not start).
+     - The same refusal read only after NVRM had started: `auto-go: NOT STARTING THE GPU: the framebuffer refused
+       this macOS's classes after NVRM had started (...)` and `nvrm-layout` `declined late ...`. The firmware's picture
+       stays, and this start is counted: two such starts in a row without a desktop that stays up turn the driver off,
+       and the installer's job of section 1, step 1, puts the previous driver back.
+     - `nvaccel-layout` refused: `NVAccel: does not attach: ... the display runs without acceleration` and NVRM's
+       `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` is 6, there is no
+       `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
+       started). The framebuffer lights the display, so the boot guard counts the start as good and the installer's
+       job puts nothing back. A desktop without acceleration on this driver has not been seen: if the screen stays
+       black or shows only a cursor, use `ssh`.
+     - `nvagdc-layout` refused: `debug.nvrmfb_agdc` is -6 and `debug.nvrmfb_agdc_layout` 2; the desktop runs without
+       AppleGraphicsDeviceControl, and the start counts as good.
+
+     Send the output of the three commands with `sw_vers`. Then boot once with `nvlayout=0` only to see whether the
+     rest works (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out
+     again (TROUBLESHOOTING.md has what that boot risks).
 4. **Start-up time.** `sysctl debug | grep nvrm_boot_` gives each phase of the start in milliseconds. Pass: the
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
    Fail: it comes up later, or 7 with a display connected; boot once with `-nvrmoldwaits` and send both sets of

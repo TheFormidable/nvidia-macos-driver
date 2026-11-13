@@ -93,27 +93,57 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 ## 2. El primer arranque
 
 1. **La tarjeta arrancó.** Instala y reinicia. Bien: la ventana de inicio de sesión aparece en la tarjeta NVIDIA;
-   `kmutil showloaded --list-only | grep nullmoth` muestra cuatro líneas; `system_profiler SPDisplaysDataType`
-   muestra la GeForce con Metal soportado. Mal: se queda la imagen del firmware o la pantalla en negro. Por `ssh`,
+   `kmutil showloaded --list-only | grep nullmoth` muestra cuatro líneas (NVRM, NVAccel, NVRMFB, NVRMAGDC), cinco
+   en macOS 26, donde el instalador agrega su driver de audio `com.nullmoth.NMXAudio` para un controlador HD Audio;
+   `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: se queda la imagen del firmware o la pantalla en negro. Por `ssh`,
    busca en el registro del kernel `NOT STARTING THE GPU` (la línea da el motivo) y sigue con los pasos 3 y 5 de
    abajo, que distinguen los motivos.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
    reinicia antes de nada ([SWITCHES.md](SWITCHES.md) dice qué es).
-3. **Las comprobaciones de las clases de Apple.** En cada macOS que tengas (15 y 26), el primer arranque es la prueba
-   que importa:
+3. **Las comprobaciones de las clases de Apple.** Nadie ha comparado los tamaños de las clases de Apple para los que
+   se hizo esta compilación con los que registra tu macOS: en cada macOS que tengas (15 y 26) el primer arranque es
+   esa comparación, y es la prueba que importa. Justo después (por `ssh` si la pantalla no apareció):
 
    ```bash
    ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'
-   sysctl debug.nvrmfb_layout debug.nvrmfb_agdc debug.nvaccel_layout debug.nvaccel_layout_bad
+   sysctl debug.nvrmfb_layout debug.nvrmfb_layout_vtdiff debug.nvrmfb_agdc debug.nvrmfb_agdc_layout \
+          debug.nvaccel_layout debug.nvaccel_layout_bad debug.nvaccel_layout_vtlong debug.nvaccel_layout_vtshort
+   log show --last boot --predicate 'eventMessage CONTAINS "Apple class layout" OR eventMessage CONTAINS "Apple vtable lengths"'
    ```
 
-   Bien: `nvrmfb-layout`, `nvagdc-layout` y `nvaccel-layout` empiezan cada uno por `ok:`; `debug.nvaccel_layout` es 1
-   y `debug.nvaccel_layout_bad` 0. Una línea `differ:` o `not compared:` en `nvrmfb-layout-vtables` o
-   `nvaccel-layout-vtables` no es un fallo, pero envíala con `sw_vers`. Mal: una línea empieza por `refused:`.
-   Envíala con `sw_vers`; después arranca una vez con `nvlayout=0` solo para ver si funciona lo demás, y vuelve a
-   quitarlo (TROUBLESHOOTING.md explica qué significa cada rechazo y qué arriesga ese arranque).
+   `sysctl` imprime `unknown oid` para un nombre que ninguna kext registró, sigue con los demás y al final sale con el
+   número de nombres desconocidos; el `log show` tarda cerca de un minuto. Lo que el código está escrito para mostrar:
+   - Bien: `nvrmfb-layout` dice `ok: 3 classes, vtables not compared; macOS <compilación> (Darwin <versión>)`,
+     `nvagdc-layout` `ok: 1 class, vtables not compared; macOS ...`, y `nvaccel-layout` empieza por `ok:` y el número
+     de clases y de vtables que comparó; no hay línea `nvrm-layout` (NVRM solo la escribe cuando se niega a arrancar).
+     `debug.nvrmfb_layout`, `debug.nvrmfb_agdc`, `debug.nvrmfb_agdc_layout` y `debug.nvaccel_layout` valen 1 y
+     `debug.nvaccel_layout_bad` vale 0. Una línea `differ:` o `not compared:` en `nvrmfb-layout-vtables` o
+     `nvaccel-layout-vtables`, o `debug.nvrmfb_layout_vtdiff`, `debug.nvaccel_layout_vtlong` o
+     `debug.nvaccel_layout_vtshort` por encima de 0, no es un fallo (la longitud de una vtable se informa, nunca es
+     motivo de rechazo), pero envíala con `sw_vers`.
+   - Mal: una línea empieza por `refused:` (nombra la clase y los dos tamaños). Lo que hace cada rechazo:
+     - `nvrmfb-layout` rechazado, leído por NVRM antes de arrancar la tarjeta: el registro del kernel tiene
+       `NOT STARTING THE GPU: NVRMFB cannot drive a display on this macOS ...`, `nvrm-layout` dice `declined: ...`,
+       se queda la imagen del firmware y el guardián de arranque no cuenta este arranque. `debug.nvrmfb_layout` no
+       existe (el framebuffer no arrancó).
+     - El mismo rechazo leído solo después de que NVRM arrancara: `auto-go: NOT STARTING THE GPU: the framebuffer
+       refused this macOS's classes after NVRM had started (...)` y `nvrm-layout` `declined late ...`. Se queda la
+       imagen del firmware y este arranque sí cuenta: dos arranques así seguidos sin un escritorio que se mantenga
+       apagan el driver, y la tarea del instalador de la sección 1, paso 1, devuelve el driver anterior.
+     - `nvaccel-layout` rechazado: `NVAccel: does not attach: ... the display runs without acceleration` y, de NVRM,
+       `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` vale 6, no existe
+       `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
+       arrancó). El framebuffer enciende la pantalla, así que el guardián de arranque cuenta el arranque como bueno y
+       la tarea del instalador no devuelve nada. Nadie ha visto todavía un escritorio sin aceleración con este driver:
+       si la pantalla se queda negra o solo muestra un cursor, usa `ssh`.
+     - `nvagdc-layout` rechazado: `debug.nvrmfb_agdc` vale -6 y `debug.nvrmfb_agdc_layout` 2; el escritorio funciona
+       sin AppleGraphicsDeviceControl, y el arranque cuenta como bueno.
+
+     Envía la salida de las tres órdenes con `sw_vers`. Después arranca una vez con `nvlayout=0` solo para ver si
+     funciona lo demás (la comprobación se sigue haciendo, y su línea empieza entonces por
+     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque).
 4. **Tiempo de arranque.** `sysctl debug | grep nvrm_boot_` da cada fase del arranque en milisegundos. Bien: el
    escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
    Mal: aparece más tarde, o 7 con una pantalla conectada; arranca una vez con `-nvrmoldwaits` y envía los dos juegos
