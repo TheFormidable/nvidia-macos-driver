@@ -281,7 +281,8 @@ def main():
         sc.before()
         rc, out = sc.prove()
         fails = lines(out, "FAIL") + lines(out, "NOT CHECKED")
-        arm("a working directory that did everything right: every check ok, exit 0", rc == 0 and not fails and len(lines(out, "ok")) >= 12, out)
+        arm("a working directory that did everything right: every check ok, exit 0", rc == 0 and not fails and len(lines(out, "ok")) >= 12,
+            "\n".join(failures(out)) or out)
         for want in ("Homebrew's", "unchanged", "files Homebrew keeps that changed during the build: 0", "homebrew-cache): absent",
                      "brew processes seen: 0", "every one inside the working directory", "/usr/bin/patch",
                      "Mach-O programs and libraries under", "Mach-O files of the working directory's tools", "mesa_clc",
@@ -425,7 +426,7 @@ def main():
         hold = tmp / "pkg-away"
         control("a run without a package is not taken for a good one", "no staged package", lambda: (w / "package").rename(hold), lambda: hold.rename(w / "package"))
         rc, out = sc.prove()
-        arm("after the controls the scene is good again (each control undid its change)", rc == 0, out)
+        arm("after the controls the scene is good again (each control undid its change)", rc == 0, "\n".join(failures(out)) or out)
 
         # toolchain-id
         rc1, a = run([sc.script, "toolchain-id", w], sc.env)
@@ -531,6 +532,26 @@ def main():
         rc, o = run([sc.script, "logs", w], sc.env)
         arm("logs shows the toolchain's newest log (logs/toolchain/) beside three newer step logs",
             rc == 0 and f"==== {w}/logs/toolchain/llvm.log (last 300" in o, o[:1500])
+        # reads: every label printed, exit 0 although many reads cannot be made here (no Mac programs, Mach-O files that do
+        # not run), nothing left behind in the working directory
+        before_w = sorted(str(x) for x in w.rglob("*"))
+        rc, o = run([sc.script, "reads", w], sc.env, timeout=300)
+        labels = ("otool -L <toolchain>/bin/cmake", "ssl.OPENSSL_VERSION", "llvm-config --targets-built", "glslangValidator --version",
+                  "--variable pc_path pkg-config", "--cflags --libs SPIRV-Tools", "ls -l <workdir>/tools/bin", "mesa_clc",
+                  "libvulkan_nouveau.dylib", "pyvenv.cfg", "LC_BUILD_VERSION", "DEVELOPER_DIR=<an empty folder> /usr/bin/make --version",
+                  "xcode-select -p", "tar --version", "the tarball: size and SHA-256", "owner/group of every header", "AppleDouble",
+                  "LIBARCHIVE.xattr", "the account name", "text files of pkgroot that hold the home folder", "---- VERSION",
+                  "NULLMOTH-LOCAL-BUILD.txt", "links in pkgroot", "set-uid and set-gid", "codesign -dv", "xattr -lr pkgroot",
+                  "the home folder and the working directory in the compiled files")
+        heads = [l for l in o.splitlines() if l.startswith("---- ")]
+        miss = [x for x in labels if not any(x in h for h in heads)]
+        arm("reads prints every label, says what it could not read, and exits 0", rc == 0 and not miss and o.count("could not be read: ") >= 3
+            and "== end of the reads" in o, (rc, miss, o[-1500:]))
+        arm("reads measures the home folder in the compiled files (the stand-in mesa_clc names the working directory under it)",
+            "<workdir>/out/nvk-build/src/compiler/clc/mesa_clc" in o, o[-1500:])
+        arm("reads writes nothing it leaves in the working directory", sorted(str(x) for x in w.rglob("*")) == before_w, "")
+        rc, o = run([sc.script, "reads", tmp / "nowhere"], sc.env, timeout=120)
+        arm("reads of a working directory that is not there: every read says why, exit 0", rc == 0 and o.count("could not be read: ") >= 15, o[-1500:])
         # nothing of the watch is left running
         left = subprocess.run(["ps", "-axo", "command="], capture_output=True, text=True).stdout
         arm("no watch is left running", str(sc.ci) not in left, "")

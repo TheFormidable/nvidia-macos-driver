@@ -231,6 +231,9 @@ jobs:
         # also after a failed step: what it can still check is worth seeing, and what it cannot is said
         if: ${{ !cancelled() }}
         run: /bin/bash build/ci_full_build.sh prove "$NMCI_WORK" "$NMCI/brew-before.txt" "$NMCI" /usr/local
+      - name: What only a Mac can show (a record for the reader, never a failure)
+        if: ${{ !cancelled() }}
+        run: /bin/bash build/ci_full_build.sh reads "$NMCI_WORK" || echo "the reads ended early (exit $?)"
       - name: Free disk and the working directory's size at the end
         if: ${{ always() }}
         run: |
