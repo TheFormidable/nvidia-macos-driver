@@ -550,12 +550,24 @@ prove_loads() {
 }
 
 # What the package ships and this build made (a file whose SHA256SUMS line differs from the base package's, or that the
-# base package does not have) must run on macOS 15.0: its LC_BUILD_VERSION minos at most 15.0. The files carried over
-# unchanged from the base package are counted apart.
+# base package does not have) must run on macOS 15.0: the minimum it names (LC_BUILD_VERSION minos, or
+# LC_VERSION_MIN_MACOSX) at most 15.0, and a file that names none fails. A kext binary (Mach-O file type 0x0b,
+# MH_KEXT_BUNDLE) is the exception: Apple's linker writes no minimum into a kext (NVRM, linked with
+# -mmacosx-version-min=15.0, names none, and none of the twelve kexts of the 2.9 package names one), so a kext that names
+# none is counted apart; a kext that does name one is held to 15.0 as any other file. A fat file is never taken for a
+# kext. The files carried over unchanged from the base package are counted apart.
 sums_hash() { awk -v r="$2" '{ q = substr($0, 67); if (q == r || q == "./" r) { print substr($0, 1, 64); exit } }' "$1" 2>/dev/null; }
 base_dir() { local b; b=$(find "$1/package/base" -maxdepth 3 -type f -name install.sh 2>/dev/null | sed -n 1p); [ -n "$b" ] && dirname "$b"; return 0; }
+# minos_list <file of versions> <kexts that name none>: "minos 12.0 x1, 15.0 x2, and 6 kexts, which name none"
+minos_list() {
+  local d k
+  d=$(sort "$1" | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }')
+  k=""
+  [ "$2" = 0 ] || k="$2 kext$([ "$2" = 1 ] || printf s), which name$([ "$2" != 1 ] || printf s) none"
+  printf '%s' "${d:+minos $d}${d:+${k:+, and }}$k"
+}
 prove_minos() {
-  local w=$1 t=$2 r=$1/package/pkgroot b f rel hn hb m built=0 kept=0 bad="" dist="" kdist=""
+  local w=$1 t=$2 r=$1/package/pkgroot b f rel hn hb m built=0 kept=0 bad="" dist="" kdist="" nk=0 nkk=0 why
   if [ ! -f "$r/SHA256SUMS" ]; then skipped "the macOS version of what the package ships: no staged package ($r)"; return 0; fi
   b=$(base_dir "$w")
   machos "$r" > "$t/pkg.txt"
@@ -564,18 +576,28 @@ prove_minos() {
     rel=${f#"$r"/}; m=$(minos_of "$f")
     hn=$(sums_hash "$r/SHA256SUMS" "$rel"); hb=""
     [ -z "$b" ] || hb=$(sums_hash "$b/SHA256SUMS" "$rel")
-    if [ -n "$hb" ] && [ "$hb" = "$hn" ]; then kept=$((kept + 1)); printf '%s\n' "${m:-none}" >> "$t/minos-kept.txt"; continue; fi
-    built=$((built + 1)); printf '%s\n' "${m:-none}" >> "$t/minos-built.txt"
+    if [ -n "$hb" ] && [ "$hb" = "$hn" ]; then
+      kept=$((kept + 1))
+      if [ -z "$m" ] && [ "$(macho_kind "$f")" = "thin 0b" ]; then nkk=$((nkk + 1)); else printf '%s\n' "${m:-none}" >> "$t/minos-kept.txt"; fi
+      continue
+    fi
+    built=$((built + 1))
+    if [ -z "$m" ] && [ "$(macho_kind "$f")" = "thin 0b" ]; then nk=$((nk + 1)); continue; fi
+    printf '%s\n' "${m:-none}" >> "$t/minos-built.txt"
     if [ -z "$m" ]; then bad="$bad
 $rel: no minimum macOS version"
     elif ! ver_le "$m" 15.0; then bad="$bad
 $rel: minos $m"; fi
   done < "$t/pkg.txt"
-  dist=$(sort "$t/minos-built.txt" | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }')
-  kdist=$(sort "$t/minos-kept.txt" | uniq -c | awk '{ printf "%s%s x%s", (NR > 1 ? ", " : ""), $2, $1 }')
+  # the reason is given once, beside the first count of kexts the line shows
+  why=" (the linker writes none into a kext)"
+  dist=$(minos_list "$t/minos-built.txt" "$nk")
+  [ "$nk" = 0 ] || { dist=$dist$why; why=""; }
+  kdist=$(minos_list "$t/minos-kept.txt" "$nkk")
+  [ "$nkk" = 0 ] || kdist=$kdist$why
   if [ "$built" = 0 ]; then fail "Mach-O files the package ships that this build made: none found"
-  elif [ -z "$bad" ]; then ok "Mach-O files the package ships that this build made: $built, minos $dist: none needs a macOS newer than 15.0 (carried over unchanged from the base package: $kept${kdist:+, minos $kdist})"
-  else fail "Mach-O files the package ships that this build made: $built, minos $dist; $(printf '%s' "$bad" | grep -c .) need a macOS newer than 15.0 or name none:"; printf '%s\n' "$bad" | grep . | indent 30; fi
+  elif [ -z "$bad" ]; then ok "Mach-O files the package ships that this build made: $built, $dist: no file needs a macOS newer than 15.0 (carried over unchanged from the base package: $kept${kdist:+, $kdist})"
+  else fail "Mach-O files the package ships that this build made: $built, $dist; $(printf '%s' "$bad" | grep -c .) need a macOS newer than 15.0 or name none:"; printf '%s\n' "$bad" | grep . | indent 30; fi
 }
 
 # The logs of the build steps: a line that names Homebrew's prefix is a tool, header or library a step found there.
