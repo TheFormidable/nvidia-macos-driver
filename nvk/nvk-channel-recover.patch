@@ -16,6 +16,13 @@ the kext and the adapter's power state; a kext without it fails the escape once 
 NVK_CHANNEL_RECOVER=0 runs the 2.9 code; NVK_FAULT_INJECT=<stall|fake|reset|mmu>:<n>[:<process>] is the test hook.
 Both are read from the environment or from /Library/GPUBundles/nvmtl/nvrm610.conf; a release build sees only the file.
 tools/test_channel_recover.py holds the wiring.
+Two whole-branch review corrections ride in this patch. Channel recovery now treats a fault on any copy engine
+(not only engines 0 to 2) as a channel loss it rebuilds: this card's upload channel is copy engine 4, whose
+fault is Xid 71, which 2.9 lost the device on. And the nvrm610.conf reader (nvmtl_cfg.h) now keeps the last line
+that begins with a name, as the Metal plugin's reader does, so a shipped line or a comment above the user's own
+line no longer wins in a Vulkan-only process; it still reads only the first 8191 bytes. The nvrm_chan_note_abi.h
+comment is made exact (the note answers before both gates; the power state it returns reads suspended while RM
+calls are held).
 
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
 index 4f2ea7e..b6a30ba 100644
@@ -1873,10 +1880,10 @@ index 0000000..d40da9b
 +}
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
 new file mode 100644
-index 0000000..ef8e738
+index 0000000..2d80ffc
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,442 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1964,7 +1971,7 @@ index 0000000..ef8e738
 +
 +/* In this order: a failed wake; the GPU off the bus; the firmware crashed or wants a reset; uncorrectable memory errors;
 + * RM answering anything unexpected; then the channel exceptions that end only the faulting channel group (graphics
-+ * exception 13, MMU fault 31, PBDMA 32, copy engine 39-41, reset verification 43, fault during a context switch 44,
++ * exception 13, MMU fault 31, PBDMA 32, copy engines (Xid 39-41, 70-72, 75-77, 85, 126-135), reset verification 43, fault during a context switch 44,
 + * preemptive removal 45, graphics class error 69, context switch timeout 109 - 109 is not in the open RM headers, it is
 + * what this port measured for a long compute dispatch). A changed notifier with any other Xid is UNKNOWN and is not
 + * rebuilt. Nothing changed and nothing reported: NONE, which the caller turns into STALL. An unknown power state (-1)
@@ -1988,6 +1995,8 @@ index 0000000..ef8e738
 +   if (in->changed) {
 +      switch (x) {
 +      case 13: case 31: case 32: case 39: case 40: case 41: case 43: case 44: case 45: case 69: case 109:
++      case 70: case 71: case 72: case 75: case 76: case 77: case 85:        /* copy engines 3 to 9 */
++      case 126: case 127: case 128: case 129: case 130: case 131: case 132: case 133: case 134: case 135:  /* copy engines 10 to 19 */
 +         return NVRM_LOSS_CHANNEL;
 +      default:
 +         return NVRM_LOSS_UNKNOWN;
@@ -2319,10 +2328,10 @@ index 0000000..ef8e738
 +#endif /* NVKMD_NVRM_RECOVER_H */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 new file mode 100644
-index 0000000..cf52b79
+index 0000000..d2288b6
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
-@@ -0,0 +1,654 @@
+@@ -0,0 +1,666 @@
 +/* Host test of nvkmd_nvrm_recover.h (the pure part of rebuilding a channel). Not built by meson. From this directory:
 + *   cc -std=c11 -O1 -g -Wall -Wextra -Werror -I. nvkmd_nvrm_recover_test.c -o /tmp/nvkmd_nvrm_recover_test && /tmp/nvkmd_nvrm_recover_test
 + * (add -fsanitize=address,undefined where the compiler has a runtime for them). Exit 0 = every arm passed.
@@ -2368,7 +2377,9 @@ index 0000000..cf52b79
 +static void
 +test_classify(void)
 +{
-+   static const uint32_t chan[] = { 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109 };
++   static const uint32_t chan[] = { 13, 31, 32, 39, 40, 41, 43, 44, 45, 69, 109,
++                                    70, 71, 72, 75, 76, 77, 85,
++                                    126, 127, 128, 129, 130, 131, 132, 133, 134, 135 };
 +   bool all = true;
 +   for (unsigned i = 0; i < sizeof(chan) / sizeof(chan[0]); i++)
 +      all = all && cls(chan[i], 1, -1, 0, 0, 0) == NVRM_LOSS_CHANNEL && cls(chan[i], 1, 0, 1, 0x56, 0) == NVRM_LOSS_CHANNEL;
@@ -2388,6 +2399,8 @@ index 0000000..cf52b79
 +   arm("classify: NOT_SUPPORTED for the action is neutral", cls(13, 1, 0, 1, 0x56, 0) == NVRM_LOSS_CHANNEL &&
 +       cls(0, 0, 0, 1, 0x56, 0) == NVRM_LOSS_NONE);
 +   arm("classify: an unlisted Xid (200) with a changed notifier is UNKNOWN", cls(200, 1, -1, 0, 0, 0) == NVRM_LOSS_UNKNOWN);
++   arm("classify: a non-copy-engine Xid between the copy-engine numbers (73, 74) stays UNKNOWN",
++       cls(73, 1, -1, 0, 0, 0) == NVRM_LOSS_UNKNOWN && cls(74, 1, -1, 0, 0, 0) == NVRM_LOSS_UNKNOWN);
 +   arm("classify: nothing changed, nothing reported is NONE", cls(0, 0, -1, 1, 0, 0) == NVRM_LOSS_NONE &&
 +       cls(0, 0, 0, 0, 0, 0) == NVRM_LOSS_NONE);
 +   arm("classify: suspended (pm 1) is neutral", cls(13, 1, 1, 0, 0, 0) == NVRM_LOSS_CHANNEL);
@@ -2802,6 +2815,14 @@ index 0000000..cf52b79
 +   st.replayedThrough = 10;
 +   arm("execute: copy-only replays everything", run(&f, &st, &k, &lv) == NVRM_WHY_OK && lv == NVRM_REC_REPLAY_ALL &&
 +       f.adopted.dropLo > f.adopted.dropHi && f.adopted.keepLo == 12);
++   f.in.xid = 71;   /* a copy-engine fault on this card's upload channel, which runs on copy engine 4 */
++   st.replayedThrough = 12;
++   arm("execute: a copy-engine refault ends inside the budget with COPY_REFAULT, not device loss",
++       run(&f, &st, &k, &lv) == NVRM_WHY_COPY_REFAULT && k == NVRM_LOSS_CHANNEL && strcmp(f.log, "irs") == 0);
++   st.replayedThrough = 10;
++   arm("execute: a copy-engine fault that does not refault rebuilds the copy-only channel",
++       run(&f, &st, &k, &lv) == NVRM_WHY_OK && k == NVRM_LOSS_CHANNEL && lv == NVRM_REC_REPLAY_ALL);
++   f.in.xid = 13;
 +   st.copyOnly = false;
 +   f.buildRc = -1;
 +   arm("execute: a failed build never frees the old channel", run(&f, &st, &k, &lv) == NVRM_WHY_BUILD &&
@@ -3124,10 +3145,10 @@ index 61b65ab..f6d421b 100644
 +}
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h
 new file mode 100644
-index 0000000..24c2614
+index 0000000..35ee792
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_chan_note_abi.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,72 @@
 +/*
 + * NullMoth NVIDIA driver for macOS
 + * Copyright (c) 2026 NullMoth Systems.
@@ -3184,12 +3205,14 @@ index 0000000..24c2614
 + * preemption off, so it does two atomic stores and nothing else: no IOLock, no allocation, no IOLog, no wakeup.
 + * Safe before nvrm_chan_note_sysctls() and at any time until the kext unloads. */
 +void nvrm_chan_note_xid(uint32_t xid);
-+/* The escape's body, from the user client's escape switch on the caller's thread. `e` is the kernel's copy of the
-+ * record and the caller has checked that the escape's size is exactly sizeof(struct NVRMChanNoteEsc); `pm` is the
-+ * adapter's power state as NVRM_CN_PM_*. For an unknown version or `what` it leaves `status` 0 and writes nothing;
-+ * otherwise it counts by `what` (bounded), fills pm, xidCount, xidLast and sets status NVRM_CN_OK. Atomics only: no
-+ * lock, no RM call, never sleeps. The caller answers kIOReturnSuccess either way; the record is copied back as for
-+ * every escape. */
++/* The escape's body, at the top of the user client's escape, before the connection's gate and the power gate, on the
++ * caller's thread, so that it answers during a GPU suspend and resume. `e` is the kernel's copy of the record and the
++ * caller has checked that the escape's size is exactly sizeof(struct NVRMChanNoteEsc); `pm` is the power state the kext
++ * reports for this adapter as NVRM_CN_PM_*, which reads SUSPENDED for as long as the kext holds RM calls for a sleep or
++ * wake - longer than the adapter's own running flag is clear. For an unknown version or `what` it leaves `status` 0 and
++ * writes nothing; otherwise it counts by `what` (bounded), fills pm, xidCount, xidLast and sets status NVRM_CN_OK.
++ * Atomics only: no lock, no RM call, never sleeps. The caller answers kIOReturnSuccess either way; the record is copied
++ * back as for every escape. */
 +void nvrm_chan_note_handle(struct NVRMChanNoteEsc *e, uint32_t pm);
 +/* Registers the read-only sysctls. Thread context, from the kext's sysctl registration block; a second call does
 + * nothing. They stay registered until the kext unloads. */
@@ -3198,3 +3221,52 @@ index 0000000..24c2614
 +}
 +#endif
 +#endif
+diff --git a/src/nouveau/vulkan/nvmtl_cfg.h b/src/nouveau/vulkan/nvmtl_cfg.h
+index 462b2a7..cb87f1f 100644
+--- a/src/nouveau/vulkan/nvmtl_cfg.h
++++ b/src/nouveau/vulkan/nvmtl_cfg.h
+@@ -1,27 +1,39 @@
+ /* r3-cfgall: every NVK/NVRM/NVMTL switch also reads /Library/GPUBundles/nvmtl/nvrm610.conf
+- * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang. */
++ * ("NAME=value" lines) when the env var is unset, so WindowServer (no shell env) can bisect the r3 hang.
++ * The last line that begins with "NAME=" wins, the way the Metal plugin's own reader does: a shipped value above
++ * the user's own line no longer silently beats it, and a "# NAME=..." comment does not count, because the match
++ * must start a line. This differs from the plugin's reader in one way: it looks only at the first 8191 bytes of
++ * the file, where the plugin reads the file whole, so a name whose only line sits past that point is not seen here.
++ * The installed file is far shorter than that, and in a Metal process the plugin has already set the variable, so
++ * getenv answers before this reader is reached. */
+ #ifndef NVMTL_CFG_H
+ #define NVMTL_CFG_H
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifndef NVMTL_CFG_PATH
++#define NVMTL_CFG_PATH "/Library/GPUBundles/nvmtl/nvrm610.conf"
++#endif
+ static inline const char *nvmtl_cfg_getenv(const char *name)
+ {
+    const char *e = getenv(name);
+    if (e) return e;
+    static char conf[8192]; static int loaded;
+    if (!loaded) {
+       loaded = 1;
+-      FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
++      FILE *f = fopen(NVMTL_CFG_PATH, "r");
+       if (f) { size_t n = fread(conf, 1, sizeof conf - 1, f); conf[n] = 0; fclose(f); }
+    }
+    char key[96]; snprintf(key, sizeof key, "%s=", name);
+-   const char *h = strstr(conf, key);
+-   if (!h || (h != conf && h[-1] != '\n')) return NULL;
+-   static char val[8][64]; static unsigned vi; char *v = val[vi++ % 8]; size_t i = 0; h += strlen(key);
++   const char *last = NULL;
++   for (const char *h = strstr(conf, key); h; h = strstr(h + 1, key))
++      if (h == conf || h[-1] == '\n') last = h;
++   if (!last) return NULL;
++   const char *h = last + strlen(key);
++   static char val[8][64]; static unsigned vi; char *v = val[vi++ % 8]; size_t i = 0;
+    while (h[i] && h[i] != '\n' && i < 63) { v[i] = h[i]; i++; }
+    v[i] = 0;
+    fprintf(stderr, "nvk-cfg: %s=%s (nvrm610.conf)\n", name, v);
+    return v;
+ }
+ #endif
