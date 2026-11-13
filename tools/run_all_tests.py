@@ -24,7 +24,8 @@ at its time limit, or when the run is interrupted, the test is stopped with ever
 
 No test sees the driver's own settings of the tester's environment (a Mac with the driver installed often exports
 some): every variable with a prefix of the plugin's knobs and every name tools/switches.tsv lists as read from the
-environment is left out, except the standard ones and NVRM_PRISTINE_OGKM (a source tree a test may be pointed at).
+environment is left out, except the standard ones, NVRM_PRISTINE_OGKM (a source tree a test may be pointed at) and
+NM_VULKAN_INCLUDE (the Vulkan headers a test compiles against).
 What a test is meant to take from the tester stays: CC, CXX, ZSTD, BUILD_SH_BASH, NVENCVT_HEADERS, NVDEC_HEADERS, NM_*."""
 import sys
 sys.dont_write_bytecode = True   # nor the runner itself, for what it imports from here on (python3 -B, but from inside)
@@ -58,8 +59,10 @@ TAIL = 1200              # characters of a failed test's output that are printed
 PER_TEST_TIMEOUT = {"test_build_sh.py": 1200}
 # the prefixes of plugin/nvmtl_env_knobs.h's nvmtl_env_knob_prefixed() (tools/test_run_all_tests.py holds them equal)
 KNOB_PREFIXES = ("NVMTL_", "NVK_", "NAK_", "NVRM_", "METAL2VULKAN_", "ELFHOST_", "MESA_", "NIR_", "RADV_", "ACO_")
-# listed in switches.tsv because the driver reads them too, and still the tester's to give
-KEEP_ENV = {"HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "NVRM_PRISTINE_OGKM"}
+# listed in switches.tsv because the driver reads them too (or may come to be listed there, as NM_VULKAN_INCLUDE, which
+# a build script reads and ./build.sh test exports for the tests that compile against Vulkan's headers), and still the
+# tester's to give
+KEEP_ENV = {"HOME", "PATH", "TMPDIR", "XDG_CACHE_HOME", "NVRM_PRISTINE_OGKM", "NM_VULKAN_INCLUDE"}
 RUNNING = set()          # the tests' process groups, stopped when the run is interrupted
 RUNNING_LOCK = threading.Lock()
 OWN_TMPS = set()         # the temporary folders this runner made for its tests (realpath), not left by a test

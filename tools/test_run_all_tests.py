@@ -208,6 +208,21 @@ finally:
 arm("DYLD_INSERT_LIBRARIES, a driver name, is left out of a test's environment too",
     "DYLD_INSERT_LIBRARIES" in names and "DYLD_INSERT_LIBRARIES" not in given, sorted(k for k in given if k.startswith("DYLD_")))
 arm("control: without the registry's names the runner would pass it on", unscrubbed.get("DYLD_INSERT_LIBRARIES") == "/x")
+# ./build.sh test exports NM_VULKAN_INCLUDE for the four tests that compile against vulkan/vulkan.h; were the registry to
+# list it (a build script reads it), the runner must still pass it on, or those tests skip and the run passes
+os.environ["NM_VULKAN_INCLUDE"] = "/vk"
+try:
+    kept = runner.test_env("/x-tmp", names | {"NM_VULKAN_INCLUDE"}).get("NM_VULKAN_INCLUDE")
+    saved_keep = runner.KEEP_ENV
+    runner.KEEP_ENV = saved_keep - {"NM_VULKAN_INCLUDE"}
+    try:
+        lost = runner.test_env("/x-tmp", names | {"NM_VULKAN_INCLUDE"}).get("NM_VULKAN_INCLUDE")
+    finally:
+        runner.KEEP_ENV = saved_keep
+finally:
+    del os.environ["NM_VULKAN_INCLUDE"]
+arm("NM_VULKAN_INCLUDE reaches a test even when the registry lists it", kept == "/vk", kept)
+arm("control: a runner that does not keep it drops it once the registry lists it", lost is None, lost)
 seen, out = env_run(RUNNER.replace(scrub, 'env = dict(os.environ, TMPDIR=tmp, PYTHONDONTWRITEBYTECODE="1")'))
 arm("control: with the tester's environment as it is, the driver's settings reach the test", set(DRIVER) <= seen, (sorted(set(DRIVER) - seen), out))
 knobs = (ROOT / "plugin/nvmtl_env_knobs.h").read_text()
