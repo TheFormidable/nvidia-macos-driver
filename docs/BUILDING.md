@@ -13,8 +13,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
 >   commit 3933ff6, with those tools kept, `deps`, `doctor` and `fetch` succeeded, `./build.sh --no-install build` built
 >   all 17 components in 5 minutes 41 seconds with no warning, and `package` staged a package on release 2.9 in
->   27 seconds. Nothing outside the working directory changed. `./build.sh test` passed 303 of the 315 host tests there
->   and none failed (3 were skipped and 9 not run), in 20 minutes 49 seconds.
+>   27 seconds. `./build.sh test` passed 303 of the 315 host tests there and none failed (3 were skipped and 9 not
+>   run), in 20 minutes 49 seconds. Nothing outside the working directory changed, apart from the crash reports the
+>   host tests leave on purpose (see `test` in [Commands](#commands)).
 > - On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6.
 >   303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there), `tools/test_build_sh.py`
 >   among them. The workflow that builds everything in an empty working directory, with the tools restored from

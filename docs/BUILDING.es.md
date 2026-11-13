@@ -13,9 +13,10 @@ comandos y opciones y la solución de problemas.
 >   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
 >   46,5 minutos, sin Homebrew. En el commit 3933ff6, con esas herramientas ya hechas, `deps`, `doctor` y `fetch`
 >   terminaron bien, `./build.sh --no-install build` compiló los 17 componentes en 5 minutos 41 segundos sin ningún
->   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. Nada fuera del directorio de trabajo
->   cambió. `./build.sh test` pasó allí 303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se
->   ejecutaron), en 20 minutos 49 segundos.
+>   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. `./build.sh test` pasó allí
+>   303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 20 minutos 49 segundos. Nada
+>   fuera del directorio de trabajo cambió, salvo los informes de fallo que las pruebas dejan a propósito (ver `test`
+>   en [Comandos](#comandos)).
 > - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
 >   3933ff6. De las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron allí),
 >   `tools/test_build_sh.py` entre ellas. El flujo que compila todo en un directorio de trabajo vacío, con las
