@@ -902,7 +902,10 @@ class NVRMFBClaim : public IOService
 public:
     // The claim is the first of this kext's classes to see the PCI device, before NVRM starts on it: it compares the
     // Apple framebuffer classes with this build and publishes the verdict there. When they differ every framebuffer of
-    // this kext would run on a misplaced base, so the claim steps aside too and leaves the category to Apple's own.
+    // this kext would run on a misplaced base, so the claim steps aside too. Nothing takes the category then on an
+    // installed system (the install excludes Apple's IONDRVSupport, and NVRMBootFB below refuses for the same reason):
+    // no desktop comes up on this card, NVRM declines it on the same verdict, and the install's fallback job puts the
+    // previous driver back (package/install.sh, step 6b).
     IOService *probe(IOService *provider, SInt32 *score) override
     {
         if (!nvrmfbLayoutAllows(provider, "NVRMFBClaim")) return NULL;
