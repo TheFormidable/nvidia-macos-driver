@@ -230,8 +230,8 @@ has proven itself, renewed with a reason otherwise.
 
 ### For developers
 - `./build.sh` builds the whole driver on a Mac with one command: it checks Xcode and the tools, installs what is
-  missing after asking (Homebrew formulas only, with the Homebrew of the Mac's own processor, and never an upgrade of
-  what you have; Python and Rust inside its own working directory),
+  missing after asking (Homebrew formulas only, with the Homebrew of the Mac's own processor, and build.sh itself
+  upgrades and removes nothing you have; Python and Rust inside its own working directory),
   fetches every outside source at a pinned commit or checksum (`build/pins.sh`), builds each component as a logged,
   skippable step, and can stage a package from a release package. It never uses `sudo` and never installs the driver.
   Needs macOS 15.6 or later and Xcode 26. Written and tested without a Mac and so far run on one Mac only in part,
