@@ -477,7 +477,12 @@ on_err() {
   exit "$rc"
 }
 on_exit() { release_lock; [ -z "${TMPF:-}" ] || rm -rf "$TMPF" "$TMPF".* 2>/dev/null || true; }
-on_signal() { trap - INT TERM; say "build.sh: interrupted${CUR_STEP:+ during step $CUR_STEP}" >&2; release_lock; exit 130; }
+on_signal() {
+  trap - INT TERM
+  # stopped during deps' Homebrew installs: a Python that an install of this run linked is unlinked as after the last one
+  if [ -n "$DEPS_PY3_UNDO" ]; then DEPS_PY3_UNDO=""; deps_python3_back || true; fi
+  say "build.sh: interrupted${CUR_STEP:+ during step $CUR_STEP}" >&2; release_lock; exit 130
+}
 
 # ---------------------------------------------------------------------------------------------------------- tools
 BREW=""; BREW_PREFIX=""; BREW_OTHER=""
@@ -1301,8 +1306,10 @@ EOF
 # and brew unlink removes), or <prefix>/bin/python3 leads into its keg
 brew_linked() { [ -L "$BREW_PREFIX/var/homebrew/linked/$1" ] || [ "$(keg_of "$BREW_PREFIX/bin/python3")" = "$1" ]; }
 # What cmd_deps saw before its installs: DEPS_PY3_BEFORE 1 when <prefix>/bin had a python3 that leads somewhere,
-# DEPS_KEGS_BEFORE the formulas installed then.
-DEPS_PY3_BEFORE=1; DEPS_KEGS_BEFORE=""
+# DEPS_KEGS_BEFORE the formulas installed then. DEPS_PY3_UNDO is set from that snapshot until the unlink after the
+# installs (or before the stop at a failed one) has run: on_signal, shared by every command, makes the same unlink
+# while it is set.
+DEPS_PY3_BEFORE=1; DEPS_KEGS_BEFORE=""; DEPS_PY3_UNDO=""
 # deps_python3_back: when the installs gave <prefix>/bin a python3 that it did not have before, as a link into a Python
 # formula that these installs added or that an earlier deps of this working directory unlinked, that formula is
 # unlinked again. A python3 that was there before is the user's, and so is any other formula they already had: those
@@ -1614,6 +1621,7 @@ cmd_deps() {
       # replaces such a link without asking
       DEPS_PY3_BEFORE=0; [ ! -e "$BREW_PREFIX/bin/python3" ] || DEPS_PY3_BEFORE=1
       for n in $(brew_unlinked_names); do ! brew_linked "$n" || brew_unlinked_drop "$n"; done
+      DEPS_PY3_UNDO=1
       # Without HOMEBREW_NO_INSTALL_CLEANUP, "brew install" ends with Homebrew's clean-up: the older versions of what it
       # installed or upgraded and, when the last clean-up is 30 days old, of every formula, then the formulas nothing needs
       # any more, dead links and empty folders in the prefix (on an Intel Mac that is /usr/local, shared with other
@@ -1626,11 +1634,11 @@ cmd_deps() {
           # stops only when the formula is not installed now, or was installed before, so that this install cannot be
           # told from the old one. An earlier install of this run may have linked a Python: it is unlinked before the stop
           case "$NL$DEPS_KEGS_BEFORE$NL" in *"$NL$f$NL"*) false ;; *) brew_installed "$f" ;; esac ||
-            { deps_python3_back; die "brew install $f failed"; }
+            { deps_python3_back; DEPS_PY3_UNDO=""; die "brew install $f failed"; }
           warn "brew install $f ended with an error, but $f is installed: Homebrew's own message above says what it could not do (often a link into $BREW_PREFIX/bin that a file of yours was in the way of; nothing of yours was replaced). deps goes on; its last lines say whether anything is still missing"
         fi
       done
-      deps_python3_back
+      deps_python3_back; DEPS_PY3_UNDO=""
       shadowed=$(deps_shadowed "$bin_before" 2>/dev/null) || shadowed=""
       [ -z "$shadowed" ] || say "$shadowed"
     else say "not installed; the build needs them"; fi
