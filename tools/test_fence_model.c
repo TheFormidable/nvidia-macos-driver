@@ -24,6 +24,19 @@
 
 static int fails;
 #define T(name, cond) do { if (!(cond)) { printf("FAIL %s\n", name); fails++; } else printf("ok   %s\n", name); } while (0)
+/* An arm that judges a time. When it fails it prints what was measured, and the failure is repeated with its numbers
+   at the end of the output, where a runner that keeps only the last lines of a failed test (tools/run_all_tests.py
+   keeps 1200 characters) still shows it. */
+static char recap[2048];
+static void recap_add(const char *name, const char *measured)
+{
+    const size_t used = strlen(recap);
+    snprintf(recap + used, sizeof(recap) - used, "FAIL %.60s...\n     %s\n", name, measured);
+}
+#define TM(name, cond, ...) do { \
+        if (!(cond)) { char m_[400]; snprintf(m_, sizeof(m_), __VA_ARGS__); printf("FAIL %s\n     measured: %s\n", name, m_); \
+                       recap_add(name, m_); fails++; } \
+        else printf("ok   %s\n", name); } while (0)
 #define OK    NVRM_FENCE_ST_OK
 #define COMP  NVRM_FENCE_F_COMPOSITOR
 #define AUTO  NVRM_FENCE_F_AUTO
@@ -211,6 +224,7 @@ struct actor {
     int variant;
     void (*hook)(struct actor *a, int where);
     unsigned long timedOut, lost;     /* sleeps the deadline ended; of those, ones that began with a generation already moved */
+    unsigned long long lateNs;        /* the most a sleep that the deadline ended came back after that deadline */
 };
 
 static int announce(int abortable)
@@ -244,7 +258,11 @@ static int k_sleep(void *c, unsigned k, unsigned g, unsigned long long deadlineN
         if (q_timedwait(deadlineNs)) { timedOut = 1; break; }
     }
     pthread_mutex_unlock(&Q);
-    if (timedOut) { a->timedOut++; if (moved) a->lost++; }
+    if (timedOut) {
+        const unsigned long long t = now_ns();
+        a->timedOut++; if (moved) a->lost++;
+        if (t > deadlineNs && t - deadlineNs > a->lateNs) a->lateNs = t - deadlineNs;
+    }
     atomic_fetch_sub(&gSleepers, 1);
     return r;
 }
@@ -445,7 +463,8 @@ struct reader {
     unsigned sid[6], nsid, flags, timeoutMs, iters, pauseUs, seed;
     atomic_int stop, finished;
     unsigned long res[8], full, badStatus;
-    unsigned long long maxWaitedUs, minWaitedUs, maxOverUs;
+    unsigned long long maxWaitedUs, minWaitedUs, maxOverUs, lastWaitedUs;
+    unsigned lastResult;
 };
 static void *reader_main(void *arg)
 {
@@ -460,6 +479,7 @@ static void *reader_main(void *arg)
         st = nvf_wait(&Tb, &KOPS, &r->a, &q, r->timeoutMs, 0, 1, &w);
         if (st == NVRM_FENCE_ST_FULL) r->full++; else if (st != OK) r->badStatus++;
         if (w.result < 8) r->res[w.result]++;
+        r->lastResult = w.result; r->lastWaitedUs = w.waitedUs;
         if (w.result != NVRM_FENCE_R_NONE) {
             if (w.waitedUs > r->maxWaitedUs) r->maxWaitedUs = w.waitedUs;
             if (w.waitedUs < r->minWaitedUs) r->minWaitedUs = w.waitedUs;
@@ -490,6 +510,20 @@ static void readers_join(unsigned n) { for (unsigned i = 0; i < n; i++) pthread_
 static unsigned long readers_sum(unsigned n, unsigned result) { unsigned long s = 0; for (unsigned i = 0; i < n; i++) s += R[i].res[result]; return s; }
 static unsigned long long readers_max(unsigned n) { unsigned long long m = 0; for (unsigned i = 0; i < n; i++) if (R[i].maxWaitedUs > m) m = R[i].maxWaitedUs; return m; }
 static unsigned long long readers_min(unsigned n) { unsigned long long m = ~0ull; for (unsigned i = 0; i < n; i++) if (R[i].minWaitedUs < m) m = R[i].minWaitedUs; return m; }
+static unsigned long long readers_late_us(unsigned n) { unsigned long long m = 0; for (unsigned i = 0; i < n; i++) if (R[i].a.lateNs > m) m = R[i].a.lateNs; return m / 1000ull; }
+static unsigned long readers_sleeps(unsigned n) { unsigned long s = 0; for (unsigned i = 0; i < n; i++) s += atomic_load(&R[i].a.sleeps); return s; }
+/* "reader: answer after N us, M sleeps" for the first n readers, for the line a failed time arm prints */
+static const char *readers_said(unsigned n)
+{
+    static const char *const name[8] = { "NONE", "READY", "DEAD", "TIMEOUT", "BUDGET", "ABORTED", "PENDING", "?" };
+    static char s[300];
+    size_t u = 0;
+    s[0] = 0;
+    for (unsigned i = 0; i < n && u < sizeof(s); i++)
+        u += (size_t)snprintf(s + u, sizeof(s) - u, "%s%s after %llu us, %lu sleeps", i ? "; " : "",
+                              name[R[i].lastResult < 8 ? R[i].lastResult : 7], R[i].lastWaitedUs, (unsigned long)atomic_load(&R[i].a.sleeps));
+    return s;
+}
 /* waits (bounded) until every one of the first n readers has gone to sleep at least `times` times */
 static int readers_asleep(unsigned n, unsigned long times)
 {
@@ -531,7 +565,8 @@ static void scen_interrupts(void)
     T("the channel's interrupts are trusted", nvf_chan_trusted(&Tb.c[IDX(P[0].handle)]) && Tb.stat[NVF_STAT_CHAN_NOIRQ] == 0);
     T("nobody was struck, nothing is left in the table", Tb.stat[NVF_STAT_STRIKES] == 0 && Tb.live == 0 && Tb.used == 0 && atomic_load(&gSleepers) == 0);
     T("every wait is accounted for once", Tb.stat[NVF_STAT_WAITS] == waits_ended() && Tb.stat[NVF_STAT_WAIT_READY] == ready);
-    T("no wait lasted much longer than the GPU work", readers_max(3) < 300 + SLACK_US);
+    TM("no wait lasted much longer than the GPU work", readers_max(3) < 300 + SLACK_US,
+       "longest wait %llu us (bound %llu), latest sleep %llu us past its deadline", readers_max(3), 300 + SLACK_US, readers_late_us(3));
 }
 
 static void scen_no_interrupts(void)
@@ -556,7 +591,8 @@ static void scen_no_interrupts(void)
     T("control: so the comparison of the run with interrupts does fail without them",
       !(Tb.stat[NVF_STAT_DONE_ON_IRQ] > 50 && Tb.stat[NVF_STAT_DONE_ON_SLICE] * 10 <= Tb.stat[NVF_STAT_DONE_ON_IRQ]));
     T("the channel is judged \"no interrupt\"", Tb.c[0].noirq == 1 && Tb.stat[NVF_STAT_CHAN_NOIRQ] == 1 && !nvf_chan_trusted(&Tb.c[0]));
-    T("and was looked at in short slices throughout: no wait much longer than the GPU work", readers_max(3) < 300 + SLACK_US);
+    TM("and was looked at in short slices throughout: no wait much longer than the GPU work", readers_max(3) < 300 + SLACK_US,
+       "longest wait %llu us (bound %llu), latest sleep %llu us past its deadline", readers_max(3), 300 + SLACK_US, readers_late_us(3));
     memset(&a, 0, sizeof(a));
     st = nvf_wait_seq(&Tb, &KOPS, &a, 1, P[0].handle, atomic_load(&chDone[0]) + 1, 50, 1, &w);
     T("a producer asking the kernel to sleep on that channel is told to poll (PENDING, no sleep)", st == OK && w.result == NVRM_FENCE_R_PENDING &&
@@ -602,10 +638,12 @@ static void scen_death(void)
 {
     (void)stuck_hold(0, 1);
     readers_start(3, 7, 0, 0, 2000, 1, 0);
-    T("three readers sleep on a hold whose GPU work never ends", readers_asleep(3, 1) && Tb.stat[NVF_STAT_WAITS] == 3);
+    TM("three readers sleep on a hold whose GPU work never ends", readers_asleep(3, 1) && Tb.stat[NVF_STAT_WAITS] == 3,
+       "%lu sleeps among the three within 5 s, %llu waits counted", readers_sleeps(3), Tb.stat[NVF_STAT_WAITS]);
     owner_gone(1);                                    /* the writer's connection closes (the process died) */
     readers_join(3);
-    T("the writer dies: all three are woken with DEAD, long before any bound", readers_sum(3, NVRM_FENCE_R_DEAD) == 3 && readers_max(3) < 1500000);
+    TM("the writer dies: all three are woken with DEAD, long before any bound", readers_sum(3, NVRM_FENCE_R_DEAD) == 3 && readers_max(3) < 1500000,
+       "%s (bound 1500000 us)", readers_said(3));
     T("its holds and channels are gone", Tb.live == 0 && Tb.used == 0 && Tb.stat[NVF_STAT_CHANS] == 0 && Tb.stat[NVF_STAT_END_OWNER] == 1 &&
       nvf_owner_find(&Tb, 1) < 0 && atomic_load(&gSleepers) == 0);
 
@@ -614,8 +652,9 @@ static void scen_death(void)
     (void)readers_asleep(3, 1);
     k_lock(NULL); Tb.paused = 1; nvf_end_all(&Tb, NVF_END_PM); k_unlock(NULL);     /* the machine goes to sleep */
     readers_join(3);
-    T("the GPU is put to sleep: sleeping readers are woken with DEAD", readers_sum(3, NVRM_FENCE_R_DEAD) == 3 && readers_max(3) < 1500000 &&
-      Tb.stat[NVF_STAT_END_PM] == 1 && Tb.live == 0);
+    TM("the GPU is put to sleep: sleeping readers are woken with DEAD", readers_sum(3, NVRM_FENCE_R_DEAD) == 3 && readers_max(3) < 1500000 &&
+       Tb.stat[NVF_STAT_END_PM] == 1 && Tb.live == 0, "%s (bound 1500000 us); ended by the sleep %llu, live %u", readers_said(3),
+       Tb.stat[NVF_STAT_END_PM], (unsigned)Tb.live);
     T("and holds are refused until it is back", open1(1, 11, 2, 7, 0) == NVRM_FENCE_ST_OFF);
 
     (void)stuck_hold(0, 1);
@@ -636,15 +675,19 @@ static void scen_bounds(void)
     (void)stuck_hold(0, 1);
     readers_start(2, 7, 0, 0, 30, 1, 0);
     readers_join(2);
-    T("a 30 ms budget against a hold that stays: BUDGET, not before 30 ms and not long after", readers_sum(2, NVRM_FENCE_R_BUDGET) == 2 &&
-      readers_min(2) >= 30000 && readers_max(2) <= 30000 + SLACK_US);
+    TM("a 30 ms budget against a hold that stays: BUDGET, not before 30 ms and not long after", readers_sum(2, NVRM_FENCE_R_BUDGET) == 2 &&
+       readers_min(2) >= 30000 && readers_max(2) <= 30000 + SLACK_US,
+       "%s; BUDGET %lu of 2, waits %llu..%llu us against 30000..%llu; latest sleep %llu us past its deadline",
+       readers_said(2), readers_sum(2, NVRM_FENCE_R_BUDGET), readers_min(2), readers_max(2), 30000 + SLACK_US, readers_late_us(2));
     T("the hold was not touched and nobody was struck", Tb.live == 1 && Tb.flagged == 0 && Tb.stat[NVF_STAT_STRIKES] == 0);
 
     (void)stuck_hold(0, 0);                           /* never armed: its writer's CPU is all it waits for */
     readers_start(2, 7, 0, 0, 2000, 1, 0);
     readers_join(2);
-    T("a hold that is never armed is given up 100 ms after it was opened: both readers get TIMEOUT", readers_sum(2, NVRM_FENCE_R_TIMEOUT) == 2 &&
-      readers_max(2) <= 100000 + SLACK_US && readers_min(2) >= 10000);
+    TM("a hold that is never armed is given up 100 ms after it was opened: both readers get TIMEOUT", readers_sum(2, NVRM_FENCE_R_TIMEOUT) == 2 &&
+       readers_max(2) <= 100000 + SLACK_US && readers_min(2) >= 10000,
+       "%s; TIMEOUT %lu of 2, waits %llu..%llu us against 10000..%llu; latest sleep %llu us past its deadline",
+       readers_said(2), readers_sum(2, NVRM_FENCE_R_TIMEOUT), readers_min(2), readers_max(2), 100000 + SLACK_US, readers_late_us(2));
     T("given up once, one strike, and it keeps its slot until its CLOSE", Tb.stat[NVF_STAT_EXPIRED_CPU] == 1 && Tb.stat[NVF_STAT_STRIKES] == 1 &&
       Tb.live == 0 && Tb.flagged == 1 && Tb.used == 1 && close1(1, 1, 7) == 1 && Tb.used == 0);
 
@@ -655,7 +698,7 @@ static void scen_bounds(void)
         const unsigned long long until = now_ns() + 5000000000ull;
         unsigned fin;
         do { fin = 0; for (unsigned i = 0; i < 6; i++) fin += (unsigned)atomic_load(&R[i].finished); if (fin < 3) pause_us(200); } while (fin < 3 && now_ns() < until);
-        T("six readers, room for three sleepers: at least three are refused at once", fin >= 3);
+        TM("six readers, room for three sleepers: at least three are refused at once", fin >= 3, "%u of six had finished within 5 s", fin);
     }
     (void)close1(1, 1, 7);
     readers_join(6);
@@ -711,7 +754,8 @@ static void scen_mixed(void)
     T("a mixed load ran: holds by the thousand, waits that slept, both faults rebuilt", opened > 1000 && res[NVRM_FENCE_R_READY] > 100 && rebuilt >= 2 &&
       Tb.stat[NVF_STAT_CHAN_REBINDS] == rebuilt);
     T("no wait was refused or answered with anything unknown", full == 0 && bad == 0 && res[NVRM_FENCE_R_PENDING] == 0 && res[NVRM_FENCE_R_ABORTED] == 0 && res[7] == 0);
-    T("no reader came back later than its budget plus what a busy machine may add", over <= SLACK_US);
+    TM("no reader came back later than its budget plus what a busy machine may add", over <= SLACK_US,
+       "latest return %llu us past its budget (bound %llu), latest sleep %llu us past its deadline", over, SLACK_US, readers_late_us(NR));
     T("the table's count of each answer is the readers' own", Tb.stat[NVF_STAT_WAIT_NONE] == res[NVRM_FENCE_R_NONE] &&
       Tb.stat[NVF_STAT_WAIT_READY] == res[NVRM_FENCE_R_READY] && Tb.stat[NVF_STAT_WAIT_DEAD] == res[NVRM_FENCE_R_DEAD] &&
       Tb.stat[NVF_STAT_WAIT_TIMEOUT] == res[NVRM_FENCE_R_TIMEOUT] && Tb.stat[NVF_STAT_WAIT_BUDGET] == res[NVRM_FENCE_R_BUDGET] &&
@@ -744,6 +788,7 @@ int main(void)
     atomic_store(&gpuStop, 1);
     pthread_join(gpu, NULL);
     pthread_join(bh, NULL);
+    if (recap[0]) printf("\nthe time arms that failed, with what they measured:\n%s", recap);
     printf(fails ? "\n%d FAILED\n" : "\nall passed\n", fails);
     return fails ? 1 : 0;
 }
