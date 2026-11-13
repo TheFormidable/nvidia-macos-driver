@@ -135,6 +135,7 @@ jobs:
       - name: Compile check with Xcode's kernel headers (also fetches the pinned NVIDIA tree)
         run: bash build/kext_check.sh
       - name: NVIDIA RM core and NVKMS for macOS
+        id: rm
         run: |
           W="$RUNNER_TEMP/rm620"; mkdir -p "$W"
           P="$PWD/build-out/kext-check/src/open-gpu-kernel-modules-620.70.06"
@@ -152,7 +153,9 @@ jobs:
       - name: No option of the build computer in the compile lines, no Linux kernel helper in NVRM
         # An Intel Mac's clang takes -mfunction-return=thunk-extern when NVIDIA's makefiles ask, and NVRM then imports
         # ___x86_return_thunk, which no macOS defines. The lists are the ones build_rm620.sh and build_kms620.sh compiled;
-        # imports.txt is build_nvrm.sh's `nm -u` of the linked NVRM.
+        # imports.txt is build_nvrm.sh's `nm -u` of the linked NVRM. It runs once the RM and NVKMS are compiled, also when
+        # a link failed, so that the compile lines are checked and their checksums printed in every run that has them.
+        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}
         run: |
           W="$RUNNER_TEMP/rm620/ogkm-620.70.06"; O="$RUNNER_TEMP/kexts"; bad=0
           for part in nvidia nvidia-modeset; do
