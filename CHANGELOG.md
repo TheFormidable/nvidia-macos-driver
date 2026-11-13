@@ -118,8 +118,10 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   stay out of it.
 - In a program that uses NVK's Vulkan driver without the Metal plugin, a setting written twice in
   `/Library/GPUBundles/nvmtl/nvrm610.conf` now takes its last line, and a comment that names a setting is ignored: the
-  rule a Metal process already followed and the one the documents describe. NVK reads only the first 8191 bytes of
-  the file, where the plugin reads it whole.
+  rule a Metal process already followed and the one the documents describe. NVK's reader stays stricter than the
+  plugin's: it reads only the first 8191 bytes of the file, where the plugin reads it whole, it takes a line only when
+  the line begins with the name and its `=` with no blank before either, and the value is everything up to the end of
+  the line, blanks included, up to 63 bytes. A line written `NAME=value` from the first column reads the same in both.
 - The Metal plugin's fence wait (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) no
   longer counts time asleep, so a frame that was pending at sleep is not declared lost at wake.
 - A texture the application releases while the GPU may still use it is now freed only once no command buffer that
