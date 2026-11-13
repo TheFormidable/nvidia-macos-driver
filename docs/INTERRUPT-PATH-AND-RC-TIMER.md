@@ -212,6 +212,15 @@ through a gate of their own: `stop()` closes it and waits until no call is insid
 inside then keeps the GPU object alive and is logged). From then on the monitor has no GPU for the rest of the boot,
 also when another card is started later.
 
+System sleep and shutdown run the same suspend and resume paths themselves, so they hold the GPU against the monitor
+for as long as they last: `setPowerState(0)` until the wake has run, `systemWillShutdown` for good. The hold waits
+first for a monitor call that is already inside (30 s at sleep, 8 s at shutdown); every call that comes meanwhile does
+nothing: a power-off it asks for fails, and the poll then counts the GPU idle from zero. The one exception is the
+power resource's switch-on that the wake itself asks for, through the monitor's call, before the GPU's resume. Without
+the hold a poll could suspend the GPU a second time while the system did, resume it while the system went to sleep
+(it then woke marked running on a slot that had lost power), or switch the power resource off under the system's
+resume.
+
 ## The kext stays loaded
 
 Nothing NVRM.kext registers is ever taken back: its sysctls (the kernel links them into its own list, but they are
