@@ -4,7 +4,8 @@
 
 **Not released.** This section describes the branch being prepared as 3.0. Nothing in it has run on an NVIDIA card
 yet. Its kernel extensions (NVRM, NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC) and its Metal plugin were compiled
-and linked with Apple's own toolchain on one Mac (Intel, macOS 26.7, Xcode 26.5), and none of them was loaded there;
+and linked with Apple's own toolchain on one Mac (Intel, macOS 26.7, Xcode 26.5), at an earlier state of the branch,
+and none of them was loaded there (the host tests ran there too);
 NVK and the shader translator have not yet been built on a Mac. The check list for a first run on a card is
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
