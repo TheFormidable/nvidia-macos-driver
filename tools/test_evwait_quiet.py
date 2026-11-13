@@ -16,8 +16,13 @@ named "invariant 1:" to "invariant 5:":
 
 This test builds that program against the header and requires every arm to pass; then, for each invariant, against a
 copy of the header with the rule that keeps it taken out, and requires that invariant's arm to fail. A control whose
-damage does not apply (the header's text moved) fails too, so a rewrite of the header must bring its controls along."""
-import pathlib, shutil, subprocess, sys, tempfile
+damage does not apply (the header's text moved) fails too, so a rewrite of the header must bring its controls along.
+
+The flag is shared by the process's threads without a lock. A text arm holds that the only plain store to it is DEAD
+and that the two changes that depend on what it holds (0 to QUIET, QUIET to 0) are compare-and-swaps, so that a DEAD
+stored by another thread between the read and the write is never overwritten or cleared; no single-threaded run can
+show that interleaving, so its control is a copy of the header with the old read-then-store clear."""
+import pathlib, re, shutil, subprocess, sys, tempfile
 
 R = pathlib.Path(__file__).resolve().parents[1]
 HDR = R / "kexts/NVRM/nvrm_evwait.h"
@@ -49,7 +54,7 @@ CONTROLS = [
     ("invariant 4", "a failed wait call makes the process QUIET instead of DEAD",
      [("    *fell_back = NVRM_EVW_FB_DEAD;\n", "    *fell_back = NVRM_EVW_FB_QUIET;\n")]),
     ("invariant 5", "the run of missed wakes is not restarted when a thread trips the rule or polls while QUIET",
-     [("            t->misses = 0;\n            if (!*fell_back)", "            if (!*fell_back)"),
+     [("            t->misses = 0;\n            int was = 0;\n", "            int was = 0;\n"),
       ("    t->misses = 0;   /* a polling thread misses nothing", "    /* a polling thread misses nothing")]),
 ]
 
@@ -67,12 +72,28 @@ def build_and_run(hdr_text, d, tag):
     return r, r.stdout
 
 
+def flag_writes_ok(h):
+    """The process flag: one plain store (DEAD), and a compare-and-swap for each of 0 -> QUIET and QUIET -> 0."""
+    stores = re.findall(r"\*fell_back\s*=(?!=)\s*([^;]+);", h)
+    cas = re.findall(r"__atomic_compare_exchange_n\(\s*fell_back\s*,\s*&was\s*,\s*(\w+)\s*,", h)
+    inits = re.findall(r"\bint was = (\w+);", h)
+    return stores == ["NVRM_EVW_FB_DEAD"] and sorted(cas) == ["0", "NVRM_EVW_FB_QUIET"] and \
+        sorted(inits) == ["0", "NVRM_EVW_FB_QUIET"]
+
+
 CC = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
 if CC is None:
     arm("a C compiler to build tools/test_evwait_loop.c", False, "no cc, clang or gcc on PATH")
     print("FAILED"); sys.exit(1)
 hdr = HDR.read_text()
 src = LOOP.read_text()
+arm("the flag: DEAD is the only plain store; 0 -> QUIET and QUIET -> 0 are compare-and-swaps", flag_writes_ok(hdr))
+old_clear = ("        if (*fell_back == NVRM_EVW_FB_QUIET) { *fell_back = 0; ops->stat(ctx, NVRM_EVW_S_BACK); }\n")
+new_clear = ("        int was = NVRM_EVW_FB_QUIET;\n        if (*fell_back == NVRM_EVW_FB_QUIET &&\n"
+             "            __atomic_compare_exchange_n(fell_back, &was, 0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))\n"
+             "            ops->stat(ctx, NVRM_EVW_S_BACK);\n")
+arm("control: the flag - a clear that reads QUIET and then stores 0 (a DEAD in between is lost) fails",
+    hdr.count(new_clear) == 1 and not flag_writes_ok(hdr.replace(new_clear, old_clear)))
 with tempfile.TemporaryDirectory() as d:
     r, out = build_and_run(hdr, d, "good")
     arm("tools/test_evwait_loop.c builds against the header and every arm passes", r is not None and r.returncode == 0
