@@ -126,7 +126,7 @@ def redirect(job, fake, t):
 # The real tools the job and the fakes may use. The three that change files are reached through a guard that refuses
 # an argument outside the test's folder (a path the job builds while it runs is not seen by redirect()).
 REAL = ("cut", "grep", "date", "cat")
-GUARDED = ("rm", "cp", "mkdir")
+GUARDED = ("rm", "cp", "mkdir", "mv")
 GUARD = r'''#!/bin/bash
 for a in "$@"; do
   case "$a" in
@@ -238,7 +238,7 @@ class Result:
 
 
 def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False, osbuild=INSTALLER["BUILD"],
-        osbuild_fail=0, fbs="", displays="", console="root", card=""):
+        osbuild_fail=0, fbs="", displays="", console="root", card="", kc_fails=None):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
     line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read) and
@@ -264,6 +264,16 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
                 (fake / name).chmod(0o755)
             else:
                 (fake / name).symlink_to(real)
+        if kc_fails:   # the copy (cp) or the rename (mv) of the kernel collection fails; a cut cp leaves a short file
+            tool = kc_fails
+            (fake / tool).rename(fake / (tool + ".guard"))
+            (fake / tool).write_text("#!/bin/bash\n"
+                'case "$*" in *AuxiliaryKernelExtensions.kc*Library/KernelCollections/AuxiliaryKernelExtensions.kc*)\n'
+                '  echo "' + tool + ' FAILED $*" >> "$T/calls"\n'
+                + ('  printf partial > "${@: -1}"\n' if tool == "cp" else "")
+                + '  exit 1;; esac\n'
+                'exec "' + str(fake) + '/' + tool + '.guard" "$@"\n')
+            (fake / tool).chmod(0o755)
         text = redirect(job, fake, t)
         lib = t / "Library"
         bk = t / INSTALLER["BK"].lstrip("/")
@@ -325,6 +335,7 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
         r.kexts = [read(lib / "Extensions" / f"{k}.kext" / "which").strip() for k in NAMES]
         r.bundle = read(lib / "GPUBundles/NVMTLDriver.bundle/which").strip()
         r.kc = read(lib / "KernelCollections/AuxiliaryKernelExtensions.kc").strip()
+        r.kc_tmp = sorted(x.name for x in (lib / "KernelCollections").iterdir() if x.name != "AuxiliaryKernelExtensions.kc")
         r.fw = read(lib / "NullMoth/nvfw/which").strip()
         r.version = read(lib / "NullMoth/driver-version").strip()
         r.marker = read(lib / "NullMoth/driver-restored").strip()
@@ -727,6 +738,24 @@ except Unsafe:
     arm("control: a template that runs a command while the job is written is not filled in", True)
 except AssertionError as e:
     arm("control: a template that runs a command while the job is written is not filled in", False, e)
+
+# ---- the kernel collection's copy or rename fails (a full volume, an I/O error)
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), kc_fails="cp")
+arm("refusal, the collection's copy fails: nothing changed, the job stays, no restart, no file left, logged",
+    untouched(r) and r.job_left and r.kc_tmp == [] and r.rc == 0 and "could not be copied" in r.log, show(r) + str(r.kc_tmp))
+arm("  control: the failure was injected into the collection's copy (at ee7f332 this start left a cut collection in"
+    " place, the job gone and the Mac restarting)", "cp FAILED -p " in r.calls and ".kc.nullmoth-restore" in r.calls, show(r))
+r = run(job, nv={"nullmoth-nv-starts": "%02"}, kc_fails="cp")
+arm("twice, the collection's copy fails: nothing changed, the job stays, no restart",
+    untouched(r) and r.job_left and r.kc_tmp == [] and "could not be copied" in r.log, show(r) + str(r.kc_tmp))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), kc_fails="mv")
+arm("refusal, the rename fails: the collection in place is the new one whole, the job stays, no restart",
+    r.kc == "new" and r.job_left and not r.restarted and "could not be put in place" in r.log, show(r) + str(r.kc_tmp))
+r = run(job, registry=FB_REFUSED + ioreg_line(EARLY))
+arm("the ordinary refusal leaves no staging file", restored(r) and r.kc_tmp == [], show(r) + str(r.kc_tmp))
+un = (ROOT / "package/uninstall.sh").read_text()
+arm("  and one a job left behind (cut off in the middle) is removed by the next install and by the uninstaller",
+    src.count('rm -f "$LG" "$LGP" "$KC.nullmoth-restore"\n') == 1 and un.count('"$KC.nullmoth-restore"') == 1)
 
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)
