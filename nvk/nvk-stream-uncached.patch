@@ -1,0 +1,51 @@
+Stream chunks are no longer GPU-cacheable. NullMoth's own change (not an upstream Mesa commit).
+NVK appends each small queue push (context setup, heap and shader local memory binds) and each upload of the upload
+queue to the current 64 KB stream chunk, right behind the previous one with 4-byte alignment, so a new push often
+starts in a cache line the GPU has already read. Every release up to 2.9 mapped stream chunks GPU-cacheable
+(NV01_MEMORY_SYSTEM with ATTR2_GPU_CACHEABLE_YES, a non-volatile PTE); the GPU's L2 does not snoop CPU writes and
+coherence comes only from the L2 invalidate in the tail of each submission. The host fetches pushbuffer words ahead of
+the engine, so it can read the next push before the previous submission's tail has run, and then sees that shared line
+as it was before the CPU wrote the new words, and an invalid pushbuffer entry stops the channel. Stream chunks are now
+plain system memory (volatile PTE), as the context's own pushbuffer, GPFIFO, semaphore and notifier pages already are.
+Each stream line is read once, so nothing is lost by not caching it. The command pool's chunks are not changed and still
+follow NVK_CMDPOOL_GPU_UNCACHED.
+
+diff --git a/src/nouveau/vulkan/nvk_mem_stream.c b/src/nouveau/vulkan/nvk_mem_stream.c
+index e2cdda6..0b28281 100644
+--- a/src/nouveau/vulkan/nvk_mem_stream.c
++++ b/src/nouveau/vulkan/nvk_mem_stream.c
+@@ -7,7 +7,6 @@
+ 
+ #include "nvk_device.h"
+ #include "vk_sync.h"
+-#include "nvmtl_cfg.h"
+ 
+ struct nvk_mem_stream_chunk {
+    struct nvkmd_mem *mem;
+@@ -20,18 +19,17 @@ struct nvk_mem_stream_chunk {
+ };
+ 
+ 
+-/* b80 B3: nvk69's GPU-cacheable flag (bit 6, see nvk_device_memory.c / nvkmd_nvrm_mem.c) for the driver's own
+- * GPU-read structures. NVK_CMDPOOL_GPU_UNCACHED=1 restores the volatile mapping (the control arm). */
+-#define NVK69_MEM_GPU_CACHED ((enum nvkmd_mem_flags)(1u << 6))
++/* Stream chunks are never GPU-cacheable, unlike the command pool's chunks (nvk_cmd_pool.c, NVK_CMDPOOL_GPU_UNCACHED). */
+ static inline enum nvkmd_mem_flags
+ nvk_b80_gart_flags(void)
+ {
+-   static int uncached = -1;
+-   if (uncached < 0) {
+-      const char *e = nvmtl_cfg_getenv("NVK_CMDPOOL_GPU_UNCACHED");
+-      uncached = e && e[0] == '1';
+-   }
+-   return uncached ? NVKMD_MEM_GART : (enum nvkmd_mem_flags)(NVKMD_MEM_GART | NVK69_MEM_GPU_CACHED);
++   /* A stream chunk is appended to while the GPU is still reading its earlier part: each push and each upload
++    * lands right behind the last one, often in the same cache line. The GPU's cache does not see CPU writes, and
++    * the host fetches the next push before the engine has run the invalidate that ends the previous one, so a
++    * cached chunk let it read the line as it was before the new words were written: the header of the new push
++    * was missing and the channel stopped with an invalid pushbuffer entry. Stream memory is read once, in order,
++    * and gains nothing from the cache; it is never cached. */
++   return NVKMD_MEM_GART;
+ }
+ 
+ static VkResult
