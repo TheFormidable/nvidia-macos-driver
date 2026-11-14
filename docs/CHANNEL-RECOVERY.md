@@ -55,12 +55,13 @@ Nothing is printed on a healthy GPU.
   copy is not made again and the image keeps what it holds. A copy, blit, mipmap generation or upload into the image
   (and a render or storage write that was sampled again afterwards) is not seen, and the old upload is then made again
   over it. An image that is being freed is not copied again. The uploads of managed buffers and the GPU zero fills of
-  new Private buffers that rode a dropped command buffer (`NVMTL_PRESUBMIT_PROLOGUE`, on by default) did not run
-  either: the managed ranges are marked to be uploaded again at the next submit, from the buffer's CPU copy (if GPU
-  work wrote the same range in between, the CPU copy wins); the zero fills are not made again (a later command buffer
-  may already have written those buffers), so those buffers hold what the VRAM held. Textures that the residency
-  manager was moving in a dropped evict batch already point at their new images, which hold undefined contents. The
-  surface-fence holds of the command buffer are closed on its error path as on every other.
+  new buffers (Private ones and, by default, the VRAM copy of a managed one) that rode a dropped command buffer
+  (`NVMTL_PRESUBMIT_PROLOGUE`, on by default) did not run either: the managed ranges are marked to be uploaded again
+  at the next submit, from the buffer's CPU copy (if GPU work wrote the same range in between, the CPU copy wins); the
+  zero fills are not made again (a later command buffer may already have written those buffers), so those buffers
+  hold what the VRAM held wherever nothing was written or uploaded since. Textures that the residency manager was
+  moving in a dropped evict batch already point at their new images, which hold undefined contents. The surface-fence
+  holds of the command buffer are closed on its error path as on every other.
 - Log lines (`nvmtl.log`; in a release build also the system log, since the line holds the word "fault"):
   `vk: after a GPU fault, a channel rebuild dropped this command buffer (N so far in <process>, fence after W ms): it
   did not run and is reported as failed; the device stays up; NVK: Xid X, R channel rebuilds, D flushes dropped, P
