@@ -57,8 +57,9 @@ arm("the debt starts at zero on every framebuffer", "volatile SInt32 fConnectOwe
 
 def old_source():
     # the commit that brought the debt, found by its name: neither an uncommitted edit nor a later commit moves the base
-    log = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "fConnectOwed", "--", REL],
-                         capture_output=True, text=True, check=True).stdout.split()
+    # --no-textconv: the search starts no diff driver of the tester's git configuration
+    log = subprocess.run(["git", "-C", str(ROOT), "log", "--no-textconv", "--format=%H", "-S", "fConnectOwed",
+                          "--", REL], capture_output=True, text=True, check=True).stdout.split()
     rev = log[-1] + "~1" if log else "HEAD"
     return subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{REL}"], capture_output=True, text=True,
                           check=True).stdout

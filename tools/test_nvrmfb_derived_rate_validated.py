@@ -53,8 +53,10 @@ arm("a refused test pass still returns an error to IOFramebuffer (kIOReturnUnsup
 
 def old_source():
     # the commit that introduced the check, found by its log text, so later commits to the file do not move the base
-    intro = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "-S", "NVKMS refused the timing -- not offered",
-                            "--", REL], capture_output=True, text=True, check=True).stdout.split()
+    # --no-textconv: the search starts no diff driver of the tester's git configuration
+    intro = subprocess.run(["git", "-C", str(ROOT), "log", "--no-textconv", "--format=%H", "-S",
+                            "NVKMS refused the timing -- not offered", "--", REL],
+                           capture_output=True, text=True, check=True).stdout.split()
     rev = intro[-1] + "~1" if intro else "HEAD"
     return subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{REL}"], capture_output=True, text=True,
                           check=True).stdout
