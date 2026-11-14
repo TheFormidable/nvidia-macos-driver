@@ -552,7 +552,7 @@ nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || 
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
-rm -f "$LG" "$LGP"
+rm -f "$LG" "$LGP" "$KC.nullmoth-restore"
 if [ -d "$BK/NVRM.kext" ]; then
   mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the fallback job's folders"
   cat > "$LG.tmp" <<EOF || die "write the fallback job"
@@ -621,6 +621,14 @@ else
   [ -d "\$BK/NVRM.kext" ] || { echo "\$(date) the driver turned itself off but its backup \$BK is gone" >> \$LOG; done_job; exit 0; }
   echo "\$(date) the new driver did not bring the display up twice; restoring the previous driver from \$BK" >> \$LOG
 fi
+# the kernel collection is copied out of the backup before anything is changed, beside the one in place, and put in
+# place by a rename below: a copy that fails (a full volume) changes nothing, and the job stays for the next start
+rm -f "$KC.nullmoth-restore"
+if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ] && ! cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC.nullmoth-restore"; then
+  rm -f "$KC.nullmoth-restore"
+  echo "\$(date) the previous kernel collection could not be copied out of \$BK; nothing was changed, the job stays" >> \$LOG
+  exit 0
+fi
 for k in $KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
 for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
 rm -rf /Library/NullMoth/kexts "$FW"
@@ -628,7 +636,9 @@ rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
 # the previous driver may be one that reads the old location
 [ ! -d "\$BK/nvfw" ] || ! mkdir -m 0755 "$FWOLD" 2>/dev/null || ditto "\$BK/nvfw" "$FWOLD"
-if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then cp -p "\$BK/AuxiliaryKernelExtensions.kc" "$KC"; else rm -f "$KC"; fi
+if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ]; then
+  mv -f "$KC.nullmoth-restore" "$KC" || { echo "\$(date) the previous kernel collection could not be put in place; the job stays" >> \$LOG; exit 0; }
+else rm -f "$KC"; fi
 [ ! -f "\$BK/os-major" ] || cp -p "\$BK/os-major" /Library/NullMoth/os-major
 if [ -f "\$BK/driver-version" ]; then cp -p "\$BK/driver-version" /Library/NullMoth/driver-version; else rm -f /Library/NullMoth/driver-version; fi
 nvram -d \$V:nullmoth-nv-starts 2>/dev/null
