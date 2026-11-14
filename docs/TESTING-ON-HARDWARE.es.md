@@ -449,6 +449,7 @@ kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantie
 | Informe de error del trabajo descartado | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
 | Gracia de imágenes | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | Decodificación H.264 de RTX 50 en el servicio de decodificación | `NVMTL_NVENCVT=0` (la biblioteca de códecs apagada en todas partes) | `nvrm610.conf` |
+| Texturas de video 4:2:2 (fotogramas de cámara) | `NVMTL_YUV422=0` (las texturas 4:2:2 se rechazan) | `nvrm610.conf` |
 | Correcciones del compilador de NVK | `NVK_SKIP_PATCHES="<nombres de parches>"` | al compilar desde el código fuente |
 
 CHANGELOG.md, "The ways back", y SWITCHES.md dicen qué devuelve cada una en detalle.
