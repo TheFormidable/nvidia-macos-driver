@@ -53,15 +53,23 @@ Nothing is printed on a healthy GPU.
   its staging buffer when something next finishes that upload (a readback, a migration, the next upload of the same
   image), but only if the image has only been sampled since; if a render pass, a copy or a storage use came after it,
   the copy is not made again (it could overwrite what that work wrote) and the image keeps what it holds. An image
-  that is being freed is not copied again. The surface-fence holds of the command buffer are closed on its error path
-  as on every other.
+  that is being freed is not copied again. The uploads of managed buffers and the GPU zero fills of new Private
+  buffers that rode a dropped command buffer (`NVMTL_PRESUBMIT_PROLOGUE`, on by default) did not run either: the
+  managed ranges are marked to be uploaded again at the next submit, from the buffer's CPU copy (if GPU work wrote
+  the same range in between, the CPU copy wins); the zero fills are not made again (a later command buffer may already
+  have written those buffers), so those buffers hold what the VRAM held. Textures that the residency manager was
+  moving in a dropped evict batch already point at their new images, which hold undefined contents. The surface-fence
+  holds of the command buffer are closed on its error path as on every other.
 - Log lines (`nvmtl.log`; in a release build also the system log, since the line holds the word "fault"):
   `vk: after a GPU fault, a channel rebuild dropped this command buffer (N so far in <process>, fence after W ms): it
   did not run and is reported as failed; the device stays up; NVK: Xid X, R channel rebuilds, D flushes dropped, P
   replayed` for the first and every 256th, and on the first one the `fault context:` lines of the work that was
   running. `vk: tex upload async: the copy a channel rebuild dropped was made again -> 0` after the async-upload copy,
   or `vk: tex upload async: the copy a channel rebuild dropped is not made again - the image was used since (layout
-  N), the image keeps what it held`.
+  N), the image keeps what it held`. `vk: U managed uploads and Z zero fills rode a dropped command buffer (N such so
+  far in <process>) - the uploads are marked to be made again at the next submit, the zero-filled buffers hold what
+  VRAM held` for the first and every 256th; `residency (res2): evict-batch of N copies FAILED to complete (-1) -
+  those textures now read undefined contents` for a dropped evict batch.
 - A loss that is not rebuilt still ends the process's device exactly as before; the loss line in `nvmtl.log` is now
   followed by `vk: NVK channel recovery: last loss <KIND (...)>, Xid X, not rebuilt because: <reason>; ...` where KIND
   is CHANNEL, STALL, MEMORY (ECC), GSP (firmware), BUS, RESUME (failed wake) or UNKNOWN. With `NVK_CHANNEL_RECOVER=0`

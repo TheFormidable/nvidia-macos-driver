@@ -18,7 +18,9 @@ This test holds what only the plugin's glue in plugin/nvmtl_vk.c and plugin/NVMT
   the clock      the fence wait of nvmtl_vk_submit_finish is timed on awake time (CLOCK_UPTIME_RAW)
   the uploads    an async texture upload whose copy was dropped is made again from its staging buffer, but only
                  while the image is still in the layout that copy left (nothing used it for writing since), and
-                 never for an image that is being freed
+                 never for an image that is being freed; the managed-buffer uploads of a dropped pre-submit prologue
+                 are marked dirty again (through the managed flush's own hook, before the prologue's holds are
+                 released), its zero fills are not made again, and the drop is logged
   Metal          -1 completes the command buffer with an error and is not quarantined; the error completion closes the
                  surface fence holds first (nvmtl_busy_mark_done), so a hold armed on dropped work cannot stay open
   NVK's lines    the "nvk-reason:" lines (among them "nvrm channel slot N rebuilt after ..." and "... not rebuilt: ...")
@@ -34,6 +36,7 @@ import pathlib, re, shutil, subprocess, sys, tempfile
 R = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else pathlib.Path(__file__).resolve().parents[1])
 VK = (R / "plugin/nvmtl_vk.c").read_text()
 EV = (R / "plugin/NVMTLEventSync.m").read_text()
+OBJ = (R / "plugin/NVMTLObjects.m").read_text()
 LOSS = (R / "plugin/nvmtl_loss.h").read_text()
 DEV = (R / "plugin/NVMTLDevice.m").read_text()
 FAILURE_H = (R / "plugin/nvmtl_log_failure.h").read_text()
@@ -151,6 +154,32 @@ def chk_uploads(vk):
             and "nvmtl_asyncup_finish(nvmtl_asyncup_take(" not in vk)
 
 
+def chk_prologue(vk, obj):
+    fin = body(vk, "int nvmtl_vk_submit_finish(nvmtl_inflight *f)")
+    i = fin.find("    if (pre->begun) {\n")
+    blk = fin[i:fin.find("\n    }\n", i)] if i >= 0 else ""
+    mf = body(obj, "static void nvmtl_managed_flush(void) {")
+    zf = body(obj, "static void nvmtl_zero_flush(void) {")
+    redo = body(obj, "static void nvmtl_pre_redo(void *held) {")
+    return (order(blk, "if (dropped && (pre->copies || pre->fills)) {", "nvmtl_pre_redo_hook(pre->hold[i]);",
+                  "if (nvmtl_drop_log_due(n))", "rode a dropped command buffer", "nvmtl_pre_drop(pre);")
+            and blk.count("nvmtl_pre_drop(pre);") == 1
+            and "nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;" in mf
+            and "nvmtl_pre_redo_hook" not in zf
+            and order(redo, "[(NSArray *)e count] != 3) continue;", "nvmtl_managed_mark(b, lo, hi);")
+            and "fill" not in redo.split("{", 1)[-1])
+
+
+def order(text, *parts):
+    """Every part occurs in text, each after the one before it."""
+    at = -1
+    for p in parts:
+        at = text.find(p, at + 1)
+        if at < 0:
+            return False
+    return True
+
+
 def chk_metal(ev):
     done = body(ev, "static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {")
     first = done.split("\n")[1].strip() if done.count("\n") > 1 else ""
@@ -220,6 +249,17 @@ run("an async texture upload whose copy was dropped is made again before its sta
     ("made again over work that came after it", (sub(VK, "    if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {\n", "    if (0) {\n"),)),
     ("made again for an image being freed", (sub(VK, "    nvmtl_vk_image_upload_drain(i);   // an async upload", "    nvmtl_vk_image_upload_barrier(i);   // an async upload"),)),
 ])
+run("a dropped prologue's managed uploads are marked again before its holds go; its zero fills are not redone",
+    chk_prologue, (VK, OBJ), [
+        ("no mark again", (sub(VK, "if (pre->hold[i]) nvmtl_pre_redo_hook(pre->hold[i]);", ";"), OBJ)),
+        ("the holds released before the mark", (sub(sub(VK, "        nvmtl_pre_drop(pre);\n        const unsigned long long k = g_pre_subs++;",
+                                                        "        const unsigned long long k = g_pre_subs++;"),
+                                                    "        pre->cb.wseq = c->wseq; nvmtl_cmd_retire(&pre->cb);\n",
+                                                    "        pre->cb.wseq = c->wseq; nvmtl_cmd_retire(&pre->cb); nvmtl_pre_drop(pre);\n"), OBJ)),
+        ("the hook set by the zero flush too", (VK, sub(OBJ, "        nvmtl_pre_release_hook = nvmtl_pre_release;\n        nvmtl_vk_pre_hold((__bridge_retained void *)todo);\n        const unsigned long long k",
+                                                        "        nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;\n        nvmtl_vk_pre_hold((__bridge_retained void *)todo);\n        const unsigned long long k"))),
+        ("a zero flush's hold walked as managed ranges", (VK, sub(OBJ, "[(NSArray *)e count] != 3) continue;", "[(NSArray *)e count] < 1) continue;"))),
+    ])
 run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed first", chk_metal, (EV,), [
     ("the holds closed after the marks", (sub(EV, "    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error\n    NSDictionary *marks = cb->_busyMarks;\n",
                                                "    NSDictionary *marks = cb->_busyMarks;\n    nvmtl_vk_fence_close_all(&cb->_fence);\n"),)),

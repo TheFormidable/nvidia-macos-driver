@@ -797,6 +797,19 @@ static void nvmtl_purge_report(const char *why) {
 }
 static void nvmtl_pre_release(void *held) { @autoreleasepool { (void)CFBridgingRelease(held); } }
 static void nvmtl_zero_flush(void);
+static void nvmtl_managed_mark(NVMTLBuffer *b, NSUInteger lo, NSUInteger hi);
+// A hold of a prologue NVK dropped in a channel rebuild, still retained (nvmtl_pre_drop releases it after this). Only the
+// managed flush's holds (entries @[buffer, lo, hi]) are redone; a zero flush's hold (entries are buffers) is left alone.
+static void nvmtl_pre_redo(void *held) {
+    @autoreleasepool {
+        for (id e in (__bridge NSArray *)held) {
+            if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 3) continue;
+            NSArray *t = e; NVMTLBuffer *b = t[0];
+            const NSUInteger lo = [t[1] unsignedIntegerValue], hi = [t[2] unsignedIntegerValue];
+            if (hi > lo && hi <= b->_b.size && b->_shadow.map) nvmtl_managed_mark(b, lo, hi);
+        }
+    }
+}
 static void nvmtl_managed_flush(void) {
     if (!atomic_load(&gManagedAny) || gManagedInFlush) return;
     gManagedInFlush = 1;
@@ -818,7 +831,7 @@ static void nvmtl_managed_flush(void) {
             if (nvmtl_vk_pre_copy(&b->_shadow, lo, &b->_b, lo, n))
                 nvlog("managed: upload of %lu bytes at %lu FAILED - the GPU keeps the old bytes", (unsigned long)n, (unsigned long)lo);
         }
-        nvmtl_pre_release_hook = nvmtl_pre_release;
+        nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;
         nvmtl_vk_pre_hold((__bridge_retained void *)todo);
     } else
     for (NSArray *t in todo) {
