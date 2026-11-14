@@ -92,12 +92,12 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   there; `fetch` took 40 seconds, `build` of all 17 components 5 minutes 41 seconds, `package` 27 seconds. On
   GitHub's Intel runner, `deps` from nothing took 3 hours 53 minutes; with the tools restored from its cache, `deps`
   took 40 seconds, `build` 30 minutes 20 seconds and `package` 60 seconds. `deps` leaves the tools built from source
-  (1.1 GB: each build tree is removed once its tool's checks pass), Rust (515 MB) and its crates (97 MB). After a
-  whole build and package the working directory on the Intel Mac held about 8 GB (sources 3.4 GB, tools 1.8 GB,
-  build trees 1.2 GB, outputs 1.1 GB, the package 492 MB). `deps` asks for 10 GB free before it starts LLVM and says
-  how much is free when there is less. Keep the Mac awake and on power: a tool whose build is interrupted (Ctrl-C,
-  sleep, power) is built again from the beginning by the next `./build.sh deps`, and LLVM is the long one. A tool
-  that fails stops `deps` with its log named; the next `deps` starts at that tool.
+  (1.1 GB: each build tree is removed once its tool's checks pass), Rust (515 MB) and its cargo folder with bindgen,
+  cbindgen and the crates (97 MB). After a whole build and package the working directory on the Intel Mac held about
+  8 GB (sources 3.4 GB, tools 1.8 GB, build trees 1.2 GB, outputs 1.1 GB, the package 492 MB). `deps` asks for 10 GB
+  free before it starts LLVM and says how much is free when there is less. Keep the Mac awake and on power: a tool whose
+  build is interrupted (Ctrl-C, sleep, power) is built again from the beginning by the next `./build.sh deps`, and LLVM
+  is the long one. A tool that fails stops `deps` with its log named; the next `deps` starts at that tool.
 - Time with `NM_TOOLS_FROM=homebrew` on an Intel Mac: Homebrew compiles each missing formula here, LLVM 22 the
   longest; no such run has been timed, and `deps` warns before it asks. To compile, Homebrew also needs
   Apple's command line tools besides Xcode, as new as this macOS: without them it stops at the first formula with

@@ -101,20 +101,21 @@ comandos y opciones y la solución de problemas.
   máquina Intel de GitHub, `deps` desde cero tardó 3 horas 53 minutos; con las herramientas recuperadas de su caché,
   `deps` tardó 40 segundos, `build` 30 minutos 20 segundos y `package` 60 segundos. `deps` deja las herramientas
   compiladas desde fuentes (1,1 GB: cada carpeta de compilación se borra cuando su herramienta pasa sus
-  comprobaciones), Rust (515 MB) y sus crates (97 MB). Después de compilar todo y preparar el paquete, el directorio
-  de trabajo del Mac Intel ocupaba unos 8 GB (fuentes 3,4 GB, herramientas 1,8 GB, carpetas de compilación 1,2 GB,
-  resultados 1,1 GB, el paquete 492 MB). `deps` pide 10 GB libres antes de empezar LLVM y dice cuánto queda libre si
-  hay menos. Mantén el Mac despierto y enchufado: una herramienta interrumpida (Ctrl-C, reposo, corte) se vuelve a
-  compilar desde el principio con el siguiente `./build.sh deps`, y LLVM es la larga. Una herramienta que falla detiene
-  `deps` y nombra su registro (`<directorio de trabajo>/logs/toolchain/<herramienta>.log`); el siguiente `deps` empieza
-  por ella. Las fórmulas de Homebrew de estas herramientas no tenían compilaciones listas (bottles) para Mac Intel
-  cuando se leyó homebrew-core el 2026-11-13: con `NM_TOOLS_FROM=homebrew`, `deps` hace que Homebrew compile aquí
-  cada fórmula que falte y lo que necesita, LLVM 22 la más larga, y eso puede cambiar tu `python3`. Ese camino solo se
-  ha probado contra sustitutos y nunca se ha medido; `deps` avisa antes de preguntar. En Apple silicon Homebrew
-  instala compilaciones listas. Para compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
-  macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o `Your Command Line Tools are
-  too outdated`. `xcode-select --install` las instala y Actualización de software las actualiza;
-  `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` muestra la versión que tienes.
+  comprobaciones), Rust (515 MB) y su carpeta de cargo con bindgen, cbindgen y los crates (97 MB). Después de compilar
+  todo y preparar el paquete, el directorio de trabajo del Mac Intel ocupaba unos 8 GB (fuentes 3,4 GB, herramientas
+  1,8 GB, carpetas de compilación 1,2 GB, resultados 1,1 GB, el paquete 492 MB). `deps` pide 10 GB libres antes de
+  empezar LLVM y dice cuánto queda libre si hay menos. Mantén el Mac despierto y enchufado: una herramienta interrumpida
+  (Ctrl-C, reposo, corte) se vuelve a compilar desde el principio con el siguiente `./build.sh deps`, y LLVM es la
+  larga. Una herramienta que falla detiene `deps` y nombra su registro
+  (`<directorio de trabajo>/logs/toolchain/<herramienta>.log`); el siguiente `deps` empieza por ella. Las fórmulas de
+  Homebrew de estas herramientas no tenían compilaciones listas (bottles) para Mac Intel cuando se leyó homebrew-core el
+  2026-11-13: con `NM_TOOLS_FROM=homebrew`, `deps` hace que Homebrew compile aquí cada fórmula que falte y lo que
+  necesita, LLVM 22 la más larga, y eso puede cambiar tu `python3`. Ese camino solo se ha probado contra sustitutos y
+  nunca se ha medido; `deps` avisa antes de preguntar. En Apple silicon Homebrew instala compilaciones listas. Para
+  compilar, Homebrew necesita además de Xcode las herramientas de línea de comandos de Apple, tan nuevas como este
+  macOS: sin ellas se detiene en la primera fórmula con `Xcode alone is not sufficient` o
+  `Your Command Line Tools are too outdated`. `xcode-select --install` las instala y Actualización de software las
+  actualiza; `pkgutil --pkg-info=com.apple.pkg.CLTools_Executables` muestra la versión que tienes.
 
 ## Inicio rápido
 
