@@ -10,10 +10,10 @@
 #ceiling dev dlss 13
 #ceiling dev nvencvt 50
 #ceiling dev nvk 77
-#ceiling dev plugin 228
+#ceiling dev plugin 227
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 488
+#ceiling unreviewed all 487
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -462,7 +462,7 @@ env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_WAIT_COMPLETION	dev	unset	2.9	-	unreviewed
 env	NVMTL_XLATE_TRIG_FLUSH	dev	unset	2.9	-	unreviewed
-env	NVMTL_YUV422	dev	unset	2.9	-	unreviewed
+env	NVMTL_YUV422	escape	on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9)	2.9	3.2	Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused.
 env	NVMTL_ZERO_FILL	dev	unset	2.9	-	unreviewed
 env	NVMTL_ZPROBE	diag	unset	2.9	-	unreviewed
 env	NVRM_610_BOOST	dev	unset	2.9	-	unreviewed
