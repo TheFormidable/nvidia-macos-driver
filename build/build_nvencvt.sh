@@ -15,6 +15,11 @@ BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 R=$BASE/build/nvencvt
 HDR=$BASE/build/nvencvt-headers
+# The folders below go unquoted into the commands sent to the build Mac's shell: only letters, digits and % + - . / @ _
+# (build.sh's nm_unsafe_path, the same pattern), so that no & ; | ( * [ { or quote in one makes a command of its own.
+for p in "$BASE" "${NM_OGKM620:-}" "${NM_OGKM620_PRISTINE:-}"; do
+  case "$p" in *[]\[\ \!\"\#\$\&\'\(\)\*\,\:\;\<\=\>\?\\\^\`\{\|\}\~[:space:][:cntrl:]]*) echo "STOP: '$p' (NULLMOTH_BUILD_ROOT, NM_OGKM620 or NM_OGKM620_PRISTINE) may hold only letters, digits and % + - . / @ _: it goes into a shell command on the build Mac"; exit 2 ;; esac
+done
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" vendor/nvenc | tar x -C "$TMP"

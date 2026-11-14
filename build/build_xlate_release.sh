@@ -9,6 +9,11 @@ H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
 BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that Mac}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 R=$BASE/build/xlate-release
+# The folders below go unquoted into the commands sent to the build Mac's shell: only letters, digits and % + - . / @ _
+# (build.sh's nm_unsafe_path, the same pattern), so that no & ; | ( * [ { or quote in one makes a command of its own.
+for p in "$BASE" "${NULLMOTH_RUST_BIN:-}" "${NULLMOTH_CARGO_HOME:-}"; do
+  case "$p" in *[]\[\ \!\"\#\$\&\'\(\)\*\,\:\;\<\=\>\?\\\^\`\{\|\}\~[:space:][:cntrl:]]*) echo "STOP: '$p' (NULLMOTH_BUILD_ROOT, NULLMOTH_RUST_BIN or NULLMOTH_CARGO_HOME) may hold only letters, digits and % + - . / @ _: it goes into a shell command on the build Mac"; exit 2 ;; esac
+done
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" translator | tar x -C "$TMP"

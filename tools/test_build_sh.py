@@ -1995,21 +1995,51 @@ def arm_source_modes():
     rc, out = sb.run("--workdir", wd, "deps", "-y")
     check("a working directory with a blank: deps stops at the start with one line naming it, nothing fetched or built",
           rc == 2 and "contains a space" in out and not tc_builds(sb) and not os.path.exists(wd), (rc, out[-400:]))
-    # a colon would split every step's PATH and the toolchain's pkg-config search path, a quote its answers
-    def chars_problems():
+    # every ASCII character but letters, digits and % + - . / @ _ (and the control characters) is refused: a colon would
+    # split every step's PATH, a quote pkg-config's answers, & ; | ( ) < > end the release scripts' commands on the build
+    # Mac (an "R&D" folder made "rm -rf <home>/R" of their first one), * ? [ ] { } are patterns there, a comma splits
+    # build_nvk.sh's -Wl,-oso_prefix list, and # ! = ^ ~ are read in some places
+    REFUSED = (":", ";", "'", '"', "\\", "$", "`", "&", "|", "<", ">", "(", ")", "[", "]", "{", "}", "*", "?", "!", "#",
+               "~", "^", "=", ",", "\x1b", "\x7f")
+    def chars_problems(chars=REFUSED, var=None):
         p = []
-        for ch in (":", ";", "'", '"', "\\", "$", "`"):
+        for ch in chars:
             wd = str(sb.home / f"my{ch}build")
             sb.clear()
-            rc, out = sb.run("--workdir", wd, "deps", "-y")
-            if rc != 2 or "contains one of" not in out or tc_builds(sb) or os.path.exists(wd):
+            if var:   # a setting of the tester's that the release scripts put into their commands
+                rc, out = sb.run("deps", "-y", extra={var: wd})
+            else:
+                rc, out = sb.run("--workdir", wd, "deps", "-y")
+            if rc != 2 or "may hold only letters, digits and % + - . / @ _" not in out or tc_builds(sb) or os.path.exists(wd):
                 p.append(f"{ch!r}: exit {rc}, {out[-200:]!r}")
         return p
     p = chars_problems()
-    check("a working directory with : ; ' \" \\ $ or `: deps stops at the start with one line naming it, nothing fetched or built", not p, p)
+    check("a working directory with any of : ; ' \" \\ $ ` & | < > ( ) [ ] { } * ? ! # ~ ^ = , or a control character: "
+          "deps stops at the start with one line naming it, nothing fetched or built", not p, p)
+    p = [x for v in ("NULLMOTH_BUILD_ROOT", "NULLMOTH_RUST_BIN", "NULLMOTH_CARGO_HOME", "NM_OGKM620", "NM_OGKM620_PRISTINE")
+         for x in chars_problems(("&", "("), var=v)]
+    check("NULLMOTH_BUILD_ROOT, NULLMOTH_RUST_BIN, NULLMOTH_CARGO_HOME, NM_OGKM620 or NM_OGKM620_PRISTINE with & or (: "
+          "deps stops at the start, nothing fetched or built", not p, p)
+    # the control: letters of another alphabet and the six characters kept are taken
+    wd = str(sb.home / "años" / "nm_build+1@x%y.z-über")
+    sb.clear()
+    rc, out = sb.run("--workdir", wd, "--dry-run", "deps")
+    check("a working directory with accented letters and % + - . @ _ is taken (dry run)",
+          rc == 0 and "may hold only" not in out, (rc, out[-400:]))
     with sb.scratch():
-        sb.break_script('  case "$NM_WORK" in *[:', '  case "$NM_WORK" in *[@')
-        negative("a build.sh that takes a working directory with a colon", [x for x in chars_problems() if x.startswith("':'")])
+        sb.break_script('nm_unsafe_path() { case "$1" in', 'nm_unsafe_path() { return 1; case "$1" in')
+        negative("a build.sh that takes a working directory with an ampersand", [x for x in chars_problems() if x.startswith("'&'")])
+    # the three release scripts guard a run by hand with build.sh's own pattern: one text in the four files
+    def pattern_problems(texts):
+        pats = {n: re.findall(r'\*\[\]\\\[[^\n]*?\[:cntrl:\]\]\*\)', t) for n, t in texts.items()}
+        return ([f"{n}: {len(v)} copies of the pattern" for n, v in pats.items() if len(v) != 1]
+                or [f"{n}: {v[0]} is not build.sh's {pats['build.sh'][0]}" for n, v in pats.items() if v != pats["build.sh"]])
+    texts = {n: (ROOT / n).read_text() for n in ("build.sh", "build/build_plugin_release.sh", "build/build_xlate_release.sh",
+                                                  "build/build_nvencvt.sh")}
+    p = pattern_problems(texts)
+    check("build.sh's nm_unsafe_path and the guards of the plugin, translator and video release scripts are one pattern", not p, p)
+    texts["build/build_nvencvt.sh"] = texts["build/build_nvencvt.sh"].replace("\\&", "", 1)
+    negative("a video release script whose guard takes an ampersand", pattern_problems(texts))
     # NM_TOOLS_FROM on each processor
     def mode(arch, value):
         s = Sandbox(f"mode-{arch}-{value or 'unset'}", cpu=arch, arch=arch, tools_from=value, formulas=("cmake",))
