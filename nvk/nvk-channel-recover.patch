@@ -1062,10 +1062,10 @@ index 2a2195e..a8ae5b0 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..a854910
+index 0000000..7373d0c
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -0,0 +1,1014 @@
+@@ -0,0 +1,1016 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -1124,10 +1124,12 @@ index 0000000..a854910
 + *     a submission (nvrm_gsub_submit), the CPU wait for a sync (nvrm_gsub_ctx_wait), the wait of sync. A wait that
 + *     fails returns with the mutex released, and the op returns that failure; nvrm_rec_leave then only counts down.
 + *     Every early return of an op after nvrm_rec_enter goes through nvrm_rec_leave. The owner makes no RM call and
-+ *     no escape while it holds the mutex: an RM call waits at the kext's power gate during a GPU suspend, and a
-+ *     recoverer waiting for the mutex would then answer BUSY, or take it after the resume and rebuild a channel that
-+ *     only stood still for the sleep. The flushing ops renew the boost lease before nvrm_rec_enter and reap the
-+ *     deferred frees after nvrm_rec_leave (nvrm_rec_op_begin, nvrm_rec_op_end);
++ *     no escape while it holds the mutex (one exception, the test hook, only once NVK_FAULT_INJECT arms it and once per
++ *     process: from nvrm_gsub_submit, nvrm_rec_inject_for_flush sends its note and, in mode `reset`,
++ *     nvrm_rec_inject_after_doorbell its channel reset): an RM call waits at the kext's power gate during a GPU
++ *     suspend, and a recoverer waiting for the mutex would then answer BUSY, or take it after the resume and rebuild a
++ *     channel that only stood still for the sleep. The flushing ops renew the boost lease before nvrm_rec_enter and
++ *     reap the deferred frees after nvrm_rec_leave (nvrm_rec_op_begin, nvrm_rec_op_end);
 + *   - a recovering thread, for the whole rebuild, after it claimed the slot (`recovering`, under nvkmd_nvrm_gsub_mtx);
 + *   - the doorbell kick, with one trylock and nothing else;
 + *   - destroy (nvrm_rec_mark_dying), with a plain lock, only to set `dying`; it holds it for nothing else.
