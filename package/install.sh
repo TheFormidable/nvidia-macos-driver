@@ -724,8 +724,12 @@ step "6c. counting a start as good once the desktop is up"
 # The kernel's guard only counts a start as good when the framebuffer lights a head, or when the card reports that none
 # of its connectors has a display. A laptop whose panel hangs off the integrated GPU reaches that report late and does
 # not always reach it: two boots that missed it switched a healthy driver off, leaving the Mac with no NVIDIA card in
-# Metal at all. A desktop that comes up and stays up is also a good start, so this job says so. A boot that never
-# reaches a desktop keeps its count, which is what the guard is for.
+# Metal at all. A desktop that comes up and stays up is also a good start, so this job says so, but only while NVRM
+# runs a card (nvrm-claimed) and either its framebuffer has reported the display path up (debug.nvrmfb_guard_cleared)
+# or a display hangs off another GPU. With the card claimed and nothing lit the start keeps its count (the kernel
+# clears it if the display comes up later). With no NVIDIA driver running (no kext loaded yet, or the driver off) the
+# desktop says nothing about the new driver: the count is cleared and nullmoth-nv-ok is not written, so the install's
+# trial goes on. A boot that never reaches a desktop keeps its count, which is what the guard is for.
 # A lit head is not a desktop. When WindowServer cannot get a Metal device for a display this driver drives (the plugin
 # refused at load, or a crash in it), CoreDisplay asserts "Failed to create MetalDevice" and launchd restarts
 # WindowServer every ten seconds: a black screen with only the cursor, boot after boot (477 such crashes since 10-31,
@@ -755,6 +759,8 @@ ws_reports() {
   done
   echo $c
 }
+# the registry ids of the displays (IODisplayConnect) in what ioreg printed
+ids() { grep -o '<class IODisplayConnect, id 0x[0-9a-fA-F]*' | grep -o '0x[0-9a-fA-F]*'; }
 pids=""; n=0
 while [ "$n" -lt 48 ]; do
   p=$(pgrep -x WindowServer 2>/dev/null | head -1)
@@ -773,9 +779,30 @@ while [ "$n" -lt 48 ]; do
              "macOS's classes); this start does not count as good" >> $LOG
         exit 0
       fi
+      # The driver's desktop: NVRM runs a card and its framebuffer lit the display path (or found nothing to light),
+      # or a display hangs off another GPU (a laptop's panel). A claimed card with no display anywhere but under it
+      # shows nothing of this driver yet: the start keeps its count.
+      claimed=0; ioreg -l -w0 2>/dev/null | grep -q '"nvrm-claimed" = Yes' && claimed=1
+      if [ "$claimed" = 1 ] && [ "$(sysctl -n debug.nvrmfb_guard_cleared 2>/dev/null)" != 1 ]; then
+        card=$(ioreg -r -k nvrm-claimed -w0 2>/dev/null | ids); card=" $(echo $card) "; other=0
+        for d in $(ioreg -r -c IODisplayConnect -w0 2>/dev/null | ids); do
+          case "$card" in *" $d "*) ;; *) other=1;; esac
+        done
+        if [ "$other" = 0 ]; then
+          echo "$(date) WindowServer $p stayed up, but the driver shows no picture and no other GPU has a display;" \
+               "this start keeps its count" >> $LOG
+          exit 0
+        fi
+      fi
       nvram -d $V:nullmoth-nv-starts 2>/dev/null
-      nvram $V:nullmoth-nv-ok=1 2>/dev/null
       nvram -d $V:nullmoth-ws-loop 2>/dev/null
+      if [ "$claimed" = 0 ]; then
+        # no NVIDIA driver ran this start (not loaded yet, or off): its desktop says nothing about the new driver
+        echo "$(date) the desktop came up and stayed up (WindowServer $p for 45 s) with no NVIDIA driver running;" \
+             "the start count is cleared and the install's trial goes on" >> $LOG
+        exit 0
+      fi
+      nvram $V:nullmoth-nv-ok=1 2>/dev/null
       echo "$(date) the desktop came up and stayed up (WindowServer $p for 45 s); this start counts as good" >> $LOG
       exit 0
     fi

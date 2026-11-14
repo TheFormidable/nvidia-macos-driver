@@ -12,7 +12,12 @@ A WindowServer that stays up is not this driver's desktop either when the driver
 classes: NVRM then declined the card and wrote that on the PCI device (nvrm-layout = "declined ..."), and nothing of the
 driver shows a picture. Calling that start good would end the install's trial, and the fallback job
 (tools/test_lastgood_refusal.py) would take itself away at the next start. The job reads the registry before it calls
-a start good; the control is the job without that look."""
+a start good; the control is the job without that look.
+
+Nor is a desktop with no NVIDIA driver running (no kext loaded yet, or the driver off), or one where NVRM claimed the
+card and nothing lit: the job ends the trial (nullmoth-nv-ok) only when a card carries nvrm-claimed and its
+framebuffer reported the display path up (debug.nvrmfb_guard_cleared) or a display hangs off another GPU. The controls
+are the job with the two lines it had before that rule."""
 import os
 import pathlib
 import re
@@ -50,6 +55,7 @@ eval "echo \${$i}"''',
 case "$2" in
   kern.boottime) echo "{ sec = $BOOT_SEC, usec = 912475 } Sat Nov  7 22:00:00 2026";;
   debug.nvaccelfb) [ -n "$ARMED" ] && echo "$ARMED" || exit 1;;
+  debug.nvrmfb_guard_cleared) [ -n "$CLEARED" ] && echo "$CLEARED" || exit 1;;
   *) exit 1;;
 esac''',
     "nvram": r'''#!/bin/bash
@@ -70,14 +76,26 @@ if [ "$1" = 45 ] && [ "$n" -lt "${CRASHES:-0}" ]; then : > "$DRDIR/WindowServer-
 exit 0''',
     "shutdown": r'''#!/bin/bash
 echo "shutdown $*" >> "$T/calls"''',
-    # what `ioreg -l -w0` prints: the properties the test gave it
+    # what `ioreg -l -w0` prints: the properties the test gave it; `ioreg -r -k nvrm-claimed` the claimed card's
+    # subtree and `ioreg -r -c IODisplayConnect` every display, as the test gave them
     "ioreg": r'''#!/bin/bash
-[ -z "$REGISTRY" ] || printf '%s\n' "$REGISTRY"
+case " $* " in
+  *" -k nvrm-claimed "*) [ -z "$CARD" ] || printf '%s\n' "$CARD";;
+  *" -c IODisplayConnect "*) [ -z "$DISPLAYS" ] || printf '%s\n' "$DISPLAYS";;
+  *" -r "*) ;;
+  *) [ -z "$REGISTRY" ] || printf '%s\n' "$REGISTRY";;
+esac
 exit 0''',
 }
 
 
-def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, registry=""):
+# a start of this driver: NVRM claimed the card and the framebuffer reported its display path up
+CLAIMED = '    | |   "nvrm-claimed" = Yes'
+GOOD = dict(registry=CLAIMED, cleared="1")
+
+
+def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, registry="", cleared="", card="",
+        displays="", starts=None):
     t = pathlib.Path(tempfile.mkdtemp(prefix="bgws-"))
     fake = t / "bin"
     fake.mkdir()
@@ -93,13 +111,18 @@ def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, reg
     os.utime(old, (time.time() - 86400, time.time() - 86400))
     if prior_loop is not None:
         (t / "nv.nullmoth-ws-loop").write_text(prior_loop + "\n")
+    if starts is not None:
+        (t / "nv.nullmoth-nv-starts").write_text(starts + "\n")
     text = redirect(job, fake, t, dr)
     script = t / "bootguard.sh"
     script.write_text(text)
     env = dict(os.environ, T=str(t), WS_PIDS=" ".join(map(str, pids)), ARMED=armed or "", CRASHES=str(crashes),
-               CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120), REGISTRY=registry)
+               CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120), REGISTRY=registry,
+               CLEARED=cleared, CARD=card, DISPLAYS=displays)
     try:
-        p = subprocess.run(["/bin/bash", str(script)], env=env, capture_output=True, text=True, timeout=120)
+        # JOB_BASH: the shell the job runs under (macOS runs it with bash 3.2)
+        p = subprocess.run([os.environ.get("JOB_BASH", "/bin/bash"), str(script)], env=env, capture_output=True,
+                           text=True, timeout=120)
         log = (t / "bootguard.log").read_text() if (t / "bootguard.log").exists() else ""
         calls = (t / "calls").read_text() if (t / "calls").exists() else ""
     finally:
@@ -163,7 +186,7 @@ arm("and reads WindowServer reports from this boot", "DiagnosticReports" in job 
 
 loop = list(range(500, 900, 10))   # a new WindowServer at every look
 
-p, log, calls = run(job, pids=[777])
+p, log, calls = run(job, pids=[777], **GOOD)
 arm("a WindowServer that stays up for the wait counts as good", "counts as good" in log, log + p.stderr)
 arm("  and clears the start count and sets nv-ok", "nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts" in calls
     and "nullmoth-nv-ok=1" in calls, calls)
@@ -187,7 +210,7 @@ p, log, calls = run(job, pids=loop, crashes=99, armed=None)
 arm("a WindowServer loop on a display this driver does not drive is left alone", "nv-starts=%02" not in calls
     and "shutdown" not in calls and "four minutes" in log, log + calls)
 
-p, log, calls = run(job, pids=[600, 610, 620, 620, 620, 620, 620, 620, 620, 620], crashes=2)
+p, log, calls = run(job, pids=[600, 610, 620, 620, 620, 620, 620, 620, 620, 620], crashes=2, **GOOD)
 arm("two crashes at boot and then a steady WindowServer still counts as good", "counts as good" in log
     and "nv-starts=%02" not in calls, log + calls)
 
@@ -209,18 +232,73 @@ for text in written:
         log + calls)
     arm("  and the start count and the driver are left as they are", "nullmoth-nv-starts" not in calls
         and "shutdown" not in calls, calls)
-p, log, calls = run(job, pids=[777],
+p, log, calls = run(job, pids=[777], cleared="1",
                     registry='    | |   "nvrmfb-layout" = "ok: 3 classes, vtables not compared; macOS 25G342"\n'
-                             '    | |   "nvaccel-layout" = "refused: IOAccelDevice2 is 0x90 bytes in this macOS"')
+                             '    | |   "nvaccel-layout" = "refused: IOAccelDevice2 is 0x90 bytes in this macOS"\n'
+                             + CLAIMED)
 arm("the other layout lines are not NVRM's refusal: the desktop that stayed up counts as good", "counts as good" in log
     and "nullmoth-nv-ok=1" in calls, log + calls)
 if written and job.count(LOOK) == 1:
-    p, log, calls = run(job.replace(LOOK, "      if false; then\n"), pids=[777],
-                        registry=f'    | |   "nvrm-layout" = "{written[0]}"')
+    # the late decline: NVRM had claimed the card and its framebuffer then refused
+    p, log, calls = run(job.replace(LOOK, "      if false; then\n"), pids=[777], cleared="1",
+                        registry=f'    | |   "nvrm-layout" = "{written[-1]}"\n' + CLAIMED)
     arm("control: without the look the job calls the refused start good (what ends the install's trial)",
         "counts as good" in log and "nullmoth-nv-ok=1" in calls, log + calls)
 else:
     arm("control: the job without its look at the registry can be made", False)
+
+# A desktop that stayed up ends the install's trial (nullmoth-nv-ok) only when it is this driver's: NVRM claimed a card
+# and either its framebuffer reported the display path up (debug.nvrmfb_guard_cleared) or a display hangs off another
+# GPU. With no NVIDIA driver running the count is cleared and the trial goes on; with the card claimed and nothing lit
+# the start keeps its count.
+NVOK = "nullmoth-nv-ok=1"
+DEL_STARTS = "nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts"
+PCI = "+-o GFX0@0  <class IOPCIDevice, id 0x1000002a0, registered, matched, active, busy 0 (120 ms), retain 18>"
+ON_CARD = "+-o display0  <class IODisplayConnect, id 0x1000004f8, registered, matched, active, busy 0 (1 ms), retain 6>"
+ELSEWHERE = ON_CARD.replace("0x1000004f8", "0x1000004e0")
+CASES = {
+    "a": dict(registry=CLAIMED, cleared="1", card=PCI + "\n" + ON_CARD, displays=ON_CARD, starts="%01"),
+    "b": dict(registry="", starts="%01"),
+    "c": dict(registry=CLAIMED, starts="%01", card=PCI),
+    "d": dict(registry=CLAIMED, starts="%01", card=PCI, displays=ELSEWHERE),
+    "e": dict(registry=CLAIMED, starts="%01", card=PCI + "\n" + ON_CARD, displays=ON_CARD),
+    "f": dict(registry="", starts="%02"),
+}
+p, log, calls = run(job, pids=[777], **CASES["a"])
+arm("(a) the card claimed and its display path up: the start counts as good", "counts as good" in log
+    and DEL_STARTS in calls and NVOK in calls, log + calls)
+p, log, calls = run(job, pids=[777], **CASES["b"])
+arm("(b) no NVIDIA driver running (no kext loaded yet): the count is cleared, the trial goes on, no nv-ok",
+    DEL_STARTS in calls and NVOK not in calls and "with no NVIDIA driver running" in log
+    and "the install's trial goes on" in log and "counts as good" not in log, log + calls)
+p, log, calls = run(job, pids=[777], **CASES["c"])
+arm("(c) the card claimed and nothing lit yet (the display armed late): the start keeps its count, nothing written",
+    "this start keeps its count" in log and "nvram -d" not in calls and "=" not in calls, log + calls)
+p, log, calls = run(job, pids=[777], **CASES["d"])
+arm("(d) the card claimed, not lit, a display on another GPU (a laptop's panel): the start counts as good",
+    "counts as good" in log and NVOK in calls, log + calls)
+p, log, calls = run(job, pids=[777], **CASES["e"])
+arm("(e) the card claimed, not lit, the only display under the card: the start keeps its count",
+    "this start keeps its count" in log and NVOK not in calls and "nullmoth-nv-starts" not in calls, log + calls)
+p, log, calls = run(job, pids=[777], **CASES["f"])
+arm("(f) the driver off after two dark starts: the count is cleared as before, no nv-ok", DEL_STARTS in calls
+    and NVOK not in calls and "with no NVIDIA driver running" in log, log + calls)
+# the controls: the job with the two lines it had before this rule calls (b), (c) and (e) good and ends the trial
+NEW_START = "      # The driver's desktop: NVRM runs a card"
+NEW_END = "      echo \"$(date) the desktop came up and stayed up (WindowServer $p for 45 s); this"
+NEW_RULE = job[job.index(NEW_START):job.index(NEW_END)]
+OLD_RULE = ("      nvram -d $V:nullmoth-nv-starts 2>/dev/null\n      nvram $V:nullmoth-nv-ok=1 2>/dev/null\n"
+            "      nvram -d $V:nullmoth-ws-loop 2>/dev/null\n")
+old_job = job.replace(NEW_RULE, OLD_RULE)
+arm("control: the job with the older rule can be made", old_job != job and job.count(NEW_RULE) == 1)
+for c in "bce":
+    p, log, calls = run(old_job, pids=[777], **CASES[c])
+    arm(f"control: with the older rule ({c}) writes nv-ok and counts as good",
+        NVOK in calls and "counts as good" in log, log + calls)
+# the registry ids are compared whole: a display whose id only begins like one under the card is another display
+p, log, calls = run(job, pids=[777], **dict(CASES["e"], displays=ON_CARD.replace("0x1000004f8", "0x1000004f80")))
+arm("  a display whose id only begins like the card's is another GPU's: the start counts as good",
+    "counts as good" in log and NVOK in calls, log + calls)
 
 # a job whose PATH line moved, or that names nvram by its full path, is not run at all
 for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
