@@ -743,7 +743,9 @@ class Sandbox:
         os.symlink(BASH, self.bin / "bash")
         # the real git, without the three variables an arm may have set to something that names nothing: where git is
         # Apple's (APPLE_TOOLS) they would reach xcrun; git itself reads none of them
+        # git-prompt: whether git may ask on the terminal (GIT_TERMINAL_PROMPT) in each call, beside its arguments
         (self.bin / "git").write_text(f'#!/bin/bash\n{{ printf git; for a in "$@"; do printf " %q" "$a"; done; echo; }} >> {self.journal}\n'
+                                      f'printf "%s %s\\n" "${{GIT_TERMINAL_PROMPT-unset}}" "$*" >> {self.dir}/git-prompt\n'
                                       f'unset SDKROOT TOOLCHAINS DEVELOPER_DIR\nexec {GIT} "$@"\n')
         (self.bin / "git").chmod(0o755)
         for name_, role in STANDINS.items():
@@ -3056,12 +3058,26 @@ def arm_mesagit():
                                                    '      [ -f "${NM_VULKAN_INCLUDE:-$MESA/include}/vulkan/vulkan_core.h" ] || die'))[0])
 
 
+def prompt_problems(sb):
+    """every git fetch and clone of build.sh's fetch runs with GIT_TERMINAL_PROMPT=0: a mirror that asks for a login, or
+    a repository that is gone, makes it fail instead of waiting for a name on the terminal"""
+    f = sb.dir / "git-prompt"
+    lines = [l for l in (f.read_text().splitlines() if f.exists() else []) if re.search(r" (fetch|clone) ", l)]
+    return ([] if lines else ["no git fetch or clone was recorded"]) + [l for l in lines if not l.startswith("0 ")][:3]
+
+
 def arm_stepgit():
     sb = Sandbox("stepgit")
     rc, out = sb.run("fetch")
     if rc != 0:
         check("fetch for the steps' git arm", False, out[-400:])
         return
+    p = prompt_problems(sb)
+    check("fetch's git fetch and clone never ask on the terminal (GIT_TERMINAL_PROMPT=0)", not p, p)
+    sbp = Sandbox("stepgit-prompt")
+    sbp.break_script('git_q() { GIT_TERMINAL_PROMPT=0 git -c', 'git_q() { git -c')
+    sbp.run("fetch")
+    negative("a fetch whose git may ask for a name on the terminal", prompt_problems(sbp))
     p = stepgit_problems(sb)
     check("a step's git reads none of the tester's configuration: no hooks folder, signing or file system monitor of "
           "theirs acts in a step's clone, checkout, status or archive", not p, p)

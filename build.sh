@@ -1111,7 +1111,7 @@ passthru() { local v; for v in "$@"; do eval "[ -n \"\${$v+x}\" ] && printf '%s\
 # its post-checkout in every clone; a hook may download or install anything), no file system monitor, no global
 # attributes file (the pinned repositories mark no file for a filter; a global one could send every file through
 # git-lfs or another filter), and git init / clone get an empty template (init.templateDir would copy hooks and files).
-git_q() { git -c advice.detachedHead=false -c init.defaultBranch=nm -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+git_q() { GIT_TERMINAL_PROMPT=0 git -c advice.detachedHead=false -c init.defaultBranch=nm -c core.hooksPath=/dev/null -c core.fsmonitor=false \
               -c core.attributesFile=/dev/null "$@"; }
 mirror_url() {   # <pin id>: the mirror variable's value, or the pinned URL
   local mv url
