@@ -3,9 +3,10 @@
 This page follows a frame from a Metal app down to the GPU, then covers how the driver is installed, removed, and
 recovered. Paths are the ones on an installed Mac; the source folder for each piece is in brackets.
 
-> The driver is new. Release 2.9 was tested on an RTX 5060 under macOS 15.7.x; release 3.0 has not run on a card yet
-> ([TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md)). The driver may not work on every card, board or OpenCore setup.
-> If your Mac does not boot macOS with OpenCore yet, set that up first with the
+> The driver is new. Release 2.9 was tested on an RTX 5060 under macOS 15.7.x; a package of the 3.0 branch at commit
+> aa27c73 has been installed and started on one machine with an RTX 5050, and no test of it on a card has been
+> reported yet ([TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md)). The driver may not work on every card, board or
+> OpenCore setup. If your Mac does not boot macOS with OpenCore yet, set that up first with the
 > [OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/), then install the driver.
 
 ## 1. The layers

@@ -1,11 +1,12 @@
 # Testing release 3.0 on a card
 
-This page is the check list for the first run of release 3.0 on a card. Nothing on it has been seen on an NVIDIA card:
-nothing built from this branch has been installed, loaded or run on one, so each "pass" below is what the code is
-written to show, not a result anyone has observed. What has run is the build: at commit 3933ff6, `./build.sh` built
-every component and staged a package on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel
-runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). [BUILDING.md](BUILDING.md) says what
-ran where.
+This page is the check list for the first run of release 3.0 on a card. No result of it has been reported: a package
+built from this branch at commit aa27c73 has been installed over 2.9 and started on one machine with an RTX 5050, and
+nothing more is known from there, so each "pass" below is what the code is written to show, not a result anyone has
+reported. What else has run is the build: at commit 3933ff6, `./build.sh` built every component and staged a package on
+one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
+Xcode 26.3 with the 26.2 SDK), and at commit aa27c73 on that Mac again, where the host tests ran too (305 passed,
+0 failed, of 317). [BUILDING.md](BUILDING.md) says what ran where.
 
 En español: [TESTING-ON-HARDWARE.es.md](TESTING-ON-HARDWARE.es.md).
 
@@ -105,11 +106,10 @@ restart. Take every test setting out again when its test is done.
    its first start. On that Mac `./build.sh deps` took 46.5 minutes in an empty working directory at commit 650db45,
    downloads included; at commit 3933ff6 the build of the 17 components took 5 minutes 41 seconds and the package
    27 seconds, and the working directory then held about 8 GB.
-   Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. A pass
-   does not cover the firmware, which the real install takes from the earlier install or downloads from NVIDIA before
-   it changes anything. It has not yet been run with a package that `./build.sh` made: on that Mac the package was
-   staged and nothing more. Pass: its last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it
-   refused; fix that first.
+   Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. A pass does
+   not cover the firmware, which the real install takes from the earlier install or downloads from NVIDIA before it
+   changes anything. No result of it with a package that `./build.sh` made has been reported. Pass: its last line is
+   `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that first.
 5. **Your settings file.** Read it before you install: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. The installer
    replaces the whole folder `/Library/GPUBundles/nvmtl` with the package's, and of your old file it puts back, at the
    end of the package's file, only the lines between `# --- my settings, kept on update ---` and
@@ -164,9 +164,9 @@ restart. Take every test setting out again when its test is done.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
-3. **The Apple class checks.** Nobody has compared the sizes of Apple's classes that this build was made for with
-   the ones your macOS registers: on each macOS you have (15 and 26) the first start is that comparison, and it is the
-   test that matters. Right after it (over `ssh` if the screen did not come up):
+3. **The Apple class checks.** Nobody has reported a comparison of the sizes of Apple's classes that this build was made
+   for with the ones a macOS registers: on each macOS you have (15 and 26) the first start is that comparison, and it is
+   the test that matters. Right after it (over `ssh` if the screen did not come up):
 
    ```bash
    ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'
@@ -207,7 +207,7 @@ restart. Take every test setting out again when its test is done.
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` is 6, there is no
        `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
        started). The framebuffer lights the display, so the boot guard counts the start as good and the installer's
-       job puts nothing back. A desktop without acceleration on this driver has not been seen. If the screen
+       job puts nothing back. A desktop without acceleration on this driver has not been reported. If the screen
        stays black or shows only the pointer while WindowServer keeps dying and every display is on this card, the
        boot-guard job turns the driver off and restarts once from the login window, and the fallback job, while it
        is still installed, puts the previous driver back at that next start; `/Library/NullMoth/bootguard.log`, read

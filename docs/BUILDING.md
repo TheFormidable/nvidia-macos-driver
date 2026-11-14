@@ -6,18 +6,21 @@ an installable package. It never uses `sudo` and never installs the driver; at t
 
 En español: [BUILDING.es.md](BUILDING.es.md).
 
-> **What has run, and where.** Nothing built from this branch has been installed, loaded or run on an NVIDIA card, and
-> no package made by `./build.sh package` has been installed. What has run:
+> **What has run, and where.** A package made by `./build.sh package` at commit aa27c73 on the Intel Mac below has been
+> installed over release 2.9 and started on one machine with an RTX 5050: the machine started with it twice, and the
+> installer's fallback job did not put 2.9 back. No test of it on an NVIDIA card has been reported. What has run:
 >
 > - On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5). At commit 650db45, `./build.sh deps` started from an empty
 >   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
 >   commit 3933ff6, with those tools kept, `deps`, `doctor` and `fetch` succeeded, `./build.sh --no-install build` built
 >   all 17 components in 5 minutes 41 seconds with no warning, and `package` staged a package on release 2.9 in
->   27 seconds. `./build.sh test` passed 303 of the 315 host tests there and none failed (3 were skipped and 9 not
->   run), in 20 minutes 49 seconds. Nothing outside the working directory changed, apart from the crash reports macOS
->   writes for the small programs the host tests make fail on purpose (see `test` in [Commands](#commands)). At commit
->   ee7f332 `build` built the 17 components again in 401 seconds with no warning and `package` staged the package in
->   28 seconds; the host tests were not run there at that commit.
+>   27 seconds. `./build.sh test` passed 303 of the 315 host tests there and none failed (3 were skipped and 9 not run),
+>   in 20 minutes 49 seconds. Nothing outside the working directory changed, apart from the crash reports macOS writes
+>   for the small programs the host tests make fail on purpose (see `test` in [Commands](#commands)). At commit ee7f332
+>   `build` built the 17 components again in 401 seconds with no warning and `package` staged the package in 28 seconds;
+>   the host tests were not run there at that commit. At commit aa27c73 `build` built the 17 components in 361 seconds
+>   with no warning, `package` staged the package in 26 seconds, and `./build.sh test` passed 305 of the 317 host tests
+>   there with none failed (3 were skipped and 9 not run), in 25 minutes 50 seconds.
 > - On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6.
 >   In the workflow `ci`, 303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there),
 >   `tools/test_build_sh.py` among them. The workflow `full-build`, which builds everything in an empty working
@@ -37,8 +40,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   script (`tools/test_build_sh.py`, on Linux and on GitHub's runners): `deps` taking its tools from Homebrew, which
 >   is what it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
 > - Nowhere when this notice was written (2026-11-14): a whole build on Apple silicon (see
->   [Requirements](#requirements)), and a build or a test of this branch's commits after ee7f332 on any Mac, GitHub's
->   included.
+>   [Requirements](#requirements)), a build or a test of this branch's commits after ee7f332 on GitHub's runners, and of
+>   those after aa27c73 on any Mac (they were compiled and their host tests run on Linux only; those that need a Mac
+>   have not run).
 >
 > `build.sh` is written for macOS's `/bin/bash` 3.2 and its BSD tools. On a system other than macOS only `doctor`,
 > `fetch`, `test`, `env`, `clean`, `help` and a dry run of any command but `deps` work. A step can still stop on
@@ -499,9 +503,10 @@ account that built it, and it carries none of your Mac's extended attributes (th
 base names your browser), so it can be passed on. The ryzenadj built here has another SHA-256 than the
 one the 1401 app pins, so the app will not install it; the driver is not affected.
 
-No package made by `./build.sh package` has been installed on any Mac, and nothing built from this branch has been
-loaded or run on an NVIDIA card: whoever installs one first is testing it. The sizes of Apple's IOKit classes on
-macOS 26.7 have not been measured either; the kexts compare them with their own when they start (the layout check).
+A package made by `./build.sh package` at commit aa27c73 has been installed over release 2.9 and started on one machine
+with an RTX 5050, and no test of it on an NVIDIA card has been reported: whoever installs one is testing it. The sizes
+of Apple's IOKit classes on macOS 26.7 have not been reported either; the kexts compare them with their own when they
+start (the layout check).
 
 Install it yourself, as for a release (read [README.md](../README.md), "Install — by hand", first: OpenCore must be
 set up):

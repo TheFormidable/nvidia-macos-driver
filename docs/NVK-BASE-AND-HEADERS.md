@@ -53,10 +53,10 @@ once without the scheduling patch, with the flags the library is built with: eve
 encodes with it. On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) the library has been built with the whole chain
 and LLVM 22, and had the same bytes in three builds (one with tools built by hand, then with `./build.sh` at commits
 650db45 and 3933ff6, which do not differ in NVK's sources or patches), at 3933ff6 with no warning; GitHub's Intel
-runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) built it at that commit too. Not
-checked anywhere: the image on a card. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa
-release. The library's build id changes, so shader caches written by a 2.9 build are not reused and shaders are
-compiled again once.
+runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) built it at that commit too.
+`nvk-stream-uncached`, added after commit aa27c73, has been compiled on Linux only. No check of the image on a card has
+been reported. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa release. The library's build id
+changes, so shader caches written by a 2.9 build are not reused and shaders are compiled again once.
 
 ## NVRM headers
 

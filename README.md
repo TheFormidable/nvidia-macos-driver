@@ -1,16 +1,18 @@
 # NullMoth NVIDIA Driver for macOS
 
-> **Not yet run on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
+> **Not yet tested on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
 > At commits 3933ff6 and ee7f332, `./build.sh` built every component of it, with build tools it had built from pinned
-> sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's
-> Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At 3933ff6 the host tests
-> passed on that Mac and, in GitHub's workflow `ci`, on that runner; at ee7f332 they passed in the workflow `ci` on
-> GitHub's Intel and Apple-silicon runners, and the workflow `full-build` succeeded in every step, its own run of the
-> host tests included ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been
-> installed, loaded or run on an NVIDIA card: whoever installs it first is testing it. Read
-> [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back to 2.9 at hand: the first
-> step of that page is a way back you have tried, and [CHANGELOG.md](CHANGELOG.md), "The ways back", gives the way
-> back from each change on its own.
+> sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel
+> runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At 3933ff6 the host tests passed on
+> that Mac and, in GitHub's workflow `ci`, on that runner; at ee7f332 they passed in the workflow `ci` on GitHub's Intel
+> and Apple-silicon runners, and the workflow `full-build` succeeded in every step, its own run of the host tests
+> included; at aa27c73 that Mac built and staged it again and the host tests passed there
+> ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). A package built from aa27c73 has been installed
+> over 2.9 and started on one machine with an RTX 5050, but no test of it on a card has been reported, and the commits
+> after aa27c73 have been compiled and their host tests run on Linux only (those that need a Mac have not run): whoever
+> installs it is testing it. Read [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back
+> to 2.9 at hand: the first step of that page is a way back you have tried, and [CHANGELOG.md](CHANGELOG.md), "The ways
+> back", gives the way back from each change on its own.
 
 **What this branch is.** Release 2.9 of the driver with the changes being prepared as 3.0: the kernel knows which
 process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
@@ -18,7 +20,7 @@ through long GPU waits instead of polling; a GPU fault on one channel costs the 
 application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime and FaceTime once a short self-test
 has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed; each risky change that
 changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
-are undone only by reinstalling 2.9. None of it has run on an NVIDIA card yet.
+are undone only by reinstalling 2.9. No test of it on an NVIDIA card has been reported yet.
 Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card, in order:
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
@@ -236,7 +238,8 @@ repository, so a package is the release's with every part this checkout builds r
 ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
 ```
 
-Such a package has been staged on both Intel Macs above; none has been installed yet.
+Such a package has been staged on both Intel Macs above, and one made at commit aa27c73 on the first of them has been
+installed and started on one machine with an RTX 5050.
 
 `./build.sh help` lists the commands, components and options; `./build.sh env` prints every variable the build
 scripts read, to run one of them by hand. [docs/BUILDING.md](docs/BUILDING.md) explains everything, including what

@@ -7,8 +7,8 @@ the core channel spun in `nvEvoMakeRoom` forever, and the Mac needed a hard rese
 
 Tested on an RTX 5050 (GB207, FSP boot), MacPro7,1 SMBIOS, macOS 15.8.1: repeated sleep and wake with the desktop,
 windows and Metal apps intact. That test was of 2.9. The additions of release 3.0 (the interrupt gate, the paused 1 Hz
-timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d) have not run through a sleep
-on a card yet; they are marked "(3.0)" below.
+timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d): no run of them through a sleep
+on a card has been reported yet; they are marked "(3.0)" below.
 
 ## What happens
 
@@ -98,7 +98,7 @@ ordinary clock, as in 2.9 (a wait across a long sleep can then be called lost at
 
 **VT-d.** With a DMA mapper (DMA modes 1 and 2, [DMA-IOMMU.md](DMA-IOMMU.md)) the GPU's bus addresses stay valid
 across sleep: AppleVTD keeps its tables in memory and restores them before drivers wake. `debug.nvrm_dma_live` reads
-the same before and after a sleep with nothing else running. Not yet observed on hardware.
+the same before and after a sleep with nothing else running. Not yet reported from hardware.
 
 ## Switches and diagnostics
 

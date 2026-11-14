@@ -6,8 +6,10 @@ puede preparar un paquete instalable. Nunca usa `sudo` y nunca instala el driver
 hacerlo. La guía completa, en inglés, es [BUILDING.md](BUILDING.md); aquí están el inicio rápido, la referencia de
 comandos y opciones y la solución de problemas.
 
-> **Qué se ha ejecutado, y dónde.** Nada compilado desde esta rama se ha instalado, cargado ni ejecutado en una
-> tarjeta NVIDIA, y no se ha instalado ningún paquete hecho con `./build.sh package`. Lo que se ha ejecutado:
+> **Qué se ha ejecutado, y dónde.** Un paquete hecho con `./build.sh package` en el commit aa27c73 en el Mac Intel de
+> abajo se ha instalado sobre la versión 2.9 y ha arrancado en una máquina con una RTX 5050: la máquina arrancó con él
+> dos veces, y la tarea del instalador que devuelve la versión anterior no devolvió la 2.9. No se ha informado de
+> ninguna prueba suya en una tarjeta NVIDIA. Lo que se ha ejecutado:
 >
 > - En un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5). En el commit 650db45, `./build.sh deps` empezó con un
 >   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
@@ -18,7 +20,9 @@ comandos y opciones y la solución de problemas.
 >   fuera del directorio de trabajo cambió, salvo los informes de fallo que macOS escribe de los programas pequeños que
 >   las pruebas hacen fallar a propósito (ver `test` en [Comandos](#comandos)). En el commit ee7f332, `build` volvió a
 >   compilar los 17 componentes en 401 segundos sin ningún aviso y `package` preparó el paquete en 28 segundos; las
->   pruebas no se ejecutaron allí en ese commit.
+>   pruebas no se ejecutaron allí en ese commit. En el commit aa27c73, `build` compiló los 17 componentes en
+>   361 segundos sin ningún aviso, `package` preparó el paquete en 26 segundos y `./build.sh test` pasó allí 305 de las
+>   317 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 25 minutos 50 segundos.
 > - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
 >   3933ff6. En el flujo `ci`, de las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron
 >   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
@@ -38,8 +42,9 @@ comandos y opciones y la solución de problemas.
 >   compilación (`tools/test_build_sh.py`, en Linux y en las máquinas de GitHub): `deps` tomando sus herramientas de
 >   Homebrew, que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
 > - En ninguna parte cuando se escribió este aviso (2026-11-14): una compilación completa en Apple silicon (ver
->   [Requisitos](#requisitos)), ni una compilación o una prueba de los commits de esta rama posteriores a ee7f332 en
->   ningún Mac, tampoco en los de GitHub.
+>   [Requisitos](#requisitos)), ni una compilación o una prueba de los commits de esta rama posteriores a ee7f332 en las
+>   máquinas de GitHub, ni de los posteriores a aa27c73 en ningún Mac (se compilaron y sus pruebas se ejecutaron solo en
+>   Linux; las que necesitan un Mac no se han ejecutado).
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
 > funcionan `doctor`, `fetch`, `test`, `env`, `clean`, `help` y la prueba en seco de cualquier comando salvo `deps`. Un
@@ -201,10 +206,10 @@ Todas las fuentes salen de las versiones fijadas en [build/pins.sh](../build/pin
 lo fijado detiene la compilación y no se usa nada de ella. `./build.sh doctor` compara lo fijado con los scripts que
 usan las mismas fuentes.
 
-Ningún paquete hecho con `./build.sh package` se ha instalado en ningún Mac, y nada compilado desde esta rama se ha
-cargado ni ejecutado en una tarjeta NVIDIA: quien instale uno primero lo está probando. Tampoco se han medido los
-tamaños de las clases IOKit de Apple en macOS 26.7; los kexts los comparan con los suyos al arrancar (la comprobación
-de la disposición de las clases).
+Un paquete hecho con `./build.sh package` en el commit aa27c73 se ha instalado sobre la versión 2.9 y ha arrancado en
+una máquina con una RTX 5050, y no se ha informado de ninguna prueba suya en una tarjeta NVIDIA: quien instale uno lo
+está probando. Tampoco se ha informado de los tamaños de las clases IOKit de Apple en macOS 26.7; los kexts los comparan
+con los suyos al arrancar (la comprobación de la disposición de las clases).
 
 Para hacer un paquete instalable hace falta el paquete publicado de la versión 2.9 como base, porque algunos archivos
 que `install.sh` necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo

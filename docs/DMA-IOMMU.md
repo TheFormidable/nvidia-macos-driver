@@ -44,7 +44,7 @@ In modes 1 and 2:
 
 Sleep and wake: the driver does nothing special. According to AppleVTD's published source it keeps its tables in
 memory and turns translation back on before drivers are woken, so a mapping made before sleep is still valid after
-it. This has not been tried (see the last section).
+it. No run of it has been reported (see "What has not been reported from hardware").
 
 ## How to see which mode a machine is in
 
@@ -128,18 +128,18 @@ answer).
 The way back to a working desktop on a VT-d machine where modes 1 or 2 fail is to turn VT-d off (or keep the
 installer's dropped DMAR table), which gives mode 0.
 
-## What was never run on hardware
+## What has not been reported from hardware
 
-Everything in modes 1, 2 and 3, and mode 0 too: nothing of this branch has been loaded on a Mac yet. The DMA layer as
-it stands at commit 3933ff6, the self-test's check for an untranslated address included, was compiled and linked for
-macOS 15 and later on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner
-(macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). Its kernel imports were checked against the
-export lists in the published source of the macOS 15 and 26 kernels, and on that Mac `kmutil libraries` found every
-symbol NVRM imported at an earlier state of the branch; the decisions were tested on a host. Nothing of it has run
-with a real mapper:
+Everything in modes 1, 2 and 3, and mode 0 too: a package of commit aa27c73 has been installed and started on one
+machine with an RTX 5050, and nothing of it has been reported from there. The DMA layer as it stands at commit 3933ff6,
+the self-test's check for an untranslated address included, was compiled and linked for macOS 15 and later on one Intel
+Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
+Xcode 26.3 with the 26.2 SDK). Its kernel imports were checked against the export lists in the published source of the
+macOS 15 and 26 kernels, and on that Mac `kmutil libraries` found every symbol NVRM imported at an earlier state of the
+branch; the decisions were tested on a host. No result of it with a real mapper has been reported:
 
-- the NVIDIA RM's own bus-address path (it is compiled into the driver and is the path Linux always uses, but it was
-  never executed on macOS);
+- the NVIDIA RM's own bus-address path (it is compiled into the driver and is the path Linux always uses, but no run of
+  it on macOS has been reported);
 - AppleVTD's behaviour on macOS 15 and 26 (one segment per mapping, the read-back call), as read from IOPCIFamily's
   published source;
 - surface copies through a mapped staging buffer, and the cost of mapping under load;

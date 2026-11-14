@@ -1,9 +1,10 @@
 # The surface fence: the kernel knows who is still drawing into a surface
 
-Status: the kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and macOS 26
-export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real threads.
-**None of it has been loaded or run on a Mac.** It is on by default. Boot-arg `nvrmfence=0` switches it off, and the
-driver's surface sync then behaves as 2.9's did ("The one switch" lists what still differs).
+Status: the kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and
+macOS 26 export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real threads.
+**No test of it on a card has been reported yet**; a package of commit aa27c73 has been installed and started on one
+machine with an RTX 5050. It is on by default. Boot-arg `nvrmfence=0` switches it off, and the driver's surface sync
+then behaves as 2.9's did ("The one switch" lists what still differs).
 Nothing of 2.9's surface sync was removed: it is what every fallback below lands on.
 
 ## What it is for
@@ -489,9 +490,9 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
 Read with `sysctl debug.nvrm_fence_state` and so on.
 
 1. **After login.** `state` 1, `accel` 1, `chan_adds` above 0, `map_fail` 0, `map_mismatch` 0. If `map_fail` or
-   `map_mismatch` is not 0, send the `NVRM-xnu: fence:` lines: the driver is running as 2.9 for those processes and
-   that is the thing to fix first. This is the step that has never run anywhere: the first registration of a
-   channel happens in WindowServer at the login window.
+   `map_mismatch` is not 0, send the `NVRM-xnu: fence:` lines: the driver is running as 2.9 for those processes and that
+   is the thing to fix first. No result of this step has been reported yet: the first registration of a channel happens
+   in WindowServer at the login window.
 2. **Desktop in use for a minute.** `opens`, `arms` and `closes` grow together; `auto` grows with every WindowServer
    frame; `done_on_irq` is far larger than `done_on_slice`; `chan_noirq` 0; `expired_gpu`, `expired_cpu`, `strikes`
    and `owners_distrusted` 0; `close_gpu_behind` 0 or a handful. 2.9's counters
