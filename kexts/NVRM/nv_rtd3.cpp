@@ -93,9 +93,9 @@ static void nv_rtd3_poll(thread_call_param_t, thread_call_param_t)
     const unsigned period_ms = g_rtd3.state == NV_RTD3_ON ? 1000 : 250;
     int r = nv_rtd3_tick(&g_rtd3, &g_ops, &g_idle, 1);
     if (r == NV_RTD3_TICK_POWERED_OFF) kprintf("NVRM-xnu: RTD3 GPU powered off after %u s idle\n", NV_RTD3_IDLE_SECONDS);
-    else if (r == NV_RTD3_TICK_OFF_FAILED) kprintf("NVRM-xnu: RTD3 power-off failed, GPU resumed and left on\n");
+    else if (r == NV_RTD3_TICK_OFF_FAILED) kprintf("NVRM-xnu: RTD3 power-off not done (the system holds the GPU, the GPU was not suspended, or _OFF failed): the GPU stays on\n");
     else if (r == NV_RTD3_TICK_WOKE) kprintf("NVRM-xnu: RTD3 GPU powered on for a client\n");
-    else if (r == NV_RTD3_TICK_WAKE_FAILED) kprintf("NVRM-xnu: RTD3 power-on FAILED, the GPU stays unreachable\n");
+    else if (r == NV_RTD3_TICK_WAKE_FAILED) kprintf("NVRM-xnu: RTD3 power-on not done (the system holds the GPU, or _ON failed)\n");
     uint64_t dl; clock_interval_to_deadline(period_ms, kMillisecondScale, &dl);
     thread_call_enter_delayed(g_call, dl);
 }
