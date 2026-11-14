@@ -15,7 +15,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   all 17 components in 5 minutes 41 seconds with no warning, and `package` staged a package on release 2.9 in
 >   27 seconds. `./build.sh test` passed 303 of the 315 host tests there and none failed (3 were skipped and 9 not
 >   run), in 20 minutes 49 seconds. Nothing outside the working directory changed, apart from the crash reports macOS
->   writes for the small programs the host tests make fail on purpose (see `test` in [Commands](#commands)).
+>   writes for the small programs the host tests make fail on purpose (see `test` in [Commands](#commands)). At commit
+>   ee7f332 `build` built the 17 components again in 401 seconds with no warning and `package` staged the package in
+>   28 seconds; the host tests were not run there at that commit.
 > - On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6.
 >   In the workflow `ci`, 303 of the 315 host tests passed and none failed (3 were skipped and 9 not run there),
 >   `tools/test_build_sh.py` among them. The workflow `full-build`, which builds everything in an empty working
@@ -25,11 +27,18 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   from a full clone on the same kind of runner and on the Intel Mac). Eleven of its twelve checks of what was built
 >   passed; the twelfth asked the six kexts for a minimum macOS version, which the linker does not write into a kext.
 >   Both causes are corrected in the commits after 3933ff6.
+> - On GitHub's runners at commit ee7f332. In the workflow `ci`, 304 of the 316 host tests passed and none failed
+>   (3 were skipped and 9 not run) on the Intel runner and, for the first time whole, on the Apple-silicon runner
+>   (macos-15). The workflow `full-build` (macOS 15.7.9, Xcode 26.3 with the 26.2 SDK, the tools restored from GitHub's
+>   cache) succeeded in every step: it built all 17 components in 19 minutes 26 seconds, staged the package in
+>   57 seconds, passed 304 of the 316 host tests with none failed, and all twelve of its checks of what was built
+>   passed; the whole job took 1 hour 18 minutes.
 > - Only against stand-ins for macOS's tools, Xcode, Homebrew, rustup, the git remotes and each component's build
->   script (`tools/test_build_sh.py`, on Linux and on that runner): `deps` taking its tools from Homebrew, which is what
->   it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
-> - Nowhere when this notice was written (2026-11-13): a whole build on Apple silicon (see
->   [Requirements](#requirements)), and a build of this branch's commits after 3933ff6 on either Mac.
+>   script (`tools/test_build_sh.py`, on Linux and on GitHub's runners): `deps` taking its tools from Homebrew, which
+>   is what it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
+> - Nowhere when this notice was written (2026-11-14): a whole build on Apple silicon (see
+>   [Requirements](#requirements)), and a build or a test of this branch's commits after ee7f332 on any Mac, GitHub's
+>   included.
 >
 > `build.sh` is written for macOS's `/bin/bash` 3.2 and its BSD tools. On a system other than macOS only `doctor`,
 > `fetch`, `test`, `env`, `clean`, `help` and a dry run of any command but `deps` work. A step can still stop on
@@ -47,9 +56,8 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   Apple silicon is meant to work as a build host (the release scripts default to an Apple-silicon Rust toolchain), but
   no whole build with `build.sh` has run on one: there `deps` takes its tools from Homebrew, a way that has run only
   against stand-ins. GitHub's Apple-silicon runner compiles and links the kexts, and at commit 95811c2 they had the
-  same bytes as on its Intel runner. The host tests have not passed whole on Apple silicon: their last run that got a
-  runner, at an earlier commit, passed 298 of 312 with 2 failures, in arms that have passed on the Intel runner since
-  commit ef2a216, and GitHub has had no Apple-silicon runner free at any push after it.
+  same bytes as on its Intel runner. The host tests passed whole on Apple silicon for the first time at commit ee7f332,
+  on that runner (304 of 316, none failed).
 - **Xcode 26 or later**, the full Xcode, selected with `xcode-select`. Whole builds have succeeded with two of them,
   both at commit 3933ff6: Xcode 26.5 (SDK 26.5) on the Intel Mac above, and Xcode 26.3 (SDK 26.2) on GitHub's Intel
   runner. Xcode 26.3 is the newest Xcode that runs on macOS 15 (Xcode 26.4.1, 26.5 and 26.6 need macOS 26.2
