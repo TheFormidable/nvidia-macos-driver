@@ -367,7 +367,7 @@ BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
 # the NVRM in place before this run (step 6b compares it with the record of the install before this one)
-NVSUM0=$(cksum < "$EXT/NVRM.kext/Contents/MacOS/NVRM" 2>/dev/null) || NVSUM0=""
+NVSUM0=$(cksum 2>/dev/null < "$EXT/NVRM.kext/Contents/MacOS/NVRM") || NVSUM0=""
 [ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
