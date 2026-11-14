@@ -29,6 +29,8 @@ tools/test_shared_headers.py. This test reads the patch and holds what only NVK'
                  GPU the kext calls suspended asks RM nothing (the inputs make no RM call, the action comes after the
                  suspended test) and gives the claim back and the mutex up without counting, reporting or giving up;
                  the decision is given the channel's last progress, so a stamp left by an earlier sleep is not believed
+  the root       a stalled wait's root channel counts as still moving through the pure header's nvrm_rec_root_alive
+                 (a quarter of a budget, so the stamp of the waiter's own kick at half a budget never counts)
   the exports    nvmtl_nvk_fence_dropped_v1 and nvmtl_nvk_recover_stats_v1 with the signatures of the contract,
                  default visibility, declared in nvkmd.h
   the 2.9 path   the 2.9 verdicts are kept as functions and are what the hooks call with recovery off
@@ -369,6 +371,15 @@ def chk_asleep(p):
             and bool(fin) and "NVRM_WHY_ASLEEP" not in fin.split("{", 1)[-1])
 
 
+def chk_root_alive(p):
+    """nvrm_rec_run decides "the stall's root was seen to move" with the pure header's test, which the host test
+    covers, not with a comparison of its own."""
+    run = body(newfile(p, REC_C), "nvrm_rec_run")
+    ra = body(newfile(p, REC_H), "nvrm_rec_root_alive")
+    return (order(run, "if (nvrm_rec_root_alive(now, r->progNs, budget)) {", "why = NVRM_WHY_ROOT_ALIVE;")
+            and "r->progNs < budget" not in run and "return now - progNs < budget / 4;" in ra)
+
+
 def chk_exports(p):
     rc, sy, kh = newfile(p, REC_C), added(p, SYNC_C), added(p, NVKMD_H)
     return ('__attribute__((visibility("default"))) unsigned\nnvmtl_nvk_recover_stats_v1(uint64_t *out, unsigned n)' in rc
@@ -474,6 +485,8 @@ CHECKS = [
     ("the sleep: the look-again reason is not final", chk_asleep,
      "+   return w == NVRM_WHY_KIND ||", "+   return w == NVRM_WHY_ASLEEP || w == NVRM_WHY_KIND ||"),
     ("the sleep: the decision is given the channel's last progress", chk_asleep, "+      st.progNs = r->progNs;\n", ""),
+    ("the root: nvrm_rec_run asks the pure header whether the stall's root still moves", chk_root_alive,
+     "+      if (nvrm_rec_root_alive(now, r->progNs, budget)) {", "+      if (now - r->progNs < budget / 2) {"),
     ("the exports: the two functions of the contract, default visibility, declared in nvkmd.h", chk_exports,
      "+nvmtl_nvk_fence_dropped_v1(VkDevice device, VkFence fence)\n+{", "+nvmtl_nvk_fence_dropped_v1(VkFence fence, VkDevice device)\n+{"),
     ("the 2.9 path: with recovery off the hooks run the kept 2.9 verdicts", chk_off_is_29,
