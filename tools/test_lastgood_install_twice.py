@@ -154,6 +154,7 @@ class InstallTwice(Fixture):
         for k in m.KEXTS:
             shutil.rmtree(self.root / f'Library/Extensions/{k}.kext')
         first = self.install()
+        self.assertNotIn('No such file', first.stderr)   # no NVRM in place to read is not an error to show
         self.assertIn('no previous driver to fall back to (first install)', first.line6b)
         self.assertIsNone(self.job())
         second = self.install()
