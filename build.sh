@@ -991,7 +991,12 @@ doctor() {   # prints; sets D_MISSING
   say "== sources (\"./build.sh fetch\")"
   source_status
   say "== things that can stop a build on another Mac"
-  for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "[ -z \"\${$x:-}\" ]" || d_note "$x is set in your environment; build.sh removes it for every step (an exported CC breaks build_rm620.sh)"; done
+  # the value through eval, the test outside it: bash 3.2 runs the ERR trap for a test that fails inside eval even
+  # on the left of ||, which stopped doctor (and deps after its installs) when one of these was set
+  local xv
+  for x in CC CXX CFLAGS CPPFLAGS LDFLAGS; do eval "xv=\${$x:-}"; [ -z "$xv" ] || d_note "$x is set in your environment; build.sh removes it for every step and for what deps builds (an exported CC breaks build_rm620.sh)"; done
+  for x in PYTHONPATH PYTHONHOME; do eval "xv=\${$x:-}"; [ -z "$xv" ] || d_note "$x is set in your environment; build.sh removes it for every step and for what deps builds"; done
+  for x in RUSTFLAGS RUSTC_WRAPPER CARGO_TARGET_DIR PIP_TARGET PIP_PREFIX PIP_USER; do eval "xv=\${$x:-}"; [ -z "$xv" ] || d_note "$x is set in your environment; build.sh removes it for what deps builds"; done
   # cargo reads the .cargo/config.toml of every folder above the one it works in, before its own CARGO_HOME's: the
   # translator is fetched from the checkout and built under the working directory, so with either inside the home
   # folder the tester's own ~/.cargo/config.toml applies to it. Nothing turns that off; doctor names the files.
@@ -1060,11 +1065,35 @@ step_env() {
   printf '%s\n' env -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u NM_TAHOE -u SDKROOT \
     -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH -u LIBRARY_PATH -u CPATH \
     -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \
+    -u PYTHONPATH -u PYTHONHOME \
     "PATH=$STEP_PATH" "NULLMOTH_BUILD_ROOT=$R" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0}" PYTHONDONTWRITEBYTECODE=1 \
     "JOBS=${JOBS:-$NM_JOBS}" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   [ -z "$STEP_SDK" ] || printf '%s\n' "SDKROOT=$STEP_SDK"
 }
 STEP_SDK=""; STEP_SDK_DONE=0
+# What deps builds itself (the translator, the Python environment, bindgen and cbindgen) runs without the caller's
+# variables that change what cmake, clang, Python, pip or cargo build, or where they write: those a step loses
+# (step_env) and the tools' own. cmake initialises its compilers, flags, deployment target, architectures, toolchain
+# file, launchers and search paths from CC, CXX, CFLAGS, CXXFLAGS, LDFLAGS, MACOSX_DEPLOYMENT_TARGET,
+# CMAKE_OSX_ARCHITECTURES, CMAKE_TOOLCHAIN_FILE, CMAKE_<LANG>_COMPILER_LAUNCHER and CMAKE_PREFIX_PATH/CMAKE_*_PATH on
+# its first configure, and "cmake --install" puts everything under DESTDIR (cmake-env-variables(7)); clang reads
+# CPATH, C/CPLUS/OBJC_INCLUDE_PATH and LIBRARY_PATH; Python puts PYTHONPATH before the venv's packages and starts from
+# PYTHONHOME; pip takes every option from PIP_<OPTION> (PIP_TARGET, PIP_PREFIX, PIP_USER, PIP_ROOT move the install
+# out of the venv); cargo install builds in CARGO_TARGET_DIR (or CARGO_BUILD_TARGET_DIR) and keeps it, and takes
+# RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, RUSTC, RUSTC_WRAPPER and CARGO_BUILD_TARGET. Kept, as the downloads need them or
+# build.sh sets them: HOME, the proxy variables, SSL_CERT_FILE, DEVELOPER_DIR, RUSTUP_DIST_SERVER, PIP_INDEX_URL and
+# pip's other network options (the hashes are checked whatever the index). pip's and cargo's own configuration files
+# still apply.
+DEPS_UNSET_CC=( -u SDKROOT -u CC -u CXX -u OBJC -u CFLAGS -u CXXFLAGS -u OBJCFLAGS -u CPPFLAGS -u LDFLAGS -u MACOSX_DEPLOYMENT_TARGET
+  -u LIBRARY_PATH -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_PATH -u PKG_CONFIG_LIBDIR )
+DEPS_UNSET_CMAKE=( "${DEPS_UNSET_CC[@]}" -u CMAKE_PREFIX_PATH -u CMAKE_INCLUDE_PATH -u CMAKE_LIBRARY_PATH -u CMAKE_FRAMEWORK_PATH
+  -u CMAKE_PROGRAM_PATH -u CMAKE_APPBUNDLE_PATH -u CMAKE_TOOLCHAIN_FILE -u CMAKE_OSX_ARCHITECTURES -u CMAKE_C_COMPILER_LAUNCHER
+  -u CMAKE_CXX_COMPILER_LAUNCHER -u CMAKE_INSTALL_MODE -u DESTDIR )
+DEPS_UNSET_PY=( "${DEPS_UNSET_CC[@]}" -u PYTHONPATH -u PYTHONHOME -u PIP_TARGET -u PIP_PREFIX -u PIP_ROOT -u PIP_USER -u PIP_SRC
+  -u PIP_NO_BINARY -u PIP_ONLY_BINARY -u PIP_CONSTRAINT -u PIP_REQUIREMENT -u PIP_NO_BUILD_ISOLATION -u PIP_NO_CACHE_DIR )
+DEPS_UNSET_CARGO=( "${DEPS_UNSET_CC[@]}" -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS -u RUSTC -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER
+  -u RUSTDOC -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_TARGET -u CARGO_BUILD_RUSTFLAGS -u CARGO_BUILD_RUSTC
+  -u CARGO_BUILD_RUSTC_WRAPPER -u CARGO_INSTALL_ROOT )
 find_sdk() {   # sets STEP_SDK: the macOS SDK every step gets as SDKROOT; nothing where there is no xcrun (not a Mac)
   [ "$STEP_SDK_DONE" = 0 ] || return 0
   STEP_SDK_DONE=1; STEP_SDK=""
@@ -1776,12 +1805,12 @@ deps_spirv_llvm() {
   [ ! -e "$pre" ] || safe_rm "$pre"
   say "building SPIRV-LLVM-Translator (log: $(printf '%s' "$CUR_LOG" | tilde))"
   find_sdk   # the SDK as SDKROOT, as for every step (step_env), never the caller's
-  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S "$src" -B "$bld" -G Ninja "-DCMAKE_MAKE_PROGRAM=$T_NINJA" -DCMAKE_BUILD_TYPE=Release \
+  x env "${DEPS_UNSET_CMAKE[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S "$src" -B "$bld" -G Ninja "-DCMAKE_MAKE_PROGRAM=$T_NINJA" -DCMAKE_BUILD_TYPE=Release \
     "-DCMAKE_INSTALL_PREFIX=$pre" -DCMAKE_INSTALL_LIBDIR=lib "-DCMAKE_INSTALL_NAME_DIR=$pre/lib" "-DCMAKE_INSTALL_RPATH=$pre/lib" \
     -DBUILD_SHARED_LIBS=ON -DCCACHE_ALLOWED=OFF -DLLVM_BUILD_TOOLS=ON -DLLVM_SPIRV_INCLUDE_TESTS=OFF \
     "-DLLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm" "-DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=$hdr"
-  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
-  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --install "$bld"
+  x env "${DEPS_UNSET_CMAKE[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --build "$bld" -j "$NM_JOBS"
+  x env "${DEPS_UNSET_CMAKE[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" --install "$bld"
   [ -f "$pre/lib/pkgconfig/LLVMSPIRVLib.pc" ] || { say "the install left no $pre/lib/pkgconfig/LLVMSPIRVLib.pc" >> "$CUR_LOG"; fail_step spirv-llvm-translator 1; }
   spirv_llvm_for > "$pre/.nm-llvm"
   CUR_STEP=""
@@ -1813,10 +1842,10 @@ deps_python() {
   [ ! -d "$VENV" ] || safe_rm "$VENV"
   mkdir -p "$TOOLS"
   find_sdk   # a package pip builds from source compiles with the SDK as SDKROOT, as every step does (step_env)
-  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
+  env "${DEPS_UNSET_PY[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "$T_PYTHON" -m venv "$VENV" || die "could not create $VENV"
   write_requirements > "$TOOLS/requirements.txt"
   # pip keeps what it downloads in ~/Library/Caches/pip unless told otherwise: that cache is the working directory's too
-  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
+  env "${DEPS_UNSET_PY[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR="$TOOLS/pip-cache" PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 "$VENV/bin/python3" -m pip install -q --require-hashes --no-deps -r "$TOOLS/requirements.txt" \
     || die "pip could not install the pinned packages (see above)"
   write_requirements | sha256_stdin > "$VENV/.nm-requirements"
   : "$want_new"
@@ -1847,11 +1876,11 @@ deps_rust() {
   fi
   local renv=( "RUSTUP_HOME=$RUSTUP_DIR" "CARGO_HOME=$CARGO_DIR" "PATH=$CARGO_DIR/bin:/usr/bin:/bin:/usr/sbin:/sbin" )
   [ -z "${RUSTUP_DIST_SERVER:-}" ] || renv+=( "RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER" )
-  env "${renv[@]}" "$init" -y -q --no-modify-path --profile minimal --default-toolchain none || die "rustup-init failed"
-  env "${renv[@]}" "$CARGO_DIR/bin/rustup" toolchain install "$NM_PIN_RUST_VERSION" --profile minimal || die "rustup could not install $NM_PIN_RUST_VERSION"
-  env "${renv[@]}" "$CARGO_DIR/bin/rustup" target add --toolchain "$NM_PIN_RUST_VERSION" x86_64-apple-darwin || die "rustup could not add the x86_64-apple-darwin target"
-  env "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_BINDGEN_VERSION" bindgen-cli || die "cargo install bindgen-cli failed"
-  env "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_CBINDGEN_VERSION" cbindgen || die "cargo install cbindgen failed"
+  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "$init" -y -q --no-modify-path --profile minimal --default-toolchain none || die "rustup-init failed"
+  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "$CARGO_DIR/bin/rustup" toolchain install "$NM_PIN_RUST_VERSION" --profile minimal || die "rustup could not install $NM_PIN_RUST_VERSION"
+  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "$CARGO_DIR/bin/rustup" target add --toolchain "$NM_PIN_RUST_VERSION" x86_64-apple-darwin || die "rustup could not add the x86_64-apple-darwin target"
+  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_BINDGEN_VERSION" bindgen-cli || die "cargo install bindgen-cli failed"
+  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_CBINDGEN_VERSION" cbindgen || die "cargo install cbindgen failed"
 }
 # tools/bin: one link per tool the build may take from outside Xcode; it is the first folder on every step's PATH.
 # tools/bin/patch is not a link but a two-line script that runs the chosen patch with -f. macOS's patch asks a question

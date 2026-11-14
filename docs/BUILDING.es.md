@@ -363,8 +363,19 @@ Variables que `build.sh` calcula y pasa a los scripts (las muestra `./build.sh e
 
 Cada paso recibe además `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`, tu
 `SDKROOT` y tu `TOOLCHAINS`, las rutas de búsqueda (`PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`, `LIBRARY_PATH`, `CPATH`,
-`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`) y `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`,
-`HOMEBREW_REPOSITORY` quitados de su entorno. Para ejecutar un script a mano como lo hace `build.sh`:
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`), `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`,
+`HOMEBREW_REPOSITORY`, `PYTHONPATH` y `PYTHONHOME` quitados de su entorno. Lo que `deps` compila por sí mismo
+(SPIRV-LLVM-Translator, el entorno de Python, bindgen y cbindgen) pierde las mismas variables del compilador y rutas de
+búsqueda, tu `MACOSX_DEPLOYMENT_TARGET` y las de cada herramienta: para cmake `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`,
+`CMAKE_LIBRARY_PATH`, `CMAKE_FRAMEWORK_PATH`, `CMAKE_PROGRAM_PATH`, `CMAKE_APPBUNDLE_PATH`, `CMAKE_TOOLCHAIN_FILE`,
+`CMAKE_OSX_ARCHITECTURES`, `CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`, `CMAKE_INSTALL_MODE` y `DESTDIR`;
+para Python y pip `PYTHONPATH`, `PYTHONHOME`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`, `PIP_SRC`,
+`PIP_NO_BINARY`, `PIP_ONLY_BINARY`, `PIP_CONSTRAINT`, `PIP_REQUIREMENT`, `PIP_NO_BUILD_ISOLATION` y `PIP_NO_CACHE_DIR`;
+para rustup y cargo `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+`RUSTDOC`, `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_TARGET`, `CARGO_BUILD_RUSTFLAGS`,
+`CARGO_BUILD_RUSTC`, `CARGO_BUILD_RUSTC_WRAPPER` y `CARGO_INSTALL_ROOT`. Tus variables de proxy, `SSL_CERT_FILE`,
+`DEVELOPER_DIR`, `RUSTUP_DIST_SERVER`, `PIP_INDEX_URL` y los demás ajustes de red de pip siguen llegando, igual que los
+archivos de configuración de pip y de cargo. Para ejecutar un script a mano como lo hace `build.sh`:
 
 ```bash
 eval "$(./build.sh env)"

@@ -329,12 +329,24 @@ These are not settings: `build.sh` derives them, gives them to the build scripts
 Every step also gets `CC`, `CXX`, `OBJC`, `CFLAGS`, `CXXFLAGS`, `OBJCFLAGS`, `CPPFLAGS`, `LDFLAGS`, `NM_TAHOE`,
 your own `SDKROOT` (it may name another platform's SDK; the step gets the macOS one, above) and `TOOLCHAINS` (it
 makes xcrun find another toolchain's compiler), the search paths `PKG_CONFIG_PATH` (given back to NVK as above), `PKG_CONFIG_LIBDIR`, `CMAKE_PREFIX_PATH`,
-`LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, and `HOMEBREW_PREFIX`,
-`HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY` removed from its environment: an exported `CC` breaks build_rm620.sh,
-`NM_TAHOE` selects the macOS 26 accelerator, and a login shell may point the others at a Homebrew of the other
-architecture. Your `SDKROOT` and `TOOLCHAINS` do not reach `build.sh` itself either: Apple's `/usr/bin/git`, `make`
-and `python3` find the real tool through xcrun, and `build.sh` asks those tools questions before its first step: an
-`SDKROOT` that names an SDK which is not there would make them fail.
+`LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `HOMEBREW_PREFIX`,
+`HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY`, `PYTHONPATH` and `PYTHONHOME` removed from its environment: an exported `CC`
+breaks build_rm620.sh, `NM_TAHOE` selects the macOS 26 accelerator, a login shell may point the search paths at a
+Homebrew of the other architecture, and `PYTHONPATH` would put other packages before the Python environment's checked
+ones (`PYTHONHOME` stops every `python3`). What `deps` builds itself (the SPIRV-LLVM-Translator, the Python environment,
+bindgen and cbindgen) loses the same compiler variables and search paths and your `MACOSX_DEPLOYMENT_TARGET`, and each
+tool's own: for cmake `CMAKE_PREFIX_PATH`, `CMAKE_INCLUDE_PATH`, `CMAKE_LIBRARY_PATH`, `CMAKE_FRAMEWORK_PATH`,
+`CMAKE_PROGRAM_PATH`, `CMAKE_APPBUNDLE_PATH`, `CMAKE_TOOLCHAIN_FILE`, `CMAKE_OSX_ARCHITECTURES`,
+`CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`, `CMAKE_INSTALL_MODE` and `DESTDIR`; for Python and pip
+`PYTHONPATH`, `PYTHONHOME`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`, `PIP_SRC`, `PIP_NO_BINARY`,
+`PIP_ONLY_BINARY`, `PIP_CONSTRAINT`, `PIP_REQUIREMENT`, `PIP_NO_BUILD_ISOLATION` and `PIP_NO_CACHE_DIR`; for rustup and
+cargo `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTDOC`,
+`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_TARGET`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_BUILD_RUSTC`,
+`CARGO_BUILD_RUSTC_WRAPPER` and `CARGO_INSTALL_ROOT`. Your proxy variables, `SSL_CERT_FILE`, `DEVELOPER_DIR`,
+`RUSTUP_DIST_SERVER`, `PIP_INDEX_URL` and pip's other network settings still reach them, and so do pip's and cargo's own
+configuration files. Your `SDKROOT` and `TOOLCHAINS` do not reach `build.sh` itself either: Apple's `/usr/bin/git`,
+`make` and `python3` find the real tool through xcrun, and `build.sh` asks those tools questions before its first step:
+an `SDKROOT` that names an SDK which is not there would make them fail.
 doctor names both when they are set; to build with another SDK, choose its Xcode with `DEVELOPER_DIR`. `STEPS` and `NM_REV` (read by build_release_inputs.sh) and `X` and `RELEASE` (build_xlate.sh and
 build_plugin.sh, the original author's development scripts for trees in `~/nvmtl-build`) are not used: `build.sh`
 replaces those scripts.

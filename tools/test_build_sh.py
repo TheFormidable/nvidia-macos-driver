@@ -105,6 +105,8 @@ LIB=${0%/*}; SB=$NMT_SB; S=$SB/state; J=$SB/journal
 name=${self##*/}
 rec() { { printf '%s' "$1"; shift; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$J"; }
 rec "$name" "$@"
+# deps' own builds: which of the caller's variables listed in $NMT_LEAK_VARS reached this tool (and the kept ones, $NMT_KEEP_VARS)
+leakrec() { local v out=""; for v in ${NMT_LEAK_VARS:-} ${NMT_KEEP_VARS:-}; do [ -z "${!v+x}" ] || out="$out $v"; done; rec leak "$1" "${out# }"; }
 mkwrap() {   # <path> <role> [version text]
   mkdir -p "${1%/*}"
   printf '#!/bin/bash\nNMT_SB=%q exec /bin/bash %q %q "$0" "$@"\n' "$SB" "$LIB/fake.sh" "$2" > "$1"; chmod 755 "$1"
@@ -279,8 +281,8 @@ case "$role" in
       --version|-V) echo "Python $(cat "$self.version")" ;;
       -m)
         case "${2:-}" in
-          venv) rec sdkroot venv "${SDKROOT-UNSET}"; d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
-          pip) rec sdkroot pip "${SDKROOT-UNSET}"; [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
+          venv) rec sdkroot venv "${SDKROOT-UNSET}"; leakrec venv; d=$3; mkwrap "$d/bin/python3" pyvenv "$(cat "$self.version")"; printf 'home = %s\n' "${self%/*}" > "$d/pyvenv.cfg" ;;
+          pip) rec sdkroot pip "${SDKROOT-UNSET}"; leakrec pip; [ "${self##*/}" = python3 ] && [ -f "${self%/bin/*}/pyvenv.cfg" ] || { echo "stand-in: pip outside a virtual environment" >&2; exit 1; }
                # like pip: what it downloads is kept in ~/Library/Caches/pip unless PIP_CACHE_DIR or PIP_NO_CACHE_DIR says otherwise
                [ -n "${PIP_NO_CACHE_DIR:-}" ] || { c=${PIP_CACHE_DIR:-$HOME/Library/Caches/pip}; mkdir -p "$c/http-v2" && : > "$c/http-v2/stand-in"; }
                mkwrap "${self%/*}/meson" ver "1.12.1"; mkwrap "${self%/*}/mako-render" ver "1.4.3" ;;
@@ -314,7 +316,7 @@ case "$role" in
     case "$1" in --version) echo "rustc $v (stand-in 2026-10-01)" ;; --print) echo "$t/lib/rustlib/$4/lib" ;; esac ;;
   cargo)
     case "${1:-}" in
-      install) root=""; ver=""; what=""
+      install) leakrec cargo-install; root=""; ver=""; what=""
         shift; while [ $# -gt 0 ]; do case "$1" in --root) root=$2; shift ;; --version) ver=$2; shift ;; --locked) ;; *) what=$1 ;; esac; shift; done
         [ -n "$root" ] || root=${CARGO_HOME:-$HOME/.cargo}
         case "$what" in bindgen-cli) mkwrap "$root/bin/bindgen" ver "bindgen $ver" ;; *) mkwrap "$root/bin/$what" ver "$what $ver" ;; esac ;;
@@ -322,7 +324,7 @@ case "$role" in
       *) exit 1 ;;
     esac ;;
   cmake)   # configure records the install prefix; --install lays out what SPIRV-LLVM-Translator installs
-    case "${1:-}" in -S|--build|--install) rec sdkroot "cmake${1}" "${SDKROOT-UNSET}" ;; esac
+    case "${1:-}" in -S|--build|--install) rec sdkroot "cmake${1}" "${SDKROOT-UNSET}"; leakrec "cmake${1}" ;; esac
     case "${1:-}" in
       --version) cat "$self.version" ;;
       -S) b=""; pre=""; prev=""
@@ -3322,7 +3324,8 @@ def arm_vars(mac):
             "C_INCLUDE_PATH": "/opt/homebrew/include", "CPLUS_INCLUDE_PATH": "/opt/homebrew/include",
             "OBJC_INCLUDE_PATH": "/opt/homebrew/include", "PKG_CONFIG_LIBDIR": "/opt/homebrew/lib/pkgconfig",
             "LDFLAGS": "-L/opt/homebrew/lib", "CPPFLAGS": "-I/opt/homebrew/include", "HOMEBREW_PREFIX": "/opt/homebrew",
-            "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew"}
+            "HOMEBREW_CELLAR": "/opt/homebrew/Cellar", "HOMEBREW_REPOSITORY": "/opt/homebrew",
+            "PYTHONPATH": "/opt/homebrew/lib/python3.14/site-packages", "PYTHONHOME": "/opt/homebrew"}
 
     def leak_problems(tag):
         mac.clear()
@@ -3339,6 +3342,9 @@ def arm_vars(mac):
     with mac.scratch():
         mac.break_script("    -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH -u PKG_CONFIG_LIBDIR -u HOMEBREW_PREFIX -u HOMEBREW_CELLAR -u HOMEBREW_REPOSITORY \\\n", "")
         negative("a step_env that keeps clang's include paths and the caller's HOMEBREW_ variables", leak_problems("c"))
+    with mac.scratch():
+        mac.break_script("    -u PYTHONPATH -u PYTHONHOME \\\n", "")
+        negative("a step_env that keeps the caller's PYTHONPATH and PYTHONHOME", leak_problems("d"))
 
 
 # SDKROOT. Every step, the translator's build and pip get the macOS SDK of the Xcode chosen as SDKROOT (without it Apple's
@@ -3452,13 +3458,74 @@ def sdkdeps_problems(script_edit=None):
     return p
 
 
+# What deps builds itself (the translator's cmake, the venv and pip, cargo install) gets none of the caller's variables
+# that change what cmake, clang, Python, pip or cargo build or where they write, and keeps HOME, the proxy variables,
+# SSL_CERT_FILE, DEVELOPER_DIR, RUSTUP_DIST_SERVER and PIP_INDEX_URL.
+DEPS_LEAK = {"CC": "/usr/local/bin/gcc-14", "CXX": "/usr/local/bin/g++-14", "CFLAGS": "-O0", "LDFLAGS": "-L/usr/local/opt/x/lib",
+             "CPPFLAGS": "-I/usr/local/opt/x/include", "MACOSX_DEPLOYMENT_TARGET": "10.9", "CMAKE_PREFIX_PATH": "/usr/local",
+             "CMAKE_TOOLCHAIN_FILE": "/somewhere/vcpkg.cmake", "DESTDIR": "/somewhere", "CPATH": "/usr/local/include",
+             "LIBRARY_PATH": "/usr/local/lib", "PYTHONPATH": "/somewhere/site-packages", "PYTHONHOME": "/somewhere",
+             "PIP_TARGET": "/somewhere/pip", "PIP_USER": "1", "RUSTFLAGS": "-C target-cpu=native", "RUSTC_WRAPPER": "sccache",
+             "CARGO_TARGET_DIR": "/somewhere/target"}
+DEPS_KEEP = {"https_proxy": "http://proxy.invalid:3128", "SSL_CERT_FILE": "/somewhere/ca.pem", "PIP_INDEX_URL": "https://mirror.invalid/simple"}
+DEPS_LEAK_CMDS = ("cmake-S", "cmake--build", "cmake--install", "venv", "pip", "cargo-install")
+# what each tool must not get: the compiler variables and search paths, and the tool's own (build.sh's DEPS_UNSET_*)
+DEPS_LEAK_CC = {"CC", "CXX", "CFLAGS", "LDFLAGS", "CPPFLAGS", "MACOSX_DEPLOYMENT_TARGET", "CPATH", "LIBRARY_PATH"}
+DEPS_LEAK_OWN = {"cmake": {"CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE", "DESTDIR"},
+                 "py": {"PYTHONPATH", "PYTHONHOME", "PIP_TARGET", "PIP_USER"},
+                 "cargo": {"RUSTFLAGS", "RUSTC_WRAPPER", "CARGO_TARGET_DIR"}}
+assert DEPS_LEAK_CC | set().union(*DEPS_LEAK_OWN.values()) == set(DEPS_LEAK)
+
+
+def depsenv_problems(script_edit=None):
+    sb = Sandbox("depsenv", formulas=("cmake",))
+    (sb.state / "brew-llvm").write_text("23.1.5\n")
+    (sb.state / "brew-llvm22").write_text("")
+    if script_edit:
+        sb.break_script(*script_edit)
+    sb.clear()
+    e = dict(DEPS_LEAK); e.update(DEPS_KEEP)
+    e["NMT_LEAK_VARS"] = " ".join(DEPS_LEAK); e["NMT_KEEP_VARS"] = " ".join(DEPS_KEEP)
+    rc, out = sb.run("deps", "-y", extra=e)
+    got = {}
+    for l in sb.jlines():
+        if l.startswith("leak "):
+            w = shlex.split(l)
+            got.setdefault(w[1], []).append(set((w[2] if len(w) > 2 else "").split()))
+    p = [] if rc == 0 else [f"deps exit {rc}: {out[-400:]}"]
+    for who in DEPS_LEAK_CMDS:
+        if who not in got:
+            p.append(f"{who} did not run"); continue
+        bad = DEPS_LEAK_CC | DEPS_LEAK_OWN["cmake" if who.startswith("cmake") else "cargo" if who.startswith("cargo") else "py"]
+        for seen in got[who]:
+            if seen & bad:
+                p.append(f"{who} got {sorted(seen & bad)} from the caller")
+            if set(DEPS_KEEP) - seen:
+                p.append(f"{who} lost {sorted(set(DEPS_KEEP) - seen)}")
+    return p
+
+
+def arm_depsenv():
+    p = depsenv_problems()
+    check("deps' own builds (translator, venv, pip, cargo install) get none of the caller's compiler, Python, pip or cargo variables and keep the proxy, certificate and index", not p, p)
+    negative("a translator configure that keeps the caller's CC and DESTDIR",
+             depsenv_problems(('  x env "${DEPS_UNSET_CMAKE[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S', '  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S')))
+    negative("a pip that keeps the caller's PYTHONPATH and PIP_TARGET",
+             depsenv_problems(('  env "${DEPS_UNSET_PY[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=', '  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=')))
+    negative("a cargo install that keeps the caller's CARGO_TARGET_DIR and RUSTFLAGS",
+             depsenv_problems(('  env "${DEPS_UNSET_CARGO[@]}" "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_BINDGEN_VERSION"',
+                               '  env "${renv[@]}" "RUSTUP_TOOLCHAIN=$NM_PIN_RUST_VERSION" "$CARGO_DIR/bin/cargo" install --locked --root "$CARGO_DIR" --version "$NM_PIN_BINDGEN_VERSION"')))
+    negative("a pip that loses the caller's proxy (a clean environment of its own)",
+             depsenv_problems(('  env "${DEPS_UNSET_PY[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=', '  env -i "HOME=$HOME" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=')))
+
+
 def arm_sdkdeps():
     p = sdkdeps_problems()
     check("the translator's cmake, venv and pip get SDKROOT = the macOS SDK, not the caller's", not p, p)
     negative("a translator build that keeps the caller's environment as it is",
-             sdkdeps_problems(('  x env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S', '  x env "PATH=$tpath" "$T_CMAKE" -S')))
+             sdkdeps_problems(('  x env "${DEPS_UNSET_CMAKE[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} "PATH=$tpath" "$T_CMAKE" -S', '  x env "PATH=$tpath" "$T_CMAKE" -S')))
     negative("a pip without SDKROOT",
-             sdkdeps_problems(('  env -u SDKROOT ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=', '  env -u SDKROOT PIP_CACHE_DIR=')))
+             sdkdeps_problems(('  env "${DEPS_UNSET_PY[@]}" ${STEP_SDK:+"SDKROOT=$STEP_SDK"} PIP_CACHE_DIR=', '  env "${DEPS_UNSET_PY[@]}" PIP_CACHE_DIR=')))
 
 
 def nosdk_problems(script_edit=None):
@@ -4774,6 +4841,7 @@ def main():
                     timed("source_ownpy", arm_source_ownpy)
                 if want("sdkroot"):
                     timed("sdkdeps", arm_sdkdeps)
+                    timed("depsenv", arm_depsenv)
                     timed("nosdk", arm_nosdk)
             except BaseException as e:   # reported after the join, as a failure
                 errors.append(e)
