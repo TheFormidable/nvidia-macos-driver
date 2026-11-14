@@ -5,6 +5,8 @@ Negative control: the pre-fix formula (min(2*bootW, 3840) wide, min(2*bootH, 216
 raster) is reproduced here as oldCaps(); it is asserted to STRAND a 32:9 panel booted narrow, which is exactly
 the behaviour the new computeScanoutCaps() must not have. If the extracted method still computed the old caps,
 the panel-follows assertions below would fail.
+The reservation's floor (nvrmfb_scanout_reserve.h) is applied on a BAR1 of 512 MB or more only: a 1080p list on an
+unknown or smaller BAR1 must reserve exactly what it asks for.
 """
 import pathlib
 import subprocess
@@ -23,6 +25,7 @@ fixture = r'''
 using NvU32=uint32_t;using NvU64=uint64_t;using NvBool=bool;
 enum { NV_TRUE=1,NV_FALSE=0 };
 #define FBLOG(...) ((void)0)
+#include "HDR_RESERVE"
 #define FBLOGV(...) ((void)0)
 static bool PE_parse_boot_argn(const char *,void *,int) { return false; }
 struct NvKmsKapiDisplayModeTimings {
@@ -39,7 +42,7 @@ struct Kms {
 struct NVRMNVDAFramebuffer {
     Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
     NvU32 fW=0,fH=0,fScalerMaxW=0,fScalerMaxH=0,fRasterMaxW=0;
-    NvU64 fSize=0,fAllocSize=0;
+    NvU64 fSize=0,fAllocSize=0,fModesAllocSize=0,fBarLen=0;
     void computeScanoutCaps(NvU32 pitchAlign);
 };
 static NvKmsKapiDisplayMode mode(unsigned w,unsigned h,unsigned hz) {
@@ -91,12 +94,24 @@ int main() {
     hg.computeScanoutCaps(256);
     assert(hg.fRasterMaxW==7680 && hg.fScalerMaxH==4320);
 
+    // the reserve floor (a 3840x2160 desktop) is applied on a BAR1 of 512 MB or more only; below, or with BAR1 unknown
+    // (0), a 1080p list reserves what it asks for. The ceilings stay the list's either way.
+    const NvU64 list1080=((NvU64)1920*4*1080+0xffff)&~0xffffull,floor4k=((NvU64)3840*4*2160+0xffff)&~0xffffull;
+    Kms p;p.modes={mode(1920,1080,60)};
+    for(NvU64 bar:{0ull,256ull<<20,(512ull<<20)-1,512ull<<20,8ull<<30}){
+        NVRMNVDAFramebuffer s;s.fKms=&p;s.fW=1920;s.fH=1080;s.fSize=list1080;s.fBarLen=bar;
+        s.computeScanoutCaps(256);
+        assert(s.fModesAllocSize==list1080 && s.fAllocSize==(bar>=(512ull<<20)?floor4k:list1080));
+        assert(s.fScalerMaxW==1920 && s.fScalerMaxH==1080 && s.fRasterMaxW==1920);
+    }
+
     puts("PASS: ceilings follow the panel's widest/tallest validated raster (ultrawide 7680x2160, 4K at boot-1080p), "
-         "boot floor held, empty-list fallback, interlaced ignored, 8K clamp; old formula stranded the ultrawide");
+         "boot floor held, empty-list fallback, interlaced ignored, 8K clamp; old formula stranded the ultrawide; "
+         "reserve floor only on a BAR1 of 512 MB or more");
 }
 '''
 with tempfile.TemporaryDirectory() as directory:
     path = pathlib.Path(directory)
-    (path / 'test.cpp').write_text(fixture + method + checks)
+    (path / 'test.cpp').write_text(fixture.replace('HDR_RESERVE', str(root / 'kexts/NVRMFB/fb/nvrmfb_scanout_reserve.h')) + method + checks)
     subprocess.run(['clang++', '-std=c++17', str(path / 'test.cpp'), '-o', str(path / 'test')], check=True)
     subprocess.run([str(path / 'test')], check=True)
