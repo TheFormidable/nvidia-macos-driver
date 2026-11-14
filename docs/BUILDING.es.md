@@ -210,10 +210,12 @@ sudo env CHECK=1 ./install.sh
 sudo ./install.sh && sudo shutdown -r now
 ```
 
-La primera línea con `install.sh` es una prueba: revisa el paquete y el Mac sin cambiar nada. Antes de instalar, lee
-en [README.md](../README.md) "Install — by hand" (OpenCore debe estar configurado). Para volver atrás, instala de la
-misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`; para quitar el driver por completo:
-`sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están en [BUILDING.md](BUILDING.md#installing-the-result-and-going-back).
+La primera línea con `install.sh` es una prueba: revisa el paquete y el Mac sin cambiar nada. Que pase no cubre el
+firmware, que la instalación real toma de la instalación anterior o descarga de NVIDIA antes de cambiar nada. Antes de
+instalar, lee en [README.md](../README.md) "Install — by hand" (OpenCore debe estar configurado). Para volver atrás,
+instala de la misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`; para quitar el driver
+por completo: `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están en
+[BUILDING.md](BUILDING.md#installing-the-result-and-going-back).
 
 Ejecuta los comandos tal como aparecen (`./install.sh`, no `bash install.sh`: install.sh reconoce por ese nombre una
 instalación en curso). install.sh comprueba la integridad de un paquete, no quién lo hizo, así que acepta este.
