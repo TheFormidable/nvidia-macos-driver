@@ -8729,6 +8729,7 @@ int nvmtl_vk_cmd_abandon(nvk_cmdbuf *c)
 static pthread_mutex_t nvmtl_submit_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 void (*nvmtl_pre_submit_hook)(void);
 void (*nvmtl_pre_release_hook)(void *);
+void (*nvmtl_pre_redo_hook)(void *);
 typedef struct { nvk_cmdbuf cb; unsigned begun, n, fills, copies, nhold; unsigned long long bytes; void *hold[4]; } nvmtl_prologue;
 static __thread nvmtl_prologue *g_pre_cur;
 static _Atomic unsigned long long g_pre_subs, g_pre_copies, g_pre_fills, g_pre_bytes, g_pre_fail;
@@ -9060,7 +9061,19 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     const unsigned perf_sets = c->nsets;
     pt[6] = nvmtl_perf_now();
     if (pre->begun) {
-        pre->cb.wseq = c->wseq; nvmtl_cmd_retire(&pre->cb); nvmtl_pre_drop(pre);
+        pre->cb.wseq = c->wseq; nvmtl_cmd_retire(&pre->cb);
+        if (dropped && (pre->copies || pre->fills)) {
+            // The prologue rode the dropped submission. Its managed ranges are marked dirty again (the next submit uploads
+            // them from the CPU copy); its zero fills are not redone: a later submit may already have written those buffers.
+            static _Atomic unsigned long long lostpre;
+            const unsigned long long n = atomic_fetch_add(&lostpre, 1) + 1;
+            for (unsigned i = 0; nvmtl_pre_redo_hook && i < pre->nhold; i++) if (pre->hold[i]) nvmtl_pre_redo_hook(pre->hold[i]);
+            if (nvmtl_drop_log_due(n))
+                nvlog("vk: %u managed uploads and %u zero fills rode a dropped command buffer (%llu such so far in %s) - "
+                      "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held",
+                      pre->copies, pre->fills, n, getprogname());
+        }
+        nvmtl_pre_drop(pre);
         const unsigned long long k = g_pre_subs++; g_pre_copies += pre->copies; g_pre_fills += pre->fills; g_pre_bytes += pre->bytes;
         if (!k || ((k + 1) & 0xFFF) == 0)
             nvlog("vk: pre-submit prologue census: %llu submits carried %llu managed uploads + %llu zero fills (%llu KB) - each WAS its own submit; %llu prologues failed",
@@ -9070,7 +9083,8 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     pt[7] = nvmtl_perf_now();
     nvmtl_perf_submit(perf_sets, pt);
     // -1 is "retired with an error": Metal completes the command buffer with an error and nothing is quarantined, and an
-    // upload that was dropped is not taken as done. Never -2: the device is up and the next command buffer runs.
+    // upload that was dropped is not taken as done (a caller that acts on -1, and the prologue's managed uploads above;
+    // the prologue's zero fills are not made again). Never -2: the device is up and the next command buffer runs.
     return nvmtl_drop_result(dropped, nvmtl_drop_report_on());
 }
 
