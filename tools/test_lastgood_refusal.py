@@ -54,6 +54,9 @@ INSTALLER = {
     "FWOLD": "/Users/Shared/nvfw",
     "KC": "/Library/KernelCollections/AuxiliaryKernelExtensions.kc",
     "BUILD": "25G342",
+    # the fallback the job restores: this run's backup, or the one an install still on trial kept, and its macOS build
+    "FB": "/Library/NullMoth/backup-20261113-000000.TESTED",
+    "FBOSB": "25G342",
 }
 PATH_LINE = "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
 LOOK = "refused() { ioreg -l -w0 2>/dev/null | grep -q '\"nvrm-layout\" = \"declined'; }"
@@ -482,10 +485,10 @@ arm("  a build that cannot be read once is asked again: the previous driver is p
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY), osbuild_fail=2)
 arm("    and so it is at the third question", restored(r) and r.asked == 3, show(r))
 try:
-    r = run(fill(template(src), BUILD=""), registry=FB_REFUSED + ioreg_line(EARLY))
+    r = run(fill(template(src), FBOSB=""), registry=FB_REFUSED + ioreg_line(EARLY))
     arm("  nor when the install recorded no build", untouched(r) and r.job_left and "an unknown build" in r.log,
         show(r))
-    r = run(fill(template(src), BUILD=""), registry=FB_REFUSED + ioreg_line(EARLY), osbuild=None)
+    r = run(fill(template(src), FBOSB=""), registry=FB_REFUSED + ioreg_line(EARLY), osbuild=None)
     arm("  nor when neither build is known (two unknowns are not the same build)", untouched(r) and r.job_left, show(r))
 except Unsafe as e:
     arm("  nor when the install recorded no build", False, e)

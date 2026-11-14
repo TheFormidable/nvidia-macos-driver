@@ -22,6 +22,14 @@ if name=='id':print('0')
 elif name=='uname':print('x86_64')
 elif name=='sw_vers':print('25G241' if a==['-buildVersion'] else os.environ.get('FAKE_OS_VERSION','15.8.1'))
 elif name=='ioreg':print('+-o GFX0@0  <class IOPCIDevice>\n    {\n      "device-id" = <'+os.environ.get('FAKE_NV_DEVICE','052d0000')+'>\n      "vendor-id" = <de100000>\n    }')
+elif name=='nvram' and os.environ.get('FIXTURE_NVRAM')=='state':
+ # NVRAM that keeps what is written: a variable never written or deleted is absent (exit 1), as the real tool does
+ f=r/'nvram.json';d=json.loads(f.read_text()) if f.exists() else {'boot-args':'nvfb=1 nvaccel=1'};k=lambda x:x.split(':')[-1]
+ if a[0]=='-d':d.pop(k(a[1]),None)
+ elif '=' in a[0]:d[k(a[0].split('=',1)[0])]=a[0].split('=',1)[1]
+ elif k(a[0]) in d:print(a[0]+'\t'+d[k(a[0])])
+ else:sys.exit(1)
+ f.write_text(json.dumps(d))
 elif name=='nvram':print('boot-args\tnvfb=1 nvaccel=1')
 elif name=='stat':
  p=Path(a[-1]);info=p.lstat()
