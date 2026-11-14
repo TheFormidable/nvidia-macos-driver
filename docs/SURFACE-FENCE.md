@@ -95,9 +95,10 @@ Before the kernel trusts such a view it has to prove itself twice:
 2. The process then stores a second value there and asks again; the kernel must now read the second value. A view
    that is a snapshot or a private copy of the page still shows the first one and fails.
 
-A channel that fails either step is not watched: nothing is ever armed on it, a line goes to the log
-(`NVRM-xnu: fence: pid N: ... - this channel is not watched`), `map_fail` or `map_mismatch` counts it, and that
-process's surfaces keep 2.9's marks and tags. The cost of any failure here is the fence for that process while the
+A channel that fails either step is not watched: nothing is ever armed on it, the first eight such failures since boot
+write a line to the log (`NVRM-xnu: fence: pid N: ... - this channel is not watched`; later ones reach only the
+kernel's debug output, see "The log lines"), `map_fail` or `map_mismatch` counts every one, and that process's
+surfaces keep 2.9's marks and tags. The cost of any failure here is the fence for that process while the
 channel exists; the channel itself keeps working.
 
 When NVK rebuilds a channel after a fault, the channel gets a new error notifier. NVK tells the kernel, which wires
