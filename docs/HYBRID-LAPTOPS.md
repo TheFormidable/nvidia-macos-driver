@@ -211,7 +211,9 @@ Optional file `/Library/GPUBundles/nvmtl-gpu-policy.txt`:
     igpu Safari        # this process never gets the NVIDIA device
     nvidia Blender     # this process always gets it
 
-A per-process line beats the mode, the last matching line wins. Each decision is logged as `gpu policy for <process>: ...`
+A `#` starts a comment, at the start of a line or after a rule (in 2.9 only at the start of a line, so the file
+above did nothing there). A per-process line beats the mode, the last matching line wins. Each decision is logged as
+`gpu policy for <process>: ...`
 in the plugin log. The plugin can offer a device or not; it cannot list a device without making it the default, so a
 process sent to the low-power GPU does not see the NVIDIA device in `MTLCopyAllDevices` either. That is why the default is
 `mode nvidia`. WindowServer is never offered the device when the NVIDIA GPU is headless (unchanged).

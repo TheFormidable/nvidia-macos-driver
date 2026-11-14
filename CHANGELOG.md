@@ -301,6 +301,10 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   `nvrm610.conf` are not part of this list.
 - [docs/SWITCHES.md](docs/SWITCHES.md) lists every switch the driver reads (environment names, boot arguments,
   sysctls, flag files), what each does, and what is in effect when it is not set.
+- The GPU policy file of a hybrid laptop (`/Library/GPUBundles/nvmtl-gpu-policy.txt`) takes a comment after a rule,
+  as the example in [docs/HYBRID-LAPTOPS.md](docs/HYBRID-LAPTOPS.md) shows them. In 2.9 a `#` started a comment only
+  at the start of a line, so a file copied from that example set no mode and named no process, and `mode apple` with a
+  blank after it set nothing either.
 
 ### The ways back
 
