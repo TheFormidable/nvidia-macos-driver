@@ -44,6 +44,8 @@ or the arm's own check given a broken result):
   linux              on Linux no xcrun, security or otool runs and OpenSSL gets no darwin target; on Apple silicon
                      OpenSSL gets the arm64 target
   bash32             nothing in the script that /bin/bash 3.2 or the BSD tools of macOS lack
+  checkfail          an installed glslangValidator or llvm-config that fails: check still ends with its list of
+                     FAIL lines and "STOP: N of M tools failed their checks"
 
 The shell is $BUILD_SH_BASH (default /bin/bash, macOS's bash 3.2 on a Mac). usage: test_toolchain_sh.py [arm ...]"""
 import hashlib, os, pathlib, platform, re, shlex, shutil, subprocess, sys, tempfile
@@ -724,6 +726,30 @@ def main():
             (sb.prefix / "bin/spirv-val").unlink()
             rc, out, err = sb.run(["check", "spirv-tools"])
             check("check fails and names a file removed since", rc == 1 and "spirv-val" in out, out + err)
+
+        if arm("checkfail"):
+            # under set -e -o pipefail an assignment from a pipeline whose program fails ended the script there, before
+            # the list of what failed; every check must still be reported
+            def checkfail_problems(muts=None):
+                s = sandbox()
+                script = mutate(s, "checkfail", muts) if muts else None
+                rc, out, err = s.run(["build"] + TOOLS)
+                if rc != 0:
+                    return [f"the build of the ten tools failed: exit {rc}: {err[-500:]}"]
+                for rel in ("bin/glslangValidator", "llvm/bin/llvm-config"):
+                    (s.prefix / rel).unlink()
+                    write(s.prefix / rel, "#!/bin/sh\nexit 3\n", 0o755)
+                rc, out, err = s.run(["check", "glslang", "llvm"], script=script)
+                probs = [] if rc == 1 else [f"exit {rc}"]
+                for w in ("STOP: 2 of 2 tools failed their checks", "glslangValidator --version starts with",
+                          "llvm-config --components lacks"):
+                    if w not in out + err:
+                        probs.append(f"{w!r} is not said: {(out + err)[-500:]}")
+                return probs
+            p = checkfail_problems()
+            check("a glslangValidator and an llvm-config that fail: check names each failed check and ends with its STOP line", not p, p)
+            bad = [(' | sed -n 1p) || true', ' | sed -n 1p)'), (" | sed 's/\\..*//') || true", " | sed 's/\\..*//')")]
+            control("a script whose check ends at the first failing program", checkfail_problems(bad))
 
         if arm("pinver"):
             # each program's --version against the version this script builds. The lines a real build printed (one
