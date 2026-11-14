@@ -174,18 +174,18 @@ static inline int nvrm_evw_must_poll(unsigned reason)
     return reason == NVRM_EVW_R_CAPPED || reason == NVRM_EVW_R_ABORTED || reason == NVRM_EVW_R_SPURIOUS;
 }
 
-/* Going back to polling after missed wakes is a pause, not the end. The event is posted by a bottom half that needs the
-   GPU lock, and RM holds that lock through long calls (a display mode change, a display waking, a wake from sleep): GPU
-   work keeps completing while no event is posted, and NVRM_EVW_MISS_LIMIT missed wakes take only some tens of
-   milliseconds of that. So a QUIET process polls, and each of its threads, counting in its own waits (no clock), tries
-   the event again once its pause has passed: in a trial its rounds sleep as if the flag were clear. The first answer
-   that proves events arrive (WOKEN, MOVED, or a capped or aborted answer whose count moved: nvrm_evw_round) clears the
-   flag for the whole process and resets this thread; the NVRM_EVW_TRIAL_MISSES-th missed wake of the trial ends it and
-   doubles this thread's pause (256 waits first, NVRM_EVW_PAUSE_MAX at most). A sleep that ran out with the work still
-   pending is neither. When events never come back, a thread pays at most NVRM_EVW_TRIAL_MISSES missed wakes (each at
-   most one NVRM_EVW_MAX_SLEEP_US sleep of latency) per trial: 22 trials in its first million waits after going QUIET
-   (pauses 256 to 32768 are 65280 waits and 8 trials, then one trial per 65536 waits). A failed kernel call (DEAD) never
-   gets a trial.
+/* Going back to polling after missed wakes is a pause, not the end. NVRM_EVW_MISS_LIMIT missed wakes take only some
+   tens of milliseconds, and events that stop for that long while GPU work completes (an interrupt served late or lost;
+   when that happens is not measured) may well come back. RM posts the event from rm_isr, without the GPU lock, so a
+   long RM call is not what holds it back. So a QUIET process polls, and each of its threads, counting in its own waits
+   (no clock), tries the event again once its pause has passed: in a trial its rounds sleep as if the flag were clear.
+   The first answer that proves events arrive (WOKEN, MOVED, or a capped or aborted answer whose count moved:
+   nvrm_evw_round) clears the flag for the whole process and resets this thread; the NVRM_EVW_TRIAL_MISSES-th missed
+   wake of the trial ends it and doubles this thread's pause (256 waits first, NVRM_EVW_PAUSE_MAX at most). A sleep that
+   ran out with the work still pending is neither. When events never come back, a thread pays at most
+   NVRM_EVW_TRIAL_MISSES missed wakes (each at most one NVRM_EVW_MAX_SLEEP_US sleep of latency) per trial: 22 trials in
+   its first million waits after going QUIET (pauses 256 to 32768 are 65280 waits and 8 trials, then one trial per 65536
+   waits). A failed kernel call (DEAD) never gets a trial.
 
    nvrm_evw_quiet: once per round, after nvrm_evw_begin (`fresh`: what it returned), with the flag as read now. Returns
    the flag as this round must use it: 0 while this thread is in a trial of a QUIET process. *began: a trial starts now. */
