@@ -59,9 +59,13 @@ Nothing is printed on a healthy GPU.
   (`NVMTL_PRESUBMIT_PROLOGUE`, on by default) did not run either: the managed ranges are marked to be uploaded again
   at the next submit, from the buffer's CPU copy (if GPU work wrote the same range in between, the CPU copy wins); the
   zero fills are not made again (a later command buffer may already have written those buffers), so those buffers
-  hold what the VRAM held wherever nothing was written or uploaded since. Textures that the residency manager was
-  moving in a dropped evict batch already point at their new images, which hold undefined contents. The surface-fence
-  holds of the command buffer are closed on its error path as on every other.
+  hold what the VRAM held wherever nothing was written or uploaded since. Without the prologue
+  (`NVMTL_PRESUBMIT_PROLOGUE=0`, or when it could not be opened) a managed upload rides a submission of its own; if a
+  rebuild drops that one, it is reported (`managed: upload of N bytes at O FAILED - the GPU keeps the old bytes`,
+  which a release build does send to the system log; with `NVMTL_DROP_REPORT=0` it is taken as done) and not made
+  again. Textures that the residency manager was moving in a dropped evict batch already point at their new images,
+  which hold undefined contents. The surface-fence holds of the command buffer are closed on its error path as on
+  every other.
 - Log lines (`nvmtl.log`; a release build also sends the first, with its `fault context:` lines, and the fourth to the
   system log, since they hold the word "fault", and the last, which holds "FAILED"; the two `tex upload async` lines
   are in `nvmtl.log` only):
