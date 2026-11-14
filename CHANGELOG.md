@@ -19,8 +19,9 @@ succeeded there for the first time: the build, the package, the host tests (304 
 run, of 316) and its twelve checks of what was built. In the workflow `ci` at that commit the host tests passed with
 the same numbers on that runner and, for the first time whole, on GitHub's Apple-silicon runner (macos-15). At commit
 95811c2 the kernel extensions built on GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has
-run on an Apple-silicon Mac. Nothing committed after ee7f332 has been built or tested on a Mac or on GitHub. The check
-list for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
+run on an Apple-silicon Mac. Nothing committed after ee7f332 has been built or tested on a Mac or on GitHub: the
+corrections made after it, among those below, were compiled and their host tests run on Linux only. The check list
+for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
 alters how the driver runs has one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
@@ -85,9 +86,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   of README.md, which excludes Apple's IONDRVSupport, no desktop comes up on the card; where IONDRVSupport is not
   excluded, Apple's firmware framebuffer takes the card and shows a slow desktop without acceleration when the
   firmware's picture still lies inside the card's memory window (otherwise the screen stays dark there too). After an
-  install over an earlier driver, while the installer's fallback job is still there (until the start after the first
-  one that showed the display), the job finds the refusal at that start, keeps it (the class and both sizes) in
-  `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts the
+  install over an earlier driver, while the installer's fallback job is still there (until the first start after the
+  one in which it found the display lit), the job finds the refusal at that start, keeps it (the class and both sizes)
+  in `/Library/NullMoth/lastgood.log` and, while the Mac still runs the macOS build the install was made on, puts the
   earlier driver back and restarts (where another GPU shows a display and a user is logged in by then, the restart is
   left to that user; a display on the refused card, which only Apple's firmware framebuffer can draw, does not hold it
   back, even after an automatic login). The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout`
@@ -119,14 +120,26 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   channel within 30 s) ends the device exactly as in 2.9. A Mac put to sleep with a game or WindowServer waiting on
   the GPU no longer loses the device or rebuilds a channel that was only stopped for the sleep: the kext answers NVK's
   channel note without waiting for the GPU's resume and reports the GPU as suspended until it lets RM calls through
-  again, NVK sends no escape while it holds a channel's lock, and a stall seen while the GPU is suspended restarts the
-  no-progress budget instead of rebuilding, at every sleep, for up to 360 s of awake time per sleep. Way back:
-  `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf`. See [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
+  again, neither the thread that submits to a channel nor its doorbell ring makes an RM call or escape while it holds
+  the channel's lock (only the recovery sequence calls RM with the lock held, besides the test hook when
+  `NVK_FAULT_INJECT` arms it; for a channel that merely stands still it starts only once the kext no longer reports the
+  GPU suspended, or after 360 s), and a stall seen while the GPU is suspended restarts the no-progress budget instead of
+  rebuilding, at every sleep, for up to 360 s of awake time per sleep. A wait that stands still behind another channel
+  that hangs without a fault (the graphics channel behind the upload channel, for example) has that channel rebuilt too,
+  within the same limits, where depending on timing the application could lose its device instead, with the line "the
+  channel it waits on is still progressing". Way back: `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf`. See
+  [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
 - After such a recovery the Metal command buffer whose work was dropped completes with an error instead of as success,
   and the process keeps its device; the plugin no longer waits for, and counts, the completion record such a command
   buffer can never write (eight of those used to switch command-pool reuse off for the process). A device loss that
   is not recovered now names its kind (firmware, bus, failed wake, ECC) in the log. Way back for the error report:
   `NVMTL_DROP_REPORT=0` in `nvrm610.conf` (the command buffer is reported as completed).
+  When a rebuild drops a command buffer that carried uploads of managed buffers (the plugin's pre-submit prologue),
+  those ranges are uploaded again at the next submission instead of staying unwritten on the GPU, and a line in the
+  system log says so for the first such drop of a process and every 256th (`vk: after a GPU fault, U managed uploads
+  and Z zero fills rode a dropped command buffer ...`). The GPU zero fills of new buffers that rode it (Private buffers
+  and, by default, the VRAM copy of a new managed buffer) are not made again: such a buffer holds what the VRAM held
+  wherever nothing was written or uploaded since.
 - NVK's own warnings and errors no longer go to a file in `/private/tmp` from every Metal process. An installed
   plugin writes them to `nvmtl.log` only for a process started with `NVMTL_PROCESS_ENV=1`; from every other process,
   WindowServer included, NVK's errors and the two channel-recovery lines (`nvrm channel slot N rebuilt after ...` and
@@ -138,6 +151,8 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   plugin's: it reads only the first 8191 bytes of the file, where the plugin reads it whole, it takes a line only when
   the line begins with the name and its `=` with no blank before either, and the value is everything up to the end of
   the line, blanks included, up to 63 bytes. A line written `NAME=value` from the first column reads the same in both.
+  This now holds for NVRM_ASYNC, NVK_DIAG, NVK_QUEUE_COUNT and NVMTL_GDQ_DQ too, which took their first line in such a
+  program (for the settings NVK reads from the file itself; the eight `NVRM_610_` items keep the older rule there).
 - The Metal plugin's fence wait (the one that gives a fence up as lost after ten budgets: 50 s in WindowServer) no
   longer counts time asleep, so a frame that was pending at sleep is not declared lost at wake.
 - A texture the application releases while the GPU may still use it is now freed only once no command buffer that
@@ -250,6 +265,33 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - A process that fails channel registrations of the surface fence in a loop cannot flood the system log: only the
   first 8 failures since boot reach it; later ones go to the debug output, and `debug.nvrm_fence_map_fail` and
   `debug.nvrm_fence_map_mismatch` count them all.
+
+#### Installing and the way back
+- The installer's fallback job (it puts the earlier driver back when the new one cannot start) copies the earlier
+  kernel collection out of the backup before it changes anything and puts it in place by a rename. Before, it copied
+  over the collection in place without checking the copy: one that failed half-way (a full volume) left a cut
+  collection and no job to try again; now such a failure changes nothing and the job stays for the next start.
+- The fallback job looks for a lit display at each of its looks, whichever of it and the kexts starts first, and
+  stays through the start in which it first finds the display lit, so a WindowServer that keeps dying in that start
+  still finds the way back; it removes itself at a later start. A start count of two that already includes the
+  present start (a card NVRM has claimed) no longer puts the earlier driver back while this start may still light the
+  display.
+- A second run of `install.sh` before a start that lit the display (to add the DLSS files or the boost switch, or a
+  newer build over an untried one) keeps the first run's backup as the way back, with that backup's own macOS build,
+  and says so in step 6b. Before, the fallback job would have put back the driver that was on trial.
+- The boot-guard job ends an install's trial only on a desktop of this driver: a card NVRM claimed, and either its
+  display path reported up (`debug.nvrmfb_guard_cleared`) or a display on another GPU. A desktop with no NVIDIA driver
+  running only clears the start count, and a claimed card with nothing lit and no display on another GPU keeps its
+  count. Before, any WindowServer that stayed up 45 s ended the trial, so the way back could be gone before the new
+  driver had shown a picture.
+- A WindowServer that keeps dying while the accelerator refused this macOS's classes (`nvaccel-layout` says
+  `refused`) now turns the driver off and restarts once from the login window, as with an armed accelerator, when
+  every display hangs off the card NVRM claimed.
+- The installer's last lines no longer tell you to undo the install with `uninstall.sh`, which removes the driver and
+  restores nothing: they name the folder that holds what was installed before and say to install its own package
+  again.
+- A rehearsal (`sudo env CHECK=1 ./install.sh`) that stops in step 3 no longer leaves a `/var/tmp/nullmoth.XXXX` folder
+  with a copy of every third-party kext behind.
 
 #### Switches and reports
 - `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a
@@ -404,6 +446,32 @@ has proven itself, renewed with a reason otherwise.
   system monitor, attributes file and template folder out of its own).
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
+- `./build.sh` refuses a working directory, `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`,
+  `NM_OGKM620` or `NM_OGKM620_PRISTINE` whose path holds a character other than letters (of any alphabet), digits and
+  `% + - . / @ _`, and the three release scripts refuse such a path themselves. They put these paths unquoted into the
+  commands they hand to the build Mac's shell, where a folder such as `R&D` split a command and could delete a folder
+  beside it.
+- The commands the plugin, translator and video (nvencvt) release scripts run on the build Mac get the step's
+  `SDKROOT`, so Apple's clang and ld no longer search `/usr/local/include` and `/usr/local/lib` (Homebrew's on an
+  Intel Mac) before the SDK of the Xcode `build.sh` chose.
+- With `NM_MESA_GIT` set, the plugin step stops with the reason when the folder the release plugin is compiled against
+  (`<workdir>/build/gpu-src/mesa/include`) has no Vulkan headers, instead of starting and failing on a missing
+  `vulkan_core.h` (or compiling against Homebrew's under `/usr/local`).
+- What `deps` builds itself (the translator's cmake, the Python environment and pip, cargo's bindgen and cbindgen) no
+  longer takes your compiler variables (`CC`, `CXX`, `CFLAGS`, `LDFLAGS` ...), cmake's search paths, `PYTHONPATH` and
+  `PYTHONHOME`, the pip options that move or change what it installs (`PIP_TARGET`, `PIP_USER` ...), or `RUSTFLAGS`,
+  `RUSTC_WRAPPER` and `CARGO_TARGET_DIR`; every step also loses `PYTHONPATH` and `PYTHONHOME`, and doctor names those
+  that are set.
+- A download with the wrong SHA-256 is refused with both checksums, the expected one and the one it had. A
+  `glslangValidator` or `llvm-config` that fails when asked its version no longer ends `deps`' checks before they list
+  what is missing.
+- `clean` with a `NULLMOTH_BUILD_ROOT` outside the working directory finishes and names the folders it leaves there,
+  instead of stopping halfway. `clean` and `help` work on a system other than macOS too, and the messages say so.
+- The git that fetches the pinned sources never asks for a user name on the terminal: a remote that wants one fails
+  at once with git's own message.
+- After `package`, `./build.sh` prints the three install commands bare and the explanation on a line of its own. Pasted
+  into Terminal, whose zsh does not take `#` as a comment, the old trailing `# a dry run: ...` reached `install.sh` as
+  arguments, and it refused with "expected --payload directory or no arguments".
 
 ## 2.9
 

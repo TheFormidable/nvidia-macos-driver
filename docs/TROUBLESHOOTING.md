@@ -149,12 +149,15 @@ does not count such a start as good (`/Library/NullMoth/bootguard.log` ends it w
 driver turns itself off at the third start, and the fallback job, while it is still installed, then puts the earlier
 driver back and restarts. With a display on another GPU, or without the job, put the earlier driver back by hand:
 install its own package again (the installer's last lines named the folder that keeps it). That job takes itself away at
-the first start
-after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS update
-that changed a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow
-one, until you boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
+the first start after the one in which it found the display lit (a second run of install.sh before such a start keeps
+the first run's backup as the way back), and a first install has none: a refusal then (after a macOS update that changed
+a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow one, until you
+boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
 AppleGraphicsDeviceControl; with the accelerator refused (`NVAccel: Apple class layout refused: ...` in the log) the
-desktop runs without acceleration.
+desktop runs without acceleration; if instead WindowServer keeps dying there (a black screen with only the pointer) and
+every display is on this card, the boot-guard job turns the driver off and restarts once from the login window, and the
+fallback job, while it is still installed, puts the earlier driver back at that next start; with a display on another
+GPU the boot-guard job leaves that loop alone.
 Report the line (after a restart by itself, `/Library/NullMoth/lastgood.log`) with `sw_vers`. `nvlayout=0` in the
 boot arguments starts them anyway (the check still runs and logs `overridden (nvlayout=0): ...`), at the risk the
 check exists for (a crash or a frozen desktop); use it only to confirm. `nvlayout=0` changes the verdict, not the
@@ -292,6 +295,9 @@ then freed at once, as in 2.9.
   `sudo nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove=1`, then `sudo shutdown -r now`, gives the next
   starts the firmware's picture. Without it, two starts in a row whose display never came up turn the driver off by
   themselves; after an install over an earlier driver, `install.sh`'s job then puts that driver back and restarts.
+  A start whose desktop comes up with no NVIDIA driver running, or with the card started, nothing lit and no display
+  on another GPU, does not count as good (`/Library/NullMoth/bootguard.log` says which), so it does not end the
+  install's trial.
   When the framebuffer refused this macOS's classes (section 3), the driver gives none of the starts in this item or
   the one above a picture: the framebuffer that draws the firmware's picture with the driver off is built on the same
   classes. They have a picture only where OpenCore does not exclude IONDRVSupport (Apple's own firmware framebuffer
