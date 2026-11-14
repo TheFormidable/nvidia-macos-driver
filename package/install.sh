@@ -562,16 +562,19 @@ step "6b. falling back to the previous driver if this one cannot start"
 # /Library/NullMoth/trial-backup, so a restore by the job, an uninstall or another release's install in between ends
 # the trial). The kept backup keeps its own macOS build for the job's refusal rule; an install on trial that had no
 # previous driver passes that on: no job. The path read back is used only as a backup folder of this installer's
-# naming that exists; nothing is ever removed through it.
+# naming that exists; nothing is ever removed through it. It and the build read from it go between single quotes into
+# the job below, which runs as root at every start: a path that holds anything but the characters mktemp gives such a
+# name is not used, and a build that holds anything but letters and digits counts as unknown.
 FB=$BK; FBREC=""; FBOSB=$BUILD; FBKEPT=0
 TR=/Library/NullMoth/trial-backup
 if [ -f "$TR" ] && [ -n "$NVSUM0" ] && ! nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok >/dev/null 2>&1 \
    && [ "$(sed -n 1p "$TR")" = "$NVSUM0" ]; then
   FB=$(sed -n 2p "$TR"); FBREC=$FB; FBKEPT=1; FBOSB=""
-  case "$FB" in /Library/NullMoth/backup-*) case "$FB" in *..*) FB="";; esac;; *) FB="";; esac
+  case "$FB" in /Library/NullMoth/backup-*) case "$FB" in *..*|*[!A-Za-z0-9._/-]*) FB="";; esac;; *) FB="";; esac
   [ -z "$FB" ] || { [ -d "$FB/NVRM.kext" ] && [ ! -L "$FB" ]; } || FB=""
   [ -z "$FB" ] || FBOSB=$(sed -n 1p "$FB/macos-build" 2>/dev/null)
 fi
+case "$FBOSB" in *[!A-Za-z0-9]*) FBOSB="";; esac
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
