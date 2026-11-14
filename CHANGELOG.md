@@ -304,7 +304,8 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - The GPU policy file of a hybrid laptop (`/Library/GPUBundles/nvmtl-gpu-policy.txt`) takes a comment after a rule,
   as the example in [docs/HYBRID-LAPTOPS.md](docs/HYBRID-LAPTOPS.md) shows them. In 2.9 a `#` started a comment only
   at the start of a line, so a file copied from that example set no mode and named no process, and `mode apple` with a
-  blank after it set nothing either.
+  blank after it set nothing either. Such a file takes effect with this release: copied whole, the example gives
+  `mode apple` (the last of its two `mode` lines) and its two process rules.
 
 ### The ways back
 
