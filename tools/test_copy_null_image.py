@@ -4,7 +4,8 @@
 Logic Pro 12.3.1 on 2.6.5 (plugin 78BE873A) crashed opening the Dolby Atmos mixer: RealityKit's TextureManager uploaded
 a texture through copyFromBuffer:toTexture:, the layout barrier carried a null VkImage, and NVK read 0x520 from it in
 nvk_CmdPipelineBarrier2. The production copy functions are compiled with Vulkan dispatch stubbed; an optional argument
-checks another nvmtl_vk.c (the 2.6.5 one dispatches the null image and fails the first arms)."""
+checks another nvmtl_vk.c (the 2.6.5 one dispatches the null image and fails the first arms). A buffer copied into a
+multisample texture is refused the same way (not valid Vulkan), and a 1-sample texture still copies."""
 import os
 import pathlib
 import subprocess
@@ -79,6 +80,7 @@ static void check(int ok, const char *name) { checks++; printf("%s %s\n", ok ? "
     ('static inline uint32_t nvmtl_lvl(', True),
     ('static inline uint32_t nvmtl_blocks(', True),
     ('static int nvmtl_copy_has_image(', False),
+    ('static int nvmtl_copy_into_multisample(', False),
     ('int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(', True),
     ('int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(', True),
 ]) + r'''
@@ -100,6 +102,12 @@ int main(void) {
     check(rc == 0 && copies == 2, "negative control: and reads back");
     for (int i = 0; i < 40; i++) nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&c, &b, 0, 256, &none, 0, 0, 64, 64, 0, 0);
     check(logs <= 16, "a per-frame refusal is logged at most 16 times");
+    nvk_image ms = good; ms.samples = 4; ms.mtl_type = 4; unsigned b2 = barriers + copies;
+    rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&c, &b, 0, 256, &ms, 0, 0, 64, 64, 0, 0);
+    check(rc == -1 && barriers + copies == b2, "buffer -> 4-sample texture is refused before Vulkan");
+    nvk_image one = good; one.samples = 1; unsigned b3 = barriers + copies;
+    rc = nvmtl_vk_cmd_copy_buffer_to_image_level_layer(&c, &b, 0, 256, &one, 0, 0, 64, 64, 0, 0);
+    check(rc == 0 && barriers + copies == b3 + 3, "negative control: a 1-sample texture still copies (2 barriers, 1 copy)");
     printf("%s: %u checks, %u failures\n", errors ? "FAIL" : "PASS", checks, errors);
     return errors ? 1 : 0;
 }
