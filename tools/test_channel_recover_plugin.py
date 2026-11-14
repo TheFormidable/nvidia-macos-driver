@@ -167,7 +167,9 @@ def chk_prologue(vk, obj):
             and blk.count("nvmtl_pre_drop(pre);") == 1
             and "nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;" in mf
             and "nvmtl_pre_redo_hook" not in zf
-            and order(redo, "[(NSArray *)e count] != 3) continue;", "nvmtl_managed_mark(b, lo, hi);")
+            # a zero flush's hold lists buffers, which have no `count`: the class is asked before the length
+            and order(redo, "if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 3) continue;",
+                      "nvmtl_managed_mark(b, lo, hi);")
             and "fill" not in redo.split("{", 1)[-1])
 
 
@@ -260,6 +262,8 @@ run("a dropped prologue's managed uploads are marked again before its holds go; 
         ("the hook set by the zero flush too", (VK, sub(OBJ, "        nvmtl_pre_release_hook = nvmtl_pre_release;\n        nvmtl_vk_pre_hold((__bridge_retained void *)todo);\n        const unsigned long long k",
                                                         "        nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;\n        nvmtl_vk_pre_hold((__bridge_retained void *)todo);\n        const unsigned long long k"))),
         ("a zero flush's hold walked as managed ranges", (VK, sub(OBJ, "[(NSArray *)e count] != 3) continue;", "[(NSArray *)e count] < 1) continue;"))),
+        ("a zero flush's buffers asked for a count", (VK, sub(OBJ, "if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 3) continue;",
+                                                          "if ([(NSArray *)e count] != 3) continue;"))),
     ])
 run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed first", chk_metal, (EV,), [
     ("the holds closed after the marks", (sub(EV, "    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error\n    NSDictionary *marks = cb->_busyMarks;\n",
