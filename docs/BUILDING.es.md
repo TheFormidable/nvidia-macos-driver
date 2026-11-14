@@ -323,7 +323,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_LILU_DEBUG_KEXT` | Para `nmkbl` y `nmhda` |
 | `NM_VIRTUALSMC_SRC` | Para `nmkbl` |
 | `NM_MACKERNELSDK` | Para `nmkbl` y `nmhda` |
-| `NULLMOTH_BUILD_ROOT` | Carpeta de compilación de los scripts existentes (por defecto `<workdir>/build`) |
+| `NULLMOTH_BUILD_ROOT` | Carpeta bajo cuya subcarpeta `build` ponen sus árboles los scripts existentes (por defecto `<workdir>`) |
 | `NULLMOTH_BUILD_HOST` | El Mac de compilación de los scripts de publicación (por defecto este Mac) |
 | `NM_LOCAL_HOST_PATH` | PATH de los comandos que esos scripts ejecutan en este Mac |
 | `NV_VERSION` | Versión de NVIDIA (debe ser la fijada, 620.70.06) |
