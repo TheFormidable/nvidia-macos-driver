@@ -33,6 +33,7 @@
 #include "nvmtl_shared_wc.h"
 #include "nvmtl_app_profile.h"
 #import "nvmtl_osver_install.h"
+#include "nvmtl_os_major.h"
 #include "nvmtl_claims.h"
 #include "nvmtl_gpu_policy.h"
 #include "nvmtl_card_select.h"
@@ -957,15 +958,27 @@ static void nvmtl_install_hw_resource_pools(id dev)
     set(dev, NSSelectorFromString(@"setHwResourcePool:count:"), pools, 3);
     nvlog("  hw resource pools: installed 3 (slot 2 + count)");
 }
+/* A refusal before [super initWithAcceleratorPort:] must not free the object. Under ARC, returning nil from an init
+   releases self, and -[_MTLDevice dealloc] then releases dispatch objects that only the superclass's init creates: a NULL
+   dispatch_release on Metal's device queue, which killed the program inside MTLCopyAllDevices. The uninitialized object
+   is kept instead (one per refused accelerator each time Metal builds its device list). After super init has run, a
+   plain nil is safe and is used. */
+static id nvmtl_refuse_before_init(id obj)
+{
+    (void)CFBridgingRetain(obj);
+    return nil;
+}
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
-    {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when the version cannot be
-           read, it creates no device, before touching the accelerator */
-        char v[32] = {0}; size_t n = sizeof v - 1;
-        int major = sysctlbyname("kern.osproductversion", v, &n, NULL, 0) == 0 ? atoi(v) : 0;
-        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nil; }
+    {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when neither kern.osproductversion
+           nor kern.osrelease gives a version, it creates no device, before touching the accelerator */
+        char v[32] = {0}, d[32] = {0}; size_t n = sizeof v - 1, dn = sizeof d - 1;
+        if (sysctlbyname("kern.osproductversion", v, &n, NULL, 0) != 0) v[0] = 0;
+        if (sysctlbyname("kern.osrelease", d, &dn, NULL, 0) != 0) d[0] = 0;
+        int major = nvmtl_os_major_from(v, d);   // "10.16" for a program built before macOS 11: resolved from Darwin
+        if (major < 15 || major > 26) { nvlog("  macOS %s is not supported by this driver: no device", v[0] ? v : "unknown"); return nvmtl_refuse_before_init(self); }
     }
-    if (!nvmtl_card_wanted(port)) return nil;   // nvmultigpu=1 only: this process drives another card
+    if (!nvmtl_card_wanted(port)) return nvmtl_refuse_before_init(self);   // nvmultigpu=1 only: this process drives another card
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
     {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
