@@ -449,10 +449,13 @@ What `build.sh` does around the existing scripts, so that they do not need the o
 
 ## Building one piece
 
+`build fb` builds NVRMFB.kext, and the RM core first if it is not up to date; `build nvrm accel` builds several
+components, and `build kexts` a group:
+
 ```bash
-./build.sh build fb            # NVRMFB.kext, and the RM core first if it is not up to date
-./build.sh build nvrm accel    # several
-./build.sh build kexts         # a group
+./build.sh build fb
+./build.sh build nvrm accel
+./build.sh build kexts
 ./build.sh --force build plugin
 ./build.sh --flavour dev build plugin
 ./build.sh --accel 26 build accel

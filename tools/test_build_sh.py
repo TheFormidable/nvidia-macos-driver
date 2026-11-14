@@ -4301,6 +4301,16 @@ def arm_test_cmd(mac):
         negative("tools/bin/patch without -f (macOS's patch asks at the terminal)", asked_problems(mac))
 
 
+def hint_problems(out):
+    """install_hint's lines between "Nothing was installed." and "Going back:": the commands (indented) carry no comment"""
+    m = re.search(r"Nothing was installed\.[^\n]*\n(.*?)\nGoing back:", out, re.S)
+    if not m:
+        return [f"no install hint in: {out[-300:]!r}"]
+    cmds = [l for l in m.group(1).splitlines() if l.startswith("  ")]
+    return ([] if any(l.strip().startswith("sudo env CHECK=1 ./install.sh") for l in cmds) else ["no dry-run command"]) + \
+        [f"{l!r} holds a comment" for l in cmds if " #" in l]
+
+
 def arm_package(mac):
     def problems(s):
         p = []
@@ -4319,6 +4329,14 @@ def arm_package(mac):
         ok = rc == 0 and st and st[-1][0] == "package" and st[-1][1][1:] == [str(mac.work / "out"), str(mac.work / "package")]
         ok = ok and "sudo env CHECK=1 ./install.sh" in out and not any(l.startswith("sudo") for l in mac.jlines())
         check("package stages from a base package and prints the install command without running it", ok, (rc, st[-1:], out[-600:]))
+        p = hint_problems(out)
+        check("the install commands it prints are bare: no line that starts with a command holds a # comment, which "
+              "macOS's zsh would pass to install.sh", not p, p)
+    with mac.scratch():
+        mac.clear()
+        mac.break_script('  say "  sudo env CHECK=1 ./install.sh"\n', '  say "  sudo env CHECK=1 ./install.sh        # a dry run"\n')
+        rc, out = mac.run("--base-package", str(mac.dir / "brew"), "package")
+        negative("an install command printed with a comment after it", hint_problems(out))
     with mac.scratch():
         mac.break_script('[ "$NM_ACCEL" = both ] || die', 'true || die')
         negative("a package with one NVAccel flavour", problems(mac))
