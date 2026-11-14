@@ -95,6 +95,8 @@ class Fixture(m.Install):
         self.set_nvram(**{'nullmoth-nv-starts': '%02'})
         job = self.root / 'job.sh'
         mine = f'PATH={self.bin}:/usr/bin:/bin:/usr/sbin:/sbin'
+        # nor is it run when its PATH line is not the one replaced here: this machine's nvram and shutdown would answer
+        self.assertEqual(text.count('\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\n'), 1)
         job.write_text(text.replace('PATH=/usr/bin:/bin:/usr/sbin:/sbin', mine, 1))
         # JOB_BASH: the shell the job runs under (macOS runs it with bash 3.2)
         j = subprocess.run([os.environ.get('JOB_BASH', '/bin/bash'), str(job)], env=self.env, capture_output=True,
