@@ -2,8 +2,9 @@
 
 Status: at commit 3933ff6 the kext's, NVK's and the Metal plugin's parts were compiled and linked with Apple's own
 tools on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4
-processors, macOS 15, Xcode 26.3 with the 26.2 SDK). Their pure logic runs in host tests. **None of it has been loaded
-or run on a Mac, and no rebuild of a real channel has been seen.** It is on by default. `NVK_CHANNEL_RECOVER=0` in
+processors, macOS 15, Xcode 26.3 with the 26.2 SDK). Their pure logic runs in host tests. The corrections made after
+commit ee7f332 have been compiled and tested on Linux only. **None of it has been loaded or run on a Mac, and no
+rebuild of a real channel has been seen.** It is on by default. `NVK_CHANNEL_RECOVER=0` in
 `/Library/GPUBundles/nvmtl/nvrm610.conf` switches it off, and NVK then runs the 2.9 code.
 
 ## What changed
@@ -68,7 +69,9 @@ Nothing is printed on a healthy GPU.
   every other.
 - Log lines (`nvmtl.log`; a release build also sends the first, with its `fault context:` lines, and the fourth to the
   system log, since they hold the word "fault", and the last, which holds "FAILED"; the two `tex upload async` lines
-  are in `nvmtl.log` only):
+  are in `nvmtl.log` only as they read here: when the copy fails (`was made again -> -N - the image keeps what it
+  held`) or has no command buffer (`cannot be made again (no command buffer) - the image keeps what it held`), the
+  line goes to the system log too):
   `vk: after a GPU fault, a channel rebuild dropped this command buffer (N so far in <process>, fence after W ms): it
   did not run and is reported as failed; the device stays up; NVK: Xid X, R channel rebuilds, D flushes dropped, P
   replayed` for the first and every 256th, and on the first one the `fault context:` lines of the work that was
