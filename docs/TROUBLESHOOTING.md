@@ -148,11 +148,11 @@ started the card, and the fallback job does not see that refusal. Where no other
 does not count such a start as good (`/Library/NullMoth/bootguard.log` ends it with `... keeps its count`), so the
 driver turns itself off at the third start, and the fallback job, while it is still installed, then puts the earlier
 driver back and restarts. With a display on another GPU, or without the job, put the earlier driver back by hand:
-install its own package again (the installer's last lines named the folder that keeps it). That job takes itself away at
-the first start after the one in which it found the display lit (a second run of install.sh before such a start keeps
-the first run's backup as the way back), and a first install has none: a refusal then (after a macOS update that changed
-a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow one, until you
-boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
+install its own package again (the installer's last lines named the folder that keeps it). The fallback job takes itself
+away at the first start after the one in which it found the display lit (a second run of install.sh before such a start
+keeps the first run's backup as the way back), and a first install has none: a refusal then (after a macOS update that
+changed a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow one, until
+you boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
 AppleGraphicsDeviceControl; with the accelerator refused (`NVAccel: Apple class layout refused: ...` in the log) the
 desktop runs without acceleration; if instead WindowServer keeps dying there (a black screen with only the pointer) and
 every display is on this card, the boot-guard job turns the driver off and restarts once from the login window, and the
