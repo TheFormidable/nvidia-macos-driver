@@ -950,7 +950,11 @@ bool NVRM::startGPU(IOService *provider)
     // publish "overridden" instead, and both start as before.
     // This relies on NVRMFBClaim (probe score 30000) having probed this PCI device before NVRM (score 1000) starts on
     // it, which IOKit does within one matching pass. The line below says which way round it was on this boot; NVRMFB
-    // logs the same from its side. A verdict published later is read again just before go(2).
+    // logs the same from its side. A verdict published later is read again just before go(2). If the claim is never
+    // probed (the IOFramebuffer category of this PCI device already had a client, such as Apple's IONDRVFramebuffer,
+    // when the auxiliary collection's personalities arrived; IOKit then skips them without a probe), the first verdict
+    // is NVRMNVDAFramebuffer::start's, after go(2): the framebuffer refuses, the card runs, nvrm-layout is never
+    // written, and the fallback job does not see the refusal.
     {
         char text[200];
         gNvLayoutFb = (unsigned)nvrmPeerLayout(provider, "nvrmfb-layout", text, sizeof text);
