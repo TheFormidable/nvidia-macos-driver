@@ -232,10 +232,10 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
      Envía la salida de las tres órdenes con `sw_vers` (tras un rechazo del framebuffer que la tarea deshizo, envía
      en su lugar `/Library/NullMoth/lastgood.log`). Después arranca una vez con `nvlayout=0` solo para ver si
      funciona lo demás (la comprobación se sigue haciendo, y su línea empieza entonces por
-     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si ese
-     arranque falla, ningún otro interruptor ayuda (con `nvlayout=0` también arranca el framebuffer que muestra la
-     imagen del firmware con el driver apagado): quita `nvlayout=0` del `config.plist` desde fuera de macOS. Si la
+     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si la
      tarea ya devolvió 2.9, eso significa instalar de nuevo con `nvlayout=0` ya puesto en los argumentos de arranque.
+     Si ese arranque falla, ningún otro interruptor ayuda (con `nvlayout=0` también arranca el framebuffer que muestra
+     la imagen del firmware con el driver apagado): quita `nvlayout=0` del `config.plist` desde fuera de macOS.
 4. **Tiempo de arranque.** `sysctl debug | grep nvrm_boot_` da cada fase del arranque en milisegundos. Bien: el
    escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
    Mal: aparece más tarde, o 7 con una pantalla conectada; arranca una vez con `-nvrmoldwaits` y envía los dos juegos
