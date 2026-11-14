@@ -141,8 +141,15 @@ brings the previous driver back. A display on this card does not hold the restar
 framebuffer can draw it then: after an automatic login onto Apple's slow desktop the Mac restarts as well, and the
 log's last line says `The only lit display is on the card whose driver was refused ... restarting`. A slow desktop
 without acceleration that stays after an install while the log does not end with the `not restarted now` line means
-that nothing was put back: the log says why (another macOS build, or the backup is gone), or there is no such job. That
-job takes itself away at the first start
+that nothing was put back: the log says why (another macOS build, or the backup is gone), or there is no such job.
+If `IONDRVFramebuffer` holds the card while `ioreg -l -w0 | grep -e nvrm-layout -e nvrmfb-layout` prints an
+`nvrmfb-layout` line that says `refused` and no `nvrm-layout` line, the framebuffer refused after NVRM had already
+started the card, and the fallback job does not see that refusal. Where no other GPU has a display, the boot-guard job
+does not count such a start as good (`/Library/NullMoth/bootguard.log` ends it with `... keeps its count`), so the
+driver turns itself off at the third start, and the fallback job, while it is still installed, then puts the earlier
+driver back and restarts. With a display on another GPU, or without the job, put the earlier driver back by hand:
+install its own package again (the installer's last lines named the folder that keeps it). That job takes itself away at
+the first start
 after one where the new driver showed its display, and a first install has none: a refusal then (after a macOS update
 that changed a class, for example) ends every start the same way, without a desktop on the card or on Apple's slow
 one, until you boot with `nvlayout=0` or take the driver out (section 4). With AGDC refused the display runs without
