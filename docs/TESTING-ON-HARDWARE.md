@@ -316,7 +316,8 @@ cast, an old frame, frames that flicker between two, one of those counters above
    application's CPU use lower than with 2.9 or the same, and its frame rate the same. Fail: more stutter or CPU than
    with 2.9, or `nvrm_evt_user_fallbacks` above 0 (this holds for ten minutes with no display change; across a display
    sleep or a system sleep, a rise of it followed by `nvrm_evt_woken` rising again is the process going back to the
-   event, not a failure). Launch the application once from Terminal with
+   event, not a failure, but nothing is known to cause such a rise: report it with what the machine was doing).
+   Launch the application once from Terminal with
    `NVMTL_PROCESS_ENV=1 NVRM_EVENT_WAIT=0` in front of its command and compare
    ([EVENT-WAIT.md](EVENT-WAIT.md) explains every number).
 2. **A GPU fault that the application survives.** Follow [CHANNEL-RECOVERY.md](CHANNEL-RECOVERY.md), "What to look at

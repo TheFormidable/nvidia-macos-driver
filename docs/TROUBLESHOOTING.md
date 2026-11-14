@@ -228,10 +228,11 @@ debug.nvrm_evt_user_missed debug.nvrm_evt_user_fallbacks` taken while the applic
 already done; a few of them are normal (the GPU shows a completion a moment before its event arrives).
 `debug.nvrm_evt_user_fallbacks` counts each time a process went back to polling because its wakes stopped arriving
 (the line `nvrm: event wait OFF for this process (16 wakes in a row did not arrive; it is tried again now and then)`
-in its output). One or two around a display mode change, a display waking or a wake from sleep are expected: the
-process tries the event again and, when its wakes arrive, prints `nvrm: event wait back ON for this process` and
-sleeps on it again. Only a counter that keeps rising while `debug.nvrm_evt_woken` stands still means the event is not
-being posted.
+in its output). The process tries the event again and, when its wakes arrive, prints `nvrm: event wait back ON for
+this process` and sleeps on it again. A rise is not the expected answer to a display mode change, a display waking or
+a wake from sleep (the event is posted without the GPU lock, so a long RM call does not hold it back): report it, and
+say what the machine was doing. A counter that keeps rising while `debug.nvrm_evt_woken` stands still means the event
+is not being posted.
 `NVRM_GSUB_LOG=1` in `nvrm610.conf` prints, when a channel closes, how its waits went. [EVENT-WAIT.md](EVENT-WAIT.md)
 explains the numbers.
 
