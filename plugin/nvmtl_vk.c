@@ -9069,7 +9069,7 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
             const unsigned long long n = atomic_fetch_add(&lostpre, 1) + 1;
             for (unsigned i = 0; nvmtl_pre_redo_hook && i < pre->nhold; i++) if (pre->hold[i]) nvmtl_pre_redo_hook(pre->hold[i]);
             if (nvmtl_drop_log_due(n))
-                nvlog("vk: %u managed uploads and %u zero fills rode a dropped command buffer (%llu such so far in %s) - "
+                nvlog("vk: after a GPU fault, %u managed uploads and %u zero fills rode a dropped command buffer (%llu such so far in %s) - "
                       "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held",
                       pre->copies, pre->fills, n, getprogname());
         }
