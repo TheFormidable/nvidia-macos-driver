@@ -7,6 +7,7 @@
 #include "nvrm_off.h"
 #include "nv-xnu.h"
 #include "nvrm_utilization.h"
+#include "nvrm_utilization_pace.h"
 #include "nvrm_bar_limits.h"
 #include "nvrm_off_bar.h"
 #include "nvrm_startup_policy.h"
@@ -243,6 +244,8 @@ private:
     IOLock      *fUtilizationLock = nullptr;
     void        *fUtilizationState = nullptr;
     bool         fUtilizationStopping = false;
+    unsigned     fUtilizationSlow = 0;        // slow reads in a row (under fUtilizationLock)
+    uint64_t     fUtilizationNotBefore = 0;   // mach_absolute_time before which no read is made (under fUtilizationLock)
     uint32_t     fPassDone = 0;
     IOWorkLoop  *fWorkLoop = NULL;
     IOFilterInterruptEventSource *fIntSrc = NULL;
@@ -3260,9 +3263,25 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         int counted = 0;
         if (!nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
         IOLockLock(fUtilizationLock);
+        const uint64_t utilT0 = mach_absolute_time();
         const bool ready = !fUtilizationStopping && !isInactive() && fAdapter && fPassDone >= 2 &&
-                           OSAddAtomic(0, &fGpuPm) == kGpuPmRunning;
+                           OSAddAtomic(0, &fGpuPm) == kGpuPmRunning && nvrmUtilPauseOver(utilT0, fUtilizationNotBefore);
         const bool ok = ready && nvrm_query_utilization(fNv.gpu_id, &fUtilizationState, sample);
+        // A read that hangs holds the RM's locks and must not be issued again every second (nvrm_utilization_pace.h):
+        // a slow one, answered or not, pauses the sampler, and kUtilSlowStop in a row stop it for this boot.
+        const uint64_t utilT1 = mach_absolute_time();
+        uint64_t utilNs = 0; absolutetime_to_nanoseconds(utilT1 - utilT0, &utilNs);
+        if (ready && nvrmUtilSlowRead(&fUtilizationSlow, &fUtilizationStopping, utilNs)) {
+            uint64_t backoff = 0; nanoseconds_to_absolutetime(kUtilBackoffNs, &backoff);
+            fUtilizationNotBefore = utilT1 + backoff;
+            if (fUtilizationStopping)
+                LOG("utilization: a read took %llu ms (limit %llu), %u in a row - sampling stopped for this boot so the RM locks are not held again",
+                    (unsigned long long)(utilNs / 1000000ull), kUtilHangNs / 1000000ull, fUtilizationSlow);
+            else
+                LOG("utilization: a read took %llu ms (limit %llu), %u in a row - no read for the next %llu s",
+                    (unsigned long long)(utilNs / 1000000ull), kUtilHangNs / 1000000ull, fUtilizationSlow,
+                    kUtilBackoffNs / 1000000000ull);
+        }
         IOLockUnlock(fUtilizationLock);
         nv_xnu_pm_exit(counted);
         return ok ? kIOReturnSuccess : (ready ? kIOReturnIOError : kIOReturnNotReady);
