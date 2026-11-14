@@ -180,7 +180,7 @@ static inline int nvrm_evw_must_poll(unsigned reason)
    when that happens is not measured) may well come back. RM posts the event from rm_isr, without the GPU lock, so a
    long RM call is not what holds it back. So a QUIET process polls, and each of its threads, counting in its own waits
    (no clock), tries the event again once its pause has passed: in a trial its rounds sleep as if the flag were clear.
-   The first answer that proves events arrive (WOKEN, MOVED, or a capped or aborted answer whose count moved:
+   A trial's first answer that proves events arrive (WOKEN, MOVED, or a capped or aborted answer whose count moved:
    nvrm_evw_round) clears the flag for the whole process and resets this thread; the NVRM_EVW_TRIAL_MISSES-th missed
    wake of the trial ends it and doubles this thread's pause (256 waits first, NVRM_EVW_PAUSE_MAX at most). A sleep that
    ran out with the work still pending is neither. When events never come back, a thread pays at most
