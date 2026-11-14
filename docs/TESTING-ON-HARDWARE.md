@@ -217,10 +217,10 @@ restart. Take every test setting out again when its test is done.
      Send the output of the three commands with `sw_vers` (after a framebuffer refusal that the job undid,
      `/Library/NullMoth/lastgood.log` instead). Then boot once with `nvlayout=0` only to see whether the rest works
      (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out again
-     (TROUBLESHOOTING.md has what that boot risks). If that boot crashes, no other switch helps (with `nvlayout=0` the
+     (TROUBLESHOOTING.md has what that boot risks). After the job has put 2.9 back, that means installing again with
+     `nvlayout=0` already in the boot arguments. If that boot crashes, no other switch helps (with `nvlayout=0` the
      framebuffer that shows the firmware's picture with the driver off starts too): take `nvlayout=0` out of
-     `config.plist` from outside macOS. After the job has put 2.9 back, that means installing again with
-     `nvlayout=0` already in the boot arguments.
+     `config.plist` from outside macOS.
 4. **Start-up time.** `sysctl debug | grep nvrm_boot_` gives each phase of the start in milliseconds. Pass: the
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
    Fail: it comes up later, or 7 with a display connected; boot once with `-nvrmoldwaits` and send both sets of
