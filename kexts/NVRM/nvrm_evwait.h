@@ -159,8 +159,9 @@ static inline void nvrm_evw_forget(struct nvrm_evw_thread *t) { t->seq_valid = 0
    sleep that runs out between the two is a missed wake although its event is on the way. That event shows at the
    thread's next call as a moved count: WOKEN when it comes during a sleep, MOVED when it came before the call. Either
    proves that events arrive, so either ends the run. What proves a dead event is NVRM_EVW_MISS_LIMIT missed wakes in a
-   row with the count standing still all the while. Any other reason leaves the run as it is here (nvrm_evw_round also
-   ends it on a capped or aborted answer whose count moved); a kext that gives no reason (2.9) never counts a miss. */
+   row with the count standing still all the while (the run is the thread's, across the events of all its devices). Any
+   other reason leaves the run as it is here (nvrm_evw_round also ends it on a capped or aborted answer whose count
+   moved); a kext that gives no reason (2.9) never counts a miss. */
 static inline int nvrm_evw_account(struct nvrm_evw_thread *t, unsigned reason, int done, uint32_t slept_us, int *missed)
 {
     *missed = 0;
@@ -202,7 +203,11 @@ static inline int nvrm_evw_quiet(struct nvrm_evw_thread *t, int fresh, int flag,
     }
     if (flag != NVRM_EVW_FB_QUIET) { t->trial = 0; return flag; }
     if (t->trial) return 0;
-    t->misses = 0;   /* a polling thread misses nothing; it must not leave QUIET one missed wake away from going back */
+    t->misses = 0;   /* a polling thread misses nothing; it must not leave QUIET one missed wake away from going back. A
+                        thread that ran no round in the quiet time keeps its run, and the run is per thread, not per
+                        event: in a process with two devices, its first missed wake on the other device's event can be
+                        the sixteenth (polling until a trial). Not reset at a fresh read on purpose: a thread whose
+                        waits alternate between two dead events would then never reach sixteen */
     if (fresh) t->quiet_waits++;
     if (t->quiet_waits < (t->pause ? t->pause : NVRM_EVW_PAUSE_FIRST)) return flag;
     t->quiet_waits = 0; t->trial = 1; t->trial_misses = 0; *began = 1;
