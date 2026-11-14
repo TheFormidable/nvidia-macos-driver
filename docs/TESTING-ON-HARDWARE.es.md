@@ -54,20 +54,25 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 1. **Una vuelta atrás que hayas probado.** Ten a mano el paquete descomprimido de la versión sobre la que instalas
    (2.9): instalarlo de nuevo con su propio `install.sh` devuelve cada archivo a su sitio
    ([BUILDING.md](BUILDING.md), "Installing the result and going back", que también dice qué hace y qué no hace
-   `uninstall.sh`). Antes de cambiar nada, el instalador copia lo que está instalado ahora (las kexts, el bundle del
+   `uninstall.sh`). Antes de cambiar nada, el instalador copia lo que está instalado ahora (los kexts, el bundle del
    plugin, la carpeta `/Library/GPUBundles/nvmtl` con su archivo de ajustes, la colección del kernel, el firmware) en
    una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
-   `== 4. back up what is there now -> ...`; anótalo. También deja una tarea que se ejecuta en cada arranque: cuando el
-   driver nuevo se apagó solo tras dos arranques seguidos que nunca encendieron su pantalla (o tras caerse
-   WindowServer una y otra vez en la pantalla NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este
-   macOS (sección 2, paso 3), la tarea devuelve todo desde esa carpeta y reinicia una vez (tras un rechazo te deja
-   a ti el reinicio cuando otra GPU muestra una pantalla y has iniciado sesión: sección 2, paso 1);
-   `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos fue. Tras un rechazo solo lo hace mientras el Mac
-   siga en la compilación de macOS en la que se instaló, así que no actualices macOS entre la instalación y estas
-   pruebas. Se borra sola en el primer arranque después de uno que encendió la pantalla, así que no ayuda con un
-   problema que aparezca más tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece
-   ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in"; las entradas de 1401 en el selector de arranque
-   solo existen en un Mac preparado con la app 1401). Activa Sesión remota (Configuración del Sistema, o Ajustes del
+   `== 4. back up what is there now -> ...`; anótalo. Si vuelves a ejecutar el instalador antes de un arranque que
+   haya encendido la pantalla, la vuelta atrás sigue siendo la carpeta de la primera ejecución, y su línea `== 6b.`
+   lo dice. También deja una tarea que se ejecuta en cada arranque: cuando el driver nuevo se apagó solo tras dos
+   arranques seguidos que nunca encendieron su pantalla (o tras caerse WindowServer una y otra vez en la pantalla
+   NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este macOS (sección 2, paso 3), la tarea devuelve
+   todo desde esa carpeta y reinicia una vez (tras un rechazo te deja a ti el reinicio cuando otra GPU muestra una
+   pantalla y has iniciado sesión: sección 2, paso 1); `/Library/NullMoth/lastgood.log` dice cuál de los dos motivos
+   fue (tras caerse WindowServer una y otra vez su línea es la de los dos arranques; las caídas mismas quedan en
+   `/Library/NullMoth/bootguard.log`). Tras un rechazo solo lo hace mientras el Mac siga en la compilación de macOS en
+   la que se instaló, así que no actualices macOS entre la instalación y estas pruebas. Se borra sola en el primer
+   arranque después de aquel en que encontró la pantalla encendida, así que no ayuda con un problema que aparezca más
+   tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece ([TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+   "4. Getting back in"; las entradas de 1401 en el selector de arranque solo existen en un Mac preparado con la app
+   1401). Ten claro también cómo editarás el `config.plist` de OpenCore cuando macOS no arranque (desde la Terminal de
+   Recuperación o desde otro sistema, con la partición EFI montada): un argumento de arranque que pusiste para una
+   prueba solo se puede quitar desde allí. Activa Sesión remota (Configuración del Sistema, o Ajustes del
    Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
    fallos de abajo dejan el Mac sin escritorio o con el escritorio congelado, y entonces los registros se leen por la
    red.
@@ -107,9 +112,11 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    macOS en su primer arranque. En ese Mac `./build.sh deps` tardó 46,5 minutos en un directorio de trabajo vacío en
    el commit 650db45, descargas incluidas; en el commit 3933ff6 la compilación de los 17 componentes tardó 5 minutos
    41 segundos y el paquete 27 segundos, y el directorio de trabajo ocupaba después unos 8 GB.
-   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Todavía
-   no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete y nada más. Bien: su
-   última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
+   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Que pase
+   no dice nada del firmware, que la instalación de verdad toma de la instalación anterior o descarga de NVIDIA antes
+   de cambiar nada. Todavía no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete
+   y nada más. Bien: su última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó;
+   arréglalo primero.
 5. **Tu archivo de ajustes.** Léelo antes de instalar: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. El instalador
    reemplaza la carpeta `/Library/GPUBundles/nvmtl` entera por la del paquete, y de tu archivo anterior solo vuelve a
    poner, al final del archivo del paquete, las líneas que están entre `# --- my settings, kept on update ---` y
@@ -134,7 +141,17 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    vuelve a arrancar con 2.9. En el primer caso busca, por `ssh`, en el registro del kernel `NOT STARTING THE GPU` (la
    línea da el motivo) y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos. En el segundo,
    `cat /Library/NullMoth/lastgood.log` dice por qué la tarea del instalador devolvió 2.9 (el paso 3 explica el
-   rechazo que puede nombrar); envía ese archivo con `sw_vers`.
+   rechazo que puede nombrar); envía ese archivo con `sw_vers`. Una pantalla negra con solo el puntero, o una ventana
+   de inicio de sesión que vuelve una y otra vez, es WindowServer cayéndose: `cat /Library/NullMoth/bootguard.log`
+   por `ssh` lo dice (`WindowServer keeps dying ...`). El driver queda entonces apagado para el arranque siguiente, y
+   la tarea del instalador, mientras siga ahí, devuelve 2.9 en ese arranque; el Mac solo se reinicia solo desde la
+   ventana de inicio de sesión y solo tras la primera de esas caídas en serie, así que con una sesión abierta ejecuta
+   `sudo shutdown -r now`. El mismo registro dice cómo se contó cada arranque que llegó a un escritorio:
+   `... this start counts as good` termina la prueba de la instalación; `... with no NVIDIA driver running; the
+   start count is cleared and the install's trial goes on` quiere decir que el driver no funcionó en ese arranque;
+   `... the driver shows no picture and no other GPU has a display; this start keeps its count` quiere decir que NVRM
+   arrancó la tarjeta y que 45 segundos después de aparecer WindowServer no había nada encendido (dos arranques así
+   seguidos apagan el driver).
    En un Mac cuyo OpenCore no excluye IONDRVSupport de Apple (la tabla del README lo excluye) una ventana de inicio de
    sesión todavía no es un "bien": cuando el driver rechaza la tarjeta, el framebuffer de firmware de la propia Apple
    la toma y muestra una ventana de inicio de sesión y un escritorio lentos y sin aceleración. Dos órdenes de solo
@@ -153,7 +170,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    de Apple, con `... the previous driver is back; restarting`. Tras ese reinicio la primera orden nombra el
    framebuffer de 2.9, así que lee el archivo. Solo cuando otra GPU muestra una pantalla y has iniciado sesión te deja
    a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous driver starts at the
-   next restart`). Envía el archivo con `sw_vers`.
+   next restart`). Envía el archivo con `sw_vers`. Si la primera orden nombra `NVRMBootFB`, el driver está apagado en
+   este arranque (dos arranques sin pantalla, las caídas en serie de WindowServer, `nullmoth-remove` o `-nvoff`) y no
+   se devolvió nada: instala 2.9 de nuevo.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -169,7 +188,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    log show --last boot --predicate 'eventMessage CONTAINS "Apple class layout" OR eventMessage CONTAINS "Apple vtable lengths"'
    ```
 
-   `sysctl` imprime `unknown oid` para un nombre que ninguna kext registró, sigue con los demás y al final sale con el
+   `sysctl` imprime `unknown oid` para un nombre que ningún kext registró, sigue con los demás y al final sale con el
    número de nombres desconocidos; el `log show` tarda cerca de un minuto. Lo que el código está escrito para mostrar:
    - Bien: `nvrmfb-layout` dice `ok: 3 classes, vtables not compared; macOS <compilación> (Darwin <versión>)`,
      `nvagdc-layout` `ok: 1 class, vtables not compared; macOS ...`, y `nvaccel-layout` empieza por `ok:` y el número
@@ -202,15 +221,20 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` vale 6, no existe
        `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
        arrancó). El framebuffer enciende la pantalla, así que el guardián de arranque cuenta el arranque como bueno y
-       la tarea del instalador no devuelve nada. Nadie ha visto todavía un escritorio sin aceleración con este driver:
-       si la pantalla se queda negra o solo muestra un cursor, usa `ssh`.
+       la tarea del instalador no devuelve nada. Nadie ha visto todavía un escritorio sin aceleración con este driver.
+       Si la pantalla se queda negra o solo muestra el puntero mientras WindowServer se cae una y otra vez, la tarea
+       del guardián de arranque apaga el driver y reinicia una vez desde la ventana de inicio de sesión, y la tarea de
+       vuelta atrás, mientras siga instalada, devuelve el driver anterior en ese arranque siguiente;
+       `/Library/NullMoth/bootguard.log`, leído por `ssh`, lo dice.
      - `nvagdc-layout` rechazado: `debug.nvrmfb_agdc` vale -6 y `debug.nvrmfb_agdc_layout` 2; el escritorio funciona
        sin AppleGraphicsDeviceControl, y el arranque cuenta como bueno.
 
      Envía la salida de las tres órdenes con `sw_vers` (tras un rechazo del framebuffer que la tarea deshizo, envía
      en su lugar `/Library/NullMoth/lastgood.log`). Después arranca una vez con `nvlayout=0` solo para ver si
      funciona lo demás (la comprobación se sigue haciendo, y su línea empieza entonces por
-     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si la
+     `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si ese
+     arranque falla, ningún otro interruptor ayuda (con `nvlayout=0` también arranca el framebuffer que muestra la
+     imagen del firmware con el driver apagado): quita `nvlayout=0` del `config.plist` desde fuera de macOS. Si la
      tarea ya devolvió 2.9, eso significa instalar de nuevo con `nvlayout=0` ya puesto en los argumentos de arranque.
 4. **Tiempo de arranque.** `sysctl debug | grep nvrm_boot_` da cada fase del arranque en milisegundos. Bien: el
    escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
@@ -401,8 +425,8 @@ tarjeta en esos contadores, o una activación pierde una; envía el registro del
 ## Las vueltas atrás
 
 Una por cambio; cada una devuelve el comportamiento de 2.9 solo de ese cambio. Están para saber si un cambio está
-detrás de un problema, no para dejarlas puestas. Un argumento de arranque actúa en el siguiente reinicio: las cuatro
-kexts no se pueden descargar y volver a cargar a mano, porque cada una se mantiene cargada desde que arrancó
+detrás de un problema, no para dejarlas puestas. Un argumento de arranque actúa en el siguiente reinicio: los cuatro
+kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantiene cargado desde que arrancó
 (`kmutil unload` lo rechaza hasta el siguiente reinicio).
 
 | Cambio | Vuelta atrás | Dónde |

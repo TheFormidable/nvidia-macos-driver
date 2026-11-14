@@ -54,18 +54,22 @@ restart. Take every test setting out again when its test is done.
    copies what is installed now (the kexts, the plugin bundle, the folder `/Library/GPUBundles/nvmtl` with its
    settings file, the kernel collection, the firmware) into a new folder
    `/Library/NullMoth/backup-<date>-<time>.<random>`, whose name it prints on its line
-   `== 4. back up what is there now -> ...`; note it. It also leaves a job that runs at
-   each start: when the new driver has turned itself off after two starts in a row that never lit its display (or
-   after WindowServer kept dying on the NVIDIA display), or when its framebuffer refused the Apple classes of this
+   `== 4. back up what is there now -> ...`; note it. A second run of the installer before a start that lit the
+   display keeps the first run's folder as the way back, and says so on its `== 6b.` line. It also leaves a job that
+   runs at each start: when the new driver has turned itself off after two starts in a row that never lit its display
+   (or after WindowServer kept dying on the NVIDIA display), or when its framebuffer refused the Apple classes of this
    macOS (section 2, step 3), the job puts everything back from that folder and restarts once (after a refusal it
    leaves the restart to you when another GPU shows a display and you are logged in: section 2, step 1);
-   `/Library/NullMoth/lastgood.log` says which it was. After a refusal it does so only while the Mac runs the macOS
-   build the install was made on, so do not update macOS between the install and these tests. It removes itself at the
-   first start after one that lit the display, so it does not help with a problem that comes later. Know how you will
-   start the Mac when the desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "4. Getting back in";
-   the 1401 picker entries exist only on a Mac set up with the 1401 app). Turn on Remote Login (System Settings,
-   General, Sharing) and make sure you can reach the Mac over `ssh` from another computer: several failures below
-   leave no desktop or a frozen one, and the logs are then read over the network.
+   `/Library/NullMoth/lastgood.log` says which it was (after a WindowServer loop its line is the one about two starts;
+   the loop itself is in `/Library/NullMoth/bootguard.log`). After a refusal it does so only while the Mac runs the
+   macOS build the install was made on, so do not update macOS between the install and these tests. It removes itself
+   at the first start after the one in which it found the display lit, so it does not help with a problem that comes
+   later. Know how you will start the Mac when the desktop does not come up ([TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+   "4. Getting back in"; the 1401 picker entries exist only on a Mac set up with the 1401 app). Know also how you will
+   edit OpenCore's `config.plist` when macOS does not start (from Recovery's Terminal or another system, with the EFI
+   partition mounted): a boot argument added for a test can only be taken out there. Turn on Remote Login (System
+   Settings, General, Sharing) and make sure you can reach the Mac over `ssh` from another computer: several failures
+   below leave no desktop or a frozen one, and the logs are then read over the network.
    Pass: you have started the Mac once by that way back, and logged in over `ssh`. Fail: either does not work; do not
    go on.
 2. **A clean starting point.** `nvram boot-args` shows the `boot-args` line: it should hold the install line of
@@ -101,9 +105,11 @@ restart. Take every test setting out again when its test is done.
    its first start. On that Mac `./build.sh deps` took 46.5 minutes in an empty working directory at commit 650db45,
    downloads included; at commit 3933ff6 the build of the 17 components took 5 minutes 41 seconds and the package
    27 seconds, and the working directory then held about 8 GB.
-   Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. It has not
-   yet been run with a package that `./build.sh` made: on that Mac the package was staged and nothing more. Pass: its
-   last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it refused; fix that first.
+   Then, from `pkgroot`, `sudo env CHECK=1 ./install.sh` checks the package and the Mac and changes nothing. A pass
+   does not cover the firmware, which the real install takes from the earlier install or downloads from NVIDIA before
+   it changes anything. It has not yet been run with a package that `./build.sh` made: on that Mac the package was
+   staged and nothing more. Pass: its last line is `CHECK PASS (nothing changed)`. Fail: a `STOP:` line says what it
+   refused; fix that first.
 5. **Your settings file.** Read it before you install: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. The installer
    replaces the whole folder `/Library/GPUBundles/nvmtl` with the package's, and of your old file it puts back, at the
    end of the package's file, only the lines between `# --- my settings, kept on update ---` and
@@ -126,7 +132,16 @@ restart. Take every test setting out again when its test is done.
    keeps the last picture of the start, or is black), or the Mac restarts by itself and comes up on 2.9 again. In the
    first case look, over `ssh`, in the kernel log for `NOT STARTING THE GPU` (the line gives the reason) and go on
    with steps 3 and 5 below, which tell the reasons apart. In the second `cat /Library/NullMoth/lastgood.log` says why
-   the installer's job put 2.9 back (step 3 has the refusal it may name); send that file with `sw_vers`.
+   the installer's job put 2.9 back (step 3 has the refusal it may name); send that file with `sw_vers`. A black
+   screen with only the pointer, or a login window that keeps coming back, is WindowServer dying:
+   `cat /Library/NullMoth/bootguard.log` over `ssh` says so (`WindowServer keeps dying ...`). The driver is then off
+   for the next start, and the installer's job, while it is still there, puts 2.9 back at that start; the Mac
+   restarts by itself only from the login window and only after the first such loop, so with a session open run
+   `sudo shutdown -r now`. The same log says how each start that reached a desktop was counted: `... this start
+   counts as good` ends the install's trial; `... with no NVIDIA driver running; the start count is cleared and the
+   install's trial goes on` means that the driver did not run in that start; `... the driver shows no picture and no
+   other GPU has a display; this start keeps its count` means that NVRM started the card and nothing was lit 45
+   seconds after WindowServer came up (two such starts in a row turn the driver off).
    On a Mac whose OpenCore does not exclude Apple's IONDRVSupport (the README's table excludes it) a login window is
    not yet a pass: when the driver declines the card, Apple's own firmware framebuffer takes it and brings up a login
    window and a desktop that are slow and have no acceleration. Two read-only commands tell the cases apart:
@@ -144,7 +159,8 @@ restart. Take every test setting out again when its test is done.
    is back; restarting`. After that restart the first command names 2.9's framebuffer, so read the file. Only when
    another GPU shows a display and you are logged in does the job leave the restart to you (the file ends with
    `... so the Mac is not restarted now: the previous driver starts at the next restart`). Send the file with
-   `sw_vers`.
+   `sw_vers`. `NVRMBootFB` from the first command means that the driver is off for this start (two starts without a
+   display, the WindowServer loop, `nullmoth-remove` or `-nvoff`) and nothing was put back: install 2.9 again.
 2. **No leftover switch.** `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
    Pass: `debug.nvrm_switches_nondefault` is 0. Fail: a name marked with `!` is set; remove it from `boot-args` and
    restart before anything else ([SWITCHES.md](SWITCHES.md) says what it is).
@@ -191,15 +207,19 @@ restart. Take every test setting out again when its test is done.
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` is 6, there is no
        `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
        started). The framebuffer lights the display, so the boot guard counts the start as good and the installer's
-       job puts nothing back. A desktop without acceleration on this driver has not been seen: if the screen stays
-       black or shows only a cursor, use `ssh`.
+       job puts nothing back. A desktop without acceleration on this driver has not been seen. If the screen
+       stays black or shows only the pointer while WindowServer keeps dying, the boot-guard job turns the driver off
+       and restarts once from the login window, and the fallback job, while it is still installed, puts the previous
+       driver back at that next start; `/Library/NullMoth/bootguard.log`, read over `ssh`, says so.
      - `nvagdc-layout` refused: `debug.nvrmfb_agdc` is -6 and `debug.nvrmfb_agdc_layout` 2; the desktop runs without
        AppleGraphicsDeviceControl, and the start counts as good.
 
      Send the output of the three commands with `sw_vers` (after a framebuffer refusal that the job undid,
      `/Library/NullMoth/lastgood.log` instead). Then boot once with `nvlayout=0` only to see whether the rest works
      (the check still runs, and its line then starts with `overridden (nvlayout=0):`), and take it out again
-     (TROUBLESHOOTING.md has what that boot risks). After the job has put 2.9 back, that means installing again with
+     (TROUBLESHOOTING.md has what that boot risks). If that boot crashes, no other switch helps (with `nvlayout=0` the
+     framebuffer that shows the firmware's picture with the driver off starts too): take `nvlayout=0` out of
+     `config.plist` from outside macOS. After the job has put 2.9 back, that means installing again with
      `nvlayout=0` already in the boot arguments.
 4. **Start-up time.** `sysctl debug | grep nvrm_boot_` gives each phase of the start in milliseconds. Pass: the
    desktop comes up no later than with 2.9, and `debug.nvrm_boot_heads_why` is not 7 while a display is connected.
