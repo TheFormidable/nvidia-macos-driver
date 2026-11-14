@@ -3110,10 +3110,22 @@ def arm_tamper():
     left = git("-C", bare, "tag", "-l", check_rc=False) if bare.exists() else ""
     check("the refused tag is not left in the local repository", "620.70.06" not in left, left)
     sb2 = Sandbox("tamperweb")
-    p, out = tamper_problems(sb2, extra={"NM_WEBKIT_SPI_URL": f"file://{rt}/www/raw.githubusercontent.com/WebKit/WebKit/"
-                                         "3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit"},
-                             what="webkit")
+    web = {"NM_WEBKIT_SPI_URL": f"file://{rt}/www/raw.githubusercontent.com/WebKit/WebKit/"
+                                "3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty/libwebrtc/Source/webrtc/webkit_sdk/WebKit"}
+    p, out = tamper_problems(sb2, extra=web, what="webkit")
     check("fetch refuses a downloaded file whose SHA-256 is not the pin", not p, (p, out[-600:]))
+    # the message names both hashes: the downloaded file's (one of the two tampered headers) and the pin
+    webdir = (rt / "www/raw.githubusercontent.com/WebKit/WebKit/3bfbc200370710495ffa440abdd31b943c83ad7a/Source/ThirdParty"
+              "/libwebrtc/Source/webrtc/webkit_sdk/WebKit")
+    tampered = {hashlib.sha256((webdir / f).read_bytes()).hexdigest() for f in ("CMBaseObjectSPI.h", "VTVideoDecoderSPI.h")}
+    def hashes_problems(out):
+        m = re.search(r"has SHA-256 ([0-9a-f]{64}), the pin is ([0-9a-f]{64})", out)
+        return [] if m and m.group(1) in tampered and m.group(1) != m.group(2) else [f"no two hashes in: {out[-300:]!r}"]
+    p = hashes_problems(out)
+    check("the refusal of a downloaded file names its SHA-256 and the pin's", not p, p)
+    with sb2.scratch():
+        sb2.break_script('  got=$(sha256_file "$tmp")   # before the file is removed', '  rm -f "$tmp"; got=$(sha256_file "$tmp" 2>/dev/null || true)   # before the file is removed')
+        negative("a refusal that hashes the file after removing it", hashes_problems(tamper_problems(sb2, extra=web, what="webkit")[1]))
     sb3 = Sandbox("tamper-neg", remotes=rt)
     sb3.break_script('  if [ "$got" != "$commit" ]; then', '  if false; then')
     negative("fetch that does not compare the commit", tamper_problems(sb3)[0])

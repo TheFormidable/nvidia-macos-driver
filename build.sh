@@ -1177,7 +1177,7 @@ checkout_clone() {
   git_q -C "$dir" checkout -q --detach "$commit"
 }
 fetch_file() {   # <id> <dest>: one file, SHA-256 checked
-  local id=$1 dest=$2 sha url mv tmp
+  local id=$1 dest=$2 sha url mv tmp got
   sha=$(pin "${id}_SHA256"); mv=$(pin "${id}_MIRROR"); url=$(pin "${id}_URL")
   eval "[ -z \"\${$mv:-}\" ] || url=\"\${$mv%/}/${url##*/}\""
   if [ -f "$dest" ] && [ "$(sha256_file "$dest")" = "$sha" ]; then say "  ok       $(pin "${id}_NAME")"; return 0; fi
@@ -1186,7 +1186,8 @@ fetch_file() {   # <id> <dest>: one file, SHA-256 checked
   [ "$NM_DRY_RUN" = 1 ] && { say "    curl -fsSL $(q "$url") -o $(q "$dest")"; return 0; }
   mkdir -p "$(dirname "$dest")"; tmp=$dest.part
   curl -fsSL --proto '=https,file' --retry 3 -o "$tmp" "$url" || { rm -f "$tmp"; die "could not download $url"; }
-  [ "$(sha256_file "$tmp")" = "$sha" ] || { rm -f "$tmp"; die "$url has SHA-256 $(sha256_file "$tmp" 2>/dev/null), the pin is $sha (build/pins.sh)"; }
+  got=$(sha256_file "$tmp")   # before the file is removed: the message names what was downloaded
+  [ "$got" = "$sha" ] || { rm -f "$tmp"; die "$url has SHA-256 $got, the pin is $sha (build/pins.sh)"; }
   mv -f "$tmp" "$dest"; say "  verified $(pin "${id}_NAME"): sha256 $sha"
 }
 verify_given_tree() {   # <what> <dir> <file with the version> <expected text>
