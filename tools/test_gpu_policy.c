@@ -1,6 +1,8 @@
 /* Per-process GPU choice on hybrid laptops (plugin/nvmtl_gpu_policy.h), on the host.
  *   cc -Wall -I../plugin test_gpu_policy.c -o /tmp/t && /tmp/t     -> 0 failed
- *   cc -DALWAYS_NVIDIA ...   (the plugin before the policy: every process gets the device)  -> the "integrated GPU" arms fail */
+ *   cc -DALWAYS_NVIDIA ...   (the plugin before the policy: every process gets the device)  -> the "integrated GPU" arms fail
+ * The arms on a comment after a rule fail against the header of release 2.9, which took '#' for a comment only at the
+ * start of a line. */
 #include <stdio.h>
 #include "nvmtl_gpu_policy.h"
 static int fails;
@@ -22,6 +24,20 @@ int main(void)
     ARM("a prefix of a name does not match", nmp_parse(file, "Safar", &apple) == NMP_PREF_AUTO);
     ARM("no file means mode nvidia", (nmp_parse(NULL, "x", &apple), apple == 0));
     ARM("mode nvidia after mode apple switches back", (nmp_parse("mode apple\nmode nvidia\n", "x", &apple), apple == 0));
+    /* the example of docs/HYBRID-LAPTOPS.md as a tester copies it: indented, a comment after every rule */
+    const char *doc =
+        "    mode nvidia        # default: every process gets the NVIDIA device\n"
+        "    mode apple         # Apple's rule: an app whose Info.plist sets NSSupportsAutomaticGraphicsSwitching to true is\n"
+        "                       # content with the low-power GPU and does not get the NVIDIA device; every other app keeps it\n"
+        "    igpu Safari        # this process never gets the NVIDIA device\n"
+        "    nvidia Blender     # this process always gets it\n";
+    ARM("the documented example: an igpu rule with a comment after it", nmp_parse(doc, "Safari", &apple) == NMP_PREF_IGPU);
+    ARM("the documented example: mode apple with a comment after it", apple == 1);
+    ARM("the documented example: a nvidia rule with a comment after it", nmp_parse(doc, "Blender", &apple) == NMP_PREF_NVIDIA);
+    ARM("the documented example: a process it does not name gets AUTO", nmp_parse(doc, "Notes", &apple) == NMP_PREF_AUTO);
+    ARM("mode apple with blanks after it", (nmp_parse("mode apple  \t\n", "x", &apple), apple == 1));
+    ARM("a rule's word with only a comment after it names no process", nmp_parse("igpu   # Safari\n", "# Safari", &apple) == NMP_PREF_AUTO);
+    ARM("a comment after the last rule does not undo it", nmp_parse("igpu Safari\n# nvidia Safari\n", "Safari", &apple) == NMP_PREF_IGPU);
 
     ARM("switch off: every process gets the NVIDIA device", DECIDE(0, 1, NMP_PREF_IGPU, 1, 1) == 1);
     ARM("no other Metal GPU: the device is given even if the policy says integrated", DECIDE(1, 1, NMP_PREF_IGPU, 1, 0) == 1);
