@@ -30,9 +30,9 @@ release every process uses both, chosen per wait:
   and polls; it prints one line
   (`nvrm: event wait OFF for this process (16 wakes in a row did not arrive; it is tried again now and then) - waits
   poll as before`) and the kext counts it in `debug.nvrm_evt_user_fallbacks`.
-- that is not for the rest of the process's life. The kext posts the event from a step that needs the GPU lock, and RM
-  holds that lock through some long calls (a display mode change, a display waking, a wake from sleep), so for some
-  tens of milliseconds work can complete while no event is posted, and sixteen missed wakes fit in that. So each
+- that is not for the rest of the process's life. Sixteen missed wakes take only some tens of milliseconds, and events
+  that stop for that long (an interrupt that is served late or lost) may come back; RM posts the event from its
+  interrupt routine without the GPU lock, so a long RM call is not what holds it back. So each
   waiting thread of a process that went back to polling tries the event again after 256 of its own waits: it sleeps
   on the event as before, and the first answer that shows events arrive puts the whole process back on the event, with
   the line `nvrm: event wait back ON for this process - its wakes arrive again`. Four missed wakes in such a try end
@@ -93,11 +93,12 @@ Read these together, while an application that waits on the GPU is running:
   and the two below go only to the kernel's debug output (`kprintf`: a serial console or a debugger), not to the log
   that `log show` reads, so on an ordinary Mac only the counters show them. This counter above 0, together with the
   line `nvrm: event wait OFF for this process (16 wakes in a row did not arrive; ...)` in the application's output,
-  means a process stopped sleeping on the completion event for a while. A rise of one or two around a display mode
-  change, a display waking or a wake from sleep, with `nvrm_evt_woken` rising again afterwards (and the line
-  `nvrm: event wait back ON for this process` after the first one), is the event coming back: the process sleeps on
-  it again. A counter that rises and `nvrm_evt_woken` that stays still while the GPU is busy means the events do not
-  come back.
+  means a process stopped sleeping on the completion event for a while. A rise followed by `nvrm_evt_woken` rising
+  again (and the line `nvrm: event wait back ON for this process` after the first one) is the event coming back: the
+  process sleeps on it again. When that happens has not been observed on a GPU, and it is not the expected answer to a
+  display mode change, a display waking or a wake from sleep: if you see the counter rise, report it and say what the
+  machine was doing. A counter that rises and `nvrm_evt_woken` that stays still while the GPU is busy means the
+  events do not come back.
 - `nvrm_evt_capped` 0 (more than 256 threads asleep at once otherwise).
 - `nvrm_evt_post_drain_stuck` 0. When a process closes, the kext waits for an RM event post that is still being
   delivered to it (microseconds, normally never) before it frees the connection. It waits twice: up to 200 ms when

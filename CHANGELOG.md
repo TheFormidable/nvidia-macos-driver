@@ -102,9 +102,9 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   waits shorter than 1 ms are unchanged. A process whose wake-ups do not arrive goes back to polling by itself; an
   event that merely arrives late (the GPU shows a completion just before its event) does not count towards that, so
   a game or compositor that waits at a steady cadence keeps sleeping. Going back to polling is not for the life of
-  the process, because wake-ups can stop for a moment (a display mode change, a display waking, a wake from sleep):
-  each of its threads tries the event again after a pause (256 of its waits, doubled after each failed try up to
-  65536), and the first wake that arrives puts the whole process back on the event. Only a kext that cannot wait at
+  the process, because wake-ups can stop for a moment and come back: each of its threads tries the event again after a
+  pause (256 of its waits, doubled after each failed try up to 65536), and the first wake that arrives puts the whole
+  process back on the event. Only a kext that cannot wait at
   all keeps a process polling for good. Way back: `NVRM_EVENT_WAIT=0` in
   `nvrm610.conf`. Like 2.9's `0`, it makes every process poll, WindowServer included, which costs WindowServer more
   CPU than both 2.9's default and this release's. See [docs/EVENT-WAIT.md](docs/EVENT-WAIT.md).
