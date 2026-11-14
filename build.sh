@@ -2435,15 +2435,21 @@ print_env() {
 # Before NULLMOTH_BUILD_ROOT defaulted to the working directory, the trees were in <work>/build/build; nothing uses
 # that folder now.
 old_layout_rm() { [ -n "${NULLMOTH_BUILD_ROOT:-}" ] || [ ! -e "$W/build/build" ] || safe_rm "$W/build/build"; }
+clean_rm() {   # safe_rm of what is inside the working directory; a NULLMOTH_BUILD_ROOT of yours outside it is left alone
+  local p
+  for p in "$@"; do
+    if in_workdir "$p"; then safe_rm "$p"; else say "not deleted (outside the working directory, your NULLMOTH_BUILD_ROOT): $p"; fi
+  done
+}
 cmd_clean() {
   local what=${1:-outputs}
   [ -d "$W" ] || { say "nothing to clean: $W does not exist"; return 0; }
   [ -f "$W/$MARKER" ] || die "$W has no $MARKER marker; build.sh deletes nothing there"
   case "$what" in
-    outputs) safe_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt" \
+    outputs) clean_rm "$O" "$STAMPS" "$LOGS" "$PKGDIR" "$RMWORK" "$R/build/plugin-release" "$R/build/plugin-dev" "$R/build/xlate-release" "$R/build/nvencvt" \
                      "$TC_WORK" "$TC_SRC"   # the toolchain's build trees and exported sources; the toolchain stays with the tools
              old_layout_rm ;;
-    sources) safe_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS"
+    sources) clean_rm "$SRC" "$R/build/ogkm620" "$R/build/gpu-src" "$NVHDR" "$RMWORK" "$STAMPS"
              old_layout_rm ;;
     tools)   safe_rm "$TOOLS" "$STAMPS" ;;
     all)     ask "Delete everything in $W (sources, tools, outputs)?" || { say "nothing deleted"; return 0; }

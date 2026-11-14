@@ -4413,7 +4413,35 @@ def arm_clean(mac):
         check("clean refuses a folder build.sh did not make", rc != 0 and (other / "keep").exists() and ".nullmoth-build-workdir" in out, out[-300:])
     with mac.scratch():
         mac.break_script('    in_workdir "$p" || die "refusing to delete $p', '    true || die "refusing to delete $p')
+        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"; else', '    if true; then safe_rm "$p"; else')   # both guards
         negative("clean that deletes outside the working directory", outside_problems(mac))
+    # a NULLMOTH_BUILD_ROOT outside the working directory: clean deletes everything of its own inside the working
+    # directory, names what it leaves in that root, deletes nothing there, and ends with exit 0
+    def rootclean_problems(s, what):
+        root = s.dir / "elsewhere-root"
+        keep = root / "build/rm620/x"
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        keep.write_text("x")
+        mine = {"outputs": ("out", "stamps", "logs", "tools/toolchain-build"), "sources": ("src", "stamps")}[what]
+        for d in mine:
+            (s.work / d).mkdir(parents=True, exist_ok=True)
+            (s.work / d / "x").write_text("x")
+        rc, out = s.run("clean", what, extra={"NULLMOTH_BUILD_ROOT": str(root)})
+        p = [] if rc == 0 else [f"exit {rc}: {out[-300:]}"]
+        if not keep.exists():
+            p.append("a file in the NULLMOTH_BUILD_ROOT outside the working directory was deleted")
+        if f"not deleted (outside the working directory, your NULLMOTH_BUILD_ROOT): {root}/build/rm620" not in out:
+            p.append(f"no note for {root}/build/rm620: {out[-300:]}")
+        p += [f"<work>/{d} is still there" for d in mine if (s.work / d).exists()]
+        return p
+    with mac.scratch():
+        p = rootclean_problems(mac, "outputs") + rootclean_problems(mac, "sources")
+        check("clean and clean sources with a NULLMOTH_BUILD_ROOT outside the working directory: everything inside is "
+              "deleted, nothing outside, a note names what is left, exit 0", not p, p)
+    with mac.scratch():
+        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"; else', '    if true; then safe_rm "$p"; else')
+        negative("clean that hands safe_rm the paths outside the working directory (it stops half-way)",
+                 rootclean_problems(mac, "outputs"))
 
 
 # ------------------------------------------------------------------------------------------------- pins against their consumers
