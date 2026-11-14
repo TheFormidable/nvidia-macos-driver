@@ -42,8 +42,11 @@ def windowserver():
 # event at least once. The count is sticky per connection (NVRM.cpp, fEvtEverSlept 0 -> 1), so a connection that
 # already slept once never increments it again: WindowServer and any other long-running GPU client were counted
 # soon after boot and do not move it during a probe. A freshly launched probe opens its own device connection, so
-# the count moving across that probe's lifetime is attributable to the probe itself. That is how a run proves the
-# wait policy it asked for actually took effect, without depending on any line the driver prints.
+# the count moving across that probe's lifetime is taken as the probe's own. That is how a run proves the wait
+# policy it asked for actually took effect, without depending on any line the driver prints. The count is one for
+# the whole machine, though: another process whose connection sleeps for the first time during the probe (one that
+# starts then, or an older one whose waits were all short until then) moves it too, so a refused poll probe on a
+# desktop in use is worth one more run before it is believed.
 EVT_CLIENTS_SYSCTL = "debug.nvrm_evt_clients"
 
 
@@ -80,7 +83,9 @@ def verify_policy(policy, before, after):
         return True, "slept (" + EVT_CLIENTS_SYSCTL + " +" + str(delta) + ")"
     if policy == "poll":
         if delta != 0:
-            return False, "poll probe slept on the GPU event (" + EVT_CLIENTS_SYSCTL + " moved by " + str(delta) + ")"
+            return False, ("poll probe slept on the GPU event (" + EVT_CLIENTS_SYSCTL + " moved by " + str(delta)
+                           + "; another process's first sleep during the probe also moves it: run again on a quiet"
+                           + " desktop)")
         return True, "did not sleep (" + EVT_CLIENTS_SYSCTL + " unchanged)"
     return False, "unknown policy " + repr(policy)
 
