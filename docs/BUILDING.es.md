@@ -22,10 +22,10 @@ comandos y opciones y la solución de problemas.
 >   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
 >   vacío con las herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17
 >   componentes en 30 minutos 20 segundos y preparó el paquete en 60 segundos. Su paso `./build.sh test` falló allí: el
->   clon del trabajo no tenía historial, y 14 de las 315 pruebas leen revisiones anteriores (las mismas pruebas pasan
->   desde un clon completo en el mismo tipo de máquina y en el Mac Intel). De sus doce comprobaciones de lo compilado
->   pasaron once; la duodécima pedía a los seis kexts una versión mínima de macOS, que el enlazador no escribe en un
->   kext. Las dos causas están corregidas en los commits posteriores a 3933ff6.
+>   clon del trabajo no tenía historial, y 16 de las 315 pruebas leen revisiones anteriores: 14 fallaron y 2 se saltaron
+>   (las mismas pruebas pasan desde un clon completo en el mismo tipo de máquina y en el Mac Intel). De sus doce
+>   comprobaciones de lo compilado pasaron once; la duodécima pedía a los seis kexts una versión mínima de macOS, que el
+>   enlazador no escribe en un kext. Las dos causas están corregidas en los commits posteriores a 3933ff6.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
 >   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
 >   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.

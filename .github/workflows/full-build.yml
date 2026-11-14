@@ -39,11 +39,11 @@
 # same stop.
 # Commit 3933ff6 (run 43497488138), caches restored: deps, doctor, fetch, the build of every component (the plugin with
 # SDK 26.2 and the translator among them) and the package succeeded. Its ./build.sh test step stopped there: the job's
-# clone had no history, and 14 of the 315 tests read earlier revisions (287 passed, 14 failed, 5 skipped, 9 not run;
-# the same tests pass from a full clone on the same kind of runner and on the Intel Mac). Eleven of its twelve checks
-# of what was built passed; the twelfth asked the six kexts for a minimum macOS version, which the linker does not
-# write into a kext (the other ten files the build made name 10.12, 12.0 or 15.0). Both causes are corrected in the
-# tree after 3933ff6; a run with those corrections has not been seen yet.
+# clone had no history, and 16 of the 315 tests read earlier revisions: 14 failed and 2 skipped (in all 287 passed, 14
+# failed, 5 skipped, 9 not run; the same tests pass from a full clone on the same kind of runner and on the Intel Mac).
+# Eleven of its twelve checks of what was built passed; the twelfth asked the six kexts for a minimum macOS version,
+# which the linker does not write into a kext (the other ten files the build made name 10.12, 12.0 or 15.0). Both causes
+# are corrected in the tree after 3933ff6; a run with those corrections has not been seen yet.
 #
 # Time, as measured on this runner. From nothing (96bf32c): deps 3 h 53 min, then about 23 min of build before the
 # plugin stopped it. With the caches below restored (3933ff6): the four restores 4 min 34 s, deps 40 s, fetch 45 s,

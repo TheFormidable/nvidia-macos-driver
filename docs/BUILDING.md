@@ -21,10 +21,10 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   `tools/test_build_sh.py` among them. The workflow `full-build`, which builds everything in an empty working
 >   directory with the tools restored from GitHub's cache, ran `deps`, `doctor` and `fetch`, built all 17 components
 >   in 30 minutes 20 seconds and staged the package in 60 seconds. Its `./build.sh test` step failed there: the job's
->   clone had no history, and 14 of the 315 tests read earlier revisions (the same tests pass from a full clone on the
->   same kind of runner and on the Intel Mac). Eleven of its twelve checks of what was built passed; the twelfth asked
->   the six kexts for a minimum macOS version, which the linker does not write into a kext. Both causes are corrected
->   in the commits after 3933ff6.
+>   clone had no history, and 16 of the 315 tests read earlier revisions: 14 failed and 2 skipped (the same tests pass
+>   from a full clone on the same kind of runner and on the Intel Mac). Eleven of its twelve checks of what was built
+>   passed; the twelfth asked the six kexts for a minimum macOS version, which the linker does not write into a kext.
+>   Both causes are corrected in the commits after 3933ff6.
 > - Only against stand-ins for macOS's tools, Xcode, Homebrew, rustup, the git remotes and each component's build
 >   script (`tools/test_build_sh.py`, on Linux and on that runner): `deps` taking its tools from Homebrew, which is what
 >   it does on an Apple-silicon Mac, and the stop on a Mac without Xcode.
