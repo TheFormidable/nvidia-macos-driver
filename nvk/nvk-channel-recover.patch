@@ -24,7 +24,9 @@ the flush that was running included, and a fault inside that replayed work ends 
 The patch also changes 2.9's nvrm610.conf reader (src/nouveau/vulkan/nvmtl_cfg.h): it keeps the last line that
 begins with a name, as the Metal plugin's reader does, where 2.9 kept the first, so a shipped line or a comment
 above the user's own line does not win in a process that loads NVK without the plugin; the header's comment lists
-where it still differs from the plugin's reader.
+where it still differs from the plugin's reader. The three file-local copies of 2.9's reader (nvkmd_nvrm_ctx.c,
+nvk_physical_device.c, nvk_cmd_dispatch.c, for NVRM_ASYNC, NVK_DIAG, NVK_QUEUE_COUNT and NVMTL_GDQ_DQ) are removed
+and those four names are read through it too.
 Leaving this patch out of the chain also brings back the first-line-wins reader.
 
 diff --git a/src/nouveau/vulkan/meson.build b/src/nouveau/vulkan/meson.build
@@ -41,6 +43,98 @@ index 4f2ea7e..b6a30ba 100644
    'nvkmd/nvrm/nvRmApi.c',
    'nvkmd/nvrm/nvRmSemSurf.c',
  )
+diff --git a/src/nouveau/vulkan/nvk_cmd_dispatch.c b/src/nouveau/vulkan/nvk_cmd_dispatch.c
+index fa0cee9..c3b0664 100644
+--- a/src/nouveau/vulkan/nvk_cmd_dispatch.c
++++ b/src/nouveau/vulkan/nvk_cmd_dispatch.c
+@@ -28,30 +28,9 @@
+ #include "nv_push_clc7c0.h"
+ #include "nv_push_clc86f.h"
+ 
+-/* r3-conf2: WindowServer gets no shell env. When NAME is unset, read "NAME=value" from the root file
+- * /Library/GPUBundles/nvmtl/nvrm610.conf. Purpose: bisect the r3 sync/submit switches that hang WindowServer's fence. */
+-#include <stdio.h>
+-#include <string.h>
++/* r3-conf2: WindowServer gets no shell env. When NAME is unset, nvmtl_cfg_getenv reads "NAME=value" from the root
++ * file /Library/GPUBundles/nvmtl/nvrm610.conf (the last line for a name wins; nvmtl_cfg.h). */
+ #include "nvmtl_cfg.h"
+-static const char *nvmtl_conf_getenv(const char *name)
+-{
+-   const char *e = getenv(name);
+-   if (e) return e;
+-   static char conf[8192]; static int loaded;
+-   if (!loaded) {
+-      loaded = 1;
+-      FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
+-      if (f) { size_t n = fread(conf, 1, sizeof conf - 1, f); conf[n] = 0; fclose(f); }
+-   }
+-   char key[96]; snprintf(key, sizeof key, "%s=", name);
+-   const char *h = strstr(conf, key);
+-   if (!h || (h != conf && h[-1] != '\n')) return NULL;
+-   static char val[64]; size_t i = 0; h += strlen(key);
+-   while (h[i] && h[i] != '\n' && i < sizeof val - 1) { val[i] = h[i]; i++; }
+-   val[i] = 0;
+-   fprintf(stderr, "nvk: %s=%s (nvrm610.conf)\n", name, val);
+-   return val;
+-}
+ 
+ 
+ VkResult
+@@ -343,7 +322,7 @@ nvk_gdq_cfg(void)
+       const char *s;
+       struct nvk_gdq_cfg c = { .pcas = 3, .membar = 1 };
+       /* k5: chains on by default; NVMTL_GDQ_DQ=0 restores the push-buffer barrier (control arm) */
+-      c.dq = !(s = nvmtl_conf_getenv("NVMTL_GDQ_DQ")) || atoi(s);
++      c.dq = !(s = nvmtl_cfg_getenv("NVMTL_GDQ_DQ")) || atoi(s);
+       c.noinv = (s = nvmtl_cfg_getenv("NVMTL_GDQ_NOINV")) ? (uint32_t)atoi(s) : 0;
+       if ((s = nvmtl_cfg_getenv("NVMTL_GDQ_PCAS")))
+          c.pcas = strtoul(s, NULL, 0) & 0xf;
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+index 102db41..8021f35 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -81,29 +81,9 @@ static unsigned int minor(dev_t dev)
+ #include "clcdc0.h"
+ #include "clce97.h"
+ 
+-/* r3-conf2: WindowServer gets no shell env. When NAME is unset, read "NAME=value" from the root file
+- * /Library/GPUBundles/nvmtl/nvrm610.conf. Purpose: bisect the r3 sync/submit switches that hang WindowServer's fence. */
+-#include <stdio.h>
+-#include <string.h>
+-static const char *nvmtl_conf_getenv(const char *name)
+-{
+-   const char *e = getenv(name);
+-   if (e) return e;
+-   static char conf[8192]; static int loaded;
+-   if (!loaded) {
+-      loaded = 1;
+-      FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
+-      if (f) { size_t n = fread(conf, 1, sizeof conf - 1, f); conf[n] = 0; fclose(f); }
+-   }
+-   char key[96]; snprintf(key, sizeof key, "%s=", name);
+-   const char *h = strstr(conf, key);
+-   if (!h || (h != conf && h[-1] != '\n')) return NULL;
+-   static char val[64]; size_t i = 0; h += strlen(key);
+-   while (h[i] && h[i] != '\n' && i < sizeof val - 1) { val[i] = h[i]; i++; }
+-   val[i] = 0;
+-   fprintf(stderr, "nvk: %s=%s (nvrm610.conf)\n", name, val);
+-   return val;
+-}
++/* r3-conf2: WindowServer gets no shell env. When NAME is unset, nvmtl_cfg_getenv reads "NAME=value" from the root
++ * file /Library/GPUBundles/nvmtl/nvrm610.conf (the last line for a name wins; nvmtl_cfg.h). */
++#include "nvmtl_cfg.h"
+ 
+ 
+ static uint32_t
+@@ -1783,7 +1763,7 @@ nvk_create_physical_device(struct nvkmd_pdev *nvkmd,
+     * processes that ask for more than one queue pay for them. */
+    uint32_t gq_count = 4;
+    {
+-      const char *e = nvmtl_conf_getenv("NVK_QUEUE_COUNT");
++      const char *e = nvmtl_cfg_getenv("NVK_QUEUE_COUNT");
+       if (e && atoi(e) >= 1)
+          gq_count = MIN2((uint32_t)atoi(e), 16);
+    }
 diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
 index 0b543a6..823f4df 100644
 --- a/src/nouveau/vulkan/nvk_queue.c
@@ -293,10 +387,67 @@ index 29f5c52..d2e781e 100644
  VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
                                   struct vk_object_base *log_obj);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 42f5f01..e2a6740 100644
+index 42f5f01..6b818f7 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-@@ -690,7 +690,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
+@@ -42,29 +42,9 @@
+ #include "ctrl/ctrl0090.h"  // b81: NV0090_CTRL_CMD_SET_LG_SECTOR_PROMOTION
+ #include "util/os_time.h" // G-SUB: vk_sync absolute timeouts are on os_time_get_nano
+ 
+-/* r3-conf2: WindowServer gets no shell env. When NAME is unset, read "NAME=value" from the root file
+- * /Library/GPUBundles/nvmtl/nvrm610.conf. Purpose: bisect the r3 sync/submit switches that hang WindowServer's fence. */
+-#include <stdio.h>
+-#include <string.h>
+-static const char *nvmtl_conf_getenv(const char *name)
+-{
+-   const char *e = getenv(name);
+-   if (e) return e;
+-   static char conf[8192]; static int loaded;
+-   if (!loaded) {
+-      loaded = 1;
+-      FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
+-      if (f) { size_t n = fread(conf, 1, sizeof conf - 1, f); conf[n] = 0; fclose(f); }
+-   }
+-   char key[96]; snprintf(key, sizeof key, "%s=", name);
+-   const char *h = strstr(conf, key);
+-   if (!h || (h != conf && h[-1] != '\n')) return NULL;
+-   static char val[64]; size_t i = 0; h += strlen(key);
+-   while (h[i] && h[i] != '\n' && i < sizeof val - 1) { val[i] = h[i]; i++; }
+-   val[i] = 0;
+-   fprintf(stderr, "nvk: %s=%s (nvrm610.conf)\n", name, val);
+-   return val;
+-}
++/* r3-conf2: WindowServer gets no shell env. When NAME is unset, nvmtl_cfg_getenv reads "NAME=value" from the root
++ * file /Library/GPUBundles/nvmtl/nvrm610.conf (the last line for a name wins; nvmtl_cfg.h). */
++#include "../../nvmtl_cfg.h"
+ 
+ 
+ #define SUBC_NVC36F 0
+@@ -94,7 +74,7 @@ nvkmd_nvrm_async_on(void)
+    static bool diag_armed; if (!diag_armed) { diag_armed = true; (void)nvkmd_nvrm_diag_on(); }
+    static int on = -1;
+    if (on < 0) {
+-      const char *e = nvmtl_conf_getenv("NVRM_ASYNC");
++      const char *e = nvmtl_cfg_getenv("NVRM_ASYNC");
+       on = !(e && e[0] == '0');
+    }
+    return on;
+@@ -107,13 +87,12 @@ nvkmd_nvrm_async_on(void)
+  * error notifier, and the last SEM_ACQUIRE it emitted (which channel's semaphore, which value). Off = unchanged r3. */
+ #include <fcntl.h>
+ #include <unistd.h>
+-#include "../../nvmtl_cfg.h"
+ bool
+ nvkmd_nvrm_diag_on(void)
+ {
+    static int on = -1;
+    if (on < 0) {
+-      const char *e = nvmtl_conf_getenv("NVK_DIAG");
++      const char *e = nvmtl_cfg_getenv("NVK_DIAG");
+       on = e && e[0] == '1';
+       if (on) {
+          char path[128]; snprintf(path, sizeof path, "/private/tmp/nvk-diag-%d.log", (int)getpid());
+@@ -690,7 +669,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
     return __atomic_load_n(s->sem, __ATOMIC_ACQUIRE) >= seq;
  }
  
@@ -305,7 +456,7 @@ index 42f5f01..e2a6740 100644
  nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx)
  {
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
-@@ -706,9 +706,10 @@ nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -706,9 +685,10 @@ nvrm_gsub_fault_info(struct nvkmd_nvrm_exec_ctx *ctx)
  
  /* THE FAULT IS THE DEATH SIGNAL, THE CLOCK IS NOT (kept from the synchronous flush): a changed error
   * notifier is fatal at once. Sticky per channel, so a second waiter on the dead channel fails at once too, and the
@@ -318,7 +469,7 @@ index 42f5f01..e2a6740 100644
  {
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     struct nvkmd_nvrm_slot *s = &nvkmd_nvrm_slots[slot];
-@@ -736,9 +737,10 @@ nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_o
+@@ -736,9 +716,10 @@ nvkmd_nvrm_slot_health(uint32_t slot, uint32_t gen, struct vk_object_base *log_o
     return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel faulted");
  }
  
@@ -331,7 +482,7 @@ index 42f5f01..e2a6740 100644
  {
     pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_slots[slot].gen == gen ? nvkmd_nvrm_slots[slot].ctx : NULL;
-@@ -756,6 +758,56 @@ nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms, str
+@@ -756,6 +737,56 @@ nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms, str
     return vk_errorf(log_obj, VK_ERROR_DEVICE_LOST, "NVRM channel made no progress within NVRM_FLUSH_TIMEOUT_MS");
  }
  
@@ -388,7 +539,7 @@ index 42f5f01..e2a6740 100644
  struct nvrm_deferred {
     struct nvrm_deferred *next;
     void (*fn)(void *);
-@@ -874,8 +926,15 @@ nvkmd_nvrm_reap_deferred(void)
+@@ -874,8 +905,15 @@ nvkmd_nvrm_reap_deferred(void)
     }
  }
  
@@ -406,7 +557,7 @@ index 42f5f01..e2a6740 100644
  static VkResult
  nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_object_base *log_obj)
  {
-@@ -885,7 +944,9 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
+@@ -885,7 +923,9 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
        return VK_SUCCESS;
     const uint32_t slot = ctx->slot1 - 1, gen = nvkmd_nvrm_slots[slot].gen;
     const int64_t t0 = os_time_get_nano(), budget = nvkmd_nvrm_flush_timeout_ms() * 1000000LL;
@@ -417,7 +568,7 @@ index 42f5f01..e2a6740 100644
     for (;;) {
        const uint64_t v = __atomic_load_n(sem, __ATOMIC_ACQUIRE);
        if (v >= seq)
-@@ -893,17 +954,42 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
+@@ -893,17 +933,42 @@ nvrm_gsub_wait_seq(struct nvkmd_nvrm_exec_ctx *ctx, uint64_t seq, struct vk_obje
        VkResult r = nvkmd_nvrm_slot_health(slot, gen, log_obj);
        if (r != VK_SUCCESS)
           return r;
@@ -466,7 +617,7 @@ index 42f5f01..e2a6740 100644
  static void
  nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
  {
-@@ -930,6 +1016,15 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -930,6 +995,15 @@ nvrm_gsub_register(struct nvkmd_nvrm_exec_ctx *ctx)
        s->faulted = false;
        s->kchan = 0;
        s->kseqQuiet = 0;
@@ -482,7 +633,7 @@ index 42f5f01..e2a6740 100644
        ctx->slot1 = i + 1;
        break;
     }
-@@ -951,6 +1046,9 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
+@@ -951,6 +1025,9 @@ nvrm_gsub_unregister(struct nvkmd_nvrm_exec_ctx *ctx)
  {
     if (ctx->slot1 == 0)
        return;
@@ -492,7 +643,7 @@ index 42f5f01..e2a6740 100644
     // idle first: nothing this channel still reads may be freed under it (a fault or deadline was already said)
     if (ctx->wSeq != 0)
        (void)nvrm_gsub_wait_seq(ctx, ctx->wSeq, NULL);
-@@ -1137,17 +1235,23 @@ nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, uint64_t co
+@@ -1137,17 +1214,23 @@ nvkmd_nvrm_fence(struct nvkmd_dev *dev, uint32_t op, uint32_t flags, uint64_t co
  }
  
  
@@ -521,7 +672,7 @@ index 42f5f01..e2a6740 100644
  
  	ctx->gpPut = (ctx->gpPut + 1) % 0x8000;
  }
-@@ -1228,11 +1332,12 @@ write_semaphore_acquire(struct nv_push *push, uint64_t adrGpu, uint64_t value)
+@@ -1228,11 +1311,12 @@ write_semaphore_acquire(struct nv_push *push, uint64_t adrGpu, uint64_t value)
  }
  
  
@@ -535,7 +686,7 @@ index 42f5f01..e2a6740 100644
                                struct nvkmd_ctx **ctx_out)
  {
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(_dev);
-@@ -1250,12 +1355,16 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+@@ -1250,12 +1334,16 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
     ctx->base.dev = &dev->base;
  
     ctx->osEvent = -1;
@@ -552,7 +703,7 @@ index 42f5f01..e2a6740 100644
  
  	NV_CONTEXT_DMA_ALLOCATION_PARAMS ctxDmaParams = {
  		.flags =
-@@ -1310,7 +1419,9 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+@@ -1310,7 +1398,9 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
              /* nvk-tsgsched (patch_nvk_tsgsched.py): timeslice / interleave knobs, unset = RM's defaults */
              {
                 static int tsgsched_gfx_n;
@@ -563,7 +714,7 @@ index 42f5f01..e2a6740 100644
                 const char *tse = getenv("NVRM_TSG_TIMESLICE_US"), *hie = getenv("NVRM_TSG_Q0_HIGH");
                 if (tse && atoi(tse) > 0) {
                    struct { NvU64 timesliceUs; } __attribute__((aligned(8))) tsp = { (NvU64)atoi(tse) };
-@@ -1543,8 +1654,10 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+@@ -1543,8 +1633,10 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
      * backtrace). The device's one event (nvkmd_nvrm_dev.c) is what waits sleep on. osEvent stays -1 and
      * hEvent 0 here, which the teardown below already tolerates. */
  
@@ -574,7 +725,7 @@ index 42f5f01..e2a6740 100644
  
     *ctx_out = &ctx->base;
     return VK_SUCCESS;
-@@ -1565,10 +1678,10 @@ nvkmd_nvrm_create_exec_ctx(struct nvkmd_dev *_dev,
+@@ -1565,10 +1657,10 @@ nvkmd_nvrm_create_exec_ctx(struct nvkmd_dev *_dev,
                                enum nvkmd_engines engines,
                                struct nvkmd_ctx **ctx_out)
  {
@@ -587,7 +738,7 @@ index 42f5f01..e2a6740 100644
     }
     return r;
  }
-@@ -1582,13 +1695,21 @@ nvrm_gsub_gpfifo_reserve(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
+@@ -1582,13 +1674,21 @@ nvrm_gsub_gpfifo_reserve(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
     if ((ctx->gpPut + 1) % 0x8000 != ctx->gpGet)
        return VK_SUCCESS;
     nvkmd_nvrm_gsub_count(NVRM_GS_FIFOWAIT);
@@ -610,7 +761,7 @@ index 42f5f01..e2a6740 100644
        ctx->gpGet = ctx->slotPut[s];
        if ((ctx->gpPut + 1) % 0x8000 != ctx->gpGet)
           return VK_SUCCESS;
-@@ -1603,13 +1724,15 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1603,13 +1703,15 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
  {
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
     struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
@@ -629,7 +780,7 @@ index 42f5f01..e2a6740 100644
  
     ctx->wSeq++;
     /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
-@@ -1620,7 +1743,14 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1620,7 +1722,14 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
        .addr = ctx->cmdBuf->va->addr + 4 * (uint64_t)(ctx->segStart - (uint32_t *)ctx->cmdBuf->map),
        .size_B = 4 * (uint32_t)(ctx->push.end - ctx->segStart),
     };
@@ -644,7 +795,7 @@ index 42f5f01..e2a6740 100644
     userD->GPPut = ctx->gpPut;
     // batch 56: USERD and host-visible VRAM are write-combined; drain the fill buffers before the doorbell
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-@@ -1632,19 +1762,30 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1632,19 +1741,30 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
     (void)*(volatile NvU32 *)&userD->GPPut;
     volatile NvU32 *doorbell = (void*)((NvU8*)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
     *doorbell = submitTokenNotifier->info32;
@@ -677,7 +828,7 @@ index 42f5f01..e2a6740 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1652,7 +1793,10 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+@@ -1652,7 +1772,10 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
     nv_push_init(&ctx->push, (uint32_t *)ctx->cmdBuf->map + next * (0x10000 / 4 / NVRM_CMD_SLOTS),
                  0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
     ctx->segStart = ctx->push.start;
@@ -689,7 +840,7 @@ index 42f5f01..e2a6740 100644
     return VK_SUCCESS;
  }
  
-@@ -1681,7 +1825,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
+@@ -1681,7 +1804,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
           continue;
        }
        nvkmd_nvrm_gsub_count(NVRM_GS_CPUWAIT);
@@ -700,7 +851,7 @@ index 42f5f01..e2a6740 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1753,10 +1900,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
+@@ -1753,10 +1879,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
        nvkmd_mem_unref(ctx->userD);
     if (ctx->notifier != NULL)
        nvkmd_mem_unref(ctx->notifier);
@@ -717,7 +868,7 @@ index 42f5f01..e2a6740 100644
  static VkResult
  nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj,
-@@ -1765,9 +1918,35 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
+@@ -1765,9 +1897,35 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
  
@@ -756,7 +907,7 @@ index 42f5f01..e2a6740 100644
  }
  
  static VkResult
-@@ -1775,12 +1954,26 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1775,12 +1933,26 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
                               struct vk_object_base *log_obj)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -784,7 +935,7 @@ index 42f5f01..e2a6740 100644
  
     NvNotification *notifiers = ctx->notifier->map;
     NvNotification *submitTokenNotifier = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
-@@ -1908,17 +2101,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
+@@ -1908,17 +2080,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                              const struct nvkmd_ctx_exec *execs)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -809,7 +960,7 @@ index 42f5f01..e2a6740 100644
  }
  
  static VkResult
-@@ -1928,10 +2125,16 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
+@@ -1928,10 +2104,16 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
                                const struct vk_sync_signal *signals)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -827,7 +978,7 @@ index 42f5f01..e2a6740 100644
     return r;
  }
  
-@@ -1940,10 +2143,16 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
+@@ -1940,10 +2122,16 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -846,7 +997,7 @@ index 42f5f01..e2a6740 100644
     return r;
  }
  
-@@ -1954,6 +2163,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
+@@ -1954,6 +2142,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
     .signal = nvkmd_nvrm_exec_ctx_signal,
     .flush = nvkmd_nvrm_exec_ctx_flush,
     .sync = nvkmd_nvrm_exec_ctx_sync,
@@ -854,7 +1005,7 @@ index 42f5f01..e2a6740 100644
  };
  
  static VkResult
-@@ -2088,8 +2298,31 @@ static struct {
+@@ -2088,8 +2277,31 @@ static struct {
     NvU32 level;
     NvU64 slice;
     bool have;
@@ -886,7 +1037,7 @@ index 42f5f01..e2a6740 100644
  __attribute__((visibility("default"))) int nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us);
  __attribute__((visibility("default"))) int
  nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
-@@ -2133,6 +2366,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2133,6 +2345,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
              ts.timesliceUs = 0;
           nvmtl_tsg_saved[i].level = cur;
           nvmtl_tsg_saved[i].slice = ts.timesliceUs;
@@ -894,7 +1045,7 @@ index 42f5f01..e2a6740 100644
           nvmtl_tsg_saved[i].have = true;
        }
        NvU32 lv = (NvU32)interleave_level;
-@@ -2142,8 +2376,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2142,8 +2355,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
           ts.timesliceUs = timeslice_us;
           b = nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts);
        }

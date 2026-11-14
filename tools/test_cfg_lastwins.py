@@ -2,7 +2,10 @@
 """NVK's settings-file reader (nvmtl_cfg_getenv): the LAST line that begins with "NAME=" wins, as the Metal plugin's
 own reader does. This matters only in a process that loads NVK without the plugin (a Vulkan program): in a Metal
 process the plugin has already set the variable, so getenv wins before this reader runs. The reader is in
-src/nouveau/vulkan/nvmtl_cfg.h, whose change this branch carries in nvk/nvk-channel-recover.patch.
+src/nouveau/vulkan/nvmtl_cfg.h, whose change this branch carries in nvk/nvk-channel-recover.patch. The same patch
+removes the three file-local copies of the older reader that nvk-macos.patch adds (nvkmd_nvrm_ctx.c,
+nvk_physical_device.c, nvk_cmd_dispatch.c), so the four names they read (NVRM_ASYNC, NVK_DIAG, NVK_QUEUE_COUNT,
+NVMTL_GDQ_DQ) follow the same rule; that is an arm too.
 
 The test reconstructs the header from the patch (one contiguous hunk), redirects its file path to one the test
 controls WITHOUT changing the path the driver uses, builds a tiny C program around it, and feeds it conf files:
@@ -141,6 +144,18 @@ def main():
     before, after = hunk_images(patch, CFG)
     arm("the patch reconstructs a single whole-file hunk of nvmtl_cfg.h (reader present in both images)",
         "nvmtl_cfg_getenv" in after and "nvmtl_cfg_getenv" in before and after != before)
+    macos = (R / "nvk/nvk-macos.patch").read_text() if (R / "nvk/nvk-macos.patch").exists() else ""
+    copy = "static const char *nvmtl_conf_getenv(const char *name)"
+    added = sum(1 for l in macos.splitlines() if l == "+" + copy)
+    removed = sum(1 for l in patch.splitlines() if l == "-" + copy)
+    arm("no file-local copy of the older reader is left: channel-recover removes every one nvk-macos.patch adds",
+        added == 3 and removed == added, f"nvk-macos.patch adds {added}, nvk-channel-recover.patch removes {removed}")
+    four = ("NVMTL_GDQ_DQ", "NVK_QUEUE_COUNT", "NVRM_ASYNC", "NVK_DIAG")
+    plus = [l for l in patch.splitlines() if l.startswith("+")]
+    arm("the copies' four names (NVMTL_GDQ_DQ, NVK_QUEUE_COUNT, NVRM_ASYNC, NVK_DIAG) go through nvmtl_cfg_getenv",
+        all(any(f'nvmtl_cfg_getenv("{n}")' in l for l in plus) for n in four)
+        and not any("nvmtl_conf_getenv(" in l for l in plus),
+        [n for n in four if not any(f'nvmtl_cfg_getenv("{n}")' in l for l in plus)])
     arm("the new reader keeps the last match that starts a line; the old reader took the first",
         "const char *last = NULL;" in after and "last = h;" in after and "const char *last" not in before)
     arm("the new reader documents the 8191-byte limit it keeps (differs from the plugin, which reads the file whole)",

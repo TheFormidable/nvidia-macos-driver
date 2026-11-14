@@ -19,8 +19,9 @@
 #        then nvk-channel-recover (a faulted or stalled channel is rebuilt instead of losing the device; nvkmd/nvrm/
 #        nvrm_chan_note_abi.h in it is a copy of kexts/NVRM/nvrm_chan_note_abi.h; NVK_CHANNEL_RECOVER=0 in nvrm610.conf
 #        turns it off). It also carries the change of nvmtl_cfg.h, the reader of nvrm610.conf for every NVK, NVRM and
-#        NVMTL setting, to take the last line that sets a name: leaving this patch out of the chain also brings back
-#        2.9's reader, where the first such line wins (NVK_CHANNEL_RECOVER=0 keeps the new reader).
+#        NVMTL setting, to take the last line that sets a name, and moves the three file-local readers of 2.9 onto it
+#        (NVRM_ASYNC, NVK_DIAG, NVK_QUEUE_COUNT, NVMTL_GDQ_DQ): leaving this patch out of the chain also brings back
+#        2.9's readers, where the first such line wins (NVK_CHANNEL_RECOVER=0 keeps the new reader).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
