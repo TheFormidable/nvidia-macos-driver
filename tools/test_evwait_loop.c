@@ -3,7 +3,7 @@
    delivered (the stand-in kernel sees every sleep that begins on a count its awaited event has already moved past);
    events that arrive late, after the work shows complete, never switch the process to polling; dead events cost at most
    the 2 ms bound per sleep and end in polling, with a trial now and then, and events that come back are slept on again
-   (arms "invariant 1:" to "5:", whose controls are tools/test_evwait_quiet.py); a full kernel does not spin; a channel
+   (arms "invariant 1:" to "6:", whose controls are tools/test_evwait_quiet.py); a full kernel does not spin; a channel
    with no event goes through the same wait callback and can never switch the process to polling.
    What timing cannot decide is not asserted: with the completion visible before its event (as on the GPU), a sleep can
    run out between the two, so the count of missed wakes in the threaded arms is printed, not required to be 0.
@@ -152,6 +152,7 @@ struct script {
     uint32_t count;               /* the event count wait() reports */
     unsigned pendings, waits, reads, noevent, backoffs, stats[NVRM_EVW_S_N];
     uint32_t last_seen, last_us, max_us; int last_fd;
+    volatile int *set_fb; int set_to;   /* another thread changes the process flag during the sleep call */
 };
 static int s_pending(void *ctx, int *fd) { struct script *s = ctx; *fd = s->pendings++ ? s->fd_second : s->fd; return s->pending; }
 static int s_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
@@ -162,6 +163,7 @@ static int s_wait(void *ctx, int fd, uint32_t seen, uint32_t us, uint64_t *out)
     if (fd < 0) s->noevent++;
     if (fd >= 0 && us == 0) { s->reads++; if (s->rc) return s->rc; *out = nvrm_evw_pack(s->count, NVRM_EVW_R_COUNT); return 0; }
     if (s->rc) return s->rc;
+    if (s->set_fb) *s->set_fb = s->set_to;
     *out = nvrm_evw_pack(s->count, s->reason);
     return 0;
 }
@@ -267,6 +269,21 @@ static void scripted(void)
     }
     T("a capped or aborted answer whose count moved ends a run of missed wakes, and still takes its polling step", cut_ok && !fb);
     T("control: the same answers with the count where it was leave the run as it is", kept_ok && !fb);
+    /* the flag is read once per round: a thread that read it clear, holding a count remembered before the events stopped,
+       is answered MOVED after another thread made the process QUIET. That event is older than the quiet time. */
+    memset(&s, 0, sizeof s); memset(&t, 0, sizeof t); t.seq_fd = -1; fb = 0;
+    s.pending = 1; s.fd = s.fd_second = 3; s.reason = NVRM_EVW_R_MOVED; s.count = 101; s.set_fb = &fb; s.set_to = NVRM_EVW_FB_QUIET;
+    nvrm_evw_remember(&t, 3, 100);
+    round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
+    T("invariant 6: QUIET set by another thread during the call: a MOVED count remembered from before does not clear it",
+      fb == NVRM_EVW_FB_QUIET && s.stats[NVRM_EVW_S_BACK] == 0 && s.waits == 1 && t.seq == 101 && t.misses == 0);
+    memset(&s, 0, sizeof s); memset(&t, 0, sizeof t); t.seq_fd = -1; fb = 0;
+    s.pending = 1; s.fd = s.fd_second = 3; s.reason = NVRM_EVW_R_WOKEN; s.count = 101; s.set_fb = &fb; s.set_to = NVRM_EVW_FB_QUIET;
+    nvrm_evw_remember(&t, 3, 100);
+    round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
+    T("control: QUIET set during the sleep, the sleep woken by an event: the flag is cleared, BACK once",
+      fb == 0 && s.stats[NVRM_EVW_S_BACK] == 1);
+    s.set_fb = NULL;
 }
 
 /* the missed-wake control needs pending() to change its answer inside one round: busy before the sleep, complete after */
