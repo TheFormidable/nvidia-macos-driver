@@ -222,10 +222,11 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
        arrancó). El framebuffer enciende la pantalla, así que el guardián de arranque cuenta el arranque como bueno y
        la tarea del instalador no devuelve nada. Nadie ha visto todavía un escritorio sin aceleración con este driver.
-       Si la pantalla se queda negra o solo muestra el puntero mientras WindowServer se cae una y otra vez, la tarea
-       del guardián de arranque apaga el driver y reinicia una vez desde la ventana de inicio de sesión, y la tarea de
-       vuelta atrás, mientras siga instalada, devuelve el driver anterior en ese arranque siguiente;
-       `/Library/NullMoth/bootguard.log`, leído por `ssh`, lo dice.
+       Si la pantalla se queda negra o solo muestra el puntero mientras WindowServer se cae una y otra vez y todas
+       las pantallas están en esta tarjeta, la tarea del guardián de arranque apaga el driver y reinicia una vez desde
+       la ventana de inicio de sesión, y la tarea de vuelta atrás, mientras siga instalada, devuelve el driver
+       anterior en ese arranque siguiente; `/Library/NullMoth/bootguard.log`, leído por `ssh`, lo dice. Con una
+       pantalla en otra GPU la tarea del guardián de arranque no toca esas caídas.
      - `nvagdc-layout` rechazado: `debug.nvrmfb_agdc` vale -6 y `debug.nvrmfb_agdc_layout` 2; el escritorio funciona
        sin AppleGraphicsDeviceControl, y el arranque cuenta como bueno.
 
