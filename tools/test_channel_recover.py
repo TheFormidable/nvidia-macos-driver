@@ -265,7 +265,9 @@ def chk_no_rm_under_mutex(p):
     return (all(order(func(p, CTX_C, op), "nvrm_rec_op_begin(ctx);", "nvrm_rec_enter(ctx, log_obj)",
                       "nvrm_rec_leave(ctx);", "nvrm_rec_op_end(ctx);") for op in FLUSHING_OPS)
             and "nvkmd_nvrm_boost_burst(" in beg and "nvkmd_nvrm_reap_deferred();" in end
-            and "nvrm_rec_enabled()" in end
+            # the op reaps exactly when nvrm_rec_enter took the mutex: its condition is the owner's (rec_owner_applies)
+            and "   if (ctx->slot1 != 0 && nvrm_rec_enabled())" in end
+            and "return ctx->slot1 != 0 && nvrm_rec_enabled();" in body(rc, "rec_owner_applies")
             and bool(held) and "nvkmd_nvrm_boost_burst(" not in held and "nvkmd_nvrm_reap_deferred" not in held
             and "   if (!ctx->recHeld)\n      nvkmd_nvrm_reap_deferred();" in sub
             and sub.count("nvkmd_nvrm_reap_deferred") == 1
@@ -453,6 +455,8 @@ CHECKS = [
      "+   VkResult r = nvrm_rec_enter(ctx, log_obj);\n+   if (r != VK_SUCCESS)\n+      return r;\n+   nvrm_rec_op_begin(ctx);\n \n-   VkResult r = nvkmd_nvrm_exec_ctx_flush("),
     ("the locks: the submission reaps only without a context mutex", chk_no_rm_under_mutex,
      "+   if (!ctx->recHeld)\n+      nvkmd_nvrm_reap_deferred();", "+   if (1)\n+      nvkmd_nvrm_reap_deferred();"),
+    ("the locks: the op reaps after the mutex exactly when it took it", chk_no_rm_under_mutex,
+     "+   if (ctx->slot1 != 0 && nvrm_rec_enabled())", "+   if (ctx->slot1 != 0 && !nvrm_rec_enabled())"),
     ("the locks: the four blocking waits release the mutex", chk_blocking_waits,
      "r = nvrm_gsub_wait_seq_owner(ctx, ctx->slotSeq[next], log_obj);",
      "r = nvrm_gsub_wait_seq(ctx, ctx->slotSeq[next], log_obj);"),
