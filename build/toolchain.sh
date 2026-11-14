@@ -519,7 +519,7 @@ check_glslang() {
   local first
   need_file bin/glslang; need_file bin/glslangValidator; [ -e "$P/bin/glslangValidator" ] || return 0
   answers_pin glslang bin/glslangValidator --version
-  first=$(cd / && env -i "$P/bin/glslangValidator" --version 2>/dev/null | sed -n 1p)
+  first=$(cd / && env -i "$P/bin/glslangValidator" --version 2>/dev/null | sed -n 1p) || true   # answers_pin counted a failure
   case "$first" in "Glslang Version: "*:*) ;; *) bad "glslangValidator --version starts with \"$first\", not \"Glslang Version: N:x.y.z\" (build.sh reads it)" ;; esac
 }
 
@@ -556,10 +556,10 @@ check_llvm() {
   need_file llvm/bin/clang; need_glob llvm/lib "libLLVM*.$so*"; need_glob llvm/lib "libclang-cpp*.$so*"; need_file "llvm/lib/libclang.$so"
   need_file llvm/lib/cmake/llvm/LLVMConfig.cmake; need_file llvm/lib/cmake/clang/ClangConfig.cmake
   answers_pin llvm llvm/bin/llvm-config --version; answers llvm/bin/clang --version
-  major=$(cd / && env -i "$P/llvm/bin/llvm-config" --version 2>/dev/null | sed 's/\..*//')
+  major=$(cd / && env -i "$P/llvm/bin/llvm-config" --version 2>/dev/null | sed 's/\..*//') || true   # answers_pin counted a failure
   need_file "llvm/lib/clang/$major/include/opencl-c.h"; need_file "llvm/lib/clang/$major/include/opencl-c-base.h"
   [ "$(cd / && env -i "$P/llvm/bin/llvm-config" --shared-mode 2>/dev/null)" = shared ] || bad "llvm-config --shared-mode does not say shared"
-  comps=" $(cd / && env -i "$P/llvm/bin/llvm-config" --components 2>/dev/null | tr '\n' ' ') "
+  comps=" $(cd / && env -i "$P/llvm/bin/llvm-config" --components 2>/dev/null | tr '\n' ' ') " || true   # the list below says what lacks
   for c in $LLVM_COMPONENTS; do case "$comps" in *" $c "*) ;; *) missing="$missing $c" ;; esac; done
   [ -z "$missing" ] || bad "llvm-config --components lacks what Mesa asks for:$missing"
 }
