@@ -58,7 +58,7 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    plugin, la carpeta `/Library/GPUBundles/nvmtl` con su archivo de ajustes, la colección del kernel, el firmware) en
    una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
    `== 4. back up what is there now -> ...`; anótalo. Si vuelves a ejecutar el instalador antes de un arranque que
-   haya encendido la pantalla, la vuelta atrás sigue siendo la carpeta de la primera ejecución, y su línea `== 6b.`
+   haya encendido la pantalla, la vuelta atrás sigue siendo la carpeta de la primera ejecución, y su paso `== 6b.`
    lo dice. También deja una tarea que se ejecuta en cada arranque: cuando el driver nuevo se apagó solo tras dos
    arranques seguidos que nunca encendieron su pantalla (o tras caerse WindowServer una y otra vez en la pantalla
    NVIDIA), o cuando su framebuffer rechazó las clases de Apple de este macOS (sección 2, paso 3), la tarea devuelve
