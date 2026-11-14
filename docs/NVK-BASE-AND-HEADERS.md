@@ -10,8 +10,8 @@ A rebase onto a newer Mesa therefore buys only the upstream commits made since. 
 reject. Moving the base would still re-base about 17,600 lines of patches that WindowServer composites through, with no
 card available to validate, so the base stays. The upstream fixes that matter for current cards are carried instead as
 three patches of the default chain (`build/build_nvk.sh`), right after the 2.9 patches and before this driver's own
-`nvk-evwait`, `nvk-fence` and `nvk-channel-recover`. Each holds upstream commits with their text unchanged; the
-header of each patch and `NOTICE` list them.
+`nvk-evwait`, `nvk-fence`, `nvk-channel-recover` and `nvk-stream-uncached`. Each holds upstream commits with their
+text unchanged; the header of each patch and `NOTICE` list them.
 
 - `nvk/nvk-mesa-26.3.0.patch`: what the 26.3.0 release (0a6fa60a) has over rc3 in the 13 files the NVK library is
   compiled from, 17 commits of the 26.3 branch. For RTX 50 it holds the uniform `Ldcg` scoreboard fix on SM120: a
