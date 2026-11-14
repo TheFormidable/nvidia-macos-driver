@@ -26,7 +26,8 @@
 #                 Needs the macOS 26 SDK.
 #
 # What GitHub's runners have shown, a history (the logs of runs 43344333098 to 43419906041, then of the runs of commits
-# 95811c2 and 3933ff6, all 2026-11-13). kexts-linux green in every run. plugin, on the macos-26 image with its newer
+# 95811c2, 3933ff6 and ee7f332, all 2026-11-13; in the run of ee7f332, 43522118240, all six jobs were green, and no
+# commit after it has run here). kexts-linux green in every run. plugin, on the macos-26 image with its newer
 # Xcode, green in every run that was not cancelled; GitHub cancelled it at 8364212, at ef2a216 and at 3933ff6 (run
 # 43497487987: before it started, for lack of a runner). kexts-mac green on both runners in 43410589619, 43419906041
 # and at 95811c2, with Xcode 26.3: NVIDIA's RM core (1121 commands) and NVKMS (225) compiled, every kext linked with 0
@@ -38,8 +39,9 @@
 # runners' compile lines hold the same words in the same order and differed in spaces only: the make of macOS (GNU
 # make 3.81) leaves a space where the compiler refused an option NVIDIA's makefile asked it about, so the checksum is
 # taken with runs of spaces squeezed.
-# host-tests on the Intel runner: green at 95811c2 (302 of 314 passed, 0 failed, 3 skipped, 9 not run) and at 3933ff6
-# (303 of 315 passed, 0 failed, 3 skipped, 9 not run). The three skipped at 3933ff6: tools/test_h264_kat_selftest.py
+# host-tests on the Intel runner: green at 95811c2 (302 of 314 passed, 0 failed, 3 skipped, 9 not run), at 3933ff6
+# (303 of 315 passed, 0 failed, 3 skipped, 9 not run) and at ee7f332 (run 43522118240: 304 of 316 passed, 0 failed,
+# 3 skipped, 9 not run). The three skipped at 3933ff6: tools/test_h264_kat_selftest.py
 # and tools/test_nvenc_parsers.py (NVIDIA's headers are not where the runner looks: it is not told the working
 # directory) and tools/test_h264_kat_vectors.py (no ffmpeg); the nine not run are those the runner leaves to the
 # build step or that name no build line. Its first run, 43443873231, had passed 298 of 314, and three had failed for
@@ -47,7 +49,8 @@
 # tools/test_dlss_fetch.sh wanted a zstd command, which macOS does not have, and the controls of
 # tools/test_rtd3_hold.cpp got one sleep in their fixed time on the loaded runner; tools/test_ci_full_build.py was
 # skipped: the compiler's command that made its stand-in for libSystem failed (its words were not kept).
-# host-tests on the Apple-silicon runner: never green. Its last run that got a runner, at 22536c6, passed 298 of 312
+# host-tests on the Apple-silicon runner: green for the first time at ee7f332 (run 43522118240: 304 of 316 passed,
+# 0 failed, 3 skipped, 9 not run). Before it, its last run that got a runner, at 22536c6, passed 298 of 312
 # with 2 failed, 3 skipped and 9 not run: one arm of tools/test_build_sh.py (a caller's SDKROOT for another
 # platform) and two of tools/test_toolchain_sh.py (variables macOS itself sets reached a step's record;
 # version_above). The same arms failed on the Intel runner at 8364212 and pass there since ef2a216. At every push
