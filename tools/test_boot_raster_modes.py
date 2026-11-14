@@ -48,6 +48,8 @@ struct Kms {
     int getDisplayMode(void *,unsigned,unsigned index,NvKmsKapiDisplayMode *mode,NvBool *valid,NvBool *pref) {
         if(index>=modes.size())return -1;*mode=modes[index];*valid=true;*pref=index==1;return 1;
     }
+    // A derived rate is offered only when NVKMS accepts its timing; this stand-in accepts every timing.
+    NvBool (*validateDisplayMode)(void *,unsigned,const NvKmsKapiDisplayMode *)=[](void *,unsigned,const NvKmsKapiDisplayMode *)->NvBool{return true;};
 };
 struct NVRMNVDAFramebuffer {
     bool fInternal=false;Kms *fKms=nullptr;void *fDev=this;unsigned fDisplay=1,fIndex=0;
@@ -57,6 +59,7 @@ struct NVRMNVDAFramebuffer {
     void setProperty(const char *,unsigned long long,unsigned) {}
     unsigned addKmsRefreshModes(unsigned n);
     unsigned addDsrModes(unsigned n);
+    static void dtToKapi(const IODetailedTimingInformationV2 *,NvKmsKapiDisplayMode *) {}
 };
 static NvKmsKapiDisplayMode mode(unsigned w,unsigned h,unsigned hz) {
     NvKmsKapiDisplayMode m;auto &k=m.timings;k.hVisible=w;k.vVisible=h;
@@ -116,6 +119,11 @@ int main() {
     assert(rate(d.fDT[0])==240 && rate(d.fDT[1])==120 && rate(d.fDT[2])==60);
     assert(d.fDT[1].horizontalBlanking==d.fDT[0].horizontalBlanking && !d.fDT[1].dscCompressedBitsPerPixel);
     assert(d.addKmsRefreshModes(dn)==dn);   // idempotent: nothing listed twice
+    // a panel that takes only its own timings: NVKMS refuses the derived ones, so only the native 240 Hz is listed
+    Kms own;own.modes={mode(2560,1600,240)};
+    own.validateDisplayMode=[](void *,unsigned,const NvKmsKapiDisplayMode *)->NvBool{return false;};
+    NVRMNVDAFramebuffer o;o.fKms=&own;o.fBootMode=own.modes[0];
+    assert(o.addKmsRefreshModes(0)==1 && o.fDT[0].detailedTimingModeID==0x10000);
     Kms lo;lo.modes={mode(2560,1600,165)};
     NVRMNVDAFramebuffer l;l.fKms=&lo;l.fBootMode=lo.modes[0];
     assert(l.addKmsRefreshModes(0)==1);
