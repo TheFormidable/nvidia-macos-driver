@@ -26,6 +26,19 @@ more than five seconds remove utilization keys instead of reporting a false
 0%. Cache age includes time spent asleep. Both NVRM and NVAccel must be built
 from this change; an older NVRM does not implement the query interface.
 
+A read holds the RM's locks until the firmware answers, and the RM waits about
+6 s for an answer before it gives up. Issued again every second, a read the
+firmware does not answer keeps other processes, the window server and shutdown
+waiting on those locks. So a read that takes longer than 0.5 s pauses the
+sampler: NVRM makes no read for the next 20 seconds, and the utilization keys
+are removed meanwhile, as for a failed query. Three slow reads in a row stop it
+until the next boot. The time includes the wait for the locks, so a mode set or
+a channel recovery that holds them can also make one read slow; a fast read,
+answered or failed, starts the count again. Each slow read is logged with its
+time (`utilization: a read took N ms`). The rule is in
+`kexts/NVRM/nvrm_utilization_pace.h`, and `tools/test_utilization_pace.py`
+compiles and checks it on a host.
+
 ## Parser test
 
 ```sh
