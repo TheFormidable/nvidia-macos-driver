@@ -55,7 +55,7 @@ restart. Take every test setting out again when its test is done.
    settings file, the kernel collection, the firmware) into a new folder
    `/Library/NullMoth/backup-<date>-<time>.<random>`, whose name it prints on its line
    `== 4. back up what is there now -> ...`; note it. A second run of the installer before a start that lit the
-   display keeps the first run's folder as the way back, and says so on its `== 6b.` line. It also leaves a job that
+   display keeps the first run's folder as the way back, and says so in its `== 6b.` step. It also leaves a job that
    runs at each start: when the new driver has turned itself off after two starts in a row that never lit its display
    (or after WindowServer kept dying on the NVIDIA display), or when its framebuffer refused the Apple classes of this
    macOS (section 2, step 3), the job puts everything back from that folder and restarts once (after a refusal it
