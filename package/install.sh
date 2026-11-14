@@ -363,6 +363,8 @@ BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n
 [ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "cannot record the backup in the installer guard"
 step "4. back up what is there now -> $BK"
 printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
+# the NVRM in place before this run (step 6b compares it with the record of the install before this one)
+NVSUM0=$(cksum < "$EXT/NVRM.kext/Contents/MacOS/NVRM" 2>/dev/null) || NVSUM0=""
 [ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
@@ -551,19 +553,35 @@ step "6b. falling back to the previous driver if this one cannot start"
 # nothing can draw on that card. A framebuffer with nothing plugged into it shows nothing (a second GPU that only
 # computes), so with no display on any framebuffer the Mac restarts whoever is logged in, and at the login window it
 # restarts whatever shows it.
+# A run over an install that is still on trial keeps the fallback that install chose: the files in place now are the
+# driver on trial, not one known to work, so a backup of them is no way back. On trial means: no start has lit the
+# display since (nullmoth-nv-ok absent) and the NVRM in place is the one that install put there (its checksum is in
+# /Library/NullMoth/trial-backup, so a restore by the job, an uninstall or another release's install in between ends
+# the trial). The kept backup keeps its own macOS build for the job's refusal rule; an install on trial that had no
+# previous driver passes that on: no job. The path read back is used only as a backup folder of this installer's
+# naming that exists; nothing is ever removed through it.
+FB=$BK; FBREC=""; FBOSB=$BUILD; FBKEPT=0
+TR=/Library/NullMoth/trial-backup
+if [ -f "$TR" ] && [ -n "$NVSUM0" ] && ! nvram 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok >/dev/null 2>&1 \
+   && [ "$(sed -n 1p "$TR")" = "$NVSUM0" ]; then
+  FB=$(sed -n 2p "$TR"); FBREC=$FB; FBKEPT=1; FBOSB=""
+  case "$FB" in /Library/NullMoth/backup-*) case "$FB" in *..*) FB="";; esac;; *) FB="";; esac
+  [ -z "$FB" ] || { [ -d "$FB/NVRM.kext" ] && [ ! -L "$FB" ]; } || FB=""
+  [ -z "$FB" ] || FBOSB=$(sed -n 1p "$FB/macos-build" 2>/dev/null)
+fi
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
 rm -f "$LG" "$LGP" "$KC.nullmoth-restore" /Library/NullMoth/lastgood.seen
-if [ -d "$BK/NVRM.kext" ]; then
+if [ -n "$FB" ] && [ -d "$FB/NVRM.kext" ]; then
   mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the fallback job's folders"
   cat > "$LG.tmp" <<EOF || die "write the fallback job"
 #!/bin/bash
-# Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
+# Written by the NVIDIA driver install: restores the driver in $FB if the installed one cannot start.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
-BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
-OSB='$BUILD'   # the macOS build this install was made on: the one the previous driver was running on
+BK='$FB'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
+OSB='$FBOSB'   # the macOS build that backup was made on: the one the previous driver was running on
 # no launchctl bootout here: booting out the running job kills this script before it can restart the Mac (10-17 test)
 done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh /Library/NullMoth/lastgood.seen; }
 # NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
@@ -689,10 +707,19 @@ EOF
 <key>RunAtLoad</key><true/></dict></plist>
 EOF
   chmod 644 "$LGP" && chown root:wheel "$LGP" || die "fallback job permissions"
-  ok "previous driver kept as the fallback ($BK)"
+  if [ "$FBKEPT" = 1 ]; then
+    ok "the install before this one has not lit its display yet: its fallback stays ($FB); this run's backup $BK holds the driver on trial"
+  else ok "previous driver kept as the fallback ($FB)"; fi
+elif [ "$FBKEPT" = 1 ] && [ -n "$FBREC" ]; then
+  ok "the install before this one has not lit its display yet and its fallback $FBREC is gone: no fallback (this run's backup $BK holds the driver on trial)"
+elif [ "$FBKEPT" = 1 ]; then
+  ok "the install before this one has not lit its display yet and left no fallback: no fallback (this run's backup $BK holds the driver on trial)"
 else
-  ok "no previous driver to fall back to (first install)"
+  FB=""; ok "no previous driver to fall back to (first install)"
 fi
+# the record a later run reads: the NVRM this run installed and the fallback it chose (empty: none). Written last; a
+# failed write leaves no record, and a later run then backs up what it finds, as before.
+{ cksum < "$EXT/NVRM.kext/Contents/MacOS/NVRM" && printf '%s\n' "$FB"; } > "$TR.tmp" 2>/dev/null && mv -f "$TR.tmp" "$TR" || rm -f "$TR.tmp" "$TR"
 step "6c. counting a start as good once the desktop is up"
 # The kernel's guard only counts a start as good when the framebuffer lights a head, or when the card reports that none
 # of its connectors has a display. A laptop whose panel hangs off the integrated GPU reaches that report late and does
