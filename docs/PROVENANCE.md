@@ -150,7 +150,11 @@ of them is an ancestor of `rel-29` or of this branch, none of their files exists
 The ray-query code in `nvk/nvk-macos.patch` is Mesa's own `nir_lower_ray_queries`. 2.9's hardware ray tracing is the
 translator's own BVH path.
 
-> Status (the branch prepared as 3.0): open, and not this branch's to settle. The paragraph above is release 2.9's text, and release 2.9's own tree, like this one, holds what it says is absent: `nvk/hwrt/` with the `ttu` files, whose patches `build/build_nvk.sh` applies, and the setting `NVK_HWRT_QUERY` in NVK and in the plugin's profile ([HWRT.md](HWRT.md) describes that work and how its layout rows were measured). This branch changed no file under `nvk/hwrt/` and makes no statement about how those files relate to `hwrt-28`: that is the original project's to say.
+> Status (the branch prepared as 3.0): open, and not this branch's to settle. The paragraph above is release 2.9's text,
+> and release 2.9's own tree, like this one, holds what it says is absent: `nvk/hwrt/` with the `ttu` files, whose
+> patches `build/build_nvk.sh` applies, and the setting `NVK_HWRT_QUERY` in NVK and in the plugin's profile
+> ([HWRT.md](HWRT.md) describes that work and how its layout rows were measured). This branch changed no file under
+> `nvk/hwrt/` and makes no statement about how those files relate to `hwrt-28`: that is the original project's to say.
 
 ## 5. Items that must change or be decided
 
