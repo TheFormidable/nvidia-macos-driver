@@ -4147,7 +4147,8 @@ def arm_hosts(commits):
     lx = Sandbox("linux")
     (lx.state / "os").write_text("Linux\n")
     rc, out = lx.run("build")
-    check("not a Mac: build stops at the start and says what works there", rc == 2 and "building needs a Mac" in out, out[-300:])
+    check("not a Mac: build stops at the start and says what works there (clean and help among it)",
+          rc == 2 and "building needs a Mac" in out and "env, clean, help and a dry run" in out, out[-300:])
     lx.break_script('is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac', 'true || die "building needs a Mac')
     rc, out = lx.run("build")
     negative("a build that goes ahead on another system", [] if rc == 2 and "building needs a Mac" in out else ["went ahead"])
