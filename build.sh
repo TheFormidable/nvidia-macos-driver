@@ -2438,7 +2438,8 @@ old_layout_rm() { [ -n "${NULLMOTH_BUILD_ROOT:-}" ] || [ ! -e "$W/build/build" ]
 clean_rm() {   # safe_rm of what is inside the working directory; a NULLMOTH_BUILD_ROOT of yours outside it is left alone
   local p
   for p in "$@"; do
-    if in_workdir "$p"; then safe_rm "$p"; else say "not deleted (outside the working directory, your NULLMOTH_BUILD_ROOT): $p"; fi
+    if in_workdir "$p"; then safe_rm "$p"
+    elif [ -e "$p" ] || [ -L "$p" ]; then say "not deleted (outside the working directory, your NULLMOTH_BUILD_ROOT): $p"; fi
   done
 }
 cmd_clean() {
