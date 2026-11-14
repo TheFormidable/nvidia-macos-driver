@@ -40,6 +40,20 @@ die() {
 trap 'die "uninstaller interrupted (signal HUP)"' HUP
 trap 'die "uninstaller interrupted (signal INT)"' INT
 trap 'die "uninstaller interrupted (signal TERM)"' TERM
+# The bundle identifier of each kext in KEXTS, as install.sh names them.
+primary_bundle_id() {
+ if [ "$1" = NVPrimarySelector ]; then echo org.hackintosh.experimental.NVPrimarySelector
+ else echo "com.nullmoth.$1"; fi
+}
+# lists_driver <kmutil inspect output>: true when it names a kext of KEXTS. Only those identifiers count, each as a
+# whole word (com.nullmoth.NVRM is not com.nullmoth.NVRMFB): another com.nullmoth kext in /Library/Extensions (NMHDA,
+# NMKbdBacklight) is not one this script removes, is kept in the collection on purpose, and must not stop the removal.
+lists_driver() {
+  local ids k
+  ids=$(printf '%s\n' "$1" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)')
+  for k in $KEXTS; do printf '%s\n' "$ids" | grep -Fxq "$(primary_bundle_id "$k")" && return 0; done
+  return 1
+}
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 # SIP's filesystem protection makes the driver's files and the kernel collection read-only even for root: removal then
 # failed half-way ("Operation not permitted" on every bundle, then kmutil). The driver cannot load in that state either,
@@ -72,7 +86,10 @@ else
   kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$RB/repo" -A "$NEWKC" -z >/dev/null 2>&1 || die "kmutil could not rebuild the collection"
   [ -s "$NEWKC" ] || die "kmutil produced no removal collection"
   INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "cannot inspect the removal collection"
-  printf '%s\n' "$INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the removal collection still lists the NVIDIA driver or selector"
+  lists_driver "$INS" && die "the removal collection still lists the NVIDIA driver or selector"
+  # The AMD and Intel GPU driver's Metal accelerator (NMXAccel) names this driver's Metal plugin, which the removal
+  # below takes out of /Library/GPUBundles: stop before anything is changed instead of leaving that GPU without Metal.
+  printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq com.nullmoth.NMXAccel && die "the AMD and Intel GPU driver's accelerator (NMXAccel) uses this driver's Metal plugin, which the removal would take away; remove that driver first with its own uninstaller. Nothing was changed."
   # Other processes can move or delete files in /Library/KernelCollections between this check and the publish below.
   # A private copy of the verified collection lets the publish go ahead when the candidate there is gone.
   cp -p "$NEWKC" "$RB/removal-candidate.kc" || die "cannot keep a copy of the removal collection"
@@ -113,7 +130,7 @@ else
 fi
 if [ -f "$KC" ]; then
   FINAL_INS=$(kmutil inspect -a x86_64 -A "$KC" 2>/dev/null) || die "cannot verify the published removal collection"
-  printf '%s\n' "$FINAL_INS" | grep -Eq 'com\.nullmoth|org\.hackintosh\.experimental\.NVPrimarySelector' && die "the kernel collection still lists the NVIDIA driver or selector"
+  lists_driver "$FINAL_INS" && die "the kernel collection still lists the NVIDIA driver or selector"
 fi
 REMOVING=0
 rm -rf "$RB"
