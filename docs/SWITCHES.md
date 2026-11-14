@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 5 | 1 | 54 | 410 | 12 |  | 488 |
+| env |  | 6 |  |  | 5 | 1 | 55 | 409 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
 | sysctl |  | 5 | 4 | 12 |  |  | 349 |  |  |  | 370 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -38,7 +38,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
-| env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: the waits of 2.9) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
+| env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
 | bootarg | `nvaccel_pageoff_locked` | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |
 | bootarg | `nvaccel_surf_planes` | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |
@@ -188,7 +188,7 @@ Each of these does nothing unless it is set.
 | `NVK_CMDPOOL_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_CURVES` | dev | unset | 2.9 | - | unreviewed | nvk/curves/curves.patch, plugin/NVMTLObjects.m |
 | `NVK_DESC_QUARANTINE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_DIAG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_DIAG` | diag | unset | 2.9 | - | NVK_DIAG=1: NVK's diagnostic lines, and the process's standard error goes to /private/tmp/nvk-diag-\<pid>.log; a wait that times out dumps the state of every channel there | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVK_DUMP_QMD` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_DUMP_SHADER_DIR` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_FAULT_INJECT` | test | off (unset: nothing is injected) | 3.0 | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. | nvk/nvk-channel-recover.patch |
@@ -200,7 +200,7 @@ Each of these does nothing unless it is set.
 | `NVK_NO_BIGPAGE` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_NO_NONCONTIG` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_PREEMPT_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_QUEUE_COUNT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_QUEUE_COUNT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-unbound-stage.patch |
@@ -276,7 +276,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_GAME_GPU_PRIORITY` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_GAME_LOWER_BACKGROUND` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_GAME_TIMESLICE_US` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_GDQ_DQ` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_GDQ_DQ` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVMTL_GDQ_INVFULL` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_GDQ_MEMBAR` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_GDQ_NOINV` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
@@ -443,7 +443,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_PRIVATE_CAPTURE_DIR` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PRIVATE_CAPTURE_REQUEST` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PRIVATE_POOL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
-| `NVMTL_PROCESS_ENV` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_env_knobs.h |
+| `NVMTL_PROCESS_ENV` | diag | unset | 2.9 | - | NVMTL_PROCESS_ENV=1 in a process's own environment (exactly 1; not honoured in a process run as root or setuid/setgid): the release plugin keeps that process's driver variables (NVMTL_, NVK_, NVRM_ and the other driver prefixes), which then win over the settings file, and writes its log, /tmp/nvmtl.log, for that process, which it does for no other process | plugin/nvmtl_env_knobs.h |
 | `NVMTL_PSTAT` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_RAW_MATCH_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_RAW_MAX_GPRS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
@@ -524,10 +524,10 @@ Each of these does nothing unless it is set.
 | `NVRM_610_TSG` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVRM_610_USERMODE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVRM_610_ZCULL` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVRM_ASYNC` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVRM_EVENT_WAIT` | escape | on (NVRM_EVENT_WAIT=0 in the settings file: the waits of 2.9) | 2.9 | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. | nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
+| `NVRM_ASYNC` | dev | unset | 2.9 | - | NVRM_ASYNC=0 (any value that begins with 0) turns NVK's asynchronous submission off: each flush waits until the GPU has finished it, the waits and syncs between submissions do nothing and memory is freed at once, as before NVK's asynchronous path; channel recovery is off with it, and NVK's channels are not registered with the surface fence | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
+| `NVRM_EVENT_WAIT` | escape | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 2.9 | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. | nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
 | `NVRM_FLUSH_TIMEOUT_MS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, plugin/nvmtl_vk.c |
-| `NVRM_GSUB_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVRM_GSUB_LOG` | diag | unset | 2.9 | - | NVRM_GSUB_LOG set to any value, 0 included: when a channel closes, NVK prints on standard error how its submissions and waits went (event sleeps, wakes, time-outs, fallbacks to polling) | nvk/nvk-macos.patch |
 | `NVRM_ONE_CONN_PER_MAP` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-hubfix.patch |
 | `NVRM_TSG_Q0_HIGH` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, plugin/nvmtl_game_priority.h, plugin/nvmtl_vk.c |
 | `NVRM_TSG_TIMESLICE_US` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, plugin/nvmtl_game_priority.h, plugin/nvmtl_vk.c |
@@ -1049,7 +1049,7 @@ Each of these does nothing unless it is set.
 | `/tmp/nvencvt.barcode` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
 | `/tmp/nvencvt.dpb` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
 | `/tmp/nvencvt.dump` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
-| `/tmp/nvencvt.log` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c, vendor/nvenc/vt/nvencvt_dec.c |
+| `/tmp/nvencvt.log` | diag | absent | 2.9 | - | flag file: when it is a regular file owned by root and not writable by group or others, each process that loads the codec library writes its log to /tmp/nvencvt-\<pid>.log | vendor/nvenc/vt/nvencvt.c, vendor/nvenc/vt/nvencvt_dec.c |
 | `/tmp/nvencvt.refs` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
 | `/tmp/nvencvt.stats` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
 | `/tmp/nvmtl-dump-request` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLObjects.m |
@@ -1060,7 +1060,7 @@ Each of these does nothing unless it is set.
 | `/tmp/nvmtl-trace-huge` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLObjects.m |
 | `/tmp/nvmtl-trace-long` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLObjects.m |
 | `/tmp/nvmtl-trace-request` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLObjects.m |
-| `/tmp/nvmtl.log` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |
+| `/tmp/nvmtl.log` | diag | absent | 2.9 | - | the plugin's log of a process started with NVMTL_PROCESS_ENV=1 (in $TMPDIR when /tmp/nvmtl.log cannot be opened for it; NVMTL_LOG_PATH names another file); a release plugin writes it for no other process | plugin/NVMTLDevice.m |
 | `/usr/local/etc/nvencvt.conf` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | vendor/nvenc/vt/nvencvt.c |
 
 ## procname
