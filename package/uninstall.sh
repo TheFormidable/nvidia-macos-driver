@@ -96,7 +96,7 @@ rm -rf /Users/Shared/nvfw 2>/dev/null || true
 # the optional GPU boost daemon (package/boost_daemon.sh), if one was installed
 [ ! -f "$(dirname "$0")/boost_daemon.sh" ] || /bin/bash "$(dirname "$0")/boost_daemon.sh" remove || true
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
-rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh "$KC.nullmoth-restore" || die "cannot remove the fallback job"
+rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh /Library/NullMoth/lastgood.seen "$KC.nullmoth-restore" || die "cannot remove the fallback job"
 launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
 rm -f /Library/LaunchDaemons/com.nullmoth.bootguard.plist /Library/NullMoth/bootguard.sh || die "cannot remove the boot-guard job"
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || true
