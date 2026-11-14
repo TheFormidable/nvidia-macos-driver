@@ -54,8 +54,8 @@
 # with 2 failed, 3 skipped and 9 not run: one arm of tools/test_build_sh.py (a caller's SDKROOT for another
 # platform) and two of tools/test_toolchain_sh.py (variables macOS itself sets reached a step's record;
 # version_above). The same arms failed on the Intel runner at 8364212 and pass there since ef2a216. At every push
-# after 22536c6 (96bf32c, 8364212, ef2a216, 95811c2, 3933ff6) GitHub cancelled that job: "The job was not acquired by
-# Runner of type hosted even after multiple attempts".
+# between 22536c6 and ee7f332 (96bf32c, 8364212, ef2a216, 95811c2, 3933ff6) GitHub cancelled that job: "The job was
+# not acquired by Runner of type hosted even after multiple attempts".
 # In 43429828046 and 43443873231 the tests left /private/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 # and an xcodebuild result bundle behind, and in no run before: those were the runs in which tools/test_build_sh.py
 # handed Apple's own /usr/bin/make an SDKROOT that names no SDK, and the first two in which tools/test_toolchain_sh.py
