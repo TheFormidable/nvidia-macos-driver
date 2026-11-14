@@ -12,7 +12,9 @@
  * (an integrated GPU macOS still drives, such as Coffee Lake). With no second Metal GPU the NVIDIA device is the only
  * choice and is always given.
  *
- * Policy file /Library/GPUBundles/nvmtl-gpu-policy.txt, one rule per line, '#' starts a comment:
+ * Policy file /Library/GPUBundles/nvmtl-gpu-policy.txt, one rule per line. '#' starts a comment, at the start of a line
+ * or after a rule, and the blanks before it or at a line's end are not part of the rule (so a process whose name holds
+ * '#' cannot be named):
  *     mode nvidia          (default) every process gets the NVIDIA device
  *     mode apple           follow Apple's rule: a process whose Info.plist sets NSSupportsAutomaticGraphicsSwitching to
  *                          true is content with the low-power GPU and does not get the NVIDIA device; every other process
@@ -41,8 +43,12 @@ static inline int nmp_parse(const char *text, const char *proc, int *mode_apple)
         while (*p && *p != '\n' && *p != '\r') { if (n + 1 < sizeof line) line[n++] = *p; p++; }
         while (*p == '\n' || *p == '\r') p++;
         line[n] = 0;
+        /* a comment after a rule, as docs/HYBRID-LAPTOPS.md shows the rules, used to be read as part of the rule: the
+         * mode was then not set and the process named was the name with the comment, which matches nothing */
+        char *h = strchr(line, '#'); if (h) { *h = 0; n = (size_t)(h - line); }
+        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = 0;
         char *q = line; while (*q == ' ' || *q == '\t') q++;
-        if (!*q || *q == '#') continue;
+        if (!*q) continue;
         if (!strncmp(q, "mode ", 5)) {
             char *v = q + 5; while (*v == ' ' || *v == '\t') v++;
             if (!strcmp(v, "apple")) *mode_apple = 1; else if (!strcmp(v, "nvidia")) *mode_apple = 0;
