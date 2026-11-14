@@ -910,7 +910,7 @@ index 42f5f01..e2a6740 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..01d0a6f
+index 0000000..a854910
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 @@ -0,0 +1,1014 @@
@@ -1667,7 +1667,7 @@ index 0000000..01d0a6f
 +         pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
 +         return VK_SUCCESS;
 +      }
-+      if (now - r->progNs < budget / 2) {
++      if (nvrm_rec_root_alive(now, r->progNs, budget)) {
 +         if (R == slot) {
 +            pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
 +            return VK_SUCCESS;                                /* it moved meanwhile: the waiter re-arms */
@@ -1930,10 +1930,10 @@ index 0000000..01d0a6f
 +}
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
 new file mode 100644
-index 0000000..2d80ffc
+index 0000000..7ec0991
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.h
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,454 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -2078,6 +2078,18 @@ index 0000000..2d80ffc
 +   if (*since == 0 || prog >= *since)
 +      *since = now != 0 ? now : 1;
 +   return now - *since < NVRM_REC_ASLEEP_NS;
++}
++
++/* A stalled wait's root R (another channel) counts as still moving when its semaphore was last seen to change less than
++ * a quarter of the budget ago. progNs is the time of the look that saw the change, not of the change: a root nobody
++ * CPU-waits on is looked at only by the waiter's own kick (at half the budget) and its stall check (at the full one),
++ * so a change made before the kick is stamped by the kick and is half a budget old at the check, give or take one
++ * wait round (2 ms). A threshold of half a budget would make that a coin flip; a change after the kick is stamped by
++ * the check itself (age 0). */
++static inline bool
++nvrm_rec_root_alive(int64_t now, int64_t progNs, int64_t budget)
++{
++   return now - progNs < budget / 4;
 +}
 +
 +/* ── the rebuild budget: at most NVRM_REC_MAX_REBUILDS inside NVRM_REC_WINDOW_NS; a stamp of 0 is an unused one ─── */
@@ -2378,10 +2390,10 @@ index 0000000..2d80ffc
 +#endif /* NVKMD_NVRM_RECOVER_H */
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
 new file mode 100644
-index 0000000..e4406c4
+index 0000000..ecfa36f
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover_test.c
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,682 @@
 +/* Host test of nvkmd_nvrm_recover.h (the pure part of rebuilding a channel). Not built by meson. From this directory:
 + *   cc -std=c11 -O1 -g -Wall -Wextra -Werror -I. nvkmd_nvrm_recover_test.c -o /tmp/nvkmd_nvrm_recover_test && /tmp/nvkmd_nvrm_recover_test
 + * (add -fsanitize=address,undefined where the compiler has a runtime for them). Exit 0 = every arm passed.
@@ -3033,6 +3045,21 @@ index 0000000..e4406c4
 +   arm("control: the GSP crash is not a channel fault", nvrm_rec_classify(&gsp) != NVRM_LOSS_CHANNEL);
 +}
 +
++/* ── the root-alive test of nvrm_rec_run: a stamp made by the waiter's own kick is never recent progress ── */
++static void
++test_root_alive(void)
++{
++   const int64_t ms = 1000000, budget = 5000 * ms;
++   bool kick = true;
++   for (int64_t j = -10 * ms; j <= 10 * ms; j += ms / 4)   /* the kick's stamp, the check one round earlier or later */
++      kick = kick && !nvrm_rec_root_alive(budget, budget / 2 + j, budget);
++   arm("root alive: a change first seen by the waiter's kick (half a budget old +- 10 ms) is not recent progress", kick);
++   arm("root alive: a change seen by the stall check itself is recent progress", nvrm_rec_root_alive(budget, budget, budget));
++   arm("root alive: a change seen 1 s before the check (by the root's own waiter) is recent progress",
++       nvrm_rec_root_alive(budget, budget - 1000 * ms, budget));
++   arm("root alive: a stamp one budget old is not", !nvrm_rec_root_alive(budget, 0, budget));
++}
++
 +int
 +main(void)
 +{
@@ -3044,6 +3071,7 @@ index 0000000..e4406c4
 +   test_drops();
 +   test_execute();
 +   test_asleep();
++   test_root_alive();
 +   test_controls();
 +   printf("%u ok, %u failed\n", oks, fails);
 +   return fails ? 1 : 0;
