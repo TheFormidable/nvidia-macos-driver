@@ -93,8 +93,8 @@ reinstall 2.9 (and `-nvrmnopm` / `-nvrmnoshutdown` for the power paths). Use a w
 you saw with it and without it. A boot argument needs a restart; a line in `nvrm610.conf` goes into your own block at
 the end of the file and acts on the processes started after it (log out and in for WindowServer).
 
-Unlike the rest of this page, these entries do not come from logs people sent yet: nothing of 3.0 has run on a card.
-They say what the driver reports and what each line means. A line quoted here as in `nvmtl.log` is written by an
+Unlike the rest of this page, these entries do not come from logs people sent yet: no log of 3.0 from a card has been
+sent. They say what the driver reports and what each line means. A line quoted here as in `nvmtl.log` is written by an
 installed (release) plugin only for a process started with `NVMTL_PROCESS_ENV=1`; for every other process, WindowServer
 included, only the plugin's failure lines reach the system log, with the prefix `NullMoth:`
 ([TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md), "Where the driver writes").

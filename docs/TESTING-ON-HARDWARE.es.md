@@ -1,12 +1,13 @@
 # Probar la versión 3.0 en una tarjeta
 
-Esta página es la lista de comprobaciones para la primera prueba de la versión 3.0 en una tarjeta. Nada de lo que
-contiene se ha visto en una tarjeta NVIDIA: nada compilado a partir de esta rama se ha instalado, cargado ni ejecutado
-en una, así que cada "bien" de abajo es lo que el código está escrito para mostrar, no un resultado que alguien haya
-observado. Lo que sí se ha ejecutado es la compilación: en el commit 3933ff6, `./build.sh` compiló todos los
-componentes y preparó un paquete en un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5) y en la máquina Intel de GitHub
-(macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2). [BUILDING.es.md](BUILDING.es.md) dice qué se
-ejecutó y dónde.
+Esta página es la lista de comprobaciones para la primera prueba de la versión 3.0 en una tarjeta. No se ha informado de
+ningún resultado suyo: un paquete compilado a partir de esta rama en el commit aa27c73 se ha instalado sobre la 2.9 y ha
+arrancado en una máquina con una RTX 5050, y no se sabe nada más de allí, así que cada "bien" de abajo es lo que el
+código está escrito para mostrar, no un resultado del que alguien haya informado. Lo demás que se ha ejecutado es la
+compilación: en el commit 3933ff6, `./build.sh` compiló todos los componentes y preparó un paquete en un Mac Intel
+(12 hilos, macOS 26.7, Xcode 26.5) y en la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15,
+Xcode 26.3 con el SDK 26.2), y en el commit aa27c73 otra vez en ese Mac, donde también se ejecutaron las pruebas (de
+317 pasaron 305 y no falló ninguna). [BUILDING.es.md](BUILDING.es.md) dice qué se ejecutó y dónde.
 
 In English: [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). La versión en inglés es la de referencia.
 
@@ -112,11 +113,10 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    macOS en su primer arranque. En ese Mac `./build.sh deps` tardó 46,5 minutos en un directorio de trabajo vacío en
    el commit 650db45, descargas incluidas; en el commit 3933ff6 la compilación de los 17 componentes tardó 5 minutos
    41 segundos y el paquete 27 segundos, y el directorio de trabajo ocupaba después unos 8 GB.
-   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Que pase
-   no dice nada del firmware, que la instalación de verdad toma de la instalación anterior o descarga de NVIDIA antes
-   de cambiar nada. Todavía no se ha ejecutado con un paquete hecho por `./build.sh`: en ese Mac se preparó el paquete
-   y nada más. Bien: su última línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó;
-   arréglalo primero.
+   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Que pase no
+   dice nada del firmware, que la instalación de verdad toma de la instalación anterior o descarga de NVIDIA antes de
+   cambiar nada. No se ha informado de ningún resultado suyo con un paquete hecho por `./build.sh`. Bien: su última
+   línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
 5. **Tu archivo de ajustes.** Léelo antes de instalar: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. El instalador
    reemplaza la carpeta `/Library/GPUBundles/nvmtl` entera por la del paquete, y de tu archivo anterior solo vuelve a
    poner, al final del archivo del paquete, las líneas que están entre `# --- my settings, kept on update ---` y
@@ -177,9 +177,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
    reinicia antes de nada ([SWITCHES.md](SWITCHES.md) dice qué es).
-3. **Las comprobaciones de las clases de Apple.** Nadie ha comparado los tamaños de las clases de Apple para los que
-   se hizo esta compilación con los que registra tu macOS: en cada macOS que tengas (15 y 26) el primer arranque es
-   esa comparación, y es la prueba que importa. Justo después (por `ssh` si la pantalla no apareció):
+3. **Las comprobaciones de las clases de Apple.** Nadie ha informado de una comparación de los tamaños de las clases de
+   Apple para los que se hizo esta compilación con los que registra un macOS: en cada macOS que tengas (15 y 26) el
+   primer arranque es esa comparación, y es la prueba que importa. Justo después (por `ssh` si la pantalla no apareció):
 
    ```bash
    ioreg -l -w0 | grep -E '"(nvrmfb|nvagdc|nvaccel|nvrm)-layout'
@@ -220,13 +220,13 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
      - `nvaccel-layout` rechazado: `NVAccel: does not attach: ... the display runs without acceleration` y, de NVRM,
        `auto-go: the accelerator declined this macOS's classes ...`; `debug.nvrm_boot_heads_why` vale 6, no existe
        `debug.nvaccel_layout` ni hay `nvagdc-layout` (AppleGraphicsDeviceControl solo se crea para un acelerador que
-       arrancó). El framebuffer enciende la pantalla, así que el guardián de arranque cuenta el arranque como bueno y
-       la tarea del instalador no devuelve nada. Nadie ha visto todavía un escritorio sin aceleración con este driver.
-       Si la pantalla se queda negra o solo muestra el puntero mientras WindowServer se cae una y otra vez y todas
-       las pantallas están en esta tarjeta, la tarea del guardián de arranque apaga el driver y reinicia una vez desde
-       la ventana de inicio de sesión, y la tarea de vuelta atrás, mientras siga instalada, devuelve el driver
-       anterior en ese arranque siguiente; `/Library/NullMoth/bootguard.log`, leído por `ssh`, lo dice. Con una
-       pantalla en otra GPU la tarea del guardián de arranque no toca esas caídas.
+       arrancó). El framebuffer enciende la pantalla, así que el guardián de arranque cuenta el arranque como bueno y la
+       tarea del instalador no devuelve nada. Nadie ha informado todavía de un escritorio sin aceleración con este
+       driver. Si la pantalla se queda negra o solo muestra el puntero mientras WindowServer se cae una y otra vez y
+       todas las pantallas están en esta tarjeta, la tarea del guardián de arranque apaga el driver y reinicia una vez
+       desde la ventana de inicio de sesión, y la tarea de vuelta atrás, mientras siga instalada, devuelve el driver
+       anterior en ese arranque siguiente; `/Library/NullMoth/bootguard.log`, leído por `ssh`, lo dice. Con una pantalla
+       en otra GPU la tarea del guardián de arranque no toca esas caídas.
      - `nvagdc-layout` rechazado: `debug.nvrmfb_agdc` vale -6 y `debug.nvrmfb_agdc_layout` 2; el escritorio funciona
        sin AppleGraphicsDeviceControl, y el arranque cuenta como bueno.
 

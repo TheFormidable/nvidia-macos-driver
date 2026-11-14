@@ -1,9 +1,10 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
-Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **None of it has run on a
-GPU yet.** Apple's compiler has built this code as it stands at commit 3933ff6, every change below included: on one
-Intel Mac (12 threads, macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4
-processors, macOS 15, Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
+Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **No test of it on a GPU has
+been reported yet**; a package of commit aa27c73 has been installed and started on one machine with an RTX 5050. Apple's
+compiler has built this code as it stands at commit 3933ff6, every change below included: on one Intel Mac (12 threads,
+macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
+Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
 export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on
 the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`); `tools/test_irq_timer_wiring.py` checks the
 source text. Every change below is **on by default**; the five in the

@@ -2,14 +2,15 @@
 
 ## 3.0
 
-**Not released.** This section describes the branch being prepared as 3.0. Nothing in it has run on an NVIDIA card
-yet, and nothing built from it has been installed or loaded. At commit 3933ff6, `./build.sh` built all 17 components
-of the driver with no warning on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5): the kernel extensions (NVRM,
-NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC), NVK, the Metal plugin, the shader translator, the video library and
-the other components; it then staged a package over the 2.9 release package there, and the host tests passed there
-(303 passed, 0 failed, 3 skipped, 9 not run, of 315). At commit ee7f332 it built the 17 components and staged the
-package there again; the host tests were not run there at that commit. It had built that Mac's build tools from an
-empty working directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found every one of
+**Not released.** This section describes the branch being prepared as 3.0. No test of it on an NVIDIA card has been
+reported yet. At commit 3933ff6, `./build.sh` built all 17 components of the driver with no warning on one Intel
+Mac (12 threads, macOS 26.7, Xcode 26.5): the kernel extensions (NVRM, NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC),
+NVK, the Metal plugin, the shader translator, the video library and the other components; it then staged a package over
+the 2.9 release package there, and the host tests passed there (303 passed, 0 failed, 3 skipped, 9 not run, of 315). At
+commit ee7f332 it built the 17 components and staged the package there again; the host tests were not run there at that
+commit. At commit aa27c73 it built the 17 components with no warning, staged the package and ran the host tests
+there (305 passed, 0 failed, 3 skipped, 9 not run, of 317). It had built that Mac's build tools from an empty working
+directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found every one of
 the 506 kernel symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed have been fixed
 since. On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit
 3933ff6, the workflow `full-build` built all 17 components and staged the package (its test step failed there because
@@ -19,9 +20,11 @@ succeeded there for the first time: the build, the package, the host tests (304 
 run, of 316) and its twelve checks of what was built. In the workflow `ci` at that commit the host tests passed with
 the same numbers on that runner and, for the first time whole, on GitHub's Apple-silicon runner (macos-15). At commit
 95811c2 the kernel extensions built on GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has
-run on an Apple-silicon Mac. Nothing committed after ee7f332 has been built or tested on a Mac or on GitHub: the
-corrections made after it, among those below, were compiled and their host tests run on Linux only. The check list
-for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
+run on an Apple-silicon Mac. A package built from aa27c73 on the Intel Mac has been installed over 2.9 on one machine
+with an RTX 5050, which started with it twice without the installer's fallback job putting 2.9 back. Nothing committed
+after ee7f332 has run on GitHub, and nothing committed after aa27c73 has been built or tested on a Mac: the changes made
+after it, among those below, were compiled and their host tests run on Linux only (those that need a Mac have not run).
+The check list for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
 alters how the driver runs has one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
@@ -98,9 +101,9 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   left to that user; a display on the refused card, which only Apple's firmware framebuffer can draw, does not hold it
   back, even after an automatic login). The verdicts are on the GPU's PCI device as `nvrmfb-layout`, `nvagdc-layout`
   and `nvaccel-layout`. NVRMFB also publishes how many virtual functions IOFramebuffer and IODisplayParameterHandler
-  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. None of the
-  three checks has run on a Mac yet, and the sizes of these classes in macOS 26.7 were not measured: each check
-  decides when its kext starts. Way back for all three checks: boot argument `nvlayout=0`.
+  have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. No result of
+  the three checks on a Mac has been reported yet, and the sizes of these classes in macOS 26.7 have not been reported:
+  each check decides when its kext starts. Way back for all three checks: boot argument `nvlayout=0`.
 - WindowServer marks each surface plane as newest in video memory once per commit, not once for every part of the
   command buffer and every texture that writes it. Each mark is a call into the accelerator that takes its lock, and a
   video playing in a window made many of them per frame.
@@ -268,8 +271,8 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   read back from the mapper before the GPU sees it, and the GPU is not started at all if a two-page self-test does not
   read back (that is not counted as a failed start). The accelerator's copies of GPU memory to the CPU go through a
   buffer mapped the same way. Without VT-d nothing changes. `sysctl debug.nvrm_dma_mode` and the `nvrm-dma` property
-  show which case a machine is in; `nvrmdma=0` refuses to start the GPU behind a mapper (diagnostic). Never run with
-  a mapper on real hardware yet: see [docs/DMA-IOMMU.md](docs/DMA-IOMMU.md).
+  show which case a machine is in; `nvrmdma=0` refuses to start the GPU behind a mapper (diagnostic). No run with a
+  mapper on real hardware has been reported yet: see [docs/DMA-IOMMU.md](docs/DMA-IOMMU.md).
 - The event wait reports why each wait returned and counts it (`debug.nvrm_evt_*`); a thread turned away because 256
   threads already sleep is told so instead of looking woken. Closing a process no longer races an RM event post into
   the freed connection: the close waits for a post in flight (as the Linux driver does) and keeps the connection

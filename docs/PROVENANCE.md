@@ -87,7 +87,7 @@ Two providers register with VideoToolbox: NullMoth's own libraries (carried bina
 | Turing TU116, TU10x: GTX 1660, RTX 20 (c4b7 / c4b0) | own `_t2d`; nvencvt opt-in (new) | own; nvencvt opt-in (new) | VP9 nvencvt opt-in (new) | nvencvt opt-in (new) | own `_tu10x` only | none in hardware |
 | Ampere GA10x (c7b7 / c7b0) | own `_t2d`; nvencvt with `NVENCVT_AMPERE_ALL_DEC=1` | own; nvencvt with the same switch | nvencvt auto | nvencvt with the same switch | own `_ga10x`; nvencvt with `NVENCVT_AMPERE_ENC=1`, untried | none in hardware |
 | Ada (c9b7 / c9b0) | nvencvt auto (own `_t2d` registers below it) | nvencvt auto (own below it) | nvencvt auto | nvencvt auto | nvencvt auto (own: none) | nvencvt auto |
-| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt auto in the decode service once its self-test has passed on the card, opt-in in other processes behind the same test (new, not yet run on a card) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
+| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt auto in the decode service once its self-test has passed on the card, opt-in in other processes behind the same test (new, no run on a card reported yet) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
 
 What each carried library is still needed for, and what is missing before `libnvencvt` can replace it:
 
