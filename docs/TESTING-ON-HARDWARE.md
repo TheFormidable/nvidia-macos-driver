@@ -208,9 +208,10 @@ restart. Take every test setting out again when its test is done.
        `debug.nvaccel_layout` and no `nvagdc-layout` (AppleGraphicsDeviceControl is made only for an accelerator that
        started). The framebuffer lights the display, so the boot guard counts the start as good and the installer's
        job puts nothing back. A desktop without acceleration on this driver has not been seen. If the screen
-       stays black or shows only the pointer while WindowServer keeps dying, the boot-guard job turns the driver off
-       and restarts once from the login window, and the fallback job, while it is still installed, puts the previous
-       driver back at that next start; `/Library/NullMoth/bootguard.log`, read over `ssh`, says so.
+       stays black or shows only the pointer while WindowServer keeps dying and every display is on this card, the
+       boot-guard job turns the driver off and restarts once from the login window, and the fallback job, while it
+       is still installed, puts the previous driver back at that next start; `/Library/NullMoth/bootguard.log`, read
+       over `ssh`, says so. With a display on another GPU the boot-guard job leaves that loop alone.
      - `nvagdc-layout` refused: `debug.nvrmfb_agdc` is -6 and `debug.nvrmfb_agdc_layout` 2; the desktop runs without
        AppleGraphicsDeviceControl, and the start counts as good.
 
