@@ -54,7 +54,7 @@ static void clock_interval_to_deadline(unsigned ms,int,std::uint64_t*d){*d=ms;} 
 struct OSObject{int refs=1;void retain(){++refs;}void release(){--refs;}};
 class Base{public:IOReturn getAttributeForConnection(IOIndex,IOSelect,std::uintptr_t*){return 77;}};
 struct NVRMNVDAFramebuffer:OSObject,Base{
-using super=Base; bool fDpyLost=false,fHidden=false,fInternal=false,fConnectFired=false; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
+using super=Base; bool fDpyLost=false,fHidden=false,fInternal=false,fConnectFired=false; volatile int fConnectOwed=0; unsigned fEdidSize=0,fIndex=0; UInt8 fEdid[256]={};
 volatile int fStopping=0; thread_call_t fConnectNotify=reinterpret_cast<void*>(1);
 struct{void(*proc)(void*,void*);void*target;void*ref;}fConnect{}; unsigned scheduled=0;std::uint64_t deadline=0;
 void scheduleCall(thread_call_t,std::uint64_t d){++scheduled;deadline=d;retain();}
@@ -63,6 +63,9 @@ void notifyConnectionChanged(unsigned); static void connectNotifyFire(thread_cal
 };
 class NVRMCallReference{OSObject*p;public:explicit NVRMCallReference(OSObject*v):p(v){}~NVRMCallReference(){p->release();}};
 static int OSAddAtomic(int,volatile int*v){return *v;}
+// gLanding runs once inside the next compare-and-swap: another thread's store that lands exactly there
+static void(*gLanding)()=nullptr;
+static bool OSCompareAndSwap(int o,int n,volatile int*v){if(auto l=gLanding){gLanding=nullptr;l();}if(*v!=o)return false;*v=n;return true;}
 '''
 checks = r'''
 int main(){NVRMNVDAFramebuffer f;std::uintptr_t v=0;f.fEdidSize=128;
@@ -81,7 +84,15 @@ assert(f.getDDCBlock(0,1,99,0,out,&n)==kIOReturnUnsupported);f.notifyConnectionC
 assert(f.scheduled==1&&f.deadline==500&&f.refs==2);unsigned calls=0;
 f.fConnect.proc=[](void*t,void*r){++*static_cast<unsigned*>(t);assert(r==reinterpret_cast<void*>(7));};
 f.fConnect.target=&calls;f.fConnect.ref=reinterpret_cast<void*>(7);NVRMNVDAFramebuffer::connectNotifyFire(&f,nullptr);
-assert(calls==1&&f.fConnectFired&&f.refs==1);puts("PASS: extracted production connection, DDC, scheduling, callback methods");}
+assert(calls==1&&f.fConnectFired&&f.refs==1);
+// no handler yet: the notification is owed, not dropped, and nothing is scheduled until a registration pays it
+NVRMNVDAFramebuffer g;NVRMNVDAFramebuffer::connectNotifyFire(&g,nullptr);assert(g.fConnectOwed==1&&g.scheduled==0&&!g.fConnectFired);
+// a registration that stores its handler between the first read and the flag: paid by a later run, never fired there
+static NVRMNVDAFramebuffer h;static unsigned hc=0;
+gLanding=[]{h.fConnect.proc=[](void*t,void*){++*static_cast<unsigned*>(t);};h.fConnect.target=&hc;};
+NVRMNVDAFramebuffer::connectNotifyFire(&h,nullptr);assert(h.fConnectOwed==0&&h.scheduled==1&&h.deadline==100&&hc==0&&!h.fConnectFired);
+NVRMNVDAFramebuffer::connectNotifyFire(&h,nullptr);assert(hc==1&&h.fConnectFired&&h.fConnectOwed==0);
+puts("PASS: extracted production connection, DDC, scheduling, callback methods");}
 '''
 with tempfile.TemporaryDirectory() as td:
     temp=pathlib.Path(td); cpp=temp/'check.cpp'; cpp.write_text(fixture+'\n'+attrs+'\n'+ddc+'\n'+notify+'\n'+callback+'\n'+checks,encoding='utf-8')
