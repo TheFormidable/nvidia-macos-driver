@@ -1174,10 +1174,12 @@ cmd_fetch() {
   fetch_bare OGKM610 "$og"
   if [ -n "${NM_OGKM610:-}" ]; then verify_given_tree "NVIDIA $NM_PIN_OGKM610_REF tree" "$OGKM610" version.mk "NVIDIA_VERSION = $NM_PIN_OGKM610_REF"
   else export_tree OGKM610 "$og" "$OGKM610"; fi
-  # Mesa: a clone with a work tree (build_nvk.sh exports the pinned commit from it; the plugin reads its include/)
+  # Mesa: a clone with a work tree (build_nvk.sh exports the pinned commit from it; the plugin reads
+  # <root>/build/gpu-src/mesa/include, never NM_MESA_GIT)
   if [ -n "${NM_MESA_GIT:-}" ]; then
     git -C "$MESA" cat-file -e "$NM_PIN_MESA_COMMIT^{commit}" 2>/dev/null || die "NM_MESA_GIT=$MESA has no commit $NM_PIN_MESA_COMMIT"
-    [ "$(git -C "$MESA" rev-parse HEAD)" = "$NM_PIN_MESA_COMMIT" ] || warn "$MESA has $(git -C "$MESA" rev-parse --short HEAD) checked out: the release plugin takes its Vulkan headers from that work tree's include/, which is then not mesa-26.3.0-rc3's"
+    [ "$(git -C "$MESA" rev-parse HEAD)" = "$NM_PIN_MESA_COMMIT" ] || warn "$MESA has $(git -C "$MESA" rev-parse --short HEAD) checked out: NVK is built from commit $NM_PIN_MESA_COMMIT of it, and ./build.sh test gives the host tests that work tree's include/, which is then not mesa-26.3.0-rc3's"
+    [ -f "$R/build/gpu-src/mesa/include/vulkan/vulkan_core.h" ] || warn "the plugin is compiled against $R/build/gpu-src/mesa/include, not against this clone: build it after a ./build.sh fetch without NM_MESA_GIT, or with --flavour dev and NM_VULKAN_INCLUDE=$MESA/include"
     say "  ok       Mesa: $MESA (given)"
   else
     fetch_bare MESA "$GITDIR/mesa.git"
@@ -2246,7 +2248,10 @@ need_sources_for() {
   esac
   case "$n" in
     nvk) [ -f "$OGKM610/version.mk" ] && git -C "$MESA" cat-file -e "$NM_PIN_MESA_COMMIT^{commit}" 2>/dev/null || die "nvk needs Mesa and NVIDIA $NM_PIN_OGKM610_REF: run ./build.sh fetch" ;;
-    plugin) [ -f "${NM_VULKAN_INCLUDE:-$MESA/include}/vulkan/vulkan_core.h" ] || die "the plugin needs Mesa's Vulkan headers: run ./build.sh fetch" ;;
+    plugin)   # the folder build_plugin_release.sh / build_plugin_dev.sh compile against; NM_MESA_GIT does not move it
+      local inc=$R/build/gpu-src/mesa/include
+      [ "$NM_FLAVOUR" != dev ] || inc=${NM_VULKAN_INCLUDE:-$inc}
+      [ -f "$inc/vulkan/vulkan_core.h" ] || die "the plugin is compiled against $inc, which holds no vulkan/vulkan_core.h: run ./build.sh fetch (without NM_MESA_GIT, which the plugin does not read), or build --flavour dev with NM_VULKAN_INCLUDE" ;;
     vulkan) [ -n "${NM_KHRONOS_URL:-}" ] || [ -d "$KHRONOS/Vulkan-Loader" ] || die "the loader needs its sources: run ./build.sh fetch" ;;
     ryzenadj) [ -d "$RYZENSRC/.git" ] || die "ryzenadj needs RyzenAdj: run ./build.sh fetch" ;;
     nvencvt) [ -d "$NVHDR/ogd/.git" ] && [ -s "$NVHDR/webkit-spi/VTVideoDecoderSPI.h" ] || die "libnvencvt needs its headers: run ./build.sh fetch" ;;
@@ -2299,13 +2304,13 @@ cmd_test() {
   [ -n "$py" ] || die "no python3"
   say "== pins"; check_pins
   # The plugin's tests compile against Vulkan's headers, from NM_VULKAN_INCLUDE (a folder that holds vulkan/vulkan.h).
-  # Unset, they get the fetched Mesa's include/, the folder the release plugin is compiled against.
+  # Unset, they get the fetched Mesa's include/ (without NM_MESA_GIT, the folder the release plugin is compiled against).
   if [ -n "${NM_VULKAN_INCLUDE:-}" ]; then
     export NM_VULKAN_INCLUDE
     say "Vulkan headers for the tests: $NM_VULKAN_INCLUDE (NM_VULKAN_INCLUDE)"
   elif [ -f "$MESA/include/vulkan/vulkan.h" ]; then
     export NM_VULKAN_INCLUDE=$MESA/include
-    say "Vulkan headers for the tests: $NM_VULKAN_INCLUDE (the fetched Mesa's, which the release plugin is compiled against)"
+    say "Vulkan headers for the tests: $NM_VULKAN_INCLUDE (the fetched Mesa's)"
   else
     say "Vulkan headers for the tests: none (no fetched Mesa), so the plugin's tests that compile against them are skipped unless ~/Vulkan-Headers/include has them; ./build.sh fetch brings Mesa's"
   fi

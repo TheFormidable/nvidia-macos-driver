@@ -3017,6 +3017,43 @@ def host_sdk_problems(sb, script, sdk):
     return [] if r.stdout.strip() == want else [f"the build host's command saw SDKROOT={r.stdout.strip()!r}, not {want!r} ({r.stderr[-200:]})"]
 
 
+# NM_MESA_GIT names a Mesa clone of the tester's for NVK; the release plugin still compiles against
+# <root>/build/gpu-src/mesa/include, which a fetch with NM_MESA_GIT does not make: the plugin step must stop before it
+# starts, saying which folder it reads, rather than compile against no headers (or /usr/local's)
+def mesagit_problems(name, own_clone, script_edit=None):
+    sb = Sandbox(name)
+    if script_edit:
+        sb.break_script(*script_edit)
+    extra = {}
+    if own_clone:
+        clone = sb.dir / "own-mesa"
+        shutil.rmtree(clone, ignore_errors=True)
+        git("clone", "-q", REMOTES / "gitlab.freedesktop.org/mesa/mesa.git", clone)
+        extra["NM_MESA_GIT"] = str(clone)
+    rc, out = sb.run("fetch", extra=extra)
+    if rc != 0:
+        return [f"fetch exit {rc}: {out[-300:]}"], False
+    sb.clear()
+    rc, out = sb.run("build", "plugin", extra=extra)
+    ran = "plugin" in sb.step_keys() or any("build_plugin_release.sh" in l for l in sb.jlines())
+    want = f"the plugin is compiled against {sb.work}/build/gpu-src/mesa/include"
+    p = []
+    if own_clone and (rc == 0 or ran or want.replace(str(sb.home), "~") not in out and want not in out):
+        p.append(f"exit {rc}, the plugin step {'ran' if ran else 'did not run'}: {out[-300:]}")
+    return p, ran
+
+
+def arm_mesagit():
+    p, _ = mesagit_problems("mesagit", True)
+    check("with NM_MESA_GIT, build plugin stops before its step and names the folder the release plugin reads", not p, p)
+    p, ran = mesagit_problems("mesagit-none", False)
+    check("control: after a fetch without NM_MESA_GIT the plugin step is reached", ran and not p, p)
+    # the old preflight: the headers looked for where NM_MESA_GIT (or NM_VULKAN_INCLUDE) points
+    negative("a preflight that looks for the plugin's headers in the NM_MESA_GIT clone",
+             mesagit_problems("mesagit-old", True, ('      [ -f "$inc/vulkan/vulkan_core.h" ] || die',
+                                                   '      [ -f "${NM_VULKAN_INCLUDE:-$MESA/include}/vulkan/vulkan_core.h" ] || die'))[0])
+
+
 def arm_stepgit():
     sb = Sandbox("stepgit")
     rc, out = sb.run("fetch")
@@ -4118,7 +4155,7 @@ def arm_test_cmd(mac):
         negative("test that ignores a failing host test", problems(mac))
 
     # the plugin's tests get Vulkan's headers: NM_VULKAN_INCLUDE as the tester set it, else the fetched Mesa's include/
-    # (the folder the release plugin is compiled against), else none, and one line says which
+    # (without NM_MESA_GIT, the folder the release plugin is compiled against), else none, and one line says which
     mesa_inc = str(mac.work / "build/gpu-src/mesa/include")
     shown = "~/" + os.path.relpath(mesa_inc, mac.home)   # build.sh writes a path in the home folder with ~
 
@@ -4727,6 +4764,8 @@ def main():
                     timed("basepkg", arm_basepkg)
                 if want("stepgit"):
                     timed("stepgit", arm_stepgit)
+                if want("mesagit"):
+                    timed("mesagit", arm_mesagit)
                 if want("source"):
                     timed("source", arm_source)
                     timed("source_some", arm_source_some)
