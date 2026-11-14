@@ -11,6 +11,9 @@ H=${NULLMOTH_BUILD_HOST:?set NULLMOTH_BUILD_HOST to the build Mac ssh host}
 BASE=${NULLMOTH_BUILD_ROOT:?set NULLMOTH_BUILD_ROOT to the build folder on that Mac}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 R=$BASE/build/plugin-release
+# The build folder goes unquoted into the commands sent to the build Mac's shell: only letters, digits and % + - . / @ _
+# (build.sh's nm_unsafe_path, the same pattern), so that no & ; | ( * [ { or quote in one makes a command of its own.
+case "$BASE" in *[]\[\ \!\"\#\$\&\'\(\)\*\,\:\;\<\=\>\?\\\^\`\{\|\}\~[:space:][:cntrl:]]*) echo "STOP: NULLMOTH_BUILD_ROOT '$BASE' may hold only letters, digits and % + - . / @ _: it goes into a shell command on the build Mac"; exit 2 ;; esac
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 git -C "$HERE" archive "$REV" plugin | tar x -C "$TMP"

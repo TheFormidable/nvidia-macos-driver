@@ -68,8 +68,11 @@ comandos y opciones y la solución de problemas.
   las herramientas de Apple (un Xcode borrado o renombrado después de seleccionarlo): todas fallarían.
 - Un clon git de este repositorio (no un archivo descargado): el plugin, el traductor y la biblioteca de video se
   compilan desde revisiones de git. La ruta del clon, la del directorio de trabajo y la de tu
-  carpeta personal no pueden contener espacios, y la del directorio de trabajo tampoco `:` `;` `'` `"` `\` `$` ni una
-  comilla invertida.
+  carpeta personal no pueden contener espacios, y la del directorio de trabajo solo puede llevar letras (también
+  acentuadas), cifras y `%` `+` `-` `.` `/` `@` `_`: los scripts la ponen en órdenes de shell, en el `PATH` y en las
+  rutas de búsqueda de las herramientas, que leen cualquier otro signo como comillas, separador o patrón. Lo mismo vale
+  para `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`, `NM_OGKM620` y `NM_OGKM620_PRISTINE` si los
+  fijas.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
 - Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor: de dónde salen lo dice
   `NM_TOOLS_FROM`. En un
@@ -258,7 +261,7 @@ archivo y el archivo sobre el valor por defecto. El archivo se lee, nunca se eje
 <!-- reference: options -->
 | Opción | Variable | Por defecto | Significado |
 |---|---|---|---|
-| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Directorio de trabajo; fuera del clon, sin espacios, sin `: ; ' " \ $` ni comilla invertida |
+| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Directorio de trabajo; fuera del clon; solo letras, cifras y `% + - . / @ _` |
 | `-j N`, `--jobs N` | `NM_JOBS` | número de núcleos | Trabajos de compilación en paralelo |
 | `-y`, `--yes` | `NM_ASSUME_YES` | `0` | Responder sí a las preguntas de `build.sh` (nunca al instalador de Homebrew) |
 | `--no-install` | `NM_NO_INSTALL` | `0` | No instalar nada; decir qué falta |
@@ -408,7 +411,7 @@ recompila ese paso y los que dependen de él. Una sola ejecución a la vez por d
 | Mensaje o síntoma | Causa | Qué hacer |
 |---|---|---|
 | `STOP: the working directory contains a space` (o la ruta del clon, o la carpeta personal) | Los scripts de publicación y build_nvk.sh separan por espacios | Usa `--workdir` con una ruta sin espacios; mueve el clon |
-| `STOP: the working directory contains one of : ; ' " \ $` (o una comilla invertida) | El `PATH` y las rutas de búsqueda de las herramientas se separan por los dos puntos (las de CMake por el punto y coma), y pkg-config lee las comillas y barras invertidas de sus rutas como comillas | Usa `--workdir` con una ruta sin ellos |
+| `STOP: the working directory may hold only letters, digits and % + - . / @ _` (o `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`, `NM_OGKM620`, `NM_OGKM620_PRISTINE`) | Los scripts de publicación ponen la carpeta sin comillas en las órdenes que pasan al shell del Mac de compilación, donde `&` `;` `\|` `(` terminan una orden y `*` `?` `[` `{` son patrones; el `PATH` y las rutas de búsqueda se separan por los dos puntos (las de CMake por el punto y coma), pkg-config lee comillas y barras invertidas como comillas, y la lista `-Wl,` de build_nvk.sh se separa por las comas | Usa `--workdir` (o el ajuste) con una ruta solo de esos caracteres |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 necesita macOS 15.6 o posterior | Actualiza macOS o compila en otro Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` apunta a las herramientas de línea de comandos | Instala Xcode 26 y ejecuta `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
 | `STOP: the developer folder xcode-select -p names, ..., does not exist` (o `holds none of Apple's tools`, o `DEVELOPER_DIR names`) | El Xcode seleccionado se borró o se renombró, `DEVELOPER_DIR` indica una carpeta equivocada, o una actualización de macOS dejó incompletas las herramientas de línea de comandos | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` con el Xcode que tengas, o corrige o quita `DEVELOPER_DIR` |

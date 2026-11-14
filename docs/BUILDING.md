@@ -63,7 +63,10 @@ En español: [BUILDING.es.md](BUILDING.es.md).
   of Apple's tools (an Xcode removed or renamed after it was selected): Apple's tools would then all fail.
 - A git clone of this repository (not a downloaded archive): the plugin, translator and video library are built from
   git revisions. The path of the clone, of the working directory and of your home folder must not contain a space,
-  and the working directory's none of `:` `;` `'` `"` `\` `$` or a backquote either.
+  and the working directory may hold only letters (accented ones too), digits and `%` `+` `-` `.` `/` `@` `_`: the
+  build scripts put it into shell commands, `PATH` and the search paths of the build tools, which read every other
+  sign as quoting, a separator or a pattern. The same holds for `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`,
+  `NULLMOTH_CARGO_HOME`, `NM_OGKM620` and `NM_OGKM620_PRISTINE` when you set them.
 - The network, for `fetch`, for `deps`, and for every NVK build (see [What is not automated](#what-is-not-automated-and-why)).
 - The build tools of NVK, the Vulkan loader and the translator (see [Tools each component needs](#tools-each-component-needs)):
   every other component builds with Xcode and what macOS has. Where they come from is what `NM_TOOLS_FROM` says:
@@ -221,7 +224,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 <!-- reference: options -->
 | Option | Variable | Default | Meaning |
 |---|---|---|---|
-| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Where everything `build.sh` makes, downloads and installs goes. Outside the checkout, no spaces, none of `: ; ' " \ $` and no backquote |
+| `--workdir DIR` | `NM_WORK` | `~/nullmoth-build` | Where everything `build.sh` makes, downloads and installs goes. Outside the checkout; only letters, digits and `% + - . / @ _` |
 | `-j N`, `--jobs N` | `NM_JOBS` | the number of cores | Parallel compile jobs (given to the scripts as `JOBS` and `NVK_JOBS` unless you set those) |
 | `-y`, `--yes` | `NM_ASSUME_YES` | `0` | Answer yes to `build.sh`'s questions (installing formulas and Rust, `clean all`). Never to Homebrew's own installer |
 | `--no-install` | `NM_NO_INSTALL` | `0` | Install nothing; say what is missing. With `all`, stop after doctor when something is missing |
@@ -524,7 +527,7 @@ restart to you (`/Library/NullMoth/lastgood.log` says so); the next restart brin
 | Message or symptom | Cause | What to do |
 |---|---|---|
 | `STOP: the working directory contains a space` (or the checkout path, or the home folder) | The release scripts' remote commands and build_nvk.sh's compiler flags split on spaces | Use `--workdir` with a path without spaces; move the checkout |
-| `STOP: the working directory contains one of : ; ' " \ $` (or a backquote) | `PATH` and the build tools' search paths split on a colon (CMake's on a semicolon), and pkg-config reads quotes and backslashes in its paths as quoting | Use `--workdir` with a path without them |
+| `STOP: the working directory may hold only letters, digits and % + - . / @ _` (or `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`, `NM_OGKM620`, `NM_OGKM620_PRISTINE`) | The release scripts put the folder unquoted into the commands they hand to the build Mac's shell, where `&` `;` `\|` `(` end a command and `*` `?` `[` `{` are patterns; `PATH` and the build tools' search paths split on a colon (CMake's on a semicolon), pkg-config reads quotes and backslashes as quoting, and build_nvk.sh's `-Wl,` list splits on a comma | Use `--workdir` (or the setting) with a path of those characters only |
 | `STOP: this Mac runs macOS 14...` | Xcode 26 needs macOS 15.6 or later | Update macOS, or build on another Mac |
 | doctor: `MISSING full Xcode 26.0 or later: only the command line tools are selected` | `xcode-select` points at the command line tools | Install Xcode 26, then `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` |
 | `STOP: the developer folder xcode-select -p names, ..., does not exist` (or `holds none of Apple's tools`, or `DEVELOPER_DIR names`) | The selected Xcode was removed or renamed, `DEVELOPER_DIR` names a wrong folder, or a macOS update left the command line tools incomplete | `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer` with the Xcode you have, or correct or unset `DEVELOPER_DIR` |

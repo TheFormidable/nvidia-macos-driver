@@ -339,6 +339,15 @@ derive_paths() {
 }
 
 # Refusals that hold for every command that builds or writes (doctor reports them instead of stopping).
+# nm_unsafe_path <path>: true when the path holds a character that a shell, make or a linker reads as more than itself.
+# The release scripts put the build folder into the commands they send to the build Mac's /bin/bash -c unquoted, the
+# RM's and NVKMS's compile lines run its paths as shell commands, PATH and the tools' search paths split on : (CMake's on
+# ;), pkg-config reads quotes and \ as quoting, and build_nvk.sh's -Wl,-oso_prefix,<folder> splits on a comma. So the
+# list is complete rather than the characters seen to break something: every ASCII character but letters, digits and
+# % + - . / @ _ is refused, and the control characters. Letters of other alphabets (años, über) are taken. build/
+# build_plugin_release.sh, build_xlate_release.sh and build_nvencvt.sh carry the same pattern, for a run by hand.
+nm_unsafe_path() { case "$1" in *[]\[\ \!\"\#\$\&\'\(\)\*\,\:\;\<\=\>\?\\\^\`\{\|\}\~[:space:][:cntrl:]]*) return 0 ;; esac; return 1; }
+NM_PATH_CHARS="letters, digits and % + - . / @ _"
 PATH_PROBLEMS=""
 path_problem() { PATH_PROBLEMS="$PATH_PROBLEMS$1
 "; }
@@ -353,9 +362,8 @@ check_paths() {
   case "$NM_WORK" in /*) ;; '') path_problem "the working directory may not be /" ;; *) path_problem "the working directory must be an absolute path (got $NM_WORK)" ;; esac
   case "$NM_WORK/" in */./*|*/../*) path_problem "the working directory may not contain . or .. parts (got $NM_WORK)" ;; esac
   case "$NM_WORK" in *[$ws]*) path_problem "the working directory contains a space ($NM_WORK): the release scripts' commands split on it" ;; esac
-  # tools/bin is the first folder of every step's PATH and the toolchain's pkg-config searches its own lib/pkgconfig:
-  # a colon splits both, a semicolon CMake's lists, and pkg-config reads quotes and backslashes in its paths as quoting
-  case "$NM_WORK" in *[:\;\'\"\\\$\`]*) path_problem "the working directory contains one of : ; ' \" \\ \$ \` ($NM_WORK): PATH and the search paths of the build tools split on them or read them as quoting" ;; esac
+  # every character but those of NM_PATH_CHARS (nm_unsafe_path says why); a blank or line break has its line above
+  case "$NM_WORK" in *[$ws]*|*"$nl"*) ;; *) if nm_unsafe_path "$NM_WORK"; then path_problem "the working directory may hold only $NM_PATH_CHARS ($NM_WORK): the build scripts put it into shell commands, PATH and the search paths of the build tools, which read the others as quoting, a separator or a pattern"; fi ;; esac
   case "$NM_WORK/" in "$HERE/"*) path_problem "the working directory $NM_WORK is inside the checkout; choose one outside it (default ~/nullmoth-build)" ;; esac
   [ -z "$NM_WORK" ] || case "$HERE/" in "$NM_WORK/"*) path_problem "the checkout is inside the working directory $NM_WORK; choose another working directory" ;; esac
   local rh; rh=$(absolute_path "${HOME:-/}")
@@ -363,6 +371,14 @@ check_paths() {
   if [ -n "${NULLMOTH_BUILD_ROOT:-}" ]; then
     case "$NULLMOTH_BUILD_ROOT" in *[$ws]*) path_problem "NULLMOTH_BUILD_ROOT contains a space" ;; esac
   fi
+  # the folders the release scripts put into the commands they send to the build Mac, when you set them (their defaults
+  # are inside the working directory or NULLMOTH_BUILD_ROOT)
+  local v p
+  for v in NULLMOTH_BUILD_ROOT NULLMOTH_RUST_BIN NULLMOTH_CARGO_HOME NM_OGKM620 NM_OGKM620_PRISTINE; do
+    eval "p=\${$v:-}"; [ -n "$p" ] || continue
+    case "$v=$p" in NULLMOTH_BUILD_ROOT=*[$ws]*|NULLMOTH_BUILD_ROOT=*"$nl"*) continue ;; esac   # those have their line above
+    if nm_unsafe_path "$p"; then path_problem "$v may hold only $NM_PATH_CHARS ($p): the release scripts put it into a shell command"; fi
+  done
   git -C "$HERE" rev-parse --is-inside-work-tree >/dev/null 2>&1 || path_problem "$HERE is not a git checkout (the release scripts build from git revisions; clone the repository instead of downloading an archive)"
   return 0
 }
