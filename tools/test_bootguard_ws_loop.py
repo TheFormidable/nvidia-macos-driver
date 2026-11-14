@@ -242,10 +242,18 @@ p, log, calls = run(job, pids=[777], cleared="1",
                              + CLAIMED)
 arm("the other layout lines are not NVRM's refusal: the desktop that stayed up counts as good", "counts as good" in log
     and "nullmoth-nv-ok=1" in calls, log + calls)
+PCI = "+-o GFX0@0  <class IOPCIDevice, id 0x1000002a0, registered, matched, active, busy 0 (120 ms), retain 18>"
+ON_CARD = "+-o display0  <class IODisplayConnect, id 0x1000004f8, registered, matched, active, busy 0 (1 ms), retain 6>"
+ELSEWHERE = ON_CARD.replace("0x1000004f8", "0x1000004e0")
 if written and job.count(LOOK) == 1:
-    # the late decline: NVRM had claimed the card and its framebuffer then refused
-    p, log, calls = run(job.replace(LOOK, "      if false; then\n"), pids=[777], cleared="1",
-                        registry=f'    | |   "nvrm-layout" = "{written[-1]}"\n' + CLAIMED)
+    # the late decline: NVRM had claimed the card and its framebuffer then refused, so nothing clears the guard in that
+    # start. With a display on another GPU the look is all that keeps the job from calling it good.
+    late = dict(pids=[777], registry=f'    | |   "nvrm-layout" = "{written[-1]}"\n' + CLAIMED, card=PCI,
+                displays=ELSEWHERE)
+    p, log, calls = run(job, **late)
+    arm("a late decline with a display on another GPU is not a good start", "does not count as good" in log
+        and "nullmoth-nv-ok=1" not in calls and "nullmoth-nv-starts" not in calls, log + calls)
+    p, log, calls = run(job.replace(LOOK, "      if false; then\n"), **late)
     arm("control: without the look the job calls the refused start good (what ends the install's trial)",
         "counts as good" in log and "nullmoth-nv-ok=1" in calls, log + calls)
 else:
@@ -257,9 +265,6 @@ else:
 # the start keeps its count.
 NVOK = "nullmoth-nv-ok=1"
 DEL_STARTS = "nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts"
-PCI = "+-o GFX0@0  <class IOPCIDevice, id 0x1000002a0, registered, matched, active, busy 0 (120 ms), retain 18>"
-ON_CARD = "+-o display0  <class IODisplayConnect, id 0x1000004f8, registered, matched, active, busy 0 (1 ms), retain 6>"
-ELSEWHERE = ON_CARD.replace("0x1000004f8", "0x1000004e0")
 CASES = {
     "a": dict(registry=CLAIMED, cleared="1", card=PCI + "\n" + ON_CARD, displays=ON_CARD, starts="%01"),
     "b": dict(registry="", starts="%01"),
