@@ -325,7 +325,7 @@ index 7322b4c..b466cb7 100644
  
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
 new file mode 100644
-index 0000000..72a93c3
+index 0000000..86794ed
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_evwait.h
 @@ -0,0 +1,353 @@
@@ -551,7 +551,7 @@ index 0000000..72a93c3
 +    t->pause = p >= NVRM_EVW_PAUSE_MAX / 2u ? NVRM_EVW_PAUSE_MAX : 2u * p;
 +    t->trial = 0; t->trial_misses = 0; t->quiet_waits = 0; t->misses = 0;
 +}
-+/* An answer proved that events arrive: this thread's quiet state goes (the caller clears a QUIET flag). */
++/* An answer proved that events arrive: this thread's quiet state goes (a QUIET flag only on an answer about now). */
 +static inline void nvrm_evw_events_back(struct nvrm_evw_thread *t)
 +{
 +    t->trial = 0; t->pause = 0; t->quiet_waits = 0; t->trial_misses = 0; t->misses = 0;

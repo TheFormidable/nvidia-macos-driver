@@ -220,7 +220,7 @@ static inline void nvrm_evw_trial_failed(struct nvrm_evw_thread *t)
     t->pause = p >= NVRM_EVW_PAUSE_MAX / 2u ? NVRM_EVW_PAUSE_MAX : 2u * p;
     t->trial = 0; t->trial_misses = 0; t->quiet_waits = 0; t->misses = 0;
 }
-/* An answer proved that events arrive: this thread's quiet state goes (the caller clears a QUIET flag). */
+/* An answer proved that events arrive: this thread's quiet state goes (a QUIET flag only on an answer about now). */
 static inline void nvrm_evw_events_back(struct nvrm_evw_thread *t)
 {
     t->trial = 0; t->pause = 0; t->quiet_waits = 0; t->trial_misses = 0; t->misses = 0;
