@@ -511,9 +511,8 @@ Run the commands as shown (`./install.sh`, not `bash install.sh`: install.sh rec
 To go back, install the release you used as the base in the same way, from its own unpacked `pkgroot`: it replaces
 every file the tester build changed, and the next restart loads the release. To remove the driver completely:
 `sudo ./uninstall.sh && sudo shutdown -r now` from any package (it refuses while SIP is enabled; README.md,
-"Uninstall"). install.sh prints `Undo: sudo ./uninstall.sh <backup folder>`, but uninstall.sh does not restore that
-backup: it removes the driver. With the 1401 app, "1401: Remove NVIDIA driver" in the OpenCore picker puts the Mac
-back as it was before the app's install.
+"Uninstall"). uninstall.sh does not restore the backup folder install.sh names: it removes the driver. With the 1401
+app, "1401: Remove NVIDIA driver" in the OpenCore picker puts the Mac back as it was before the app's install.
 
 Installing a tester build over a release leaves the same fallback job a release install leaves: if this build's
 framebuffer refuses the running macOS's Apple classes so that the driver shows nothing on the card, the job puts the
