@@ -56,6 +56,20 @@ old = m.private_source(SOURCE, ROOT, BIN, prefixes=["/Library/", "/System/", "/U
 arm("control: without /var/db/ the real kext approval database stays",
     any("/var/db/SystemPolicyConfiguration/KextPolicy" in b for b in outside(old)), outside(old))
 
+# a fixture folder whose own path holds a prefix (a TMPDIR under /Volumes/x/Users/Shared/): every system path still
+# starts with that folder; moved a prefix at a time, the later prefixes moved the earlier ones' paths out of it again
+def unmoved(text, root):
+    inside = [(a.start(), a.end()) for a in re.finditer(re.escape(root), text)]
+    return [text[max(0, p.start() - 60):p.end()] for p in re.finditer(r"/Library/|/System/|/Users/Shared/|/var/db/", text)
+            if not any(a <= p.start() < b for a, b in inside) and not text[:p.start()].endswith((root, "$HERE"))]
+for r in ("/v/Users/Shared/t", "/v/System/t", "/v/var/db/t"):
+    u = unmoved(m.private_source(SOURCE, pathlib.Path(r), BIN), r)
+    arm(f"a fixture folder that holds {r[2:-1]}: every system path lies under it", not u, u[:2])
+    one_at_a_time = SOURCE
+    for prefix in m.SYSTEM_PREFIXES:
+        one_at_a_time = one_at_a_time.replace(prefix, r + prefix)
+    arm(f"  control: moved a prefix at a time, a path leaves {r}", bool(unmoved(one_at_a_time, r)))
+
 for name, changed in (("one more folder", SOURCE.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH",
                                                          "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin; export PATH")),
                       ("written as two lines", SOURCE.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH",
