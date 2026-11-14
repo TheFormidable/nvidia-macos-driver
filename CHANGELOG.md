@@ -108,12 +108,14 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   command buffer and every texture that writes it. Each mark is a call into the accelerator that takes its lock, and a
   video playing in a window made many of them per frame.
 - A monitor that sends a placeholder 1920x1080 identification while it is still waking (after some warm restarts) and
-  its real one a few seconds later gets its own resolutions, up to a 3840x2160 desktop, on a card whose BAR1 is 512 MB
-  or more: there the framebuffer reserves the memory a display scans out of with a floor of a 3840x2160 desktop at
-  start, and a mode list that arrives later is measured against the memory really allocated. Before, the reservation
-  followed the first identification and the monitor stayed a 1920x1080 television until a cold start. Below 512 MB of
-  BAR1 the floor is not applied, because there it would take a large part of the accelerator's surface budget; without
-  `nvfbhidpi` each lit head on a larger BAR1 reserves about 24 MB more video memory for a 1920x1080 monitor.
+  its real one a few seconds later gets its own resolutions on a card whose BAR1 is 512 MB or more, as long as its
+  largest desktop needs no more memory than a 3840x2160 one: there the framebuffer reserves the memory a display scans
+  out of with a floor of a 3840x2160 desktop at start, and a mode list that arrives later is measured against the
+  memory really allocated (a larger one keeps the first identification's limits until a cold start). Before, the
+  reservation followed the first identification and the monitor stayed a 1920x1080 television until a cold start.
+  Below 512 MB of BAR1 the floor is not applied, because there it would take a large part of the accelerator's surface
+  budget; without `nvfbhidpi` each lit head on a larger BAR1 reserves about 24 MB more video memory for a 1920x1080
+  monitor.
 - Refresh rates derived from a panel mode of 240 Hz or more (its half and its quarter) are offered only when NVKMS
   accepts their timing; a refused one is logged and left out. Before, a panel that takes only its own timings showed
   the rate as selected and stayed at the previous one.

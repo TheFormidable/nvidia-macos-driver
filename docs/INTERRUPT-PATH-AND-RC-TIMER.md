@@ -253,7 +253,7 @@ start a card again before a restart.
 
 A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
 and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
-for, and none of them unloads the running kext. Not yet observed on hardware.
+for, and none of them unloads the running kext. Not yet reported from hardware.
 
 ## The wait queue
 
