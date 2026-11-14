@@ -3,8 +3,8 @@
 
 After NVRM_EVW_MISS_LIMIT missed wakes a process polls, but each thread tries the event again after a pause that it
 counts in its own waits, and the first answer that proves events arrive puts the process back on them. Only a kernel
-wait call that fails keeps the process polling for good. tools/test_evwait_loop.c holds five invariants of that in arms
-named "invariant 1:" to "invariant 5:":
+wait call that fails keeps the process polling for good. tools/test_evwait_loop.c holds six invariants of that in arms
+named "invariant 1:" to "invariant 6:":
 
   1  a round is one polling step or one sleep of at most NVRM_EVW_MAX_SLEEP_US, and a wait ends only with its work
   2  events that stop and come back (the threaded stand-in kernel): sleeping on events again within the pause and trial
@@ -13,6 +13,7 @@ named "invariant 1:" to "invariant 5:":
   4  a failed wait call: polling for good, never a trial
   5  two threads: one brings the events back; the other, which tripped the rule, sleeps again and one missed wake does
      not trip it
+  6  a count remembered from before the quiet time that moved does not end it: only a trial's answer or a wake does
 
 This test builds that program against the header and requires every arm to pass; then, for each invariant, against a
 copy of the header with the rule that keeps it taken out, and requires that invariant's arm to fail. A control whose
@@ -56,6 +57,8 @@ CONTROLS = [
     ("invariant 5", "the run of missed wakes is not restarted when a thread trips the rule or polls while QUIET",
      [("            t->misses = 0;\n            int was = 0;\n", "            int was = 0;\n"),
       ("    t->misses = 0;   /* a polling thread misses nothing", "    /* a polling thread misses nothing")]),
+    ("invariant 6", "a MOVED answer outside a trial clears QUIET (a count remembered from before the quiet time)",
+     [("    const int now = proof && (t->trial || why == NVRM_EVW_R_WOKEN);\n", "    const int now = proof;\n")]),
 ]
 
 
@@ -98,7 +101,7 @@ with tempfile.TemporaryDirectory() as d:
     r, out = build_and_run(hdr, d, "good")
     arm("tools/test_evwait_loop.c builds against the header and every arm passes", r is not None and r.returncode == 0
         and "\nall passed" in out, out)
-    for n in range(1, 6):
+    for n in range(1, 7):
         arm(f"the program has an arm for invariant {n}, and it passes", f'T("invariant {n}:' in src
             and f"ok   invariant {n}:" in out,
             " | ".join(l for l in out.splitlines() if f"invariant {n}:" in l or l.startswith("     ")))
