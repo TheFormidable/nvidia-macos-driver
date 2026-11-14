@@ -997,7 +997,7 @@ SYSCTL_TIER = {
 DIAG_WORD = re.compile(r"(DEBUG|DUMP|TRACE|_LOG|LOG_|STATS|PROBE|VERBOSE|PRINT|_HUD|TIMING|REPORT|DIAG|WATCH|VALIDATE|ASSERT|_DBG|SELFTEST)")
 FILE_TIER = {"/Library/GPUBundles/nvmtl/nvrm610.conf": ("install", "the settings file the installer writes; the user block is kept on update"),
              "/Library/GPUBundles/nvmtl-allow.txt": ("install", "process names the plugin loads into, written by the installer"),
-             "/Library/GPUBundles/nvmtl-gpu-policy.txt": ("setting", "per-application card choice on a machine with two NVIDIA cards"),
+             "/Library/GPUBundles/nvmtl-gpu-policy.txt": ("setting", "per-application choice between the NVIDIA GPU and the integrated GPU on a hybrid laptop"),
              "/Library/NullMoth/nvfb-small": ("recovery", "the same as boot-arg nvfbsmall=1 without a restart into recovery"),
              "/Library/NullMoth/gamemode-active": ("internal", "written by the game-priority helper while a game runs")}
 BUILD_DEV = {"NVK_EXTRA_PATCHES": "extra patch files from nvk/ applied after the chain when NVK is built"}

@@ -968,7 +968,7 @@ sysctl	debug.nvrmfb_vram_releases	diag	read-only	2.9	-	vramRelease calls
 sysctl	debug.nvrmfb_vramtest	diag	writable by root	2.9	-	grant N x 8 MB of VRAM through vramGrant (0 = release all)
 sysctl	debug.nvrmfb_vramtest_mode	diag	writable by root	2.9	-	1 = release without the kernel unmap
 file	/Library/GPUBundles/nvmtl-allow.txt	install	absent	2.9	-	process names the plugin loads into, written by the installer
-file	/Library/GPUBundles/nvmtl-gpu-policy.txt	setting	absent	2.9	-	per-application card choice on a machine with two NVIDIA cards
+file	/Library/GPUBundles/nvmtl-gpu-policy.txt	setting	absent	2.9	-	per-application choice between the NVIDIA GPU and the integrated GPU on a hybrid laptop
 file	/Library/GPUBundles/nvmtl-gpupass-probe	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
 file	/Library/GPUBundles/nvmtl/no-failed-air	diag	absent	2.9	-	unreviewed: a flag or log file; the release plugin refuses /tmp paths
 file	/Library/GPUBundles/nvmtl/nvrm610.conf	install	absent	2.9	-	the settings file the installer writes; the user block is kept on update

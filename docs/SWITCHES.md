@@ -1033,7 +1033,7 @@ Each of these does nothing unless it is set.
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
 | `/Library/GPUBundles/nvmtl-allow.txt` | install | absent | 2.9 | - | process names the plugin loads into, written by the installer | plugin/NVMTLDevice.m |
-| `/Library/GPUBundles/nvmtl-gpu-policy.txt` | setting | absent | 2.9 | - | per-application card choice on a machine with two NVIDIA cards | plugin/NVMTLDevice.m |
+| `/Library/GPUBundles/nvmtl-gpu-policy.txt` | setting | absent | 2.9 | - | per-application choice between the NVIDIA GPU and the integrated GPU on a hybrid laptop | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl-gpupass-probe` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl/no-failed-air` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLLibraryLoad.m |
 | `/Library/GPUBundles/nvmtl/nvrm610.conf` | install | absent | 2.9 | - | the settings file the installer writes; the user block is kept on update | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m |
