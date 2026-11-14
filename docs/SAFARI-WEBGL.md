@@ -14,11 +14,12 @@ Before that, the process tried the operating-system cryptex folders, which do no
 
 `package/safari_gpu_copy.sh` places a copy of the driver bundle in the second folder. That folder is on the Preboot
 volume, which is not part of the sealed system volume; the script never writes under `/System/Library` and refuses any
-destination that does not resolve under `/System/Volumes/Preboot`. It is off by default:
+destination that does not resolve under `/System/Volumes/Preboot`. It is off by default. The first command installs
+the driver with the copy, the second adds the copy later, and the third takes it away (uninstall.sh does this too):
 
-    sudo env NULLMOTH_SAFARI_GPU_COPY=1 ./install.sh        # install with the copy
-    sudo ./safari_gpu_copy.sh install                        # or add it later
-    sudo ./safari_gpu_copy.sh remove                         # take it away (uninstall.sh does this too)
+    sudo env NULLMOTH_SAFARI_GPU_COPY=1 ./install.sh
+    sudo ./safari_gpu_copy.sh install
+    sudo ./safari_gpu_copy.sh remove
 
 On a Mac where System Integrity Protection refuses the write, nothing is changed.
 
