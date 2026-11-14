@@ -175,6 +175,30 @@ class InstallTwice(m.Install):
         self.assertIsNone(self.job())
         self.assertTrue((self.root / 'Library/NullMoth/elsewhere/NVRM.kext').is_dir())
 
+    def test_last_lines_name_what_was_installed_before(self):
+        # uninstall.sh restores nothing: the installer's last words say where the driver from before is kept
+        first = self.install()
+        self.assertNotIn('Undo:', first.stdout)
+        self.assertTrue(first.stdout.rstrip().endswith(
+            'What was installed before is kept in ' + first.bk + '. To go back to it, install its own package again;'
+            ' sudo ./uninstall.sh\nremoves the driver.'), first.stdout[-400:])
+        second = self.install()
+        self.assertTrue(second.stdout.rstrip().endswith(
+            'What was installed before the trial is kept in ' + first.bk + " (this run's backup " + second.bk +
+            ' holds the driver on trial). To go back\nto it, install its own package again; sudo ./uninstall.sh removes'
+            ' the driver.'), second.stdout[-400:])
+
+    def test_last_line_of_a_first_install(self):
+        for k in m.KEXTS:
+            shutil.rmtree(self.root / f'Library/Extensions/{k}.kext')
+        first = self.install()
+        self.assertTrue(first.stdout.rstrip().endswith(
+            '\nNothing was installed before; sudo ./uninstall.sh removes the driver.'), first.stdout[-400:])
+        second = self.install()
+        self.assertTrue(second.stdout.rstrip().endswith(
+            '\nNo driver from before the trial is kept (see step 6b); sudo ./uninstall.sh removes the driver.'),
+            second.stdout[-400:])
+
     def test_uninstall_removes_the_record(self):
         self.assertIn(' /Library/NullMoth/trial-backup ', (R / 'package/uninstall.sh').read_text())
 
