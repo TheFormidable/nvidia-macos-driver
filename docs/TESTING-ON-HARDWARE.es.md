@@ -144,11 +144,11 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    rechazo que puede nombrar); envía ese archivo con `sw_vers`. Una pantalla negra con solo el puntero, o una ventana
    de inicio de sesión que vuelve una y otra vez, es WindowServer cayéndose: `cat /Library/NullMoth/bootguard.log`
    por `ssh` lo dice (`WindowServer keeps dying ...`). El driver queda entonces apagado para el arranque siguiente, y
-   la tarea del instalador, mientras siga ahí, devuelve 2.9 en ese arranque; el Mac solo se reinicia solo desde la
-   ventana de inicio de sesión y solo tras la primera de esas caídas en serie, así que con una sesión abierta ejecuta
-   `sudo shutdown -r now`. El mismo registro dice cómo se contó cada arranque que llegó a un escritorio:
+   la tarea del instalador, mientras siga ahí, devuelve 2.9 en ese arranque; el Mac se reinicia solo únicamente desde
+   la ventana de inicio de sesión y únicamente tras la primera de esas caídas en serie, así que con una sesión abierta
+   ejecuta `sudo shutdown -r now`. El mismo registro dice cómo se contó cada arranque que llegó a un escritorio:
    `... this start counts as good` termina la prueba de la instalación; `... with no NVIDIA driver running; the
-   start count is cleared and the install's trial goes on` quiere decir que el driver no funcionó en ese arranque;
+   start count is cleared and the install's trial goes on` quiere decir que el driver no se ejecutó en ese arranque;
    `... the driver shows no picture and no other GPU has a display; this start keeps its count` quiere decir que NVRM
    arrancó la tarjeta y que 45 segundos después de aparecer WindowServer no había nada encendido (dos arranques así
    seguidos apagan el driver).
