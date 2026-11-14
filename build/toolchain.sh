@@ -354,7 +354,7 @@ check_cmake() {
 # OPENSSLDIR is $P/ssl: that is where this OpenSSL, and so this Python, looks for cert.pem by default.
 # cert.pem is the macOS system roots (read from the system keychain with "security", which only reads).
 recipe_openssl() {
-  local target=()
+  local target=() n
   if is_darwin; then
     case "$(uname -m)" in
       x86_64) target=(darwin64-x86_64-cc) ;; arm64) target=(darwin64-arm64-cc) ;;
@@ -379,7 +379,7 @@ recipe_openssl() {
       if [ -f "$f" ]; then x cp "$f" "$P/ssl/cert.pem"; break; fi
     done
   fi
-  logline "cert.pem: $(grep -c 'BEGIN CERTIFICATE' "$P/ssl/cert.pem" 2>/dev/null || echo 0) certificates"
+  n=$(grep -c 'BEGIN CERTIFICATE' "$P/ssl/cert.pem" 2>/dev/null || true); logline "cert.pem: ${n:-0} certificates"
 }
 check_openssl() {
   need_file build-deps/lib/libssl.a; need_file build-deps/lib/libcrypto.a; need_file build-deps/include/openssl/ssl.h

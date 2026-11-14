@@ -44,6 +44,7 @@ or the arm's own check given a broken result):
   linux              on Linux no xcrun, security or otool runs and OpenSSL gets no darwin target; on Apple silicon
                      OpenSSL gets the arm64 target
   bash32             nothing in the script that /bin/bash 3.2 or the BSD tools of macOS lack
+  certcount          a cert.pem without a certificate is logged as "cert.pem: 0 certificates", on one line
   checkfail          an installed glslangValidator or llvm-config that fails: check still ends with its list of
                      FAIL lines and "STOP: N of M tools failed their checks"
 
@@ -726,6 +727,22 @@ def main():
             (sb.prefix / "bin/spirv-val").unlink()
             rc, out, err = sb.run(["check", "spirv-tools"])
             check("check fails and names a file removed since", rc == 1 and "spirv-val" in out, out + err)
+
+        if arm("certcount"):
+            # grep -c prints 0 and fails when nothing matches: a "|| echo 0" after it logged a second 0 on its own line
+            def certcount_problems(muts=None):
+                s = sandbox()
+                write(s.sb / "sysbin/security", "#!/bin/sh\nexit 0\n", 0o755)   # a keychain that gives no certificate
+                s.run(["build", "ninja", "cmake", "openssl"], script=mutate(s, "certcount", muts) if muts else None)
+                log = (s.logs / "openssl.log").read_text() if (s.logs / "openssl.log").exists() else ""
+                lines = log.splitlines()
+                ok = "cert.pem: 0 certificates" in lines and not [l for l in lines if l.strip() == "0" or l == "cert.pem: 0"]
+                return [] if ok else [f"the log says: {[l for l in lines if 'cert.pem' in l or l.strip() == '0']}"]
+            p = certcount_problems()
+            check("a cert.pem without a certificate: the log says cert.pem: 0 certificates, on one line", not p, p)
+            bad = [('n=$(grep -c \'BEGIN CERTIFICATE\' "$P/ssl/cert.pem" 2>/dev/null || true); logline "cert.pem: ${n:-0} certificates"',
+                    'logline "cert.pem: $(grep -c \'BEGIN CERTIFICATE\' "$P/ssl/cert.pem" 2>/dev/null || echo 0) certificates"')]
+            control("the count with || echo 0 after grep -c", certcount_problems(bad))
 
         if arm("checkfail"):
             # under set -e -o pipefail an assignment from a pipeline whose program fails ended the script there, before
