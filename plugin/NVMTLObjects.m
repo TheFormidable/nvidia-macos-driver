@@ -1598,18 +1598,29 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
 // surface has changed since the last use (the surface seed), by the CPU. The surface is never written back.
 - (void)nvmtlY422SurfaceIn {
     @synchronized (self) {
+        // the waits nvmtlSurfaceIn makes: another process's GPU write of this plane (its busy tag), else WindowServer's
+        if (_clientWritten) nvmtl_busy_wait(_y422Surf, _y422Plane);
         if (_y422Synced && IOSurfaceGetSeed(_y422Surf) == _y422Seed) return;
+        if (!_clientWritten && nvmtl_busy_foreign(_y422Surf, _y422Plane)) { _clientWritten = YES; nvmtl_busy_wait(_y422Surf, _y422Plane); }
+        if (!_clientWritten) nvmtl_vk_fence_wait_compositor((uint32_t)IOSurfaceGetID(_y422Surf));
         uint32_t seed = 0;
         if (IOSurfaceLock(_y422Surf, kIOSurfaceLockReadOnly, &seed) != kIOReturnSuccess) { nvlog("4:2:2 surface-in: IOSurfaceLock FAILED"); return; }
         const uint8_t *base = IOSurfaceGetBaseAddressOfPlane(_y422Surf, (uint32_t)_y422Plane);
         const size_t row = IOSurfaceGetBytesPerRowOfPlane(_y422Surf, (uint32_t)_y422Plane), span = nvmtl_y422_row_bytes(_i.w);
         const size_t rows = IOSurfaceGetHeightOfPlane(_y422Surf, (uint32_t)_y422Plane);
-        if (base && row >= span && rows >= _i.h) {
+        // the rows must also end inside the surface's allocation: a plane's rows can describe more memory than the
+        // surface owns (the same bound as nvmtlSurfaceCopyable)
+        const uintptr_t b0 = (uintptr_t)IOSurfaceGetBaseAddress(_y422Surf), bp = (uintptr_t)base;
+        const size_t alloc = IOSurfaceGetAllocSize(_y422Surf), off = bp >= b0 ? bp - b0 : 0;
+        const BOOL fits = base && b0 && bp >= b0 && off <= alloc && span && row >= span && rows >= _i.h && _i.h
+            && span <= alloc - off && (size_t)(_i.h - 1) <= (alloc - off - span) / row;
+        if (fits) {
             for (uint32_t y = 0; y < _i.h; y++) memcpy((uint8_t *)_y422Raw.mutableBytes + (size_t)y * span, base + (size_t)y * row, span);
             _y422Seed = IOSurfaceGetSeed(_y422Surf);
-        } else nvlog("4:2:2 surface-in: surface plane %lu is %zu bytes/row x %zu rows, the texture needs %zu x %u - frame skipped", (unsigned long)_y422Plane, row, rows, span, _i.h);
+        } else nvlog("4:2:2 surface-in: surface plane %lu is %zu bytes/row x %zu rows at offset %zu of a %zu-byte allocation, the texture needs %zu x %u - frame skipped",
+                     (unsigned long)_y422Plane, row, rows, off, alloc, span, _i.h);
         IOSurfaceUnlock(_y422Surf, kIOSurfaceLockReadOnly, &seed);
-        if (base && row >= span && rows >= _i.h) { [self nvmtlY422Upload:0 rows:_i.h]; _y422Synced = YES; }
+        if (fits) { [self nvmtlY422Upload:0 rows:_i.h]; _y422Synced = YES; }
     }
 }
 - (void)nvmtlSurfaceIn {
