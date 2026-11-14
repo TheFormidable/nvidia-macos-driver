@@ -116,7 +116,7 @@ check('negative control: a close that frees the list is caught',
 # CoreDisplay_CreateDisplayForCGXDisplayDevice when it was refused. The bar bound is the real check;
 # asserting anything tighter here asserts a driver that cannot drive a display.
 _dev_branch = nvrm.split('NvU64 n = c->memArea.numRanges;')[1].split('IOAddressRange *r')[0]
-check('a device client maps only inside this card\'s bars',
+check('a device client maps only inside a started card\'s windows',
       'nv_pm_is_gpu(' in _dev_branch and 'nv_pm_dev_refused' in _dev_branch)
 check('the framebuffer-only refusal is gone (it broke CoreDisplay on real hardware)',
       'nv_pm_is_gpu_fb' not in _dev_branch
