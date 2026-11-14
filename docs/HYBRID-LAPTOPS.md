@@ -420,6 +420,10 @@ open row.
   never writes the Radeon, and the accelerator counts it as a head only with the switch on.
 - `tools/test_hybrid_wiring.py`: the switch is off by default, bounded waits, guarded table writes. Fails on a tree without
   this change.
+- `tools/test_hybrid_fb_dependent_id.py`: `NMIntelFB` (both start paths) and `NMGopFB` set the dependent ID and index before
+  `IOFramebuffer::start`; `NMIntelFB` maps the panel surface before it publishes anything another thread reaches, and a
+  failed start undoes what it published through the routine `stop()` uses. Its negative controls are made from the text
+  it reads (a publisher moved ahead of the map check, the two properties moved behind `IOFramebuffer::start`).
 - `tools/test_hybrid_scripts.sh`: the switch script against a stub `nvram`, and the verifier against saved logs
   (`tools/hybrid_fixtures`), including a log where the flip never lands.
 - `tools/test_hybrid_resume20.c`: display versions 20 and 30 and the C20 PHY (register range, D2D in the DDI buffer, MBUS and GMBUS
