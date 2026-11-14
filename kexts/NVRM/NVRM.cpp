@@ -954,7 +954,10 @@ bool NVRM::startGPU(IOService *provider)
     // probed (the IOFramebuffer category of this PCI device already had a client, such as Apple's IONDRVFramebuffer,
     // when the auxiliary collection's personalities arrived; IOKit then skips them without a probe), the first verdict
     // is NVRMNVDAFramebuffer::start's, after go(2): the framebuffer refuses, the card runs, nvrm-layout is never
-    // written, and the fallback job does not see the refusal.
+    // written, and the fallback job's look for a refusal does not see it. Such a start still counts against the boot
+    // guard: the framebuffer never clears the count, and the install's boot-guard job leaves the count of a claimed
+    // card that shows nothing alone unless another GPU has a display. So after two such starts the driver is off at
+    // the third, and the fallback job, while it is installed, puts the earlier driver back.
     {
         char text[200];
         gNvLayoutFb = (unsigned)nvrmPeerLayout(provider, "nvrmfb-layout", text, sizeof text);
