@@ -7,13 +7,19 @@ yet, and nothing built from it has been installed or loaded. At commit 3933ff6, 
 of the driver with no warning on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5): the kernel extensions (NVRM,
 NVAccel for macOS 15 and 26, NVRMFB, NVRMAGDC), NVK, the Metal plugin, the shader translator, the video library and
 the other components; it then staged a package over the 2.9 release package there, and the host tests passed there
-(303 passed, 0 failed, 3 skipped, 9 not run, of 315). It had built that Mac's build tools from an empty working
-directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found every one of the 506 kernel
-symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed have been fixed since. On
-GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit 3933ff6, the
-build of all 17 components and the package succeeded, and the host tests passed (303 passed, 0 failed, 3 skipped,
-9 not run, of 315). At commit 95811c2 the kernel extensions built on GitHub's Intel and Apple-silicon runners had the
-same bytes; no whole build has run on an Apple-silicon Mac, and the host tests have not passed whole on one. The check
+(303 passed, 0 failed, 3 skipped, 9 not run, of 315). At commit ee7f332 it built the 17 components and staged the
+package there again; the host tests were not run there at that commit. It had built that Mac's build tools from an
+empty working directory at commit 650db45. At an earlier state of the branch that macOS's `kmutil` found every one of
+the 506 kernel symbols NVRM imports, and 291 of the 310 host tests passed there; the seven that failed have been fixed
+since. On GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK), at commit
+3933ff6, the workflow `full-build` built all 17 components and staged the package (its test step failed there because
+its clone had no history, which is corrected after 3933ff6), and in the workflow `ci` the host tests passed
+(303 passed, 0 failed, 3 skipped, 9 not run, of 315). At commit ee7f332 every step of the workflow `full-build`
+succeeded there for the first time: the build, the package, the host tests (304 passed, 0 failed, 3 skipped, 9 not
+run, of 316) and its twelve checks of what was built. In the workflow `ci` at that commit the host tests passed with
+the same numbers on that runner and, for the first time whole, on GitHub's Apple-silicon runner (macos-15). At commit
+95811c2 the kernel extensions built on GitHub's Intel and Apple-silicon runners had the same bytes; no whole build has
+run on an Apple-silicon Mac. Nothing committed after ee7f332 has been built or tested on a Mac or on GitHub. The check
 list for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
@@ -353,11 +359,11 @@ has proven itself, renewed with a reason otherwise.
   or one only one of the two systems exports, fails the check instead of failing to load on a user's Mac.
 - `.github/workflows/ci.yml` runs that check, the host tests and the Mac builds on every push once Actions are enabled
   for the repository.
-- `.github/workflows/full-build.yml` runs on every push and by hand: on GitHub's Intel runner it builds the whole
-  driver with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when it has
-  them), stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken from
-  Homebrew.
-- `tools/run_all_tests.py` says, after a failed test, when the checkout lacks the history that 14 of the tests read
+- `.github/workflows/full-build.yml` runs by hand (one run takes between one and four and a half hours of GitHub's
+  Intel Mac): on GitHub's Intel runner it builds the whole driver with `./build.sh` in a new working directory (its
+  tools and sources restored from GitHub's cache when it has them), stages a package over the 2.9 release package,
+  runs the host tests and checks that nothing was taken from Homebrew. At commit ee7f332 every step of it succeeded.
+- `tools/run_all_tests.py` says, after a failed test, when the checkout lacks the history that some of the tests read
   from git (a clone made with `--depth 1`, a clone without the release tags, a tree that is not a git checkout), and
   names the command that brings it.
 - NVK's library came out with the same bytes in three builds on the Intel Mac (once with build tools made by hand,

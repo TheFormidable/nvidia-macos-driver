@@ -33,9 +33,10 @@ NM_VULKAN_INCLUDE (the Vulkan headers a test compiles against).
 What a test is meant to take from the tester stays: CC, CXX, ZSTD, BUILD_SH_BASH, NVENCVT_HEADERS, NVDEC_HEADERS, NM_*."""
 # Where the whole suite has run on a Mac, with the commit of each run. At commit 3933ff6, on one Intel Mac (12 threads,
 # macOS 26.7, Xcode 26.5) through ./build.sh test and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
-# Xcode 26.3 with the 26.2 SDK): on both, 303 of 315 passed, 0 failed, 3 skipped, 9 not run. On Apple silicon it has
-# never passed whole: GitHub's last run there that got a runner, at commit 22536c6, passed 298 of 312 with 2 failed,
-# in arms that pass on the Intel runner since commit ef2a216.
+# Xcode 26.3 with the 26.2 SDK) in the workflow ci: on both, 303 of 315 passed, 0 failed, 3 skipped, 9 not run. At
+# commit ee7f332, in the workflow ci on GitHub's Intel runner and on its Apple-silicon runner (macos-15, the first run
+# that passed whole on Apple silicon), and in the workflow full-build on the Intel runner through ./build.sh test: on
+# each, 304 of 316 passed, 0 failed, 3 skipped, 9 not run.
 import sys
 sys.dont_write_bytecode = True   # nor the runner itself, for what it imports from here on (python3 -B, but from inside)
 import concurrent.futures  # noqa: E402

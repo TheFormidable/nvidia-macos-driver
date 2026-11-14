@@ -1,11 +1,13 @@
 # NullMoth NVIDIA Driver for macOS
 
 > **Not yet run on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
-> At commit 3933ff6, `./build.sh` built every component of it, with build tools it had built from pinned sources, and
-> staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel runner
-> (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At that commit the host tests passed on both
-> ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been installed, loaded or run
-> on an NVIDIA card: whoever installs it first is testing it. Read
+> At commits 3933ff6 and ee7f332, `./build.sh` built every component of it, with build tools it had built from pinned
+> sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's
+> Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At 3933ff6 the host tests
+> passed on that Mac and, in GitHub's workflow `ci`, on that runner; at ee7f332 they passed in the workflow `ci` on
+> GitHub's Intel and Apple-silicon runners, and the workflow `full-build` succeeded in every step, its own run of the
+> host tests included ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). Nothing built from it has been
+> installed, loaded or run on an NVIDIA card: whoever installs it first is testing it. Read
 > [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back to 2.9 at hand: the first
 > step of that page is a way back you have tried, and [CHANGELOG.md](CHANGELOG.md), "The ways back", gives the way
 > back from each change on its own.
@@ -223,9 +225,9 @@ seconds there, and `deps` took 3 hours 53 minutes on GitHub's Intel runner; it n
 builds. In a later run on that Mac with those tools kept, `deps` took 49 seconds, the build of all 17 components 5
 minutes 41 seconds and the package 27 seconds, and the working directory then held about 8 GB. On Apple silicon `deps`
 installs Homebrew's ready-made tools instead. That path has run only against a stand-in for Homebrew: no whole build
-with `build.sh` has run on an Apple-silicon Mac, and the host tests have not passed whole on one. GitHub's
-Apple-silicon runner compiles and links the kexts; at commit 95811c2 they had the same bytes as the kexts built on
-GitHub's Intel runner.
+with `build.sh` has run on an Apple-silicon Mac. GitHub's Apple-silicon runner compiles and links the kexts (at
+commit 95811c2 they had the same bytes as the kexts built on GitHub's Intel runner), and at commit ee7f332 the host
+tests passed whole there for the first time (304 passed, 0 failed, 3 skipped, 9 not run, of 316).
 
 To make an installable package, give it a release package as the base (some carried files have no source in this
 repository, so a package is the release's with every part this checkout builds replaced):
@@ -262,9 +264,11 @@ export lists of macOS 15 and macOS 26; it runs on a Mac or on Linux (clang, llvm
 downloads its pinned inputs into `build-out/` on the first run. The second runs the host tests (on a Mac; on Linux
 the tests that need a Mac fail, among them every test that compiles Objective-C). `.github/workflows/ci.yml` runs
 both, and the kext and plugin builds, on every push once Actions are enabled for the repository.
-`.github/workflows/full-build.yml` runs on every push and by hand: on GitHub's Intel runner it builds the whole driver
-with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when it has them),
-stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken from Homebrew.
+`.github/workflows/full-build.yml` runs by hand (Actions, full-build, Run workflow): on GitHub's Intel runner it builds
+the whole driver with `./build.sh` in a new working directory (its tools and sources restored from GitHub's cache when
+it has them), stages a package over the 2.9 release package, runs the host tests and checks that nothing was taken
+from Homebrew. One run takes between one and four and a half hours of GitHub's Intel Mac; at commit ee7f332 every step
+of it succeeded.
 
 A change that adds a switch (an environment name, a boot argument, a sysctl) needs a row in `tools/switches.tsv`;
 `python3 tools/switch_registry.py check` says which, and what a new switch may be.

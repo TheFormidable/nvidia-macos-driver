@@ -16,7 +16,9 @@ comandos y opciones y la solución de problemas.
 >   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. `./build.sh test` pasó allí
 >   303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 20 minutos 49 segundos. Nada
 >   fuera del directorio de trabajo cambió, salvo los informes de fallo que macOS escribe de los programas pequeños que
->   las pruebas hacen fallar a propósito (ver `test` en [Comandos](#comandos)).
+>   las pruebas hacen fallar a propósito (ver `test` en [Comandos](#comandos)). En el commit ee7f332, `build` volvió a
+>   compilar los 17 componentes en 401 segundos sin ningún aviso y `package` preparó el paquete en 28 segundos; las
+>   pruebas no se ejecutaron allí en ese commit.
 > - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
 >   3933ff6. En el flujo `ci`, de las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron
 >   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
@@ -26,12 +28,18 @@ comandos y opciones y la solución de problemas.
 >   (las mismas pruebas pasan desde un clon completo en el mismo tipo de máquina y en el Mac Intel). De sus doce
 >   comprobaciones de lo compilado pasaron once; la duodécima pedía a los seis kexts una versión mínima de macOS, que el
 >   enlazador no escribe en un kext. Las dos causas están corregidas en los commits posteriores a 3933ff6.
+> - En las máquinas de GitHub, en el commit ee7f332. En el flujo `ci`, de las 316 pruebas pasaron 304 y no falló
+>   ninguna (3 se saltaron y 9 no se ejecutaron) en la máquina Intel y, por primera vez completas, en la máquina con
+>   Apple silicon (macos-15). El flujo `full-build` (macOS 15.7.9, Xcode 26.3 con el SDK 26.2, las herramientas
+>   recuperadas de la caché de GitHub) terminó bien en todos sus pasos: compiló los 17 componentes en 19 minutos
+>   26 segundos, preparó el paquete en 57 segundos, pasó 304 de las 316 pruebas sin ningún fallo, y sus doce
+>   comprobaciones de lo compilado pasaron; el trabajo entero tardó 1 hora 18 minutos.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
->   compilación (`tools/test_build_sh.py`, en Linux y en esa máquina): `deps` tomando sus herramientas de Homebrew,
->   que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
-> - En ninguna parte cuando se escribió este aviso (2026-11-13): una compilación completa en Apple silicon (ver
->   [Requisitos](#requisitos)), ni una compilación de los commits de esta rama posteriores a 3933ff6 en ninguno de
->   los dos Mac.
+>   compilación (`tools/test_build_sh.py`, en Linux y en las máquinas de GitHub): `deps` tomando sus herramientas de
+>   Homebrew, que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
+> - En ninguna parte cuando se escribió este aviso (2026-11-14): una compilación completa en Apple silicon (ver
+>   [Requisitos](#requisitos)), ni una compilación o una prueba de los commits de esta rama posteriores a ee7f332 en
+>   ningún Mac, tampoco en los de GitHub.
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
 > funcionan `doctor`, `fetch`, `test`, `env`, `clean`, `help` y la prueba en seco de cualquier comando salvo `deps`. Un
@@ -52,9 +60,8 @@ comandos y opciones y la solución de problemas.
   pero `build.sh` no ha hecho ninguna compilación completa en un Mac con Apple silicon: allí `deps` toma sus
   herramientas de Homebrew, un camino que solo se ha probado contra sustitutos. La máquina con Apple silicon de GitHub
   compila y enlaza los kexts, y en el commit 95811c2 salieron con los mismos bytes que en su máquina Intel. Las pruebas
-  no han pasado completas en Apple silicon: su última ejecución que consiguió máquina, en un commit anterior, pasó 298
-  de 312 con 2 fallos, en partes que pasan en la máquina Intel desde el commit ef2a216, y GitHub no ha tenido libre
-  ninguna máquina con Apple silicon en ningún push posterior.
+  pasaron completas en Apple silicon por primera vez en el commit ee7f332, en esa máquina (304 de 316, sin ningún
+  fallo).
 - **Xcode 26 o posterior**, el Xcode completo, seleccionado con `xcode-select`. Compilaciones completas han terminado
   bien con dos de ellos, ambas en el commit 3933ff6: Xcode 26.5 (SDK 26.5) en el Mac Intel de arriba y Xcode 26.3 (SDK 26.2)
   en la máquina Intel de GitHub. Xcode 26.3 es el Xcode más nuevo que funciona en macOS 15 (Xcode 26.4.1,
