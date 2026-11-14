@@ -171,7 +171,8 @@ brew_own_folders() {
 # lists, or between its last list and prove) is "not checked" (which fails the job), never "0 seen".
 # A shorter pause is the machine's and not the watch's: GitHub's Intel runner, with four slow processors busy with a
 # whole build, made its lists about 0.75 s apart on average in the run of 95811c2, and once 11 s apart in about 42
-# minutes. prove prints the longest pause and the time it ended, so that the reader sees how fine the net was and which step ran then.
+# minutes. prove prints the longest pause and the time it ended, so that the reader sees how fine the net was and which
+# step ran then.
 # Being outside every process group, it is not ended with whatever started it: it ends when watch-stop or prove
 # removes its pid file, when the folder of that file is gone, and by itself after NMCI_WATCH_MAX seconds (eight hours
 # when unset, more than any job runs), so that one whose starter was killed does not list processes for ever.
