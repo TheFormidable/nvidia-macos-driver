@@ -283,7 +283,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_LILU_DEBUG_KEXT` | none | For the optional kexts `nmkbl` and `nmhda`: a Lilu DEBUG kext |
 | `NM_VIRTUALSMC_SRC` | none | For `nmkbl`: a VirtualSMC source tree |
 | `NM_MACKERNELSDK` | none | For `nmkbl` and `nmhda`: a MacKernelSDK tree |
-| `NULLMOTH_BUILD_ROOT` | `<workdir>/build` | The build folder the existing scripts default their trees under |
+| `NULLMOTH_BUILD_ROOT` | `<workdir>` | The folder the existing scripts default their trees under, in its subfolder `build` |
 | `NULLMOTH_BUILD_HOST` | this Mac | The release scripts' build Mac (an ssh host). Unset, `build.sh` runs them on this Mac |
 | `NM_LOCAL_HOST_PATH` | `/usr/bin:/bin:/usr/sbin:/sbin` | The PATH of a command the release scripts run on this Mac as their build host |
 | `NV_VERSION` | `620.70.06` | NVIDIA's version, for build_rm620.sh and build_kms620.sh; another value than the pin stops `build.sh` |
