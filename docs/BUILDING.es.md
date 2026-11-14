@@ -219,10 +219,10 @@ por completo: `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están
 
 Ejecuta los comandos tal como aparecen (`./install.sh`, no `bash install.sh`: install.sh reconoce por ese nombre una
 instalación en curso). install.sh comprueba la integridad de un paquete, no quién lo hizo, así que acepta este.
-`uninstall.sh` se niega con SIP activado, y no restaura la copia que nombra la línea `Undo:` de install.sh: quita el
-driver. En un paquete de prueba NVK, el traductor y las demás bibliotecas van firmados ad hoc; el ryzenadj compilado
-aquí tiene otro SHA-256 que el que fija la app 1401, que no lo instalará (el driver no se ve afectado). El firmware
-GSP lo descarga install.sh al instalar.
+`uninstall.sh` se niega con SIP activado, y no restaura la copia que nombra install.sh: quita el driver. En un paquete
+de prueba NVK, el traductor y las demás bibliotecas van firmados ad hoc; el ryzenadj compilado aquí tiene otro SHA-256
+que el que fija la app 1401, que no lo instalará (el driver no se ve afectado). El firmware GSP lo descarga install.sh
+al instalar.
 
 Instalar una compilación de prueba sobre una versión publicada deja el mismo trabajo de respaldo que deja la
 instalación de una versión publicada: si el framebuffer de esta compilación rechaza las clases de Apple del macOS en
