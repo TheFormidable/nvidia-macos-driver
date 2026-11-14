@@ -1,7 +1,7 @@
 # The whole driver built from an empty folder on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15, Xcode
-# 26.3 with the 26.2 SDK), at every push and by hand (Actions, full-build, Run workflow), to show "anybody can build it"
-# on a Mac nobody here prepared. The job types what docs/BUILDING.md tells a tester, in a new working directory W under
-# the runner's temporary folder:
+# 26.3 with the 26.2 SDK), by hand (Actions, full-build, Run workflow), to show "anybody can build it" on a Mac nobody
+# here prepared. It does not start at a push: one run takes between one and four and a half hours of GitHub's Intel Mac.
+# The job types what docs/BUILDING.md tells a tester, in a new working directory W under the runner's temporary folder:
 #   ./build.sh --yes --workdir W deps          default settings: on an Intel Mac NVK's tools are built from pinned
 #                                              sources into W, with no Homebrew call (a dry run checks that first)
 #   ./build.sh --workdir W doctor              nothing may be MISSING
@@ -30,9 +30,6 @@
 # 95811c2 on this runner about 0.75 s apart on average and once 11 s apart), and nothing about the package's contents
 # beyond the checks above. The package is not uploaded: it never leaves the runner.
 #
-# A job gates once it has been seen green on GitHub's runners (the rule of ci.yml): this one is marked
-# continue-on-error until it has been seen green once: then delete that line.
-#
 # What it has shown, a history. Commit 96bf32c, nothing cached: deps took 3 h 53 min, the build stopped at the plugin
 # (SDK 26.2 does not declare MTLDevice.supportsPlacementSparse; fixed in 3d4df3f) and prove reported Rust's own
 # rust-lld (fixed in 71cb29d and 76e1fed). Commit 95811c2, caches restored: deps 12.7 min, the build 20 min to the
@@ -43,7 +40,10 @@
 # failed, 5 skipped, 9 not run; the same tests pass from a full clone on the same kind of runner and on the Intel Mac).
 # Eleven of its twelve checks of what was built passed; the twelfth asked the six kexts for a minimum macOS version,
 # which the linker does not write into a kext (the other ten files the build made name 10.12, 12.0 or 15.0). Both causes
-# are corrected in the tree after 3933ff6; a run with those corrections has not been seen yet.
+# are corrected in ee7f332.
+# Commit ee7f332 (run 43522118214), caches restored: every step succeeded, for the first time. The four restores about
+# 3 min, deps 9 min 34 s, fetch 27 s, the build of every component 19 min 26 s, the package 57 s, ./build.sh test
+# 34 min 53 s (304 passed, 0 failed, 3 skipped, 9 not run, of 316); prove: 12 checks, 12 ok. The whole job 1 h 18 min.
 #
 # Time, as measured on this runner. From nothing (96bf32c): deps 3 h 53 min, then about 23 min of build before the
 # plugin stopped it. With the caches below restored (3933ff6): the four restores 4 min 34 s, deps 40 s, fetch 45 s,
@@ -75,19 +75,17 @@
 # downloaded), never what this build made.
 name: full-build
 on:
-  push:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  # one run at a time per branch, the newest push waiting: a run that is building LLVM for the first time is not cancelled
+  # one run at a time per branch: a run started while one is running waits, and the running one is not cancelled for it
   group: full-build-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   intel-from-nothing:
     runs-on: macos-15-intel
     timeout-minutes: 340
-    continue-on-error: true
     defaults:
       run:
         shell: bash

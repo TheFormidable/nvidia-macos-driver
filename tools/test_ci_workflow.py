@@ -291,8 +291,9 @@ def full_problems(fb, ci, root):
             out.append(f"{name}@{' '.join(sorted(refs))}: not the commit ci.yml pins ({' '.join(sorted(want.get(name, set()))) or 'ci.yml does not use it'})")
     if re.search(r"upload|publish|deploy|\bgh\s|\bcurl\b.*-T\b|\bscp\b|\bssh\b", code, re.I):
         out.append("the full build uploads or sends something (the package never leaves the runner)")
-    if not re.search(r"^on:\n  push:\n  workflow_dispatch:\n(?=\S)", code, re.M):
-        out.append("the full build does not run on every push and by hand (on: push, workflow_dispatch, nothing else)")
+    # one run takes one to four and a half hours of GitHub's Intel runner: it starts by hand, never at a push
+    if not re.search(r"^on:\n  workflow_dispatch:\n(?=\S)", code, re.M):
+        out.append("the full build does not start by hand only (on: workflow_dispatch, nothing else)")
     j = jobs(code)
     if len(j) != 1:
         out.append(f"the full build is not one job ({len(j)})")
@@ -306,10 +307,9 @@ def full_problems(fb, ci, root):
     # controls read older revisions and release tags from git
     if not re.search(r"^      - uses: actions/checkout@.*\n        with:\n(?:          .*\n)*?          fetch-depth: 0\b", t, re.M):
         out.append("the full build's checkout is not a full clone (fetch-depth: 0): the tests' controls read older revisions and tags")
-    coe = bool(re.search(r"^    continue-on-error: true\n", t, re.M))
-    said = "continue-on-error until it has been seen green once" in fb
-    if coe != said:
-        out.append("continue-on-error and the header's sentence about it disagree (it stays until the job has been seen green once, then both go)")
+    # it has been seen green once (ee7f332), so by ci.yml's rule it gates: no continue-on-error, and no header that says it has one
+    if "continue-on-error" in fb:
+        out.append("the full build is marked continue-on-error, or its header says so (it has been seen green once: it gates)")
     if not re.search(r"^concurrency:\n  group: [^\n]+\n  cancel-in-progress: false\n", code, re.M):
         out.append("the full build's concurrency does not keep a running build (cancel-in-progress: false)")
     if not run_block(fb, XCODE_STEP) or run_block(fb, XCODE_STEP) != run_block(ci, XCODE_STEP):
@@ -383,15 +383,17 @@ fb_control("an upload of the package is caught", "      - name: The logs of what
            "      - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - name: The logs of what failed\n", "upload")
 fb_control("a copy sent with scp is caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test", "run: ./build.sh --workdir \"$NMCI_WORK\" test && scp x y:", "uploads or sends")
 fb_control("pull_request_target is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request_target:\n", "pull_request_target")
-fb_control("a pull_request trigger is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n", "every push and by hand")
+fb_control("a pull_request trigger is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n", "by hand only")
+fb_control("a push trigger is caught", "on:\n  workflow_dispatch:\n", "on:\n  push:\n  workflow_dispatch:\n", "by hand only")
+fb_control("a schedule trigger is caught", "  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n    - cron: '0 3 * * *'\n", "by hand only")
 fb_control("a script that does not exist is caught", "/bin/bash build/ci_full_build.sh logs", "/bin/bash build/ci_full_buld.sh logs", "not in the tree")
 fb_control("another runner is caught", "    runs-on: macos-15-intel\n", "    runs-on: macos-15\n", "macos-15-intel")
 fb_control("a second job is caught", "\n    steps:\n", "\n    steps:\n      - run: true\n  second:\n    runs-on: ubuntu-24.04\n    steps:\n", "not one job")
 fb_control("no timeout is caught", "    timeout-minutes: 340\n", "", "no timeout below")
 fb_control("GitHub's own limit as the timeout is caught", "    timeout-minutes: 340\n", "    timeout-minutes: 360\n", "no timeout below")
-fb_control("continue-on-error without the header's sentence is caught", "continue-on-error until it has been seen green once", "continue-on-error for now",
-           "disagree")
-fb_control("the sentence left after continue-on-error went is caught", "    continue-on-error: true\n", "", "disagree")
+fb_control("continue-on-error put back is caught", "    timeout-minutes: 340\n", "    timeout-minutes: 340\n    continue-on-error: true\n", "continue-on-error")
+fb_control("the header's sentence about continue-on-error put back is caught", "# What it has shown, a history.",
+           "# This one is marked continue-on-error until it has been seen green once.\n# What it has shown, a history.", "continue-on-error")
 fb_control("a concurrency that cancels the running build is caught", "  cancel-in-progress: false\n", "  cancel-in-progress: true\n", "cancel-in-progress: false")
 fb_control("a checkout that keeps the token is caught", "          persist-credentials: false\n", "", "persist-credentials")
 fb_control("sudo is caught", "run: ./build.sh --workdir \"$NMCI_WORK\" test", "run: sudo ./build.sh --workdir \"$NMCI_WORK\" test", "sudo")

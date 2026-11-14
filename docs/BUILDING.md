@@ -623,11 +623,12 @@ build_kms620.sh and accel_build.sh on a small stand-in NVIDIA tree (real make an
 folder keeps the compile list complete and the kexts' -D flags the same, and the personal-string check stops at a home path or `user@host` and only reports an ordinary word. What these tests cannot show is how a real Xcode, Homebrew and compiler behave: the whole builds on the two Macs
 named at the top have shown it for Xcode 26.3 and 26.5, and no run on a Mac has used Homebrew.
 
-In addition, every push is built in an empty working directory on GitHub's Intel runner (no NVIDIA card, nothing
-installed or loaded), with the tools built from source restored from GitHub's cache once a run has made them (from
-nothing, at commit 96bf32c, `deps` took 3 hours 53 minutes there): `.github/workflows/full-build.yml` runs deps, doctor, fetch, build,
-package and test, then checks that Homebrew was neither used nor changed and that everything built loads only from macOS, that folder and
-the driver's own folders. Its result is under the repository's Actions tab, workflow full-build; when it fails or runs
-out of time, its last step prints the logs. At commit 3933ff6 every step up to `package` succeeded there; its `test`
-step and one of its checks failed, for the reasons the notice at the top gives. Until it has passed once, its result does not hold up a
-change.
+In addition, the workflow full-build builds everything in an empty working directory on GitHub's Intel runner (no NVIDIA
+card, nothing installed or loaded), with the tools built from source restored from GitHub's cache once a run has made
+them (from nothing, at commit 96bf32c, `deps` took 3 hours 53 minutes there): `.github/workflows/full-build.yml` runs
+deps, doctor, fetch, build, package and test, then checks that Homebrew was neither used nor changed and that everything
+built loads only from macOS, that folder and the driver's own folders. It starts only by hand (Actions, full-build, Run
+workflow): one run takes between one and four and a half hours of GitHub's Intel Mac. Its result is under the
+repository's Actions tab, workflow full-build; when it fails or runs out of time, its last step prints the logs. At
+commit 3933ff6 every step up to `package` succeeded there; its `test` step and one of its checks failed, for the reasons
+the notice at the top gives. At commit ee7f332 every step and all twelve checks succeeded there.

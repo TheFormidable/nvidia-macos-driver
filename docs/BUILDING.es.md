@@ -471,11 +471,13 @@ Para reportar un fallo: abre un issue, di qué comando ejecutaste y adjunta el a
 indique el mensaje o la tabla de arriba y ejecuta el mismo comando otra vez: los pasos terminados se saltan y el que
 falló se repite. `-v` muestra la salida de cada paso mientras se ejecuta.
 
-Además, cada push se compila en un directorio de trabajo vacío en la máquina Intel de GitHub (sin tarjeta NVIDIA,
-sin instalar ni cargar nada), con las herramientas compiladas desde fuentes recuperadas de la caché de GitHub cuando
-una ejecución anterior las hizo (desde cero, en el commit 96bf32c, `deps` tardó allí 3 horas 53 minutos): `.github/workflows/full-build.yml`
-ejecuta deps, doctor, fetch, build, package y test, y comprueba que Homebrew no se usó ni cambió y que todo lo
-compilado carga solo de macOS, de esa carpeta y de las carpetas del propio driver. El resultado está en la pestaña
-Actions del repositorio, flujo full-build; si falla o se le acaba el tiempo, su último paso muestra los registros. En
-el commit 3933ff6 todos los pasos hasta `package` terminaron bien allí; su paso `test` y una de sus comprobaciones
-fallaron, por las razones que da el aviso del principio. Hasta que haya pasado una vez, su resultado no detiene ningún cambio.
+Además, el flujo full-build compila todo en un directorio de trabajo vacío en la máquina Intel de GitHub (sin tarjeta
+NVIDIA, sin instalar ni cargar nada), con las herramientas compiladas desde fuentes recuperadas de la caché de GitHub
+cuando una ejecución anterior las hizo (desde cero, en el commit 96bf32c, `deps` tardó allí 3 horas 53 minutos):
+`.github/workflows/full-build.yml` ejecuta deps, doctor, fetch, build, package y test, y comprueba que Homebrew no se
+usó ni cambió y que todo lo compilado carga solo de macOS, de esa carpeta y de las carpetas del propio driver. Solo se
+inicia a mano (Actions, full-build, Run workflow): una ejecución ocupa entre una y cuatro horas y media la máquina Intel
+de GitHub. El resultado está en la pestaña Actions del repositorio, flujo full-build; si falla o se le acaba el tiempo,
+su último paso muestra los registros. En el commit 3933ff6 todos los pasos hasta `package` terminaron bien allí; su paso
+`test` y una de sus comprobaciones fallaron, por las razones que da el aviso del principio. En el commit ee7f332 todos
+los pasos y las doce comprobaciones terminaron bien allí.
