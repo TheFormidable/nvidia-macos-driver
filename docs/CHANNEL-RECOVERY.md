@@ -62,7 +62,9 @@ Nothing is printed on a healthy GPU.
   hold what the VRAM held wherever nothing was written or uploaded since. Textures that the residency manager was
   moving in a dropped evict batch already point at their new images, which hold undefined contents. The surface-fence
   holds of the command buffer are closed on its error path as on every other.
-- Log lines (`nvmtl.log`; in a release build also the system log, since the line holds the word "fault"):
+- Log lines (`nvmtl.log`; a release build also sends the first, with its `fault context:` lines, to the system log,
+  since they hold the word "fault", and the last, which holds "FAILED"; the three between them are in `nvmtl.log`
+  only):
   `vk: after a GPU fault, a channel rebuild dropped this command buffer (N so far in <process>, fence after W ms): it
   did not run and is reported as failed; the device stays up; NVK: Xid X, R channel rebuilds, D flushes dropped, P
   replayed` for the first and every 256th, and on the first one the `fault context:` lines of the work that was
