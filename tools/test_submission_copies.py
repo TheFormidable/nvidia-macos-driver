@@ -296,7 +296,8 @@ int main(void) { @autoreleasepool {
     NVMTLTexture *swap=tex(shared,1,YES), *overlay=tex(other,2,YES);
     cb=commitParts(@[@[swap,overlay],@[swap]]);
     assert(seen(mark(shared,1)) && seen(mark(other,1)));
-    assert(dirtyCalls==(half?3:0));   // VRAM marked newest at commit only when the page-off waits
+    assert(dirtyCalls==(half?2:0));   // VRAM marked newest at commit only when the page-off waits: once per surface,
+                                      // though the swap surface is written by two parts
     // and before the pending marks: a page-off of the surface would otherwise wait for this command buffer while its
     // commit waits for the accelerator lock that page-off holds
     if (half) assert(lastAt([NSString stringWithFormat:@"d%u",IOSurfaceGetID(shared)]) < at(mark(shared,1)));
@@ -314,7 +315,7 @@ int main(void) { @autoreleasepool {
     assert([cb nvmtlAdvancePart] && cb->_executionDone && !cb->_cbError);
     if (half) assert(at(mark(shared,0)) < at(@"o1:1") && times(@"o1:1")==1);
     else assert(at(mark(shared,0)) > lastAt(@"o1:0") && at(mark(other,0)) > lastAt(@"o1:0"));
-    assert(dirtyCalls==(half?3:0));   // publication never asked the kernel again
+    assert(dirtyCalls==(half?2:0));   // publication never asked the kernel again
     // the kernel fence: each surface's hold is armed once, with the fence of the last part that writes it (the swap
     // surface by part 1, not part 0), and closed once, after that
     assert(times(armed(shared,1))==1 && !seen(armed(shared,0)) && times(armed(other,0))==1 && !seen(armed(other,1)));
