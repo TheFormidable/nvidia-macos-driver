@@ -202,15 +202,17 @@ number of kernel connections that have slept on the GPU completion event at
 least once) immediately before and after the probe. That counter is sticky per
 connection, so a connection that already slept once never moves it again, and a
 long-running GPU client such as WindowServer does not disturb it during a probe;
-a freshly launched probe opens its own connection, so any movement is the
-probe's own. An `event` probe must move the counter up (its connection slept); a
-`poll` probe must leave it unchanged (it never slept). A probe that fails this
-check stops the run with "requested wait policy was not verified", naming the
-counter reading. The runner records `evt_clients_before`, `evt_clients_after`,
-`policy_verified` and `policy_verification` in each probe's JSON. If the counter
-cannot be read (a kext that predates it), the run reports that the policy could
-not be verified rather than passing silently. The pure decision is covered on
-any machine by `python3 tools/test_bench_event_wait.py`.
+a freshly launched probe opens its own connection, so a movement is taken as the
+probe's own. Another process whose connection sleeps for the first time during
+the probe moves it too, so a refused poll probe on a desktop in use is worth one
+more run before it is believed. An `event` probe must move the counter up (its
+connection slept); a `poll` probe must leave it unchanged (it never slept). A
+probe that fails this check stops the run with "requested wait policy was not
+verified", naming the counter reading. The runner records `evt_clients_before`,
+`evt_clients_after`, `policy_verified` and `policy_verification` in each probe's
+JSON. If the counter cannot be read (a kext that predates it), the run reports
+that the policy could not be verified rather than passing silently. The pure
+decision is covered on any machine by `python3 tools/test_bench_event_wait.py`.
 
 The tool writes local results and logs; it does not upload anything or edit the
 driver configuration. Normal driver shader-cache activity can still occur.
