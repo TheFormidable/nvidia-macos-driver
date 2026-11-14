@@ -702,6 +702,10 @@ class Sandbox:
         self.host_brew_hidden = False
         self.dir = TMP / "sb" / name
         shutil.rmtree(self.dir, ignore_errors=True)
+        # whether git may ask on the terminal (GIT_TERMINAL_PROMPT) in each call, beside its arguments: beside the
+        # sandbox, not in it, where the arms that check that a command writes nothing look
+        self.git_prompt = TMP / "sb" / (name + ".git-prompt")
+        self.git_prompt.unlink(missing_ok=True)
         self.home = self.dir / "home"
         self.bin = self.dir / "bin"
         self.state = self.dir / "state"
@@ -743,9 +747,8 @@ class Sandbox:
         os.symlink(BASH, self.bin / "bash")
         # the real git, without the three variables an arm may have set to something that names nothing: where git is
         # Apple's (APPLE_TOOLS) they would reach xcrun; git itself reads none of them
-        # git-prompt: whether git may ask on the terminal (GIT_TERMINAL_PROMPT) in each call, beside its arguments
         (self.bin / "git").write_text(f'#!/bin/bash\n{{ printf git; for a in "$@"; do printf " %q" "$a"; done; echo; }} >> {self.journal}\n'
-                                      f'printf "%s %s\\n" "${{GIT_TERMINAL_PROMPT-unset}}" "$*" >> {self.dir}/git-prompt\n'
+                                      f'printf "%s %s\\n" "${{GIT_TERMINAL_PROMPT-unset}}" "$*" >> {self.git_prompt}\n'
                                       f'unset SDKROOT TOOLCHAINS DEVELOPER_DIR\nexec {GIT} "$@"\n')
         (self.bin / "git").chmod(0o755)
         for name_, role in STANDINS.items():
@@ -3061,7 +3064,7 @@ def arm_mesagit():
 def prompt_problems(sb):
     """every git fetch and clone of build.sh's fetch runs with GIT_TERMINAL_PROMPT=0: a mirror that asks for a login, or
     a repository that is gone, makes it fail instead of waiting for a name on the terminal"""
-    f = sb.dir / "git-prompt"
+    f = sb.git_prompt
     lines = [l for l in (f.read_text().splitlines() if f.exists() else []) if re.search(r" (fetch|clone) ", l)]
     return ([] if lines else ["no git fetch or clone was recorded"]) + [l for l in lines if not l.startswith("0 ")][:3]
 
