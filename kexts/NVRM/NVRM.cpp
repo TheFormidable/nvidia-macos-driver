@@ -3603,7 +3603,8 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
     } else {
         NvU64 n = c->memArea.numRanges;
         // A range that is not card memory goes down the system-RAM path below, which checks the owner.
-        // A range that IS card memory must still land inside one of this card's bars, which is what stops
+        // A range that IS card memory must still land inside a window of a started card (nv_pm_is_gpu: the primary
+        // and, with nvmultigpu=1, every card in the device table), which is what stops
         // a caller handing us an arbitrary physical address and getting it mapped.
         // This was narrowed to the framebuffer bar alone, on the reasoning that a user process has no
         // business holding a writable mapping of the register file. The display stack disagrees: measured
