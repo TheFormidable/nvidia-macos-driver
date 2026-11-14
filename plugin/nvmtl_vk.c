@@ -9908,9 +9908,10 @@ static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
 // The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
 // the staging buffer, which still holds the bytes, and wait. The layouts are named explicitly rather than through
 // img_to: draws queued after the dropped copy may have sampled the image, and this copy must wait for them.
-// Only while the image is still in the layout the copy left it in: any other layout means that a render pass, a copy or
-// a storage use came after the copy, and such work may have written the image since; the old upload made again now would
-// overwrite what it wrote. The image then keeps what it holds, as when nothing finished the upload.
+// Only while the image is still in the layout the copy left it in. A render pass, a clear or a storage use leaves
+// another layout, so the copy is not made again over what they wrote. A copy, blit, mipmap generation or upload into
+// the image, and a render or storage write later sampled again, leave this same layout and are not seen: the old upload
+// is then made again over what they wrote. The image keeps what it holds only in the first case.
 static void nvmtl_asyncup_redo(nvk_image *img, nvmtl_asyncup *au)
 {
     if (img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
