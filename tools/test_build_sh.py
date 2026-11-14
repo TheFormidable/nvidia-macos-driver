@@ -4451,7 +4451,7 @@ def arm_clean(mac):
         check("clean refuses a folder build.sh did not make", rc != 0 and (other / "keep").exists() and ".nullmoth-build-workdir" in out, out[-300:])
     with mac.scratch():
         mac.break_script('    in_workdir "$p" || die "refusing to delete $p', '    true || die "refusing to delete $p')
-        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"; else', '    if true; then safe_rm "$p"; else')   # both guards
+        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"\n', '    if true; then safe_rm "$p"\n')   # both guards
         negative("clean that deletes outside the working directory", outside_problems(mac))
     # a NULLMOTH_BUILD_ROOT outside the working directory: clean deletes everything of its own inside the working
     # directory, names what it leaves in that root, deletes nothing there, and ends with exit 0
@@ -4470,6 +4470,9 @@ def arm_clean(mac):
             p.append("a file in the NULLMOTH_BUILD_ROOT outside the working directory was deleted")
         if f"not deleted (outside the working directory, your NULLMOTH_BUILD_ROOT): {root}/build/rm620" not in out:
             p.append(f"no note for {root}/build/rm620: {out[-300:]}")
+        absent = {"outputs": "build/plugin-release", "sources": "build/gpu-src"}[what]   # never made in that root
+        if f"NULLMOTH_BUILD_ROOT): {root}/{absent}" in out:
+            p.append(f"a note for {root}/{absent}, which does not exist: {out[-300:]}")
         p += [f"<work>/{d} is still there" for d in mine if (s.work / d).exists()]
         return p
     with mac.scratch():
@@ -4477,8 +4480,12 @@ def arm_clean(mac):
         check("clean and clean sources with a NULLMOTH_BUILD_ROOT outside the working directory: everything inside is "
               "deleted, nothing outside, a note names what is left, exit 0", not p, p)
     with mac.scratch():
-        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"; else', '    if true; then safe_rm "$p"; else')
+        mac.break_script('    if in_workdir "$p"; then safe_rm "$p"\n', '    if true; then safe_rm "$p"\n')
         negative("clean that hands safe_rm the paths outside the working directory (it stops half-way)",
+                 rootclean_problems(mac, "outputs"))
+    with mac.scratch():
+        mac.break_script('    elif [ -e "$p" ] || [ -L "$p" ]; then say "not deleted', '    else say "not deleted')
+        negative("clean that names a path which is not there as left in the NULLMOTH_BUILD_ROOT",
                  rootclean_problems(mac, "outputs"))
 
 
