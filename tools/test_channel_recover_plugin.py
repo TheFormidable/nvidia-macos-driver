@@ -163,7 +163,9 @@ def chk_prologue(vk, obj):
     zf = body(obj, "static void nvmtl_zero_flush(void) {")
     redo = body(obj, "static void nvmtl_pre_redo(void *held) {")
     return (order(blk, "if (dropped && (pre->copies || pre->fills)) {", "nvmtl_pre_redo_hook(pre->hold[i]);",
-                  "if (nvmtl_drop_log_due(n))", "rode a dropped command buffer", "nvmtl_pre_drop(pre);")
+                  "if (nvmtl_drop_log_due(n))",
+                  'nvlog("vk: after a GPU fault, %u managed uploads and %u zero fills rode a dropped command buffer',
+                  "nvmtl_pre_drop(pre);")
             and blk.count("nvmtl_pre_drop(pre);") == 1
             and "nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;" in mf
             and "nvmtl_pre_redo_hook" not in zf
@@ -264,6 +266,8 @@ run("a dropped prologue's managed uploads are marked again before its holds go; 
         ("a zero flush's hold walked as managed ranges", (VK, sub(OBJ, "[(NSArray *)e count] != 3) continue;", "[(NSArray *)e count] < 1) continue;"))),
         ("a zero flush's buffers asked for a count", (VK, sub(OBJ, "if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 3) continue;",
                                                           "if ([(NSArray *)e count] != 3) continue;"))),
+        # without "fault" the release rule (nvmtl_log_failure.h) keeps the line out of the system log
+        ("the line without the words a release build keeps", (sub(VK, 'nvlog("vk: after a GPU fault, %u managed', 'nvlog("vk: %u managed'), OBJ)),
     ])
 run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed first", chk_metal, (EV,), [
     ("the holds closed after the marks", (sub(EV, "    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error\n    NSDictionary *marks = cb->_busyMarks;\n",
@@ -319,6 +323,10 @@ RULE_CASES = [
     ("nvk-reason: X nvkmd_nvrm_queue.c:1: nvrm channel slot 3 rebuilt after a CHANNEL loss", 0),
     ("vk: vkCreateDevice -> -8", 1),
     ("vk: a channel rebuild dropped this command buffer; fault context follows", 1),
+    ("vk: after a GPU fault, 3 managed uploads and 1 zero fills rode a dropped command buffer (1 such so far in WindowServer) - "
+     "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held", 1),
+    ("vk: 3 managed uploads and 1 zero fills rode a dropped command buffer (1 such so far in WindowServer) - "
+     "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held", 0),
     ("vk: initialized successfully", 0),
     ('vk: NVK messages ON: its own warnings and errors land here as "nvk-reason:"', 0),
 ]
