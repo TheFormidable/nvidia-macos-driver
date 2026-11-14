@@ -196,8 +196,11 @@ number for the same settings with RT on. Flip the default only on that evidence.
 
 ## Checks that run without a card
 
+The first checks the model, the encode mapping, the ABI, the region judge and the layout judge; the second the machine
+code of the query region and of the lowering (it needs a built NVK tree); the third the profile opt-in:
+
 ```
-bash nvk/hwrt/run_host_tests.sh                         # model, encode mapping, ABI, region judge, layout judge
-bash nvk/hwrt/run_cpu_checks.sh <patched Mesa tree> build   # machine code of the query region and of the lowering (needs a built NVK tree)
-cc -Iplugin -o /tmp/tap tools/test_app_profile.c && /tmp/tap   # the profile opt-in
+bash nvk/hwrt/run_host_tests.sh
+bash nvk/hwrt/run_cpu_checks.sh <patched Mesa tree> build
+cc -Iplugin -o /tmp/tap tools/test_app_profile.c && /tmp/tap
 ```

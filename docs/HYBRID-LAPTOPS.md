@@ -257,13 +257,15 @@ machine takes.
 
 ## Switching it on and off
 
-The order to try every switch in, with what to send back, is in `docs/HYBRID-TESTER-PLAN.md`.
+The order to try every switch in, with what to send back, is in `docs/HYBRID-TESTER-PLAN.md`. `copy` sets
+`nmhybrid=1`, `import` sets `nmhybrid=2`, `off` removes `nmhybrid`, `status` shows it, and `copy --dry-run` prints the
+boot-args it would write:
 
-    sudo tools/hybrid_switch.sh copy      # nmhybrid=1
-    sudo tools/hybrid_switch.sh import    # nmhybrid=2
-    sudo tools/hybrid_switch.sh off       # removes nmhybrid
+    sudo tools/hybrid_switch.sh copy
+    sudo tools/hybrid_switch.sh import
+    sudo tools/hybrid_switch.sh off
     tools/hybrid_switch.sh status
-    tools/hybrid_switch.sh copy --dry-run # prints the boot-args it would write
+    tools/hybrid_switch.sh copy --dry-run
 
 Other boot-args are kept. Restart after changing it. The Intel panel driver (`NMIntelFB`, built by
 `kexts/NMIntelFB/build.sh`) is a separate opt-in kext and is not in the standard package; it declines to start unless the
@@ -275,10 +277,11 @@ the boot-arg gone the panel driver does not start and the firmware framebuffer o
 
 ## Check it
 
-After the restart:
+After the restart, the first command reads this boot's log and the live sysctls, the second saves the boot's hybrid
+lines in `hybrid.log` (the file to send us), and the third reads that file:
 
-    tools/hybrid_verify.sh                       # reads this boot's log and the live sysctls
-    log show --last boot --predicate 'eventMessage CONTAINS "hybrid:"' > hybrid.log   # to send us
+    tools/hybrid_verify.sh
+    log show --last boot --predicate 'eventMessage CONTAINS "hybrid:"' > hybrid.log
     tools/hybrid_verify.sh hybrid.log
 
 It prints one line per step and a verdict: `copy proven`, `import proven`, `not proven: <first missing step>` or `off`.

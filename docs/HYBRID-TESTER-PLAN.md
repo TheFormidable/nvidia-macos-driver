@@ -12,11 +12,12 @@ Background and the meaning of each switch: `docs/HYBRID-LAPTOPS.md`. All switche
   (OpenCore picker, reset NVRAM, or edit boot-args from another machine) and restart; the firmware framebuffer owns the panel again.
 - Set boot-args with `sudo nvram boot-args="..."`, keeping what is already there (`nvram boot-args` shows it). The helper
   `sudo tools/hybrid_switch.sh copy|import|off` only handles `nmhybrid=1`, `2` and removal; for `nmhybrid=3` and `4` write the boot-arg by hand.
-- Collect the log after every boot with:
+- Collect the log after every boot with the commands below: the second prints the verdict line, the third the last
+  start-up step the panel driver reached (also if the screen froze).
 
       log show --last boot --predicate 'eventMessage CONTAINS "hybrid:"' > hybrid-<step>.log
-      tools/hybrid_verify.sh hybrid-<step>.log           # prints the verdict line
-      sysctl debug.nmintelfb_step                        # the last start-up step the panel driver reached (also if the screen froze)
+      tools/hybrid_verify.sh hybrid-<step>.log
+      sysctl debug.nmintelfb_step
 
 - Always send: the machine model, the CPU and its Intel/AMD generation, the macOS version, `nvram boot-args`, and the hybrid log of the boot.
 - If the machine freezes at start-up, read `nvram nullmoth-ifb-step` after the next (switch removed) boot and send it.
