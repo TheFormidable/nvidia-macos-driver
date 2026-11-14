@@ -126,7 +126,7 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   GPU suspended, or after 360 s), and a stall seen while the GPU is suspended restarts the no-progress budget instead of
   rebuilding, at every sleep, for up to 360 s of awake time per sleep. A wait that stands still behind another channel
   that hangs without a fault (the graphics channel behind the upload channel, for example) has that channel rebuilt too,
-  within the same limits, where depending on timing the application could lose its device instead, with the line "the
+  within the same limits; before, depending on timing, the application could lose its device instead, with the line "the
   channel it waits on is still progressing". Way back: `NVK_CHANNEL_RECOVER=0` in `nvrm610.conf`. See
   [docs/CHANNEL-RECOVERY.md](docs/CHANNEL-RECOVERY.md).
 - After such a recovery the Metal command buffer whose work was dropped completes with an error instead of as success,
