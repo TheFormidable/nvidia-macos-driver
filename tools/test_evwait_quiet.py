@@ -59,6 +59,9 @@ CONTROLS = [
       ("    t->misses = 0;   /* a polling thread misses nothing", "    /* a polling thread misses nothing")]),
     ("invariant 6", "a MOVED answer outside a trial clears QUIET (a count remembered from before the quiet time)",
      [("    const int now = proof && (t->trial || why == NVRM_EVW_R_WOKEN);\n", "    const int now = proof;\n")]),
+    ("invariant 6, capped or aborted", "a capped or aborted answer whose count moved clears QUIET outside a trial",
+     [("    const int now = proof && (t->trial || why == NVRM_EVW_R_WOKEN);\n",
+       "    const int now = proof && (t->trial || why != NVRM_EVW_R_MOVED);\n")]),
 ]
 
 
