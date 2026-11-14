@@ -23,8 +23,8 @@
 #   --base-package FILE (NM_BASE_PACKAGE)  --force (NM_FORCE)  --config FILE (NM_CONFIG)
 # docs/BUILDING.md explains everything; docs/BUILDING.es.md has the quick start in Spanish.
 #
-# Written for the /bin/bash 3.2 of macOS and its BSD tools, and runs on Linux for doctor, fetch, test, env and a dry run
-# of any command but deps.
+# Written for the /bin/bash 3.2 of macOS and its BSD tools, and runs on Linux for doctor, fetch, test, env, clean,
+# help and a dry run of any command but deps.
 # It never calls sudo and never installs the driver.
 set -Eeu -o pipefail
 umask 022
@@ -861,7 +861,7 @@ doctor() {   # prints; sets D_MISSING
               else d_note "Intel: homebrew-core had no ready-made builds for Intel Macs of the formulas deps installs when it was read on 2026-11-13; with NM_TOOLS_FROM=homebrew deps has it compile each missing formula here (not timed); NM_TOOLS_FROM=source builds them in the working directory instead"; fi ;;
     esac
   else
-    d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env and a dry run of any command but deps work; building needs macOS with Xcode"
+    d_missing "a Mac: this is $(uname -s) $(uname -m). Here only doctor, fetch, test, env, clean, help and a dry run of any command but deps work; building needs macOS with Xcode"
   fi
   say "== checkout and working directory"
   check_paths
@@ -1651,7 +1651,7 @@ deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means sourc
   say "deps: everything required is present"
 }
 cmd_deps() {
-  is_mac || die "deps installs Mac tools, also in a dry run; this is $(uname -s). On this machine only doctor, fetch, test, env and a dry run of any command but deps work"
+  is_mac || die "deps installs Mac tools, also in a dry run; this is $(uname -s). On this machine only doctor, fetch, test, env, clean, help and a dry run of any command but deps work"
   find_tools
   local missing_xcode=0 f want=() llvmf nobrew=0
   xcode-select -p >/dev/null 2>&1 && xcodebuild -version >/dev/null 2>&1 || missing_xcode=1
@@ -2227,7 +2227,7 @@ write_build_info() {
 
 # ---------------------------------------------------------------------------------------------------------- build
 prepare_build() {   # what every build command needs before its first step
-  is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac with Xcode; this is $(uname -s). Here only doctor, fetch, test, env and a dry run of any command but deps work"
+  is_mac || [ "$NM_DRY_RUN" = 1 ] || die "building needs a Mac with Xcode; this is $(uname -s). Here only doctor, fetch, test, env, clean, help and a dry run of any command but deps work"
   find_tools
   if [ "$NM_DRY_RUN" = 0 ]; then make_tool_links; fi
   derive_paths

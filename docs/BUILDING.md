@@ -32,9 +32,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 >   [Requirements](#requirements)), and a build of this branch's commits after 3933ff6 on either Mac.
 >
 > `build.sh` is written for macOS's `/bin/bash` 3.2 and its BSD tools. On a system other than macOS only `doctor`,
-> `fetch`, `test`, `env` and a dry run of any command but `deps` work. A step can still stop on something neither the
-> stand-ins nor these two Macs showed (another Xcode or SDK, a formula name, a compiler warning). Run
-> `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report file to
+> `fetch`, `test`, `env`, `clean`, `help` and a dry run of any command but `deps` work. A step can still stop on
+> something neither the stand-ins nor these two Macs showed (another Xcode or SDK, a formula name, a compiler warning).
+> Run `./build.sh doctor` first, then `./build.sh`; when a step stops, the message names it and gives a report file to
 > attach to an issue (see [When a build fails](#when-a-build-fails)). A step that stops never leaves a half-built
 > result behind as finished, so after the fix the next run continues from that step.
 

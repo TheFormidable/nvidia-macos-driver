@@ -34,10 +34,10 @@ comandos y opciones y la solución de problemas.
 >   los dos Mac.
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
-> funcionan `doctor`, `fetch`, `test`, `env` y la prueba en seco de cualquier comando salvo `deps`. Un paso todavía
-> puede detenerse por algo que no mostraron ni los sustitutos ni estos dos Mac (otro Xcode u otro SDK, el nombre de
-> una fórmula, un aviso del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un paso se
-> detiene, el mensaje dice cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver
+> funcionan `doctor`, `fetch`, `test`, `env`, `clean`, `help` y la prueba en seco de cualquier comando salvo `deps`. Un
+> paso todavía puede detenerse por algo que no mostraron ni los sustitutos ni estos dos Mac (otro Xcode u otro SDK, el
+> nombre de una fórmula, un aviso del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un
+> paso se detiene, el mensaje dice cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver
 > [Cuando falla la compilación](#cuando-falla-la-compilación)). Un paso que falla nunca queda marcado como terminado,
 > así que, una vez corregido, la siguiente ejecución sigue desde ese paso.
 
