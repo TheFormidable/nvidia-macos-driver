@@ -176,13 +176,19 @@ class InstallTwice(Fixture):
 
     def test_record_outside_the_backups_is_not_used(self):
         self.install()
-        rec = self.root / 'Library/NullMoth/trial-backup'
-        other = self.root / 'Library/NullMoth/backup-x/../elsewhere'
-        (self.root / 'Library/NullMoth/elsewhere/NVRM.kext').mkdir(parents=True)
-        rec.write_text(rec.read_text().splitlines()[0] + '\n' + str(other) + '\n')
-        self.install()
-        self.assertIsNone(self.job())
-        self.assertTrue((self.root / 'Library/NullMoth/elsewhere/NVRM.kext').is_dir())
+        nm = self.root / 'Library/NullMoth'
+        rec = nm / 'trial-backup'
+        (nm / 'elsewhere/NVRM.kext').mkdir(parents=True)
+        (nm / 'backup-x').mkdir()   # the folder the ".." climbs out of exists, so that path does lead to an NVRM
+        (nm / 'backup-link').symlink_to(nm / 'elsewhere')
+        # one path for each rule: ".." in it, not a backup folder's name, a link; each leads to a folder with an NVRM
+        for other in (nm / 'backup-x/../elsewhere', nm / 'elsewhere', nm / 'backup-link'):
+            self.assertTrue(os.path.isdir(f'{other}/NVRM.kext'), other)
+            rec.write_text(rec.read_text().splitlines()[0] + '\n' + str(other) + '\n')
+            run = self.install()
+            self.assertIn('has not lit its display yet', run.line6b)   # the record was read: the install is on trial
+            self.assertIsNone(self.job(), other)
+        self.assertTrue((nm / 'elsewhere/NVRM.kext').is_dir())
 
     def test_last_lines_name_what_was_installed_before(self):
         # uninstall.sh restores nothing: the installer's last words say where the driver from before is kept
