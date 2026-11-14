@@ -283,6 +283,18 @@ static void scripted(void)
     round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
     T("control: QUIET set during the sleep, the sleep woken by an event: the flag is cleared, BACK once",
       fb == 0 && s.stats[NVRM_EVW_S_BACK] == 1);
+    /* the same window with a capped or an aborted answer whose count moved: it ends the thread's run of missed wakes and
+       takes its polling step, and the flag stays for the thread's next trial */
+    int late_ok = 1;
+    for (unsigned i = 0; i < sizeof cut / sizeof cut[0]; i++) {
+        memset(&s, 0, sizeof s); memset(&t, 0, sizeof t); t.seq_fd = -1; fb = 0;
+        s.pending = 1; s.fd = s.fd_second = 3; s.reason = cut[i]; s.count = 101; s.set_fb = &fb; s.set_to = NVRM_EVW_FB_QUIET;
+        nvrm_evw_remember(&t, 3, 100); t.misses = 5;
+        round1(&s, &t, NVRM_EVW_ADAPT, LONG_WAIT, &fb);
+        if (fb != NVRM_EVW_FB_QUIET || s.stats[NVRM_EVW_S_BACK] || t.misses != 0 || s.backoffs != 1) late_ok = 0;
+    }
+    T("invariant 6, capped or aborted: QUIET set during the call: such an answer whose count moved does not clear it either",
+      late_ok);
     s.set_fb = NULL;
 }
 
