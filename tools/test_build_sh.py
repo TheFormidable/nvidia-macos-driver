@@ -3002,6 +3002,21 @@ def host_proxy_problems(sb, script):
     return [] if r.stdout.strip() == want else [f"the build host's command saw {r.stdout.strip()!r}, not {want!r} ({r.stderr[-200:]})"]
 
 
+def host_sdk_problems(sb, script, sdk):
+    """the SDKROOT a step gets (step_env) reaches the commands the release scripts send through local_build_host.sh;
+    without one in the step, none is invented (an empty SDKROOT is not an SDK)"""
+    d = sb.dir / "hostlink-sdk"
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir()
+    os.symlink(script, d / "ssh")
+    env = {"HOME": str(sb.home), "PATH": "/usr/bin:/bin"}
+    if sdk is not None:
+        env["SDKROOT"] = sdk
+    r = subprocess.run([str(d / "ssh"), "nullmoth-local-build", 'echo "${SDKROOT-unset}"'], env=env, capture_output=True, text=True)
+    want = sdk if sdk else "unset"
+    return [] if r.stdout.strip() == want else [f"the build host's command saw SDKROOT={r.stdout.strip()!r}, not {want!r} ({r.stderr[-200:]})"]
+
+
 def arm_stepgit():
     sb = Sandbox("stepgit")
     rc, out = sb.run("fetch")
@@ -3036,6 +3051,14 @@ def arm_stepgit():
     assert t2 != t, "broken-script control: the proxy loop not found in local_build_host.sh"
     bad.write_text(t2)
     negative("a build host that drops the proxy variables", host_proxy_problems(sb, bad))
+    sdk = str(sb.dir / "sdk")
+    p = host_sdk_problems(sb, sb.co / "build/local_build_host.sh", sdk) + host_sdk_problems(sb, sb.co / "build/local_build_host.sh", None)
+    check("local_build_host.sh passes the step's SDKROOT to its command, and sets none when the step has none", not p, p)
+    t3 = t.replace('    [ -n "${SDKROOT:-}" ] && envs+=( "SDKROOT=$SDKROOT" )\n', '')
+    assert t3 != t, "broken-script control: the SDKROOT line not found in local_build_host.sh"
+    bad.write_text(t3)
+    negative("a build host that drops SDKROOT (the plugin, translator and nvencvt compiles then search /usr/local)",
+             host_sdk_problems(sb, bad, sdk))
 
 
 def arm_tamper():

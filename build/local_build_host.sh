@@ -5,8 +5,10 @@
 # own Mac: it links this file as ssh, rsync and scp in a folder it puts first on PATH and sets NULLMOTH_BUILD_HOST to
 # the name below. For that host only:
 #   ssh <host> <command>        runs <command> here with /bin/bash -c, in a login-like environment (env -i: HOME, USER,
-#                               LOGNAME, TMPDIR, LANG, PATH=$NM_LOCAL_HOST_PATH, and DEVELOPER_DIR / CARGO_NET_OFFLINE
-#                               when set), as ssh would on a build Mac; no ssh login or Remote Login is needed. Its
+#                               LOGNAME, TMPDIR, LANG, PATH=$NM_LOCAL_HOST_PATH, and DEVELOPER_DIR / SDKROOT /
+#                               CARGO_NET_OFFLINE / PYTHONDONTWRITEBYTECODE when set: SDKROOT is the macOS SDK
+#                               build.sh gives every step, which keeps /usr/local out of clang's and the linker's
+#                               searches), as ssh would on a build Mac; no ssh login or Remote Login is needed. Its
 #                               git reads no configuration of the tester's (GIT_CONFIG_GLOBAL=/dev/null,
 #                               GIT_CONFIG_NOSYSTEM=1), as every step of build.sh: build_nvencvt.sh's clone, fetch and
 #                               checkout of its header trees run no hooks, monitor or filters of theirs. The proxy
@@ -36,6 +38,7 @@ case "$me" in
            "LANG=${LANG:-en_US.UTF-8}" "PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 )
     [ -n "${DEVELOPER_DIR:-}" ] && envs+=( "DEVELOPER_DIR=$DEVELOPER_DIR" )
+    [ -n "${SDKROOT:-}" ] && envs+=( "SDKROOT=$SDKROOT" )
     [ -n "${CARGO_NET_OFFLINE:-}" ] && envs+=( "CARGO_NET_OFFLINE=$CARGO_NET_OFFLINE" )
     [ -n "${PYTHONDONTWRITEBYTECODE:-}" ] && envs+=( "PYTHONDONTWRITEBYTECODE=$PYTHONDONTWRITEBYTECODE" )
     for v in http_proxy https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
