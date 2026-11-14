@@ -736,7 +736,10 @@ step "6c. counting a start as good once the desktop is up"
 # 92 of them 12 or more in a row, on 2.7.2 too). The head lit, so the kernel had already cleared its count, and a
 # WindowServer was running at both of this job's looks, so the start was called good. Now "stayed up" means the SAME
 # WindowServer for the whole wait with no new WindowServer report, and a WindowServer that keeps dying while the
-# driver drives the display turns the driver off for the next boot, exactly like the kernel's guard.
+# driver drives the display turns the driver off for the next boot, exactly like the kernel's guard. The driver drives
+# it when its accelerator is armed (debug.nvaccelfb), and also when the accelerator refused this macOS's classes (it
+# then registers no debug.nvaccelfb, while the framebuffer still lights the display) and every display hangs off the
+# card NVRM runs: a loop with a display on another GPU is not this driver's.
 BG=/Library/NullMoth/bootguard.sh; BGP=/Library/LaunchDaemons/com.nullmoth.bootguard.plist
 launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
 mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the boot-guard job's folders"
@@ -809,7 +812,18 @@ while [ "$n" -lt 48 ]; do
     [ -n "$p2" ] && case " $pids " in *" $p2 "*) ;; *) pids="$pids $p2";; esac
     set -- $pids
     # Only a display this driver drives makes WindowServer's Metal device ours: debug.nvaccelfb reads 1 once armed.
-    if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$(sysctl -n debug.nvaccelfb 2>/dev/null)" = 1 ]; then
+    # An accelerator that refused this macOS's classes registers no debug.nvaccelfb, yet the framebuffer lights the
+    # display and WindowServer can die on it just the same. Then the loop is this driver's only when every display is
+    # on the card NVRM drives (the PCI device that carries nvrm-claimed): a desktop on another GPU keeps the driver.
+    ours=0
+    if [ "$(sysctl -n debug.nvaccelfb 2>/dev/null)" = 1 ]; then ours=1
+    elif ioreg -l -w0 2>/dev/null | grep -q '"nvaccel-layout" = "refused'; then
+      card=$(ioreg -r -k nvrm-claimed -w0 2>/dev/null | ids); card=" $(echo $card) "
+      all=$(ioreg -r -c IODisplayConnect -w0 2>/dev/null | ids)
+      [ -z "$all" ] || ours=1
+      for d in $all; do case "$card" in *" $d "*) ;; *) ours=0;; esac; done
+    fi
+    if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$ours" = 1 ]; then
       prev=$(nvram $V:nullmoth-ws-loop 2>/dev/null | cut -f2)
       nvram $V:nullmoth-nv-starts=%02 2>/dev/null
       nvram -d $V:nullmoth-nv-ok 2>/dev/null

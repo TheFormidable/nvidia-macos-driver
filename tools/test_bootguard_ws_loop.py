@@ -17,7 +17,11 @@ a start good; the control is the job without that look.
 Nor is a desktop with no NVIDIA driver running (no kext loaded yet, or the driver off), or one where NVRM claimed the
 card and nothing lit: the job ends the trial (nullmoth-nv-ok) only when a card carries nvrm-claimed and its
 framebuffer reported the display path up (debug.nvrmfb_guard_cleared) or a display hangs off another GPU. The controls
-are the job with the two lines it had before that rule."""
+are the job with the two lines it had before that rule.
+
+A WindowServer that keeps dying is this driver's loop when its accelerator is armed (debug.nvaccelfb), or when the
+accelerator refused this macOS's classes and every display hangs off the card NVRM claimed; the control is the job
+with the armed-only rule."""
 import os
 import pathlib
 import re
@@ -299,6 +303,32 @@ for c in "bce":
 p, log, calls = run(job, pids=[777], **dict(CASES["e"], displays=ON_CARD.replace("0x1000004f8", "0x1000004f80")))
 arm("  a display whose id only begins like the card's is another GPU's: the start counts as good",
     "counts as good" in log and NVOK in calls, log + calls)
+
+# an accelerator that refused this macOS registers no debug.nvaccelfb, but NVRMFB lights the display: a WindowServer
+# that keeps dying there is this driver's loop when every display hangs off the card NVRM drives, and not when a
+# display is on another GPU or there is none
+REF = '    | |   "nvaccel-layout" = "refused: IOAccelDevice2 is 0x90 bytes in this macOS"'
+RULE = '    if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$ours" = 1 ]; then\n'
+OLD_LOOP = '    if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$(sysctl -n debug.nvaccelfb 2>/dev/null)" = 1 ]; then\n'
+p, log, calls = run(job, pids=loop, crashes=99, armed=None, registry=REF + "\n" + CLAIMED, card=PCI + "\n" + ON_CARD,
+                    displays=ON_CARD)
+arm("a loop on the only display, with the accelerator refused, turns the driver off and restarts once",
+    "nullmoth-nv-starts=%02" in calls and "shutdown -r now" in calls, log + calls)
+for what, card, disp in (("on another GPU only", PCI, ELSEWHERE), ("on both GPUs", PCI + "\n" + ON_CARD,
+                                                                     ON_CARD + "\n" + ELSEWHERE), ("nowhere", PCI, "")):
+    p, log, calls = run(job, pids=loop, crashes=99, armed=None, registry=REF + "\n" + CLAIMED, card=card, displays=disp)
+    arm(f"a loop with the accelerator refused and a display {what} is left alone",
+        "nv-starts=%02" not in calls and "shutdown" not in calls, log + calls)
+p, log, calls = run(job, pids=loop, crashes=99, armed=None, registry=REF, card="", displays=ON_CARD)
+arm("  and so is one with no card claimed (the driver off: Apple's or the firmware's framebuffer draws)",
+    "nv-starts=%02" not in calls and "shutdown" not in calls, log + calls)
+if job.count(RULE) == 1:
+    p, log, calls = run(job.replace(RULE, OLD_LOOP), pids=loop, crashes=99, armed=None, registry=REF + "\n" + CLAIMED,
+                        card=PCI + "\n" + ON_CARD, displays=ON_CARD)
+    arm("control: with the armed-only rule the same loop is left alone (what left a black screen at every start)",
+        "nv-starts=%02" not in calls and "four minutes" in log, log + calls)
+else:
+    arm("control: the job's loop rule can be found", False)
 
 # a job whose PATH line moved, or that names nvram by its full path, is not run at all
 for what, bad in (("its PATH line changed", job.replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=/bin:/usr/bin:/usr/sbin:/sbin")),
