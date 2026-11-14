@@ -516,7 +516,7 @@ bootarg	-nvrmnobootscreen	recovery	unset	2.9	-	turns one part of the driver off 
 bootarg	-nvrmnodpms	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	-nvrmnoflip	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	-nvrmnogamma	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
-bootarg	-nvrmnogo	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	-nvrmnogo	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start: the driver idles until `nvrmctl go <pass>`. Where no other GPU has a display, two starts in a row with it that never run `nvrmctl go` turn the driver off at the next start (the boot-guard job keeps the count of a start in which NVRM claimed the card and nothing was lit)
 bootarg	-nvrmnopm	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	-nvrmnoshutdown	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	-nvrmoldwaits	escape	on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9)	3.0	3.2	Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times.
