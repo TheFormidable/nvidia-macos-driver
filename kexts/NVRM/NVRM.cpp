@@ -1485,7 +1485,7 @@ void NVRM::autoGo(void *p0, wait_result_t)
                 "Boot-arg nvlayout=0 starts it anyway.", text);
             s->fPCI->setProperty("nvrm-layout", "declined late (before go(2)): the framebuffer refused this macOS's classes (nvrmfb-layout); nvlayout=0 starts the card anyway");
             s->setProperty("nvrm-autogo", "not started: framebuffer layout refused");
-            s->releaseBootHold("framebuffer layout refused - the card stays as the firmware left it");
+            s->releaseBootHold("framebuffer layout refused - go(2) not run; BAR1 may already have been moved");
             nvrmBootTiming(s);
             s->release(); thread_terminate(current_thread()); return;
         }
