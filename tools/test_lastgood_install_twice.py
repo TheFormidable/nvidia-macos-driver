@@ -85,18 +85,29 @@ class Fixture(m.Install):
         osb = re.search(r"^OSB='([^']*)'", text, re.M).group(1)
         return text, bk, osb
 
+    def unsafe(self, text):
+        """Why the job must not run here (this machine's nvram and shutdown would answer), or None"""
+        root = str(self.root)
+        # it names no system folder outside the fixture's root
+        for path in re.findall(r'(\S*)(/(?:Library|System|Users)/)', text):
+            if not path[0].endswith(root):
+                return f'it names {"".join(path)}'
+        # its PATH line is the one replaced here, and nothing after it reaches past the stand-ins: no second PATH,
+        # no `command -p`, no program named by its full path
+        if text.count('\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\n') != 1:
+            return 'its PATH line is not the one replaced here'
+        rest = text.split('\n', 1)[1].replace('\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\n', '\n', 1)
+        m = re.search(r'PATH=|\bcommand\s+-[A-Za-z]*p|(?:^|[^\w.-])/(?:usr/)?s?bin/\w+', rest, re.M)
+        return f'it reaches past the stand-ins: {m.group(0).strip()}' if m else None
+
     def dark_twice(self):
         """The next start after two that never lit the display: the driver is off and the job runs."""
         text = self.job()[0]
-        root = str(self.root)
-        # the job must name no system folder outside the fixture's root before it runs here
-        for path in re.findall(r'(\S*)(/(?:Library|System|Users)/)', text):
-            self.assertTrue(path[0].endswith(root), path)
+        why = self.unsafe(text)
+        self.assertIsNone(why, why)
         self.set_nvram(**{'nullmoth-nv-starts': '%02'})
         job = self.root / 'job.sh'
         mine = f'PATH={self.bin}:/usr/bin:/bin:/usr/sbin:/sbin'
-        # nor is it run when its PATH line is not the one replaced here: this machine's nvram and shutdown would answer
-        self.assertEqual(text.count('\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\n'), 1)
         job.write_text(text.replace('PATH=/usr/bin:/bin:/usr/sbin:/sbin', mine, 1))
         # JOB_BASH: the shell the job runs under (macOS runs it with bash 3.2)
         j = subprocess.run([os.environ.get('JOB_BASH', '/bin/bash'), str(job)], env=self.env, capture_output=True,
@@ -122,6 +133,19 @@ class InstallTwice(Fixture):
         j, log = self.dark_twice()
         self.assertIn('restoring the previous driver from ' + first.bk, log)
         self.assertEqual(self.installed(), 'old-NVRM', log + j.stderr)
+
+    def test_control_a_job_that_would_reach_this_machine_is_not_run(self):
+        self.install()
+        text = self.job()[0]
+        self.assertIsNone(self.unsafe(text))
+        for old, new in (('\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\n', '\nPATH=/bin:/usr/bin:/usr/sbin:/sbin\n'),
+                         ('\nshutdown -r now', '\n/sbin/shutdown -r now'),
+                         ("\nBK='", "\nPATH=/sbin:$PATH; BK='"),
+                         ('\nshutdown -r now', '\ncommand -p shutdown -r now'),
+                         ('LOG=' + str(self.root) + '/Library/', 'LOG=/Library/')):
+            bad = text.replace(old, new, 1)
+            self.assertNotEqual(bad, text, old)
+            self.assertIsNotNone(self.unsafe(bad), new)
 
     def test_three_runs_keep_the_first_backup(self):
         first = self.install()
