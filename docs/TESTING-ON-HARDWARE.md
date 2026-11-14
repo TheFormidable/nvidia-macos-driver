@@ -425,6 +425,7 @@ restart).
 | Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
 | Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | RTX 50 H.264 decode in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
+| 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
 | Upstream compiler fixes in NVK | `NVK_SKIP_PATCHES="<patch names>"` | building from source |
 
 CHANGELOG.md, "The ways back", and SWITCHES.md say what each one restores in full.

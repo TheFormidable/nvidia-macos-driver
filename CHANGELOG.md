@@ -30,8 +30,13 @@ and in [docs/SWITCHES.md](docs/SWITCHES.md), and are there to tell whether a new
 left set. Several default-on changes have no switch of their own: the interrupt path's closing at sleep, shutdown and
 stop; the adapter-teardown order and the idle power-down hold; the per-GPU interrupt mark and the real CPU count; the
 unbounded kernel-mapping table; the nano timers apart from their cancel wait; the event connection's close; the
-plugin's fence clock; and the kernel extensions staying loaded once started. The way back from these is to reinstall
-2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
+utilization sampler's pause after a slow reading; the framebuffer's scanout floor on a BAR1 of 512 MB or more, its
+derived refresh rates checked with NVKMS, its owed connect interrupt and its keeping of an override's
+scale-resolutions; the hybrid panel framebuffers' start order; NVK's uncached command and upload stream; the plugin's
+fence clock, its refusal of a copy into a multisample image, its kept visible-link answers, its kept grid-only scans,
+its one VRAM mark per surface plane per commit, its reading of the macOS version and its keeping of a device it
+refuses before Metal's own init; and the kernel extensions staying loaded once started. The way back from these is to
+reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
 
 ### Fixes and changes
 
@@ -96,6 +101,24 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   have in the running macOS (`nvrmfb-layout-vtables`); that is a report and never a reason to refuse. None of the
   three checks has run on a Mac yet, and the sizes of these classes in macOS 26.7 were not measured: each check
   decides when its kext starts. Way back for all three checks: boot argument `nvlayout=0`.
+- WindowServer marks each surface plane as newest in video memory once per commit, not once for every part of the
+  command buffer and every texture that writes it. Each mark is a call into the accelerator that takes its lock, and a
+  video playing in a window made many of them per frame.
+- A monitor that sends a placeholder 1920x1080 identification while it is still waking (after some warm restarts) and
+  its real one a few seconds later gets its own resolutions, up to a 3840x2160 desktop, on a card whose BAR1 is 512 MB
+  or more: there the framebuffer reserves the memory a display scans out of with a floor of a 3840x2160 desktop at
+  start, and a mode list that arrives later is measured against the memory really allocated. Before, the reservation
+  followed the first identification and the monitor stayed a 1920x1080 television until a cold start. Below 512 MB of
+  BAR1 the floor is not applied, because there it would take a large part of the accelerator's surface budget; without
+  `nvfbhidpi` each lit head on a larger BAR1 reserves about 24 MB more video memory for a 1920x1080 monitor.
+- Refresh rates derived from a panel mode of 240 Hz or more (its half and its quarter) are offered only when NVKMS
+  accepts their timing; a refused one is logged and left out. Before, a panel that takes only its own timings showed
+  the rate as selected and stayed at the previous one.
+- A display connected after start-up no longer stays dark when its connect interrupt comes due before macOS has
+  registered the handler for it: the interrupt is kept owed and scheduled again 100 ms after the handler is
+  registered.
+- A display override's own HiDPI sizes (its scale-resolutions) are kept until the display is rotated: the framebuffer
+  takes back only the scaled sizes it offered itself for a rotated display.
 
 #### Applications and games
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
@@ -171,6 +194,24 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   2.9 kept them behind `NVK_EXTRA_PATCHES=nvk-upstream-nak`, a build option that did not build. Shaders are compiled
   again once after the update. When building from source, `NVK_SKIP_PATCHES` leaves one of the three patches out to
   find the cause of a rendering fault (see [docs/NVK-BASE-AND-HEADERS.md](docs/NVK-BASE-AND-HEADERS.md)).
+- A copy from a buffer or from host memory into a multisample image is refused before it reaches Vulkan, and the first
+  eight are named in the log: it is not valid Vulkan, and the copy engine raises an error for it that the GPU firmware
+  may not recover from.
+- System Settings > Displays could hang for seconds when it opened: the translator parsed a function's whole shader
+  text again each time newFunctionWithName:constantValues: asked whether its visible functions must be linked first.
+  The plugin now keeps the translator's definite answer per shader text; an answer read from the translator's error
+  text is never kept.
+- Programs built with an SDK older than macOS 11, which the kernel tells the system version 10.16, are no longer
+  refused the NVIDIA device on macOS 15 and 26: the plugin then reads the version from kern.osrelease. A device the
+  plugin refuses before Metal's own initialisation (the version check, or another card under `nvmultigpu=1`) no
+  longer crashes the program: the uninitialised object is kept instead of being freed into Metal's dealloc.
+- NVK writes its command and upload stream into plain system memory instead of memory the GPU caches. A small push
+  written behind the previous one in the same cache line could be fetched by the GPU as the line was before the
+  write, and the channel stopped with an invalid pushbuffer entry (Xid 32). On 2.9 this could take the GPU from a
+  process at login (a transparent Dock, missing icons, a lock screen that crashed in a loop); with this release's
+  channel recovery the same fault rebuilds the channel and drops the submission that was running (on the upload
+  channel that work is replayed, and a second fault there ends the device). The command pool's own memory is
+  unchanged and still follows `NVK_CMDPOOL_GPU_UNCACHED`.
 
 #### Video
 - RTX 50: H.264 video in Safari, QuickTime and FaceTime (green picture). The decoder from the vendored codec library is
@@ -185,6 +226,15 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   the symptom.
 - The codec library's build compares the NVIDIA structures it uses with the kernel module's version and stops on a
   difference.
+- The plugin keeps the result of a compute kernel's grid-only scan per library text and kernel name, so a pipeline
+  built for each converted frame (VideoToolbox's pixel transfer, a camera preview) no longer scans the whole module
+  text again.
+- A camera preview that stayed black: textures in the packed 4:2:2 video formats (BGRG422, GBGR422), in which
+  CoreVideo hands camera frames to Metal, are made by default, as Apple's drivers make them. A camera frame whose rows
+  would end past its surface's memory is skipped with a log line instead of being read, and before a frame is read the
+  plugin waits, for a bounded time as for other IOSurface textures, for another process's GPU write of it or for
+  WindowServer's. Way back: `NVMTL_YUV422=0` in `nvrm610.conf` (4:2:2 textures are refused, as in 2.9). Not yet
+  confirmed on a card.
 
 #### Kernel (NVRM)
 - The RM's background work runs on one worker per GPU, in order, as on Linux, instead of one thread per item.
@@ -265,6 +315,18 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
 - A process that fails channel registrations of the surface fence in a loop cannot flood the system log: only the
   first 8 failures since boot reach it; later ones go to the debug output, and `debug.nvrm_fence_map_fail` and
   `debug.nvrm_fence_map_mismatch` count them all.
+- A GPU utilization reading that takes longer than 500 ms pauses the once-a-second sampler for 20 s, and three such
+  readings in a row stop it for the rest of the boot; each slow reading is logged with its duration. The reading holds
+  the RM's locks while it waits for the firmware, and a firmware that answered slowly could keep other processes,
+  WindowServer and the shutdown waiting on them every second. The time includes the wait for those locks, so one
+  reading held up by a mode set or a channel recovery costs 20 s of GPU usage statistics, not the rest of the boot; a
+  fast reading, answered or failed, starts the count again.
+- Hybrid laptop panels (NMIntelFB, NMGopFB; `nmhybrid=1` or `2`): each framebuffer sets its dependent ID and index
+  before IOFramebuffer::start, as NVRMFB does, so it joins the shared controller at start and the first power change
+  no longer meets a missing controller (a page fault at boot), and the accelerator finds the panel's index 4 when the
+  panel publishes. A panel surface that cannot be mapped leaves the panel to the firmware framebuffer, and a failed
+  IOFramebuffer::start of NMIntelFB undoes its timers, its display-firmware target and its backlight service through
+  the same routine stop() uses.
 
 #### Installing and the way back
 - The installer's fallback job (it puts the earlier driver back when the new one cannot start) copies the earlier
@@ -292,6 +354,15 @@ plugin's fence clock; and the kernel extensions staying loaded once started. The
   again.
 - A rehearsal (`sudo env CHECK=1 ./install.sh`) that stops in step 3 no longer leaves a `/var/tmp/nullmoth.XXXX` folder
   with a copy of every third-party kext behind.
+- The uninstaller also removes the hybrid laptop panel drivers (NMIntelFB, its virtual test build NMIntelFBVirtual,
+  and NMGopFB) with the rest of the driver. Before, it took one left in `/Library/Extensions` for another product's
+  kext and stopped ("the removal collection still lists the NVIDIA driver or selector") before changing anything, so
+  the driver could not be removed from a hybrid laptop that had one.
+- Another com.nullmoth kext that the uninstaller does not remove (NMHDA, NMKbdBacklight, NMDRM, NMSMN) left in
+  `/Library/Extensions` no longer stops the removal with "the removal collection still lists the NVIDIA driver or
+  selector": the two checks of the rebuilt collection look for the identifiers of the kexts the uninstaller removes,
+  each as a whole name, and a kext of this driver still stops it. The AMD/Intel GPU driver's accelerator (NMXAccel)
+  still stops it, now with its own reason: it uses this driver's Metal plugin, which the removal takes away.
 
 #### Switches and reports
 - `sysctl debug.nvrm_switches` lists the driver boot arguments a Mac has set beside the install line and marks with a
@@ -333,6 +404,7 @@ has proven itself, renewed with a reason otherwise.
 | Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |
 | Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | H.264 decode on RTX 50 in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
+| 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
 
 `sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.
 
