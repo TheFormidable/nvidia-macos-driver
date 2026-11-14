@@ -919,4 +919,15 @@ if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
 else
   echo "If macOS asks, allow the extensions in System Settings > Privacy & Security, then reboot once more."
 fi
-echo "Undo: sudo ./uninstall.sh $BK"
+# uninstall.sh only removes the driver; it restores nothing. Say where the driver from before is kept, if anywhere.
+if [ -n "$FB" ] && [ "$FBKEPT" = 1 ]; then
+  echo "What was installed before the trial is kept in $FB (this run's backup $BK holds the driver on trial). To go back"
+  echo "to it, install its own package again; sudo ./uninstall.sh removes the driver."
+elif [ -n "$FB" ]; then
+  echo "What was installed before is kept in $FB. To go back to it, install its own package again; sudo ./uninstall.sh"
+  echo "removes the driver."
+elif [ "$FBKEPT" = 1 ]; then
+  echo "No driver from before the trial is kept (see step 6b); sudo ./uninstall.sh removes the driver."
+else
+  echo "Nothing was installed before; sudo ./uninstall.sh removes the driver."
+fi
