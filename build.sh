@@ -2463,8 +2463,11 @@ cmd_clean() {
 install_hint() {
   say "Nothing was installed. To install what was built (needs your password; read README.md, \"Install — by hand\", first):"
   say "  cd $(q "$PKGDIR/pkgroot" | tilde)"
-  say "  sudo env CHECK=1 ./install.sh        # a dry run: checks the package and this Mac, changes nothing"
+  # the commands bare and the explanation after them, not indented: macOS's interactive zsh takes a "#" for a word,
+  # and a pasted comment would reach install.sh as arguments
+  say "  sudo env CHECK=1 ./install.sh"
   say "  sudo ./install.sh && sudo shutdown -r now"
+  say "The first install.sh line is a dry run: it checks the package and this Mac and changes nothing."
   say "Going back: docs/BUILDING.md, \"Installing the result and going back\"."
 }
 summary() {
