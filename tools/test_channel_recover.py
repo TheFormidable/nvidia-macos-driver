@@ -15,7 +15,9 @@ tools/test_shared_headers.py. This test reads the patch and holds what only NVK'
                  nvrm_gsub_wait's run on the awake clock and restart when a channel was rebuilt; both still sleep
                  through nvkmd_nvrm_wait_block(_until); the clock is CLOCK_UPTIME_RAW on macOS
   the locks      the lock rules are written where the context mutexes are declared; every op takes the mutex first
-                 and every return after that goes through nvrm_rec_leave; the four blocking waits release it
+                 and every return after that goes through nvrm_rec_leave; the four blocking waits release it; the
+                 owner makes no RM call with it held (the boost lease before nvrm_rec_enter, the reap after
+                 nvrm_rec_leave; the submission reaps only with recovery off)
   the rebuild    the new channel is built before the old one is freed; a failed free of the old channel gives up
                  (FAIL(FREE)) and changes nothing; the GPFIFO the plan fills is the new channel's own; the prologue
                  buffer is new for every rebuild; the adopt step sets errBase, then calls the fence's rebind without
@@ -232,7 +234,8 @@ def op_balanced(b):
     rest = rest[:end] if end >= 0 else rest
     rets = [x.start() for x in re.finditer(r"\breturn\b", rest)]
     leave = rest.rfind("nvrm_rec_leave(ctx);")
-    return len(rets) == 1 and leave >= 0 and leave < rets[0] and rest[leave:rets[0]].count(";") == 1
+    tail = rest[leave:rets[0]].replace("nvrm_rec_op_end(ctx);", "") if rets else ""
+    return len(rets) == 1 and leave >= 0 and leave < rets[0] and tail.count(";") == 1
 
 
 def chk_ops(p):
@@ -241,6 +244,30 @@ def chk_ops(p):
     return (all(op_balanced(func(p, CTX_C, op)) for op in OPS)
             and order(sr, "nvrm_rec_enter(ctx, NULL)", "return;", "nvrm_rec_leave(ctx);")
             and ".set_reinit = nvkmd_nvrm_set_reinit," in src)
+
+
+FLUSHING_OPS = ["nvkmd_nvrm_exec_ctx_flush", "nvkmd_nvrm_exec_ctx_signal", "nvkmd_nvrm_exec_ctx_sync"]
+
+
+def chk_no_rm_under_mutex(p):
+    """The owner makes no RM call with the context mutex held: the flushing ops renew the boost lease before
+    nvrm_rec_enter and reap after nvrm_rec_leave; the flush itself does neither; the submission reaps only when it
+    holds no context mutex (recovery off: 2.9's place)."""
+    rc = newfile(p, REC_C)
+    src = newtext(p, CTX_C)
+    i = src.find("/* The flush, with the context mutex held by the caller")
+    j = src.find("NvNotification *submitTokenNotifier", i)
+    held = src[i:j] if 0 <= i < j else ""
+    sub = func(p, CTX_C, "nvrm_gsub_submit")
+    beg, end = (func(p, CTX_C, f) for f in ("nvrm_rec_op_begin", "nvrm_rec_op_end"))
+    return (all(order(func(p, CTX_C, op), "nvrm_rec_op_begin(ctx);", "nvrm_rec_enter(ctx, log_obj)",
+                      "nvrm_rec_leave(ctx);", "nvrm_rec_op_end(ctx);") for op in FLUSHING_OPS)
+            and "nvkmd_nvrm_boost_burst(" in beg and "nvkmd_nvrm_reap_deferred();" in end
+            and "nvrm_rec_enabled()" in end
+            and bool(held) and "nvkmd_nvrm_boost_burst(" not in held and "nvkmd_nvrm_reap_deferred" not in held
+            and "   if (!ctx->recHeld)\n      nvkmd_nvrm_reap_deferred();" in sub
+            and sub.count("nvkmd_nvrm_reap_deferred") == 1
+            and "The owner makes no RM call and\n *     no escape while it holds the mutex" in rc)
 
 
 def chk_blocking_waits(p):
@@ -409,6 +436,12 @@ CHECKS = [
     ("the locks: every op takes the mutex first and leaves through nvrm_rec_leave", chk_ops,
      "+   r = nvrm_exec_ctx_flush_held(ctx, log_obj);\n    if (r == VK_SUCCESS && ctx->gsub)",
      "+   r = nvrm_exec_ctx_flush_held(ctx, log_obj);\n+   if (r != VK_SUCCESS)\n+      return r;\n    if (r == VK_SUCCESS && ctx->gsub)"),
+    ("the locks: the owner makes no RM call with the context mutex held (boost before, reap after)",
+     chk_no_rm_under_mutex,
+     "+   nvrm_rec_op_begin(ctx);\n+   VkResult r = nvrm_rec_enter(ctx, log_obj);\n+   if (r != VK_SUCCESS)\n+      return r;\n \n-   VkResult r = nvkmd_nvrm_exec_ctx_flush(",
+     "+   VkResult r = nvrm_rec_enter(ctx, log_obj);\n+   if (r != VK_SUCCESS)\n+      return r;\n+   nvrm_rec_op_begin(ctx);\n \n-   VkResult r = nvkmd_nvrm_exec_ctx_flush("),
+    ("the locks: the submission reaps only without a context mutex", chk_no_rm_under_mutex,
+     "+   if (!ctx->recHeld)\n+      nvkmd_nvrm_reap_deferred();", "+   if (1)\n+      nvkmd_nvrm_reap_deferred();"),
     ("the locks: the four blocking waits release the mutex", chk_blocking_waits,
      "r = nvrm_gsub_wait_seq_owner(ctx, ctx->slotSeq[next], log_obj);",
      "r = nvrm_gsub_wait_seq(ctx, ctx->slotSeq[next], log_obj);"),

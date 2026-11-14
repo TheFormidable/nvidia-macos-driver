@@ -137,7 +137,10 @@ first one of each sleep (a channel that moved since an earlier sleep starts a ne
 wake watchdogs end any sleep that takes longer); a GPU that stays suspended longer (a resume that never comes) gets
 the usual sequence, which waits for the resume inside RM, as it does with an older kext, which cannot give that
 answer in time. No escape is made while a channel's lock is held by the doorbell ring, so a ring during a sleep holds
-up nobody. What a tester sees after a sleep: nothing; `debug.nvrm_chan_recovered` and
+up nobody. Nor by the thread that submits to the channel: it renews the clock-boost lease before taking the lock and
+frees memory after letting it go, so a submission that meets the GPU suspended waits for the resume without the lock,
+and a wait that reaches its budget meanwhile still gets the "asleep" answer. What a tester sees after a sleep:
+nothing; `debug.nvrm_chan_recovered` and
 `debug.nvrm_chan_gave_up` do not move (`debug.nvrm_chan_kicks` may), and with `NVK_DIAG=1` a process prints
 `nvrm: channel slot N stands still while the GPU is suspended for a sleep or wake - waiting again`. Application
 timeouts (`vkWaitForFences`) are still measured on the ordinary clock. With `NVK_CHANNEL_RECOVER=0` the budget is on
