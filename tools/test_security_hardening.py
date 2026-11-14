@@ -109,8 +109,8 @@ check('negative control: a close that frees the list is caught',
       not frees_in_free_only(nvrm.replace('        if (fMapList) fMapList->context.valid = NV_FALSE;\n',
                                           '        if (fMapList) fMapList->context.valid = NV_FALSE;\n        nvMapListFree(&fMapList);\n', 1)))
 
-# A card range mapped into a process must at least land inside one of this card's bars, so a caller
-# cannot hand over an arbitrary physical address and have it mapped.
+# A card range mapped into a process must at least land inside a window of a started card
+# (nv_pm_is_gpu), so a caller cannot hand over an arbitrary physical address and have it mapped.
 # This arm used to require the framebuffer bar ALONE. That shipped to the test Mac and WindowServer
 # crash-looped: CoreDisplay maps phys 0x80bb0000 out of bar0 and aborted in
 # CoreDisplay_CreateDisplayForCGXDisplayDevice when it was refused. The bar bound is the real check;
