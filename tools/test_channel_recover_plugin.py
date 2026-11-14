@@ -17,7 +17,8 @@ This test holds what only the plugin's glue in plugin/nvmtl_vk.c and plugin/NVMT
                  loss line names NVK's kind of loss when the statistics export exists
   the clock      the fence wait of nvmtl_vk_submit_finish is timed on awake time (CLOCK_UPTIME_RAW)
   the uploads    an async texture upload whose copy was dropped is made again from its staging buffer, but only
-                 while the image is still in the layout that copy left (nothing used it for writing since), and
+                 while the image is still in the layout that copy left (a render pass, clear or storage use since
+                 leaves another one; a copy, blit or upload into it leaves the same one and is not seen), and
                  never for an image that is being freed; the managed-buffer uploads of a dropped pre-submit prologue
                  are marked dirty again (through the managed flush's own hook, before the prologue's holds are
                  released), its zero fills are not made again, and the drop is logged
