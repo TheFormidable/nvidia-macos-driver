@@ -180,6 +180,11 @@ n=$(cat "$T/sleep.n" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$T/sleep.n
 [ ! -f "$T/registry.$n" ] || cat "$T/registry.$n" >> "$T/ioreg.txt"
 [ ! -f "$T/nvram.$n" ] || . "$T/nvram.$n"
 exit 0''',
+    # this boot's name: the file the test wrote; no file, no answer. Any other question is refused.
+    "sysctl": r'''#!/bin/bash
+[ "$*" = "-n kern.bootsessionuuid" ] || { echo "sysctl $*" >> "$T/calls"; exit 1; }
+[ -f "$T/boot.txt" ] || exit 1
+cat "$T/boot.txt"''',
     "shutdown": r'''#!/bin/bash
 echo "shutdown $*" >> "$T/calls"''',
     # the running macOS build: the file the test wrote; no file, no answer (the tool failed). osbuild.fail holds how
@@ -238,7 +243,8 @@ class Result:
 
 
 def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, keep=False, osbuild=INSTALLER["BUILD"],
-        osbuild_fail=0, fbs="", displays="", console="root", card="", kc_fails=None):
+        osbuild_fail=0, fbs="", displays="", console="root", card="", kc_fails=None, boot="BOOT-THIS", seen=None,
+        seen_dir=False):
     """One start of the Mac with the job installed. registry is what ioreg prints at the first look and nv the NVRAM
     variables at the job's start; later[n] is added to the registry during the n-th wait, and nv_later[n] is a shell
     line that changes the fake NVRAM during it. osbuild is the macOS build that runs (None: it cannot be read) and
@@ -313,14 +319,21 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
             (t / "card.txt").write_text(card)
         if console is not None:
             (t / "console.txt").write_text(console + "\n")
+        if boot is not None:
+            (t / "boot.txt").write_text(boot + "\n")
+        if seen is not None:
+            (lib / "NullMoth/lastgood.seen").write_text(seen + "\n")
+        if seen_dir:   # a note that cannot be written
+            (lib / "NullMoth/lastgood.seen").mkdir()
         for name, value in (nv or {}).items():
             (t / f"nv.{name}").write_text(value + "\n")
         for n, more in (later or {}).items():
             (t / f"registry.{n}").write_text(more)
         for n, line in (nv_later or {}).items():
             (t / f"nvram.{n}").write_text(line + "\n")
-        p = subprocess.run(["/bin/bash", str(script)], env={"T": str(t), "PATH": "/usr/bin:/bin"}, capture_output=True,
-                           text=True, timeout=300)
+        # JOB_BASH: the shell the job runs under (macOS runs it with bash 3.2)
+        p = subprocess.run([os.environ.get("JOB_BASH", "/bin/bash"), str(script)],
+                           env={"T": str(t), "PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=300)
 
         def read(path):
             return path.read_text() if path.exists() else ""
@@ -339,6 +352,8 @@ def run(job, *, registry="", nv=None, later=None, nv_later=None, backup=True, ke
         r.fw = read(lib / "NullMoth/nvfw/which").strip()
         r.version = read(lib / "NullMoth/driver-version").strip()
         r.marker = read(lib / "NullMoth/driver-restored").strip()
+        seenp = lib / "NullMoth/lastgood.seen"
+        r.seen = read(seenp).strip() if seenp.is_file() else ""
         r.job_left = plist.exists() and script.exists()
         r.job_gone = not plist.exists() and not script.exists()
         r.restarted = "shutdown -r now" in r.calls
@@ -407,6 +422,7 @@ def show(r):
 
 
 src = (ROOT / "package/install.sh").read_text()
+un = (ROOT / "package/uninstall.sh").read_text()
 nvrm = (ROOT / "kexts/NVRM/NVRM.cpp").read_text()
 
 # ---- the two ends of the wire: what NVRM writes, and what the two jobs look for
@@ -630,13 +646,13 @@ r = run(job, registry=FB_OK)
 arm("a driver whose classes fit is left alone and the job stays for the next start", untouched(r) and r.job_left, show(r))
 
 # ---- the two looks the job had before, unchanged
-r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"})
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen="BOOT-EARLIER")
 arm("the display came up at an earlier start: the job takes itself away, as before",
     untouched(r) and r.job_gone and "keeping it" in r.log and r.sleeps == 0, show(r))
 
 r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"})
 arm("two starts in a row without a display: the previous driver is put back, as before",
-    restored(r) and r.sleeps == 0 and "did not bring the display up twice; restoring the previous driver from" in r.log
+    restored(r) and r.sleeps == 1 and "did not bring the display up twice; restoring the previous driver from" in r.log
     and "refused" not in r.log, show(r))
 
 r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%01"},
@@ -648,6 +664,67 @@ r = run(job, registry=FB_OK, nv_later={2: 'echo 1 > "$T/nv.nullmoth-nv-ok"'})
 arm("a display that comes up while the job is looking ends the looking", untouched(r) and r.sleeps == 2, show(r))
 arm("  and leaves the job in place: WindowServer can still keep dying on that display, and the next start needs it",
     r.job_left and "keeping it" not in r.log, show(r))
+
+# ---- the order of the kexts and the job is not fixed
+CLAIMED = '    | |   "nvrm-claimed" = Yes\n'
+STAYS = "the job stays until the next one"
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"})
+arm("the display came up in this start before the job's first look: the job stays and notes this boot",
+    untouched(r) and r.job_left and r.seen == "BOOT-THIS" and STAYS in r.log and "keeping it" not in r.log
+    and r.rc == 0, show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, boot=None)
+arm("  control: a boot whose name cannot be read keeps the older rule (the job takes itself away)",
+    untouched(r) and r.job_gone and "keeping it" in r.log and not r.seen, show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen_dir=True)
+arm("  a note that cannot be written keeps the older rule too: the job never stays for good",
+    untouched(r) and r.job_gone and "keeping it" in r.log, show(r))
+r = run(job, registry=FB_OK, nv_later={2: 'echo 1 > "$T/nv.nullmoth-nv-ok"'}, seen_dir=True)
+arm("  and a note that cannot be written at a later look keeps the job for the next start, as the older rule did",
+    untouched(r) and r.job_left and "keeping it" not in r.log and r.sleeps == 2, show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen="BOOT-THIS")
+arm("  found again in the same boot: still kept, nothing more in the log", untouched(r) and r.job_left
+    and r.log == "", show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen="BOOT-EARLIER")
+arm("  found at a later start: the job and its note are gone", untouched(r) and r.job_gone and not r.seen
+    and "keeping it" in r.log, show(r))
+r = run(job, registry=FB_OK, nv_later={2: 'echo 1 > "$T/nv.nullmoth-nv-ok"'})
+arm("a display that comes up while the job is looking notes this boot as well", untouched(r) and r.job_left
+    and r.seen == "BOOT-THIS" and r.sleeps == 2, show(r))
+# the start after one in which the display lit before the first look and WindowServer then kept dying (6c wrote %02
+# and deleted nullmoth-nv-ok): the driver is off, NVRM claims nothing, the previous driver comes back
+r1 = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, boot="BOOT-LIT")
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, seen=r1.seen or None, boot="BOOT-NEXT")
+arm("after a WindowServer loop on a display lit before the job looked, the next start puts the previous driver back",
+    r1.job_left and r1.seen == "BOOT-LIT" and restored(r) and not r.seen, show(r1) + show(r))
+
+arm("  and the note goes with the job: an install and the uninstaller remove one left from an earlier trial",
+    src.count('"$KC.nullmoth-restore" /Library/NullMoth/lastgood.seen\n') == 1
+    and job.count("done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh "
+                  "/Library/NullMoth/lastgood.seen; }") == 1 and un.count(" /Library/NullMoth/lastgood.seen ") == 1)
+
+r = run(job, registry=FB_OK + CLAIMED, nv={"nullmoth-nv-starts": "%02"})
+arm("a count of two that includes this start (NVRM claimed the card) restores nothing and goes on looking",
+    untouched(r) and r.job_left and r.looks >= 48, show(r))
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, later={1: CLAIMED})
+arm("  also when the claim is published during the job's first wait", untouched(r) and r.job_left, show(r))
+r = run(job, registry=FB_OK + CLAIMED, nv={"nullmoth-nv-starts": "%02"},
+        nv_later={3: 'echo 1 > "$T/nv.nullmoth-nv-ok"'})
+arm("  and when that start then lights the display, the job stays for the next start", untouched(r) and r.job_left
+    and r.seen == "BOOT-THIS", show(r))
+r = run(job, registry=FB_OK + CLAIMED, nv={"nullmoth-nv-starts": "%03"})
+arm("a count of three is two failed starts whatever is claimed: restored at once", restored(r) and r.sleeps == 0,
+    show(r))
+try:
+    HOLD = ("    case \"$v\" in %02) sleep 5; if ioreg -l -w0 2>/dev/null | grep -q '\"nvrm-claimed\" = Yes'; then v=;"
+            " fi;; esac\n")
+    blind = job.replace(HOLD, "")
+    if blind == job:
+        raise AssertionError("the control's edit found nothing to change")
+    r = run(blind, registry=FB_OK + CLAIMED, nv={"nullmoth-nv-starts": "%02"})
+    arm("  control: without the look at the claim, that count of two restores during the start (the bug)",
+        restored(r), show(r))
+except (Unsafe, AssertionError) as e:
+    arm("  control: the job without its look at the claim can be run", False, e)
 
 # ---- differential against 2.9's job (v2.9 = 7412cdd), which had no look at the registry and ran once.
 # Whenever NVRM has NOT declined the card, the new job must do at its first pass exactly what 2.9's did: restore or
@@ -668,7 +745,8 @@ if job29 is not None:
     # every no-refusal case the two jobs can meet at the first pass: the display came up before, two failed starts
     # (with and without a backup), one failed start (below the count), and a quiet start with nothing set.
     for label, kw in (
-        ("the display came up at an earlier start", dict(registry=FB_OK, nv={"nullmoth-nv-ok": "1"})),
+        ("the display came up at an earlier start",
+         dict(registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen="BOOT-EARLIER")),
         ("two starts in a row without a display", dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"})),
         ("two starts without a display and the backup gone",
          dict(registry=FB_OK, nv={"nullmoth-nv-starts": "%02"}, backup=False)),
@@ -712,7 +790,7 @@ for what, bad in (("its PATH line changed", job.replace(PATH_LINE, "PATH=/bin:/u
     except AssertionError as e:
         arm(f"control: a job that would reach this machine is not run ({what})", False, e)
 # the guard in front of the real rm, cp and mkdir: a path outside the test's folder is refused, one inside is done
-r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, keep=True)
+r = run(job, registry=FB_OK, nv={"nullmoth-nv-ok": "1"}, seen="BOOT-EARLIER", keep=True)
 try:
     t = r.fake.parent
     env = {"T": str(t), "PATH": str(r.fake)}
@@ -753,9 +831,8 @@ arm("refusal, the rename fails: the collection in place is the new one whole, th
     r.kc == "new" and r.job_left and not r.restarted and "could not be put in place" in r.log, show(r) + str(r.kc_tmp))
 r = run(job, registry=FB_REFUSED + ioreg_line(EARLY))
 arm("the ordinary refusal leaves no staging file", restored(r) and r.kc_tmp == [], show(r) + str(r.kc_tmp))
-un = (ROOT / "package/uninstall.sh").read_text()
 arm("  and one a job left behind (cut off in the middle) is removed by the next install and by the uninstaller",
-    src.count('rm -f "$LG" "$LGP" "$KC.nullmoth-restore"\n') == 1 and un.count('"$KC.nullmoth-restore"') == 1)
+    src.count('rm -f "$LG" "$LGP" "$KC.nullmoth-restore"') == 1 and un.count('"$KC.nullmoth-restore"') == 1)
 
 print(f"{fails} failed")
 sys.exit(1 if fails else 0)

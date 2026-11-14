@@ -522,9 +522,10 @@ nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>/dev/null || tru
 step "6b. falling back to the previous driver if this one cannot start"
 # The kernel's boot guard (nvrm_off.h) turns the driver off after two starts in a row that never brought the display
 # up, so the Mac reaches a desktop on the firmware's framebuffer. This one-shot job then puts the previous driver back
-# from this install's backup and restarts once. It removes itself as soon as the new driver has shown its display
-# (nullmoth-nv-ok), so nothing keeps running on a Mac where the update worked. A fresh install has no previous driver to
-# go back to: the guard still keeps the Mac usable, and nothing is restored.
+# from this install's backup and restarts once. It removes itself at the first start after the one in which it found
+# that the new driver had shown its display (nullmoth-nv-ok), so nothing keeps running on a Mac where the update
+# worked. A fresh install has no previous driver to go back to: the guard still keeps the Mac usable, and nothing is
+# restored.
 # One failure never reaches that guard. The framebuffer compares Apple's classes on this macOS with the ones it was
 # built for, and when they differ NVRM declines the card before the guard counts anything (NVRM.cpp, startGPU). Every
 # framebuffer of the driver refuses for the same reason, the one that shows the desktop with the driver off included,
@@ -534,9 +535,11 @@ step "6b. falling back to the previous driver if this one cannot start"
 # still inside the card's apertures), the login window first. NVRM says so on the PCI device (nvrm-layout =
 # "declined ..."), and the job reads it there. The kexts can start after the job does, so it looks every five seconds
 # for four minutes.
-# Its other two looks stay as they were and where they were, at the job's start: a start count of two or more, and
-# the word that the display came up. A display that comes up later ends the looking and leaves the job in place, as
-# before: WindowServer can still keep dying on that display (step 6c), and the next start must find the job.
+# Nothing orders the kexts and the job either, so its other two looks allow for both orders. The word that the display
+# came up (nullmoth-nv-ok) is looked for at every look, and the job removes itself only at a start after the one in
+# which it first found it (lastgood.seen holds that start's kern.bootsessionuuid): WindowServer can still keep dying on
+# that display (step 6c), and the next start must find the job. A start count of exactly two is not acted on when NVRM
+# has claimed a card in this start, which makes this start the second of the two; three or more is acted on at once.
 # The refusal's restore has two conditions that the older rule does not have. It happens only on the macOS build this
 # install was made on: the previous driver was running there, so it fits; after a macOS update the refusal may be the
 # update's doing, and a driver from before these checks would be put onto classes that really changed. On another
@@ -552,7 +555,7 @@ nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-starts 2>/dev/null || 
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-nv-ok 2>/dev/null || true
 LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgood.plist
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
-rm -f "$LG" "$LGP" "$KC.nullmoth-restore"
+rm -f "$LG" "$LGP" "$KC.nullmoth-restore" /Library/NullMoth/lastgood.seen
 if [ -d "$BK/NVRM.kext" ]; then
   mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the fallback job's folders"
   cat > "$LG.tmp" <<EOF || die "write the fallback job"
@@ -562,7 +565,7 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 BK='$BK'; LOG=/Library/NullMoth/lastgood.log; V=7C436110-AB2A-4BBB-A880-FE41995C9F82
 OSB='$BUILD'   # the macOS build this install was made on: the one the previous driver was running on
 # no launchctl bootout here: booting out the running job kills this script before it can restart the Mac (10-17 test)
-done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh; }
+done_job() { rm -f /Library/LaunchDaemons/com.nullmoth.lastgood.plist /Library/NullMoth/lastgood.sh /Library/NullMoth/lastgood.seen; }
 # NVRM's word on the PCI device that it declined the card because the framebuffer refused this macOS's classes
 refused() { ioreg -l -w0 2>/dev/null | grep -q '"nvrm-layout" = "declined'; }
 # Someone may be working at a desktop: a display is connected to another GPU's framebuffer and a user owns the
@@ -589,15 +592,35 @@ shown() {
 }
 user() { [ "\$(stat -f %Su /dev/console 2>/dev/null)" != root ]; }
 busy() { shown && user; }
-ok=0; nvram \$V:nullmoth-nv-ok >/dev/null 2>&1 && ok=1
+# nullmoth-nv-ok stays set from the start that lit the display on, and the kernel may have set it in this very start
+# before the first look. The job is kept through the start in which it first finds it (WindowServer can still keep
+# dying there, step 6c) and removes itself at a later start that finds it: lastgood.seen holds the start it was first
+# found in. A start whose boot id cannot be read, or a note that cannot be written, keeps the older rule (removed at a
+# first look that finds it, kept at a later one), so the job never stays for good.
+SEEN=/Library/NullMoth/lastgood.seen
+display_up() {
+  s=""; b=\$(sysctl -n kern.bootsessionuuid 2>/dev/null)
+  if [ -n "\$b" ]; then
+    s=\$(cat \$SEEN 2>/dev/null)
+    [ "\$s" != "\$b" ] || exit 0
+    if [ -z "\$s" ] && echo "\$b" > \$SEEN 2>/dev/null; then
+      echo "\$(date) the new driver brought its display up in this start; the job stays until the next one" >> \$LOG
+      exit 0
+    fi
+  fi
+  [ -n "\$s" ] || [ "\$n" = 0 ] || exit 0
+  echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0
+}
 v=\$(nvram \$V:nullmoth-nv-starts 2>/dev/null | cut -f2)
 why=""; n=0
 while [ -z "\$why" ]; do
   if refused; then why=refused; break; fi
+  if nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then display_up; fi
   if [ "\$n" = 0 ]; then
-    if [ "\$ok" = 1 ]; then echo "\$(date) the new driver brought its display up; keeping it" >> \$LOG; done_job; exit 0; fi
+    # NVRM counts a start as it begins: a count of exactly two while NVRM has claimed a card in this start is one
+    # failed start and this one. With the driver off (two counted starts) NVRM claims nothing, and two is acted on.
+    case "\$v" in %02) sleep 5; if ioreg -l -w0 2>/dev/null | grep -q '"nvrm-claimed" = Yes'; then v=; fi;; esac
     case "\$v" in %0[2-9a-f]|%[1-9a-f]?) why=twice; break;; esac
-  elif nvram \$V:nullmoth-nv-ok >/dev/null 2>&1; then exit 0
   fi
   n=\$((n + 1)); [ "\$n" -lt 48 ] || exit 0
   sleep 5
