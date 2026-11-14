@@ -28,7 +28,8 @@ spec.loader.exec_module(m)
 V = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 
 
-class InstallTwice(m.Install):
+class Fixture(m.Install):
+    """The fixture with real folders made by mktemp, and the stand-ins only a Mac does not need."""
     def setUp(self):
         super().setUp()
         self.env['FIXTURE_NVRAM'] = 'state'
@@ -70,6 +71,11 @@ class InstallTwice(m.Install):
     def nvrm(self, folder):
         return (Path(folder) / 'NVRM.kext/Contents/MacOS/NVRM').read_text()
 
+    def scratch(self):
+        """The installer's private folders left in /var/tmp (moved under the fixture's root by the mktemp stand-in)."""
+        d = self.root / 'vartmp'
+        return sorted(x.name for x in d.iterdir()) if d.exists() else []
+
     def job(self):
         p = self.root / 'Library/NullMoth/lastgood.sh'
         if not p.exists():
@@ -99,6 +105,8 @@ class InstallTwice(m.Install):
     def installed(self):
         return self.nvrm(self.root / 'Library/Extensions')
 
+
+class InstallTwice(Fixture):
     def test_install_twice_keeps_the_first_backup(self):
         first = self.install()
         self.assertEqual(self.nvrm(first.bk), 'old-NVRM')
@@ -201,6 +209,35 @@ class InstallTwice(m.Install):
 
     def test_uninstall_removes_the_record(self):
         self.assertIn(' /Library/NullMoth/trial-backup ', (R / 'package/uninstall.sh').read_text())
+
+
+class Rehearsal(Fixture):
+    """A rehearsal (CHECK=1) that stops in step 3 used to leave /var/tmp/nullmoth.XXXX behind, with a copy of every
+    third-party kext in /Library/Extensions. It is removed now, and only the one step 3 made: a T inherited from the
+    caller's environment is never removed (the installer runs as root)."""
+    def test_rehearsal_that_stops_in_step_3_leaves_nothing(self):
+        r = self.run_install(CHECK='1', FAKE_PREFLIGHT_FAIL='1')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('test kernel collection build failed', r.stdout + r.stderr)
+        self.assertEqual(self.scratch(), [])
+
+    def test_rehearsal_that_passes_leaves_nothing(self):
+        r = self.run_install(CHECK='1')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.scratch(), [])
+
+    def test_inherited_t_is_never_removed(self):
+        mine = self.root / 'not-the-installers'
+        (mine / 'keep').mkdir(parents=True)
+        r = self.run_install(CHECK='1', T=str(mine), FAKE_OS_VERSION='14.7')   # stops in step 1, before step 3
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('built for macOS 15 and 26', r.stdout + r.stderr)
+        self.assertTrue((mine / 'keep').is_dir())
+
+    def test_real_install_that_stops_keeps_its_folder(self):
+        r = self.run_install(FAKE_LIVE_FAIL='1')
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len([x for x in self.scratch() if x.startswith('nullmoth.')]), 1, self.scratch())
 
 
 if __name__ == '__main__':

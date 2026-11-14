@@ -17,7 +17,8 @@ KARG=(--allow-missing-kdk); [ -f "$K" ] && KARG+=(--kernel "$K")
 KB=/System/Library/KernelCollections/BootKernelExtensions.kc
 KS=/System/Library/KernelCollections/SystemKernelExtensions.kc
 BK=""; LOCKDIR=/Library/NullMoth/install.lock; LOCK_HELD=0; LOCK_RELEASE_OK=1; LOCK_ID=""
-INSTALLING=0; NEWKC=""; STAGE=""
+# T is set only by the mktemp of step 3: one inherited from the caller's environment is never removed below
+INSTALLING=0; NEWKC=""; STAGE=""; T=""
 release_install_lock() {
   if [ "$LOCK_HELD" = 1 ] && [ "$LOCK_RELEASE_OK" = 1 ]; then
     if [ -z "$LOCK_ID" ] || [ -L "$LOCKDIR" ] || [ ! -d "$LOCKDIR" ] ||
@@ -120,7 +121,9 @@ backup_copy() {
     die "back up $component"
   fi
 }
-finish_install() { [ -z "$STAGE" ] || rm -rf "$STAGE"; release_install_lock; }
+# A rehearsal (CHECK=1) that stops in step 3 leaves nothing behind, not even its copy of every third-party kext; a real
+# install that stops keeps its folder, as before.
+finish_install() { [ -z "$STAGE" ] || rm -rf "$STAGE"; [ "${CHECK:-0}" != 1 ] || [ -z "$T" ] || rm -rf "$T"; release_install_lock; }
 trap finish_install EXIT
 trap 'die "installer interrupted (signal HUP)"' HUP
 trap 'die "installer interrupted (signal INT)"' INT
