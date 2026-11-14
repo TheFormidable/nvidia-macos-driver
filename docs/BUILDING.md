@@ -504,8 +504,9 @@ sudo env CHECK=1 ./install.sh
 sudo ./install.sh && sudo shutdown -r now
 ```
 
-The first install.sh line is a dry run: it checks the package and this Mac and changes nothing. Run the commands as
-shown (`./install.sh`, not `bash install.sh`: install.sh recognises a running install by that name).
+The first install.sh line is a dry run: it checks the package and this Mac and changes nothing. A pass does not cover
+the firmware, which the real install takes from the earlier install or downloads from NVIDIA before it changes anything.
+Run the commands as shown (`./install.sh`, not `bash install.sh`: install.sh recognises a running install by that name).
 
 To go back, install the release you used as the base in the same way, from its own unpacked `pkgroot`: it replaces
 every file the tester build changed, and the next restart loads the release. To remove the driver completely:
