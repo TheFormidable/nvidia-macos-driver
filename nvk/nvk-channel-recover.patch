@@ -8,8 +8,10 @@ fences answer "did not run" through nvmtl_nvk_fence_dropped_v1). Before that, a 
 at half the budget. A fault inside replayed work drops everything in flight. Only channel exceptions and stalls are
 rebuilt, at most 3 times in 30 s per channel; every other loss ends exactly as 2.9 ended, plus one line naming it.
 A system sleep is not a fault: while the kext reports the GPU suspended for a sleep or wake, a stalled wait looks
-again instead of rebuilding (for at most 360 s of awake time per sleep), and no escape is made with a channel's mutex
-held.
+again instead of rebuilding (for at most 360 s of awake time per sleep), and neither the thread that submits to a
+channel nor the doorbell ring makes an RM call or escape while it holds the channel's mutex (the boost lease is
+renewed before it, deferred frees are reaped after it); only a rebuild, which starts after the kext has answered that
+the GPU is running, calls RM with it held.
 The pure part is nvkmd/nvrm/nvkmd_nvrm_recover.h, with its host test nvkmd_nvrm_recover_test.c beside it.
 nvkmd/nvrm/nvrm_chan_note_abi.h is a byte-for-byte copy of kexts/NVRM/nvrm_chan_note_abi.h (escape 0xE8: counters in
 the kext and the adapter's power state; a kext without it fails the escape once and is not asked again).
@@ -291,7 +293,7 @@ index 29f5c52..d2e781e 100644
  VkResult nvkmd_nvrm_slot_stalled(uint32_t slot, uint32_t gen, uint64_t want, long ms,
                                   struct vk_object_base *log_obj);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 42f5f01..4a65a44 100644
+index 42f5f01..e2a6740 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 @@ -690,7 +690,7 @@ nvkmd_nvrm_seq_done(uint32_t slot, uint32_t gen, uint64_t seq)
@@ -675,7 +677,19 @@ index 42f5f01..4a65a44 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1681,7 +1822,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
+@@ -1652,7 +1793,10 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+    nv_push_init(&ctx->push, (uint32_t *)ctx->cmdBuf->map + next * (0x10000 / 4 / NVRM_CMD_SLOTS),
+                 0x10000 / 4 / NVRM_CMD_SLOTS, BITFIELD_BIT(SUBC_NV9097));
+    ctx->segStart = ctx->push.start;
+-   nvkmd_nvrm_reap_deferred();
++   /* RM frees: with recovery on they wait at the kext's power gate during a GPU suspend, so they are never made
++    * with the context mutex held; the op reaps after nvrm_rec_leave (nvrm_rec_op_end). Recovery off: 2.9's place. */
++   if (!ctx->recHeld)
++      nvkmd_nvrm_reap_deferred();
+    return VK_SUCCESS;
+ }
+ 
+@@ -1681,7 +1825,10 @@ nvrm_gsub_ctx_wait(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_o
           continue;
        }
        nvkmd_nvrm_gsub_count(NVRM_GS_CPUWAIT);
@@ -686,7 +700,7 @@ index 42f5f01..4a65a44 100644
        if (r != VK_SUCCESS)
           return r;
     }
-@@ -1753,10 +1897,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
+@@ -1753,10 +1900,16 @@ nvkmd_nvrm_exec_ctx_destroy(struct nvkmd_ctx *_ctx)
        nvkmd_mem_unref(ctx->userD);
     if (ctx->notifier != NULL)
        nvkmd_mem_unref(ctx->notifier);
@@ -703,7 +717,7 @@ index 42f5f01..4a65a44 100644
  static VkResult
  nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj,
-@@ -1765,16 +1915,36 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
+@@ -1765,9 +1918,35 @@ nvkmd_nvrm_exec_ctx_wait(struct nvkmd_ctx *_ctx,
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
  
@@ -718,32 +732,59 @@ index 42f5f01..4a65a44 100644
 +   r = nvrm_gsub_ctx_wait(ctx, log_obj, wait_count, waits);   // G-SUB (b79): the waits are real now
 +   nvrm_rec_leave(ctx);
 +   return r;
- }
- 
++}
++
 +static VkResult
 +nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj);
 +
++/* The flushing ops' two RM calls, made with no context mutex held: during a GPU suspend an RM call waits at the kext's
++ * power gate until the resume, and a recoverer that waits for the mutex meanwhile would answer BUSY, or get it after
++ * the resume and rebuild a channel that only stood still for the sleep. The boost lease is renewed before the op takes
++ * the mutex (where 2.9 renewed it, at the start of the flush), and the frees whose work has passed are reaped after
++ * nvrm_rec_leave. With recovery off nvrm_rec_enter takes nothing and nvrm_gsub_submit reaps, as in 2.9. */
++static void
++nvrm_rec_op_begin(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   nvkmd_nvrm_boost_burst(nvkmd_nvrm_pdev(nvkmd_nvrm_dev(ctx->base.dev)->base.pdev));
++}
++
++static void
++nvrm_rec_op_end(struct nvkmd_nvrm_exec_ctx *ctx)
++{
++   if (ctx->slot1 != 0 && nvrm_rec_enabled())   /* the op took the mutex: nvrm_gsub_submit did not reap */
++      nvkmd_nvrm_reap_deferred();
+ }
+ 
  static VkResult
- nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+@@ -1775,12 +1954,26 @@ nvkmd_nvrm_exec_ctx_flush(struct nvkmd_ctx *_ctx,
                               struct vk_object_base *log_obj)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   nvrm_rec_op_begin(ctx);
 +   VkResult r = nvrm_rec_enter(ctx, log_obj);
 +   if (r != VK_SUCCESS)
 +      return r;
 +   r = nvrm_exec_ctx_flush_held(ctx, log_obj);
 +   nvrm_rec_leave(ctx);
++   nvrm_rec_op_end(ctx);
 +   return r;
 +}
 +
-+/* The flush, with the context mutex held by the caller */
++/* The flush, with the context mutex held by the caller; it makes no RM call (nvrm_rec_op_begin, nvrm_rec_op_end) */
 +static VkResult
 +nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj)
 +{
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(ctx->base.dev);
     struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
     struct NvRmApi rm;
-@@ -1908,17 +2078,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
+    nvkmd_nvrm_dev_api_ctl(pdev, &rm);
+ 
+-   nvkmd_nvrm_boost_burst(pdev);   /* full clocks while work is being submitted, idle clocks when it stops */
++   /* the boost lease (full clocks while work is being submitted) was renewed by the op, before the mutex */
+ 
+    NvNotification *notifiers = ctx->notifier->map;
+    NvNotification *submitTokenNotifier = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
+@@ -1908,17 +2101,21 @@ nvkmd_nvrm_exec_ctx_exec(struct nvkmd_ctx *_ctx,
                              const struct nvkmd_ctx_exec *execs)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
@@ -768,10 +809,11 @@ index 42f5f01..4a65a44 100644
  }
  
  static VkResult
-@@ -1928,10 +2102,14 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
+@@ -1928,10 +2125,16 @@ nvkmd_nvrm_exec_ctx_signal(struct nvkmd_ctx *_ctx,
                                const struct vk_sync_signal *signals)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   nvrm_rec_op_begin(ctx);
 +   VkResult r = nvrm_rec_enter(ctx, log_obj);
 +   if (r != VK_SUCCESS)
 +      return r;
@@ -781,13 +823,15 @@ index 42f5f01..4a65a44 100644
     if (r == VK_SUCCESS && nvkmd_nvrm_async_on())   // G-SUB (b79): record what this submission will signal
        nvrm_gsub_ctx_signaled(ctx, signal_count, signals);
 +   nvrm_rec_leave(ctx);
++   nvrm_rec_op_end(ctx);
     return r;
  }
  
-@@ -1940,10 +2118,14 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
+@@ -1940,10 +2143,16 @@ nvkmd_nvrm_exec_ctx_sync(struct nvkmd_ctx *_ctx,
                              struct vk_object_base *log_obj)
  {
     struct nvkmd_nvrm_exec_ctx *ctx = nvkmd_nvrm_exec_ctx(_ctx);
++   nvrm_rec_op_begin(ctx);
 +   VkResult r = nvrm_rec_enter(ctx, log_obj);
 +   if (r != VK_SUCCESS)
 +      return r;
@@ -798,10 +842,11 @@ index 42f5f01..4a65a44 100644
 -      r = nvrm_gsub_wait_seq(ctx, ctx->wSeq, log_obj);
 +      r = nvrm_gsub_wait_seq_owner(ctx, ctx->wSeq, log_obj);
 +   nvrm_rec_leave(ctx);
++   nvrm_rec_op_end(ctx);
     return r;
  }
  
-@@ -1954,6 +2136,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
+@@ -1954,6 +2163,7 @@ const struct nvkmd_ctx_ops nvkmd_nvrm_exec_ctx_ops = {
     .signal = nvkmd_nvrm_exec_ctx_signal,
     .flush = nvkmd_nvrm_exec_ctx_flush,
     .sync = nvkmd_nvrm_exec_ctx_sync,
@@ -809,7 +854,7 @@ index 42f5f01..4a65a44 100644
  };
  
  static VkResult
-@@ -2088,8 +2271,31 @@ static struct {
+@@ -2088,8 +2298,31 @@ static struct {
     NvU32 level;
     NvU64 slice;
     bool have;
@@ -841,7 +886,7 @@ index 42f5f01..4a65a44 100644
  __attribute__((visibility("default"))) int nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us);
  __attribute__((visibility("default"))) int
  nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
-@@ -2133,6 +2339,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2133,6 +2366,7 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
              ts.timesliceUs = 0;
           nvmtl_tsg_saved[i].level = cur;
           nvmtl_tsg_saved[i].slice = ts.timesliceUs;
@@ -849,7 +894,7 @@ index 42f5f01..4a65a44 100644
           nvmtl_tsg_saved[i].have = true;
        }
        NvU32 lv = (NvU32)interleave_level;
-@@ -2142,8 +2349,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
+@@ -2142,8 +2376,12 @@ nvmtl_nvk_tsg_reprioritise_v1(int interleave_level, unsigned long timeslice_us)
           ts.timesliceUs = timeslice_us;
           b = nvRmApiControl(&rm, c->hTsg, 0xa06c0103, &ts, sizeof ts);
        }
@@ -865,10 +910,10 @@ index 42f5f01..4a65a44 100644
     return changed;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 new file mode 100644
-index 0000000..d40da9b
+index 0000000..01d0a6f
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -0,0 +1,1010 @@
+@@ -0,0 +1,1014 @@
 +/*
 + * Copyright © 2026 NullMoth Systems.
 + * SPDX-License-Identifier: MIT
@@ -926,7 +971,11 @@ index 0000000..d40da9b
 + *     (nvrm_rec_release / nvrm_rec_retake): the GPFIFO-full wait (nvrm_gsub_gpfifo_reserve), the ring-slot wait after
 + *     a submission (nvrm_gsub_submit), the CPU wait for a sync (nvrm_gsub_ctx_wait), the wait of sync. A wait that
 + *     fails returns with the mutex released, and the op returns that failure; nvrm_rec_leave then only counts down.
-+ *     Every early return of an op after nvrm_rec_enter goes through nvrm_rec_leave;
++ *     Every early return of an op after nvrm_rec_enter goes through nvrm_rec_leave. The owner makes no RM call and
++ *     no escape while it holds the mutex: an RM call waits at the kext's power gate during a GPU suspend, and a
++ *     recoverer waiting for the mutex would then answer BUSY, or take it after the resume and rebuild a channel that
++ *     only stood still for the sleep. The flushing ops renew the boost lease before nvrm_rec_enter and reap the
++ *     deferred frees after nvrm_rec_leave (nvrm_rec_op_begin, nvrm_rec_op_end);
 + *   - a recovering thread, for the whole rebuild, after it claimed the slot (`recovering`, under nvkmd_nvrm_gsub_mtx);
 + *   - the doorbell kick, with one trylock and nothing else;
 + *   - destroy (nvrm_rec_mark_dying), with a plain lock, only to set `dying`; it holds it for nothing else.
