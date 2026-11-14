@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import struct
 import subprocess
 import sys
@@ -73,7 +74,8 @@ def private_source(source,root,bin_dir,prefixes=SYSTEM_PREFIXES):
     source=source.replace(PATH_LINE,'PATH='+str(bin_dir)+':/usr/bin:/bin:/usr/sbin:/sbin; export PATH')
     for prefix in ['Library/','Users/Shared/']:
         source=source.replace('$HERE/'+prefix,'$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__')
-    for prefix in prefixes:source=source.replace(prefix,str(root)+prefix)
+    # one pass: a prefix inside root itself (a temporary folder under /Volumes/x/Users/Shared/) is not moved again
+    source=re.sub('|'.join(map(re.escape,prefixes)),lambda x:str(root)+x.group(0),source)
     for prefix in ['Library/','Users/Shared/']:
         source=source.replace('$HERE/__PAYLOAD_'+prefix.replace('/','_')+'__','$HERE/'+prefix)
     return source.replace('require_install_directory /Library\n','require_install_directory '+str(root/'Library')+'\n')
