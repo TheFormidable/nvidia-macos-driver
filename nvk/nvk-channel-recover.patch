@@ -10,8 +10,9 @@ rebuilt, at most 3 times in 30 s per channel; every other loss ends exactly as 2
 A system sleep is not a fault: while the kext reports the GPU suspended for a sleep or wake, a stalled wait looks
 again instead of rebuilding (for at most 360 s of awake time per sleep), and neither the thread that submits to a
 channel nor the doorbell ring makes an RM call or escape while it holds the channel's mutex (the boost lease is
-renewed before it, deferred frees are reaped after it); only a rebuild, which starts after the kext has answered that
-the GPU is running, calls RM with it held.
+renewed before it, deferred frees are reaped after it); only the recovery sequence (and the armed test hook) calls RM
+with it held, and for a channel that merely stands still it starts only once the kext no longer reports the GPU
+suspended or those 360 s have passed.
 The pure part is nvkmd/nvrm/nvkmd_nvrm_recover.h, with its host test nvkmd_nvrm_recover_test.c beside it.
 nvkmd/nvrm/nvrm_chan_note_abi.h is a byte-for-byte copy of kexts/NVRM/nvrm_chan_note_abi.h (escape 0xE8: counters in
 the kext and the adapter's power state; a kext without it fails the escape once and is not asked again).
