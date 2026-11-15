@@ -2,7 +2,7 @@
 # build_release_inputs.sh <out dir>: everything a release package takes from this tree that is built on the build Mac
 # itself, from the tree this script sits in, laid out the way the release step reads it:
 #   <out>/kexts/{nvrm,fb,accel,accel26,agdc,nmsmn}/<Name>.kext   <out>/userland/nvmtl-air-dis   <out>/nvk/libvulkan_nouveau.dylib
-#   <out>/dlss-pkg/   <out>/boost/nvmtl-boost   <out>/vulkan-loader/
+#   <out>/dlss-pkg/   <out>/boost/nvmtl-boost   <out>/nvkbridge/ (the native Vulkan runtime)   <out>/vulkan-loader/
 # The Metal plugin, the shader translator and the video codec library are built by their own scripts
 # (build_plugin_release.sh, build_xlate_release.sh, build_nvencvt.sh), which take a git revision; the audio driver comes
 # from its own repository. Run this from a checkout of the revision being released: the first line of <out>/BUILD.txt
@@ -29,7 +29,7 @@ OGKM=${NM_OGKM620:-$R/build/rm620/ogkm-620.70.06}
 PRISTINE=${NM_OGKM620_PRISTINE:-$R/build/ogkm620/open-gpu-kernel-modules-620.70.06}
 OGKM610=${NM_OGKM610:-$R/build/ogkm620/open-gpu-kernel-modules-610.57.04}
 MESA=${NM_MESA_GIT:-$R/build/gpu-src/mesa}
-STEPS=${STEPS:-nvrm fb accel agdc nmsmn nmkbl nmhda efizip airdis dlss nvk boost vulkan}
+STEPS=${STEPS:-nvrm fb accel agdc nmsmn nmkbl nmhda efizip airdis dlss nvk boost nvkbridge vulkan}
 for d in "$OGKM/src/nvidia" "$PRISTINE/src/nvidia" "$OGKM610/src/common" "$MESA/.git"; do
   [ -e "$d" ] || { echo "STOP: $d does not exist (see the paths at the top of this script)"; exit 2; }
 done
@@ -61,6 +61,10 @@ boost() {
   [ -d "$OUT/nvk-build/mesa" ] || { echo "the boost daemon is built against NVK's patched tree: run the nvk step first"; return 1; }
   mkdir -p "$OUT/boost" && bash "$HERE/tools/nvmtl-boost/build.sh" "$OUT/nvk-build/mesa" "$OUT/boost/nvmtl-boost"
 }
+nvkbridge() {   # NVK's library and the Vulkan headers of the Mesa tree it was built from, as build.sh's nvkbridge step
+  [ -d "$OUT/nvk-build/mesa/include" ] || { echo "the native Vulkan runtime is built from NVK's output: run the nvk step first"; return 1; }
+  rm -rf "$OUT/nvkbridge" && bash "$HERE/tools/nvk-bridge/build.sh" "$OUT/nvk/libvulkan_nouveau.dylib" "$OUT/nvk-build/mesa/include" "$OUT/nvkbridge"
+}
 mkdir -p "$OUT/kexts" "$OUT/userland"
 step nvrm   env NVRM_PRISTINE_OGKM="$PRISTINE" bash "$HERE/build/build_nvrm.sh" "$HERE/kexts/NVRM" "$OGKM" "$OUT/kexts/nvrm"
 step fb     env OGKM="$OGKM" bash "$HERE/build/fb_build.sh" "$HERE/kexts" "$OUT/kexts/fb"
@@ -80,6 +84,7 @@ step airdis bash "$HERE/build/build_air_dis.sh" "$OUT/userland"
 step dlss   bash "$HERE/build/build_dlss_cache.sh" "$OUT/dlss-pkg"
 step nvk    nvk
 step boost  boost
+step nvkbridge nvkbridge
 # cmake and ninja for the loader are among NVK's build tools
 step vulkan env PATH="${NVK_PATH:+$NVK_PATH:}$PATH" bash "$HERE/build/build_vulkan_loader.sh" "$OUT/vulkan-loader"
 # every kext a step built must be whole: the binary and its Info.plist
