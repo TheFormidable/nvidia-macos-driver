@@ -321,7 +321,8 @@ fi
   die "this package has no libnvencvt.dylib in NVMTLDriver.bundle (the video codecs); rebuild it with package/stage_nvencvt.sh"
 # The accelerator names NVKZinkGLDriver.bundle as the OpenGL driver unless the boot argument nvzink=0 is set: without the
 # bundle every OpenGL application would find no driver, so a package without it stops here, before anything changes.
-[ -f "$HERE/Library/GPUBundles/$ZINK_GB/Contents/MacOS/NVKZinkGLDriver" ] && [ -f "$HERE/Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib" ] || \
+[ -f "$HERE/Library/GPUBundles/$ZINK_GB/Contents/MacOS/NVKZinkGLDriver" ] && [ -f "$HERE/Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib" ] && \
+  [ -f "$HERE/Library/GPUBundles/nvmtl/zink/gld_bundle_probe" ] || \
   die "this package has no $ZINK_GB or nvmtl/zink (native OpenGL); rebuild it with ./build.sh package"
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
@@ -489,6 +490,16 @@ chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB" "$GB/nvm
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
 chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
 sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer cannot read $GB/nvmtl-allow.txt (restore from $BK)"
+# GLEngine finds the OpenGL bundle the accelerator names through macOS's trusted GPU-bundle lookup, the one that finds
+# NVMTLDriver.bundle for Metal. A bundle the lookup refuses would leave every OpenGL application without a driver, so
+# the install stops and rolls back. NVMTLDriver.bundle is the control: when the lookup does not find it either (the
+# lookup is missing or changed in this macOS), the probe cannot judge, and the install only says so.
+ZPROBE="$GB/nvmtl/zink/gld_bundle_probe"
+if "$ZPROBE" NVMTLDriver >/dev/null 2>&1; then
+  "$ZPROBE" NVKZinkGLDriver || die "macOS does not trust the installed OpenGL bundle $ZINK_GB (restore from $BK)"
+else
+  echo "   note: macOS's GPU-bundle lookup does not answer for NVMTLDriver.bundle here, so $ZINK_GB was not checked by it"
+fi
 # Create the shared shader caches the plugin looks for. Without them NVMTL_AIRCACHE_DIR never resolves, so
 # WindowServer, which compiles the compositor's pipelines on demand, re-translates them from scratch at every start
 # and its content renders black until the translation finishes (community patch #19; ownership below).

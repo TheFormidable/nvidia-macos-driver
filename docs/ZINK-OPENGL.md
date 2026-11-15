@@ -108,6 +108,12 @@ first frame on this driver.
 `nvmtl/zink`. It backs the bundle up with the others, installs it, owns it root:wheel, and puts the previous state back
 on a rollback and in the fallback job of step 6b (the runtime goes with `nvmtl`). `package/uninstall.sh` removes both.
 
+Once the bundle is in place, the installer asks macOS's trusted GPU-bundle lookup (`gpu_bundle_find_trusted`, the one
+that finds `NVMTLDriver.bundle` for Metal) for it with `nvmtl/zink/gld_bundle_probe` (tools/gld_bundle_probe.c, from
+the HighDelay/nvidia-macos-driver-nvk fork). If the lookup finds `NVMTLDriver.bundle` but not `NVKZinkGLDriver.bundle`,
+the install stops and rolls back, since every OpenGL application would otherwise find no driver. If the lookup does
+not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer says so and goes on.
+
 ## What was checked
 
 - The darwin cross-build on Linux: Mesa's 834 objects of libnvk_zink.dylib and zink_sync_probe with 0 errors and 0

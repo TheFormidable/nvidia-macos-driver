@@ -104,6 +104,8 @@ class Install(unittest.TestCase):
         # native OpenGL: the GL driver bundle and its runtime in nvmtl/zink (install.sh stops without them)
         for rel in ['Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver','Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib']:
             z=self.payload/rel;z.parent.mkdir(parents=True,exist_ok=True);z.write_text('new-'+z.name)
+        # the trusted GPU-bundle lookup's probe, which install.sh runs on the installed bundle: here it finds every name
+        probe=self.payload/'Library/GPUBundles/nvmtl/zink/gld_bundle_probe';probe.write_text('#!/bin/bash\nexit 0\n');probe.chmod(0o755)
         (self.payload/'Library/GPUBundles/nvmtl-allow.txt').write_text('new-allow')
         load=struct.pack('<6I',0x32,24,1,0x000f0500,0x000f0500,0)
         runtime=self.payload/'Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib'
