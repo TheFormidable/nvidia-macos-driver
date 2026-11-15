@@ -63,10 +63,11 @@ presentation; name the frontend.
 - **The loader does not find the driver:** add `VK_LOADER_DEBUG=all` to the same launch. Older loaders read
   `VK_ICD_FILENAMES` instead of `VK_DRIVER_FILES`.
 - **An extension is missing:** the runtime does not offer the renderer's present id, present wait, swapchain
-  maintenance, present timing or HDR metadata extensions (README.md). An application that requires one of them cannot
+  maintenance, present timing or HDR metadata extensions (the runtime's README.md, `tools/nvk-bridge` in the driver's
+  source). An application that requires one of them cannot
   use this runtime.
 - **Hardware decoding fails:** try the software decoding command above first.
 
 The loader's selection rules are in the Khronos loader and driver interface document ("Overriding the Default Driver
 Discovery"). Each application's own rendering and presentation needs decide whether it works; the runtime implements
-what README.md lists.
+what the runtime's README.md lists.
