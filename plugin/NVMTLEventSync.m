@@ -58,7 +58,8 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
             NVMTLPendingSurfaceWrite *write = writes[key];
             NVMTLCommandBuffer *writer = write ? write->buffer : nil;
             NVMTLTexture *backing = write ? write->texture : nil;
-            const BOOL sameBacking = backing && (backing == t || (backing->_vramOn && t->_vramOn));
+            // two direct imports of the family's VRAM are one backing; a tiled image of a Managed wrapper is its own
+            const BOOL sameBacking = backing && (backing == t || (backing->_vramOn && t->_vramOn && !backing->_surfaceLinear.img && !t->_surfaceLinear.img));
             if (writer && writer != cb && sameBacking && write->seed == IOSurfaceGetSeed(t->_surf)) return YES;
         }
         return NO;
@@ -264,7 +265,8 @@ static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
         for (NVMTLSubmissionPart *part in cb->_parts) {
             if (![part isKindOfClass:[NVMTLSubmissionPart class]]) continue;
             for (NVMTLTexture *t in part->surfaces) {
-                if (!t->_surf || !t->_vramOn) continue;
+                // a tiled image reaches the VRAM only by its copy at publication, so its VRAM is not marked newest here
+                if (!t->_surf || !t->_vramOn || t->_surfaceLinear.img) continue;
                 const uint32_t sid = (uint32_t)IOSurfaceGetID(t->_surf), plane = (uint32_t)t->_plane;
                 NSNumber *key = @(((uint64_t)sid << 8) | (plane & 0xffu)), *done = marked[key];
                 if (!done) { done = @(nvmtl_vk_surface_dirty(sid, plane)); marked[key] = done; }
@@ -464,8 +466,10 @@ static int nvmtl_skip_empty_on(void) {
         if (s == drawable || !after) continue;
         NVMTLTexture *r = s->_parent ? s->_parent : s;
         const unsigned long planes = r->_surf ? (unsigned long)IOSurfaceGetPlaneCount(r->_surf) : 0;
-        const int waits = r->_vramOn && planes > 1 && nvmtl_ws_kernel_waits() && nvmtl_ws_surface_wait();
-        if (nvmtl_schedule_after_surface(after, r->_surf != NULL, r->_vramOn, planes, waits)) _scheduleAfterPublish = YES;
+        // a tiled image of a Managed wrapper is published by a copy after the GPU finished, as a private image is
+        const BOOL direct = r->_vramOn && !r->_surfaceLinear.img;
+        const int waits = direct && planes > 1 && nvmtl_ws_kernel_waits() && nvmtl_ws_surface_wait();
+        if (nvmtl_schedule_after_surface(after, r->_surf != NULL, direct, planes, waits)) _scheduleAfterPublish = YES;
     }
     part->scratch = [_scratch copy]; part->signalEvent = event; part->value = value;
     part->encoders = _nEnc - _nEncSealed; _nEncSealed = _nEnc;
