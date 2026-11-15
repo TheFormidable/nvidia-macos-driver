@@ -70,7 +70,8 @@ static struct st_context *st_api_get_current(void)
    return mesa_current;
 }
 /* _mesa_make_current flushes the context it leaves */
-static bool st_api_make_current(struct st_context *st, struct pipe_frontend_drawable *d, struct pipe_frontend_drawable *r)
+static bool st_api_make_current(struct st_context *st, struct pipe_frontend_drawable *d,
+                                struct pipe_frontend_drawable *r)
 {
    (void)d; (void)r;
    if (mesa_current && mesa_current != st && mesa_current->dead) fault("flush of a freed context at a bind");
@@ -78,8 +79,15 @@ static bool st_api_make_current(struct st_context *st, struct pipe_frontend_draw
    mesa_current = st;
    return true;
 }
-static int nvk_iosurface_group_release(struct nvk_zink_context *ctx) { if (ctx->freed) fault("release of freed"); return 1; }
-static void nvk_zink_present_release(struct nvk_zink_context *ctx) { if (ctx->freed) fault("present release of freed"); }
+static int nvk_iosurface_group_release(struct nvk_zink_context *ctx)
+{
+   if (ctx->freed) fault("release of freed");
+   return 1;
+}
+static void nvk_zink_present_release(struct nvk_zink_context *ctx)
+{
+   if (ctx->freed) fault("present release of freed");
+}
 static void pipe_resource_reference(struct pipe_resource **p, struct pipe_resource *q) { (void)p; (void)q; }
 static void st_api_destroy_drawable(struct pipe_frontend_drawable *d) { (void)d; }
 static void st_destroy_context(struct st_context *st) { if (st->dead) fault("double destroy"); st->dead = 1; }
@@ -221,7 +229,8 @@ def main():
         print(rp.stdout, end="")
         if rp.returncode != 0 and rp.stderr.strip():   # the control's own fault is expected and not printed
             print(rp.stderr, end="")
-        cases = {ln.split()[1] for ln in rp.stdout.splitlines() if ln.startswith(("ok", "FAIL")) and len(ln.split()) > 1}
+        cases = {ln.split()[1] for ln in rp.stdout.splitlines()
+                 if ln.startswith(("ok", "FAIL")) and len(ln.split()) > 1}
         expected = {"deferred_alive", "deferred_freed_at_next_bind", "deferred_new_current", "own_thread_freed_now",
                     "held_alive_while_borrowed", "held_restored_live", "held_freed_at_unbind",
                     "borrowed_target_freed", "unbound_freed_by_owner", "uncertain_kept", "control_fault_is_seen",
