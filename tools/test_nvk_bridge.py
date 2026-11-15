@@ -303,7 +303,7 @@ def installer_problems(install, uninstall):
     p = []
     loops = {"backup": r'for b in [^;]* nvmtl [^;]*; do \[ ! -e "\$GB/\$b" \] \|\| backup_copy "\$b" ditto "\$GB/\$b" "\$BK/\$b"; done',
              "rollback": r'for b in [^;]* nvmtl [^;]*; do\n    rm -rf "\$GB/\$b" \|\| failed=1\n    \[ ! -e "\$BK/\$b" \] \|\| ditto "\$BK/\$b" "\$GB/\$b"',
-             "replace": r'for b in NVMTLDriver.bundle nvmtl; do rm -rf "\$GB/\$b" && ditto "\$HERE/Library/GPUBundles/\$b" "\$GB/\$b"',
+             "replace": r'for b in NVMTLDriver.bundle nvmtl( [^;]*)?; do rm -rf "\$GB/\$b" && ditto "\$HERE/Library/GPUBundles/\$b" "\$GB/\$b"',
              "owner": r'chown -R root:wheel [^\n]*"\$GB/nvmtl"', "modes": r'chmod -R go-w,a\+rX [^\n]*"\$GB/nvmtl"',
              "step 6b fallback": r'for b in [^;]* nvmtl [^;]*; do rm -rf "\$GB/\\\$b"; \[ ! -e "\\\$BK/\\\$b" \] \|\| ditto "\\\$BK/\\\$b" "\$GB/\\\$b"; done'}
     for what, rx in loops.items():
@@ -322,8 +322,8 @@ p = installer_problems(ins, unins)
 check("install.sh backs up, replaces (root:wheel, go-w), rolls back and in its step 6b fallback restores "
       "Library/GPUBundles/nvmtl whole, and uninstall.sh backs it up, removes and restores it whole", not p, p)
 control("an installer whose fallback leaves nvmtl out", installer_problems(
-    ins.replace('for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/\\$b"',
-                'for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl-allow.txt; do rm -rf "$GB/\\$b"', 1), unins))
+    ins.replace('for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt $ZINK_GB; do rm -rf "$GB/\\$b"',
+                'for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl-allow.txt $ZINK_GB; do rm -rf "$GB/\\$b"', 1), unins))
 
 
 # ------------------------------------------------------------------------------------------ host_test.mm on a Mac
