@@ -19,6 +19,9 @@ not choose it keep the provider they use today.
 | `nvk_bridge_icd.json` | a Vulkan loader manifest that names the frontend |
 | `nvk-bridge-runtime.properties` | the runtime's identity (the frontend's SHA-256), read by the optional companion mod |
 
+The package also carries [INSTALL.md](INSTALL.md) as `MINECRAFT-NVK.md` and [APPLICATIONS.md](APPLICATIONS.md) as
+`NVK-APPLICATIONS.md` at its top, beside `install.sh`; they are not installed.
+
 The renderer is a separate copy so that it is a separate image in the process: an application's Vulkan objects never
 mix with the NVK instance the Metal plugin runs in the same process. It reads the same settings file as the driver's
 NVK (`/Library/GPUBundles/nvmtl/nvrm610.conf`) and keys its shader cache on the same build identity (`LC_UUID`).
@@ -51,6 +54,9 @@ rebuilds the runtime, because the component depends on `nvk`.
   host pages instead (`VK_EXT_external_memory_host`). With a full BAR this path is never taken.
 - When a copy does not complete within five seconds, the device is marked uncertain: its resources are kept, not freed,
   and every later call on that device returns `VK_ERROR_DEVICE_LOST`.
+- The frontend reads no environment variable. The plugin's developer switches `NVMTL_NO_SURFACE_PAGEOFF` and
+  `NVMTL_NO_SURFACE_SHARE` do not reach it: it always imports the drawable's VRAM and always marks it newest. The way
+  out of the runtime is per application: remove the JVM argument or `VK_DRIVER_FILES`.
 
 ## Interfaces with the driver
 
@@ -86,11 +92,17 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
 ## What is known
 
 The source fork reports Minecraft 26.3 (Fabric and NeoForge) rendering through this frontend on an RTX 2060 SUPER,
-macOS 26.7.1, with its own NVK build and a full 8 GiB BAR. This tree's version was built and checked on Linux only: its
-three Objective-C++ files compile for x86_64 macOS 15.0 against a stand-in SDK without a warning, and its build and
-package wiring passes this repository's tests. It has not run on a Mac with this tree's NVK.
+macOS 26.7.1, with its own NVK build and a full 8 GiB BAR. This tree's version was built and checked on Linux only:
+`bridge.mm`, `host_test.mm` and `smoke.mm` pass a syntax-only compile for x86_64 macOS 15.0 against a stand-in SDK, with
+two declarations the stand-in lacks (`CGSizeMake`, `CALayer.opaque`) added for the check, and its build and package
+wiring passes this repository's tests. It has not run on a Mac with this tree's NVK.
 
 Limits: one window per swapchain, formats `B8G8R8A8_SRGB` and `B8G8R8A8_UNORM` only, FIFO and immediate present modes,
 and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each present allocates
-and imports its copy target and waits for it on the CPU. With a BAR smaller than VRAM, NVK's own memory types are those
-of this tree's NVK: the source fork's change of NVK memory types for a small BAR is not part of this runtime.
+and imports its copy target and waits for it on the CPU. That import and the mark after the copy are two kernel calls
+per frame that take the accelerator's lock, and the frontend holds its device's submit lock during both, so the
+application's own queue submissions wait as well. During a screen share a captured frame is paged off under that lock,
+and a page-off can hold it while it waits for the GPU (the accelerator's `debug.nvaccel_surf_mark_lock_wait_*` counters
+measure such waits). The cost of these calls has not been measured on a card. The Metal plugin imports each surface's
+VRAM once and keeps it. With a BAR smaller than VRAM, NVK's own memory types are those of this tree's NVK: the source
+fork's change of NVK memory types for a small BAR is not part of this runtime.

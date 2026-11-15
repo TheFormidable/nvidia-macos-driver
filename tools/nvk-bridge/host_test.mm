@@ -2,7 +2,7 @@
 // frontend's source and replaces the renderer with fakes, so no GPU is used.
 // Build and run on a Mac:
 //   xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -std=c++17 -fobjc-arc -O2 \
-//     -I<Vulkan headers> nvk/native-macos/host_test.mm -framework Foundation \
+//     -I<Vulkan headers> tools/nvk-bridge/host_test.mm -framework Foundation \
 //     -framework QuartzCore -framework Metal -framework IOSurface -framework IOKit -o host_test
 //   ./host_test
 #include "bridge.mm"
