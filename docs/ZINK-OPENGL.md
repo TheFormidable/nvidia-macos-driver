@@ -2,7 +2,7 @@
 
 On macOS 15.5 or later the accelerator names `NVKZinkGLDriver.bundle` as its OpenGL driver. OpenGL applications then
 run on NVK through Mesa's Zink instead of on Apple's OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's
-renderer for every application, as in 3.0.
+renderer for every application, as in 2.9.
 
 This was built and checked on Linux only (the cross-build and the checks below). It has not yet run on a Mac.
 
@@ -63,8 +63,8 @@ framework binary, the shared cache or a kernel to find them, and nothing does so
 
 ## The layout guard
 
-The owner's Mac runs a build that is neither recorded one, so the private offsets above are not known to hold there. A
-build whose layout differs would have these reads and writes land in the wrong memory of every OpenGL application.
+On any other macOS build (26.7.3, for example) the private offsets above are not known to hold. A build whose layout
+differs would have these reads and writes land in the wrong memory of every OpenGL application.
 Before it reads past any recorded pointer or writes through one, `nvk_cgl_prepare_gld` proves the memory is shaped as
 the record says, using only facts the process already has and the sizes the public SDK headers give
 (`zink/nvk_cgl_guard.h`). On any mismatch it keeps Apple's renderer for that context, returning as it does when the

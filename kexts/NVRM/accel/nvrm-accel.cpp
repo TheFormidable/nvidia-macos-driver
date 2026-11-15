@@ -268,7 +268,7 @@ static bool nvaccelMultiGpu(void)
 #ifndef NMX_ACCEL
 // Native OpenGL (docs/ZINK-OPENGL.md): on macOS 15.5 (Darwin 24.5) or later the accelerator names
 // NVKZinkGLDriver.bundle as its OpenGL driver, which runs OpenGL on NVK through Mesa's Zink and forwards everything else
-// to Apple's renderer. Boot argument nvzink=0 keeps Apple's OpenGL over Metal, as in 3.0. Read once, at the first start.
+// to Apple's renderer. Boot argument nvzink=0 keeps Apple's OpenGL over Metal, as in 2.9. Read once, at the first start.
 // The NMX build (AMD and Intel GPUs) keeps Apple's renderer: Zink's Vulkan driver here is NVK.
 static int gNvZink = -1;
 static void nvaccelReadZink(void)

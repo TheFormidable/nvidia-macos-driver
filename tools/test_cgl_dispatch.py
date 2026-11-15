@@ -115,7 +115,7 @@ check("nvk_cgl.c takes the swap slot from gliDispatch.h (offsetof(..., disp.swap
 check("nvk_cgl.c's saved table is as long as the SDK's GLIFunctionDispatch", 'sizeof(GLIFunctionDispatch)' in src)
 gen_text = (ROOT / 'build/generate_cgl_dispatch.py').read_text()
 check('the generated entries are offsetof() values', 'offsetof(struct _CGLContextObject, disp.' in gen_text)
-# hdz: no step of the native OpenGL build reads a binary for a layout (a debugger, a disassembler, the shared cache)
+# No step of the native OpenGL build reads a binary for a layout (a debugger, a disassembler, the shared cache)
 scripts = ['build/build_zink.sh', 'build/generate_cgl_dispatch.py', 'build/generate_gld_forward.py', 'build/prepare_zink.py',
            'build/opengl_api.py']
 bad = [(s, w) for s in scripts for w in ('lldb', 'otool -tv', 'otool -t ', 'dyld_shared_cache', 'dsc_extractor', 'objdump -d', 'class-dump')
