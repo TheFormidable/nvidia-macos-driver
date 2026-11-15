@@ -1498,6 +1498,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
         }
     }
     if (_y422Surf) { CFRelease(_y422Surf); _y422Surf = NULL; }
+    if (!_parent && _surfaceLinear.img) nvmtl_vk_image_destroy(&_surfaceLinear);   // before the VRAM it is bound to goes back
     if (!_parent && _vramOn) { if (!nvmtl_ic_put(&_vramBuf)) nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
     if (_surfOwned && _surf) CFRelease(_surf);
@@ -1630,8 +1631,12 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
     if (r->_clientWritten) nvmtl_busy_wait(r->_surf, r->_plane);
-    const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
-    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
+    // The GPU backing is the shared VRAM itself (direct), or an image of this process: a private one, or the tiled image
+    // of a shader-writable Managed wrapper. Such an image is current when the CPU seed has not moved since it was synced
+    // and the VRAM's generation has not moved either (another writer of the VRAM bumps it when it publishes).
+    const BOOL direct = r->_vramOn && !r->_surfaceLinear.img;
+    const uint32_t vgen = direct ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
+    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (direct || vgen == r->_surfGen)) return;
     if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) { r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); }
     if (!r->_clientWritten) nvmtl_vk_fence_wait_compositor((uint32_t)IOSurfaceGetID(r->_surf));
     if (r->_surfSynced && !r->_vramOn && vgen == r->_surfGen && nvmtl_plane_seed_on()) {
@@ -1650,6 +1655,10 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (![r nvmtlSurfaceCopyable]) return;
     { uint32_t now = IOSurfaceGetSeed(r->_surf);
       if (r->_vramOn && nvmtl_vram_tag_current(r->_surf, r->_plane, now)) {
+          // the VRAM holds the surface: a tiled image takes it from there on the GPU, a direct import already has it
+          if (r->_surfaceLinear.img && nvmtl_vk_copy_image(r->_q, &r->_surfaceLinear, 0, 0, &r->_i, 0, 0, r->_i.w, r->_i.h)) {
+              nvlog("surface-in: copy of surface %u's VRAM into its tiled image FAILED - retried at the next use", (unsigned)IOSurfaceGetID(r->_surf)); return; }
+          if (r->_surfaceLinear.img) r->_surfGen = vgen;
           r->_surfSeed = now; r->_surfSynced = YES; g_surfin_skip++;
           static unsigned ns; if (ns++ < 6 || ns % 2000 == 0) nvlog("item 7: surface-in SKIPPED (shared VRAM current at seed %u): %llu skipped, %llu copied", now, g_surfin_skip, g_surfin_copy);
           return; } }
@@ -1669,7 +1678,7 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
-    g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
+    g_surfin_copy++; if (direct) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);   // a tiled image's upload left the VRAM as it was
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     }
 }
@@ -1752,6 +1761,9 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
+    // a tiled image is published into the VRAM on the GPU first; the VRAM is marked newest only once it holds the pixels
+    if (r->_surfaceLinear.img && nvmtl_vk_copy_image(r->_q, &r->_i, 0, 0, &r->_surfaceLinear, 0, 0, r->_i.w, r->_i.h)) {
+        nvlog("surface-out: copy of surface %u's tiled image into its VRAM FAILED", (unsigned)IOSurfaceGetID(r->_surf)); return NO; }
     const uint32_t before = r->_vramOn ? IOSurfaceGetSeed(r->_surf) : 0;   // right before the mark: nvmtl_vram_tags_follow
     const int marked = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
                                                    : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);

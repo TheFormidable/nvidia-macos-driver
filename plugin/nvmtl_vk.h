@@ -28,7 +28,11 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
                  void *sparse;   /* a sparse image (NVMTL_SPARSE_TEXTURES=1): its nvmtl_vk_sparse_info, freed with the image */
-                 uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 uint8_t hz_ut;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 uint8_t linear;  /* a linear alias of a buffer: 1 = offset and pitch 128-byte aligned, 2 = not (NVK renders it
+                                     through its own tiled shadow even when no other attachment is tiled) */
+                 uint8_t alias_a8; /* a linear alias of a buffer: the a8 component mapping of its view */
+               } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
 #define NVMTL_NCOL 8
@@ -128,6 +132,8 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                  uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
+                 void *render_shadows, *active_render_shadows; /* tiled stand-ins of linear attachments of framebuffer-fetch passes
+                                     (nvmtl_vk_cmd_begin_pass): every one made by this recording, and those of the open pass */
                  nvmtl_cl_tag life; /* counted as begun and not yet ended (nvmtl_cmd_life.h): an end is counted once, and only for a counted begin */
                  /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
                     dynamic state is bound, since binding a pipeline without them leaves that state undefined */

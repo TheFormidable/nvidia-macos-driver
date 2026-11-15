@@ -41,7 +41,8 @@ renders it. Quit and reopen Photo Booth after changing it.
 ## Checks
 
 - `python3 tools/test_surface_drawable_usage.py`: the usage policy and the import fallback, compiled from the source
-  with stand-ins, run as "Photo Booth" and as "WindowServer", with two controls that must fail.
+  with stand-ins, run as "Photo Booth" and as "WindowServer", with controls that must fail. It also holds the backing
+  of shader-writable Managed wrappers (a tiled image over the kept import, `NVMTL_MANAGED_SURFACE_TILED`).
 - `python3 tools/test_photobooth_preview.py`: the adapter's functions against stand-in classes (process identity,
   marking, the reflection, pass-through arguments, invalid bounds, signatures, inherited methods, the switch), with a
   control that must fail. It needs `xcrun clang` with Objective-C.
