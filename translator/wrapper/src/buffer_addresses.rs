@@ -51,14 +51,25 @@ fn data_dependent(v: u32, local: &HashMap<u32, &Instruction>, defs: &HashMap<u32
 fn kept_roots(m: &rspirv::dr::Module, defs: &HashMap<u32, Instruction>, sb_types: &HashMap<u32, u32>, roots: &[(u32, u32, u32)], value_types: &HashMap<u32, u32>) -> (HashSet<u32>, HashSet<u32>) {
     let local: HashMap<u32, &Instruction> = m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()).filter_map(|i| Some((i.result_id?, i))).collect();
     let mut owner: HashMap<u32, u32> = roots.iter().filter(|r| sb_types.get(&r.1).is_some_and(|&p| holds_runtime_array(p, defs, 0))).map(|r| (r.0, r.0)).collect();
+    let chain = |op: Op| matches!(op, Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject);
+    // Blocks need not be stored in dominance order, and a phi names its back-edge value before the block that makes
+    // it. Every chain of a root is found first, so a use is seen as one wherever it stands in the function.
+    loop {
+        let mut changed = false;
+        for i in m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()) {
+            if !chain(i.class.opcode) { continue; }
+            let (Some(&root), Some(r)) = (i.operands.first().and_then(id).and_then(|v| owner.get(&v)), i.result_id) else { continue };
+            if !owner.contains_key(&r) { owner.insert(r, root); changed = true; }
+        }
+        if !changed { break; }
+    }
     let (mut needs, mut bad) = (HashSet::new(), HashSet::new());
     for i in m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()) {
         let Some(&root) = i.operands.first().and_then(id).and_then(|v| owner.get(&v)) else {
             bad.extend(i.operands.iter().filter_map(id).filter_map(|v| owner.get(&v).copied())); continue };
         if i.operands.iter().skip(1).filter_map(id).any(|v| owner.contains_key(&v)) { bad.insert(root); }
         match i.class.opcode {
-            Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject => {
-                if let Some(r) = i.result_id { owner.insert(r, root); }
+            op if chain(op) => {
                 let (mut seen, mut budget) = (HashSet::new(), 96u32);
                 if i.operands.iter().skip(1).filter_map(id).any(|x| data_dependent(x, &local, defs, value_types, &mut seen, &mut budget)) { needs.insert(root); }
             }
@@ -440,6 +451,79 @@ OpFunctionEnd
             + "\n%helper = OpFunction %uint None %helper_fn\n%arg = OpFunctionParameter %pu\n%entry = OpLabel\n%helper_value = OpLoad %uint %arg\nOpReturnValue %helper_value\nOpFunctionEnd\n";
         let input = source(&text); validate(&input);
         assert!(lower(&input).unwrap_err().contains("FunctionCall"));
+    }
+    // A loop reads through a phi of two buffers' pointers. The runtime-array buffer's pointer arrives on the back edge,
+    // from a block stored after the phi, so its chain is known only once every chain of the module is: the phi is a use
+    // that needs the pointer in both forms, and the buffer is lowered with the other one.
+    const BACK_EDGE_PHI: &str = r#"
+OpCapability Shader
+OpCapability VariablePointersStorageBuffer
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %buf %fixed
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %arr ArrayStride 4
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %fblock Block
+OpMemberDecorate %fblock 0 Offset 0
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 0
+OpDecorate %fixed DescriptorSet 0
+OpDecorate %fixed Binding 1
+%void = OpTypeVoid
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%arr = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %arr
+%fblock = OpTypeStruct %uint
+%pb = OpTypePointer StorageBuffer %block
+%pf = OpTypePointer StorageBuffer %fblock
+%pu = OpTypePointer StorageBuffer %uint
+%buf = OpVariable %pb StorageBuffer
+%fixed = OpVariable %pf StorageBuffer
+%fn = OpTypeFunction %void
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%q = OpAccessChain %pu %fixed %zero
+%x = OpLoad %uint %q
+OpBranch %header
+%header = OpLabel
+%p = OpPhi %pu %q %entry %next %body
+%i = OpPhi %uint %zero %entry %i1 %body
+%v = OpLoad %uint %p
+%cond = OpULessThan %bool %i %one
+OpLoopMerge %merge %body None
+OpBranchConditional %cond %body %merge
+%body = OpLabel
+%next = OpAccessChain %pu %buf %zero %x
+%i1 = OpIAdd %uint %i %one
+OpBranch %header
+%merge = OpLabel
+OpStore %q %v
+OpReturn
+OpFunctionEnd
+"#;
+    fn kept_of(bytes: &[u8]) -> HashSet<u32> {
+        let m = rspirv::dr::load_bytes(bytes).unwrap();
+        let defs: HashMap<u32, Instruction> = m.types_global_values.iter().filter_map(|i| Some((i.result_id?, i.clone()))).collect();
+        let sb_types: HashMap<u32, u32> = m.types_global_values.iter().filter(|i| i.class.opcode == Op::TypePointer
+            && i.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer)))
+            .filter_map(|i| Some((i.result_id?, id(i.operands.get(1)?)?))).collect();
+        let roots: Vec<(u32, u32, u32)> = m.types_global_values.iter().filter(|i| i.class.opcode == Op::Variable
+            && i.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer)))
+            .filter_map(|i| Some((i.result_id?, i.result_type?, 0))).collect();
+        let value_types: HashMap<u32, u32> = m.all_inst_iter().filter_map(|i| Some((i.result_id?, i.result_type?))).collect();
+        kept_roots(&m, &defs, &sb_types, &roots, &value_types).0
+    }
+    #[test] fn a_pointer_reaching_a_phi_on_the_back_edge_keeps_no_descriptor() {
+        let control = source(&BACK_EDGE_PHI.replace("%p = OpPhi %pu %q %entry %next %body", "%p = OpPhi %pu %q %entry %q %body"));
+        validate(&control);
+        assert_eq!(kept_of(&control).len(), 1, "a data-indexed runtime array that reaches only chains and loads keeps its descriptor");
+        let input = source(BACK_EDGE_PHI); validate(&input);
+        assert!(kept_of(&input).is_empty(), "the back-edge phi needs the pointer in both forms, so the buffer is lowered");
+        let output = lower(&input).unwrap(); assert_ne!(output, input); validate(&output);
     }
     #[test] #[ignore] fn corpus_lowered_shaders_still_validate() {
         use metal2vulkan::passes::Stage; use std::collections::BTreeMap;
