@@ -397,7 +397,7 @@ STEP_SCRIPTS = {
     "build/build_dlss_cache.sh": "dlss", "build/build_osver.sh": "osver", "build/build_nvk.sh": "nvk",
     "tools/nvmtl-boost/build.sh": "boost", "build/build_vulkan_loader.sh": "vulkan", "build/build_plugin_release.sh": "plugin",
     "build/build_plugin_dev.sh": "plugindev", "build/build_xlate_release.sh": "xlate", "build/build_nvencvt.sh": "nvencvt",
-    "build/build_primary_selector.sh": "selector", "build/package_local.sh": "package",
+    "build/build_primary_selector.sh": "selector", "build/build_zink.sh": "zink", "build/package_local.sh": "package",
 }
 STEPLIB_SH = r'''#!/bin/bash
 # steplib.sh <key> <script> <args...>: a component build script's stand-in (tools/test_build_sh.py)
@@ -473,6 +473,7 @@ case $key in
   plugindev) mk "$1/NVMTLDriver" ;;
   xlate) mk "$2/libnvmtl_translate.dylib" ;;
   nvencvt) mk "$2/libnvencvt.dylib" ;;
+  zink) mk "$3/zink/libnvk_cgl.dylib"; mk "$3/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver" ;;
   selector) mk "$1/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
   package) mk "$3/pkgroot/SHA256SUMS" ;;
 esac
@@ -607,6 +608,15 @@ def make_remotes(root, tamper=False):
                                    {"meson.build": MESON_BUILD + salt, "include/vulkan/vulkan_core.h": "#define VK_HEADER_VERSION 363\n",
                                     "include/vulkan/vulkan.h": '#include "vulkan_core.h"\n'},
                                    tags=["mesa-26.3.0-rc3"])
+    # Zink's Mesa (NM_PIN_ZINKMESA): a later commit of the same repository, on a branch of its own
+    mw = TMP / "repo-work" / "mesa.git"
+    git("checkout", "-q", "-b", "zink", cwd=mw)
+    (mw / "VERSION").write_text("26.3.0\n" + salt)
+    git("add", "-A", cwd=mw)
+    git("commit", "-qm", "stand-in for mesa-26.3.0", cwd=mw)
+    git("tag", "-a", "-m", "mesa-26.3.0", "mesa-26.3.0", cwd=mw)
+    git("push", "-q", root / "gitlab.freedesktop.org/mesa/mesa.git", "zink", "refs/tags/mesa-26.3.0", cwd=mw)
+    commits["ZINKMESA"] = git("rev-parse", "HEAD", cwd=mw)
     _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.367"])
     _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.367"])
     _, commits["OPENGPUDOC"] = make_repo(gh / "NVIDIA/open-gpu-doc.git", {"classes/video/clc9b0.h": "/* doc */\n" + salt})
@@ -660,13 +670,13 @@ def build_template():
         shutil.copy2(src, dst, follow_symlinks=False)
     pins = (TPL / "build/pins.sh").read_text()
     replace = {}
-    for pid in ("OGKM620", "OGKM610", "MESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ", "SPIRVLLVM", "SPIRVHEADERS"):
+    for pid in ("OGKM620", "OGKM610", "MESA", "ZINKMESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ", "SPIRVLLVM", "SPIRVHEADERS"):
         replace[pin_value(pins, f"NM_PIN_{pid}_COMMIT")] = commits[pid]
     for pid in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
         replace[pin_value(pins, f"NM_PIN_{pid}_SHA256")] = sums[pid]
     replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_X86_64")] = ri["x86_64-apple-darwin"]
     replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_AARCH64")] = ri["aarch64-apple-darwin"]
-    for rel in ["build/pins.sh", "nvk/MESA_BASE", *STEP_SCRIPTS]:
+    for rel in ["build/pins.sh", "nvk/MESA_BASE", "build/prepare_zink.py", *STEP_SCRIPTS]:
         p = TPL / rel
         t = p.read_text()
         for old, new in replace.items():
@@ -909,7 +919,7 @@ def want(name):
 
 # ------------------------------------------------------------------------------------------------- what is expected
 ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "vulkan",
-         "plugin", "xlate", "nvencvt"]
+         "plugin", "xlate", "nvencvt", "zink"]
 FRESH_MISSING = ["Xcode", "Homebrew", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
                  "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
 MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
@@ -2779,6 +2789,7 @@ def arm_needs():
 FETCH_WANT = [("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/620.70.06"),
               ("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/610.57.04"),
               ("https://gitlab.freedesktop.org/mesa/mesa.git", "refs/tags/mesa-26.3.0-rc3"),
+              ("https://gitlab.freedesktop.org/mesa/mesa.git", "refs/tags/mesa-26.3.0"),
               ("https://github.com/KhronosGroup/Vulkan-Headers", "refs/tags/v1.4.367"),
               ("https://github.com/KhronosGroup/Vulkan-Loader", "refs/tags/v1.4.367"),
               ("https://github.com/NVIDIA/open-gpu-doc.git", "@OPENGPUDOC"),
@@ -4511,6 +4522,7 @@ def pin_expectations(pins):
         ("NM_PIN_MESA_COMMIT", "nvk/MESA_BASE", c8),
         ("NM_PIN_MESA_COMMIT", "build/build_nvk.sh", f"2.9: {c8}, {p['NM_PIN_MESA_REF']}"),
         ("NM_PIN_MESA_COMMIT", "nvk/nvk-mesa-26.3.0.patch", f"{p['NM_PIN_MESA_REF'].replace('mesa-', '')} (nvk/MESA_BASE, {c8})"),
+        ("NM_PIN_ZINKMESA_COMMIT", "build/prepare_zink.py", "MESA_COMMIT = '%s'" % p["NM_PIN_ZINKMESA_COMMIT"]),
         ("NM_PIN_VKLOADER_REF", "build/build_vulkan_loader.sh", "TAG=" + p["NM_PIN_VKLOADER_REF"]),
         ("NM_PIN_VKHEADERS_REF", "build/build_vulkan_loader.sh", "TAG=" + p["NM_PIN_VKHEADERS_REF"]),
         ("NM_PIN_VKLOADER_COMMIT", "build/build_vulkan_loader.sh", "LOADER_SHA=" + p["NM_PIN_VKLOADER_COMMIT"]),

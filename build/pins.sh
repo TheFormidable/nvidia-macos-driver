@@ -9,7 +9,7 @@
 # a file:// path), REF (tag; empty when only a commit is pinned), COMMIT (verified after the fetch: a mismatch stops
 # the build) or SHA256 (for a single file).
 
-NM_PIN_SOURCES="OGKM620 OGKM610 MESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBKIT_CMBASE WEBKIT_VTDEC SPIRVLLVM SPIRVHEADERS"
+NM_PIN_SOURCES="OGKM620 OGKM610 MESA ZINKMESA VKHEADERS VKLOADER OPENGPUDOC RYZENADJ WEBKIT_CMBASE WEBKIT_VTDEC SPIRVLLVM SPIRVHEADERS"
 
 # NVIDIA open-gpu-kernel-modules 620.70.06, the RM core and NVKMS the kexts link. build/build_rm620.sh and
 # build/build_kms620.sh (their NV_VERSION default, "V=${NV_VERSION:-620.70.06}"), README.md (Build from source),
@@ -38,6 +38,13 @@ NM_PIN_MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
 NM_PIN_MESA_MIRROR=NM_MESA_URL
 NM_PIN_MESA_REF=mesa-26.3.0-rc3
 NM_PIN_MESA_COMMIT=90a959ebba9dbb36f2ea5176091c15d6ebdd0af0
+# Mesa mesa-26.3.0, the tree native OpenGL's Zink is built from (build/build_zink.sh): the commit build/prepare_zink.py
+# checks (MESA_COMMIT) and zink/mesa-zink-nvk.patch applies to. Fetched into the same bare repository as NVK's Mesa.
+NM_PIN_ZINKMESA_NAME="Mesa 26.3.0 (native OpenGL: Zink)"
+NM_PIN_ZINKMESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
+NM_PIN_ZINKMESA_MIRROR=NM_MESA_URL
+NM_PIN_ZINKMESA_REF=mesa-26.3.0
+NM_PIN_ZINKMESA_COMMIT=0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4
 # Not fetched by build.sh: the Vulkan headers of the automatic checks (build/ci_vulkan_headers.sh, used by
 # build/ci_plugin.sh and the host tests on GitHub's runners). Khronos Vulkan-Headers v1.4.363 (the tag's peeled commit,
 # git ls-remote 2026-11-13): each of its C headers in include/vulkan and include/vk_video is byte for byte the file of
