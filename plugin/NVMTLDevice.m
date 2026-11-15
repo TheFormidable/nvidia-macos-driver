@@ -1304,6 +1304,13 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
 }
+// A texture whose usage is Unknown may be used every valid way, shader writes through mip and slice views included, so
+// it gets a storage-capable image when it is made: the storage twin that covers a later write without a storage view
+// (nvmtl_storage_view_for) serves the root texture only, never a view of it. From the HighDelay/nvidia-macos-driver-nvk fork. Surface wrappers keep their
+// own rule (nvmtl_surface_usage), which reports Unknown only over a backing without a storage view.
+static BOOL nvmtl_texture_usage_writable(NSUInteger usage) {
+    return usage == MTLTextureUsageUnknown || (usage & MTLTextureUsageShaderWrite) != 0;
+}
 // BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
 // R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
 // kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
@@ -1441,7 +1448,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
         if (wantStex) { static _Atomic unsigned long msw; const unsigned long k = atomic_fetch_add(&msw, 1) + 1;
@@ -1454,7 +1461,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     t->_stex = t->_i.storage == 1;
     t->_rbSwap = rbSwap;
     t->_usage = d.usage;
-    if (wantStex && !t->_stex) { static unsigned long lost; lost++;
+    if ((d.usage & MTLTextureUsageShaderWrite) && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }
     nvmtl_texture_desc_swizzle(t, d);
     nvlog("newTextureWithDescriptor: %lux%lu%s -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (__bridge void *)t); return t; }
@@ -2423,7 +2430,7 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
         if (sa8) {
-            a8mask |= 1u << i;
+            a8mask |= 1u << i; rt.a8_mask |= 1u << i;   // its framebuffer-fetch reads are remapped (nvmtl_a8_fetch.h)
             if (rt.blend[i].enabled) {   // the red lane is Metal's alpha: blend it with the alpha factors and operation
                 rt.blend[i].src_rgb = nvmtl_a8_factor(rt.blend[i].src_alpha); rt.blend[i].dst_rgb = nvmtl_a8_factor(rt.blend[i].dst_alpha);
                 rt.blend[i].op_rgb = rt.blend[i].op_alpha; }
@@ -3169,7 +3176,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     uint32_t mtl_type = (uint32_t)d.textureType;
     uint32_t layers = nvmtl_vk_layers_for_desc(mtl_type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
     if (nvmtl_vk_image_size_align((uint32_t)d.width, (uint32_t)d.height, depth ? dvk : vkf, (uint32_t)d.mipmapLevelCount, mtl_type, layers, depth,
-                                  (d.usage & MTLTextureUsageShaderWrite) != 0 && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
+                                  nvmtl_texture_usage_writable(d.usage) && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
     MTLSizeAndAlign r = { sz, al }; return r;
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)d

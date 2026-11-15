@@ -443,7 +443,7 @@ void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, siz
     if (bytes) *bytes = g_alloc_bytes;
 }
 
-#define INSTANCE_FNS(X) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceFeatures) \
+#define INSTANCE_FNS(X) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceFeatures) X(vkGetPhysicalDeviceFormatProperties) \
     X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceMemoryProperties2) X(vkGetPhysicalDeviceProperties2) X(vkCreateDevice) X(vkGetDeviceProcAddr)
 #define DEVICE_FNS(X) X(vkGetDeviceQueue) X(vkCreateBuffer) X(vkGetBufferMemoryRequirements) X(vkAllocateMemory) \
     X(vkGetImageMemoryRequirements2) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCreateImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
@@ -2185,12 +2185,12 @@ static int nvmtl_vk_stage(nvk_queue *q, size_t size, nvk_buffer *out)
 
 int nvmtl_vk_format_is_storage(uint32_t vkfmt)
 {
-    static void (*fp)(VkPhysicalDevice, VkFormat, VkFormatProperties *); static int tried;
+    // The query is one of the instance functions nvmtl_vk_init resolves under its pthread_once, so every thread sees it
+    // resolved once init returned. A flag of its own set before the pointer could be seen by another thread first, which
+    // then answered "not storage" and created that texture without its storage view (from the HighDelay/
+    // nvidia-macos-driver-nvk fork).
     if (nvmtl_vk_init()) return 0;
-    if (!tried) { tried = 1; fp = (void (*)(VkPhysicalDevice, VkFormat, VkFormatProperties *))pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
-                  if (!fp) nvlog("vk: vkGetPhysicalDeviceFormatProperties is missing — NO texture can be a storage image"); }
-    if (!fp) return 0;
-    VkFormatProperties fpz; memset(&fpz, 0, sizeof fpz); fp(g_pdev, (VkFormat)vkfmt, &fpz);
+    VkFormatProperties fpz; memset(&fpz, 0, sizeof fpz); pvkGetPhysicalDeviceFormatProperties(g_pdev, (VkFormat)vkfmt, &fpz);
     return (fpz.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 }
 static int nvmtl_vk_cube_compat(uint32_t mtl_type, uint32_t w, uint32_t h, uint32_t layers)
@@ -2870,6 +2870,7 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
         out->alloc = mr.size;
         VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
     }
+    out->alias_a8 = (uint8_t)a8;   // the mapping of its own view: an attachment takes an identity view instead
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
@@ -5090,6 +5091,7 @@ static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p,
  */
 #define NVMTL_FETCH_SET 3
 #define NVMTL_FETCH_BINDING 192
+#include "nvmtl_a8_fetch.h"
 static VkDescriptorSetLayout g_fetchLayout, g_emptyLayout;
 static VkDescriptorPool g_fetchPools[64]; static unsigned g_nfetchPools;
 static int nvmtl_fbfetch_on(void)
@@ -6297,6 +6299,15 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
         rt = &lrt;
     }
     if (samples != 1 && samples != 2 && samples != 4 && samples != 8) { nvlog("pipeline: rasterSampleCount %u is not carried (1, 2, 4, 8)", samples); return -1; }
+    // A8 colour attachments are attached through identity views (nvmtl_vk_cmd_attachment_view): their framebuffer-fetch
+    // reads are given Metal's (0,0,0,r) in the shader instead (nvmtl_a8_fetch.h)
+    NSData *a8data = nil;
+    if (rt->a8_mask && nvmtl_fbfetch_on()) {
+        uint32_t *patched = NULL; size_t patched_bytes = 0;
+        const int remapped = nvmtl_spirv_a8_fetch(fs, fn, rt->a8_mask, &patched, &patched_bytes);
+        if (remapped < 0) { nvlog("pipeline: the A8 framebuffer-fetch remap cannot read this fragment shader - pipeline REFUSED"); return -1; }
+        if (remapped) { a8data = [NSData dataWithBytesNoCopy:patched length:patched_bytes freeWhenDone:YES]; fs = a8data.bytes; fn = a8data.length; }
+    }
     NSData *vdata = nvmtl_address_shader(vs, vn), *fdata = nvmtl_address_shader(fs, fn);
     if (!vdata || !fdata) return -1;
     vs = vdata.bytes; vn = vdata.length; fs = fdata.bytes; fn = fdata.length;
@@ -8156,7 +8167,9 @@ int nvmtl_vk_cmd_attachment_view(nvk_cmdbuf *c, nvk_image *img, int depth, uint3
     *out = NULL;
     if (level >= mips || slice >= layers) { nvlog("encoder: apps2 attachment level %u slice %u is outside the image (%u level(s), %u slice(s)) — pass REFUSED", level, slice, mips, layers); return -1; }
     *w = img->w >> level ? img->w >> level : 1u; *h = img->h >> level ? img->h >> level : 1u;
-    if ((mips <= 1 && layers <= 1) || ((depth || img->mtl_type == 7) && !level && !slice)) {
+    // an image whose own view swizzles (A8, ARGB8: alias_a8) is attached through an identity view of its own, as Vulkan
+    // requires of attachment and input-attachment views
+    if ((depth || !img->alias_a8) && ((mips <= 1 && layers <= 1) || ((depth || img->mtl_type == 7) && !level && !slice))) {
         if (!img->view) { nvlog("encoder: apps2 attachment image has no view — pass REFUSED"); return -1; }
         if (mips > 1 || layers > 1 || img->mtl_type == 7) { static int said; if (said++ < 4) nvlog("encoder: apps2 a %s attachment at level 0 slice 0 of a %u-level %u-slice image uses the image's own view (as before)", depth ? "depth/stencil" : "3D", mips, layers); }
         *out = img->view; return 0;
@@ -8185,7 +8198,7 @@ int nvmtl_vk_cmd_attachment_view_fmt(nvk_cmdbuf *c, nvk_image *img, int depth, u
     *w = img->w >> level ? img->w >> level : 1u; *h = img->h >> level ? img->h >> level : 1u;
     uint32_t vt = img->mtl_type <= 1 ? 0u : img->mtl_type == 4 ? 4u : 2u;
     void *v = NULL;
-    if (nvmtl_vk_image_view_create_range(img, vkfmt, a8, level, 1, slice, 1, vt, &v)) return -1;
+    if (nvmtl_vk_image_view_create_range(img, vkfmt, a8 == 1 ? 0 : a8, level, 1, slice, 1, vt, &v)) return -1;   // A8: identity
     if (nvmtl_vk_cmd_retire_view(c, v)) return -1;
     static int said; if (said++ < 4) nvlog("encoder: gl3 colour attachment in its VIEW's format %u over a format-%u image", vkfmt, img->fmt);
     *out = v; return 0;
@@ -8230,7 +8243,7 @@ int nvmtl_vk_cmd_attachment_view_n(nvk_cmdbuf *c, nvk_image *img, int depth, uin
         v = (void *)vv;
     } else {
         uint32_t vt = nlayers > 1 ? (img->mtl_type <= 1 ? 1u : 3u) : (img->mtl_type <= 1 ? 0u : img->mtl_type == 4 ? 4u : 2u);
-        if (nvmtl_vk_image_view_create_range(img, vkfmt ? vkfmt : img->fmt, a8, level, 1, slice, nlayers, vt, &v)) return -1;
+        if (nvmtl_vk_image_view_create_range(img, vkfmt ? vkfmt : img->fmt, a8 == 1 ? 0 : a8, level, 1, slice, nlayers, vt, &v)) return -1;
     }
     if (nvmtl_vk_cmd_retire_view(c, v)) return -1;
     *out = v; return 0;
@@ -9351,7 +9364,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     g_alloc_bytes += mr.size;
     if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res1_off++; g_res1_off_b += i->alloc; }
     else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
-    i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     pthread_mutex_lock(&g_sl_lock);
     nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img); nvmtl_vw_tic_note(view);
     pthread_mutex_unlock(&g_sl_lock);
@@ -9465,7 +9478,7 @@ int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_o
       g_alloc_bytes += mr.size;
       if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res2_off++; g_res2_off_b += i->alloc; }
       else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res2_on++; g_res2_on_b += mr.size; } }
-    i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = (uint32_t)was;
+    i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = (uint32_t)was;
     return 0;
 fail:
     if (view) pvkDestroyImageView(g_dev, view, NULL);
@@ -12131,6 +12144,7 @@ static int nvmtl_vk_image_create_typed_placed_lifetime_body(uint32_t w, uint32_t
     if (placed_ok(&mr, heap, offset, "placed image")) { pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     VKCK(pvkBindImageMemory(g_dev, out->img, (VkDeviceMemory)heap->mem, offset), "vkBindImageMemory(placed)");
     out->mem = heap->mem; out->placed = 1; out->alloc = 0; out->hz_off = offset; out->hz_len = mr.size;
+    out->alias_a8 = (uint8_t)a8;
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                              : mtl_type == 5 ? VK_IMAGE_VIEW_TYPE_CUBE : mtl_type == 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : mtl_type == 7 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
