@@ -145,7 +145,7 @@ put_file "$OUT/plugin/NVMTLDriver" Library/GPUBundles/NVMTLDriver.bundle/Content
 # beside NVMTLDriver.bundle. Zink opens its Vulkan driver by name (@rpath/libnvk_zink_vulkan.dylib): the nvkbridge
 # component's frontend, and beside it the copy of this build's NVK that the frontend loads (libnvk_renderer.dylib).
 ZO=$OUT/zink; ZR=Library/GPUBundles/nvmtl/zink
-for f in libnvk_zink.dylib libnvk_cgl.dylib zink_sync_probe; do put_signed "$ZO/zink/$f" "$ZR/$f"; done
+for f in libnvk_zink.dylib libnvk_cgl.dylib zink_sync_probe gld_bundle_probe; do put_signed "$ZO/zink/$f" "$ZR/$f"; done
 for f in cgl-dispatch-map.json MESA-SOURCE.json; do put_file "$ZO/zink/$f" "$ZR/$f"; done
 [ -f "$OUT/nvkbridge/lib/libnvk_minecraft.dylib" ] && [ -f "$OUT/nvkbridge/lib/libnvk_renderer.dylib" ] ||
   stop "native OpenGL needs the nvkbridge component's frontend and renderer ($OUT/nvkbridge/lib): build nvkbridge"

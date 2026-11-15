@@ -10,6 +10,8 @@
 #   <out>/zink/cgl-dispatch-map.json   what build/generate_cgl_dispatch.py made of this SDK's OpenGL headers
 #   <out>/zink/cgl-api-requirements.json, MESA-SOURCE.json   the registry contract and the Mesa tree's identity
 #   <out>/zink/zink_sync_probe          Mesa's barrier and queue check (tools/zink_sync_probe.c), run here once
+#   <out>/zink/gld_bundle_probe         asks macOS's trusted GPU-bundle lookup for a bundle by name
+#                                      (tools/gld_bundle_probe.c); package/install.sh runs it on the installed bundle
 #   <out>/NVKZinkGLDriver.bundle       the GL driver bundle the accelerator names (zink/gld_bridge.c)
 # Everything is x86_64, minos 15.0 like the rest of the package's userland (install.sh's runtime check refuses a package
 # whose binaries ask for a newer macOS than the Mac runs, and 15.0 to 15.4 install the driver), with any call to an API
@@ -76,6 +78,8 @@ mkdir -p "$BUNDLE/Contents/MacOS"
 xcrun clang -arch x86_64 -mmacosx-version-min=$MIN "$AV" -bundle -std=c11 -O2 -Wall -Wextra -Werror -fvisibility=hidden \
   -I"$H/zink" -I"$G" "$H/zink/gld_bridge.c" "$G/gld_forward.S" \
   -Wl,-rpath,@loader_path/../../../nvmtl/zink -o "$BUNDLE/Contents/MacOS/NVKZinkGLDriver"
+xcrun clang -arch x86_64 -mmacosx-version-min=$MIN "$AV" -std=c11 -O2 -Wall -Wextra -Werror \
+  "$H/tools/gld_bundle_probe.c" -o "$Z/gld_bundle_probe"
 cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,9 +93,11 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # 5. signatures and the checks a package makes
-for f in "$Z/libnvk_zink.dylib" "$Z/libnvk_cgl.dylib" "$Z/zink_sync_probe"; do codesign -f -s - "$f" >/dev/null; done
+for f in "$Z/libnvk_zink.dylib" "$Z/libnvk_cgl.dylib" "$Z/zink_sync_probe" "$Z/gld_bundle_probe"; do
+  codesign -f -s - "$f" >/dev/null
+done
 codesign -f -s - "$BUNDLE" >/dev/null
-for f in "$Z/libnvk_zink.dylib" "$Z/libnvk_cgl.dylib" "$BUNDLE/Contents/MacOS/NVKZinkGLDriver"; do
+for f in "$Z/libnvk_zink.dylib" "$Z/libnvk_cgl.dylib" "$Z/gld_bundle_probe" "$BUNDLE/Contents/MacOS/NVKZinkGLDriver"; do
   lipo "$f" -verify_arch x86_64 || stop "${f##*/} is not x86_64"
   codesign --verify --strict "$f" || stop "${f##*/} does not verify"
   # nothing from outside macOS and the runtime folder: a Homebrew library would follow the package to the user's Mac

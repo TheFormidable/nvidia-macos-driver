@@ -1974,7 +1974,7 @@ comp_info() {
     # zink: native OpenGL through Mesa's Zink (docs/ZINK-OPENGL.md); its private Vulkan runtime is the nvkbridge
     # component's, which build/package_local.sh copies beside it
     zink)  C_DESC="native OpenGL: Zink, the CGL adapter and NVKZinkGLDriver.bundle"
-           C_SRC="build/build_zink.sh build/prepare_zink.py build/opengl_api.py build/generate_cgl_dispatch.py build/generate_gld_forward.py zink tools/zink_sync_probe.c"
+           C_SRC="build/build_zink.sh build/prepare_zink.py build/opengl_api.py build/generate_cgl_dispatch.py build/generate_gld_forward.py zink tools/zink_sync_probe.c tools/gld_bundle_probe.c"
            C_VARS="NM_MESA_GIT"; C_PINS="ZINKMESA_ PY_"; C_TOOLS="xcode meson"; C_OUT="$O/zink/zink/libnvk_cgl.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
