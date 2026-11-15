@@ -227,9 +227,14 @@ def main():
     check("nvk_cgl.c runs nvk_cgl_check_gld_layout in prepare_gld and returns 0 on a mismatch",
           "nvk_cgl_check_gld_layout(engine" in cgl
           and re.search(r"if \(layout != NVK_CGL_LAYOUT_OK\).*?return 0;", cgl, re.S) is not None)
-    check("nvk_cgl.c no longer reads the profile byte or the dispatch pointers before the check",
+    check("nvk_cgl.c reads neither the profile byte nor the dispatch pointers before the check",
           "*(unsigned char *)((char *)engine + GLI_PROFILE)" not in cgl
           and "*(void **)((char *)engine + GLI_CGL_DISPATCH)" not in cgl)
+    m = re.search(r"EXPORT int nvk_cgl_prepare_gld\(.*?\n\}\n", cgl, re.S)
+    body = m.group(0) if m else ""
+    check("prepare_gld proves the layout before it makes the Zink screen, so a refusal opens no NVK device",
+          0 <= body.find("nvk_cgl_check_gld_layout(") < body.find("nvk_zink_screen_ready()")
+          and body.count("nvk_zink_screen_ready()") == 1, body[:200])
     check("integer_dispatch_slot checks the CGL private object and engine list are heap blocks",
           cgl.count("nvk_cgl_block_spans(meta") == 1 and cgl.count("nvk_cgl_block_spans(items") == 1)
     check("a refusal is logged once per process on stderr",

@@ -68,8 +68,8 @@ On any other macOS build (26.7.3, for example) the private offsets above are not
 differs would have these reads and writes land in the wrong memory of every OpenGL application.
 Before it reads past any recorded pointer or writes through one, `nvk_cgl_prepare_gld` proves the memory is shaped as
 the record says, using only facts the process already has and the sizes the public SDK headers give
-(`zink/nvk_cgl_guard.h`). On any mismatch it keeps Apple's renderer for that context, returning as it does when the
-Zink screen cannot be made, having written nothing. The checks are:
+(`zink/nvk_cgl_guard.h`). It runs before the process's Zink screen (a Vulkan instance and an NVK device) is made. On
+any mismatch it keeps Apple's renderer for that context, having written nothing and opened no device. The checks are:
 
 - the GLI context is a heap block that spans every recorded read (its own allocator reports the block's start and size:
   `malloc_zone_from_ptr` and `malloc_size`);
