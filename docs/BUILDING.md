@@ -390,6 +390,7 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `osver` | libnvmtl_osver.dylib | build/build_osver.sh | |
 | `nvk` | NVK, the Vulkan driver (libvulkan_nouveau.dylib) | build/build_nvk.sh | |
 | `boost` | nvmtl-boost | tools/nvmtl-boost/build.sh | nvk |
+| `nvkbridge` | the native Vulkan presentation runtime (libnvk_minecraft.dylib), which the package installs at `/Library/GPUBundles/nvmtl/minecraft` | tools/nvk-bridge/build.sh | nvk |
 | `vulkan` | the Khronos Vulkan loader v1.4.367, which the package offers to applications (`vulkan-for-apps.sh`); not the plugin's own loader | build/build_vulkan_loader.sh | |
 | `plugin` | the Metal plugin (NVMTLDriver) | build/build_plugin_release.sh, or build/build_plugin_dev.sh with `--flavour dev` | |
 | `xlate` | the shader translator (libnvmtl_translate.dylib) | build/build_xlate_release.sh | |
@@ -415,7 +416,7 @@ dependencies too) before the first step starts.
 | `nvencvt` | `python3` 3.8 or later on the build Mac's PATH (`NM_LOCAL_HOST_PATH`, default `/usr/bin:/bin:/usr/sbin:/sbin`) | `python3 --version` there |
 | `vulkan` | cmake 3.22.1 or later and ninja | `--version`; the toolchain's, and with `NM_TOOLS_FROM=homebrew` also Homebrew's or one on PATH |
 | `xlate` | Rust 1.98.1 in the working directory | `deps` installs it |
-| `nvk` (and `boost`, built from it) | Python 3.10 or later (Mesa's meson.build) with meson, mako, PyYAML, packaging in `<workdir>/tools/venv`; LLVM 22 with its clang libraries; SPIRV-LLVM-Translator for LLVM 22; SPIRV-Tools; glslang; pkg-config; Rust with bindgen and cbindgen; a `patch` that also creates files (NVK's chain adds files; Homebrew `gpatch` when macOS's cannot) | each one, as `doctor` shows |
+| `nvk` (and `boost` and `nvkbridge`, built from it) | Python 3.10 or later (Mesa's meson.build) with meson, mako, PyYAML, packaging in `<workdir>/tools/venv`; LLVM 22 with its clang libraries; SPIRV-LLVM-Translator for LLVM 22; SPIRV-Tools; glslang; pkg-config; Rust with bindgen and cbindgen; a `patch` that also creates files (NVK's chain adds files; Homebrew `gpatch` when macOS's cannot) | each one, as `doctor` shows |
 
 `deps` installs `gpatch` only when no `patch` found passes both tests. The oldest Python the kext and video scripts
 have been run with is macOS's own `python3` (3.9 with Xcode); nothing in them needs 3.10.
