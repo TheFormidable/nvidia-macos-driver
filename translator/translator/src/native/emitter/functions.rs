@@ -1467,19 +1467,29 @@ impl Emitter {
         for inst in tir.blocks.iter().flat_map(|block| &block.insts) {
             inst.visit_uses(|name| *use_counts.entry(name.to_string()).or_default() += 1);
         }
-        self.opaque_resource_payload_loads
-            .extend(
-                self.bda_inttoptr_sources
-                    .iter()
-                    .filter_map(|(pointer, source)| {
-                        let LlValue::Local(integer) = &source.value else {
-                            return None;
-                        };
-                        (self.opaque_resource_pointers.contains(pointer)
-                            && use_counts.get(integer) == Some(&1))
-                        .then(|| (integer.clone(), pointer.clone()))
-                    }),
-            );
+        // This resource-copy idiom also occurs in raw-first sampler retries
+        // without BDA; discovering it must not depend on the address model.
+        self.opaque_resource_payload_loads.extend(
+            tir.blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| {
+                    inst.opcode == "inttoptr" && matches!(inst.result_ty, Some(LlType::Ptr(1)))
+                })
+                .filter_map(|inst| {
+                    let pointer = inst.result.as_ref()?;
+                    let source = inst.operands.first()?.as_typed_value()?;
+                    if source.ty != LlType::Int(64) {
+                        return None;
+                    }
+                    let LlValue::Local(integer) = &source.value else {
+                        return None;
+                    };
+                    (self.opaque_resource_pointers.contains(pointer)
+                        && use_counts.get(integer) == Some(&1))
+                    .then(|| (integer.clone(), pointer.clone()))
+                }),
+        );
         self.seed_network_storage(&tir, &body_blocks, &f.params);
         for network in
             crate::native::emitter::pointer_network::null_rooted_pointer_networks(&body_blocks)
@@ -1539,13 +1549,26 @@ impl Emitter {
                     })
                     .collect::<Vec<_>>();
                 direct_buffers.sort_unstable();
-                for (_, name) in direct_buffers {
+                for (param_index, name) in direct_buffers {
                     let (low, high) =
                         self.emit_direct_buffer_address_payload(&name, &mut instructions)?;
                     let address =
                         self.combine_pointer_payload_words(low, high, &mut instructions)?;
                     self.pointer_payload_words.insert(name.clone(), (low, high));
-                    self.bda_direct_addresses.insert(name, address);
+                    self.bda_direct_addresses.insert(name.clone(), address);
+                    // array_ref<void> is a generic pointer to the driver's
+                    // synthesized buffer-address table. A direct load/GEP must
+                    // use the same address as a pointer passed through a helper
+                    // or local field, rather than read the first buffer's data.
+                    if matches!(f.params[param_index as usize].1, LlType::Ptr(0))
+                        && self.data_buffer_params.contains(&name)
+                    {
+                        for raw in self.raw_offsets.values_mut() {
+                            if raw.root == name && raw.addrspace == 0 && raw.device_addr_base.is_none() {
+                                raw.device_addr_base = Some(address);
+                            }
+                        }
+                    }
                 }
             }
             let tir_block = &tir.blocks[block_idx];
