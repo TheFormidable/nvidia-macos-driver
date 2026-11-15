@@ -2673,21 +2673,30 @@ fn register_embedded_textures(
         } else {
             (ctx.ty_image(tex.dim, tex.arrayed, tex.comp), None)
         };
+        // An array of textures (array<texture2d<float>, N>) goes through the heap as well, each element by the slot its
+        // own handle carries: declared as an array binding, it would need N descriptors at one binding, and the host's
+        // layout has one per texture slot (a robust driver clamps the index to element 0). A texture buffer keeps its
+        // binding, as one bound directly does (bindless_all_on): the host's heap holds images and samplers only.
         if crate::reflect::bindless_fixed_fields_on()
             && tex.storage_format.is_none()
-            && tex.array_length.is_none()
+            && tex.dim != Dim::DimBuffer
         {
             let off = u64::from(tex.field_offset);
+            let end = off + u64::from(tex.array_length.unwrap_or(1)) * 8;
+            let element = |at: u64| at >= off && at < end && (at - off) % 8 == 0;
             let heap_ids: std::collections::BTreeSet<Word> = ctx
                 .emit_sidecar
                 .buffer_pointer_heap_loads
                 .iter()
-                .filter(|f| f.root == buffer_root && f.byte_offset == off)
+                .filter(|f| f.root == buffer_root && element(f.byte_offset))
                 .map(|f| f.id)
                 .collect();
             let unrouted = ctx.emit_sidecar.buffer_pointer_field_loads.iter().any(|f| {
-                f.root == buffer_root && f.byte_offset == off && !heap_ids.contains(&f.id)
-            });
+                f.root == buffer_root && element(f.byte_offset) && !heap_ids.contains(&f.id)
+            }) || (tex.array_length.is_some()
+                && ctx.emit_sidecar.buffer_pointer_dynamic_field_loads.iter().any(|d| {
+                    d.root == buffer_root && d.byte_offset == off && !heap_ids.contains(&d.id)
+                }));
             if !heap_ids.is_empty() && !unrouted {
                 let heap = bindless_heap_var(ctx, image_ty, (tex.dim, tex.arrayed), tex.comp);
                 let facts: Vec<crate::emit_sidecar::BufferPointerHeapLoad> = ctx

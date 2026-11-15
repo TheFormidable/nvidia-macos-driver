@@ -282,6 +282,15 @@ fn a_flat_c_array_member_is_indexed_rather_than_collapsed_to_element_zero() {
     let asm = disassemble(&spv).expect("disassemble");
     let module = Disassembly::parse(&asm);
 
+    // The array goes through the image heap when every read of an element loads its handle (heap routing of fixed
+    // argument-buffer fields, NVMTL_NO_TIER2_FIXED unset): the stage layout has one descriptor per binding, so a
+    // 32-element array at one binding would leave elements 1 to 31 without a descriptor.
+    if !module.results().any(|(_, op, args)| {
+        op == "OpTypeArray" && args.get(1).is_some_and(|length| module.constant_value(length) == Some(32))
+    }) {
+        assert_heap_element_is_indexed_by_its_handle(&module, &asm);
+        return;
+    }
     let (array_ty, image_ty) = module
         .results()
         .find_map(|(id, op, args)| {
@@ -325,6 +334,55 @@ fn a_flat_c_array_member_is_indexed_rather_than_collapsed_to_element_zero() {
         .results()
         .find_map(|(id, op, args)| (op == "OpLoad" && args.get(1) == Some(&element)).then_some(id))
         .unwrap_or_else(|| panic!("the selected element is loaded:\n{asm}"));
+    assert!(
+        module
+            .results()
+            .any(|(_, op, args)| op == "OpSampledImage" && args.get(1) == Some(&loaded)),
+        "and the loaded element is what gets sampled:\n{asm}"
+    );
+}
+
+// The element's handle is read from the argument buffer at the runtime index, its slot bits index the image heap,
+// and that heap element is what gets sampled.
+fn assert_heap_element_is_indexed_by_its_handle(module: &Disassembly, asm: &str) {
+    let def = |id: u32| module.results().find(|(def, ..)| *def == id);
+    let heap = module
+        .results()
+        .find_map(|(id, op, args)| {
+            let (_, _, pointer) = def(*args.first()?)?;
+            let (_, array_op, array) = def(*pointer.first()?)?;
+            (op == "OpVariable"
+                && array_op == "OpTypeRuntimeArray"
+                && module.opcode(*array.first()?) == Some("OpTypeImage"))
+            .then_some(id)
+        })
+        .unwrap_or_else(|| panic!("the texture array goes through the image heap:\n{asm}"));
+    let (element, index) = module
+        .results()
+        .find_map(|(id, op, args)| match args {
+            [_, base, index] if op == "OpAccessChain" && *base == heap => Some((id, *index)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the heap is indexed:\n{asm}"));
+    let handle = match def(index) {
+        Some((_, "OpBitwiseAnd", [_, handle, _])) => *handle,
+        other => panic!("the heap index is the slot bits of a handle, not {other:?}:\n{asm}"),
+    };
+    let handle_address = match def(handle) {
+        Some((_, "OpLoad", [_, address])) => *address,
+        other => panic!("the handle is loaded from the argument buffer, not {other:?}:\n{asm}"),
+    };
+    match def(handle_address) {
+        Some((_, "OpAccessChain" | "OpInBoundsAccessChain", [_, _, indices @ ..])) => assert!(
+            indices.last().is_some_and(|last| module.constant_value(last).is_none()),
+            "the handle's word is chosen by the runtime index, not a constant:\n{asm}"
+        ),
+        other => panic!("the handle is read through an access chain, not {other:?}:\n{asm}"),
+    }
+    let loaded = module
+        .results()
+        .find_map(|(id, op, args)| (op == "OpLoad" && args.get(1) == Some(&element)).then_some(id))
+        .unwrap_or_else(|| panic!("the selected heap element is loaded:\n{asm}"));
     assert!(
         module
             .results()
