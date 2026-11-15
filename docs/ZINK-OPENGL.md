@@ -22,13 +22,19 @@ Vulkan driver is the copy of this build's NVK that the nvkbridge component carri
 ## How a context reaches Zink
 
 1. GLEngine loads the bundle the accelerator names. Every GLD entry point jumps to Apple's AppleMetalOpenGLRenderer,
-   except `gldGetVersion`, `gldCreateContext` and `gldDestroyContext`.
+   except `gldGetVersion`, `gldCreateContext` and `gldDestroyContext`. The bundle resolves each delegate in Apple's
+   renderer when it loads. If `gldGetVersion`, `gldCreateContext` or `gldDestroyContext` is absent, the bundle reports
+   no OpenGL for the card, so the application falls back exactly as it would under `nvzink=0`. If any other delegate is
+   absent, the bundle forwards the ones that resolved and points the missing one at a stub that returns a GLD error, so
+   the card keeps Apple's OpenGL through the bundle rather than losing it; GLEngine on the same renderer does not call a
+   delegate that renderer lacks.
 2. After Apple's `gldCreateContext` succeeds, the bundle hands the new context to the CGL adapter. The bundle opens the
    adapter at run time; when the adapter or one of its two entry points is missing, the bundle only forwards and
    OpenGL stays Apple's.
 3. The adapter leaves a context with Apple's renderer when Zink cannot start in this process (no NVK device, for
-   example), when the application asked for a profile Zink does not serve, when `NVKZINK_DISABLE=1` is set, and in
-   OBS (below). Otherwise it saves GLEngine's dispatch table and puts its own entries in the context's table.
+   example), when the application asked for a profile Zink does not serve, when `NVKZINK_DISABLE=1` is set, in OBS
+   (below), and when the GLEngine private layout the adapter reads and writes does not match the record (next
+   section). Otherwise it saves GLEngine's dispatch table and puts its own entries in the context's table.
 
 ## Where the layout comes from
 
@@ -54,6 +60,30 @@ ported from, as its observations of GLEngine on macOS 15.8.1 (24H32) and 26.7.1 
 x86_64. They are kept as named constants in zink/nvk_cgl.c and zink/gld_bridge.c. No tool in this tree reads a
 framework binary, the shared cache or a kernel to find them, and nothing does so at run time.
 `build/generate_gld_forward.py` lists the export names of AppleMetalOpenGLRenderer with `nm -gU`: names, not layouts.
+
+## The layout guard
+
+The owner's Mac runs a build that is neither recorded one, so the private offsets above are not known to hold there. A
+build whose layout differs would have these reads and writes land in the wrong memory of every OpenGL application.
+Before it reads past any recorded pointer or writes through one, `nvk_cgl_prepare_gld` proves the memory is shaped as
+the record says, using only facts the process already has and the sizes the public SDK headers give
+(`zink/nvk_cgl_guard.h`). On any mismatch it keeps Apple's renderer for that context, returning as it does when the
+Zink screen cannot be made, having written nothing. The checks are:
+
+- the GLI context is a heap block that spans every recorded read (its own allocator reports the block's start and size:
+  `malloc_zone_from_ptr` and `malloc_size`);
+- the profile byte is legacy (0) or core (1);
+- the CGL context derived from the recorded dispatch pointer is a heap block holding a whole `struct
+  _CGLContextObject`, and its first member (`rend`) is this GLI context, which ties the recorded pointer to the public
+  layout: on a mismatched layout that near never holds;
+- the saved dispatch table is a heap block that spans a whole `GLIFunctionDispatch`, the table the adapter writes
+  into.
+
+`integer_dispatch_slot` applies the same test to the CGL private object and its engine list before reading through
+them. The first refusal in a process is written once to standard error, naming the check that refused, so a user's
+report can say why OpenGL stayed Apple's. The `malloc_size` of a pointer read from a wrong offset is almost never the
+size of a real block, so a wrong layout is refused rather than written into; a layout the checks cannot confirm is
+also refused, which keeps Apple's OpenGL working even where it costs the Zink path.
 
 ## Presentation
 
@@ -88,4 +118,13 @@ on a rollback and in the fallback job of step 6b (the runtime goes with `nvmtl`)
   warnings, a link against empty framework stubs, the dispatch table generated from the 11.3 SDK's OpenGL headers,
   and `nvk_cgl.c` and `gld_bridge.c` compiled with `-Wall -Wextra -Werror` (`-fsyntax-only`).
 - `tools/test_cgl_dispatch.py`: the generator's rules on synthetic headers.
-- Not checked: `appkit.m` and `native_drawable.m` (no AppKit headers on Linux), the real link, and running anything.
+- `tools/test_cgl_gld_guard.py`: the layout guard's checks, compiled for the Linux host from `zink/nvk_cgl_guard.h`
+  and fed synthetic heap blocks. It accepts the recorded layout and refuses each way the layout can differ (a GLI
+  context that is not a block or is too small, a profile byte out of range, a null or interior dispatch pointer, a CGL
+  context whose `rend` is not the engine, a saved table that is not a block or is too small), each with its own reason,
+  with controls. It loads no Apple framework and touches no GPU; `malloc_size` has no Linux name, so a shim behind the
+  header's two macros uses `malloc_usable_size`.
+- Not checked: `appkit.m` and `native_drawable.m` (no AppKit headers on Linux), the real link, running anything, and
+  whether the recorded builds' saved dispatch table and CGL private object are their own heap blocks (the guard assumes
+  so, as the adapter already assumes of the GLI integer callback vector; if one is interior on a Mac, those builds fall
+  back to Apple's OpenGL, which is safe).
