@@ -168,13 +168,50 @@ static void nvmtl_ws_release(NVMTLSurfaceHolds *holds, uint32_t sid, NSMutableAr
 }
 // Publishes what was waiting, after the marks are released. Returns NO when one of cb's own textures could not be
 // published (its command buffer fails, as before); another command buffer's has already completed, so that is logged.
+// The private planes of one two-plane surface are copied out together, at the place of the last of them
+// (nvmtl_plane_group.h, nvmtl_surface_out_planes): one lock, one submission and one wait for the whole surface. Every
+// plane is still copied out before this returns, so a command buffer held until publication (_scheduleAfterPublish)
+// still reports scheduled only after the fence of the copy that holds its last pixels.
 static BOOL nvmtl_ws_publish_settled(NSArray *settled, NVMTLCommandBuffer *cb) {
     BOOL ok = YES;
-    for (NVMTLDeferredPublication *d in settled) {
-        if (d->dirtied ? [d->texture nvmtlSurfaceOutDirtied:YES] : [d->texture nvmtlSurfaceOut]) continue;
-        if (cb && d->owner == cb) ok = NO;
-        else nvlog("WindowServer surface %u: publication after its last write refused", (unsigned)IOSurfaceGetID(d->texture->_surf));
+    const NSUInteger n = settled.count;
+    int *role = NULL;
+    if (n > 1 && nvmtl_surfout_planes_on()) {
+        nvmtl_pg_item *it = calloc(n, sizeof *it); role = calloc(n, sizeof *role);
+        for (NSUInteger i = 0; it && role && i < n; i++) {
+            NVMTLDeferredPublication *d = settled[i];
+            NVMTLTexture *r = d->texture->_parent ? d->texture->_parent : d->texture;
+            it[i].surf = (uintptr_t)r->_surf; it[i].root = (uintptr_t)(__bridge void *)r; it[i].plane = (uint32_t)r->_plane;
+            it[i].copy = r->_surf && !d->dirtied && !r->_vramOn;
+            it[i].planes = it[i].copy ? (uint32_t)IOSurfaceGetPlaneCount(r->_surf) : 0;
+        }
+        if (!it || !role || !nvmtl_pg_plan(it, (int)n, role)) { free(role); role = NULL; }
+        free(it);
     }
+    for (NSUInteger i = 0; i < n; i++) {
+        NVMTLDeferredPublication *d = settled[i];
+        if (role && role[i] >= 0) continue;   // its plane is copied out by its group's lead, further on in this loop
+        NSMutableArray<NVMTLDeferredPublication *> *members = [NSMutableArray arrayWithObject:d];
+        int notOut = -1;   // a group's answer: the planes that were not copied out; -1 = every member on its own, as before
+        if (role && role[i] == NVMTL_PG_LEAD) {
+            NVMTLTexture *byPlane[NVMTL_PG_MAX_PLANES] = { nil };
+            for (NSUInteger j = 0; j < i; j++) if (role[j] == (int)i) [members addObject:settled[j]];
+            for (NVMTLDeferredPublication *m in members) { NVMTLTexture *r = m->texture->_parent ? m->texture->_parent : m->texture; byPlane[r->_plane] = r; }
+            NSMutableArray<NVMTLTexture *> *roots = [NSMutableArray new];
+            for (int p = 0; p < NVMTL_PG_MAX_PLANES; p++) if (byPlane[p]) [roots addObject:byPlane[p]];
+            notOut = nvmtl_surface_out_planes(roots);
+        }
+        // each publication answers for its own plane only: a command buffer fails for a plane it wrote, not for another's
+        for (NVMTLDeferredPublication *m in members) {
+            NVMTLTexture *r = m->texture->_parent ? m->texture->_parent : m->texture;
+            const BOOL done = notOut >= 0 ? !(notOut & (1 << r->_plane))
+                                          : m->dirtied ? [m->texture nvmtlSurfaceOutDirtied:YES] : [m->texture nvmtlSurfaceOut];
+            if (done) continue;
+            if (cb && m->owner == cb) ok = NO;
+            else nvlog("WindowServer surface %u: publication after its last write refused", (unsigned)IOSurfaceGetID(m->texture->_surf));
+        }
+    }
+    free(role);
     return ok;
 }
 // The surfaces this command buffer writes and the last part that writes each: what the kernel fence holds
@@ -329,10 +366,13 @@ static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
     }
     cb->_busyMarks = marks;
 }
+// The done tags go out before the holds close, and nothing returns before the close. WAS: close first, then the tags: a
+// reader that read the tag in between found it pending with no hold behind it, the kernel answered NONE at once, and the
+// reader polled the tag (one 100 us step, up to 10 ms when a newer write of that plane came in meanwhile). Both say what
+// is already true when this runs: every part has landed and been published, or the command buffer failed. A reader that
+// finds the tag done reads; one already asleep on the hold wakes at the close just after.
 static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
-    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error
     NSDictionary *marks = cb->_busyMarks;
-    if (!marks) return;
     cb->_busyMarks = nil;
     for (NSString *key in marks) {
         NSArray *m = marks[key]; NVMTLTexture *t = m[0]; const uint64_t seq = [m[1] unsignedLongLongValue];
@@ -342,6 +382,16 @@ static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
             nvmtl_busy_write(t->_surf, t->_plane, seq, 1);
         }
     }
+    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error
+}
+// NVMTL_BUSY_DONE_EARLY=0: a command buffer that completed writes its done tags and closes its holds at the end of
+// nvmtlFinishExecution, after its scheduled report and its presentations, as before (nvmtlFinishExecution says why
+// they now go first). Read once.
+static BOOL nvmtl_busy_done_early_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_BUSY_DONE_EARLY"); on = nvmtl_busy_marks_on() && !(e && e[0] == '0');
+        nvlog("surface busy tags: done %s (NVMTL_BUSY_DONE_EARLY=%s)", on ? "before scheduled and present" : "at the end of the command buffer", e ? e : "unset"); }
+    return on;
 }
 
 @implementation NVMTLSubmissionPart
@@ -516,6 +566,14 @@ static int nvmtl_skip_empty_on(void) {
     // The ahead pass can run on another thread (nvmtl_ahead_kick). Close the parts to it first, so it cannot submit a
     // part this loop has already passed: that part's fence and its in-flight slot would never come back.
     @synchronized ([NVMTLCommandBuffer class]) { _partsRetiring = YES; }
+    // Completed: every part has landed and been published (nvmtlAdvancePart), so the done tags and the holds go out
+    // before anyone is handed a surface, by the scheduled report held back until here or by a presentation. WAS: at the
+    // end, after both: WindowServer compositing a drawable just presented, or a Chromium layer handed over from its
+    // scheduled callback, found the tag pending and slept in the kernel until this thread got there, behind the
+    // command-buffer class lock that the submit-ahead pass holds across its submissions. Not after an error (parts
+    // submitted ahead can still be running, the loop below waits for them) and not in WindowServer, which writes no tags
+    // and whose holds close after its publications in nvmtl_surface_finish_writes: both keep the call at the end.
+    if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);
     if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }
     for (NSUInteger i = _nextPart; i < _parts.count; i++) {
         NVMTLSubmissionPart *p = _parts[i];
@@ -548,7 +606,7 @@ static int nvmtl_skip_empty_on(void) {
     if (!error && _gpuTimingSeen && !_gpuTimingInvalid)
         (void)nvmtl_vk_interval_seconds(&_gpuTiming, &deviceStart, &deviceEnd);
     nvmtl_surface_finish_writes(self);
-    nvmtl_busy_mark_done(self);
+    nvmtl_busy_mark_done(self);   // after an error, in WindowServer, or with NVMTL_BUSY_DONE_EARLY=0; otherwise nothing is left
     [_completionCondition lock];
     _gpuStart = deviceStart; _gpuEnd = deviceEnd;
     _legacyKernelEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
@@ -797,10 +855,18 @@ static void nvmtl_gsub_ahead_pass1(void) {
         BOOL published = result == 0;
         if (published) {
             // the GPU has finished this part: its surfaces' kernel marks are released (nvmtl_ws_part_landed) before the
-            // surface work below, which takes the surface's own lock
+            // surface work below, which takes the surface's own lock.
+            // Without the early ordering the part's own textures are published here, in the same pass as what the
+            // releases freed, so the planes of a two-plane surface are copied out together there too.
             NSMutableArray *settled = [NSMutableArray new];
-            for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
-            if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
+            NSMutableArray *publish = [NSMutableArray new];
+            for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) {
+                NVMTLDeferredPublication *d = [NVMTLDeferredPublication new];
+                d->texture = texture; d->dirtied = NO; d->owner = self;
+                [publish addObject:d];
+            }
+            [publish addObjectsFromArray:settled];
+            if (!nvmtl_ws_publish_settled(publish, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
         }
         if (!published) {

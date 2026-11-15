@@ -200,11 +200,13 @@ static inline int64_t nvmtl_pa_verify(const uint8_t *base, const nvmtl_pa_surfac
    as `what` says) with the byte found and the byte expected (at = -1: no byte to show). */
 typedef struct { int step; const char *what; int64_t at; uint8_t got, want; } nvmtl_pa_result;
 /* The self-test's view of its private surface, given by the caller that made it: a CPU lock (read-only or read-write)
-   that returns the surface's base address, NULL when the lock failed, and its unlock with the same option. */
+   that returns the surface's base address, NULL when the lock failed, its unlock with the same option, and the
+   surface's seed now (NULL: the host cannot say, and what a mark does to the seed stays unmeasured). */
 typedef struct {
     void *ctx;
     uint8_t *(*lock)(void *ctx, int read_only);
     void (*unlock)(void *ctx, int read_only);
+    uint32_t (*seed)(void *ctx);
 } nvmtl_pa_host;
 static inline void nvmtl_pa_fail(nvmtl_pa_result *r, int step, const char *what, int64_t at, uint8_t got, uint8_t want)
 {

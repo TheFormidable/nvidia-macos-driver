@@ -44,10 +44,22 @@ static void nvmtl_busy_write(IOSurfaceRef s,NSUInteger p,uint64_t seq,int done){
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 @class NVMTLCommandBuffer;
-@interface NVMTLTexture:NSObject{@public IOSurfaceRef _surf; BOOL _vramOn;NSUInteger _plane;}@end
+@interface NVMTLTexture:NSObject{@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn,_failOut;NSUInteger _plane;}@end
+// the planes of a two-plane private surface published together (NVMTLObjects.m): only twoPlane has two planes, so the
+// planner groups nothing in the arms before the last one, where a grouped copy-out would abort. In the last arm every
+// grouped copy-out is recorded with its roots and answers planesAnswer (the planes NOT copied out, one bit each; -1 =
+// not tried), every plane-by-plane publication is recorded in outLog as [texture, dirtied], and a texture with _failOut
+// refuses its own.
+#include "nvmtl_plane_group.h"
+static IOSurfaceRef twoPlane;
+static size_t IOSurfaceGetPlaneCount(IOSurfaceRef s){return s==twoPlane?2:0;}
+static BOOL planesOn=YES;
+static BOOL nvmtl_surfout_planes_on(void){return planesOn;}
+static NSMutableArray *planeCalls,*outLog; static int planesAnswer;
+static int nvmtl_surface_out_planes(NSArray *roots){if(!planeCalls)abort();[planeCalls addObject:[roots copy]];return planesAnswer;}
 @implementation NVMTLTexture
-- (BOOL)nvmtlSurfaceOut{return YES;}
-- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{(void)dirtied;return YES;}
+- (BOOL)nvmtlSurfaceOut{if(outLog)[outLog addObject:@[self,@NO]];return !_failOut;}
+- (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied{if(outLog)[outLog addObject:@[self,@(dirtied)]];return !_failOut;}
 @end
 @interface NVMTLCommandBuffer:NSObject{@public id _queue;NSArray *_parts;NSDictionary *_busyMarks;nvmtl_fence_hold _fence;}@end
 @implementation NVMTLCommandBuffer @end
@@ -56,6 +68,8 @@ static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 '''
 checks=r'''
 static NVMTLTexture *texture(IOSurfaceRef surface){NVMTLTexture*t=[NVMTLTexture new];t->_surf=surface;t->_vramOn=YES;return t;}
+static NVMTLDeferredPublication *settledOf(NVMTLTexture*t,BOOL dirtied,NVMTLCommandBuffer*owner){NVMTLDeferredPublication*d=[NVMTLDeferredPublication new];d->texture=t;d->dirtied=dirtied;d->owner=owner;return d;}
+static BOOL published(NSArray*log,NVMTLTexture*t){for(NSArray*e in log)if(e[0]==t)return YES;return NO;}
 static NVMTLCommandBuffer *writer(id queue,NVMTLTexture*t){NVMTLCommandBuffer*b=[NVMTLCommandBuffer new];b->_queue=queue;NVMTLSubmissionPart*p=[NVMTLSubmissionPart new];p->surfaces=[NSSet setWithObject:t];b->_parts=@[p];return b;}
 int main(void){@autoreleasepool{
  struct {unsigned id,seed;} surface={4,7};
@@ -128,9 +142,49 @@ int main(void){@autoreleasepool{
  nvmtl_surface_finish_writes(w2);
  assert([markLog.lastObject isEqual:@"4:0"]&&[nvmtl_ws_pending_holds countForObject:@4]==0);
  assert(nvmtl_surface_writers.count==0&&!nvmtl_ws_deferred.count);
+ // The private planes of one two-plane surface that settle together (the NV12 frame WindowServer draws for a screen
+ // share) are handed to ONE copy-out, with their root textures in plane order, whatever order they settled in; a
+ // surface of one plane beside them is published on its own, and no plane of the group is published twice.
+ { struct __IOSurface nv={9,1},single={10,1}; twoPlane=(IOSurfaceRef)&nv;
+   NVMTLTexture *y=[NVMTLTexture new],*uv=[NVMTLTexture new],*one=[NVMTLTexture new],*view=[NVMTLTexture new];
+   y->_surf=twoPlane;uv->_surf=twoPlane;uv->_plane=1;one->_surf=(IOSurfaceRef)&single;view->_parent=uv;view->_surf=twoPlane;view->_plane=1;
+   NVMTLCommandBuffer *A=[NVMTLCommandBuffer new],*B=[NVMTLCommandBuffer new];
+   planeCalls=[NSMutableArray new];outLog=[NSMutableArray new];planesAnswer=0;
+   assert(nvmtl_ws_publish_settled(@[settledOf(view,NO,A),settledOf(one,NO,A),settledOf(y,NO,B)],B));
+   assert(planeCalls.count==1&&[planeCalls[0] count]==2&&planeCalls[0][0]==y&&planeCalls[0][1]==uv);   // a view stands for its root
+   assert(outLog.count==1&&outLog[0][0]==one);
+   // each publication answers for its own plane: B fails when ITS plane (0) was not copied out, and not when A's was
+   planesAnswer=1<<0; assert(!nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B));
+   planesAnswer=1<<1; assert(nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B));
+   assert(!nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],A));
+   planesAnswer=(1<<0)|(1<<1); assert(!nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B));
+   assert(planeCalls.count==5&&outLog.count==1);   // answered by the group: no plane was published again on its own
+   // not tried (a plane is not copyable): every member on its own, as before, each answering for itself
+   planesAnswer=-1;[outLog removeAllObjects];uv->_failOut=YES;
+   assert(nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B)&&outLog.count==2&&published(outLog,y)&&published(outLog,uv));
+   assert(!nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],A));
+   uv->_failOut=NO;
+   // a plane whose commit marked its VRAM (dirtied), or one that lives in VRAM, keeps the whole surface plane by plane
+   const NSUInteger calls=planeCalls.count;planesAnswer=0;[outLog removeAllObjects];
+   assert(nvmtl_ws_publish_settled(@[settledOf(uv,YES,A),settledOf(y,NO,B)],B)&&planeCalls.count==calls&&outLog.count==2);
+   assert([outLog[0][1] boolValue]&&![outLog[1][1] boolValue]);   // and the dirtied one is still published as dirtied
+   uv->_vramOn=YES;[outLog removeAllObjects];
+   assert(nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B)&&planeCalls.count==calls&&outLog.count==2);
+   uv->_vramOn=NO;
+   // one plane alone, or two publications of the same plane, are not a group
+   [outLog removeAllObjects];
+   assert(nvmtl_ws_publish_settled(@[settledOf(y,NO,B)],B)&&nvmtl_ws_publish_settled(@[settledOf(y,NO,A),settledOf(y,NO,B)],B));
+   assert(planeCalls.count==calls&&outLog.count==3);
+   // NVMTL_SURFOUT_PLANES=0: plane by plane, as before
+   planesOn=NO;[outLog removeAllObjects];
+   assert(nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B)&&planeCalls.count==calls&&outLog.count==2);
+   planesOn=YES;
+   assert(nvmtl_ws_publish_settled(@[settledOf(uv,NO,A),settledOf(y,NO,B)],B)&&planeCalls.count==calls+1);
+   planeCalls=nil;outLog=nil;twoPlane=NULL;
+ }
  printf("PASS (kernel half %s): aliases, CPU seeds, queues, planes, private backing, latest writer, weak lifetime, 1000 cleanup "
         "cycles, WindowServer commit: %s, CPU edits still import, overlapping writers release the kernel mark once, with "
-        "the last of them\n", half?"present":"absent",
+        "the last of them; the private planes of a two-plane surface settle into one copy-out, each answering for itself\n", half?"present":"absent",
         half?"VRAM marked newest at commit and the record stamped after the kernel's seed move"
             :"nothing marked newest at commit (old ordering for an accelerator without the page-off wait)");
 }return 0;}
