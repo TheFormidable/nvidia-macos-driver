@@ -1,6 +1,6 @@
 # NullMoth NVIDIA Driver for macOS
 
-> **Not yet tested on a card.** `claude/all-improvements` is a branch of a fork that changes a large part of the driver.
+> **Not yet tested on a card.** `fable` is a branch of a fork that changes a large part of the driver.
 > At commits 3933ff6 and ee7f332, `./build.sh` built every component of it, with build tools it had built from pinned
 > sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel
 > runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At 3933ff6 the host tests passed on
@@ -21,6 +21,21 @@ application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime
 has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed; each risky change that
 changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
 are undone only by reinstalling 2.9. No test of it on an NVIDIA card has been reported yet.
+
+Two parts of it come from the HighDelay/nvidia-macos-driver-nvk fork and have been built and checked on Linux only:
+
+- **OpenGL through Zink.** On macOS 15.5 or later OpenGL applications run on NVK through Mesa's Zink instead of
+  Apple's OpenGL over Metal. The boot argument `nvzink=0` turns it off and gives every application Apple's OpenGL
+  back. See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
+- **A Vulkan runtime for Minecraft and other Vulkan applications.** The driver installs a native Vulkan runtime at
+  `/Library/GPUBundles/nvmtl/minecraft`: rendering goes to NVK and each frame is copied on the GPU into the window,
+  with no MoltenVK. Nothing uses it unless an application selects it when it is launched: Minecraft 26.3 with the JVM
+  argument `-Dorg.lwjgl.vulkan.libname=/Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib`, MPV and other
+  applications that use the Vulkan loader with
+  `VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json`. See
+  [tools/nvk-bridge/INSTALL.md](tools/nvk-bridge/INSTALL.md) and
+  [tools/nvk-bridge/APPLICATIONS.md](tools/nvk-bridge/APPLICATIONS.md).
+
 Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card, in order:
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
 
@@ -49,7 +64,7 @@ Support the work: https://buymeacoffee.com/nullmoth
 | macOS | 15.5 Sequoia or later (2.9 was tested on 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
 | GPUs | NVIDIA Turing and later; developed on an RTX 5060 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
-| Also | OpenGL (through Apple's GL-on-Metal), OpenCL, Core Image, Core ML |
+| Also | OpenGL (on NVK through Zink on macOS 15.5 or later, Apple's GL-on-Metal before 15.5 or with `nvzink=0`), Vulkan for applications that select it, OpenCL, Core Image, Core ML |
 
 ## How it works
 
@@ -63,6 +78,8 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 | Shader translator | inside the plugin (`libnvmtl_translate.dylib`) | `translator/` (LGPL-3.0, based on metal2vulkan) |
 | Vulkan back end (NVK) | `/Library/GPUBundles/nvmtl/` | `nvk/nvk-macos.patch` and the chain in `build/build_nvk.sh` on Mesa `90a959eb` (26.3.0-rc3) |
 | Kernel extensions | `/Library/Extensions/NVRM, NVAccel, NVRMFB, NVRMAGDC` | `kexts/` |
+| Native OpenGL (Zink) | `/Library/GPUBundles/NVKZinkGLDriver.bundle`, `/Library/GPUBundles/nvmtl/zink` | `zink/` on Mesa 26.3.0 (`0a6fa60a`), `build/build_zink.sh` |
+| Vulkan runtime for applications | `/Library/GPUBundles/nvmtl/minecraft` | `tools/nvk-bridge/` |
 | GPU firmware (GSP) | `/Library/NullMoth/nvfw/nvidia/620.70.06` | NVIDIA, unmodified; fetched from NVIDIA's driver package at install (`package/fw_fetch.sh`) |
 
 The kernel side runs NVIDIA's own open GPU kernel modules (620.70.06) under macOS. NVRMFB is the display framebuffer,
