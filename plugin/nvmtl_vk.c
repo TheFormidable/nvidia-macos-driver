@@ -3287,7 +3287,7 @@ int nvmtl_vk_plane_selftest(uint32_t surfaceID, const nvmtl_pa_surface *s, const
     nvk_buffer vb[2]; nvk_image img[2];
     memset(vb, 0, sizeof vb); memset(img, 0, sizeof img);
     uint8_t *scratch = NULL;
-    nvmtl_ps_premise q; memset(&q, 0, sizeof q);
+    nvmtl_ps_premise q; memset(&q, 0, sizeof q); int refused = 0;
     if (!s || !hst || !hst->lock || !hst->unlock || !surfaceID ||
         nvmtl_pa_eligible(s, 0, s->p[0].w, s->p[0].h, 1) || nvmtl_pa_eligible(s, 1, s->p[1].w, s->p[1].h, 2)) {
         nvmtl_pa_fail(r, 1, "the private surface is not an eligible two-plane surface", -1, 0, 0); goto done;
@@ -3309,7 +3309,7 @@ int nvmtl_vk_plane_selftest(uint32_t surfaceID, const nvmtl_pa_surface *s, const
         if (nvmtl_pa_gpu_write(&img[p], &s->p[p], NVMTL_PA_GEN_B, scratch)) { nvmtl_pa_fail(r, 3, "a GPU write failed", -1, 0, 0); goto done; }
     for (uint32_t p = 0; p < 2; p++)
         if (nvmtl_pa_mark(surfaceID, p, hst, &q)) { nvmtl_pa_fail(r, 3, p ? "the kernel refused plane 1's mark" : "the kernel refused plane 0's mark", -1, 0, 0); goto done; }
-    if (nvmtl_pa_mark(surfaceID, 0, hst, &q)) q.marks++;   /* already newest; a refusal only counts against the seed measurement */
+    if (nvmtl_pa_mark(surfaceID, 0, hst, &q)) { q.marks++; refused = 1; }   /* already newest; a refusal only counts against the seed measurement */
     if (nvmtl_pa_look(hst, s, NVMTL_PA_GEN_B, NVMTL_PA_GEN_B, 4, "both planes written by the GPU and paged off", r)) goto done;
     if (nvmtl_pa_gpu_write(&img[1], &s->p[1], NVMTL_PA_GEN_C, scratch) || nvmtl_pa_mark(surfaceID, 1, hst, &q)) {
         nvmtl_pa_fail(r, 5, "plane 1's second write or mark failed", -1, 0, 0); goto done;
@@ -3339,6 +3339,8 @@ done:
         const int holds = nvmtl_ps_premise_holds(&q);
         atomic_store(&g_pa_mark_seed, holds ? 1 : 2);
         if (holds) nvlog("planar surfaces: each of the self-test's %u marks moved the surface's seed by exactly one in %s - the VRAM tags of a surface's other planes may follow a mark", q.marks, getprogname());
+        else if (q.marks - q.by_one == 1 && refused)
+            nvlog("planar surfaces: the self-test's mark of VRAM that is already newest was refused in %s, so what a mark does to the surface's seed is not measured - the VRAM tags of a surface's other planes do not follow a mark", getprogname());
         else nvlog("planar surfaces: %u of the self-test's %u marks moved the surface's seed by exactly one in %s (the first that did not: %u -> %u) - the VRAM tags of a surface's other planes do not follow a mark",
                    q.by_one, q.marks, getprogname(), q.odd_before, q.odd_after);
     }
@@ -9846,8 +9848,9 @@ int nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t ro
 // thread. The planes' imports overlap (each runs from its plane to the end of the allocation) but every copy writes only
 // its own plane's rows, so the copies never touch the same bytes. The caller holds the surface's read-write lock and
 // every plane's monitor. No shared lease is used here (the caller sets no page key): a thread tracks one lease at a time.
-// Non-zero, with nothing submitted and every import given back, when a plane cannot take this path; the caller then
-// reads each plane back on its own.
+// Returns 0 when every plane was read back. -1: a plane cannot take this path; nothing was recorded and every import was
+// given back, so the caller reads each plane back on its own, under the same lock. -2: the copies were recorded (the
+// images' tracked layouts have moved) and the submission or its wait failed; the caller does not read the planes again.
 int nvmtl_vk_image_read_host_planes(nvk_queue *q, int n, nvk_image *const *img, void *const *base, const size_t *row_bytes,
                                     const size_t *bytes, nvk_buffer *const *cache)
 {

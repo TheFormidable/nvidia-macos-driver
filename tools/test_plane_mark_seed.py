@@ -164,7 +164,7 @@ def check(name, ok):
 check('the self-test of the source measures the seed around its marks', build_and_run(vkc) == 0)
 always = vkc.replace('atomic_store(&g_pa_mark_seed, holds ? 1 : 2);', 'atomic_store(&g_pa_mark_seed, 1);', 1)
 check('control: a self-test that says yes whatever it measured is caught', always != vkc and build_and_run(always, quiet=True) == 1)
-no_remark = vkc.replace('    if (nvmtl_pa_mark(surfaceID, 0, hst, &q)) q.marks++;', '', 1)
+no_remark = vkc.replace('    if (nvmtl_pa_mark(surfaceID, 0, hst, &q)) { q.marks++; refused = 1; }', '    (void)refused;', 1)
 check('control: a self-test without the mark of VRAM already newest is caught', no_remark != vkc and build_and_run(no_remark, quiet=True) == 1)
 unmeasured = vkc.replace('if (hst->seed) nvmtl_ps_premise_note(q, before, hst->seed(hst->ctx));', 'nvmtl_ps_premise_note(q, 0, 1);', 1)
 check('control: a self-test that notes a move it did not read is caught', unmeasured != vkc and build_and_run(unmeasured, quiet=True) == 1)
