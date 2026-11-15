@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 7 | 1 | 55 | 408 | 12 |  | 489 |
+| env |  | 6 |  |  | 9 | 1 | 55 | 408 | 12 |  | 491 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
 | sysctl |  | 5 | 4 | 12 |  |  | 352 |  |  |  | 373 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -39,6 +39,8 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
+| env | `NVMTL_PLANE_FOLLOW` | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. |
+| env | `NVMTL_SURFOUT_PLANES` | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. |
 | env | `NVMTL_YUV422` | on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9) | 3.2 | Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused. |
 | env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
@@ -436,6 +438,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_PAR_SIGCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PERF_LOG` | diag | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_PIPELINE_THREADS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
+| `NVMTL_PLANE_FOLLOW` | escape | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.0 | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. | plugin/NVMTLObjects.m |
 | `NVMTL_PLANE_SEED` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_POOL_COST_LIB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_pool_cost.inc |
 | `NVMTL_POOL_REUSE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
@@ -484,6 +487,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SURFACE_BUSY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
 | `NVMTL_SURFIN_ORDERED` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_SURFIN_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
+| `NVMTL_SURFOUT_PLANES` | escape | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.0 | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. | plugin/NVMTLObjects.m |
 | `NVMTL_SURFOUT_READBACK` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_SURF_IMPORT_CACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_SURF_IMPORT_CACHE_IDLE_MS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |

@@ -22,5 +22,22 @@ int main(void)
     ARM("a lock whose unlock reported another seed (a foreign write between) records nothing",
         nvmtl_ps_record(&p, 9, 11, 0, 5, 6, S) == 0 && !nvmtl_ps_covers(&p, 9, 11, 1, 4, 5, 2 * S, 2 * S));
     ARM("an unchanged seed needs no record", nvmtl_ps_covers(&p, 7, 11, 1, 5, 5, 2 * S, 2 * S));
+    /* planes in their own VRAM: when the other planes' tags follow the seed move of our mark of one plane */
+    ARM("a mark that took and moved the seed by one is ours: the other planes' tags follow", nvmtl_ps_mark_moved(0, 8, 9));
+    ARM("the seed wrapping around is still a move by one", nvmtl_ps_mark_moved(0, 0xffffffffu, 0));
+    ARM("a mark that left the seed where it was moves no tag", !nvmtl_ps_mark_moved(0, 8, 8));
+    ARM("a move by two has someone else's write in it", !nvmtl_ps_mark_moved(0, 8, 10));
+    ARM("a seed that went back is not ours", !nvmtl_ps_mark_moved(0, 9, 8));
+    ARM("a lock that was taken marked nothing: a move then is someone else's", !nvmtl_ps_mark_moved(1, 8, 9));
+    ARM("a refused mark marked nothing", !nvmtl_ps_mark_moved(-1, 8, 9));
+    /* what the planar self-test measures before any tag may follow: every mark it made moved the seed by exactly one */
+    static nvmtl_ps_premise q;
+    ARM("no mark measured, nothing proven", !nvmtl_ps_premise_holds(&q));
+    nvmtl_ps_premise_note(&q, 8, 9); nvmtl_ps_premise_note(&q, 0xffffffffu, 0);
+    ARM("every mark moved the seed by one (also across the wrap): the premise holds", nvmtl_ps_premise_holds(&q) && q.marks == 2);
+    nvmtl_ps_premise_note(&q, 9, 9);
+    ARM("one mark that moved nothing ends it, and is kept for the log", !nvmtl_ps_premise_holds(&q) && q.odd_before == 9 && q.odd_after == 9);
+    nvmtl_ps_premise_note(&q, 9, 11); nvmtl_ps_premise_note(&q, 11, 12);
+    ARM("later marks do not bring it back, and the first odd one stays", !nvmtl_ps_premise_holds(&q) && q.marks == 5 && q.by_one == 3 && q.odd_after == 9);
     return fails ? 1 : 0;
 }

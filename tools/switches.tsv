@@ -384,6 +384,7 @@ env	NVMTL_OS_VERSION	dev	unset	2.9	-	unreviewed
 env	NVMTL_PAR_SIGCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PERF_LOG	diag	unset	2.9	-	unreviewed
 env	NVMTL_PIPELINE_THREADS	dev	unset	2.9	-	unreviewed
+env	NVMTL_PLANE_FOLLOW	escape	on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch)	3.0	3.2	When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so.
 env	NVMTL_PLANE_SEED	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_COST_LIB	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_REUSE	dev	unset	2.9	-	unreviewed
@@ -432,6 +433,7 @@ env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFOUT_PLANES	escape	on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9)	3.0	3.2	The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use.
 env	NVMTL_SURFOUT_READBACK	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE_IDLE_MS	dev	unset	2.9	-	unreviewed

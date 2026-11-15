@@ -37,8 +37,8 @@ utilization sampler's pause after a slow reading; the framebuffer's scanout floo
 derived refresh rates checked with NVKMS, its owed connect interrupt and its keeping of an override's
 scale-resolutions; the hybrid panel framebuffers' start order; NVK's uncached command and upload stream; the plugin's
 fence clock, its refusal of a copy into a multisample image, its kept visible-link answers, its kept grid-only scans,
-its one VRAM mark per surface plane per commit, its done tags written before its holds close, its reading of the
-macOS version and its keeping of a device it
+its one VRAM mark per surface plane per commit, its done tags written before its holds close, WindowServer's early
+start of the two-plane round trip, its reading of the macOS version and its keeping of a device it
 refuses before Metal's own init; and the kernel extensions staying loaded once started. The way back from these is to
 reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
 
@@ -108,6 +108,36 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
 - WindowServer marks each surface plane as newest in video memory once per commit, not once for every part of the
   command buffer and every texture that writes it. Each mark is a call into the accelerator that takes its lock, and a
   video playing in a window made many of them per frame.
+- A screen share through the system's picker (ScreenCaptureKit: Google Meet in any browser, Discord) costs
+  WindowServer fewer waits for the GPU on every captured frame. Reported: while a share runs, the desktop and a game
+  lose most of their frame rate (Minecraft Java from 199 to 40 frames a second, to 20-30 with OpenGL), although the
+  other side of the call sees a smooth picture. Which wait costs that much has not been measured on a card; these
+  are the ones the code shows. Nothing in the driver depends on a share being on: the frames WindowServer draws for
+  it are two-plane (NV12) surfaces, each one cost several waits in a row, and each wait lasts as long as whatever
+  else keeps the GPU busy lets it. Three changes:
+  - Drawn through private images (always in 2.9; in this release until the round trip below has passed): the two
+    planes are copied back to the surface together, under one lock and with one wait for the GPU, where each plane
+    took the lock and waited by itself; and since the lock is taken once, the plane copied first no longer looks
+    stale and is no longer uploaded again at its next use, which was a third wait, on the compositor's thread. A
+    plane whose copy fails is reported by itself and the other one stands. Way back: `NVMTL_SURFOUT_PLANES=0` in
+    `nvrm610.conf`.
+  - With the planes in VRAM: marking one plane newest moves the surface's one seed, which left the tag of the plane
+    marked first one seed behind, so at its next use WindowServer locked the surface (a copy of both planes back to
+    system memory in the kernel) and uploaded that plane again, once per captured frame. The other planes' tags now
+    follow a mark that took and around which the seed moved by exactly one. That move is the mark's own only where
+    every mark moves the seed by one, which is macOS's doing and not this driver's, so the round trip below now reads
+    the seed around each of its marks (one of them a mark of video memory that is already newest), and the tags
+    follow only in a process whose round trip saw every mark move it by exactly one (the log says which:
+    `planar surfaces: each of the self-test's ... marks moved the surface's seed by exactly one`). Elsewhere nothing
+    follows, as before. Way back: `NVMTL_PLANE_FOLLOW=0` in `nvrm610.conf`.
+  - WindowServer starts the round trip that allows planes in VRAM five seconds after its device is made, not at its
+    first two-plane surface: every surface it wrapped before the verdict stayed on private images for as long as it
+    was kept, so a share that was the first to bring such surfaces ran on them, and a round trip started while a
+    game kept the GPU busy could miss its 2 s bound and leave WindowServer on private images until the next login.
+  Compiled and host-tested on Linux only; not yet run on a card, so how much of the lost frame rate comes back is
+  not known, and neither is what macOS does to the seed on a mark (the round trip's log line says it). Reading
+  `sysctl debug | grep -E 'nvaccel|nvrm_fence'` twice, ten seconds apart, during a share shows what is left (the
+  three counters below among them).
 - A monitor that sends a placeholder 1920x1080 identification while it is still waking (after some warm restarts) and
   its real one a few seconds later gets its own resolutions on a card whose BAR1 is 512 MB or more, as long as its
   largest desktop needs no more memory than a 3840x2160 one: there the framebuffer reserves the memory a display scans
@@ -422,6 +452,8 @@ has proven itself, renewed with a reason otherwise.
 | Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | H.264 decode on RTX 50 in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
 | 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
+| Capture frames on private images: both planes copied back together | `NVMTL_SURFOUT_PLANES=0` | `nvrm610.conf` |
+| Capture frames in VRAM: the other plane's tag follows a mark | `NVMTL_PLANE_FOLLOW=0` | `nvrm610.conf` |
 | Done tags and holds before scheduled and present | `NVMTL_BUSY_DONE_EARLY=0` | `nvrm610.conf` |
 
 `sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.

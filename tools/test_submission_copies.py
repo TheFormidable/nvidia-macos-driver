@@ -195,6 +195,11 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
 @implementation TestEvent
 - (void)setSignaledValue:(uint64_t)value { assert(cpu[0]==expected); signals++; }
 @end
+// the planes of a two-plane private surface published together (NVMTLObjects.m): these fixtures' surfaces have one
+// plane, so the planner never groups them; the copy-out itself is proven by tools/test_surface_publication.py
+#include "nvmtl_plane_group.h"
+static BOOL nvmtl_surfout_planes_on(void) { return YES; }
+static int nvmtl_surface_out_planes(NSArray *roots) { (void)roots; abort(); }
 /*WS*/
 @implementation NVMTLCommandBuffer
 - (void)nvmtlMarkScheduled { scheduled++; }

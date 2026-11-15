@@ -968,6 +968,7 @@ static id nvmtl_refuse_before_init(id obj)
     (void)CFBridgingRetain(obj);
     return nil;
 }
+static void nvmtl_plane_selftest_early(void);
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port {
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
     {   /* the 2.x driver is built for macOS 15 and 26 only: on any later macOS, or when neither kern.osproductversion
@@ -997,6 +998,7 @@ static id nvmtl_refuse_before_init(id obj)
         return nil;
     }
     nvmtl_gl_caps_enable();
+    nvmtl_plane_selftest_early();
     if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
         nvmtl_nvdec_register();
@@ -1482,15 +1484,24 @@ static void nvmtl_vram_tag_write(IOSurfaceRef surf, NSUInteger plane, uint32_t s
     CFDataRef dd = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_vram_tag_key(plane);
     IOSurfaceSetValue(surf, k, dd); CFRelease(k); CFRelease(dd);
 }
+// A tag is read and written back in two calls. Within this process they are made under g_vram_tag_lock: a plane's tag
+// is written by that plane's own publication and, since the tags of a surface's other planes follow a mark
+// (nvmtl_vram_tags_follow), by another plane's thread too, which holds another monitor. Another process's write of the
+// same tag is not excluded by this, as it never was.
+#include <os/lock.h>
+static os_unfair_lock g_vram_tag_lock = OS_UNFAIR_LOCK_INIT;
 static uint32_t nvmtl_vram_tag_bump(IOSurfaceRef surf, NSUInteger plane, uint32_t seed)
 {
-    const uint32_t g = nvmtl_vram_gen(surf, plane) + 1; nvmtl_vram_tag_write(surf, plane, seed, g); return g;
+    os_unfair_lock_lock(&g_vram_tag_lock);
+    const uint32_t g = nvmtl_vram_gen(surf, plane) + 1; nvmtl_vram_tag_write(surf, plane, seed, g);
+    os_unfair_lock_unlock(&g_vram_tag_lock);
+    return g;
 }
 static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t seed)
 {
-    nvmtl_vram_tag t = { NVMTL_VRAM_MAGIC, seed, nvmtl_vram_gen(surf, plane) };
-    CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_vram_tag_key(plane);
-    IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
+    os_unfair_lock_lock(&g_vram_tag_lock);
+    nvmtl_vram_tag_write(surf, plane, seed, nvmtl_vram_gen(surf, plane));
+    os_unfair_lock_unlock(&g_vram_tag_lock);
 }
 typedef struct { uint32_t magic, done; uint64_t stamp_ns, seq; int32_t pid; uint32_t pad; } nvmtl_busy_tag;
 #define NVMTL_BUSY_MAGIC 0x4255535au
@@ -1649,6 +1660,7 @@ static void nvmtl_pa_unlock(void *ctx, int read_only)
 {
     IOSurfaceUnlock((IOSurfaceRef)ctx, read_only ? kIOSurfaceLockReadOnly : 0, NULL);
 }
+static uint32_t nvmtl_pa_seed(void *ctx) { return IOSurfaceGetSeed((IOSurfaceRef)ctx); }
 // The round trip on a private 128 x 64 NV12 surface (nvmtl_vk_plane_selftest), once per process, off every caller's thread.
 // Its verdict decides for the life of the process; any failure keeps two-plane surfaces on private images.
 static void nvmtl_plane_selftest(void)
@@ -1671,7 +1683,7 @@ static void nvmtl_plane_selftest(void)
     if (!surf) nvmtl_pa_fail(&r, 1, "IOSurfaceCreate refused the private NV12 surface", -1, 0, 0);
     else {
         nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
-        const nvmtl_pa_host hst = { (void *)surf, nvmtl_pa_lock, nvmtl_pa_unlock };
+        const nvmtl_pa_host hst = { (void *)surf, nvmtl_pa_lock, nvmtl_pa_unlock, nvmtl_pa_seed };
         nvmtl_vk_plane_selftest((uint32_t)IOSurfaceGetID(surf), &s, &hst, &r);
         CFRelease(surf);
     }
@@ -1684,6 +1696,23 @@ static int nvmtl_plane_vram_ready(void)
     const int st = nvmtl_vk_plane_vram_state();
     if (st < 0) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ nvmtl_plane_selftest(); });
     return st > 0;
+}
+// WindowServer asks for the self-test a few seconds after its device is made, not at its first two-plane surface. Every
+// surface wrapped before the verdict keeps its private image for as long as WindowServer keeps a wrapper of it, so when
+// the first two-plane surfaces of a session were the frames of a screen share, that share ran on private images (a
+// copy-out and the scheduled hold on every frame) or on surfaces with one private and one VRAM plane. Started while a
+// game kept the GPU busy, the self-test could also miss its 2 s bound and leave WindowServer on private images for its
+// life. The self-test is the same one, started the same way and once per process (nvmtl_plane_vram_ready); a two-plane
+// surface that arrives before this does starts it as before. The device's thread never waits for it.
+static void nvmtl_plane_selftest_early(void)
+{
+    const char *me = getprogname();
+    if (nvmtl_vk_vendor() != 0x10de || !nvmtl_vk_surface_share_on() || !me || strcmp(me, "WindowServer")) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * (int64_t)NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+                       ^{ (void)nvmtl_plane_vram_ready(); });
+    });
 }
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
