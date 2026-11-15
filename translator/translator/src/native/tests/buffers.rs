@@ -1589,6 +1589,13 @@ declare extern_weak i64 @mtl.force_not_checked.load.i64.p1(ptr addrspace(1)) sec
     let module = load_bytes(&spv).expect("load translated module");
     assert!(module.all_inst_iter().any(|i| guarded_load_argument(&module, i).is_some()),
         "the intrinsic must lower to a defined guarded memory load: {asm}");
+    // The load may be outlined into a shared function, which must be marked Inline so it costs no call.
+    assert!(
+        asm.lines()
+            .filter(|line| line.contains("OpFunction ") && !line.contains(" None "))
+            .all(|line| line.contains(" Inline ")),
+        "{asm}"
+    );
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
