@@ -31,7 +31,7 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  uint8_t hz_ut;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
                  uint8_t linear;  /* a linear alias of a buffer: 1 = offset and pitch 128-byte aligned, 2 = not (NVK renders it
                                      through its own tiled shadow even when no other attachment is tiled) */
-                 uint8_t alias_a8; /* a linear alias of a buffer: the a8 component mapping of its view */
+                 uint8_t alias_a8; /* the a8 component mapping of the image's own view (nvmtl_a8_mapping); 0 = identity */
                } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -383,7 +383,8 @@ typedef struct { uint32_t patch_type, n, partition, winding, stepfn, scale_en, c
 int nvmtl_vk_pipeline_create_tess(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend,
                                   const void *vin, uint32_t samples, const nvk_tess_desc *td, void *out);
 int nvmtl_spirv_tess_info(const void *spv, size_t bytes, uint32_t *patchType, uint32_t *cps);
-typedef struct { uint32_t ncol, cfmt[NVMTL_NCOL]; nvk_blend_state blend[NVMTL_NCOL]; uint32_t dfmt, discard, a2c, a2one; uint32_t view_mask; } nvk_rt;
+typedef struct { uint32_t ncol, cfmt[NVMTL_NCOL]; nvk_blend_state blend[NVMTL_NCOL]; uint32_t dfmt, discard, a2c, a2one; uint32_t view_mask;
+                 uint32_t a8_mask; /* the A8 colour attachments, whose framebuffer-fetch reads are remapped (nvmtl_a8_fetch.h) */ } nvk_rt;
 typedef struct { nvk_image *col[NVMTL_NCOL]; void *colview[NVMTL_NCOL]; uint32_t colw[NVMTL_NCOL], colh[NVMTL_NCOL];
     nvk_image *res[NVMTL_NCOL]; void *resview[NVMTL_NCOL]; uint32_t resw[NVMTL_NCOL], resh[NVMTL_NCOL];
     float clear[NVMTL_NCOL][4]; nvk_image *ds; void *dsview; float clear_depth; uint32_t clear_stencil, load, w, h;
