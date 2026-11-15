@@ -41,6 +41,14 @@ source, which this audit could not fetch, so the owner's statement that none was
 | BLAKE3 in `dlss/blake3`, used by `dlss_cache` | BLAKE3 1.8.2 as vendored by Mesa | CC0-1.0 (Apache-2.0 alternative not used) | `NOTICE`, `licenses/BLAKE3-LICENSE-CC0.txt` (new) |
 | `air-runtime` in the plugin bundle | LLVM, Zstandard | Apache-2.0 with LLVM exception, BSD-3-Clause | `NOTICE` |
 | `nvmtl-air-dis` in the plugin bundle | NullMoth (`plugin/air_dis.c`), uses `air-runtime` | NullMoth | — |
+| Shader translator repairs in `translator/` (argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining, WebGPU textures) | `HighDelay/nvidia-macos-driver-nvk`, a fork of this project: commits 41b06da3 (its `passes/stage_input` part), 53dfbae4 (its `wrapper/src/buffer_addresses.rs` part), 10cee03d, a40482e0, abf60a9a, ce3ca167, b2b4218b, d2df8bd4, 48a7431c (its tests only), 7118eee5, cc983eeb (its translator part), 4c657a6f, and the resolution lines of the merge d506f6cd; adapted to this tree's translator (`keep_on_storage_buffer`, the heap's texel bindings) | LGPL-3.0-or-later, the fork's `translator/LICENSE` | `NOTICE`, `translator/LICENSE`, each commit's `Ported-from` lines |
+| Translator checks run on a Mac or through a built plugin (`tools/test_sampler_array_gpu.m`, `tools/test_integer_texture_handle_gpu.m`, `tools/test_webgpu_msaa_gpu.m`, `tools/fixtures/integer_texture_handle.metal`, `tools/fixtures/webgpu_msaa_resolve.metal`, `tools/translator_readback.py`, `tools/translator_readback.cpp`); not shipped | the same fork, commits b2b4218b, 7118eee5, abf60a9a, 050f1912, 5c5a936f, 48a7431c | PolyForm Noncommercial 1.0.0 (the fork's `LICENSE`) | each commit's `Ported-from` lines |
+| Metal plugin fixes: Photo Booth's preview (`plugin/NVMTLPhotoBooth.m`), the surface drawable usage rule, the tiled image of shader-writable Managed surface wrappers and the tiled stand-ins in framebuffer-fetch passes, half-float mip filling, Unknown-usage storage views, the format query guard, A8 attachments (`plugin/nvmtl_a8_fetch.h`), the scheduled-present handler | the same fork, commits 7044b06b, b240c970, d32f88f1, 03f7ddd1, e126221b, written into this tree's `plugin/NVMTLDevice.m`, `NVMTLObjects.m`, `NVMTLObjects.h`, `NVMTLEventSync.m`, `nvmtl_vk.c`, `nvmtl_vk.h`; the Photo Booth opt-out is a settings-file switch here, and the tiled image sits behind its own switch; their host tests and Mac-only probes came along, adapted | PolyForm Noncommercial 1.0.0 | `NOTICE`, the two files' headers, each commit's `Ported-from` lines |
+| Native Vulkan presentation runtime `tools/nvk-bridge` (`Library/GPUBundles/nvmtl/minecraft`) | the same fork's `nvk/native-macos`, commits d9dd1207, f396de6c, 6ca72cbf, 16607235, f10c4685, afb3c5d0, 85194bec, aac6d4ae, be75aa0a, 66b65b77; adapted: the window-system extensions of this tree's NVK are hidden from applications, `build.sh` replaces `build.py`, and the Wine frontend, the asynchronous present worker and the fork's small-BAR NVK patch are left out. Its `libnvk_renderer.dylib` is this package's NVK under another install name | PolyForm Noncommercial 1.0.0 (frontend); MIT (the NVK copy) | `NOTICE`, `LICENSE`, `licenses/Mesa-license.rst` |
+| Native OpenGL: Zink (`Library/GPUBundles/nvmtl/zink/libnvk_zink.dylib`) | Mesa 26.3.0 (commit 0a6fa60a, pin `NM_PIN_ZINKMESA`) with `zink/mesa-zink-nvk.patch` | MIT | `NOTICE`, `licenses/Mesa-license.rst` |
+| Native OpenGL: the frontend, the CGL adapter and `NVKZinkGLDriver.bundle` (`zink/`, `build/build_zink.sh`, `build/opengl_api.py`) | the same fork's `zink/`: commits eaf7d128, bdbed15c, 4872b8ce, 3e28b36e (contributed to that fork under MIT) and the merge 0757ff18 that took them in, then fe3d6bc0, f2d11c69, d4165ff7, cde551a5, c6021b6f, bdce1a8d, a74bafaf, a1c7fa3c, a1811409, 6d4bbb5a, 5c23543d, 53d20059, 35b67301; adapted: the adapter is opened at run time and a process whose Zink cannot start keeps Apple's OpenGL. Written here: the dispatch generator `build/generate_cgl_dispatch.py` (it reads only the SDK's `CGLContext.h`, `gliDispatch.h`, `CGLMacro.h` and GL headers; the fork's generator is not taken) and the layout guard `zink/nvk_cgl_guard.h` | MIT, Copyright (c) 2026 Dino Zink contributors; this tree's changes under the same licence | `NOTICE`, `licenses/Dino-Zink-MIT.txt`, each commit's `Ported-from` lines |
+| OpenGL registry data in the generated capability lists (`cgl_api.inc`) | Khronos OpenGL-Registry `gl.xml` as Mesa 26.3.0 ships it | Apache-2.0 | `NOTICE`, `licenses/Khronos-OpenGL-Registry-Apache-2.0.txt` |
+| Zink's Vulkan driver (`nvmtl/zink/libnvk_zink_vulkan.dylib`, `libnvk_renderer.dylib`) | the `tools/nvk-bridge` frontend and its copy of this package's NVK, copied by `build/package_local.sh` | PolyForm Noncommercial 1.0.0; MIT | as the two rows above |
 
 Downloaded on the user's Mac, never shipped: NVIDIA's DLSS runtimes (SDK 310.9.16, from NVIDIA's GitHub), the NGX core
 (one file from NVIDIA's Linux 620.70.06 package) and `libnvJitLink` (from NVIDIA's PyPI wheel). `package/dlss_fetch.sh` pins
@@ -231,6 +239,19 @@ Mesa build; `build/build_nvk.sh` is the place to write `licenses/nvk-rust-crates
 is a 44-line reduction of one fragment shader of a commercial game (a four-tap shadow filter). It holds a standard technique
 and generic names. Low exposure; rewrite it from a Metal source written for the purpose if the owner wants no game-derived
 bytes in the repository (done).
+
+**P10. GLEngine's private offsets in native OpenGL (decision for the owner).** `zink/nvk_cgl.c` and `zink/gld_bridge.c`
+read and write through offsets inside GLEngine's private context data (0x8e0, 0x5b00, 0xb2c8, 0xb2d0, 0xc6a6, and +0x78,
++0x82, stride 0x1e90, +0x10 of the private context object) and call GLD entries with argument orders that no public
+header gives. They are data recorded by the HighDelay/nvidia-macos-driver-nvk fork on macOS 15.8.1 (24H32) and 26.7.1
+(25G241); that fork's own record of them (`docs/ZINK-SEQUOIA-ABI.json` there) compares routines of Apple's OpenGL
+framework and GLEngine between the two builds, so they come from examining Apple's binaries, the same kind of source as
+the class layouts of P5. No tool in this tree reads a framework binary, the shared cache or a kernel, and nothing does
+so at run time: the fork's LLDB generator, `zink/gld_abi.h`, `zink/gld_trace.*` and its collection command are not
+taken, and `zink/nvk_cgl_guard.h` checks at run time that the memory is shaped as recorded before any read or write. The
+dispatch table itself comes from the SDK's public headers. Options: keep the offsets as interoperability data, as for
+P5; or leave native OpenGL out of the package until the offsets can be derived from a public source. Not changed without
+a decision.
 
 ## 6. Reviewed, nothing to change
 
