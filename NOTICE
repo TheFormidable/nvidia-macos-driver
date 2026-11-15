@@ -142,21 +142,21 @@ kexts/NMKbdBacklight  The keyboard backlight plugin follows the structure of Vir
              feature reports, tools/asus), and OpenRazer (the Razer feature report, tools/razer), which are GPL-2.0, and from the ACPI tables of laptops whose owners sent
              them in. No code was copied from them; the code here is NullMoth's own.
 
-translator/  The repairs of argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining and WebGPU
-             textures come from the HighDelay/nvidia-macos-driver-nvk fork
+translator/  The repairs of argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining and
+             WebGPU textures come from the HighDelay/nvidia-macos-driver-nvk fork
              (https://github.com/HighDelay/nvidia-macos-driver-nvk), a fork of this project, whose translator/ is under
              the same licence as this one: the GNU Lesser General Public License v3.0 or later (translator/LICENSE,
              translator/COPYING).
 
 plugin       The Photo Booth preview adapter (plugin/NVMTLPhotoBooth.m), the A8 framebuffer-fetch remap
              (plugin/nvmtl_a8_fetch.h), the tiled image of shader-writable Managed IOSurface wrappers and the tiled
-             stand-ins of linear attachments in framebuffer-fetch passes, the surface drawable usage rule, the half-float
-             mip filling, the storage view of Unknown-usage textures and the empty scheduled-present handler come from
-             the HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project (LICENSE),
-             written into this tree's plugin.
+             stand-ins of linear attachments in framebuffer-fetch passes, the surface drawable usage rule, the
+             half-float mip filling, the storage view of Unknown-usage textures and the empty scheduled-present handler
+             come from the HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project
+             (LICENSE), written into this tree's plugin.
 
-tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/GPUBundles/nvmtl/minecraft (bridge.mm, its
-             host and smoke tests, ModFreeProbe.java and its documents) comes from nvk/native-macos of the
+tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/GPUBundles/nvmtl/minecraft (bridge.mm,
+             its host and smoke tests, ModFreeProbe.java and its documents) comes from nvk/native-macos of the
              HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project (LICENSE), adapted
              to this tree's NVK and plugin. Its lib/libnvk_renderer.dylib is a copy of this package's NVK (Mesa, MIT;
              see NVK above).
