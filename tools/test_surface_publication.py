@@ -29,7 +29,7 @@ fixture = r'''
 typedef struct __IOSurface { unsigned seed; unsigned char cpu[4], cpu1[4]; unsigned planes; } Surface;   // cpu1: plane 1's own bytes
 typedef int IOReturn;
 enum { kIOSurfaceLockReadOnly = 1 };
-typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; } Image;
+typedef struct { unsigned w,h,bpp; unsigned char gpu[4]; void *img; } Image;   // img: set on a tiled image's linear import
 static dispatch_semaphore_t entered, release_read;
 static unsigned uploads, gpu_seed;
 static unsigned long long g_surfin_skip, g_surfin_copy;
@@ -67,7 +67,8 @@ static int nvmtl_vk_image_read_host_planes(void *q, int n, nvk_image *const *img
     planeReads++; planeReadN=n; if (planeReadAnswer) return planeReadAnswer;
     for (int i = 0; i < n; i++) memcpy(base[i], img[i]->gpu, 4); return 0;
 }
-static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return 1; }
+static unsigned vram_generation=1;   // the VRAM's generation: moved by hand where another writer published into it
+static uint32_t nvmtl_vram_gen(IOSurfaceRef s, NSUInteger p) { return vram_generation; }
 // the VRAM tags: plane 0's is gpu_seed, as before; the planes above it (the two-plane arm) have their own. tagSets
 // counts every write of a tag's seed that is not the marked plane's own bump.
 static unsigned plane_tag[4], tagSets;
@@ -75,7 +76,7 @@ static os_unfair_lock g_vram_tag_lock = OS_UNFAIR_LOCK_INIT;
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, unsigned seed) { return (p ? plane_tag[p & 3] : gpu_seed) == seed; }
 static void nvmtl_vram_tag_write(IOSurfaceRef s, NSUInteger p, unsigned seed, unsigned gen) { (void)gen; tagSets++; if (p) plane_tag[p & 3]=seed; else gpu_seed=seed; }
 static void nvmtl_vram_tag_set(IOSurfaceRef s, NSUInteger p, unsigned seed) { nvmtl_vram_tag_write(s, p, seed, 1); }
-static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed) { if (p) plane_tag[p & 3]=seed; else gpu_seed=seed; return 1; }
+static unsigned nvmtl_vram_tag_bump(IOSurfaceRef s, NSUInteger p, unsigned seed) { if (p) plane_tag[p & 3]=seed; else gpu_seed=seed; return vram_generation; }
 // what this process's planar self-test measured: 1 = each of its marks moved the surface's seed by exactly one
 static int seedMeasured=1;
 static int nvmtl_vk_plane_mark_moves_seed(void) { return seedMeasured; }
@@ -113,6 +114,11 @@ static void nvmtl_frame_dump(const char *tag, void *base, size_t row, unsigned w
 static BOOL nvmtl_ws_kernel_waits(void){return NO;}
 static void nvmtl_ws_mark(uint32_t sid,BOOL pending){(void)sid;(void)pending;}
 static void nvtrace(const char *f,...){(void)f;}
+// the GPU copy between a Managed wrapper's tiled image and its linear VRAM import, counted; copyFailure makes it fail
+static unsigned gpuCopies; static int copyFailure;
+static int nvmtl_vk_copy_image(void *q, Image *src, uint32_t sx, uint32_t sy, Image *dst, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h) {
+    gpuCopies++; if (copyFailure) return -1; memcpy(dst->gpu, src->gpu, 4); return 0;
+}
 static int nvmtl_vk_image_write(void *q, Image *i, void *base, size_t row) {
     memcpy(i->gpu,base,4); uploads++; return 0;
 }
@@ -125,7 +131,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 }
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
-    uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i; void *_q;
+    uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i, _surfaceLinear; void *_q;
     IOSurfaceRef _y422Surf;   // NULL: not a 4:2:2 texture
 }
 - (void)nvmtlY422SurfaceIn;
@@ -319,11 +325,31 @@ int main(int argc, char **argv) { @autoreleasepool {
       assert([v0 nvmtlSurfaceOutDirtied:YES] && vs.seed==30 && tagSets==unmeasured+1 && nvmtl_vram_tag_current(&vs,1,30));
       tryAnswer=-1; markMoves=NULL;
     }
+    // a shader-writable Managed wrapper drawn through a tiled image of its own (_i) over the linear VRAM import
+    // (_surfaceLinear): its publication copies the tiled image into the VRAM before the mark, another writer's
+    // publication (a new VRAM generation at the same seed) is copied back on the GPU, a CPU write is uploaded into the
+    // tiled image and leaves the VRAM's tag alone, and a copy that fails neither marks nor calls the tiled image current
+    { Surface ms={.seed=17}; NVMTLTexture *m=[NVMTLTexture new]; m->_surf=&ms; m->_vramOn=YES;
+      m->_i=(Image){.w=1,.h=1,.bpp=4,.gpu={3,17,41,255}}; m->_surfaceLinear=(Image){.w=1,.h=1,.bpp=4,.img=(void *)1};
+      dirtyAnswer=0; gpuCopies=0; busyForeign=0; const unsigned marks=blockingDirties;
+      assert([m nvmtlSurfaceOut] && gpuCopies==1 && !memcmp(m->_surfaceLinear.gpu,m->_i.gpu,4) && blockingDirties==marks+1);
+      unsigned before=uploads; [m nvmtlSurfaceIn]; assert(gpuCopies==1 && uploads==before);   // published: current
+      memset(m->_surfaceLinear.gpu,82,4); vram_generation++;
+      [m nvmtlSurfaceIn]; assert(gpuCopies==2 && m->_i.gpu[0]==82 && m->_surfGen==vram_generation && uploads==before);
+      ms.seed++; memset(ms.cpu,93,4); [m nvmtlSurfaceIn];
+      assert(uploads==before+1 && m->_i.gpu[0]==93 && !nvmtl_vram_tag_current(&ms,0,ms.seed));
+      copyFailure=1; const unsigned marks2=blockingDirties;
+      assert(![m nvmtlSurfaceOut] && blockingDirties==marks2);
+      m->_surfSynced=NO; gpu_seed=ms.seed; [m nvmtlSurfaceIn]; assert(!m->_surfSynced);
+      copyFailure=0; [m nvmtlSurfaceIn]; assert(m->_surfSynced && m->_i.gpu[0]==82);
+      dirtyAnswer=1; vram_generation=1;
+    }
     puts("PASS: overlapping publication preserves GPU pixels; later CPU edits import; a publication after the commit's "
          "VRAM mark never waits for the accelerator lock and retries a busy re-mark off its thread; another process's "
          "write is waited for before import, a surface no application wrote waits for WindowServer's kernel holds; the "
          "planes of a private two-plane surface are copied out under one lock, each answering for itself; the VRAM tags "
-         "of a surface's other planes follow a mark only where the self-test measured the seed");
+         "of a surface's other planes follow a mark only where the self-test measured the seed; a Managed wrapper's tiled "
+         "image is published through its VRAM import by GPU copies");
 } return 0; }
 '''
 # The copy-out of several planes in one submission (nvmtl_vk_image_read_host_planes, plugin/nvmtl_vk.c) needs Vulkan and

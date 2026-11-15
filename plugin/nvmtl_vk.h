@@ -28,7 +28,11 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
                  void *sparse;   /* a sparse image (NVMTL_SPARSE_TEXTURES=1): its nvmtl_vk_sparse_info, freed with the image */
-                 uint8_t hz_ut; } nvk_image;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 uint8_t hz_ut;   /* hazard model: 0 not yet known, 1 tracked, 2 untracked (Metal hazardTrackingMode) */
+                 uint8_t linear;  /* a linear alias of a buffer: 1 = offset and pitch 128-byte aligned, 2 = not (NVK renders it
+                                     through its own tiled shadow even when no other attachment is tiled) */
+                 uint8_t alias_a8; /* the a8 component mapping of the image's own view (nvmtl_a8_mapping); 0 = identity */
+               } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
 #define NVMTL_NCOL 8
@@ -128,6 +132,8 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  nvmtl_fx_cb fx;   /* fault context: the last dispatches and the storage binds in force (nvmtl_fault_context.h) */
                  uint64_t fx_seq;  /* the queue-submit sequence number this command buffer was submitted with */
                  uint32_t begin_id; /* this command buffer's begin ordinal: what its per-dispatch witness words carry */
+                 void *render_shadows, *active_render_shadows; /* tiled stand-ins of linear attachments of framebuffer-fetch passes
+                                     (nvmtl_vk_cmd_begin_pass): every one made by this recording, and those of the open pass */
                  nvmtl_cl_tag life; /* counted as begun and not yet ended (nvmtl_cmd_life.h): an end is counted once, and only for a counted begin */
                  /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
                     dynamic state is bound, since binding a pipeline without them leaves that state undefined */
@@ -377,7 +383,8 @@ typedef struct { uint32_t patch_type, n, partition, winding, stepfn, scale_en, c
 int nvmtl_vk_pipeline_create_tess(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend,
                                   const void *vin, uint32_t samples, const nvk_tess_desc *td, void *out);
 int nvmtl_spirv_tess_info(const void *spv, size_t bytes, uint32_t *patchType, uint32_t *cps);
-typedef struct { uint32_t ncol, cfmt[NVMTL_NCOL]; nvk_blend_state blend[NVMTL_NCOL]; uint32_t dfmt, discard, a2c, a2one; uint32_t view_mask; } nvk_rt;
+typedef struct { uint32_t ncol, cfmt[NVMTL_NCOL]; nvk_blend_state blend[NVMTL_NCOL]; uint32_t dfmt, discard, a2c, a2one; uint32_t view_mask;
+                 uint32_t a8_mask; /* the A8 colour attachments, whose framebuffer-fetch reads are remapped (nvmtl_a8_fetch.h) */ } nvk_rt;
 typedef struct { nvk_image *col[NVMTL_NCOL]; void *colview[NVMTL_NCOL]; uint32_t colw[NVMTL_NCOL], colh[NVMTL_NCOL];
     nvk_image *res[NVMTL_NCOL]; void *resview[NVMTL_NCOL]; uint32_t resw[NVMTL_NCOL], resh[NVMTL_NCOL];
     float clear[NVMTL_NCOL][4]; nvk_image *ds; void *dsview; float clear_depth; uint32_t clear_stencil, load, w, h;
