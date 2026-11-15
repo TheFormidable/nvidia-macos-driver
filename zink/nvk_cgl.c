@@ -19,6 +19,12 @@
 #include <string.h>
 
 #define EXPORT __attribute__((visibility("default")))
+/* The structural checks that guard the recorded private offsets below read the
+ * heap through Apple's allocator. nvk_cgl_guard.h keeps the same checks portable
+ * to the Linux host test, which maps these macros onto a malloc_usable_size shim. */
+#define NVK_CGL_BLOCK_SIZE(p) malloc_size(p)
+#define NVK_CGL_IN_ZONE(p) (malloc_zone_from_ptr(p) != NULL)
+#include "nvk_cgl_guard.h"
 /* The CGL context's public layout, from the SDK: struct _CGLContextObject (CGLContext.h) is the engine pointer, the
  * GLIFunctionDispatch table (gliDispatch.h, the table CGLMacro.h calls through) and then the private pointer. The
  * adapter swaps the engine pointer and the table, PREFIX_BYTES from the start; every dispatch slot below is an
@@ -110,6 +116,15 @@ int nvk_cgl_obs_compatibility_enabled(void);
 
 __attribute__((noinline)) static int fail(const char *error) { last_error = error; return 0; }
 EXPORT const char *nvk_cgl_last_error(void) { return last_error ? last_error : "none"; }
+
+/* A layout check refused the recorded private offsets, so OpenGL stays Apple's.
+ * Report the first refusal once for the process, so a user's report can say why. */
+static void layout_refused_once(const char *why)
+{
+   static atomic_flag reported = ATOMIC_FLAG_INIT;
+   if (!atomic_flag_test_and_set(&reported))
+      fprintf(stderr, "NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (%s)\n", why);
+}
 
 static struct nvk_cgl_bridge *find_bridge(CGLContextObj context)
 {
@@ -432,10 +447,18 @@ static void use_zink(struct nvk_cgl_bridge *b)
 static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b)
 {
    char *meta=*(char **)((char *)b->context+PREFIX_BYTES);
-   if (!meta) return NULL;
+   /* The CGL private object is a block distinct from the one nvk_cgl_prepare_gld
+    * proved; require it to span the record's engine count and list before either
+    * is read, and the engine list to span the records it is said to hold. */
+   if (!nvk_cgl_block_spans(meta, PRIV_ENGINE_COUNT + sizeof(int16_t))) {
+      layout_refused_once("the CGL private object is not a heap block of the recorded size"); return NULL;
+   }
    char *items=*(char **)(meta+PRIV_ENGINES);
    int count=*(int16_t *)(meta+PRIV_ENGINE_COUNT);
    if (!items || count<1 || count>16) return NULL;
+   if (!nvk_cgl_block_spans(items, (size_t)count*PRIV_ENGINE_STRIDE)) {
+      layout_refused_once("the CGL engine list is not a heap block spanning its records"); return NULL;
+   }
    for (int i=0;i<count;++i) {
       char *entry=items+(size_t)i*PRIV_ENGINE_STRIDE;
       if (*(void **)entry==b->engine) return (void ***)(entry+PRIV_ENGINE_CALLBACKS);
@@ -540,12 +563,31 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
    if ((disabled && !strcmp(disabled, "1")) || nvk_cgl_obs_compatibility_enabled()) return 0;
    if (native_surface_copy_context()) return 0;
    if (!nvk_zink_screen_ready()) return 0;
-   unsigned char profile = *(unsigned char *)((char *)engine + GLI_PROFILE);
-   if (profile > 1) return 0;
-   CGLContextObj context = (CGLContextObj)((char *)*(void **)((char *)engine + GLI_CGL_DISPATCH) -
-                                           offsetof(struct _CGLContextObject, disp));
-   void **back = *(void ***)((char *)engine + GLI_SAVED_DISPATCH);
-   if (!context || !back) return 0;
+   /* Prove the recorded private offsets land in memory shaped as the record says
+    * before any read past a pointer or any write through one. On a build whose
+    * layout differs, keep Apple's renderer for this context exactly as when the
+    * Zink screen cannot be made: return 0, having written nothing. */
+   unsigned char profile = 0;
+   void *context_ptr = NULL;
+   void **back = NULL;
+   enum nvk_cgl_layout layout =
+      nvk_cgl_check_gld_layout(engine, GLI_PROFILE, GLI_CGL_DISPATCH, GLI_SAVED_DISPATCH,
+                               offsetof(struct _CGLContextObject, disp),
+                               sizeof(struct _CGLContextObject), sizeof(GLIFunctionDispatch),
+                               &profile, &context_ptr, &back);
+   if (layout != NVK_CGL_LAYOUT_OK) {
+      static const char *const why[] = {
+         [NVK_CGL_LAYOUT_ENGINE_BLOCK] = "the GLI context is not a heap block of the recorded size",
+         [NVK_CGL_LAYOUT_PROFILE] = "the GLI profile byte is neither legacy nor core",
+         [NVK_CGL_LAYOUT_CONTEXT_NULL] = "a recorded dispatch pointer in the GLI context is null",
+         [NVK_CGL_LAYOUT_CONTEXT_BLOCK] = "the CGL context is not a heap block of the SDK's size",
+         [NVK_CGL_LAYOUT_CONTEXT_REND] = "the CGL context's renderer is not this GLI engine",
+         [NVK_CGL_LAYOUT_SAVED_BLOCK] = "the saved dispatch table is not a heap block spanning GLIFunctionDispatch",
+      };
+      layout_refused_once(why[layout]);
+      return 0;
+   }
+   CGLContextObj context = (CGLContextObj)context_ptr;
    struct nvk_cgl_bridge *b = calloc(1, sizeof(*b));
    if (!b) return 0;
    b->context = context; b->engine = engine; b->driver = driver;
