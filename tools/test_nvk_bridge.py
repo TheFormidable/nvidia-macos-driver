@@ -15,7 +15,9 @@ package and the installer carry it.
 
 Every check of a text has a control: the same check on a changed copy must fail.
 On a Mac with Vulkan headers (NM_VULKAN_INCLUDE) it also builds host_test.mm with AddressSanitizer and
-UndefinedBehaviorSanitizer and runs it.
+UndefinedBehaviorSanitizer and runs it. On a Mac without them it runs everything else and then reports itself skipped
+(exit 2, as the other tests that read NM_VULKAN_INCLUDE do), so that a run that should have built host_test.mm and did
+not shows as a skip; a NM_VULKAN_INCLUDE that holds no vulkan/vulkan.h fails.
 usage: test_nvk_bridge.py"""
 import hashlib, json, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
@@ -182,10 +184,20 @@ control("a surface_dirty with another signature", interface_problems(
     BRIDGE, PATCH.replace("nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID, uint32_t plane)",
                           "nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID)", 1), plugin, plist))
 
-code = re.sub(r"//[^\n]*|/\*.*?\*/", "", BRIDGE, flags=re.S)
-reads = re.findall(r"\b(getenv|secure_getenv|environ|NSProcessInfo|fopen|O_CREAT|O_WRONLY|O_RDWR)\b", code)
-check("bridge.mm reads no environment variable and opens no file to write (it opens only /dev/null, read-only)",
-      not reads and len(re.findall(r"(?<!\w)open\(", code)) == 1 and 'open("/dev/null",O_RDONLY|O_CLOEXEC)' in code, reads)
+def reads_problems(bridge):
+    code = re.sub(r"//[^\n]*|/\*.*?\*/", "", bridge, flags=re.S)
+    reads = re.findall(r"\b(getenv|secure_getenv|environ|NSProcessInfo|fopen|O_CREAT|O_WRONLY|O_RDWR)\b", code)
+    if len(re.findall(r"(?<!\w)open\(", code)) != 1 or 'open("/dev/null",O_RDONLY|O_CLOEXEC)' not in code:
+        reads.append("an open( other than the one of /dev/null, read-only")
+    return reads
+
+
+p = reads_problems(BRIDGE)
+check("bridge.mm reads no environment variable and opens no file to write (it opens only /dev/null, read-only)", not p, p)
+control("a bridge.mm that reads an environment variable",
+        reads_problems(BRIDGE.replace("Share share{3,", 'getenv("X");Share share{3,', 1)))
+control("a bridge.mm that opens a file to write", reads_problems(
+    BRIDGE.replace('open("/dev/null",O_RDONLY|O_CLOEXEC)', 'open("/tmp/x",O_WRONLY|O_CLOEXEC)', 1)))
 
 
 def wsi_problems(bridge):
@@ -205,9 +217,15 @@ def wsi_problems(bridge):
     return p
 
 
+def metal_wsi(wsi):
+    return ".EXT_metal_surface = true," in wsi and "VK_USE_PLATFORM_METAL_EXT" in wsi
+
+
 wsi = (ROOT / "nvk" / "nvk-metal-wsi.patch").read_text()
 check("NVK's chain gives NVK its own Metal window-system layer (nvk-metal-wsi.patch), the reason for the filter",
-      ".EXT_metal_surface = true," in wsi and "VK_USE_PLATFORM_METAL_EXT" in wsi)
+      metal_wsi(wsi))
+check("control: a patch without the Metal surface extension is caught",
+      not metal_wsi(wsi.replace(".EXT_metal_surface = true,", "")), "the check found nothing wrong in a copy that is wrong")
 p = wsi_problems(BRIDGE)
 check("bridge.mm neither offers nor accepts the renderer's own surface and swapchain extensions, and no surface, "
       "swapchain or present entry point reaches the renderer", not p, p)
@@ -262,9 +280,16 @@ pkg = (ROOT / "build" / "package_local.sh").read_text()
 p = package_problems(pkg)
 check("package_local.sh puts the four files (the two libraries 755) under Library/GPUBundles/nvmtl/minecraft", not p, p)
 control("a package that leaves out the renderer", package_problems(pkg.replace(" lib/libnvk_renderer.dylib;", ";", 1)))
+def readme_problems(readme):
+    listed = sorted(re.findall(r"^\| `([^`]+)` \|", readme.split("## What is installed")[1].split("##")[0], re.M))
+    return [] if listed == sorted(FILES) else [f"README.md lists {listed}, not {sorted(FILES)}"]
+
+
 readme = (NB / "README.md").read_text()
-check("README.md lists exactly the files the package installs",
-      sorted(re.findall(r"^\| `([^`]+)` \|", readme.split("## What is installed")[1].split("##")[0], re.M)) == sorted(FILES))
+p = readme_problems(readme)
+check("README.md lists exactly the files the package installs", not p, p)
+control("a README.md without the renderer's row",
+        readme_problems(re.sub(r"^\| `lib/libnvk_renderer\.dylib` \|[^\n]*\n", "", readme, count=1, flags=re.M)))
 
 
 def installer_problems(install, uninstall):
@@ -302,8 +327,13 @@ inc = os.environ.get("NM_VULKAN_INCLUDE", "") or str(Path.home() / "Vulkan-Heade
 if sys.platform != "darwin":
     print("note: host_test.mm needs a Mac (Foundation, Metal, IOSurface, IOKit); not built here")
 elif not (Path(inc) / "vulkan/vulkan.h").is_file():
-    check("NM_VULKAN_INCLUDE holds vulkan/vulkan.h", not os.environ.get("NM_VULKAN_INCLUDE"), inc)
-    print("note: no Vulkan headers (NM_VULKAN_INCLUDE or ~/Vulkan-Headers/include): host_test.mm is not built")
+    if os.environ.get("NM_VULKAN_INCLUDE"):
+        check("NM_VULKAN_INCLUDE holds vulkan/vulkan.h", False, inc)
+    elif not fails:
+        print("SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h (./build.sh test does, "
+              "after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers; the other checks passed, host_test.mm "
+              "is not built")
+        sys.exit(2)
 else:
     t = Path(tempfile.mkdtemp(prefix="nvkbridge-host-"))
     try:
