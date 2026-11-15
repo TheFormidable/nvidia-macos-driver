@@ -39,7 +39,12 @@ int nvk_zink_begin_front_flush(struct nvk_zink_context *ctx);
 void nvk_zink_end_front_flush(struct nvk_zink_context *ctx, int presented);
 int nvk_zink_make_current(struct nvk_zink_context *ctx);
 struct nvk_zink_context *nvk_zink_get_current(void);
+/* The owner's drop: the context is freed once it is Mesa-current on no thread. */
 void nvk_zink_destroy(struct nvk_zink_context *ctx);
+/* Hold a context across binds that may leave it, for example the current
+ * context saved before a borrowed bind and restored after. NULL is allowed. */
+void nvk_zink_ref(struct nvk_zink_context *ctx);
+void nvk_zink_unref(struct nvk_zink_context *ctx);
 int nvk_zink_resize(struct nvk_zink_context *ctx, unsigned width, unsigned height);
 nvk_zink_proc nvk_zink_get_proc_address(const char *name);
 /* RGBA8, top row first. Requires ctx current on the calling thread. */

@@ -483,6 +483,8 @@ static int iosurface_integer(void *engine, unsigned parameter, const int *values
          if (previous) CGLReleaseContext(previous);
          CGLUnlockContext(b->context); return kCGLBadContext;
       }
+      /* Keep the Mesa context restored below alive across the borrowed bind. */
+      nvk_zink_ref(previous_zink);
    }
    int result=kCGLBadState;
    if (bridge_current(engine)) {
@@ -497,6 +499,7 @@ static int iosurface_integer(void *engine, unsigned parameter, const int *values
       CGLError restored=CGLSetCurrentContext(previous);
       int mesa_restored=nvk_zink_make_current(previous_zink);
       if (!mesa_restored) nvk_zink_make_current(NULL);
+      nvk_zink_unref(previous_zink);
       if (previous) CGLReleaseContext(previous);
       CGLUnlockContext(b->context);
       if (restored || !mesa_restored) result=kCGLBadContext;
@@ -1043,11 +1046,14 @@ EXPORT int nvk_cgl_present(CGLContextObj context)
       CGLUnlockContext(context);
       return fail("Cannot bind presentation context");
    }
+   /* Keep the Mesa context restored below alive across the borrowed bind. */
+   nvk_zink_ref(previous_zink);
    int presented = present_drawable(context) != 0;
    const char *presentation_error = last_error;
    CGLError restored = CGLSetCurrentContext(previous);
    int mesa_restored = nvk_zink_make_current(previous_zink);
    if (!mesa_restored) nvk_zink_make_current(NULL);
+   nvk_zink_unref(previous_zink);
    if (previous) CGLReleaseContext(previous);
    CGLUnlockContext(context);
    if (restored || !mesa_restored) return fail("Cannot restore context after presentation");

@@ -164,6 +164,7 @@ nvk_zink_create_drawable_profile(unsigned width, unsigned height, struct nvk_zin
    if (!width || !height || width > INT_MAX || height > INT_MAX) return NULL;
    struct nvk_zink_context *ctx = calloc(1, sizeof(*ctx));
    if (!ctx) return NULL;
+   ctx->refs = 1;
    if (share) {
       ctx->screen = share->screen;
       p_atomic_inc(&ctx->screen->refs);
@@ -214,21 +215,9 @@ NVK_EXPORT struct nvk_zink_context *nvk_zink_get_current(void)
    return st ? st->frontend_context : NULL;
 }
 
-NVK_EXPORT int nvk_zink_make_current(struct nvk_zink_context *ctx)
+static void destroy_now(struct nvk_zink_context *ctx)
 {
-   if (ctx && p_atomic_read(&ctx->screen->uncertain)) return 0;
-   /* Each native GL entrypoint verifies the Mesa context. Rebinding the same
-    * frontend on every call needlessly validates/refcounts its framebuffers.
-    * Drawable stamp changes are still handled by Mesa's draw validation.
-    */
-   if (ctx && st_api_get_current() == ctx->st) return 1;
-   return ctx ? st_api_make_current(ctx->st, &ctx->drawable, &ctx->drawable)
-              : st_api_make_current(NULL, NULL, NULL);
-}
-
-NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
-{
-   if (!ctx || p_atomic_read(&ctx->screen->uncertain)) return;
+   if (p_atomic_read(&ctx->screen->uncertain)) return;
    if (ctx->st) {
       if (!nvk_iosurface_group_release(ctx)) return;
       nvk_zink_present_release(ctx);
@@ -242,6 +231,57 @@ NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
       pipe_resource_reference(&ctx->attachments[i], NULL);
    p_atomic_dec(&ctx->screen->refs);
    free(ctx);
+}
+
+NVK_EXPORT void nvk_zink_ref(struct nvk_zink_context *ctx)
+{
+   if (ctx) p_atomic_inc(&ctx->refs);
+}
+
+NVK_EXPORT void nvk_zink_unref(struct nvk_zink_context *ctx)
+{
+   if (!ctx || !p_atomic_dec_zero(&ctx->refs)) return;
+   /* The destroyer holds the context while it tears it down: the borrowed
+    * binds of nvk_iosurface_group_release take and drop a reference, and
+    * that must not reach zero a second time. A teardown that stops early
+    * (uncertain GPU work) leaves the context allocated on purpose. */
+   p_atomic_set(&ctx->refs, 1);
+   destroy_now(ctx);
+}
+
+/* A context stays allocated while it is Mesa-current on any thread. CGL may
+ * destroy a context on one thread after another thread switched CGL away from
+ * it: nothing unbinds Mesa there, and that thread's next bind reads and
+ * flushes the context it leaves. The thread's reference keeps it alive until
+ * then, and the last reference frees it after the unbind. A thread that ends
+ * with a context still Mesa-current keeps that context allocated until the
+ * process ends. */
+NVK_EXPORT int nvk_zink_make_current(struct nvk_zink_context *ctx)
+{
+   if (ctx && p_atomic_read(&ctx->screen->uncertain)) return 0;
+   /* Each native GL entrypoint verifies the Mesa context. Rebinding the same
+    * frontend on every call needlessly validates/refcounts its framebuffers.
+    * Drawable stamp changes are still handled by Mesa's draw validation.
+    */
+   if (ctx && st_api_get_current() == ctx->st) return 1;
+   struct nvk_zink_context *old = nvk_zink_get_current();
+   nvk_zink_ref(ctx);
+   int ok = ctx ? st_api_make_current(ctx->st, &ctx->drawable, &ctx->drawable)
+                : st_api_make_current(NULL, NULL, NULL);
+   struct nvk_zink_context *now = nvk_zink_get_current();
+   if (ctx && now != ctx) nvk_zink_unref(ctx);
+   if (old && now != old) nvk_zink_unref(old);
+   return ok;
+}
+
+/* The owner's drop. A context current on the calling thread is unbound here
+ * first, as before; one still current on another thread is freed by that
+ * thread's next bind. */
+NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
+{
+   if (!ctx || p_atomic_read(&ctx->screen->uncertain)) return;
+   if (ctx->st && st_api_get_current() == ctx->st) nvk_zink_make_current(NULL);
+   nvk_zink_unref(ctx);
 }
 
 NVK_EXPORT int nvk_zink_resize(struct nvk_zink_context *ctx, unsigned width, unsigned height)

@@ -451,10 +451,13 @@ int nvk_iosurface_group_release(struct nvk_zink_context *ctx)
     * current binding. No Apple GL calls participate in this operation. */
    struct nvk_zink_context *previous=nvk_zink_get_current();
    bool borrowed=previous!=ctx && p_atomic_read(&g->count);
-   if (borrowed && !nvk_zink_make_current(ctx)) return 0;
+   /* The borrowed bind drops this thread's reference to previous; hold it
+    * so that the restore below binds a live context. */
+   if (borrowed) nvk_zink_ref(previous);
+   if (borrowed && !nvk_zink_make_current(ctx)) { nvk_zink_unref(previous); return 0; }
    int flushed=nvk_zink_flush_iosurfaces(ctx);
    if (!flushed) {
-      if (borrowed) nvk_zink_make_current(previous);
+      if (borrowed) { nvk_zink_make_current(previous); nvk_zink_unref(previous); }
       return 0;
    }
    if (p_atomic_dec_zero(&g->refs)) {
@@ -464,5 +467,8 @@ int nvk_iosurface_group_release(struct nvk_zink_context *ctx)
       pthread_mutex_destroy(&g->mutex);free(g);
    }
    ctx->iosurfaces=NULL;
-   return !borrowed || nvk_zink_make_current(previous);
+   if (!borrowed) return 1;
+   int restored=nvk_zink_make_current(previous);
+   nvk_zink_unref(previous);
+   return restored;
 }
