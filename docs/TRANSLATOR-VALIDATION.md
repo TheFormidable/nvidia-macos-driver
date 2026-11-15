@@ -18,8 +18,8 @@ What the repairs added or changed:
 
 | Repair | Tests |
 | --- | --- |
-| Argument-buffer texture arrays read through the image heap | `tests/argument_buffer_wrapped_resource.rs` (flat C-array case, both routes) |
-| Buffer-address lowering refuses an escaping address-table pointer | wrapper `buffer_addresses.rs`, `refuses_table_pointers_passed_to_helpers_before_changing_types` |
+| Argument-buffer texture arrays read through the image heap; a single texture buffer through the heap's texel binding | `tests/argument_buffer_wrapped_resource.rs` (flat C-array and texture-buffer cases, each with `NVMTL_NO_TIER2_FIXED` unset, 0 and 1, the last two in child processes) |
+| Buffer-address lowering refuses an escaping address-table pointer, and finds a kept buffer's chains before checking their uses | wrapper `buffer_addresses.rs`, `refuses_table_pointers_passed_to_helpers_before_changing_types`, `a_pointer_reaching_a_phi_on_the_back_edge_keeps_no_descriptor` |
 | ivec2 uniform through a vec4 slot, 2 to 16 samplers in a sampler-phi retry | `tests/gl_uniform_vector_loads.rs`, `tests/gl_sampler_phi_limits.rs`, `inline.rs` unit tests |
 | Address-space parsing, array_ref<void> table reads, local device-pointer stores, RGB10A2 residual | `native::parse` unit tests; `native::tests::buffers`, `textures`, `intrinsics` (data-flow checks) |
 | Texture and sampler handles in a local object's fields | `native::tests::textures`, `native_local_resource_objects_keep_both_live_samples` |
