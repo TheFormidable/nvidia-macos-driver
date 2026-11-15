@@ -3,7 +3,12 @@
 
 nvmtl_surface_widen_usage, nvmtl_surface_usage, nvmtl_managed_surface_tiled_on and nvmtl_surface_image_create are
 lifted from plugin/NVMTLDevice.m and compiled with stand-ins for IOSurface, the import cache and the Vulkan image calls, so each case below can say which
-backing a wrapper got and what was released on the way. The cases:
+backing a wrapper got and what was released on the way. The lines of nvmtlNewSurfaceTexture that compute the storage
+request (wantStex) and the colour-attachment request (wantRt) are lifted too, and the call must pass both to
+nvmtl_surface_image_create. The cases:
+  - the import asks for a storage view when the descriptor asks for ShaderWrite, or when an application's single-plane,
+    not framebuffer-only, non-A8 surface has a storage format; it asks for a colour attachment when the usage is Unknown,
+    has RenderTarget, or is widened for an application's drawable;
   - an application's drawable that is not framebuffer-only reports ShaderRead and RenderTarget, and ShaderWrite only
     when its backing has a storage view; WindowServer and framebuffer-only textures keep the usage they asked for;
   - an Unknown usage stays Unknown when the backing has no storage view (the optimal-tiled storage twin covers its
@@ -15,9 +20,9 @@ backing a wrapper got and what was released on the way. The cases:
   - a shader-writable wrapper in Managed storage keeps the import to publish through and is drawn through a tiled image
     of its own, which starts out not current whatever the surface's tag says; NVMTL_MANAGED_SURFACE_TILED=0 draws it
     straight into the import; a tiled image that cannot be made sends it to a private image, the import released once.
-Each case runs once as "Photo Booth" and once as "WindowServer". Three controls must fail: the function with the storage
-fallback taken out, the usage rule that keeps Unknown over a real storage view, and the function without its tiled
-image for Managed wrappers.
+Each case runs once as "Photo Booth" and once as "WindowServer". Five controls must fail: the function with the storage
+fallback taken out, the usage rule that keeps Unknown over a real storage view, the function without its tiled image for
+Managed wrappers, the storage request without its drawable rule, and the colour-attachment request set to 0.
 
 The source of the policy is the HighDelay/nvidia-macos-driver-nvk fork (Photo Booth's shared drawables, and stale
 layers of application icons drawn into shader-writable Managed surfaces)."""
@@ -46,8 +51,20 @@ IMAGE = function('static int nvmtl_managed_surface_tiled_on(') + function('stati
 FALLBACK = '''                    if ((stex && !t->_i.storage) || (rt && !(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))) {'''
 TILED = '''== MTLStorageModeManaged && nvmtl_managed_surface_tiled_on()) {'''
 if FALLBACK not in IMAGE or TILED not in IMAGE:
-    print('FAIL: nvmtl_surface_image_create no longer has the fallback or the Managed branch this test drives')
+    print('FAIL: nvmtl_surface_image_create does not have the fallback or the Managed branch this test drives')
     sys.exit(1)
+NEW_TEXTURE = function('- (id<MTLTexture>)nvmtlNewSurfaceTexture:')
+STEX_FIRST = 'int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;'
+STEX_RULE = ('    if (!wantStex && surf && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_surface_widen_usage(t->_fbo) && !a8\n'
+             '        && nvmtl_vk_format_is_storage(vkf)) wantStex = 1;')
+RT_LINE = ('const int wantRt = d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageRenderTarget)'
+           ' || nvmtl_surface_widen_usage(t->_fbo);')
+CALL = 'nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex, wantRt)'
+if not all(text in NEW_TEXTURE for text in (STEX_FIRST, STEX_RULE, RT_LINE, CALL)):
+    print('FAIL: nvmtlNewSurfaceTexture does not compute wantStex and wantRt as this test lifts them, or does not pass both '
+          'to nvmtl_surface_image_create')
+    sys.exit(1)
+REQUEST = '    ' + STEX_FIRST + '\n' + STEX_RULE + '\n    ' + RT_LINE
 
 FIXTURE = r'''
 #define _POSIX_C_SOURCE 200809L   /* setenv and unsetenv under -std=c11 */
@@ -80,13 +97,14 @@ typedef struct { int planes; struct { unsigned row; } p[2]; } nvmtl_pa_surface;
 static unsigned long long g_surf_vram, g_surf_private;
 static unsigned alias_calls, private_calls, image_drops, buffer_puts, buffer_drops, tag_current;
 static int drop_storage, drop_render, alias_fails, cached, typed_fails;
-static size_t IOSurfaceGetPlaneCount(IOSurfaceRef s) { (void)s; return 1; }
+static size_t surface_planes = 1;
+static size_t IOSurfaceGetPlaneCount(IOSurfaceRef s) { (void)s; return surface_planes; }
 static size_t IOSurfaceGetBytesPerRow(IOSurfaceRef s) { (void)s; return 2048; }
 static size_t IOSurfaceGetHeight(IOSurfaceRef s) { (void)s; return 64; }
 static uint32_t IOSurfaceGetID(IOSurfaceRef s) { (void)s; return 1; }
 static uint32_t IOSurfaceGetSeed(IOSurfaceRef s) { (void)s; return 7; }
 static int nvmtl_vk_surface_share_on(void) { return 1; }
-static int nvmtl_vk_format_is_storage(uint32_t f) { (void)f; return 1; }
+static int nvmtl_vk_format_is_storage(uint32_t f) { return f != 58; }   /* 58 stands for a format without storage */
 static int nvmtl_vram_tag_current(IOSurfaceRef s, NSUInteger p, uint32_t seed) { (void)s; (void)p; (void)seed; return (int)tag_current; }
 static int nvmtl_ic_get(IOSurfaceRef s, size_t need, nvk_buffer *b) { (void)s; (void)need; b->live = 1; return 0; }
 static int nvmtl_ic_put(nvk_buffer *b) { assert(b->live); buffer_puts++; if (cached) { b->live = 0; return 1; } return 0; }
@@ -113,6 +131,24 @@ static int nvmtl_plane_vram_ready(void) { return 0; }
 static int nvmtl_vk_plane_image_create(uint32_t id, const nvmtl_pa_surface *s, uint32_t p, uint32_t w, uint32_t h, uint32_t f, uint32_t bpp,
                                        int a8, int st, nvk_buffer *b, nvk_image *o) { (void)id; (void)s; (void)p; (void)w; (void)h; (void)f; (void)bpp; (void)a8; (void)st; (void)b; (void)o; return -1; }
 @@IMAGE@@
+/* the request lines of nvmtlNewSurfaceTexture, with the descriptor and the wrapper reduced to what they read */
+static void requests(NSUInteger usage, BOOL fbo, IOSurfaceRef surf, size_t planes, int a8, uint32_t vkf, int *stex, int *rt) {
+    struct { NSUInteger usage; } d = { usage };
+    struct { BOOL _fbo; } wrapper = { fbo }, *t = &wrapper;
+    surface_planes = planes;
+@@REQUEST@@
+    surface_planes = 1;
+    *stex = wantStex; *rt = wantRt;
+}
+static void expect_requests(NSUInteger usage, BOOL fbo, IOSurfaceRef surf, size_t planes, int a8, uint32_t vkf, int stex, int rt) {
+    int got_stex = -1, got_rt = -1;
+    requests(usage, fbo, surf, planes, a8, vkf, &got_stex, &got_rt);
+    if (got_stex != stex || got_rt != rt) {
+        printf("FAIL (%s): usage %lu fbo %d planes %zu a8 %d format %u asks storage %d colour %d, expected %d %d\n",
+               program, usage, fbo, planes, a8, vkf, got_stex, got_rt, stex, rt);
+        exit(1);
+    }
+}
 static void reset(NVMTLTexture *t) {
     memset(t, 0, sizeof *t); alias_calls = private_calls = image_drops = buffer_puts = buffer_drops = tag_current = 0;
     drop_storage = drop_render = alias_fails = cached = typed_fails = 0;
@@ -128,6 +164,17 @@ static int cases(void) {
     for (int fbo = 0; fbo < 2; fbo++) for (int storage = 0; storage < 2; storage++)
         assert(nvmtl_surface_usage(MTLTextureUsageUnknown, (BOOL)fbo, (BOOL)storage) == (!ws && !fbo && storage ? 7ul : MTLTextureUsageUnknown));
     assert(nvmtl_surface_widen_usage(NO) == !ws && !nvmtl_surface_widen_usage(YES));
+    /* what the import is asked for */
+    expect_requests(1, NO, (void *)1, 1, 0, 37, !ws, !ws);   /* a drawable that is not framebuffer-only, ShaderRead only */
+    expect_requests(1, YES, (void *)1, 1, 0, 37, 0, 0);      /* framebuffer-only */
+    expect_requests(1, NO, (void *)1, 1, 1, 37, 0, !ws);     /* A8 */
+    expect_requests(1, NO, (void *)1, 2, 0, 37, 0, !ws);     /* a plane of a two-plane surface */
+    expect_requests(1, NO, (void *)1, 1, 0, 58, 0, !ws);     /* a format without storage */
+    expect_requests(1, NO, NULL, 1, 0, 37, 0, !ws);          /* no surface */
+    expect_requests(3, YES, (void *)1, 2, 1, 58, 1, 0);      /* ShaderWrite asked for */
+    expect_requests(MTLTextureUsageUnknown, YES, (void *)1, 1, 0, 37, 0, 1);
+    expect_requests(MTLTextureUsageUnknown, NO, (void *)1, 1, 0, 37, !ws, 1);
+    expect_requests(5, YES, (void *)1, 1, 0, 37, 0, 1);      /* RenderTarget asked for */
     NVMTLTexture t;
     /* a writable wrapper whose import keeps its storage view: the family's VRAM */
     reset(&t);
@@ -209,7 +256,7 @@ def compiler():
 def build_and_run(directory, image, name):
     src = pathlib.Path(directory) / (name + '.c')
     exe = pathlib.Path(directory) / name
-    src.write_text(FIXTURE.replace('@@POLICY@@', POLICY).replace('@@IMAGE@@', image))
+    src.write_text(FIXTURE.replace('@@POLICY@@', POLICY).replace('@@IMAGE@@', image).replace('@@REQUEST@@', REQUEST))
     r = subprocess.run(compiler() + ['-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Wno-unused-function', '-Wno-unused-label',
                                       '-fsanitize=address,undefined', '-fno-sanitize-recover=all', str(src), '-o', str(exe)],
                        capture_output=True, text=True)
@@ -258,6 +305,17 @@ def main():
             print('FAIL: control: a Managed wrapper drawn straight into the import was not refused' + (('\n' + err) if err else ''))
             return 1
         print('ok   control: the source without the tiled image for Managed wrappers fails')
+        global REQUEST
+        kept = REQUEST
+        for name, broken in (('the storage request without its drawable rule', REQUEST.replace(STEX_RULE, '', 1)),
+                             ('the colour-attachment request set to 0', REQUEST.replace(RT_LINE, 'const int wantRt = 0;', 1))):
+            REQUEST = broken
+            runs, err = build_and_run(d, IMAGE, 'control4')
+            REQUEST = kept
+            if runs is None or not runs[0][0]:
+                print('FAIL: control: ' + name + ' was not refused' + (('\n' + err) if err else ''))
+                return 1
+            print('ok   control: ' + name + ' fails as Photo Booth')
     return 0
 
 
