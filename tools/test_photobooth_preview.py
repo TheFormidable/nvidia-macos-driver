@@ -43,7 +43,7 @@ FUNCTIONS = ''.join(function(s) for s in (
 ))
 TRANSFORM = '*transform = (nvmtl_photobooth_affine){ 1, 0, 0, -1, 0, y };'
 if TRANSFORM not in FUNCTIONS:
-    print('FAIL: nvmtl_photobooth_reflection no longer builds the transform this test checks')
+    print('FAIL: nvmtl_photobooth_reflection does not build the transform this test checks')
     sys.exit(1)
 
 FIXTURE = r'''
