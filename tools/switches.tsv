@@ -125,9 +125,6 @@ env	NVENCVT_REFS	dev	unset	2.9	-	unreviewed
 env	NVENCVT_STATS	diag	unset	2.9	-	unreviewed
 env	NVENCVT_SYNC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_TWOPASS	dev	unset	2.9	-	unreviewed
-env	NVKZINK_DISABLE	escape	on (NVKZINK_DISABLE=1 in an application's environment: that application's OpenGL stays Apple's, over Metal)	3.0	3.2	Native OpenGL takes over each new OpenGL context of an application; this leaves one application's contexts with Apple's renderer, for a program that mixes its GL objects with Apple's CGL and IOSurface calls.
-env	NVKZINK_OBS_COMPAT	escape	on (NVKZINK_OBS_COMPAT=0 in OBS's environment: OBS's OpenGL runs on Zink as well, and its screen capture keeps the RGBA16F format it asks for; it wins over the OBS preference NVKZinkCaptureCompatibility)	3.0	3.2	In OBS only, OpenGL stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the first frame on this driver.
-env	NVKZINK_PRESENT	escape	on (auto: a window's frames go to a CAMetalLayer when the context has an AppKit view, through an IOSurface otherwise; NVKZINK_PRESENT=gpu always takes the IOSurface path, cpu copies each frame with the CPU, native fails where the layer cannot be used)	3.0	3.2	Native OpenGL presents a window's frames through a CAMetalLayer on the GPU; gpu or cpu picks one of the copy paths instead, for a window that draws wrongly with the layer.
 env	NVK_ACCEL_ID	dev	unset	2.9	-	unreviewed
 env	NVK_BAR_VRAM	dev	unset	2.9	-	unreviewed
 env	NVK_CHANNEL_RECOVER	escape	on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9)	3.0	3.2	After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device.
@@ -1043,4 +1040,3 @@ build	NVK_REF_EXPORTS	internal	unset	2.9	-	a build host setting (a path, a job c
 build	NVK_SKIP_PATCHES	escape	on (unset: build/build_nvk.sh applies every patch of its chain)	3.0	3.2	Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT <names> (NVK_SKIP_PATCHES)".
 build	NVK_SYSROOT	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVRM_PRISTINE_OGKM	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
-pref	NVKZinkCaptureCompatibility	escape	on (defaults write com.obsproject.obs-studio NVKZinkCaptureCompatibility -bool NO: as NVKZINK_OBS_COMPAT=0)	3.0	3.2	OBS's own preference for the choice NVKZINK_OBS_COMPAT makes, read from OBS's preferences domain when the variable is not set.

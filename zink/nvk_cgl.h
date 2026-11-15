@@ -16,11 +16,10 @@ int nvk_cgl_attach(CGLContextObj context, unsigned width, unsigned height);
 int nvk_cgl_detach(CGLContextObj context);
 int nvk_cgl_resize(CGLContextObj context, unsigned width, unsigned height);
 /* Automatic GLD selection needs no application calls to this API.
- * NVKZINK_PRESENT=auto (default) prefers native CAMetalLayer VRAM copies,
- * using the Minecraft import/dirty protocol. CGL clients without an AppKit
- * drawable retain GPU IOSurface/Apple presentation. =native requires the
- * direct path, =gpu selects Apple presentation, =cpu is explicit readback.
- * GPU failures never silently select CPU transfer or reuse uncertain work. */
+ * Presentation prefers native CAMetalLayer VRAM copies, using the Minecraft
+ * import/dirty protocol. CGL clients without an AppKit drawable keep GPU
+ * IOSurface/Apple presentation. Frames never go through a CPU copy, and GPU
+ * failures never reuse uncertain work. */
 /* Like CGLFlushDrawable, presentation may target a non-current context.
  * It is locked and bound temporarily; the caller's CGL/Mesa bindings return
  * unchanged. The application must still serialize use of each context. */

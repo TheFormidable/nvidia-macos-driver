@@ -433,38 +433,18 @@ NVK_EXPORT int nvk_zink_present_iosurface(struct nvk_zink_context *ctx, IOSurfac
    if (format != 0x52474241 /* RGBA */ && format != 0x42475241 /* BGRA */) return 0;
    size_t row = (size_t)ctx->width * 4;
    if (row > SIZE_MAX / ctx->height) return 0;
-   size_t size = row * ctx->height, stride = IOSurfaceGetBytesPerRow(surface);
+   size_t stride = IOSurfaceGetBytesPerRow(surface);
    if (stride < row || stride > SIZE_MAX / ctx->height ||
        IOSurfaceGetAllocSize(surface) < stride * ctx->height) return 0;
-   const char *mode = getenv("NVKZINK_PRESENT");
-   bool cpu = mode && !strcmp(mode, "cpu");
-   if (!cpu && nvk_zink_present_import(ctx, 0, surface)) {
-      if (IOSurfaceLock(surface, 0, NULL) != kIOReturnSuccess) return 0;
-      int ok = nvk_zink_present_begin(ctx, 0, 0, 0);
-      /* Always drain before unlocking, including submission failure. */
-      if (!nvk_zink_present_wait(ctx, 0)) { finish(ctx); ok = 0; }
-      ok &= IOSurfaceUnlock(surface, 0, NULL) == kIOReturnSuccess;
-      nvk_zink_present_release(ctx);
-      return ok;
-   }
-   if (!cpu) return 0;
-   unsigned char *pixels = malloc(size);
-   if (!pixels) return 0;
-   if (!nvk_zink_readback(ctx, pixels, size, row)) { free(pixels); return 0; }
-   if (IOSurfaceLock(surface, 0, NULL) != kIOReturnSuccess) { free(pixels); return 0; }
-   unsigned char *base = IOSurfaceGetBaseAddress(surface);
-   if (base) {
-      for (unsigned y = 0; y < ctx->height; ++y) {
-         unsigned char *dst = base + y * stride, *src = pixels + y * row;
-         if (format == 0x52474241) memcpy(dst, src, row);
-         else for (unsigned x = 0; x < ctx->width; ++x) {
-            dst[x * 4] = src[x * 4 + 2]; dst[x * 4 + 1] = src[x * 4 + 1];
-            dst[x * 4 + 2] = src[x * 4]; dst[x * 4 + 3] = src[x * 4 + 3];
-         }
-      }
-   }
-   int ok = IOSurfaceUnlock(surface, 0, NULL) == kIOReturnSuccess && base;
-   free(pixels);
+   /* The frame goes over on the GPU only; a surface NVK cannot import is
+    * refused rather than copied with the CPU. */
+   if (!nvk_zink_present_import(ctx, 0, surface)) return 0;
+   if (IOSurfaceLock(surface, 0, NULL) != kIOReturnSuccess) return 0;
+   int ok = nvk_zink_present_begin(ctx, 0, 0, 0);
+   /* Always drain before unlocking, including submission failure. */
+   if (!nvk_zink_present_wait(ctx, 0)) { finish(ctx); ok = 0; }
+   ok &= IOSurfaceUnlock(surface, 0, NULL) == kIOReturnSuccess;
+   nvk_zink_present_release(ctx);
    return ok;
 }
 

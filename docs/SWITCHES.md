@@ -21,13 +21,13 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 14 | 1 | 55 | 408 | 12 |  | 496 |
+| env |  | 6 |  |  | 11 | 1 | 55 | 408 | 12 |  | 493 |
 | bootarg | 4 | 13 | 30 | 21 | 13 |  | 8 | 6 | 2 |  | 97 |
 | sysctl |  | 5 | 4 | 12 |  |  | 366 |  |  |  | 387 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
-| pref |  |  |  |  | 1 |  |  |  |  |  | 1 |
+| pref |  |  |  |  |  |  |  |  |  |  | 0 |
 
 ## The ways back
 
@@ -35,9 +35,6 @@ Each of these turns one change that is on by default back off. None is needed on
 
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
-| env | `NVKZINK_DISABLE` | on (NVKZINK_DISABLE=1 in an application's environment: that application's OpenGL stays Apple's, over Metal) | 3.2 | Native OpenGL takes over each new OpenGL context of an application; this leaves one application's contexts with Apple's renderer, for a program that mixes its GL objects with Apple's CGL and IOSurface calls. |
-| env | `NVKZINK_OBS_COMPAT` | on (NVKZINK_OBS_COMPAT=0 in OBS's environment: OBS's OpenGL runs on Zink as well, and its screen capture keeps the RGBA16F format it asks for; it wins over the OBS preference NVKZinkCaptureCompatibility) | 3.2 | In OBS only, OpenGL stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the first frame on this driver. |
-| env | `NVKZINK_PRESENT` | on (auto: a window's frames go to a CAMetalLayer when the context has an AppKit view, through an IOSurface otherwise; NVKZINK_PRESENT=gpu always takes the IOSurface path, cpu copies each frame with the CPU, native fails where the layer cannot be used) | 3.2 | Native OpenGL presents a window's frames through a CAMetalLayer on the GPU; gpu or cpu picks one of the copy paths instead, for a window that draws wrongly with the layer. |
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
 | env | `NVMTL_BUSY_DONE_EARLY` | on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch) | 3.2 | A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
@@ -63,7 +60,6 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `nvrmworkq` | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and the stop of a GPU wait for it. |
 | bootarg | `nvzink` | on (nvzink=0: Apple's OpenGL over Metal, as in 2.9) | 3.2 | On macOS 15.5 or later the accelerator names NVKZinkGLDriver.bundle as its OpenGL driver, so OpenGL applications run on NVK through Mesa's Zink; nvzink=0, read once when the accelerator starts, keeps Apple's renderer for every application. |
 | build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT \<names> (NVK_SKIP_PATCHES)". |
-| pref | `NVKZinkCaptureCompatibility` | on (defaults write com.obsproject.obs-studio NVKZinkCaptureCompatibility -bool NO: as NVKZINK_OBS_COMPAT=0) | 3.2 | OBS's own preference for the choice NVKZINK_OBS_COMPAT makes, read from OBS's preferences domain when the variable is not set. |
 
 ## Test hooks
 
@@ -188,9 +184,6 @@ Each of these does nothing unless it is set.
 | `NVENCVT_STATS` | diag | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_SYNC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_TWOPASS` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
-| `NVKZINK_DISABLE` | escape | on (NVKZINK_DISABLE=1 in an application's environment: that application's OpenGL stays Apple's, over Metal) | 3.0 | 3.2 | Native OpenGL takes over each new OpenGL context of an application; this leaves one application's contexts with Apple's renderer, for a program that mixes its GL objects with Apple's CGL and IOSurface calls. | zink/nvk_cgl.c |
-| `NVKZINK_OBS_COMPAT` | escape | on (NVKZINK_OBS_COMPAT=0 in OBS's environment: OBS's OpenGL runs on Zink as well, and its screen capture keeps the RGBA16F format it asks for; it wins over the OBS preference NVKZinkCaptureCompatibility) | 3.0 | 3.2 | In OBS only, OpenGL stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the first frame on this driver. | zink/appkit.m |
-| `NVKZINK_PRESENT` | escape | on (auto: a window's frames go to a CAMetalLayer when the context has an AppKit view, through an IOSurface otherwise; NVKZINK_PRESENT=gpu always takes the IOSurface path, cpu copies each frame with the CPU, native fails where the layer cannot be used) | 3.0 | 3.2 | Native OpenGL presents a window's frames through a CAMetalLayer on the GPU; gpu or cpu picks one of the copy paths instead, for a window that draws wrongly with the layer. | zink/native_drawable.m, zink/nvk_cgl.c, zink/nvk_zink.c |
 | `NVK_ACCEL_ID` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-card-select.patch, plugin/NVMTLDevice.m |
 | `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. | nvk/nvk-channel-recover.patch |
@@ -1136,4 +1129,3 @@ Each of these does nothing unless it is set.
 
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
-| `NVKZinkCaptureCompatibility` | escape | on (defaults write com.obsproject.obs-studio NVKZinkCaptureCompatibility -bool NO: as NVKZINK_OBS_COMPAT=0) | 3.0 | 3.2 | OBS's own preference for the choice NVKZINK_OBS_COMPAT makes, read from OBS's preferences domain when the variable is not set. | zink/appkit.m |
