@@ -742,6 +742,18 @@ fn lower_pack_rgb10a2(
             vec![Operand::IdRef(product)],
         ));
         let residual = ctx.module.fresh_id();
+        // This FMA recovers the rounding error of the separately rounded
+        // product. Without NoContraction a backend may evaluate it as two
+        // operations and lose the residual at RGB10A2 half-way boundaries.
+        ctx.module.annotations.push(Instruction::new(
+            Op::Decorate,
+            None,
+            None,
+            vec![
+                Operand::IdRef(residual),
+                Operand::Decoration(Decoration::NoContraction),
+            ],
+        ));
         out.push(Instruction::new(
             Op::ExtInst,
             Some(float),

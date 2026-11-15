@@ -6616,6 +6616,23 @@ mod tests {
         }
     }
 
+    fn assert_owned_texel_invalid(module: &Module, opcode: Op) {
+        let Some(OwnedModuleFailure::Invalid(error)) = owned_module_failure(module) else {
+            panic!("texel contract violation was accepted or misclassified");
+        };
+        let prefix = format!(
+            "native emitter: owned {opcode:?} violates its image, coordinate, texel, or image-operands contract ["
+        );
+        let details = error
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or_else(|| panic!("wrong texel diagnostic: {error}"));
+        for field in ["coordinate ", "texel ", "operands ", "mode "] {
+            assert!(details.contains(field), "missing {field} in {error}");
+        }
+        assert!(details.contains("false"), "no failed contract in {error}");
+    }
+
     fn assert_owned_type_construction(module: &Module, expected: &str) {
         match owned_module_failure(module) {
             Some(OwnedModuleFailure::TypeConstruction(error)) => assert_eq!(error, expected),
@@ -7753,12 +7770,7 @@ mod tests {
         ];
         for module in invalid {
             let opcode = module.functions[0].blocks[0].instructions[1].class.opcode;
-            assert_owned_invalid(
-                &module,
-                &format!(
-                    "native emitter: owned {opcode:?} violates its image, coordinate, texel, or image-operands contract"
-                ),
-            );
+            assert_owned_texel_invalid(&module, opcode);
         }
 
         let valid = [
@@ -7789,10 +7801,7 @@ mod tests {
             1,
             false,
         );
-        assert_owned_invalid(
-            &module,
-            "native emitter: owned ImageFetch violates its image, coordinate, texel, or image-operands contract",
-        );
+        assert_owned_texel_invalid(&module, Op::ImageFetch);
         let bytes = module
             .assemble()
             .iter()
@@ -8833,7 +8842,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_pointer_check_matches_vulkan_validation() {
+    fn owned_pointer_null_policy_keeps_its_stricter_logical_rejection() {
         let valid = module_with_blocks(vec![block(50, vec![inst(Op::Return, vec![])])]);
         let invalid = module_with_composite_instruction(Instruction::new(
             Op::ConstantNull,
@@ -8874,12 +8883,11 @@ mod tests {
             .expect("spirv-val must accept the owned pointer-contract baseline");
         crate::tools::spirv_val_bytes(&bytes(&variable_pointer_null), &tmp)
             .expect("spirv-val must accept a null admitted by VariablePointers");
-        let validation = crate::tools::spirv_val_bytes(&bytes(&invalid), &tmp);
+        // Validator versions admit different unused logical-null forms. The
+        // owned emitter cannot retain those pointer constants, independently
+        // of whether Vulkan admits them. Keep the owned rejection above and
+        // use external validation for the representable positive controls.
         let _ = std::fs::remove_dir(&tmp);
-        assert!(
-            validation.is_err(),
-            "spirv-val must reject a Logical-addressing pointer null"
-        );
     }
 
     #[test]
@@ -9208,7 +9216,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_derivative_execution_model_check_is_not_backed_by_vulkan_validation() {
+    fn owned_derivative_execution_model_check_matches_vulkan_validation() {
         let module = module_with_composite_instruction(Instruction::new(
             Op::Fwidth,
             Some(15),
@@ -9231,10 +9239,8 @@ mod tests {
         let validation = crate::tools::spirv_val_bytes(&bytes, &tmp);
         let _ = std::fs::remove_dir(&tmp);
         assert!(
-            validation.is_ok(),
-            "spirv-val now rejects a derivative reachable from GLCompute, so the owned check has a \
-             second line of defence behind it; say so here rather than leaving this note stale: \
-             {validation:?}"
+            validation.is_err(),
+            "spirv-val must reject a compute derivative without the required derivative execution mode: {validation:?}"
         );
     }
 

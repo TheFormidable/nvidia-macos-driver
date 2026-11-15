@@ -1120,9 +1120,7 @@ entry:
         "{asm}"
     );
     assert!(asm.contains("OpTypeSampler"), "{asm}");
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 5);
     assert!(asm.contains("Binding 162"), "{asm}");
     if std::process::Command::new("spirv-val")
         .arg("--version")
@@ -1226,8 +1224,9 @@ entry:
             .expect("reflected descriptor");
         assert_eq!(reflected.set, 0);
         assert_eq!(reflected.binding, binding);
-        // samplers keep one binding per Metal index; sampled textures live in the descriptor heap
-        if kind == crate::reflect::ResourceKind::Sampler {
+        if kind == crate::reflect::ResourceKind::Texture {
+            assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), metal_index);
+        } else {
             assert!(asm.contains(&format!("Binding {binding}")), "{asm}");
         }
     }
@@ -1307,9 +1306,7 @@ entry:
         .expect("storage descriptor");
     assert_eq!(sampled.binding, 72);
     assert_eq!(storage.binding, 520);
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 40);
     assert!(asm.contains("Binding 520"), "{asm}");
     reflection
         .validate_descriptor_abi()
@@ -4346,9 +4343,7 @@ entry:
     let asm = disassemble(&spv).expect("disassemble");
     assert!(asm.contains("OpTypeImage"), "{asm}");
     assert!(asm.contains(" 1D "), "{asm}");
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 0);
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
