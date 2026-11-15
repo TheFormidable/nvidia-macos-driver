@@ -10,8 +10,9 @@ package and the installer carry it.
   service it matches is the accelerator's class; it reads no environment variable; and the renderer's own
   window-system extensions (nvk-metal-wsi.patch) are filtered.
 - build.sh builds it after nvk as part of all; package_local.sh puts its four files under
-  Library/GPUBundles/nvmtl/minecraft; install.sh and uninstall.sh back up, replace, restore and remove
-  Library/GPUBundles/nvmtl as a whole folder, so the runtime inside it needs no line of its own.
+  Library/GPUBundles/nvmtl/minecraft and its two guides at the package's top; install.sh and uninstall.sh back up,
+  replace, restore and remove Library/GPUBundles/nvmtl as a whole folder, so the runtime inside it needs no line of its
+  own.
 
 Every check of a text has a control: the same check on a changed copy must fail.
 On a Mac with Vulkan headers (NM_VULKAN_INCLUDE) it also builds host_test.mm with AddressSanitizer and
@@ -273,13 +274,19 @@ def package_problems(text):
         p.append(f"package_local.sh stages {staged}, not {FILES}")
     if 'drop_lines "$NB"; rm -rf "${R:?}/$NB"' not in text:
         p.append("a runtime folder of the base package is not cleared first")
+    for src, dst in (("INSTALL.md", "MINECRAFT-NVK.md"), ("APPLICATIONS.md", "NVK-APPLICATIONS.md")):
+        if f'put_file "$HERE/tools/nvk-bridge/{src}" {dst}\n' not in text:
+            p.append(f"the package does not carry {src} as {dst}")
     return p
 
 
 pkg = (ROOT / "build" / "package_local.sh").read_text()
 p = package_problems(pkg)
-check("package_local.sh puts the four files (the two libraries 755) under Library/GPUBundles/nvmtl/minecraft", not p, p)
+check("package_local.sh puts the four files (the two libraries 755) under Library/GPUBundles/nvmtl/minecraft, and "
+      "INSTALL.md and APPLICATIONS.md at the package's top", not p, p)
 control("a package that leaves out the renderer", package_problems(pkg.replace(" lib/libnvk_renderer.dylib;", ";", 1)))
+control("a package without the Minecraft guide",
+        package_problems(pkg.replace('put_file "$HERE/tools/nvk-bridge/INSTALL.md" MINECRAFT-NVK.md\n', "", 1)))
 def readme_problems(readme):
     listed = sorted(re.findall(r"^\| `([^`]+)` \|", readme.split("## What is installed")[1].split("##")[0], re.M))
     return [] if listed == sorted(FILES) else [f"README.md lists {listed}, not {sorted(FILES)}"]

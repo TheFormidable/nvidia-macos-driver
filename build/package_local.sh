@@ -129,6 +129,9 @@ NB=Library/GPUBundles/nvmtl/minecraft
 drop_lines "$NB"; rm -rf "${R:?}/$NB"
 for f in lib/libnvk_minecraft.dylib lib/libnvk_renderer.dylib; do put_file "$OUT/nvkbridge/$f" "$NB/$f" 755; done
 for f in nvk_bridge_icd.json nvk-bridge-runtime.properties; do put_file "$OUT/nvkbridge/$f" "$NB/$f"; done
+# how an application selects it, at the top of the package beside install.sh (the runtime's README.md stays in the source)
+put_file "$HERE/tools/nvk-bridge/INSTALL.md" MINECRAFT-NVK.md
+put_file "$HERE/tools/nvk-bridge/APPLICATIONS.md" NVK-APPLICATIONS.md
 put_signed "$OUT/xlate/libnvmtl_translate.dylib" Library/GPUBundles/nvmtl/libnvmtl_translate.dylib
 if [ -f "$R/Library/GPUBundles/nvmtl/libnvmtl_osver.dylib" ]; then
   put_signed "$OUT/osver/libnvmtl_osver.dylib" Library/GPUBundles/nvmtl/libnvmtl_osver.dylib

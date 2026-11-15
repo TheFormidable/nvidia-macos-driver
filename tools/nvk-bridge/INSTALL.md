@@ -33,9 +33,10 @@ the same library to SDL and keeps all its own device and feature checks.
 
 ## The companion mod
 
-The source fork also has a companion selector mod (HighDelay/minecraft-nvk). From version 0.1.2 it finds the runtime at
-`/Library/GPUBundles/nvmtl/minecraft` by itself and checks it with `nvk-bridge-runtime.properties`. It is optional: use
-either the mod or the JVM argument. With the JVM argument, remove the mod's jar from the instance's `mods/` folder and
+The source fork reports that its optional companion selector mod, from version 0.1.2, finds the runtime at
+`/Library/GPUBundles/nvmtl/minecraft` by itself and checks it with `nvk-bridge-runtime.properties`. That mod has not been
+run with this driver; the JVM argument above is the way this driver documents and tests. Use either the mod or the JVM
+argument. With the JVM argument, remove the mod's jar from the instance's `mods/` folder and
 the mod's own `-Dnvkbridge.runtime=...` and `-Dnvkbridge.enabled=...` arguments.
 
 ## A runtime in another folder
