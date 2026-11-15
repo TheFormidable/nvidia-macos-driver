@@ -1539,13 +1539,26 @@ impl Emitter {
                     })
                     .collect::<Vec<_>>();
                 direct_buffers.sort_unstable();
-                for (_, name) in direct_buffers {
+                for (param_index, name) in direct_buffers {
                     let (low, high) =
                         self.emit_direct_buffer_address_payload(&name, &mut instructions)?;
                     let address =
                         self.combine_pointer_payload_words(low, high, &mut instructions)?;
                     self.pointer_payload_words.insert(name.clone(), (low, high));
-                    self.bda_direct_addresses.insert(name, address);
+                    self.bda_direct_addresses.insert(name.clone(), address);
+                    // array_ref<void> is a generic pointer to the driver's
+                    // synthesized buffer-address table. A direct load/GEP must
+                    // use the same address as a pointer passed through a helper
+                    // or local field, rather than read the first buffer's data.
+                    if matches!(f.params[param_index as usize].1, LlType::Ptr(0))
+                        && self.data_buffer_params.contains(&name)
+                    {
+                        for raw in self.raw_offsets.values_mut() {
+                            if raw.root == name && raw.addrspace == 0 && raw.device_addr_base.is_none() {
+                                raw.device_addr_base = Some(address);
+                            }
+                        }
+                    }
                 }
             }
             let tir_block = &tir.blocks[block_idx];
