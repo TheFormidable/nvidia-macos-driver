@@ -26,7 +26,7 @@ typedef struct { uint32_t id; } Surf;
 static uint32_t IOSurfaceGetID(Surf *s) { return s->id; }
 static unsigned calls, errors, checks; static int refuse_id;
 static int nvmtl_vk_surface_dirty(uint32_t sid, uint32_t plane) { calls++; return (int)sid == refuse_id ? -1 : 0; }
-@interface NVMTLTexture : NSObject { @public Surf *_surf; BOOL _vramOn; NSUInteger _plane; } @end
+@interface NVMTLTexture : NSObject { @public Surf *_surf; BOOL _vramOn; NSUInteger _plane; struct { void *img; } _surfaceLinear; } @end
 @implementation NVMTLTexture @end
 @interface NVMTLSubmissionPart : NSObject { @public NSSet *surfaces; } @end
 @implementation NVMTLSubmissionPart @end

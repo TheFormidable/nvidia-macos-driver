@@ -980,7 +980,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
         nvlog("texture buffer: format %lu width %lu is not carried -> nil", (unsigned long)d.pixelFormat, (unsigned long)d.width); return nil; }
     const size_t range = (size_t)d.width * bpp;
     NVMTLTexture *t = [NVMTLTexture new]; int st = 0;
-    if (nvmtl_vk_texel_view_create(&b->_b, offset, range, vkf, (d.usage & MTLTextureUsageShaderWrite) != 0, &t->_tbAlias, &t->_tbView, &st)) {
+    if (nvmtl_vk_texel_view_create(&b->_b, offset, range, vkf, nvmtl_texture_usage_writable(d.usage), &t->_tbAlias, &t->_tbView, &st)) {
         nvlog("texture buffer: %lu x fmt %lu at offset %lu of a %zu-byte buffer -> nil (reason above)", (unsigned long)d.width,
               (unsigned long)d.pixelFormat, (unsigned long)offset, b->_b.size); return nil; }
     t->_tbStorage = st != 0;
@@ -1027,10 +1027,10 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     NVMTLTexture *t = [NVMTLTexture new];
     static int noRecycle = -1; if (noRecycle < 0) { noRecycle = getenv("NVMTL_NO_BUFTEX_RECYCLE") != NULL;
         nvlog("buffer texture: dres R3 recycle %s", noRecycle ? "OFF (NVMTL_NO_BUFTEX_RECYCLE)" : "ON"); }
-    const uint32_t bkey[12] = { 2, (uint32_t)w, (uint32_t)h, vkf, bpp, (uint32_t)a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
+    const uint32_t bkey[12] = { 2, (uint32_t)w, (uint32_t)h, vkf, bpp, (uint32_t)a8, (uint32_t)nvmtl_texture_usage_writable(d.usage),
         (d.usage & MTLTextureUsageRenderTarget) != 0, (uint32_t)offset, (uint32_t)((uint64_t)offset >> 32), (uint32_t)bpr, (uint32_t)((uint64_t)bpr >> 32) };
     const BOOL brec = !noRecycle && _nbpk && nvmtl_bpark_take(self, bkey, &t->_i) == 0;
-    if (!brec && nvmtl_vk_image_create_buffer_alias((uint32_t)w, (uint32_t)h, vkf, bpp, a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
+    if (!brec && nvmtl_vk_image_create_buffer_alias((uint32_t)w, (uint32_t)h, vkf, bpp, a8, nvmtl_texture_usage_writable(d.usage),
                                            (d.usage & MTLTextureUsageRenderTarget) != 0, &_b, offset, bpr, &t->_i)) {
         nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu) -> nil (reason above)",
               (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size, (unsigned long)_storage);
@@ -1498,6 +1498,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
         }
     }
     if (_y422Surf) { CFRelease(_y422Surf); _y422Surf = NULL; }
+    if (!_parent && _surfaceLinear.img) nvmtl_vk_image_destroy(&_surfaceLinear);   // before the VRAM it is bound to goes back
     if (!_parent && _vramOn) { if (!nvmtl_ic_put(&_vramBuf)) nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
     if (!_parent) nvmtl_vk_host_pages_drop(&_hostPages);
     if (_surfOwned && _surf) CFRelease(_surf);
@@ -1630,8 +1631,12 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
     if (r->_clientWritten) nvmtl_busy_wait(r->_surf, r->_plane);
-    const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
-    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
+    // The GPU backing is the shared VRAM itself (direct), or an image of this process: a private one, or the tiled image
+    // of a shader-writable Managed wrapper. Such an image is current when the CPU seed has not moved since it was synced
+    // and the VRAM's generation has not moved either (another writer of the VRAM bumps it when it publishes).
+    const BOOL direct = r->_vramOn && !r->_surfaceLinear.img;
+    const uint32_t vgen = direct ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
+    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (direct || vgen == r->_surfGen)) return;
     if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) { r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); }
     if (!r->_clientWritten) nvmtl_vk_fence_wait_compositor((uint32_t)IOSurfaceGetID(r->_surf));
     if (r->_surfSynced && !r->_vramOn && vgen == r->_surfGen && nvmtl_plane_seed_on()) {
@@ -1650,6 +1655,10 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (![r nvmtlSurfaceCopyable]) return;
     { uint32_t now = IOSurfaceGetSeed(r->_surf);
       if (r->_vramOn && nvmtl_vram_tag_current(r->_surf, r->_plane, now)) {
+          // the VRAM holds the surface: a tiled image takes it from there on the GPU, a direct import already has it
+          if (r->_surfaceLinear.img && nvmtl_vk_copy_image(r->_q, &r->_surfaceLinear, 0, 0, &r->_i, 0, 0, r->_i.w, r->_i.h)) {
+              nvlog("surface-in: copy of surface %u's VRAM into its tiled image FAILED - retried at the next use", (unsigned)IOSurfaceGetID(r->_surf)); return; }
+          if (r->_surfaceLinear.img) r->_surfGen = vgen;
           r->_surfSeed = now; r->_surfSynced = YES; g_surfin_skip++;
           static unsigned ns; if (ns++ < 6 || ns % 2000 == 0) nvlog("item 7: surface-in SKIPPED (shared VRAM current at seed %u): %llu skipped, %llu copied", now, g_surfin_skip, g_surfin_copy);
           return; } }
@@ -1669,7 +1678,7 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
-    g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
+    g_surfin_copy++; if (direct) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);   // a tiled image's upload left the VRAM as it was
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     }
 }
@@ -1752,6 +1761,9 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
+    // a tiled image is published into the VRAM on the GPU first; the VRAM is marked newest only once it holds the pixels
+    if (r->_surfaceLinear.img && nvmtl_vk_copy_image(r->_q, &r->_i, 0, 0, &r->_surfaceLinear, 0, 0, r->_i.w, r->_i.h)) {
+        nvlog("surface-out: copy of surface %u's tiled image into its VRAM FAILED", (unsigned)IOSurfaceGetID(r->_surf)); return NO; }
     const uint32_t before = r->_vramOn ? IOSurfaceGetSeed(r->_surf) : 0;   // right before the mark: nvmtl_vram_tags_follow
     const int marked = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
                                                    : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
@@ -2049,6 +2061,9 @@ int nvmtl_y422_blit_refused(id tex, const char *what) {
 }
 // CoreAnimation uploads only level 0 of the mipmapped texture it draws a Dock badge digit into and samples it trilinear,
 // so the levels nobody wrote need filling; a write to a higher level or generateMipmaps sets _mipsWritten and ends that.
+// It does the same with the half-float (extended sRGB) application icons Spotlight shows minified: their levels are made
+// by the GPU's filtered blits, which average the floats, where averaging their bytes would garble colour and alpha (the
+// HighDelay/nvidia-macos-driver-nvk fork found the icons missing at small sizes).
 static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, MTLRegion region, NSUInteger level) {
     NVMTLTexture *r = t->_parent ?: t;
     if (level + t->_baseLevel > 0) { r->_mipsWritten = YES; return; }
@@ -2060,8 +2075,15 @@ static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, M
         case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: bpp = 1; break;
         case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: bpp = 2; break;
         case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB: bpp = 4; break;
+        case MTLPixelFormatR16Float: bpp = 2; break;
+        case MTLPixelFormatRG16Float: bpp = 4; break;
+        case MTLPixelFormatRGBA16Float: bpp = 8; break;
         default: return; }
     if (bpp != im->bpp) return;
+    if (t.pixelFormat == MTLPixelFormatR16Float || t.pixelFormat == MTLPixelFormatRG16Float || t.pixelFormat == MTLPixelFormatRGBA16Float) {
+        if (nvmtl_vk_image_gen_mipmaps(t->_q, im)) nvlog("mip autofill: the half-float levels could not be made on the GPU");
+        return;
+    }
     size_t cap = (size_t)((w + 1) / 2) * ((h + 1) / 2) * bpp; uint8_t *cur = malloc(cap), *nxt = malloc(cap);
     if (!cur || !nxt) { free(cur); free(nxt); return; }
     const uint8_t *src = bytes; size_t srow = row; uint32_t sw = w, sh = h;
@@ -5832,7 +5854,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     if (nvmtl_vk_image_create_typed_placed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex,
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
@@ -5926,7 +5948,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
     const uint32_t w = (uint32_t)d.width, hh = (uint32_t)d.height, mips = (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1);
     const uint32_t type = (uint32_t)d.textureType, layers = nvmtl_vk_layers_for_desc(type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
-    const int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    const int wantStex = nvmtl_texture_usage_writable(d.usage);
     const uint32_t key[12] = { 1, w, hh, vkf, bpp, (uint32_t)a8, mips, (uint32_t)wantStex, type, layers, 0, 0 };
     NVMTLTexture *t = [NVMTLTexture new];
     NSUInteger off = 0, len = charge; BOOL rec = NO;
@@ -7790,6 +7812,15 @@ static void nvmtl_late_present(void) {
                 atomic_store(&lastwns, wns); atomic_store(&lastwaits, waits);
             }
         }
+    }
+    // A drawable an application made itself (not a CAMetalDrawable) may store the private scheduled-present handler and
+    // call it from -present without checking it: the source fork reports Parallels' AsyncDrawable doing so, and a
+    // command buffer that never registered one crashed it there. Such a drawable that answers the selector is given an
+    // empty handler, which captures neither the command buffer nor the drawable. A CAMetalDrawable keeps its own path.
+    if (![drawable conformsToProtocol:@protocol(CAMetalDrawable)]) {
+        SEL scheduled = sel_registerName("addPresentScheduledHandler:");
+        if ([drawable respondsToSelector:scheduled])
+            ((void (*)(id, SEL, void (^)(id<MTLDrawable>)))objc_msgSend)(drawable, scheduled, ^(id<MTLDrawable> d) { (void)d; });
     }
     if ([drawable respondsToSelector:@selector(texture)]) {
         _present = (NVMTLTexture *)[(id<CAMetalDrawable>)drawable texture];

@@ -273,6 +273,7 @@ env	NVMTL_LOSS_RECORDS	dev	unset	2.9	-	unreviewed
 env	NVMTL_M4_NOTE_FAST	dev	unset	2.9	-	unreviewed
 env	NVMTL_MANAGED_EAGER_ZERO	dev	unset	2.9	-	unreviewed
 env	NVMTL_MANAGED_OWNED_VRAM	dev	unset	2.9	-	unreviewed
+env	NVMTL_MANAGED_SURFACE_TILED	escape	on (NVMTL_MANAGED_SURFACE_TILED=0 in the settings file: a shader-writable Managed wrapper of a surface in the family's VRAM is drawn straight into the linear import, as in 3.0 before this switch)	3.0	3.2	A shader-writable Managed wrapper of a single-plane surface in the family's VRAM is drawn, sampled and read by framebuffer fetch through a tiled image of its own, which is copied into the linear VRAM import before the surface is marked and from it when another writer made the VRAM newer.
 env	NVMTL_MANAGED_SYSMEM	dev	unset	2.9	-	unreviewed
 env	NVMTL_MANAGED_VRAM_MIN	dev	unset	2.9	-	unreviewed
 env	NVMTL_MATRIX8_CMLOAD_TRACE	diag	unset	2.9	-	unreviewed
@@ -386,6 +387,7 @@ env	NVMTL_OSVER_TEST_REAL	dev	unset	2.9	-	unreviewed
 env	NVMTL_OS_VERSION	dev	unset	2.9	-	unreviewed
 env	NVMTL_PAR_SIGCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PERF_LOG	diag	unset	2.9	-	unreviewed
+env	NVMTL_PHOTOBOOTH_FLIP	escape	on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9)	3.0	3.2	In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched.
 env	NVMTL_PIPELINE_THREADS	dev	unset	2.9	-	unreviewed
 env	NVMTL_PLANE_FOLLOW	escape	on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch)	3.0	3.2	When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so.
 env	NVMTL_PLANE_SEED	dev	unset	2.9	-	unreviewed
