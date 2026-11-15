@@ -23,11 +23,12 @@ Vulkan driver is the copy of this build's NVK that the nvkbridge component carri
 
 1. GLEngine loads the bundle the accelerator names. Every GLD entry point jumps to Apple's AppleMetalOpenGLRenderer,
    except `gldGetVersion`, `gldCreateContext` and `gldDestroyContext`. The bundle resolves each delegate in Apple's
-   renderer when it loads. If `gldGetVersion`, `gldCreateContext` or `gldDestroyContext` is absent, the bundle reports
-   no OpenGL for the card, so the application falls back exactly as it would under `nvzink=0`. If any other delegate is
-   absent, the bundle forwards the ones that resolved and points the missing one at a stub that returns a GLD error, so
-   the card keeps Apple's OpenGL through the bundle rather than losing it; GLEngine on the same renderer does not call a
-   delegate that renderer lacks.
+   renderer when it loads. If Apple's renderer cannot be opened, or `gldGetVersion`, `gldCreateContext` or
+   `gldDestroyContext` is absent from it, the bundle reports no OpenGL for the card (`gldGetVersion` answers 0 and
+   `gldCreateContext` 10006) and says so on standard error; a start with `nvzink=0` gives Apple's renderer back, since
+   the accelerator then names AppleMetalOpenGLRenderer itself. If any other delegate is absent, the bundle forwards the
+   ones that resolved and points the missing one at a stub that returns a GLD error, so the card keeps Apple's OpenGL
+   through the bundle rather than losing it; GLEngine on the same renderer does not call a delegate that renderer lacks.
 2. After Apple's `gldCreateContext` succeeds, the bundle hands the new context to the CGL adapter. The bundle opens the
    adapter at run time; when the adapter or one of its two entry points is missing, the bundle only forwards and
    OpenGL stays Apple's.
