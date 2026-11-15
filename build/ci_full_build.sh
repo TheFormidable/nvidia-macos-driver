@@ -602,7 +602,7 @@ $rel: minos $m"; fi
 }
 
 # The logs of the build steps: a line that names Homebrew's prefix is a tool, header or library a step found there.
-COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost vulkan plugin xlate nvencvt package spirv-llvm-translator"
+COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt package spirv-llvm-translator"
 prove_logs() {
   local w=$1 p=$2 c f n=0 hits=""
   for c in $COMPONENT_LOGS; do
@@ -747,7 +747,7 @@ cmd_reads() {
   fi
   if [ ! -d "$r" ]; then
     for v in "text files of pkgroot that hold the home folder" VERSION NULLMOTH-LOCAL-BUILD.txt "links in pkgroot" "set-uid and set-gid files in pkgroot" \
-             "codesign -dv of each kext and of the four user-space products" "xattr -lr pkgroot: attributes and how many files carry each"; do
+             "codesign -dv of each kext and of the six user-space products" "xattr -lr pkgroot: attributes and how many files carry each"; do
       rhead "$v"; cannot "no staged package ($r)"
     done
   else
@@ -757,11 +757,12 @@ cmd_reads() {
     rhead "NULLMOTH-LOCAL-BUILD.txt"; sed "s|$home|~|g" "$r/NULLMOTH-LOCAL-BUILD.txt" 2>&1
     rhead "links in pkgroot"; find "$r" -type l -exec ls -l {} \; 2>&1 | sed "s|$r/||g"; say "(end of list)"
     rhead "set-uid and set-gid files in pkgroot"; find "$r" \( -perm -4000 -o -perm -2000 \) -print 2>&1 | sed "s|$r/||"; say "(end of list)"
-    rhead "codesign -dv of each kext and of the four user-space products"
+    rhead "codesign -dv of each kext and of the six user-space products"
     if ! command -v codesign > /dev/null 2>&1; then cannot "codesign is not there"
     else
       for f in $(cd "$r" && find Library -name '*.kext' -type d -prune 2>/dev/null | LC_ALL=C sort) Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib \
-               Library/GPUBundles/nvmtl/libnvmtl_translate.dylib Library/GPUBundles/NVMTLDriver.bundle Library/NullMoth/boost/nvmtl-boost; do
+               Library/GPUBundles/nvmtl/libnvmtl_translate.dylib Library/GPUBundles/NVMTLDriver.bundle Library/NullMoth/boost/nvmtl-boost \
+               Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib Library/GPUBundles/nvmtl/minecraft/lib/libnvk_renderer.dylib; do
         say "== $f"
         if [ -e "$r/$f" ]; then codesign -dv "$r/$f" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier)|not signed' || say "(none of those lines)"
         else cannot "$f is not in the package"; fi
