@@ -421,7 +421,7 @@ dependencies too) before the first step starts.
 `deps` installs `gpatch` only when no `patch` found passes both tests. The oldest Python the kext and video scripts
 have been run with is macOS's own `python3` (3.9 with Xcode); nothing in them needs 3.10.
 
-They are built in the order of the table. Groups: `all` (the seventeen components above the optional ones), `kexts`
+They are built in the order of the table. Groups: `all` (the eighteen components above the optional ones), `kexts`
 (rm to nmsmn) and `userland` (airdis to nvencvt). The kext order is fixed: build_rm620.sh copies the pristine NVIDIA
 tree, applies the patches in kexts/NVRM/patches and writes the command lines every later kext step reads back;
 build_kms620.sh builds in the same tree; NVRM links both archives; NVRMFB and NVAccel compile against the patched tree.
