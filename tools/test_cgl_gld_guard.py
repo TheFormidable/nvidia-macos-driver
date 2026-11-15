@@ -4,7 +4,7 @@ zink/nvk_cgl_guard.h holds the structural checks that nvk_cgl_prepare_gld runs b
 build whose layout differs keeps Apple's renderer instead of writing into the wrong memory. This test compiles those
 checks for the host and feeds nvk_cgl_check_gld_layout synthetic heap blocks: one laid out as the record says (accepted)
 and one per way the layout can differ (each refused with its own reason), with controls. It touches no GPU, loads no
-Apple framework and installs nothing, so it is safe on the owner's Mac; malloc_size has no Linux name, so a shim behind
+Apple framework and installs nothing, so it is safe to run on any Mac; malloc_size has no Linux name, so a shim behind
 the header's two macros uses malloc_usable_size on Linux and malloc_size on a Mac.
 usage: test_cgl_gld_guard.py"""
 import os
