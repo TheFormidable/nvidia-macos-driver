@@ -7,8 +7,11 @@ Each line is present exactly once, in its function, at the place its order matte
     kernel took, so the open has to come first; a pending mark before the VRAM mark is the deadlock the comment above
     nvmtl_ws_mark_pending explains);
   - the application hold is opened before the first busy tag is written (the tag's pad word says what the open took);
-  - everything a command buffer holds is closed by the first statement of nvmtl_busy_mark_done, before its early return,
-    so every command buffer closes its holds on every path;
+  - everything a command buffer holds is closed by the last statement of nvmtl_busy_mark_done, after its done tags (a
+    reader between the two would find a pending tag with no hold behind it and poll), and nothing returns before it, so
+    every command buffer closes its holds on every path;
+  - a command buffer that completed in a process that writes tags (never WindowServer) runs nvmtl_busy_mark_done before
+    it reports a held-back "scheduled" and before its presentations; the call at the end stays for the other cases;
   - a part's holds are armed right after its submission and before anything waits for it, on both submit paths;
   - the reader's kernel wait follows the first early return of nvmtl_busy_wait (a process never waits for itself) and
     precedes the older wait, which stays whole: the test that passes a tag older than 100 ms at once, then the poll.
@@ -91,8 +94,19 @@ def check(f):
         'row 6: the application hold is not opened before the first busy tag'
 
     done = body(es, 'static void nvmtl_busy_mark_done(')
-    first = done.split('{', 1)[1].strip().split('\n', 1)[0]
-    assert first.startswith(ROW[7]), 'row 7 is not the first statement of nvmtl_busy_mark_done'
+    last = done.rstrip().rsplit('\n', 2)[-2].strip()
+    assert last.startswith(ROW[7]), 'row 7 is not the last statement of nvmtl_busy_mark_done'
+    assert not re.search(r'\breturn\b', done), 'nvmtl_busy_mark_done can return before row 7: that command buffer keeps its holds'
+    assert done.index('nvmtl_busy_write(t->_surf, t->_plane, seq, 1);') < done.index(ROW[7]), 'row 7 comes before the done tags'
+    fin = body(es, '- (void)nvmtlFinishExecution:(NSError *)error {')
+    early = 'if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);'
+    held = 'if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }'
+    assert fin.count(early) == 1 and fin.index('_partsRetiring = YES;') < fin.index(early) < fin.index(held) < fin.index('if (!error && _presentations.count)'), \
+        'the early done tags are not between the retiring of the parts and the held-back scheduled report'
+    assert re.search(r'nvmtl_surface_finish_writes\(self\);\n\s*nvmtl_busy_mark_done\(self\);', fin), 'the call at the end is gone'
+    on = body(es, 'static BOOL nvmtl_busy_done_early_on(void) {')
+    assert "on = nvmtl_busy_marks_on() && !(e && e[0] == '0');" in on, \
+        'the early done tags are not on by default, off with NVMTL_BUSY_DONE_EARLY=0 and limited to the processes that write tags (WindowServer would close its holds before its publications)'
 
     ahead = body(es, '- (BOOL)nvmtlSubmitAhead {')
     assert re.search(r'part->inflight = f;\n\s*' + re.escape(ROW[8]), ahead), 'row 8 does not follow part->inflight = f; in nvmtlSubmitAhead'
@@ -193,7 +207,12 @@ controls = [
     ('row 4 missing', mutate('NVMTLEventSync.m', ROW[4], '')),
     ('row 5 after the holder count', move_after('NVMTLEventSync.m', ROW[5], 'if ([nvmtl_ws_pending_holds countForObject:n]) return;')),
     ('row 6 after the tags', move_after('NVMTLEventSync.m', ROW[6], 'nvmtl_busy_write(t->_surf, t->_plane, seq, 0);')),
-    ('row 7 after the early return', move_after('NVMTLEventSync.m', ROW[7], '    if (!marks) return;')),
+    ('row 7 before the done tags', move_after('NVMTLEventSync.m', ROW[7], 'static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {')),
+    ('a return before row 7', mutate('NVMTLEventSync.m', '    cb->_busyMarks = nil;\n', '    cb->_busyMarks = nil;\n    if (!marks) return;\n')),
+    ('the early done tags after the scheduled report', move_after('NVMTLEventSync.m', 'if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);',
+                                                                 'if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }')),
+    ('the early done tags after an error too', mutate('NVMTLEventSync.m', 'if (!error && nvmtl_busy_done_early_on())', 'if (nvmtl_busy_done_early_on())')),
+    ('the early done tags in WindowServer too', mutate('NVMTLEventSync.m', 'on = nvmtl_busy_marks_on() && ', 'on = ')),
     ('row 8 missing', mutate('NVMTLEventSync.m', ROW[8], '')),
     ('row 9 after the wait', move_after('NVMTLEventSync.m', ROW[9], 'result = nvmtl_vk_submit_finish(f);')),
     ('row 10 on the done tag too', mutate('NVMTLDevice.m', ROW[10], 'nvmtl_vk_fence_tag_word((uint32_t)IOSurfaceGetID(surf))')),

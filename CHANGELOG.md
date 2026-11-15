@@ -37,7 +37,8 @@ utilization sampler's pause after a slow reading; the framebuffer's scanout floo
 derived refresh rates checked with NVKMS, its owed connect interrupt and its keeping of an override's
 scale-resolutions; the hybrid panel framebuffers' start order; NVK's uncached command and upload stream; the plugin's
 fence clock, its refusal of a copy into a multisample image, its kept visible-link answers, its kept grid-only scans,
-its one VRAM mark per surface plane per commit, its reading of the macOS version and its keeping of a device it
+its one VRAM mark per surface plane per commit, its done tags written before its holds close, its reading of the
+macOS version and its keeping of a device it
 refuses before Metal's own init; and the kernel extensions staying loaded once started. The way back from these is to
 reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
 
@@ -126,6 +127,12 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   takes back only the scaled sizes it offered itself for a rotated display.
 
 #### Applications and games
+- An application tells readers that a surface is finished (its done tag, then the close of its surface fence hold)
+  before it reports the command buffer as scheduled and before it hands its drawables over, not after: WindowServer
+  compositing a frame that was just presented found it marked as still being drawn and slept until the
+  application's completion thread got that far. The done tag is also written before the hold is closed, where a
+  reader arriving between the two polled the tag. Way back for the first: `NVMTL_BUSY_DONE_EARLY=0` in
+  `nvrm610.conf`; the order of tag and close has none.
 - Applications no longer poll through long GPU waits: after 1 ms a waiting thread sleeps on the GPU's completion
   event, as WindowServer already did, and a thread whose waits run longer than about 2 ms sleeps almost at once;
   waits shorter than 1 ms are unchanged. A process whose wake-ups do not arrive goes back to polling by itself; an
@@ -415,6 +422,7 @@ has proven itself, renewed with a reason otherwise.
 | Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | H.264 decode on RTX 50 in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
 | 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
+| Done tags and holds before scheduled and present | `NVMTL_BUSY_DONE_EARLY=0` | `nvrm610.conf` |
 
 `sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.
 

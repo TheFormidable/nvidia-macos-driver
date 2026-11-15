@@ -23,7 +23,8 @@ This test holds what only the plugin's glue in plugin/nvmtl_vk.c and plugin/NVMT
                  are marked dirty again (through the managed flush's own hook, before the prologue's holds are
                  released), its zero fills are not made again, and the drop is logged
   Metal          -1 completes the command buffer with an error and is not quarantined; the error completion closes the
-                 surface fence holds first (nvmtl_busy_mark_done), so a hold armed on dropped work cannot stay open
+                 surface fence holds (nvmtl_busy_mark_done, whose last statement that is, with no return before it), so
+                 a hold armed on dropped work cannot stay open
   NVK's lines    the "nvk-reason:" lines (among them "nvrm channel slot N rebuilt after ..." and "... not rebuilt: ...")
                  go through the plugin's log rule (nvlog_every -> nvlog_line) with NVK's text as an argument, never as
                  the format, and the callback opens no file of its own; the release rule (nvmtl_log_failure.h, built
@@ -187,11 +188,11 @@ def order(text, *parts):
 
 def chk_metal(ev):
     done = body(ev, "static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {")
-    first = done.split("\n")[1].strip() if done.count("\n") > 1 else ""
+    last = done.rstrip().split("\n")[-2].strip() if done.count("\n") > 1 else ""
     # every place a part is quarantined, and the condition it is quarantined under
     conds = re.findall(r"if \(([^)]*)\) \{\s*if \(!nvmtl_quarantined_parts\) nvmtl_quarantined_parts = \[NSMutableArray new\];\s*"
                        r"\[nvmtl_quarantined_parts addObject:\w+\];", ev)
-    return (first.startswith("nvmtl_vk_fence_close_all(&cb->_fence);")
+    return (last.startswith("nvmtl_vk_fence_close_all(&cb->_fence);") and not re.search(r"\breturn\b", done)
             and "nvmtl_busy_mark_done(self);" in ev
             and "code:MTLCommandBufferErrorInternal" in ev
             and len(conds) == ev.count("[nvmtl_quarantined_parts addObject:") == 2
@@ -269,9 +270,8 @@ run("a dropped prologue's managed uploads are marked again before its holds go; 
         # without "fault" the release rule (nvmtl_log_failure.h) keeps the line out of the system log
         ("the line without the words a release build keeps", (sub(VK, 'nvlog("vk: after a GPU fault, %u managed', 'nvlog("vk: %u managed'), OBJ)),
     ])
-run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed first", chk_metal, (EV,), [
-    ("the holds closed after the marks", (sub(EV, "    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error\n    NSDictionary *marks = cb->_busyMarks;\n",
-                                               "    NSDictionary *marks = cb->_busyMarks;\n    nvmtl_vk_fence_close_all(&cb->_fence);\n"),)),
+run("Metal: -1 completes with an error, is not quarantined, and the fence holds are closed", chk_metal, (EV,), [
+    ("a return before the holds are closed", (sub(EV, "    cb->_busyMarks = nil;\n", "    cb->_busyMarks = nil;\n    if (!marks) return;\n"),)),
     ("every failed part quarantined", (sub(EV, "if (result == -2) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:part];",
                                            "if (result) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:part];"),)),
     ("every failed ahead part quarantined at the finish", (sub(EV, "if (result == -2) {\n            if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];\n            [nvmtl_quarantined_parts addObject:p];",

@@ -181,8 +181,9 @@ static inline void nvmtl_fence_mark_sent(nvmtl_fence_legacy *L, uint32_t sid, ui
               When more holds ended during the wait than the kernel keeps the reasons of, it answers READY only if
               every one of them was a completion, and otherwise the worst of them (TIMEOUT before DEAD), whoever's
               they were: so a reader whose own write completed can be told DEAD or TIMEOUT, and goes on as below.
-     NONE     the kernel holds nothing for this reader: the writer closed its hold and writes its tag next, or the hold
-              was let go before this reader came (the cases of DEAD and TIMEOUT below).
+     NONE     the kernel holds nothing for this reader: the hold was let go before this reader came (the cases of DEAD
+              and TIMEOUT below), or a writer of an older plugin closed its hold and writes its tag next (a writer of
+              this one writes its done tag before it closes).
      DEAD     the hold was let go without completion: the writer exited, its channel faulted, the GPU went to sleep or
               the fence stopped. The last two leave a live writer whose GPU work may still run.
      TIMEOUT  the kernel gave the hold up at its bound (or with every other hold, when the fence switched itself off).

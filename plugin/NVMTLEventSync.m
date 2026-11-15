@@ -329,10 +329,13 @@ static void nvmtl_busy_mark_commit(NVMTLCommandBuffer *cb) {
     }
     cb->_busyMarks = marks;
 }
+// The done tags go out before the holds close, and nothing returns before the close. WAS: close first, then the tags: a
+// reader that read the tag in between found it pending with no hold behind it, the kernel answered NONE at once, and the
+// reader polled the tag (one 100 us step, up to 10 ms when a newer write of that plane came in meanwhile). Both say what
+// is already true when this runs: every part has landed and been published, or the command buffer failed. A reader that
+// finds the tag done reads; one already asleep on the hold wakes at the close just after.
 static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
-    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error
     NSDictionary *marks = cb->_busyMarks;
-    if (!marks) return;
     cb->_busyMarks = nil;
     for (NSString *key in marks) {
         NSArray *m = marks[key]; NVMTLTexture *t = m[0]; const uint64_t seq = [m[1] unsignedLongLongValue];
@@ -342,6 +345,16 @@ static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {
             nvmtl_busy_write(t->_surf, t->_plane, seq, 1);
         }
     }
+    nvmtl_vk_fence_close_all(&cb->_fence);   // every command buffer, every process, also after an error
+}
+// NVMTL_BUSY_DONE_EARLY=0: a command buffer that completed writes its done tags and closes its holds at the end of
+// nvmtlFinishExecution, after its scheduled report and its presentations, as before (nvmtlFinishExecution says why
+// they now go first). Read once.
+static BOOL nvmtl_busy_done_early_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_BUSY_DONE_EARLY"); on = nvmtl_busy_marks_on() && !(e && e[0] == '0');
+        nvlog("surface busy tags: done %s (NVMTL_BUSY_DONE_EARLY=%s)", on ? "before scheduled and present" : "at the end of the command buffer", e ? e : "unset"); }
+    return on;
 }
 
 @implementation NVMTLSubmissionPart
@@ -516,6 +529,14 @@ static int nvmtl_skip_empty_on(void) {
     // The ahead pass can run on another thread (nvmtl_ahead_kick). Close the parts to it first, so it cannot submit a
     // part this loop has already passed: that part's fence and its in-flight slot would never come back.
     @synchronized ([NVMTLCommandBuffer class]) { _partsRetiring = YES; }
+    // Completed: every part has landed and been published (nvmtlAdvancePart), so the done tags and the holds go out
+    // before anyone is handed a surface, by the scheduled report held back until here or by a presentation. WAS: at the
+    // end, after both: WindowServer compositing a drawable just presented, or a Chromium layer handed over from its
+    // scheduled callback, found the tag pending and slept in the kernel until this thread got there, behind the
+    // command-buffer class lock that the submit-ahead pass holds across its submissions. Not after an error (parts
+    // submitted ahead can still be running, the loop below waits for them) and not in WindowServer, which writes no tags
+    // and whose holds close after its publications in nvmtl_surface_finish_writes: both keep the call at the end.
+    if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);
     if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }
     for (NSUInteger i = _nextPart; i < _parts.count; i++) {
         NVMTLSubmissionPart *p = _parts[i];
@@ -548,7 +569,7 @@ static int nvmtl_skip_empty_on(void) {
     if (!error && _gpuTimingSeen && !_gpuTimingInvalid)
         (void)nvmtl_vk_interval_seconds(&_gpuTiming, &deviceStart, &deviceEnd);
     nvmtl_surface_finish_writes(self);
-    nvmtl_busy_mark_done(self);
+    nvmtl_busy_mark_done(self);   // after an error, in WindowServer, or with NVMTL_BUSY_DONE_EARLY=0; otherwise nothing is left
     [_completionCondition lock];
     _gpuStart = deviceStart; _gpuEnd = deviceEnd;
     _legacyKernelEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
