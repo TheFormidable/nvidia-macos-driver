@@ -1717,12 +1717,24 @@ static void nvmtl_plane_selftest_early(void)
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
+    const char *vwhy = NULL;   // why a single-plane surface that fits the family's VRAM still takes a private image
+    const char *pwhy = NULL;   // the same for a plane of a two-plane surface
     if (surf && plane == 0 && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
             nvk_buffer vb;
             if (!nvmtl_ic_get(surf, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
+                    // A linear import can lose the storage view that the optimal format has. A writable wrapper then
+                    // takes the private image below, which is writable whenever the format is, so that its usage
+                    // never claims ShaderWrite over a view that cannot be written (Core Image would get a nil
+                    // render destination, and Photo Booth's preview would stay black).
+                    if (stex && !t->_i.storage) {
+                        nvmtl_vk_image_destroy(&t->_i);
+                        if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
+                        vwhy = "the linear import has no storage view";
+                        goto private_image;
+                    }
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
                     uint32_t seed = IOSurfaceGetSeed(surf);
                     int current = nvmtl_vram_tag_current(surf, 0, seed);
@@ -1736,7 +1748,6 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             }
         }
     }
-    const char *pwhy = NULL;
     if (surf && IOSurfaceGetPlaneCount(surf) == 2 && nvmtl_vk_surface_share_on()) {
         nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
         const int why = nvmtl_pa_eligible(&s, (uint32_t)plane, w, h, bpp);
@@ -1757,6 +1768,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             pwhy = "the plane's VRAM could not be used";
         }
     }
+private_image:
     g_surf_private++;
     // A private image stands for the whole surface: wrappers that read it and wrappers that write it must share ONE image
     // (nvmtlNewSurfaceTexture caches it), or what one writes the other never sees. So it is made writable whenever the
@@ -1767,24 +1779,30 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         nvlog("item 7: surface %u %ux%u plane %lu -> a private image, copied in and out (%s; row %zu bytes, %zu plane(s))",
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
               (plane != 0 || pplanes > 1) ? (pwhy ? pwhy : "more than one plane") : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
-              : (prow % 32) ? "the row is not a multiple of 32 bytes" : "the family VRAM could not be used", prow, pplanes);
+              : (prow % 32) ? "the row is not a multiple of 32 bytes" : vwhy ? vwhy : "the family VRAM could not be used", prow, pplanes);
     }
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }
 
 // A CAMetalLayer drawable with framebufferOnly=NO is, on real Metal, usable as a render target AND a compute/Core Image
 // destination. QuartzCore hands this driver a descriptor whose usage is only ShaderRead for it, so Core Image refuses the
-// texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. The surface's
-// image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
+// texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. Such a
+// wrapper asks for a storage view before the surface is imported (nvmtlNewSurfaceTexture), and ShaderWrite is reported
+// only when the backing has one (storage).
 // WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
-static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
-    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a
-    // non-storage surface would forbid its optimal-tiled storage twin below
-    // (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy.
-    if (usage == MTLTextureUsageUnknown) return usage;
+static BOOL nvmtl_surface_widen_usage(BOOL fbo) {
     static int ws = -1;
     if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
-    if (!fbo && !ws) {
+    return !fbo && !ws;
+}
+static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a surface without a storage view would
+    // forbid its optimal-tiled storage twin (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy,
+    // so Unknown stays Unknown there. With a real storage view the explicit bits are reported as for any other usage:
+    // Photo Booth's drawables can arrive with an Unknown descriptor, and Core Image refuses a destination whose usage
+    // does not include ShaderWrite.
+    if (usage == MTLTextureUsageUnknown && !storage) return usage;
+    if (nvmtl_surface_widen_usage(fbo)) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         if (storage) usage |= MTLTextureUsageShaderWrite;
     }
@@ -1819,6 +1837,11 @@ static char nvmtl_surface_cache_key;
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    // Core Image can be handed a ShaderRead-only descriptor for a drawable that is not framebuffer-only. Ask for the
+    // real storage view before the family's VRAM is imported (a private image is made writable anyway). Only for
+    // single-plane surfaces, the drawables: the planes of a two-plane video surface keep the views they asked for.
+    if (!wantStex && surf && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_surface_widen_usage(t->_fbo) && !a8
+        && nvmtl_vk_format_is_storage(vkf)) wantStex = 1;
     NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
     // Failed BAR imports use a private image. Repeated wrappers of the same
