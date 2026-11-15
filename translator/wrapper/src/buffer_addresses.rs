@@ -70,21 +70,51 @@ fn kept_roots(m: &rspirv::dr::Module, defs: &HashMap<u32, Instruction>, sb_types
     let derived = owner.into_iter().filter(|(_, o)| kept.contains(o)).map(|(v, _)| v).collect();
     (kept, derived)
 }
+fn is_pointer_chain(op: Op) -> bool {
+    matches!(op, Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::InBoundsPtrAccessChain | Op::CopyObject)
+}
+/// `seeds` and every pointer an access chain or copy derives from them, in any function and in any instruction order.
+fn pointer_chains_from(m: &rspirv::dr::Module, mut derived: HashSet<u32>) -> HashSet<u32> {
+    loop {
+        let mut changed = false;
+        for i in m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()) {
+            if is_pointer_chain(i.class.opcode) && i.operands.first().and_then(id).is_some_and(|v| derived.contains(&v)) {
+                if let Some(r) = i.result_id { changed |= derived.insert(r); }
+            }
+        }
+        if !changed { return derived; }
+    }
+}
+/// The address table's pointers stay StorageBuffer while the other buffers' pointer types become PhysicalStorageBuffer.
+/// A table pointer that reaches a call, a phi, a select, a store of the pointer itself or a return would need that
+/// instruction's types rewritten as well, so such a shader is refused before anything changes and keeps its descriptor
+/// path.
+fn check_table_pointer_uses(m: &rspirv::dr::Module, table: u32) -> Result<(), String> {
+    let derived = pointer_chains_from(m, HashSet::from([table]));
+    for i in m.functions.iter().flat_map(|f| f.blocks.iter()).flat_map(|b| b.instructions.iter()) {
+        for (at, operand) in i.operands.iter().enumerate() {
+            if id(operand).is_some_and(|v| derived.contains(&v))
+                && !(at == 0 && (is_pointer_chain(i.class.opcode) || matches!(i.class.opcode, Op::Load | Op::Store))) {
+                return Err(format!("address-table pointer escapes through {:?}; keeping the descriptor path", i.class.opcode));
+            }
+        }
+    }
+    Ok(())
+}
 /// Gives the variables in `seeds`, which stay StorageBuffer, and every pointer derived from them their own pointer
 /// types, so the types they shared with lowered buffers can become PhysicalStorageBuffer. Each new type is placed right
 /// after the one it copies.
 fn keep_on_storage_buffer(m: &mut rspirv::dr::Module, seeds: &[u32], sb_types: &HashMap<u32, u32>, value_types: &mut HashMap<u32, u32>, fresh: &mut dyn FnMut() -> u32) {
-    let mut dup: HashMap<u32, u32> = HashMap::new(); let mut derived: HashSet<u32> = seeds.iter().copied().collect();
+    let mut dup: HashMap<u32, u32> = HashMap::new();
+    let derived = pointer_chains_from(m, seeds.iter().copied().collect());
     for v in &mut m.types_global_values {
         if v.class.opcode == Op::Variable && v.result_id.is_some_and(|n| derived.contains(&n)) {
             if let Some(t) = v.result_type.filter(|t| sb_types.contains_key(t)) { let n = *dup.entry(t).or_insert_with(&mut *fresh); v.result_type = Some(n); value_types.insert(v.result_id.unwrap(), n); }
         }
     }
     for i in m.functions.iter_mut().flat_map(|f| f.blocks.iter_mut()).flat_map(|b| b.instructions.iter_mut()) {
-        if !matches!(i.class.opcode, Op::AccessChain | Op::InBoundsAccessChain | Op::PtrAccessChain | Op::CopyObject) { continue; }
-        if !i.operands.first().and_then(id).is_some_and(|v| derived.contains(&v)) { continue; }
+        if !is_pointer_chain(i.class.opcode) || !i.result_id.is_some_and(|r| derived.contains(&r)) { continue; }
         let (Some(r), Some(t)) = (i.result_id, i.result_type) else { continue };
-        derived.insert(r);
         if sb_types.contains_key(&t) { let n = *dup.entry(t).or_insert_with(&mut *fresh); i.result_type = Some(n); value_types.insert(r, n); }
     }
     let mut places: Vec<(usize, Instruction)> = dup.iter().map(|(&t, &n)| (m.types_global_values.iter().position(|i| i.result_id == Some(t)).unwrap() + 1,
@@ -171,6 +201,7 @@ fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
     for &(n,_,b) in &roots {
         if b >= 32 || sets.get(&n) != Some(&0) { return Err(format!("unsupported source buffer descriptor {n}, binding {b}")); }
     }
+    if let Some(tv) = table_var { check_table_pointer_uses(&m, tv)?; }
     let root_ids: HashSet<_> = roots.iter().map(|r|r.0).collect();
     for i in m.all_inst_iter() {
         if matches!(i.class.opcode, Op::ArrayLength | Op::PtrEqual | Op::PtrNotEqual | Op::PtrDiff | Op::CopyMemory | Op::CopyMemorySized) && i.operands.iter().filter_map(id).any(|n| !kept_derived.contains(&n) && value_types.get(&n).is_some_and(|t|sb_types.contains_key(t))) {
@@ -401,6 +432,14 @@ OpFunctionEnd
     #[test] fn a_table_with_a_nonzero_block_offset_is_not_an_address_table() {
         let input=source(&WITH_TABLE.replace("OpMemberDecorate %tblock 0 Offset 0", "OpMemberDecorate %tblock 0 Offset 16"));
         assert_eq!(lower(&input).unwrap(), input, "a different table layout must keep the descriptor path");
+    }
+    #[test] fn refuses_table_pointers_passed_to_helpers_before_changing_types() {
+        let text = WITH_TABLE.replace("OpCapability Shader", "OpCapability Shader\nOpCapability VariablePointersStorageBuffer")
+            .replace("%fn = OpTypeFunction %void", "%helper_fn = OpTypeFunction %uint %pu\n%fn = OpTypeFunction %void")
+            .replace("%size = OpLoad %uint %size_p", "%size = OpFunctionCall %uint %helper %size_p")
+            + "\n%helper = OpFunction %uint None %helper_fn\n%arg = OpFunctionParameter %pu\n%entry = OpLabel\n%helper_value = OpLoad %uint %arg\nOpReturnValue %helper_value\nOpFunctionEnd\n";
+        let input = source(&text); validate(&input);
+        assert!(lower(&input).unwrap_err().contains("FunctionCall"));
     }
     #[test] #[ignore] fn corpus_lowered_shaders_still_validate() {
         use metal2vulkan::passes::Stage; use std::collections::BTreeMap;
