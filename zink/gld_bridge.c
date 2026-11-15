@@ -21,18 +21,44 @@ static int available;
 static int (*cgl_prepare)(void *engine, void *driver);
 static void (*cgl_destroy)(void *driver);
 
+/* The forwarder list is the export names of the build Mac's renderer. When the
+ * installed renderer lacks one of them, GLEngine on that same renderer will not
+ * call it either, but its jump stub would otherwise reach a null target. Point
+ * such a target here, so a stray call returns a GLD error instead of jumping to
+ * zero. The return convention of GLD entries that return a pointer is unknown;
+ * this target exists only to keep an unexpected call from crashing. */
+static int gld_absent_delegate(void) { return 10000; }
+
 __attribute__((constructor)) static void initialize(void)
 {
    void *apple = dlopen("/System/Library/Extensions/AppleMetalOpenGLRenderer.bundle/Contents/MacOS/AppleMetalOpenGLRenderer",
                         RTLD_NOW | RTLD_LOCAL);
    if (!apple) { fprintf(stderr, "NVKZinkGLDriver: %s\n", dlerror()); return; }
+   /* The three lifecycle entries the overrides below forward into must resolve;
+    * every other delegate may be absent from a renderer that is not the build
+    * Mac's. Forward the ones that resolved and stub the ones that did not, so
+    * the card keeps Apple's OpenGL through this bundle rather than losing it. */
+   int missing_required = 0, missing_absent = 0;
+   const char *first_absent = NULL;
    for (size_t i = 0; i < sizeof(gld_names) / sizeof(gld_names[0]); ++i) {
       gld_targets[i] = dlsym(apple, gld_names[i]);
-      if (!gld_targets[i]) {
-         fprintf(stderr, "NVKZinkGLDriver: missing delegate %s\n", gld_names[i]); return;
+      if (gld_targets[i]) continue;
+      if (i == (size_t)GLD_INDEX_gldGetVersion || i == (size_t)GLD_INDEX_gldCreateContext ||
+          i == (size_t)GLD_INDEX_gldDestroyContext) {
+         fprintf(stderr, "NVKZinkGLDriver: missing required delegate %s; OpenGL is unavailable for this card"
+                 " (boot argument nvzink=0 restores Apple's renderer)\n", gld_names[i]);
+         missing_required = 1;
+      } else {
+         gld_targets[i] = (void *)gld_absent_delegate;
+         if (!first_absent) first_absent = gld_names[i];
+         ++missing_absent;
       }
    }
+   if (missing_required) return;
    available = 1;
+   if (missing_absent)
+      fprintf(stderr, "NVKZinkGLDriver: %d delegate(s) absent from this renderer (first %s);"
+              " forwarding the rest to Apple's renderer\n", missing_absent, first_absent);
    /* The adapter beside the Zink runtime (rpath @loader_path/../../../nvmtl/zink). Both functions or neither. */
    void *cgl = dlopen("@rpath/libnvk_cgl.dylib", RTLD_NOW | RTLD_LOCAL);
    if (cgl) {
