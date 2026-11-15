@@ -157,7 +157,7 @@ folder that carries that mark.
 | Rust 1.98.1 with the x86_64-apple-darwin target, bindgen-cli 0.73.2, cbindgen 0.29.4 (rustup-init 1.29.3, SHA-256 checked, run with `--no-modify-path`) | `<workdir>/tools/rustup` (RUSTUP_HOME), `<workdir>/tools/cargo` (CARGO_HOME) |
 | Links to exactly the tools the build may use; the first folder on every step's PATH, followed by the Python environment's `bin` (Homebrew's `bin` never is on it) | `<workdir>/tools/bin` |
 | `ssh`, `rsync`, `scp` that act on this Mac (see [Components](#components-and-their-order)) | `<workdir>/tools/host` |
-| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3, Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers; with `NM_TOOLS_FROM=source`, by `deps` and only for the tools it builds: ninja 1.13.2 (v1.13.2, 3441b633c2fe), CMake 4.4.5 (v4.4.5, aa4fae824a02), OpenSSL 3.5.9 (openssl-3.5.9, 45e844fa2a14), zstd 1.5.7 (v1.5.7, f8745da6ff1a), xz 5.8.4 (v5.8.4, d3e650e63c11), CPython 3.14.10 (v3.14.10, b703b2c5e704), pkgconf 2.5.1 (pkgconf-2.5.1, 4fc570f91d9d), Khronos SPIRV-Headers vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, 496543121ce6), Khronos SPIRV-Tools vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, ef96ed763b43), Khronos glslang 16.6.0 (16.6.0, e1b562a8bed2), LLVM 22.1.8 with clang (llvmorg-22.1.8, ca7933e47d3a). None of those is shipped: NVK's own build has LLVM and SPIRV-Tools turned off, and only the native `mesa_clc`, a build-time program, links them | `<workdir>/src`, and `<workdir>/build/...` in the layout the build scripts already expect (see below) |
+| Downloaded sources, verified: NVIDIA's open-gpu-kernel-modules 620.70.06 and 610.57.04, Mesa 26.3.0-rc3 and 26.3.0 (Zink's), Vulkan-Headers and Vulkan-Loader v1.4.367, open-gpu-doc, RyzenAdj v0.19.0, two WebKit headers; with `NM_TOOLS_FROM=source`, by `deps` and only for the tools it builds: ninja 1.13.2 (v1.13.2, 3441b633c2fe), CMake 4.4.5 (v4.4.5, aa4fae824a02), OpenSSL 3.5.9 (openssl-3.5.9, 45e844fa2a14), zstd 1.5.7 (v1.5.7, f8745da6ff1a), xz 5.8.4 (v5.8.4, d3e650e63c11), CPython 3.14.10 (v3.14.10, b703b2c5e704), pkgconf 2.5.1 (pkgconf-2.5.1, 4fc570f91d9d), Khronos SPIRV-Headers vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, 496543121ce6), Khronos SPIRV-Tools vulkan-sdk-1.4.363.0 (vulkan-sdk-1.4.363.0, ef96ed763b43), Khronos glslang 16.6.0 (16.6.0, e1b562a8bed2), LLVM 22.1.8 with clang (llvmorg-22.1.8, ca7933e47d3a). None of those is shipped: NVK's own build has LLVM and SPIRV-Tools turned off, and only the native `mesa_clc`, a build-time program, links them | `<workdir>/src`, and `<workdir>/build/...` in the layout the build scripts already expect (see below) |
 | Outputs | `<workdir>/out` (kexts in `out/kexts`, NVK in `out/nvk`, and so on) |
 | One log per step, one stamp per step, failure reports | `<workdir>/logs`, `<workdir>/stamps`, `<workdir>/reports` |
 | The staged package and its tarball | `<workdir>/package/pkgroot`, `<workdir>/package/nullmoth-nvidia-local-<commit>.tar.gz` |
@@ -290,7 +290,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | `NM_OGKM620_PRISTINE` | fetched | An unpacked NVIDIA 620.70.06 tree to use instead of fetching (checked by its `version.mk`) |
 | `NM_OGKM620` | `<workdir>/build/rm620/ogkm-620.70.06` | A 620.70.06 tree whose RM and modeset archives are already built: the `rm` and `kms` steps are then skipped |
 | `NM_OGKM610` | fetched | An unpacked NVIDIA 610.57.04 tree to use instead of fetching |
-| `NM_MESA_GIT` | fetched | A Mesa clone that holds commit 90a959eb (mesa-26.3.0-rc3), for NVK and for the host tests of `./build.sh test`. The plugin does not read it: it is compiled against `<workdir>/build/gpu-src/mesa/include`, which only a `./build.sh fetch` without this setting makes (or `--flavour dev` with `NM_VULKAN_INCLUDE`), and the plugin step stops when that folder is missing |
+| `NM_MESA_GIT` | fetched | A Mesa clone that holds commit 90a959eb (mesa-26.3.0-rc3), for NVK and for the host tests of `./build.sh test`. When it also holds 0a6fa60a (mesa-26.3.0), Zink is built from it; otherwise `fetch` adds that commit to `<workdir>/src/git/mesa.git`. The plugin does not read it: it is compiled against `<workdir>/build/gpu-src/mesa/include`, which only a `./build.sh fetch` without this setting makes (or `--flavour dev` with `NM_VULKAN_INCLUDE`), and the plugin step stops when that folder is missing |
 | `NM_VULKAN_INCLUDE` | Mesa's `include` | Vulkan headers for the development plugin and for the host tests of `./build.sh test` |
 | `NM_LILU_DEBUG_KEXT` | none | For the optional kexts `nmkbl` and `nmhda`: a Lilu DEBUG kext |
 | `NM_VIRTUALSMC_SRC` | none | For `nmkbl`: a VirtualSMC source tree |
@@ -395,6 +395,7 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `plugin` | the Metal plugin (NVMTLDriver) | build/build_plugin_release.sh, or build/build_plugin_dev.sh with `--flavour dev` | |
 | `xlate` | the shader translator (libnvmtl_translate.dylib) | build/build_xlate_release.sh | |
 | `nvencvt` | libnvencvt.dylib (video) | build/build_nvencvt.sh | rm |
+| `zink` | native OpenGL (docs/ZINK-OPENGL.md): Mesa 26.3.0's Zink (libnvk_zink.dylib), the CGL adapter (libnvk_cgl.dylib) and NVKZinkGLDriver.bundle | build/build_zink.sh | |
 | `selector` | NVPrimarySelector.kext; optional, not in `all` | build/build_primary_selector.sh | |
 | `nmkbl` | NMKbdBacklight.kext; optional, built only when `NM_LILU_DEBUG_KEXT`, `NM_VIRTUALSMC_SRC` and `NM_MACKERNELSDK` are set | kexts/NMKbdBacklight/build.sh | |
 | `nmhda` | NMHDA.kext; optional, built only when `NM_LILU_DEBUG_KEXT` and `NM_MACKERNELSDK` are set | kexts/NMHDA/build.sh | |
@@ -416,13 +417,14 @@ dependencies too) before the first step starts.
 | `nvencvt` | `python3` 3.8 or later on the build Mac's PATH (`NM_LOCAL_HOST_PATH`, default `/usr/bin:/bin:/usr/sbin:/sbin`) | `python3 --version` there |
 | `vulkan` | cmake 3.22.1 or later and ninja | `--version`; the toolchain's, and with `NM_TOOLS_FROM=homebrew` also Homebrew's or one on PATH |
 | `xlate` | Rust 1.98.1 in the working directory | `deps` installs it |
+| `zink` | the Python environment's meson (with mako, PyYAML, packaging) and ninja; Xcode's bison and flex | `doctor`'s Python environment and ninja lines |
 | `nvk` (and `boost` and `nvkbridge`, built from it) | Python 3.10 or later (Mesa's meson.build) with meson, mako, PyYAML, packaging in `<workdir>/tools/venv`; LLVM 22 with its clang libraries; SPIRV-LLVM-Translator for LLVM 22; SPIRV-Tools; glslang; pkg-config; Rust with bindgen and cbindgen; a `patch` that also creates files (NVK's chain adds files; Homebrew `gpatch` when macOS's cannot) | each one, as `doctor` shows |
 
 `deps` installs `gpatch` only when no `patch` found passes both tests. The oldest Python the kext and video scripts
 have been run with is macOS's own `python3` (3.9 with Xcode); nothing in them needs 3.10.
 
-They are built in the order of the table. Groups: `all` (the eighteen components above the optional ones), `kexts`
-(rm to nmsmn) and `userland` (airdis to nvencvt). The kext order is fixed: build_rm620.sh copies the pristine NVIDIA
+They are built in the order of the table. Groups: `all` (the nineteen components above the optional ones), `kexts`
+(rm to nmsmn) and `userland` (airdis to zink). The kext order is fixed: build_rm620.sh copies the pristine NVIDIA
 tree, applies the patches in kexts/NVRM/patches and writes the command lines every later kext step reads back;
 build_kms620.sh builds in the same tree; NVRM links both archives; NVRMFB and NVAccel compile against the patched tree.
 

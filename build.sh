@@ -179,6 +179,7 @@ check_pins() {
     "$base"*) if [ -n "$base" ]; then say "  pin ok    Mesa = $NM_PIN_MESA_COMMIT (nvk/MESA_BASE $base)"; else say "  pin FAIL  nvk/MESA_BASE is empty"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)); fi ;;
     *) say "  pin FAIL  Mesa = $NM_PIN_MESA_COMMIT, but nvk/MESA_BASE says $base"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
   esac
+  pin_agree "Mesa (Zink)" "$NM_PIN_ZINKMESA_COMMIT" build/prepare_zink.py "MESA_COMMIT = '$NM_PIN_ZINKMESA_COMMIT'"
   pin_agree "Vulkan loader tag" "$NM_PIN_VKLOADER_REF" build/build_vulkan_loader.sh "TAG=$NM_PIN_VKLOADER_REF"
   pin_agree "Vulkan-Headers tag" "$NM_PIN_VKHEADERS_REF" build/build_vulkan_loader.sh "TAG=$NM_PIN_VKHEADERS_REF"
   pin_agree "Vulkan-Loader commit" "$NM_PIN_VKLOADER_COMMIT" build/build_vulkan_loader.sh "LOADER_SHA=$NM_PIN_VKLOADER_COMMIT"
@@ -1194,6 +1195,12 @@ verify_given_tree() {   # <what> <dir> <file with the version> <expected text>
   [ -f "$2/$3" ] && grep -q "$4" "$2/$3" || die "$1 at $2 is not the pinned one ($3 does not contain $4)"
   say "  ok       $1: $2 (given; $3 says $4)"
 }
+# zink_mesa_git: the repository build_zink.sh exports Zink's Mesa from (a given NM_MESA_GIT that has the commit, or the
+# bare repository ./build.sh fetch put it in)
+zink_mesa_git() {
+  if [ -n "${NM_MESA_GIT:-}" ] && git -C "$MESA" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null; then printf '%s\n' "$MESA"
+  else printf '%s\n' "$GITDIR/mesa.git"; fi
+}
 cmd_fetch() {
   say "== fetching the pinned sources into $W"
   local og=$GITDIR/open-gpu-kernel-modules.git
@@ -1214,6 +1221,10 @@ cmd_fetch() {
   else
     fetch_bare MESA "$GITDIR/mesa.git"
     checkout_clone MESA "$GITDIR/mesa.git" "$MESA"
+  fi
+  # Zink's Mesa (mesa-26.3.0): into the bare repository beside NVK's, unless a given NM_MESA_GIT has the commit
+  if [ -z "${NM_MESA_GIT:-}" ] || ! git -C "$MESA" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null; then
+    fetch_bare ZINKMESA "$GITDIR/mesa.git"
   fi
   fetch_bare VKHEADERS "$KHRONOS/Vulkan-Headers"
   fetch_bare VKLOADER "$KHRONOS/Vulkan-Loader"
@@ -1911,7 +1922,7 @@ make_tool_links() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- components
-ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt"
+ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink"
 EXTRA_COMPONENTS="selector nmkbl nmhda"
 # comp_info <name>: C_DEPS (components), C_SRC (checkout paths whose contents it is built from, scripts included),
 # C_VARS (variables it reads), C_PINS (the build/pins.sh entries it is built from, by name prefix), C_OUT (a file that
@@ -1960,6 +1971,11 @@ comp_info() {
     nvencvt) C_DESC="libnvencvt.dylib (video)"; C_DEPS="rm"
            C_SRC="build/build_nvencvt.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt vendor/nvenc tools/nvencvt_header_abi.py tools/nvk_header_abi.py"
            C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_TOOLS="xcode hostpython"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
+    # zink: native OpenGL through Mesa's Zink (docs/ZINK-OPENGL.md); its private Vulkan runtime is the nvkbridge
+    # component's, which build/package_local.sh copies beside it
+    zink)  C_DESC="native OpenGL: Zink, the CGL adapter and NVKZinkGLDriver.bundle"
+           C_SRC="build/build_zink.sh build/prepare_zink.py build/opengl_api.py build/generate_cgl_dispatch.py build/generate_gld_forward.py zink tools/zink_sync_probe.c"
+           C_VARS="NM_MESA_GIT"; C_PINS="ZINKMESA_ PY_"; C_TOOLS="xcode meson"; C_OUT="$O/zink/zink/libnvk_cgl.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
     nmkbl) C_DESC="NMKbdBacklight.kext (optional; needs Lilu, VirtualSMC, MacKernelSDK)"; C_SRC="kexts/NMKbdBacklight build/check_kext_libraries.sh"
@@ -2014,6 +2030,7 @@ recipe() {   # <component>: everything its output depends on, as text
     say "glslang $([ -n "$T_GLSLANG" ] && "$T_GLSLANG" --version 2>/dev/null | first_line) meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version)"
     tc_used_stamps ;;
   esac
+  case " $C_TOOLS " in *" meson "*) say "meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version) ninja $([ -n "$T_NINJA" ] && "$T_NINJA" --version)" ;; esac
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
@@ -2162,6 +2179,7 @@ run_component() {
       if [ "$NM_DRY_RUN" = 0 ] && otool -L "$O/nvk/libvulkan_nouveau.dylib" | awk 'NR>1{print $1}' | grep -E '^(/usr/local/|/opt/homebrew/|/Users/)'; then
         say "STOP: libvulkan_nouveau.dylib loads a library from outside macOS (above): a Homebrew library leaked into the build" | tee -a "$CUR_LOG"; return 5
       fi ;;
+    zink) x "${STEP_ENV[@]}" bash "$HERE/build/build_zink.sh" "$(zink_mesa_git)" "$NM_PIN_ZINKMESA_COMMIT" "$O/zink" ;;
     boost) x mkdir -p "$O/boost"; x "${STEP_ENV[@]}" bash "$HERE/tools/nvmtl-boost/build.sh" "$O/nvk-build/mesa" "$O/boost/nvmtl-boost" ;;
     nvkbridge)   # NVK's library and the Vulkan headers of the Mesa tree it was built from
       [ ! -e "$O/nvkbridge" ] || safe_rm "$O/nvkbridge"
@@ -2246,6 +2264,7 @@ prepare_build() {   # what every build command needs before its first step
 #   hostpython  nvencvt: python3 on the build Mac's PATH, the same minimum
 #   cmake       vulkan: cmake and ninja
 #   rust        xlate, nvk: Rust in the working directory
+#   meson       zink: the Python environment's meson and ninja (Mesa's bison and flex are Xcode's)
 #   nvk         nvk: the Python environment (Python 3.10+, meson), LLVM 22, SPIRV-LLVM-Translator, SPIRV-Tools, glslang,
 #               bindgen, cbindgen
 need_tools_for() {   # stop early, naming what a component needs and does not have
@@ -2260,6 +2279,9 @@ need_tools_for() {   # stop early, naming what a component needs and does not ha
   case " $C_TOOLS " in *" hostpython "*) [ "$BUILD_HOST" != "$LOCAL_HOST" ] || [ -n "$(host_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN(build-Mac)" ;; esac
   case " $C_TOOLS " in *" cmake "*) { [ -n "$T_CMAKE" ] && [ -n "$T_NINJA" ]; } || miss="$miss cmake/ninja" ;; esac
   case " $C_TOOLS " in *" rust "*) [ -x "$RUST_BIN/rustc" ] || miss="$miss Rust-$NM_PIN_RUST_VERSION" ;; esac
+  case " $C_TOOLS " in *" meson "*)
+    [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$T_NINJA" ] || miss="$miss ninja" ;;
+  esac
   case " $C_TOOLS " in *" nvk "*)
     [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
     spirv_llvm_ok || miss="$miss SPIRV-LLVM-Translator-$NM_PIN_TOOL_LLVM_MAJOR"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
@@ -2284,6 +2306,7 @@ need_sources_for() {
   esac
   case "$n" in
     nvk) [ -f "$OGKM610/version.mk" ] && git -C "$MESA" cat-file -e "$NM_PIN_MESA_COMMIT^{commit}" 2>/dev/null || die "nvk needs Mesa and NVIDIA $NM_PIN_OGKM610_REF: run ./build.sh fetch" ;;
+    zink) git -C "$(zink_mesa_git)" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null || die "zink needs Mesa $NM_PIN_ZINKMESA_REF: run ./build.sh fetch" ;;
     plugin)   # the folder build_plugin_release.sh / build_plugin_dev.sh compile against; NM_MESA_GIT does not move it
       local inc=$R/build/gpu-src/mesa/include
       [ "$NM_FLAVOUR" != dev ] || inc=${NM_VULKAN_INCLUDE:-$inc}
@@ -2300,7 +2323,7 @@ expand_components() {   # names and groups -> component names in build order
     case "$a" in
       all) out="$out$ALL_COMPONENTS " ;;
       kexts) out="$out rm kms nvrm fb accel agdc nmsmn " ;;
-      userland) out="$out airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt " ;;
+      userland) out="$out airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink " ;;
       *) comp_info "$a" >/dev/null 2>&1 || die "unknown component '$a'. Components: $ALL_COMPONENTS $EXTRA_COMPONENTS (groups: all kexts userland)"
          [ "$a" != package ] || die "use ./build.sh package"
          out="$out$a " ;;

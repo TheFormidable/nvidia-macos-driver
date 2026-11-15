@@ -8,6 +8,11 @@ if [ "${1:-}" = --payload ]; then
   HERE=$(cd "$2" && pwd) || exit 2
 elif [ "$#" != 0 ]; then echo "STOP: expected --payload directory or no arguments" >&2; exit 2; fi
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
+# --- native OpenGL (docs/ZINK-OPENGL.md) ---
+# NVKZinkGLDriver.bundle, the GL driver bundle NVAccel names in IOGLBundleName: installed, backed up, restored by the
+# rollback and the fallback job, and owned like NVMTLDriver.bundle. Its runtime is nvmtl/zink, which goes with nvmtl.
+ZINK_GB=NVKZinkGLDriver.bundle
+# --- end of native OpenGL ---
 EXT=/Library/Extensions; GB=/Library/GPUBundles; FW=/Library/NullMoth/nvfw; FWOLD=/Users/Shared/nvfw
 KC=/Library/KernelCollections/AuxiliaryKernelExtensions.kc
 K=/System/Library/Kernels/kernel
@@ -45,7 +50,7 @@ rollback_install() {
     rm -rf "$EXT/$k.kext" || failed=1
     [ ! -e "$BK/$k.kext" ] || ditto "$BK/$k.kext" "$EXT/$k.kext" || failed=1
   done
-  for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do
+  for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt $ZINK_GB; do
     rm -rf "$GB/$b" || failed=1
     [ ! -e "$BK/$b" ] || ditto "$BK/$b" "$GB/$b" || failed=1
   done
@@ -314,6 +319,10 @@ fi
 # silently leave Ada without a hardware encoder and Safari on the wrong decoder, so the install stops before it changes anything.
 [ -f "$HERE/Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib" ] || \
   die "this package has no libnvencvt.dylib in NVMTLDriver.bundle (the video codecs); rebuild it with package/stage_nvencvt.sh"
+# The accelerator names NVKZinkGLDriver.bundle as the OpenGL driver unless the boot argument nvzink=0 is set: without the
+# bundle every OpenGL application would find no driver, so a package without it stops here, before anything changes.
+[ -f "$HERE/Library/GPUBundles/$ZINK_GB/Contents/MacOS/NVKZinkGLDriver" ] && [ -f "$HERE/Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib" ] || \
+  die "this package has no $ZINK_GB or nvmtl/zink (native OpenGL); rebuild it with ./build.sh package"
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
 # macOS lacks stops the build for all of them. 2.5.3 report: a Realtek USB Wi-Fi kext (RtWlanU1827) needed
 # com.apple.iokit.IOUSBFamily, which macOS 15 no longer has, and the stop said only "test kernel collection build
@@ -372,7 +381,7 @@ NVSUM0=$(cksum 2>/dev/null < "$EXT/NVRM.kext/Contents/MacOS/NVRM") || NVSUM0=""
 # ditto, not cp -Rp: cp re-applies file flags through symlinks and stopped on nvmtl/libvulkan.dylib with "chflags: Too
 # many levels of symbolic links" (Mac 1.10 logs 10-10, 2 uploads); ditto keeps links, flags and xattrs, as the restore does.
 for k in $KEXTS; do [ ! -e "$EXT/$k.kext" ] || backup_copy "$k" ditto "$EXT/$k.kext" "$BK/$k.kext"; done
-for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do [ ! -e "$GB/$b" ] || backup_copy "$b" ditto "$GB/$b" "$BK/$b"; done
+for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt $ZINK_GB; do [ ! -e "$GB/$b" ] || backup_copy "$b" ditto "$GB/$b" "$BK/$b"; done
 [ ! -f "$KC" ] || backup_copy "kernel collection" cp -p "$KC" "$BK/AuxiliaryKernelExtensions.kc"
 [ ! -d /Library/NullMoth/kexts ] || backup_copy "cached accelerators" ditto /Library/NullMoth/kexts "$BK/kexts"
 [ ! -f /Library/NullMoth/os-major ] || backup_copy "OS record" cp -p /Library/NullMoth/os-major "$BK/os-major"
@@ -434,7 +443,7 @@ done
 MYCONF_START='# --- my settings, kept on update ---'; MYCONF_END='# --- end my settings ---'
 [ ! -f "$GB/nvmtl/nvrm610.conf" ] || sed -n "/^$MYCONF_START\$/,/^$MYCONF_END\$/p" "$GB/nvmtl/nvrm610.conf" \
   | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._,=*-]{0,160})\$" > "$T/my-conf" || : > "$T/my-conf"
-for b in NVMTLDriver.bundle nvmtl; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
+for b in NVMTLDriver.bundle nvmtl $ZINK_GB; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
 # Packages up to 2.8.1 installed NVIDIAShared.bundle, which held two of NVIDIA's closed compiler libraries. This package
 # does not carry it (the plugin only ever used it when a developer switch was set), and an update takes the old copy away.
 rm -rf "$GB/NVIDIAShared.bundle" || die "remove the old NVIDIAShared.bundle (restore from $BK)"
@@ -474,11 +483,11 @@ if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
       || echo "   note: the approval record for $k is read-only here; macOS may ask to allow it again"
   done
 fi
-chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
+chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB" "$GB/nvmtl-allow.txt" || die "bundle permissions"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
-chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
+chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
 sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer cannot read $GB/nvmtl-allow.txt (restore from $BK)"
 # Create the shared shader caches the plugin looks for. Without them NVMTL_AIRCACHE_DIR never resolves, so
 # WindowServer, which compiles the compositor's pipelines on demand, re-translates them from scratch at every start
@@ -677,7 +686,7 @@ if [ -f "\$BK/AuxiliaryKernelExtensions.kc" ] && ! cp -p "\$BK/AuxiliaryKernelEx
   exit 0
 fi
 for k in $KEXTS; do rm -rf "$EXT/\$k.kext"; [ ! -e "\$BK/\$k.kext" ] || ditto "\$BK/\$k.kext" "$EXT/\$k.kext"; done
-for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
+for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl nvmtl-allow.txt $ZINK_GB; do rm -rf "$GB/\$b"; [ ! -e "\$BK/\$b" ] || ditto "\$BK/\$b" "$GB/\$b"; done
 rm -rf /Library/NullMoth/kexts "$FW"
 [ ! -d "\$BK/kexts" ] || ditto "\$BK/kexts" /Library/NullMoth/kexts
 [ ! -d "\$BK/nvfw" ] || ditto "\$BK/nvfw" "$FW"
