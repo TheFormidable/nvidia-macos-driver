@@ -70,7 +70,9 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
 
 - `host_test.mm` includes `bridge.mm` and replaces the renderer with fakes: enumeration bounds, the extension filter,
   device creation, the limited-BAR choice, surface formats, image acquisition and its timeouts, present failures and
-  exception containment. It needs a Mac; the build line is at its top.
+  exception containment. It needs a Mac: `tools/test_nvk_bridge.py` builds it there with AddressSanitizer and
+  UndefinedBehaviorSanitizer and runs it when Vulkan headers are at hand (`NM_VULKAN_INCLUDE`), and its top has the
+  build line.
 - `smoke.mm` drives an installed runtime: instance, device and the device features Minecraft needs, and with SDL3 a
   window with frames, a resize, a minimize and a restore. `NVKBRIDGE_VERIFY_PIXELS=1` reads every presented copy back
   and checks its pixels. To test the loader route, pass `libvulkan.1.dylib` as the entry with `VK_DRIVER_FILES` set to
@@ -79,7 +81,7 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
   `-Dorg.lwjgl.vulkan.libname` set and checks that the game, LWJGL and SDL all use the frontend. It needs Java 25 and the
   game's and LWJGL 3.4.3's jars; it does not start the game.
 - `tools/test_nvk_bridge.py` checks on any system that the build, the package and the installer carry the runtime and
-  that the interfaces above match this tree.
+  that the interfaces above match this tree, and runs `build.sh` with stand-ins for Apple's tools.
 
 ## What is known
 
