@@ -229,7 +229,10 @@ NVAccel only ever waits for compositor holds: an application that is still drawi
   application hold (ended when the producer has published). Each hold is armed with the VkFence of the last part that
   writes the surface, right after that part is submitted. Every command buffer closes what it still holds when it
   finishes, on every path (completion, a failed or lost submission, a lost device); WindowServer also closes each
-  surface as it releases it.
+  surface as it releases it. An application writes its done tags before it closes, and a command buffer that
+  completed does both before it reports "scheduled" (when that was held back) and before it hands its drawables
+  over, so a reader handed the surface by either finds the tag done (`NVMTL_BUSY_DONE_EARLY=0`: at the end of the
+  command buffer, as before).
 - **Readers.** A busy tag whose pad word is `0x4B464E43` ("the kernel holds this write") makes the reader sleep in the
   kernel, up to 2 s, until the holds it found end. Only the answer that the write is complete ends the reader's wait
   by itself. When the kernel answers that it let the hold go or holds nothing (the writer exited, a channel fault, the

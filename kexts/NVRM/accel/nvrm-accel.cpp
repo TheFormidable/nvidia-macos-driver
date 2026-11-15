@@ -2001,6 +2001,21 @@ NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-
 NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation, or used another validity bit, after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
+// What a screen capture's page-offs cost the threads that mark surfaces: how often and how long a mark or a grant that
+// waits for the accelerator lock found it taken (most often by a page-off's copy). Read-only; nothing here changes what
+// the driver does.
+static SInt64 gCntSvLockWaits, gCntSvLockWaitUs;
+static int gSvLockWaitMaxUs;
+NVACCEL_CNT(nvaccel_surf_mark_lock_waits,    gCntSvLockWaits,  "surface VRAM marks and grants that found the accelerator lock taken and waited for it");
+NVACCEL_CNT(nvaccel_surf_mark_lock_wait_us,  gCntSvLockWaitUs, "time those marks and grants waited for the accelerator lock, in total, us");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_surf_mark_lock_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gSvLockWaitMaxUs, 0, "longest wait of a surface VRAM mark or grant for the accelerator lock, us");
+static void nvCntUs(uint64_t t0, SInt64 *count, SInt64 *total, int *max)
+{
+    uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    const int us = (int)(ns / 1000);
+    OSAddAtomic64(1, count); OSAddAtomic64(us, total);
+    if (us > *max) *max = us;   // a report, not a decision: a lost update between two threads is harmless
+}
 // A DMA mapper (VT-d) that translates the GPU: the page-off copies through a staging buffer NVRM mapped ("nvSurfDma").
 // Without a mapper (mode 0) none of these moves; debug.nvaccel_dma_mode reads 0 once a page-off has asked.
 static int gNvAccelDmaMode = -1;
@@ -2142,6 +2157,8 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_already); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_changed);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_recopied);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_waits); sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_mode);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_staged);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_maps);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_map_fail);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_unmaps);     sysctl_register_oid(&sysctl__debug_nvaccel_dma_abandoned);
@@ -2460,6 +2477,18 @@ static unsigned nvAccelPlaneGrant(NVAccel *a, void *surf, NVResource *res, NVVid
     }
     return st;
 }
+// The accelerator lock for a mark or a grant: a try first, so that a wait behind another holder (a page-off copy, most
+// often) is counted and timed (debug.nvaccel_surf_mark_lock_*); then, unless the caller asked only to try, the same
+// blocking nvFamLock as before. Either way the lock is taken through nvFamLock, with its owner record and pin.
+static bool nvFamLockMark(NVAccel *a, bool tryOnly)
+{
+    if (nvFamLock(a, true)) return true;
+    if (tryOnly) return false;
+    const uint64_t t0 = mach_absolute_time();
+    const bool locked = nvFamLock(a, false);
+    if (locked) nvCntUs(t0, &gCntSvLockWaits, &gCntSvLockWaitUs, &gSvLockWaitMaxUs);   // no lock (the family is going away) is no wait
+    return locked;
+}
 static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task_t task, unsigned cmd)
 {
     if (p->version == NVRM_SURFSHARE_VERSION && cmd == NVRM_ESC_SURF_DIRTY && (p->plane & NVRM_SS_PLANE_GPU_MARK)) {
@@ -2489,7 +2518,7 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
     }
     void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
     if (!surf) { p->status = NVRM_SS_NO_SURFACE; gNVSVRefused++; return kIOReturnSuccess; }
-    if (!nvFamLock(a, tryOnly)) { ((OSObject *)surf)->release(); p->status = tryOnly ? NVRM_SS_BUSY : NVRM_SS_OFF; return kIOReturnSuccess; }
+    if (!nvFamLockMark(a, tryOnly)) { ((OSObject *)surf)->release(); p->status = tryOnly ? NVRM_SS_BUSY : NVRM_SS_OFF; return kIOReturnSuccess; }
     void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
     NVResource *res = OSDynamicCast(NVResource, ctx);

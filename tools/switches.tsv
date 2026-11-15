@@ -169,6 +169,7 @@ env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
 env	NVMTL_BUFFER_GRACE	dev	unset	2.9	-	unreviewed
 env	NVMTL_BUF_GUARD	dev	unset	2.9	-	unreviewed
+env	NVMTL_BUSY_DONE_EARLY	escape	on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch)	3.0	3.2	A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished.
 env	NVMTL_CACHE_SYNC_IO	dev	unset	2.9	-	unreviewed
 env	NVMTL_CANONICAL_POINTERS	dev	unset	2.9	-	unreviewed
 env	NVMTL_CARD	setting	unset	2.9	-	Card for an application: With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0).
@@ -383,6 +384,7 @@ env	NVMTL_OS_VERSION	dev	unset	2.9	-	unreviewed
 env	NVMTL_PAR_SIGCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PERF_LOG	diag	unset	2.9	-	unreviewed
 env	NVMTL_PIPELINE_THREADS	dev	unset	2.9	-	unreviewed
+env	NVMTL_PLANE_FOLLOW	escape	on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch)	3.0	3.2	When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so.
 env	NVMTL_PLANE_SEED	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_COST_LIB	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_REUSE	dev	unset	2.9	-	unreviewed
@@ -431,6 +433,7 @@ env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFOUT_PLANES	escape	on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9)	3.0	3.2	The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use.
 env	NVMTL_SURFOUT_READBACK	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE_IDLE_MS	dev	unset	2.9	-	unreviewed
@@ -567,6 +570,7 @@ bootarg	nvfbsmall	recovery	unset	2.9	-	turns one part of the driver off or back 
 bootarg	nvfbsurround	setting	unset	2.9	-	Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off.
 bootarg	nvfbtrace	diag	unset	2.9	-	observes only
 bootarg	nvfbvib	setting	unset	2.9	-	Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone.
+bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
 bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it.
 bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
 bootarg	nvhud	diag	unset	2.9	-	observes only
@@ -687,6 +691,9 @@ sysctl	debug.nvaccel_pageoff_unlocked_wait_max_us	diag	read-only	2.9	-	longest u
 sysctl	debug.nvaccel_pageoff_unlocked_waits	diag	read-only	2.9	-	page-offs that waited for the GPU without the accelerator lock
 sysctl	debug.nvaccel_res_free	diag	read-only	2.9	-	NVResource objects freed
 sysctl	debug.nvaccel_res_new	diag	read-only	2.9	-	NVResource objects created
+sysctl	debug.nvaccel_surf_mark_lock_wait_max_us	diag	read-only	3.0	-	longest wait of a surface VRAM mark or grant for the accelerator lock, us
+sysctl	debug.nvaccel_surf_mark_lock_wait_us	diag	read-only	3.0	-	time those marks and grants waited for the accelerator lock, in total, us
+sysctl	debug.nvaccel_surf_mark_lock_waits	diag	read-only	3.0	-	surface VRAM marks and grants that found the accelerator lock taken and waited for it
 sysctl	debug.nvaccel_surf_plane_validbits	diag	read-only	3.0	-	OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane)
 sysctl	debug.nvaccel_surf_planes	diag	read-only	3.0	-	1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0)
 sysctl	debug.nvaccel_surface_fence	diag	read-only	3.0	-	1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only)
@@ -958,13 +965,27 @@ sysctl	debug.nvrmfb_layout_classes	diag	read-only	3.0	-	Apple classes NVRMFB com
 sysctl	debug.nvrmfb_layout_vtables	diag	read-only	3.0	-	Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse
 sysctl	debug.nvrmfb_layout_vtdiff	diag	read-only	3.0	-	Apple vtables whose length differs from this build; reported, never a reason to refuse
 sysctl	debug.nvrmfb_vram_budget_bytes	diag	read-only	2.9	-	the BAR1 grant budget in force
+sysctl	debug.nvrmfb_vram_dirty	diag	read-only	3.0	-	1 once a new block did not read as zero although the RM clears: from then on every block is filled again
 sysctl	debug.nvrmfb_vram_display_aware	recovery	writable by root	2.9	-	1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction
 sysctl	debug.nvrmfb_vram_display_bytes	diag	read-only	2.9	-	scanout+cursor the framebuffer itself maps into BAR1
+sysctl	debug.nvrmfb_vram_fast	diag	read-only	3.0	-	1 = a granted block is not filled with zeros again while the RM's clearing is believed, and blocks of a size in churn are made ahead of time; 0 = boot argument nvfbvramfast=0: every grant is filled and made on the caller's thread
+sysctl	debug.nvrmfb_vram_fill_skipped	diag	read-only	3.0	-	new blocks not filled from the processor (the RM cleared them and they read as zero)
+sysctl	debug.nvrmfb_vram_fill_us	diag	read-only	3.0	-	microseconds spent filling new blocks from the processor
+sysctl	debug.nvrmfb_vram_filled	diag	read-only	3.0	-	new blocks filled with zeros from the processor
 sysctl	debug.nvrmfb_vram_grant_bytes	diag	read-only	2.9	-	bytes granted
 sysctl	debug.nvrmfb_vram_grants	diag	read-only	2.9	-	vramGrant successes
 sysctl	debug.nvrmfb_vram_mapped_bytes	diag	read-only	2.9	-	the BAR1 budget counter, live
+sysctl	debug.nvrmfb_vram_power_events	diag	read-only	3.0	-	standby, resume and lost messages from NVRM since the system started, one for each framebuffer of the card (after the first, every new block is filled again)
+sysctl	debug.nvrmfb_vram_ready_back	diag	read-only	3.0	-	blocks made ahead of time that went back unused (ready ones, and ones that never became ready)
+sysctl	debug.nvrmfb_vram_ready_bytes	diag	read-only	3.0	-	bytes of blocks ready now
+sysctl	debug.nvrmfb_vram_ready_hits	diag	read-only	3.0	-	grants served from a block made ahead of time (nearly all of them without a wait for the display gate)
+sysctl	debug.nvrmfb_vram_ready_made	diag	read-only	3.0	-	blocks the worker made ahead of time that became ready
+sysctl	debug.nvrmfb_vram_ready_misses	diag	read-only	3.0	-	grants of a size in churn that found no block ready
 sysctl	debug.nvrmfb_vram_release_bytes	diag	read-only	2.9	-	bytes released
 sysctl	debug.nvrmfb_vram_releases	diag	read-only	2.9	-	vramRelease calls
+sysctl	debug.nvrmfb_vram_rm_clears	diag	read-only	3.0	-	what NVRM said of the RM: 0 nothing yet (always so with nvfbvramfast=0), 1 it clears video memory before a client gets it, 2 it does not, or the GPU had been through a standby before the question, or NVRM had no answer three times
+sysctl	debug.nvrmfb_vram_wake_clean	diag	read-only	3.0	-	new blocks after a standby that read as zero before they were filled
+sysctl	debug.nvrmfb_vram_wake_dirty	diag	read-only	3.0	-	new blocks after a standby that did not read as zero before they were filled
 sysctl	debug.nvrmfb_vramtest	diag	writable by root	2.9	-	grant N x 8 MB of VRAM through vramGrant (0 = release all)
 sysctl	debug.nvrmfb_vramtest_mode	diag	writable by root	2.9	-	1 = release without the kernel unmap
 file	/Library/GPUBundles/nvmtl-allow.txt	install	absent	2.9	-	process names the plugin loads into, written by the installer
