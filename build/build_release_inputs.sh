@@ -3,6 +3,7 @@
 # itself, from the tree this script sits in, laid out the way the release step reads it:
 #   <out>/kexts/{nvrm,fb,accel,accel26,agdc,nmsmn}/<Name>.kext   <out>/userland/nvmtl-air-dis   <out>/nvk/libvulkan_nouveau.dylib
 #   <out>/dlss-pkg/   <out>/boost/nvmtl-boost   <out>/nvkbridge/ (the native Vulkan runtime)   <out>/vulkan-loader/
+#   <out>/zink/ (native OpenGL: build_zink.sh's zink/ and NVKZinkGLDriver.bundle)
 # The Metal plugin, the shader translator and the video codec library are built by their own scripts
 # (build_plugin_release.sh, build_xlate_release.sh, build_nvencvt.sh), which take a git revision; the audio driver comes
 # from its own repository. Run this from a checkout of the revision being released: the first line of <out>/BUILD.txt
@@ -16,6 +17,9 @@
 #   NM_OGKM610           open-gpu-kernel-modules 610.57.04 (headers NVK is built against)
 #                                                                            default .../build/ogkm620/open-gpu-kernel-modules-610.57.04
 #   NM_MESA_GIT          a Mesa git clone holding nvk/MESA_BASE              default .../build/gpu-src/mesa
+#                        Zink's Mesa (build/prepare_zink.py's MESA_COMMIT) comes from it when it holds that
+#                        commit, otherwise from the bare repository ./build.sh fetch puts it in
+#                        (${NM_WORK:-$NULLMOTH_BUILD_ROOT}/src/git/mesa.git)
 #   NM_LILU_DEBUG_KEXT, NM_VIRTUALSMC_SRC, NM_MACKERNELSDK   the Lilu DEBUG kext, the VirtualSMC source and MacKernelSDK
 #                        at the commits the EFI's VirtualSMC set is built from; with all three set the keyboard backlight
 #                        plugin and the display-audio plugin are built too (<out>/kexts/nmkbl, nmhda) with their EFI package, otherwise skipped
@@ -29,7 +33,7 @@ OGKM=${NM_OGKM620:-$R/build/rm620/ogkm-620.70.06}
 PRISTINE=${NM_OGKM620_PRISTINE:-$R/build/ogkm620/open-gpu-kernel-modules-620.70.06}
 OGKM610=${NM_OGKM610:-$R/build/ogkm620/open-gpu-kernel-modules-610.57.04}
 MESA=${NM_MESA_GIT:-$R/build/gpu-src/mesa}
-STEPS=${STEPS:-nvrm fb accel agdc nmsmn nmkbl nmhda efizip airdis dlss nvk boost nvkbridge vulkan}
+STEPS=${STEPS:-nvrm fb accel agdc nmsmn nmkbl nmhda efizip airdis dlss nvk boost nvkbridge zink vulkan}
 for d in "$OGKM/src/nvidia" "$PRISTINE/src/nvidia" "$OGKM610/src/common" "$MESA/.git"; do
   [ -e "$d" ] || { echo "STOP: $d does not exist (see the paths at the top of this script)"; exit 2; }
 done
@@ -65,6 +69,12 @@ nvkbridge() {   # NVK's library and the Vulkan headers of the Mesa tree it was b
   [ -d "$OUT/nvk-build/mesa/include" ] || { echo "the native Vulkan runtime is built from NVK's output: run the nvk step first"; return 1; }
   rm -rf "$OUT/nvkbridge" && bash "$HERE/tools/nvk-bridge/build.sh" "$OUT/nvk/libvulkan_nouveau.dylib" "$OUT/nvk-build/mesa/include" "$OUT/nvkbridge"
 }
+zink() {   # native OpenGL, as build.sh's zink step; the package also needs nvkbridge's frontend and renderer
+  local commit git
+  commit=$(cd "$HERE/build" && python3 -c 'import prepare_zink; print(prepare_zink.MESA_COMMIT)') || return 1
+  if git -C "$MESA" cat-file -e "$commit^{commit}" 2>/dev/null; then git=$MESA; else git=${NM_WORK:-$R}/src/git/mesa.git; fi
+  rm -rf "$OUT/zink" && bash "$HERE/build/build_zink.sh" "$git" "$commit" "$OUT/zink"
+}
 mkdir -p "$OUT/kexts" "$OUT/userland"
 step nvrm   env NVRM_PRISTINE_OGKM="$PRISTINE" bash "$HERE/build/build_nvrm.sh" "$HERE/kexts/NVRM" "$OGKM" "$OUT/kexts/nvrm"
 step fb     env OGKM="$OGKM" bash "$HERE/build/fb_build.sh" "$HERE/kexts" "$OUT/kexts/fb"
@@ -85,6 +95,7 @@ step dlss   bash "$HERE/build/build_dlss_cache.sh" "$OUT/dlss-pkg"
 step nvk    nvk
 step boost  boost
 step nvkbridge nvkbridge
+step zink   zink
 # cmake and ninja for the loader are among NVK's build tools
 step vulkan env PATH="${NVK_PATH:+$NVK_PATH:}$PATH" bash "$HERE/build/build_vulkan_loader.sh" "$OUT/vulkan-loader"
 # every kext a step built must be whole: the binary and its Info.plist
