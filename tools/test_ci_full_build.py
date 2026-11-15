@@ -850,6 +850,9 @@ def main():
             not gone, gone)
         arm("the links prove expects in tools/bin are the ones build.sh makes (rustdoc aside: no step needs it, it is linked when Rust has it)",
             want_links == links, (sorted(want_links), sorted(links)))
+        want_logs = set(re.search(r'^COMPONENT_LOGS="([^"]*)"', own, re.M).group(1).split())
+        allc = set(re.search(r'^ALL_COMPONENTS="([^"]*)"', bsh, re.M).group(1).split())
+        arm("prove reads the build log of every component in build.sh's ALL_COMPONENTS", allc <= want_logs, sorted(allc - want_logs))
         arm("the scripts' toolchain folders are those", "tc_prefix() { printf '%s/tools/toolchain' \"$1\"; }" in own
             and "tc_logs() { printf '%s/logs/toolchain' \"$1\"; }" in own, "")
         cache = {"${{ runner.temp }}/nmw/tools/toolchain", "!${{ runner.temp }}/nmw/src/toolchain", "${{ runner.temp }}/nmw/tools/venv",

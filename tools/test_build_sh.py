@@ -395,7 +395,8 @@ STEP_SCRIPTS = {
     "build/accel_build_all.sh": "accel", "build/accel_build.sh": "accel1", "build/build_agdc.sh": "agdc",
     "kexts/NMSMN/build.sh": "nmsmn", "tools/ryzenadj-macos/build.sh": "ryzenadj", "build/build_air_dis.sh": "airdis",
     "build/build_dlss_cache.sh": "dlss", "build/build_osver.sh": "osver", "build/build_nvk.sh": "nvk",
-    "tools/nvmtl-boost/build.sh": "boost", "build/build_vulkan_loader.sh": "vulkan", "build/build_plugin_release.sh": "plugin",
+    "tools/nvmtl-boost/build.sh": "boost", "tools/nvk-bridge/build.sh": "nvkbridge", "build/build_vulkan_loader.sh": "vulkan",
+    "build/build_plugin_release.sh": "plugin",
     "build/build_plugin_dev.sh": "plugindev", "build/build_xlate_release.sh": "xlate", "build/build_nvencvt.sh": "nvencvt",
     "build/build_primary_selector.sh": "selector", "build/package_local.sh": "package",
 }
@@ -468,6 +469,7 @@ case $key in
   osver) mk "$1/libnvmtl_osver.dylib" ;;
   nvk) mk "$3/libvulkan_nouveau.dylib"; mk "$3/BUILD.txt"; mkdir -p "$3/mesa" ;;
   boost) mk "$2" ;;
+  nvkbridge) mk "$3/lib/libnvk_minecraft.dylib" ;;
   vulkan) mk "$1/libvulkan.1.dylib" ;;
   plugin) mk "$2/NVMTLDriver" ;;
   plugindev) mk "$1/NVMTLDriver" ;;
@@ -908,8 +910,8 @@ def want(name):
 
 
 # ------------------------------------------------------------------------------------------------- what is expected
-ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "vulkan",
-         "plugin", "xlate", "nvencvt"]
+ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "nvkbridge",
+         "vulkan", "plugin", "xlate", "nvencvt"]
 FRESH_MISSING = ["Xcode", "Homebrew", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
                  "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
 MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
