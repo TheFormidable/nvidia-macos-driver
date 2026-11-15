@@ -138,7 +138,7 @@ jobs:
         run: |
           set -o pipefail
           python3 tools/run_all_tests.py -j 4 --tail 20000 | tee "$RUNNER_TEMP/tests.txt"
-          if grep -E '^skip (test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf)\.py:' "$RUNNER_TEMP/tests.txt"; then
+          if grep -E '^skip (test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge|test_opengl_perf)\.py:' "$RUNNER_TEMP/tests.txt"; then
             echo "::error::a test that needs the Vulkan headers was skipped: NM_VULKAN_INCLUDE did not reach it"; exit 1
           fi
       - name: No test made macOS start an install of the command line tools
