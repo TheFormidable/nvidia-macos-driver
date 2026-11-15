@@ -81,6 +81,7 @@ int nvmtl_vk_init(void);
 static uint32_t nvmtl_gl_uniform_index(id function);
 static void nvmtl_gl_uniform_inherit(id function, id source);
 void nvmtl_gl_caps_enable(void);
+static void nvmtl_photobooth_install(void);   // NVMTLPhotoBooth.m
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
 const char *nvmtl_vk_device_name(void);
@@ -998,6 +999,7 @@ static void nvmtl_plane_selftest_early(void);
         return nil;
     }
     nvmtl_gl_caps_enable();
+    nvmtl_photobooth_install();
     nvmtl_plane_selftest_early();
     if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
@@ -3413,6 +3415,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 @end
 
 #import "NVMTLDevice_contract.m"
+#import "NVMTLPhotoBooth.m"
 
 #import "NVMTLObjects.m"
 #import "NVMTLMetalFXDLSS.m"
