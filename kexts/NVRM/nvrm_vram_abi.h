@@ -17,6 +17,17 @@
 
 #define NVRM_VRAM_BAR1_BUDGET (192ull * 1024ull * 1024ull)
 
+// Asked of NVRM by a framebuffer: does the RM clear video memory before a client gets it (its scrub-on-free; see
+// nvrm_query_vidmem_cleared)? cleared: 1 yes and the GPU has not been through a standby yet, 0 no (the RM does not, or
+// the GPU has: what was free then came back as it was); the call fails while NVRM has no answer from the RM. An NVRM
+// that does not know the name passes it up its providers, where nobody answers: the framebuffer keeps its own zero
+// fill.
+#define NVRM_VRAM_FN_CLEARED  "nvVidmemCleared"
+struct NVRMVidmemCleared {
+    unsigned int version;
+    unsigned int cleared;
+};
+
 struct NVRMVramRequest {
     unsigned int       version;
     unsigned int       flags;

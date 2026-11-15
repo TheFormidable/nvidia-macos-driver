@@ -48,6 +48,7 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_gpuva_abi.h"
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
+#include "nvrm_vram_abi.h"
 #include "nvrm_chan_note_abi.h"
 #include "nvrm_evwait.h"
 #include "nvrm_fence.h"
@@ -58,6 +59,7 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_free(struct NVRMGpuVaRequest *);
 extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, NvU32 *pStatus);
+extern "C" bool nvrm_query_vidmem_cleared(NvU32 gpuId, NvU32 *pCleared, NvU32 *pStatus);
 extern "C" bool nvrm_query_gpu_profile(NvU32 gpuId, NvU32 *pArch, NvU32 *pImpl, NvU32 *pCls3d, NvU32 *pClsCompute,
                                        NvU32 *pClsCopy, NvU32 *pClsEnc, NvU32 *pClsDec, NvU32 *pStatus);
 kern_return_t _start(kmod_info_t *ki, void *data);
@@ -241,6 +243,10 @@ private:
     nv_state_t   fNv = {};
     bool         fPrivateState = false;
     bool         fAdapter = false;
+    // What the RM answered once the adapter was up: 0 nothing yet, 1 it clears video memory before a client gets it,
+    // 2 it does not. NVRMFB asks for it ("nvVidmemCleared") and, on 1, leaves its own zero fill out until the first
+    // standby.
+    volatile SInt32 fVidmemCleared = 0;
     IOLock      *fUtilizationLock = nullptr;
     void        *fUtilizationState = nullptr;
     bool         fUtilizationStopping = false;
@@ -2439,6 +2445,15 @@ IOReturn NVRM::go(uint32_t pass)
                     (unsigned)qst, (unsigned)ramKb);
             }
         }
+        {
+            NvU32 cleared = 0, qst = 0;
+            if (nvrm_query_vidmem_cleared(nv->gpu_id, &cleared, &qst)) {
+                OSCompareAndSwap(0, cleared ? 1 : 2, (volatile UInt32 *)&fVidmemCleared);
+                LOG("the RM %s video memory before a client gets it (FB caps)", cleared ? "clears" : "does not clear");
+            } else {
+                LOG("FB_GET_CAPS_V2 did not answer (status 0x%x) - framebuffers keep their own zero fill", (unsigned)qst);
+            }
+        }
         publishGpuProfile();
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
         nvrm_power_start(&fNv);   // boot-arg nvrmtgp=1: the notebook power budget while on mains power (nvrm_power.cpp)
@@ -3373,6 +3388,17 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
             return nvrm_surfshare_rm((struct NVRMSurfShareRm *)p1) ? kIOReturnIOError : kIOReturnSuccess;
         if (fn->isEqualTo(NVRM_SS_FN_PAGEOFF))
             return nvrm_surfshare_pageoff((struct NVRMSurfPageoff *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
+    }
+    if (fn && fn->isEqualTo(NVRM_VRAM_FN_CLEARED)) {   // NVRMFB: may it leave its zero fill of a granted block out?
+        struct NVRMVidmemCleared *q = (struct NVRMVidmemCleared *)p1;
+        if (!q || q->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
+        const SInt32 answer = OSAddAtomic(0, &fVidmemCleared);
+        // Yes only until the GPU's first standby (gpuSuspend: system sleep, shutdown, RTD3): the slot loses power
+        // there, the RM brings back what was allocated, and nothing in its sources clears what was free. The
+        // framebuffer counts the power messages itself, but one that starts, or is loaded again, after a standby
+        // has seen none of them.
+        q->cleared = (answer == 1 && fPmCycles == 0) ? 1u : 0u;
+        return answer ? kIOReturnSuccess : kIOReturnNotReady;
     }
     if (fn && fn->isEqualTo(NVRM_DISPLAY_PTRS_FN)) {
         NVRMDisplayPointers *ptrs = (NVRMDisplayPointers *)p1;

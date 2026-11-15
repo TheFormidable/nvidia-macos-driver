@@ -108,13 +108,48 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
 - WindowServer marks each surface plane as newest in video memory once per commit, not once for every part of the
   command buffer and every texture that writes it. Each mark is a call into the accelerator that takes its lock, and a
   video playing in a window made many of them per frame.
-- A screen share through the system's picker (ScreenCaptureKit: Google Meet in any browser, Discord) costs
-  WindowServer fewer waits for the GPU on every captured frame. Reported: while a share runs, the desktop and a game
-  lose most of their frame rate (Minecraft Java from 199 to 40 frames a second, to 20-30 with OpenGL), although the
-  other side of the call sees a smooth picture. Which wait costs that much has not been measured on a card; these
-  are the ones the code shows. Nothing in the driver depends on a share being on: the frames WindowServer draws for
-  it are two-plane (NV12) surfaces, each one cost several waits in a row, and each wait lasts as long as whatever
-  else keeps the GPU busy lets it. Three changes:
+- A screen share through the system's picker (ScreenCaptureKit: Google Meet in any browser, Discord) no longer
+  costs WindowServer a fill of 9 MB from the processor and a wait for the display on every captured frame. Reported:
+  while a share runs, the desktop and a game lose most of their frame rate (Minecraft Java from 199 to 40 frames a
+  second, to 20-30 with OpenGL), although the other side of the call sees a smooth picture. Measured on that Mac
+  (RTX 5050, one 1920x1080 display at 100 Hz, this branch at aa27c73): WindowServer falls from 100 frames a second
+  to 20, and the game runs at twice WindowServer's rate. For every captured frame WindowServer makes a new surface
+  of 9,043,968 bytes of video memory and destroys it in the same frame. Of the 50 ms each frame took on its main
+  thread, 27.4 ms were the framebuffer filling the new block with zeros from the processor, through BAR1 (about
+  330 MB/s), and 6.0 ms were the wait for the display gate, which a flip holds while it waits for its latch. Two
+  changes in the framebuffer (`kexts/NVRMFB/fb/nvrm-vram-pool.h`), with one way back for both, the boot argument
+  `nvfbvramfast=0`:
+  - The fill is left out while the RM's own clearing is believed. The RM clears video memory when it is freed,
+    refuses to allocate while its scrubber is not valid and reports this as a capability of the device
+    (`NV0080_CTRL_FB_CAPS_VIDMEM_ALLOCS_ARE_CLEARED`); NVRM asks once, when the adapter is up. The framebuffer
+    reads 65 places of every block it does not fill. The first block that is not zero there, and the first standby
+    of the GPU (a system sleep, or an idle power-down where `nvrtd3=1` allows them: the slot loses power, and
+    nothing in the RM's open sources clears the memory that was free), each end the belief until the next restart:
+    from then on every block is filled as in 2.9, and the blocks that were ready go back unused. After a standby
+    the same 65 places are still read before the fill and only counted
+    (`debug.nvrmfb_vram_wake_clean`, `debug.nvrmfb_vram_wake_dirty`), so that a card can show whether its memory
+    comes back clean. That the memory is clean at boot is the RM's word and NVIDIA's comment, not something the
+    open sources show for this card; the 65 places are the only check on it.
+  - A size that is granted three times in a row and handed back twice in a row, each within a second of the one
+    before, is in churn. For such a size a worker thread keeps up to three blocks ready (64 MB in all, or two blocks
+    of a larger size, never more than an eighth of the BAR1 budget; only on a BAR1 over 512 MB), and a grant takes
+    one without waiting for the display gate. Every block is still a new allocation with its own cookie, made by the
+    same code with the gate held, one per hold; a block that has to be filled is filled by the worker after it let
+    go of the gate. Ready blocks go back within a second and a half of the last grant or release of their size,
+    before a grant is refused for lack of room, after a standby (none made before it is handed out) and when the
+    framebuffer stops. The worker runs as an ordinary kernel thread, below the calls that carry flips and vblanks,
+    and calls into the display code only after it has seen the GPU up: a block it holds when a standby begins waits
+    and goes back after the wake. Releases are unchanged.
+  About 15 to 16 ms of other work per captured frame stay on WindowServer's main thread in that measurement (the
+  upload of the new surface, NVK's and the RM's objects for it, the composite), so the most these two changes can
+  give there is about 60 frames a second in WindowServer where there were 20 (50 if WindowServer then waits for
+  every other refresh of the 100 Hz display), and less after the Mac has slept (the worker then fills each block
+  itself, about 27 ms each, so it cannot make one for every frame). Compiled and host-tested on Linux only
+  (`tools/test_vram_pool.c`); not yet run on a card.
+- Three smaller changes for the same report were written before that measurement, from the code alone. The
+  measurement shows they are not what costs the frame rate on that Mac, whose capture surfaces have one plane; they
+  stay because each is right for two-plane (NV12) capture and video surfaces, where each surface cost several waits
+  in a row:
   - Drawn through private images (always in 2.9; in this release until the round trip below has passed): the two
     planes are copied back to the surface together, under one lock and with one wait for the GPU, where each plane
     took the lock and waited by itself; and since the lock is taken once, the plane copied first no longer looks
@@ -134,10 +169,9 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
     first two-plane surface: every surface it wrapped before the verdict stayed on private images for as long as it
     was kept, so a share that was the first to bring such surfaces ran on them, and a round trip started while a
     game kept the GPU busy could miss its 2 s bound and leave WindowServer on private images until the next login.
-  Compiled and host-tested on Linux only; not yet run on a card, so how much of the lost frame rate comes back is
-  not known, and neither is what macOS does to the seed on a mark (the round trip's log line says it). Reading
-  `sysctl debug | grep -E 'nvaccel|nvrm_fence'` twice, ten seconds apart, during a share shows what is left (the
-  three counters below among them).
+  Compiled and host-tested on Linux only; not yet run on a card, so what macOS does to the seed on a mark is not
+  known (the round trip's log line says it). Reading `sysctl debug | grep -E 'nvaccel|nvrm_fence|nvrmfb_vram'`
+  twice, ten seconds apart, during a share shows what is left (the counters below among them).
 - A monitor that sends a placeholder 1920x1080 identification while it is still waking (after some warm restarts) and
   its real one a few seconds later gets its own resolutions on a card whose BAR1 is 512 MB or more, as long as its
   largest desktop needs no more memory than a 3840x2160 one: there the framebuffer reserves the memory a display scans
@@ -424,6 +458,14 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   waited), `debug.nvaccel_surf_mark_lock_wait_us` (the time they waited, in total) and
   `debug.nvaccel_surf_mark_lock_wait_max_us` (the longest wait; a value near 100000 means a page-off waited for the
   GPU with the lock held). They change nothing the driver does.
+- Read-only counters for the granted blocks of video memory (`sysctl debug | grep nvrmfb_vram`): what the RM
+  answered (`_rm_clears`), standby, resume and lost messages so far, one for each framebuffer of the card
+  (`_power_events`), blocks not filled and filled (`_fill_skipped`, `_filled`, the time the fills took in
+  `_fill_us`), whether a block was not zero although the RM clears (`_dirty`), what new blocks read after a sleep
+  (`_wake_clean`, `_wake_dirty`), and the ready blocks: grants served from one and grants of a size in churn that
+  found none (`_ready_hits`, `_ready_misses`), blocks that became ready and blocks that went back unused
+  (`_ready_made`, `_ready_back`), bytes ready now (`_ready_bytes`). `debug.nvrmfb_vram_fast` shows whether
+  `nvfbvramfast=0` is set.
 
 ### The ways back
 
@@ -446,6 +488,7 @@ has proven itself, renewed with a reason otherwise.
 | RC timer | `nvrmrctimer=0` | boot argument |
 | Nano timer cancel wait | `nvrmnanowait=0` | boot argument |
 | DMA through VT-d | `nvrmdma=0` (with a mapper: the GPU is not started; without one: nothing changes) | boot argument |
+| Granted blocks of video memory: no second zero fill, blocks ready for a size in churn | `nvfbvramfast=0` | boot argument |
 | Event wait in every process | `NVRM_EVENT_WAIT=0` (every process polls, WindowServer included) | `nvrm610.conf` |
 | Channel recovery | `NVK_CHANNEL_RECOVER=0` | `nvrm610.conf` |
 | Error report for dropped work | `NVMTL_DROP_REPORT=0` | `nvrm610.conf` |

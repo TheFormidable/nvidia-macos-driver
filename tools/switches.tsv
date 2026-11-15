@@ -570,6 +570,7 @@ bootarg	nvfbsmall	recovery	unset	2.9	-	turns one part of the driver off or back 
 bootarg	nvfbsurround	setting	unset	2.9	-	Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off.
 bootarg	nvfbtrace	diag	unset	2.9	-	observes only
 bootarg	nvfbvib	setting	unset	2.9	-	Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone.
+bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
 bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it.
 bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
 bootarg	nvhud	diag	unset	2.9	-	observes only
@@ -964,13 +965,27 @@ sysctl	debug.nvrmfb_layout_classes	diag	read-only	3.0	-	Apple classes NVRMFB com
 sysctl	debug.nvrmfb_layout_vtables	diag	read-only	3.0	-	Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse
 sysctl	debug.nvrmfb_layout_vtdiff	diag	read-only	3.0	-	Apple vtables whose length differs from this build; reported, never a reason to refuse
 sysctl	debug.nvrmfb_vram_budget_bytes	diag	read-only	2.9	-	the BAR1 grant budget in force
+sysctl	debug.nvrmfb_vram_dirty	diag	read-only	3.0	-	1 once a new block did not read as zero although the RM clears: from then on every block is filled again
 sysctl	debug.nvrmfb_vram_display_aware	recovery	writable by root	2.9	-	1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction
 sysctl	debug.nvrmfb_vram_display_bytes	diag	read-only	2.9	-	scanout+cursor the framebuffer itself maps into BAR1
+sysctl	debug.nvrmfb_vram_fast	diag	read-only	3.0	-	1 = a granted block is not filled with zeros again while the RM's clearing is believed, and blocks of a size in churn are made ahead of time; 0 = boot argument nvfbvramfast=0: every grant is filled and made on the caller's thread
+sysctl	debug.nvrmfb_vram_fill_skipped	diag	read-only	3.0	-	new blocks not filled from the processor (the RM cleared them and they read as zero)
+sysctl	debug.nvrmfb_vram_fill_us	diag	read-only	3.0	-	microseconds spent filling new blocks from the processor
+sysctl	debug.nvrmfb_vram_filled	diag	read-only	3.0	-	new blocks filled with zeros from the processor
 sysctl	debug.nvrmfb_vram_grant_bytes	diag	read-only	2.9	-	bytes granted
 sysctl	debug.nvrmfb_vram_grants	diag	read-only	2.9	-	vramGrant successes
 sysctl	debug.nvrmfb_vram_mapped_bytes	diag	read-only	2.9	-	the BAR1 budget counter, live
+sysctl	debug.nvrmfb_vram_power_events	diag	read-only	3.0	-	standby, resume and lost messages from NVRM since the system started, one for each framebuffer of the card (after the first, every new block is filled again)
+sysctl	debug.nvrmfb_vram_ready_back	diag	read-only	3.0	-	blocks made ahead of time that went back unused (ready ones, and ones that never became ready)
+sysctl	debug.nvrmfb_vram_ready_bytes	diag	read-only	3.0	-	bytes of blocks ready now
+sysctl	debug.nvrmfb_vram_ready_hits	diag	read-only	3.0	-	grants served from a block made ahead of time (nearly all of them without a wait for the display gate)
+sysctl	debug.nvrmfb_vram_ready_made	diag	read-only	3.0	-	blocks the worker made ahead of time that became ready
+sysctl	debug.nvrmfb_vram_ready_misses	diag	read-only	3.0	-	grants of a size in churn that found no block ready
 sysctl	debug.nvrmfb_vram_release_bytes	diag	read-only	2.9	-	bytes released
 sysctl	debug.nvrmfb_vram_releases	diag	read-only	2.9	-	vramRelease calls
+sysctl	debug.nvrmfb_vram_rm_clears	diag	read-only	3.0	-	what NVRM said of the RM: 0 nothing yet (always so with nvfbvramfast=0), 1 it clears video memory before a client gets it, 2 it does not, or the GPU had been through a standby before the question, or NVRM had no answer three times
+sysctl	debug.nvrmfb_vram_wake_clean	diag	read-only	3.0	-	new blocks after a standby that read as zero before they were filled
+sysctl	debug.nvrmfb_vram_wake_dirty	diag	read-only	3.0	-	new blocks after a standby that did not read as zero before they were filled
 sysctl	debug.nvrmfb_vramtest	diag	writable by root	2.9	-	grant N x 8 MB of VRAM through vramGrant (0 = release all)
 sysctl	debug.nvrmfb_vramtest_mode	diag	writable by root	2.9	-	1 = release without the kernel unmap
 file	/Library/GPUBundles/nvmtl-allow.txt	install	absent	2.9	-	process names the plugin loads into, written by the installer

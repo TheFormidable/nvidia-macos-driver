@@ -125,6 +125,38 @@ static inline uint64_t nvrmSurfaceBudget(uint64_t barLen, SInt64 displayBytes)
     return barLen - reserve;
 }
 
+// Fast grants (nvrm-vram-pool.h has the story and the numbers). gVramFast is the one way out, boot argument
+// nvfbvramfast=0, read once in start(): every granted block is filled with zeros from the processor, on the caller's
+// thread, and nothing is kept ready, as before. debug.nvrmfb_vram_fast shows it.
+#include "nvrm-vram-pool.h"
+static int gVramFast = 1;
+static volatile SInt32 gVramRmClears = 0;      // 0 no answer from NVRM yet, 1 the RM clears video memory itself, 2 it does not (vramAskRm)
+static volatile SInt32 gVramRmAsks = 0;        // questions NVRM had no answer to (three, then 2 above)
+static volatile SInt32 gVramPowerEvents = 0;   // "NVRMGpuPower" messages since the system started (each framebuffer of the card gets its own)
+static volatile SInt32 gVramTesting = 0;       // the vramtest sysctl is at work: its blocks are not the pool's business
+static volatile SInt32 gVramPoolOrphans = 0;   // a framebuffer stopped with the GPU in standby and left blocks in the pool
+static volatile SInt64 gCntVramDirty, gCntVramFillSkipped, gCntVramFilled, gCntVramFillUs, gCntVramWakeClean, gCntVramWakeDirty;
+static volatile SInt64 gCntVramReadyHit, gCntVramReadyMiss, gCntVramReadyMade, gCntVramReadyBack;
+static volatile SInt64 gVramReadyBytes;
+static nvrm_vp gVramPool;                      // every use holds vramPoolLock(), and nothing else is taken while it is held
+static IOLock *vramPoolLock()
+{
+    static IOLock *volatile gL = nullptr;
+    if (!gL) {
+        IOLock *l = IOLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gL)) IOLockFree(l);
+    }
+    return gL;
+}
+static inline UInt64 nvrmNowNs() { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
+// The fill from the processor is left out only while the switch is on, the RM said it clears, the GPU has not been
+// through a standby and every block read back as zero so far (nvrm_vp_trusted).
+static inline bool nvrmVramTrusted()
+{
+    return gVramFast && nvrm_vp_trusted(OSAddAtomic(0, &gVramRmClears) == 1, (long long)OSAddAtomic(0, &gVramPowerEvents),
+                                        (long long)OSAddAtomic64(0, &gCntVramDirty));
+}
+
 // EDID base block bytes 21 and 22 hold the panel's physical size in centimetres. macOS wants it in
 // millimetres, per mode, through IODisplayModeInformation.imageWidth/imageHeight -- IOGraphicsTypes.h
 // calls them "physical width/height of active image if known, in millimeters, otherwise zero", and
@@ -811,6 +843,23 @@ public:
                                   void *param1, void *param2, void *param3, void *param4) APPLE_KEXT_OVERRIDE;
     bool     vramGrant(struct NVRMVramRequest *r);
     bool     vramRelease(struct NVRMVramRequest *r);
+    // Fast grants (nvrm-vram-pool.h): the bodies of the two calls above that run with the display gate held, and the
+    // worker that makes blocks of a size in churn ahead of time, so that the caller's thread does not wait for the
+    // gate and does not fill them.
+    bool     vramGrantGated(struct NVRMVramRequest *r, bool *fillLater);
+    bool     vramReleaseGated(struct NVRMVramRequest *r, bool counted);
+    bool     vramFill(void *kva, NvU64 bytes, bool watched);
+    bool     vramPoolUsable();
+    bool     vramTakeReady(struct NVRMVramRequest *r, NvU64 want, bool note, bool *hot);
+    void     vramPoolKick();
+    bool     vramPoolStep();
+    unsigned vramPoolDrain(bool forRoom);
+    void     vramPoolGiveBack(const nvrm_vp_block *b, const char *why);
+    void     vramAskRm();
+    thread_call_t fVramPoolCall = nullptr;
+    static void vramPoolFire(thread_call_param_t p0, thread_call_param_t);
+    volatile SInt32 fVramPoolClosed = 0;   // stop() sets it: this framebuffer neither takes ready blocks nor runs the worker again
+    volatile SInt32 fVramPoolKicks = 0;    // rises with every request for this framebuffer's worker (vramPoolKick)
     uint32_t fVramGrantLogged = 0;
     uint32_t fVramGrants = 0;
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override;
@@ -3249,6 +3298,17 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
                                        : fHwVblWanted ? "deferred until NVKMS latches a flip on this head" : "not available - the timer stays the VBL");
     fReflip = nvrmfbCall(reflipFire, this);
     fGpuWake = nvrmfbCall(gpuWakeFire, this);
+    // The worker of ready VRAM blocks is not one of the calls above: after a system sleep it fills each block it makes
+    // from the processor, 27 ms for 9 MB, several in a row. It runs like an ordinary kernel thread, below the calls
+    // that carry flips, vblanks and the cursor (still one at a time).
+    fVramPoolCall = thread_call_allocate_with_options(vramPoolFire, this, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+    {
+        uint32_t fast = 1;
+        if (PE_parse_boot_argn("nvfbvramfast", &fast, sizeof fast) && !fast && gVramFast) {
+            gVramFast = 0;
+            FBLOG("boot-arg nvfbvramfast=0: every granted block is filled with zeros here and made on the caller's thread");
+        }
+    }
     FBLOG("reflip keep-alive NOT armed: enableController's modeset owns the head, no boot-time re-syncs");
     fBars = nvrmfbCall(barsFire, this);
     uint32_t hudGate = 0;
@@ -3306,7 +3366,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
         if (sl) IORecursiveLockUnlock(sl);
         if (mine) release();
     }
-    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fCursorCall, &fConnectNotify, &fAudioCall};
+    thread_call_t *calls[] = {&fHwVblCall, &fReflip, &fGpuWake, &fBars, &fVblTimer, &fSampler, &fHeadProbe, &fCursorCall, &fConnectNotify, &fAudioCall, &fVramPoolCall};
     for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; ++i) {
         thread_call_t call = *calls[i];
         if (!call) continue;
@@ -3316,6 +3376,26 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
             IOSleep(1);
         }
         *calls[i] = nullptr;
+    }
+    // The worker is gone (cancelled above; a run in progress has ended): the blocks kept ready go back now, and this
+    // framebuffer takes none again. The pool is shared by every framebuffer of the card, so the others' go back too;
+    // their workers make new ones when they are asked for. Not with the GPU in standby: the calls into NVKMS would
+    // wait for the wake with the gate held. The blocks then stay in the shared pool, are never handed out (a power
+    // event came after they were made), and go back with the first worker that runs after the wake: this
+    // framebuffer's will not run again, so gVramPoolOrphans asks another framebuffer of the card for its own
+    // ("NVRMGpuPower" 1). The flag is raised before the look at the GPU: NVRM marks the GPU running before it sends
+    // that message, so a stop that still sees the standby has raised the flag by the time the message arrives. A
+    // flag left up after the blocks went back here costs one run of a worker that finds nothing.
+    OSCompareAndSwap(0, 1, &fVramPoolClosed);
+    {
+        unsigned held = 0;
+        if (IOLock *pl = vramPoolLock()) { IOLockLock(pl); held = nvrm_vp_held(&gVramPool); IOLockUnlock(pl); }
+        if (held) OSCompareAndSwap(0, 1, (volatile UInt32 *)&gVramPoolOrphans);
+        NVRMDisplayGate gate;
+        if (gate.valid() && fKms && fDev && rmGpuReady()) vramPoolDrain(false);
+        else if (held)
+            FBLOG("stopping with the GPU in standby: %u block(s) made ahead of time stay allocated until another framebuffer "
+                  "of the card runs its worker after the wake (until restart if none does)", held);
     }
     // vblFire retries a refused registration; one that passed its stopping check before fStopping was set can register
     // after the unregister above. The timer is drained now, so a callback registered that way is removed here.
@@ -4600,12 +4680,29 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_budget_bytes, CTLFLAG_RD | CTLFLAG_LOC
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_mapped_bytes,  CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramMappedBytes,  "the BAR1 budget counter, live");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_display_bytes, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramDisplayBytes, "scanout+cursor the framebuffer itself maps into BAR1");
 SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_display_aware, CTLFLAG_RW | CTLFLAG_LOCKED, &gVramDisplayAware, 0, "1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_fast, CTLFLAG_RD | CTLFLAG_LOCKED, &gVramFast, 0, "1 = a granted block is not filled with zeros again while the RM's clearing is believed, and blocks of a size in churn are made ahead of time; 0 = boot argument nvfbvramfast=0: every grant is filled and made on the caller's thread");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_rm_clears, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gVramRmClears, 0, "what NVRM said of the RM: 0 nothing yet (always so with nvfbvramfast=0), 1 it clears video memory before a client gets it, 2 it does not, or the GPU had been through a standby before the question, or NVRM had no answer three times");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_power_events, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gVramPowerEvents, 0, "standby, resume and lost messages from NVRM since the system started, one for each framebuffer of the card (after the first, every new block is filled again)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_fill_skipped, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramFillSkipped, "new blocks not filled from the processor (the RM cleared them and they read as zero)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_filled,       CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramFilled,      "new blocks filled with zeros from the processor");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_fill_us,      CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramFillUs,      "microseconds spent filling new blocks from the processor");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_dirty,        CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramDirty,       "1 once a new block did not read as zero although the RM clears: from then on every block is filled again");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_wake_clean,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramWakeClean,   "new blocks after a standby that read as zero before they were filled");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_wake_dirty,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramWakeDirty,   "new blocks after a standby that did not read as zero before they were filled");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_hits,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyHit,    "grants served from a block made ahead of time (nearly all of them without a wait for the display gate)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_misses, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyMiss,   "grants of a size in churn that found no block ready");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_made,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyMade,   "blocks the worker made ahead of time that became ready");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_back,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyBack,   "blocks made ahead of time that went back unused (ready ones, and ones that never became ready)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_bytes,  CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramReadyBytes,     "bytes of blocks ready now");
 static struct NVRMVramRequest gVramTest[256]; static int gVramTestN; static int gVramTestMode;
 static int nvrmfb_vramtest_sysctl SYSCTL_HANDLER_ARGS
 {
     int v = gVramTestN; int err = sysctl_handle_int(oidp, &v, 0, req);
     if (err || req->newptr == 0) return err;
     if (!gFB) return ENXIO;
+    // The test finds the limit of BAR1 with its own grants: none of them is served from a ready block or counts for a
+    // size's churn (vramPoolUsable).
+    OSIncrementAtomic(&gVramTesting);
     if (v > 0) {
         while (gVramTestN < v && gVramTestN < 256) {
             struct NVRMVramRequest *r = &gVramTest[gVramTestN]; nvu_zero(r, sizeof *r);
@@ -4619,6 +4716,7 @@ static int nvrmfb_vramtest_sysctl SYSCTL_HANDLER_ARGS
         while (gVramTestN > 0) { struct NVRMVramRequest *r = &gVramTest[--gVramTestN]; if (gVramTestMode == 1) r->kva = nullptr; gFB->vramRelease(r); }
         kprintf("NVRM-fb: vramtest: released %d (mode %d)\n", n, gVramTestMode);
     }
+    OSDecrementAtomic(&gVramTesting);
     return 0;
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_vramtest, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, nvrmfb_vramtest_sysctl, "I",
@@ -4682,6 +4780,14 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_mapped_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_budget_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_display_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_display_aware);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vramtest); sysctl_register_oid(&sysctl__debug_nvrmfb_vramtest_mode);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_fast); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_rm_clears);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_power_events);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_fill_skipped); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_filled);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_fill_us); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_dirty);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_wake_clean); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_wake_dirty);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_hits); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_misses);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_made); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_back);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_interval); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_sum);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_n); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_max);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
@@ -4692,23 +4798,140 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_color_range); sysctl_register_oid(&sysctl__debug_nvrmfb_color_vibrance);
 }
 
+// The size a request is granted as: whole 64 KiB, and on a small window one of a few classes (nvrm-vram-class.h).
+static inline NvU64 nvrmVramWant(NvU64 size, NvU64 barLen)
+{
+    NvU64 want = (size + 0xFFFFull) & ~0xFFFFull;
+    if (want && barLen && barLen <= (512ull << 20)) want = nvrmVramSizeClass(want);   // few hole sizes in a small window
+    return want;
+}
+// Once per boot: does the RM clear video memory itself? NVRM asked it when the adapter came up and answers from that.
+// An NVRM that does not know the question, or has no answer after three tries, counts as "it does not": the fill stays.
+void NVRMNVDAFramebuffer::vramAskRm()
+{
+    if (OSAddAtomic(0, &gVramRmClears)) return;
+    IOService *rm = getProvider();
+    while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
+    const OSSymbol *fn = OSSymbol::withCString(NVRM_VRAM_FN_CLEARED);
+    struct NVRMVidmemCleared q = {}; q.version = NVRM_VRAM_ABI_VERSION;
+    const IOReturn ret = (rm && fn) ? rm->callPlatformFunction(fn, false, &q, NULL, NULL, NULL) : kIOReturnUnsupported;
+    OSSafeReleaseNULL(fn);
+    if (ret == kIOReturnSuccess) {
+        if (OSCompareAndSwap(0, q.cleared ? 1 : 2, (volatile UInt32 *)&gVramRmClears))
+            FBLOG("the RM %s: granted blocks are %s", q.cleared ? "clears video memory before a client gets it" : "does not clear video memory",
+                  q.cleared ? "not filled with zeros a second time until the GPU's first standby (boot-arg nvfbvramfast=0 fills them)"
+                            : "filled with zeros here, as before");
+    } else if (OSIncrementAtomic(&gVramRmAsks) + 1 >= 3) {
+        if (OSCompareAndSwap(0, 2, (volatile UInt32 *)&gVramRmClears))
+            FBLOG("NVRM did not say whether the RM clears video memory (0x%x): granted blocks are filled with zeros here, as before", (unsigned)ret);
+    }
+}
+// Blocks are kept ready only on a BAR1 over 512 MB: a small window has no room to spare and its sizes are classes
+// (nvrm-vram-class.h). Whether a ready block was filled from the processor or left as the RM cleared it does not
+// matter here: the worker does what the block needs before it is ready.
+bool NVRMNVDAFramebuffer::vramPoolUsable()
+{
+    return gVramFast && fBarLen > (512ull << 20) && fVramPoolCall && !OSAddAtomic(0, &fVramPoolClosed) && !OSAddAtomic(0, &gVramTesting);
+}
+// The worker is wanted. The count lets a run that is ending see that it was asked for meanwhile (vramPoolFire), and
+// tells the framebuffer whose worker serves the accelerator from the others of the card (the power message).
+void NVRMNVDAFramebuffer::vramPoolKick()
+{
+    if (!fVramPoolCall) return;
+    OSIncrementAtomic(&fVramPoolKicks);
+    scheduleCall(fVramPoolCall, 0);
+}
+// A ready block of exactly `want` bytes, handed to the caller without the display gate. `note`: this is the grant's
+// first look, which counts for the size's churn. *hot: the size is in churn (the worker should make more).
+bool NVRMNVDAFramebuffer::vramTakeReady(struct NVRMVramRequest *r, NvU64 want, bool note, bool *hot)
+{
+    IOLock *pl = vramPoolLock();
+    if (!pl) return false;
+    nvrm_vp_block b = {};
+    const UInt64 now = nvrmNowNs();
+    IOLockLock(pl);
+    *hot = note ? nvrm_vp_note(&gVramPool, want, now) != 0 : nvrm_vp_hot(&gVramPool, want, now) != 0;
+    const bool hit = nvrm_vp_take(&gVramPool, want, &b) != 0;
+    if (hit) gVramReadyBytes = (SInt64)gVramPool.ready_bytes;
+    IOLockUnlock(pl);
+    if (!hit) return false;
+    // The block has been in the table of allocations since the worker made it; the caller sees it only now.
+    advanceFlipEpoch();
+    r->handle = b.handle; r->kva = b.kva; r->phys = b.phys; r->actualSize = b.bytes; r->allocationCookie = b.cookie;
+    r->mappedTotal = (unsigned long long)(OSAddAtomic64(0, &gVramMappedBytes) + gVramParkedBytes);   // as the gated path reports it
+    OSAddAtomic64(1, &gCntGrant); OSAddAtomic64((SInt64)b.bytes, &gCntGrantBytes); OSAddAtomic64(1, &gCntVramReadyHit);
+    return true;
+}
 bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 {
-    NVRMDisplayGate gate; if (!gate.valid()) return false;
+    // WAS: every grant waited here for the display gate, which a flip holds while it waits for its latch, and then filled
+    // the block with zeros from the processor: 6 ms and 27 ms on WindowServer's main thread for each 9 MB surface of a
+    // screen share, one per captured frame (nvrm-vram-pool.h). A size in churn is now served from the blocks the worker
+    // keeps ready, without the gate.
+    const NvU64 want = nvrmVramWant(r->size, fBarLen);
+    bool hot = false, granted = false;
+    if (gVramFast) vramAskRm();   // before the gate: the question goes up to NVRM, and nothing here needs the gate for it
+    if (want && fKms && fDev && vramPoolUsable() && vramTakeReady(r, want, true, &hot)) { vramPoolKick(); return true; }
+    {
+        NVRMDisplayGate gate; if (!gate.valid()) return false;
+        // The worker may have made one while this thread waited for the gate.
+        if (hot && vramPoolUsable() && vramTakeReady(r, want, false, &hot)) granted = true;
+        else {
+            if (hot) OSAddAtomic64(1, &gCntVramReadyMiss);
+            granted = vramGrantGated(r, nullptr);
+        }
+    }
+    // The worker is asked for only now, with the gate let go: asked for before, it would take the gate first and this
+    // grant would wait behind the block it makes, and then make its own as well.
+    if (hot) vramPoolKick();
+    return granted;
+}
+// Fills a new block with zeros from the processor, through BAR1, and counts what that cost. `watched` (the worker,
+// which fills after it let go of the display gate, and which a system sleep does not stop): in pieces of 1 MB with a
+// look at the GPU before each, so that a standby that begins meanwhile is written into for one piece at most and
+// not for the 27 ms a block takes. False when it stopped short: the block is not zero then and must not become ready.
+bool NVRMNVDAFramebuffer::vramFill(void *kva, NvU64 bytes, bool watched)
+{
+    const UInt64 t0 = nvrmNowNs();
+    bool whole = true;
+    if (!watched) nvu_zero_wide(kva, (size_t)bytes);
+    else {
+        const NvU64 piece = 1ull << 20;
+        for (NvU64 off = 0; off < bytes; off += piece) {
+            if (!rmGpuReady()) { whole = false; break; }
+            nvu_zero_wide((char *)kva + off, (size_t)(bytes - off < piece ? bytes - off : piece));
+        }
+    }
+    // Counted only when whole, the time too: debug.nvrmfb_vram_fill_us / _filled is then the cost of one fill.
+    if (whole) { OSAddAtomic64(1, &gCntVramFilled); OSAddAtomic64((SInt64)((nvrmNowNs() - t0) / 1000ull), &gCntVramFillUs); }
+    return whole;
+}
+// With the display gate held. fillLater (the worker makes a block ahead of time): the block is not a grant to the
+// accelerator yet (vramTakeReady counts it when it is handed out), a refusal for lack of room is silent, and a block
+// that has to be filled with zeros is not filled here: *fillLater says so and the worker fills it once it has let
+// go of the gate.
+bool NVRMNVDAFramebuffer::vramGrantGated(struct NVRMVramRequest *r, bool *fillLater)
+{
+    const bool forPool = fillLater != nullptr;
+    if (fillLater) *fillLater = false;
     nvrmfbInstallSysctl();
     r->phys = 0; r->kva = nullptr; r->handle = nullptr; r->actualSize = 0; r->mappedTotal = 0;
     if (!fKms || !fDev) { FBLOG("nvAllocVram: no NVKMS device yet"); return false; }
-    NvU64 want = (r->size + 0xFFFFull) & ~0xFFFFull;
+    const NvU64 want = nvrmVramWant(r->size, fBarLen);
     if (!want) return false;
-    if (fBarLen && fBarLen <= (512ull << 20)) want = nvrmVramSizeClass(want);   // few hole sizes in a small window (see nvrm-vram-class.h)
 
     const SInt64 budget = (SInt64)nvrmSurfaceBudget(fBarLen, gVramDisplayBytes);
     gVramBudgetBytes = budget;
     // Parked blocks keep their BAR1 mapping (see below), so they count against the budget. On a 256 MB BAR1 (every
     // GTX 16, boards without Resizable BAR) the park ceiling is the smaller one, so surfaces keep most of the budget.
     SInt64 before = OSAddAtomic64((SInt64)want, &gVramMappedBytes) + gVramParkedBytes;
+    // Blocks kept ready count against the budget too: before a grant of the accelerator is refused for lack of it
+    // they all go back, and the sum is taken again.
+    if (before + (SInt64)want > budget && !forPool && vramPoolDrain(true))
+        before = OSAddAtomic64(0, &gVramMappedBytes) - (SInt64)want + gVramParkedBytes;
     if (before + (SInt64)want > budget) {
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
+        if (forPool) return false;
         // A full 256 MB window is refused thousands of times in a session (one size, retried every frame: 1,413 lines in
         // one user log), and each line costs a kernel log write on the path that is already out of room. Log the first
         // eight, then every 256th with the running count, and say once who holds the window: grants against releases
@@ -4730,7 +4953,20 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 
     struct NvKmsKapiMemory *mem = nullptr; void *kva = nullptr; NvU64 phys = 0;
 
-    for (int attempt = 0; attempt < 8 && !mem; attempt++) {
+    // The real limit of BAR1 lies somewhere under the budget (see the two failure lines below), and blocks kept ready
+    // hold a part of it. When allocateMemory or mapMemory refuse the accelerator's grant, the ready blocks go back and
+    // the same attempt is made once more: `attempt` goes on counting, so one grant still parks no more than before, and
+    // the failure line is printed once, after the last try (it says so when it was the first try that had no room and
+    // the second ended another way).
+    const char *const who = forPool ? " (a block made ahead of time)" : "";
+    int attempt = 0, noRoom = 0, noRoomFirst = 0;   // noRoom: 1 allocateMemory said no, 2 mapMemory did
+    for (int round = 0; round < 2 && !mem; round++) {
+    if (round) {
+        if (forPool || !noRoom || !vramPoolDrain(true)) break;
+        before = OSAddAtomic64(0, &gVramMappedBytes) - (SInt64)want + gVramParkedBytes;
+        noRoomFirst = noRoom; noRoom = 0;   // kept for the line below, should the second try end another way
+    }
+    for (; attempt < 8 && !mem; attempt++) {
         struct NvKmsKapiAllocateMemoryParams mp; nvu_zero(&mp, sizeof mp);
         NvU8 compressible = 0;
         mp.layout = NvKmsSurfaceMemoryLayoutPitch;
@@ -4739,17 +4975,12 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         mp.useVideoMemory = NV_TRUE;
         mp.compressible   = &compressible;
         struct NvKmsKapiMemory *m = fKms->allocateMemory(fDev, &mp);
-        // Both failures print what the budget counted at that moment: the real BAR1 limit of a 256 MB window is
-        // somewhere under the budget, and only these lines can show where.
-        if (!m) { FBLOG("nvAllocVram(%llu): allocateMemory failed (mapped %lld + parked %lld of %lld budget, BAR1 %llu)",
-                        (unsigned long long)want, (long long)gVramMappedBytes, (long long)gVramParkedBytes, (long long)budget,
-                        (unsigned long long)fBarLen); break; }
+        // Both failures are printed after the loop, with what the budget counted: the real BAR1 limit of a 256 MB
+        // window is somewhere under the budget, and only these lines can show where.
+        if (!m) { noRoom = 1; break; }
         void *k = nullptr;
         if (!fKms->mapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, &k) || !k) {
-            FBLOG("nvAllocVram(%llu): mapMemory(KERNEL) failed (mapped %lld + parked %lld of %lld budget, BAR1 %llu)",
-                  (unsigned long long)want, (long long)gVramMappedBytes, (long long)gVramParkedBytes, (long long)budget,
-                  (unsigned long long)fBarLen);
-            fKms->freeMemory(fDev, m); break;
+            fKms->freeMemory(fDev, m); noRoom = 2; break;
         }
         NvU64 p = fPhysForVa ? fPhysForVa(k) : 0;
         bool onScanout = p && fPhys  && fSize     && p < (fPhys + fSize)         && (p + want) > fPhys;
@@ -4757,15 +4988,15 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         if (!p) {
             // No physical address means RM's mapping table could not record this mapping. Parking it would hold one
             // more mapping per attempt and the next attempt fails the same way: release it and refuse this request.
-            FBLOG("nvAllocVram(%llu): attempt %d has no physical address — released, request refused (RM mapping table full?)",
-                  (unsigned long long)want, attempt);
+            FBLOG("nvAllocVram(%llu): attempt %d has no physical address — released, request refused (RM mapping table full?)%s",
+                  (unsigned long long)want, attempt, who);
             fKms->unmapMemory(fDev, m, NVKMS_KAPI_MAPPING_TYPE_KERNEL, k); fKms->freeMemory(fDev, m);
             break;
         }
         if (onScanout || onConsole) {
-            FBLOG("nvAllocVram: attempt %d phys 0x%llx %s — parking it and rolling again",
+            FBLOG("nvAllocVram: attempt %d phys 0x%llx %s — parking it and rolling again%s",
                   attempt, (unsigned long long)p,
-                  !p ? "has no physical address" : onScanout ? "OVERLAPS THE SCANOUT" : "OVERLAPS THE CONSOLE");
+                  !p ? "has no physical address" : onScanout ? "OVERLAPS THE SCANOUT" : "OVERLAPS THE CONSOLE", who);
             if (gNParkedForever < (int)(sizeof gParkedForever / sizeof gParkedForever[0]) &&
                 gVramParkedBytes + (SInt64)want <= nvrmParkCeiling(fBarLen)) {
                 // kept allocated AND mapped: the overlap is judged by the BAR1 address of this mapping, so unmapping
@@ -4810,20 +5041,27 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
                         fKms->freeMemory(fDev, gm);
                     }
                 }
-                FBLOG("nvAllocVram: %llu bytes cannot be parked (%lld bytes parked over %d slots) — %s",
+                FBLOG("nvAllocVram: %llu bytes cannot be parked (%lld bytes parked over %d slots) — %s%s",
                       (unsigned long long)want, (long long)gVramParkedBytes, gNParkedForever,
-                      guarded ? "holding a guard block over the overlap instead" : "released, no guard block placed");
+                      guarded ? "holding a guard block over the overlap instead" : "released, no guard block placed", who);
             }
             continue;
         }
         mem = m; kva = k; phys = p;
     }
+    }
     if (!mem) {
+        // (A block the worker makes ahead of time fails without a line: nobody asked for it, and it tries again later.)
+        if ((noRoom || noRoomFirst) && !forPool)
+            FBLOG("nvAllocVram(%llu): %s failed%s (mapped %lld + parked %lld of %lld budget, BAR1 %llu)",
+                  (unsigned long long)want, (noRoom ? noRoom : noRoomFirst) == 1 ? "allocateMemory" : "mapMemory(KERNEL)",
+                  noRoom ? "" : " on the first try; the second, after the ready blocks went back, ended another way",
+                  (long long)gVramMappedBytes, (long long)gVramParkedBytes, (long long)budget, (unsigned long long)fBarLen);
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
         // Who holds the window, once per boot: a 256 MB BAR1 that fills up cannot be told apart from a leak by the
         // failure lines alone; grants against releases can.
         static volatile SInt32 said = 0;
-        if (OSCompareAndSwap(0, 1, &said))
+        if (!forPool && OSCompareAndSwap(0, 1, &said))
             FBLOG("BAR1 full: %lld grants (%lld bytes) vs %lld releases (%lld bytes); live %lld, console parks %lld bytes "
                   "in %d slots, display %lld, budget %lld, BAR1 %llu",
                   (long long)gCntGrant, (long long)gCntGrantBytes, (long long)gCntRelease, (long long)gCntReleaseBytes,
@@ -4832,7 +5070,8 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         return false;
     }
 
-    nvu_zero_wide(kva, (size_t)want);
+    // First, as always: is the aperture live? (Before the change this came after the fill. It comes first now so that
+    // a mapping that does not reach the card is refused as such, and not read as a block the RM did not clear.)
     volatile NvU64 *q = (volatile NvU64 *)kva;
     q[0] = 0x5A5AA5A5C0FFEE01ull;
     NvU64 back = q[0];
@@ -4846,6 +5085,41 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
         OSAddAtomic64(-(SInt64)want, &gVramMappedBytes);
         return false;
     }
+    // WAS: every block was then filled with zeros here, from the processor, through BAR1 (about 330 MB/s: 27 ms for the
+    // 9 MB of one captured frame, with the display gate held). The RM clears video memory itself before it hands it out
+    // (nvrm_query_vidmem_cleared), so while its word is believed (nvrmVramTrusted) the second fill is left out. The
+    // word is checked on every block: NVRM_VP_PROBES places and the end are read, and the first block that is not zero
+    // there ends the belief until restart. So does the first standby: from then on every block is filled as before,
+    // and what the same places read before the fill is only counted (debug.nvrmfb_vram_wake_clean / _wake_dirty), so
+    // that a card can show whether its free memory comes back clean from a sleep.
+    bool clean = false;
+    const bool trusted = nvrmVramTrusted();
+    const bool forTheRecord = !trusted && gVramFast && OSAddAtomic(0, &gVramRmClears) == 1 && !OSAddAtomic64(0, &gCntVramDirty);
+    if (trusted || forTheRecord) {
+        const volatile NvU64 *probe = (const volatile NvU64 *)kva;
+        NvU64 at = 0, got = 0;
+        clean = true;
+        for (unsigned i = 0; i <= NVRM_VP_PROBES && clean; i++) {
+            at = nvrm_vp_probe_at(want, i);
+            got = probe[at];
+            if (got) clean = false;
+        }
+        if (forTheRecord) {
+            OSAddAtomic64(1, clean ? &gCntVramWakeClean : &gCntVramWakeDirty);
+            clean = false;
+        } else if (!clean && OSAddAtomic64(1, &gCntVramDirty) == 0) {
+            FBLOG("nvAllocVram(%llu): the RM says it clears video memory, but this block reads 0x%llx at byte %llu - "
+                  "from now on every block is filled with zeros here, as before",
+                  (unsigned long long)want, (unsigned long long)got, (unsigned long long)(at << 3));
+            // The blocks that were made ready while the word was believed were not filled either: none of them is
+            // handed out any more, and the worker gives them back.
+            if (IOLock *pl = vramPoolLock()) { IOLockLock(pl); nvrm_vp_power_event(&gVramPool); IOLockUnlock(pl); }
+            vramPoolKick();
+        }
+    }
+    if (clean) OSAddAtomic64(1, &gCntVramFillSkipped);
+    else if (fillLater) *fillLater = true;
+    else vramFill(kva, want, false);
 
     const UInt64 allocationCookie = gAllocations.insert(mem, want);
     if (!allocationCookie) {
@@ -4857,6 +5131,7 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
     r->handle = mem; r->kva = kva; r->phys = (unsigned long long)phys;
     r->actualSize = (unsigned long long)want;
     r->mappedTotal = (unsigned long long)(before + (SInt64)want);
+    if (forPool) return true;
     fVramGrants++;
     OSAddAtomic64(1, &gCntGrant); OSAddAtomic64((SInt64)want, &gCntGrantBytes);
     if (fVramGrantLogged < 16) { fVramGrantLogged++;
@@ -4869,6 +5144,17 @@ bool NVRMNVDAFramebuffer::vramGrant(struct NVRMVramRequest *r)
 bool NVRMNVDAFramebuffer::vramRelease(struct NVRMVramRequest *r)
 {
     NVRMDisplayGate gate; if (!gate.valid()) return false;
+    const NvU64 bytes = r->actualSize;
+    if (!vramReleaseGated(r, true)) return false;
+    // A size that is handed back as often as it is asked for is one in churn (nvrm-vram-pool.h).
+    if (bytes && vramPoolUsable())
+        if (IOLock *pl = vramPoolLock()) { IOLockLock(pl); nvrm_vp_note_back(&gVramPool, bytes, nvrmNowNs()); IOLockUnlock(pl); }
+    return true;
+}
+// With the display gate held. counted: the accelerator hands the block back (a block made ahead of time that goes
+// back unused was never the accelerator's).
+bool NVRMNVDAFramebuffer::vramReleaseGated(struct NVRMVramRequest *r, bool counted)
+{
     struct NvKmsKapiMemory *mem = (struct NvKmsKapiMemory *)r->handle;
     if (!mem || !fKms || !fDev) return false;
     if (!gAllocations.remove(mem, r->allocationCookie)) return false;
@@ -4876,9 +5162,144 @@ bool NVRMNVDAFramebuffer::vramRelease(struct NVRMVramRequest *r)
     if (r->kva) fKms->unmapMemory(fDev, mem, NVKMS_KAPI_MAPPING_TYPE_KERNEL, r->kva);
     fKms->freeMemory(fDev, mem);
     if (r->actualSize) OSAddAtomic64(-(SInt64)r->actualSize, &gVramMappedBytes);
-    OSAddAtomic64(1, &gCntRelease); OSAddAtomic64((SInt64)r->actualSize, &gCntReleaseBytes);
+    if (counted) { OSAddAtomic64(1, &gCntRelease); OSAddAtomic64((SInt64)r->actualSize, &gCntReleaseBytes); }
     r->handle = nullptr; r->kva = nullptr; r->phys = 0; r->actualSize = 0; r->allocationCookie = 0;
     return true;
+}
+// With the display gate held: a block of the pool goes back to NVKMS. It was never the accelerator's, so it is not
+// counted as a release of its; a release that fails (the table of allocations does not know the block) leaves it
+// allocated until restart, and says so.
+void NVRMNVDAFramebuffer::vramPoolGiveBack(const nvrm_vp_block *b, const char *why)
+{
+    struct NVRMVramRequest r = {};
+    r.version = NVRM_VRAM_ABI_VERSION;
+    r.handle = b->handle; r.kva = b->kva; r.phys = b->phys; r.actualSize = b->bytes; r.allocationCookie = b->cookie;
+    if (vramReleaseGated(&r, false)) { OSAddAtomic64(1, &gCntVramReadyBack); return; }
+    FBLOG("a block of %llu bytes made ahead of time could not be given back (%s): it stays allocated until restart",
+          (unsigned long long)b->bytes, why);
+}
+// With the display gate held: every block of the pool goes back to NVKMS (stop, or `forRoom`: a grant of the
+// accelerator found no room, and then the worker makes nothing for a while either). Returns how many went back.
+unsigned NVRMNVDAFramebuffer::vramPoolDrain(bool forRoom)
+{
+    IOLock *pl = vramPoolLock();
+    if (!pl || !fKms || !fDev) return 0;
+    unsigned n = 0;
+    for (;;) {
+        nvrm_vp_block b = {};
+        const UInt64 now = nvrmNowNs();
+        IOLockLock(pl);
+        const int why = nvrm_vp_next_release(&gVramPool, now, 1, &b);
+        // Whether or not anything was there to give back: a block the worker has in hand now must not become
+        // ready in the room this grant is asking for.
+        if (!why && forRoom) nvrm_vp_refused_all(&gVramPool, now);
+        gVramReadyBytes = (SInt64)gVramPool.ready_bytes;
+        IOLockUnlock(pl);
+        if (!why) break;
+        vramPoolGiveBack(&b, forRoom ? "a grant needed the room" : "the framebuffer stops");
+        n++;
+    }
+    return n;
+}
+// One operation of the worker: a block of the pool that is not wanted any more goes back, or one is made for a size
+// in churn. The display gate is held only around the calls into NVKMS, once per operation, so a flip never waits
+// behind more than one of them; a block that has to be filled with zeros is filled after the gate was let go.
+// NVKMS is called only after a look at the GPU with the gate held: a call made while NVRM suspends the GPU would
+// wait for the wake inside the RM with the gate held, and the framebuffer's own sleep and wake need that gate.
+// What is left, as for every grant and release of the accelerator before: the instant between that look and the
+// call; and on a wake the stretch in which NVRM has marked the GPU running and has not opened the RM's gate yet (the
+// NVKMS resume). No run of the worker is due in that stretch - the half-second look ended with the standby, and the
+// message that runs it again comes after the gate is open - and one that came would wait for the resume to end, not
+// for anything that needs the display gate. Returns true when something was done (there may be more).
+bool NVRMNVDAFramebuffer::vramPoolStep()
+{
+    IOLock *pl = vramPoolLock();
+    if (!pl || !fKms || !fDev) return false;
+    const bool keep = vramPoolUsable();
+    const UInt64 budget = (UInt64)nvrmSurfaceBudget(fBarLen, gVramDisplayBytes);
+    UInt64 gen = 0, bytes = 0;
+    IOLockLock(pl);
+    const UInt64 now = nvrmNowNs();
+    const bool back = nvrm_vp_release_due(&gVramPool, now, !keep) != 0;
+    if (!back && keep) bytes = nvrm_vp_next_fill(&gVramPool, now, budget, &gen);
+    gVramReadyBytes = (SInt64)gVramPool.ready_bytes;
+    IOLockUnlock(pl);
+    nvrm_vp_block b = {};
+    if (back) {
+        // The block leaves the pool only once this thread holds the gate and has seen the GPU up, so one that cannot
+        // go back now stays where it is ("NVRMGpuPower" 1 runs the worker again).
+        NVRMDisplayGate gate;
+        if (!gate.valid() || !rmGpuReady()) return false;
+        IOLockLock(pl);
+        const int why = nvrm_vp_next_release(&gVramPool, nvrmNowNs(), !keep, &b);
+        gVramReadyBytes = (SInt64)gVramPool.ready_bytes;
+        IOLockUnlock(pl);
+        if (why) vramPoolGiveBack(&b, why == NVRM_VP_WHY_IDLE ? "its size is no longer in churn" : "made before a power event");
+        return true;
+    }
+    if (!bytes) return false;
+    struct NVRMVramRequest r = {};
+    r.version = NVRM_VRAM_ABI_VERSION;
+    r.size = bytes;
+    bool fill = false, granted = false;
+    {
+        NVRMDisplayGate gate;
+        // Room for this block and for a whole ceiling of ready blocks behind it, or the accelerator's next grant
+        // would have to take them all back (vramPoolDrain).
+        const SInt64 inUse = OSAddAtomic64(0, &gVramMappedBytes) + gVramParkedBytes;
+        if (gate.valid() && rmGpuReady() && inUse + (SInt64)bytes + (SInt64)nvrm_vp_cap(budget, bytes) <= (SInt64)budget)
+            granted = vramGrantGated(&r, &fill);
+    }
+    if (!granted) {
+        IOLockLock(pl); nvrm_vp_refused(&gVramPool, bytes, nvrmNowNs()); IOLockUnlock(pl);
+        return true;   // another size may still be wanted
+    }
+    // A fill that stopped short (the GPU went to standby under it) leaves a block that is not zero: it is not stored,
+    // whatever the pool would say (the message that makes it stale may not have arrived yet).
+    const bool whole = !fill || vramFill(r.kva, r.actualSize, true);
+    b.handle = r.handle; b.kva = r.kva; b.phys = r.phys; b.bytes = r.actualSize; b.cookie = r.allocationCookie; b.gen = gen;
+    IOLockLock(pl);
+    const bool stored = whole && b.bytes == bytes && nvrm_vp_store(&gVramPool, &b, nvrmNowNs(), budget) != 0;
+    gVramReadyBytes = (SInt64)gVramPool.ready_bytes;
+    IOLockUnlock(pl);
+    if (stored) { OSAddAtomic64(1, &gCntVramReadyMade); return true; }
+    // Not wanted any more: the size left the churn, a power event came while the block was made, or everything went
+    // back for want of room. It goes back at once when the GPU is up ...
+    {
+        NVRMDisplayGate gate;
+        if (gate.valid() && rmGpuReady()) { vramPoolGiveBack(&b, "it was not wanted any more when it was made"); return true; }
+    }
+    // ... and else waits in the pool, apart from the ready blocks, until the first worker that runs after the wake.
+    IOLockLock(pl);
+    const bool waits = nvrm_vp_park(&gVramPool, &b) != 0;
+    IOLockUnlock(pl);
+    if (!waits)
+        FBLOG("a block of %llu bytes made ahead of time could not be given back (GPU in standby, and no place left for "
+              "it to wait): it stays allocated until restart", (unsigned long long)b.bytes);
+    return false;
+}
+// The worker (nvrm-vram-pool.h). It runs one at a time (THREAD_CALL_OPTIONS_ONCE), one operation per run, and asks
+// for itself again while there is more to do.
+void NVRMNVDAFramebuffer::vramPoolFire(thread_call_param_t p0, thread_call_param_t)
+{
+    NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
+    NVRMCallReference callReference(me);
+    if (OSAddAtomic(0, &me->fStopping)) return;   // stop() gives everything back itself
+    // A GPU in standby is left alone: a call into NVKMS would wait for the wake with the display gate held, and the
+    // framebuffer's own wake needs that gate. What is ready stays where it is; "NVRMGpuPower" 1 runs the worker again.
+    if (!me->rmGpuReady()) return;
+    const SInt32 kicks = OSAddAtomic(0, &me->fVramPoolKicks);
+    if (me->vramPoolStep()) { me->scheduleCall(me->fVramPoolCall, 0); return; }
+    // Nothing to do now. While the pool holds blocks: a look in half a second, so that they go back when their size
+    // has left the churn (the worker is otherwise only run by a grant). A request that arrived during this run must
+    // not be put off by that: entering a call that is already waiting moves it to the new time.
+    IOLock *pl = vramPoolLock();
+    if (!pl) return;
+    IOLockLock(pl);
+    const unsigned held = nvrm_vp_held(&gVramPool);
+    IOLockUnlock(pl);
+    if (held) { uint64_t d; clock_interval_to_deadline(500, kMillisecondScale, &d); me->scheduleCall(me->fVramPoolCall, d); }
+    if (OSAddAtomic(0, &me->fVramPoolKicks) != kicks) me->scheduleCall(me->fVramPoolCall, 0);
 }
 
 IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction,
@@ -4888,12 +5309,28 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
     bool isFree  = functionName && functionName->isEqualTo(NVRM_VRAM_FN_FREE);
     if (functionName && functionName->isEqualTo("NVRMGpuPower")) {   // from NVRM: 0 standby, 1 resumed, 2 lost
         const uintptr_t st = (uintptr_t)param1;
+        // Standby, resumed or lost. A block made ready before this is not handed out any more: the worker gives it
+        // back once the GPU has resumed, and starts no operation before that. From the first of these messages
+        // on, every new block is filled with zeros again (nvrm_vp_trusted): the slot lost power, and nothing in the
+        // RM's sources clears the memory that was free. The message reaches every framebuffer of the card, one after
+        // the other on NVRM's thread, and each of them counts: a framebuffer that saw only one of a pair must end
+        // the belief all the same.
+        if (OSIncrementAtomic(&gVramPowerEvents) == 0 && gVramFast && OSAddAtomic(0, &gVramRmClears) == 1)
+            FBLOG("first standby of the GPU: from now on every granted block is filled with zeros here, as before");
+        if (IOLock *pl = vramPoolLock()) { IOLockLock(pl); nvrm_vp_power_event(&gVramPool); IOLockUnlock(pl); }
         if (st == 0) {
             if (fModeSet && fSurf) fHeadSlept = true;   // nvKmsSuspend shuts every head down
             fSysSlept = true;                            // the next power-on is a system wake (familyDidWake)
             FBLOG("GPU going to standby: head %u off with it", fHead);
         } else if (st == 1) {
             if (fGpuWake) scheduleCall(fGpuWake, 0);
+            // Asked for after the head's own wake, which needs the display gate too (the worker holds it for one
+            // operation at most). Only a framebuffer whose worker has run before runs it again, so that not every
+            // framebuffer of the card works on the one pool; and one more, the first to hear of the wake whose
+            // worker has not run before, for the blocks another left when it stopped during the standby.
+            if (fVramPoolCall && !OSAddAtomic(0, &fStopping) &&
+                (OSAddAtomic(0, &fVramPoolKicks) || OSCompareAndSwap(1, 0, (volatile UInt32 *)&gVramPoolOrphans)))
+                vramPoolKick();
         } else {
             FBLOG("GPU lost on wake: head %u stays dark (restart needed)", fHead);
         }

@@ -16,6 +16,7 @@ extern "C" {
 #include "class/cl0080.h"
 #include "class/cl2080.h"
 #include "ctrl/ctrl2080/ctrl2080perf.h"
+#include "ctrl/ctrl0080/ctrl0080fb.h"
 
 void NV_API_CALL rm_kernel_rmapi_op(nvidia_stack_t *sp, void *ops_cmd);
 }
@@ -213,6 +214,63 @@ extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, 
     if (hClient) {
         NvV32 fst = fbiFree(hClient, hClient, hClient);
         if (fst != 0) FBILOG("freeing the root client -> status 0x%x", (unsigned)fst);
+    }
+    return ok;
+}
+
+/*
+ * Does the RM clear video memory before a client gets it? It says so itself, per device, as a framebuffer capability
+ * (NV0080_CTRL_FB_CAPS_VIDMEM_ALLOCS_ARE_CLEARED). The RM sets it while its scrub-on-free is on: pages a client freed
+ * are cleared by the copy engine before they can be allocated again, an allocation fails rather than hand out memory
+ * when the scrubber is not valid, and at boot the memory is cleared by the firmware (the last 256 MB) and by the RM on
+ * the GSP (the rest; NVIDIA's comment in kernel_gsp_tu102.c, that code is not in the open sources). The capability is
+ * fixed for the life of the device: it says that scrub-on-free is on, not that the scrubber ran. In particular nothing
+ * in the open sources clears the memory that was free when the slot lost power in a system sleep, so NVRMFB believes
+ * the answer only until the first standby and checks every block it does not fill (kexts/NVRMFB/fb/nvrm-vram-pool.h).
+ * The fill it leaves out was 9 MB from the processor, through BAR1, for every frame of a screen share.
+ * *pCleared: 1 the RM clears, 0 it does not (or did not answer: the result is false then).
+ */
+enum { kFbCapsClearedByte = 2, kFbCapsClearedBit = 0x02 };
+static_assert((1 ? NV0080_CTRL_FB_CAPS_VIDMEM_ALLOCS_ARE_CLEARED) == kFbCapsClearedByte &&
+              (0 ? NV0080_CTRL_FB_CAPS_VIDMEM_ALLOCS_ARE_CLEARED) == kFbCapsClearedBit &&
+              kFbCapsClearedByte < NV0080_CTRL_FB_CAPS_TBL_SIZE, "the capability's place in NVIDIA's table moved");
+extern "C" bool nvrm_query_vidmem_cleared(NvU32 gpuId, NvU32 *pCleared, NvU32 *pStatus)
+{
+    NvU32 hClient = 0, hDevice = 0;
+    NvV32 st = 0;
+    bool  ok = false;
+    struct FbiAttachIds   at;
+    NV0080_ALLOC_PARAMETERS dp;
+    NV0080_CTRL_FB_GET_CAPS_V2_PARAMS cp;
+
+    if (pCleared) *pCleared = 0;
+    if (pStatus)  *pStatus  = 0xffffffffu;
+    do {
+        st = fbiAlloc(0, 0, kClsRootClient, NULL, 0, &hClient);
+        if (st != 0 || !hClient) { FBILOG("cleared: NV01_ROOT_CLIENT -> status 0x%x", (unsigned)st); break; }
+        fbiZero(&at, sizeof at);
+        at.gpuIds[0] = gpuId;
+        at.gpuIds[1] = kGpuInvalidId;
+        st = fbiControl(hClient, hClient, kCmdGpuAttachIds, &at, sizeof at);
+        if (st != 0) { FBILOG("cleared: GPU_ATTACH_IDS -> status 0x%x", (unsigned)st); break; }
+        fbiZero(&dp, sizeof dp);
+        dp.deviceId = 0; dp.hClientShare = hClient;
+        st = fbiAlloc(hClient, hClient, kClsDevice0, &dp, sizeof dp, &hDevice);
+        if (st != 0 || !hDevice) { FBILOG("cleared: NV01_DEVICE_0 -> status 0x%x", (unsigned)st); break; }
+        fbiZero(&cp, sizeof cp);
+        st = fbiControl(hClient, hDevice, NV0080_CTRL_CMD_FB_GET_CAPS_V2, &cp, sizeof cp);
+        if (st != 0) { FBILOG("cleared: FB_GET_CAPS_V2 -> status 0x%x", (unsigned)st); break; }
+        const bool cleared = (cp.capsTbl[kFbCapsClearedByte] & kFbCapsClearedBit) != 0;
+        if (pCleared) *pCleared = cleared ? 1u : 0u;
+        FBILOG("gpu 0x%08x: FB caps %02x %02x %02x - the RM %s video memory before a client gets it",
+               (unsigned)gpuId, (unsigned)cp.capsTbl[0], (unsigned)cp.capsTbl[1], (unsigned)cp.capsTbl[2],
+               cleared ? "clears" : "does NOT clear");
+        ok = true;
+    } while (0);
+    if (pStatus) *pStatus = (NvU32)st;
+    if (hClient) {
+        NvV32 fst = fbiFree(hClient, hClient, hClient);
+        if (fst != 0) FBILOG("cleared: freeing the root client -> status 0x%x", (unsigned)fst);
     }
     return ok;
 }

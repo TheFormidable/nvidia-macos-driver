@@ -22,8 +22,8 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 9 | 1 | 55 | 408 | 12 |  | 491 |
-| bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 352 |  |  |  | 373 |
+| bootarg | 4 | 13 | 30 | 21 | 12 |  | 8 | 6 | 2 |  | 96 |
+| sysctl |  | 5 | 4 | 12 |  |  | 366 |  |  |  | 387 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -46,6 +46,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
 | bootarg | `nvaccel_pageoff_locked` | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |
 | bootarg | `nvaccel_surf_planes` | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |
+| bootarg | `nvfbvramfast` | on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9) | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. |
 | bootarg | `nvlayout` | on (nvlayout=0: the layout is still checked and any difference logged, but it no longer stops the start; 2.9 did not check at all) | 3.2 | Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update. |
 | bootarg | `nvrmatomic` | on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9) | 3.2 | The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool. |
 | bootarg | `nvrmbhthread` | on (nvrmbhthread=0: the bottom half runs on the interrupt's work loop, as in 2.9) | 3.2 | The RM's interrupt bottom half runs on its own thread, so a long one no longer holds back the next GPU interrupt. |
@@ -629,6 +630,7 @@ Each of these does nothing unless it is set.
 | `nvfbsurround` | setting | unset | 2.9 | - | Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbtrace` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbvib` | setting | unset | 2.9 | - | Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone. | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvfbvramfast` | escape | on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9) | 3.0 | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbvrr` | setting | unset | 2.9 | - | Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfetchcopy` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `nvhud` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -1028,13 +1030,27 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_layout_vtables` | diag | read-only | 3.0 | - | Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
 | `debug.nvrmfb_layout_vtdiff` | diag | read-only | 3.0 | - | Apple vtables whose length differs from this build; reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
 | `debug.nvrmfb_vram_budget_bytes` | diag | read-only | 2.9 | - | the BAR1 grant budget in force | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_dirty` | diag | read-only | 3.0 | - | 1 once a new block did not read as zero although the RM clears: from then on every block is filled again | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_aware` | recovery | writable by root | 2.9 | - | 1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_bytes` | diag | read-only | 2.9 | - | scanout+cursor the framebuffer itself maps into BAR1 | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_fast` | diag | read-only | 3.0 | - | 1 = a granted block is not filled with zeros again while the RM's clearing is believed, and blocks of a size in churn are made ahead of time; 0 = boot argument nvfbvramfast=0: every grant is filled and made on the caller's thread | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_fill_skipped` | diag | read-only | 3.0 | - | new blocks not filled from the processor (the RM cleared them and they read as zero) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_fill_us` | diag | read-only | 3.0 | - | microseconds spent filling new blocks from the processor | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_filled` | diag | read-only | 3.0 | - | new blocks filled with zeros from the processor | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_grant_bytes` | diag | read-only | 2.9 | - | bytes granted | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_grants` | diag | read-only | 2.9 | - | vramGrant successes | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_mapped_bytes` | diag | read-only | 2.9 | - | the BAR1 budget counter, live | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_power_events` | diag | read-only | 3.0 | - | standby, resume and lost messages from NVRM since the system started, one for each framebuffer of the card (after the first, every new block is filled again) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ready_back` | diag | read-only | 3.0 | - | blocks made ahead of time that went back unused (ready ones, and ones that never became ready) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ready_bytes` | diag | read-only | 3.0 | - | bytes of blocks ready now | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ready_hits` | diag | read-only | 3.0 | - | grants served from a block made ahead of time (nearly all of them without a wait for the display gate) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ready_made` | diag | read-only | 3.0 | - | blocks the worker made ahead of time that became ready | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ready_misses` | diag | read-only | 3.0 | - | grants of a size in churn that found no block ready | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_release_bytes` | diag | read-only | 2.9 | - | bytes released | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_releases` | diag | read-only | 2.9 | - | vramRelease calls | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_rm_clears` | diag | read-only | 3.0 | - | what NVRM said of the RM: 0 nothing yet (always so with nvfbvramfast=0), 1 it clears video memory before a client gets it, 2 it does not, or the GPU had been through a standby before the question, or NVRM had no answer three times | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_wake_clean` | diag | read-only | 3.0 | - | new blocks after a standby that read as zero before they were filled | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_wake_dirty` | diag | read-only | 3.0 | - | new blocks after a standby that did not read as zero before they were filled | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vramtest` | diag | writable by root | 2.9 | - | grant N x 8 MB of VRAM through vramGrant (0 = release all) | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vramtest_mode` | diag | writable by root | 2.9 | - | 1 = release without the kernel unmap | kexts/NVRMFB/fb/nvrm-fb.cpp |
 
