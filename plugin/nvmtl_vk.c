@@ -11682,8 +11682,11 @@ int nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nv
 // The format features of the tiling a linear alias is really made with. With VK_EXT_image_drm_format_modifier (g_linmod)
 // that is DRM modifier 0, single plane, whose features NVK reports apart from plain LINEAR tiling's and which can include
 // colour attachments where LINEAR's do not: taking linearTilingFeatures for such an image dropped RenderTarget, and with
-// it the input-attachment usage framebuffer fetch needs. 0 when the query is missing or lists no such modifier. The
-// device is fixed for the process, so each format's answer is kept (formats below 256; others are asked every time).
+// it the input-attachment usage framebuffer fetch needs. When the modifier query is missing or its list has no modifier 0
+// of one plane, plain LINEAR tiling's features are taken: NVK lists no modifier at all for formats it cannot render to and
+// for B10G11R11_UFLOAT and E5B9G9R9_UFLOAT, yet accepts modifier 0 for every format, and LINEAR's features still say
+// those formats can be sampled. 0 only when no query is there at all. The device is fixed for the process, so each
+// format's answer is kept (formats below 256; others are asked every time).
 // plain_linear: plain LINEAR tiling's features whatever the tiling (nvmtl_vk_image_create_buffer_alias_as).
 static _Atomic uint64_t g_alias_feature_cache[2][256];
 static VkFormatFeatureFlags nvmtl_vk_buffer_tiling_features(PFN_vkGetPhysicalDeviceFormatProperties gfp, VkFormat format, int plain_linear)
@@ -11696,31 +11699,33 @@ static VkFormatFeatureFlags nvmtl_vk_buffer_tiling_features(PFN_vkGetPhysicalDev
         if (cached & valid) return (VkFormatFeatureFlags)cached;
     }
     VkFormatFeatureFlags features = 0;
-    if (!modifier) {
+    int listed = 0;
+    if (modifier) {
+        PFN_vkGetPhysicalDeviceFormatProperties2 query = (PFN_vkGetPhysicalDeviceFormatProperties2)
+            pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties2");
+        VkDrmFormatModifierPropertiesListEXT list = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT, NULL, 0, NULL };
+        VkFormatProperties2 properties = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &list, { 0, 0, 0 } };
+        if (query) query(g_pdev, format, &properties);
+        const uint32_t capacity = list.drmFormatModifierCount;
+        VkDrmFormatModifierPropertiesEXT *modifiers = capacity ? calloc(capacity, sizeof *modifiers) : NULL;
+        if (modifiers) {
+            list.pDrmFormatModifierProperties = modifiers;
+            query(g_pdev, format, &properties);
+            for (uint32_t i = 0; i < list.drmFormatModifierCount && i < capacity; i++) {
+                if (!modifiers[i].drmFormatModifier && modifiers[i].drmFormatModifierPlaneCount == 1) {
+                    features = modifiers[i].drmFormatModifierTilingFeatures;
+                    listed = 1;
+                    break;
+                }
+            }
+            free(modifiers);
+        }
+    }
+    if (!listed) {
         if (!gfp) return 0;
         VkFormatProperties properties; memset(&properties, 0, sizeof properties);
         gfp(g_pdev, format, &properties);
         features = properties.linearTilingFeatures;
-    } else {
-        PFN_vkGetPhysicalDeviceFormatProperties2 query = (PFN_vkGetPhysicalDeviceFormatProperties2)
-            pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties2");
-        if (!query) return 0;
-        VkDrmFormatModifierPropertiesListEXT list = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT, NULL, 0, NULL };
-        VkFormatProperties2 properties = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &list, { 0, 0, 0 } };
-        query(g_pdev, format, &properties);
-        const uint32_t capacity = list.drmFormatModifierCount;
-        if (!capacity) return 0;
-        VkDrmFormatModifierPropertiesEXT *modifiers = calloc(capacity, sizeof *modifiers);
-        if (!modifiers) return 0;
-        list.pDrmFormatModifierProperties = modifiers;
-        query(g_pdev, format, &properties);
-        for (uint32_t i = 0; i < list.drmFormatModifierCount && i < capacity; i++) {
-            if (!modifiers[i].drmFormatModifier && modifiers[i].drmFormatModifierPlaneCount == 1) {
-                features = modifiers[i].drmFormatModifierTilingFeatures;
-                break;
-            }
-        }
-        free(modifiers);
     }
     if (index < 256) atomic_store_explicit(&g_alias_feature_cache[modifier][index], valid | features, memory_order_release);
     return features;
