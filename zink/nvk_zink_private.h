@@ -14,6 +14,10 @@ struct nvk_zink_screen {
 struct nvk_zink_context {
    struct pipe_frontend_drawable drawable;
    struct nvk_zink_screen *screen;
+   /* One reference for the owner (CGL, until nvk_zink_destroy), one for each
+    * thread on which the context is Mesa-current, and one for each caller that
+    * holds it across a bind (nvk_zink_ref). Freed when the last one drops. */
+   int refs;
    struct st_visual visual;
    struct st_context *st;
    struct pipe_resource *attachments[ST_ATTACHMENT_COUNT];
