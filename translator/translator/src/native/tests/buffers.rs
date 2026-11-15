@@ -488,8 +488,8 @@ exit:
     let loaded_i16 = module
         .all_inst_iter()
         .filter_map(|instruction| {
-            // a device-address read is a load, or a call of the shared inline function that does the load
-            (matches!(instruction.class.opcode, Op::Load | Op::FunctionCall)
+            ((instruction.class.opcode == Op::Load
+                || guarded_load_argument(&module, instruction).is_some())
                 && instruction
                     .result_type
                     .is_some_and(|ty| i16_types.contains(&ty)))
@@ -610,6 +610,9 @@ entry:
             }
             _ => {}
         }
+        if let (Some(id), Some(address)) = (instruction.result_id, guarded_load_argument(&module, instruction)) {
+            loaded_from.insert(id, address);
+        }
     }
     // A table slot is read either by an inline load or by a call of the shared inline function that converts the address
     // to a pointer and loads through it (that conversion is the first hop).
@@ -655,7 +658,7 @@ entry:
     });
     assert!(
         two_hops,
-        "the 7 must be stored through the device pointer READ FROM the table (two OpConvertUToPtr hops):\n{asm}"
+        "the 7 must be stored through the device pointer READ FROM the table (including a guarded load helper):\n{asm}"
     );
     for ty in &b78_wrapper_types {
         let pointee = module
@@ -804,7 +807,7 @@ entry:
 }
 
 #[test]
-fn native_generic_callback_table_cursor_is_refused_not_silently_emptied() {
+fn native_generic_callback_table_cursor_keeps_its_store() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 @next_buffer = internal addrspace(2) global i32 1
@@ -842,64 +845,25 @@ entry:
         std::process::id()
     ));
     let _ = std::fs::create_dir_all(&tmp);
-    let error = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp)
-        .err()
-        .unwrap_or_else(|| {
-            panic!(
-                "the store through the placeholder cannot be emitted, so this must not translate"
-            )
-        });
-    assert!(
-        error.contains("addresses nothing"),
-        "the refusal must name the placeholder that swallowed the store: {error}"
-    );
-    let _ = std::fs::remove_dir_all(tmp);
-}
-
-#[test]
-#[ignore = "known defect: the device-address store is refused, not kept; see the doc comment"]
-fn native_generic_callback_table_cursor_keeps_its_store() {
-    let ll = r#"
-target triple = "spirv-unknown-vulkan1.2"
-@next_buffer = internal addrspace(2) global i32 1
-
-define void @k(ptr %buffers) {
-entry:
-  call void @callback(ptr %buffers)
-  ret void
-}
-
-define internal void @callback(ptr %state) {
-entry:
-  %alias = bitcast ptr %state to ptr
-  %table = load ptr, ptr %alias, align 8
-  %slot = getelementptr inbounds ptr addrspace(1), ptr %table, i64 1
-  %slot_alias = bitcast ptr %slot to ptr
-  %buffer = load ptr addrspace(1), ptr %slot_alias, align 8
-  store i32 7, ptr addrspace(1) %buffer, align 4
-  ret void
-}
-
-!air.kernel = !{!0}
-!0 = !{ptr @k, !1, !2}
-!1 = !{}
-!2 = !{!3}
-!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, ptr addrspace(2) @next_buffer, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"array_ref<void>", !"air.arg_name", !"buffers"}
-"#;
-    let tmp = std::env::temp_dir().join(format!(
-        "metal2vulkan_native_callback_table_cursor_store_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&tmp);
-    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp)
-        .unwrap_or_else(|error| panic!("the translation is refused rather than emitted: {error}"));
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let module = load_bytes(&spv).expect("module");
     let asm = disassemble(&spv).expect("disassemble");
+    let sevens = module.types_global_values.iter().filter_map(|i| {
+        (i.class.opcode == Op::Constant && i.operands.first() == Some(&Operand::LiteralBit32(7))).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    assert!(module.all_inst_iter().any(|store| {
+        let [Operand::IdRef(pointer), Operand::IdRef(value), ..] = store.operands.as_slice() else { return false };
+        store.class.opcode == Op::Store && sevens.contains(value)
+            && module.all_inst_iter().any(|convert| {
+                convert.result_id == Some(*pointer) && convert.class.opcode == Op::ConvertUToPtr
+                    && module.all_inst_iter().any(|call| {
+                        call.result_id.map(Operand::IdRef).as_ref() == convert.operands.first()
+                            && guarded_load_argument(&module, call).is_some()
+                    })
+            })
+    }), "the callback must store 7 through the loaded device address: {asm}");
+    tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
     let _ = std::fs::remove_dir_all(tmp);
-    assert!(
-        asm.contains("OpStore"),
-        "the AIR stores 7 through the device pointer it loads from the table, so the module must \
-         contain a store; it contains none:\n{asm}"
-    );
 }
 
 #[test]
@@ -938,6 +902,28 @@ entry:
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
     assert!(asm.contains("PhysicalStorageBuffer64"), "{asm}");
+    let module = load_bytes(&spv).expect("module");
+    let address_types = module.types_global_values.iter().filter_map(|i| {
+        (i.class.opcode == Op::TypeInt && i.operands.first() == Some(&Operand::LiteralBit32(64))).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    let local_types = module.types_global_values.iter().filter_map(|i| match i.operands.as_slice() {
+        [Operand::StorageClass(StorageClass::Function), Operand::IdRef(value)]
+            if i.class.opcode == Op::TypePointer && address_types.contains(value) => i.result_id,
+        _ => None,
+    }).collect::<HashSet<_>>();
+    let locals = module.all_inst_iter().filter_map(|i| {
+        (i.class.opcode == Op::Variable && i.result_type.is_some_and(|t| local_types.contains(&t))).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    let nulls = module.types_global_values.iter().filter_map(|i| {
+        (i.class.opcode == Op::ConstantNull && i.result_type.is_some_and(|t| address_types.contains(&t))).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    for store in module.all_inst_iter().filter(|i| i.class.opcode == Op::Store) {
+        if let [Operand::IdRef(pointer), Operand::IdRef(value), ..] = store.operands.as_slice() {
+            if locals.contains(pointer) {
+                assert!(!nulls.contains(value), "a known device address must not be serialized as null: {asm}");
+            }
+        }
+    }
     tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
     let _ = std::fs::remove_dir_all(tmp);
 }
@@ -1600,6 +1586,9 @@ declare extern_weak i64 @mtl.force_not_checked.load.i64.p1(ptr addrspace(1)) sec
     let asm = disassemble(&spv).expect("disassemble");
     assert!(asm.contains("PhysicalStorageBuffer64"), "{asm}");
     assert!(asm.contains("OpConvertUToPtr"), "{asm}");
+    let module = load_bytes(&spv).expect("load translated module");
+    assert!(module.all_inst_iter().any(|i| guarded_load_argument(&module, i).is_some()),
+        "the intrinsic must lower to a defined guarded memory load: {asm}");
     // The load may be outlined into a shared function, which must be marked Inline so it costs no call.
     assert!(
         asm.lines()
@@ -12334,7 +12323,7 @@ merge:
 }
 
 #[test]
-fn native_forward_unmodeled_device_gep_phi_uses_typed_zero_not_pointer_phi() {
+fn native_forward_device_gep_phi_keeps_integer_addresses_without_private_pointer_storage() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
 %struct.Box = type { [3 x float], [3 x float] }
@@ -12378,10 +12367,26 @@ rhs:
         !asm.lines().any(|line| line.contains("OpSelect %_ptr_")),
         "unmodeled forward-GEP arms must not emit a pointer select:\n{asm}"
     );
-    assert!(
-        !asm.contains("OpTypePointer Private"),
-        "unmodeled forward-GEP arms must not be backed by a private pointer:\n{asm}"
-    );
+    // Metadata-free entry arguments are undefined. This case checks the
+    // address representation; the GPU readback fixture supplies metadata,
+    // bounded branches and observable output before executing either arm.
+    let module = load_bytes(&out).expect("load translated module");
+    let addresses = module.types_global_values.iter().filter_map(|i| {
+        (i.class.opcode == Op::TypeInt && i.operands.first() == Some(&Operand::LiteralBit32(64))).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    assert!(!asm.contains("OpTypePointer Private"), "{asm}");
+    let pointer_types = module.types_global_values.iter().filter_map(|i| {
+        (i.class.opcode == Op::TypePointer).then_some(i.result_id?)
+    }).collect::<HashSet<_>>();
+    assert!(module.all_inst_iter().all(|i| !matches!(i.class.opcode, Op::Phi | Op::Select)
+        || i.result_type.is_none_or(|t| !pointer_types.contains(&t))), "no pointer-valued merge: {asm}");
+    let conversions = module.all_inst_iter().filter(|i| i.class.opcode == Op::ConvertUToPtr).collect::<Vec<_>>();
+    assert!(!conversions.is_empty(), "integer address must be materialized: {asm}");
+    for convert in conversions {
+        let Some(Operand::IdRef(address)) = convert.operands.first() else { panic!("address operand") };
+        let source = module.all_inst_iter().find(|i| i.result_id == Some(*address)).expect("address definition");
+        assert!(source.result_type.is_some_and(|t| addresses.contains(&t)), "expected a 64-bit integer address: {asm}");
+    }
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
@@ -14461,20 +14466,7 @@ entry:
                 && matches!(instruction.operands.first(), Some(Operand::IdRef(id)) if nulls.contains(id))
         })
         .count();
-    // The device-address loads are outlined into one shared inline function, so a read shows up as a call of it; with
-    // no such function a read is a float load.
-    let is_float = |instruction: &Instruction| {
-        instruction.result_type.is_some_and(|ty| float_types.contains(&ty))
-    };
-    let float_calls = module
-        .all_inst_iter()
-        .filter(|instruction| instruction.class.opcode == Op::FunctionCall && is_float(instruction))
-        .count();
-    let float_plain_loads = module
-        .all_inst_iter()
-        .filter(|instruction| instruction.class.opcode == Op::Load && is_float(instruction))
-        .count();
-    let float_loads = if float_calls > 0 { float_calls } else { float_plain_loads };
+    let float_loads = effective_entry_load_count(&module, &float_types);
     assert_eq!(
         (null_copies, float_loads),
         (0, 2),

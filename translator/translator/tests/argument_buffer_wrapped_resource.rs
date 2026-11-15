@@ -193,6 +193,34 @@ attributes #0 = { convergent nounwind }
 !7 = !{i32 2, !"air.fragment_input", !"generated(5slicej)", !"air.flat", !"air.arg_type_name", !"uint", !"air.arg_name", !"slice"}
 "#;
 
+const FLAT_TEXTURE_BUFFER: &str = r#"target triple = "air64_v28-apple-macosx26.5.0"
+
+%Args = type { %"struct.metal::texture_buffer" }
+%"struct.metal::texture_buffer" = type { ptr addrspace(1) }
+
+define <4 x float> @k(ptr addrspace(2) %args) local_unnamed_addr #0 {
+entry:
+  %tf = getelementptr inbounds %Args, ptr addrspace(2) %args, i64 0, i32 0, i32 0
+  %tex = load ptr addrspace(1), ptr addrspace(2) %tf, align 8
+  %r = tail call { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1) %tex, i32 3, i32 1)
+  %c = extractvalue { <4 x float>, i8 } %r, 0
+  ret <4 x float> %c
+}
+
+declare { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1), i32, i32)
+
+attributes #0 = { convergent nounwind }
+
+!air.fragment = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{!9}
+!9 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!2 = !{!3}
+!3 = !{i32 0, !"air.indirect_buffer", !"air.buffer_size", i32 8, !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 2, !"air.struct_type_info", !4, !"air.arg_type_name", !"Args", !"air.arg_name", !"args"}
+!4 = !{i32 0, i32 8, i32 0, !"texture_buffer<float, read>", !"texels", !"air.indirect_argument", !5}
+!5 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.read", !"air.arg_type_name", !"texture_buffer<float, read>", !"air.arg_name", !"texels"}
+"#;
+
 #[test]
 fn a_flat_embedded_texture_still_binds() {
     let spv = translate_sanitized_native(FLAT, Stage::Kernel, &tmp()).expect("translate");
@@ -282,6 +310,18 @@ fn a_flat_c_array_member_is_indexed_rather_than_collapsed_to_element_zero() {
     let asm = disassemble(&spv).expect("disassemble");
     let module = Disassembly::parse(&asm);
 
+    // With heap routing of fixed argument-buffer fields on (NVMTL_NO_TIER2_FIXED unset or 0), the array goes through
+    // the image heap, each element by the handle its read loads: the stage layout has one descriptor per binding, so
+    // a 32-element array at one binding would leave elements 1 to 31 without a descriptor. With the switch set, the
+    // array is one array binding indexed at run time.
+    let declares_32_element_array = module.results().any(|(_, op, args)| {
+        op == "OpTypeArray" && args.get(1).is_some_and(|length| module.constant_value(length) == Some(32))
+    });
+    if metal2vulkan::reflect::bindless_fixed_fields_on() {
+        assert!(!declares_32_element_array, "the heap route declares no 32-element descriptor array:\n{asm}");
+        assert_heap_element_is_indexed_by_its_handle(&module, &asm);
+        return;
+    }
     let (array_ty, image_ty) = module
         .results()
         .find_map(|(id, op, args)| {
@@ -325,6 +365,55 @@ fn a_flat_c_array_member_is_indexed_rather_than_collapsed_to_element_zero() {
         .results()
         .find_map(|(id, op, args)| (op == "OpLoad" && args.get(1) == Some(&element)).then_some(id))
         .unwrap_or_else(|| panic!("the selected element is loaded:\n{asm}"));
+    assert!(
+        module
+            .results()
+            .any(|(_, op, args)| op == "OpSampledImage" && args.get(1) == Some(&loaded)),
+        "and the loaded element is what gets sampled:\n{asm}"
+    );
+}
+
+// The element's handle is read from the argument buffer at the runtime index, its slot bits index the image heap,
+// and that heap element is what gets sampled.
+fn assert_heap_element_is_indexed_by_its_handle(module: &Disassembly, asm: &str) {
+    let def = |id: u32| module.results().find(|(def, ..)| *def == id);
+    let heap = module
+        .results()
+        .find_map(|(id, op, args)| {
+            let (_, _, pointer) = def(*args.first()?)?;
+            let (_, array_op, array) = def(*pointer.first()?)?;
+            (op == "OpVariable"
+                && array_op == "OpTypeRuntimeArray"
+                && module.opcode(*array.first()?) == Some("OpTypeImage"))
+            .then_some(id)
+        })
+        .unwrap_or_else(|| panic!("the texture array goes through the image heap:\n{asm}"));
+    let (element, index) = module
+        .results()
+        .find_map(|(id, op, args)| match args {
+            [_, base, index] if op == "OpAccessChain" && *base == heap => Some((id, *index)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the heap is indexed:\n{asm}"));
+    let handle = match def(index) {
+        Some((_, "OpBitwiseAnd", [_, handle, _])) => *handle,
+        other => panic!("the heap index is the slot bits of a handle, not {other:?}:\n{asm}"),
+    };
+    let handle_address = match def(handle) {
+        Some((_, "OpLoad", [_, address])) => *address,
+        other => panic!("the handle is loaded from the argument buffer, not {other:?}:\n{asm}"),
+    };
+    match def(handle_address) {
+        Some((_, "OpAccessChain" | "OpInBoundsAccessChain", [_, _, indices @ ..])) => assert!(
+            indices.last().is_some_and(|last| module.constant_value(last).is_none()),
+            "the handle's word is chosen by the runtime index, not a constant:\n{asm}"
+        ),
+        other => panic!("the handle is read through an access chain, not {other:?}:\n{asm}"),
+    }
+    let loaded = module
+        .results()
+        .find_map(|(id, op, args)| (op == "OpLoad" && args.get(1) == Some(&element)).then_some(id))
+        .unwrap_or_else(|| panic!("the selected heap element is loaded:\n{asm}"));
     assert!(
         module
             .results()
@@ -384,5 +473,83 @@ impl Disassembly {
 
     fn constant_value(&self, id: &u32) -> Option<u32> {
         self.constants.get(id).copied()
+    }
+}
+
+#[test]
+fn a_single_embedded_texture_buffer_reads_through_the_texel_heap() {
+    let spv = translate_sanitized_native(FLAT_TEXTURE_BUFFER, Stage::Fragment, &tmp()).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    let module = Disassembly::parse(&asm);
+    let decorations = |id: u32| -> Vec<String> {
+        let prefix = format!("OpDecorate %{id} ");
+        asm.lines()
+            .filter_map(|line| line.trim().strip_prefix(prefix.as_str()).map(str::to_string))
+            .collect()
+    };
+    // The image variables: a pointer to an image, or to a runtime array of images (the heap).
+    let def = |id: u32| module.results().find(|(def, ..)| *def == id);
+    let image_of = |ty: u32| match def(ty) {
+        Some((_, "OpTypeImage", _)) => Some(ty),
+        Some((_, "OpTypeRuntimeArray" | "OpTypeArray", [element, ..])) => {
+            (module.opcode(*element) == Some("OpTypeImage")).then_some(*element)
+        }
+        _ => None,
+    };
+    let image_vars: Vec<u32> = module
+        .results()
+        .filter(|(_, op, args)| {
+            *op == "OpVariable"
+                && args.first().and_then(|ptr| def(*ptr)).is_some_and(|(_, _, pointer)| {
+                    pointer.first().and_then(|pointee| image_of(*pointee)).is_some()
+                })
+        })
+        .map(|(id, ..)| id)
+        .collect();
+    let [texel_var] = image_vars[..] else {
+        panic!("one image variable holds the texture buffer, not {image_vars:?}:\n{asm}");
+    };
+    let placed = decorations(texel_var);
+    // The bindless heap's uniform texel buffers are descriptor set 2, binding 3 (reflect::BINDLESS_UTEXEL_BINDING);
+    // the host puts a texture buffer's texel view there, so the field's handle selects the real buffer.
+    if metal2vulkan::reflect::bindless_fixed_fields_on() {
+        assert!(
+            placed.iter().any(|d| d == "DescriptorSet 2") && placed.iter().any(|d| d == "Binding 3"),
+            "the texture buffer field is read through the heap's texel binding, not {placed:?}:\n{asm}"
+        );
+    } else {
+        assert!(
+            !placed.iter().any(|d| d == "DescriptorSet 2"),
+            "with NVMTL_NO_TIER2_FIXED set the field keeps a per-draw binding, not {placed:?}:\n{asm}"
+        );
+    }
+    assert!(asm.contains("OpImageFetch"), "the texel is fetched:\n{asm}");
+}
+
+// The switch is read once per process (reflect::bindless_fixed_fields_on), so each mode runs in its own child: other
+// tests of this binary translate concurrently and keep the production default.
+#[test]
+fn the_heap_route_tests_hold_with_the_switch_unset_and_set() {
+    if std::env::var_os("M2V_TEST_TIER2_FIXED_CHILD").is_some() {
+        return;
+    }
+    for value in ["0", "1"] {
+        for test in [
+            "a_flat_c_array_member_is_indexed_rather_than_collapsed_to_element_zero",
+            "a_single_embedded_texture_buffer_reads_through_the_texel_heap",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture", "--test-threads", "1"])
+                .env("M2V_TEST_TIER2_FIXED_CHILD", "1")
+                .env("NVMTL_NO_TIER2_FIXED", value)
+                .output()
+                .expect("run the test in a child process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{test} with NVMTL_NO_TIER2_FIXED={value}: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

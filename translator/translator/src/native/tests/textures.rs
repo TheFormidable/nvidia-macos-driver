@@ -311,6 +311,29 @@ declare i32 @air.get_width_texture_buffer(ptr addrspace(1), i32)
 }
 
 #[test]
+fn native_local_resource_objects_keep_both_live_samples() {
+    let ll = include_str!("../../../tests/opaque_texture_fields.ll");
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_local_resource_objects_{}", std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).expect("temporary directory");
+    let spv = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp)
+        .expect("translate immutable resource fields");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert_eq!(asm.matches("OpImageSampleImplicitLod").count(), 2,
+        "both live resource reads must survive helper inlining, not become zero:\n{asm}");
+    // Texture-array elements use the existing per-draw table and image heap;
+    // samplers retain their individual Metal slots.
+    for binding in [0, 160, 161, 640] {
+        assert!(asm.contains(&format!("Binding {binding}\n")),
+            "resource-array binding {binding} must survive alias forwarding:\n{asm}");
+    }
+    if std::process::Command::new("spirv-val").arg("--version").output().is_ok() {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+}
+
+#[test]
 fn native_array_ref_texture_lowers_to_descriptor_array() {
     let ll = r#"
 %"struct.metal::texture2d" = type { ptr addrspace(1) }
@@ -1120,9 +1143,7 @@ entry:
         "{asm}"
     );
     assert!(asm.contains("OpTypeSampler"), "{asm}");
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 5);
     assert!(asm.contains("Binding 162"), "{asm}");
     if std::process::Command::new("spirv-val")
         .arg("--version")
@@ -1226,8 +1247,9 @@ entry:
             .expect("reflected descriptor");
         assert_eq!(reflected.set, 0);
         assert_eq!(reflected.binding, binding);
-        // samplers keep one binding per Metal index; sampled textures live in the descriptor heap
-        if kind == crate::reflect::ResourceKind::Sampler {
+        if kind == crate::reflect::ResourceKind::Texture {
+            assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), metal_index);
+        } else {
             assert!(asm.contains(&format!("Binding {binding}")), "{asm}");
         }
     }
@@ -1307,9 +1329,7 @@ entry:
         .expect("storage descriptor");
     assert_eq!(sampled.binding, 72);
     assert_eq!(storage.binding, 520);
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 40);
     assert!(asm.contains("Binding 520"), "{asm}");
     reflection
         .validate_descriptor_abi()
@@ -4346,9 +4366,7 @@ entry:
     let asm = disassemble(&spv).expect("disassemble");
     assert!(asm.contains("OpTypeImage"), "{asm}");
     assert!(asm.contains(" 1D "), "{asm}");
-    // Sampled textures are reached through the descriptor heap (an array of images in set 2, indexed by the slot the
-    // argument table holds), not through one descriptor binding per Metal texture index.
-    assert!(asm.contains("OpTypeRuntimeArray") && asm.contains("DescriptorSet 2"), "{asm}");
+    assert_sampled_texture_binding(&load_bytes(&spv).expect("module"), 0);
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()

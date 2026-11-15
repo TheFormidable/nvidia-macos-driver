@@ -450,11 +450,14 @@ fn parse_call_args(args_str: &str) -> Option<Vec<String>> {
 
 fn arg_value_token(chunk: &str) -> Option<String> {
     let toks = super::lex::split_top_level_whitespace(chunk);
-    let last = *toks.last()?;
-    if last.starts_with('%') {
-        return Some(last.to_string());
-    }
-    Some(last.to_string())
+    // Types and parameter attributes precede the value. A constant expression
+    // can itself span several tokens (e.g. `splat (float ...)`); keeping only
+    // the last token silently drops its opcode when substituting the argument.
+    // Keep the first complete value suffix, in its original LLVM spelling.
+    (1..toks.len()).find_map(|start| {
+        let value = toks[start..].join(" ");
+        super::parse::parse_value(&value).ok().map(|_| value)
+    })
 }
 
 fn strip_leading_word<'a>(s: &'a str, words: &[&str]) -> &'a str {
@@ -1505,6 +1508,50 @@ define i32 @main(i32 %0, ptr %fp) {
     }
 
     #[test]
+    fn call_arguments_preserve_complete_constant_expressions() {
+        for (argument, expected) in [
+            ("<3 x float> splat (float 0x3FA47AE140000000)", "splat (float 0x3FA47AE140000000)"),
+            ("ptr addrspace(1) inttoptr (i64 16 to ptr addrspace(1))", "inttoptr (i64 16 to ptr addrspace(1))"),
+            ("ptr getelementptr inbounds ([4 x i32], ptr @table, i64 0, i64 2)", "getelementptr inbounds ([4 x i32], ptr @table, i64 0, i64 2)"),
+            ("ptr bitcast (ptr @table to ptr)", "bitcast (ptr @table to ptr)"),
+            ("<2 x float> <float 1.0, float 2.0>", "<float 1.0, float 2.0>"),
+            ("ptr addrspace(1) noundef nonnull align 16 dereferenceable(32) %buffer", "%buffer"),
+            ("float noundef 1.000000e+00", "1.000000e+00"),
+            ("[8 x i8] undef", "undef"),
+        ] {
+            assert_eq!(arg_value_token(argument).as_deref(), Some(expected), "{argument}");
+        }
+        assert!(arg_value_token("<3 x float> splat (float invalid)").is_none());
+        assert!(arg_value_token("i32 unknown (i32 1)").is_none());
+    }
+
+    #[test]
+    fn inlined_vector_splat_compiles_without_losing_the_constant() {
+        let src = r#"
+define internal <3 x float> @clearcoat(<3 x float> %color, <3 x float> %f0) {
+entry:
+  %scaled = fmul fast <3 x float> %color, %f0
+  ret <3 x float> %scaled
+}
+define <3 x float> @main(<3 x float> %color) {
+entry:
+  %r = call <3 x float> @clearcoat(<3 x float> %color, <3 x float> splat (float 0x3FA47AE140000000))
+  ret <3 x float> %r
+}
+"#;
+        let out = inline_nonrecursive_internal_calls(src);
+        assert!(!out.contains("call <3 x float> @clearcoat"), "{out}");
+        assert!(out.contains("fmul fast <3 x float> %color, splat (float 0x3FA47AE140000000)"), "{out}");
+        let bytes = crate::native::emit_vulkan_spirv(&out).expect("emit inlined splat");
+        let module = crate::spirv_module::load_bytes(bytes).expect("load SPIR-V");
+        assert!(module.all_inst_iter().any(|i| i.class.opcode == spirv::Op::FMul));
+        assert!(module.types_global_values.iter().any(|i| {
+            i.class.opcode == spirv::Op::Constant
+                && i.operands == [crate::spirv_module::Operand::LiteralBit32(0.04f32.to_bits())]
+        }), "inlining must retain the clearcoat reflectance");
+    }
+
+    #[test]
     fn single_return_value_callee_inlined() {
         let src = "\
 define internal i32 @add1(i32 %0) {
@@ -1886,6 +1933,44 @@ out:
     }
 
     #[test]
+    fn a_sample_through_a_nine_way_sampler_phi_is_made_once_per_sampler() {
+        // Apple's GL resolving a sampler2D argument (Complementary's GetReflection) by a switch
+        // over nine samplers
+        let params: Vec<String> = (0..9).map(|k| format!("ptr addrspace(2) %s{k}")).collect();
+        let cases: String = (1..9).map(|k| format!("    i32 {k}, label %c{k}\n")).collect();
+        let arms: String = (1..9).map(|k| format!("c{k}:\n  br label %after\n")).collect();
+        let incoming: Vec<String> = std::iter::once("[ %s0, %entry ]".to_string())
+            .chain((1..9).map(|k| format!("[ %s{k}, %c{k} ]")))
+            .collect();
+        let mut f = FuncBlock {
+            header: format!(
+                "define <4 x float> @r(ptr addrspace(1) %t, {}, i32 %k) {{",
+                params.join(", ")
+            ),
+            body: format!(
+                "entry:\n  switch i32 %k, label %after [\n{cases}  ]\n{arms}after:\n  %smp = phi ptr addrspace(2) {}\n  \
+                 %r = call {{ <4 x float>, i8 }} @air.sample_texture_2d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) %smp, i32 0)\n  \
+                 %v = extractvalue {{ <4 x float>, i8 }} %r, 0\n  ret <4 x float> %v",
+                incoming.join(", ")
+            )
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        };
+        assert!(split_sampler_phi_samples_in(&mut f));
+        let text = f.body.join("\n");
+        assert!(!text.contains("phi ptr addrspace(2)"), "{text}");
+        for k in 0..9 {
+            assert!(
+                text.contains(&format!("ptr addrspace(2) %s{k}, i32 0)")),
+                "a read of %s{k}:\n{text}"
+            );
+        }
+        assert_eq!(text.matches(" = icmp eq i32 ").count(), 8, "{text}");
+        assert!(text.contains("%r = select i1 "), "{text}");
+    }
+
+    #[test]
     fn caller_phi_pred_relabeled_to_cont() {
         let src = "\
 define internal i32 @id(i32 %0) {
@@ -2121,7 +2206,8 @@ mod b52_equiv_tests {
 /// entry block with a pointer and only read afterwards has each read replaced by that pointer. This is what an optimizer's
 /// scalar replacement does, and what lets the address of a sampler in an argument buffer (Blender stores one per texture in
 /// its MTLShaderFragmentImpl object and reads it in `main`) reach the sample call as the buffer address it is. None when
-/// nothing changes. Only used to retry a module that failed as written.
+/// nothing changes. Resource-bearing local objects need this before modeling opaque handles;
+/// other shapes can also use it when retrying a module that failed as written.
 pub(crate) fn inline_and_forward_object_fields(san_ll: &str) -> Option<String> {
     let inlined = try_inline(san_ll, None).unwrap_or_else(|| san_ll.to_string());
     let mut items = parse_items(&inlined)?;
@@ -2422,8 +2508,11 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
                 && once
                 && after.is_some_and(|a| a.starts_with(',') || a.starts_with(')'))
         };
+        // A stage binds at most 16 Metal samplers, so a pick among them has at most that many
+        // incoming samplers: Complementary's GetReflection takes a sampler2D argument that
+        // Apple's GL resolves with a nine-way switch.
         if incoming.is_empty()
-            || !(2..=8).contains(&samplers.len())
+            || !(2..=16).contains(&samplers.len())
             || samplers.iter().any(|v| !(v.starts_with('@') || dominating.contains(v)))
             || uses.is_empty()
             || !uses.iter().all(|&j| use_ok(j))
@@ -2627,8 +2716,8 @@ fn canonicalize_local_field_addresses_in(f: &mut FuncBlock, named: &HashMap<Stri
         let derived = if let Some(cast) = rest.strip_prefix("bitcast ptr ") {
             let Some(base) = cast.strip_suffix(" to ptr").map(str::trim) else { continue };
             let Some(base) = addrs.get(base) else { continue };
-            if base.path.is_empty() {
-                continue; // the object itself, as lifetime markers take it
+            if base.path.is_empty() && !pointer_access_only(&f.body, name) {
+                continue; // keep whole-object addresses used by lifetime markers or escaping uses
             }
             Addr { root: base.root.clone(), root_ty: base.root_ty.clone(), path: base.path.clone(), ty: base.ty.clone(), inbounds: base.inbounds }
         } else {
