@@ -549,8 +549,9 @@ static void release_integer_dispatch(struct nvk_cgl_bridge *b)
  * Give GLEngine a private table to populate, and leave adapters in the
  * original saved table for CGL's final restore. This is distinct from the HAL
  * table. The GLD proxy owns this registration and calls destroy during
- * teardown. A process whose Zink screen cannot be made (no private NVK
- * runtime, no NVIDIA device) keeps Apple's renderer for every context. */
+ * teardown. The Zink screen is made only once a context's layout is proven;
+ * a process whose screen cannot be made (no private NVK runtime, no NVIDIA
+ * device) keeps Apple's renderer for every context. */
 EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
 {
    if (!engine || !driver) return 0;
@@ -558,11 +559,11 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
     * CGL/IOSurface interop. Never switch a live context. */
    if (nvk_cgl_obs_compatibility_enabled()) return 0;
    if (native_surface_copy_context()) return 0;
-   if (!nvk_zink_screen_ready()) return 0;
    /* Prove the recorded private offsets land in memory shaped as the record says
-    * before any read past a pointer or any write through one. On a build whose
-    * layout differs, keep Apple's renderer for this context exactly as when the
-    * Zink screen cannot be made: return 0, having written nothing. */
+    * before any read past a pointer or any write through one, and before the
+    * Zink screen (a Vulkan instance and an NVK device) exists. On a build whose
+    * layout differs, keep Apple's renderer for this context: return 0, having
+    * written nothing and opened no device. */
    unsigned char profile = 0;
    void *context_ptr = NULL;
    void **back = NULL;
@@ -583,6 +584,7 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
       layout_refused_once(why[layout]);
       return 0;
    }
+   if (!nvk_zink_screen_ready()) return 0;
    CGLContextObj context = (CGLContextObj)context_ptr;
    struct nvk_cgl_bridge *b = calloc(1, sizeof(*b));
    if (!b) return 0;
