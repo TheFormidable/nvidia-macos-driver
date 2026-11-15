@@ -169,6 +169,7 @@ env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
 env	NVMTL_BUFFER_GRACE	dev	unset	2.9	-	unreviewed
 env	NVMTL_BUF_GUARD	dev	unset	2.9	-	unreviewed
+env	NVMTL_BUSY_DONE_EARLY	escape	on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch)	3.0	3.2	A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished.
 env	NVMTL_CACHE_SYNC_IO	dev	unset	2.9	-	unreviewed
 env	NVMTL_CANONICAL_POINTERS	dev	unset	2.9	-	unreviewed
 env	NVMTL_CARD	setting	unset	2.9	-	Card for an application: With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0).

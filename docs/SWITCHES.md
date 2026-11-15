@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 6 | 1 | 55 | 408 | 12 |  | 488 |
+| env |  | 6 |  |  | 7 | 1 | 55 | 408 | 12 |  | 489 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
 | sysctl |  | 5 | 4 | 12 |  |  | 352 |  |  |  | 373 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -35,6 +35,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
+| env | `NVMTL_BUSY_DONE_EARLY` | on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch) | 3.2 | A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
@@ -220,6 +221,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_BDA_PROBE_HASH` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_BUFFER_GRACE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_BUF_GUARD` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_BUSY_DONE_EARLY` | escape | on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch) | 3.0 | 3.2 | A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished. | plugin/NVMTLEventSync.m |
 | `NVMTL_CACHE_SYNC_IO` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_CANONICAL_POINTERS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h |
 | `NVMTL_CARD` | setting | unset | 2.9 | - | Card for an application: With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0). | plugin/NVMTLDevice.m |
