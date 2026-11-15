@@ -2694,11 +2694,12 @@ fn register_embedded_textures(
         };
         // An array of textures (array<texture2d<float>, N>) goes through the heap as well, each element by the slot its
         // own handle carries: declared as an array binding, it would need N descriptors at one binding, and the host's
-        // layout has one per texture slot (a robust driver clamps the index to element 0). A texture buffer keeps its
-        // binding, as one bound directly does (bindless_all_on): the host's heap holds images and samplers only.
+        // layout has one per texture slot (a robust driver clamps the index to element 0). The heap (descriptor set 2,
+        // bindings 0 to 4) holds sampled images, samplers, storage images and texel buffers, so a single texture
+        // buffer reads through it as well; only an array of texture buffers keeps its binding.
         if crate::reflect::bindless_fixed_fields_on()
             && tex.storage_format.is_none()
-            && tex.dim != Dim::DimBuffer
+            && (tex.array_length.is_none() || tex.dim != Dim::DimBuffer)
         {
             let off = u64::from(tex.field_offset);
             let end = off + u64::from(tex.array_length.unwrap_or(1)) * 8;
