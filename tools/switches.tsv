@@ -604,6 +604,7 @@ bootarg	nvrmworkq	escape	on (nvrmworkq=0: every work item gets a thread of its o
 bootarg	nvrtd3	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvrtd3res	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvselector	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
+bootarg	nvzink	escape	on (nvzink=0: Apple's OpenGL over Metal, as in 3.0)	3.0	3.2	On macOS 15.5 or later the accelerator names NVKZinkGLDriver.bundle as its OpenGL driver, so OpenGL applications run on NVK through Mesa's Zink; nvzink=0, read once when the accelerator starts, keeps Apple's renderer for every application.
 sysctl	debug.nmflat_held	diag	read-only	2.9	-	frames of one flat colour held back from the flip (nmflatskip)
 sysctl	debug.nmhda	diag	read-only	2.9	-	NVIDIA HD Audio table patch
 sysctl	debug.nmhybrid	diag	read-only	2.9	-	hybrid laptop path: 0 off, 1 copy changed pixels to the other GPU's panel, 2 scan out the composited surface in place
