@@ -7895,6 +7895,11 @@ static void nvmtl_private_depth_layout(nvk_cmdbuf *, nvk_image *, VkImageLayout)
 // Applications grid's and native icons' layers). With framebuffer fetch on, such an attachment is rendered and read
 // through an explicit tiled image instead: loaded from the linear image on the GPU when the pass loads, and copied back
 // at the end of the pass (nvmtl_vk_cmd_end_render). The images are this recording's and are destroyed when it retires.
+// A depth or stencil attachment makes NVK shadow a linear colour attachment too (nvk_rendering_linear), so it counts as
+// mixed. The pipeline that begins the pass is not asked whether it reads [[color(n)]]: a later pipeline of the same pass
+// may, and pipeline compatibility (nvmtl_vk_pipeline_compatible) does not include the fetch mask, so such a pipeline joins
+// the open pass without ending it. Every such pass in a process with framebuffer fetch on therefore pays one tiled image
+// and two copies; that cost has not been measured on a card.
 typedef struct nvmtl_render_shadow {
     struct nvmtl_render_shadow *next, *active_next;
     nvk_image image;
@@ -7937,7 +7942,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     const int result = nvmtl_vk_cmd_begin_pass_body(c, &optimal, p);
     if (!result) {
         c->active_render_shadows = active;
-        static unsigned said; if (said++ < 4) nvlog("begin_render: %u linear attachment(s) of a framebuffer-fetch pass drawn through tiled stand-ins", (unsigned)__builtin_popcount(linear));
+        static unsigned said; if (said++ < 4) nvlog("begin_render: %u linear attachment(s) beside a tiled, unaligned or depth attachment drawn through tiled stand-ins (framebuffer fetch on)", (unsigned)__builtin_popcount(linear));
     }
     return result;
 }
