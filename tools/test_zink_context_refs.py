@@ -5,7 +5,9 @@ reads and flushes it. zink/nvk_zink.c therefore counts references: the owner's, 
 Mesa-current, and one per caller that holds it across a borrowed bind. This test takes the reference code out of
 nvk_zink.c as written (destroy_now through nvk_zink_destroy, and nvk_zink_get_current), compiles it for the host with
 stand-ins for the few Mesa calls it makes, and runs the sequences on two threads. The stand-ins record a read or flush
-of a freed context as a fault. It touches no GPU and loads no Apple framework or Mesa.
+of a freed context as a fault. It also reads zink/nvk_cgl.c: the per-thread bridge cache of bridge_current is checked
+without reading the cached bridge, which another thread may have freed. It touches no GPU and loads no Apple framework
+or Mesa.
 usage: test_zink_context_refs.py"""
 import os
 import re
@@ -190,6 +192,12 @@ def main():
           cgl.count("nvk_zink_ref(previous_zink);") == 2 and cgl.count("nvk_zink_unref(previous_zink);") == 2)
     check("nvk_iosurface_group_release holds the saved context across its borrowed bind",
           "nvk_zink_ref(previous);" in ios and ios.count("nvk_zink_unref(previous);") == 3)
+    fast = re.search(r"static struct nvk_cgl_bridge \*bridge_current\(void \*engine\)\n\{(.*?)pthread_mutex_lock", cgl,
+                     re.S)
+    check("bridge_current decides whether its cached bridge holds by the cached context and engine, before it reads "
+          "the bridge", fast is not None and "thread_context != context" in fast.group(1)
+          and "thread_engine != engine" in fast.group(1) and "thread_bridge->" not in fast.group(1),
+          fast.group(1) if fast else "bridge_current not found")
     if body is None:
         print(f"{fails} failed")
         return 1
@@ -211,7 +219,7 @@ def main():
             return 1
         rp = subprocess.run([str(binary)], capture_output=True, text=True)
         print(rp.stdout, end="")
-        if rp.stderr.strip():
+        if rp.returncode != 0 and rp.stderr.strip():   # the control's own fault is expected and not printed
             print(rp.stderr, end="")
         cases = {ln.split()[1] for ln in rp.stdout.splitlines() if ln.startswith(("ok", "FAIL")) and len(ln.split()) > 1}
         expected = {"deferred_alive", "deferred_freed_at_next_bind", "deferred_new_current", "own_thread_freed_now",

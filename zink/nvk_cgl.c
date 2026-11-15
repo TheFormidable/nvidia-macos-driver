@@ -98,6 +98,12 @@ static struct native_cleanup *native_quarantine;
 static _Atomic unsigned generation;
 static _Thread_local unsigned thread_generation;
 static _Thread_local struct nvk_cgl_bridge *thread_bridge;
+/* The CGL context and engine thread_bridge was looked up for. The fast path of
+ * bridge_current compares these instead of reading thread_bridge: a cached
+ * bridge of a context this thread no longer has current may be freed by
+ * another thread at any time. */
+static _Thread_local CGLContextObj thread_context;
+static _Thread_local void *thread_engine;
 static _Thread_local const char *last_error;
 static int materialize(struct nvk_cgl_bridge *b);
 static void release_gpu_present(struct nvk_cgl_bridge *b);
@@ -192,12 +198,15 @@ static struct nvk_cgl_bridge *bridge_current(void *engine)
    unsigned current_generation = atomic_load(&generation);
    CGLContextObj context = CGLGetCurrentContext();
    if (thread_generation != current_generation || !thread_bridge ||
-       thread_bridge->context != context || thread_bridge->engine != engine) {
+       thread_context != context || thread_engine != engine) {
       pthread_mutex_lock(&bridges_lock);
       thread_bridge = find_bridge(context);
+      thread_context = context; thread_engine = engine;
       thread_generation = atomic_load(&generation);
       pthread_mutex_unlock(&bridges_lock);
    }
+   /* thread_bridge is now the bridge of the context current on this thread;
+    * CGL does not allow another thread to destroy a context current here. */
    if (!thread_bridge || thread_bridge->engine != engine ||
        (!thread_bridge->zink && !materialize(thread_bridge)) ||
        !nvk_zink_make_current(thread_bridge->zink)) {
