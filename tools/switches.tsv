@@ -383,6 +383,7 @@ env	NVMTL_OSVER_TEST_REAL	dev	unset	2.9	-	unreviewed
 env	NVMTL_OS_VERSION	dev	unset	2.9	-	unreviewed
 env	NVMTL_PAR_SIGCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PERF_LOG	diag	unset	2.9	-	unreviewed
+env	NVMTL_PHOTOBOOTH_FLIP	escape	on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9)	3.0	3.2	In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched.
 env	NVMTL_PIPELINE_THREADS	dev	unset	2.9	-	unreviewed
 env	NVMTL_PLANE_FOLLOW	escape	on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch)	3.0	3.2	When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so.
 env	NVMTL_PLANE_SEED	dev	unset	2.9	-	unreviewed
