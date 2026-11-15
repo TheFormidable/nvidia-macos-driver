@@ -1911,7 +1911,7 @@ make_tool_links() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- components
-ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost vulkan plugin xlate nvencvt"
+ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt"
 EXTRA_COMPONENTS="selector nmkbl nmhda"
 # comp_info <name>: C_DEPS (components), C_SRC (checkout paths whose contents it is built from, scripts included),
 # C_VARS (variables it reads), C_PINS (the build/pins.sh entries it is built from, by name prefix), C_OUT (a file that
@@ -1948,6 +1948,9 @@ comp_info() {
            C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR= SPIRVLLVM_ SPIRVHEADERS_"
            C_TOOLS="xcode patch nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
+    # nvkbridge: the native Vulkan presentation runtime, built from this build's NVK (tools/nvk-bridge/README.md)
+    nvkbridge) C_DESC="the native Vulkan presentation runtime (libnvk_minecraft.dylib)"; C_DEPS="nvk"; C_SRC="tools/nvk-bridge"
+           C_OUT="$O/nvkbridge/lib/libnvk_minecraft.dylib" ;;
     vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
            C_OUT="$O/vulkan-loader/libvulkan.1.dylib" ;;
     plugin) C_DESC="the Metal plugin (NVMTLDriver, $NM_FLAVOUR)"; C_SRC="build/build_plugin_release.sh build/build_plugin_dev.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt plugin"
@@ -2160,6 +2163,9 @@ run_component() {
         say "STOP: libvulkan_nouveau.dylib loads a library from outside macOS (above): a Homebrew library leaked into the build" | tee -a "$CUR_LOG"; return 5
       fi ;;
     boost) x mkdir -p "$O/boost"; x "${STEP_ENV[@]}" bash "$HERE/tools/nvmtl-boost/build.sh" "$O/nvk-build/mesa" "$O/boost/nvmtl-boost" ;;
+    nvkbridge)   # NVK's library and the Vulkan headers of the Mesa tree it was built from
+      [ ! -e "$O/nvkbridge" ] || safe_rm "$O/nvkbridge"
+      x "${STEP_ENV[@]}" bash "$HERE/tools/nvk-bridge/build.sh" "$O/nvk/libvulkan_nouveau.dylib" "$O/nvk-build/mesa/include" "$O/nvkbridge" ;;
     vulkan)
       x "${STEP_ENV[@]}" "NM_KHRONOS_URL=${NM_KHRONOS_URL:-file://$KHRONOS}" bash "$HERE/build/build_vulkan_loader.sh" "$O/vulkan-loader" ;;
     plugin)
@@ -2294,7 +2300,7 @@ expand_components() {   # names and groups -> component names in build order
     case "$a" in
       all) out="$out$ALL_COMPONENTS " ;;
       kexts) out="$out rm kms nvrm fb accel agdc nmsmn " ;;
-      userland) out="$out airdis dlss osver nvk boost vulkan plugin xlate nvencvt " ;;
+      userland) out="$out airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt " ;;
       *) comp_info "$a" >/dev/null 2>&1 || die "unknown component '$a'. Components: $ALL_COMPONENTS $EXTRA_COMPONENTS (groups: all kexts userland)"
          [ "$a" != package ] || die "use ./build.sh package"
          out="$out$a " ;;
