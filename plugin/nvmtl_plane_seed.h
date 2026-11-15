@@ -39,4 +39,31 @@ static inline int nvmtl_ps_covers(const nvmtl_ps *p, uint32_t surf, uint64_t coo
     }
     return have == now_seed;
 }
+/* Planes that live in their own VRAM carry a tag in the surface: "this plane's VRAM is current at seed X". Marking one
+   plane's VRAM newest in the kernel moves the surface's one seed, so the tags of the other planes fell one seed behind,
+   and the plane marked first was locked, paged off and uploaded again at its next use: once per captured frame in
+   WindowServer. 1 when the seed went from `before` (read just before the mark) to `after` (read just after it) through
+   that mark alone, so that a tag current at `before` may be moved to `after`: the mark took (`marked` 0; 1 is a lock that
+   was taken, -1 a refusal, and neither moves the seed) and the seed moved by exactly one. A larger move has someone
+   else's write in it, and no move leaves the tags current as they are. */
+static inline int nvmtl_ps_mark_moved(int marked, uint32_t before, uint32_t after)
+{
+    return marked == 0 && (uint32_t)(after - before) == 1u;
+}
+/* That rule rests on one thing this driver's code cannot show: that every mark that takes moves the seed by exactly
+   one. The move is made by the accelerator family (IOSurfaceDeviceCache::setCurrent), not by us. If a mark could take
+   without moving the seed, a move by one seen around it would be someone else's write, and following it would call a
+   plane's VRAM current over newer CPU pixels. So the planar self-test measures it, in each process, before any tag
+   follows: every mark it makes is noted with the seed read just before and just after it (also a mark of VRAM that was
+   already newest, as WindowServer's mark at completion is after its mark at commit). The premise holds only when at
+   least one mark was noted and every one of them moved the seed by exactly one. The first that did not is kept for
+   the log. */
+typedef struct { uint32_t marks, by_one, odd_before, odd_after; } nvmtl_ps_premise;
+static inline void nvmtl_ps_premise_note(nvmtl_ps_premise *q, uint32_t before, uint32_t after)
+{
+    q->marks++;
+    if ((uint32_t)(after - before) == 1u) { q->by_one++; return; }
+    if (q->marks - q->by_one == 1) { q->odd_before = before; q->odd_after = after; }
+}
+static inline int nvmtl_ps_premise_holds(const nvmtl_ps_premise *q) { return q->marks > 0 && q->by_one == q->marks; }
 #endif

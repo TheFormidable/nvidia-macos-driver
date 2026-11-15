@@ -1565,6 +1565,7 @@ static bool nvmtl_surfout_import(void) {
 // been measured on a card with screen capture running; the seed behaviour it relies on (a read-write lock moves the seed by
 // exactly one, unlock reports the same value) is measured on macOS.
 #include "nvmtl_plane_seed.h"
+#include "nvmtl_plane_group.h"
 static nvmtl_ps g_ps;
 static os_unfair_lock g_ps_lock = OS_UNFAIR_LOCK_INIT;
 static BOOL nvmtl_plane_seed_on(void)
@@ -1673,6 +1674,45 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     }
 }
 - (BOOL)nvmtlSurfaceOut { return [self nvmtlSurfaceOutDirtied:NO]; }
+// NVMTL_PLANE_FOLLOW (on by default, =0 off): when our mark of one plane's VRAM moves the surface's seed, the tags of the
+// surface's other planes that were current just before it follow the move (nvmtl_ps_mark_moved, nvmtl_plane_seed.h).
+// WAS: a surface has one seed for all its planes and every mark that takes moves it, so of the two planes of an NV12
+// frame WindowServer drew for a screen share only the one marked last carried the current seed. The other one looked
+// stale at its next use: WindowServer locked the surface (a page-off of both planes in the kernel) and uploaded the
+// plane's own pixels again, waiting for the GPU on the compositor's thread, once per captured frame.
+// The tag describes the plane's VRAM, which the mark of another plane does not touch, and the move is taken for ours
+// only when the mark took and the seed moved by exactly one between the two reads around it. That is ours only if a
+// mark that takes always moves the seed by one, which is the accelerator family's doing and not in this code: were
+// there a mark that takes and moves nothing, a move by one around it would be someone else's CPU write, and the other
+// plane's tag would call its VRAM current over those newer pixels (stale chroma or luma, and unlike the marked plane's
+// own tag with the kernel still saying system memory is newest). So nothing follows until this process's planar
+// self-test has seen every one of its own marks move the seed by exactly one (nvmtl_vk_plane_mark_moves_seed); planes
+// are in their own VRAM only after that self-test passed, so the answer is known before the first follow could happen.
+// Where the family moves the seed some other way, the tags stay as they were before this change.
+static BOOL nvmtl_plane_follow_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_PLANE_FOLLOW"); on = !(e && e[0] == '0'); nvlog("VRAM tags of a surface's other planes %s our own marks (NVMTL_PLANE_FOLLOW=%s)", on ? "follow, once the self-test has measured the seed," : "do not follow", e ?: "unset"); }
+    return on && nvmtl_vk_plane_mark_moves_seed();
+}
+static unsigned long long g_plane_follow;
+static void nvmtl_vram_tags_follow(IOSurfaceRef s, NSUInteger plane, int marked, uint32_t before, uint32_t after)
+{
+    if (!nvmtl_ps_mark_moved(marked, before, after)) return;
+    const size_t planes = IOSurfaceGetPlaneCount(s);
+    if (planes < 2 || !nvmtl_plane_follow_on()) return;
+    for (size_t p = 0; p < planes; p++) {
+        if (p == plane) continue;
+        // checked and moved in one step for this process: plane p's own publication writes this tag under another monitor
+        os_unfair_lock_lock(&g_vram_tag_lock);
+        const int follows = nvmtl_vram_tag_current(s, p, before);
+        if (follows) nvmtl_vram_tag_write(s, p, after, nvmtl_vram_gen(s, p));
+        os_unfair_lock_unlock(&g_vram_tag_lock);
+        if (!follows) continue;
+        g_plane_follow++;
+        static unsigned n; if (n++ < 6 || n % 5000 == 0) nvlog("VRAM tag of surface %u plane %lu follows our mark of plane %lu (seed %u -> %u): %llu so far", (unsigned)IOSurfaceGetID(s), (unsigned long)p, (unsigned long)plane, before, after, g_plane_follow);
+    }
+}
 // A re-mark after the commit's (nvmtlSurfaceOutDirtied:) that found the accelerator lock taken is retried here, off the
 // completion thread: a CPU lock that paged the surface off between the commit's two marks would otherwise leave its
 // unfinished copy current until the surface is drawn again. Each retry is again a try that never waits for the lock,
@@ -1683,17 +1723,20 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     static dispatch_queue_t queue; static dispatch_once_t once;
     dispatch_once(&once, ^{ queue = dispatch_queue_create("nvmtl.surface-remark", DISPATCH_QUEUE_SERIAL); });
     dispatch_async(queue, ^{
-        int marked = 1;
+        int marked = 1; uint32_t after = seed;
         for (int i = 0; i < 50 && marked > 0; i++) {
             if (i) usleep(2000);
             if (IOSurfaceGetSeed(r->_surf) != seed) return;
             marked = nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+            after = IOSurfaceGetSeed(r->_surf);
         }
         if (marked) return;
         @synchronized (nvmtl_surface_sync(r)) {
             if (r->_surfSeed != seed) return;
             const uint32_t now = IOSurfaceGetSeed(r->_surf);
             r->_surfSeed = now; r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, now);
+            // the other planes follow the move this mark made (seed was read right before the try, after right behind it)
+            if (now == after) nvmtl_vram_tags_follow(r->_surf, r->_plane, marked, seed, after);
         }
     });
 }
@@ -1709,12 +1752,14 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
+    const uint32_t before = r->_vramOn ? IOSurfaceGetSeed(r->_surf) : 0;   // right before the mark: nvmtl_vram_tags_follow
     const int marked = !r->_vramOn ? -1 : dirtied ? nvmtl_vk_surface_dirty_try((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)
                                                    : nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
     if (r->_vramOn && (dirtied || !marked)) {
         uint32_t seed = IOSurfaceGetSeed(r->_surf);
         r->_surfSeed = seed; r->_surfSynced = YES;
         r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
+        nvmtl_vram_tags_follow(r->_surf, r->_plane, marked, before, seed);
         if (dirtied && marked > 0) nvmtl_surface_remark_later(r, seed);
         static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
         return YES;
@@ -1749,6 +1794,94 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
     return YES;
     }
+}
+// NVMTL_SURFOUT_PLANES (on by default, =0 off): the planes of a two-plane surface written through private images (the NV12
+// frames WindowServer draws for ScreenCaptureKit) are published together: one read-write lock, one submission, one fence
+// wait (nvmtl_plane_group.h decides which publications qualify). WAS: each plane was its own surface-out, so a captured
+// frame cost WindowServer's completion thread two GPU round trips, and the second plane's lock moved the surface's one
+// seed past the seed the first plane had just recorded. The first plane then looked stale and was uploaded again at its
+// next bind, a third round trip, on the compositor's thread. While a game keeps the GPU busy each round trip waits for
+// the game's timeslice. (Reported with a screen share running: the desktop and the game fall from 199 to 40 frames a
+// second. What share of that these round trips are has not been measured on a card.)
+static BOOL nvmtl_surfout_planes_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURFOUT_PLANES"); on = !(e && e[0] == '0'); nvlog("surface-out of two-plane surfaces: planes %s (NVMTL_SURFOUT_PLANES=%s)", on ? "together" : "one by one", e ?: "unset"); }
+    return on;
+}
+static unsigned long long g_surfout_planes, g_surfout_planes_split, g_surfout_planes_moved;
+// The copy-out of every plane in roots: the root textures of one surface, one per plane, in plane order, all private.
+// The caller holds every plane's monitor (nvmtl_surface_out_planes takes them in plane order). -1: not tried (a plane
+// is not copyable), and the caller publishes each plane on its own as before. Otherwise the planes that were NOT
+// copied out, one bit per plane index: 0 = every plane is published. A plane that was copied out is published whatever
+// became of the others, as it was when each plane had its own surface-out.
+static int nvmtl_surface_out_planes_held(NSArray<NVMTLTexture *> *roots)
+{
+    const NSUInteger n = roots.count;
+    IOSurfaceRef s = roots[0]->_surf;
+    int every = 0;
+    for (NVMTLTexture *r in roots) { if (r->_surf != s || r->_vramOn || r->_plane >= NVMTL_PG_MAX_PLANES || ![r nvmtlSurfaceCopyable]) return -1; every |= 1 << r->_plane; }
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
+    uint32_t lockSeed = 0;
+    if (IOSurfaceLock(s, lockopt, &lockSeed) != kIOReturnSuccess) { nvlog("G13 surface-out (planes together): IOSurfaceLock FAILED"); return every; }
+    nvk_image *img[NVMTL_PG_MAX_PLANES]; nvk_buffer *cache[NVMTL_PG_MAX_PLANES];
+    void *base[NVMTL_PG_MAX_PLANES]; size_t row[NVMTL_PG_MAX_PLANES], bytes[NVMTL_PG_MAX_PLANES];
+    BOOL whole = nvmtl_surfout_import();
+    for (NSUInteger k = 0; k < n; k++) {
+        NVMTLTexture *r = roots[k];
+        base[k] = IOSurfaceGetBaseAddressOfPlane(s, (uint32_t)r->_plane);
+        row[k] = IOSurfaceGetBytesPerRowOfPlane(s, (uint32_t)r->_plane);
+        bytes[k] = base[k] ? IOSurfaceGetAllocSize(s) - (size_t)((uint8_t *)base[k] - (uint8_t *)IOSurfaceGetBaseAddress(s)) : 0;
+        img[k] = &r->_i; cache[k] = &r->_hostPages;
+        if (!base[k] || !row[k]) whole = NO;
+    }
+    // one submission for every plane; when a plane's pages cannot be imported (-1: nothing was recorded), each plane is
+    // read back on its own, still under this one lock, so the seed still moves once. A submission that failed (-2) is
+    // not tried again plane by plane: the readback of every plane failed.
+    int notOut = 0;
+    const int rc = whole ? nvmtl_vk_image_read_host_planes(roots[0]->_q, (int)n, img, base, row, bytes, cache) : -1;
+    if (rc == -1) {
+        g_surfout_planes_split++;
+        for (NSUInteger k = 0; k < n; k++) {
+            int one = -1;
+            if (base[k] && row[k] && nvmtl_surfout_import()) one = nvmtl_vk_image_read_host(roots[k]->_q, img[k], base[k], row[k], bytes[k], cache[k]);
+            if (one) one = (base[k] && row[k]) ? nvmtl_vk_image_read(roots[k]->_q, img[k], base[k], row[k]) : -1;
+            if (one) notOut |= 1 << roots[k]->_plane;
+        }
+    } else if (rc) notOut = every;
+    uint32_t seed = 0; IOReturn unlocked = IOSurfaceUnlock(s, lockopt, &seed); if (lockopt) seed = IOSurfaceGetSeed(s);
+    if (unlocked != kIOReturnSuccess) notOut = every;
+    if (notOut) nvlog("G13 surface-out (planes together): readback FAILED (surface %u, planes 0x%x of 0x%x)", (unsigned)IOSurfaceGetID(s), (unsigned)notOut, (unsigned)every);
+    if (notOut == every) return notOut;
+    if (!lockopt && seed != lockSeed) g_surfout_planes_moved++;   // someone else's lock overlapped ours: see the log below
+    // Every plane copied out under this lock holds what the CPU pages hold at its unlock, so every one of them follows
+    // the seed the unlock reported, as the single plane of a plane-by-plane surface-out does. A later move of the seed
+    // (another process's lock, a CPU write) still differs from it and uploads the planes again. A plane that was not
+    // copied out keeps the seed it had, as after its own failed surface-out.
+    for (NVMTLTexture *r in roots) if (!(notOut & (1 << r->_plane))) { r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = nvmtl_vram_gen(s, r->_plane); }
+    if (notOut) return notOut;
+    g_surfout_planes++;
+    static unsigned no; if (no++ < 6 || no % 2000 == 0)
+        nvlog("G13 surface-out, planes together #%llu: surface %u, %lu planes, %llu split, %llu with a foreign seed move, lock %u unlock %u, %.2f ms",
+              g_surfout_planes, (unsigned)IOSurfaceGetID(s), (unsigned long)n, g_surfout_planes_split, g_surfout_planes_moved, lockSeed, seed,
+              (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
+    return 0;
+}
+// The monitors of every plane, taken in plane order (roots are sorted by plane; nothing else takes two of them), then the
+// copy-out. Lock order: monitor of plane 0, then plane 1, ..., then the IOSurface lock, as a single plane's surface-out
+// takes its one monitor and then the IOSurface lock.
+static int nvmtl_surface_out_planes_from(NSArray<NVMTLTexture *> *roots, NSUInteger held)
+{
+    if (held == roots.count) return nvmtl_surface_out_planes_held(roots);
+    int rc;
+    @synchronized (nvmtl_surface_sync(roots[held])) { rc = nvmtl_surface_out_planes_from(roots, held + 1); }
+    return rc;
+}
+static int nvmtl_surface_out_planes(NSArray<NVMTLTexture *> *roots)
+{
+    if (roots.count < 2 || roots.count > NVMTL_PG_MAX_PLANES) return -1;
+    return nvmtl_surface_out_planes_from(roots, 0);
 }
 - (NSUInteger)width  { return MAX(1u, [self nvi]->w >> _baseLevel); }
 - (NSUInteger)height { return MAX(1u, [self nvi]->h >> _baseLevel); }

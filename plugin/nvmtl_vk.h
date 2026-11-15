@@ -343,6 +343,11 @@ int  nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byt
 int  nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes);
 int  nvmtl_vk_image_write_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache);
 int  nvmtl_vk_image_read_host(nvk_queue *q, nvk_image *img, void *base, size_t row_bytes, size_t bytes, nvk_buffer *cache);
+// several images (the planes of one surface) copied into their own imported pages in one submission with one wait.
+// -1, with nothing recorded, when any of them cannot use the imported-pages path: the caller reads each on its own.
+// -2 when the submission or its wait failed: the readback failed, as a single image's does
+int  nvmtl_vk_image_read_host_planes(nvk_queue *q, int n, nvk_image *const *img, void *const *base, const size_t *row_bytes,
+                                     const size_t *bytes, nvk_buffer *const *cache);
 void nvmtl_vk_host_pages_drop(nvk_buffer *cache);
 /* The surface and cookie the next host-page copy on this thread belongs to (cookie 0 = none): lets wrappers of one surface share an import (NVMTL_HOST_PAGES_SHARE=1). */
 void nvmtl_vk_host_pages_key(uint32_t surface_id, uint64_t cookie);
@@ -568,12 +573,14 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
 /* Two-plane surfaces whose planes live in their own VRAM (nvmtl_plane_alias.h). vram_ranged: one plane's VRAM granted with
    its byte range. plane_vram_gate: NULL when the accelerator offers ranged grants and its page-off waits unlocked, else
    why not. plane_vram_state: 1 the process's self-test passed; 0 not now; -1 the caller must start the self-test (one
-   caller per process). plane_vram_verdict: the self-test's result, logged once. plane_image_create: an eligible plane as
+   caller per process). plane_mark_moves_seed: 1 once that self-test passed and saw each of its marks move the surface's
+   seed by exactly one. plane_vram_verdict: the self-test's result, logged once. plane_image_create: an eligible plane as
    a texture over its VRAM (0: *vb and *img are the caller's). plane_selftest: the round trip on a private surface,
    r->step 0 = passed; it waits for the GPU and the kernel, so never on a caller's thread. */
 int nvmtl_vk_surface_vram_ranged(uint32_t surfaceID, uint32_t plane, uint64_t off, uint64_t len, nvk_buffer *out);
 const char *nvmtl_vk_plane_vram_gate(void);
 int  nvmtl_vk_plane_vram_state(void);
+int  nvmtl_vk_plane_mark_moves_seed(void);
 void nvmtl_vk_plane_vram_verdict(const nvmtl_pa_result *r, uint64_t ns);
 int  nvmtl_vk_plane_image_create(uint32_t surfaceID, const nvmtl_pa_surface *s, uint32_t plane, uint32_t w, uint32_t h, uint32_t vkf,
                                  uint32_t bpp, int a8, int storage, nvk_buffer *vb, nvk_image *img);
