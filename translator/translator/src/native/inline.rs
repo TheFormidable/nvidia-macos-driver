@@ -1886,6 +1886,44 @@ out:
     }
 
     #[test]
+    fn a_sample_through_a_nine_way_sampler_phi_is_made_once_per_sampler() {
+        // Apple's GL resolving a sampler2D argument (Complementary's GetReflection) by a switch
+        // over nine samplers
+        let params: Vec<String> = (0..9).map(|k| format!("ptr addrspace(2) %s{k}")).collect();
+        let cases: String = (1..9).map(|k| format!("    i32 {k}, label %c{k}\n")).collect();
+        let arms: String = (1..9).map(|k| format!("c{k}:\n  br label %after\n")).collect();
+        let incoming: Vec<String> = std::iter::once("[ %s0, %entry ]".to_string())
+            .chain((1..9).map(|k| format!("[ %s{k}, %c{k} ]")))
+            .collect();
+        let mut f = FuncBlock {
+            header: format!(
+                "define <4 x float> @r(ptr addrspace(1) %t, {}, i32 %k) {{",
+                params.join(", ")
+            ),
+            body: format!(
+                "entry:\n  switch i32 %k, label %after [\n{cases}  ]\n{arms}after:\n  %smp = phi ptr addrspace(2) {}\n  \
+                 %r = call {{ <4 x float>, i8 }} @air.sample_texture_2d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) %smp, i32 0)\n  \
+                 %v = extractvalue {{ <4 x float>, i8 }} %r, 0\n  ret <4 x float> %v",
+                incoming.join(", ")
+            )
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        };
+        assert!(split_sampler_phi_samples_in(&mut f));
+        let text = f.body.join("\n");
+        assert!(!text.contains("phi ptr addrspace(2)"), "{text}");
+        for k in 0..9 {
+            assert!(
+                text.contains(&format!("ptr addrspace(2) %s{k}, i32 0)")),
+                "a read of %s{k}:\n{text}"
+            );
+        }
+        assert_eq!(text.matches(" = icmp eq i32 ").count(), 8, "{text}");
+        assert!(text.contains("%r = select i1 "), "{text}");
+    }
+
+    #[test]
     fn caller_phi_pred_relabeled_to_cont() {
         let src = "\
 define internal i32 @id(i32 %0) {
@@ -2422,8 +2460,11 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
                 && once
                 && after.is_some_and(|a| a.starts_with(',') || a.starts_with(')'))
         };
+        // A stage binds at most 16 Metal samplers, so a pick among them has at most that many
+        // incoming samplers: Complementary's GetReflection takes a sampler2D argument that
+        // Apple's GL resolves with a nine-way switch.
         if incoming.is_empty()
-            || !(2..=8).contains(&samplers.len())
+            || !(2..=16).contains(&samplers.len())
             || samplers.iter().any(|v| !(v.starts_with('@') || dominating.contains(v)))
             || uses.is_empty()
             || !uses.iter().all(|&j| use_ok(j))
