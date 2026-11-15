@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 6 | 1 | 55 | 408 | 12 |  | 488 |
 | bootarg | 4 | 13 | 30 | 21 | 11 |  | 8 | 6 | 2 |  | 95 |
-| sysctl |  | 5 | 4 | 12 |  |  | 349 |  |  |  | 370 |
+| sysctl |  | 5 | 4 | 12 |  |  | 352 |  |  |  | 373 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -748,6 +748,9 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_pageoff_unlocked_waits` | diag | read-only | 2.9 | - | page-offs that waited for the GPU without the accelerator lock | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_res_free` | diag | read-only | 2.9 | - | NVResource objects freed | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_res_new` | diag | read-only | 2.9 | - | NVResource objects created | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_mark_lock_wait_max_us` | diag | read-only | 3.0 | - | longest wait of a surface VRAM mark or grant for the accelerator lock, us | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_mark_lock_wait_us` | diag | read-only | 3.0 | - | time those marks and grants waited for the accelerator lock, in total, us | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_mark_lock_waits` | diag | read-only | 3.0 | - | surface VRAM marks and grants that found the accelerator lock taken and waited for it | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_plane_validbits` | diag | read-only | 3.0 | - | OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_planes` | diag | read-only | 3.0 | - | 1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence` | diag | read-only | 3.0 | - | 1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |

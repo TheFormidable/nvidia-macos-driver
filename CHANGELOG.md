@@ -382,6 +382,11 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   at the start of a line, so a file copied from that example set no mode and named no process, and `mode apple` with a
   blank after it set nothing either. Such a file takes effect with this release: copied whole, the example gives
   `mode apple` (the last of its two `mode` lines) and its two process rules.
+- Three read-only counters say what the accelerator's lock costs the threads that mark surfaces, a screen share's
+  copies among its holders: `debug.nvaccel_surf_mark_lock_waits` (marks and grants that found the lock taken and
+  waited), `debug.nvaccel_surf_mark_lock_wait_us` (the time they waited, in total) and
+  `debug.nvaccel_surf_mark_lock_wait_max_us` (the longest wait; a value near 100000 means a page-off waited for the
+  GPU with the lock held). They change nothing the driver does.
 
 ### The ways back
 
