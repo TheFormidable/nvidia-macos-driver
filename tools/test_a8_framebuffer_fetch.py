@@ -134,7 +134,7 @@ def main():
         print('SKIP: no C compiler')
         return 2
     if COUNT not in HEADER:
-        print('FAIL: nvmtl_spirv_a8_fetch no longer counts the reads the way this test\'s control expects')
+        print('FAIL: nvmtl_spirv_a8_fetch does not count the reads the way this test\'s control expects')
         return 1
     with tempfile.TemporaryDirectory(prefix='nvmtl-a8-fetch-') as d:
         rc, out = run(d, HEADER, 'current')
