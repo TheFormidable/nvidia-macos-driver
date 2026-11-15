@@ -33,9 +33,9 @@ Vulkan driver is the copy of this build's NVK that the nvkbridge component carri
    adapter at run time; when the adapter or one of its two entry points is missing, the bundle only forwards and
    OpenGL stays Apple's.
 3. The adapter leaves a context with Apple's renderer when Zink cannot start in this process (no NVK device, for
-   example), when the application asked for a profile Zink does not serve, when `NVKZINK_DISABLE=1` is set, in OBS
-   (below), and when the GLEngine private layout the adapter reads and writes does not match the record (next
-   section). Otherwise it saves GLEngine's dispatch table and puts its own entries in the context's table.
+   example), when the application asked for a profile Zink does not serve, in OBS (below), and when the GLEngine
+   private layout the adapter reads and writes does not match the record (next section). Otherwise it saves
+   GLEngine's dispatch table and puts its own entries in the context's table.
 
 ## Where the layout comes from
 
@@ -90,22 +90,17 @@ also refused, which keeps Apple's OpenGL working even where it costs the Zink pa
 
 For a context with an AppKit view, frames are copied on the GPU into the IOSurface of the window's CAMetalLayer
 drawable, through the same IOSurface import, completion fence and dirty notification NVK already offers the plugin
-(`nvmtl_nvk_stage_import`, `nvmtl_nvk_surface_dirty`). A context without a view presents through an IOSurface.
+(`nvmtl_nvk_stage_import`, `nvmtl_nvk_surface_dirty`). A context without a view, or one whose layer cannot be used,
+presents through an IOSurface that NVK imports. No frame goes through a CPU copy.
 
-## Switches
+## The way out
 
-All are rows in tools/switches.tsv (docs/SWITCHES.md).
+Native OpenGL has one way out, boot argument `nvzink=0` (a row in tools/switches.tsv, docs/SWITCHES.md): the
+accelerator names AppleMetalOpenGLRenderer again, read once when it starts, so every application keeps Apple's
+OpenGL. Nothing else switches native OpenGL off or changes how it presents.
 
-| Switch | What it does |
-|---|---|
-| boot argument `nvzink=0` | the accelerator names AppleMetalOpenGLRenderer again; read once when it starts |
-| `NVKZINK_DISABLE=1` | one application's OpenGL stays Apple's |
-| `NVKZINK_PRESENT=gpu`, `cpu` or `native` | the IOSurface path for every context, a CPU copy, or the layer path with no fallback (default `auto`) |
-| `NVKZINK_OBS_COMPAT=0` | in OBS, OpenGL runs on Zink as well and its screen capture keeps RGBA16F |
-| OBS preference `NVKZinkCaptureCompatibility` (`defaults write com.obsproject.obs-studio NVKZinkCaptureCompatibility -bool NO`) | the same as `NVKZINK_OBS_COMPAT=0`; the variable wins when set |
-
-In OBS, by default, OpenGL stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before
-the first frame on this driver.
+In OBS, OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the
+first frame on this driver.
 
 ## Install and removal
 

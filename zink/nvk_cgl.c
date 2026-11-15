@@ -65,16 +65,13 @@ struct nvk_cgl_bridge {
    void *original[PREFIX_BYTES / sizeof(void *)];
    nvk_zink_proc procs[MAX_ENTRIES];
    GLuint present_texture, present_fbo;
-   unsigned char *present_pixels;
-   size_t present_capacity;
-   unsigned present_width, present_height;
    struct {
       IOSurfaceRef surface;
       GLuint texture;
       GLsync fence;
    } gpu_present[2];
    unsigned gpu_width, gpu_height, gpu_slot;
-   bool present_configured, gpu_disabled, native_present, native_required, apple_uncertain;
+   bool present_configured, native_present, apple_uncertain;
    void *driver;
    void **engine_back;
    void *apple_back[sizeof(GLIFunctionDispatch) / sizeof(void *)];
@@ -557,10 +554,9 @@ static void release_integer_dispatch(struct nvk_cgl_bridge *b)
 EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
 {
    if (!engine || !driver) return 0;
-   /* Keep an entire application's GL objects in Apple's driver when testing
-    * clients that require CGL/IOSurface interop. Never switch a live context. */
-   const char *disabled = getenv("NVKZINK_DISABLE");
-   if ((disabled && !strcmp(disabled, "1")) || nvk_cgl_obs_compatibility_enabled()) return 0;
+   /* OBS keeps all of its GL objects in Apple's driver, together with its
+    * CGL/IOSurface interop. Never switch a live context. */
+   if (nvk_cgl_obs_compatibility_enabled()) return 0;
    if (native_surface_copy_context()) return 0;
    if (!nvk_zink_screen_ready()) return 0;
    /* Prove the recorded private offsets land in memory shaped as the record says
@@ -665,7 +661,6 @@ EXPORT void nvk_cgl_destroy_gld(void *driver)
    nvk_zink_destroy(b->zink);
    release_integer_dispatch(b);
    free(b->api_extensions);free(b->api_extension_string);
-   free(b->present_pixels);
    free(b->cleanup_reserve);
    free(b);
 }
@@ -985,13 +980,10 @@ static int present_drawable(CGLContextObj context)
    if (!prepare_iosurface_flush(b)) return 0;
    drain_native_cleanups(b);
    if (b->apple_uncertain) return fail("Apple presentation completion uncertain; resources quarantined");
+   /* A context with an AppKit view presents through a CAMetalLayer; one
+    * without a view, or whose layer cannot be used, through Apple's IOSurface. */
    if (!b->present_configured) {
-      const char *mode = getenv("NVKZINK_PRESENT");
-      if (mode && strcmp(mode, "auto") && strcmp(mode, "gpu") && strcmp(mode, "native") && strcmp(mode, "cpu"))
-         return fail("NVKZINK_PRESENT must be auto, native, gpu or cpu");
-      b->gpu_disabled = mode && !strcmp(mode, "cpu");
-      b->native_required = mode && !strcmp(mode, "native");
-      b->native_present = !mode || !strcmp(mode, "auto") || b->native_required;
+      b->native_present = true;
       b->present_configured = true;
    }
    if (b->native_present) {
@@ -1007,15 +999,14 @@ static int present_drawable(CGLContextObj context)
                 !has_drawable)
                return 2; /* No output yet: do not blit into an unattached Apple FBO. */
          }
-         if (b->native_required) return fail("Native presentation needs an AppKit view and matching NVIDIA drawable");
          /* CGL clients without an NSView retain the GPU IOSurface path.
           * Never fall back after an uncertain submission or to CPU pixels. */
          if (acquired != NVK_NATIVE_NO_VIEW) {
             nvk_native_remove(context);
             b->native_present = false;
          }
-         /* Early Cocoa swaps may precede setView/update. Keep auto eligible
-          * for native presentation once that view is attached. */
+         /* Early Cocoa swaps may precede setView/update. Keep the context
+          * eligible for native presentation once that view is attached. */
       } else {
       int copied = nvk_zink_present_native(b->zink, surface, opaque_drawable(context));
       if (copied < 0) {
@@ -1029,54 +1020,8 @@ static int present_drawable(CGLContextObj context)
       return nvk_zink_swap(b->zink);
       }
    }
-   if (!b->gpu_disabled) {
-      if (!prepare_gpu_present(b)) return fail("GPU presentation needs NVK host import and Apple IOSurface textures");
-      return gpu_present(b);
-   }
-   size_t row = (size_t)b->width * 4;
-   if (row > SIZE_MAX / b->height) return fail("Drawable size overflow");
-   size_t size = row * b->height;
-   if (size > b->present_capacity) {
-      unsigned char *pixels = realloc(b->present_pixels, size);
-      if (!pixels) return fail("Out of memory during presentation");
-      b->present_pixels = pixels; b->present_capacity = size;
-   }
-   int ok = nvk_zink_readback_bottom_up(b->zink, b->present_pixels, size, row);
-   if (!ok) return fail("Zink readback failed");
-   if (opaque_drawable(context))
-      for (size_t i = 3; i < size; i += 4) b->present_pixels[i] = 255;
-   /* Apple GL state is private to the presentation side. The application's
-    * Mesa GL state is untouched, including its FBOs, pixel stores and buffers. */
-   use_original(b);
-   if (!reserve_native_cleanup(b)) { use_zink(b); return fail("Cannot reserve native presentation cleanup"); }
-   if (!b->present_texture) glGenTextures(1, &b->present_texture);
-   if (!b->present_fbo) glGenFramebuffers(1, &b->present_fbo);
-   glBindTexture(GL_TEXTURE_2D, b->present_texture);
-   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-   if (b->present_width != b->width || b->present_height != b->height) {
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, b->width, b->height, 0,
-                   GL_RGBA, GL_UNSIGNED_BYTE, b->present_pixels);
-      b->present_width = b->width; b->present_height = b->height;
-   } else {
-      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, b->width, b->height,
-                      GL_RGBA, GL_UNSIGNED_BYTE, b->present_pixels);
-   }
-   glBindFramebuffer(GL_READ_FRAMEBUFFER, b->present_fbo);
-   glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                          GL_TEXTURE_2D, b->present_texture, 0);
-   glReadBuffer(GL_COLOR_ATTACHMENT0);
-   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-   GLint double_buffer = 0;
-   glGetIntegerv(GL_DOUBLEBUFFER, &double_buffer);
-   glDrawBuffer(double_buffer ? GL_BACK : GL_FRONT);
-   glBlitFramebuffer(0, 0, b->width, b->height, 0, 0, b->width, b->height,
-                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
-   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-   GLenum error = glGetError();
-   CGLError swap_error = CGLFlushDrawable(context);
-   use_zink(b);
-   if (error != GL_NO_ERROR || swap_error != kCGLNoError) return fail("Apple drawable upload or swap failed");
-   return nvk_zink_swap(b->zink);
+   if (!prepare_gpu_present(b)) return fail("GPU presentation needs NVK host import and Apple IOSurface textures");
+   return gpu_present(b);
 }
 
 EXPORT int nvk_cgl_present(CGLContextObj context)
@@ -1137,7 +1082,6 @@ EXPORT int nvk_cgl_detach(CGLContextObj context)
    nvk_zink_destroy(b->zink);
    release_integer_dispatch(b);
    free(b->api_extensions);free(b->api_extension_string);
-   free(b->present_pixels);
    free(b->cleanup_reserve);
    free(b);
    CGLUnlockContext(context);

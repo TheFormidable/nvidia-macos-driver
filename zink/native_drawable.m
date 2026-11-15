@@ -59,9 +59,7 @@ static id<MTLDevice> metal_device(uint32_t vendor, uint32_t deviceID)
 
 void nvk_native_bind_view(CGLContextObj context, void *pointer)
 {
-   const char *mode = getenv("NVKZINK_PRESENT");
-   if (!context || ![NSThread isMainThread] ||
-       (mode && strcmp(mode, "native") && strcmp(mode, "auto"))) return;
+   if (!context || ![NSThread isMainThread]) return;
    NSView *view = (__bridge NSView *)pointer;
    NSMutableDictionary *table = bindings();
    @synchronized(table) {
