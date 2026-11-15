@@ -140,6 +140,23 @@ else
 fi
 # the plugin binary goes in before finish_package.sh, whose reseal refreshes it with the bundle's seal
 put_file "$OUT/plugin/NVMTLDriver" Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver 755
+# --- native OpenGL (zink component, docs/ZINK-OPENGL.md) ---
+# The runtime goes in nvmtl/zink, which install.sh installs, backs up and restores with nvmtl; the GL driver bundle
+# beside NVMTLDriver.bundle. Zink opens its Vulkan driver by name (@rpath/libnvk_zink_vulkan.dylib): the nvkbridge
+# component's frontend, and beside it the copy of this build's NVK that the frontend loads (libnvk_renderer.dylib).
+ZO=$OUT/zink; ZR=Library/GPUBundles/nvmtl/zink
+for f in libnvk_zink.dylib libnvk_cgl.dylib zink_sync_probe; do put_signed "$ZO/zink/$f" "$ZR/$f"; done
+for f in cgl-dispatch-map.json MESA-SOURCE.json; do put_file "$ZO/zink/$f" "$ZR/$f"; done
+[ -f "$OUT/nvkbridge/lib/libnvk_minecraft.dylib" ] && [ -f "$OUT/nvkbridge/lib/libnvk_renderer.dylib" ] ||
+  stop "native OpenGL needs the nvkbridge component's frontend and renderer ($OUT/nvkbridge/lib): build nvkbridge"
+put_signed "$OUT/nvkbridge/lib/libnvk_minecraft.dylib" "$ZR/libnvk_zink_vulkan.dylib"
+put_signed "$OUT/nvkbridge/lib/libnvk_renderer.dylib" "$ZR/libnvk_renderer.dylib"
+ZB=Library/GPUBundles/NVKZinkGLDriver.bundle
+[ -f "$ZO/NVKZinkGLDriver.bundle/Contents/Info.plist" ] || stop "$ZO/NVKZinkGLDriver.bundle was not built"
+drop_lines "$ZB"; rm -rf "${R:?}/$ZB"; mkdir -p "$(dirname "$R/$ZB")"; cp -pR "$ZO/NVKZinkGLDriver.bundle" "$R/$ZB"
+codesign --force --sign - "$R/$ZB" >/dev/null 2>&1 || stop "could not sign $ZB"
+refresh_tree "$ZB"; echo "replaced $ZB (signed ad hoc)"
+# --- end of native OpenGL ---
 if [ -d "$R/licenses" ]; then
   for f in "$HERE"/licenses/*; do if [ -f "$f" ]; then put_file "$f" "licenses/$(basename "$f")"; fi; done
   # This checkout's notice and licence too: install.sh copies licenses/ to /Library/NullMoth/licenses, and the base

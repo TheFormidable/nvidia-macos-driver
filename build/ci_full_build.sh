@@ -602,7 +602,7 @@ $rel: minos $m"; fi
 }
 
 # The logs of the build steps: a line that names Homebrew's prefix is a tool, header or library a step found there.
-COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt package spirv-llvm-translator"
+COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink package spirv-llvm-translator"
 prove_logs() {
   local w=$1 p=$2 c f n=0 hits=""
   for c in $COMPONENT_LOGS; do

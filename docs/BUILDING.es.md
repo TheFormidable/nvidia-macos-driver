@@ -330,7 +330,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
 | `NM_OGKM620` | Un árbol 620.70.06 con el RM ya compilado (se saltan `rm` y `kms`) |
 | `NM_OGKM610` | Un árbol NVIDIA 610.57.04 ya descomprimido |
-| `NM_MESA_GIT` | Un clon de Mesa con el commit 90a959eb, para NVK y para las pruebas de `./build.sh test`. El plugin no lo lee: se compila con `<workdir>/build/gpu-src/mesa/include`, que solo crea un `./build.sh fetch` sin este ajuste (o `--flavour dev` con `NM_VULKAN_INCLUDE`), y el paso del plugin se detiene si falta esa carpeta |
+| `NM_MESA_GIT` | Un clon de Mesa con el commit 90a959eb, para NVK y para las pruebas de `./build.sh test`. Si también tiene 0a6fa60a (mesa-26.3.0), Zink se compila desde él; si no, `fetch` añade ese commit a `<workdir>/src/git/mesa.git`. El plugin no lo lee: se compila con `<workdir>/build/gpu-src/mesa/include`, que solo crea un `./build.sh fetch` sin este ajuste (o `--flavour dev` con `NM_VULKAN_INCLUDE`), y el paso del plugin se detiene si falta esa carpeta |
 | `NM_VULKAN_INCLUDE` | Cabeceras de Vulkan para el plugin de desarrollo y para las pruebas de `./build.sh test` |
 | `NM_LILU_DEBUG_KEXT` | Para `nmkbl` y `nmhda` |
 | `NM_VIRTUALSMC_SRC` | Para `nmkbl` |
@@ -422,6 +422,7 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `plugin` | el plugin de Metal (NVMTLDriver) |
 | `xlate` | el traductor de shaders |
 | `nvencvt` | libnvencvt.dylib (video) |
+| `zink` | OpenGL nativo (docs/ZINK-OPENGL.md): Zink de Mesa 26.3.0, el adaptador CGL y NVKZinkGLDriver.bundle |
 | `selector` | NVPrimarySelector.kext (opcional) |
 | `nmkbl` | NMKbdBacklight.kext (opcional) |
 | `nmhda` | NMHDA.kext (opcional) |
