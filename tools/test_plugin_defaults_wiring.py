@@ -4,7 +4,8 @@
 tools/test_switch_defaults.c holds the rules of nvmtl_switch_defaults.h, tools/test_tex_upload.c the rules of
 nvmtl_tex_upload.h and tools/test_pretranslate.c the pool. This test holds the calls those cannot reach:
 
-  async reader   nvmtl_async_tex_upload in plugin/nvmtl_vk.c decides with nvmtl_async_tex_upload_default(e, getprogname())
+  async reader   nvmtl_async_tex_upload in plugin/nvmtl_vk.c decides with
+                 nvmtl_async_tex_upload_default(e, getprogname())
   pretranslate   nvmtl_pretranslate_on in plugin/NVMTLLibraryLoad.m decides with nvmtl_pretranslate_default(...) given
                  nvmtl_process_is_game(); nvmtl_pretranslate_library queues through the bounded submit (512 jobs) and
                  counts a refused job as skipped after releasing what it retained
@@ -12,8 +13,13 @@ nvmtl_tex_upload.h and tools/test_pretranslate.c the pool. This test holds the c
   surface-out    both replaceRegion methods of plugin/NVMTLObjects.m finish the upload of an IOSurface texture
                  (nvmtl_vk_image_upload_barrier) right before [self nvmtlSurfaceOut]
   the room       nvmtl_vk_image_write_region_level_layer asks nvmtl_up_room after the finish-first and before it makes
-                 the asynchronous record; the store counts an upload in and the finish counts it out
-  the hand-back  nvmtl_asyncup_store returns the handle nvmtl_up_set replaced, under the lock, and the upload finishes it
+                 the asynchronous record
+  the counts     the store counts an upload in before it publishes the handle, and every finish counts it out
+                 unconditionally
+  one way out    every stored record is finished by nvmtl_asyncup_finish (barrier, drain, finish-first, hand-back),
+                 and the failure paths before the store free their record without finishing (it was never counted)
+  the hand-back  nvmtl_asyncup_store returns the handle nvmtl_up_set replaced, under the lock, and the upload
+                 finishes it outside it: nothing is finished or waited for while g_asyncup_mutex is held
 
 Each check also runs on damaged copies of the text, which must fail it (the controls).
 Run: python3 tools/test_plugin_defaults_wiring.py [root]"""
@@ -44,7 +50,8 @@ def code(text):
 
 def body(text, head):
     """From the line that starts with `head` to the first line that is a lone closing brace, or '' when absent."""
-    pat = "".join(r"\s*" + re.escape(c) + r"\s*" if c in "(),*:" else r"\s+" if c == " " else re.escape(c) for c in head)
+    pat = "".join(r"\s*" + re.escape(c) + r"\s*" if c in "(),*:" else r"\s+" if c == " " else re.escape(c)
+                  for c in head)
     found = re.search(pat, text)
     if not found:
         return ""
@@ -56,10 +63,15 @@ def body(text, head):
 WS = r"\s*"
 
 
+def seq(*tokens):
+    """A regular expression for these tokens in this order, with any whitespace between them."""
+    return WS.join(re.escape(t) for t in tokens)
+
+
 def async_reader(s):
     b = code(body(s["vk"], "static int nvmtl_async_tex_upload(void)"))
-    return re.search(r"\bon" + WS + "=" + WS + r"nvmtl_async_tex_upload_default" + WS + r"\(" + WS + r"e" + WS + ","
-                     + WS + r"getprogname" + WS + r"\(" + WS + r"\)" + WS + r"\)" + WS + ";", b) is not None
+    return re.search(r"\b" + seq("on", "=", "nvmtl_async_tex_upload_default", "(", "e", ",", "getprogname", "(", ")",
+                                 ")", ";"), b) is not None
 
 
 def pretranslate_reader(s):
@@ -71,10 +83,12 @@ def pretranslate_reader(s):
 def pretranslate_bounded(s):
     lib = code(s["lib"])
     b = code(body(s["lib"], "void nvmtl_pretranslate_library(NVMTLLibrary *lib)"))
-    m = re.search(r"nvmtl_pool_submit_bounded" + WS + r"\(" + WS + r"nvmtl_pre_pool" + WS + r"\(" + WS + r"\)" + WS + ","
-                  + WS + r"nvmtl_pre_run" + WS + "," + WS + r"j" + WS + "," + WS + r"NVMTL_PRE_QUEUED_MAX" + WS + r"\)", b)
-    refused = re.search(r"CFRelease" + WS + r"\(" + WS + r"j->lib" + WS + r"\)[^}]*free" + WS + r"\(" + WS + r"j" + WS
-                        + r"\)[^}]*NVMTL_POOL_FULL[^}]*gPreSkipped", b, re.S)
+    m = re.search(seq("nvmtl_pool_submit_bounded", "(", "nvmtl_pre_pool", "(", ")", ",", "nvmtl_pre_run", ",", "j", ",",
+                      "NVMTL_PRE_QUEUED_MAX", ")"), b)
+    # a refused job releases both of its retains and frees itself, is counted as skipped, and the loop goes on
+    refused = re.search(seq("CFRelease", "(", "j->lib", ")", ";", "CFRelease", "(", "j->name", ")", ";",
+                            "free", "(", "j", ")") + r"[^}]*NVMTL_POOL_FULL[^}]*gPreSkipped[^}]*;"
+                        + WS + seq("continue", ";"), b, re.S)
     return (m is not None and refused is not None and re.search(r"nvmtl_pool_submit" + WS + r"\(", b) is None
             and re.search(r"#define" + WS + r"NVMTL_PRE_QUEUED_MAX" + WS + r"512\b", lib) is not None)
 
@@ -85,10 +99,9 @@ def pool_qos(s):
             and "QOS_CLASS_BACKGROUND" not in b)
 
 
-BARRIER = (r"if" + WS + r"\(" + WS + r"\(" + WS + r"_parent" + WS + r"\?" + WS + r"_parent" + WS + ":" + WS + r"self" + WS
-           + r"\)" + WS + r"->" + WS + r"_surf" + WS + r"\)" + WS + r"nvmtl_vk_image_upload_barrier" + WS + r"\(" + WS
-           + r"(\[" + WS + r"self" + WS + r"nvi" + WS + r"\]|im)" + WS + r"\)" + WS + ";" + WS + r"\[" + WS + r"self" + WS
-           + r"nvmtlSurfaceOut" + WS + r"\]")
+BARRIER = (seq("if", "(", "(", "_parent", "?", "_parent", ":", "self", ")", "->", "_surf", ")",
+               "nvmtl_vk_image_upload_barrier", "(") + WS + "(" + seq("[", "self", "nvi", "]") + "|im)" + WS
+           + seq(")", ";", "[", "self", "nvmtlSurfaceOut", "]"))
 
 
 def barrier_in(s, head):
@@ -96,8 +109,8 @@ def barrier_in(s, head):
     w = b.find("nvmtl_vk_image_write_region_level_layer")
     m = re.search(BARRIER, b)
     # the barrier is the statement right before the only surface-out, which comes after the upload
-    return w >= 0 and m is not None and m.start() > w and len(re.findall(r"\[" + WS + r"self" + WS + r"nvmtlSurfaceOut"
-                                                                         + WS + r"\]", b)) == 1
+    outs = re.findall(seq("[", "self", "nvmtlSurfaceOut", "]"), b)
+    return w >= 0 and m is not None and m.start() > w and len(outs) == 1
 
 
 REPLACE = "- (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level withBytes:"
@@ -117,31 +130,72 @@ WRITE = "int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *im
 
 def room(s):
     b = code(body(s["vk"], WRITE))
-    first = re.search(r"if" + WS + r"\(" + WS + r"finish_first" + WS + r"\)" + WS + r"nvmtl_asyncup_finish" + WS + r"\("
-                      + WS + r"img" + WS + "," + WS + r"nvmtl_asyncup_take" + WS + r"\(" + WS + r"img" + WS + r"\)", b)
-    r = re.search(r"if" + WS + r"\(" + WS + r"nvmtl_up_room" + WS + r"\(" + WS + r"held" + WS + "," + WS + r"held_bytes" + WS
-                  + "," + WS + r"bytes" + WS + r"\)" + WS + r"\)" + WS + r"\{", b)
-    alloc = re.search(r"au" + WS + "=" + WS + r"\(" + WS + r"nvmtl_asyncup" + WS + r"\*" + WS + r"\)" + WS + r"calloc", b)
-    loads = re.search(r"held" + WS + "=" + WS + r"atomic_load" + WS + r"\(" + WS + r"&" + WS + r"g_asyncup_held" + WS
-                      + r"\)" + WS + "," + WS + r"held_bytes" + WS + "=" + WS + r"atomic_load" + WS + r"\(" + WS + r"&"
-                      + WS + r"g_asyncup_held_bytes" + WS + r"\)", b)
+    first = re.search(seq("if", "(", "finish_first", ")", "nvmtl_asyncup_finish", "(", "img", ",", "nvmtl_asyncup_take",
+                          "(", "img", ")"), b)
+    r = re.search(seq("if", "(", "nvmtl_up_room", "(", "held", ",", "held_bytes", ",", "bytes", ")", ")", "{"), b)
+    alloc = re.search(seq("au", "=", "(", "nvmtl_asyncup", "*", ")", "calloc"), b)
+    loads = re.search(seq("held", "=", "atomic_load", "(", "&", "g_asyncup_held", ")", ",", "held_bytes", "=",
+                          "atomic_load", "(", "&", "g_asyncup_held_bytes", ")"), b)
     return (first is not None and r is not None and alloc is not None and loads is not None
             and first.start() < loads.start() < r.start() < alloc.start() and len(re.findall(r"calloc", b)) == 1)
 
 
+def compact(text):
+    """The code without comments (whole-line and trailing) and without any whitespace."""
+    return re.sub(r"\s+", "", re.sub(r"(?<![:\"])//[^\n]*", "", text))
+
+
+STORE = "static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)"
+FINISH = "static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)"
+
+
 def counting(s):
-    st = re.sub(r"\s+", "", code(body(s["vk"], "static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)")))
-    fi = re.sub(r"\s+", "", code(body(s["vk"], "static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)")))
-    return ("atomic_fetch_add(&g_asyncup_held,1);" in st and "atomic_fetch_add(&g_asyncup_held_bytes,au->bytes);" in st
-            and "atomic_fetch_sub(&g_asyncup_held,1);" in fi and "atomic_fetch_sub(&g_asyncup_held_bytes,au->bytes);" in fi
-            and "au->bytes=bytes;" in re.sub(r"\s+", "", code(body(s["vk"], WRITE))))
+    st = compact(body(s["vk"], STORE))
+    fi = compact(body(s["vk"], FINISH))
+    # the count is raised before the handle is published under the lock, so a finish on another thread that takes it
+    # can never lower the count first (a wrapped, huge count would turn every upload synchronous)
+    add = st.find("atomic_fetch_add(&g_asyncup_held,1);atomic_fetch_add(&g_asyncup_held_bytes,au->bytes);")
+    lock = st.find("pthread_mutex_lock(&g_asyncup_mutex);")
+    # the finish lowers it on every path, the drain of a dying image (img NULL) and a redone copy included:
+    # unconditional statements right after the redo decision and right before the record is freed
+    out = ("nvmtl_asyncup_redo(img,au);atomic_fetch_sub(&g_asyncup_held,1);"
+           "atomic_fetch_sub(&g_asyncup_held_bytes,au->bytes);nvmtl_vk_buffer_destroy(&au->stage);free(au);}")
+    return (0 <= add < lock and fi.endswith(out) and fi.count("atomic_fetch_sub(") == 2
+            and "au->bytes=bytes;" in compact(body(s["vk"], WRITE)))
+
+
+def one_way_out(s):
+    """Every stored record leaves through nvmtl_asyncup_finish, and nothing that was never stored does."""
+    vk = compact(s["vk"])
+    wr = compact(body(s["vk"], WRITE))
+    callers = ("voidnvmtl_vk_image_upload_barrier(nvk_image*img){"
+               "nvmtl_asyncup_finish(img,nvmtl_asyncup_take(img));}",
+               "staticvoidnvmtl_vk_image_upload_drain(nvk_image*img){"
+               "nvmtl_asyncup_finish(NULL,nvmtl_asyncup_take(img));}")
+    # the upload itself finishes only what it took (finish-first) or what the store handed back; its failure paths
+    # before the store free their own record and must not finish it (it was never counted in)
+    return (all(c in vk for c in callers) and vk.count("nvmtl_asyncup_finish(") == 5
+            and wr.count("nvmtl_asyncup_finish(") == 2 and vk.count("nvmtl_vk_submit_finish(&au->infl)") == 1
+            and wr.count("free(au);") == 3)
+
+
+def no_wait_under_lock(s):
+    """Neither the store nor the take finishes or waits for anything while g_asyncup_mutex is held."""
+    ok = True
+    for head in (STORE, "static uint64_t nvmtl_asyncup_take(nvk_image *img)"):
+        b = compact(body(s["vk"], head))
+        lk, un = b.find("pthread_mutex_lock(&g_asyncup_mutex);"), b.find("pthread_mutex_unlock(&g_asyncup_mutex);")
+        inside = b[lk:un] if 0 <= lk < un else ""
+        ok = ok and bool(inside) and not re.search(r"finish|wait|redo|free\(", inside)
+    return ok
 
 
 def hand_back(s):
-    st = re.sub(r"\s+", "", code(body(s["vk"], "static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)")))
-    lk, st_set, un = st.find("pthread_mutex_lock(&g_asyncup_mutex);"), st.find("constuint64_told=nvmtl_up_set(&s,token);"), \
-        st.find("pthread_mutex_unlock(&g_asyncup_mutex);")
-    wr = re.sub(r"\s+", "", code(body(s["vk"], WRITE)))
+    st = compact(body(s["vk"], STORE))
+    lk = st.find("pthread_mutex_lock(&g_asyncup_mutex);")
+    st_set = st.find("constuint64_told=nvmtl_up_set(&s,token);")
+    un = st.find("pthread_mutex_unlock(&g_asyncup_mutex);")
+    wr = compact(body(s["vk"], WRITE))
     return (0 <= lk < st_set < un and "returnold;}" in st
             and "nvmtl_asyncup_finish(img,nvmtl_asyncup_store(img,(uint64_t)(uintptr_t)au));" in wr
             and wr.count("nvmtl_asyncup_store(") == 1)
@@ -150,11 +204,13 @@ def hand_back(s):
 CHECKS = [
     ("nvmtl_async_tex_upload decides with nvmtl_async_tex_upload_default(e, getprogname())", async_reader, [
         ("vk", "on = nvmtl_async_tex_upload_default(e, getprogname());", "on = e && e[0] == '1';"),
-        ("vk", "on = nvmtl_async_tex_upload_default(e, getprogname());", "on = nvmtl_async_tex_upload_default(e, NULL);"),
+        ("vk", "on = nvmtl_async_tex_upload_default(e, getprogname());",
+         "on = nvmtl_async_tex_upload_default(e, NULL);"),
     ]),
     ("nvmtl_pretranslate_on decides with nvmtl_pretranslate_default(...) and nvmtl_process_is_game()",
      pretranslate_reader, [
-        ("lib", "on = nvmtl_pretranslate_default(e, e ? 0 : nvmtl_process_is_game());", "on = e && !strcmp(e, \"1\");"),
+        ("lib", "on = nvmtl_pretranslate_default(e, e ? 0 : nvmtl_process_is_game());",
+         "on = e && !strcmp(e, \"1\");"),
         ("lib", "on = nvmtl_pretranslate_default(e, e ? 0 : nvmtl_process_is_game());",
          "on = nvmtl_pretranslate_default(e, 0);"),
     ]),
@@ -164,6 +220,9 @@ CHECKS = [
          "nvmtl_pool_submit(nvmtl_pre_pool(), nvmtl_pre_run, j)"),
         ("lib", "#define NVMTL_PRE_QUEUED_MAX 512", "#define NVMTL_PRE_QUEUED_MAX 100000"),
         ("lib", "atomic_fetch_add(&gPreSkipped, 1); refused++;", "refused++;"),
+        ("lib", "CFRelease(j->lib); CFRelease(j->name); free(j);\n            if (rc",
+         "CFRelease(j->lib); free(j);\n            if (rc"),
+        ("lib", "refused++;\n            continue;", "refused++;\n            break;"),
     ]),
     ("the pool's workers run at utility QoS, not background", pool_qos, [
         ("pool", "QOS_CLASS_UTILITY, 0);", "QOS_CLASS_BACKGROUND, 0);"),
@@ -188,9 +247,33 @@ CHECKS = [
         ("vk", "    atomic_fetch_sub(&g_asyncup_held, 1);", ""),
         ("vk", "    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);\n", ""),
         ("vk", "            else au->bytes = bytes;", ""),
+        ("vk", "    atomic_fetch_sub(&g_asyncup_held, 1);   //",
+         "    if (img) atomic_fetch_sub(&g_asyncup_held, 1);   //"),
+        ("vk", "    atomic_fetch_add(&g_asyncup_held, 1);\n    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);\n"
+               "    pthread_mutex_lock(&g_asyncup_mutex);",
+         "    pthread_mutex_lock(&g_asyncup_mutex);\n    atomic_fetch_add(&g_asyncup_held, 1);\n"
+         "    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);"),
+    ]),
+    ("every stored upload leaves through nvmtl_asyncup_finish, and a record never stored does not", one_way_out, [
+        ("vk", "{ nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }",
+         "{ nvmtl_asyncup_finish(img, (uint64_t)(uintptr_t)au); return -1; }"),
+        ("vk", "{ nvmtl_asyncup_finish(NULL, nvmtl_asyncup_take(img)); }",
+         "{ uint64_t t = nvmtl_asyncup_take(img); if (t) { nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)t; "
+         "nvmtl_vk_submit_finish(&au->infl); nvmtl_vk_buffer_destroy(&au->stage); free(au); } }"),
+        ("vk", "        if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));\n",
+         "        if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));\n"
+         "        nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));\n"),
+    ]),
+    ("the store and the take neither finish nor wait while they hold g_asyncup_mutex", no_wait_under_lock, [
+        ("vk", "    const uint64_t old = nvmtl_up_set(&s, token);",
+         "    const uint64_t old = nvmtl_up_set(&s, token);\n"
+         "    if (old) nvmtl_vk_submit_finish(&((nvmtl_asyncup *)(uintptr_t)old)->infl);"),
+        ("vk", "    img->up_token = 0;\n    pthread_mutex_unlock(&g_asyncup_mutex);",
+         "    img->up_token = 0;\n    nvmtl_asyncup_finish(img, token);\n    pthread_mutex_unlock(&g_asyncup_mutex);"),
     ]),
     ("the store hands back the replaced handle under the lock and the upload finishes it", hand_back, [
-        ("vk", "    const uint64_t old = nvmtl_up_set(&s, token);", "    nvmtl_up_set(&s, token); const uint64_t old = 0;"),
+        ("vk", "    const uint64_t old = nvmtl_up_set(&s, token);",
+         "    nvmtl_up_set(&s, token); const uint64_t old = 0;"),
         ("vk", "nvmtl_asyncup_finish(img, nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au));",
          "(void)nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);"),
         ("vk", "    return old;\n}", "    return 0;\n}"),
@@ -205,7 +288,8 @@ for name, check, mutations in CHECKS:
             continue
         damaged = dict(SRC)
         damaged[key] = SRC[key].replace(old, new)
-        arm("  control fails it: " + (old.strip()[:50] + " -> " + (new.strip()[:40] or "(removed)")), not check(damaged))
+        arm("  control fails it: " + (old.strip()[:50] + " -> " + (new.strip()[:40] or "(removed)")),
+            not check(damaged))
 
 # whitespace is not the code: the same text with its spacing changed still passes
 spaced = {k: re.sub(r"\(", "( ", v) for k, v in SRC.items()}
