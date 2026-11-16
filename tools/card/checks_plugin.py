@@ -158,7 +158,7 @@ CHECKS = [
          env={"NVMTL_MANAGED_SURFACE_TILED": "0"}, info=[r"^INFO RGBA(8|16F) M: ", r"^INFO driver: "]),
     _new("plugin.pb-orientation", 335,
          "Core Image's legacy render into a drawable of a layer outside any window equals the offscreen render",
-         "plugin_pb_orientation.m", ["Foundation", "Metal", "QuartzCore", "CoreImage", "CoreGraphics"], 60,
+         "plugin_pb_orientation.m", ["Foundation", "Metal", "QuartzCore", "CoreImage", "CoreGraphics"], 90,
          [r"^PASS drawable-equals-offscreen "],
          info=[r"^INFO drawable"]),
     _row("plugin.photobooth-surface", 340, _PB_TITLE,

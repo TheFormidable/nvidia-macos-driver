@@ -11,6 +11,9 @@
  *   /usr/bin/xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -fobjc-arc -O2 tools/card/plugin_pb_orientation.m \
  *     -framework Foundation -framework Metal -framework QuartzCore -framework CoreImage -framework CoreGraphics \
  *     -o <run>/bin/<id>/nvmtltest
+ * Its alarm is 60 s: it is the card run's first program to render through Core Image, and the run's shader caches
+ * start empty, so it pays for translating Core Image's kernels (tools/photobooth_surface_probe.m, which renders the
+ * same kinds of image, has 120 s). A program ended by its alarm stops every later GPU check of the run.
  * It opens no window and no camera and writes no file. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash.
  * Not yet run on a Mac. */
 #import "plugin_common.h"
@@ -36,7 +39,7 @@ static const char *row_colour(const uint8_t *bytes, unsigned y)
 int main(void)
 {
     @autoreleasepool {
-        nm_start(30);
+        nm_start(60);
         id<MTLDevice> device = nm_device();
         id<MTLCommandQueue> queue = [device newCommandQueue];
         CIContext *context = [CIContext contextWithMTLDevice:device
