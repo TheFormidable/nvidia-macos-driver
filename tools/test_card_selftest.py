@@ -602,7 +602,8 @@ class World:
             if (self.state / f).exists():
                 (self.state / f).unlink()
         env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.root / "tmp"),
-               "NVK_INHERITED_KNOB": "1", "VK_ICD_FILENAMES": "/nowhere.json", "SDKROOT": "/nowhere"}
+               "NVK_INHERITED_KNOB": "1", "VK_ICD_FILENAMES": "/nowhere.json", "SDKROOT": "/nowhere",
+               "NVK_DIAG": "1"}
         before = self.listing()
         p = subprocess.Popen([PY, "-B", str(self.state / "wrap.py"), str(self.state / "cfg.json")], env=env,
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -745,6 +746,8 @@ try:
         and env_lines.get("NVMTL_LOG_PATH", "").endswith("-plugin.pass.nvmtl.log") and env_lines.get("NVMTL_NO_FAILED_AIR") == "1"
         and "runs/main/cache/" in env_lines.get("NVMTL_AIRCACHE", "") and "runs/main/cache/" in env_lines.get("MESA_SHADER_CACHE_DIR", ""),
         env_lines)
+    arm("every check runs with NVK_DIAG=0 (it wins over NVK_DIAG=1 in nvrm610.conf), whatever the runner's own "
+        "environment says", env_lines.get("NVK_DIAG") == "0", env_lines.get("NVK_DIAG"))
     arm("the plugin's log of a check is in that check's log", "--- nvmtl.log ---\nplugin log line from ~" in plog, plog[-800:])
     xc = [l for l in w.calls() if l.startswith("xcrun-env")]
     arm("builds get their own TMPDIR and clang module cache in the run folder, and no NVMTL_ variable",

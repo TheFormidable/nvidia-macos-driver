@@ -484,11 +484,12 @@ starts. A check that was not started is listed as "not run" with the reason.
 
 It never uses sudo; installs, loads or copies nothing into `/Library` or `/System`; changes no setting (not
 `nvrm610.conf`, not `defaults`, not a boot argument, not the boost policy); runs none of `nvram`, `csrutil`, `bless`,
-`kmutil`, `kextload` or `launchctl`; sets `NVK_DIAG` in no check (NVK would write into `/private/tmp`); reads no kernel
-collection, kernel binary, dyld shared cache or framework binary; opens no
-network connection; asks for no permission (camera, microphone, screen recording, accessibility, automation, files in
-Desktop, Documents or Downloads); and kills only the process groups of its own children. Windows open briefly for the
-window checks; `caffeinate` keeps the display awake only while those run.
+`kmutil`, `kextload` or `launchctl`; runs every check with `NVK_DIAG=0`, which wins over a `NVK_DIAG=1` line in
+`nvrm610.conf` (NVK would write into `/private/tmp`), and lets no check set it; reads no kernel collection, kernel
+binary, dyld shared cache or framework binary; opens no network connection; asks for no permission (camera, microphone,
+screen recording, accessibility, automation, files in Desktop, Documents or Downloads); and kills only the process
+groups of its own children. Windows open briefly for the window checks; `caffeinate` keeps the display awake only while
+those run.
 
 ## The ways back
 

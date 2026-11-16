@@ -9,10 +9,10 @@ The checks are the rows of every tools/card/checks_<part>.py (part: install, xla
 holds the checks of release 3.0.1's own changes, each of which skips on a checkout without that change). Each file
 holds CHECKS, a list of dicts whose keys are listed in KEYS below; a key the runner does not know, an unknown
 placeholder, a duplicate id, a program that is not a built check, an installed file or one of the runner's own system
-programs, or a forbidden command word (NVK_DIAG among them: it sends NVK's output to /private/tmp) refuses the run
-before anything is built. The runner sorts the rows by "order",
-refuses the run unless this Mac runs the staged package of --expect (the gates below), builds every check from this
-checkout with /usr/bin/xcrun clang, runs each on the installed driver one at a time, and writes, under
+programs, or a forbidden command word (NVK_DIAG among them: it sends NVK's output to /private/tmp; every check runs with
+NVK_DIAG=0, which wins over the settings file) refuses the run before anything is built. The runner sorts the rows by
+"order", refuses the run unless this Mac runs the staged package of --expect (the gates below), builds every check from
+this checkout with /usr/bin/xcrun clang, runs each on the installed driver one at a time, and writes, under
 ~/nullmoth-claude only:
 
   <out>/report.md      the header (macOS, CPU, Metal device, package, IOGLBundleName, checkout) and the table
@@ -127,7 +127,8 @@ DEFAULT_RC_MAP = {3: "skip", 4: "inactive"}
 EXPECT_KEYS = ("rc", "stdout", "stderr_forbid")
 ID = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 # words no check may put in its command lines or environment (the rules of the Mac the checks run on); NVK_DIAG=1 makes
-# NVK copy its standard error into /private/tmp/nvk-diag-<pid>.log (nvk/nvk-diag-nofollow.patch)
+# NVK copy its standard error into /private/tmp/nvk-diag-<pid>.log (nvk/nvk-diag-nofollow.patch), so the runner itself
+# gives every check NVK_DIAG=0 (run_env) and no row may set it
 FORBIDDEN = re.compile(r"(?<![\w.-])(sudo|nvram|csrutil|bless|kmutil|kextload|kextunload|kextutil|launchctl|defaults|"
                        r"tccutil|osascript|screencapture|spindump|killall|pkill|pmset|dtrace|lldb|java|java_home|NVK_DIAG|"
                        r"install\.sh|uninstall\.sh|vulkan-for-apps\.sh|MallocStackLogging\w*|NM_TEST_PLUGIN)(?![\w-])"
@@ -982,6 +983,11 @@ class Run:
         env = self.plain_env(cid)
         env.update(NVMTL_PROCESS_ENV="1", NVMTL_LOG_PATH=str(self.logs / f"{nn}-{cid}.nvmtl.log"),
                    NVMTL_AIRCACHE=str(self.cache / "air" / "aircache"), NVMTL_NO_FAILED_AIR="1", NVMTL_NO_FPS="1")
+        # NVK_DIAG=1 in nvrm610.conf would send NVK's standard error into /private/tmp/nvk-diag-<pid>.log, outside the
+        # run folder, and hide it from every stderr rule. The environment wins over the file in both readers (the
+        # plugin's, plugin/NVMTLObjects.m, which NVMTL_PROCESS_ENV=1 keeps it for; NVK's nvmtl_cfg_getenv), and NVK
+        # turns it on only for a value that starts with 1.
+        env["NVK_DIAG"] = "0"
         env.update(self.caches_env())
         env.update({k: self.subst(v) for k, v in check_env.items()})
         return env
