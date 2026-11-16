@@ -36,7 +36,8 @@
  * GPU_WAIT_SECONDS ends the program by SIGALRM, as the alarm would, so that the runner stops every later GPU check.
  * A crash prints "CRASH <signal>" and a backtrace on stderr and exits 70. The program writes no file and changes no
  * setting; it reads only the AIR text and the plugin log of its own process, in the folders the runner named.
- * Not yet run on a Mac.
+ * It has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package, before abarray-c's declaration
+ * was respelled and the INFO translator line was added.
  *
  * Never run here: an index past 0 of an array of texture buffers, and anything under NVMTL_NO_TIER2_FIXED, whose old
  * path declares one descriptor for a whole argument-buffer texture array (an index past 0 would read past it); the
