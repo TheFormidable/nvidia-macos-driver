@@ -497,8 +497,10 @@ video libraries, the plugin's own Vulkan loader (1.4.362) and a few configuratio
 against its own SHA256SUMS (and against `NM_BASE_PACKAGE_SHA256` when set), refuses a base that is not release 2.9
 (the release this tree is staged onto) or that holds anything but folders, plain files and links to a file beside
 them (a link out of its folder would carry the step's writes with it), replaces every part this checkout builds
-(the kexts, NVK, the translator, the plugin binary, the scripts, the DLSS tools, the licences), refreshes their
-SHA256SUMS lines, writes `VERSION` (`NM_PACKAGE_VERSION`: by default the release this checkout is, from CHANGELOG.md),
+(the kexts, NVK, the translator, the plugin binary, the scripts, the DLSS tools, the licences), adds the parts 2.9
+does not have (the Vulkan runtime in `nvmtl/minecraft`, native OpenGL in `nvmtl/zink` and
+`NVKZinkGLDriver.bundle`), refreshes their SHA256SUMS lines, writes `VERSION` (`NM_PACKAGE_VERSION`: by default the
+release this checkout is, from CHANGELOG.md),
 adds `NULLMOTH-LOCAL-BUILD.txt` (commit, local changes, pins), runs `package/finish_package.sh`
 like a release, then makes the check install.sh makes first (`shasum -a 256 -c SHA256SUMS`). install.sh checks a
 package's integrity, not who built it, so it accepts this one. The tarball's headers name `root` and `wheel`, not the
@@ -525,9 +527,12 @@ the firmware, which the real install takes from the earlier install or downloads
 Run the commands as shown (`./install.sh`, not `bash install.sh`: install.sh recognises a running install by that name).
 
 To go back, install the release you used as the base in the same way, from its own unpacked `pkgroot`: it replaces
-every file the tester build changed, and the next restart loads the release. To remove the driver completely:
-`sudo ./uninstall.sh && sudo shutdown -r now` from any package (it refuses while SIP is enabled; README.md,
-"Uninstall"). uninstall.sh does not restore the backup folder install.sh names: it removes the driver. With the 1401
+every file it has, and the next restart loads the release. Release 2.9's installer and uninstaller do not know
+`/Library/GPUBundles/NVKZinkGLDriver.bundle` and leave it in place; 2.9's accelerator does not name it, so it is not
+loaded. This tree's `sudo ./uninstall.sh` removes it, so run that first, or remove the bundle afterwards with
+`sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`. To remove the driver completely:
+`sudo ./uninstall.sh && sudo shutdown -r now` from this package, or from any package when that bundle is not installed
+(it refuses while SIP is enabled; README.md, "Uninstall"). uninstall.sh does not restore the backup folder install.sh names: it removes the driver. With the 1401
 app, "1401: Remove NVIDIA driver" in the OpenCore picker puts the Mac back as it was before the app's install.
 
 Installing a tester build over a release leaves the same fallback job a release install leaves: if this build's

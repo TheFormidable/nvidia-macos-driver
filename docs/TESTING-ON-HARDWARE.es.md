@@ -380,7 +380,10 @@ largas que miden este camino.
    (...)` quiere decir que el adaptador encontró distinta la disposición de esta compilación y dejó la aplicación en el
    OpenGL de Apple, como debe: envía esa línea y la salida de `sw_vers`. Mal: un cierre inesperado, una ventana negra
    o una imagen equivocada; reinicia una vez con el argumento de arranque `nvzink=0` y di si desaparece. Ver
-   [ZINK-OPENGL.md](ZINK-OPENGL.md).
+   [ZINK-OPENGL.md](ZINK-OPENGL.md). Para volver a la versión 2.9 o a un paquete 3.0 anterior, ejecuta primero el
+   `sudo ./uninstall.sh` de este paquete: los instaladores de esos paquetes no conocen
+   `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio. Su acelerador no lo nombra, así que no se
+   carga, y `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle` lo quita.
 
 ## 5. Video
 
