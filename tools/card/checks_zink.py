@@ -12,10 +12,11 @@ Two programs, one subcommand per process, so that one crash or hang ends one row
                                presentation, a render thread, clearDrawable, LWJGL's off-main calls (with
                                tools/card/zink_lwjgl_stub.m built as liblwjgl.dylib) and window formats (information)
 Both include tools/card/zink_common.h. Every program follows the conventions of tools/card: exit 0 pass, 1 fail, 2
-setup error, 3 skip, 4 inactive (a hardware context stayed Apple's, for the reason the driver printed), one line per
-case and a RESULT line. Rows that need Zink say "zink"; the software-renderer controls (Apple's software renderer in
-the same program, which never reaches the bundle) do not. glbench (tools/glbench/glbench.c) runs as a smoke row and a
-number. The migration probe may crash by design of the code it probes, so it runs last, in its own process.
+setup error, 3 skip, 4 inactive (the adapter's layout guard kept a hardware context Apple's; any other reason is a
+failure), one line per case and a RESULT line. Rows that need Zink say "zink"; the software-renderer controls (Apple's
+software renderer in the same program, which never reaches the bundle) do not. glbench (tools/glbench/glbench.c) runs
+as a smoke row and a number. The migration probe may crash by design of the code it probes, so it runs last, in its
+own process.
 
 Every row builds its own copy of its program into {BIN}/<id>/nvmtltest, the name the plugin always grants a device.
 Not yet run on a Mac."""
