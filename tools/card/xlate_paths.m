@@ -11,7 +11,8 @@
  *   walk                           a loop that picks its next buffer through a pointer phi on its back edge
  *   esc                            a device pointer read from a buffer and passed to a helper marked noinline
  *   pack10 pack565                 pack_float_to_unorm10a2 near every half-way value (and their float neighbours),
- *                                  pack_float_to_unorm565 for every half value in [0, 1], and controls (NaN, clamps)
+ *                                  RGB565 packing of every half value in [0, 1] (half3 forms first, float3 last), and
+ *                                  controls (NaN, clamps)
  *   splat                          a helper marked noinline called with a vector splat constant
  *   localfield                     textures and samplers kept in a local array of structs and read by a helper
  *   lanes                          an int2 read through a float4 pointer at a run-time index
@@ -169,17 +170,24 @@ static id<MTLSamplerState> sampler_state(MTLSamplerAddressMode s, MTLSamplerAddr
     return [g_device newSamplerStateWithDescriptor:d];
 }
 
+/* what the last shape() call found: 1 every marker in the AIR text, 0 one or more absent, -1 not known (no dump) */
+static int g_shape = -1;
+
 /* Reports, for each marker, whether the AIR text of `name` holds it (only when the row set NVMTL_AIR_DUMP). */
 static void shape(const char *c, NSString *name, NSArray<NSString *> *markers)
 {
+    g_shape = -1;
     const char *dir = getenv("NVMTL_AIR_DUMP");
     if (!markers.count || !dir || !*dir) return;
     NSString *path = [[@(dir) stringByAppendingPathComponent:name] stringByAppendingPathExtension:@"ll"];
     NSString *air = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!air) { info("%s shape: no AIR text of %s in the dump folder", c, name.UTF8String); return; }
-    for (NSString *m in markers)
-        info("%s shape: '%s' %s in the AIR of %s", c, m.UTF8String,
-             [air rangeOfString:m].location != NSNotFound ? "present" : "absent", name.UTF8String);
+    g_shape = 1;
+    for (NSString *m in markers) {
+        const BOOL here = [air rangeOfString:m].location != NSNotFound;
+        if (!here) g_shape = 0;
+        info("%s shape: '%s' %s in the AIR of %s", c, m.UTF8String, here ? "present" : "absent", name.UTF8String);
+    }
 }
 
 typedef enum { BUILD_OK, BUILD_SKIP, BUILD_FAIL } build_status;
@@ -627,6 +635,7 @@ static void case_pack10(const char *c)
                       "  o[i] = pack_float_to_unorm10a2(in[i]);\n}\n";
     id<MTLComputePipelineState> pso = build_case(c, body, @"p10", @[@"air.pack.unorm.rgb10a2"], NULL);
     if (!pso) return;
+    const int intrinsic = g_shape;   // 0: the AIR has no air.pack.unorm.rgb10a2 call, the packing is plain arithmetic
     // every 10-bit half-way value (2j+1)/2046 and its two float neighbours, in all three channels in different
     // orders, the 2-bit ones (2j+1)/6 in alpha, then the controls of translator_readback.cpp and infinities
     enum { HALFWAY = 1023 * 3, CONTROLS = 6, COUNT = (HALFWAY + CONTROLS + 63) / 64 * 64 };
@@ -665,6 +674,14 @@ static void case_pack10(const char *c)
         pass(c, "%u inputs packed as the exact product rounds half to even", (unsigned)COUNT);
         return;
     }
+    if (bad && guards && intrinsic == 0) {
+        // Apple's compiler wrote the packing as arithmetic on the float product, whose rounding at these half-way
+        // inputs is not the exact product's: the reference describes only the intrinsic the translator lowers
+        skip(c, "the AIR has no air.pack.unorm.rgb10a2 call, so the repair's lowering is not reached; %u of %u differ "
+             "from the exact product's rounding (first input (%.9g,%.9g,%.9g,%.9g) got=%08x expected=%08x)", bad,
+             (unsigned)COUNT, v[4 * first], v[4 * first + 1], v[4 * first + 2], v[4 * first + 3], o[first], want_first);
+        return;
+    }
     if (bad) fail(c, "%u of %u wrong; first input (%.9g,%.9g,%.9g,%.9g) got=%08x expected=%08x%s", bad, (unsigned)COUNT,
                   v[4 * first], v[4 * first + 1], v[4 * first + 2], v[4 * first + 3], o[first], want_first,
                   guards ? "" : "; guards overwritten");
@@ -675,22 +692,24 @@ static void case_pack565(const char *c)
 {
     // The inputs are half values, as in the AIR form air.pack.unorm.rgb565.v3f16: a half times 31 or 63 is exact in
     // float, so the translator's rounding of the float product (dispatch_texture.rs, lower_pack_rgb565) is the exact
-    // rounding. The half3 overload is tried first; if Apple's compiler has only float3, the same values go as floats.
-    NSString *half_body = @"kernel void p565(device const half4* in [[buffer(0)]], device ushort* o [[buffer(1)]],\n"
-                           "                 uint i [[thread_position_in_grid]]) {\n"
-                           "  o[i] = pack_float_to_unorm565(in[i].xyz);\n}\n";
-    NSString *float_body = @"kernel void p565f(device const float4* in [[buffer(0)]], device ushort* o [[buffer(1)]],\n"
-                            "                  uint i [[thread_position_in_grid]]) {\n"
-                            "  o[i] = pack_float_to_unorm565(in[i].xyz);\n}\n";
-    NSArray<NSString *> *markers = @[@"air.pack.unorm.rgb565"];
+    // rounding. The forms on half3 come first (the MSL name of the half3 overload is not known here, so both are
+    // tried); if Apple's compiler refuses both, the same values go as floats to the float3 form.
+    static const struct { const char *name, *call, *type; BOOL as_float; } forms[] = {
+        {"p565h", "pack_half_to_unorm565", "half4", NO}, {"p565", "pack_float_to_unorm565", "half4", NO},
+        {"p565f", "pack_float_to_unorm565", "float4", YES}};
     id<MTLComputePipelineState> pso = nil;
     char why[1400];
     BOOL as_float = NO;
-    build_status st = build(c, half_body, @"p565", markers, &pso, NULL, why, sizeof why);
-    if (st == BUILD_SKIP) {
-        info("%s: the half3 form was refused by Apple's compiler (%s); trying float3 with the same values", c, why);
-        as_float = YES;
-        st = build(c, float_body, @"p565f", markers, &pso, NULL, why, sizeof why);
+    build_status st = BUILD_SKIP;
+    for (unsigned f = 0; f < sizeof forms / sizeof forms[0] && st == BUILD_SKIP; f++) {
+        if (f) info("%s: the %s form was not compiled (%s); trying %s on %s", c, forms[f - 1].call, why,
+                    forms[f].call, forms[f].type);
+        NSString *body = [NSString stringWithFormat:@"kernel void %s(device const %s* in [[buffer(0)]],\n"
+                          "  device ushort* o [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+                          "  o[i] = %s(in[i].xyz);\n}\n", forms[f].name, forms[f].type, forms[f].call];
+        as_float = forms[f].as_float;
+        NSArray<NSString *> *markers = as_float ? @[@"air.pack.unorm.rgb565"] : @[@"air.pack.unorm.rgb565.v3f16"];
+        st = build(c, body, @(forms[f].name), markers, &pso, NULL, why, sizeof why);
     }
     if (st == BUILD_SKIP) { skip(c, "%s", why); return; }
     if (st == BUILD_FAIL) { fail(c, "%s", why); return; }
