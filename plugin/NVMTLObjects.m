@@ -2262,7 +2262,14 @@ static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, M
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                 (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, _baseSlice))
         nvlog("replaceRegion: upload FAILED");
-    else { [self nvmtlSurfaceOut]; nvmtl_mip_autofill(self, bytes, row, region, level); }
+    else {
+        // The asynchronous upload may still be queued when this returns. A direct VRAM import's surface-out marks the
+        // VRAM newest in the kernel with no copy, so WindowServer or another process would read it, or a CPU lock page
+        // it off, before the pixels are there. For an IOSurface texture the copy is finished first; without a pending
+        // upload (WindowServer, NVMTL_ASYNC_TEX_UPLOAD=0) the barrier does nothing.
+        if ((_parent ? _parent : self)->_surf) nvmtl_vk_image_upload_barrier([self nvi]);
+        [self nvmtlSurfaceOut]; nvmtl_mip_autofill(self, bytes, row, region, level);
+    }
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice
             withBytes:(const void *)bytes bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)img {
@@ -2283,7 +2290,11 @@ static void nvmtl_mip_autofill(NVMTLTexture *t, const void *bytes, size_t row, M
         rc = nvmtl_vk_image_write_region_level_layer(_q, im, (const uint8_t *)bytes + zi * per, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                      (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, (uint32_t)(vol ? region.origin.z + zi : slice + _baseSlice));
     if (rc) nvlog("replaceRegion:slice: upload FAILED");
-    else { [self nvmtlSurfaceOut]; if (!vol) nvmtl_mip_autofill(self, bytes, row, region, level); }
+    else {
+        // as in replaceRegion: an IOSurface's VRAM is not marked newest while its asynchronous copy is still queued
+        if ((_parent ? _parent : self)->_surf) nvmtl_vk_image_upload_barrier(im);
+        [self nvmtlSurfaceOut]; if (!vol) nvmtl_mip_autofill(self, bytes, row, region, level);
+    }
 }
 // A view of a texture buffer is another texel-buffer view of the same bytes. Apple's GL asks for one whenever a buffer
 // texture is sampled through a sampler of another type (Minecraft 26's R8Sint/R32Float buffer textures), every draw

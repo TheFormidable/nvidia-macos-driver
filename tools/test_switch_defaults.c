@@ -19,6 +19,10 @@ int main(void)
         nvmtl_async_tex_upload_default("1", "WindowServer") && nvmtl_async_tex_upload_default("1", "java"));
     ARM("any other value, the empty one too, turns it off (as 3.0 read it)",
         !nvmtl_async_tex_upload_default("", "java") && !nvmtl_async_tex_upload_default("yes", "java"));
+    ARM("3.0 read only the first character: \"10\" and \"1 \" turn it on",
+        nvmtl_async_tex_upload_default("10", "java") && nvmtl_async_tex_upload_default("1 ", "java")
+        && nvmtl_async_tex_upload_default("10", "WindowServer"));
+    ARM("and \"01\" turns it off", !nvmtl_async_tex_upload_default("01", "java"));
     ARM("only the exact name WindowServer is left out",
         nvmtl_async_tex_upload_default(NULL, "WindowServer2") && nvmtl_async_tex_upload_default(NULL, "windowserver"));
 

@@ -20,7 +20,9 @@
 //   - destroy, readback, CPU map and surface-out finish a pending upload first (no use-after-free: this is
 //     the #96 regression this guard exists to prevent);
 //   - a draw that merely SAMPLES the image needs no CPU finish: the upload's command buffer was submitted, so
-//     queue order plus the image's TRANSFER->SHADER_READ barrier already order the copy before the sample.
+//     queue order plus the image's TRANSFER->SHADER_READ barrier already order the copy before the sample;
+//   - two uploads racing on one image lose no handle: the second store hands the first back to be finished;
+//   - what pending uploads hold stays within NVMTL_UP_HELD_MAX uploads and NVMTL_UP_HELD_BYTES_MAX bytes.
 
 #ifndef NVMTL_TEX_UPLOAD_H
 #define NVMTL_TEX_UPLOAD_H
@@ -54,8 +56,34 @@ static inline uint64_t nvmtl_up_before_consume(const nvmtl_up_state *s)
     return s ? s->infl : 0;
 }
 
-// Record the in-flight handle after an async submit; clear it after the upload has been finished (waited).
-static inline void nvmtl_up_set(nvmtl_up_state *s, uint64_t infl) { if (s) s->infl = infl; }
+// Record the in-flight handle after an async submit and return the handle it replaces (0 for none). Two threads that
+// upload to the same image at once both find no handle, both submit, and the second store finds the first one's
+// handle. It is handed back so that the caller finishes it: overwriting it would leak that upload's staging buffer,
+// command pool, query pool and fence, and leave its copy running when the image is freed. Clear the handle after the
+// upload has been finished (waited).
+static inline uint64_t nvmtl_up_set(nvmtl_up_state *s, uint64_t infl)
+{
+    const uint64_t old = s ? s->infl : 0;
+    if (s) s->infl = infl;
+    return old;
+}
 static inline void nvmtl_up_clear(nvmtl_up_state *s) { if (s) s->infl = 0; }
+
+// How much the pending asynchronous uploads of the whole process may hold. A pending upload is kept until its image
+// is uploaded again, read back, migrated or destroyed, and a texture that is uploaded once and only sampled afterwards
+// keeps it for its whole life. Each one holds its own host-visible staging buffer, the size of the upload, and also a
+// command pool, a timestamp query pool and a fence. The byte limit bounds the memory; the count limit bounds the
+// driver objects, which many small uploads would pile up long before they reach the byte limit. Without room the
+// upload takes the synchronous path (the shared per-thread staging buffer and a wait), which holds nothing afterwards.
+#define NVMTL_UP_HELD_MAX       256u
+#define NVMTL_UP_HELD_BYTES_MAX (256ull << 20)
+
+// 1 when one more asynchronous upload of `bytes` fits beside the `held_count` uploads holding `held_bytes` of staging.
+// Written so that no sum can wrap, even when held_bytes is already past the limit.
+static inline int nvmtl_up_room(uint64_t held_count, uint64_t held_bytes, uint64_t bytes)
+{
+    return held_count < NVMTL_UP_HELD_MAX && bytes <= NVMTL_UP_HELD_BYTES_MAX
+        && held_bytes <= NVMTL_UP_HELD_BYTES_MAX - bytes;
+}
 
 #endif

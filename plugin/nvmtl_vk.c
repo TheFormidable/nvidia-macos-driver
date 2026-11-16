@@ -10162,7 +10162,8 @@ int nvmtl_vk_cmd_prepare_sampled_image(nvk_cmdbuf *c, nvk_image *img, int storag
 // plugin/nvmtl_tex_upload.h for the invariants (unit-tested in tools/test_tex_upload.c). An earlier attempt
 // (community PR #96) deferred the wait without this lifetime guard and corrupted IOSurface textures that are
 // uploaded then destroyed; the guard below is what makes it safe, and it is a no-op on the synchronous path
-// because up_token is only ever set here.
+// because up_token is only ever set here. What the pending uploads of the process hold is bounded (nvmtl_up_room:
+// 256 uploads and 256 MiB of staging); an upload past either limit takes the synchronous path.
 static int nvmtl_async_tex_upload(void)
 {
     static int on = -1;
@@ -10173,8 +10174,16 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
-typedef struct { nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic; } nvmtl_asyncup;
+typedef struct {
+    nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic;
+    uint64_t bytes;   // the staging bytes it holds, counted out of g_asyncup_held_bytes when it is finished
+} nvmtl_asyncup;
 static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
+// What the stored handles of the process hold: how many there are and their staging bytes (nvmtl_up_room). An upload is
+// counted in when its handle is stored and out when it is finished, so a failed submit that frees its own record is
+// never counted. Plain atomics: the room check reads them without the lock, so two threads can both pass it and go one
+// upload past a limit each, which is a bound on how far it is overshot, not a leak.
+static _Atomic uint64_t g_asyncup_held, g_asyncup_held_bytes;
 // Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
 static uint64_t nvmtl_asyncup_take(nvk_image *img)
 {
@@ -10186,13 +10195,20 @@ static uint64_t nvmtl_asyncup_take(nvk_image *img)
     pthread_mutex_unlock(&g_asyncup_mutex);
     return token;
 }
-static void nvmtl_asyncup_store(nvk_image *img, uint64_t token)
+// Store a new handle and return the one it replaces (0 for none). Another thread uploading to the same image can have
+// stored its handle after this one read the image's handle without the lock; the caller finishes the returned handle
+// outside the lock, so that upload is neither leaked nor left running when the image is freed.
+static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)
 {
+    nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    atomic_fetch_add(&g_asyncup_held, 1);
+    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);
     pthread_mutex_lock(&g_asyncup_mutex);
     nvmtl_up_state s = { img->up_token };
-    nvmtl_up_set(&s, token);
+    const uint64_t old = nvmtl_up_set(&s, token);
     img->up_token = s.infl;
     pthread_mutex_unlock(&g_asyncup_mutex);
+    return old;
 }
 // The copy of an async upload was dropped by a channel rebuild after a GPU fault (nvmtl_vk_submit_finish answered -1).
 // The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
@@ -10231,6 +10247,8 @@ static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
     if (!token) return;
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
     if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);
+    atomic_fetch_sub(&g_asyncup_held, 1);   // every handle finished here was counted in by nvmtl_asyncup_store
+    atomic_fetch_sub(&g_asyncup_held_bytes, au->bytes);
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
 }
@@ -10265,8 +10283,21 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     if (mode == NVMTL_UP_SUBMIT_ASYNC) {
         // a prior async upload to THIS image must land before we overwrite the texture or its staging
         if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));
-        au = (nvmtl_asyncup *)calloc(1, sizeof *au);
-        if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
+        // The room is judged after that finish, so a texture uploaded again every frame gives back its place first and
+        // keeps it. Without room the upload takes the synchronous path below, which holds nothing once it returns.
+        const uint64_t held = atomic_load(&g_asyncup_held), held_bytes = atomic_load(&g_asyncup_held_bytes);
+        if (nvmtl_up_room(held, held_bytes, bytes)) {
+            au = (nvmtl_asyncup *)calloc(1, sizeof *au);
+            if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
+            else au->bytes = bytes;
+        } else {
+            static _Atomic int said;
+            if (!atomic_exchange(&said, 1))
+                nvlog("vk: tex upload async: %llu pending uploads hold %llu bytes of staging (limits %u and %llu): "
+                      "an upload past a limit waits for its copy, as in 3.0",
+                      (unsigned long long)held, (unsigned long long)held_bytes, NVMTL_UP_HELD_MAX,
+                      (unsigned long long)NVMTL_UP_HELD_BYTES_MAX);
+        }
     }
     if (au) { stageb = &au->stage; c = &au->cb; }
     else {
@@ -10287,7 +10318,9 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
         // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
         au->bic = bic;   // kept so that a copy a channel rebuild drops can be made again (nvmtl_asyncup_redo)
         if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
-        nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);
+        // A second thread's upload to this image may have been stored since the image's handle was read above: it is
+        // handed back here and finished, outside the lock, rather than overwritten and lost.
+        nvmtl_asyncup_finish(img, nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au));
         return 0;
     }
     return nvmtl_vk_submit_wait(c);

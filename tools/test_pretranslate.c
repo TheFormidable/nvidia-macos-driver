@@ -41,6 +41,19 @@ static int *get(int i)
     return spv;
 }
 static void bg_job(void *ctx) { (void)get((int)(intptr_t)ctx); }
+/* for the bounded-submit arm: a job that holds the pool's only worker until the gate opens, and one that counts runs */
+static pthread_mutex_t gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gate_cv = PTHREAD_COND_INITIALIZER;
+static int gate_shut;
+static atomic_int counted;
+static void gate_job(void *ctx)
+{
+    (void)ctx;
+    pthread_mutex_lock(&gate_mu);
+    while (gate_shut) pthread_cond_wait(&gate_cv, &gate_mu);
+    pthread_mutex_unlock(&gate_mu);
+}
+static void count_job(void *ctx) { (void)ctx; atomic_fetch_add(&counted, 1); }
 static atomic_int app_bad;
 static void *app_thread(void *arg)
 {
@@ -84,6 +97,30 @@ int main(void)
     for (int i = 0; i < 50; i++) nvmtl_pool_submit(&p2, bg_job, (void *)(intptr_t)(i % 5));
     nvmtl_pool_drain(&p2);
     arm("the pool starts at most two threads for fifty jobs", p2.started == 2);
+    /* the bounded submit: while the one worker is held, at most max_queued jobs wait and the others are refused with
+       NVMTL_POOL_FULL, leaving their context with the caller; once the queue drains there is room again */
+    {
+        static nvmtl_pool p3; nvmtl_pool_init(&p3, 1, 1);
+        pthread_mutex_lock(&gate_mu); gate_shut = 1; pthread_mutex_unlock(&gate_mu);
+        int queued = 0, full = 0, other = 0;
+        nvmtl_pool_submit(&p3, gate_job, NULL);                 /* the worker takes it and blocks */
+        for (int r = 0; !r; usleep(1000)) { pthread_mutex_lock(&p3.mu); r = p3.running; pthread_mutex_unlock(&p3.mu); }
+        for (int i = 0; i < 20; i++) {
+            int rc = nvmtl_pool_submit_bounded(&p3, count_job, NULL, 8);
+            if (rc == 0) queued++; else if (rc == NVMTL_POOL_FULL) full++; else other++;
+        }
+        arm("a bounded submit queues max_queued jobs and refuses the rest as full",
+            queued == 8 && full == 12 && other == 0);
+        pthread_mutex_lock(&gate_mu); gate_shut = 0; pthread_cond_broadcast(&gate_cv); pthread_mutex_unlock(&gate_mu);
+        nvmtl_pool_drain(&p3);
+        arm("only the queued jobs ran: a refused one never does", atomic_load(&counted) == 8);
+        arm("after the queue drains a bounded submit is accepted again",
+            nvmtl_pool_submit_bounded(&p3, count_job, NULL, 8) == 0);
+        nvmtl_pool_drain(&p3);
+        arm("an unbounded submit (max_queued 0) is never refused",
+            nvmtl_pool_submit_bounded(&p3, count_job, NULL, 0) == 0);
+        nvmtl_pool_drain(&p3);
+    }
     printf("%s (%d failed)\n", fails ? "FAILED" : "ALL ARMS HOLD", fails);
     return fails != 0;
 }
