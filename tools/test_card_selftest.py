@@ -297,8 +297,8 @@ case "$2" in
 esac""",
     "pgrep": """[ -s "$S/ws" ] || exit 1
 cat "$S/ws\"""",
-    "ps": """echo "  4242     1  4242 S    00:03 stand-in"
-echo "  4243  4242  4242 S    00:03 stand-in-child\"""",
+    "ps": """[ -f "$S/ps_lines" ] && while read -r pid rest; do kill -0 "$pid" 2>/dev/null && echo "$pid $rest"; done < "$S/ps_lines"
+echo "    1     0     1 Ss   00:03 stand-in-init\"""",
     "sw_vers": """case "$1" in -productVersion) echo 26.7 ;; -buildVersion) echo 25X000 ;; *) exit 1 ;; esac""",
     "getconf": """case "$1" in DARWIN_USER_TEMP_DIR) echo "$S/usertmp/" ;; DARWIN_USER_CACHE_DIR) echo "$S/usercache/" ;; *) exit 1 ;; esac""",
     "xcrun": """out=; src=; prev=
@@ -337,10 +337,13 @@ def bump(name, by=1, to=None):
         f.write(str(to if to is not None else v + by) + "\\n")
 
 
-def heartbeat_child(tag):
+def heartbeat_child(tag, ps_line=False):
     if os.fork() == 0:
         with open(os.path.join(S, tag + ".pid"), "w") as f:
             f.write(str(os.getpid()))
+        if ps_line:
+            with open(os.path.join(S, "ps_lines"), "a") as f:
+                f.write(" ".join(str(x) for x in (os.getpid(), os.getppid(), os.getpgid(0))) + " S 00:01 stand-in-orphan\\n")
         for _ in range(200):
             with open(os.path.join(S, tag + ".beat"), "a") as f:
                 f.write("x")
@@ -393,6 +396,10 @@ elif mode == "alarm":
     time.sleep(10)
 elif mode == "bg":
     heartbeat_child(me)
+    print("PASS stand-in case")
+elif mode == "orphan":
+    heartbeat_child(me, ps_line=True)
+    time.sleep(0.5)
     print("PASS stand-in case")
 elif mode == "slow":
     heartbeat_child(me)
@@ -803,6 +810,23 @@ try:
             os.killpg(pid, signal.SIGKILL) if tag.endswith("main") else os.kill(pid, signal.SIGKILL)
         except (OSError, ValueError):
             pass
+    w = World(TOP, "orphan")
+    w.checks({"checks_plugin.py": [prow("plugin.orphan", "orphan", order=300), prow("plugin.after", "pass", order=301),
+                                   prow("plugin.cpu", "pass", kind="cpu", order=302)]})
+    out = w.base / "runs" / "o"
+    rc, text = w.run(["--out", str(out)], no_kill=True, kill_poll=1)
+    got, _ = results(w, out)
+    log = next((p.read_text() for p in (out / "logs").glob("*-plugin.orphan.log")), "") if (out / "logs").exists() else ""
+    arm("a check that ends while a process it started outlives the group's SIGKILL is STUCK: the later GPU checks are not "
+        "run, a later CPU check runs, exit 4",
+        rc == 4 and got.get("plugin.orphan", {}).get("result") == "STUCK" and got.get("plugin.after", {}).get("result") == "not run"
+        and got.get("plugin.cpu", {}).get("result") == "pass", (rc, got, text[-1500:]))
+    arm("its log names the process left in its group and the program's own exit", "stand-in-orphan" in log
+        and "rc 0, a process of its group still running" in log, log[-800:])
+    try:
+        os.kill(int((w.state / "plugin.orphan.pid").read_text()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
 
     # ---------------------------------------------------------------------------------------------- stop rules
     for mode, word in (("gaveup", "debug.nvrm_chan_gave_up rose by 1"), ("fence", "debug.nvrm_fence_state changed from 1 to 3"),
