@@ -214,7 +214,7 @@ NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 pyt
 # instead of being installed with Homebrew. Each is a tag's peeled commit as "git ls-remote" gave it on 2026-11-13.
 # The ninja, glslang, SPIRV-Tools, Python and LLVM versions equal homebrew-core's on that day (NVK has not been built
 # on an Apple-silicon Mac). The mirror variable replaces the URL, as above.
-NM_PIN_TOOLCHAIN_SOURCES="TCNINJA TCCMAKE TCOPENSSL TCZSTD TCXZ TCPYTHON TCPKGCONF TCSPIRVHEADERS TCSPIRVTOOLS TCGLSLANG TCLLVM"
+NM_PIN_TOOLCHAIN_SOURCES="TCNINJA TCCMAKE TCOPENSSL TCZSTD TCXZ TCPYTHON TCPKGCONF TCSPIRVHEADERS TCSPIRVTOOLS TCGLSLANG TCLLVM TCBISON"
 # ninja 1.13.2: what meson and cmake drive (meson needs 1.8.2); Homebrew's version.
 NM_PIN_TCNINJA_NAME="ninja 1.13.2 (toolchain)"
 NM_PIN_TCNINJA_URL=https://github.com/ninja-build/ninja.git
@@ -288,3 +288,15 @@ NM_PIN_TCLLVM_URL=https://github.com/llvm/llvm-project.git
 NM_PIN_TCLLVM_MIRROR=NM_TC_LLVM_URL
 NM_PIN_TCLLVM_REF=llvmorg-22.1.8
 NM_PIN_TCLLVM_COMMIT=ca7933e47d3a3451d81e72ac174dcb5aa28b59d1
+# GNU Bison 3.8.2 for native OpenGL's Mesa (NM_PIN_TOOL_BISON_MIN above), from its release tarball: the tarball carries
+# configure and Bison's own generated parser, so it builds with a C compiler and m4 alone, where a checkout of Bison's
+# git repository would need autoconf, automake, gettext and gnulib first. A file pin, not a commit: its SHA-256 is the
+# one two independent package recipes state for this URL, both read on GitHub on 2026-11-16 (spack-packages,
+# repos/spack_repo/builtin/packages/bison/package.py, and conda-forge's bison-feedstock, recipe/meta.yaml); build.sh
+# checks the download against it before anything is extracted. Homebrew's bison is 3.8.2 too. The mirror variable is a
+# base URL (".../gnu/bison"): the file's name is added to it.
+NM_PIN_TCBISON_NAME="GNU Bison 3.8.2 (toolchain, for native OpenGL)"
+NM_PIN_TCBISON_URL=https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz
+NM_PIN_TCBISON_MIRROR=NM_TC_BISON_URL
+NM_PIN_TCBISON_REF=
+NM_PIN_TCBISON_SHA256=06c9e13bdf7eb24d4ceb6b59205a4f67c2c7e7213119644430fe82fbd14a0abb
