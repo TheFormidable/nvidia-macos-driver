@@ -486,7 +486,9 @@ fi
 # Measured on an update (Core Ultra 5 225F, macOS 26): while this script replaces the loaded kexts macOS shows a
 # "kext upgrade" notice, but the first restart loads the new kexts from the collection built below (kernelmanagerd:
 # every one "approved", 0 filtered), so an update needs one restart. ALLOWED counts the kexts macOS already allows.
-# rollback_install does not undo this write, so it comes after the OpenGL bundle check above, which can still stop.
+# rollback_install does not undo this write. It comes after the OpenGL bundle check above, the last check of the
+# installed bundles. A later stop (the shader caches or the collection build below) still rolls the kexts back with
+# their new hashes recorded, and macOS then asks to allow the restored kexts again.
 KPDB=/var/db/SystemPolicyConfiguration/KextPolicy; ALLOWED=0
 if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
   for k in $KEXTS; do
