@@ -30,8 +30,9 @@ and --plan (which start no check program and write nothing). The real tools/card
 stand-in installation, once whole (every row passes) and once with a defect for each row; install.plugin-translator
 also with a copy of the translator beside the plugin of the same build, of an older one (also unreadable by this
 account), one that is not Mach-O and one without LC_UUID (nvmtl/'s too), without nvmtl/'s copy, and on a checkout
-whose plugin loader has no preference for the copy beside it. After every run: no file appeared outside the run folder
-and the stand-ins' own folder.
+whose plugin loader shows no preference for the copy beside it (with none, the same build and an older one beside the
+plugin); its preference finder also on loader snippets that do and do not name the copy beside the plugin. After every
+run: no file appeared outside the run folder and the stand-ins' own folder.
 
 Not a card check: it runs on Linux and on a Mac without the driver. Written and run on Linux only so far."""
 import sys
@@ -257,6 +258,33 @@ arm("the Mach-O reader: a fat file's arches and its x86_64 slice; a script is no
 sums = R.sums_lines("a" * 64 + "  ./Library/GPUBundles/x\n" + "b" * 64 + " *Library/GPUBundles/y z\n" + "short line\n")
 arm("SHA256SUMS lines with and without ./, the path from column 67", sums == [("a" * 64, "Library/GPUBundles/x"),
                                                                               ("b" * 64, "Library/GPUBundles/y z")], sums)
+
+
+def pref(*body):
+    """install.plugin-translator's preference finder on a loader of one function that calls dladdr"""
+    return R._xlate_beside("static void f(void) {\n    Dl_info i; dladdr((const void *)&f, &i);\n    "
+                           + "\n    ".join(body) + "\n}\n")
+
+
+got = [pref('snprintf(p, sizeof p, "%s/libnvmtl_translate.dylib", dir);'),
+       pref('NSString *s = [NSString stringWithFormat:@"%@/../Resources/libnvmtl_translate.dylib", d];'),
+       pref('const char *b = @"Contents/MacOS/libnvmtl_translate.dylib".UTF8String;')]
+arm("the plugin-translator row's preference finder takes a literal that is the path beside the plugin, or a format "
+    "whose last directive prints the folder before \"/\" and the path",
+    got == [("f", "libnvmtl_translate.dylib"), ("f", "../Resources/libnvmtl_translate.dylib"),
+            ("f", "Contents/MacOS/libnvmtl_translate.dylib")], got)
+got = [pref('nvlog("translate: no copy at Contents/MacOS/libnvmtl_translate.dylib");'),
+       pref('nvlog("translate: %s/lib dir/libnvmtl_translate.dylib", d);'),
+       pref('nvlog("translate: dlopen(%s/libnvmtl_translate.dylib): %s", p, e);'),
+       pref('nvlog("translate: %s: no libnvmtl_translate.dylib", p);'),
+       pref('const char *b = "..\\\\x/libnvmtl_translate.dylib";'),
+       pref('const char *b = "100%/libnvmtl_translate.dylib";'),
+       pref('void *h = dlopen("/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib", RTLD_NOW);'),
+       pref('// "libnvmtl_translate.dylib"', '/* "%s/libnvmtl_translate.dylib" */'),
+       R._xlate_beside('static void f(void) { const char *b = "libnvmtl_translate.dylib"; }\n')]
+arm("and none that names no usable path beside the plugin: a space, a format whose last directive is not followed by "
+    "\"/\" and the path, a backslash, a lone %, an absolute path, a comment, or a function without dladdr",
+    got == [None] * 9, got)
 
 
 # ------------------------------------------------------------------------------------------- the stand-in world
@@ -1278,18 +1306,40 @@ try:
     rc, text = w.run(only + ["--out", str(out)])
     got, data = results(w, out)
     pt = got.get("install.plugin-translator", {})
-    arm("install.plugin-translator on a checkout whose plugin loader has no preference for a copy beside it (its "
+    no_pref = ("INFO plugin source: the row finds no function of plugin/NVMTLLibraryLoad.m that calls dladdr and names "
+               "libnvmtl_translate.dylib by a relative path, so it cannot tell which copy the plugin prefers")
+    arm("install.plugin-translator on a checkout whose plugin loader shows no preference for a copy beside it (its "
         "function that calls dladdr opens nvmtl/'s by its absolute path; the bare name only in comments, a log line "
-        "and a function without dladdr): it passes on nvmtl/'s alone though an older copy is beside the plugin, and "
-        "says so as information",
-        rc == 0 and pt.get("result") == "pass"
-        and pt.get("why") == f"the plugin opens {w.gb}/nvmtl/libnvmtl_translate.dylib: its source names no copy "
-        "beside it"
-        and "INFO plugin source: no function of plugin/NVMTLLibraryLoad.m calls dladdr and names "
-            "libnvmtl_translate.dylib: this plugin opens nvmtl/'s only, and a copy beside it does not matter"
-            in pt.get("info", []), (rc, pt, text[-800:]))
+        "and a function without dladdr), with an older copy beside the plugin: it fails closed, since it cannot tell "
+        "which copy the plugin opens, and says so",
+        rc == 1 and pt.get("result") == "FAIL"
+        and pt.get("why") == f"the Metal plugin may open {beside}, of another build (LC_UUID {XU_OLD_T}, not {XU_T}), "
+        f"in place of {x}: the row finds no function of plugin/NVMTLLibraryLoad.m that calls dladdr and names "
+        f"libnvmtl_translate.dylib by a relative path, so it cannot tell which copy the plugin prefers, and releases "
+        f"1.0.0 to 3.0.1 prefer the one beside the plugin whenever it is readable"
+        and no_pref in pt.get("info", [])
+        and f"INFO the plugin opens {x} or {beside}: its source does not tell which"[:200] in pt.get("info", []),
+        (rc, pt, text[-800:]))
     left += w.leftover
-    arm("and nothing was written outside the run folder by these six runs either", not left, left)
+    w.install()
+    out = w.base / "runs" / "i6"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("and with no copy beside the plugin: it passes on nvmtl/'s, with the same INFO line",
+        rc == 0 and pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {x}: no copy beside it"
+        and no_pref in pt.get("info", []), (rc, pt, text[-800:]))
+    left += w.leftover
+    w.install(defects=("beside-same",))
+    out = w.base / "runs" / "i7"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("and with a copy of the same build beside the plugin: it passes, whichever of the two the plugin opens",
+        rc == 0 and pt.get("result") == "pass"
+        and pt.get("why") == f"the plugin opens {x} or {beside}, one build (LC_UUID {XU_T})", (rc, pt, text[-800:]))
+    left += w.leftover
+    arm("and nothing was written outside the run folder by these eight runs either", not left, left)
 finally:
     shutil.rmtree(TOP, ignore_errors=True)
 

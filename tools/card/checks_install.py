@@ -24,13 +24,17 @@ The read rows name a function of the runner ("func"), which reads the installed 
                              readable, and opens nvmtl/libnvmtl_translate.dylib ({X}) only otherwise. The row takes that
                              preference from the checkout's plugin/NVMTLLibraryLoad.m: a function of it
                              (nvmtl_xlate_ready) that, comments left out, calls dladdr and names the translator by a
-                             relative path, the bare "libnvmtl_translate.dylib". It fails when {X} is missing or not
-                             Mach-O, and when the plugin opens the copy beside it and that copy's LC_UUID is not {X}'s
-                             (or it has none): the Metal rows would then translate with another build than the readback
-                             rows, which use {X} directly. Its INFO lines give each copy's LC_UUID, size and SHA-256
-                             prefix. A checkout whose plugin source has no such function judges {X} alone and says so.
-                             A package staged onto an older one can carry the older copy in the bundle:
-                             build/package_local.sh replaces nvmtl/'s only.
+                             relative path, the bare "libnvmtl_translate.dylib" (or a format that prints the folder
+                             first, "%s/libnvmtl_translate.dylib"). It fails when {X} is missing or not Mach-O, and
+                             when the plugin opens the copy beside it and that copy is not Mach-O or its LC_UUID is not
+                             {X}'s (or it has none): the Metal rows would then translate with another build than the
+                             readback rows, which use {X} directly. When the row finds no such function (another
+                             spelling, or a source it cannot read), it fails closed: a readable copy beside the plugin
+                             that is not {X}'s build fails it, since every release from 1.0.0 to 3.0.1 opens that copy;
+                             with none, {X} alone is judged. Its INFO lines give each copy's LC_UUID (8-4-4-4-12, upper
+                             case, as the plugin's own log line), size and SHA-256 prefix. A package staged onto an
+                             older one can carry the older copy in the bundle: build/package_local.sh replaces nvmtl/'s
+                             only.
 The program rows run the installed probes as package/install.sh does after an install:
   install.gl-bundle-trusted  gld_bundle_probe NVMTLDriver (the control), then NVKZinkGLDriver: macOS's trusted
                              GPU-bundle lookup finds both; a lookup that refuses the control (exit 1) makes the row a
