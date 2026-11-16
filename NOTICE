@@ -163,11 +163,15 @@ tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/G
 
 zink/        Native OpenGL (/Library/GPUBundles/NVKZinkGLDriver.bundle and /Library/GPUBundles/nvmtl/zink) is Mesa's
              Zink from Mesa 26.3.0 (commit 0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4) with zink/mesa-zink-nvk.patch, MIT
-             (licenses/Mesa-license.rst). The frontend, the CGL adapter and the GL driver bundle in zink/, and
-             build/build_zink.sh and build/opengl_api.py, come from the HighDelay/nvidia-macos-driver-nvk fork, where
-             they are MIT, Copyright (c) 2026 Dino Zink contributors (licenses/Dino-Zink-MIT.txt); this tree's changes
-             to them are under the same licence. The CGL dispatch table is generated when the driver is built from the
-             macOS SDK's public OpenGL headers. The capability lists generated beside it carry data of the Khronos
+             (licenses/Mesa-license.rst). The frontend, the CGL adapter and the GL driver bundle in zink/,
+             build/build_zink.sh, build/opengl_api.py and tools/gld_bundle_probe.c come from the
+             HighDelay/nvidia-macos-driver-nvk fork, where they are MIT, Copyright (c) 2026 Dino Zink contributors
+             (licenses/Dino-Zink-MIT.txt); this tree's changes to them are under the same licence.
+             build/prepare_zink.py and build/generate_gld_forward.py also come from that fork, where commit eaf7d128
+             added them together with build/build_zink.sh; neither carries a licence line of its own, there or here.
+             That fork's docs/ZINK-OPENGL.md says of the contribution eaf7d128 is part of: "its original MIT
+             attribution is retained". The CGL dispatch table is generated when the driver is built from the macOS
+             SDK's public OpenGL headers. The capability lists generated beside it carry data of the Khronos
              OpenGL registry (gl.xml as Mesa 26.3.0 ships it, https://github.com/KhronosGroup/OpenGL-Registry),
              Apache-2.0, Copyright 2013-2020 The Khronos Group Inc. (licenses/Khronos-OpenGL-Registry-Apache-2.0.txt).
              Zink's Vulkan driver in nvmtl/zink is the tools/nvk-bridge frontend and its copy of NVK.
