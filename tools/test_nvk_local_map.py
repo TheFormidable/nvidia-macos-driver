@@ -21,17 +21,20 @@ carries it with 12 lines of context, so no Mesa tree is needed), compiles it wit
   the map       nvkmd_dev_alloc_mapped_mem compiled from the patch: a refused map of memory the default placed is
                 made again once in system RAM, the first memory let go exactly once; any other refused map fails as
                 before
-  the order     with USERD in system RAM the read of GPPut before a doorbell no longer goes through BAR1, so the
-  page          device keeps one page that the default places behind BAR1 and reads it before every doorbell.
-                nvkmd_nvrm_dev_bar_order_init and the read are compiled from the patch: the page is asked for as
-                plain LOCAL memory (a HOST_READ or SHARED request would be left in system RAM) only in the default
+  the order     with USERD in system RAM a new GPPut is visible to the GPU at once and nothing holds it back behind
+  page          what was written through BAR1, so the device keeps one page that the default places behind BAR1 and
+                reads it before it writes GPPut for a doorbell (what NVIDIA's own driver does with GPPut in system
+                RAM). nvkmd_nvrm_dev_bar_order_init and the read are compiled from the patch: the page is asked for
+                as plain LOCAL memory (a HOST_READ or SHARED request would be left in system RAM) only in the default
                 mode, kept only when it carries the default's mark, let go otherwise; the read really loads from the
                 page (the page is made unreadable and the load faults) and does nothing without a page or a device
   the text      the three allocations the CPU reads back say NVKMD_MEM_HOST_READ, the two flags are bits of their own,
                 an allocation the default placed is made in system RAM when the RM has no video memory for it, each
-                of the three doorbells the patch shows reads GPPut, then the order page, then rings; the device makes
-                the page last and lets it go first; a refused BAR1 map of memory the default placed is not reported
-                as an error; and the patch touches the nine files it names
+                of the three doorbells the patch shows reads the order page, then writes GPPut, drains, reads GPPut
+                and rings; the read drains the thread's write-combining buffers first, and the writers drain their
+                own (a shader upload, a sync of memory the default placed); the device makes the page last and lets
+                it go first; a refused BAR1 map of memory the default placed is not reported as an error; and the
+                patch touches the ten files it names
   the chain     the patch is in the 3.0 chain after nvk-nvrm-fixes (it is made on top of it) and is not an
                 upstream-fix patch that NVK_SKIP_PATCHES may leave out; its header is prose patch(1) cannot misread
   the way back  CHANGELOG.md has NVK_LOCAL_MAP_SYSMEM=1 in 3.0.1's table of ways back, the registry row is a setting
@@ -91,11 +94,12 @@ NVRMH = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h"
 CTXC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c"
 DEVC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c"
 RECC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c"
-FILES = ["src/nouveau/vulkan/nvk_descriptor_set.c", "src/nouveau/vulkan/nvk_device.c", "src/nouveau/vulkan/nvkmd/nvkmd.c",
-         "src/nouveau/vulkan/nvkmd/nvkmd.h", NVRMH, CTXC, DEVC, MEMC, RECC]
+ARENAC = "src/nouveau/vulkan/nvk_mem_arena.c"
+FILES = ["src/nouveau/vulkan/nvk_descriptor_set.c", "src/nouveau/vulkan/nvk_device.c", ARENAC,
+         "src/nouveau/vulkan/nvkmd/nvkmd.c", "src/nouveau/vulkan/nvkmd/nvkmd.h", NVRMH, CTXC, DEVC, MEMC, RECC]
 
 # --- the text -------------------------------------------------------------------------------------------------------
-arm("the patch touches the nine files of the change and nothing else",
+arm("the patch touches the ten files of the change and nothing else",
     sorted(re.findall(r"(?m)^diff --git a/(\S+) b/\1$", "diff --git " + body)) == FILES)
 arm("3.0's opt-in function is removed and nothing still calls it",
     "nvrm_local_map_stays_vram(struct nvkmd_nvrm_pdev *pdev)" in minus and "nvrm_local_map_stays_vram(" not in after)
@@ -164,19 +168,33 @@ a = mhunk.find("\n{\n")
 b = mhunk.find("\n}\n", a)
 mapped = mhunk[a + 1:b + 3] if a >= 0 and b > a else ""
 arm("the body of nvkmd_dev_alloc_mapped_mem is whole in the patch's text",
-    mhunk.startswith("                           struct nvkmd_mem **mem_out)\n{") and "*mem_out = mem;" in mapped)
+    a >= 0 and mhunk[:a].endswith("                           struct nvkmd_mem **mem_out)") and "*mem_out = mem;" in mapped)
 
 # --- the order page, in the text -------------------------------------------------------------------------------------
-# Every doorbell the patch shows: the write-combining buffers drained, GPPut read, the order page read, then the ring.
-RING = (r"__atomic_thread_fence\(__ATOMIC_SEQ_CST\);[^\n]*\n(?:\s*//[^\n]*\n)*\s*\(void\)\*\(volatile NvU32 \*\)&userD->GPPut;\n"
-        r"(?:\s*//[^\n]*\n)*\s*nvkmd_nvrm_dev_bar_order\(ctx->base\.dev\);\n"
-        r"\s*volatile NvU32 \*doorbell = [^;\n]*;\n\s*\*doorbell = ")
+# Every doorbell the patch shows: the order page read, GPPut written, the write-combining buffers drained, GPPut read
+# back (the lost-doorbell read of NVK_LOCAL_MAP_SYSMEM=0, where USERD is behind BAR1), then the ring. The order page
+# comes BEFORE the store of GPPut: in system RAM a new GPPut is visible to the GPU at once.
+GAP = r"(?:[ \t]*(?://[^\n]*)?\n)*"
+RING = (r"nvkmd_nvrm_dev_bar_order\(ctx->base\.dev\);[^\n]*\n\s*userD->GPPut = [^;\n]*;\n" + GAP +
+        r"\s*__atomic_thread_fence\(__ATOMIC_SEQ_CST\);[^\n]*\n" + GAP +
+        r"\s*\(void\)\*\(volatile NvU32 \*\)&userD->GPPut;\n\s*volatile NvU32 \*doorbell = [^;\n]*;\n\s*\*doorbell = ")
 for what, path, n in (("a submission and the flush that waits (nvkmd_nvrm_ctx.c)", CTXC, 2),
                       ("the doorbell a stalled or rebuilt channel is rung with (nvkmd_nvrm_recover.c)", RECC, 1)):
     text = "".join(t for _, t in hunks(path))
-    arm(f"{what}: GPPut is read, then the order page, then the doorbell is rung, at each of the {n}",
-        len(re.findall(RING, text)) == n and len(re.findall(r"(?m)^\s*\*doorbell = ", text)) == n,
-        (len(re.findall(RING, text)), len(re.findall(r"(?m)^\s*\*doorbell = ", text))))
+    got = (len(re.findall(RING, text)), len(re.findall(r"(?m)^\s*\*doorbell = ", text)),
+           len(re.findall(r"(?m)^\s*userD->GPPut = ", text)), text.count("nvkmd_nvrm_dev_bar_order("))
+    arm(f"{what}: the order page is read, then GPPut is written, drained and read back, then the doorbell is rung, "
+        f"at each of the {n}", got == (n, n, n, n), got)
+arm("the read before GPPut drains the thread's write-combining buffers first",
+    re.search(r"if \(p != NULL\) \{\n\s*__atomic_thread_fence\(__ATOMIC_SEQ_CST\);\n\s*\(void\)\*p;\n\s*\}",
+              "".join(t for _, t in hunks(NVRMH))) is not None)
+arm("a shader upload drains the writing thread's write-combining buffers when its copy is done",
+    re.search(r"size_B -= copy_size_B;\n   \}\n(?:\s*(?:/\*.*?\*/)?\s*\n)*?\s*__atomic_thread_fence\(__ATOMIC_SEQ_CST\);\n\s*\n"
+              r"\s*nvk_mem_arena_set_map_dirty\(arena\);\n\}", "".join(t for _, t in hunks(ARENAC)), re.S) is not None)
+arm("a sync of memory the default placed behind BAR1 drains them too, and still syncs nothing else for coherent memory",
+    re.search(r"if \(mem->flags & NVKMD_MEM_COHERENT\) \{\n(?:\s*/\*.*?\*/\n)?\s*if \(mem->flags & NVKMD_MEM_DEFAULT_BAR\)\n"
+              r"\s*__atomic_thread_fence\(__ATOMIC_SEQ_CST\);\n\s*return;\n\s*\}",
+              "".join(t for _, t in hunks("src/nouveau/vulkan/nvkmd/nvkmd.c")), re.S) is not None)
 devt = "".join(t for _, t in hunks(DEVC))
 arm("the device makes the order page last, when it can allocate, and before it is handed out",
     re.search(r"nvkmd_nvrm_dev_bar_order_init\(dev, log_obj\);\n\s*\*dev_out = &dev->base;\n\s*return VK_SUCCESS;", devt) is not None
