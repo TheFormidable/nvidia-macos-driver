@@ -25,6 +25,7 @@
 #include "nvmtl_plane_seed.h"
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
+#include "nvmtl_switch_defaults.h"
 #include "nvmtl_fetch_copy.h"
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
@@ -10042,7 +10043,8 @@ int nvmtl_vk_cmd_prepare_sampled_image(nvk_cmdbuf *c, nvk_image *img, int storag
     return 0;
 }
 
-// Asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD, default OFF). replaceRegion otherwise submits a copy
+// Asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD; from 3.0.1 on by default in every process but WindowServer,
+// nvmtl_switch_defaults.h, and NVMTL_ASYNC_TEX_UPLOAD=0 is the way back). replaceRegion otherwise submits a copy
 // and drains the GPU before returning, so a GL app that uploads many textures per frame stalls once per
 // upload. With the flag on, a region upload gets its OWN staging buffer and command buffer, is submitted
 // without waiting, and its handle is kept on the image (nvk_image.up_token). The handle is finished (fence
@@ -10056,8 +10058,8 @@ static int nvmtl_async_tex_upload(void)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_ASYNC_TEX_UPLOAD");
-        on = e && e[0] == '1';
-        nvlog("vk: async texture upload %s (NVMTL_ASYNC_TEX_UPLOAD)", on ? "ON" : "OFF (default)");
+        on = nvmtl_async_tex_upload_default(e, getprogname());
+        nvlog("vk: async texture upload %s (NVMTL_ASYNC_TEX_UPLOAD=%s)", on ? "ON" : "OFF", e ? e : "unset");
     }
     return on;
 }
