@@ -26,6 +26,29 @@ only.
   write. The full name is now read first (the last such line wins), then the short one, without printing anything.
 - **A refused boost is asked again after 30 s.** 3.0 stopped asking for the rest of the process after one refusal, so a
   refusal while the GPU came back from sleep left that app without boost until it was restarted.
+- **New blocks of video memory are cleared by the copy engine.** 3.0 stopped filling a granted block with zeros while
+  the RM's own clearing is believed, but only until the GPU's first standby (a system sleep): from then on, and for
+  good once a block read as not zero, every new block was filled from the processor through BAR1 again, at about
+  330 MB/s, 27 ms for the 9 MB of each captured frame of a screen share, with the display gate held. Such a block is
+  now cleared by the GPU's copy engine: NVRMFB asks NVRM (`nvVidmemClear`), and NVRM runs the RM's own memset on the
+  block (`kexts/NVRM/nvrm_pageoff.c`, the way the page-off copy already runs) with the API and GPU locks held for the
+  clear only. NVRM never waits for a standby there: with the GPU not running it answers at once and the block is
+  filled from the processor as before. The same 65 probes that check the RM's clearing then check the engine's; a block
+  that does not read as zero is filled from the processor, and so is every block for the rest of the boot. Work whose
+  end was not seen leaves its block allocated until restart, never handed out or freed, so that late zeros cannot land
+  in someone else's memory. `debug.nvrmfb_vram_ce_clear` says whether the clear is on (1), off by boot argument (0) or
+  stood down (2); `debug.nvrmfb_vram_ce_cleared`, `_ce_us`, `_ce_fallbacks` and `_ce_kept` count it, and the old
+  `_filled` / `_fill_us` count what was still filled from the processor. `kexts/NVRMFB/fb/nvrm-vram-clear.h` holds the
+  rules, `tools/test_vram_clear.c` every answer against them. The cause of the 330 MB/s itself is not established:
+  the RM asks for a write-combined mapping, and by the macOS 26 sources NVRM's way of making it gets one.
+
+### The ways back
+
+One per change, as in 3.0 below; each restores the 3.0 behaviour of that change only.
+
+| Change | Way back | Kind |
+|---|---|---|
+| Copy-engine clear of new blocks of video memory | `nvfbceclear=0` | boot argument |
 
 ## 3.0
 
