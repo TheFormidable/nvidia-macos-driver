@@ -245,7 +245,7 @@ is a 44-line reduction of one fragment shader of a commercial game (a four-tap s
 and generic names. Low exposure; rewrite it from a Metal source written for the purpose if the owner wants no game-derived
 bytes in the repository (done).
 
-**P10. GLEngine's private offsets in native OpenGL (decision for the owner).** `zink/nvk_cgl.c` and `zink/gld_bridge.c`
+**P10. GLEngine's private offsets in native OpenGL (kept by the owner).** `zink/nvk_cgl.c` and `zink/gld_bridge.c`
 read and write through offsets inside GLEngine's private context data (0x8e0, 0x5b00, 0xb2c8, 0xb2d0, 0xc6a6, and +0x78,
 +0x82, stride 0x1e90, +0x10 of the private context object) and call GLD entries with argument orders that no public
 header gives. They are data recorded by the HighDelay/nvidia-macos-driver-nvk fork on macOS 15.8.1 (24H32) and 26.7.1
@@ -254,9 +254,9 @@ framework and GLEngine between the two builds, so they come from examining Apple
 the class layouts of P5. No tool in this tree reads a framework binary, the shared cache or a kernel, and nothing does
 so at run time: the fork's LLDB generator, `zink/gld_abi.h`, `zink/gld_trace.*` and its collection command are not
 taken, and `zink/nvk_cgl_guard.h` checks at run time that the memory is shaped as recorded before any read or write. The
-dispatch table itself comes from the SDK's public headers. Options: keep the offsets as interoperability data, as for
-P5; or leave native OpenGL out of the package until the offsets can be derived from a public source. Not changed without
-a decision.
+dispatch table itself comes from the SDK's public headers. The options were to keep the offsets as interoperability
+data, as for P5, or to leave native OpenGL out of the package until they can be derived from a public source. The owner
+chose on 2026-11-16 to keep them as interoperability data.
 
 ## 6. Reviewed, nothing to change
 
