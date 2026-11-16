@@ -149,6 +149,13 @@ only.
   of secondary command buffers are read from the right structure, and the range of a map that is synchronised is
   computed correctly (no effect on NVRM, whose maps are coherent). Mesa's NAK compiler changes since are not taken.
   These four entries were compiled on Linux only; nothing in them has run on a card.
+- **Metal apps get this build's shader translator.** The Metal plugin opens the `libnvmtl_translate.dylib` beside it
+  in `NVMTLDriver.bundle` whenever there is one, and the one in `nvmtl/` only when there is none. Release 2.9, the
+  package `./build.sh package` starts from, carries its translator beside the plugin, and the 3.0 and 3.0.1 packages
+  put this build's in `nvmtl/` only: Metal apps translated with release 2.9's translator, so none of the translator's
+  repairs since 2.9 reached them. The package now puts this build's translator beside the plugin too, and the package
+  step stops when the two copies are not the same build. Shaders cached with 2.9's translator are translated again
+  once: the name of each shader cache entry carries the SHA-256 of the translator file that made it.
 
 ### The ways back
 
