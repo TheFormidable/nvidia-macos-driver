@@ -419,6 +419,57 @@ with `nvmultigpu=1` ([MULTI-GPU-DESIGN.md](MULTI-GPU-DESIGN.md)) and repeat both
 cards are back and `debug.nvrm_fence_state` is 1. Fail: a card missing from those counters, or a wake that loses one;
 send the kernel log of that boot.
 
+## Automatic card checks (tools/card_selftest.py)
+
+`tools/card_selftest.py` runs the card checks of the new parts (native Vulkan, native OpenGL through Zink, the Metal
+plugin and the translator) in one unattended run, on the Mac with the package installed and its driver loaded. It has
+not yet run on a Mac: it was written, and its host test `tools/test_card_selftest.py` run, on Linux only, so its first
+run on a card is a test of the runner too.
+
+Start it from the checkout the package was built from, in the background, and wait until its folder holds `DONE`:
+
+```
+mkdir -p ~/nullmoth-claude/cardtest
+cd ~/nullmoth-claude/src
+/usr/bin/python3 -B -I tools/card_selftest.py --out ~/nullmoth-claude/cardtest/run1 \
+  > ~/nullmoth-claude/cardtest/run1.txt 2>&1 &
+```
+
+The first line of `DONE` is the exit status; `report.md` beside it is the answer. `--list` prints every check and builds
+nothing; `--plan` looks at the conditions of the next paragraph, all but the Metal probe, and prints what would be built
+and run, with no GPU program; `--no-window` leaves out the checks that open a window; `--only REGEX` runs only the
+checks whose id matches; `--expect COMMIT` names the commit of the installed package when it is not the default one.
+
+Before any check is built it refuses the run (exit 3) unless the out folder lies inside `~/nullmoth-claude`, outside
+`src` and `build2`, is empty or absent and has 2 GB free; the checkout is clean and its driver sources are those of the
+expected commit; the staged package in `~/nullmoth-claude/build2/package/pkgroot` is of that commit and every file it
+puts under `/Library/GPUBundles` is installed unchanged (`nvrm610.conf` is not compared); the accelerator is in the
+IORegistry; and a small probe sees the driver's Metal device. A refusal of the out folder writes nothing; any later
+refusal writes `report.md` and `DONE` with the reason.
+
+It writes only into the out folder (by default `~/nullmoth-claude/cardtest/<UTC time>`): `report.md` (the machine's
+facts and one line per check), `results.json`, `logs/` (one log per check and per build, with the program's output and
+its `nvmtl.log`), `bin/` (the built checks), `tmp/` and `cache/` (each check's TMPDIR and the shader caches the checks
+are pointed at), and `DONE` last. In `report.md`, `results.json`, the logs and every line it prints, the home folder
+becomes `~`, the account name `<user>`, the host name `<host>` and the user temporary and cache folders `<usertmp>` and
+`<usercache>`. `report.md` ends with what appeared outside the folder while it ran, by name only: files of the plugin in
+`/tmp`, new shader cache entries, crash reports of the programs it ran.
+
+Exit status: 0 every check that ran passed (the skipped and inactive ones are listed with their reason); 1 a check
+failed, ran out of time, crashed, could not be stopped or did not build; 2 a wrong option; 3 refused; 4 stopped early
+(also when a check failed before the stop). Every check has a time limit. A check still alive 15 s after it was killed
+at its limit, a GPU check that ran out of time, a rise of `debug.nvrm_chan_gave_up`, a change of
+`debug.nvrm_fence_state` or a new WindowServer process stops every later GPU check; a rise of `debug.nvrm_xid_count`
+fails the check it happened in. After 40 minutes nothing new starts. A check that was not started is listed as "not run"
+with the reason.
+
+It never uses sudo; installs, loads or copies nothing into `/Library` or `/System`; changes no setting (not
+`nvrm610.conf`, not `defaults`, not a boot argument); runs none of `nvram`, `csrutil`, `bless`, `kmutil`,
+`kextload` or `launchctl`; reads no kernel collection, kernel binary, dyld shared cache or framework binary; opens no
+network connection; asks for no permission (camera, microphone, screen recording, accessibility, automation, files in
+Desktop, Documents or Downloads); and kills only the process groups of its own children. Windows open briefly for the
+window checks; `caffeinate` keeps the display awake only while those run.
+
 ## The ways back
 
 One per change; each restores the 2.9 behaviour of that change only. They exist to tell whether a change is behind a
