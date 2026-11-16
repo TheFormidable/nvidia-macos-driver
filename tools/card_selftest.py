@@ -5,10 +5,12 @@ parts, in one unattended run on a Mac with the driver installed and loaded.
   cd ~/nullmoth-claude/src && /usr/bin/python3 -B -I tools/card_selftest.py [--out DIR] [--expect COMMIT]
       [--only REGEX] [--no-window] [--max-seconds N] [--deadline N] [--plan | --list]
 
-The checks are the rows of every tools/card/checks_<part>.py (part: install, xlate, plugin, vulkan, zink). Each file
+The checks are the rows of every tools/card/checks_<part>.py (part: install, xlate, plugin, vulkan, zink, v301; v301
+holds the checks of release 3.0.1's own changes, each of which skips on a checkout without that change). Each file
 holds CHECKS, a list of dicts whose keys are listed in KEYS below; a key the runner does not know, an unknown
 placeholder, a duplicate id, a program that is not a built check, an installed file or one of the runner's own system
-programs, or a forbidden command word refuses the run before anything is built. The runner sorts the rows by "order",
+programs, or a forbidden command word (NVK_DIAG among them: it sends NVK's output to /private/tmp) refuses the run
+before anything is built. The runner sorts the rows by "order",
 refuses the run unless this Mac runs the staged package of --expect (the gates below), builds every check from this
 checkout with /usr/bin/xcrun clang, runs each on the installed driver one at a time, and writes, under
 ~/nullmoth-claude only:
@@ -108,7 +110,7 @@ LINE_CUT = 230
 DETAIL_CUT = 120
 LOG_KEEP = 4 * 1024 * 1024   # bytes of each stream kept in a check's log (the end of it)
 
-PARTS = ("install", "xlate", "plugin", "vulkan", "zink")
+PARTS = ("install", "xlate", "plugin", "vulkan", "zink", "v301")
 KINDS = ("read", "cpu", "gpu")
 KEYS = ("id", "part", "title", "kind", "order", "sources", "build", "argv", "env", "limit", "needs", "window", "expect",
         "rc_map", "info", "func")
@@ -119,14 +121,17 @@ RC_WORDS = ("skip", "inactive", "fallback", "fail")
 DEFAULT_RC_MAP = {3: "skip", 4: "inactive"}
 EXPECT_KEYS = ("rc", "stdout", "stderr_forbid")
 ID = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
-# words no check may put in its command lines or environment (the rules of the Mac the checks run on)
+# words no check may put in its command lines or environment (the rules of the Mac the checks run on); NVK_DIAG=1 makes
+# NVK copy its standard error into /private/tmp/nvk-diag-<pid>.log (nvk/nvk-diag-nofollow.patch)
 FORBIDDEN = re.compile(r"(?<![\w.-])(sudo|nvram|csrutil|bless|kmutil|kextload|kextunload|kextutil|launchctl|defaults|"
-                       r"tccutil|osascript|screencapture|spindump|killall|pkill|pmset|dtrace|lldb|java|java_home|"
+                       r"tccutil|osascript|screencapture|spindump|killall|pkill|pmset|dtrace|lldb|java|java_home|NVK_DIAG|"
                        r"install\.sh|uninstall\.sh|vulkan-for-apps\.sh|MallocStackLogging\w*|NM_TEST_PLUGIN)(?![\w-])"
                        r"|/private/tmp|(?<![\w.~}-])/tmp(?![\w.-])|sysctl\s+-w")
 # the runner's programs a check may start (the others in SYSTEM are the runner's own reads)
 CHECK_PROGRAMS = ("/usr/bin/xcrun", "/usr/bin/python3", "/bin/sh")
-DRIVER_PATHS = ("plugin", "zink", "translator", "nvk", "kexts", "dlss", "vendor", "tools/nvk-bridge/bridge.mm")
+# build/build_nvk.sh names the chain of NVK patches the package was built with (its CHAIN line)
+DRIVER_PATHS = ("plugin", "zink", "translator", "nvk", "kexts", "dlss", "vendor", "tools/nvk-bridge/bridge.mm",
+                "build/build_nvk.sh")
 COUNTERS = ("debug.nvrm_xid_count", "debug.nvrm_chan_recovered", "debug.nvrm_chan_gave_up", "debug.nvrm_chan_dropped",
             "debug.nvrm_fence_state")
 FAILED = ("FAIL", "TIMEOUT", "CRASH", "STUCK", "build failed")
