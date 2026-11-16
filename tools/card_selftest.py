@@ -966,6 +966,13 @@ def _xlate_beside(text):
     return None
 
 
+def _uuid_text(m):
+    """the LC_UUID of a macho() result as the plugin's "translate: opened" line and dwarfdump --uuid print it
+    (8-4-4-4-12 hexadecimal digits, upper case); "none" when there is none or no Mach-O file"""
+    u = m and m["uuid"]
+    return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}".upper() if u else "none"
+
+
 def _xlate_copy(lines, path):
     """an INFO line on one copy of the translator; -> (state, its macho()), state "absent", "unreadable" or "readable"
     (the plugin's own test: access with R_OK)"""
@@ -981,7 +988,7 @@ def _xlate_copy(lines, path):
         size, sha = f"{os.path.getsize(path)} bytes", "sha256 " + sha256_file(path)[:12]
     except OSError as e:
         size, sha = "size ?", f"sha256 not read ({type(e).__name__})"
-    kind = f"{'+'.join(m['arches'])}, LC_UUID {m['uuid'] or 'none'}" if m else "not Mach-O"
+    kind = f"{'+'.join(m['arches'])}, LC_UUID {_uuid_text(m)}" if m else "not Mach-O"
     lines.append(f"INFO translator {rel}: {kind}, {size}, {sha}")
     return "readable", m
 
@@ -1015,15 +1022,19 @@ def install_plugin_translator(ctx, check):
         fails.append(f"{x}, the translator of the readback rows and the plugin's fallback, is "
                      + {"absent": "missing", "unreadable": "not readable"}.get(xs, "not Mach-O"))
     why = f"{PLUGIN_LOADER} ({found[0]}) prefers the copy beside the plugin" if found else ""
+    # one build: both copies Mach-O, with one LC_UUID (two copies without one are not known to be one build)
+    same = bool(xm and bm and xm["uuid"] and bm["uuid"] == xm["uuid"])
     if opened == beside and not bm:
         fails.append(f"the Metal plugin opens {beside}, which is not Mach-O, because {why}: its dlopen fails there, "
                      f"and the plugin does not fall back to {x}")
-    elif opened == beside and not (xm and bm["uuid"] and bm["uuid"] == xm["uuid"]):
-        fails.append(f"the Metal plugin opens {beside} (LC_UUID {bm['uuid'] or 'none'}), not the build of {x} (LC_UUID "
-                     f"{(xm and xm['uuid']) or 'none'}), because {why}: this run's Metal rows translate with that "
-                     f"copy, while its readback rows use {x}")
-    if opened == beside:
-        ok = f"the plugin opens {beside}, the same build as {x} (LC_UUID {bm['uuid']})"
+    elif opened == beside and not same:
+        fails.append(f"the Metal plugin opens {beside} (LC_UUID {_uuid_text(bm)}), not the build of {x} (LC_UUID "
+                     f"{_uuid_text(xm)}), because {why}: this run's Metal rows translate with that copy, while its "
+                     f"readback rows use {x}")
+    if fails:
+        ok = ""
+    elif opened == beside:
+        ok = f"the plugin opens {beside}, the same build as {x} (LC_UUID {_uuid_text(xm)})"
     elif found:
         ok = f"the plugin opens {x}: no {'readable ' if bs == 'unreadable' else ''}copy beside it"
     else:
