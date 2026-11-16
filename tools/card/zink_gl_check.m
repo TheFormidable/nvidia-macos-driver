@@ -21,8 +21,9 @@
  * --map PATH names the installed cgl-dispatch-map.json, whose "capabilities" give the version caps and extension
  * lists the adapter advertises (build/generate_cgl_dispatch.py:236-243).
  *
- * A hardware context that stays Apple's makes the check inactive (exit 4), with the reason the driver printed; see
- * zk_not_zink in zink_common.h. Nothing here draws on screen or writes a file. Not yet run on a Mac. */
+ * A hardware context that the adapter's layout guard keeps Apple's makes the check inactive (exit 4), with the
+ * guard's reason; any other hardware context that stays Apple's is a failure. See zk_not_zink in zink_common.h.
+ * Nothing here draws on screen or writes a file. Not yet run on a Mac. */
 #include "zink_common.h"
 #include <IOSurface/IOSurface.h>
 #include <OpenGL/CGLIOSurface.h>

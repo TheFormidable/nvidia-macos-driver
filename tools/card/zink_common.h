@@ -2,12 +2,12 @@
  * zink_win_check.m (AppKit windows) each include this file once; tools/card/checks_zink.py builds and runs them.
  *
  * It holds the conventions of the programs in tools/card: exit status 0 pass, 1 a check failed, 2 setup error (the
- * program could not build its own objects), 3 skip (first stdout line "SKIP: <why>"), 4 inactive (the context is
- * Apple's, not Zink's: first stdout line "INACTIVE: <why>"); one stdout line per case ("PASS <case> ...",
- * "FAIL <case>: ...", "INFO ...") and a last line "RESULT pass|fail|skip|inactive <counts>"; the program's own alarm;
- * handlers that turn a crash into "CRASH <signal>" and exit status 70, so that no crash report is written; and a copy
- * of standard error kept in memory, so that the program can read the driver's own lines and tell why a hardware
- * context stayed Apple's. Nothing here writes a file. Not yet run on a Mac. */
+ * program could not build its own objects), 3 skip (first stdout line "SKIP: <why>"), 4 inactive (the adapter's
+ * layout guard kept the context Apple's: first stdout line "INACTIVE: <why>"); one stdout line per case
+ * ("PASS <case> ...", "FAIL <case>: ...", "INFO ...") and a last line "RESULT pass|fail|skip|inactive <counts>"; the
+ * program's own alarm; handlers that turn a crash into "CRASH <signal>" and exit status 70, so that no crash report is
+ * written; and a copy of standard error kept in memory, so that the program can read the driver's own lines and tell
+ * why a hardware context stayed Apple's. Nothing here writes a file. Not yet run on a Mac. */
 #ifndef ZINK_COMMON_H
 #define ZINK_COMMON_H
 
@@ -544,34 +544,33 @@ static bool zk_is_software(const char *renderer)
    return renderer && strstr(renderer, "Apple Software Renderer") != NULL;
 }
 
-/* Never returns: a hardware context that is not Zink's. The driver's own lines say why (zink/nvk_cgl.c:129 the
- * layout guard, once per process; zink/nvk_zink.c:127 no screen; zink/gld_bridge.c:36, :48, :70 the bundle). A layout
- * refusal or a bundle that is not loaded makes the check inactive; a screen that could not start, or a bundle without
- * its renderer or adapter, is a failure of the installed driver. */
+/* Never returns: a hardware context that is not Zink's. Only the layout guard's refusal makes the check inactive
+ * (zink/nvk_cgl.c:125-130, printed once per process, for the first context it refuses): the guard keeps Apple's
+ * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
+ * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
+ * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
+ * (zink/gld_bridge.c:36, :48, :70), any other driver line, a bundle that is not loaded at all, or no line that says
+ * why. The runner neither reads standard error of an inactive row nor counts the row as a failure, so an inactive
+ * verdict for those would hide them. */
 static _Noreturn void zk_not_zink(const char *renderer)
 {
    char line[ZK_LINE_MAX];
+   const char *shown = renderer ? renderer : "(null)";
    zk_tee_sync();
    if (zk_tee_find("NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (", line,
                    sizeof(line)))
       zk_inactive("%s", line + strlen("NVK Zink: "));
-   if (zk_tee_find("NVK Zink: no screen", line, sizeof(line))) {
-      zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", renderer ? renderer : "(null)", line);
-      zk_finish();
-   }
-   if (zk_tee_find("NVKZinkGLDriver: ", line, sizeof(line))) {
-      zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", renderer ? renderer : "(null)", line);
-      zk_finish();
-   }
-   if (!renderer) {
+   if (!renderer)
       /* On the Zink path every call returns 0 when the capability table cannot be built (nvk_cgl.c:323-330). */
       zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s", zk_last_error());
-      zk_finish();
-   }
-   if (!zk_image(ZK_BUNDLE, NULL, 0))
-      zk_inactive("the context is Apple's (GL_RENDERER %s); NVKZinkGLDriver.bundle is not loaded in this process",
-                  renderer);
-   zk_inactive("the context is Apple's (GL_RENDERER %s); the driver printed no reason", renderer);
+   else if (zk_tee_driver_line(line, sizeof(line)))
+      zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", shown, line);
+   else if (!zk_image(ZK_BUNDLE, NULL, 0))
+      zk_fail("zink", "the context is Apple's (GL_RENDERER %s) and NVKZinkGLDriver.bundle is not loaded in this "
+              "process, although IOGLBundleName names it", shown);
+   else
+      zk_fail("zink", "the context is Apple's (GL_RENDERER %s) and the driver printed no reason", shown);
+   zk_finish();
 }
 
 /* The first context of a check, current on the calling thread: Zink's, or Apple's software renderer for a control.
