@@ -53,6 +53,7 @@ its own children's groups. Its system programs come from the SYSTEM table, which
 import sys
 sys.dont_write_bytecode = True   # nor for the check files it loads (python3 -B, but from inside)
 import argparse  # noqa: E402
+import ast
 import datetime
 import hashlib
 import importlib.util
@@ -490,8 +491,38 @@ def normalized(c):
     return c
 
 
+# what a check file may import and call: it defines CHECKS and nothing else when it is loaded (no I/O)
+PURE_IMPORTS = {"re", "os", "os.path", "json", "itertools", "functools", "string", "textwrap", "copy", "collections",
+                "__future__"}
+IO_NAMES = {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint", "getattr", "globals", "vars"}
+IO_ATTRS = {"read_text", "write_text", "read_bytes", "write_bytes", "open", "mkdir", "unlink", "system", "popen",
+            "remove", "rename", "listdir", "walk", "scandir", "glob", "iterdir", "stat", "exists", "getenv"}
+
+
+def import_problems(text):
+    """-> what in a check file could read, write or start something when it is loaded: an import beyond a few pure
+    modules of the standard library, or a call that opens, lists or starts"""
+    tree = ast.parse(text, feature_version=(3, 9))
+    probs = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            probs += [f"import {a.name}" for a in node.names if a.name not in PURE_IMPORTS]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "") not in PURE_IMPORTS:
+            probs.append(f"from {node.module} import")
+        elif isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name) and f.id in IO_NAMES:
+                probs.append(f.id + "()")
+            elif isinstance(f, ast.Attribute) and f.attr in IO_ATTRS:
+                probs.append("." + f.attr + "()")
+        elif isinstance(node, ast.Attribute) and node.attr == "environ":
+            probs.append(".environ")
+    return probs
+
+
 def load_checks(card_dir):
-    """-> (rows sorted by order then id, errors): every tools/card/checks_*.py, loaded from its path"""
+    """-> (rows sorted by order then id, errors): every tools/card/checks_*.py, read and vetted (import_problems), then
+    loaded from its path"""
     rows, errors = [], []
     card_dir = Path(card_dir)
     for f in sorted(card_dir.glob("checks_*.py")):
@@ -499,6 +530,14 @@ def load_checks(card_dir):
         part = f.stem[len("checks_"):]
         if part not in PARTS:
             errors.append(f"{rel}: '{part}' is not a part ({', '.join(PARTS)})")
+            continue
+        try:
+            probs = import_problems(f.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError) as e:
+            errors.append(f"{rel}: cannot be read as Python 3.9: {type(e).__name__}: {e}")
+            continue
+        if probs:
+            errors.append(f"{rel}: not loaded, it would do more than define CHECKS: {', '.join(sorted(set(probs)))}")
             continue
         try:
             spec = importlib.util.spec_from_file_location(f"card_checks_{part}", str(f))

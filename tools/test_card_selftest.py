@@ -107,33 +107,7 @@ named = [(c["id"], s) for c in checks for s in strings_of(c) + c["sources"]
 arm("no file in tools/card is named test_*, and no row names a tools/test_*.c, .cpp, .sh or .py (run_all_tests.py would "
     "run it on the card)", not host_tests and not named and not RUNNER.name.startswith("test_"), (host_tests, named))
 
-ALLOWED_IMPORTS = {"re", "os", "os.path", "json", "itertools", "functools", "string", "textwrap", "copy", "collections",
-                   "__future__"}
-IO_NAMES = {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
-IO_ATTRS = {"read_text", "write_text", "read_bytes", "write_bytes", "open", "mkdir", "unlink", "system", "popen",
-            "remove", "rename", "listdir", "walk", "scandir", "glob", "iterdir", "stat", "exists"}
-
-
-def import_time_problems(path):
-    """imports beyond a few pure modules of the standard library, or a call that reads, writes or starts something"""
-    tree = ast.parse(path.read_text(), feature_version=(3, 9))
-    probs = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            probs += [a.name for a in node.names if a.name not in ALLOWED_IMPORTS]
-        elif isinstance(node, ast.ImportFrom):
-            if (node.module or "") not in ALLOWED_IMPORTS:
-                probs.append(node.module)
-        elif isinstance(node, ast.Call):
-            f = node.func
-            if isinstance(f, ast.Name) and f.id in IO_NAMES:
-                probs.append(f.id + "()")
-            elif isinstance(f, ast.Attribute) and f.attr in IO_ATTRS:
-                probs.append("." + f.attr + "()")
-    return probs
-
-
-probs = {f.name: import_time_problems(f) for f in files}
+probs = {f.name: R.import_problems(f.read_text()) for f in files}
 probs = {k: v for k, v in probs.items() if v}
 arm("the check files import only pure standard modules and read, write or start nothing when loaded", not probs, probs)
 syntax = []
@@ -216,6 +190,13 @@ rows, errs = refused_by_loader({"checks_plugin.py": [GOOD], "checks_zink.py": [Z
 arm("control: a duplicate id is refused", any("also in" in e for e in errs), errs)
 rows, errs = refused_by_loader({"checks_other.py": [GOOD]})
 arm("control: a file named for no part is refused", any("is not a part" in e for e in errs), errs)
+with tempfile.TemporaryDirectory() as d:
+    mark = Path(d, "mark")
+    Path(d, "checks_plugin.py").write_text(f"import subprocess\nopen({str(mark)!r}, 'w').close()\nCHECKS = []\n")
+    rows, errs = R.load_checks(d)
+    arm("control: a check file that would import or open something is refused before it is loaded (its code never runs)",
+        not rows and any("not loaded" in e and "import subprocess" in e and "open()" in e for e in errs)
+        and not mark.exists(), errs)
 
 
 # --------------------------------------------------------------------------------------------------- unit arms
