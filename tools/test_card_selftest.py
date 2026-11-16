@@ -28,9 +28,10 @@ check and stopped after it; the refusals (an --out outside the base or not empty
 sources, another package commit, an installed file that differs, a device of another class, an unknown key), --list
 and --plan (which start no check program and write nothing). The real tools/card/checks_install.py runs against a
 stand-in installation, once whole (every row passes) and once with a defect for each row; install.plugin-translator
-also with a copy of the translator beside the plugin of the same build and of an older one, without nvmtl/'s copy, and
-on a checkout whose plugin loader has no preference for the copy beside it. After every run: no file appeared outside
-the run folder and the stand-ins' own folder.
+also with a copy of the translator beside the plugin of the same build, of an older one (also unreadable by this
+account), one that is not Mach-O and one without LC_UUID (nvmtl/'s too), without nvmtl/'s copy, and on a checkout
+whose plugin loader has no preference for the copy beside it. After every run: no file appeared outside the run folder
+and the stand-ins' own folder.
 
 Not a card check: it runs on Linux and on a Mac without the driver. Written and run on Linux only so far."""
 import sys
@@ -226,9 +227,10 @@ arm("the scrub: home in its three forms, the user folders, the host and its firs
 
 
 def macho_bytes(uuid, minos=(15, 0), ident=None, cpu=0x01000007):
-    cmds = struct.pack("<II", 0x1B, 24) + bytes.fromhex(uuid)
+    """a thin Mach-O file: LC_UUID (none when uuid is None), LC_BUILD_VERSION and an optional LC_ID_DYLIB"""
+    cmds = struct.pack("<II", 0x1B, 24) + bytes.fromhex(uuid) if uuid else b""
     cmds += struct.pack("<IIIIII", 0x32, 24, 1, (minos[0] << 16) | (minos[1] << 8), 26 << 16, 0)
-    n = 2
+    n = 2 if uuid else 1
     if ident:
         name = ident.encode() + b"\0"
         name += b"\0" * (-(24 + len(name)) % 8)
@@ -275,6 +277,9 @@ m.GB_OWNER_UID = os.getuid()
 m.KILL_POLL = cfg["kill_poll"]
 if cfg["no_kill"]:
     m._killpg = lambda pgid, sig: None
+if cfg["unreadable"]:     # files that access(R_OK) refuses, as for another account (this test may run as root)
+    _access, _deny = os.access, set(cfg["unreadable"])
+    os.access = lambda p, mode, **k: False if mode & os.R_OK and os.fspath(p) in _deny else _access(p, mode, **k)
 if cfg["fault"]:
     def fault(self, *a, **k):
         raise RuntimeError("a stand-in fault of the runner")
@@ -465,9 +470,13 @@ echo "PASS device"
 """
 
 MESA = "0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4"
-# nvmtl/'s translator, and an older build of it with another LC_UUID
-XU, XU_OLD = "44" * 16, "29" * 16
+# nvmtl/'s translator, and an older build of it with another LC_UUID (release 2.9's, the copy the Mac of round 11 had
+# beside the plugin), each with its LC_UUID as the row prints it, the form of the plugin's "translate: opened" line
+XU, XU_OLD = "44" * 16, "cbc0201690e23dbfbfd716087181d77f"
+XU_T, XU_OLD_T = "44444444-4444-4444-4444-444444444444", "CBC02016-90E2-3DBF-BFD7-16087181D77F"
 XLATE, XLATE_OLD = macho_bytes(XU), macho_bytes(XU_OLD) + b"older"
+SCRIPT = b"#!/bin/sh\n"
+BESIDE = "NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib"
 # a plugin loader without the preference for a copy beside the plugin: its function that calls dladdr opens nvmtl/'s
 # copy by its absolute path, and the bare name is only in comments, a log line and a function that does not call dladdr
 LOADER_NO_BESIDE = """static const char *nvmtl_xlate_name(void) {
@@ -551,12 +560,17 @@ class World:
         front = macho_bytes(U2, (15, 0), "@loader_path/libnvk_minecraft.dylib")
         rend = macho_bytes(U1, (15, 0), "@loader_path/libnvk_renderer.dylib")
         self.put("NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver", macho_bytes(U3), 0o755)
-        if "noxlate" not in defects:
+        if "nouuid" in defects:          # nvmtl/'s copy and one beside the plugin, both Mach-O without LC_UUID
+            self.put("nvmtl/libnvmtl_translate.dylib", macho_bytes(None), 0o755)
+            self.put(BESIDE, macho_bytes(None) + b"its own signature", 0o755)
+        elif "noxlate" not in defects:
             self.put("nvmtl/libnvmtl_translate.dylib", XLATE, 0o755)
         if "beside-same" in defects:     # the same build signed apart: other bytes, the same LC_UUID
-            self.put("NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib", XLATE + b"its own signature", 0o755)
+            self.put(BESIDE, XLATE + b"its own signature", 0o755)
         if "beside-old" in defects:      # an older release's copy, kept by a package staged onto that release
-            self.put("NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib", XLATE_OLD, 0o755)
+            self.put(BESIDE, XLATE_OLD, 0o755)
+        if "beside-script" in defects:   # a file there that is not Mach-O: the plugin's dlopen of it fails
+            self.put(BESIDE, SCRIPT, 0o755)
         self.put("nvmtl/libvulkan_nouveau.dylib", rend, 0o755)
         self.put("nvmtl/libvulkan.1.4.362.dylib", macho_bytes(U3), 0o755)
         os.symlink("libvulkan.1.4.362.dylib", self.gb / "nvmtl" / "libvulkan.1.dylib")
@@ -621,11 +635,11 @@ class World:
             out |= {str(Path(dirpath, n)) for n in dirnames + filenames}
         return out
 
-    def run(self, argv, no_kill=False, kill_poll=3, timeout=180, fault=False, signal_when=None):
+    def run(self, argv, no_kill=False, kill_poll=3, timeout=180, fault=False, signal_when=None, unreadable=()):
         cfg = {"runner": str(RUNNER), "system": self.system, "src": str(self.src), "gb": str(self.gb),
                "audit_tmp": [str(self.root / "tmp")], "icd": str(self.root / "icd"),
                "exec_only_under": [os.path.realpath(str(self.root)), PY], "kill_poll": kill_poll, "no_kill": no_kill, "fault": fault,
-               "argv": argv}
+               "unreadable": [str(self.gb / r) for r in unreadable], "argv": argv}
         (self.state / "wrap.py").write_text(WRAP)
         (self.state / "cfg.json").write_text(json.dumps(cfg))
         for f in ("calls.log", "ran.log"):
@@ -1157,7 +1171,7 @@ try:
         pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {w.gb}/nvmtl/libnvmtl_translate.dylib: no "
         "copy beside it" and any(l.startswith("INFO plugin source: plugin/NVMTLLibraryLoad.m (nvmtl_xlate_ready) calls "
                                               "dladdr") for l in pt.get("info", []))
-        and f"INFO translator nvmtl/libnvmtl_translate.dylib: x86_64, LC_UUID {XU}, {len(XLATE)} bytes, sha256 "
+        and f"INFO translator nvmtl/libnvmtl_translate.dylib: x86_64, LC_UUID {XU_T}, {len(XLATE)} bytes, sha256 "
             f"{hashlib.sha256(XLATE).hexdigest()[:12]}" in pt.get("info", []), pt)
     w.install(defects=("manifest", "extra", "mesa", "control", "sync", "beside-old"))
     w.set(gl_bundle="AppleMetalOpenGLRenderer")
@@ -1174,19 +1188,20 @@ try:
         and "README.txt" in got["install.minecraft-files"]["why"] and "1.4.362" in got["install.minecraft-files"]["why"],
         (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
     pt = got.get("install.plugin-translator", {})
-    beside = f"{w.gb}/NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib"
+    beside = f"{w.gb}/{BESIDE}"
+    # execute() keeps the first 200 characters of each INFO line, so a line naming a path under a long TMPDIR is cut
     arm("install.plugin-translator with an older build beside the plugin (install.identity still passes, as on the Mac "
         "of round 11): one FAIL line naming the file the plugin opens, both LC_UUIDs, the plugin's preference and what "
         "it means for the run",
         got.get("install.identity", {}).get("result") == "pass"
-        and pt.get("why") == f"the Metal plugin opens {beside} (LC_UUID {XU_OLD}), not the build of "
-        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU}), because plugin/NVMTLLibraryLoad.m (nvmtl_xlate_ready) "
-        f"prefers the copy beside the plugin: this run's Metal rows translate with that copy, while its readback rows "
-        f"use {w.gb}/nvmtl/libnvmtl_translate.dylib" and f"INFO the plugin opens {beside}" in pt.get("info", []), pt)
+        and pt.get("why") == f"the Metal plugin opens {beside} (LC_UUID {XU_OLD_T}), not the build of "
+        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU_T}), because plugin/NVMTLLibraryLoad.m "
+        f"(nvmtl_xlate_ready) prefers the copy beside the plugin: this run's Metal rows translate with that copy, "
+        f"while its readback rows use {w.gb}/nvmtl/libnvmtl_translate.dylib"
+        and f"INFO the plugin opens {beside}"[:200] in pt.get("info", []), pt)
     report = (out / "report.md").read_text()
     old_line = ("- install.plugin-translator: INFO translator "
-                "NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib: "
-                f"x86_64, LC_UUID {XU_OLD}, {len(XLATE_OLD)} bytes, "
+                f"{BESIDE}: x86_64, LC_UUID {XU_OLD_T}, {len(XLATE_OLD)} bytes, "
                 f"sha256 {hashlib.sha256(XLATE_OLD).hexdigest()[:12]}")
     arm("and report.md lists that failing read row's INFO lines (each copy's LC_UUID, size and SHA-256 prefix) under "
         "Information", old_line in report.split("## Information", 1)[-1]
@@ -1204,7 +1219,7 @@ try:
     arm("and with a copy beside the plugin of the same build, signed apart (other bytes, the same LC_UUID): "
         "install.plugin-translator passes, the plugin opening that copy",
         pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {beside}, the same build as "
-        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU})", pt)
+        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU_T})", pt)
     left = list(w.leftover)
     only = ["--only", r"^install\.plugin-translator$"]
     w.install(defects=("noxlate",))
@@ -1216,6 +1231,46 @@ try:
         rc == 1 and list(got) == ["install.plugin-translator"] and pt.get("result") == "FAIL"
         and pt.get("why") == f"{w.gb}/nvmtl/libnvmtl_translate.dylib, the translator of the readback rows and the "
         "plugin's fallback, is missing", (rc, pt, text[-800:]))
+    left += w.leftover
+    x = f"{w.gb}/nvmtl/libnvmtl_translate.dylib"
+    w.install(defects=("beside-script",))
+    out = w.base / "runs" / "i4s"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator with a file beside the plugin that is not Mach-O: it fails, saying that the "
+        "plugin's dlopen fails there without falling back to nvmtl/'s, and keeps its INFO lines",
+        rc == 1 and pt.get("result") == "FAIL"
+        and pt.get("why") == f"the Metal plugin opens {beside}, which is not Mach-O, because plugin/NVMTLLibraryLoad.m "
+        f"(nvmtl_xlate_ready) prefers the copy beside the plugin: its dlopen fails there, and the plugin does not fall "
+        f"back to {x}"
+        and f"INFO translator {BESIDE}: not Mach-O, {len(SCRIPT)} bytes, sha256 "
+            f"{hashlib.sha256(SCRIPT).hexdigest()[:12]}" in pt.get("info", [])
+        and f"INFO translator nvmtl/libnvmtl_translate.dylib: x86_64, LC_UUID {XU_T}, {len(XLATE)} bytes, sha256 "
+            f"{hashlib.sha256(XLATE).hexdigest()[:12]}" in pt.get("info", []), (rc, pt, text[-800:]))
+    left += w.leftover
+    w.install(defects=("nouuid",))
+    out = w.base / "runs" / "i4n"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator with nvmtl/'s copy and the one beside the plugin both without LC_UUID: it fails, as "
+        "two builds it cannot tell apart",
+        rc == 1 and pt.get("result") == "FAIL"
+        and pt.get("why") == f"the Metal plugin opens {beside} (LC_UUID none), not the build of {x} (LC_UUID none), "
+        f"because plugin/NVMTLLibraryLoad.m (nvmtl_xlate_ready) prefers the copy beside the plugin: this run's Metal "
+        f"rows translate with that copy, while its readback rows use {x}", (rc, pt, text[-800:]))
+    left += w.leftover
+    w.install(defects=("beside-old",))
+    out = w.base / "runs" / "i4u"
+    rc, text = w.run(only + ["--out", str(out)], unreadable=(BESIDE,))
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator with an older build beside the plugin that this account cannot read: it passes, "
+        "since the plugin's own access(R_OK) test then opens nvmtl/'s",
+        rc == 0 and pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {x}: no readable copy beside it"
+        and f"INFO translator {BESIDE}: there but not readable by this account" in pt.get("info", [])
+        and f"INFO the plugin opens {x}"[:200] in pt.get("info", []), (rc, pt, text[-800:]))
     left += w.leftover
     w.install(defects=("beside-old",))
     (w.src / "plugin" / "NVMTLLibraryLoad.m").write_text(LOADER_NO_BESIDE)
@@ -1234,7 +1289,7 @@ try:
             "libnvmtl_translate.dylib: this plugin opens nvmtl/'s only, and a copy beside it does not matter"
             in pt.get("info", []), (rc, pt, text[-800:]))
     left += w.leftover
-    arm("and nothing was written outside the run folder by these three runs either", not left, left)
+    arm("and nothing was written outside the run folder by these six runs either", not left, left)
 finally:
     shutil.rmtree(TOP, ignore_errors=True)
 
