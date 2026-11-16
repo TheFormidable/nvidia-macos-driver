@@ -2032,6 +2032,9 @@ recipe() {   # <component>: everything its output depends on, as text
   esac
   case " $C_TOOLS " in *" meson "*) say "meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version) ninja $([ -n "$T_NINJA" ] && "$T_NINJA" --version)" ;; esac
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
+  # NVKZinkGLDriver.bundle exports the build Mac's AppleMetalOpenGLRenderer names (build/generate_gld_forward.py), which
+  # a macOS update can change without any change to Xcode: the system's build is part of zink's recipe
+  if [ "$n" = zink ] && is_mac; then say "macos $(sw_vers -buildVersion 2>/dev/null || true)"; fi
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
   for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"; done
