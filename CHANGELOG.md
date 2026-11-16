@@ -735,6 +735,10 @@ has proven itself, renewed with a reason otherwise.
   component's two libraries, which are its Vulkan driver. Built and checked on Linux only: a darwin cross-build of
   Zink, and syntax-only compiles of the CGL adapter, the GL bundle and the runtime's three Objective-C++ files against
   a stand-in SDK (Zink's two AppKit files were not compiled); neither component has been built on a Mac.
+- Native OpenGL's build needs Bison 3.0 or later (macOS's `/usr/bin/bison` is 2.3): `./build.sh deps` builds GNU
+  Bison 3.8.2 from its release tarball, SHA-256 checked, on an Intel Mac and installs Homebrew's `bison` on Apple
+  silicon. Without one, a build that includes `zink` (`all` and `package` do) stops before its first component's first
+  step, naming bison and `./build.sh deps`. Bison's recipe has not run on a Mac or anywhere else.
 - New host tests: `tools/test_nvk_bridge.py` (the runtime's interfaces with NVK and the plugin, and on a Mac with
   Vulkan headers its host test built with ASan and UBSan), `tools/test_cgl_dispatch.py` and
   `tools/test_cgl_gld_guard.py` (the dispatch generator's rules and the layout guard's checks, on synthetic input),

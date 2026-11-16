@@ -131,6 +131,10 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   warnings, a link against empty framework stubs, the dispatch table generated from the 11.3 SDK's OpenGL headers,
   and `nvk_cgl.c` and `gld_bridge.c` compiled with `-Wall -Wextra -Werror` (`-fsyntax-only`).
 - `tools/test_cgl_dispatch.py`: the generator's rules on synthetic headers.
+- `tools/test_build_zink_tools.py`: `build/build_zink.sh`'s check of the bison and flex on its PATH, with stand-ins.
+  Mesa 26.3.0's grammars need Bison 3.0 or newer: a bison of 3.0 or newer passes, and macOS's 2.3, a bison that
+  prints no version, a missing bison and a missing flex each stop the script before meson, naming `./build.sh deps`
+  where a bison is the reason.
 - `tools/test_cgl_gld_guard.py`: the layout guard's checks, compiled for the Linux host from `zink/nvk_cgl_guard.h`
   and fed synthetic heap blocks. It accepts the recorded layout and refuses each way the layout can differ (a GLI
   context that is not a block or is too small, a profile byte out of range, a null or interior dispatch pointer, a CGL

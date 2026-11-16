@@ -1,19 +1,22 @@
 #!/bin/bash
-# build/toolchain.sh: build the tools NVK's build needs from pinned sources, into one folder, without Homebrew.
+# build/toolchain.sh: build the tools NVK's and native OpenGL's builds need, from pinned sources, without Homebrew.
 #
 #   build/toolchain.sh list                 the tool names in build order, one per line
 #   build/toolchain.sh id <name>            one line that changes whenever that tool's recipe changes
 #   build/toolchain.sh build <name>...      build, install and check each, in the order given; stop at the first failure
-#   build/toolchain.sh check <name>...      only the checks of what is installed
+#   build/toolchain.sh check <name>...      only the checks of what is installed (bison's runs a grammar in a temporary
+#                                           folder, which it removes)
 #
 # When homebrew-core was read on 2026-11-13 it had no ready-made builds for Intel Macs of the formulas build.sh would
 # install: there "brew install" compiles LLVM with every target, two Pythons and OpenSSL into /usr/local. This script
-# builds only what NVK's build uses, for this Mac's own processor, with Apple's clang, from source trees that build.sh
-# has fetched and verified by commit.
+# builds only what NVK's build uses, and the Bison native OpenGL's Mesa needs, for this Mac's own processor, with
+# Apple's clang, from source trees that build.sh has fetched and verified by commit (Bison's: a release tarball
+# verified by its SHA-256).
 #
 # Input is the environment only (build.sh sets it):
 #   NM_TC_PREFIX  where the tools are installed. Fixed layout: bin/ (ninja, cmake, pkgconf and its pkg-config link,
-#                 glslang and glslangValidator, the spirv-* programs), lib/, include/, lib/pkgconfig/SPIRV-Tools.pc;
+#                 glslang and glslangValidator, the spirv-* programs, bison), lib/, include/,
+#                 lib/pkgconfig/SPIRV-Tools.pc, share/bison/ (Bison's skeletons, which bin/bison reads);
 #                 python/ (Python 3.14 with pip); llvm/ (LLVM and clang, shared libraries); ssl/ (OpenSSL's folder with
 #                 cert.pem, where the Python built here looks for CA certificates by default); build-deps/ (static
 #                 OpenSSL, zstd and liblzma with their headers, used only while Python is built); .nm-toolchain/ (one
@@ -34,7 +37,7 @@
 # folder .nm-toolchain-logs) is refused before anything is written; the folders are judged by where they really are
 # (pwd -P), so a link does not get past the rules; a record of installed files with a line that is not a file of the
 # prefix reached through its real folders stops the build before anything is removed. xcrun and security are run from
-# /usr/bin, never through the caller's PATH.
+# /usr/bin, never through the caller's PATH; bison is built to run /usr/bin/m4.
 #
 # Written for the /bin/bash 3.2 of macOS and its BSD tools. It also runs on Linux, so that the portable recipes and the
 # host test (tools/test_toolchain_sh.py) can run there; the steps that exist only on a Mac (xcrun, security, otool,
@@ -48,7 +51,10 @@ warn() { say "WARNING: $*" >&2; }
 die()  { say "STOP: $*" >&2; exit 2; }
 
 # ---------------------------------------------------------------------------------------------------------- the tools
-TOOLS="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
+# bison is last, so that a toolchain built from an empty prefix builds the ten other tools without a bison in bin/ (the
+# first folder of every build command's PATH). A later build of one of them in a prefix that holds bison (a raised
+# recipe, a moved pin) finds bin/bison there.
+TOOLS="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm bison"
 
 # A recipe's number: raise it whenever that tool's recipe or checks change, so that build.sh, which compares the id
 # with the stamp, builds the tool again. The processor is part of the id: a toolchain made under Rosetta is not the
@@ -56,7 +62,7 @@ TOOLS="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
 recipe_number() {
   case "$1" in
     ninja) echo 2 ;; cmake) echo 2 ;; openssl) echo 2 ;; zstd) echo 2 ;; xz) echo 2 ;; python) echo 2 ;;
-    pkgconf) echo 2 ;; spirv-tools) echo 2 ;; glslang) echo 2 ;; llvm) echo 2 ;;
+    pkgconf) echo 2 ;; spirv-tools) echo 2 ;; glslang) echo 2 ;; llvm) echo 2 ;; bison) echo 1 ;;
     *) return 1 ;;
   esac
 }
@@ -73,6 +79,7 @@ pinned_version() {
     pkgconf) echo 2.5.1 ;;
     glslang) echo 16.6.0 ;;
     llvm) echo 22.1.8 ;;
+    bison) echo 3.8.2 ;;
     *) return 1 ;;
   esac
 }
@@ -90,7 +97,8 @@ macos_min() {
   case "$v" in *[!0-9.]*|*..*|*.) die "MACOSX_DEPLOYMENT_TARGET must be a macOS version such as 15.0 (got $v)" ;; esac
   printf '%s\n' "$v"
 }
-# The fixed place of the macOS helpers xcrun and security: never looked up through the caller's PATH.
+# The fixed place of the macOS helpers xcrun and security, never looked up through the caller's PATH, and of the m4
+# bison is built to run.
 SYSBIN=/usr/bin
 ncpu() { sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2; }
 # the extension of a shared library on this system (LLVM's layout check)
@@ -564,6 +572,71 @@ check_llvm() {
   [ -z "$missing" ] || bad "llvm-config --components lacks what Mesa asks for:$missing"
 }
 
+# GNU Bison 3.8.2, for native OpenGL's Mesa: its GLSL grammars use "%define api.pure" and "%define parse.error
+# verbose", which macOS's Bison 2.3 refuses. Built from the release tarball build.sh verified and extracted, with
+# configure and make in a copy of the tree, as for cmake and CPython. The copy keeps the files' times (cp -p): the
+# tarball's configure, Makefile.in and generated parser are newer than what they are made from, and a copy with new
+# times in another order could make make try to make them again with autoconf, automake and a bison this Mac does not
+# have. Given: the system's m4 by its absolute path (bison runs it on every grammar; configure would otherwise take the
+# first m4 on PATH, and bison would look for "m4" on the PATH of whatever runs it). Turned off: translations (they would
+# look for libintl), dependency tracking (a one-time build), and the yacc command and its liby library, which nothing
+# here uses. Bison's own tests are not run. Homebrew's formula builds the same release with configure, its default
+# options and macOS's m4. configure (gnulib's javacomp.m4 and javaexec.m4, for Bison's Java tests and examples) looks
+# for javac, java and jre on PATH and runs the ones it finds; on a Mac /usr/bin/javac and /usr/bin/java are Apple's
+# stubs, which on a Mac without a JDK may ask to install one. The empty cache values on the configure line answer those
+# probes, and the gcj and jikes ones of older copies of those files, as "not found", so that none of them runs.
+BISON_NO_JAVA=(ac_cv_prog_HAVE_JAVAC_IN_PATH= ac_cv_prog_HAVE_JAVA_IN_PATH= ac_cv_prog_HAVE_JRE_IN_PATH=
+               ac_cv_prog_HAVE_GCJ_IN_PATH= ac_cv_prog_HAVE_JIKES_IN_PATH=)
+BISON_M4=$SYSBIN/m4
+recipe_bison() {
+  [ -x "$BISON_M4" ] || die "bison is built to run $BISON_M4, which is not there (on a Mac it comes with Xcode's command line tools)"
+  [ -x "$SRC/bison/configure" ] || die "bison: $SRC/bison has no configure: it is not the extracted release tarball"
+  clean_env
+  x cp -RPp "$SRC/bison" "$B/bison"; x chmod -R u+w "$B/bison"
+  xin "$B/bison" "${CLEAN[@]}" ./configure "--prefix=$P" --disable-nls --disable-dependency-tracking --disable-yacc "M4=$BISON_M4" "${BISON_NO_JAVA[@]}"
+  xin "$B/bison" "${CLEAN[@]}" make -j "$JOBS"
+  xin "$B/bison" "${CLEAN[@]}" make install
+}
+# A grammar like Mesa 26.3.0's GLSL ones (a pure parser with locations and a parameter, glcpp-parse.y:179-180 and
+# glsl_parser.yy:86-87 for the two %define lines), which bin/bison must turn into C with a pure parser (YYPURE 1) and
+# verbose syntax errors (yysyntax_error, which only parse.error verbose or detailed writes); Bison 2.3 stops at its
+# first %define. Run as Mesa's build runs it (-o, --defines, -p), in a new folder of TMPDIR (the work folder's tmp/
+# during a build) that is removed again, so that a check writes nothing into the prefix.
+BISON_GRAMMAR='%define api.pure
+%define parse.error verbose
+%locations
+%parse-param {int *nm_sum}
+%lex-param {int *nm_sum}
+%union { int n; }
+%{
+static int yylex(YYSTYPE *lval, YYLTYPE *lloc, int *nm_sum);
+static void yyerror(YYLTYPE *lloc, int *nm_sum, const char *msg);
+%}
+%token <n> NUM
+%%
+input: %empty | input NUM { *nm_sum += $2; } ;
+%%
+static int yylex(YYSTYPE *lval, YYLTYPE *lloc, int *nm_sum) { (void)lval; (void)lloc; (void)nm_sum; return 0; }
+static void yyerror(YYLTYPE *lloc, int *nm_sum, const char *msg) { (void)lloc; (void)nm_sum; (void)msg; }'
+check_bison() {
+  local d out rc=0
+  need_file bin/bison; need_file share/bison/skeletons/yacc.c; need_file share/bison/m4sugar/m4sugar.m4
+  [ -e "$P/bin/bison" ] || return 0
+  answers_pin bison bin/bison --version
+  if [ -n "${TMPDIR:-}" ]; then d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX") || d=""; else d=$(mktemp -d) || d=""; fi
+  if [ -z "$d" ] || [ ! -d "$d" ]; then bad "no temporary folder for the grammar of bin/bison's check (mktemp -d failed)"; return 0; fi
+  printf '%s\n' "$BISON_GRAMMAR" > "$d/nm-check.y"
+  out=$(cd "$d" && env -i "$P/bin/bison" -o nm-check.c --defines=nm-check.h -p nm_check_ nm-check.y 2>&1) || rc=$?
+  if [ "$rc" != 0 ]; then
+    bad "bin/bison refuses a grammar with %define api.pure and %define parse.error verbose (exit $rc): $(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"
+  elif [ ! -s "$d/nm-check.h" ] || ! grep -q '^#define YYPURE 1' "$d/nm-check.c" 2>/dev/null || ! grep -q 'yysyntax_error' "$d/nm-check.c" 2>/dev/null; then
+    bad "bin/bison turns a grammar with %define api.pure and %define parse.error verbose into C without a pure parser (#define YYPURE 1), verbose errors (yysyntax_error) or its header"
+  else
+    cnote "bin/bison turns a grammar with %define api.pure and %define parse.error verbose into C: a pure parser with verbose errors, and its header"
+  fi
+  rm -rf "$d"
+}
+
 # cmake_project <source> <install prefix> [-D...]: configure for ninja in $B (or $B/$B_SUB), build, install. Shared
 # libraries get absolute install names and an rpath of their own lib folder, so that the programs start from an empty
 # environment and whatever links them later needs nothing more.
@@ -687,7 +760,7 @@ run_checks() {   # <tool>: CHECK_BAD counts the failures
   case "$1" in
     ninja) check_ninja ;; cmake) check_cmake ;; openssl) check_openssl ;; zstd) check_zstd ;; xz) check_xz ;;
     python) check_python ;; pkgconf) check_pkgconf ;; spirv-tools) check_spirv_tools ;; glslang) check_glslang ;;
-    llvm) check_llvm ;;
+    llvm) check_llvm ;; bison) check_bison ;;
   esac
   check_libraries "$1"
 }
@@ -715,7 +788,7 @@ build_one() {
   case "$t" in
     ninja) recipe_ninja ;; cmake) recipe_cmake ;; openssl) recipe_openssl ;; zstd) recipe_zstd ;; xz) recipe_xz ;;
     python) recipe_python ;; pkgconf) recipe_pkgconf ;; spirv-tools) recipe_spirv_tools ;; glslang) recipe_glslang ;;
-    llvm) recipe_llvm ;;
+    llvm) recipe_llvm ;; bison) recipe_bison ;;
   esac
   record_tool_files "$t"
   logline "---- checks"
@@ -739,7 +812,7 @@ build_one() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- main
-usage() { sed -n '3,7p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; }
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in
