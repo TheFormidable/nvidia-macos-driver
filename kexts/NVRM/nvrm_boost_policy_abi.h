@@ -13,12 +13,15 @@
  * The kext now holds a policy of three values that NVK reads through this selector each time it would renew:
  *   NVRM_BP_UNDECIDED  nobody chose since boot: every process follows NVRM_610_BOOST as before (the conf file keeps
  *                      the choice across reboots; the kext starts here at every boot)
- *   NVRM_BP_IDLE       idle mode: no process renews its lease, and one that holds a lease or a hold clears it
+ *   NVRM_BP_IDLE       idle mode: no process renews its lease, and one that still has a lease or a hold clears it
+ *                      at its next submission
  *   NVRM_BP_NORMAL     idle mode off: every process boosts per burst of work (or holds, with NVRM_610_BOOST=hold),
  *                      even one that started with NVRM_610_BOOST=0
  * It changes no RM state: a process's boost is its own RM client's request, and only that process can clear it, so
  * the policy takes effect at each busy process's next renewal (within a second of its work). A process that is not
- * submitting holds no lease past its last 3 s. Other RM clients (NVMetrics' own boost, nvmtl-boost) are not affected.
+ * submitting holds no lease past its last 3 s; one that holds (NVRM_610_BOOST=hold) and submits nothing keeps its hold
+ * until it submits again or exits, in idle mode too. Other RM clients (NVMetrics' own boost, nvmtl-boost) are not
+ * affected.
  *
  * Reading is open to any process that can open the user client; setting needs root (the caller's credential, checked
  * on its own thread). The value also shows in the read-only sysctl debug.nvrm_boost_policy, with the number of

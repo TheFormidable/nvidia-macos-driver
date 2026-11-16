@@ -14,16 +14,21 @@ Also:
 - NVRM_610_BOOST is read under its full name in nvrm610.conf too (the last such line wins), then as 2.9's short
   "BOOST=" line, at each device creation and without printing. nvrm610_value only ever matched the short form in the
   file, so a Vulkan app without the Metal plugin (which copies the file into the environment) did not see the line
-  NVMetrics and the settings tool write.
+  NVMetrics writes.
 - A refused lease or hold is asked again 30 s later instead of never again in that process: a refusal while the GPU
   came back from sleep turned boost off until the app was restarted.
-- A hold process also looks at the policy at most once a second while it submits, so idle mode clears its hold.
+- A hold process also looks at the policy at most once a second while it submits, so idle mode clears its hold at
+  its next submission. One that submits nothing keeps its hold until it submits again or exits.
+- A hold is cleared as it was asked, with the CUDA bit, and then without it as before: the RM's internal interface
+  clears the two kinds of boost apart, and which clear the firmware honours for a hold is not in the open sources.
+- One renewal runs at a time (boostBusy). The deadline alone let a second thread renew while the first one's RM
+  call waited at the kext's power gate through a standby, and the two then raced on what the process holds.
 
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index d2e781e..42cf0d8 100644
+index d2e781e..e951701 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-@@ -40,35 +40,43 @@ struct nvkmd_nvrm_pdev {
+@@ -40,35 +40,46 @@ struct nvkmd_nvrm_pdev {
     NvHandle hDevice;
     NvHandle hSubdevice;
     NvHandle hUsermode;
@@ -37,11 +42,14 @@ index d2e781e..42cf0d8 100644
 +   /* Performance boost (see nvkmd_nvrm_boost_burst). boostMode is what NVRM_610_BOOST says for this process, fixed
 +    * when the device is created; the shape used at each renewal also follows the kext's boost policy
 +    * (nvrm_boost_policy_abi.h), read again each time. boostRenewNs is the monotonic time before which a submit does
-+    * not look again. Written only by the thread that won the renewal (and by create and destroy): boostLive, what this
-+    * process has asked the GPU for and not cleared (NVKMD_NVRM_BOOST_OFF: nothing); boostPolicy, the kext's last
-+    * answer; boostAsk, 1 the kext answers, 0 not asked yet, -1 a kext without the selector (not asked again). */
++    * not look again. boostBusy is 1 while one thread renews: the deadline alone lets a second thread in when the first
++    * one's RM call outlasts it (the call waits at the kext's power gate through a standby). Written only by the thread
++    * that holds boostBusy (and by create and destroy): boostLive, what this process has asked the GPU for and not
++    * cleared (NVKMD_NVRM_BOOST_OFF: nothing); boostPolicy, the kext's last answer; boostAsk, 1 the kext answers, 0 not
++    * asked yet, -1 a kext without the selector (not asked again). */
     int boostMode;
     uint64_t boostRenewNs;
++   int boostBusy;
 +   int boostLive;
 +   int boostAsk;
 +   uint64_t boostPolicy;
@@ -71,7 +79,7 @@ index d2e781e..42cf0d8 100644
  
  struct nvkmd_nvrm_dev {
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
-index 866088e..4e1604e 100644
+index 866088e..5e8c8a2 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
 @@ -100,16 +100,55 @@
@@ -130,7 +138,7 @@ index 866088e..4e1604e 100644
  // the chipset id, and keep the RM formula only for chips that table does not know.
  static uint8_t nvkmd_nvrm_sm_for_chipset(uint16_t chipset, uint32_t smVersion)
  {
-@@ -648,30 +687,38 @@ nvkmd_nvrm_create_pdev(struct vk_object_base *log_obj,
+@@ -648,30 +687,39 @@ nvkmd_nvrm_create_pdev(struct vk_object_base *log_obj,
     assert(os_page_size <= UINT32_MAX);
     pdev->base.bind_align_B = os_page_size;
  
@@ -156,6 +164,7 @@ index 866088e..4e1604e 100644
 -      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: PERF_BOOST flags 0x%x INFINITE rc 0x%x\n", (unsigned)bp.flags, (unsigned)bs);
 -   } else if (nvkmd_nvrm_diag_on()) {
 -      fprintf(stderr, "nvrm: PERF_BOOST %s\n", pdev->boostMode == NVKMD_NVRM_BOOST_BURST ? "per burst of work" : "off");
++   pdev->boostBusy = 0;
 +   pdev->boostLive = NVKMD_NVRM_BOOST_OFF;
 +   pdev->boostAsk = 0;
 +   pdev->boostPolicy = NVRM_BP_UNDECIDED;
@@ -180,7 +189,7 @@ index 866088e..4e1604e 100644
     {
        int tv = nvrm610_value("RATEDTDP");
        NV2080_CTRL_PERF_RATED_TDP_ACTION act = NV2080_CTRL_PERF_RATED_TDP_ACTION_DEFAULT;
-@@ -803,57 +850,107 @@ done:
+@@ -803,60 +851,136 @@ done:
     return result;
  }
  
@@ -215,6 +224,24 @@ index 866088e..4e1604e 100644
 +   return nvrm_bp_shape(pdev->boostPolicy, pdev->boostMode);
 +}
 +
++/* Clear what this process has asked the GPU for (`live`). A hold was asked as a CUDA client's boost (flags 0x12), and
++ * the RM's internal interface clears that kind apart from the regular one (bIsCudaClient of its CLEAR_3X call). What
++ * the firmware does with a clear that does not carry the bit is not in the open sources, so a hold is cleared first as
++ * it was asked and then as 3.0 cleared it; a clear of a boost that is not there changes nothing. Returns the answer
++ * to the plain clear. */
++static NV_STATUS
++nvkmd_nvrm_boost_clear(struct nvkmd_nvrm_pdev *pdev, struct NvRmApi *rm, int live)
++{
++   NV2080_CTRL_PERF_BOOST_PARAMS bp = { .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_CLEAR, .duration = 0 };
++   if (live == NVKMD_NVRM_BOOST_HOLD) {
++      NV2080_CTRL_PERF_BOOST_PARAMS cp = {
++         .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_CLEAR | (NV2080_CTRL_PERF_BOOST_FLAGS_CUDA_YES << 4),   /* 0x10 */
++         .duration = 0 };
++      nvRmApiControl(rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &cp, sizeof cp);
++   }
++   return nvRmApiControl(rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
++}
++
 +/* Bring what this process has asked the GPU for to `shape`: a lease is asked again at every renewal, a hold once,
 + * and in idle mode whatever is still asked is cleared. Returns the RM's answer, NV_OK when nothing had to be sent.
 + * A refused clear is not repeated: a lease ends by itself within NVKMD_NVRM_BOOST_LEASE_S. */
@@ -226,6 +253,11 @@ index 866088e..4e1604e 100644
 +   if (shape == NVKMD_NVRM_BOOST_OFF) {
 +      if (live == NVKMD_NVRM_BOOST_OFF)
 +         return NV_OK;
++      const NV_STATUS cs = nvkmd_nvrm_boost_clear(pdev, rm, live);
++      pdev->boostLive = NVKMD_NVRM_BOOST_OFF;
++      if (nvkmd_nvrm_diag_on())
++         fprintf(stderr, "nvrm: PERF_BOOST cleared for idle mode (rc 0x%x)\n", (unsigned)cs);
++      return NV_OK;
 +   } else if (shape == NVKMD_NVRM_BOOST_HOLD) {
 +      if (live == NVKMD_NVRM_BOOST_HOLD)
 +         return NV_OK;
@@ -236,11 +268,9 @@ index 866088e..4e1604e 100644
 +      bp.duration = NVKMD_NVRM_BOOST_LEASE_S;
 +   }
 +   NV_STATUS bs = nvRmApiControl(rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
-+   if (shape == NVKMD_NVRM_BOOST_OFF || bs == NV_OK)
++   if (bs == NV_OK)
 +      pdev->boostLive = shape;
-+   if (shape == NVKMD_NVRM_BOOST_OFF && nvkmd_nvrm_diag_on())
-+      fprintf(stderr, "nvrm: PERF_BOOST cleared for idle mode (rc 0x%x)\n", (unsigned)bs);
-+   return shape == NVKMD_NVRM_BOOST_OFF ? NV_OK : bs;
++   return bs;
 +}
  
  void
@@ -258,27 +288,38 @@ index 866088e..4e1604e 100644
                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED))
        return;
  
-+   const int shape = nvkmd_nvrm_boost_shape(pdev);
-+   if (shape == NVKMD_NVRM_BOOST_OFF && pdev->boostLive == NVKMD_NVRM_BOOST_OFF)
-+      return;
-    struct NvRmApi rm;
-    nvkmd_nvrm_dev_api_ctl(pdev, &rm);
+-   struct NvRmApi rm;
+-   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
 -   NV2080_CTRL_PERF_BOOST_PARAMS bp = {
 -      .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_TO_MAX,
 -      .duration = NVKMD_NVRM_BOOST_LEASE_S,
 -   };
 -   NV_STATUS bs = nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
-+   NV_STATUS bs = nvkmd_nvrm_boost_apply(pdev, &rm, shape);
-    if (bs != NV_OK) {
+-   if (bs != NV_OK) {
 -      /* Not supported here: stop asking rather than fail every second. */
 -      __atomic_store_n(&pdev->boostMode, NVKMD_NVRM_BOOST_OFF, __ATOMIC_RELAXED);
-+      /* Not granted: ask again later rather than fail every second. */
-+      __atomic_store_n(&pdev->boostRenewNs, now + NVKMD_NVRM_BOOST_RETRY_NS, __ATOMIC_RELAXED);
-       if (nvkmd_nvrm_diag_on())
+-      if (nvkmd_nvrm_diag_on())
 -         fprintf(stderr, "nvrm: PERF_BOOST lease refused (rc 0x%x), not asking again\n", (unsigned)bs);
-+         fprintf(stderr, "nvrm: PERF_BOOST %s refused (rc 0x%x), asking again in 30 s\n",
-+                 shape == NVKMD_NVRM_BOOST_HOLD ? "hold" : "lease", (unsigned)bs);
++   /* And one renewal at a time. The RM call below can outlast the deadline just set (it waits at the kext's power gate
++    * through a standby); a second winner would then read and write boostLive beside the first, ask a hold twice, or
++    * see nothing to clear just before the first one's hold lands. It skips this renewal instead. */
++   if (__atomic_exchange_n(&pdev->boostBusy, 1, __ATOMIC_ACQUIRE))
++      return;
++
++   const int shape = nvkmd_nvrm_boost_shape(pdev);
++   if (shape != NVKMD_NVRM_BOOST_OFF || pdev->boostLive != NVKMD_NVRM_BOOST_OFF) {
++      struct NvRmApi rm;
++      nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++      NV_STATUS bs = nvkmd_nvrm_boost_apply(pdev, &rm, shape);
++      if (bs != NV_OK) {
++         /* Not granted: ask again later rather than fail every second. */
++         __atomic_store_n(&pdev->boostRenewNs, now + NVKMD_NVRM_BOOST_RETRY_NS, __ATOMIC_RELAXED);
++         if (nvkmd_nvrm_diag_on())
++            fprintf(stderr, "nvrm: PERF_BOOST %s refused (rc 0x%x), asking again in 30 s\n",
++                    shape == NVKMD_NVRM_BOOST_HOLD ? "hold" : "lease", (unsigned)bs);
++      }
     }
++   __atomic_store_n(&pdev->boostBusy, 0, __ATOMIC_RELEASE);
  }
  
  static void
@@ -291,21 +332,25 @@ index 866088e..4e1604e 100644
  	   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
  
 -	   if (pdev->boostMode != NVKMD_NVRM_BOOST_OFF) {   /* drop any boost still leased or held */
-+	   if (pdev->boostLive != NVKMD_NVRM_BOOST_OFF) {   /* drop any boost still leased or held */
- 	      NV2080_CTRL_PERF_BOOST_PARAMS bp = { .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_CLEAR, .duration = 0 };
- 	      nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
- 	   }
+-	      NV2080_CTRL_PERF_BOOST_PARAMS bp = { .flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_CLEAR, .duration = 0 };
+-	      nvRmApiControl(&rm, pdev->hSubdevice, NV2080_CTRL_CMD_PERF_BOOST, &bp, sizeof bp);
+-	   }
++	   if (pdev->boostLive != NVKMD_NVRM_BOOST_OFF)   /* drop any boost still leased or held */
++	      nvkmd_nvrm_boost_clear(pdev, &rm, pdev->boostLive);
  	   nvRmApiFree(&rm, pdev->hVaSpace);
  	   nvRmApiUnmapMemory(&rm, pdev->hSubdevice, pdev->hUsermode, 0, &pdev->usermodeMap);
  	   nvRmApiFree(&rm, pdev->hUsermode);
  	   nvRmApiFree(&rm, pdev->hSubdevice);
  	   nvRmApiFree(&rm, pdev->hDevice);
+    }
+ 
+    free(pdev->classList);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvrm_boost_policy_abi.h b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_boost_policy_abi.h
 new file mode 100644
-index 0000000..ff0abed
+index 0000000..475d03f
 --- /dev/null
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_boost_policy_abi.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,52 @@
 +/*
 + * NullMoth NVIDIA driver for macOS
 + * Copyright (c) 2026 NullMoth Systems.
@@ -321,12 +366,15 @@ index 0000000..ff0abed
 + * The kext now holds a policy of three values that NVK reads through this selector each time it would renew:
 + *   NVRM_BP_UNDECIDED  nobody chose since boot: every process follows NVRM_610_BOOST as before (the conf file keeps
 + *                      the choice across reboots; the kext starts here at every boot)
-+ *   NVRM_BP_IDLE       idle mode: no process renews its lease, and one that holds a lease or a hold clears it
++ *   NVRM_BP_IDLE       idle mode: no process renews its lease, and one that still has a lease or a hold clears it
++ *                      at its next submission
 + *   NVRM_BP_NORMAL     idle mode off: every process boosts per burst of work (or holds, with NVRM_610_BOOST=hold),
 + *                      even one that started with NVRM_610_BOOST=0
 + * It changes no RM state: a process's boost is its own RM client's request, and only that process can clear it, so
 + * the policy takes effect at each busy process's next renewal (within a second of its work). A process that is not
-+ * submitting holds no lease past its last 3 s. Other RM clients (NVMetrics' own boost, nvmtl-boost) are not affected.
++ * submitting holds no lease past its last 3 s; one that holds (NVRM_610_BOOST=hold) and submits nothing keeps its hold
++ * until it submits again or exits, in idle mode too. Other RM clients (NVMetrics' own boost, nvmtl-boost) are not
++ * affected.
 + *
 + * Reading is open to any process that can open the user client; setting needs root (the caller's credential, checked
 + * on its own thread). The value also shows in the read-only sysctl debug.nvrm_boost_policy, with the number of
