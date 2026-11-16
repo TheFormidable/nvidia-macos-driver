@@ -917,6 +917,8 @@ XLATE_NAME = "libnvmtl_translate.dylib"
 # a comment, a string literal (Objective-C's @"..." too), a character literal, a brace, other code, any other character
 _C_TOKEN = re.compile(r'//[^\n]*|/\*.*?(?:\*/|\Z)|@?"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|[{}]|'
                       r'[^{}"\'/@]+|.', re.S)
+# a printf or NSString format directive: %s, %@, %.*s, %-12ls, ...
+_C_FORMAT = re.compile(r"%[-+ #0'*.\d]*(?:hh|ll|[hljztqL])?[a-zA-Z@]")
 
 
 def _c_blocks(text):
@@ -953,16 +955,36 @@ def _c_blocks(text):
     return out
 
 
+def _beside_rel(lit):
+    """-> the path relative to the plugin's folder of the translator that a string literal names, or None. The literal
+    is that path itself ("libnvmtl_translate.dylib"), or a format whose last directive prints the folder, followed by
+    "/" and the path ("%s/libnvmtl_translate.dylib", "%@/../Resources/libnvmtl_translate.dylib"). The path is not
+    absolute, as nvmtl/'s is, and holds no space, % or backslash: a log line that only mentions the name names no
+    path."""
+    rest, last = lit, None
+    for last in _C_FORMAT.finditer(lit):
+        pass
+    if last:
+        rest = lit[last.end():]
+        if not rest.startswith("/"):
+            return None
+        rest = rest[1:]
+    if rest.startswith("/") or re.search(r"[\s%\\]", rest) or os.path.basename(rest) != XLATE_NAME:
+        return None
+    return rest
+
+
 def _xlate_beside(text):
     """-> (function, relative path) of the first function of the plugin's loader source that calls dladdr and names the
-    translator by a relative path, the copy beside the plugin it prefers; None when no function does both. Comments do
-    not count, nor the absolute path of nvmtl/'s copy."""
+    translator by a path relative to the plugin's folder (_beside_rel), the copy beside the plugin it prefers; None
+    when no function does both. Comments do not count."""
     for name, code, lits in _c_blocks(text):
         if not re.search(r"\bdladdr\s*\(", code):
             continue
         for lit in lits:
-            if not lit.startswith("/") and os.path.basename(lit) == XLATE_NAME and not re.search(r"[\s%\\]", lit):
-                return name, lit
+            rel = _beside_rel(lit)
+            if rel:
+                return name, rel
     return None
 
 
@@ -998,47 +1020,60 @@ def install_plugin_translator(ctx, check):
     readback rows translate with). The checkout's plugin source (its driver sources equal the package's, a gate) tells
     whether the plugin prefers a copy beside itself; then the copy it opens is compared with {X} by LC_UUID, the
     build's identity, never byte for byte: the package signs each copy separately (package/finish_package.sh seals the
-    plugin bundle again with codesign --deep), so two copies of one build can differ in their signatures."""
+    plugin bundle again with codesign --deep), so two copies of one build can differ in their signatures. When the
+    source does not show the preference (another spelling of it, or a source that cannot be read), the row fails
+    closed: a readable copy beside the plugin that is not {X}'s build fails it, since every release from 1.0.0 to 3.0.1
+    opens that copy."""
     vals = ctx.values()
     x = vals["X"]
     lines, fails = [], []
     try:
         found = _xlate_beside(Path(ctx.src, PLUGIN_LOADER).read_text(errors="replace"))
+        unknown = (f"the row finds no function of {PLUGIN_LOADER} that calls dladdr and names {XLATE_NAME} by a "
+                   f"relative path")
     except OSError as e:
-        found = None
+        found, unknown = None, f"{PLUGIN_LOADER} cannot be read"
         fails.append(f"{PLUGIN_LOADER}: {type(e).__name__}")
     beside = os.path.normpath(os.path.join(os.path.dirname(vals["P"]), found[1] if found else XLATE_NAME))
     if found:
         lines.append(f"INFO plugin source: {PLUGIN_LOADER} ({found[0]}) calls dladdr and names {found[1]!r}: the "
                      f"plugin prefers the copy beside it, when readable, to nvmtl/'s")
-    elif not fails:
-        lines.append(f"INFO plugin source: no function of {PLUGIN_LOADER} calls dladdr and names {XLATE_NAME}: this "
-                     f"plugin opens nvmtl/'s only, and a copy beside it does not matter")
+    else:
+        lines.append(f"INFO plugin source: {unknown}, so it cannot tell which copy the plugin prefers")
     xs, xm = _xlate_copy(lines, x)
     bs, bm = _xlate_copy(lines, beside)
-    opened = beside if found and bs == "readable" else x
-    lines.append(f"INFO the plugin opens {opened}")
+    there = bs == "readable"     # the plugin's own test of the copy beside it: access(R_OK)
+    if there and not found:
+        lines.append(f"INFO the plugin opens {x} or {beside}: its source does not tell which")
+    else:
+        lines.append(f"INFO the plugin opens {beside if there else x}")
     if not xm:
         fails.append(f"{x}, the translator of the readback rows and the plugin's fallback, is "
                      + {"absent": "missing", "unreadable": "not readable"}.get(xs, "not Mach-O"))
     why = f"{PLUGIN_LOADER} ({found[0]}) prefers the copy beside the plugin" if found else ""
     # one build: both copies Mach-O, with one LC_UUID (two copies without one are not known to be one build)
     same = bool(xm and bm and xm["uuid"] and bm["uuid"] == xm["uuid"])
-    if opened == beside and not bm:
+    if there and found and not bm:
         fails.append(f"the Metal plugin opens {beside}, which is not Mach-O, because {why}: its dlopen fails there, "
                      f"and the plugin does not fall back to {x}")
-    elif opened == beside and not same:
+    elif there and found and not same:
         fails.append(f"the Metal plugin opens {beside} (LC_UUID {_uuid_text(bm)}), not the build of {x} (LC_UUID "
                      f"{_uuid_text(xm)}), because {why}: this run's Metal rows translate with that copy, while its "
                      f"readback rows use {x}")
+    elif there and not same:
+        what = ("which is not Mach-O" if not bm else
+                f"of another build (LC_UUID {_uuid_text(bm)}, not {_uuid_text(xm)})")
+        fails.append(f"the Metal plugin may open {beside}, {what}, in place of {x}: {unknown}, so it cannot tell "
+                     f"which copy the plugin prefers, and releases 1.0.0 to 3.0.1 prefer the one beside the plugin "
+                     f"whenever it is readable")
     if fails:
         ok = ""
-    elif opened == beside:
+    elif there and found:
         ok = f"the plugin opens {beside}, the same build as {x} (LC_UUID {_uuid_text(xm)})"
-    elif found:
-        ok = f"the plugin opens {x}: no {'readable ' if bs == 'unreadable' else ''}copy beside it"
+    elif there:
+        ok = f"the plugin opens {x} or {beside}, one build (LC_UUID {_uuid_text(xm)})"
     else:
-        ok = f"the plugin opens {x}: its source names no copy beside it"
+        ok = f"the plugin opens {x}: no {'readable ' if bs == 'unreadable' else ''}copy beside it"
     return _verdict_of(fails, ok, lines)
 
 

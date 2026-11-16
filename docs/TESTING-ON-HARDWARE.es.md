@@ -470,8 +470,10 @@ las sondas instaladas de OpenGL nativo. La del traductor, `install.plugin-transl
 `nvmtl/libnvmtl_translate.dylib` solo si no, mientras que las comprobaciones de lectura de `xlate` traducen
 directamente con la copia de `nvmtl/`: un paquete preparado sobre otro más antiguo puede conservar la copia antigua en
 el bundle, y entonces las comprobaciones de Metal prueban otro traductor que las de lectura. Falla cuando la copia que
-abre el plugin no es la misma compilación que la de `nvmtl/` (por su LC_UUID), y da el LC_UUID, el tamaño y el
-principio del SHA-256 de cada copia.
+abre el plugin no es la misma compilación que la de `nvmtl/` (por su LC_UUID) o no es Mach-O. Si no encuentra esa
+preferencia en el `plugin/NVMTLLibraryLoad.m` del checkout, falla siempre que haya junto al plugin una copia legible
+que no sea esa compilación, porque todas las versiones de la 1.0.0 a la 3.0.1 abren esa copia. Da el LC_UUID de cada
+copia, escrito como lo escribe el log del plugin, su tamaño y el principio de su SHA-256.
 
 Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que termine:
 

@@ -443,7 +443,10 @@ probes. The translator's check, `install.plugin-translator`, is there because th
 `nvmtl/libnvmtl_translate.dylib` only otherwise, while the readback checks of `xlate` translate with the `nvmtl/` copy
 directly: a package staged onto an older one can keep the older copy in the bundle, and the Metal checks then test
 another translator than the readback checks. It fails when the copy the plugin opens is not the same build as
-`nvmtl/`'s (by LC_UUID), and gives each copy's LC_UUID, size and SHA-256 prefix.
+`nvmtl/`'s (by LC_UUID) or is not Mach-O. When it does not find that preference in the checkout's
+`plugin/NVMTLLibraryLoad.m`, it fails whenever a readable copy beside the plugin is not that build, since every release
+from 1.0.0 to 3.0.1 opens that copy. It gives each copy's LC_UUID, written as the plugin's log writes it, its size and
+its SHA-256 prefix.
 
 Start it from the checkout the package was built from, in the background, and wait until it has ended:
 
