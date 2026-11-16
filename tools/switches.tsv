@@ -435,6 +435,7 @@ env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFIN_ZERO	escape	on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0)	3.0.1	3.2	WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0.
 env	NVMTL_SURFOUT_PLANES	escape	on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9)	3.0	3.2	The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use.
 env	NVMTL_SURFOUT_READBACK	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE	dev	unset	2.9	-	unreviewed
@@ -462,6 +463,7 @@ env	NVMTL_WG_ZERO_NEG	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_SKIP_EVERY	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_FREE_OFFMAIN	escape	on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0)	3.0.1	3.2	WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager.
 env	NVMTL_WS_FULL	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed

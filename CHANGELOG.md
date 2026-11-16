@@ -53,6 +53,35 @@ only.
   before), so the first run of a level does not stop for each new shader. Other processes are left as they were; `=1`
   still turns it on in any process. Neither of these two was measured on a card yet; the rules are in
   `plugin/nvmtl_switch_defaults.h` and `tools/test_switch_defaults.c`.
+- **WindowServer does not upload a surface whose pages are all zero.** While the screen is shared, WindowServer's
+  main thread spent about 16 ms of each captured frame in the Metal plugin, by spindump samples taken before 3.0's
+  fast grants. 4.2 ms of it were the surface-in of the new capture surface, which nobody had written: its CPU pages
+  were imported, copied into the video memory the kernel had just granted, and waited for. On a surface's first
+  surface-in the plugin now reads its pages under the same read-only lock the upload takes (`NVMTL_SURFIN_ZERO`,
+  `plugin/nvmtl_zero_scan.h`); when every byte is zero it clears the surface's video memory with a GPU fill ahead of
+  the next command buffer and does not upload. Only single-plane surfaces in the family's video memory that no other
+  process has drawn into are taken this way, and no VRAM tag is published for them, so other processes upload as
+  before; a fill that does not run (its prologue failed or rode a dropped submission) makes the surface decide again at
+  its next use, though the command buffers already submitted by then read the video memory as it was, as after a
+  failed upload in 3.0. When the prologue's End fails, WindowServer now also marks the managed uploads it carried to be
+  made again (they were lost there before); other processes keep 3.0's handling. It is off with
+  `NVMTL_PRESUBMIT_PROLOGUE=0`, whose fills would not be ordered against other threads' submits. A later change of the
+  surface is uploaded at once, without a second scan. The scan itself costs from
+  about 0.5 ms (pages resident) to about 3 ms (pages faulted in), so the saving is an estimate of 1.2 to 3.7 ms per
+  captured frame from those samples, NOT measured; the census line "surface-in zero census" counts scans, zero
+  answers, their mean time and the full scans that ended non-zero. `tools/test_zero_scan.c`,
+  `tools/test_ws_capture.c`, `tools/test_surfin_zero.py` and `tools/test_surfin_zero_plugin.py` hold it.
+- **WindowServer frees a dead texture's video-memory import on a thread of its own.** When Core Animation released a
+  texture over a surface in the family's video memory and no submitted work could still read it, the RM frees of its
+  import ran on WindowServer's main thread: about 1.2 ms of each captured frame in the same samples. Such a free now
+  goes to a serial queue (`NVMTL_WS_FREE_OFFMAIN`, `plugin/nvmtl_ws_capture.h`); only imports of the family's video
+  memory move, at most 64 MB of them wait at a time (past that a free runs where it did), and the death is recorded
+  for fault reports before the free is queued. A free that waited for a submit already ran this way, after the surface
+  was released. The free still takes the RM's per-client gate on that thread, so part of the saving can come back as
+  waits there, and with the change above on fewer of these frees find no work in flight (the rest are freed later on
+  the completion thread, as before), so the two savings overlap; it is an estimate from samples taken before 3.0's
+  fast grants, NOT measured.
+  `tools/test_ws_capture.c` and `tools/test_surfin_zero_plugin.py` hold it.
 - **NVK's own mapped memory stays in video memory outside WindowServer.** The shader heap, the descriptor tables and
   sets and the other device-local memory NVK itself maps were kept in system RAM, uncached on the GPU side, so the GPU
   fetched shader code and descriptors over PCIe; `NVK_LOCAL_MAP_SYSMEM=0` kept them in video memory behind BAR1, and
@@ -93,6 +122,8 @@ One per change, as in 3.0 below; each restores the 3.0 behaviour of that change 
 | Asynchronous texture uploads outside WindowServer | `NVMTL_ASYNC_TEX_UPLOAD=0` | `nvrm610.conf` |
 | Shaders of a game translated ahead | `NVMTL_PRETRANSLATE=0` | `nvrm610.conf` |
 | NVK's own mapped memory in video memory outside WindowServer | `NVK_LOCAL_MAP_SYSMEM=1` | `nvrm610.conf` |
+| WindowServer clears an all-zero surface on the GPU instead of uploading it | `NVMTL_SURFIN_ZERO=0` | `nvrm610.conf` |
+| WindowServer frees dead video-memory imports on a thread of its own | `NVMTL_WS_FREE_OFFMAIN=0` | `nvrm610.conf` |
 
 ## 3.0
 

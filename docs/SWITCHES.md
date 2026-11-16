@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 13 | 1 | 55 | 406 | 12 |  | 493 |
+| env |  | 6 |  |  | 15 | 1 | 55 | 406 | 12 |  | 495 |
 | bootarg | 4 | 13 | 30 | 21 | 14 |  | 8 | 6 | 2 |  | 98 |
 | sysctl |  | 5 | 4 | 12 |  |  | 373 |  |  |  | 394 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -45,7 +45,9 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_PHOTOBOOTH_FLIP` | on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9) | 3.2 | In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched. |
 | env | `NVMTL_PLANE_FOLLOW` | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. |
 | env | `NVMTL_PRETRANSLATE` | on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0) | 3.2 | In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process. |
+| env | `NVMTL_SURFIN_ZERO` | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. |
 | env | `NVMTL_SURFOUT_PLANES` | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. |
+| env | `NVMTL_WS_FREE_OFFMAIN` | on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0) | 3.2 | WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager. |
 | env | `NVMTL_YUV422` | on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9) | 3.2 | Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused. |
 | env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
@@ -453,7 +455,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_POOL_COST_LIB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_pool_cost.inc |
 | `NVMTL_POOL_REUSE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_PRESENT_INLINE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
-| `NVMTL_PRESUBMIT_PROLOGUE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_PRESUBMIT_PROLOGUE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m, plugin/nvmtl_vk.c |
 | `NVMTL_PRETRANSLATE` | escape | on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0) | 2.9 | 3.2 | In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process. | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h |
 | `NVMTL_PRETRANSLATE_THREADS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_PRIVATE_CAPTURE_DIR` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -497,6 +499,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SURFACE_BUSY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
 | `NVMTL_SURFIN_ORDERED` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_SURFIN_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
+| `NVMTL_SURFIN_ZERO` | escape | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.0.1 | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. | plugin/NVMTLObjects.m, plugin/nvmtl_vk.c |
 | `NVMTL_SURFOUT_PLANES` | escape | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.0 | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. | plugin/NVMTLObjects.m |
 | `NVMTL_SURFOUT_READBACK` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_SURF_IMPORT_CACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
@@ -524,6 +527,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_WIT_SKIP_EVERY` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WIT_WAIT_MS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_FILL_PCT` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_WS_FREE_OFFMAIN` | escape | on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0) | 3.0.1 | 3.2 | WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager. | plugin/nvmtl_vk.c |
 | `NVMTL_WS_FULL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_RESERVE_MB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_RT_GATE_MB` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m, plugin/nvmtl_app_profile.h |

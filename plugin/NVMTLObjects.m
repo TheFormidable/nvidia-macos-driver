@@ -798,11 +798,17 @@ static void nvmtl_purge_report(const char *why) {
 static void nvmtl_pre_release(void *held) { @autoreleasepool { (void)CFBridgingRelease(held); } }
 static void nvmtl_zero_flush(void);
 static void nvmtl_managed_mark(NVMTLBuffer *b, NSUInteger lo, NSUInteger hi);
-// A hold of a prologue NVK dropped in a channel rebuild, still retained (nvmtl_pre_drop releases it after this). Only the
-// managed flush's holds (entries @[buffer, lo, hi]) are redone; a zero flush's hold (entries are buffers) is left alone.
+// A hold of a prologue NVK dropped in a channel rebuild or whose End failed, still retained (nvmtl_pre_drop releases it
+// after this). The managed flush's holds (entries @[buffer, lo, hi]) are redone; a zero flush's hold (entries are
+// buffers) is left alone; a texture (NVMTL_SURFIN_ZERO, nvmtl_surf_zero_flush) is marked _zeroLost, so its next
+// surface-in decides again (scan, GPU zero fill or upload) instead of calling VRAM that was never cleared current. The
+// mark is an atomic store: this runs on the completion thread and must not take the surface monitor, whose holder can
+// be in IOSurfaceLock waiting for a pending mark only the completion thread releases.
 static void nvmtl_pre_redo(void *held) {
     @autoreleasepool {
         for (id e in (__bridge NSArray *)held) {
+            if ([e isKindOfClass:[NVMTLTexture class]]) {
+                __atomic_store_n(&((NVMTLTexture *)e)->_zeroLost, 1, __ATOMIC_RELEASE); continue; }
             if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 3) continue;
             NSArray *t = e; NVMTLBuffer *b = t[0];
             const NSUInteger lo = [t[1] unsignedIntegerValue], hi = [t[2] unsignedIntegerValue];
@@ -891,7 +897,142 @@ static void nvmtl_zero_flush(void) {
     } else if (todo.count) nvlog("zero-fill: no command buffer for %lu Private clears - they hold what VRAM held", (unsigned long)todo.count);
     gZeroInFlush = 0;
 }
-static void nvmtl_presubmit(void) { @autoreleasepool { nvmtl_zero_flush(); } @autoreleasepool { nvmtl_managed_flush(); } }
+// NVMTL_SURFIN_ZERO (on in WindowServer only, nvmtl_ws_capture.h; NVMTL_SURFIN_ZERO=0 in the settings file uploads
+// every surface and waits for it, as in 3.0). WindowServer's surface-in of a surface in the family's VRAM (a direct
+// import) copied the surface's CPU pages into that VRAM and waited for the GPU: host-page import, copy, wait. In the
+// pre-fix spindump of a shared screen that was 4.2 ms of each captured frame on the main thread (host import 2.2,
+// wait 2.0), for the new capture surface nobody has written. Now, on a root's first surface-in (and again after a
+// fill was lost), the pages are read under the same read-only lock the upload takes (nvmtl_zero_scan.h); when every
+// byte of the row * h span is zero, no upload is made and the VRAM is zero-filled on the GPU in the prologue of this
+// process's next submit (nvmtl_surf_zero_flush). The zero is observed, not assumed: the fill writes the bytes the
+// upload would have copied, padding past the pixels included. A later re-sync of the same root (a CPU write moved the
+// seed) uploads at once, without a scan.
+// What keeps it safe:
+// - Only a single-plane, direct import (no tiled image), plane 0, whose span fits both the surface and the import,
+//   and only a surface no other process has drawn (_clientWritten): a GPU write of another process could land after
+//   the scan and before this fill, and would be erased.
+// - The fill runs before every GPU use in this process: every submit goes to the one queue and runs the pre-submit hook
+//   first; the owed insert happens under the surface monitor before _surfSynced is set, so a submit that may use the
+//   surface sees it. The hook runs under the submit mutex only with the pre-submit prologue on, so with
+//   NVMTL_PRESUBMIT_PROLOGUE=0 this is off (a submit of another thread could pass a fill that is in flight). A root
+//   that dies before the flush is dropped (weak set): no command buffer holds it, so nobody reads its VRAM.
+// - No VRAM tag is published for it (nvmtlSurfaceIn): another process that wraps the surface uploads its CPU pages
+//   itself, as for any untagged surface, and never reads VRAM on the strength of a fill that has not run.
+// - A fill that does not run marks the root _zeroLost, and its next surface-in decides again: through nvmtl_pre_redo
+//   when the prologue's End failed or its submit was dropped in a channel rebuild, directly when the fill or the
+//   fallback's own submit failed. Not covered: the command buffers already submitted when the loss is seen (the one
+//   whose prologue's End failed, or those after a dropped one until its completion runs the redo) read the VRAM as it
+//   was, as 3.0's encoder did after a failed upload.
+// The census counts scans, zero answers, their mean time, and full scans that ended non-zero with their bytes (the
+// cost this adds for a surface that is zero but for its last rows).
+#include "nvmtl_zero_scan.h"
+#include "nvmtl_ws_capture.h"
+static int nvmtl_surfin_zero_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SURFIN_ZERO"), *p = getenv("NVMTL_PRESUBMIT_PROLOGUE");
+        on = nvmtl_surfin_zero_switch(e, p, getprogname());
+        nvlog("surface-in zero: a surface whose pages are all zero is %s (NVMTL_SURFIN_ZERO=%s, WindowServer only, "
+              "and only with the pre-submit prologue: NVMTL_PRESUBMIT_PROLOGUE=%s)",
+              on ? "zero-filled on the GPU before the next submit, not uploaded" : "uploaded as any other",
+              e ? e : "unset", p ? p : "unset");
+    }
+    return on;
+}
+static os_unfair_lock gSurfZeroLock = OS_UNFAIR_LOCK_INIT;
+static NSHashTable *gSurfZeroOwed;
+static _Atomic int gSurfZeroAny;
+static __thread int gSurfZeroInFlush;
+static _Atomic unsigned long long gSurfZeroScans, gSurfZeroHits, gSurfZeroNs, gSurfZeroMiss, gSurfZeroMissB;
+static _Atomic unsigned long long gSurfZeroFills, gSurfZeroLost;
+static void nvmtl_surfin_zero_census(void) {
+    const unsigned long long k = atomic_load(&gSurfZeroScans), ns = atomic_load(&gSurfZeroNs);
+    nvlog("surface-in zero census: %llu scans, %llu zero (not uploaded), mean %llu us; %llu full scans ended non-zero "
+          "(%llu MB read before the upload); %llu GPU fills made, %llu lost (decided again)",
+          k, (unsigned long long)atomic_load(&gSurfZeroHits), k ? ns / k / 1000 : 0ull,
+          (unsigned long long)atomic_load(&gSurfZeroMiss), (unsigned long long)(atomic_load(&gSurfZeroMissB) >> 20),
+          (unsigned long long)atomic_load(&gSurfZeroFills), (unsigned long long)atomic_load(&gSurfZeroLost));
+}
+// Called by nvmtlSurfaceIn under the surface monitor and the read-only lock, with the plane's pages at base. 1: r's
+// pages are zero and its VRAM is owed a zero fill before the next submit (nothing to upload); 0: upload as before.
+static int nvmtl_surfin_zero_try(NVMTLTexture *r, const void *base, size_t row) {
+    if (!nvmtl_surfin_zero_on() || r->_zeroTried || r->_clientWritten || r->_plane || !r->_vramOn
+        || r->_surfaceLinear.img || !r->_vramBuf.buf || IOSurfaceGetPlaneCount(r->_surf) > 1 || !r->_i.h) return 0;
+    if (row != IOSurfaceGetBytesPerRow(r->_surf) || base != IOSurfaceGetBaseAddress(r->_surf)
+        || row > SIZE_MAX / r->_i.h) return 0;
+    const size_t bytes = row * r->_i.h;
+    if (bytes > IOSurfaceGetAllocSize(r->_surf) || bytes > r->_vramBuf.size || (bytes & 3)) return 0;
+    r->_zeroTried = YES;   // one scan per root; a later re-sync uploads at once
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    int stage = 0;
+    const int zero = nvmtl_zero_rows_at(base, row, r->_i.h, &stage);
+    atomic_fetch_add(&gSurfZeroNs, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+    if (zero) atomic_fetch_add(&gSurfZeroHits, 1);
+    else if (stage == NVMTL_ZERO_AT_FULL) {
+        atomic_fetch_add(&gSurfZeroMiss, 1); atomic_fetch_add(&gSurfZeroMissB, bytes); }
+    const unsigned long long k = atomic_fetch_add(&gSurfZeroScans, 1) + 1;
+    if (k == 1 || (k & 0xFFF) == 0) nvmtl_surfin_zero_census();
+    if (!zero) return 0;
+    os_unfair_lock_lock(&gSurfZeroLock);
+    if (!gSurfZeroOwed) gSurfZeroOwed = [NSHashTable weakObjectsHashTable];
+    @autoreleasepool { [gSurfZeroOwed addObject:r]; }
+    atomic_store(&gSurfZeroAny, 1);
+    nvmtl_pre_submit_hook = nvmtl_presubmit;
+    os_unfair_lock_unlock(&gSurfZeroLock);
+    return 1;
+}
+// Called from nvmtl_presubmit: every owed fill rides the prologue of this submit, and the prologue holds the roots
+// until that submit has finished (so their VRAM import outlives the fill). When the prologue is off or full, the fills
+// are their own submit, waited for here; the roots are then released on another thread, because this can run inside
+// nvmtl_vk_submit_begin_at under its submit mutex and a root's last release frees its surface.
+static void nvmtl_surf_zero_flush(void) {
+    if (!atomic_load(&gSurfZeroAny) || gSurfZeroInFlush) return;
+    gSurfZeroInFlush = 1;
+    // todo is the only reference this function takes (not autoreleased into the caller's pool), so that the fallback
+    // below can hand it to another thread whole
+    NSArray *todo;
+    os_unfair_lock_lock(&gSurfZeroLock);
+    @autoreleasepool { todo = [[NSArray alloc] initWithArray:gSurfZeroOwed.allObjects]; }
+    [gSurfZeroOwed removeAllObjects]; atomic_store(&gSurfZeroAny, 0);
+    os_unfair_lock_unlock(&gSurfZeroLock);
+    unsigned n = 0, lost = 0;
+    if (todo.count && nvmtl_vk_pre_open()) {
+        for (NVMTLTexture *r in todo) {
+            if (nvmtl_vk_pre_fill(&r->_vramBuf, 0, IOSurfaceGetBytesPerRow(r->_surf) * r->_i.h, 0) == 0) n++;
+            else { __atomic_store_n(&r->_zeroLost, 1, __ATOMIC_RELEASE); lost++; }
+        }
+        nvmtl_pre_release_hook = nvmtl_pre_release; nvmtl_pre_redo_hook = nvmtl_pre_redo;
+        nvmtl_vk_pre_hold((__bridge_retained void *)todo);
+    } else if (todo.count) {
+        nvk_cmdbuf c;
+        int rc = nvmtl_vk_cmd_begin(nvmtl_device_queue(), &c);
+        if (!rc) {
+            for (NVMTLTexture *r in todo) {
+                const size_t bytes = IOSurfaceGetBytesPerRow(r->_surf) * r->_i.h;
+                if (nvmtl_vk_cmd_fill_buffer(&c, &r->_vramBuf, 0, bytes, 0) == 0) n++;
+                else { __atomic_store_n(&r->_zeroLost, 1, __ATOMIC_RELEASE); lost++; }
+            }
+            rc = nvmtl_vk_submit_wait(&c);
+        }
+        if (rc) {
+            for (NVMTLTexture *r in todo) __atomic_store_n(&r->_zeroLost, 1, __ATOMIC_RELEASE);
+            lost = (unsigned)todo.count; n = 0;
+            nvlog("surface-in zero: GPU clear of %lu surfaces FAILED - each decides again at its next surface-in",
+                  (unsigned long)todo.count);
+        }
+        void *const keep = (__bridge_retained void *)todo;
+        todo = nil;
+        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), keep, nvmtl_pre_release);
+    }
+    if (n) atomic_fetch_add(&gSurfZeroFills, n);
+    if (lost) atomic_fetch_add(&gSurfZeroLost, lost);
+    gSurfZeroInFlush = 0;
+}
+static void nvmtl_presubmit(void) {
+    @autoreleasepool { nvmtl_surf_zero_flush(); }
+    @autoreleasepool { nvmtl_zero_flush(); }
+    @autoreleasepool { nvmtl_managed_flush(); }
+}
 static int nvmtl_mzero_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_MANAGED_EAGER_ZERO"); on = !(e && e[0] == '1');
@@ -1630,6 +1771,8 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
+    // a zero fill this root was owed did not run (nvmtl_pre_redo, NVMTL_SURFIN_ZERO): it decides again
+    if (__atomic_exchange_n(&r->_zeroLost, 0, __ATOMIC_ACQ_REL)) { r->_surfSynced = NO; r->_zeroTried = NO; }
     if (r->_clientWritten) nvmtl_busy_wait(r->_surf, r->_plane);
     // The GPU backing is the shared VRAM itself (direct), or an image of this process: a private one, or the tiled image
     // of a shader-writable Managed wrapper. Such an image is current when the CPU seed has not moved since it was synced
@@ -1666,8 +1809,9 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     if (IOSurfaceLock(r->_surf, kIOSurfaceLockReadOnly, &seed) != kIOReturnSuccess) { nvlog("G13 surface-in: IOSurfaceLock FAILED"); return; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
-    int rc = -1;
-    if (base && row && nvmtl_surfin_import()) {
+    int rc = -1, zeroed = 0;
+    if (base && row && nvmtl_surfin_zero_try(r, base, row)) { rc = 0; zeroed = 1; }   // all zero: a GPU fill is owed
+    if (rc && base && row && nvmtl_surfin_import()) {
         const size_t off = (size_t)((uint8_t *)base - (uint8_t *)IOSurfaceGetBaseAddress(r->_surf));
         nvmtl_vk_host_pages_key((uint32_t)IOSurfaceGetID(r->_surf), nvmtl_host_pages_cookie(r->_surf));
         rc = nvmtl_vk_image_write_host(r->_q, &r->_i, base, row, IOSurfaceGetAllocSize(r->_surf) - off, &r->_hostPages);
@@ -1678,7 +1822,9 @@ static uint64_t nvmtl_host_pages_cookie(IOSurfaceRef s)
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
-    g_surfin_copy++; if (direct) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);   // a tiled image's upload left the VRAM as it was
+    // A tiled image's upload left the VRAM as it was. A zero fill publishes no tag, because it has not run yet: other
+    // processes and other roots of this one decide for themselves, as they do for a surface nobody tagged.
+    g_surfin_copy++; if (direct && !zeroed) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     }
 }
