@@ -19,7 +19,8 @@
  *   /usr/bin/xcrun clang++ -arch x86_64 -mmacosx-version-min=15.0 -std=c++17 -fobjc-arc -O2 -I<Vulkan headers> \
  *     tools/card/v301_vk_nvrm.mm -framework Foundation -framework Metal -o <run>/bin/<id>/nvmtltest
  * It skips on a Metal device of another driver and when the renderer's first physical device is not NVIDIA's. It writes
- * no file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * no file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. It has run once, on one
+ * Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>

@@ -5,7 +5,8 @@
  * "CRASH <signal>" and a backtrace to standard error and ends the process with exit status 70, as the new programs of
  * tools/card do (zink_common.h), so that a crash ends as an exit code that the runner reports as CRASH and macOS writes
  * no crash report (believed; the first run tells). There is no alarm here: the row's limit kills a program that hangs,
- * and the runner reports that as a time-out. Not yet run on a Mac. */
+ * and the runner reports that as a time-out. The programs that include it have run once, on one Mac, on macOS 26.7.3
+ * (25G342) with release 3.0.1's package. */
 #ifndef ZINK_CRASH_GUARD_H
 #define ZINK_CRASH_GUARD_H
 

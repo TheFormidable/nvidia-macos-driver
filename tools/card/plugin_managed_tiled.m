@@ -18,7 +18,8 @@
  *     -framework Foundation -framework Metal -framework IOSurface -o <run>/bin/<id>/nvmtltest
  * It needs NVMTL_PROCESS_ENV=1 (a release plugin reads no NVMTL_ switch and writes no log without it) and
  * NVMTL_LOG_PATH; without them it exits 3. It writes no file and opens no window; the surfaces are its own, in memory.
- * Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. It has run once, on one Mac, on macOS 26.7.3 (25G342)
+ * with release 3.0.1's package. */
 #import "plugin_common.h"
 #import <IOSurface/IOSurface.h>
 #include <math.h>

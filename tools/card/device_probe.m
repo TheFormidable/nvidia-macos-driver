@@ -9,8 +9,8 @@
  * keys and prints the names (never the values) of the keys that mention a lock; it reads no key that names the user.
  * Exit 0: the default device is of class NVMTLDevice and its name contains " (NVMTL over "; 3: it is not (first line
  * "SKIP: no device of this driver (<class>)"); 70: a crash signal (the handler writes "CRASH <signal>" and a backtrace
- * on stderr). It writes no file, opens no window and makes no GPU work beyond opening the device. Not yet run on a
- * Mac. */
+ * on stderr). It writes no file, opens no window and makes no GPU work beyond opening the device. It has run once, on
+ * one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>

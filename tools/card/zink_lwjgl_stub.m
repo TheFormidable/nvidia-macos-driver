@@ -4,7 +4,7 @@
  * their return address (zink/appkit.m:79-127). So each message is sent from here, from a function that is never
  * inlined and makes no tail call, so that the return address the hook sees lies in this image. zink_win_check.m
  * dlopens this library by its path and calls the three functions from a render thread while main runs its run loop.
- * Not yet run on a Mac. */
+ * It has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import <AppKit/AppKit.h>
 
 #define ZINK_LWJGL_EXPORT __attribute__((visibility("default"), noinline, disable_tail_calls))

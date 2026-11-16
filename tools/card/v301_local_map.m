@@ -15,7 +15,8 @@
  *     -framework Foundation -framework Metal -o <run>/bin/<id>/nvmtltest
  * It skips on a device of another driver and when NVK_LOCAL_MAP_SYSMEM or NVK_BAR_VRAM do not hold what the row asks
  * for after the device is made (the settings file sets them). It writes no file and opens no window. Exit 0 pass, 1 a
- * case failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * case failed, 2 setup only, 3 skip, 70 crash. It has run once, on one Mac, on macOS 26.7.3 (25G342) with release
+ * 3.0.1's package. */
 #import "plugin_common.h"
 
 enum { ROUNDS = 24, PER = 4, THREADS = 1024, TROUNDS = 200, TW = 64 };

@@ -12,7 +12,8 @@
  *   /usr/bin/xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -fobjc-arc -O2 tools/card/plugin_pb_preconditions.m \
  *     -framework Foundation -framework Metal -framework QuartzCore -framework CoreImage -o <run>/bin/<id>/nvmtltest
  * It writes no file, opens no window and does no GPU work beyond the device and the context. Exit 0 pass, 1 a case
- * failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * failed, 2 setup only, 3 skip, 70 crash. It has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's
+ * package. */
 #import "plugin_common.h"
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>

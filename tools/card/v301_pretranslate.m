@@ -26,7 +26,7 @@
  * NVMTL_PRETRANSLATE does not hold what the row asks for after the device is made (the settings file sets it). A game
  * row whose Info.plist this macOS did not read is a setup failure. It writes no file but the shader cache entries the
  * driver makes in the folder the runner gives it, and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3
- * skip, 70 crash. Not yet run on a Mac. */
+ * skip, 70 crash. It has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import "plugin_common.h"
 
 enum { KERNELS = 32, THREADS = 256 };

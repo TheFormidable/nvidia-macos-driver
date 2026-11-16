@@ -11,8 +11,8 @@
  *   /usr/bin/xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -fobjc-arc -O2 tools/card/plugin_format_threads.m \
  *     -framework Foundation -framework Metal -o <run>/bin/<id>/nvmtltest
  * A child ended by its own alarm ends the parent by SIGALRM too, so that the runner treats it as a timeout (a hung GPU)
- * and stops. It writes no file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. Not
- * yet run on a Mac. */
+ * and stops. It writes no file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. It
+ * has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import "plugin_common.h"
 #include <errno.h>
 #include <mach-o/dyld.h>

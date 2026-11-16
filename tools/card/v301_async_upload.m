@@ -27,7 +27,8 @@
  * It skips when NVMTL_PROCESS_ENV=1 or NVMTL_LOG_PATH is missing (a release plugin reads no switch and writes no log
  * without them), on a device of another driver, and when NVMTL_ASYNC_TEX_UPLOAD does not hold what the row asks for
  * after the device is made (the settings file sets it): then the default this row checks is not what runs. It writes no
- * file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * file and opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. It has run once, on one Mac,
+ * on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import "plugin_common.h"
 #import <IOSurface/IOSurface.h>
 

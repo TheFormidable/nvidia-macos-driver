@@ -15,7 +15,7 @@
  * start empty, so it pays for translating Core Image's kernels (tools/photobooth_surface_probe.m, which renders the
  * same kinds of image, has 120 s). A program ended by its alarm stops every later GPU check of the run.
  * It opens no window and no camera and writes no file. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash.
- * Not yet run on a Mac. */
+ * It has run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #import "plugin_common.h"
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreImage/CoreImage.h>

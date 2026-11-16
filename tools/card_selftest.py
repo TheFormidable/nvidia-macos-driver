@@ -57,7 +57,8 @@ writes nothing.
 It never uses sudo, installs, loads or copies anything outside <out>, changes a setting, reads a system binary, the
 kernel collection or the dyld shared cache, opens the network, captures the screen, or kills a process that is not in
 its own children's groups. Its system programs come from the SYSTEM table, which a host test points at stand-ins
-(tools/test_card_selftest.py). Not yet run on a Mac: it was written and its host test run on Linux only."""
+(tools/test_card_selftest.py). It has run once on a Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package; its
+host test has run on Linux only."""
 import sys
 sys.dont_write_bytecode = True   # nor for the check files it loads (python3 -B, but from inside)
 import argparse  # noqa: E402

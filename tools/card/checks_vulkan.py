@@ -23,7 +23,7 @@ are the rows of tools/card/checks_install.py; there is no row here for them. The
 README.md needs a JDK and the game's jars, which no "needs" can find, and a check never runs java.
 
 Every row builds its own copy of its program into {BIN}/<id>/nvmtltest, the name the plugin always grants a device.
-Not yet run on a Mac."""
+These rows have run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package."""
 
 _CXX = ["/usr/bin/xcrun", "clang++", "-arch", "x86_64", "-mmacosx-version-min=15.0", "-std=c++17", "-fobjc-arc", "-O2"]
 _DIR = "{GB}/nvmtl/minecraft"

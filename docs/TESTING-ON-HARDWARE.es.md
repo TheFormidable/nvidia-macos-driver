@@ -447,9 +447,11 @@ tarjeta en esos contadores, o una activación pierde una; envía el registro del
 
 `tools/card_selftest.py` ejecuta las comprobaciones en la tarjeta de las partes nuevas (Vulkan nativo, OpenGL nativo
 con Zink, el plugin de Metal y el traductor) y de los cambios propios de la versión 3.0.1 en una sola pasada sin
-atención, en el Mac con el paquete instalado y su driver cargado. Todavía no se ha ejecutado en un Mac: se escribió, y
-se ejecutó su prueba de host `tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta
-prueba también el programa.
+atención, en el Mac con el paquete instalado y su driver cargado. Se ha ejecutado una vez en una tarjeta, en macOS
+26.7.3 (25G342) con el paquete de la versión 3.0.1. Desde entonces se añadió `install.plugin-translator`, se reescribió
+el caso `abarray-c` de `xlate.paths-abarray`, que el compilador de Apple rechazó allí, y `plugin.photobooth-surface`,
+que no se compiló allí, enlaza ahora CoreGraphics: estas todavía no se han ejecutado en una tarjeta. Su prueba de host
+`tools/test_card_selftest.py` solo se ha ejecutado en Linux.
 
 Hay 134 comprobaciones en seis partes: `install`, `xlate`, `plugin`, `vulkan`, `zink` y `v301`. Las diez de `v301`
 (`tools/card/checks_v301.py`) comprueban los cambios de la versión 3.0.1: la subida asíncrona de replaceRegion y la
@@ -459,8 +461,7 @@ con la memoria mapeada propia de NVK donde la pone la 3.0.1 y con `NVK_LOCAL_MAP
 `VK_EXT_map_memory_placed` e hilos que mapean y liberan memoria a la vez con el runtime de Vulkan nativo; y una lectura
 de la política de boost como la hace NVK. Cada una necesita un archivo que añadió la versión 3.0.1, así que en un
 checkout sin la 3.0.1 cada una se omite y nombra ese archivo, y una comprobación de un valor por defecto también se
-omite cuando `nvrm610.conf` fija ese interruptor. Ninguna de las comprobaciones de la 3.0.1 se ha ejecutado todavía en
-una tarjeta.
+omite cuando `nvrm610.conf` fija ese interruptor. Las diez se ejecutaron en esa pasada.
 
 Las ocho de `install` (`tools/card/checks_install.py`) no tocan la GPU: seis leen los archivos instalados (cada archivo
 frente al paquete preparado, el bundle de OpenGL que nombra el acelerador, las carpetas de Vulkan nativo y de OpenGL

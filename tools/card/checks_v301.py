@@ -36,7 +36,8 @@ default skips when the settings file sets that switch, since the default is then
                              end, and 4 threads mapping and freeing memory at once with MallocScribble=1; the heaps,
                              and whether BAR1 covers the video memory, are information
 The pretranslate rows set NVMTL_GAME_GPU_PRIORITY=0 and NVMTL_GAME_LOWER_BACKGROUND=0, so that a program that is a
-game never changes its channel group's priority. Not yet run on a Mac."""
+game never changes its channel group's priority. These rows have run once, on one Mac, on macOS 26.7.3 (25G342) with
+release 3.0.1's package."""
 
 _FLAGS = ["-arch", "x86_64", "-mmacosx-version-min=15.0", "-fobjc-arc", "-O2"]
 _CXX = ["/usr/bin/xcrun", "clang++", "-arch", "x86_64", "-mmacosx-version-min=15.0", "-std=c++17", "-fobjc-arc", "-O2"]

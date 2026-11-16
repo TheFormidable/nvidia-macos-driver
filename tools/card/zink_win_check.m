@@ -23,7 +23,8 @@
  *
  * Windows: 400x300 or smaller, borderless, floating, not restorable, ignoring the mouse, ordered front without
  * activating the application (activation policy Accessory, orderFrontRegardless), closed at the end. The program first
- * checks for a usable GUI session (exit 3 otherwise). Nothing is written to a file. Not yet run on a Mac. */
+ * checks for a usable GUI session (exit 3 otherwise). Nothing is written to a file. It has run once, on one Mac, on
+ * macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 #include "zink_common.h"
