@@ -188,7 +188,7 @@ Each of these does nothing unless it is set.
 | `NVENCVT_SYNC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_TWOPASS` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVK_ACCEL_ID` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-card-select.patch, plugin/NVMTLDevice.m |
-| `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
 | `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. | nvk/nvk-channel-recover.patch |
 | `NVK_CMDMEM_CENSUS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
 | `NVK_CMDMEM_LIVE_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
@@ -214,7 +214,7 @@ Each of these does nothing unless it is set.
 | `NVK_PREEMPT_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_QUEUE_COUNT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
 | `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-unbound-stage.patch |
 | `NVMTL_AIRCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/NVMTLObjects.m |
 | `NVMTL_AIR_DUMP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |

@@ -35,7 +35,10 @@ plus = [l[1:] for l in ptext.split("\n") if l.startswith("+") and not l.startswi
 build = (root / "build/build_nvk.sh").read_text()
 m = re.search(r'^\s*3\.0\)\s*FIXES=\S+\s*\n(?:\s*#[^\n]*\n)*\s*CHAIN="([^"]+)"', build, re.M)
 chain = m.group(1).split() if m else []
-check("the 3.0 chain ends with nvk-boost-policy", chain[-1:] == ["nvk-boost-policy"], " ".join(chain[-3:]))
+# 3.0.1 appends nvk-mesa-main-2 and nvk-nvrm-fixes after it (nvk-nvrm-fixes is made on top of this patch)
+check("the 3.0 chain applies nvk-boost-policy, after nvk-stream-uncached",
+      "nvk-boost-policy" in chain and "nvk-stream-uncached" in chain
+      and chain.index("nvk-stream-uncached") < chain.index("nvk-boost-policy"), " ".join(chain[-4:]))
 check("the patch puts its own copy of the shared header in NVK",
       "+++ b/src/nouveau/vulkan/nvkmd/nvrm/nvrm_boost_policy_abi.h" in ptext)
 abitext = abi.read_text()

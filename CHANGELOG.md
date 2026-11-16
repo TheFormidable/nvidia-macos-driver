@@ -53,6 +53,23 @@ only.
   before), so the first run of a level does not stop for each new shader. Other processes are left as they were; `=1`
   still turns it on in any process. Neither of these two was measured on a card yet; the rules are in
   `plugin/nvmtl_switch_defaults.h` and `tools/test_switch_defaults.c`.
+- **NVK's table of CPU mappings has a lock.** On the NVRM back end every CPU map of a Vulkan memory object adds its
+  address to one hash table of the device, and every unmap or free removes it, with no lock: two threads mapping or
+  freeing two different memories at once could corrupt the heap. Each insert, search and removal now holds a mutex of
+  the device that is taken around the table alone, and an unmap takes its entry out before the kernel unmaps, so a new
+  mapping given the same address cannot lose its entry (`nvk/nvk-nvrm-fixes.patch`).
+- **`VK_EXT_map_memory_placed` is no longer offered on NVRM.** The NVRM back end ignored the address the application
+  asked for and could not map over a reserved range, but the extension was advertised, and Zink turns on client-pointer
+  maps when it sees it. It is now offered only where the back end can place a map (Linux nouveau keeps it).
+- **Three settings read once.** `NVRM_FLUSH_TIMEOUT_MS` was read on every synchronous flush, and
+  `NVK_SYSMEM_GPU_UNCACHED` and `NVK_BAR_VRAM` on every memory allocation, each time with a scan of `nvrm610.conf` and a
+  line on stderr when the file set them. They are now read once per process; their values mean what they did.
+- **Upstream NVK fixes from Mesa main.** `nvk/nvk-mesa-main-2.patch` carries eight Mesa main commits, unchanged:
+  push descriptor sets are uploaded only when they changed and only to their layout's size (they were uploaded again
+  at every draw), the single color-write mode is used when every target has the same mask, image format queries take
+  stencil usage into account, the swapchain private-data mutex is initialised on macOS too, and attachment locations
+  of secondary command buffers are read from the right structure. Mesa's NAK compiler changes since are not taken.
+  These four entries were compiled on Linux only; nothing in them has run on a card.
 
 ### The ways back
 
