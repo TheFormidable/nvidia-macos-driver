@@ -41,7 +41,8 @@ static void failed(const char *name, const char *what) {
 #define CHECK(name, condition) do { if (!(condition)) failed((name), #condition); } while (0)
 
 static void crashed(int sig) {
-    const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : sig == SIGABRT ? "SIGABRT" : "SIGNAL";
+    const char *name = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL"
+                     : sig == SIGFPE ? "SIGFPE" : sig == SIGABRT ? "SIGABRT" : "SIGNAL";
     write(2, "CRASH ", 6); write(2, name, strlen(name)); write(2, "\n", 1);
     void *frames[64]; int count = backtrace(frames, 64); backtrace_symbols_fd(frames, count, 2);
     _exit(70);
@@ -79,7 +80,8 @@ static void crashed(int sig) {
     // Models the reported Parallels behavior, which calls the stored block without a nil check; a missing block is
     // counted as a failure here instead of being called.
     if (_scheduled) { _scheduled(self); _scheduledCalls++; }
-    else failed(_case, "presented without a scheduled handler (the reported AsyncDrawable would call a nil block here)");
+    else failed(_case,
+                "presented without a scheduled handler (the reported AsyncDrawable would call a nil block here)");
     [super present];
 }
 @end
@@ -94,7 +96,8 @@ static void crashed(int sig) {
 }
 @end
 
-static const char *const KINDS[] = { "presentDrawable:", "presentDrawable:atTime:", "presentDrawable:afterMinimumDuration:" };
+static const char *const KINDS[] = {
+    "presentDrawable:", "presentDrawable:atTime:", "presentDrawable:afterMinimumDuration:" };
 static void record(id<MTLCommandBuffer> cb,id<MTLDrawable> drawable,unsigned kind) {
     if(kind==0)[cb presentDrawable:drawable];
     else if(kind==1)[cb presentDrawable:drawable atTime:123.5];
@@ -167,7 +170,8 @@ int main(void) { @autoreleasepool {
     const unsigned failures=atomic_load(&g_failures);
     if(failures) {
         pthread_mutex_lock(&g_lock);
-        printf("FAIL: %u failed check(s) in %u policy/lifetime cases and 64 concurrent custom presents; first: %s\n",failures,cases,g_first);
+        printf("FAIL: %u failed check(s) in %u policy/lifetime cases and 64 concurrent custom presents; first: %s\n",
+               failures,cases,g_first);
         pthread_mutex_unlock(&g_lock);
         return 1;
     }
