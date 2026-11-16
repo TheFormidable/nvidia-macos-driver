@@ -24,6 +24,8 @@
 #                        at the commits the EFI's VirtualSMC set is built from; with all three set the keyboard backlight
 #                        plugin and the display-audio plugin are built too (<out>/kexts/nmkbl, nmhda) with their EFI package, otherwise skipped
 # build_nvk.sh reads its own tool paths from the environment (NVK_PATH, NVK_SYSROOT, PKG_CONFIG_PATH, LIBCLANG_PATH).
+# The zink step runs build_zink.sh with this script's PATH, whose first bison must be Bison 3.0 or newer (macOS's
+# /usr/bin/bison is 2.3; ./build.sh deps makes <workdir>/tools/bin/bison) and whose first flex is macOS's.
 # STEPS="nvrm fb ..." builds only those. Each step logs to <out>/logs/<step>.log; the first failure stops the run.
 set -uo pipefail
 OUT=${1:?out dir}

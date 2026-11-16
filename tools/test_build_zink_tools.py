@@ -75,10 +75,11 @@ def main():
             v = bv.split()[-1]
             check(f"Bison {v} passes the check: build_zink.sh goes on to the tree and names the bison it found",
                   rc == 3 and "STANDIN-PREPARE" in out and f"is Bison {'.'.join(v.split('.')[:2])}; flex" in out, (rc, out))
-        for bv, words in (("bison (GNU Bison) 2.3", "is Bison 2.3; Mesa's grammars need 3.0 or newer (./build.sh deps builds one)"),
+        for bv, words in (("bison (GNU Bison) 2.3", "is Bison 2.3; Mesa's grammars need 3.0 or newer (put one first on PATH; ./build.sh deps makes "
+                                                   "<workdir>/tools/bin/bison, which ./build.sh puts first on its steps' PATH)"),
                           ("bison (GNU Bison) 2.10", "is Bison 2.10; Mesa's grammars need 3.0 or newer"),
                           ("", "does not say which Bison it is"),
-                          (None, "bison not found: native OpenGL needs Bison 3.0 or newer (./build.sh deps builds one)")):
+                          (None, "bison not found: native OpenGL needs Bison 3.0 or newer (put one first on PATH; ./build.sh deps")):
             rc, out = run(h, bv)
             what = f"Bison {bv.split()[-1]}" if bv else ("a bison that prints no version" if bv == "" else "no bison")
             check(f"{what}: build_zink.sh stops before the tree and meson, saying why",
