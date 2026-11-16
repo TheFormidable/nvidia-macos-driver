@@ -517,12 +517,13 @@ se arrancó aparece como "not run" con el motivo.
 
 Nunca usa sudo; no instala, carga ni copia nada en `/Library` ni en `/System`; no cambia ningún ajuste (ni
 `nvrm610.conf`, ni `defaults`, ni un argumento de arranque, ni la política de boost); no ejecuta `nvram`, `csrutil`,
-`bless`, `kmutil`, `kextload` ni `launchctl`; ninguna comprobación pone `NVK_DIAG` (NVK escribiría en `/private/tmp`);
-no lee la colección de kernels, el binario del kernel, la caché compartida de dyld ni el
-binario de un framework; no abre ninguna conexión de red; no pide ningún permiso (cámara, micrófono, grabación de
-pantalla, accesibilidad, automatización, archivos de Escritorio, Documentos o Descargas); y solo mata los grupos de
-procesos de sus propios hijos. Para las comprobaciones con ventana se abren ventanas un momento; `caffeinate` mantiene
-la pantalla despierta solo mientras se ejecutan.
+`bless`, `kmutil`, `kextload` ni `launchctl`; ejecuta cada comprobación con `NVK_DIAG=0`, que gana a una línea
+`NVK_DIAG=1` de `nvrm610.conf` (NVK escribiría en `/private/tmp`), y no deja que ninguna comprobación lo ponga; no lee
+la colección de kernels, el binario del kernel, la caché compartida de dyld ni el binario de un framework; no abre
+ninguna conexión de red; no pide ningún permiso (cámara, micrófono, grabación de pantalla, accesibilidad,
+automatización, archivos de Escritorio, Documentos o Descargas); y solo mata los grupos de procesos de sus propios
+hijos. Para las comprobaciones con ventana se abren ventanas un momento; `caffeinate` mantiene la pantalla despierta
+solo mientras se ejecutan.
 
 ## Las vueltas atrás
 
