@@ -193,7 +193,8 @@ rows, errs = refused_by_loader({"checks_plugin.py": [GOOD], "checks_zink.py": [Z
 arm("control: a duplicate id is refused", any("also in" in e for e in errs), errs)
 rows, errs = refused_by_loader({"checks_other.py": [GOOD]})
 arm("control: a file named for no part is refused", any("is not a part" in e for e in errs), errs)
-VX = variant(id="v301.x", part="v301", argv=["{BIN}/v301.x/nvmtltest"], needs=["file:{SRC}/plugin/nvmtl_switch_defaults.h"],
+VX = variant(id="v301.x", part="v301", argv=["{BIN}/v301.x/nvmtltest"],
+             needs=["file:{SRC}/plugin/nvmtl_switch_defaults.h"],
              build=[{"argv": ["/usr/bin/xcrun", "clang", "x.m", "-o", "{BIN}/v301.x/nvmtltest"], "limit": 9}])
 rows, errs = refused_by_loader({"checks_v301.py": [VX]})
 arm("control: tools/card/checks_v301.py is a part of its own (release 3.0.1's checks) and its rows load",
@@ -433,7 +434,8 @@ elif mode == "upload":
     print("PASS stand-in case")
 elif mode == "leave":
     home = os.environ["HOME"]
-    for p in (os.path.join(os.path.dirname(S), "tmp", "nvmtl-left.log"), os.path.join(os.path.dirname(S), "tmp", "nvk-diag-4242.log"),
+    for p in (os.path.join(os.path.dirname(S), "tmp", "nvmtl-left.log"),
+              os.path.join(os.path.dirname(S), "tmp", "nvk-diag-4242.log"),
               os.path.join(home, "Library", "Caches", "nvmtl", "entry"),
               os.path.join(home, "Library", "Logs", "DiagnosticReports", "nvmtltest-2026-11-16-030000.ips"),
               os.path.join(home, "Library", "Logs", "DiagnosticReports", "Other-2026-11-16-030000.ips")):
@@ -774,7 +776,8 @@ try:
             for l in w.calls() if l.startswith("git ")) and any(l.startswith("git ") for l in w.calls()),
         [l for l in w.calls() if l.startswith("git ")])
     arm("the checkout gate's git diff compares build/build_nvk.sh with the other driver sources",
-        any(" diff --quiet " in l and l.endswith(" build/build_nvk.sh") for l in w.calls()), [l for l in w.calls() if " diff " in l])
+        any(" diff --quiet " in l and l.endswith(" build/build_nvk.sh") for l in w.calls()),
+        [l for l in w.calls() if " diff " in l])
     genv = [l for l in w.calls() if l.startswith("git-env ")]
     arm("the runner's own reads (git through Apple's shim) get a TMPDIR in the run folder too",
         genv and all(l.endswith("runs/main/tmp/runner/") for l in genv), genv)
@@ -877,10 +880,13 @@ try:
     for mode, word in (("gaveup", "debug.nvrm_chan_gave_up rose by 1"), ("fence", "debug.nvrm_fence_state changed from 1 to 3"),
                        ("ws", "WindowServer's pid changed"),
                        ("cekept", "debug.nvrmfb_vram_ce_kept rose by 1 during plugin.cause: the copy engine's work"),
-                       ("power", "debug.nvrmfb_vram_power_events rose by 2 during plugin.cause: the GPU went through a standby"),
-                       ("ceclear", "debug.nvrmfb_vram_ce_clear went from 1 to 2 during plugin.cause: the copy engine's clear")):
+                       ("power",
+                        "debug.nvrmfb_vram_power_events rose by 2 during plugin.cause: the GPU went through a standby"),
+                       ("ceclear",
+                        "debug.nvrmfb_vram_ce_clear went from 1 to 2 during plugin.cause: the copy engine's clear")):
         w = World(TOP, "stop-" + mode)
-        for n, v in (("debug.nvrmfb_vram_ce_kept", 0), ("debug.nvrmfb_vram_power_events", 0), ("debug.nvrmfb_vram_ce_clear", 1)):
+        for n, v in (("debug.nvrmfb_vram_ce_kept", 0), ("debug.nvrmfb_vram_power_events", 0),
+                     ("debug.nvrmfb_vram_ce_clear", 1)):
             (w.state / "counters" / n).write_text(f"{v}\n")
         w.checks({"checks_plugin.py": [prow("plugin.cause", mode, order=300), prow("plugin.after", "pass", order=301),
                                        prow("plugin.cpu", "pass", kind="cpu", order=302)]})
@@ -890,7 +896,8 @@ try:
         arm(f"stop rule: {word} stops every later GPU check (exit 4), a later CPU check still runs",
             rc == 4 and got.get("plugin.cause", {}).get("result") == "pass" and got.get("plugin.after", {}).get("result") == "not run"
             and word in (data.get("stopped") or "") and got.get("plugin.cpu", {}).get("result") == "pass"
-            and (mode != "ceclear" or "went from 1 to 2 during plugin.cause" in (data.get("facts", {}).get("ce_clear_left") or "")),
+            and (mode != "ceclear"
+                 or "went from 1 to 2 during plugin.cause" in (data.get("facts", {}).get("ce_clear_left") or "")),
             (rc, data.get("stopped"), got, data.get("facts"), text[-800:]))
 
     # ----------------------------------- a rebuilt channel, a kick, and the second check with a fault stopping the run
@@ -898,16 +905,18 @@ try:
     for n, v in (("debug.nvrm_chan_dropped", 0), ("debug.nvrm_chan_kicks", 0), ("debug.nvrmfb_vram_ce_clear", 1),
                  ("debug.nvrmfb_vram_ce_cleared", 0)):
         (w.state / "counters" / n).write_text(f"{v}\n")
-    w.checks({"checks_plugin.py": [prow("plugin.rebuilt", "recovered", order=300), prow("plugin.kicked", "kicks", order=301),
-                                   prow("plugin.after", "pass", order=302), prow("plugin.xidce", "xidce", order=303),
-                                   prow("plugin.later", "pass", order=304), prow("plugin.cpu", "pass", kind="cpu", order=305)]})
+    w.checks({"checks_plugin.py": [prow("plugin.rebuilt", "recovered", order=300),
+                                   prow("plugin.kicked", "kicks", order=301), prow("plugin.after", "pass", order=302),
+                                   prow("plugin.xidce", "xidce", order=303), prow("plugin.later", "pass", order=304),
+                                   prow("plugin.cpu", "pass", kind="cpu", order=305)]})
     out = w.base / "runs" / "c"
     rc, text = w.run(["--out", str(out)])
     got, data = results(w, out)
     why = {k: got.get(k, {}).get("why", "") for k in got}
-    arm("a channel NVK rebuilt during a check fails it with the rebuild and the dropped submissions; a stalled channel rung "
-        "again is noted on a check that passes; neither stops the next GPU check",
-        got.get("plugin.rebuilt", {}).get("result") == "FAIL" and why.get("plugin.rebuilt") == "channel rebuilt +1; dropped +3"
+    arm("a channel NVK rebuilt during a check fails it with the rebuild and the dropped submissions; a stalled channel "
+        "rung again is noted on a check that passes; neither stops the next GPU check",
+        got.get("plugin.rebuilt", {}).get("result") == "FAIL"
+        and why.get("plugin.rebuilt") == "channel rebuilt +1; dropped +3"
         and got.get("plugin.kicked", {}).get("result") == "pass" and why.get("plugin.kicked") == "kicks +2"
         and got.get("plugin.after", {}).get("result") == "pass", (rc, why, data.get("stopped"), text[-800:]))
     report = (out / "report.md").read_text() if (out / "report.md").exists() else ""
@@ -973,19 +982,21 @@ try:
 
     # ------------------------------------------------------------- results.json after every row; the upload limit line
     w = World(TOP, "partial")
-    w.checks({"checks_plugin.py": [prow("plugin.first", "upload", order=300), prow("plugin.slow", "slow", "20", order=301, limit=30),
+    w.checks({"checks_plugin.py": [prow("plugin.first", "upload", order=300),
+                                   prow("plugin.slow", "slow", "20", order=301, limit=30),
                                    prow("plugin.after", "pass", order=302)]})
     out = w.base / "runs" / "p"
     rc, text = w.run(["--out", str(out)], signal_when=("plugin.slow slow", signal.SIGKILL))
     got, data = results(w, out)
-    arm("a runner killed by SIGKILL during a check leaves results.json, marked partial, with the rows it finished and the rest "
-        "null, and no DONE", rc == -signal.SIGKILL and data.get("partial") is True and data.get("exit") is None
+    arm("a runner killed by SIGKILL during a check leaves results.json, marked partial, with the rows it finished and "
+        "the rest null, and no DONE", rc == -signal.SIGKILL and data.get("partial") is True and data.get("exit") is None
         and got.get("plugin.first", {}).get("result") == "pass" and got.get("plugin.slow", {}).get("result") is None
         and got.get("plugin.after", {}).get("result") is None and not (out / "DONE").exists(), (rc, data, text[-600:]))
-    arm("the plugin's line of a row's nvmtl.log that says its pending uploads reached a limit is in that row's information",
-        got.get("plugin.first", {}).get("info") == ["driver: vk: tex upload async: 256 pending uploads hold 67108864 bytes of "
-                                                    "staging (limits 256 and 268435456): an upload past a limit waits for "
-                                                    "its copy, as in 3.0"], got.get("plugin.first"))
+    arm("the plugin's line of a row's nvmtl.log that says its pending uploads reached a limit is in that row's "
+        "information",
+        got.get("plugin.first", {}).get("info") == [
+            "driver: vk: tex upload async: 256 pending uploads hold 67108864 bytes of staging (limits 256 and "
+            "268435456): an upload past a limit waits for its copy, as in 3.0"], got.get("plugin.first"))
     try:
         os.killpg(int((w.state / "plugin.slow.main.pid").read_text()), signal.SIGKILL)
     except (OSError, ValueError):
@@ -1047,8 +1058,10 @@ try:
     rc, text = w.run(["--out", str(out)])
     got, data = results(w, out)
     arm("refused: a checkout with 3.0.1's NVRM.kext header on a loaded NVRM.kext without debug.nvrm_boost_policy (the "
-        "kexts of the package before, until the restart)", rc == 3 and "has no debug.nvrm_boost_policy" in (data.get("refused") or "")
-        and "restart after installing" in (data.get("refused") or "") and "plugin.pass" not in w.ran(), (rc, data.get("refused"), text[-600:]))
+        "kexts of the package before, until the restart)",
+        rc == 3 and "has no debug.nvrm_boost_policy" in (data.get("refused") or "")
+        and "restart after installing" in (data.get("refused") or "") and "plugin.pass" not in w.ran(),
+        (rc, data.get("refused"), text[-600:]))
     (w.state / "counters" / "debug.nvrm_boost_policy").write_text("0\n")
     (w.state / "counters" / "debug.nvrmfb_vram_ce_clear").write_text("1\n")
     (w.gb / "nvmtl" / "nvrm610.conf").write_text("NVK_CURVES=1\n# --- my settings, kept on update ---\nBOOST=0\n")
@@ -1057,13 +1070,15 @@ try:
     got, data = results(w, out)
     report = (out / "report.md").read_text() if (out / "report.md").exists() else ""
     ks = data.get("facts", {}).get("kexts_start", {})
-    arm("the same checkout on a kext that answers runs; the boost policy and copy-engine state are recorded at the start and the "
-        "end, a name the kexts lack as absent; the knobs list 2.9's short BOOST= line, which NVK still reads",
+    arm("the same checkout on a kext that answers runs; the boost policy and copy-engine state are recorded at the "
+        "start and the end, a name the kexts lack as absent; the knobs list 2.9's short BOOST= line, which NVK still "
+        "reads",
         rc == 0 and got.get("plugin.pass", {}).get("result") == "pass" and ks.get("debug.nvrm_boost_policy") == "0"
         and ks.get("debug.nvrmfb_vram_ce_clear") == "1" and ks.get("debug.nvrmfb_vram_ce_kept") == "absent"
         and data.get("facts", {}).get("kexts_end", {}).get("debug.nvrm_boost_policy") == "0"
-        and re.search(r"^- boost policy and copy-engine clear \(absent before 3\.0\.1\): start boost_policy=0 .*ce_clear=1 .*; end ",
-                      report, re.M) and re.search(r"^- nvrm610\.conf knobs: NVK_CURVES=1; BOOST=0", report, re.M),
+        and re.search(r"^- boost policy and copy-engine clear \(absent before 3\.0\.1\): "
+                      r"start boost_policy=0 .*ce_clear=1 .*; end ", report, re.M)
+        and re.search(r"^- nvrm610\.conf knobs: NVK_CURVES=1; BOOST=0", report, re.M),
         (rc, ks, report[:2500]))
     w = World(TOP, "refuse-commit")
     w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
