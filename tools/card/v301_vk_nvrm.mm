@@ -9,7 +9,10 @@
  *                in every host-visible memory type in turn, each keeping its last 3 alive and freeing every third one
  *                while it is still mapped; every word written (one per 4 KiB page) reads back as written. The table of
  *                CPU mappings had no lock, so two threads mapping or freeing two memories at once could corrupt the
- *                heap; the row runs with MallocScribble=1 and fails on NVK's "[!] ent == NULL" and "[!] nvRes:" lines
+ *                heap; the row runs with MallocScribble=1 and fails on NVK's "[!] ent == NULL" and "[!] nvRes:" lines.
+ *                NVK prints that "[!] nvRes:" line for an allocation, a map or an unmap the RM refused, alike, so a
+ *                refused allocation fails the case too: none of these few allocations of at most 1 MiB should be
+ *                refused
  * The memory heaps and types, and whether a host-visible device-local type is in the largest device-local heap (BAR1
  * covers the video memory: the case where release 3.0.1 also moves NVK's own mapped memory behind BAR1), are
  * information.
@@ -204,7 +207,9 @@ void *work(void *p)
       VkDeviceMemory memory = VK_NULL_HANDLE;
       VkResult r = vk.alloc(vk.dev, &ai, nullptr, &memory);
       if (r != VK_SUCCESS) {
-         w->refused++;
+         if (!w->refused++ && w->first.empty())
+            w->first = "vkAllocateMemory of " + std::to_string((unsigned long long)size) + " bytes in type " +
+                       std::to_string(type) + " -> " + std::to_string((int)r);
          continue;
       }
       void *at = nullptr;
@@ -425,11 +430,11 @@ int main(int argc, char **argv)
          map_failed += workers[i].map_failed;
          if (first.empty()) first = workers[i].first;
       }
-      if (refused) info("map-threads: %u allocations were refused (no memory of that type and size)", refused);
       if (started != THREADS)
          setup("map-threads", "%u of %u threads started", started, (unsigned)THREADS);
-      else if (wrong || map_failed)
-         fail("map-threads", "%u words read wrong, %u maps failed; the first: %s", wrong, map_failed, first.c_str());
+      else if (wrong || map_failed || refused)
+         fail("map-threads", "%u words read wrong, %u maps failed, %u allocations refused; the first: %s", wrong,
+              map_failed, refused, first.c_str());
       else if (made < THREADS * ITERATIONS / 2)
          fail("map-threads", "only %u of %u allocations were made", made, (unsigned)(THREADS * ITERATIONS));
       else

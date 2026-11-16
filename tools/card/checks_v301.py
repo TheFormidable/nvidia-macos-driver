@@ -145,7 +145,8 @@ CHECKS = [
                                 "-o", "{BIN}/v301.vk-nvrm/nvmtltest"], "limit": 180}],
      "argv": ["{BIN}/v301.vk-nvrm/nvmtltest", _RENDERER], "limit": 90,
      "needs": ["vkinc", "file:" + _RENDERER, _NVRM_FIXES], "env": {"MallocScribble": "1"},
-     # NVK's own lines of a mapping table that lost an entry and of a refused RM unmap (nvkmd_nvrm_mem.c)
+     # NVK's own lines of a mapping table that lost an entry, and of an RM allocation, map or unmap refused (the same
+     # text for each, nvkmd_nvrm_mem.c), from any NVK in the process; the program fails a refused allocation as well
      "expect": {"rc": 0, "stdout": [r"^PASS placed ", r"^PASS map-threads ", _RESULT],
                 "stderr_forbid": [r"^\[!\] ent == NULL", r"^\[!\] nvRes:"]},
      "rc_map": {3: "skip"}, "info": [r"^INFO "]},
