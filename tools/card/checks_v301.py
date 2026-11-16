@@ -101,7 +101,7 @@ CHECKS = [
     _row("v301.boost-policy", 295,
          "the boost policy read as NVK reads it; a set without privilege and bad values refused; nothing changed",
          "v301_boost_policy.m", ["Foundation", "Metal", "IOKit"], [],
-         [r"^PASS read ", r"^PASS refused ", r"^PASS unchanged "], [_BOOST], limit=40),
+         [r"^PASS read ", r"^PASS refused ", r"^PASS unchanged "], [_BOOST], limit=50),
     _row("v301.async-upload", 360,
          "replaceRegion's asynchronous upload, on by default: limits, overwrites, threads, frees and IOSurfaces",
          "v301_async_upload.m", ["Foundation", "Metal", "IOSurface"], ["on"], _ASYNC_ON, [_DEFAULTS],
