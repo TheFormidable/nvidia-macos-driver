@@ -52,18 +52,18 @@ only.
   RM asks for a write-combined mapping, and by the macOS 26 sources NVRM's way of making it gets one.
 - **Asynchronous texture uploads are on by default outside WindowServer.** `replaceRegion` submitted its copy and waited
   for the GPU before it returned, so an app that uploads many textures per frame stalled once per upload. The
-  asynchronous path (`NVMTL_ASYNC_TEX_UPLOAD`, its own staging buffer and command buffer, finished before the image is
-  overwritten, read back or freed: `plugin/nvmtl_tex_upload.h`) had already run by default since 3.0 for CPU-written
-  surface uploads outside WindowServer; it now runs for every region upload outside WindowServer, whose uploads stay
-  synchronous. `=1` still turns it on anywhere. What waits is limited: at most 256 uploads and 256 MiB of staging memory
-  per process, and past either an upload waits for its copy as in 3.0 (the first one is logged), so an app that uploads
-  many textures once and never reads them back does not keep a staging copy of each. The limits are judged without a
-  lock, so threads uploading at the same moment can pass them by one upload each. An upload into a texture over an
-  IOSurface is finished before the surface is published, because for a surface in the family's video memory publishing
-  copies nothing and another process could read the old pixels as the new ones. Two threads uploading into one texture
-  at once no longer lose the bookkeeping of one upload. Known and left as it was: after the GPU channel was rebuilt, an
-  upload it dropped is made again the next time the texture is finished, over any copy or blit made into the texture in
-  between (3.0's synchronous upload logged the failure and did not repeat it).
+  asynchronous path (its own staging buffer and command buffer, finished before the image is overwritten, read back or
+  freed: `plugin/nvmtl_tex_upload.h`) had already run by default since 2.6.3 for CPU-written surface uploads outside
+  WindowServer (`NVMTL_ASYNC_SURFACE_UPLOAD`); with `NVMTL_ASYNC_TEX_UPLOAD` it now runs for every region upload outside
+  WindowServer, whose uploads stay synchronous. `=1` still turns it on anywhere. What waits is limited: at most 256
+  uploads and 256 MiB of staging memory per process, and past either an upload waits for its copy as in 3.0 (the first
+  one is logged), so an app that uploads many textures once and never reads them back does not keep a staging copy of
+  each. The limits are judged without a lock, so threads uploading at the same moment can pass them by one upload each.
+  An upload into a texture over an IOSurface is finished before the surface is published, because for a surface in the
+  family's video memory publishing copies nothing and another process could read the old pixels as the new ones. Two
+  threads uploading into one texture at once no longer lose the bookkeeping of one upload. Known and left as it was:
+  after the GPU channel was rebuilt, an upload it dropped is made again the next time the texture is finished, over any
+  copy or blit made into the texture in between (3.0's synchronous upload logged the failure and did not repeat it).
 - **Shaders of a game are translated ahead.** In a game (the games category or `LSSupportsGameMode` in its `Info.plist`,
   the test macOS's own Game Mode uses), every entry point of a new shader library is translated by a small pool and
   stored in the shader cache (`NVMTL_PRETRANSLATE`, which only the Cyberpunk profile set before), so the first run of a

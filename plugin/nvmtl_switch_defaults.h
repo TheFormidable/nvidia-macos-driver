@@ -4,10 +4,10 @@
 // NVMTL_ASYNC_TEX_UPLOAD. replaceRegion submitted its copy and waited for the GPU before it returned, so an app that
 // uploads many textures per frame stalled once per upload. The asynchronous path (its own staging buffer and command
 // buffer, the handle finished before the image is overwritten, read back or freed: nvmtl_tex_upload.h) has run by
-// default for CPU-written IOSurface uploads outside WindowServer since 3.0 (NVMTL_ASYNC_SURFACE_UPLOAD). It now runs for
-// every region upload outside WindowServer as well, whose uploads stay synchronous as its surfaces' do. "1" turns it on
-// in any process, WindowServer included, as before; any other value turns it off (NVMTL_ASYNC_TEX_UPLOAD=0: replaceRegion
-// waits for its copy, as in 3.0).
+// default for CPU-written IOSurface uploads outside WindowServer since 2.6.3 (NVMTL_ASYNC_SURFACE_UPLOAD). It now runs
+// for every region upload outside WindowServer as well, whose uploads stay synchronous as its surfaces' do. "1" turns
+// it on in any process, WindowServer included, as before; any other value turns it off (NVMTL_ASYNC_TEX_UPLOAD=0:
+// replaceRegion waits for its copy, as in 3.0).
 //
 // NVMTL_PRETRANSLATE. A library's shaders were translated on the thread that first asked for each one, so the first run
 // of a game's level stopped for every new shader. In a game (the games category or LSSupportsGameMode in its
