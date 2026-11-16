@@ -26,6 +26,7 @@ SHARED = [
     ("nvrm_evwait.h", "nvk-evwait", "NVK's use of the kernel event wait (its wait loop sleeps on the kext's event)"),
     ("nvrm_chan_note_abi.h", "nvk-channel-recover", "NVK's rebuild of a channel after a GPU fault"),
     ("nvrm_fence_abi.h", "nvk-fence", "NVK's use of the kernel surface fence"),
+    ("nvrm_boost_policy_abi.h", "nvk-boost-policy", "NVK's use of the kext's boost policy (idle mode while apps run)"),
 ]
 fails = []
 

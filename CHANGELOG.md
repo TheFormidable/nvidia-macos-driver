@@ -1,5 +1,32 @@
 # Changelog
 
+## 3.0.1
+
+**Not released.** This section describes the branch being prepared as 3.0.1, on top of the 3.0 branch below (`fable` at
+9f85871b). Nothing of it has run on an NVIDIA card or on a Mac yet: it was compiled and its host tests were run on Linux
+only.
+
+### Fixes and changes
+
+- **Idle mode switches while apps run.** NVK's boost lease took its shape from `NVRM_610_BOOST` once, when a process
+  opened the device, so NVMetrics' idle mode (`NVRM_610_BOOST=0` in `nvrm610.conf`) reached only the apps started after
+  it, and switching it off left the open ones without boost until they restarted. NVRM.kext now holds a boost policy of
+  three values: undecided (every boot starts there, and each process follows `NVRM_610_BOOST` as in 3.0), idle mode and
+  normal. A root process sets it through a new user-client selector (13); there is no writable sysctl, and
+  `debug.nvrm_boost_policy` shows it read-only, with the number of changes in `debug.nvrm_boost_policy_sets`. Each
+  Vulkan process reads it at most once a second, just before it would renew its lease (`nvk/nvk-boost-policy.patch`):
+  in idle mode it asks for nothing and clears what it still has, in normal it boosts per burst again (or holds, with
+  `NVRM_610_BOOST=hold`). The selector takes no gate and makes no RM call, so it answers during a sleep too; a 3.0
+  kext does not have it, and NVK then keeps `NVRM_610_BOOST` as before. Boosts of other RM clients, such as NVMetrics'
+  own Automático/Máximo or the optional `nvmtl-boost` daemon, are theirs and are not touched. NVMetrics switches both
+  the file (for after a reboot) and the policy in one password prompt (`nvmetrics-agent policy idle|normal`).
+- **`NVRM_610_BOOST` in `nvrm610.conf` reaches every Vulkan app.** NVK's own reader matched only 2.9's short spelling
+  `BOOST=` in the file, and only when its first appearance started a line, so a Vulkan app without the Metal plugin
+  (the plugin copies the file into the environment) ignored the `NVRM_610_BOOST=0` line NVMetrics and the settings tool
+  write. The full name is now read first (the last such line wins), then the short one, without printing anything.
+- **A refused boost is asked again after 30 s.** 3.0 stopped asking for the rest of the process after one refusal, so a
+  refusal while the GPU came back from sleep left that app without boost until it was restarted.
+
 ## 3.0
 
 **Not released.** This section describes the branch being prepared as 3.0. No test of it on an NVIDIA card has been

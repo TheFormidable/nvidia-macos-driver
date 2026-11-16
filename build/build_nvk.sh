@@ -25,6 +25,9 @@
 #        then nvk-stream-uncached (stream chunks, where queue pushes and uploads are appended behind each other, are
 #        plain system memory instead of GPU-cacheable: the host could read a new push from a stale L2 line and stop
 #        the channel with an invalid pushbuffer entry).
+#        then nvk-boost-policy (3.0.1: each renewal of the boost lease also follows NVRM.kext's boost policy, so idle
+#        mode switches while apps run; nvkmd/nvrm/nvrm_boost_policy_abi.h in it is a copy of
+#        kexts/NVRM/nvrm_boost_policy_abi.h; NVRM_610_BOOST is also read under its full name from nvrm610.conf).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
@@ -69,7 +72,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
