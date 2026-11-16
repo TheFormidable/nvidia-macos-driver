@@ -532,8 +532,9 @@ class World:
         self.put("nvmtl/zink/libnvk_zink_vulkan.dylib", front, 0o755)
         self.put("nvmtl/zink/libnvk_renderer.dylib", rend, 0o755)
         control = "exit 1" if "control" in defects else 'echo "Trusted GPU bundle: /Library/GPUBundles/$1.bundle"'
-        self.put("nvmtl/zink/gld_bundle_probe", f'#!/bin/sh\ncase "$1" in NVMTLDriver) {control} ;; '
-                 f'*) echo "Trusted GPU bundle: /Library/GPUBundles/$1.bundle" ;; esac\n', 0o755)
+        if "noprobe" not in defects:
+            self.put("nvmtl/zink/gld_bundle_probe", f'#!/bin/sh\ncase "$1" in NVMTLDriver) {control} ;; '
+                     f'*) echo "Trusted GPU bundle: /Library/GPUBundles/$1.bundle" ;; esac\n', 0o755)
         sync = "exit 1" if "sync" in defects else ("echo 'PASS: 1000 four-thread barrier generations, one serial return each; "
                                                    "100 queue completion/teardown cycles'")
         self.put("nvmtl/zink/zink_sync_probe", f"#!/bin/sh\n{sync}\n", 0o755)
@@ -1002,6 +1003,14 @@ try:
         and "README.txt" in got["install.minecraft-files"]["why"] and "1.4.362" in got["install.minecraft-files"]["why"],
         (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
     arm("and nothing was written outside the run folder", not w.leftover, w.leftover)
+    w.install(defects=("noprobe",))
+    w.set(gl_bundle="NVKZinkGLDriver")
+    out = w.base / "runs" / "i3"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    arm("and with gld_bundle_probe missing: the lookup row fails (it is not a skip) and so does the zink folder's row",
+        rc == 1 and got.get("install.gl-bundle-trusted", {}).get("result") == "FAIL"
+        and got.get("install.zink-files", {}).get("result") == "FAIL", (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
 finally:
     shutil.rmtree(TOP, ignore_errors=True)
 

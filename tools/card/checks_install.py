@@ -19,8 +19,8 @@ The read rows name a function of the runner ("func"), which reads the installed 
   install.mesa-source     MESA-SOURCE.json names the Mesa commit build/prepare_zink.py pins
 The program rows run the installed probes as package/install.sh does after an install:
   install.gl-bundle-trusted  gld_bundle_probe NVMTLDriver (the control), then NVKZinkGLDriver: macOS's trusted
-                             GPU-bundle lookup finds both; a control that is not found makes the row a skip, as the
-                             installer treats it
+                             GPU-bundle lookup finds both; a lookup that refuses the control (exit 1) makes the row a
+                             skip, as the installer treats it; a probe that cannot run is a failure
   install.zink-sync-probe    zink_sync_probe: Mesa's barrier and queue as the zink patch repairs them (CPU only; a
                              broken barrier deadlocks, hence the limit)
 Not yet run on a Mac."""
@@ -42,13 +42,17 @@ CHECKS = [
      "title": "MESA-SOURCE.json names the pinned Mesa commit"},
     {"id": "install.gl-bundle-trusted", "part": "install", "kind": "cpu", "order": 110,
      "title": "macOS's GPU-bundle lookup trusts NVKZinkGLDriver.bundle (NVMTLDriver.bundle as the control)",
+     # only the lookup's own refusal of the control (exit 1, tools/gld_bundle_probe.c) is a skip; a probe that is
+     # missing or cannot run (sh's 126 or 127) is a failure of the installation
      "argv": ["/bin/sh", "-c",
-              'p=$1; if ! "$p" NVMTLDriver; then echo "SKIP: the GPU-bundle lookup does not find NVMTLDriver.bundle '
-              'either here, so it cannot judge the OpenGL bundle"; exit 3; fi; "$p" NVKZinkGLDriver',
+              'p=$1; "$p" NVMTLDriver; rc=$?; if [ "$rc" -eq 1 ]; then echo "SKIP: the GPU-bundle lookup does not find '
+              'NVMTLDriver.bundle either here, so it cannot judge the OpenGL bundle"; exit 3; fi; if [ "$rc" -ne 0 ]; '
+              'then echo "FAIL control: gld_bundle_probe NVMTLDriver ended with $rc"; exit 1; fi; "$p" NVKZinkGLDriver',
               "gl-bundle-trusted", "{GB}/nvmtl/zink/gld_bundle_probe"],
      "limit": 30,
-     "expect": {"rc": 0, "stdout": [r"^Trusted GPU bundle: /Library/GPUBundles/NVMTLDriver\.bundle",
-                                    r"^Trusted GPU bundle: /Library/GPUBundles/NVKZinkGLDriver\.bundle"]},
+     "expect": {"rc": 0, "stdout": [
+         r"^Trusted GPU bundle: (/System/Volumes/Data)?/Library/GPUBundles/NVMTLDriver\.bundle(/|$)",
+         r"^Trusted GPU bundle: (/System/Volumes/Data)?/Library/GPUBundles/NVKZinkGLDriver\.bundle(/|$)"]},
      "rc_map": {3: "skip"}},
     {"id": "install.zink-sync-probe", "part": "install", "kind": "cpu", "order": 111,
      "title": "Mesa's barrier and queue on this macOS (the installed zink_sync_probe)",
