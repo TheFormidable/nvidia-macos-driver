@@ -68,6 +68,7 @@ import stat
 import struct
 import subprocess
 import time
+import traceback
 from pathlib import Path
 
 # the commit of the package installed on the Mac the checks were written for
@@ -338,6 +339,9 @@ def run_limited(argv, env, cwd, out_path, err_path, limit):
                 res["stuck"] = True
         if not res["stuck"] and not group_ended(p.pid, until):
             res["stuck"] = True
+    except BaseException:        # the runner interrupted (SIGTERM, SIGHUP) or failed: the check goes with it
+        kill_group(p.pid)
+        raise
     finally:
         if not res["stuck"]:
             RUNNING.discard(p.pid)
@@ -1376,8 +1380,10 @@ class Run:
             raise Refused(f"the device probe sees no device of this driver: class {self.facts['device_class']}, name "
                           f"{self.facts['device_name']!r}, exit {res['rc']} ({last_line(out) or last_line(err)})")
         after = self.counters()
-        fake = {"id": "device-probe", "result": "pass", "why": ""}
+        fake = {"id": "device-probe", "result": "pass", "why": "", "xid_delta": None}
         self.watch(fake, before, after)
+        if fake["result"] == "FAIL":
+            self.stop(f"debug.nvrm_xid_count rose by {fake['xid_delta']} during the device probe")
         return not self.stopped
 
     # -- the end
@@ -1573,9 +1579,13 @@ def main(argv):
         return 3
     run.rows = [run.new_row(i + 1, c) for i, c in enumerate(checks)]
     signal.signal(signal.SIGTERM, interrupted)
+    if signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:   # the end of the shell that started it, unless nohup
+        signal.signal(signal.SIGHUP, interrupted)
     run.first_fence, run.first_ws = None, None
     try:
         return body(run)
+    except Exception as e:   # noqa: BLE001  (a fault of the runner itself still ends what it started and writes DONE)
+        return fault(run, e)
     except KeyboardInterrupt:
         for pgid in list(RUNNING):
             kill_group(pgid)
@@ -1590,6 +1600,30 @@ def main(argv):
 
 def interrupted(*_):
     raise KeyboardInterrupt
+
+
+def fault(run, e):
+    """a fault of the runner itself (not yet run on a Mac): stop its children and caffeinate, mark the rest not run,
+    and write the report and DONE (exit 4), so that a session that waits for DONE does not wait for ever"""
+    for pgid in list(RUNNING):
+        kill_group(pgid)
+    run.stop_caffeinate()
+    why = f"the runner itself failed: {type(e).__name__}: {e}"
+    run.say(why)
+    for line in traceback.format_exc().splitlines():
+        run.say(line)
+    run.stopped = run.stopped or why
+    for r in run.rows:
+        if r["result"] is None:
+            run.decide(r, "not run", why)
+    try:
+        run.report(4)
+    except Exception:   # noqa: BLE001  (the report itself failed: DONE still says how the run ended)
+        try:
+            run.write(run.out / "DONE", f"exit 4 at {utc()} ({why})\n")
+        except OSError:
+            pass
+    return 4
 
 
 def body(run):
