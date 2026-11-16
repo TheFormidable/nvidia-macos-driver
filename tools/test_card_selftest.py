@@ -276,6 +276,10 @@ m.GB_OWNER_UID = os.getuid()
 m.KILL_POLL = cfg["kill_poll"]
 if cfg["no_kill"]:
     m._killpg = lambda pgid, sig: None
+if cfg["fault"]:
+    def fault(self, *a):
+        raise RuntimeError("a stand-in fault of the runner")
+    m.Run.watch = fault
 sys.exit(m.main(cfg["argv"]))
 """
 
@@ -427,6 +431,7 @@ else:
 PROBE = """#!/bin/sh
 echo "device-probe probe" >> "{state}/ran.log"
 cls=$(cat "{state}/probe_class"); gui=$(cat "{state}/probe_gui")
+[ -f "{state}/probe_xid" ] && echo 5 > "{state}/counters/debug.nvrm_xid_count"
 [ "$cls" = NVMTLDevice ] || echo "SKIP: no device of this driver ($cls)"
 echo "DEVICE class=$cls name=Stand-in GPU (NVMTL over NVK stand-in)"
 echo "ALLDEVICES count=1"
@@ -568,10 +573,10 @@ class World:
             out |= {str(Path(dirpath, n)) for n in dirnames + filenames}
         return out
 
-    def run(self, argv, no_kill=False, kill_poll=3, timeout=180):
+    def run(self, argv, no_kill=False, kill_poll=3, timeout=180, fault=False, signal_when=None):
         cfg = {"runner": str(RUNNER), "system": self.system, "src": str(self.src), "gb": str(self.gb),
                "audit_tmp": [str(self.root / "tmp")], "icd": str(self.root / "icd"),
-               "exec_only_under": [os.path.realpath(str(self.root)), PY], "kill_poll": kill_poll, "no_kill": no_kill,
+               "exec_only_under": [os.path.realpath(str(self.root)), PY], "kill_poll": kill_poll, "no_kill": no_kill, "fault": fault,
                "argv": argv}
         (self.state / "wrap.py").write_text(WRAP)
         (self.state / "cfg.json").write_text(json.dumps(cfg))
@@ -584,6 +589,13 @@ class World:
         p = subprocess.Popen([PY, "-B", str(self.state / "wrap.py"), str(self.state / "cfg.json")], env=env,
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              start_new_session=True)
+        if signal_when:     # (a line of ran.log, a signal): sent to the runner once that check has started
+            line, sig = signal_when
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 60 and line not in self.ran_lines():
+                time.sleep(0.1)
+            time.sleep(0.3)
+            os.kill(p.pid, sig)
         try:
             out, err = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -600,6 +612,10 @@ class World:
     def ran(self):
         p = self.state / "ran.log"
         return p.read_text().split() if p.exists() else []
+
+    def ran_lines(self):
+        p = self.state / "ran.log"
+        return p.read_text().splitlines() if p.exists() else []
 
 
 def prow(cid, mode, *extra, kind="gpu", order=300, source="prog.m", **kw):
@@ -844,6 +860,42 @@ try:
         arm(f"stop rule: {word} stops every later GPU check (exit 4), a later CPU check still runs",
             rc == 4 and got.get("plugin.cause", {}).get("result") == "pass" and got.get("plugin.after", {}).get("result") == "not run"
             and word in (data.get("stopped") or "") and got.get("plugin.cpu", {}).get("result") == "pass", (rc, data.get("stopped"), got, text[-800:]))
+
+    # ------------------------------------------------------------------ an Xid in the probe, a fault of the runner
+    w = World(TOP, "probe-xid")
+    w.checks({"checks_plugin.py": [prow("plugin.after", "pass", order=300), prow("plugin.cpu", "pass", kind="cpu", order=301)]})
+    w.set(probe_xid="")
+    out = w.base / "runs" / "px"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    arm("an Xid rise during the device probe stops the run before any check: exit 4, every row not run",
+        rc == 4 and "debug.nvrm_xid_count rose by 5 during the device probe" in (data.get("stopped") or "")
+        and {r["result"] for r in got.values()} == {"not run"} and "plugin.after" not in w.ran(), (rc, data.get("stopped"), got))
+    w = World(TOP, "fault")
+    w.checks({"checks_plugin.py": [prow("plugin.after", "pass", order=300)]})
+    out = w.base / "runs" / "f"
+    rc, text = w.run(["--out", str(out)], fault=True)
+    got, data = results(w, out)
+    arm("a fault of the runner itself still writes report.md, results.json and DONE (exit 4), with the reason",
+        rc == 4 and (out / "DONE").exists() and (out / "DONE").read_text().startswith("exit 4")
+        and "RuntimeError: a stand-in fault" in (data.get("stopped") or "")
+        and got.get("plugin.after", {}).get("result") == "not run" and "Traceback" in text, (rc, data.get("stopped"), text[-800:]))
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        w = World(TOP, "signal-" + signal.Signals(sig).name)
+        w.checks({"checks_plugin.py": [prow("plugin.slow", "slow", "20", order=300, limit=30), prow("plugin.after", "pass", order=301)]})
+        out = w.base / "runs" / "sig"
+        rc, text = w.run(["--out", str(out)], signal_when=("plugin.slow slow", sig))
+        got, data = results(w, out)
+        arm(f"{signal.Signals(sig).name} to the runner during a check: the check's process group is killed with it, the "
+            "rest is not run, report.md and DONE are written, exit 4",
+            rc == 4 and (out / "DONE").exists() and "interrupted" in (data.get("stopped") or "")
+            and got.get("plugin.slow", {}).get("result") == "not run" and got.get("plugin.after", {}).get("result") == "not run"
+            and beats_stopped(w.state / "plugin.slow.beat"), (rc, data.get("stopped"), got, text[-800:]))
+        try:
+            os.killpg(int((w.state / "plugin.slow.main.pid").read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
 
     # ---------------------------------------------------------------------------------- a window, caffeinate
     w = World(TOP, "window")
