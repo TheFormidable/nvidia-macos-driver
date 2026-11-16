@@ -280,7 +280,8 @@ sys.exit(m.main(cfg["argv"]))
 """
 
 SH_FAKES = {
-    "git": """case " $* " in
+    "git": """echo "git-env TMPDIR=${TMPDIR-unset}" >> "$S/calls.log"
+case " $* " in
   *" status "*) cat "$S/git_status" 2>/dev/null; exit 0 ;;
   *" rev-parse "*) echo ffffffffffffffffffffffffffffffffffffffff; exit 0 ;;
   *" diff "*) exit "$(cat "$S/git_diff_rc" 2>/dev/null || echo 0)" ;;
@@ -734,6 +735,9 @@ try:
         all(re.match(r"^git -c core\.fsmonitor=false -C \S+ (status --porcelain|rev-parse HEAD|diff --quiet --no-ext-diff --no-textconv )", l)
             for l in w.calls() if l.startswith("git ")) and any(l.startswith("git ") for l in w.calls()),
         [l for l in w.calls() if l.startswith("git ")])
+    genv = [l for l in w.calls() if l.startswith("git-env ")]
+    arm("the runner's own reads (git through Apple's shim) get a TMPDIR in the run folder too",
+        genv and all(l.endswith("runs/main/tmp/runner/") for l in genv), genv)
     arm("no caffeinate for a run whose windowed rows are left out", not (w.state / "caffeinate.pid").exists())
     arm("stdout carries one line per row and the table", text.count("\n| ") >= len(want) and "plugin.xid: FAIL (Xid +2)" in text, text[-2000:])
 
