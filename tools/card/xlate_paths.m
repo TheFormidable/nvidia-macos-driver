@@ -392,6 +392,9 @@ static void case_abarray(const char *c)
     unsigned written = 0;
     for (unsigned k = 0; k < 8; k++) written += handles[k] != 0;
     info("%s encoder: encodedLength %lu, %u of 8 handle words written", c, (unsigned long)ae.encodedLength, written);
+    if (ae.encodedLength < 64)
+        info("%s encoder: encodedLength %lu is below the 64 bytes of eight handles", c,
+             (unsigned long)ae.encodedLength);
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:pso];
@@ -406,7 +409,9 @@ static void case_abarray(const char *c)
     [enc endEncoding];
     if (!finish(c, cb)) return;
     // the plugin logs "tier2: <function> reads N argument-buffer texture(s) through the bindless heap" when the module
-    // reads them by their handles (plugin/NVMTLEmbedded.m); a module that declares one binding for the array gets none
+    // reads them by their handles (plugin/NVMTLEmbedded.m, nvmtl_embedded_plan). It counts only the reflection's
+    // argument-buffer textures (entries with an embedded_source) whose binding the module does not declare, so the line
+    // is missing both when the module declares that binding and when the reflection names no such texture
     log_line_info(c, [NSString stringWithFormat:@"tier2: %@ reads", name]);
     static const float zero4[4] = {0};
     unsigned bad = 0, texel0 = 0, zeros = 0, first = 8;
@@ -427,9 +432,10 @@ static void case_abarray(const char *c)
          got[2], got[3], texel[first][0], texel[first][1], texel[first][2], texel[first][3],
          texel0 == 7 ? "; every index read texture 0: the index did not reach the read (one binding for the whole "
                        "array, its index held at element 0 by bounds-checked compute)"
-         : zeros == 7 ? "; every index past 0 read zeros: handle words the encoder left 0 (its INFO line above), or a "
-                        "module that reads the array through one binding (no 'tier2:' line above) and an index past "
-                        "that binding's one descriptor"
+         : zeros == 7 ? "; every index past 0 read zeros: handle words the encoder left 0 (its INFO line above), or an "
+                        "index past the one descriptor of a binding the module declares for the array (no 'tier2:' "
+                        "line above: the module declares the array's binding, or the reflection names no "
+                        "argument-buffer texture)"
          : "");
 }
 
@@ -676,10 +682,9 @@ static uint32_t unorm(float v, uint32_t maximum)
     return round_even((double)fminf(1.f, fmaxf(0.f, v)) * maximum);
 }
 
-/* For information only: the product computed in float (rounded once), then rounded half to even. Metal's conversion
-   rule allows that (within 0.6 of the exact result); the translator's lowering of air.pack.unorm.rgb10a2 aims at the
-   exact product and needs its residual FMA kept whole (NoContraction) for that, so a word that matches this and not
-   unorm() says that the residual was lost. */
+/* For information only: the product computed in float (rounded once), then rounded half to even. The translator's
+   lowering of air.pack.unorm.rgb10a2 aims at the exact product and needs its residual FMA kept whole (NoContraction)
+   for that, so a word that matches this and not unorm() says that the residual was lost. */
 static uint32_t unorm_float_product(float v, uint32_t maximum)
 {
     if (isnan(v)) v = 0;
@@ -745,9 +750,9 @@ static void case_pack10(const char *c)
     BOOL guards = guards_intact(o, COUNT, COUNT + 64);
     if (bad)
         info("pack10 rounding: %u of the %u wrong words equal the float product rounded half to even%s", float_product,
-             bad, float_product == bad && intrinsic != 0 ? " (within Metal's 0.6 rule, not the lowering's exact "
-             "product): the residual FMA was split, by a translator without its NoContraction (release 2.9's) or by a "
-             "backend that ignores it" : "");
+             bad, float_product == bad && intrinsic == 1 ? " (a rounding the lowering's exact product excludes): the "
+             "residual FMA was split, by a translator without its NoContraction (release 2.9's) or by a backend that "
+             "ignores it" : "");
     if (!bad && guards) {
         pass(c, "%u inputs packed as the exact product rounds half to even", (unsigned)COUNT);
         return;
