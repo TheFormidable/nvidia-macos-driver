@@ -361,7 +361,7 @@ SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_accel, CTLFLAG_RD | CTLFLAG_LOCKED, &g
 // root process through user-client selector 13 and read by NVK through the same selector at each renewal. A global of
 // the kext, not of a card: it survives sleep and a stop of the card, and a reboot starts it at "undecided".
 //   debug.nvrm_boost_policy       0 undecided (each process follows NVRM_610_BOOST), 1 idle mode, 2 normal
-//   debug.nvrm_boost_policy_sets  changes accepted since boot
+//   debug.nvrm_boost_policy_sets  changes since boot (a set of the value it already has is not one)
 static int gNvBoostPolicy = NVRM_BP_UNDECIDED;
 static volatile SInt64 gNvBoostPolicySets = 0;
 SYSCTL_INT(_debug, OID_AUTO, nvrm_boost_policy, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBoostPolicy, 0, "boost policy: 0 undecided (NVRM_610_BOOST), 1 idle mode, 2 normal");
@@ -3815,9 +3815,9 @@ IOReturn NVRMUserClient::sBoostPolicy(OSObject *target, void *, IOExternalMethod
         if (value >= NVRM_BP_COUNT) return kIOReturnBadArgument;
         if (!kauth_cred_issuser(kauth_cred_get())) return kIOReturnNotPrivileged;
         const int was = __atomic_exchange_n(&gNvBoostPolicy, (int)value, __ATOMIC_ACQ_REL);
-        OSIncrementAtomic64(&gNvBoostPolicySets);
         if (was != (int)value) {
             static const char *const kName[NVRM_BP_COUNT] = { "undecided", "idle mode", "normal" };
+            OSIncrementAtomic64(&gNvBoostPolicySets);   // changes, not calls: NVMetrics sets "normal" at every switch-off
             LOG("boost policy %s -> %s (pid %d)", (was >= 0 && was < NVRM_BP_COUNT) ? kName[was] : "?", kName[value], proc_selfpid());
         }
     } else if (op != NVRM_BP_OP_READ) {

@@ -127,10 +127,10 @@ index 567a3ba..340353e 100644
     struct vk_features supported_features;
     nvk_get_device_features(&nvkmd->dev_info, &supported_extensions,
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index 42cf0d8..ca90145 100644
+index e951701..559aecb 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-@@ -81,7 +81,11 @@ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
+@@ -84,7 +84,11 @@ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
  
  struct nvkmd_nvrm_dev {
     struct nvkmd_dev base;
