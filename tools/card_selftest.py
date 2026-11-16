@@ -132,8 +132,9 @@ ID = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 # NVK copy its standard error into /private/tmp/nvk-diag-<pid>.log (nvk/nvk-diag-nofollow.patch), so the runner itself
 # gives every check NVK_DIAG=0 (run_env) and no row may set it
 FORBIDDEN = re.compile(r"(?<![\w.-])(sudo|nvram|csrutil|bless|kmutil|kextload|kextunload|kextutil|launchctl|defaults|"
-                       r"tccutil|osascript|screencapture|spindump|killall|pkill|pmset|dtrace|lldb|java|java_home|NVK_DIAG|"
-                       r"install\.sh|uninstall\.sh|vulkan-for-apps\.sh|MallocStackLogging\w*|NM_TEST_PLUGIN)(?![\w-])"
+                       r"tccutil|osascript|screencapture|spindump|killall|pkill|pmset|dtrace|lldb|java|java_home|"
+                       r"NVK_DIAG|install\.sh|uninstall\.sh|vulkan-for-apps\.sh|MallocStackLogging\w*|NM_TEST_PLUGIN)"
+                       r"(?![\w-])"
                        r"|/private/tmp|(?<![\w.~}-])/tmp(?![\w.-])|sysctl\s+-w")
 # the runner's programs a check may start (the others in SYSTEM are the runner's own reads)
 CHECK_PROGRAMS = ("/usr/bin/xcrun", "/usr/bin/python3", "/bin/sh")
@@ -1137,7 +1138,8 @@ class Run:
         try:
             conf = Path(GB, "nvmtl", "nvrm610.conf").read_text(errors="replace").splitlines()
             # BOOST= is 2.9's short name of NVRM_610_BOOST, which NVK still reads (nvk/nvk-boost-policy.patch)
-            self.facts["knobs"] = [l.strip() for l in conf if re.match(r"^\s*((NVMTL|NVK|NVRM)_[A-Z0-9_]+|BOOST)\s*=", l)]
+            knob = re.compile(r"^\s*((NVMTL|NVK|NVRM)_[A-Z0-9_]+|BOOST)\s*=")
+            self.facts["knobs"] = [l.strip() for l in conf if knob.match(l)]
         except OSError:
             self.facts["knobs"] = ["(nvrm610.conf cannot be read)"]
         try:
@@ -1609,7 +1611,8 @@ class Run:
             f["kexts_end"] = self.kext_state()
 
             def short(vals):
-                return " ".join(f"{k.replace('debug.nvrmfb_vram_', '').replace('debug.nvrm_', '')}={v}" for k, v in vals.items())
+                return " ".join(f"{k.replace('debug.nvrmfb_vram_', '').replace('debug.nvrm_', '')}={v}"
+                                for k, v in vals.items())
             h.append(f"- boost policy and copy-engine clear (absent before 3.0.1): start {short(f['kexts_start'])}; "
                      f"end {short(f['kexts_end'])}")
         if f.get("ce_clear_left"):
@@ -1625,7 +1628,8 @@ class Run:
                      f"{r['detail'].replace('|', '/')[:DETAIL_CUT]} |")
         t += ["", f"{ran} ran, {failed} failed, {counts['skip']} skipped, {counts['inactive']} inactive, "
                   f"{counts['fallback']} fallback, {counts['not run']} not run"
-              + (f"; {f['kicked']} with a stalled channel rung again (debug.nvrm_chan_kicks)" if f.get("kicked") else "")]
+              + (f"; {f['kicked']} with a stalled channel rung again (debug.nvrm_chan_kicks)"
+                 if f.get("kicked") else "")]
         why = [f"- {r['id']}: {self.shown(r)}" for r in rows if r["result"] in ("skip", "inactive", "fallback", "not run")]
         t += ["", "## Skipped and why", ""] + (why or ["none"])
         info = [f"- {r['id']}: {l}" for r in rows for l in r["info"]]
@@ -1654,8 +1658,8 @@ class Run:
         """results.json after every row, marked partial, with the rows not yet decided as null: a runner ended without
         its report (SIGKILL, as at the end of a logout that a crash of WindowServer brings) leaves what it finished"""
         try:
-            self.write(self.out / "results.json", json.dumps({"exit": None, "partial": True, "stopped": self.stopped,
-                                                               "rows": self.result_rows()}, indent=1, default=str) + "\n")
+            partial = {"exit": None, "partial": True, "stopped": self.stopped, "rows": self.result_rows()}
+            self.write(self.out / "results.json", json.dumps(partial, indent=1, default=str) + "\n")
         except OSError:
             pass
 
