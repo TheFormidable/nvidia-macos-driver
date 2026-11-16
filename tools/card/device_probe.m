@@ -84,7 +84,8 @@ int main(void)
         int console = session_flag(session, CFSTR("kCGSSessionOnConsoleKey"));
         int login_done = session_flag(session, CFSTR("kCGSessionLoginDoneKey"));
         int locked = session_flag(session, CFSTR("CGSSessionScreenIsLocked"));
-        int asleep = CGDisplayIsAsleep(CGMainDisplayID()) ? 1 : 0;
+        /* the display only with a session: without one there is no window server connection to ask (-1) */
+        int asleep = session ? (CGDisplayIsAsleep(CGMainDisplayID()) ? 1 : 0) : -1;
         printf("GUI session=%d console=%d logindone=%d locked=%d asleep=%d\n", session != NULL, console, login_done, locked, asleep);
         if (session) {
             NSMutableArray<NSString *> *lock_keys = [NSMutableArray array];
