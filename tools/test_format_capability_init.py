@@ -5,7 +5,7 @@ The instance-function list (INSTANCE_FNS), its loader (LOAD_I), the pthread_once
 lifted from plugin/nvmtl_vk.c and compiled with a stand-in vkGetInstanceProcAddr that takes 150 ms to resolve the format
 query, so 24 threads ask while it is being resolved. Every thread must hear that VkFormat 64 is a storage format, the
 query must be resolved once, and an unsupported format (58) must stay unsupported. With the query missing, nvmtl_vk_init
-fails and every thread hears "not storage". A control compiles the query as it was before (its own static pointer and a
+fails and every thread hears "not storage". A control compiles the racy form of the query (its own static pointer and a
 "tried" flag set before the pointer) and must give at least one thread the wrong answer. No GPU or Vulkan SDK is needed.
 
 The fix is from the HighDelay/nvidia-macos-driver-nvk fork."""

@@ -100,7 +100,7 @@ static _Thread_local unsigned thread_generation;
 static _Thread_local struct nvk_cgl_bridge *thread_bridge;
 /* The CGL context and engine thread_bridge was looked up for. The fast path of
  * bridge_current compares these instead of reading thread_bridge: a cached
- * bridge of a context this thread no longer has current may be freed by
+ * bridge of a context that is not current on this thread may be freed by
  * another thread at any time. */
 static _Thread_local CGLContextObj thread_context;
 static _Thread_local void *thread_engine;
@@ -205,7 +205,7 @@ static struct nvk_cgl_bridge *bridge_current(void *engine)
       thread_generation = atomic_load(&generation);
       pthread_mutex_unlock(&bridges_lock);
    }
-   /* thread_bridge is now the bridge of the context current on this thread;
+   /* Here thread_bridge is the bridge of the context current on this thread;
     * CGL does not allow another thread to destroy a context current here. */
    if (!thread_bridge || thread_bridge->engine != engine ||
        (!thread_bridge->zink && !materialize(thread_bridge)) ||
