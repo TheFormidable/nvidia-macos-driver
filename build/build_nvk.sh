@@ -28,6 +28,13 @@
 #        then nvk-boost-policy (3.0.1: each renewal of the boost lease also follows NVRM.kext's boost policy, so idle
 #        mode switches while apps run; nvkmd/nvrm/nvrm_boost_policy_abi.h in it is a copy of
 #        kexts/NVRM/nvrm_boost_policy_abi.h; NVRM_610_BOOST is also read under its full name from nvrm610.conf).
+#        then nvk-mesa-main-2 (3.0.1: eight commits from Mesa main for NVK and the Vulkan runtime, unchanged, listed in
+#        its header and in NOTICE: push descriptor sets uploaded only when changed, the single color-write mode,
+#        stencil usage in format queries, the swapchain private-data mutex initialised on macOS; it touches no file
+#        of the three upstream-fix patches above, and is not one of them: NVK_SKIP_PATCHES cannot leave it out)
+#        then nvk-nvrm-fixes (3.0.1: the NVRM back end's table of CPU mappings under a lock, VK_EXT_map_memory_placed
+#        no longer offered on NVRM, which cannot place a map, and NVRM_FLUSH_TIMEOUT_MS, NVK_SYSMEM_GPU_UNCACHED and
+#        NVK_BAR_VRAM read once instead of on every flush or allocation).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
@@ -72,7 +79,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;

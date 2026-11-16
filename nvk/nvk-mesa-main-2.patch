@@ -1,0 +1,351 @@
+Eight commits from Mesa main for the NVK driver and the Vulkan runtime it is built with, in no Mesa release yet
+(26.3.0 does not have them). Upstream text (MIT licence), unchanged, oldest first; the two lines commit c9ce420e removes
+from CI fail lists (src/nouveau/ci, not part of the build) are left out:
+  commit 0f737d4e nvk: fix color_write_enable
+  commit fe4e33ab nvk: fix range calculation for map sync
+  commit 617f463e nvk: only upload descriptor state if dirty
+  commit 3e4d14a1 vulkan: Add vk_image_format_info_2_stencil_usage(..)
+  commit 3ff6450e nvk: Include stencil usage in image format queries
+  commit f924c7c9 nvk: limit push descriptor set upload to max_buffer_size
+  commit db5503a2 vulkan: initialize swapchain private mutex properly
+  commit c9ce420e vulkan: fix lookup of VkRenderingAttachmentLocationInfo
+Why each one is here:
+  color_write_enable: the MME macro added where it meant to mask, so SET_SINGLE_CT_WRITE_CONTROL was never turned on
+  even when every render target had the same write mask; the output was right, the faster mode was never used.
+  map sync range: the flush range of an indirect execution set update counted from slot 0 instead of the first slot
+  written. No effect on the NVRM back end today (every NVRM memory is coherent), kept so the code matches upstream.
+  push descriptor upload: the dirty mask of push descriptor sets was never cleared, so every draw or dispatch flush
+  uploaded every push set again (upstream: 30 thousand fewer uploads a second in Deep Rock Galactic); and each upload
+  copies the layout's size of the set, not the whole fixed-size array. Zink, DXVK and the DLSS passes use push sets.
+  stencil usage: image format queries ignored VkImageStencilUsageCreateInfo and the usage2 structures in pNext;
+  the helper it calls is the one commit 3e4d14a1 adds (an inline function in vk_physical_device.h, nothing else).
+  swapchain private mutex: the mutex of vkGet/SetPrivateData on swapchains was initialised only on Android; on macOS
+  a zeroed pthread mutex is not an initialised one, so that lock did not lock.
+  rendering attachment locations: VkRenderingAttachmentLocationInfo of a secondary command buffer was looked for in
+  the begin info instead of its inheritance info, so the remapping of attachments in it was lost.
+Not taken: the NAK compiler changes on main (they change the code of shaders), f989f044 (vk_meta integer clamping:
+only drivers that set sw_clamp_int_blits use it and NVK does not), 6712a065 (it changes a function that is only called
+inside assert(), which a release build compiles out), afe1e0d5 (submit thread affinity: it needs the util helper of
+commit 45abb7ce, which sets the affinity with pthread_setaffinity_np, and macOS has no such call).
+
+diff --git a/src/nouveau/vulkan/nvk_cmd_buffer.c b/src/nouveau/vulkan/nvk_cmd_buffer.c
+index 285f5ea..8e6a210 100644
+--- a/src/nouveau/vulkan/nvk_cmd_buffer.c
++++ b/src/nouveau/vulkan/nvk_cmd_buffer.c
+@@ -1404,7 +1404,7 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
+       struct nvk_push_descriptor_set *push_set = desc->sets[set_idx].push;
+       uint64_t push_set_addr;
+       result = nvk_cmd_buffer_upload_data(cmd, push_set->data,
+-                                          sizeof(push_set->data),
++                                          push_set->max_buffer_size,
+                                           min_cbuf_alignment,
+                                           &push_set_addr);
+       if (unlikely(result != VK_SUCCESS)) {
+@@ -1414,10 +1414,11 @@ nvk_cmd_buffer_flush_push_descriptors(struct nvk_cmd_buffer *cmd,
+ 
+       struct nvk_buffer_address set_addr = {
+          .base_addr = push_set_addr,
+-         .size = sizeof(push_set->data),
++         .size = push_set->max_buffer_size,
+       };
+       nvk_descriptor_state_set_root(cmd, desc, sets[set_idx], set_addr);
+    }
++   desc->push_dirty = 0;
+ }
+ 
+ void
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+index 22b3d15..a32eef4 100644
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -4052,7 +4052,7 @@ nvk_mme_set_write_mask(struct mme_builder *b)
+       mme_free_reg(b, val);
+ 
+       /* Check if all masks are common */
+-      struct mme_value temp = mme_add(b, mask, mme_imm(BITFIELD_RANGE(0, 4)));
++      struct mme_value temp = mme_and(b, mask, mme_imm(BITFIELD_RANGE(0, 4)));
+       mme_if(b, ine, first, temp) {
+          mme_mov_to(b, common_mask, mme_zero());
+       }
+@@ -4067,6 +4067,50 @@ nvk_mme_set_write_mask(struct mme_builder *b)
+    mme_emit(b, common_mask);
+ }
+ 
++const struct nvk_mme_test_case nvk_mme_set_write_mask_tests[] = {{
++   .params = (uint32_t[]) { 1, 0x0 },
++   .expected = (struct nvk_mme_mthd_data[]) {
++      { NV9097_SET_CT_WRITE(0), 0x0000 },
++      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
++      { }
++   },
++}, {
++   .params = (uint32_t[]) { 1, 0xf },
++   .expected = (struct nvk_mme_mthd_data[]) {
++      { NV9097_SET_CT_WRITE(0), 0x1111 },
++      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
++      { }
++   },
++}, {
++   .params = (uint32_t[]) { 8, 0x0f0f8421 },
++   .expected = (struct nvk_mme_mthd_data[]) {
++      { NV9097_SET_CT_WRITE(0), 0x0001 },
++      { NV9097_SET_CT_WRITE(1), 0x0010 },
++      { NV9097_SET_CT_WRITE(2), 0x0100 },
++      { NV9097_SET_CT_WRITE(3), 0x1000 },
++      { NV9097_SET_CT_WRITE(4), 0x1111 },
++      { NV9097_SET_CT_WRITE(5), 0x0000 },
++      { NV9097_SET_CT_WRITE(6), 0x1111 },
++      { NV9097_SET_CT_WRITE(7), 0x0000 },
++      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 0 },
++      { }
++   },
++}, {
++   .params = (uint32_t[]) { 8, 0xffffffff },
++   .expected = (struct nvk_mme_mthd_data[]) {
++      { NV9097_SET_CT_WRITE(0), 0x1111 },
++      { NV9097_SET_CT_WRITE(1), 0x1111 },
++      { NV9097_SET_CT_WRITE(2), 0x1111 },
++      { NV9097_SET_CT_WRITE(3), 0x1111 },
++      { NV9097_SET_CT_WRITE(4), 0x1111 },
++      { NV9097_SET_CT_WRITE(5), 0x1111 },
++      { NV9097_SET_CT_WRITE(6), 0x1111 },
++      { NV9097_SET_CT_WRITE(7), 0x1111 },
++      { NV9097_SET_SINGLE_CT_WRITE_CONTROL, 1 },
++      { }
++   },
++}, {}};
++
+ static void
+ nvk_flush_cb_state(struct nvk_cmd_buffer *cmd)
+ {
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set.c b/src/nouveau/vulkan/nvk_descriptor_set.c
+index 2986827..08808b7 100644
+--- a/src/nouveau/vulkan/nvk_descriptor_set.c
++++ b/src/nouveau/vulkan/nvk_descriptor_set.c
+@@ -59,6 +59,8 @@ nvk_descriptor_writer_init_push(const struct nvk_physical_device *pdev,
+    w->layout = layout;
+    w->set_map = push_set->data;
+    w->set_size_B = sizeof(push_set->data);
++
++   push_set->max_buffer_size = layout->max_buffer_size;
+ }
+ 
+ static void
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set.h b/src/nouveau/vulkan/nvk_descriptor_set.h
+index 0e6bb9e..1e538b3 100644
+--- a/src/nouveau/vulkan/nvk_descriptor_set.h
++++ b/src/nouveau/vulkan/nvk_descriptor_set.h
+@@ -63,6 +63,7 @@ nvk_descriptor_set_addr(const struct nvk_descriptor_set *set)
+ 
+ struct nvk_push_descriptor_set {
+    uint8_t data[NVK_PUSH_DESCRIPTOR_SET_SIZE];
++   uint32_t max_buffer_size;
+ };
+ 
+ void
+diff --git a/src/nouveau/vulkan/nvk_image.c b/src/nouveau/vulkan/nvk_image.c
+index b8f3d5d..f1d9cba 100644
+--- a/src/nouveau/vulkan/nvk_image.c
++++ b/src/nouveau/vulkan/nvk_image.c
+@@ -423,9 +423,9 @@ nvk_get_drm_format_modifier_properties_list(const struct nvk_physical_device *pd
+ }
+ 
+ static VkFormatFeatureFlags2
+-vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
++vk_image_usage_to_format_features(VkImageUsageFlagBits2KHR usage_flag)
+ {
+-   assert(util_bitcount(usage_flag) == 1);
++   assert(util_bitcount64(usage_flag) == 1);
+    switch (usage_flag) {
+    case VK_IMAGE_USAGE_TRANSFER_SRC_BIT:
+       return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+@@ -491,6 +491,10 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
+ {
+    VK_FROM_HANDLE(nvk_physical_device, pdev, physicalDevice);
+ 
++   const VkImageUsageFlags2KHR all_usage =
++      vk_image_format_info_2_usage(pImageFormatInfo) |
++      vk_image_format_info_2_stencil_usage(pImageFormatInfo);
++
+    const VkPhysicalDeviceExternalImageFormatInfo *external_info =
+       vk_find_struct_const(pImageFormatInfo->pNext,
+                            PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
+@@ -584,12 +588,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
+        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+ 
+-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
++   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+        (pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                                    VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)))
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+@@ -602,12 +606,12 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
+     * since it wouldn't know the other planes.
+     * See comment in nvk_image_init() below for more details.
+     */
+-   if ((pImageFormatInfo->usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
+-                                   VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
++   if ((all_usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_DECODE_SRC_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_DST_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR |
++                     VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR)) &&
+        (pImageFormatInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT))
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+ 
+@@ -668,14 +672,13 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
+     * different usage than the image so we can't always filter on usage.
+     * There is one exception to this below for storage.
+     */
+-   const VkImageUsageFlags image_usage = pImageFormatInfo->usage;
+-   VkImageUsageFlags view_usage = image_usage;
++   VkImageUsageFlags2KHR view_usage = all_usage;
+    if (pImageFormatInfo->flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
+       view_usage = 0;
+ 
+-   u_foreach_bit(b, view_usage) {
++   u_foreach_bit64(b, view_usage) {
+       VkFormatFeatureFlags2 usage_features =
+-         vk_image_usage_to_format_features(1 << b);
++         vk_image_usage_to_format_features(1ull << b);
+       if (usage_features && !(features & usage_features))
+          return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    }
+@@ -769,7 +772,7 @@ nvk_GetPhysicalDeviceImageFormatProperties2(
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+ 
+    if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+-       (pImageFormatInfo->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
++       (all_usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT))
+       return VK_ERROR_FORMAT_NOT_SUPPORTED;
+ 
+    pImageFormatProperties->imageFormatProperties = (VkImageFormatProperties) {
+diff --git a/src/nouveau/vulkan/nvk_indirect_execution_set.c b/src/nouveau/vulkan/nvk_indirect_execution_set.c
+index 155ed8a..d130f8c 100644
+--- a/src/nouveau/vulkan/nvk_indirect_execution_set.c
++++ b/src/nouveau/vulkan/nvk_indirect_execution_set.c
+@@ -387,7 +387,7 @@ nvk_UpdateIndirectExecutionSetPipelineEXT(
+    }
+ 
+    nvkmd_mem_sync_map_to_gpu(ies->mem, min_idx * (uint64_t)ies->stride_B,
+-                             (max_idx + 1) * (uint64_t)ies->stride_B);
++                             (max_idx - min_idx + 1) * (uint64_t)ies->stride_B);
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -414,5 +414,5 @@ nvk_UpdateIndirectExecutionSetShaderEXT(
+    }
+ 
+    nvkmd_mem_sync_map_to_gpu(ies->mem, min_idx * (uint64_t)ies->stride_B,
+-                             (max_idx + 1) * (uint64_t)ies->stride_B);
++                             (max_idx - min_idx + 1) * (uint64_t)ies->stride_B);
+ }
+diff --git a/src/nouveau/vulkan/nvk_mme.c b/src/nouveau/vulkan/nvk_mme.c
+index 5070bec..02a78f9 100644
+--- a/src/nouveau/vulkan/nvk_mme.c
++++ b/src/nouveau/vulkan/nvk_mme.c
+@@ -49,6 +49,7 @@ static const struct nvk_mme_test_case *mme_tests[NVK_MME_COUNT] = {
+    [NVK_MME_SET_SHADING_RATE_CONTROL]      = nvk_mme_set_shading_rate_control_tests,
+    [NVK_MME_SET_ANTI_ALIAS]                = nvk_mme_set_anti_alias_tests,
+    [NVK_MME_SET_STATISTICS_COUNTERS]       = nvk_mme_set_statistics_counters_tests,
++   [NVK_MME_SET_WRITE_MASK]                = nvk_mme_set_write_mask_tests,
+ };
+ 
+ uint32_t *
+diff --git a/src/nouveau/vulkan/nvk_mme.h b/src/nouveau/vulkan/nvk_mme.h
+index c419fe2..ee423da 100644
+--- a/src/nouveau/vulkan/nvk_mme.h
++++ b/src/nouveau/vulkan/nvk_mme.h
+@@ -289,6 +289,7 @@ extern const struct nvk_mme_test_case nvk_mme_set_tess_params_tests[];
+ extern const struct nvk_mme_test_case nvk_mme_set_shading_rate_control_tests[];
+ extern const struct nvk_mme_test_case nvk_mme_set_anti_alias_tests[];
+ extern const struct nvk_mme_test_case nvk_mme_set_statistics_counters_tests[];
++extern const struct nvk_mme_test_case nvk_mme_set_write_mask_tests[];
+ 
+ void nvk_test_all_mmes(const struct nv_device_info *devinfo);
+ 
+diff --git a/src/vulkan/runtime/vk_device.c b/src/vulkan/runtime/vk_device.c
+index b6c06d5..4a1f7c1 100644
+--- a/src/vulkan/runtime/vk_device.c
++++ b/src/vulkan/runtime/vk_device.c
+@@ -250,10 +250,8 @@ vk_device_init(struct vk_device *device,
+       UNREACHABLE("Invalid timeline mode");
+    }
+ 
+-#ifdef VK_USE_PLATFORM_ANDROID_KHR
+    mtx_init(&device->swapchain_private_mtx, mtx_plain);
+    device->swapchain_private = NULL;
+-#endif /* VK_USE_PLATFORM_ANDROID_KHR */
+ 
+    simple_mtx_init(&device->trace_mtx, mtx_plain);
+ 
+@@ -331,13 +329,12 @@ vk_device_finish(struct vk_device *device)
+    vk_device_memory_report_finish(device);
+    vk_memory_trace_finish(device);
+ 
+-#ifdef VK_USE_PLATFORM_ANDROID_KHR
+    if (device->swapchain_private) {
+       hash_table_foreach(device->swapchain_private, entry)
+          util_sparse_array_finish(entry->data);
+       ralloc_free(device->swapchain_private);
+    }
+-#endif /* VK_USE_PLATFORM_ANDROID_KHR */
++   mtx_destroy(&device->swapchain_private_mtx);
+ 
+    simple_mtx_destroy(&device->trace_mtx);
+ 
+diff --git a/src/vulkan/runtime/vk_physical_device.h b/src/vulkan/runtime/vk_physical_device.h
+index 9d9de34..383cf01 100644
+--- a/src/vulkan/runtime/vk_physical_device.h
++++ b/src/vulkan/runtime/vk_physical_device.h
+@@ -244,6 +244,22 @@ vk_image_format_info_2_usage(const VkPhysicalDeviceImageFormatInfo2 *info)
+    }
+ }
+ 
++static inline VkImageUsageFlags2KHR
++vk_image_format_info_2_stencil_usage(const VkPhysicalDeviceImageFormatInfo2 *info)
++{
++   const VkImageStencilUsage2CreateInfoKHR *stencil_usage2_info =
++      vk_find_struct_const(info->pNext, IMAGE_STENCIL_USAGE_2_CREATE_INFO_KHR);
++   if (stencil_usage2_info)
++      return stencil_usage2_info->stencilUsage;
++
++   const VkImageStencilUsageCreateInfo *stencil_usage_info =
++      vk_find_struct_const(info->pNext, IMAGE_STENCIL_USAGE_CREATE_INFO);
++   if (stencil_usage_info)
++      return stencil_usage_info->stencilUsage;
++
++   return vk_image_format_info_2_usage(info);
++}
++
+ static inline VkImageUsageFlags2KHR
+ vk_sparse_image_format_info_2_usage(const VkPhysicalDeviceSparseImageFormatInfo2 *info)
+ {
+diff --git a/src/vulkan/runtime/vk_render_pass.c b/src/vulkan/runtime/vk_render_pass.c
+index e63faa8..836f6ad 100644
+--- a/src/vulkan/runtime/vk_render_pass.c
++++ b/src/vulkan/runtime/vk_render_pass.c
+@@ -1271,7 +1271,7 @@ vk_get_command_buffer_rendering_attachment_location_info(
+    if (pBeginInfo->pInheritanceInfo->renderPass != VK_NULL_HANDLE)
+       return NULL;
+ 
+-   return vk_find_struct_const(pBeginInfo,
++   return vk_find_struct_const(pBeginInfo->pInheritanceInfo,
+                                RENDERING_ATTACHMENT_LOCATION_INFO_KHR);
+ }
+ 
