@@ -61,8 +61,8 @@ static const nvmtl_app_knob nvmtl_cp2077_knobs[] = {
     { "NVMTL_NO_PIXEL_HW_FILTER", "1" },
     /* Mapped device-local memory stays in VRAM, reached through the full-size BAR: about twice the frame rate for this
        game. The window server needs that memory in system RAM. From 3.0.1 NVK does this by default in every other
-       process for memory that is not shared (nvk/nvk-local-map-vram.patch); the profile keeps =0, which covers shared
-       memory too, as the game was qualified with. */
+       process for the part that is not shared and that the CPU does not read back (nvk/nvk-local-map-vram.patch); the
+       profile keeps =0, which covers the rest too (descriptor pools, shared memory), as the game was qualified with. */
     { "NVK_LOCAL_MAP_SYSMEM", "0" },
     /* Shared buffers in VRAM, capped at 512 MB so the game's own private allocations keep their room. */
     { "NVMTL_SHARED_VRAM", "1" },

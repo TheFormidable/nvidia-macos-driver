@@ -146,7 +146,7 @@ env	NVK_HOST_IMPORT	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_QUERY	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_WIDE	dev	unset	2.9	-	unreviewed
 env	NVK_L2_TAIL	dev	unset	2.9	-	unreviewed
-env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: By default applications place it in video memory (faster in games) while the desktop (WindowServer) and memory shared between processes keep it in system RAM. On keeps it in system RAM everywhere, as before 3.0.1; off places it in video memory for the desktop too (unsafe for the desktop).
+env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: By default applications place the part of it the processor does not read back in video memory (faster in some games), while the desktop (WindowServer), memory shared between processes and what the processor reads back keep system RAM. On keeps all of it in system RAM in every application, as before 3.0.1; off places all of it in video memory, for the desktop too (unsafe for the desktop).
 env	NVK_NO_BIGPAGE	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_NO_NONCONTIG	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_PREEMPT_LOG	diag	unset	2.9	-	unreviewed
@@ -575,7 +575,7 @@ bootarg	nvfbsmall	recovery	unset	2.9	-	turns one part of the driver off or back 
 bootarg	nvfbsurround	setting	unset	2.9	-	Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off.
 bootarg	nvfbtrace	diag	unset	2.9	-	observes only
 bootarg	nvfbvib	setting	unset	2.9	-	Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone.
-bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
+bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is cleared again, by the copy engine or with nvfbceclear=0 from the processor as in 2.9, and made on the thread that asks)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
 bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it.
 bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
 bootarg	nvhud	diag	unset	2.9	-	observes only
