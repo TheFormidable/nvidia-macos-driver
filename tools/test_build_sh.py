@@ -38,7 +38,7 @@ Arms (each with a negative control: the same check on a scratch copy of build.sh
 The shell that runs build.sh is $BUILD_SH_BASH (default /bin/bash, which on a Mac is the bash 3.2 build.sh is written
 for). On another system set BUILD_SH_BASH to a bash 3.2 to test that; the test prints which one ran.
 NMT_KEEP=1 keeps the sandbox folder. usage: test_build_sh.py [arm ...]"""
-import hashlib, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time, traceback
+import gzip, hashlib, io, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tarfile, tempfile, threading, time, traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
@@ -154,6 +154,7 @@ formula() {   # <name>: what the stand-in Homebrew puts under opt/<name>
                            mkwrap "$p/bin/llvm-spirv" ver "LLVM version 22.1.0" ;;
     llvm|llvm@22) mkwrap "$p/bin/llvm-config" ver "22.1.3"; mkdir -p "$p/lib"; : > "$p/lib/libclang.dylib" ;;
     python@3.14) mkwrap "$p/bin/python3.14" py "3.14.0" ;;
+    bison) mkwrap "$p/bin/bison" ver "bison (GNU Bison) 3.8.2" ;;
     *) return 1 ;;
   esac
 }
@@ -230,7 +231,7 @@ case "$role" in
         rec brew-info "HOMEBREW_CACHE=${HOMEBREW_CACHE:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
         f=${3:-}
         case "$f" in llvm) v=$(cat "$S/brew-llvm") ;; llvm@22) [ -f "$S/brew-llvm22" ] || exit 1; v=22.1.3 ;;
-          gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14) v=1.0 ;; *) exit 1 ;; esac
+          gpatch|ninja|cmake|pkgconf|glslang|spirv-tools|spirv-llvm-translator|python@3.14|bison) v=1.0 ;; *) exit 1 ;; esac
         printf '{"formulae":[{"name":"%s","versions":{"stable": "%s"}}]}\n' "$f" "$v" ;;
       install)
         rec brew-env "HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-}" "HOMEBREW_NO_INSTALL_UPGRADE=${HOMEBREW_NO_INSTALL_UPGRADE:-}" "HOMEBREW_NO_INSTALL_CLEANUP=${HOMEBREW_NO_INSTALL_CLEANUP:-}" "HOMEBREW_PREFIX=${HOMEBREW_PREFIX:-}" "HOMEBREW_CELLAR=${HOMEBREW_CELLAR:-}" "HOMEBREW_REPOSITORY=${HOMEBREW_REPOSITORY:-}"
@@ -350,10 +351,11 @@ case "$role" in
     # build/toolchain.sh: list, id (state/tc-recipe-<tool> raises a recipe number), build (records the call and its
     # NM_TC_* settings, needs the source trees and the earlier tools, lays out what build.sh looks for, writes the
     # stamp NM_TC_STAMP; ctl/tc-fail-<tool> makes that tool fail with its log)
-    tcs="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
+    tcs="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm bison"
     case "${1:-}" in
       list) printf '%s\n' $tcs ;;
-      id) echo "$2 recipe $(cat "$S/tc-recipe-$2" 2>/dev/null || echo 2) Darwin-$(cat "$S/arch") macos${MACOSX_DEPLOYMENT_TARGET:-15.0}" ;;
+      id) d=2; [ "$2" != bison ] || d=1
+          echo "$2 recipe $(cat "$S/tc-recipe-$2" 2>/dev/null || echo $d) Darwin-$(cat "$S/arch") macos${MACOSX_DEPLOYMENT_TARGET:-15.0}" ;;
       build) shift
         P=$NM_TC_PREFIX
         for t in "$@"; do
@@ -361,6 +363,7 @@ case "$role" in
               "NM_TC_JOBS=$NM_TC_JOBS" "NM_TC_MESON=$NM_TC_MESON" "NM_TC_STAMP=$NM_TC_STAMP" "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET-UNSET}"
           mkdir -p "$NM_TC_LOGS" "$NM_TC_WORK" "$P/.nm-toolchain"; L=$NM_TC_LOGS/$t.log; echo "build $t" > "$L"
           [ -d "$NM_TC_SRC/$t" ] || { echo "STOP: $t: its source tree $NM_TC_SRC/$t is missing" >&2; exit 2; }
+          [ "$t" != bison ] || [ -x "$NM_TC_SRC/bison/configure" ] || { echo "STOP: bison: $NM_TC_SRC/bison has no configure" >&2; exit 2; }
           [ "$t" != spirv-tools ] || [ -d "$NM_TC_SRC/spirv-headers" ] || { echo "STOP: no spirv-headers" >&2; exit 2; }
           case "$t" in cmake|pkgconf|xz|spirv-tools|glslang|llvm) [ -s "$P/.nm-toolchain/ninja" ] || { echo "STOP: $t needs the toolchain's ninja" >&2; exit 2; } ;; esac
           case "$t" in xz|spirv-tools|glslang|llvm) [ -s "$P/.nm-toolchain/cmake" ] || { echo "STOP: $t needs the toolchain's cmake" >&2; exit 2; } ;; esac
@@ -378,6 +381,7 @@ case "$role" in
             spirv-tools) mkdir -p "$P/lib/pkgconfig"; printf 'Name: SPIRV-Tools\nVersion: 2026.4.1\n' > "$P/lib/pkgconfig/SPIRV-Tools.pc" ;;
             glslang) mkwrap "$P/bin/glslang" ver "Glslang Version: 11:16.6.0"; mkwrap "$P/bin/glslangValidator" ver "Glslang Version: 11:16.6.0" ;;
             llvm) mkwrap "$P/llvm/bin/llvm-config" ver "22.1.8"; mkdir -p "$P/llvm/lib"; : > "$P/llvm/lib/libclang.dylib" ;;
+            bison) mkwrap "$P/bin/bison" ver "bison (GNU Bison) 3.8.2" ;;
           esac
           printf '%s\n' "${NM_TC_STAMP:-$t}" > "$P/.nm-toolchain/$t"
           echo "toolchain: $t ok (1 s)"
@@ -485,7 +489,7 @@ echo "stand-in for $key: done"
 # Real tools the sandbox PATH offers besides the stand-ins (a Mac has each of them in /usr/bin or /bin).
 REAL_TOOLS = ["awk", "sed", "grep", "cut", "tr", "sort", "head", "tail", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "ls", "ln",
               "chmod", "date", "mktemp", "dirname", "basename", "wc", "paste", "cmp", "diff", "tee", "env", "kill", "sleep",
-              "tar", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
+              "tar", "gzip", "find", "getconf", "touch", "expr", "uniq", "od", "xargs", "perl", "shasum", "id", "hostname", "printf",
               "true", "false", "comm", "cksum", "sh", "pwd", "test", "less", "more", "readlink"]
 STANDINS = {"df": "df", "uname": "uname", "sw_vers": "sw_vers", "sysctl": "sysctl", "xcode-select": "xcode-select",
             "xcodebuild": "xcodebuild", "xcrun": "xcrun", "curl": "curl", "otool": "otool", "sudo": "sudo",
@@ -646,6 +650,17 @@ def make_remotes(root, tamper=False):
         d.mkdir(parents=True, exist_ok=True)
         (d / "rustup-init").write_text(f'#!/bin/bash\nexec /bin/bash "$NMT_LIB/fake.sh" rustup-init "$0" "$@"\n# {triple}\n')
         ri[triple] = hashlib.sha256((d / "rustup-init").read_bytes()).hexdigest()
+    # Bison's release tarball (NM_PIN_TCBISON): one top folder with a configure, as GNU's tarballs have
+    tb = root / "www/ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz"
+    tb.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.GzipFile(str(tb), "wb", mtime=0) as gz, tarfile.open(fileobj=gz, mode="w") as tf:
+        for name, text, mode in (("configure", "#!/bin/sh\n# stand-in of Bison 3.8.2's configure\n" + salt, 0o755),
+                                 ("configure.ac", "AC_INIT([GNU Bison], [3.8.2])\n", 0o644)):
+            data = text.encode()
+            ti = tarfile.TarInfo("bison-3.8.2/" + name)
+            ti.size, ti.mode, ti.mtime = len(data), mode, 1632000000
+            tf.addfile(ti, io.BytesIO(data))
+    sums["TCBISON"] = hashlib.sha256(tb.read_bytes()).hexdigest()
     return commits, sums, ri
 
 
@@ -674,7 +689,7 @@ def build_template():
     replace = {}
     for pid in ("OGKM620", "OGKM610", "MESA", "ZINKMESA", "VKHEADERS", "VKLOADER", "OPENGPUDOC", "RYZENADJ", "SPIRVLLVM", "SPIRVHEADERS"):
         replace[pin_value(pins, f"NM_PIN_{pid}_COMMIT")] = commits[pid]
-    for pid in ("WEBKIT_CMBASE", "WEBKIT_VTDEC"):
+    for pid in ("WEBKIT_CMBASE", "WEBKIT_VTDEC", "TCBISON"):
         replace[pin_value(pins, f"NM_PIN_{pid}_SHA256")] = sums[pid]
     replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_X86_64")] = ri["x86_64-apple-darwin"]
     replace[pin_value(pins, "NM_PIN_RUSTUP_SHA256_AARCH64")] = ri["aarch64-apple-darwin"]
@@ -923,7 +938,7 @@ def want(name):
 ORDER = ["rm", "kms", "nvrm", "fb", "accel", "agdc", "nmsmn", "ryzenadj", "airdis", "dlss", "osver", "nvk", "boost", "nvkbridge",
          "vulkan", "plugin", "xlate", "nvencvt", "zink"]
 FRESH_MISSING = ["Xcode", "Homebrew", "Python 3.10", "the Python environment", "ninja", "cmake", "pkg-config",
-                 "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen"]
+                 "glslangValidator", "LLVM 22", "SPIRV-LLVM-Translator", "SPIRV-Tools", "Rust 1.98.1", "bindgen", "cbindgen", "bison 3.0"]
 MUTATING = re.compile(r"^(brew (install|upgrade|uninstall|reinstall|update|link|unlink|tap)|curl |rustup-init|rustup |cargo (install|fetch)"
                       r"|python[0-9.]* -m (venv|pip)|step |sudo|git (init|fetch|clone|checkout|archive|update-ref|tag|stash|config|sparse-checkout|symbolic-ref))")
 # variables the build scripts read that name a place; they must point into the working directory (or the checkout)
@@ -1377,7 +1392,7 @@ def arm_pathtools():
              pathtools_problems("x86_64", script_edit=("  [ \"$(LC_ALL=C head -c 2 \"$r\" 2>/dev/null)\" = '#!' ] || return 0", "  return 0")))
 
 
-DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "python@3.14", "llvm", "spirv-llvm-translator"]
+DEPS_WANT = ["ninja", "pkgconf", "glslang", "spirv-tools", "bison", "python@3.14", "llvm", "spirv-llvm-translator"]
 
 
 def deps_problems(sb, rc, out, before):
@@ -1495,7 +1510,7 @@ def arm_cargoconf():
 # Homebrew's spirv-llvm-translator is linked against Homebrew's llvm and belongs to no other LLVM. With NM_LLVM_PREFIX
 # naming an LLVM 22 that is not Homebrew's, every other tool present and Homebrew's translator installed, deps neither
 # takes that translator nor asks Homebrew anything: it builds the pinned one against the LLVM in use.
-ALL_BUT_LLVM = ("gpatch", "ninja", "cmake", "pkgconf", "glslang", "spirv-tools", "python@3.14")
+ALL_BUT_LLVM = ("gpatch", "ninja", "cmake", "pkgconf", "glslang", "spirv-tools", "python@3.14", "bison")
 
 
 def ownllvm_problems(script_edit=None, brewtr=True):
@@ -1556,7 +1571,7 @@ def arm_ownllvm():
 
 
 # Every tool already there, none of it Homebrew's: the tester's settings (NM_PYTHON, NM_LLVM_PREFIX,
-# NM_SPIRV_TOOLS_PREFIX), the toolchain an earlier deps built (ninja, cmake, pkgconf, glslang), macOS's patch. With
+# NM_SPIRV_TOOLS_PREFIX), the toolchain an earlier deps built (ninja, cmake, pkgconf, glslang, bison), macOS's patch. With
 # NM_TOOLS_FROM=homebrew and a Homebrew present, deps calls no brew at all, not even "brew info": each call it can make
 # comes after it knows that a tool is missing and that Homebrew could be the one to give it. The stand-in Homebrew
 # records every call (brew_calls). deps runs twice: the first builds the pinned translator against the LLVM of the
@@ -1570,8 +1585,9 @@ def settings_sandbox(name, script_edit=None):
     sb.wrap(tc / "bin/cmake", "cmake", "cmake version 4.4.5")
     sb.wrap(tc / "bin/pkg-config", "ver", "2.5.1")
     sb.wrap(tc / "bin/glslangValidator", "ver", "Glslang Version: 11:16.6.0")
+    sb.wrap(tc / "bin/bison", "ver", "bison (GNU Bison) 3.8.2")
     (tc / ".nm-toolchain").mkdir(parents=True)
-    for tool in ("ninja", "cmake", "pkgconf", "glslang"):
+    for tool in ("ninja", "cmake", "pkgconf", "glslang", "bison"):
         (tc / ".nm-toolchain" / tool).write_text(f"{tool} built by an earlier deps\n")
     mine = sb.home / "mine"
     sb.wrap(mine / "llvm/bin/llvm-config", "ver", "22.1.8")
@@ -1617,10 +1633,10 @@ def arm_settings():
 # ------------------------------------------------------------------------------------------- the source way (NM_TOOLS_FROM)
 # build/toolchain.sh is a stand-in (FAKE_SH "toolchain"): its calls are journalled as "toolchain-build <tool> <settings>",
 # it needs the source trees and the earlier tools a real build needs, and it lays out what build.sh looks for.
-TC_ORDER = ["ninja", "cmake", "openssl", "zstd", "xz", "python", "pkgconf", "spirv-tools", "glslang", "llvm"]
+TC_ORDER = ["ninja", "cmake", "openssl", "zstd", "xz", "python", "pkgconf", "spirv-tools", "glslang", "llvm", "bison"]
 TC_PIN = {"ninja": ["TCNINJA"], "cmake": ["TCCMAKE"], "openssl": ["TCOPENSSL"], "zstd": ["TCZSTD"], "xz": ["TCXZ"],
           "python": ["TCPYTHON"], "pkgconf": ["TCPKGCONF"], "spirv-tools": ["TCSPIRVTOOLS", "TCSPIRVHEADERS"],
-          "glslang": ["TCGLSLANG"], "llvm": ["TCLLVM"]}
+          "glslang": ["TCGLSLANG"], "llvm": ["TCLLVM"], "bison": ["TCBISON"]}
 
 
 def tc_builds(sb):
@@ -1637,9 +1653,12 @@ def tc_builds(sb):
 TC_LINKED = {"python": ["openssl", "zstd", "xz"], "glslang": ["spirv-tools"]}
 
 
-def tc_stamp_want(sb, tool, recipe=2):
+def tc_stamp_want(sb, tool, recipe=None):
+    """the stamp of a tool built from this tree's pins: a source pinned by a commit is named by it, Bison's release
+    tarball by its SHA-256; bison's recipe is 1, the other tools' 2"""
     pins = (sb.co / "build/pins.sh").read_text()
-    commits = "+".join(pin_value(pins, f"NM_PIN_{p}_COMMIT") for p in TC_PIN[tool])
+    recipe = recipe or (1 if tool == "bison" else 2)
+    commits = "+".join(pin_value(pins, f"NM_PIN_{p}_COMMIT") or pin_value(pins, f"NM_PIN_{p}_SHA256") for p in TC_PIN[tool])
     return f"{commits} {tool} recipe {recipe} Darwin-x86_64 macos15.0" + "".join(
         "; with " + tc_stamp_want(sb, n) for n in TC_LINKED.get(tool, []))
 
@@ -1700,7 +1719,7 @@ def arm_source():
         rc, out = sb.run("deps", "-y")
         return sb, source_deps_problems(sb, rc, out, before), out
     sb, p, out = run()
-    check("source way on an Intel Mac without Homebrew: deps builds the ten tools in order with the interface's settings and "
+    check("source way on an Intel Mac without Homebrew: deps builds the eleven tools in order with the interface's settings and "
           "stamps, calls no brew, offers no Homebrew, writes nothing outside the working directory, ends with everything present",
           not p, (p, out[-1500:]))
     # the per-tool times are one measured run on one Mac: deps states their sum as an estimate for this Mac's plan
@@ -1774,8 +1793,8 @@ def arm_source():
         rc, out = sb.run("doctor")
         negative("find_tools that takes a toolchain tool without its stamp",
                  [] if re.search(r"^  MISSING  glslangValidator", out, re.M) else ["taken"])
-    sb2, p2, out2 = run(edit=('TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"',
-                              'TC_ORDER="ninja cmake openssl zstd xz python pkgconf glslang spirv-tools llvm"'), tag="-neg1")
+    sb2, p2, out2 = run(edit=('TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm bison"',
+                              'TC_ORDER="ninja cmake openssl zstd xz python pkgconf glslang spirv-tools llvm bison"'), tag="-neg1")
     negative("a toolchain built out of order (glslang before SPIRV-Tools)", p2)
     sb3, p3, out3 = run(edit=('  if [ "$(tools_from)" = source ]; then deps_source "$missing_xcode"; return 0; fi\n', ''), tag="-neg2")
     negative("deps that goes the Homebrew way on an Intel Mac", p3)
@@ -1808,7 +1827,7 @@ def nobrew_sandbox(tag, edits=()):
 
 
 def nobrew_problems(sb):
-    """the claims of the source way on that Mac, each with its own list of problems: deps builds all ten tools;
+    """the claims of the source way on that Mac, each with its own list of problems: deps builds all eleven tools;
     tools/bin leads to none of Homebrew's (patch: the patch on PATH, macOS's); the Python environment is made from the
     toolchain's Python; no brew call in deps, doctor, fetch or build; doctor names the copies it does not use; the NVK
     step's pkg-config is the toolchain's"""
@@ -1874,7 +1893,7 @@ def nobrew_problems(sb):
 
 def arm_source_some():
     """on an Intel Mac whose Homebrew offers ninja, cmake, pkgconf, python3, gpatch and more, the source way takes
-    nothing from it: deps builds all ten tools, tools/bin leads to none of Homebrew's, no brew is called, the NVK step's
+    nothing from it: deps builds all eleven tools, tools/bin leads to none of Homebrew's, no brew is called, the NVK step's
     pkg-config is the toolchain's. With NM_TOOLS_FROM=homebrew the same Mac uses Homebrew's as before."""
     sb = nobrew_sandbox("")
     # first the Homebrew way on this Mac: as before, Homebrew's tools are taken and nothing is built from source
@@ -1886,7 +1905,7 @@ def arm_source_some():
     check("NM_TOOLS_FROM=homebrew on that Mac: Homebrew's tools are taken as before, nothing is built from source",
           hb_ok, (rc, sorted(viabrew), [t for t, _ in tc_builds(sb)], out[-600:]))
     P, out = nobrew_problems(sb)
-    names = {"built": "deps builds all ten tools in order (none counts as there because Homebrew has it) and ends with everything present",
+    names = {"built": "deps builds all eleven tools in order (none counts as there because Homebrew has it) and ends with everything present",
              "links": "tools/bin leads to none of Homebrew's tools: ninja, cmake, pkg-config, glslangValidator and llvm-config are the toolchain's",
              "patch": "tools/bin/patch runs the patch on PATH (macOS's), not Homebrew's gpatch",
              "venv": "the Python environment made by the Homebrew way is made again from the toolchain's Python",
@@ -1943,7 +1962,201 @@ def arm_source_fail():
     sb.clear()
     rc, out = sb.run("deps", "-y")
     got = [t for t, _ in tc_builds(sb)]
-    check("the next deps starts at SPIRV-Tools", rc == 0 and got == ["spirv-tools", "glslang", "llvm"], (rc, got, out[-600:]))
+    check("the next deps starts at SPIRV-Tools", rc == 0 and got == ["spirv-tools", "glslang", "llvm", "bison"], (rc, got, out[-600:]))
+
+
+def ten_stamps(pins):
+    """the stamps of the ten tools a toolchain held before bison was added, as build.sh wrote them on an Intel Mac with
+    MACOSX_DEPLOYMENT_TARGET at its default: "<pinned commit(s)> <tool> recipe 2 Darwin-x86_64 macos15.0", and for
+    Python and glslang the stamps of what is linked into them after "; with " """
+    c = lambda pid: pin_value(pins, f"NM_PIN_{pid}_COMMIT")
+    own = {"ninja": c("TCNINJA"), "cmake": c("TCCMAKE"), "openssl": c("TCOPENSSL"), "zstd": c("TCZSTD"), "xz": c("TCXZ"),
+           "python": c("TCPYTHON"), "pkgconf": c("TCPKGCONF"), "spirv-tools": c("TCSPIRVTOOLS") + "+" + c("TCSPIRVHEADERS"),
+           "glslang": c("TCGLSLANG"), "llvm": c("TCLLVM")}
+    s = {t: f"{v} {t} recipe 2 Darwin-x86_64 macos15.0" for t, v in own.items()}
+    s["python"] += "".join(f"; with {s[n]}" for n in ("openssl", "zstd", "xz"))
+    s["glslang"] += f"; with {s['spirv-tools']}"
+    return s
+
+
+def before_bison(sb):
+    """sb's working directory as a deps before bison was part of the toolchain left it: the ten tools with their
+    stamps exactly as they were written then, no bison, its tarball and tree not fetched"""
+    tc = sb.work / "tools/toolchain"
+    for p in (tc / ".nm-toolchain/bison", tc / "bin/bison", tc / "bin/bison.version", sb.work / "tools/bin/bison"):
+        if p.exists() or p.is_symlink():
+            p.unlink()
+    shutil.rmtree(sb.work / "src/git/tc-bison", ignore_errors=True)
+    shutil.rmtree(sb.work / "src/toolchain/bison", ignore_errors=True)
+    for r in (sb.work / "src/exports").iterdir():
+        if r.read_text().rstrip("\n").endswith("/src/toolchain/bison"):
+            r.unlink()
+    stamps = ten_stamps((sb.co / "build/pins.sh").read_text())
+    for t, s in stamps.items():
+        (tc / ".nm-toolchain" / t).write_text(s + "\n")
+    return stamps
+
+
+def arm_source_bison():
+    """bison joins the toolchain: a working directory whose toolchain holds the ten tools a deps built before (their
+    stamps as written then) gets a plan of bison alone; the dry run prints bison's fetch and build and nothing else's;
+    deps builds bison alone and leaves the ten stamps as they were"""
+    def run(edit=None, tag="", raise_llvm=False):
+        sb = source_sandbox("srcbison" + tag)
+        sb.clear()
+        rc, out = sb.run("deps", "-y")
+        p = [] if rc == 0 else [f"the first deps: exit {rc}: {out[-400:]}"]
+        stamps = before_bison(sb)
+        if edit:
+            sb.break_script(*edit)
+        if raise_llvm:
+            (sb.state / "tc-recipe-llvm").write_text("3\n")
+        sb.clear()
+        rc, dry = sb.run("--dry-run", "deps")
+        plan = re.findall(r"^deps builds from pinned sources: (.*)$", dry, re.M)
+        if rc != 0 or plan != ["bison"]:
+            p.append(f"dry run: exit {rc}, plan {plan}, not bison alone")
+        builds = re.findall(r"bash build/toolchain\.sh build (\S+)$", dry, re.M)
+        if builds != ["bison"]:
+            p.append(f"the dry run prints toolchain builds of {builds}")
+        fetches = [l.strip() for l in dry.splitlines() if re.match(r"  (fetch|export|extract|checkout) ", l)]
+        if [l.split()[0] for l in fetches] != ["fetch", "extract"] or not all("bison" in l.lower() for l in fetches):
+            p.append(f"the dry run fetches {fetches}, not bison's tarball alone")
+        if "https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz" not in dry:
+            p.append("the dry run does not name the tarball's URL")
+        if tc_builds(sb) or mutating(sb.jlines()):
+            p.append(f"the dry run ran {mutating(sb.jlines())[:3]}")
+        sb.clear()
+        rc, out = sb.run("deps", "-y")
+        got = [t for t, _ in tc_builds(sb)]
+        if rc != 0 or got != ["bison"]:
+            p.append(f"deps: exit {rc}, built {got}: {out[-300:]}")
+        tc = sb.work / "tools/toolchain/.nm-toolchain"
+        moved = [t for t, s in stamps.items() if (tc / t).read_text() != s + "\n"]
+        if moved:
+            p.append(f"the stamps of {moved} changed")
+        sha = pin_value((sb.co / "build/pins.sh").read_text(), "NM_PIN_TCBISON_SHA256")
+        b = (tc / "bison").read_text() if (tc / "bison").exists() else ""
+        if b != f"{sha} bison recipe 1 Darwin-x86_64 macos15.0\n":
+            p.append(f"bison's stamp is {b!r}")
+        link = sb.work / "tools/bin/bison"
+        if not link.exists() or str(sb.work / "tools/toolchain/bin/bison") not in link.read_text():
+            p.append("tools/bin/bison does not start the toolchain's bison")
+        return p, dry
+    p, dry = run()
+    check("a toolchain with the ten tools' stamps as a deps before bison wrote them: the plan is bison alone, the dry run "
+          "prints bison's fetch, extraction and build only, deps builds bison alone and the ten stamps stay as they were",
+          not p, (p, dry[-1500:]))
+    if not p:
+        shown = [l for l in dry.splitlines() if re.match(r"(deps builds from|toolchain sources:|  (fetch|extract) |    (curl|tar|env) )", l)]
+        print("note: --dry-run deps there:\n" + "\n".join("  | " + l for l in shown))
+    negative("a toolchain whose LLVM recipe was raised with bison's addition (LLVM is built again)", run(tag="-llvm", raise_llvm=True)[0])
+    negative("a deps that never plans bison",
+             run(('  { [ -n "$T_BISON" ] && ! { tc_mine "$T_BISON" && ! tc_current bison; }; } || want="$want bison"\n', ''), tag="-noplan")[0])
+    negative("a stamp of bison that does not name its tarball's SHA-256 (a new tarball would not build it again)",
+             run(('[ -n "$v" ] || v=$(pin "${id}_SHA256"); ', ''), tag="-nosha")[0])
+
+
+def arm_source_bison_fetch():
+    """Bison's tarball: NM_TC_BISON_URL is a folder that holds it; one whose bytes are not the pinned SHA-256 is refused
+    before anything is kept or extracted; offline, a tarball not fetched yet leaves bison out and says so"""
+    sb = source_sandbox("srcbisonfetch")
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    before_bison(sb)
+    mirror = sb.dir / "mirror"
+    mirror.mkdir()
+    env = {"NM_TC_BISON_URL": f"file://{mirror}"}
+    p = []
+    sb.clear()
+    rc, out = sb.run("deps", "--offline", "-y")
+    if tc_builds(sb) or "offline: the sources of bison are not fetched yet" not in out:
+        p.append(f"offline: built {[t for t, _ in tc_builds(sb)]}: {out[-300:]}")
+    (mirror / "bison-3.8.2.tar.gz").write_bytes(b"not the release\n")
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra=env)
+    if (rc == 0 or f"file://{mirror}/bison-3.8.2.tar.gz has SHA-256" not in out or tc_builds(sb)
+            or (sb.work / "src/git/tc-bison/bison-3.8.2.tar.gz").exists() or (sb.work / "src/toolchain/bison").exists()):
+        p.append(f"a tarball of other bytes: exit {rc}, built {[t for t, _ in tc_builds(sb)]}: {out[-300:]}")
+    shutil.copy(REMOTES / "www/ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz", mirror / "bison-3.8.2.tar.gz")
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra=env)
+    got = [t for t, _ in tc_builds(sb)]
+    if rc != 0 or got != ["bison"] or f"from file://{mirror}/bison-3.8.2.tar.gz" not in out \
+            or not (sb.work / "src/toolchain/bison/configure").is_file():
+        p.append(f"the mirror with the release: exit {rc}, built {got}: {out[-300:]}")
+    check("Bison's tarball: offline and not fetched, bison is left out and named; a NM_TC_BISON_URL whose tarball is not "
+          "the pinned one is refused before it is kept or extracted; the release from that folder is extracted and built",
+          not p, p)
+    sb.clear()
+    rc, out = sb.run("deps", "-y", extra=env)
+    check("a second deps with the tarball there fetches and extracts nothing, builds nothing",
+          rc == 0 and not tc_builds(sb) and "  extract " not in out and "  fetch    GNU Bison" not in out, out[-600:])
+
+def arm_brew_bison():
+    """Apple silicon with Homebrew: a missing bison is the formula bison, keg-only, which deps installs and links into
+    tools/bin by a small script of its own (a relocatable bison finds its data next to the path it was started by);
+    zink's check takes it"""
+    sb = Sandbox("brewbison", cpu="arm64", arch="arm64", formulas=("cmake",))
+    sb.clear()
+    rc, out = sb.run("deps", "-y")
+    inst = [l.split()[2] for l in sb.jlines() if l.startswith("brew install ")]
+    p = [] if rc == 0 else [f"exit {rc}: {out[-400:]}"]
+    if "bison" not in inst:
+        p.append(f"deps installed {inst}, not bison")
+    w = sb.work / "tools/bin/bison"
+    kegged = str(sb.dir / "brew/opt/bison/bin/bison")
+    if not w.exists() or w.is_symlink() or kegged not in w.read_text():
+        p.append(f"tools/bin/bison is not a script that runs {kegged}: {w.read_text() if w.exists() else 'missing'}")
+    else:
+        r = subprocess.run([str(w), "--version"], capture_output=True, text=True, env=sb.env())
+        if "GNU Bison) 3.8.2" not in r.stdout:
+            p.append(f"tools/bin/bison --version says {r.stdout!r}")
+    rc, doc = sb.run("doctor")
+    if f"bison 3.8.2 ({kegged}) for zink" not in doc:
+        p.append("doctor does not name Homebrew's bison for zink")
+    sb.clear()
+    rc, again = sb.run("deps", "-y")
+    if [l for l in sb.jlines() if l.startswith("brew install ")]:
+        p.append("a second deps installs again")
+    check("Apple silicon with Homebrew: deps installs the keg-only bison, tools/bin/bison runs it by its own path, "
+          "doctor names it for zink, a second deps installs nothing", not p, p)
+    neg = Sandbox("brewbison-neg", cpu="arm64", arch="arm64", formulas=("cmake",))
+    neg.break_script('  [ -n "$T_BISON" ] || want+=( bison )\n', '')
+    neg.clear()
+    neg.run("deps", "-y")
+    negative("a Homebrew deps that never asks for bison",
+             [] if [l for l in neg.jlines() if l.startswith("brew install bison")] else ["no bison installed"])
+
+
+def arm_zink_bison():
+    """zink's step needs Bison 3.0 or later on its PATH: macOS's 2.3 stops the build before any step, with a line that
+    names ./build.sh deps; a 3.x passes that check"""
+    sb = Sandbox("zinkbison")
+    d = sb.dir / "usrbin"
+    sb.wrap(d / "bison", "ver", "bison (GNU Bison) 2.3")
+    sb.break_script(STEP_PATH_LINE, STEP_PATH_LINE.replace("/usr/bin:", f"{d}:/usr/bin:"))
+    def stop(text):
+        sb.clear()
+        rc, out = sb.run("--no-install", "build", "zink")
+        m = re.search(r"zink needs:([^\n]*)", out)
+        return rc, out, (m.group(1) if m else "")
+    rc, out, miss = stop(None)
+    p = []
+    if rc == 0 or "bison-3.0-or-later(macOS's-is-2.3)" not in miss or "./build.sh deps installs them" not in out:
+        p.append(f"exit {rc}, missing list {miss!r}: {out[-300:]}")
+    if sb.step_keys():
+        p.append(f"steps ran: {sb.step_keys()}")
+    check("zink with macOS's Bison 2.3 first on the step's PATH: the build stops before any step, naming bison 3.0 "
+          "and ./build.sh deps", not p, p)
+    sb.wrap(d / "bison", "ver", "bison (GNU Bison) 3.8.2")
+    rc, out, miss = stop(None)
+    check("zink with a Bison 3.8.2 first on the step's PATH: bison is not in what zink needs",
+          "bison" not in miss, (rc, miss, out[-300:]))
+    sb.wrap(d / "bison", "ver", "bison (GNU Bison) 2.3")
+    sb.break_script('  case " $C_TOOLS " in *" bison "*)\n', '  case " $C_TOOLS " in *" nobison "*)\n')
+    rc, out, miss = stop(None)
+    negative("a zink check that does not look at bison", [] if "bison" not in miss else ["bison named"])
 
 
 def arm_source_ownpy():
@@ -2007,7 +2220,7 @@ def arm_source_modes():
     got = [t for t, _ in tc_builds(sb)]
     check("--offline with the sources fetched: builds the tools, fetches nothing (pkgconf waits for the Python environment, "
           "which cannot be filled offline)",
-          got == ["ninja", "cmake", "openssl", "zstd", "xz", "python", "spirv-tools", "glslang", "llvm"]
+          got == ["ninja", "cmake", "openssl", "zstd", "xz", "python", "spirv-tools", "glslang", "llvm", "bison"]
           and "pkgconf is built with meson" in out and not [l for l in sb.jlines() if l.startswith("git fetch")], (got, out[-600:]))
     wd = str(sb.home / "my build")
     sb.clear()
@@ -4539,6 +4752,8 @@ def pin_expectations(pins):
         ("NM_PIN_RUST_VERSION", "build/build_xlate_release.sh", "RV=${NULLMOTH_RUST_VERSION:-%s}" % p["NM_PIN_RUST_VERSION"]),
         ("NM_PIN_TOOL_LLVM_MAJOR", "build/build_nvk.sh", "(LLVM %s.1.x)" % p["NM_PIN_TOOL_LLVM_MAJOR"]),
         ("NM_PIN_BASE_RELEASE", "build/package_local.sh", "\nBASE_RELEASE=%s " % p["NM_PIN_BASE_RELEASE"]),
+        # the Bison Mesa's grammars need: build_zink.sh stops below it
+        ("NM_PIN_TOOL_BISON_MIN", "build/build_zink.sh", "\nBISON_MIN=%s\n" % p["NM_PIN_TOOL_BISON_MIN"]),
     ] + [
         # the version build/toolchain.sh compares each tool's --version with: the pinned tag without its prefix
         (f"NM_PIN_TC{pid}_REF", "build/toolchain.sh", f"    {tool}) echo {tc_tag_version(p[f'NM_PIN_TC{pid}_REF'])} ;;")
@@ -4570,7 +4785,19 @@ def pin_problems(pins, read):
         url = pins[f"NM_PIN_{key}_URL"]
         if not url.startswith(f"https://raw.githubusercontent.com/WebKit/WebKit/{pins['NM_PIN_WEBKIT_COMMIT']}/"):
             p.append(f"NM_PIN_{key}_URL does not name the pinned WebKit commit")
-    for pid in pins["NM_PIN_SOURCES"].split():
+    # Bison's tarball (bison-3.8.2.tar.gz): the version build/toolchain.sh compares bison --version with is the one in
+    # its name, and it is at least the minimum build_zink.sh asks for
+    m = re.fullmatch(r"https://[^ ]+/bison-([0-9.]+)\.tar\.gz", pins.get("NM_PIN_TCBISON_URL", ""))
+    tc = read("build/toolchain.sh")
+    if not m:
+        p.append(f"NM_PIN_TCBISON_URL={pins.get('NM_PIN_TCBISON_URL')} is not an https URL of a bison-<version>.tar.gz")
+    elif f"    bison) echo {m.group(1)} ;;" not in tc:
+        p.append(f"build/toolchain.sh does not compare bison --version with {m.group(1)}, the version of NM_PIN_TCBISON_URL")
+    elif not re.fullmatch(r"\d+\.\d+", pins["NM_PIN_TOOL_BISON_MIN"]):
+        p.append(f"NM_PIN_TOOL_BISON_MIN={pins['NM_PIN_TOOL_BISON_MIN']} is not a version such as 3.0")
+    elif tuple(map(int, m.group(1).split(".")[:2])) < tuple(map(int, pins["NM_PIN_TOOL_BISON_MIN"].split("."))):
+        p.append(f"the toolchain's Bison {m.group(1)} is older than NM_PIN_TOOL_BISON_MIN={pins['NM_PIN_TOOL_BISON_MIN']}")
+    for pid in pins["NM_PIN_SOURCES"].split() + pins["NM_PIN_TOOLCHAIN_SOURCES"].split():
         for part in ("NAME", "URL", "MIRROR"):
             if f"NM_PIN_{pid}_{part}" not in pins:
                 p.append(f"source {pid} has no {part}")
@@ -4610,6 +4837,12 @@ def arm_pins():
     bad["build/build_xlate_release.sh"] = read("build/build_xlate_release.sh").replace(
         "RV=${NULLMOTH_RUST_VERSION:-%s}" % pins["NM_PIN_RUST_VERSION"], "RV=${NULLMOTH_RUST_VERSION:-1.99.0}")
     negative("a consuming script that moved to another Rust", pin_problems(pins, lambda r: bad.get(r) or read(r)))
+    negative("a Bison tarball of another version than build/toolchain.sh's",
+             pin_problems(dict(pins, NM_PIN_TCBISON_URL=pins["NM_PIN_TCBISON_URL"].replace("3.8.2", "3.8.3")), read))
+    negative("a Bison tarball older than the minimum build_zink.sh asks for",
+             pin_problems(dict(pins, NM_PIN_TOOL_BISON_MIN="3.9"), lambda r: read(r).replace("BISON_MIN=3.0", "BISON_MIN=3.9")))
+    negative("a toolchain source without a SHA-256 or commit",
+             pin_problems({k: v for k, v in pins.items() if k != "NM_PIN_TCBISON_SHA256"}, read))
     if "NM_PIN_CI_BASEPKG_URL" in pins:
         moved = dict(pins, NM_PIN_CI_BASEPKG_URL=pins["NM_PIN_CI_BASEPKG_URL"].replace("2.9", "2.8"))
         negative("a full build's base package of another release than the pinned one", pin_problems(moved, read))
@@ -4938,6 +5171,11 @@ def main():
                     timed("source_fail", arm_source_fail)
                     timed("source_modes", arm_source_modes)
                     timed("source_ownpy", arm_source_ownpy)
+                    timed("source_bison", arm_source_bison)
+                    timed("source_bison_fetch", arm_source_bison_fetch)
+                if want("bison"):
+                    timed("brew_bison", arm_brew_bison)
+                    timed("zink_bison", arm_zink_bison)
                 if want("sdkroot"):
                     timed("sdkdeps", arm_sdkdeps)
                     timed("depsenv", arm_depsenv)

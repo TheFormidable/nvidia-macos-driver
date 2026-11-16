@@ -202,11 +202,17 @@ NM_PIN_TOOL_LLVM_MAJOR=22
 NM_PIN_TOOL_SPIRV_TOOLS_MIN=2024.1
 # glslangValidator 12.2: Mesa meson.build:734-758 when BVH shaders are built, which nvk-macos.patch turns on for NVK.
 NM_PIN_TOOL_GLSLANG_MIN=12.2
+# GNU Bison 3.0: native OpenGL's Mesa 26.3.0 (build/build_zink.sh, its BISON_MIN) has "%define api.pure" and
+# "%define parse.error verbose" in its GLSL grammars (src/compiler/glsl/glcpp/glcpp-parse.y:179-180,
+# src/compiler/glsl/glsl_parser.yy:86-87), which Bison 2.3, macOS's /usr/bin/bison, refuses with "syntax error,
+# unexpected identifier, expecting string" at the first; parse.error is a variable of Bison 3.0 and later (2.x had
+# %error-verbose). flex is macOS's (/usr/bin/flex).
+NM_PIN_TOOL_BISON_MIN=3.0
 # rustc: Mesa meson.build:950 (1.85); the pinned toolchain above is newer.
 NM_PIN_TOOL_RUSTC_MIN=1.85
 # Homebrew formulas build.sh installs when the tool is missing (only missing ones; never an upgrade). llvm@22 is "llvm"
 # while Homebrew's current LLVM is 22, and so is spirv-llvm-translator; otherwise the translator is built (above).
-NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 python@3.14"
+NM_PIN_BREW_FORMULAS="gpatch ninja cmake pkgconf glslang spirv-tools llvm@22 python@3.14 bison"
 
 # ---- The working-directory toolchain (build/toolchain.sh)
 # On a Mac where Homebrew has no ready-made builds (homebrew-core, read on 2026-11-13, had Intel bottles for none of the
