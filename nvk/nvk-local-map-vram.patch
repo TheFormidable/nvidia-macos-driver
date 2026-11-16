@@ -17,14 +17,22 @@ trip to the card; the plugin's pool is also 21 MB per process, which would come 
 WindowServer, the one process the stall was seen in, keeps system RAM as before. The stall has the shape of the lost
 doorbell that the read of GPPut through BAR1 before the doorbell fixed later (nvkmd_nvrm_ctx.c); that the two are the
 same was not shown on a card.
-With USERD in system RAM that read of GPPut no longer goes through BAR1, so it no longer holds the doorbell back
-until the shader code and table entries written through BAR1 ahead of it have landed, as it did in the one placement
-that ran on a card (NVK_LOCAL_MAP_SYSMEM=0, where USERD is behind BAR1 too). Under the default each device therefore
-keeps one page that the default places behind BAR1 mapped (nvkmd_nvrm_dev_bar_order_init) and reads a word of it
-before every doorbell, after the read of GPPut: a submission, the flush that waits, and the doorbell a rebuilt or
-stalled channel is rung with. Whether the GPU could fetch such data before the write landed was never seen on a card;
-the read keeps the order the tested placement had, for one read through BAR1 per doorbell. Without the page (another
-mode, or no room for it behind BAR1) there is no read.
+With USERD in system RAM a new GPPut is visible to the GPU at once, and the read of GPPut before the doorbell no
+longer goes through BAR1, so nothing holds the work back until the shader code and table entries written through BAR1
+just before it have landed. In the one placement that ran on a card (NVK_LOCAL_MAP_SYSMEM=0) GPPut itself was written
+through BAR1 behind them. Under the default each device therefore keeps one page that the default places behind BAR1
+mapped (nvkmd_nvrm_dev_bar_order_init; 64 KiB of video memory and of BAR1 with big pages) and, before it writes GPPut,
+drains the thread's write-combining buffers and reads a word of that page: in a submission, in the flush that waits,
+and where a stalled or rebuilt channel is rung. A read through BAR1 cannot complete before the writes sent through
+BAR1 ahead of it have landed, and the store of GPPut cannot become visible before the read has completed. NVIDIA's own
+driver does this where GPPut is in system RAM (a dummy BAR1 mapping read before the GPPut write: nv_gpu_ops.c
+deviceNeedsDummyAlloc, uvm_hal_turing_host_write_gpu_put). The read orders what has left its core, so the writers
+drain their own write-combining buffers: a shader upload at the end of nvk_mem_arena_copy_to_gpu, memory the default
+placed in nvkmd_mem_sync_to_gpu (indirect execution sets, the zero page), the tables by the unlock of their mutex.
+Whether this GPU would fetch such data too early was never seen on a card; the cost is one read through BAR1 per
+doorbell. Without the page (another mode, or no room for it behind BAR1) there is no read. An application's own
+host-visible device-local memory is behind BAR1 in every mode, as in release 3.0, and gets this read only under the
+default.
 NVK_LOCAL_MAP_SYSMEM=1 is the way back: system RAM in every process, as in release 3.0. NVK_LOCAL_MAP_SYSMEM=0 means
 what it meant: video memory in every process, WindowServer, shared memory and what the CPU reads back included.
 NVK_BAR_VRAM=0, which keeps an application's own host-visible device-local memory out of BAR1, also keeps the new
@@ -42,7 +50,9 @@ diff --git a/src/nouveau/vulkan/nvk_descriptor_set.c b/src/nouveau/vulkan/nvk_de
 index 08808b7..16a5161 100644
 --- a/src/nouveau/vulkan/nvk_descriptor_set.c
 +++ b/src/nouveau/vulkan/nvk_descriptor_set.c
-@@ -747,26 +747,28 @@ nvk_CreateDescriptorPool(VkDevice _device,
+@@ -745,30 +745,32 @@ nvk_CreateDescriptorPool(VkDevice _device,
+     * conservative here.)  Allocate enough extra space that we can chop it
+     * into maxSets pieces and align each one of them to 32B.
      */
     mem_size += min_set_align_B(pdev) * pCreateInfo->maxSets;
  
@@ -72,11 +82,15 @@ index 08808b7..16a5161 100644
           assert(pool->mem->size_B >= mem_size);
           mem_size = pool->mem->size_B;
        }
+ 
+       util_vma_heap_init(&pool->heap, HEAP_START, mem_size);
 diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
 index bd81885..005b4b7 100644
 --- a/src/nouveau/vulkan/nvk_device.c
 +++ b/src/nouveau/vulkan/nvk_device.c
-@@ -355,25 +355,26 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -353,29 +353,30 @@ nvk_CreateDevice(VkPhysicalDevice physicalDevice,
+        * Also, the I-cache pre-fetches and NVIDIA has informed us
+        * overallocating shaders BOs by 2K is sufficient.
         */
        enum nvkmd_mem_map_flags shader_map_flags = 0;
        if (pdev->info.bar_size_B >= pdev->info.vram_size_B)
@@ -104,11 +118,41 @@ index bd81885..005b4b7 100644
           if (result != VK_SUCCESS)
              goto fail_event_heap;
        }
+ 
+       nvk_slm_area_init(&dev->slm);
+diff --git a/src/nouveau/vulkan/nvk_mem_arena.c b/src/nouveau/vulkan/nvk_mem_arena.c
+index 58706dc..33983e0 100644
+--- a/src/nouveau/vulkan/nvk_mem_arena.c
++++ b/src/nouveau/vulkan/nvk_mem_arena.c
+@@ -197,16 +197,21 @@ nvk_mem_arena_copy_to_gpu(struct nvk_mem_arena *arena,
+       assert(dst_addr >= mem->addr);
+       const uint64_t mem_offset_B = dst_addr - mem->addr;
+       assert(mem_offset_B < mem_size_B);
+ 
+       /* We can't copy past the end of the mem */
+       const size_t copy_size_B = MIN2(size_B, mem_size_B - mem_offset_B);
+ 
+       memcpy(mem->mem->map + mem_offset_B, src, copy_size_B);
+ 
+       dst_addr += copy_size_B;
+       src += copy_size_B;
+       size_B -= copy_size_B;
+    }
+ 
++   /* 3.0.1 (NVRM): the shader heap can be behind BAR1, whose map is write-combined, and nothing after this copy is
++    * sure to drain the last bytes out of this core's write-combining buffers before another thread submits work that
++    * uses them: that thread's fence and its read through BAR1 order only what has left its core. */
++   __atomic_thread_fence(__ATOMIC_SEQ_CST);
++
+    nvk_mem_arena_set_map_dirty(arena);
+ }
 diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.c b/src/nouveau/vulkan/nvkmd/nvkmd.c
-index ca5cfe1..2110b63 100644
+index ca5cfe1..947074d 100644
 --- a/src/nouveau/vulkan/nvkmd/nvkmd.c
 +++ b/src/nouveau/vulkan/nvkmd/nvkmd.c
-@@ -133,24 +133,36 @@ nvkmd_dev_alloc_mapped_mem(struct nvkmd_dev *dev,
+@@ -131,28 +131,40 @@ nvkmd_dev_alloc_mapped_mem(struct nvkmd_dev *dev,
+                            enum nvkmd_mem_flags flags,
+                            enum nvkmd_mem_map_flags map_flags,
                             struct nvkmd_mem **mem_out)
  {
     struct nvkmd_mem *mem;
@@ -145,11 +189,53 @@ index ca5cfe1..2110b63 100644
  
  VkResult MUST_CHECK
  nvkmd_dev_import_dma_buf(struct nvkmd_dev *dev,
+                          struct vk_object_base *log_obj,
+                          int fd, struct nvkmd_mem **mem_out)
+@@ -461,30 +473,36 @@ nvkmd_mem_unmap(struct nvkmd_mem *mem, enum nvkmd_mem_map_flags flags)
+       assert(mem->map != NULL);
+       simple_mtx_lock(&mem->map_mutex);
+       if (--mem->map_cnt == 0) {
+          mem->ops->unmap(mem, flags, mem->map);
+          mem->map = NULL;
+       }
+       simple_mtx_unlock(&mem->map_mutex);
+    }
+ }
+ 
+ void
+ nvkmd_mem_sync_to_gpu(struct nvkmd_mem *mem, bool client_map,
+                       uint64_t offset_B, uint64_t range_B)
+ {
+-   if (mem->flags & NVKMD_MEM_COHERENT)
++   if (mem->flags & NVKMD_MEM_COHERENT) {
++      /* 3.0.1 (NVRM): memory the default placed behind BAR1 is written through a write-combined map. The caller has
++       * just written it: drain this core's write-combining buffers, so that the bytes are on their way before another
++       * thread submits work that uses them (nvkmd_nvrm_dev_bar_order orders only what has left its core). */
++      if (mem->flags & NVKMD_MEM_DEFAULT_BAR)
++         __atomic_thread_fence(__ATOMIC_SEQ_CST);
+       return;
++   }
+ 
+    const uint32_t atom_size_B = mem->dev->pdev->dev_info.nc_atom_size_B;
+    assert(util_is_aligned(offset_B, atom_size_B));
+    assert(util_is_aligned(range_B, atom_size_B));
+ 
+    if (util_has_cache_ops()) {
+       void *map = client_map ? mem->client_map : mem->map;
+       util_flush_range(map + offset_B, range_B);
+    } else {
+       mem->ops->sync_to_gpu(mem, offset_B, range_B);
+    }
+ }
+ 
+ void
 diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
 index 701554f..9aec132 100644
 --- a/src/nouveau/vulkan/nvkmd/nvkmd.h
 +++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
-@@ -53,24 +53,35 @@ enum nvkmd_mem_flags {
+@@ -51,28 +51,39 @@ enum nvkmd_mem_flags {
+    NVKMD_MEM_CAN_MAP    = 1 << 3,
+ 
     /** This memory object may be shared with other processes */
     NVKMD_MEM_SHARED     = 1 << 4,
  
@@ -185,11 +271,15 @@ index 701554f..9aec132 100644
      *
      * This sets nvkmd_mem::client_map instead of nvkmd_mem::map.  These
      * mappings may be different from internal mappings and have different
+     * rules.  Only one client mapping may exist at a time but internal
+     * mappings are reference counted.  Only client mappings can be used with
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-index 559aecb..bf69a9b 100644
+index 559aecb..62fcb35 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
-@@ -84,28 +84,45 @@ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
+@@ -82,32 +82,56 @@ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
+                                        enum nvk_debug debug_flags,
+                                        struct nvkmd_pdev **pdev_out);
  
  struct nvkmd_nvrm_dev {
     struct nvkmd_dev base;
@@ -202,9 +292,9 @@ index 559aecb..bf69a9b 100644
      * multiplied RM's per-interrupt list walk. Waits sleep on osEvent (kext selector 6). -1 / 0 = none. */
     int osEvent;
     NvHandle hEvent;
-+   /* 3.0.1: one page of video memory mapped through BAR1, read before every doorbell of this device while the
-+    * local-map default is on (nvkmd_nvrm_dev_bar_order_init in nvkmd_nvrm_mem.c says why). barOrder is NULL when there
-+    * is none; both are written once, before the device has a channel. */
++   /* 3.0.1: one page of video memory mapped through BAR1, read before GPPut is written for every doorbell of this
++    * device while the local-map default is on (nvkmd_nvrm_dev_bar_order_init in nvkmd_nvrm_mem.c says why). barOrder
++    * is NULL when there is none; both are written once, before the device has a channel. */
 +   struct nvkmd_mem *barOrderMem;
 +   const volatile NvU32 *barOrder;
  };
@@ -213,14 +303,21 @@ index 559aecb..bf69a9b 100644
  
 +void nvkmd_nvrm_dev_bar_order_init(struct nvkmd_nvrm_dev *dev, struct vk_object_base *log_obj);
 +
-+/* Before a doorbell, after the write-combining buffers were drained: a read through BAR1 cannot complete before the
-+ * writes sent through BAR1 ahead of it have landed in the video memory. dev may be NULL (a channel without one). */
++/* Called before GPPut is written. The GPU can act on a new GPPut as soon as it can read it, doorbell or not, and under
++ * the default GPPut is in system RAM, visible at once. So first this thread's write-combining buffers are drained, then
++ * a word is read through BAR1: the read cannot complete before the writes sent through BAR1 ahead of it have landed in
++ * the video memory, and the store of GPPut that follows cannot become visible before the read has completed. NVIDIA's
++ * own driver does the same where GPPut is in system RAM (uvm_hal_turing_host_write_gpu_put reads a dummy BAR1 mapping
++ * before it writes GPPut). It orders what has left its core: a writer on another thread drains its own buffers
++ * (nvk_mem_arena_copy_to_gpu, nvkmd_mem_sync_to_gpu, or the unlock of the table's mutex). dev may be NULL. */
 +static inline void
 +nvkmd_nvrm_dev_bar_order(struct nvkmd_dev *dev)
 +{
 +   const volatile NvU32 *p = dev != NULL ? nvkmd_nvrm_dev(dev)->barOrder : NULL;
-+   if (p != NULL)
++   if (p != NULL) {
++      __atomic_thread_fence(__ATOMIC_SEQ_CST);
 +      (void)*p;
++   }
 +}
 +
  VkResult nvkmd_nvrm_create_dev(struct nvkmd_pdev *pdev,
@@ -235,11 +332,15 @@ index 559aecb..bf69a9b 100644
                       void *arg);
  
  
+ struct nvkmd_nvrm_mem {
+    struct nvkmd_mem base;
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-index 3d7c609..2bd48f3 100644
+index 3d7c609..bdbe163 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
-@@ -1338,25 +1338,27 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+@@ -1336,29 +1336,31 @@ nvkmd_nvrm_create_exec_ctx_on(struct nvkmd_dev *_dev,
+    nvkmd_nvrm_dev_api_ctl(pdev, &rm);
+ 
     struct nvkmd_nvrm_exec_ctx *ctx = CALLOC_STRUCT(nvkmd_nvrm_exec_ctx);
     if (ctx == NULL)
        return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -268,10 +369,27 @@ index 3d7c609..2bd48f3 100644
  			DRF_DEF(OS03, _FLAGS, _HASH_TABLE, _DISABLE),
  
  		.hMemory = nvkmd_nvrm_mem(ctx->notifier)->hMemoryPhys,
-@@ -1739,24 +1741,27 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+ 		.offset = 0,
+ 		.limit = ctx->notifier->size_B - 1,
+@@ -1728,28 +1730,32 @@ nvrm_gsub_submit(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base *log_obj
+    write_l2_sysmem_tail(&ctx->push);
+    write_semaphore_release(&ctx->push, ctx->sem->va->addr, ctx->wSeq, true);
+    const struct nvkmd_ctx_exec seg = {
+       .addr = ctx->cmdBuf->va->addr + 4 * (uint64_t)(ctx->segStart - (uint32_t *)ctx->cmdBuf->map),
+       .size_B = 4 * (uint32_t)(ctx->push.end - ctx->segStart),
+    };
+    /* test hook: one entry at an unmapped VA ahead of the flush (a real MMU fault); the reserve above promised room
+     * for one entry only, so the extra one is written only when a second fits */
+    if (inject == NVRM_REC_INJ_MMU && (ctx->gpPut + 2) % 0x8000 != ctx->gpGet) {
+       const struct nvkmd_ctx_exec bad = { .addr = 0x1000, .size_B = 4 };
+       write_gp_fifo_entry(ctx, &bad);
     }
     write_gp_fifo_entry(ctx, &seg);
     if (inject != NVRM_REC_INJ_STALL) {   /* test hook: a doorbell that never rang */
++   // 3.0.1: with the local-map default USERD is in system RAM, so the read of GPPut below orders nothing behind BAR1,
++   // where the default keeps shader code and the image and sampler tables. The device's order page is read first, so
++   // that those writes have landed before the GPU can see the new GPPut (nvkmd_nvrm_dev_bar_order).
++   nvkmd_nvrm_dev_bar_order(ctx->base.dev);
     userD->GPPut = ctx->gpPut;
     // batch 56: USERD and host-visible VRAM are write-combined; drain the fill buffers before the doorbell
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -281,23 +399,30 @@ index 3d7c609..2bd48f3 100644
     // channel one semaphore short, CPU readback correct, ringing again recovered it). A read through BAR1 cannot
     // complete before the earlier writes on that path have landed.
     (void)*(volatile NvU32 *)&userD->GPPut;
-+   // 3.0.1: with the local-map default USERD is in system RAM and that read orders nothing behind BAR1, where the
-+   // default keeps shader code and the image and sampler tables. The device's order page stands in for it.
-+   nvkmd_nvrm_dev_bar_order(ctx->base.dev);
     volatile NvU32 *doorbell = (void*)((NvU8*)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
     *doorbell = submitTokenNotifier->info32;
     }
  
     const unsigned cur = ctx->curSlot, next = (cur + 1) % NVRM_CMD_SLOTS;
-    ctx->slotSeq[cur] = ctx->wSeq;
-    ctx->slotBeg[cur] = ctx->subPut;   /* this flush's entries: [the last doorbell's GPPut, this one's) */
-    ctx->slotPut[cur] = ctx->gpPut;
-    ctx->subPut = ctx->gpPut;
-    pthread_mutex_lock(&nvkmd_nvrm_gsub_mtx);
-    struct nvkmd_nvrm_slot *slot = &nvkmd_nvrm_slots[ctx->slot1 - 1];
-    if (nvrm_rec_enabled() && slot->sem != NULL && __atomic_load_n(slot->sem, __ATOMIC_ACQUIRE) >= slot->flushed) {
-@@ -1988,24 +1993,27 @@ nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
+@@ -1975,28 +1981,32 @@ nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
+    ctx->wSeq++;
+    /* surface fence: what this channel owes, published before the GPU can see the work (the doorbell below) */
+    __atomic_store_n(&semAdr[NVRM_FENCE_SEM_FLUSHED_OFF / 8], ctx->wSeq, __ATOMIC_RELEASE);
  
+    write_l2_sysmem_tail(&ctx->push);
+    write_semaphore_release(&ctx->push, semAdrGpu, ctx->wSeq, true);
+ 
+    struct nvkmd_ctx_exec semExec = {
+    	.addr = ctx->cmdBuf->va->addr,
+    	.size_B = 4*nv_push_dw_count(&ctx->push),
+    };
+ 
+    write_gp_fifo_entry(ctx, &semExec);
+ 
++   // 3.0.1: with the local-map default USERD is in system RAM, so the read of GPPut below orders nothing behind BAR1,
++   // where the default keeps shader code and the image and sampler tables. The device's order page is read first, so
++   // that those writes have landed before the GPU can see the new GPPut (nvkmd_nvrm_dev_bar_order).
++   nvkmd_nvrm_dev_bar_order(ctx->base.dev);
     userD->GPPut = ctx->gpPut;
  
     // batch 56 (patch_nvk_wc.py): USERD and host-visible VRAM are write-combined, and a WC store can still sit in a
@@ -309,26 +434,16 @@ index 3d7c609..2bd48f3 100644
     // channel one semaphore short, CPU readback correct, ringing again recovered it). A read through BAR1 cannot
     // complete before the earlier writes on that path have landed.
     (void)*(volatile NvU32 *)&userD->GPPut;
-+   // 3.0.1: with the local-map default USERD is in system RAM and that read orders nothing behind BAR1, where the
-+   // default keeps shader code and the image and sampler tables. The device's order page stands in for it.
-+   nvkmd_nvrm_dev_bar_order(ctx->base.dev);
     volatile NvU32 *doorbell = (void*)((NvU8*)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
     *doorbell = submitTokenNotifier->info32;
  
-    // bounded wait: unbounded before. On macOS osEvent is a dup of /dev/null (always readable), so
-    // poll returned at once and a hung channel spun a core forever with no diagnostic. NVRM_FLUSH_TIMEOUT_MS (default 5000).
-    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
-    const long timeoutMs = nvkmd_nvrm_flush_timeout_ms();   /* read once, not on every flush */
-    // The error notifier is where RM reports a real channel exception. Sample it BEFORE the wait so a
-    // notifier still carrying an older exception cannot kill the first healthy flush after it.
-    NvNotification *errN = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
-    unsigned baseStatus = (unsigned)errN->status;
-    for (;;) {
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
 index ded2acc..abed7ac 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
-@@ -65,35 +65,42 @@ nvkmd_nvrm_create_dev(struct nvkmd_pdev *_pdev,
+@@ -63,39 +63,46 @@ nvkmd_nvrm_create_dev(struct nvkmd_pdev *_pdev,
+                            NV01_EVENT_WITHOUT_EVENT_DATA | NV01_EVENT_SUBDEVICE_SPECIFIC |
+                            DRF_NUM(0005, _NOTIFY_INDEX, _SUBDEVICE, 0),
              .data = (NvP64)(uintptr_t)dev->osEvent,
           };
           if (nvRmApiAllocOsEvent(&rmOsEvent, dev->osEvent) != NV_OK ||
@@ -371,11 +486,14 @@ index ded2acc..abed7ac 100644
     if (dev->osEvent >= 0)
        NVRM_CLOSE(dev->osEvent);
  
+    FREE(dev);
+ }
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
-index fcebcf1..65859ff 100644
+index fcebcf1..07d1f2f 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
-@@ -2,59 +2,140 @@
+@@ -1,62 +1,145 @@
+ /*
   * Copyright © 2024 Collabora Ltd. and Red Hat Inc.
   * SPDX-License-Identifier: MIT
   */
@@ -490,13 +608,15 @@ index fcebcf1..65859ff 100644
 +}
 +
 +/* 3.0.1: the order page. In 3.0 nothing NVK itself wrote went through BAR1 unless NVK_LOCAL_MAP_SYSMEM=0 put all of it
-+ * there, USERD included, and then the read of GPPut before the doorbell (nvkmd_nvrm_ctx.c) was a read through BAR1: it
-+ * could not complete before the shader code and the table entries written ahead of it had landed. Under the default
-+ * USERD keeps system RAM, so that read orders nothing behind BAR1, where the default keeps shader code and the image
-+ * and sampler tables; and a write through BAR1 can still be on its way when the doorbell reaches the host (the lost
-+ * doorbell that read was added for). So one page that the default itself places behind BAR1 stays mapped for the
-+ * device's life and is read before every doorbell (nvkmd_nvrm_dev_bar_order). Whether the GPU could fetch shader code
-+ * or a table entry that early was never seen on a card: the read keeps the order the one tested placement had.
++ * there, USERD included: GPPut was then written through BAR1 behind the shader code and the table entries written
++ * ahead of it, so the GPU could not see a new GPPut before they had landed. Under the default USERD keeps system RAM,
++ * where a new GPPut is visible at once, while shader code and the image and sampler tables are written through BAR1,
++ * and a write through BAR1 can still be on its way (the lost doorbell of nvkmd_nvrm_ctx.c was one). So one page that
++ * the default itself places behind BAR1 (64 KiB of video memory and of BAR1 with big pages) stays mapped for the
++ * device's life and is read before GPPut is written for every doorbell (nvkmd_nvrm_dev_bar_order). It is what NVIDIA's
++ * own driver does where GPPut is in system RAM: a dummy BAR1 mapping read before the GPPut write
++ * (nv_gpu_ops.c deviceNeedsDummyAlloc, uvm_hal_turing_host_write_gpu_put). Whether this GPU would fetch shader code
++ * or a table entry that early was never seen on a card.
 + * Best effort: in another mode, or when the page did not get its place behind BAR1 (no room in the VRAM or in BAR1,
 + * and it came back in system RAM), there is no page and no read, and the device is made all the same. */
 +void
@@ -528,7 +648,11 @@ index fcebcf1..65859ff 100644
     if (in != NULL)
        nvrm_import_staged = *in;
  }
-@@ -165,28 +246,38 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+ 
+ /* item 7 b78: report a completed GPU write into (surface, plane) — see nvkmd.h. */
+@@ -163,32 +246,42 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+    if ((pte_kind != 0 || tile_mode != 0) && nvmtl_cfg_getenv("NVRM_XNU_TRACE")) {
+       fprintf(stderr, "alloc_tiled_mem(%#" PRIx64 ", %#" PRIx64 ", %#" PRIx8 ", %#" PRIx16 ", %#x)\n",
     	   size_B, align_B, pte_kind, tile_mode, flags);
     }
     struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(_dev);
@@ -571,7 +695,11 @@ index fcebcf1..65859ff 100644
     assert(util_is_power_of_two_or_zero64(align_B));
     const uint64_t va_align_B = MAX2(mem_align_B, align_B);
  
-@@ -277,24 +368,34 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+    enum nvkmd_va_flags va_flags = NVKMD_VA_GART;
+ 
+@@ -275,28 +368,38 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+ 			                 "nvk-compress: compressible kind %#x refused in system memory", pte_kind);
+ 		params.attr &= ~(0x3u << 12);   /* NVOS32_ATTR_COMPR 13:12 */
  		params.attr |= DRF_DEF(OS32, _ATTR, _COMPR, _REQUIRED);
  		params.attr &= ~(0x3u << 16);   /* NVOS32_ATTR_FORMAT 17:16 */
  		params.attr |= DRF_DEF(OS32, _ATTR, _FORMAT, _BLOCK_LINEAR);
@@ -606,7 +734,11 @@ index fcebcf1..65859ff 100644
                                   va_flags, pte_kind, nvbig_va_align_B,
                                   mem_out);
  }
-@@ -433,24 +534,34 @@ nvkmd_nvrm_mem_map(struct nvkmd_mem *_mem,
+ 
+ VkResult
+@@ -431,28 +534,38 @@ nvkmd_nvrm_mem_map(struct nvkmd_mem *_mem,
+       return VK_SUCCESS;
+    }
  
     NvRmApiMapping *mapping = CALLOC_STRUCT(NvRmApiMapping);
     if (mapping == NULL)
@@ -641,11 +773,16 @@ index fcebcf1..65859ff 100644
     struct hash_entry *added = _mesa_hash_table_insert(dev->mappings, mapping->address, mapping);
     simple_mtx_unlock(&dev->mappings_mutex);
     if (added == NULL) {
+    	nvRmApiUnmapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mapping);
+       free(mapping);
 diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-index 7373d0c..d730180 100644
+index 7373d0c..b138de3 100644
 --- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
 +++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c
-@@ -329,26 +329,27 @@ rec_views_locked(const struct nvkmd_nvrm_slot *x, int64_t now, struct nvrm_rec_v
+@@ -326,30 +326,31 @@ rec_views_locked(const struct nvkmd_nvrm_slot *x, int64_t now, struct nvrm_rec_v
+       v[i].sem = __atomic_load_n(s->sem, __ATOMIC_ACQUIRE);
+       v[i].flushed = s->flushed;
+       v[i].semVA = s->semVA;
        v[i].acqVA = s->acqVA;
        v[i].acqSeq = s->acqSeq;
     }
@@ -657,11 +794,11 @@ index 7373d0c..d730180 100644
     struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(ctx->base.dev->pdev);
     const NvNotification *tok = &((const NvNotification *)ctx->notifier->map)[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN];
     KeplerBControlGPFifo *userD = ctx->userD->map;
++   nvkmd_nvrm_dev_bar_order(ctx->base.dev);   /* the same steps as a submission (nvrm_gsub_submit) */
     userD->GPPut = gpPut;
 -   __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* the same four steps as a submission (nvrm_gsub_submit) */
-+   __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* the same steps as a submission (nvrm_gsub_submit) */
++   __atomic_thread_fence(__ATOMIC_SEQ_CST);
     (void)*(volatile NvU32 *)&userD->GPPut;
-+   nvkmd_nvrm_dev_bar_order(ctx->base.dev);
     volatile NvU32 *doorbell = (void *)((NvU8 *)pdev->usermodeMap.address + NVC361_NOTIFY_CHANNEL_PENDING);
     *doorbell = tok->info32;
  }
@@ -674,3 +811,4 @@ index 7373d0c..d730180 100644
     (void)log_obj;
     if (!nvrm_rec_enabled() || nvrm_rec_held != 0)
        return;
+    const int64_t now = nvrm_rec_now_ns();

@@ -121,12 +121,15 @@ only.
   has no room for the map, an allocation the default placed is made in system RAM as before instead of failing. Since
   USERD keeps system RAM, the read of GPPut before a doorbell no longer goes through BAR1, where it used to hold the
   doorbell back until everything written through BAR1 ahead of it had landed; that was the order of the one placement
-  that ran on a card (`=0`). Each device therefore keeps one page behind BAR1 and reads a word of it before every
-  doorbell, so shader code and table entries written just before a submission are in the video memory when the GPU is
-  told of the work. That the GPU could otherwise fetch them too early was never seen on a card; the read costs one trip
-  to the card per doorbell. If the RM's standby fails at a sleep, what the default placed is lost with the rest of the
-  video memory, in every process and not only in WindowServer. Not measured on a card; `tools/test_nvk_local_map.py`
-  compiles the rule, the placement and the fallback and holds every case.
+  that ran on a card (`=0`). Each device therefore keeps one page behind BAR1 (64 KiB of video memory with big pages)
+  and reads a word of it before it writes GPPut for a doorbell, so shader code and table entries written just before a
+  submission are in the video memory before the GPU can see the work. NVIDIA's own driver does the same where GPPut is
+  in system RAM. The read orders what has left the processor's write-combining buffers, so a shader upload and a sync of
+  memory the default placed now drain them when they are done. Memory an app maps itself is behind BAR1 in system-RAM
+  mode too, as in 3.0, and gets this read only under the default. That the GPU could otherwise fetch them too early was
+  never seen on a card; the read costs one trip to the card per doorbell. If the RM's standby fails at a sleep, what the
+  default placed is lost with the rest of the video memory, in every process and not only in WindowServer. Not measured
+  on a card; `tools/test_nvk_local_map.py` compiles the rule, the placement and the fallback and holds every case.
 - **NVK's table of CPU mappings has a lock.** On the NVRM back end every CPU map of a Vulkan memory object adds its
   address to one hash table of the device, and every unmap or free removes it, with no lock: two threads mapping or
   freeing two different memories at once could corrupt the heap. Each insert, search and removal now holds a mutex of
