@@ -982,6 +982,32 @@ try:
         arm(f"refused: {what} (exit 3, report.md and DONE written, no check ran)",
             rc == 3 and word in (data.get("refused") or "") and (out / "DONE").exists() and "plugin.pass" not in w.ran(),
             (rc, data.get("refused"), w.ran(), text[-600:]))
+    w = World(TOP, "refuse-kext")
+    w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
+    (w.src / "kexts" / "NVRM").mkdir(parents=True)
+    (w.src / "kexts" / "NVRM" / "nvrm_boost_policy_abi.h").write_text("/* 3.0.1 */\n")
+    out = w.base / "runs" / "r"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    arm("refused: a checkout with 3.0.1's NVRM.kext header on a loaded NVRM.kext without debug.nvrm_boost_policy (the "
+        "kexts of the package before, until the restart)", rc == 3 and "has no debug.nvrm_boost_policy" in (data.get("refused") or "")
+        and "restart after installing" in (data.get("refused") or "") and "plugin.pass" not in w.ran(), (rc, data.get("refused"), text[-600:]))
+    (w.state / "counters" / "debug.nvrm_boost_policy").write_text("0\n")
+    (w.state / "counters" / "debug.nvrmfb_vram_ce_clear").write_text("1\n")
+    (w.gb / "nvmtl" / "nvrm610.conf").write_text("NVK_CURVES=1\n# --- my settings, kept on update ---\nBOOST=0\n")
+    out = w.base / "runs" / "r2"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    report = (out / "report.md").read_text() if (out / "report.md").exists() else ""
+    ks = data.get("facts", {}).get("kexts_start", {})
+    arm("the same checkout on a kext that answers runs; the boost policy and copy-engine state are recorded at the start and the "
+        "end, a name the kexts lack as absent; the knobs list 2.9's short BOOST= line, which NVK still reads",
+        rc == 0 and got.get("plugin.pass", {}).get("result") == "pass" and ks.get("debug.nvrm_boost_policy") == "0"
+        and ks.get("debug.nvrmfb_vram_ce_clear") == "1" and ks.get("debug.nvrmfb_vram_ce_kept") == "absent"
+        and data.get("facts", {}).get("kexts_end", {}).get("debug.nvrm_boost_policy") == "0"
+        and re.search(r"^- boost policy and copy-engine clear \(absent before 3\.0\.1\): start boost_policy=0 .*ce_clear=1 .*; end ",
+                      report, re.M) and re.search(r"^- nvrm610\.conf knobs: NVK_CURVES=1; BOOST=0", report, re.M),
+        (rc, ks, report[:2500]))
     w = World(TOP, "refuse-commit")
     w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
     out = w.base / "runs" / "r"

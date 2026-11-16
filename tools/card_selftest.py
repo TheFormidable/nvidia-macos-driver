@@ -31,7 +31,9 @@ checkout whose driver sources equal --expect (git diff tree to tree, no index wr
 NULLMOTH-LOCAL-BUILD.txt commit equals --expect; every SHA256SUMS line under Library/GPUBundles matches the installed
 file (nvrm610.conf excluded, the installer appends the user's block to it); NVKZinkGLDriver.bundle, nvmtl/zink and
 nvmtl/minecraft exist; the accelerator is in the IORegistry (its IOGLBundleName, NVKZinkGLDriver, gives the "zink"
-need); and the device probe (tools/card/device_probe.m, 30 s) sees a default Metal device of class NVMTLDevice whose
+need); the loaded kexts are the checkout's (KEXT_MARKS: a checkout with 3.0.1's kexts/NVRM/nvrm_boost_policy_abi.h
+needs an NVRM.kext that answers debug.nvrm_boost_policy, which it does only after the restart that follows the
+install); and the device probe (tools/card/device_probe.m, 30 s) sees a default Metal device of class NVMTLDevice whose
 name contains " (NVMTL over ", and tells whether a console GUI session is usable (the "gui" need). A refusal of the out
 folder itself writes nothing; every later refusal writes report.md and DONE.
 
@@ -141,6 +143,16 @@ DRIVER_PATHS = ("plugin", "zink", "translator", "nvk", "kexts", "dlss", "vendor"
 COUNTERS = ("debug.nvrm_xid_count", "debug.nvrm_chan_recovered", "debug.nvrm_chan_gave_up", "debug.nvrm_chan_dropped",
             "debug.nvrm_fence_state", "debug.nvrm_chan_kicks", "debug.nvrmfb_vram_power_events",
             "debug.nvrmfb_vram_ce_clear", "debug.nvrmfb_vram_ce_cleared", "debug.nvrmfb_vram_ce_kept")
+# A checkout whose kexts answer a sysctl that older ones lack runs only where the loaded kext answers it too: the
+# package's files can all be installed while the kexts of the package before are still loaded, until the restart the
+# installer asks for (package/install.sh). (file of the checkout, sysctl, kext); NVRM.kext registers it at its start.
+KEXT_MARKS = (("kexts/NVRM/nvrm_boost_policy_abi.h", "debug.nvrm_boost_policy", "NVRM.kext"),)
+# read-only state of the kexts recorded at the start and the end of a run (3.0.1's boost policy and copy-engine clear,
+# and what decides whether that clear runs: NVRMFB trusts the RM's own clearing until a standby or a dirty block)
+KEXT_FACTS = ("debug.nvrm_boost_policy", "debug.nvrm_boost_policy_sets", "debug.nvrmfb_vram_ce_clear",
+              "debug.nvrmfb_vram_ce_cleared", "debug.nvrmfb_vram_ce_us", "debug.nvrmfb_vram_ce_fallbacks",
+              "debug.nvrmfb_vram_ce_kept", "debug.nvrmfb_vram_fast", "debug.nvrmfb_vram_rm_clears",
+              "debug.nvrmfb_vram_power_events", "debug.nvrmfb_vram_dirty")
 FAILED = ("FAIL", "TIMEOUT", "CRASH", "STUCK", "build failed")
 BASE_ENV_NAMES = ("HOME", "USER", "LOGNAME", "LANG", "PATH", "TMPDIR", "PYTHONDONTWRITEBYTECODE")
 ZINK_FILES = ("libnvk_zink.dylib", "libnvk_cgl.dylib", "libnvk_zink_vulkan.dylib", "libnvk_renderer.dylib",
@@ -1084,6 +1096,23 @@ class Run:
         m = re.search(r'"IOGLBundleName"\s*=\s*"([^"]*)"', out)
         self.facts["gl_bundle"] = m.group(1) if m else "none"
 
+    def gate_kexts(self):
+        for rel, name, kext in KEXT_MARKS:
+            if (self.src / rel).is_file():
+                rc, out, _ = quick(["sysctl", "-n", name], self.plain_env())
+                if rc != 0 or not out.strip():
+                    raise Refused(f"the checkout has {rel} but the loaded {kext} has no {name}: the kexts of an older "
+                                  f"package are loaded (restart after installing)")
+
+    def kext_state(self):
+        """-> {sysctl: value or "absent"} of KEXT_FACTS, read only"""
+        env = self.plain_env()
+        vals = {}
+        for n in KEXT_FACTS:
+            rc, out, _ = quick(["sysctl", "-n", n], env)
+            vals[n] = out.strip() if rc == 0 and out.strip() else "absent"
+        return vals
+
     def record_facts(self):
         env = self.plain_env()
         for key, argv in (("macos", ["sw_vers", "-productVersion"]), ("macos_build", ["sw_vers", "-buildVersion"]),
@@ -1097,7 +1126,8 @@ class Run:
         self.scrub = Scrub(self.home, self.user, self.host, self.facts["DARWIN_USER_TEMP_DIR"], self.facts["DARWIN_USER_CACHE_DIR"])
         try:
             conf = Path(GB, "nvmtl", "nvrm610.conf").read_text(errors="replace").splitlines()
-            self.facts["knobs"] = [l.strip() for l in conf if re.match(r"^\s*(NVMTL|NVK|NVRM)_[A-Z0-9_]+\s*=", l)]
+            # BOOST= is 2.9's short name of NVRM_610_BOOST, which NVK still reads (nvk/nvk-boost-policy.patch)
+            self.facts["knobs"] = [l.strip() for l in conf if re.match(r"^\s*((NVMTL|NVK|NVRM)_[A-Z0-9_]+|BOOST)\s*=", l)]
         except OSError:
             self.facts["knobs"] = ["(nvrm610.conf cannot be read)"]
         try:
@@ -1105,6 +1135,7 @@ class Run:
             self.facts["allow"] = [l.strip() for l in allow if l.strip() and not l.strip().startswith("#")]
         except OSError:
             self.facts["allow"] = ["(nvmtl-allow.txt cannot be read)"]
+        self.facts["kexts_start"] = self.kext_state()
 
     def counters(self):
         env = self.plain_env()
@@ -1545,6 +1576,15 @@ class Run:
                 if any(k.startswith("NVMTL_NO_FBFETCH") for k in f.get("knobs", [])) else ""),
              "- nvmtl-allow.txt: " + ("; ".join(f.get("allow", [])) or "empty") + " (nvmtltest is always granted a device)",
              f"- counters at the start: {f['counters_start'][0]}; WindowServer {f['counters_start'][1]}" if f.get("counters_start") else "- counters at the start: not read"]
+        if f.get("kexts_start"):
+            f["kexts_end"] = self.kext_state()
+
+            def short(vals):
+                return " ".join(f"{k.replace('debug.nvrmfb_vram_', '').replace('debug.nvrm_', '')}={v}" for k, v in vals.items())
+            h.append(f"- boost policy and copy-engine clear (absent before 3.0.1): start {short(f['kexts_start'])}; "
+                     f"end {short(f['kexts_end'])}")
+        if f.get("ce_clear_left"):
+            h.append(f"- {f['ce_clear_left']}")
         if refused:
             h.append(f"- REFUSED: {refused}")
         if self.stopped:
@@ -1717,6 +1757,7 @@ def body(run):
         run.gate_checkout()
         run.gate_package()
         run.gate_accel()
+        run.gate_kexts()
         run.say(f"gates: checkout clean, driver sources equal {run.expect}; package {run.facts['package_commit'][:8]}, "
                 f"{run.facts['sums_equal']} files equal; IOGLBundleName {run.facts['gl_bundle']}")
         ok = run.device_probe()
@@ -1779,7 +1820,8 @@ def plan(run, checks):
     if run.out is None:
         run.set_out(run.base / "cardtest" / "<UTC stamp>")
     run.record_facts()
-    for name, gate in (("checkout", run.gate_checkout), ("package", run.gate_package), ("accelerator", run.gate_accel)):
+    for name, gate in (("checkout", run.gate_checkout), ("package", run.gate_package), ("accelerator", run.gate_accel),
+                       ("loaded kexts", run.gate_kexts)):
         try:
             gate()
             run.say(f"gate {name}: ok")
