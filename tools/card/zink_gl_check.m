@@ -23,7 +23,8 @@
  *
  * A hardware context that the adapter's layout guard keeps Apple's makes the check inactive (exit 4), with the
  * guard's reason; any other hardware context that stays Apple's is a failure. See zk_not_zink in zink_common.h.
- * Nothing here draws on screen or writes a file. Not yet run on a Mac. */
+ * Nothing here draws on screen or writes a file. It has run on one Mac, on macOS 26.7.3 (25G342), where the adapter's
+ * layout guard kept every hardware context Apple's: only rinfo and the software-renderer controls gave results. */
 #include "zink_common.h"
 #include <IOSurface/IOSurface.h>
 #include <OpenGL/CGLIOSurface.h>
@@ -1111,18 +1112,32 @@ static void sub_iosurface(void)
    else zk_fail("write", "%d of 4096 surface pixels wrong after glFinish, first %s", wrong, why);
    zk_no_error("write", "the scissored clear and glFinish");
 
-   /* (iii) refresh: a CPU write changes the seed, and the adapter copies it in again when the rectangle texture or a
-    * framebuffer holding it is bound (zink/nvk_cgl.c:301-305, zink/nvk_iosurface.c:299-332). */
+   /* (iii) refresh: a CPU write inside IOSurfaceLock and IOSurfaceUnlock changes the seed, then glBindTexture and
+    * glBindFramebuffer of the names already bound. The adapter copies the surface in again on every such bind when
+    * the seed changed (build/generate_cgl_dispatch.py:290-293, zink/nvk_cgl.c:301-305, zink/nvk_iosurface.c:299-332),
+    * so this is judged on Zink only. Apple's software renderer kept its own contents through the same binds on macOS
+    * 26.7.3 (25G342): the control reports what it reads, after these binds and after an unbind and a bind, as
+    * information. */
    zk_surface_fill(s, 1);
    glBindTexture(GL_TEXTURE_RECTANGLE, tex);
    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
    wrong = zk_read_surface_pattern(1, why, sizeof(why));
-   if (!wrong) zk_pass("refresh", "after a CPU write and a rebind GL reads the new contents");
+   if (zk_software) {
+      zk_info("refresh on the software control: after a CPU write and a rebind of the bound names GL reads %s%s",
+              !wrong ? "the new contents" : "other contents, first ", wrong ? why : "");
+      glBindTexture(GL_TEXTURE_RECTANGLE, 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glBindTexture(GL_TEXTURE_RECTANGLE, tex);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+      wrong = zk_read_surface_pattern(1, why, sizeof(why));
+      zk_info("refresh on the software control: after an unbind and a bind GL reads %s%s",
+              !wrong ? "the new contents" : "other contents, first ", wrong ? why : "");
+   } else if (!wrong) zk_pass("refresh", "after a CPU write and a rebind GL reads the new contents");
    else zk_fail("refresh", "%d of 4096 pixels wrong after a CPU write and a rebind, first %s", wrong, why);
    zk_no_error("refresh", "the rebind and read");
 
-   /* (iii-b) without a rebind: information. Per code Zink keeps its copy until the next bind; Apple's binding is
-    * live. */
+   /* (iii-b) without a rebind: information. Per code Zink keeps its copy until the next bind; what Apple's software
+    * renderer reads here is reported as it is. */
    zk_surface_fill(s, 2);
    wrong = zk_read_surface_pattern(2, why, sizeof(why));
    int old = wrong ? zk_read_surface_pattern(1, why, sizeof(why)) : -1;
