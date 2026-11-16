@@ -294,14 +294,17 @@ static _Noreturn void zw_end(void)
 @end
 
 /* A bare NSView as LWJGL uses; it records on which threads AppKit and the adapter ask it for its surface resolution
- * (the adapter's publish_view_size reads it, zink/appkit.m:66-77). */
-static atomic_int zw_bestres_main, zw_bestres_other;
+ * (the adapter's publish_view_size reads it, zink/appkit.m:66-77). zw_in_stub is set while the render thread is inside
+ * one of the stub's calls: a read on main then is the call run on main (zink/appkit.m:88-127), a read off main then is
+ * the call run on the render thread, and a read at any other time is AppKit's own (counted, not judged). */
+static atomic_int zw_in_stub, zw_bestres_main, zw_bestres_other, zw_bestres_outside;
 @interface ZKPlainView : NSView
 @end
 @implementation ZKPlainView
 - (BOOL)wantsBestResolutionOpenGLSurface
 {
-   if ([NSThread isMainThread]) atomic_fetch_add(&zw_bestres_main, 1);
+   if (!atomic_load(&zw_in_stub)) atomic_fetch_add(&zw_bestres_outside, 1);
+   else if ([NSThread isMainThread]) atomic_fetch_add(&zw_bestres_main, 1);
    else atomic_fetch_add(&zw_bestres_other, 1);
    return NO;
 }
@@ -886,7 +889,9 @@ static void *zw_lwjgl_main(void *unused)
       ZKWin *z = zw_thread_win;
       void *context = (__bridge void *)z.context, *view = (__bridge void *)z.view;
       double t0 = zk_now();
+      atomic_store(&zw_in_stub, 1);
       zw_lwjgl_set_view(context, view);
+      atomic_store(&zw_in_stub, 0);
       zw_lwjgl_seconds[0] = zk_now() - t0;
       zw_lwjgl_view_ok = z.context.view == z.view;
       [z.context makeCurrentContext];
@@ -894,13 +899,17 @@ static void *zw_lwjgl_main(void *unused)
       atomic_store(&zw_state, 1);
       if (!zw_wait_go()) return NULL;
       t0 = zk_now();
+      atomic_store(&zw_in_stub, 1);
       zw_lwjgl_update(context);
+      atomic_store(&zw_in_stub, 0);
       zw_lwjgl_seconds[1] = zk_now() - t0;
       double start = zk_now();
       for (int i = 0; i < 30; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &zw_thread_tally);
       zw_thread_seconds = zk_now() - start;
       t0 = zk_now();
+      atomic_store(&zw_in_stub, 1);
       zw_lwjgl_clear(context);
+      atomic_store(&zw_in_stub, 0);
       zw_lwjgl_seconds[2] = zk_now() - t0;
       [NSOpenGLContext clearCurrentContext];
       atomic_store(&zw_state, 3);
@@ -1004,8 +1013,10 @@ static void sub_lwjgl(const char *stub)
    if (!zw_lwjgl_set_view || !zw_lwjgl_update || !zw_lwjgl_clear) zk_setup_error("the stub lacks its three functions");
    ZKWin *z = zw_open_or_fail(320, 240, zw_default, true, false);
    zw_thread_win = z;
+   atomic_store(&zw_in_stub, 0);
    atomic_store(&zw_bestres_main, 0);
    atomic_store(&zw_bestres_other, 0);
+   atomic_store(&zw_bestres_outside, 0);
    zw_run_render_thread(zw_lwjgl_main, 15.0);
    const char *what[3] = {"setView:", "update", "clearDrawable"};
    bool quick = true;
@@ -1018,10 +1029,13 @@ static void sub_lwjgl(const char *stub)
    if (zw_lwjgl_view_ok) zk_pass("set-view", "the context's view is the view after setView: off main");
    else zk_fail("set-view", "the context's view after setView: off main is not the view");
    int on_main = atomic_load(&zw_bestres_main), off_main = atomic_load(&zw_bestres_other);
+   zk_info("wantsBestResolutionOpenGLSurface read %d time(s) outside the stub's calls (AppKit's own reads)",
+           atomic_load(&zw_bestres_outside));
    if (on_main >= 1 && !off_main)
-      zk_pass("main-thread", "wantsBestResolutionOpenGLSurface was read %d time(s), all on main", on_main);
-   else zk_fail("main-thread", "wantsBestResolutionOpenGLSurface read on main got=%d off main got=%d expected=at "
-                "least 1 and 0 (zink/appkit.m:91-127 runs these calls on main)", on_main, off_main);
+      zk_pass("main-thread", "during the stub's calls wantsBestResolutionOpenGLSurface was read %d time(s), all on "
+              "main", on_main);
+   else zk_fail("main-thread", "during the stub's calls wantsBestResolutionOpenGLSurface read on main got=%d off main "
+                "got=%d expected=at least 1 and 0 (zink/appkit.m:88-127 runs these calls on main)", on_main, off_main);
    zw_report("frames", &zw_thread_tally, 25);
    zw_pump(0.2);
    int count = 0;
