@@ -8,8 +8,8 @@ Each case is translated through the translator's C entry point (nvmtl_translate)
 Mac, run by tools/translator_readback.cpp, which this script builds with xcrun clang++ and which loads the named
 plugin binary into its own process and dispatches the kernel offscreen on the GPU. --prepare-only stops after the
 translation and the validation (the plugin is then only hashed), so it also runs where there is no GPU. Outputs,
-SPIR-V and RESULTS.json go to --out. It is not one of the host tests run by run_all_tests.py: it needs those built
-binaries.
+SPIR-V and RESULTS.json go to --out. A case whose program gives no result within 30 s ends the script by SIGALRM.
+It is not one of the host tests run by run_all_tests.py: it needs those built binaries.
 
 No files are installed and no application is restarted. The original unit-test
 LLVM fixtures supply the pointer/resource shapes. The phi fixture's loop inputs
@@ -20,8 +20,10 @@ import argparse
 import ctypes
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -304,7 +306,18 @@ for mode in args.cases or kernels:
                        for v in lines), (mode, 'device pointer serialized as zero')
     row = {'case': mode, 'spirv_sha256': hashlib.sha256(data).hexdigest(), 'spirv_valid': True}
     if not args.prepare_only:
-        result = subprocess.run([str(binary), str(args.plugin.resolve()), str(spv), mode], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
+        try:
+            result = subprocess.run([str(binary), str(args.plugin.resolve()), str(spv), mode], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
+        except subprocess.TimeoutExpired as late:
+            # One small dispatch with no result in 30 s means a GPU that may be hung. The script then ends by SIGALRM,
+            # as a program's own alarm would, so that a runner that stops every later GPU check after a time limit
+            # (tools/card_selftest.py) stops them here too, instead of reading an exception as one failed case.
+            seen = late.stdout.decode(errors='replace') if isinstance(late.stdout, bytes) else late.stdout or ''
+            (args.out / (mode + '.log')).write_text(seen + f'TIMEOUT {mode}: no result within 30 s\n')
+            print(seen + f'TIMEOUT {mode}: the readback program gave no result within 30 s', flush=True)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGALRM)
+            raise
         (args.out / (mode + '.log')).write_text(result.stdout)
         row.update(exit_code=result.returncode, output=result.stdout)
         results.append(row)
