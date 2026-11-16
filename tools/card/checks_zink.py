@@ -132,10 +132,13 @@ for _i, (_s, _t) in enumerate((("a", "released on one thread, destroyed on anoth
                       env=_SCRIBBLE))
 
 # glbench as it is: a smoke row and a number. A context that is not Zink's makes the row inactive; zink.path says why.
+# glbench has no crash handlers of its own; zink_crash_guard.h, included by the build, turns a crash into exit 70
+# and a CRASH line on standard error, so that macOS writes no crash report for it.
 CHECKS.append({
     "id": "zink.glbench", "part": "zink", "title": "glbench 4000 draws x 20 frames on Zink: no GL error (smoke, and a "
-    "number)", "kind": "gpu", "order": 690, "sources": ["tools/glbench/glbench.c"],
-    "build": [{"argv": _CC + ["-O2", "-Wall", "{SRC}/tools/glbench/glbench.c", "-o", "{BIN}/zink.glbench/nvmtltest",
+    "number)", "kind": "gpu", "order": 690, "sources": ["tools/glbench/glbench.c", "tools/card/zink_crash_guard.h"],
+    "build": [{"argv": _CC + ["-O2", "-Wall", "-include", "{SRC}/tools/card/zink_crash_guard.h",
+                              "{SRC}/tools/glbench/glbench.c", "-o", "{BIN}/zink.glbench/nvmtltest",
                               "-framework", "OpenGL"], "limit": 300}],
     "argv": ["/bin/sh", "-c",
              'out=$("$1" 4000 20); rc=$?\n'
