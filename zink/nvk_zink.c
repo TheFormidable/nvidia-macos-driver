@@ -275,8 +275,8 @@ NVK_EXPORT int nvk_zink_make_current(struct nvk_zink_context *ctx)
 }
 
 /* The owner's drop. A context current on the calling thread is unbound here
- * first, as before; one still current on another thread is freed by that
- * thread's next bind. */
+ * first; one still current on another thread is freed by that thread's next
+ * bind. */
 NVK_EXPORT void nvk_zink_destroy(struct nvk_zink_context *ctx)
 {
    if (!ctx || p_atomic_read(&ctx->screen->uncertain)) return;

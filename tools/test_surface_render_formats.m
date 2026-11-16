@@ -114,7 +114,7 @@ int main(void) { @autoreleasepool {
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
             [cb commit]; [cb waitUntilCompleted];
             if (cb.status!=MTLCommandBufferStatusCompleted) { fprintf(stderr,"command: %s\n",cb.error.description.UTF8String); return 2; }
-            // a Shared wrapper made now reads what was published into the surface, not the Managed wrapper's own image
+            // a Shared wrapper made after the draw reads what was published into the surface, not the Managed wrapper's own image
             MTLTextureDescriptor *observer=[desc copy]; observer.storageMode=MTLStorageModeShared; observer.usage=MTLTextureUsageShaderRead;
             id<MTLTexture> external=[dev newTextureWithDescriptor:observer iosurface:surface plane:0];
             if (!external) { fprintf(stderr,"observer wrapper failed\n"); return 2; }

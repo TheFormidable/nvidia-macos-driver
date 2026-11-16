@@ -131,7 +131,7 @@ int main(void) {
 
    /* refused: the engine is not a heap block at all */
    build(&engine, &context, &back, 1);
-   reset(); reg(context); reg(back);   /* engine no longer registered */
+   reset(); reg(context); reg(back);   /* engine not registered */
    expect("engine_not_block", run(engine, &profile, &octx, &oback), NVK_CGL_LAYOUT_ENGINE_BLOCK);
 
    /* refused: the engine block is too small to span the recorded reads */

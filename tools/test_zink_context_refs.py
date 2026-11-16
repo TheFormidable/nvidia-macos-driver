@@ -129,7 +129,7 @@ int main(void)
    expect("deferred_freed_at_next_bind", a->freed && a->st->dead && faults == f0);
    expect("deferred_new_current", nvk_zink_get_current() == b && b->refs == 2);
 
-   /* 2. The owner destroys the context current on its own thread: unbound and freed at once, as before. */
+   /* 2. The owner destroys the context current on its own thread: unbound and freed at once. */
    nvk_zink_destroy(b);
    expect("own_thread_freed_now", b->freed && mesa_current == NULL);
 
