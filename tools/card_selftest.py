@@ -909,8 +909,130 @@ def install_mesa_source(ctx, check):
     return _verdict_of(fails, f"Mesa {got} as pinned", lines)
 
 
+# The plugin's translator loader, and the translator's file name. The plugin opens the copy of this file beside its own
+# executable when that copy is readable (dladdr of one of its functions gives its folder, then access(R_OK)), and
+# nvmtl/'s only otherwise (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready, the same from 1.0.0 to 3.0.1).
+PLUGIN_LOADER = "plugin/NVMTLLibraryLoad.m"
+XLATE_NAME = "libnvmtl_translate.dylib"
+# a comment, a string literal (Objective-C's @"..." too), a character literal, a brace, other code, any other character
+_C_TOKEN = re.compile(r'//[^\n]*|/\*.*?(?:\*/|\Z)|@?"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|[{}]|'
+                      r'[^{}"\'/@]+|.', re.S)
+
+
+def _c_blocks(text):
+    """-> [(name, code, literals)] of each outermost brace block of a C or Objective-C source: the name of the function
+    it is the body of ("?" when the text before it names none), its code with comments and string literals left out,
+    and the string literals in it"""
+    out, depth, head, name, code, lits = [], 0, "", "?", [], []
+    for m in _C_TOKEN.finditer(text):
+        t = m.group(0)
+        if t.startswith(("//", "/*")) or t.startswith("'"):
+            continue
+        if t.startswith(('"', '@"')):
+            if depth:
+                lits.append(t[t.index('"') + 1:-1])
+            continue
+        if t == "{":
+            if depth == 0:
+                f = re.search(r"(\w+)\s*\([^()]*\)\s*$", head)
+                name, code, lits = f.group(1) if f else "?", [], []
+            else:
+                code.append(t)
+            depth += 1
+        elif t == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                out.append((name, "".join(code), lits))
+                head = ""
+            else:
+                code.append(t)
+        elif depth:
+            code.append(t)
+        else:
+            head = (head + t)[-400:]
+    return out
+
+
+def _xlate_beside(text):
+    """-> (function, relative path) of the first function of the plugin's loader source that calls dladdr and names the
+    translator by a relative path, the copy beside the plugin it prefers; None when no function does both. Comments do
+    not count, nor the absolute path of nvmtl/'s copy."""
+    for name, code, lits in _c_blocks(text):
+        if not re.search(r"\bdladdr\s*\(", code):
+            continue
+        for lit in lits:
+            if not lit.startswith("/") and os.path.basename(lit) == XLATE_NAME and not re.search(r"[\s%\\]", lit):
+                return name, lit
+    return None
+
+
+def _xlate_copy(lines, path):
+    """an INFO line on one copy of the translator; -> (state, its macho()), state "absent", "unreadable" or "readable"
+    (the plugin's own test: access with R_OK)"""
+    rel = os.path.relpath(path, GB)
+    if not os.path.lexists(path):
+        lines.append(f"INFO translator {rel}: absent")
+        return "absent", None
+    if not os.access(path, os.R_OK):
+        lines.append(f"INFO translator {rel}: there but not readable by this account")
+        return "unreadable", None
+    m = macho(path)
+    try:
+        size, sha = f"{os.path.getsize(path)} bytes", "sha256 " + sha256_file(path)[:12]
+    except OSError as e:
+        size, sha = "size ?", f"sha256 not read ({type(e).__name__})"
+    kind = f"{'+'.join(m['arches'])}, LC_UUID {m['uuid'] or 'none'}" if m else "not Mach-O"
+    lines.append(f"INFO translator {rel}: {kind}, {size}, {sha}")
+    return "readable", m
+
+
+def install_plugin_translator(ctx, check):
+    """which libnvmtl_translate.dylib the Metal plugin opens, and whether it is the build of nvmtl/'s ({X}, the copy the
+    readback rows translate with). The checkout's plugin source (its driver sources equal the package's, a gate) tells
+    whether the plugin prefers a copy beside itself; then the copy it opens is compared with {X} by LC_UUID, the
+    build's identity, never byte for byte: the package signs each copy separately (package/finish_package.sh seals the
+    plugin bundle again with codesign --deep), so two copies of one build can differ in their signatures."""
+    vals = ctx.values()
+    x = vals["X"]
+    lines, fails = [], []
+    try:
+        found = _xlate_beside(Path(ctx.src, PLUGIN_LOADER).read_text(errors="replace"))
+    except OSError as e:
+        found = None
+        fails.append(f"{PLUGIN_LOADER}: {type(e).__name__}")
+    beside = os.path.normpath(os.path.join(os.path.dirname(vals["P"]), found[1] if found else XLATE_NAME))
+    if found:
+        lines.append(f"INFO plugin source: {PLUGIN_LOADER} ({found[0]}) calls dladdr and names {found[1]!r}: the "
+                     f"plugin prefers the copy beside it, when readable, to nvmtl/'s")
+    elif not fails:
+        lines.append(f"INFO plugin source: no function of {PLUGIN_LOADER} calls dladdr and names {XLATE_NAME}: this "
+                     f"plugin opens nvmtl/'s only, and a copy beside it does not matter")
+    xs, xm = _xlate_copy(lines, x)
+    bs, bm = _xlate_copy(lines, beside)
+    opened = beside if found and bs == "readable" else x
+    lines.append(f"INFO the plugin opens {opened}")
+    if not xm:
+        fails.append(f"{x}, the translator of the readback rows and the plugin's fallback, is "
+                     + {"absent": "missing", "unreadable": "not readable"}.get(xs, "not Mach-O"))
+    why = f"{PLUGIN_LOADER} ({found[0]}) prefers the copy beside the plugin" if found else ""
+    if opened == beside and not bm:
+        fails.append(f"the Metal plugin opens {beside}, which is not Mach-O, because {why}: its dlopen fails there, "
+                     f"and the plugin does not fall back to {x}")
+    elif opened == beside and not (xm and bm["uuid"] and bm["uuid"] == xm["uuid"]):
+        fails.append(f"the Metal plugin opens {beside} (LC_UUID {bm['uuid'] or 'none'}), not the build of {x} (LC_UUID "
+                     f"{(xm and xm['uuid']) or 'none'}), because {why}: this run's Metal rows translate with that "
+                     f"copy, while its readback rows use {x}")
+    if opened == beside:
+        ok = f"the plugin opens {beside}, the same build as {x} (LC_UUID {bm['uuid']})"
+    elif found:
+        ok = f"the plugin opens {x}: no {'readable ' if bs == 'unreadable' else ''}copy beside it"
+    else:
+        ok = f"the plugin opens {x}: its source names no copy beside it"
+    return _verdict_of(fails, ok, lines)
+
+
 READ_FUNCS = {f.__name__: f for f in (install_identity, install_zink_bundle, install_minecraft, install_zink_files,
-                                      install_mesa_source)}
+                                      install_mesa_source, install_plugin_translator)}
 
 
 # ------------------------------------------------------------------------------------------------------- the run
