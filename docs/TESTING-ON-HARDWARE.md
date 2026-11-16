@@ -476,11 +476,13 @@ failed, ran out of time, crashed, could not be stopped or did not build; 2 a wro
 time limit. A check with a process still alive 15 s after its process group was killed (at its limit, or when it ended),
 a GPU check that ran out of time, a rise of `debug.nvrm_chan_gave_up`, a change of `debug.nvrm_fence_state`, a new
 WindowServer process, a rise of `debug.nvrmfb_vram_ce_kept` (the copy engine's clear of a new video memory block was not
-seen to end) or of `debug.nvrmfb_vram_power_events` (the GPU went through a standby) stops every later GPU check. A rise
-of `debug.nvrm_xid_count`, of `debug.nvrm_chan_recovered` (a channel NVK rebuilt) or of `debug.nvrm_chan_dropped` (the
-submissions a rebuild dropped) fails the check it happened in; a stalled channel rung again (`debug.nvrm_chan_kicks`)
-and a copy-engine clear that left its on state are noted on the check. After 40 minutes (`--deadline`) nothing new
-starts. A check that was not started is listed as "not run" with the reason.
+seen to end), a change of `debug.nvrmfb_vram_ce_clear` from 1 (the copy engine's clear stood down for this boot, for
+example because a block it said it cleared did not read as zero) or a rise of `debug.nvrmfb_vram_power_events` (the GPU
+went through a standby) stops every later GPU check. A rise of `debug.nvrm_xid_count`, of `debug.nvrm_chan_recovered` (a
+channel NVK rebuilt) or of `debug.nvrm_chan_dropped` (the submissions a rebuild dropped) fails the check it happened in,
+and the second GPU check with such a rise stops every later GPU check; a stalled channel rung again
+(`debug.nvrm_chan_kicks`) is noted on the check. After 40 minutes (`--deadline`) nothing new starts. A check that was
+not started is listed as "not run" with the reason.
 
 It never uses sudo; installs, loads or copies nothing into `/Library` or `/System`; changes no setting (not
 `nvrm610.conf`, not `defaults`, not a boot argument, not the boost policy); runs none of `nvram`, `csrutil`, `bless`,
