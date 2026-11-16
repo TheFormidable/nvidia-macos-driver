@@ -27,8 +27,13 @@
      and the asking ends for this boot.
    - The engine cleared less than the block (the RM's memory is shorter than the grant): filled from the processor.
 
-   Pure: tools/test_vram_clear.c holds every answer against these rules. */
+   Pure: tools/test_vram_clear.c holds every answer against these rules. The answers' values are NVRM's own, so
+   nvrm_vram_abi.h comes first. */
 #pragma once
+
+#ifndef NVRM_VRAM_CLEAR_DONE
+#error "include nvrm_vram_abi.h before nvrm-vram-clear.h"
+#endif
 
 enum { NVRM_VC_OFF = 0, NVRM_VC_ON = 1, NVRM_VC_DOWN = 2 };   /* the clear for this boot: boot-arg off, on, stood down */
 enum { NVRM_VC_ZERO = 0, NVRM_VC_FILL = 1, NVRM_VC_KEEP = 2, NVRM_VC_PROBE = 3 };   /* what to do with the block */
@@ -40,8 +45,8 @@ static inline int nvrm_vc_answer(int *state, int known, unsigned result, unsigne
                                  unsigned long long bytes)
 {
     if (!known) { *state = NVRM_VC_DOWN; return NVRM_VC_FILL; }
-    if (result == 1u /* NVRM_VRAM_CLEAR_NOT_RUN */) return NVRM_VC_FILL;
-    if (result != 0u /* NVRM_VRAM_CLEAR_DONE */) { *state = NVRM_VC_DOWN; return NVRM_VC_KEEP; }   /* LOST or unknown */
+    if (result == NVRM_VRAM_CLEAR_NOT_RUN) return NVRM_VC_FILL;
+    if (result != NVRM_VRAM_CLEAR_DONE) { *state = NVRM_VC_DOWN; return NVRM_VC_KEEP; }   /* LOST or unknown */
     if (cleared < bytes) return NVRM_VC_FILL;
     return NVRM_VC_PROBE;
 }
