@@ -57,10 +57,14 @@ each by SHA-256, asks before downloading, and installs them root-owned. They sta
 
 Downloaded on the building Mac, never shipped: the build tools of `./build.sh deps`. On an Intel Mac it builds them from
 pinned sources in its working directory (ninja, CMake, OpenSSL, zstd, xz, CPython, pkgconf, SPIRV-Headers, SPIRV-Tools,
-glslang, LLVM with clang, then the SPIRV-LLVM-Translator; `build/pins.sh`, `NM_PIN_TC*`); on Apple silicon it installs
-them as Homebrew formulas. On both it sets up a Python environment and Rust (with bindgen and cbindgen) in the working
-directory. None of these tools reaches the package: NVK's own build has LLVM and SPIRV-Tools turned off, and only the
-native `mesa_clc`, a program run during the build, links them and the Translator. Of the Rust toolchain itself, only
+glslang, LLVM with clang, then the SPIRV-LLVM-Translator, and GNU Bison 3.8.2 from its release tarball checked by
+SHA-256; `build/pins.sh`, `NM_PIN_TC*`); on Apple silicon it installs them as Homebrew formulas. On both it sets up a
+Python environment and Rust (with bindgen and cbindgen) in the working directory. None of these tools reaches the
+package: NVK's own build has LLVM and SPIRV-Tools turned off, and only the native `mesa_clc`, a program run during the
+build, links them and the Translator. Bison turns Mesa's GLSL grammars into C while native OpenGL is built; those
+parsers are compiled into Zink and carry Bison's parser skeleton, whose licence (GPL-3.0-or-later with a special
+exception) lets a work that contains it be distributed under terms of its choice, as long as that work is not itself
+a parser generator. Of the Rust toolchain itself, only
 its standard library ends up in shipped files: rustc links it into the shader translator and into NVK's NAK compiler,
 as into every Rust library (MIT or Apache-2.0). The crates those two link are in the table above.
 

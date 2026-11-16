@@ -12,7 +12,7 @@ that a PATH xcrun or security is never run). One arm imitates Linux instead.
 
 Arms, each with a control that must fail for the reason the arm names (a scratch copy of the script broken on purpose,
 or the arm's own check given a broken result):
-  list/order/layout  list names the ten tools in build order; build builds exactly the names given, in that order,
+  list/order/layout  list names the eleven tools in build order; build builds exactly the names given, in that order,
                      and leaves the layout build.sh looks in, with the stamps
   poison             a caller environment with CC, CFLAGS, LDFLAGS, CPATH, LIBRARY_PATH, PKG_CONFIG_PATH, PYTHONPATH,
                      HOMEBREW_PREFIX, SDKROOT, a PATH that starts with a foreign folder and a HOME with pip.conf reaches
@@ -21,7 +21,7 @@ or the arm's own check given a broken result):
   fail               a failing step: exit status 1, its last lines and its log named, no stamp, nothing after it built
   check              a missing layout file, a foreign library and an @rpath library in otool -L, and a link the tool
                      installed that leads out of the prefix, /usr/lib and /System/Library each refuse the stamp
-  pinver             ninja, cmake, Python, pkgconf, glslang and LLVM must print the pinned version as a whole word; the
+  pinver             ninja, cmake, Python, pkgconf, glslang, LLVM and Bison must print the pinned version as a whole word; the
                      lines the real tools print pass
   pkgconfig          pkgconf whose "system" folders are inside the prefix is refused; after SPIRV-Tools, the toolchain's
                      pkg-config --cflags / --libs SPIRV-Tools, run from / with an empty environment, give -I<prefix>/include
@@ -47,6 +47,14 @@ or the arm's own check given a broken result):
   certcount          a cert.pem without a certificate is logged as "cert.pem: 0 certificates", on one line
   checkfail          an installed glslangValidator or llvm-config that fails: check still ends with its list of
                      FAIL lines and "STOP: N of M tools failed their checks"
+  bison              Bison's recipe: configure in a copy of the extracted tarball that keeps the files' times, with the
+                     toolchain's prefix, no translations, no dependency tracking, no yacc, SYSBIN's m4 and the Java
+                     probes answered "not found"; its check runs a grammar with Mesa's two %define lines, in a new
+                     folder of TMPDIR that it removes (never in the prefix, also with check alone), and refuses a bison
+                     that stops at them (as 2.3 does) or writes C without a pure parser or verbose errors; the bison of
+                     this machine, when there is one, takes that grammar if it is 3.0 or newer and refuses it if older
+  ids                the ids of the ten tools built before bison was added are the ones their stamps hold on a Mac
+                     that built them ("<tool> recipe 2 Darwin-x86_64 macos15.0"); bison's is its own
 
 The shell is $BUILD_SH_BASH (default /bin/bash, macOS's bash 3.2 on a Mac). usage: test_toolchain_sh.py [arm ...]"""
 import hashlib, os, pathlib, platform, re, shlex, shutil, subprocess, sys, tempfile
@@ -56,7 +64,7 @@ REAL_SCRIPT = ROOT / "build" / "toolchain.sh"
 SYSBIN_LINE = "SYSBIN=/usr/bin\n"
 SCRIPT = None   # the sandbox's copy, see Sandbox.script
 BASH = os.environ.get("BUILD_SH_BASH") or "/bin/bash"
-TOOLS = ["ninja", "cmake", "openssl", "zstd", "xz", "python", "pkgconf", "spirv-tools", "glslang", "llvm"]
+TOOLS = ["ninja", "cmake", "openssl", "zstd", "xz", "python", "pkgconf", "spirv-tools", "glslang", "llvm", "bison"]
 ONLY = sys.argv[1:]
 fails = 0
 
@@ -121,6 +129,7 @@ case "$who" in
   meson-setup) mkninja "$1/build.ninja" pkgconf "$(argval --prefix= "$@")" ;;
   openssl-configure) mkmake openssl "$(argval --prefix= "$@")" install_sw ;;
   python-configure) mkmake python "$(argval --prefix= "$@")" install ;;
+  bison-configure) mkmake bison "$(argval --prefix= "$@")" install ;;
 esac
 exit 0
 '''
@@ -158,6 +167,7 @@ Cflags: -I$p/include"; mk include/spirv-tools/libspirv.h
         for l in libLLVM libclang-cpp libclang; do macho "lib/$l.dylib"; mk "lib/$l.so"; done
         mk lib/cmake/llvm/LLVMConfig.cmake; mk lib/cmake/clang/ClangConfig.cmake
         mk lib/clang/22/include/opencl-c.h; mk lib/clang/22/include/opencl-c-base.h ;;
+  bison) tmpl bin/bison bison; mk share/bison/skeletons/yacc.c; mk share/bison/m4sugar/m4sugar.m4 ;;
 esac
 # control/links: "<tool> <file> <target>" lines, a link the install of that tool also leaves
 if [ -f "$SB/control/links" ]; then
@@ -220,6 +230,21 @@ case "$*" in
   *) exit 1 ;;
 esac
 ''',
+    # bison 3.8.2 on the check's grammar (-o <c> --defines=<h> -p <prefix> <grammar>): the C file starts as Bison's does
+    # and has the pure parser and the verbose errors the two %define lines ask for. control/bison-23 imitates Bison 2.3,
+    # which stops at the first %define; control/bison-impure one that writes C without the pure parser
+    "bison": r'''#!/bin/sh
+case "${1:-}" in --version) echo "bison (GNU Bison) 3.8.2"; echo "Written by Robert Corbett and Richard Stallman."; exit 0 ;; esac
+{ printf '@@ bison-run\nC %s\n' "$(pwd -P)"; printf '@@end\n'; } >> '@SB@/journal'
+out=""; hdr=""; g=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; --defines=*) hdr=${1#--defines=}; shift ;; -p) shift 2 ;; *) g=$1; shift ;; esac; done
+if [ -f '@SB@/control/bison-23' ]; then echo "$g:1.9-16: syntax error, unexpected identifier, expecting string" >&2; exit 1; fi
+grep -qx '%define api.pure' "$g" && grep -qx '%define parse.error verbose' "$g" || { echo "$g: not the check's grammar" >&2; exit 1; }
+{ echo '/* A Bison parser, made by GNU Bison 3.8.2.  */'
+  [ -f '@SB@/control/bison-impure' ] || echo '#define YYPURE 1'
+  echo 'static int yysyntax_error (void);'; } > "$out"
+echo '/* the parser header */' > "$hdr"
+''',
     "llvm-config": r'''#!/bin/sh
 case "${1:-}" in
   --version) echo 22.1.8 ;;
@@ -235,6 +260,7 @@ esac
 SYSBIN_HELPERS = {
     "xcrun": r'''rec xcrun "$@"; [ "$*" = "--sdk macosx --show-sdk-path" ] && printf '%s\n' @SDK@ ''',
     "security": r'''rec security "$@"; printf -- '-----BEGIN CERTIFICATE-----\nc3RhbmQtaW4=\n-----END CERTIFICATE-----\n' ''',
+    "m4": r'''rec m4 "$@"''',
 }
 HELPERS = {
     "uname": r'''case "${1:-}" in -s|'') cat '@SB@/control/os' ;; -m|-p) cat '@SB@/control/arch' ;; -r) echo 25.7.0 ;; *) echo "$(cat '@SB@/control/os') standin" ;; esac''',
@@ -306,6 +332,12 @@ class Sandbox:
         write(src / "openssl/Configure", f"exec '/bin/sh', '{sb}/lib/step.sh', 'openssl-configure', @ARGV;\n")
         write(src / "python/configure", f"#!/bin/sh\nexec /bin/sh '{sb}/lib/step.sh' python-configure \"$@\"\n", 0o755)
         write(src / "python/README.rst", "stand-in CPython\n")
+        # the extracted release tarball: configure, and files whose times the build copy must keep (an old
+        # configure.ac, a newer configure)
+        write(src / "bison/configure", f"#!/bin/sh\nexec /bin/sh '{sb}/lib/step.sh' bison-configure \"$@\"\n", 0o755)
+        write(src / "bison/configure.ac", "AC_INIT([GNU Bison], [3.8.2])\n")
+        os.utime(src / "bison/configure.ac", (1631000000, 1631000000))
+        os.utime(src / "bison/configure", (1631100000, 1631100000))
         write(src / "zstd/lib/Makefile",
               f"libzstd.a:\n\t/bin/sh '{sb}/lib/step.sh' zstd-make libzstd.a\n"
               f"install-static:\n\t/bin/sh '{sb}/lib/install.sh' zstd $(PREFIX)\ninstall-includes:\n\t@true\n")
@@ -358,7 +390,7 @@ class Sandbox:
 
     def steps(self):
         """the build steps only (not the script's own helpers)"""
-        return [r for r in self.records() if r[0] not in ("xcrun", "security", "otool")
+        return [r for r in self.records() if r[0] not in ("xcrun", "security", "otool", "bison-run")
                 and not r[0].startswith(("POISON", "PATH-"))]
 
     def stamp(self, tool):
@@ -414,6 +446,7 @@ LAYOUT = {
     "llvm": ["llvm/bin/llvm-config", "llvm/bin/clang", "llvm/lib/libLLVM.dylib", "llvm/lib/libclang-cpp.dylib",
              "llvm/lib/libclang.dylib", "llvm/lib/cmake/llvm/LLVMConfig.cmake", "llvm/lib/cmake/clang/ClangConfig.cmake",
              "llvm/lib/clang/22/include/opencl-c.h", "llvm/lib/clang/22/include/opencl-c-base.h"],
+    "bison": ["bin/bison", "share/bison/skeletons/yacc.c", "share/bison/m4sugar/m4sugar.m4"],
 }
 
 
@@ -424,7 +457,7 @@ def layout_problems(prefix):
 def configure_order(sb):
     """the tools in the order their first build step ran"""
     first = {"ninja-configure": "ninja", "cmake-bootstrap": "cmake", "openssl-configure": "openssl", "zstd-make": "zstd",
-             "python-configure": "python", "meson-setup": "pkgconf"}
+             "python-configure": "python", "meson-setup": "pkgconf", "bison-configure": "bison"}
     seen = []
     for who, *_ in sb.steps():
         t = first.get(who) or (who.split(":", 1)[1] if who.startswith("cmake-configure:") else None)
@@ -545,9 +578,9 @@ def main():
             sb = sandbox()
             before = tree_state(sb.sb, skip=("prefix", "work", "logs", "journal"))
             rc, out, err = sb.run(["list"])
-            check("list names the ten tools in build order", rc == 0 and out.split() == TOOLS, out + err)
+            check("list names the eleven tools in build order", rc == 0 and out.split() == TOOLS, out + err)
             rc, out, err = sb.run(["build"] + TOOLS, **poison_env(sb))
-            check("build of all ten tools in a poisoned environment succeeds", rc == 0, out[-1500:] + err[-1500:])
+            check("build of all eleven tools in a poisoned environment succeeds", rc == 0, out[-1500:] + err[-1500:])
             # order and layout
             check("build ran the tools in the order given", configure_order(sb) == TOOLS, configure_order(sb))
             check("the layout build.sh looks in is there", not layout_problems(sb.prefix), layout_problems(sb.prefix))
@@ -752,7 +785,7 @@ def main():
                 script = mutate(s, "checkfail", muts) if muts else None
                 rc, out, err = s.run(["build"] + TOOLS)
                 if rc != 0:
-                    return [f"the build of the ten tools failed: exit {rc}: {err[-500:]}"]
+                    return [f"the build of the eleven tools failed: exit {rc}: {err[-500:]}"]
                 for rel in ("bin/glslangValidator", "llvm/bin/llvm-config"):
                     (s.prefix / rel).unlink()
                     write(s.prefix / rel, "#!/bin/sh\nexit 3\n", 0o755)
@@ -774,10 +807,12 @@ def main():
             # pass; the same lines with another version, or the pinned one inside a longer number, are refused
             real = {"ninja": ("bin/ninja", "1.13.2"), "cmake": ("bin/cmake", "cmake version 4.4.5\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."),
                     "python": ("python/bin/python3.14", "Python 3.14.10"), "pkgconf": ("bin/pkgconf", "2.5.1"),
-                    "glslang": ("bin/glslangValidator", "Glslang Version: 11:16.6.0"), "llvm": ("llvm/bin/llvm-config", "22.1.8")}
+                    "glslang": ("bin/glslangValidator", "Glslang Version: 11:16.6.0"), "llvm": ("llvm/bin/llvm-config", "22.1.8"),
+                    "bison": ("bin/bison", "bison (GNU Bison) 3.8.2\nWritten by Robert Corbett and Richard Stallman.")}
             wrong = {"ninja": ["1.13.20", "1.12.1", "21.13.2"], "cmake": ["cmake version 4.4.50", "cmake version 3.31.6"],
                      "python": ["Python 3.14.1", "Python 3.13.10"], "pkgconf": ["2.5.10", "2.4.3"],
-                     "glslang": ["Glslang Version: 11:16.6.01", "Glslang Version: 11:15.4.0"], "llvm": ["22.1.80", "21.1.8"]}
+                     "glslang": ["Glslang Version: 11:16.6.01", "Glslang Version: 11:15.4.0"], "llvm": ["22.1.80", "21.1.8"],
+                     "bison": ["bison (GNU Bison) 3.8.20", "bison (GNU Bison) 2.3"]}
 
             def answer_as(s, rel, text):
                 """the installed program prints <text> for --version and does what it did for anything else"""
@@ -792,7 +827,7 @@ def main():
                 s = sandbox()
                 rc, out, err = s.run(["build"] + TOOLS)
                 if rc != 0:
-                    return [f"the build of the ten tools failed: exit {rc}: {err[-500:]}"]
+                    return [f"the build of the eleven tools failed: exit {rc}: {err[-500:]}"]
                 probs = []
                 for tool, (rel, line) in real.items():
                     answer_as(s, rel, line)
@@ -807,7 +842,7 @@ def main():
                     answer_as(s, rel, line)
                 return probs
             probs = pinver_problems()
-            check("the checks compare ninja, cmake, Python, pkgconf, glslang and LLVM's --version with the pinned version: "
+            check("the checks compare ninja, cmake, Python, pkgconf, glslang, LLVM and Bison's --version with the pinned version: "
                   "the real lines pass, another version or a longer number is refused", not probs, probs)
             sb = sandbox()
             control("checks that only want an answer", pinver_problems(mutate(sb, "pinver", [('    *[!0-9.]"$want"[!0-9.]*) cnote', '    *) cnote')])))
@@ -1095,7 +1130,7 @@ def main():
             p = sysbin_problems(sb, mutate(sb, "path-helpers", [('"${e[@]}" "$SYSBIN/$1"', '"${e[@]}" "$(command -v "$1")"')]))
             control("a script that looks them up on PATH runs the caller's", p)
             diff = [l for l in sb.script.read_text().splitlines() if l not in text.splitlines()]
-            check("the tested copy differs from build/toolchain.sh only in the SYSBIN line",
+            check("the tested copy differs from build/toolchain.sh only in the SYSBIN line (the m4 bison is built to run follows it)",
                   diff == [f"SYSBIN={sb.sb}/sysbin"], diff)
 
         if arm("mac"):
@@ -1225,6 +1260,150 @@ def main():
             ossl = [r for r in sb.steps() if r[0] == "openssl-configure"]
             check("on Apple silicon OpenSSL gets darwin64-arm64-cc", rc == 0 and bool(ossl) and "darwin64-arm64-cc" in ossl[0][2]
                   and "darwin64-x86_64-cc" not in ossl[0][2], (rc, err[-300:], ossl[:1]))
+
+        if arm("bison"):
+            def bison_problems(sb, script=None):
+                """what is wrong with a build of bison: its configure line, where it ran, the copy's file times, the stamp"""
+                rc, out, err = sb.run(["build", "bison"], script=script, NM_TC_KEEP="1")
+                p = [] if rc == 0 else [f"exit {rc}: {err[-400:]}"]
+                conf = next((r for r in sb.steps() if r[0] == "bison-configure"), None)
+                if not conf:
+                    return p + ["bison's configure did not run"]
+                for a in (f"--prefix={sb.prefix}", "--disable-nls", "--disable-dependency-tracking", "--disable-yacc",
+                          f"M4={sb.sb}/sysbin/m4") + NO_JAVA:
+                    if a not in conf[2]:
+                        p.append(f"configure lacks {a}: {conf[2]}")
+                copy = sb.work / "bison/bison"
+                if conf[1] != str(copy):
+                    p.append(f"configure ran in {conf[1]}, not in a copy of the tree")
+                for f in ("configure.ac", "configure"):
+                    if not (copy / f).exists() or (copy / f).stat().st_mtime != (sb.src / "bison" / f).stat().st_mtime:
+                        p.append(f"the copy's {f} does not keep the time it has in the tarball")
+                log = (sb.logs / "bison.log").read_text() if (sb.logs / "bison.log").exists() else ""
+                if "into C: a pure parser with verbose errors, and its header" not in log:
+                    p.append("the log does not say that the grammar became C")
+                if rc == 0 and sb.stamp("bison") is None:
+                    p.append("bison has no stamp")
+                p += grammar_run_problems(sb, sb.work / "tmp")
+                return p
+
+            NO_JAVA = tuple(f"ac_cv_prog_HAVE_{x}_IN_PATH=" for x in ("JAVAC", "JAVA", "JRE", "GCJ", "JIKES"))
+
+            def grammar_run_problems(sb, tmpdir):
+                """the check's last grammar run was in a new folder of tmpdir, which is gone, and none is left there"""
+                runs = [r for r in sb.records() if r[0] == "bison-run"]
+                if not runs:
+                    return ["the check's grammar did not run"]
+                cwd = runs[-1][1]
+                p = []
+                if os.path.dirname(cwd) != os.path.realpath(str(tmpdir)) or not os.path.basename(cwd).startswith("nm-bison-check."):
+                    p.append(f"the grammar ran in {cwd}, not in a new folder of {tmpdir}")
+                if os.path.exists(cwd):
+                    p.append(f"the check's folder {cwd} is left")
+                left = sorted(str(x) for x in pathlib.Path(tmpdir).glob("nm-bison-check.*"))
+                left += sorted(str(x) for x in sb.prefix.rglob("*nm-check*"))
+                if left:
+                    p.append(f"left behind: {left}")
+                return p
+            sb = sandbox()
+            p = bison_problems(sb)
+            check("bison: configure in a copy of the tarball's tree that keeps its file times, with the prefix, no "
+                  "translations, no dependency tracking, no yacc, SYSBIN's m4 and the Java probes answered; the check's grammar "
+                  "becomes C in a new folder of the work folder's tmp/, which is removed; stamped",
+                  not p, p)
+            for what, muts in (("a copy that does not keep the file times",
+                                [('x cp -RPp "$SRC/bison" "$B/bison"', 'x cp -RP "$SRC/bison" "$B/bison"')]),
+                               ("a configure without the system's m4", [(' "M4=$BISON_M4" ', ' ')]),
+                               ("a configure that builds yacc", [(' --disable-yacc ', ' ')]),
+                               ("a configure that may run javac and java", [(' "${BISON_NO_JAVA[@]}"\n', '\n')]),
+                               ("a check that runs its grammar in the prefix",
+                                [('d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX")', 'd=$P/.nm-toolchain/bison-check; mkdir -p "$d"')])):
+                sb = sandbox()
+                control(f"bison's recipe with {what}", bison_problems(sb, mutate(sb, "bison-recipe", muts)))
+
+            # check alone (no work folder): the grammar runs in the caller's TMPDIR, and the prefix stays as it was
+            def check_alone_problems(script=None):
+                s = sandbox()
+                rc, out, err = s.run(["build", "bison"])
+                if rc != 0:
+                    return [f"build: exit {rc}: {err[-300:]}"]
+                before = tree_state(s.prefix)
+                rc, out, err = s.run(["check", "bison"], script=script, NM_TC_WORK=None, NM_TC_LOGS=None, NM_TC_SRC=None)
+                p = [] if rc == 0 and "bison:\n" in out and "  ok" in out else [f"check: exit {rc}: {out[-300:]} {err[-300:]}"]
+                if "into C: a pure parser with verbose errors" not in out:
+                    p.append("check does not say that the grammar became C")
+                if diff_states(before, tree_state(s.prefix)):
+                    p.append(f"check changed the prefix: {diff_states(before, tree_state(s.prefix))[:5]}")
+                return p + grammar_run_problems(s, s.sb / "tmp")
+            p = check_alone_problems()
+            check("check bison alone runs its grammar in a new folder of the caller's TMPDIR, removes it, and leaves the "
+                  "prefix as it was", not p, p)
+            s0 = sandbox()
+            control("check bison that runs its grammar in the prefix",
+                    check_alone_problems(mutate(s0, "bison-check-prefix", [
+                        ('d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX")', 'd=$P/.nm-toolchain/bison-check; mkdir -p "$d"')])))
+
+            def refused_problems(control_file, words, script=None):
+                """a bison that does not do what the grammar asks: no stamp, exit status not 0, the terminal says why"""
+                s = sandbox()
+                (s.sb / "control" / control_file).write_text("")
+                rc, out, err = s.run(["build", "bison"], script=script)
+                p = [] if rc != 0 and s.stamp("bison") is None else [f"stamped (exit {rc})"]
+                if words not in err:
+                    p.append(f"the terminal does not say {words!r}: {err[-400:]}")
+                return p
+            for cf, words, what in (("bison-23", "refuses a grammar with %define api.pure and %define parse.error verbose",
+                                     "a bison that stops at the first %define, as 2.3 does"),
+                                    ("bison-impure", "into C without a pure parser", "a bison whose C has no pure parser")):
+                p = refused_problems(cf, words)
+                check(f"{what}: no stamp, and the terminal says why", not p, p)
+            sb = sandbox()
+            noparse = '  printf \'%s\\n\' "$BISON_GRAMMAR" > "$d/nm-check.y"\n'
+            control("a check of bison that only asks its version stamps a bison that stops at the first %define",
+                    refused_problems("bison-23", "refuses a grammar", mutate(sb, "bison-noparse", [(noparse, "  return 0\n")])))
+
+            # the check's grammar with the bison of this machine, run as the check runs it: one of 3.0 or newer (Bison
+            # 3.8.2 on a Linux host) must turn it into C with the pure parser and the verbose errors, an older one (Bison
+            # 2.3, macOS's /usr/bin/bison) must refuse it
+            m = re.search(r"^BISON_GRAMMAR='(.*?)'$", REAL_SCRIPT.read_text(), re.S | re.M)
+            grammar = m.group(1) if m else ""
+            check("build/toolchain.sh holds the check's grammar with Mesa's two %define lines",
+                  grammar.startswith("%define api.pure\n") and "\n%define parse.error verbose\n" in grammar, grammar[:200])
+            hosts = [b for b in dict.fromkeys([shutil.which("bison"), "/usr/bin/bison"]) if b and os.access(b, os.X_OK)]
+            if not hosts:
+                print("note: this machine has no bison; the check's grammar was not given to a real one")
+            for i, b in enumerate(hosts):
+                d = tmp / f"realbison{i}"
+                d.mkdir()
+                write(d / "nm-check.y", grammar + "\n")
+                v = subprocess.run([b, "--version"], capture_output=True, text=True).stdout.splitlines()
+                ver = re.search(r"(\d+)\.(\d+)", v[0] if v else "")
+                r = subprocess.run(["env", "-i", b, "-o", "nm-check.c", "--defines=nm-check.h", "-p", "nm_check_", "nm-check.y"],
+                                   cwd=str(d), capture_output=True, text=True)
+                c = (d / "nm-check.c").read_text(errors="replace") if (d / "nm-check.c").exists() else ""
+                made = r.returncode == 0 and "#define YYPURE 1" in c and "yysyntax_error" in c and (d / "nm-check.h").exists()
+                if ver and (int(ver.group(1)), int(ver.group(2))) >= (3, 0):
+                    check(f"{b} ({v[0]}) turns the check's grammar into C with a pure parser and verbose errors", made,
+                          (r.returncode, r.stderr[-300:]))
+                else:
+                    check(f"{b} ({v[0] if v else 'no version'}), older than 3.0, refuses the check's grammar",
+                          r.returncode != 0, (r.returncode, r.stdout[-200:]))
+
+        if arm("ids"):
+            # the ten tools a Mac's toolchain held before bison was added: their stamps end with these ids (an Intel Mac,
+            # MACOSX_DEPLOYMENT_TARGET 15.0, the default), and build.sh rebuilds a tool whose id changed
+            def ids_of(script=None):
+                s = sandbox()
+                return {t: s.run(["id", t], script=script, MACOSX_DEPLOYMENT_TARGET=None)[1].strip() for t in TOOLS}
+            want = {t: f"{t} recipe 2 Darwin-x86_64 macos15.0" for t in TOOLS if t != "bison"}
+            want["bison"] = "bison recipe 1 Darwin-x86_64 macos15.0"
+            got = ids_of()
+            check("the ten tools keep the ids of the toolchain built before bison was added; bison's is its own",
+                  got == want, {t: got.get(t) for t in TOOLS if got.get(t) != want[t]})
+            sb = sandbox()
+            raised = mutate(sb, "llvm-raised", [("llvm) echo 2 ;; bison) echo 1 ;;", "llvm) echo 3 ;; bison) echo 1 ;;")])
+            control("a script that raised LLVM's recipe as it added bison changes LLVM's id",
+                    [t for t, v in ids_of(raised).items() if v != want[t]])
 
         if arm("bash32"):
             # what /bin/bash 3.2 and the BSD userland of macOS do not have

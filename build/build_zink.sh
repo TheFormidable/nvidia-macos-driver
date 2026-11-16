@@ -25,10 +25,27 @@ H=$(cd "$(dirname "$0")/.." && pwd)
 stop() { echo "STOP: $*"; exit 1; }
 MIN=15.0
 AV=-Werror=unguarded-availability-new
+# Mesa 26.3.0's GLSL grammars (src/compiler/glsl/glcpp/glcpp-parse.y:179-180, glsl_parser.yy:86-87) use "%define
+# api.pure" and "%define parse.error verbose", which need Bison 3.0 or newer; macOS's /usr/bin/bison is 2.3 and stops
+# at the first of them. ./build.sh puts the bison it chose first on PATH (build/pins.sh: NM_PIN_TOOL_BISON_MIN).
+BISON_MIN=3.0
+# what to do about it, run by ./build.sh or by hand (build_release_inputs.sh runs this script with its caller's PATH)
+BISON_HOW="put one first on PATH; ./build.sh deps makes <workdir>/tools/bin/bison, which ./build.sh puts first on its steps' PATH"
 want=$(cd "$H/build" && python3 -c 'import prepare_zink; print(prepare_zink.MESA_COMMIT)')
 [ "$COMMIT" = "$want" ] || stop "the pin says Mesa $COMMIT for Zink, build/prepare_zink.py checks against $want"
 git -C "$MESA_GIT" cat-file -e "$COMMIT^{commit}" 2>/dev/null || stop "$MESA_GIT has no commit $COMMIT (./build.sh fetch)"
-for t in meson ninja bison flex xcrun codesign; do command -v "$t" >/dev/null || stop "$t not found"; done
+for t in meson ninja xcrun codesign; do command -v "$t" >/dev/null || stop "$t not found"; done
+# meson takes the first bison and flex on PATH (Mesa's meson.build, find_program): checked here, before meson, so that an
+# old bison stops the build with its reason instead of at Mesa's grammar
+command -v flex >/dev/null || stop "flex not found (macOS's is /usr/bin/flex, with Xcode's command line tools)"
+bison=$(command -v bison || true)
+[ -n "$bison" ] || stop "bison not found: native OpenGL needs Bison $BISON_MIN or newer ($BISON_HOW)"
+bv=$("$bison" --version 2>/dev/null | sed -n '1s/^[^0-9]*\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+[ -n "$bv" ] || stop "$bison does not say which Bison it is (--version); Mesa's grammars need $BISON_MIN or newer ($BISON_HOW)"
+if [ "${bv%%.*}" -lt "${BISON_MIN%%.*}" ] || { [ "${bv%%.*}" -eq "${BISON_MIN%%.*}" ] && [ "${bv#*.}" -lt "${BISON_MIN#*.}" ]; }; then
+  stop "$bison is Bison $bv; Mesa's grammars need $BISON_MIN or newer ($BISON_HOW)"
+fi
+echo "zink: $bison is Bison $bv; flex $(command -v flex)"
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 Z=$OUT/zink; S=$OUT/mesa; B=$OUT/build
 rm -rf "$Z" "$S" "$OUT/NVKZinkGLDriver.bundle" "$OUT/cgl" "$OUT/gld"; mkdir -p "$Z" "$S"
@@ -37,9 +54,9 @@ rm -rf "$Z" "$S" "$OUT/NVKZinkGLDriver.bundle" "$OUT/cgl" "$OUT/gld"; mkdir -p "
 git -C "$MESA_GIT" archive "$COMMIT" | tar -x -C "$S"
 python3 "$H/build/prepare_zink.py" "$S" --git "$MESA_GIT"
 
-# 2. Zink and its frontend. Gallium's GL front end needs bison and flex: Xcode's, since Mesa's grammars keep to what
-# bison 2.3 reads (meson.build). No LLVM, no Vulkan driver, no window system: Zink reaches the GPU through the private
-# Vulkan runtime only.
+# 2. Zink and its frontend. Gallium's GL front end needs bison and flex: the bison checked above (3.0 or newer, which
+# Mesa's grammars need) and macOS's flex. No LLVM, no Vulkan driver, no window system: Zink reaches the GPU through the
+# private Vulkan runtime only.
 args=(-Dbuildtype=release -Db_ndebug=true "-Dc_args=-mmacosx-version-min=$MIN $AV" "-Dcpp_args=-mmacosx-version-min=$MIN $AV"
       -Dc_link_args=-mmacosx-version-min=$MIN -Dcpp_link_args=-mmacosx-version-min=$MIN
       -Dgallium-drivers=zink -Dvulkan-drivers= -Dplatforms= -Degl=disabled -Dglx=disabled -Dgbm=disabled -Dglvnd=disabled
