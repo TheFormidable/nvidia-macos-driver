@@ -451,7 +451,7 @@ atención, en el Mac con el paquete instalado y su driver cargado. Todavía no s
 se ejecutó su prueba de host `tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta
 prueba también el programa.
 
-Hay 133 comprobaciones en seis partes: `install`, `xlate`, `plugin`, `vulkan`, `zink` y `v301`. Las diez de `v301`
+Hay 134 comprobaciones en seis partes: `install`, `xlate`, `plugin`, `vulkan`, `zink` y `v301`. Las diez de `v301`
 (`tools/card/checks_v301.py`) comprueban los cambios de la versión 3.0.1: la subida asíncrona de replaceRegion y la
 traducción en segundo plano de los shaders de un juego, las dos activas por defecto desde la 3.0.1, cada una junto a su
 vuelta atrás (`NVMTL_ASYNC_TEX_UPLOAD=0`, `NVMTL_PRETRANSLATE=0`); shaders, texturas y samplers nuevos usados enseguida
@@ -461,6 +461,17 @@ de la política de boost como la hace NVK. Cada una necesita un archivo que aña
 checkout sin la 3.0.1 cada una se omite y nombra ese archivo, y una comprobación de un valor por defecto también se
 omite cuando `nvrm610.conf` fija ese interruptor. Ninguna de las comprobaciones de la 3.0.1 se ha ejecutado todavía en
 una tarjeta.
+
+Las ocho de `install` (`tools/card/checks_install.py`) no tocan la GPU: seis leen los archivos instalados (cada archivo
+frente al paquete preparado, el bundle de OpenGL que nombra el acelerador, las carpetas de Vulkan nativo y de OpenGL
+nativo, el commit de Mesa con el que se compiló OpenGL nativo y el traductor que abre el plugin de Metal) y dos ejecutan
+las sondas instaladas de OpenGL nativo. La del traductor, `install.plugin-translator`, existe porque el plugin abre el
+`libnvmtl_translate.dylib` que tiene al lado en `NVMTLDriver.bundle/Contents/MacOS` siempre que ese archivo está, y
+`nvmtl/libnvmtl_translate.dylib` solo si no, mientras que las comprobaciones de lectura de `xlate` traducen
+directamente con la copia de `nvmtl/`: un paquete preparado sobre otro más antiguo puede conservar la copia antigua en
+el bundle, y entonces las comprobaciones de Metal prueban otro traductor que las de lectura. Falla cuando la copia que
+abre el plugin no es la misma compilación que la de `nvmtl/` (por su LC_UUID), y da el LC_UUID, el tamaño y el
+principio del SHA-256 de cada copia.
 
 Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que termine:
 

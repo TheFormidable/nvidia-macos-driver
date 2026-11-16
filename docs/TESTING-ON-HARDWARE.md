@@ -426,7 +426,7 @@ plugin and the translator) and of release 3.0.1's own changes in one unattended 
 installed and its driver loaded. It has not yet run on a Mac: it was written, and its host test
 `tools/test_card_selftest.py` run, on Linux only, so its first run on a card is a test of the runner too.
 
-There are 133 checks in six parts: `install`, `xlate`, `plugin`, `vulkan`, `zink` and `v301`. The ten of `v301`
+There are 134 checks in six parts: `install`, `xlate`, `plugin`, `vulkan`, `zink` and `v301`. The ten of `v301`
 (`tools/card/checks_v301.py`) check release 3.0.1's changes: replaceRegion's asynchronous upload and the background
 translation of a game's shaders, both on by default from 3.0.1, each beside its way back (`NVMTL_ASYNC_TEX_UPLOAD=0`,
 `NVMTL_PRETRANSLATE=0`); new shaders, textures and samplers used at once with NVK's own mapped memory where 3.0.1 puts
@@ -434,6 +434,16 @@ it and with `NVK_LOCAL_MAP_SYSMEM=1`; the withdrawal of `VK_EXT_map_memory_place
 memory at once through the native Vulkan runtime; and a read of the boost policy as NVK makes it. Each needs a file
 that release 3.0.1 added, so on a checkout without 3.0.1 each is a skip that names that file, and a check of a default
 also skips when `nvrm610.conf` sets that switch. None of the checks of 3.0.1 has run on a card yet.
+
+The eight of `install` (`tools/card/checks_install.py`) touch no GPU: six read the installed files (every file against
+the staged package, the OpenGL bundle the accelerator names, native Vulkan's and native OpenGL's folders, the Mesa
+commit native OpenGL was built from, and the translator the Metal plugin opens) and two run native OpenGL's installed
+probes. The translator's check, `install.plugin-translator`, is there because the plugin opens the
+`libnvmtl_translate.dylib` beside it in `NVMTLDriver.bundle/Contents/MacOS` whenever that file is there, and
+`nvmtl/libnvmtl_translate.dylib` only otherwise, while the readback checks of `xlate` translate with the `nvmtl/` copy
+directly: a package staged onto an older one can keep the older copy in the bundle, and the Metal checks then test
+another translator than the readback checks. It fails when the copy the plugin opens is not the same build as
+`nvmtl/`'s (by LC_UUID), and gives each copy's LC_UUID, size and SHA-256 prefix.
 
 Start it from the checkout the package was built from, in the background, and wait until it has ended:
 
