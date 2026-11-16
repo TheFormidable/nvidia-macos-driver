@@ -1565,11 +1565,23 @@ void check_memory_and_images()
                       m.memoryTypes[t].propertyFlags);
    info("memory heaps %s", heaps.c_str());
    info("memory types %s", types.c_str());
-   check(!limited_bar(m), "full-bar",
-         format("a DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as large as the largest DEVICE_LOCAL heap (%llu MiB): "
-                "the frontend imports the drawable's VRAM and never takes the host-page path",
-                (unsigned long long)(vram >> 20)),
-         "the frontend's limited-BAR rule (bridge.mm:288-307) holds for this device: it would copy into host pages");
+   // Full BAR: a DEVICE_LOCAL|HOST_VISIBLE type on a heap as large as the largest DEVICE_LOCAL heap. limited_bar() can
+   // also be false without it (no DEVICE_LOCAL heap, or no host-visible system memory), so both are required.
+   bool full = false;
+   const auto local_visible = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+   for (uint32_t t = 0; t < m.memoryTypeCount; ++t)
+      if ((m.memoryTypes[t].propertyFlags & local_visible) == local_visible &&
+          m.memoryTypes[t].heapIndex < m.memoryHeapCount && m.memoryHeaps[m.memoryTypes[t].heapIndex].size >= vram)
+         full = vram > 0;
+   const bool limited = limited_bar(m);
+   check(full && !limited, "full-bar",
+         format("a DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as large as the largest DEVICE_LOCAL heap (%llu MiB), "
+                "so the frontend's limited-BAR rule (bridge.mm:288-307) is false: it imports the drawable's VRAM and "
+                "never takes the host-page path", (unsigned long long)(vram >> 20)),
+         limited ? std::string("the frontend's limited-BAR rule (bridge.mm:288-307) holds for this device: it would "
+                               "copy into host pages")
+                 : format("no DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as large as the largest DEVICE_LOCAL heap "
+                          "(%llu MiB): the BAR does not cover the VRAM", (unsigned long long)(vram >> 20)));
 
    // The Metal plugin loads its own NVK (libvulkan_nouveau.dylib, plugin/nvmtl_vk.c:140) for the Metal device; it is
    // reported, not counted as another driver.
