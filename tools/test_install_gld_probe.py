@@ -33,7 +33,8 @@ arm("the probe runs while a stop still rolls the install back (after INSTALLING=
 arm("the probe runs after the bundle is copied and its permissions are set",
     start > src.find('chmod -R go-w,a+rX "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB"') > 0)
 block = src[start:end + 4] if start > 0 and end > start else ""
-arm("the kexts' new hashes go into macOS's approval record only after the probe block, since a rollback cannot undo it",
+arm("the kexts' new hashes go into macOS's approval record only after the probe block, "
+    "so a refused OpenGL bundle leaves it unchanged",
     src.find("update kext_load_history_v3", end) > end > start
     and src.count("update kext_load_history_v3") == 1 and src.find("KPDB=") > end)
 
