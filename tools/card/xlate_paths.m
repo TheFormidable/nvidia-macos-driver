@@ -196,33 +196,57 @@ static void shape(const char *c, NSString *name, NSArray<NSString *> *markers)
     }
 }
 
-/* Reports whether the plugin's log of this process (NVMTL_LOG_PATH, which the runner sets) holds `needle`. */
-static void log_line_info(const char *c, NSString *needle)
+/* The plugin's log of this process (NVMTL_LOG_PATH, which the runner sets inside the run folder), opened for reading,
+   or NULL: *set says whether the variable names a file at all. Both readers below read it with stdio, one whole line
+   at a time (getline, whatever its length), never as one UTF-8 string: a log line the plugin cut at its buffer's end
+   (nvlog's vsnprintf) may end inside a UTF-8 character, which a whole-file UTF-8 read refuses, and a fixed buffer
+   would take the rest of a long line for a line of its own. */
+static FILE *plugin_log(BOOL *set)
 {
     const char *path = getenv("NVMTL_LOG_PATH");
-    if (!path || !*path) return;
-    NSString *text = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
-    if (!text) { info("%s: the plugin log could not be read", c); return; }
-    info("%s: the plugin log %s '%s'", c, [text rangeOfString:needle].location != NSNotFound ? "has" : "has no",
-         needle.UTF8String);
+    *set = path && *path;
+    return *set ? fopen(path, "r") : NULL;
+}
+
+/* Reports whether a line of the plugin's log of this process holds `needle`. */
+static void log_line_info(const char *c, NSString *needle)
+{
+    BOOL set;
+    FILE *f = plugin_log(&set);
+    if (!set) return;
+    if (!f) { info("%s: the plugin log could not be read", c); return; }
+    const char *want = needle.UTF8String;
+    char *line = NULL;
+    size_t cap = 0;
+    BOOL has = NO;
+    while (!has && getline(&line, &cap, f) >= 0)
+        has = strstr(line, want) != NULL;
+    const BOOL bad = !has && ferror(f);
+    free(line);
+    fclose(f);
+    if (bad) info("%s: the plugin log could not be read", c);
+    else info("%s: the plugin log %s '%s'", c, has ? "has" : "has no", want);
 }
 
 /* Repeats, as "INFO translator: ...", the plugin's line of this process ("pid <pid> NVMTL: " in NVMTL_LOG_PATH) that
    names the translator it opened, "translate: opened <LC_UUID> <path> (cache tag ...)", or the line of a dlopen that
-   failed, "translate: dlopen(...)". The plugin writes it once, at its first translation (plugin/NVMTLLibraryLoad.m,
-   nvmtl_xlate_ready). The file is read with stdio, line by line: a log line the plugin cut at its buffer's end may end
-   inside a UTF-8 character, which a whole-file UTF-8 read would refuse. */
+   failed, "translate: dlopen(<path>): <dlerror>". The plugin writes it once, at its first translation
+   (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready). The dlopen line names nvmtl/'s path (NVMTL_XLATE_LIB), the
+   fallback, whichever copy the plugin tried: when the copy beside the plugin failed to open, only dlerror's text after
+   it names that copy. */
 static void translator_info(void)
 {
-    const char *path = getenv("NVMTL_LOG_PATH");
-    if (!path || !*path) return;
-    FILE *f = fopen(path, "r");
+    BOOL set;
+    FILE *f = plugin_log(&set);
+    if (!set) return;
     if (!f) { info("translator: the plugin log could not be read"); return; }
-    char mine[64], line[4096];
+    char mine[64];
     snprintf(mine, sizeof mine, "pid %d NVMTL: ", (int)getpid());
     const size_t n = strlen(mine);
+    char *line = NULL;
+    size_t cap = 0;
     BOOL found = NO;
-    while (!found && fgets(line, sizeof line, f)) {
+    while (!found && getline(&line, &cap, f) >= 0) {
         if (strncmp(line, mine, n)) continue;
         const char *t = line + n;
         if (strncmp(t, "translate: opened ", 18) && strncmp(t, "translate: dlopen(", 18)) continue;
@@ -230,8 +254,12 @@ static void translator_info(void)
         info("translator: %s", t);
         found = YES;
     }
+    const BOOL bad = !found && ferror(f);
+    free(line);
     fclose(f);
-    if (!found)
+    if (bad)
+        info("translator: the plugin log could not be read");
+    else if (!found)
         info("translator: no 'translate: opened' line of this process in the plugin log (the plugin opens its "
              "translator at its first translation)");
 }
