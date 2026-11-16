@@ -774,7 +774,8 @@ static void case_splat(const char *c)
     if (!in || !out) { setup_fail(c, "buffers"); return; }
     float *v = in.contents;
     for (unsigned i = 0; i < 16; i++) {
-        v[4 * i] = 1.f + (float)i; v[4 * i + 1] = -2.5f * (float)i; v[4 * i + 2] = 0.5f + (float)i / 16.f;
+        // no lane is zero: the library is built with fast math, under which -0 times 0.04f may come back as +0
+        v[4 * i] = 1.f + (float)i; v[4 * i + 1] = -2.5f * (float)(i + 1); v[4 * i + 2] = 0.5f + (float)i / 16.f;
         v[4 * i + 3] = 1000.f - 3.25f * (float)i;
     }
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
