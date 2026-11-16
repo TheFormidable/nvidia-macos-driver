@@ -644,6 +644,17 @@ static uint32_t unorm(float v, uint32_t maximum)
     return round_even((double)fminf(1.f, fmaxf(0.f, v)) * maximum);
 }
 
+/* For information only: the product computed in float (rounded once), then rounded half to even. Metal's conversion
+   rule allows that (within 0.6 of the exact result); the translator's lowering of air.pack.unorm.rgb10a2 aims at the
+   exact product and needs its residual FMA kept whole (NoContraction) for that, so a word that matches this and not
+   unorm() says that the residual was lost. */
+static uint32_t unorm_float_product(float v, uint32_t maximum)
+{
+    if (isnan(v)) v = 0;
+    volatile float product = fminf(1.f, fmaxf(0.f, v)) * (float)maximum;
+    return (uint32_t)rintf(product);
+}
+
 static float half_value(uint16_t bits)
 {
     unsigned exponent = (bits >> 10) & 31, fraction = bits & 1023;
@@ -688,14 +699,23 @@ static void case_pack10(const char *c)
     [enc endEncoding];
     if (!finish(c, cb)) return;
     const uint32_t *o = out.contents;
-    unsigned bad = 0, first = COUNT;
+    unsigned bad = 0, first = COUNT, float_product = 0;
     uint32_t want_first = 0;
     for (unsigned i = 0; i < COUNT; i++) {
         const float *x = &v[4 * i];
         uint32_t want = unorm(x[0], 1023) | unorm(x[1], 1023) << 10 | unorm(x[2], 1023) << 20 | unorm(x[3], 3) << 30;
-        if (o[i] != want) { if (!bad) { first = i; want_first = want; } bad++; }
+        if (o[i] == want) continue;
+        if (!bad) { first = i; want_first = want; }
+        bad++;
+        float_product += o[i] == (unorm_float_product(x[0], 1023) | unorm_float_product(x[1], 1023) << 10
+                                  | unorm_float_product(x[2], 1023) << 20 | unorm_float_product(x[3], 3) << 30);
     }
     BOOL guards = guards_intact(o, COUNT, COUNT + 64);
+    if (bad)
+        info("pack10 rounding: %u of the %u wrong words equal the float product rounded half to even%s", float_product,
+             bad, float_product == bad && intrinsic != 0 ? " (within Metal's 0.6 rule, not the lowering's exact "
+             "product): the residual FMA was split, by a translator without its NoContraction (release 2.9's) or by a "
+             "backend that ignores it" : "");
     if (!bad && guards) {
         pass(c, "%u inputs packed as the exact product rounds half to even", (unsigned)COUNT);
         return;
