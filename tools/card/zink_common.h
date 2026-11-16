@@ -7,7 +7,8 @@
  * ("PASS <case> ...", "FAIL <case>: ...", "INFO ...") and a last line "RESULT pass|fail|skip|inactive <counts>"; the
  * program's own alarm; handlers that turn a crash into "CRASH <signal>" and exit status 70, so that no crash report is
  * written; and a copy of standard error kept in memory, so that the program can read the driver's own lines and tell
- * why a hardware context stayed Apple's. Nothing here writes a file. Not yet run on a Mac. */
+ * why a hardware context stayed Apple's. Nothing here writes a file. The programs that include it have run once, on one
+ * Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package. */
 #ifndef ZINK_COMMON_H
 #define ZINK_COMMON_H
 

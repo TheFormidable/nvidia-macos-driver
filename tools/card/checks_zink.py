@@ -19,7 +19,7 @@ as a smoke row and a number. The migration probe may crash by design of the code
 own process.
 
 Every row builds its own copy of its program into {BIN}/<id>/nvmtltest, the name the plugin always grants a device.
-Not yet run on a Mac."""
+These rows have run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package."""
 
 _CC = ["/usr/bin/xcrun", "clang", "-arch", "x86_64", "-mmacosx-version-min=15.0"]
 _WARN = ["-fobjc-arc", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter"]

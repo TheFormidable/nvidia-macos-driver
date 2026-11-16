@@ -14,7 +14,8 @@
  *     -framework Foundation -framework Metal -framework IOKit -o <run>/bin/<id>/nvmtltest
  * It skips when it runs as root (a set would then be accepted), when the loaded NVRM.kext has no
  * debug.nvrm_boost_policy (a kext older than 3.0.1), and when neither NVAccel nor NVRM is there. It writes no file and
- * opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. Not yet run on a Mac. */
+ * opens no window. Exit 0 pass, 1 a case failed, 2 setup only, 3 skip, 70 crash. It has run once, on one Mac, on macOS
+ * 26.7.3 (25G342) with release 3.0.1's package. */
 #import "plugin_common.h"
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>

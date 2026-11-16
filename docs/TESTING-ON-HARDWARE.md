@@ -423,8 +423,10 @@ send the kernel log of that boot.
 
 `tools/card_selftest.py` runs the card checks of the new parts (native Vulkan, native OpenGL through Zink, the Metal
 plugin and the translator) and of release 3.0.1's own changes in one unattended run, on the Mac with the package
-installed and its driver loaded. It has not yet run on a Mac: it was written, and its host test
-`tools/test_card_selftest.py` run, on Linux only, so its first run on a card is a test of the runner too.
+installed and its driver loaded. It has run once on a card, on macOS 26.7.3 (25G342) with release 3.0.1's package.
+Since then `install.plugin-translator` was added, the `abarray-c` case of `xlate.paths-abarray`, which Apple's compiler
+refused there, was respelled, and `plugin.photobooth-surface`, which did not build there, now links CoreGraphics: these
+have not yet run on a card. Its host test `tools/test_card_selftest.py` has run on Linux only.
 
 There are 134 checks in six parts: `install`, `xlate`, `plugin`, `vulkan`, `zink` and `v301`. The ten of `v301`
 (`tools/card/checks_v301.py`) check release 3.0.1's changes: replaceRegion's asynchronous upload and the background
@@ -433,7 +435,7 @@ translation of a game's shaders, both on by default from 3.0.1, each beside its 
 it and with `NVK_LOCAL_MAP_SYSMEM=1`; the withdrawal of `VK_EXT_map_memory_placed` and threads mapping and freeing
 memory at once through the native Vulkan runtime; and a read of the boost policy as NVK makes it. Each needs a file
 that release 3.0.1 added, so on a checkout without 3.0.1 each is a skip that names that file, and a check of a default
-also skips when `nvrm610.conf` sets that switch. None of the checks of 3.0.1 has run on a card yet.
+also skips when `nvrm610.conf` sets that switch. All ten ran in that run.
 
 The eight of `install` (`tools/card/checks_install.py`) touch no GPU: six read the installed files (every file against
 the staged package, the OpenGL bundle the accelerator names, native Vulkan's and native OpenGL's folders, the Mesa

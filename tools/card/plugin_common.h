@@ -5,7 +5,8 @@
  * lines with the exit code they give (0 pass, 1 a case failed, 2 only setup failed, 3 skip), reads of the driver's
  * texture fields by name (no header of the plugin is included), and the lines this process wrote to the driver's own
  * log. The log is the file NVMTL_LOG_PATH names, which the card runner puts in its run folder; it is read, never
- * written. Not yet run on a Mac. */
+ * written. The programs that include it have run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's
+ * package. */
 #ifndef PLUGIN_COMMON_H
 #define PLUGIN_COMMON_H
 #import <Foundation/Foundation.h>
