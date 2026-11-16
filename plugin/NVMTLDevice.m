@@ -3069,7 +3069,8 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
 - (id<MTLSharedEvent>)newSharedEvent { NVMTLSharedEvent *e = [NVMTLSharedEvent new]; e->_dev = self; return e; }
 - (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier2; }
 // Whether this process is a game, by what macOS's own Game Mode daemon reads from the app's Info.plist: the games category, or
-// LSSupportsGameMode. Used only by the opt-in Game Mode GPU priority (nvmtl_game_priority.h).
+// LSSupportsGameMode. Used by the opt-in Game Mode GPU priority (nvmtl_game_priority.h) and, from 3.0.1, to turn
+// shader pre-translation on by default in a game (nvmtl_pretranslate_on in NVMTLLibraryLoad.m).
 int nvmtl_process_is_game(void)
 {
     NSDictionary *info = [[NSBundle mainBundle] infoDictionary];

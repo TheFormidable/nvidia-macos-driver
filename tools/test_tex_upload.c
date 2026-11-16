@@ -108,6 +108,29 @@ int main(void) {
       CHECK(im.gpu_copying == 1, "sampling left the upload in flight (no CPU wait forced)");
       op_destroy(&im); }
 
+    // two threads upload to one image at once: both found no handle and submitted. The second store must hand the
+    // first handle back so that it is finished; otherwise that copy leaks and runs on after the image is freed.
+    { nvmtl_up_state s = {0}; uint64_t ff1 = 1, ff2 = 1;
+      nvmtl_up_before_upload(&s, 1, &ff1); nvmtl_up_before_upload(&s, 1, &ff2);
+      CHECK(ff1 == 0 && ff2 == 0, "both racing uploads found no handle to finish first");
+      int live = 2;                                   // both copies are in flight
+      if (nvmtl_up_set(&s, 11) == 11) live--;          // nothing to hand back yet
+      if (nvmtl_up_set(&s, 12) == 11) live--;          // the first thread's handle comes back and is finished
+      if (nvmtl_up_before_consume(&s) == 12) live--;   // destroy finishes the one that is stored
+      nvmtl_up_clear(&s);
+      CHECK(live == 0, "no racing upload is lost: every submitted copy is finished"); }
+
+    // the room rule for what pending uploads hold (both limits, the edges, and no wrap-around)
+    { const uint64_t M = NVMTL_UP_HELD_BYTES_MAX;
+      CHECK(nvmtl_up_room(0, 0, 4096), "an empty process has room");
+      CHECK(nvmtl_up_room(NVMTL_UP_HELD_MAX - 1, 0, 1), "the last upload under the count limit fits");
+      CHECK(!nvmtl_up_room(NVMTL_UP_HELD_MAX, 0, 1), "the count limit holds even for a tiny upload");
+      CHECK(nvmtl_up_room(1, M - 4096, 4096), "an upload that ends exactly at the byte limit fits");
+      CHECK(!nvmtl_up_room(1, M - 4096, 4097), "one byte past the byte limit does not");
+      CHECK(nvmtl_up_room(0, 0, M) && !nvmtl_up_room(0, 0, M + 1), "one upload bigger than the limit goes synchronous");
+      CHECK(!nvmtl_up_room(1, 16, UINT64_MAX - 8), "a sum that would wrap is refused");
+      CHECK(!nvmtl_up_room(1, M + 1, 0), "nothing fits once the bytes held are past the limit"); }
+
     printf(g_pass ? "real design: all arms pass\n" : "real design: ARMS FAILED\n");
     int real_ok = g_pass;
 

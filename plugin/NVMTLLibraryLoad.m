@@ -1283,7 +1283,7 @@ static nvmtl_pool *nvmtl_pre_pool(void) {
     static nvmtl_pool pool; static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *t = getenv("NVMTL_PRETRANSLATE_THREADS"); int n = t ? atoi(t) : 2;
-        nvmtl_pool_init(&pool, n < 1 ? 1 : n > 4 ? 4 : n, 1);
+        nvmtl_pool_init(&pool, n < 1 ? 1 : n > 4 ? 4 : n, 1);   // low_qos: utility workers (nvmtl_pretranslate.h)
     });
     return &pool;
 }
@@ -1322,19 +1322,29 @@ static int nvmtl_pretranslate_on(void) {
     });
     return on;
 }
+// A queued job keeps its library alive. A game that makes thousands of libraries would keep every one it has released,
+// with its AIR and its LLVM text, until a worker reaches its jobs, so at most this many jobs wait. A job past the bound
+// is not queued: it is counted as skipped, and its shader is translated when it is first asked for, as in 3.0.
+#define NVMTL_PRE_QUEUED_MAX 512
 void nvmtl_pretranslate_library(NVMTLLibrary *lib) {
     if (!lib || !lib->_fns.count || !lib->_airs || !nvmtl_pretranslate_on() || !nvmtl_xlate_ready()) return;
-    unsigned long n = 0;
+    unsigned long n = 0, refused = 0;
     for (NSString *name in lib->_fns) {
         nvmtl_pre_job *j = malloc(sizeof *j); if (!j) break;
         j->lib = (void *)CFBridgingRetain(lib); j->name = (void *)CFBridgingRetain(name);
         atomic_fetch_add(&gPreQueued, 1);
-        if (nvmtl_pool_submit(nvmtl_pre_pool(), nvmtl_pre_run, j)) {
-            atomic_fetch_sub(&gPreQueued, 1); CFRelease(j->lib); CFRelease(j->name); free(j); break;
+        const int rc = nvmtl_pool_submit_bounded(nvmtl_pre_pool(), nvmtl_pre_run, j, NVMTL_PRE_QUEUED_MAX);
+        if (rc) {
+            atomic_fetch_sub(&gPreQueued, 1); CFRelease(j->lib); CFRelease(j->name); free(j);
+            if (rc != NVMTL_POOL_FULL) break;
+            atomic_fetch_add(&gPreSkipped, 1); refused++;
+            continue;
         }
         n++;
     }
-    nvlog("pretranslate: library of %lu entry points queued for background translation", n);
+    if (refused) nvlog("pretranslate: library of %lu entry points queued for background translation, %lu left to be "
+                       "translated when asked for (%d jobs already wait)", n, refused, NVMTL_PRE_QUEUED_MAX);
+    else nvlog("pretranslate: library of %lu entry points queued for background translation", n);
 }
 
 NSDictionary<NSString *, NSData *> *nvmtl_index_metallib_uncached(NSData *lib, NSDictionary **stageOut, NSDictionary **airOut, NSMutableArray *rec)
