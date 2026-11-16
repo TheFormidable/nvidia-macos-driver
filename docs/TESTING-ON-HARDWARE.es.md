@@ -450,7 +450,7 @@ con Zink, el plugin de Metal y el traductor) en una sola pasada sin atención, e
 driver cargado. Todavía no se ha ejecutado en un Mac: se escribió, y se ejecutó su prueba de host
 `tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta prueba también el programa.
 
-Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que su carpeta tenga `DONE`:
+Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que termine:
 
 ```
 mkdir -p ~/nullmoth-claude/cardtest
@@ -459,11 +459,13 @@ cd ~/nullmoth-claude/src
   > ~/nullmoth-claude/cardtest/run1.txt 2>&1 &
 ```
 
-La primera línea de `DONE` es el código de salida; `report.md`, a su lado, es la respuesta. `--list` muestra cada
-comprobación y no compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y
-muestra qué se compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que
-abren una ventana; `--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del
-paquete instalado cuando no es el de por defecto.
+Su carpeta tiene entonces `DONE`, cuya primera línea es el código de salida, y `report.md`, a su lado, es la respuesta.
+Solo un rechazo antes de crear la carpeta (una carpeta de salida o un archivo de comprobaciones equivocados, salida 3) o
+una opción equivocada (salida 2) no deja `DONE`; lo dice el archivo de salida. `--list` muestra cada comprobación y no
+compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y muestra qué se
+compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que abren una ventana;
+`--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del paquete instalado
+cuando no es el de por defecto.
 
 Antes de compilar ninguna comprobación rechaza la pasada (salida 3) salvo que la carpeta de salida esté dentro de
 `~/nullmoth-claude`, fuera de `src` y de `build2`, vacía o inexistente y con 2 GB libres; el checkout esté limpio y sus
@@ -483,12 +485,13 @@ de las cachés de shaders, informes de fallo de los programas que ejecutó.
 
 Código de salida: 0 pasó cada comprobación que se ejecutó (las omitidas y las inactivas aparecen con su motivo); 1 una
 comprobación falló, se quedó sin tiempo, se cayó, no se pudo parar o no compiló; 2 una opción equivocada; 3 rechazada; 4
-parada antes de tiempo (también si antes falló una comprobación). Cada comprobación tiene un límite de tiempo. Una
-comprobación que sigue viva 15 s después de matarla en su límite, una comprobación de GPU que se quedó sin tiempo, una
-subida de `debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state` o un proceso de WindowServer nuevo paran
-todas las comprobaciones de GPU que vienen después; una subida de `debug.nvrm_xid_count` hace fallar la comprobación en
-la que ocurrió. Pasados 40 minutos no empieza nada nuevo. Una comprobación que no se arrancó aparece como "not run" con
-el motivo.
+parada antes de tiempo (también si antes falló una comprobación, si se interrumpió o si falló el propio programa). Cada
+comprobación tiene un límite de tiempo. Una comprobación con un proceso que sigue vivo 15 s después de matar su grupo de
+procesos (en su límite o al terminar), una comprobación de GPU que se quedó sin tiempo, una subida de
+`debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state` o un proceso de WindowServer nuevo paran todas las
+comprobaciones de GPU que vienen después; una subida de `debug.nvrm_xid_count` hace fallar la comprobación en la que
+ocurrió. Pasados 40 minutos (`--deadline`) no empieza nada nuevo. Una comprobación que no se arrancó aparece como "not
+run" con el motivo.
 
 Nunca usa sudo; no instala, carga ni copia nada en `/Library` ni en `/System`; no cambia ningún ajuste (ni
 `nvrm610.conf`, ni `defaults`, ni un argumento de arranque); no ejecuta `nvram`, `csrutil`, `bless`, `kmutil`,

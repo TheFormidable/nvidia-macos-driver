@@ -426,7 +426,7 @@ plugin and the translator) in one unattended run, on the Mac with the package in
 not yet run on a Mac: it was written, and its host test `tools/test_card_selftest.py` run, on Linux only, so its first
 run on a card is a test of the runner too.
 
-Start it from the checkout the package was built from, in the background, and wait until its folder holds `DONE`:
+Start it from the checkout the package was built from, in the background, and wait until it has ended:
 
 ```
 mkdir -p ~/nullmoth-claude/cardtest
@@ -435,10 +435,12 @@ cd ~/nullmoth-claude/src
   > ~/nullmoth-claude/cardtest/run1.txt 2>&1 &
 ```
 
-The first line of `DONE` is the exit status; `report.md` beside it is the answer. `--list` prints every check and builds
-nothing; `--plan` looks at the conditions of the next paragraph, all but the Metal probe, and prints what would be built
-and run, with no GPU program; `--no-window` leaves out the checks that open a window; `--only REGEX` runs only the
-checks whose id matches; `--expect COMMIT` names the commit of the installed package when it is not the default one.
+Its folder then holds `DONE`, whose first line is the exit status, and `report.md` beside it is the answer. Only a
+refusal before the folder is made (a wrong out folder or check file, exit 3) or a wrong option (exit 2) leaves no
+`DONE`; the output file says why. `--list` prints every check and builds nothing; `--plan` looks at the conditions of
+the next paragraph, all but the Metal probe, and prints what would be built and run, with no GPU program; `--no-window`
+leaves out the checks that open a window; `--only REGEX` runs only the checks whose id matches; `--expect COMMIT` names
+the commit of the installed package when it is not the default one.
 
 Before any check is built it refuses the run (exit 3) unless the out folder lies inside `~/nullmoth-claude`, outside
 `src` and `build2`, is empty or absent and has 2 GB free; the checkout is clean and its driver sources are those of the
@@ -457,11 +459,11 @@ becomes `~`, the account name `<user>`, the host name `<host>` and the user temp
 
 Exit status: 0 every check that ran passed (the skipped and inactive ones are listed with their reason); 1 a check
 failed, ran out of time, crashed, could not be stopped or did not build; 2 a wrong option; 3 refused; 4 stopped early
-(also when a check failed before the stop). Every check has a time limit. A check still alive 15 s after it was killed
-at its limit, a GPU check that ran out of time, a rise of `debug.nvrm_chan_gave_up`, a change of
-`debug.nvrm_fence_state` or a new WindowServer process stops every later GPU check; a rise of `debug.nvrm_xid_count`
-fails the check it happened in. After 40 minutes nothing new starts. A check that was not started is listed as "not run"
-with the reason.
+(also when a check failed before the stop, when it was interrupted or when the runner itself failed). Every check has a
+time limit. A check with a process still alive 15 s after its process group was killed (at its limit, or when it ended),
+a GPU check that ran out of time, a rise of `debug.nvrm_chan_gave_up`, a change of `debug.nvrm_fence_state` or a new
+WindowServer process stops every later GPU check; a rise of `debug.nvrm_xid_count` fails the check it happened in. After
+40 minutes (`--deadline`) nothing new starts. A check that was not started is listed as "not run" with the reason.
 
 It never uses sudo; installs, loads or copies nothing into `/Library` or `/System`; changes no setting (not
 `nvrm610.conf`, not `defaults`, not a boot argument); runs none of `nvram`, `csrutil`, `bless`, `kmutil`,
