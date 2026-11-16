@@ -3,8 +3,10 @@
 ## 3.0.1
 
 **Not released.** This section describes the branch being prepared as 3.0.1, on top of the 3.0 branch below (`fable` at
-9f85871b). Nothing of it has run on an NVIDIA card or on a Mac yet: it was compiled and its host tests were run on Linux
-only.
+9f85871b). A package built from b80056ef, before the fix in "Metal apps get this build's shader translator" below, has
+been installed on one Mac with an RTX 5050 (macOS 26.7.3), and card checks were run on it there; the fault that entry
+fixes was found from them. Nothing committed after b80056ef has run on a card or on a Mac: it was compiled and its host
+tests were run on Linux only.
 
 ### Fixes and changes
 
@@ -151,8 +153,9 @@ only.
   These four entries were compiled on Linux only; nothing in them has run on a card.
 - **Metal apps get this build's shader translator.** The Metal plugin opens the `libnvmtl_translate.dylib` beside it
   in `NVMTLDriver.bundle` whenever there is one, and the one in `nvmtl/` only when there is none. Release 2.9, the
-  package `./build.sh package` starts from, carries its translator beside the plugin, and the 3.0 and 3.0.1 packages
-  put this build's in `nvmtl/` only: Metal apps translated with release 2.9's translator, so none of the translator's
+  package `./build.sh package` starts from, carries its translator beside the plugin, and the packages built from the
+  3.0 branch, and those built from this branch up to b80056ef (which record version 3.0.1 like the fixed ones), put
+  this build's in `nvmtl/` only: Metal apps translated with release 2.9's translator, so none of the translator's
   repairs since 2.9 reached them. The package now puts this build's translator beside the plugin too, and the package
   step stops when the two copies are not the same build. Shaders cached with 2.9's translator are translated again
   once: the name of each shader cache entry carries the SHA-256 of the translator file that made it.
