@@ -161,8 +161,10 @@ CHECKS = [
          "plugin_pb_orientation.m", ["Foundation", "Metal", "QuartzCore", "CoreImage", "CoreGraphics"], 90,
          [r"^PASS drawable-equals-offscreen "],
          info=[r"^INFO drawable"]),
+    # CoreGraphics for CGPointZero (the probe's atPoint:), a symbol CoreGraphics exports; its header's build line
+    # leaves it out, and the link fails without it
     _row("plugin.photobooth-surface", 340, _PB_TITLE,
-         "tools/photobooth_surface_probe.m", ["Foundation", "Metal", "CoreImage", "IOSurface"], 150,
+         "tools/photobooth_surface_probe.m", ["Foundation", "Metal", "CoreImage", "IOSurface", "CoreGraphics"], 150,
          [r"^PASS: 32 Core Image frames, repeated wrappers, shared/private backing and every readback pixel$"], _OLD_RC,
          argv=["/bin/sh", "-c", _PB_WRAP, "photobooth-surface", "{BIN}/plugin.photobooth-surface/nvmtltest"],
          info=[r"^INFO driver: item 7: ", r"^(read|unknown) (BGRA|RGBA) (shared|private/cache) usage="]),
