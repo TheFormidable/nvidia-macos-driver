@@ -26,6 +26,7 @@
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_switch_defaults.h"
+#include "nvmtl_ws_capture.h"
 #include "nvmtl_fetch_copy.h"
 #include "nvmtl_cmd_refusal.h"
 #include "nvmtl_loss.h"
@@ -8861,6 +8862,16 @@ static int nvmtl_prologue_on(void)
     }
     return on;
 }
+// NVMTL_SURFIN_ZERO as NVMTLObjects.m reads it (nvmtl_ws_capture.h). Where it is off (every process but WindowServer,
+// NVMTL_SURFIN_ZERO=0, or the prologue off), a prologue whose End failed is dropped under the submit mutex with no
+// redo, as in 3.0.
+static int nvmtl_vk_surfin_zero_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = nvmtl_surfin_zero_switch(getenv("NVMTL_SURFIN_ZERO"), getenv("NVMTL_PRESUBMIT_PROLOGUE"), getprogname());
+    return on;
+}
 int nvmtl_vk_pre_open(void)
 {
     nvmtl_prologue *p = g_pre_cur;
@@ -8992,6 +9003,7 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     const uint64_t sC = nvmtl_perf_now();
     if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); nvmtl_image_grace_reap(); return -1; }
     nvmtl_prologue *const pre = &f->pre;
+    void *lost_hold[sizeof pre->hold / sizeof pre->hold[0]]; unsigned nlost = 0; int lost_redo = 0;   // see below
     pthread_mutex_lock(&nvmtl_submit_mutex);
     if (pro && nvmtl_pre_submit_hook) {
         nvmtl_prologue *const up = g_pre_cur; g_pre_cur = pre;
@@ -9009,9 +9021,27 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
             pr = pvkEndCommandBuffer(pre->cb.cb);
         }
         if (pre->n && pr == VK_SUCCESS) cbs[ncb++] = pre->cb.cb;
-        else {
-            if (pre->n) { g_pre_fail++; nvlog("vk: pre-submit prologue End -> %d - %u uploads/fills (%llu bytes) LOST, the GPU keeps the old bytes", pr, pre->n, pre->bytes); }
+        else if (!nvmtl_vk_surfin_zero_on()) {
+            // as in 3.0: the holds are released here, the managed ranges they carried are not marked again
+            if (pre->n) { g_pre_fail++; nvlog("vk: pre-submit prologue End -> %d - %u uploads/fills (%llu bytes) LOST, "
+                                              "the GPU keeps the old bytes", pr, pre->n, pre->bytes); }
             nvmtl_cmd_retire(&pre->cb); nvmtl_pre_drop(pre); pre->begun = 0;
+        } else {
+            // NVMTL_SURFIN_ZERO on (WindowServer): the End failed, nothing of the prologue runs. Its holds go to the
+            // redo hook, as a dropped prologue's do in submit_finish (managed ranges marked dirty again, a texture that
+            // owed a zero fill decides again at its next surface-in), and are released after the submit mutex: a hold
+            // can be the last reference to a texture, whose release frees its surface. The command buffer submitted
+            // below still runs without the fills: a surface it reads that was owed one shows what its VRAM held.
+            if (pre->n) {
+                g_pre_fail++;
+                nvlog("vk: pre-submit prologue End -> %d - %u uploads/fills (%llu bytes) LOST: managed uploads are "
+                      "marked to be made again, surfaces owed a zero fill decide again at their next use, a new "
+                      "buffer's zero fill is not made again", pr, pre->n, pre->bytes);
+                lost_redo = 1;
+            }
+            for (unsigned i = 0; i < pre->nhold; i++) lost_hold[nlost++] = pre->hold[i];
+            pre->nhold = 0;
+            nvmtl_cmd_retire(&pre->cb); pre->begun = 0;
         }
     }
     cbs[ncb++] = c->cb;
@@ -9026,6 +9056,10 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
        queue inside this submit: they end here too, under its sequence. */
     c->fx_seq = nvmtl_life_submit(c, pre->begun ? &pre->cb : NULL, counter_reset ? nvmtl_counter_reset_record(c) : NULL);
     pthread_mutex_unlock(&nvmtl_submit_mutex);
+    for (unsigned i = 0; i < nlost; i++) {
+        if (lost_hold[i] && lost_redo && nvmtl_pre_redo_hook) nvmtl_pre_redo_hook(lost_hold[i]);
+        if (lost_hold[i] && nvmtl_pre_release_hook) nvmtl_pre_release_hook(lost_hold[i]);
+    }
     pt[4] = nvmtl_perf_now();
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
     if (pre->begun) for (nvmtl_address_page *pg = pre->cb.address_pages; pg; pg = pg->next) nvmtl_pl_stamp(&pg->life, c->fx_seq);
@@ -9182,13 +9216,16 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         pre->cb.wseq = c->wseq; nvmtl_cmd_retire(&pre->cb);
         if (dropped && (pre->copies || pre->fills)) {
             // The prologue rode the dropped submission. Its managed ranges are marked dirty again (the next submit uploads
-            // them from the CPU copy); its zero fills are not redone: a later submit may already have written those buffers.
+            // them from the CPU copy); a texture whose zero fill rode it (NVMTL_SURFIN_ZERO) is marked to decide
+            // again at its next surface-in (scan, fill or upload); the zero fills of new buffers are not redone: a
+            // later submit may already have written those buffers.
             static _Atomic unsigned long long lostpre;
             const unsigned long long n = atomic_fetch_add(&lostpre, 1) + 1;
             for (unsigned i = 0; nvmtl_pre_redo_hook && i < pre->nhold; i++) if (pre->hold[i]) nvmtl_pre_redo_hook(pre->hold[i]);
             if (nvmtl_drop_log_due(n))
                 nvlog("vk: after a GPU fault, %u managed uploads and %u zero fills rode a dropped command buffer (%llu such so far in %s) - "
-                      "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held",
+                      "the uploads are marked to be made again at the next submit, surfaces owed a zero fill decide "
+                      "again at their next use, the zero-filled new buffers hold what VRAM held",
                       pre->copies, pre->fills, n, getprogname());
         }
         nvmtl_pre_drop(pre);
@@ -9202,12 +9239,80 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     nvmtl_perf_submit(perf_sets, pt);
     // -1 is "retired with an error": Metal completes the command buffer with an error and nothing is quarantined, and an
     // upload that was dropped is not taken as done (a caller that acts on -1, and the prologue's managed uploads above;
-    // the prologue's zero fills are not made again). Never -2: the device is up and the next command buffer runs.
+    // the zero fills of new buffers are not made again, a surface owed one decides again). Never -2: the device is up
+    // and the next command buffer runs.
     return nvmtl_drop_result(dropped, nvmtl_drop_report_on());
 }
 
 static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b);
 static __thread int t_grace_reaping;   /* set while the grace reap destroys: the death was recorded at the app's free */
+
+// NVMTL_WS_FREE_OFFMAIN (on in WindowServer only, nvmtl_ws_capture.h; NVMTL_WS_FREE_OFFMAIN=0 in the settings file
+// frees on the releasing thread, as in 3.0). When Core Animation drops a texture over a surface in the family's VRAM,
+// its dealloc destroyed the import here, and when no submit in flight could still read it (the `now` case below) the
+// RM frees ran on WindowServer's main thread: 12-13 of the 16 RM-free samples of a captured frame in the pre-fix
+// spindump, about 1.2 ms per frame. Such a free now goes to a serial queue of its own. GPU safety is the `now` case's:
+// every submitted command buffer has completed and the texture is dead, so nothing new can name the buffer; doing the
+// free later keeps both true. The order "surface released, then RM duplicate freed" is not new: a graced free (not
+// `now`) already runs in the reaper after the texture's dealloc has released the surface (NVMTLObjects.m dealloc,
+// nvmtl_buffer_grace_reap). Only a family VRAM import is moved (no CPU map, not pooled, not placed; alloc 0, so the
+// allocation and budget counters are not touched): a host-pointer import keeps the surface's user pages wired and is
+// freed where it was. The queue holds at most NVMTL_FREE_OFFMAIN_CAP bytes; past that a free runs inline, as before.
+// The death is recorded in the live-range table on the releasing thread, before the enqueue, so a fault report names
+// the sequence of the app's free and not the later one of the queue. Nothing waits for the queue.
+#define NVMTL_FREE_OFFMAIN_CAP (64ull << 20)
+static _Atomic uint64_t g_free_pending_b, g_free_moved, g_free_inline, g_free_peak;
+static int nvmtl_ws_free_offmain_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_WS_FREE_OFFMAIN");
+        on = nvmtl_ws_capture_switch(e, getprogname());
+        nvlog("vk: off-main frees of dead VRAM imports %s (NVMTL_WS_FREE_OFFMAIN=%s, WindowServer only)",
+              on ? "ON" : "OFF", e ? e : "unset");
+    }
+    return on;
+}
+static void nvmtl_free_offmain_run(void *p)
+{
+    nvmtl_bgrace *g = p;
+    const uint64_t sz = g->b.size;
+    t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0;
+    free(g);
+    atomic_fetch_sub(&g_free_pending_b, sz);
+}
+// 1: g's free was queued (g is the queue's now); 0: the caller frees it as before.
+static int nvmtl_ws_free_offmain(nvmtl_bgrace *g)
+{
+    if (!nvmtl_ws_free_offmain_on()) return 0;
+    const uint64_t sz = g->b.size;
+    const uint64_t pend = atomic_fetch_add(&g_free_pending_b, sz);
+    const int ok = nvmtl_free_offmain_ok(1, g->b.imported, g->b.map != NULL, g->b.pool != NULL, g->b.placed,
+                                         g->b.bind_lost, pend, sz, NVMTL_FREE_OFFMAIN_CAP);
+    if (ok <= 0) {
+        atomic_fetch_sub(&g_free_pending_b, sz);
+        if (ok < 0) atomic_fetch_add(&g_free_inline, 1);
+        return 0;
+    }
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_attr_t a =
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+        q = dispatch_queue_create("com.nullmoth.nvmtl.vram-free", a); });
+    if (!q) { atomic_fetch_sub(&g_free_pending_b, sz); return 0; }
+    nvmtl_live_remove(&g->b);
+    uint64_t peak = atomic_load(&g_free_peak);
+    while (pend + sz > peak && !atomic_compare_exchange_weak(&g_free_peak, &peak, pend + sz)) {}
+    const uint64_t n = atomic_fetch_add(&g_free_moved, 1) + 1;
+    if (n == 1 || (n & 0xFFF) == 0)
+        nvlog("vk: ws off-main frees: %llu moved off the releasing thread, %llu kept inline by the %llu MB cap, "
+              "largest backlog %llu KB", (unsigned long long)n, (unsigned long long)atomic_load(&g_free_inline),
+              (unsigned long long)(NVMTL_FREE_OFFMAIN_CAP >> 20),
+              (unsigned long long)(atomic_load(&g_free_peak) >> 10));
+    dispatch_async_f(q, g, nvmtl_free_offmain_run);
+    return 1;
+}
+
 void nvmtl_vk_buffer_destroy(nvk_buffer *b)
 {
     const uint64_t t0 = nvmtl_perf_now();
@@ -9222,6 +9327,7 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
             pthread_mutex_lock(&g_bg_lock); nvmtl_pl_made(&g_bg);
             const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
             pthread_mutex_unlock(&g_bg_lock);
+            if (now && nvmtl_ws_free_offmain(g)) { nvmtl_perf_note(NVP_BUFDEL, t0, n); return; }
             if (now) { t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0; free(g); }
             nvmtl_perf_note(NVP_BUFDEL, t0, n);
             return;
@@ -9247,7 +9353,9 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
     // Noted BEFORE the unmap below clears b->map: only a private buffer was ever charged to the
     // in-flight budget (`if (!host_visible) nvmtl_vk_budget_charge`), and BAR1 buffers are not charged.
     const int was_charged = b->map == NULL && !b->bar1;
-    g_buf_gone++;
+    // Atomic, and the allocation counters below are not written for a buffer with no allocation of its own (an import,
+    // alloc 0): this body also runs on the reaper's thread and on the NVMTL_WS_FREE_OFFMAIN queue.
+    __atomic_add_fetch(&g_buf_gone, 1, __ATOMIC_RELAXED);
     if (!t_grace_reaping) nvmtl_fx_note_buffer_gone(b, (b->pool ? NVMTL_FX_POOLED : 0) | (b->placed ? NVMTL_FX_PLACED : 0));
     nvmtl_live_remove(b);
     pvkDestroyBuffer(g_dev, (VkBuffer)b->buf, NULL);
@@ -9264,8 +9372,10 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
         memset(b, 0, sizeof *b);
         return;
     }
-    if (!b->placed && b->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL); g_alloc_bytes -= b->alloc;
-                                if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
+    if (!b->placed && b->mem) {
+        pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
+        if (b->alloc) { g_alloc_bytes -= b->alloc; if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
+    }
     memset(b, 0, sizeof *b);
 }
 

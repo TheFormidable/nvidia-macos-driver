@@ -324,9 +324,11 @@ RULE_CASES = [
     ("vk: vkCreateDevice -> -8", 1),
     ("vk: a channel rebuild dropped this command buffer; fault context follows", 1),
     ("vk: after a GPU fault, 3 managed uploads and 1 zero fills rode a dropped command buffer (1 such so far in WindowServer) - "
-     "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held", 1),
+     "the uploads are marked to be made again at the next submit, surfaces owed a zero fill decide again at their next "
+     "use, the zero-filled new buffers hold what VRAM held", 1),
     ("vk: 3 managed uploads and 1 zero fills rode a dropped command buffer (1 such so far in WindowServer) - "
-     "the uploads are marked to be made again at the next submit, the zero-filled buffers hold what VRAM held", 0),
+     "the uploads are marked to be made again at the next submit, surfaces owed a zero fill decide again at their next "
+     "use, the zero-filled new buffers hold what VRAM held", 0),
     ("vk: initialized successfully", 0),
     ('vk: NVK messages ON: its own warnings and errors land here as "nvk-reason:"', 0),
 ]

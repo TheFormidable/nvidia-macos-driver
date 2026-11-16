@@ -131,6 +131,7 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 }
 @interface NVMTLTexture : NSObject {
 @public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn, _surfSynced, _clientWritten; void *_hostPages;
+    int _zeroLost; BOOL _zeroTried;   // NVMTL_SURFIN_ZERO: tools/test_surfin_zero.py drives it; here it never answers
     uint32_t _surfSeed, _surfGen; NSUInteger _plane; Image _i, _surfaceLinear; void *_q;
     IOSurfaceRef _y422Surf;   // NULL: not a 4:2:2 texture
 }
@@ -140,6 +141,10 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) {
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
 @end
+// the all-zero surface-in (NVMTL_SURFIN_ZERO, outside the lifted stretch) always says "upload", so every arm here runs
+// the upload path it checks; tools/test_surfin_zero.py lifts the real one
+@class NVMTLTexture;
+static int nvmtl_surfin_zero_try(NVMTLTexture *r, const void *b, size_t row) { (void)r; (void)b; (void)row; return 0; }
 @implementation NVMTLTexture
 - (BOOL)nvmtlSurfaceCopyable { return YES; }
 - (void)nvmtlY422SurfaceIn { assert(!"a non-4:2:2 texture took the 4:2:2 path"); }
