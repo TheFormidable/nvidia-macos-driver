@@ -100,7 +100,8 @@ int main(void) {
 
 
 def control_body(current):
-    """The function with an empty or missing modifier list answering 0, as the reviewed head had it."""
+    """The function with an empty or missing modifier list answering 0, as an earlier version of
+    nvmtl_vk_buffer_tiling_features had it."""
     body = current.replace('if (!listed) {', 'if (!listed && !modifier) {', 1)
     return body if body != current else None
 
