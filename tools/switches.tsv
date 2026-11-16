@@ -146,7 +146,7 @@ env	NVK_HOST_IMPORT	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_QUERY	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_WIDE	dev	unset	2.9	-	unreviewed
 env	NVK_L2_TAIL	dev	unset	2.9	-	unreviewed
-env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop).
+env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: By default applications place it in video memory (faster in games) while the desktop (WindowServer) and memory shared between processes keep it in system RAM. On keeps it in system RAM everywhere, as before 3.0.1; off places it in video memory for the desktop too (unsafe for the desktop).
 env	NVK_NO_BIGPAGE	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_NO_NONCONTIG	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_PREEMPT_LOG	diag	unset	2.9	-	unreviewed

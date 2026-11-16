@@ -22,8 +22,8 @@ of build/build_nvk.sh to those files (exact context, no fuzz) and holds:
                 files and one added line of each are in the patch; with NM_MESA_GIT naming a Mesa clone that has the
                 commits, the patch's added and removed lines are exactly those of the listed commits (CI lists left
                 out). Control: a header missing a commit, and a patch with a line no commit has, fail
-  the chain     both patches end the 3.0 chain, neither is an upstream-fix patch that NVK_SKIP_PATCHES may leave out,
-                and no header line can be taken for part of a diff
+  the chain     both patches follow nvk-boost-policy in the 3.0 chain, neither is an upstream-fix patch that
+                NVK_SKIP_PATCHES may leave out, and no header line can be taken for part of a diff
 
 usage: test_nvk_nvrm_fixes.py [driver checkout]      NM_MESA_GIT=<mesa git> for the full commit comparison"""
 import os, pathlib, re, shutil, subprocess, sys, tempfile
@@ -125,8 +125,11 @@ def nvrm_files(names):
 
 chain = chain_of(bld)
 upstream = re.search(r'^UPSTREAM_FIXES="([^"]*)"', bld, re.M)
-arm("the 3.0 chain ends with nvk-boost-policy, nvk-mesa-main-2, nvk-nvrm-fixes",
-    chain[-3:] == ["nvk-boost-policy", "nvk-mesa-main-2", "nvk-nvrm-fixes"], " ".join(chain[-4:]))
+# a later patch may follow them (nvk-local-map-vram does); the rules below are held on the text after the whole chain
+fix_at = chain.index("nvk-nvrm-fixes") if "nvk-nvrm-fixes" in chain else len(chain)
+arm("the 3.0 chain applies nvk-boost-policy, nvk-mesa-main-2 and nvk-nvrm-fixes one after the other",
+    chain[max(fix_at - 2, 0):fix_at + 1] == ["nvk-boost-policy", "nvk-mesa-main-2", "nvk-nvrm-fixes"],
+    " ".join(chain[-5:]))
 arm("neither new patch is an upstream-fix patch NVK_SKIP_PATCHES can leave out (later patches build on them)",
     upstream is not None and not {"nvk-mesa-main-2", "nvk-nvrm-fixes"} & set(upstream.group(1).split()))
 RISKY = r"[ \tX]*(--- |\+\+\+ |@@|\*\*\* |Index:|Prereq:|diff |[<>] |\.$|\d)"
@@ -137,7 +140,7 @@ for name, text in (("nvk-nvrm-fixes", fixtext), ("nvk-mesa-main-2", main2)):
 
 try:
     after = nvrm_files(chain)
-    before = nvrm_files(chain[:-1])
+    before = nvrm_files(chain[:fix_at])
     built = True
 except (ValueError, OSError) as e:
     after = before = {}
