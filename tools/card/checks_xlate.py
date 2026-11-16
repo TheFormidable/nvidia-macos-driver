@@ -29,7 +29,7 @@ caches by the runner's environment, AIR text into {OUT}/airdump/<id>, readback f
 NVMTLDriver.bundle/Contents/MacOS when that file is there, else nvmtl/libnvmtl_translate.dylib
 (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready). The rows of xlate_paths.m end with an "INFO translator: " line that
 repeats the plugin's own line naming the translator it opened (its LC_UUID and path), and the readback rows translate
-with {X} itself. Not yet run on a Mac."""
+with {X} itself. These rows have run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package."""
 
 _CC = ["/usr/bin/xcrun", "clang", "-arch", "x86_64", "-mmacosx-version-min=15.0"]
 _PY = ["/usr/bin/python3", "-B", "-I"]

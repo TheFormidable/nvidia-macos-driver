@@ -39,7 +39,8 @@ setup failed, 3 skip with "SKIP: <why>" first, 70 a crash signal; PASS, FAIL and
                               the driver's own reason line (from its nvmtl.log) as information
   plugin.surface-formats      framebuffer fetch into IOSurface wrappers, 96 cases, read by other wrappers and the CPU
   plugin.surface-formats-untiled  the same with NVMTL_MANAGED_SURFACE_TILED=0 (the way back)
-Not yet run on a Mac."""
+These rows have run once, on one Mac, on macOS 26.7.3 (25G342) with release 3.0.1's package, where
+plugin.photobooth-surface did not build: its row did not yet link CoreGraphics."""
 
 _FLAGS = ["-arch", "x86_64", "-mmacosx-version-min=15.0", "-fobjc-arc", "-O2"]
 
