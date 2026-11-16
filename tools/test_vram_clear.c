@@ -1,16 +1,17 @@
 /* test_vram_clear.c - what the framebuffer does with NVRM's answer to a copy-engine clear of a new block of video
    memory (kexts/NVRMFB/fb/nvrm-vram-clear.h), held against its rules for every answer.
-   Build and run anywhere:  cc -O2 -Wall -I kexts/NVRMFB/fb tools/test_vram_clear.c -o /tmp/test_vram_clear && /tmp/test_vram_clear
+   Build and run anywhere:  cc -O2 -Wall -I kexts/NVRM -I kexts/NVRMFB/fb tools/test_vram_clear.c -o /tmp/test_vram_clear && /tmp/test_vram_clear
 
    The arms that matter most: a block the engine may still write into is never filled-and-handed-out (it is kept), an
    older NVRM and a block that reads as not zero end the asking for the boot, and nothing that ends the asking is
    ever undone by a later answer. */
 #include <stdio.h>
+#include "nvrm_vram_abi.h"
 #include "nvrm-vram-clear.h"
 
-#define DONE 0u
-#define NOT_RUN 1u
-#define LOST 2u
+#define DONE NVRM_VRAM_CLEAR_DONE
+#define NOT_RUN NVRM_VRAM_CLEAR_NOT_RUN
+#define LOST NVRM_VRAM_CLEAR_LOST
 
 static int fails;
 #define ARM(name, cond) do { int ok_ = (cond); printf("%s %s\n", ok_ ? "ok  " : "FAIL", name); if (!ok_) fails++; } while (0)

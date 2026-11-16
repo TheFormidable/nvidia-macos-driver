@@ -33,6 +33,22 @@ NV_STATUS nvrm_ce_clear_vidmem(nv_state_t *nv, NvU32 hClient, NvU32 hMemory, NvU
 
 volatile NvU64 nvrm_pageoff_last_runs, nvrm_pageoff_last_pages, nvrm_pageoff_coalesced, nvrm_pageoff_perpage;
 
+// Has the engine finished the work with this id? ceutilsUpdateProgress reads the channel's semaphore once, and a read
+// that failed comes back as 0: the RM then counts a wrap and stores a progress ahead of everything ever sent, for the
+// rest of the boot, so every later wait here would end at once. More finished than was sent cannot be: such an answer
+// is put back as it was and read as not finished.
+static NvBool _nvrmCeReached(struct CeUtils *pCe, NvU64 workId)
+{
+    const NvU64 before = pCe->lastCompletedPayload;
+    const NvU64 now = ceutilsUpdateProgress(pCe);
+    if (now > pCe->lastSubmittedPayload) { pCe->lastCompletedPayload = before; return NV_FALSE; }
+    return now >= workId;
+}
+
+// How long a clear's end is waited for. A 9 MB clear takes a fraction of a millisecond and the caller may hold the
+// display gate; a quarter of a second covers a queue behind other work and other channels' time slices many times.
+#define NVRM_CE_CLEAR_WAIT_NS (250ull * 1000ull * 1000ull)
+
 static NV_STATUS _nvrmCopyRun(OBJGPU *pGpu, struct CeUtils *pCe, MEMORY_DESCRIPTOR *pSrc, NvU64 srcOff, NvU64 phys, NvU64 bytes,
                               NvU64 *pWorkId)
 {
@@ -86,7 +102,7 @@ static NV_STATUS _nvrmCopyLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, con
         }
         if (st == NV_OK) {
             NvU32 spins = 0;
-            while (ceutilsUpdateProgress(pMemoryManager->pCeUtils) < workId) {
+            while (!_nvrmCeReached(pMemoryManager->pCeUtils, workId)) {
                 if (++spins > 200000) { st = NV_ERR_TIMEOUT; break; }
                 osDelayUs(10);
             }
@@ -106,7 +122,7 @@ static NV_STATUS _nvrmCopyLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, con
     st = ceutilsMemcopy(pMemoryManager->pCeUtils, &p);
     if (st == NV_OK) {
         NvU32 spins = 0;
-        while (ceutilsUpdateProgress(pMemoryManager->pCeUtils) < p.submittedWorkId) {
+        while (!_nvrmCeReached(pMemoryManager->pCeUtils, p.submittedWorkId)) {
             if (++spins > 200000) { st = NV_ERR_TIMEOUT; break; }
             osDelayUs(10);
         }
@@ -118,9 +134,11 @@ static NV_STATUS _nvrmCopyLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, con
 // A framebuffer's new block of video memory, cleared by the copy engine (nvrm_vram_abi.h NVRM_VRAM_FN_CLEAR). Every
 // check that can refuse comes before anything is sent, including ceutilsMemset's own (paused queue, the block's GPU,
 // offset and length), so that a refusal leaves the block untouched and *pSent at 0. From the memset on, *pSent is 1:
-// an error then may leave work in the engine's queue that still writes zeros into the block. The end is waited for as
-// the page-off waits for its copy (at most 200000 x 10 us); the block is only ever cleared from its start, and never
-// beyond the RM's own size for it.
+// an error then may leave work in the engine's queue that still writes zeros into the block. The end is waited for
+// NVRM_CE_CLEAR_WAIT_NS at most, by the clock and not by a count of polls: the locks and maybe the display gate are
+// held meanwhile. The block is only ever cleared from its start, and never beyond the RM's own size for it. Where the
+// RM made no copy-engine utility of its own (a platform it leaves out, or RmDisableGlobalCeUtils) none is made here:
+// that is nothing sent, and the framebuffer fills the block from the processor.
 static NV_STATUS _nvrmClearLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, NvU64 bytes, NvU64 *pCleared, NvU32 *pSent)
 {
     MemoryManager *pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
@@ -129,10 +147,7 @@ static NV_STATUS _nvrmClearLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, Nv
     NV_STATUS st;
 
     if (pMemoryManager == NULL) return NV_ERR_INVALID_STATE;
-    if (pMemoryManager->pCeUtils == NULL) {
-        st = memmgrInitCeUtils(pMemoryManager, NV_FALSE, NV_TRUE);
-        if (st != NV_OK) return st;
-    }
+    if (pMemoryManager->pCeUtils == NULL) return NV_ERR_NOT_SUPPORTED;
     if (ceutilsIsSubmissionPaused(pMemoryManager->pCeUtils)) return NV_ERR_BUSY_RETRY;
     st = serverGetClientUnderLock(&g_resServ, hClient, &pClient);
     if (st != NV_OK) return st;
@@ -152,9 +167,9 @@ static NV_STATUS _nvrmClearLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, Nv
     *pSent = 1;
     st = ceutilsMemset(pMemoryManager->pCeUtils, &p);
     if (st != NV_OK) return st;
-    NvU32 spins = 0;
-    while (ceutilsUpdateProgress(pMemoryManager->pCeUtils) < p.submittedWorkId) {
-        if (++spins > 200000) return NV_ERR_TIMEOUT;
+    const NvU64 until = osGetMonotonicTimeNs() + NVRM_CE_CLEAR_WAIT_NS;
+    while (!_nvrmCeReached(pMemoryManager->pCeUtils, p.submittedWorkId)) {
+        if (osGetMonotonicTimeNs() >= until) return NV_ERR_TIMEOUT;
         osDelayUs(10);
     }
     *pCleared = length;
