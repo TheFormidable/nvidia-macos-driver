@@ -25,7 +25,9 @@ The package also carries [INSTALL.md](INSTALL.md) as `MINECRAFT-NVK.md` and [APP
 The renderer is a separate copy so that it is a separate image in the process: an application's Vulkan objects never
 mix with the NVK instance the Metal plugin runs in the same process. It reads the same settings file as the driver's
 NVK (`/Library/GPUBundles/nvmtl/nvrm610.conf`) and keys its shader cache on the same build identity (`LC_UUID`).
-The copy adds about 19.5 MB to the installed driver.
+The copy adds about 19.5 MB to the installed driver (measured on the Linux cross-build), and native OpenGL's
+`nvmtl/zink` carries a second file copy of the frontend and the renderer (docs/ZINK-OPENGL.md), which adds about the
+same again.
 
 ## How it is built
 

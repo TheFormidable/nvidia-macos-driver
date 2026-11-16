@@ -358,6 +358,10 @@ cast, an old frame, frames that flicker between two, one of those counters above
    means the adapter found this build's layout different and left the application on Apple's OpenGL, as it is meant
    to: send that line and the output of `sw_vers`. Fail: a crash, a black window or a wrong picture; restart once
    with the boot argument `nvzink=0` and say whether it goes away. See [ZINK-OPENGL.md](ZINK-OPENGL.md).
+   To go back to release 2.9 or to an earlier 3.0 package, run this package's `sudo ./uninstall.sh` first: the
+   installers of those packages do not know `/Library/GPUBundles/NVKZinkGLDriver.bundle` and leave it in place. Their
+   accelerator does not name it, so it is not loaded, and `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`
+   removes it.
 
 ## 5. Video
 

@@ -226,7 +226,10 @@ sudo ./install.sh && sudo shutdown -r now
 La primera línea con `install.sh` es una prueba: revisa el paquete y el Mac sin cambiar nada. Que pase no cubre el
 firmware, que la instalación real toma de la instalación anterior o descarga de NVIDIA antes de cambiar nada. Antes de
 instalar, lee en [README.md](../README.md) "Install — by hand" (OpenCore debe estar configurado). Para volver atrás,
-instala de la misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`; para quitar el driver
+instala de la misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`. El instalador y el
+desinstalador de la versión 2.9 no conocen `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio; el
+acelerador de 2.9 no lo nombra, así que no se carga. El `sudo ./uninstall.sh` de este árbol lo quita, así que ejecútalo
+antes, o quita el bundle después con `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`. Para quitar el driver
 por completo: `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están en
 [BUILDING.md](BUILDING.md#installing-the-result-and-going-back).
 

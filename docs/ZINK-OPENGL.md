@@ -16,8 +16,10 @@ This was built and checked on Linux only (the cross-build and the checks below).
 | `libnvk_zink_vulkan.dylib` and `libnvk_renderer.dylib`, Zink's private Vulkan driver | `/Library/GPUBundles/nvmtl/zink` | the nvkbridge component (its frontend, and a copy of this build's NVK); `build/package_local.sh` copies them |
 
 `./build.sh build zink` builds the first three from Mesa `mesa-26.3.0` (0a6fa60a, pin `NM_PIN_ZINKMESA` in
-build/pins.sh), which `./build.sh fetch` gets by commit beside NVK's Mesa. Zink does not get a second NVK: its
-Vulkan driver is the copy of this build's NVK that the nvkbridge component carries.
+build/pins.sh), which `./build.sh fetch` gets by commit beside NVK's Mesa. NVK is not built a second time for Zink:
+its Vulkan driver is a second file copy of the nvkbridge component's frontend and of the NVK renderer copy that
+component carries, so `nvmtl/zink` adds about the same 19.5 MB again as `nvmtl/minecraft` (measured on the Linux
+cross-build).
 
 ## How a context reaches Zink
 
@@ -32,7 +34,12 @@ Vulkan driver is the copy of this build's NVK that the nvkbridge component carri
 2. After Apple's `gldCreateContext` succeeds, the bundle hands the new context to the CGL adapter. The bundle opens the
    adapter at run time; when the adapter or one of its two entry points is missing, the bundle only forwards and
    OpenGL stays Apple's.
-3. The adapter leaves a context with Apple's renderer when Zink cannot start in this process (no NVK device, for
+3. Loading the bundle loads the adapter, which then replaces AppKit's `NSOpenGLContext` `setView:`, `update` and
+   `clearDrawable` in that process (they marshal LWJGL's view calls to the main thread and tell the adapter a view's
+   size), and in OBS also ScreenCaptureKit's `setPixelFormat:` (below). This happens in every process that loads
+   OpenGL on this driver, also in one whose contexts all stay with Apple's renderer; only `nvzink=0` leaves the bundle
+   unloaded.
+4. The adapter leaves a context with Apple's renderer when Zink cannot start in this process (no NVK device, for
    example), when the application asked for a profile Zink does not serve, in OBS (below), and when the GLEngine
    private layout the adapter reads and writes does not match the record (next section). Otherwise it saves
    GLEngine's dispatch table and puts its own entries in the context's table.
@@ -107,6 +114,10 @@ first frame on this driver.
 `package/install.sh` stops before it changes anything when the package has no `NVKZinkGLDriver.bundle` or no
 `nvmtl/zink`. It backs the bundle up with the others, installs it, owns it root:wheel, and puts the previous state back
 on a rollback and in the fallback job of step 6b (the runtime goes with `nvmtl`). `package/uninstall.sh` removes both.
+The installer and uninstaller of release 2.9 and of earlier 3.0 packages do not know the bundle: going back with one of
+them leaves `/Library/GPUBundles/NVKZinkGLDriver.bundle` in place (their accelerator does not name it, so it is not
+loaded). Run this package's `sudo ./uninstall.sh` first, or remove the bundle with
+`sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`.
 
 Once the bundle is in place, the installer asks macOS's trusted GPU-bundle lookup (`gpu_bundle_find_trusted`, the one
 that finds `NVMTLDriver.bundle` for Metal) for it with `nvmtl/zink/gld_bundle_probe` (tools/gld_bundle_probe.c, from
