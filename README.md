@@ -22,7 +22,7 @@ has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is
 changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
 are undone only by reinstalling 2.9. No test of it on an NVIDIA card has been reported yet.
 
-Two parts of it come from the HighDelay/nvidia-macos-driver-nvk fork and have been built and checked on Linux only:
+Four parts of it come from the HighDelay/nvidia-macos-driver-nvk fork and have been built and checked on Linux only:
 
 - **OpenGL through Zink.** On macOS 15.5 or later OpenGL applications run on NVK through Mesa's Zink instead of
   Apple's OpenGL over Metal. The boot argument `nvzink=0` turns it off and gives every application Apple's OpenGL
@@ -35,6 +35,10 @@ Two parts of it come from the HighDelay/nvidia-macos-driver-nvk fork and have be
   `VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json`. See
   [tools/nvk-bridge/INSTALL.md](tools/nvk-bridge/INSTALL.md) and
   [tools/nvk-bridge/APPLICATIONS.md](tools/nvk-bridge/APPLICATIONS.md).
+- **Shader translator repairs.** Argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining and
+  Safari's WebGPU textures.
+- **Metal plugin fixes.** Spotlight's half-float icons, stale icons in native applications, Photo Booth's preview and
+  the scheduled presents of drawables an application makes itself.
 
 Building it: [docs/BUILDING.md](docs/BUILDING.md). What to check on a card, in order:
 [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md).
