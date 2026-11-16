@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """The Metal plugin opens the shader translator beside it (NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib)
 whenever it can read one, and nvmtl/'s only when there is none (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready). Release
-2.9, the base build/package_local.sh stages onto, carries its translator only there, and the 3.0 and 3.0.1 packages put
-this build's in nvmtl/ alone: every Metal app translated with 2.9's. The package step now puts this build's in both
-places, and package/check_package.sh stops a package whose two copies are not the same build. The two are signed apart,
-so their bytes differ; the guard compares their LC_UUIDs.
+2.9, the base build/package_local.sh stages onto, carries its translator only there, and the packages made before this
+fix (from the 3.0 branch, and from 3.0.1 up to b80056ef) put this build's in nvmtl/ alone: every Metal app translated
+with 2.9's. The package step now puts this build's in both places, and package/check_package.sh stops a package whose
+two copies are not the same build. Their bytes may differ (each copy is signed on its own, and the bundle's again by
+the reseal), so the guard compares their LC_UUIDs.
 
 The package step runs whole here, on a base laid out like 2.9's, with stand-ins for the build's outputs and for Apple's
 tools (codesign, lipo, nm, otool, plutil, ditto, and a tar that drops the options only bsdtar has), so it runs on Linux
 too. The translators are small Mach-O files with an LC_UUID; the stand-in codesign appends a mark that names the file it
-signed, so two copies signed apart differ as real ones do. Where a real otool is found (the Mac's, or LLVM's
-llvm-otool), the guard is run once more with it, which checks that it reads what that otool prints.
+signed, so two copies signed apart always differ here (real ad hoc signatures may not), and the guard must pass them.
+Where a real otool is found (the Mac's, or LLVM's llvm-otool), the guard is run once more with it, which checks that it
+reads what that otool prints.
 usage: test_package_translator.py"""
 import hashlib, os, plistlib, re, shutil, struct, subprocess, sys, tempfile, uuid
 from pathlib import Path
@@ -85,7 +87,7 @@ except Exception as e:
 print(v)
 '''
 CODESIGN = r'''#!/bin/bash
-# codesign stand-in: signing a file appends a mark that names it (two copies signed apart differ, as real ones do); a
+# codesign stand-in: signing a file appends a mark that names it (two copies signed apart differ, as real ones may); a
 # bundle gets a seal file, and with --deep each Mach-O in its Contents/MacOS is signed too; checks pass; -d prints an
 # ad hoc identity
 sign=0; deep=0; t=
@@ -256,8 +258,7 @@ def arm_package_with_the_bundled_copy(t):
           uuid_of(base / BUNDLED) == OLD and uuid_of(r / BUNDLED) == NEW,
           (uuid_of(base / BUNDLED), uuid_of(r / BUNDLED)))
     check("nvmtl/ still has this build's translator too", uuid_of(r / NVMTL) == NEW, uuid_of(r / NVMTL))
-    check("the two copies were signed apart (their bytes differ) and the guard let them through",
-          (r / BUNDLED).read_bytes() != (r / NVMTL).read_bytes() and STOP_LINE not in out)
+    check("the guard let the two copies through", STOP_LINE not in out, out[-1500:])
     check("the step names the copy it replaced in the bundle", f"replaced {BUNDLED} (signed ad hoc)" in out,
           out[-1500:])
     ok, why = sums_verify(r)
@@ -294,7 +295,7 @@ def arm_the_package_of_3_0_1(t):
         base = t / "b" / "dl" / "pkgroot"; base.mkdir(parents=True); base_tree(base)
         rc, out, r = package(base, t / "b", tree)
         check("negative control: without both, the package is made and carries 2.9's translator beside the plugin "
-              "(the fault of the 3.0 and 3.0.1 packages)", rc == 0 and uuid_of(r / BUNDLED) == OLD, out[-1500:])
+              "(the fault of the packages made before this fix)", rc == 0 and uuid_of(r / BUNDLED) == OLD, out[-1500:])
 
 
 def gate(t, files, otool=None):
@@ -325,6 +326,15 @@ def arm_the_guard(t, otool=None, who="stand-in otool"):
     lines, out = gate(t, {BUNDLED: b"not a Mach-O file\n", NVMTL: macho(NEW)})
     check("a file in the bundle whose LC_UUID cannot be read stops the package",
           len(lines) == 1 and "none read" in lines[0], out)
+    lines, out = gate(t, {BUNDLED: b"not a Mach-O file\n", NVMTL: b"not a Mach-O file\n"})
+    check("two copies whose LC_UUIDs cannot be read stop the package (an empty one is not a match)",
+          len(lines) == 1 and lines[0].count("none read") == 2, out)
+    silent = t / "silent-otool"
+    silent.write_text("#!/bin/bash\nexit 1\n")
+    os.chmod(silent, 0o755)
+    lines, out = gate(t, {BUNDLED: macho(OLD), NVMTL: macho(NEW)}, str(silent))
+    check("an otool that prints nothing (missing or failing) stops the package instead of passing two builds",
+          len(lines) == 1 and lines[0].count("none read") == 2, out)
     lines, out = gate(t, {NVMTL: macho(NEW)})
     check("no translator in the bundle: the guard has nothing to say", not lines, out)
 

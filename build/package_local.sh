@@ -135,10 +135,11 @@ put_file "$HERE/tools/nvk-bridge/APPLICATIONS.md" NVK-APPLICATIONS.md
 put_signed "$OUT/xlate/libnvmtl_translate.dylib" Library/GPUBundles/nvmtl/libnvmtl_translate.dylib
 # The plugin opens the libnvmtl_translate.dylib beside itself whenever it can read one, and nvmtl/'s only when there is
 # none (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready). Release 2.9 carries its translator only there, in the bundle, so
-# the 3.0 and 3.0.1 packages, which put this build's in nvmtl/ alone, translated every Metal shader with 2.9's. The
-# bundle's copy is now this build's too, and nvmtl/'s stays (the plugin's fallback, and the copy the card checks and
-# other tools load). A base without the copy in the bundle gets none: the plugin then opens nvmtl/'s, which is this
-# build's, and install.sh replaces the installed bundle whole, so no older copy is left beside the plugin.
+# the packages made before this copy was added (from the 3.0 branch, and from 3.0.1 up to b80056ef), which put this
+# build's in nvmtl/ alone, translated every Metal shader with 2.9's. The bundle's copy is now this build's too, and
+# nvmtl/'s stays (the plugin's fallback, and the copy the card checks and other tools load). A base without the copy in
+# the bundle gets none: the plugin then opens nvmtl/'s, which is this build's, and install.sh replaces the installed
+# bundle whole, so no older copy is left beside the plugin.
 # check_package.sh stops a package whose two copies are not the same build.
 XB=Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib
 if [ -f "$R/$XB" ]; then put_signed "$OUT/xlate/libnvmtl_translate.dylib" "$XB"; fi

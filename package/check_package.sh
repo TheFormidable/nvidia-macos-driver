@@ -47,10 +47,11 @@ if [ -f "$ROOT/$PB/Contents/MacOS/NVMTLDriver" ]; then
   codesign --verify --deep --strict "$ROOT/$PB" >/dev/null 2>&1 || { echo "STOP: the plugin bundle's seal does not verify (a file changed after it was sealed)"; fail=1; }
 fi
 # The plugin opens the shader translator beside it whenever it can read one, and nvmtl/'s only when there is none
-# (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready); the card checks and other tools load nvmtl/'s. The 3.0 and 3.0.1
-# packages carried release 2.9's translator in the bundle and this build's in nvmtl/, so every Metal app translated
-# with 2.9's. A bundle that carries one must carry the same build as nvmtl/: the two are signed apart, so their bytes
-# differ, and the linker's build id (LC_UUID) is compared instead.
+# (plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready); the card checks and other tools load nvmtl/'s. The packages made
+# before build/package_local.sh copied this build's translator into the bundle (from the 3.0 branch, and from 3.0.1 up
+# to b80056ef) carried release 2.9's there and this build's in nvmtl/, so every Metal app translated with 2.9's. A
+# bundle that carries one must carry the same build as nvmtl/. Their bytes may differ (each copy is signed on its own,
+# and the bundle's again by the reseal), so the linker's build id (LC_UUID) is compared instead.
 macho_uuids() {   # <file>: its LC_UUIDs as otool -l prints them (one per architecture otool shows), or nothing
   otool -l "$1" 2>/dev/null |
     awk '$1 == "cmd" { u = ($2 == "LC_UUID") } u && $1 == "uuid" { printf "%s%s", s, $2; s = " "; u = 0 }'
