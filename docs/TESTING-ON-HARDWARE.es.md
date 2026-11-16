@@ -507,13 +507,15 @@ parada antes de tiempo (también si antes falló una comprobación, si se interr
 comprobación tiene un límite de tiempo. Una comprobación con un proceso que sigue vivo 15 s después de matar su grupo de
 procesos (en su límite o al terminar), una comprobación de GPU que se quedó sin tiempo, una subida de
 `debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state`, un proceso de WindowServer nuevo, una subida de
-`debug.nvrmfb_vram_ce_kept` (no se vio terminar el borrado con el motor de copia de un bloque nuevo de memoria de vídeo)
-o de `debug.nvrmfb_vram_power_events` (la GPU pasó por un reposo) paran todas las comprobaciones de GPU que vienen
-después. Una subida de `debug.nvrm_xid_count`, de `debug.nvrm_chan_recovered` (un canal que NVK reconstruyó) o de
-`debug.nvrm_chan_dropped` (los envíos que una reconstrucción descartó) hace fallar la comprobación en la que ocurrió; un
-canal atascado al que se volvió a llamar (`debug.nvrm_chan_kicks`) y un borrado con el motor de copia que dejó su estado
-de activo se anotan en la comprobación. Pasados 40 minutos (`--deadline`) no empieza nada nuevo. Una comprobación que no
-se arrancó aparece como "not run" con el motivo.
+`debug.nvrmfb_vram_ce_kept` (no se vio terminar el borrado con el motor de copia de un bloque nuevo de memoria de
+vídeo), un cambio de `debug.nvrmfb_vram_ce_clear` desde 1 (el borrado con el motor de copia se retiró hasta el próximo
+arranque, por ejemplo porque un bloque que dijo haber borrado no se leía como cero) o una subida de
+`debug.nvrmfb_vram_power_events` (la GPU pasó por un reposo) paran todas las comprobaciones de GPU que vienen después.
+Una subida de `debug.nvrm_xid_count`, de `debug.nvrm_chan_recovered` (un canal que NVK reconstruyó) o de
+`debug.nvrm_chan_dropped` (los envíos que una reconstrucción descartó) hace fallar la comprobación en la que ocurrió, y
+la segunda comprobación de GPU con una subida así para todas las que vienen después; un canal atascado al que se volvió
+a llamar (`debug.nvrm_chan_kicks`) se anota en la comprobación. Pasados 40 minutos (`--deadline`) no empieza nada nuevo.
+Una comprobación que no se arrancó aparece como "not run" con el motivo.
 
 Nunca usa sudo; no instala, carga ni copia nada en `/Library` ni en `/System`; no cambia ningún ajuste (ni
 `nvrm610.conf`, ni `defaults`, ni un argumento de arranque, ni la política de boost); no ejecuta `nvram`, `csrutil`,

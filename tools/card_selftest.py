@@ -39,14 +39,15 @@ name contains " (NVMTL over ", and tells whether a console GUI session is usable
 folder itself writes nothing; every later refusal writes report.md and DONE.
 
 Each child starts from an environment built from nothing (HOME, USER, LOGNAME, LANG, PATH=/usr/bin:/bin:/usr/sbin:/sbin,
-TMPDIR=<out>/tmp/<id>, the plugin's log, AIR cache and Mesa cache pointed into <out>, then the row's env), with
-/dev/null as input, its output in files, in a session of its own, in <out>/tmp/<id>. At its limit, and when it ends, its
-process group is killed and awaited for KILL_POLL seconds: a check with a process still alive then (the program, or one
-it started) is STUCK. A STUCK check, a GPU check that timed out, a rise of debug.nvrm_chan_gave_up, of
-debug.nvrmfb_vram_ce_kept or of debug.nvrmfb_vram_power_events, a change of debug.nvrm_fence_state or of WindowServer's
-pid stops every later GPU check; a rise of debug.nvrm_xid_count, debug.nvrm_chan_recovered or debug.nvrm_chan_dropped
-fails the check it happened in, and one of debug.nvrm_chan_kicks is noted in its reason. caffeinate -d -i -w <this pid>
-holds the display awake only while windowed checks run.
+TMPDIR=<out>/tmp/<id>, the plugin's log, AIR cache and Mesa cache pointed into <out>, NVK_DIAG=0, then the row's env),
+with /dev/null as input, its output in files, in a session of its own, in <out>/tmp/<id>. At its limit, and when it
+ends, its process group is killed and awaited for KILL_POLL seconds: a check with a process still alive then (the
+program, or one it started) is STUCK. A STUCK check, a GPU check that timed out, a rise of debug.nvrm_chan_gave_up, of
+debug.nvrmfb_vram_ce_kept or of debug.nvrmfb_vram_power_events, a change of debug.nvrm_fence_state, of
+debug.nvrmfb_vram_ce_clear from 1 or of WindowServer's pid stops every later GPU check; a rise of debug.nvrm_xid_count,
+debug.nvrm_chan_recovered or debug.nvrm_chan_dropped fails the check it happened in, and the FAULT_STOP-th (second) GPU
+check with such a rise stops every later one; a rise of debug.nvrm_chan_kicks is noted in its reason. caffeinate -d -i
+-w <this pid> holds the display awake only while windowed checks run.
 
 Exit: 0 every check that ran passed (skips, inactive and fallback rows listed with their reason); 1 a FAIL, TIMEOUT,
 CRASH or build failure; 2 usage; 3 refused; 4 stopped early. --list prints every row (id, part, kind, order, title)
@@ -105,6 +106,7 @@ AUDIT_TMP_DIRS = ("/tmp", "/private/tmp")
 # where the opt-in vulkan-for-apps.sh puts loader manifests (listed, never written)
 ICD_DIR = "/usr/local/share/vulkan/icd.d"
 KILL_POLL = 15               # seconds a killed check has to end before it is STUCK
+FAULT_STOP = 2               # the GPU checks with a fault (an Xid, a rebuilt channel) after which the later ones stop
 MIN_FREE = 2 * 1024 ** 3
 GB_OWNER_UID = 0             # the owner of the installed files (install.sh: root:wheel)
 DEADLINE = 2400
@@ -935,6 +937,7 @@ class Run:
         self.out = None
         self.rows = []
         self.stopped = None       # why every later GPU check is not run
+        self.faulted = []         # the GPU checks with a fault rise, in order (FAULT_STOP)
         self.deadline_hit = False
         self.build_stuck = False
         self.caffeinate = None
@@ -1360,12 +1363,15 @@ class Run:
             return word, why, why, f"exit {rc} means {word} for this row", exit_text
         return "FAIL", f"rc {rc}", detail, f"exit {rc}, not the expected {e['rc']}", exit_text
 
-    def watch(self, row, before, after):
-        """the driver's fault counters around a GPU check. A rise of the Xid count, of the channels NVK rebuilt or of
-        the submissions a rebuild dropped fails the check (a rebuilt channel can leave right-looking pixels); a rise of
-        the stalled channels NVK rang again, and a copy-engine clear that left its on state (3.0.1), are noted in its
-        reason; a give-up, a change of the fence state, a new WindowServer, copy-engine work whose end was not seen
-        (3.0.1) and a standby of the GPU stop every later GPU check."""
+    def watch(self, row, before, after, probe=False):
+        """the driver's fault counters around a GPU check (or the device probe). A rise of the Xid count, of the
+        channels NVK rebuilt or of the submissions a rebuild dropped fails the check (a rebuilt channel can leave
+        right-looking pixels), and the FAULT_STOP-th check with such a rise stops every later GPU check: with nobody at
+        the screen, a fault that repeats is not left to recover again in every later check. A rise of the stalled
+        channels NVK rang again is noted in its reason. A give-up, a change of the fence state, a new WindowServer, a
+        copy-engine clear that left its on state (3.0.1: it stands down once a block the engine said it cleared does not
+        read as zero, or its work was not seen to end), copy-engine work whose end was not seen (3.0.1) and a standby
+        of the GPU stop every later GPU check."""
         (b, _), (a, aws) = before, after
 
         def rise(name):
@@ -1380,13 +1386,18 @@ class Run:
         notes = []
         if rise("debug.nvrm_chan_kicks"):
             notes.append(f"kicks +{rise('debug.nvrm_chan_kicks')}")
-            self.facts["kicked"] = self.facts.get("kicked", 0) + 1
+            if not probe:   # the summary counts checks
+                self.facts["kicked"] = self.facts.get("kicked", 0) + 1
         if faults and rise("debug.nvrmfb_vram_ce_cleared"):
             notes.append(f"copy-engine clears +{rise('debug.nvrmfb_vram_ce_cleared')} during it")
         c0, c1 = b.get("debug.nvrmfb_vram_ce_clear"), a.get("debug.nvrmfb_vram_ce_clear")
         if c0 == 1 and isinstance(c1, int) and c1 != 1:
             notes.append(f"copy-engine clear went from 1 to {c1}")
             self.facts.setdefault("ce_clear_left", f"debug.nvrmfb_vram_ce_clear went from 1 to {c1} during {row['id']}")
+            # nvrm-fb.cpp vramClear: the engine said it cleared a block that does not read as zero (its zeros may have
+            # gone elsewhere), or its work was not seen to end; either is a reason to run nothing more on the GPU
+            self.stop(f"debug.nvrmfb_vram_ce_clear went from 1 to {c1} during {row['id']}: the copy engine's clear of "
+                      f"new video memory stood down for this boot")
         if faults:
             if row["result"] in ("pass", "skip", "inactive", "fallback"):
                 row["result"], row["why"] = "FAIL", "; ".join(faults)
@@ -1394,6 +1405,10 @@ class Run:
                 row["why"] = (row["why"] + "; " + "; ".join(faults)).lstrip("; ")
         if notes:
             row["why"] = (row["why"] + "; " + "; ".join(notes)).lstrip("; ")
+        if faults and not probe:
+            self.faulted.append(f"{row['id']} ({'; '.join(faults)})")
+            if len(self.faulted) >= FAULT_STOP:
+                self.stop(f"{len(self.faulted)} GPU checks with a fault: " + ", ".join(self.faulted))
         g0, g1 = b.get("debug.nvrm_chan_gave_up"), a.get("debug.nvrm_chan_gave_up")
         if isinstance(g0, int) and isinstance(g1, int) and g1 > g0:
             self.stop(f"debug.nvrm_chan_gave_up rose by {g1 - g0} during {row['id']}")
@@ -1507,7 +1522,7 @@ class Run:
                           f"{self.facts['device_name']!r}, exit {res['rc']} ({last_line(out) or last_line(err)})")
         after = self.counters()
         fake = {"id": "device-probe", "result": "pass", "why": "", "xid_delta": None}
-        self.watch(fake, before, after)
+        self.watch(fake, before, after, probe=True)
         if fake["result"] == "FAIL":
             self.stop(f"debug.nvrm_xid_count rose by {fake['xid_delta']} during the device probe" if fake["xid_delta"]
                       else f"{fake['why']} during the device probe")
