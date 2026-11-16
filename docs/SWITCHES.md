@@ -23,7 +23,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 11 | 1 | 55 | 408 | 12 |  | 493 |
 | bootarg | 4 | 13 | 30 | 21 | 13 |  | 8 | 6 | 2 |  | 97 |
-| sysctl |  | 5 | 4 | 12 |  |  | 366 |  |  |  | 387 |
+| sysctl |  | 5 | 4 | 12 |  |  | 368 |  |  |  | 389 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -819,6 +819,8 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_bh_stuck` | diag | read-only | 3.0 | - | bottom-half threads that did not exit at stop | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_thread` | diag | read-only | 3.0 | - | GPUs whose RM bottom half runs on its own thread | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_wake_max_us` | diag | read-only | 3.0 | - | longest bottom-half request to run, microseconds | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boost_policy` | diag | read-only | 3.0.1 | - | boost policy: 0 undecided (NVRM_610_BOOST), 1 idle mode, 2 normal | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boost_policy_sets` | diag | read-only | 3.0.1 | - | boost policy changes accepted since boot | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_arm_ms` | diag | read-only | 3.0 | - | start-up: tries to arm the accelerator, ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_gate_ms` | diag | read-only | 3.0 | - | start-up: wait for start() to have returned, ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_go_ms` | diag | read-only | 3.0 | - | start-up: go(2), ms | kexts/NVRM/NVRM.cpp |

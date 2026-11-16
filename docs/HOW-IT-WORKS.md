@@ -196,7 +196,12 @@ from NVIDIA's 610.57.04 headers with the 620.70.06 tree the kernel module is bui
 (`tools/nvencvt_header_abi.py`) and stops on a difference; without that tree on the build Mac it says that it skipped the
 comparison and builds on.
 The GPU's boost policy is `NVRM_610_BOOST`: unset is a short lease renewed while work is submitted, `hold` keeps one boost
-for the device's life, `0` never boosts.
+for the device's life, `0` never boosts. From 3.0.1 NVRM.kext also holds a machine-wide policy (undecided, idle mode,
+normal; `kexts/NVRM/nvrm_boost_policy_abi.h`) that a root process sets through user-client selector 13 and that each
+process reads there before it renews (`nvk/nvk-boost-policy.patch`): idle mode clears what a process has asked for within
+a second of its next submission, normal brings the lease back even to a process started with `NVRM_610_BOOST=0`, and
+undecided, the state at every boot, leaves each process to `NVRM_610_BOOST`. NVMetrics sets it with
+`nvmetrics-agent policy idle|normal`; `sysctl debug.nvrm_boost_policy` shows it (read-only).
 `NVRM_610_MAXPOWER_MW=<mW>` (off unless set) asks the GPU performance-scaling code for that maximum power through the public root-client GPS control and reads it back.
 `NVRM_610_RATEDTDP` is off unless set: `l` holds the card at its rated TDP performance state (a power and clock cap), `k` locks it, `x` allows the turbo ceiling.
 
