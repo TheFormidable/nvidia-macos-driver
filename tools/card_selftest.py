@@ -16,7 +16,8 @@ checkout with /usr/bin/xcrun clang, runs each on the installed driver one at a t
 ~/nullmoth-claude only:
 
   <out>/report.md      the header (macOS, CPU, Metal device, package, IOGLBundleName, checkout) and the table
-  <out>/results.json   one object per row: id, part, result, rc, signal, seconds, xid_delta, detail, log
+  <out>/results.json   one object per row: id, part, result, rc, signal, seconds, xid_delta, detail, log (written
+                       after every row as well, marked "partial", so that a runner killed without its report leaves it)
   <out>/logs/NN-id.log the argv, environment additions, limits, times, exit, verdict and its rule, counters, then the
                        program's stdout, stderr and its plugin log; NN-id.build.log for the build
   <out>/bin, tmp, cache the built programs, every child's TMPDIR, and the shader caches the children are pointed at
@@ -1285,6 +1286,12 @@ class Run:
         for line in out_text.splitlines():
             if any(re.search(rx, line) for rx in c["info"]):
                 row["info"].append(line.strip()[:200])
+        # the plugin's own line when its pending asynchronous uploads reached a limit, or a copy a channel rebuild
+        # dropped was made again (plugin/nvmtl_vk.c, "vk: tex upload async:"), whatever the row asks for
+        for line in nvlog.splitlines():
+            m = re.search(r"NVMTL: (vk: tex upload async: .*)$", line)
+            if m:
+                row["info"].append("driver: " + m.group(1).strip()[:200])
         after = self.counters() if c["kind"] == "gpu" else None
         if before and after:
             self.watch(row, before, after)
@@ -1512,8 +1519,9 @@ class Run:
             except OSError:
                 return False
         for d in AUDIT_TMP_DIRS:
-            try:
-                found += [f"{d}/{n}" for n in sorted(os.listdir(d)) if n.startswith("nvmtl") and newer(os.path.join(d, n))]
+            try:   # the plugin's files, and NVK's diagnostic copy of its standard error (NVK_DIAG=1 in nvrm610.conf)
+                found += [f"{d}/{n}" for n in sorted(os.listdir(d)) if n.startswith(("nvmtl", "nvk-diag-"))
+                          and newer(os.path.join(d, n))]
             except OSError:
                 pass
 
@@ -1604,11 +1612,10 @@ class Run:
             t += ["", "## Information", ""] + info
         t += ["", "## Written outside the work folder", ""] + ([f"- {a}" for a in audit] or ["nothing found"])
         self.write(self.out / "report.md", "\n".join(h + t) + "\n")
-        res = [{k: r[k] for k in ("id", "part", "kind", "order", "title", "result", "why", "rc", "signal", "seconds",
-                                  "xid_delta", "detail", "log", "info")} for r in rows]
         self.write(self.out / "results.json", json.dumps({"exit": code, "refused": refused, "stopped": self.stopped,
                                                            "facts": {k: v for k, v in f.items() if k != "counters_start"},
-                                                           "audit": audit, "rows": res}, indent=1, default=str) + "\n")
+                                                           "audit": audit, "rows": self.result_rows()}, indent=1,
+                                                          default=str) + "\n")
         self.say("")
         for line in t[1:]:
             if line.startswith("## Information"):
@@ -1617,6 +1624,19 @@ class Run:
         self.say(f"report: {self.out / 'report.md'}")
         self.scrub_tree()
         self.write(self.out / "DONE", f"exit {code} at {utc(end)}\n")
+
+    def result_rows(self):
+        return [{k: r[k] for k in ("id", "part", "kind", "order", "title", "result", "why", "rc", "signal", "seconds",
+                                   "xid_delta", "detail", "log", "info")} for r in self.rows]
+
+    def progress(self):
+        """results.json after every row, marked partial, with the rows not yet decided as null: a runner ended without
+        its report (SIGKILL, as at the end of a logout that a crash of WindowServer brings) leaves what it finished"""
+        try:
+            self.write(self.out / "results.json", json.dumps({"exit": None, "partial": True, "stopped": self.stopped,
+                                                               "rows": self.result_rows()}, indent=1, default=str) + "\n")
+        except OSError:
+            pass
 
     def scrub_tree(self):
         """every text file a child wrote into the run folder (outside bin, tmp and cache) passes the scrub too"""
@@ -1801,6 +1821,7 @@ def body(run):
         if i == last_window:
             run.stop_caffeinate()
         run.say(f"{r['nn']} {r['id']}: {run.shown(r)} ({r['seconds']:.1f} s){' - ' + r['detail'] if r['detail'] and r['detail'] != r['why'] else ''}")
+        run.progress()
     run.stop_caffeinate()
     code = run.exit_code()
     run.report(code)
