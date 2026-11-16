@@ -297,8 +297,15 @@ A change that adds a switch (an environment name, a boot argument, a sysctl) nee
 
 Free of charge, source code included. Nobody may sell it or use it to make money.
 
-- `plugin/`, `kexts/`, `build/`, `package/`: PolyForm Noncommercial 1.0.0 (see `LICENSE`), © NullMoth Systems.
-  Personal, research, educational and non-profit use is allowed; any commercial use is not.
+- `plugin/`, `kexts/`, `build/`, `package/`: PolyForm Noncommercial 1.0.0 (see `LICENSE`), © NullMoth Systems,
+  except the files of `build/` named in the next item. Personal, research, educational and non-profit use is allowed;
+  any commercial use is not.
+- `zink/`, `build/build_zink.sh`, `build/opengl_api.py`, `tools/gld_bundle_probe.c`: MIT (`licenses/Dino-Zink-MIT.txt`),
+  from the HighDelay/nvidia-macos-driver-nvk fork; Zink itself is Mesa (MIT). `build/prepare_zink.py` and
+  `build/generate_gld_forward.py` come from the same fork, where commit eaf7d128 added them together with
+  `build/build_zink.sh`; neither carries a licence line of its own, and that fork's `docs/ZINK-OPENGL.md` says of the
+  contribution eaf7d128 is part of: "its original MIT attribution is retained". `tools/nvk-bridge/`: PolyForm
+  Noncommercial 1.0.0, from the same fork.
 - `translator/`: LGPL-3.0-or-later (see `translator/LICENSE`): it is based on metal2vulkan, whose licence carries over.
 - `nvk/`: changes to Mesa (MIT).
 - GSP firmware: NVIDIA's redistributable firmware licence.
