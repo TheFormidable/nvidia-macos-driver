@@ -343,6 +343,25 @@ cast, an old frame, frames that flicker between two, one of those counters above
    so the first start of each takes longer. Fail: a rendering fault that 2.9 did not have; send it with the game's
    name and the card. If you build from source, `NVK_SKIP_PATCHES` builds NVK without one of the compiler patches to
    find which one is behind it ([NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)).
+5. **OpenGL (macOS 15.5 or later).** Native OpenGL through Zink has not run on a Mac with this tree, and the GLEngine
+   layout it relies on was recorded on macOS 15.8.1 (24H32) and 26.7.1 (25G241) only. First see which renderer the
+   accelerator named:
+
+   ```bash
+   log show --last boot --predicate 'eventMessage CONTAINS "NVAccel: OpenGL:"'
+   ```
+
+   It names `NVKZinkGLDriver (Zink on NVK)`, or `AppleMetalOpenGLRenderer` with `nvzink=0` or before macOS 15.5. Then
+   start an OpenGL application from Terminal (a game that uses OpenGL, or Minecraft with its OpenGL renderer) and keep
+   what it prints. Pass: it draws as it did with 2.9, and it prints no line that starts with `NVKZinkGLDriver:` or
+   `NVK Zink:`. A line `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (...)`
+   means the adapter found this build's layout different and left the application on Apple's OpenGL, as it is meant
+   to: send that line and the output of `sw_vers`. Fail: a crash, a black window or a wrong picture; restart once
+   with the boot argument `nvzink=0` and say whether it goes away. See [ZINK-OPENGL.md](ZINK-OPENGL.md).
+   To go back to release 2.9 or to an earlier 3.0 package, run this package's `sudo ./uninstall.sh` first: the
+   installers of those packages do not know `/Library/GPUBundles/NVKZinkGLDriver.bundle` and leave it in place. Their
+   accelerator does not name it, so it is not loaded, and `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`
+   removes it.
 
 ## 5. Video
 
@@ -426,6 +445,7 @@ restart).
 | Image grace | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | RTX 50 H.264 decode in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
 | 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
+| Native OpenGL through Zink | `nvzink=0` (Apple's OpenGL over Metal for every application) | boot argument |
 | Upstream compiler fixes in NVK | `NVK_SKIP_PATCHES="<patch names>"` | building from source |
 
 CHANGELOG.md, "The ways back", and SWITCHES.md say what each one restores in full.

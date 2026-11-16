@@ -44,7 +44,7 @@ static void nvmtl_busy_write(IOSurfaceRef s,NSUInteger p,uint64_t seq,int done){
 static unsigned IOSurfaceGetID(IOSurfaceRef s){return s->id;}
 static unsigned IOSurfaceGetSeed(IOSurfaceRef s){return s->seed;}
 @class NVMTLCommandBuffer;
-@interface NVMTLTexture:NSObject{@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn,_failOut;NSUInteger _plane;}@end
+@interface NVMTLTexture:NSObject{@public NVMTLTexture *_parent; IOSurfaceRef _surf; BOOL _vramOn,_failOut;NSUInteger _plane;struct {void *img;} _surfaceLinear;}@end
 // the planes of a two-plane private surface published together (NVMTLObjects.m): only twoPlane has two planes, so the
 // planner groups nothing in the arms before the last one, where a grouped copy-out would abort. In the last arm every
 // grouped copy-out is recorded with its roots and answers planesAnswer (the planes NOT copied out, one bit each; -1 =
@@ -87,6 +87,11 @@ int main(void){@autoreleasepool{
  surface.seed++;assert(!nvmtl_surface_pending_write(b,t));surface.seed--;
  alias->_vramOn=NO;assert(!nvmtl_surface_pending_write(b,alias));alias->_vramOn=YES;
  t->_vramOn=NO;assert(nvmtl_surface_pending_write(b,t));assert(!nvmtl_surface_pending_write(b,alias));t->_vramOn=YES;
+ // a Managed wrapper's tiled image is a backing of its own, not the shared VRAM: two wrappers of one surface are one
+ // backing only when both are direct imports, and a texture still matches its own record
+ alias->_surfaceLinear.img=(void*)1;assert(!nvmtl_surface_pending_write(b,alias));
+ t->_surfaceLinear.img=(void*)1;assert(nvmtl_surface_pending_write(b,t));
+ assert(!nvmtl_surface_pending_write(b,alias));t->_surfaceLinear.img=NULL;alias->_surfaceLinear.img=NULL;
  alias->_plane=1;assert(!nvmtl_surface_pending_write(b,alias));alias->_plane=0;
  nvmtl_surface_register_writes(b);nvmtl_surface_finish_writes(a);
  assert(nvmtl_surface_pending_write(a,t));
@@ -127,6 +132,11 @@ int main(void){@autoreleasepool{
  COMMIT(w1);
  assert(dirtyCalls==0&&surface.seed==seed1&&[markLog containsObject:@"4:1"]&&nvmtl_surface_pending_write(w2,t));
  nvmtl_surface_finish_writes(w1);t->_vramOn=YES;
+ // a tiled image of a Managed wrapper reaches the VRAM only by its copy at publication: its VRAM is not marked newest at
+ // commit
+ t->_surfaceLinear.img=(void*)1;dirtyCalls=0;const unsigned tiledSeed=surface.seed;
+ COMMIT(w1);assert(dirtyCalls==0&&surface.seed==tiledSeed);
+ nvmtl_surface_finish_writes(w1);t->_surfaceLinear.img=NULL;
  // a CPU write after the commit still invalidates the record (later CPU edits import)
  COMMIT(w1);surface.seed++;assert(!nvmtl_surface_pending_write(w2,t));nvmtl_surface_finish_writes(w1);
  assert(nvmtl_surface_writers.count==0);

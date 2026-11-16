@@ -81,6 +81,7 @@ int nvmtl_vk_init(void);
 static uint32_t nvmtl_gl_uniform_index(id function);
 static void nvmtl_gl_uniform_inherit(id function, id source);
 void nvmtl_gl_caps_enable(void);
+static void nvmtl_photobooth_install(void);   // NVMTLPhotoBooth.m
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
 const char *nvmtl_vk_device_name(void);
@@ -998,6 +999,7 @@ static void nvmtl_plane_selftest_early(void);
         return nil;
     }
     nvmtl_gl_caps_enable();
+    nvmtl_photobooth_install();
     nvmtl_plane_selftest_early();
     if (nvmtl_vk_vendor() == 0x1002 || nvmtl_vk_vendor() == 0x8086) nvmtl_nmxvt_register();
     if (nvmtl_vk_vendor() == 0x10de) {   /* NVDEC/NVENC are NVIDIA engines reached through NVRM */
@@ -1302,6 +1304,13 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     SEL s = sel_registerName("framebufferOnly");
     return d && [d respondsToSelector:s] && ((BOOL (*)(id, SEL))objc_msgSend)(d, s);
 }
+// A texture whose usage is Unknown may be used every valid way, shader writes through mip and slice views included, so
+// it gets a storage-capable image when it is made: the storage twin that covers a later write without a storage view
+// (nvmtl_storage_view_for) serves the root texture only, never a view of it. From the HighDelay/nvidia-macos-driver-nvk fork. Surface wrappers keep their
+// own rule (nvmtl_surface_usage), which reports Unknown only over a backing without a storage view.
+static BOOL nvmtl_texture_usage_writable(NSUInteger usage) {
+    return usage == MTLTextureUsageUnknown || (usage & MTLTextureUsageShaderWrite) != 0;
+}
 // BGR10A2Unorm (VkFormat 58) cannot be a storage image on NVIDIA; a writable private texture of it is created as
 // R10G10B10A2 (VkFormat 64): same bits per channel, storage-capable. YES when the format was swapped. Without this a
 // kernel's stores to such a texture went to the dummy storage image (Cyberpunk's tonemapped output is BGR10A2).
@@ -1439,7 +1448,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwap = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_texture_usage_writable(d.usage);
     if (d.textureType == MTLTextureType2DMultisample || d.textureType == MTLTextureType2DMultisampleArray) {
         if (d.mipmapLevelCount != 1 || d.depth != 1) { nvlog("newTextureWithDescriptor: invalid multisample color descriptor"); return nil; }
         if (wantStex) { static _Atomic unsigned long msw; const unsigned long k = atomic_fetch_add(&msw, 1) + 1;
@@ -1452,7 +1461,7 @@ static id<MTLTexture> nvmtl_make_y422_texture(MTLTextureDescriptor *d, NVMTLText
     t->_stex = t->_i.storage == 1;
     t->_rbSwap = rbSwap;
     t->_usage = d.usage;
-    if (wantStex && !t->_stex) { static unsigned long lost; lost++;
+    if ((d.usage & MTLTextureUsageShaderWrite) && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }
     nvmtl_texture_desc_swizzle(t, d);
     nvlog("newTextureWithDescriptor: %lux%lu%s -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (__bridge void *)t); return t; }
@@ -1714,29 +1723,69 @@ static void nvmtl_plane_selftest_early(void)
                        ^{ (void)nvmtl_plane_vram_ready(); });
     });
 }
-static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
-                                      uint32_t vkf, uint32_t bpp, int a8, int stex)
+// NVMTL_MANAGED_SURFACE_TILED (on by default, =0 off): a shader-writable wrapper in Managed storage of a single-plane
+// surface in the family's VRAM is drawn, sampled and read by framebuffer fetch through one tiled image of its own
+// (_i), and the linear import of the family's VRAM (_surfaceLinear) is what it publishes through: copied from the tiled
+// image on the GPU before the surface is marked (nvmtlSurfaceOutDirtied:), and into it when another writer made the
+// VRAM newer (nvmtlSurfaceIn). The source fork found native application icons drawn into such surfaces showing stale
+// layers: NVK renders a linear attachment through an implicit tiled shadow when the pass mixes it with tiled ones, and
+// what sampling and framebuffer fetch then read was the linear image. Wrappers of the surface with the same descriptor
+// share that tiled image, as they share a private one. =0: such a wrapper renders straight into the linear import.
+static int nvmtl_managed_surface_tiled_on(void)
 {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_SURFACE_TILED"); on = !(e && e[0] == '0'); nvlog("shader-writable Managed surfaces: %s (NVMTL_MANAGED_SURFACE_TILED=%s)", on ? "a tiled image of their own, published through the VRAM import" : "drawn straight into the VRAM import", e ?: "unset"); }
+    return on;
+}
+// rt: the wrapper may be drawn into (its usage has RenderTarget, or is Unknown), so its backing must be a colour attachment.
+static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
+                                      uint32_t vkf, uint32_t bpp, int a8, int stex, int rt)
+{
+    const char *vwhy = NULL;   // why a single-plane surface that fits the family's VRAM still takes a private image
+    const char *pwhy = NULL;   // the same for a plane of a two-plane surface
     if (surf && plane == 0 && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
             nvk_buffer vb;
             if (!nvmtl_ic_get(surf, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
+                    // A linear import can lose the storage view or the colour attachment that the optimal format has. A
+                    // wrapper that needs the one it lost takes the private image below, writable whenever the format
+                    // is and always renderable, so that its usage never claims ShaderWrite over a view that cannot be
+                    // written (Core Image would get a nil render destination, and Photo Booth's preview would stay
+                    // black) and a pass never draws into an image that is not a colour attachment.
+                    if ((stex && !t->_i.storage) || (rt && !(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))) {
+                        vwhy = stex && !t->_i.storage ? "the linear import has no storage view" : "the linear import is not a colour attachment";
+                        nvmtl_vk_image_destroy(&t->_i);
+                        if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
+                        goto private_image;
+                    }
+                    // a shader-writable Managed wrapper: a tiled image of its own, the import kept to publish through
+                    if (stex && ((t->_ropt >> MTLResourceStorageModeShift) & 0xF) == MTLStorageModeManaged && nvmtl_managed_surface_tiled_on()) {
+                        nvk_image tiled; memset(&tiled, 0, sizeof tiled);
+                        if (nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &tiled)) {
+                            vwhy = "no tiled image for a shader-writable Managed wrapper";
+                            nvmtl_vk_image_destroy(&t->_i);
+                            if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
+                            goto private_image;
+                        }
+                        t->_surfaceLinear = t->_i; t->_i = tiled;
+                    }
                     t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
                     uint32_t seed = IOSurfaceGetSeed(surf);
+                    // a new tiled image holds nothing yet: its first use imports the surface, whatever the tag says
                     int current = nvmtl_vram_tag_current(surf, 0, seed);
-                    if (current) { t->_surfSeed = seed; t->_surfSynced = YES; }
+                    if (current && !t->_surfaceLinear.img) { t->_surfSeed = seed; t->_surfSynced = YES; }
                     static unsigned n; if (n++ < 8 || n % 2000 == 0)
                         nvlog("item 7: surface %u %ux%u pitch %zu -> the family's VRAM%s (vram %llu, private %llu)", (unsigned)IOSurfaceGetID(surf),
-                              w, h, row, current ? ", already current (no upload)" : "", g_surf_vram, g_surf_private);
+                              w, h, row, t->_surfaceLinear.img ? ", drawn through a tiled image of its own" : current ? ", already current (no upload)" : "",
+                              g_surf_vram, g_surf_private);
                     return 0;
                 }
                 if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
             }
         }
     }
-    const char *pwhy = NULL;
     if (surf && IOSurfaceGetPlaneCount(surf) == 2 && nvmtl_vk_surface_share_on()) {
         nvmtl_pa_surface s; nvmtl_pa_read(surf, &s);
         const int why = nvmtl_pa_eligible(&s, (uint32_t)plane, w, h, bpp);
@@ -1757,6 +1806,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             pwhy = "the plane's VRAM could not be used";
         }
     }
+private_image:
     g_surf_private++;
     // A private image stands for the whole surface: wrappers that read it and wrappers that write it must share ONE image
     // (nvmtlNewSurfaceTexture caches it), or what one writes the other never sees. So it is made writable whenever the
@@ -1767,24 +1817,30 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         nvlog("item 7: surface %u %ux%u plane %lu -> a private image, copied in and out (%s; row %zu bytes, %zu plane(s))",
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
               (plane != 0 || pplanes > 1) ? (pwhy ? pwhy : "more than one plane") : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
-              : (prow % 32) ? "the row is not a multiple of 32 bytes" : "the family VRAM could not be used", prow, pplanes);
+              : (prow % 32) ? "the row is not a multiple of 32 bytes" : vwhy ? vwhy : "the family VRAM could not be used", prow, pplanes);
     }
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }
 
 // A CAMetalLayer drawable with framebufferOnly=NO is, on real Metal, usable as a render target AND a compute/Core Image
 // destination. QuartzCore hands this driver a descriptor whose usage is only ShaderRead for it, so Core Image refuses the
-// texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. The surface's
-// image is already writable whenever its format allows (see nvmtl_surface_image_create), so say so.
+// texture ("texture usage must include MTLTextureUsageShaderWrite") and Photo Booth's preview stays black. Such a
+// wrapper asks for a storage view before the surface is imported (nvmtlNewSurfaceTexture), and ShaderWrite is reported
+// only when the backing has one (storage).
 // WindowServer keeps the usage it asked for: it wraps hundreds of surfaces a second, none of them Core Image targets.
-static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
-    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a
-    // non-storage surface would forbid its optimal-tiled storage twin below
-    // (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy.
-    if (usage == MTLTextureUsageUnknown) return usage;
+static BOOL nvmtl_surface_widen_usage(BOOL fbo) {
     static int ws = -1;
     if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
-    if (!fbo && !ws) {
+    return !fbo && !ws;
+}
+static NSUInteger nvmtl_surface_usage(NSUInteger usage, BOOL fbo, BOOL storage) {
+    // Unknown permits shader writes too. Adding only ShaderRead/RenderTarget to a surface without a storage view would
+    // forbid its optimal-tiled storage twin (ImageIO's RGBA16Unorm outputs), silently sending those writes to a dummy,
+    // so Unknown stays Unknown there. With a real storage view the explicit bits are reported as for any other usage:
+    // Photo Booth's drawables can arrive with an Unknown descriptor, and Core Image refuses a destination whose usage
+    // does not include ShaderWrite.
+    if (usage == MTLTextureUsageUnknown && !storage) return usage;
+    if (nvmtl_surface_widen_usage(fbo)) {
         usage |= MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         if (storage) usage |= MTLTextureUsageShaderWrite;
     }
@@ -1819,13 +1875,18 @@ static char nvmtl_surface_cache_key;
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    // Core Image can be handed a ShaderRead-only descriptor for a drawable that is not framebuffer-only. Ask for the
+    // real storage view before the family's VRAM is imported (a private image is made writable anyway). Only for
+    // single-plane surfaces, the drawables: the planes of a two-plane video surface keep the views they asked for.
+    if (!wantStex && surf && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_surface_widen_usage(t->_fbo) && !a8
+        && nvmtl_vk_format_is_storage(vkf)) wantStex = 1;
     NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(t->_ropt), @(t->_fbo)] : nil;
     NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
-    // Failed BAR imports use a private image. Repeated wrappers of the same
-    // surface must share that image, just as successful family imports do,
-    // whether a wrapper reads it or writes it (the image is made writable).
+    // A private image, and the tiled image of a shader-writable Managed wrapper, belong to this device alone. Repeated
+    // wrappers of the same surface must share that image, just as successful family imports share the VRAM, whether a
+    // wrapper reads it or writes it (the image is made writable).
     // Weak entries do not pin the image after the application's last wrapper.
-    if (backing && !backing->_vramOn) {
+    if (backing && (!backing->_vramOn || backing->_surfaceLinear.img)) {
         NVMTLTexture *alias = (NVMTLTexture *)[backing newTextureViewWithPixelFormat:d.pixelFormat];
         if (alias) {
             alias->_viewParent = nil; alias->_usage = nvmtl_surface_usage(d.usage, t->_fbo, alias->_stex); alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
@@ -1833,7 +1894,8 @@ static char nvmtl_surface_cache_key;
             return alias;
         }
     }
-    if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
+    const int wantRt = d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageRenderTarget) || nvmtl_surface_widen_usage(t->_fbo);
+    if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex, wantRt)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
     t->_q = nvmtl_device_queue();
     t->_surf = surf; if (surf) { CFRetain(surf); t->_surfOwned = YES; t->_clientWritten = nvmtl_busy_foreign(surf, plane) != 0; }
@@ -1842,7 +1904,7 @@ static char nvmtl_surface_cache_key;
     t->_stex = t->_i.storage == 1;
     t->_usage = nvmtl_surface_usage(d.usage, t->_fbo, t->_stex);
     nvmtl_texture_desc_swizzle(t, d);
-    if (key && !t->_vramOn) [cache setObject:t forKey:key];
+    if (key && (!t->_vramOn || t->_surfaceLinear.img)) [cache setObject:t forKey:key];
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);
     return t; }
@@ -2368,7 +2430,7 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         if (nvmtl_blend_from(ca, noFrag, sa8, &rt.blend[i]))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u has a blend factor or operation this driver cannot translate (the reason is the preceding \"blend:\" log line)", i]);
         if (sa8) {
-            a8mask |= 1u << i;
+            a8mask |= 1u << i; rt.a8_mask |= 1u << i;   // its framebuffer-fetch reads are remapped (nvmtl_a8_fetch.h)
             if (rt.blend[i].enabled) {   // the red lane is Metal's alpha: blend it with the alpha factors and operation
                 rt.blend[i].src_rgb = nvmtl_a8_factor(rt.blend[i].src_alpha); rt.blend[i].dst_rgb = nvmtl_a8_factor(rt.blend[i].dst_alpha);
                 rt.blend[i].op_rgb = rt.blend[i].op_alpha; }
@@ -3114,7 +3176,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     uint32_t mtl_type = (uint32_t)d.textureType;
     uint32_t layers = nvmtl_vk_layers_for_desc(mtl_type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
     if (nvmtl_vk_image_size_align((uint32_t)d.width, (uint32_t)d.height, depth ? dvk : vkf, (uint32_t)d.mipmapLevelCount, mtl_type, layers, depth,
-                                  (d.usage & MTLTextureUsageShaderWrite) != 0 && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
+                                  nvmtl_texture_usage_writable(d.usage) && !a8, &sz, &al)) { sz = d.width * d.height * (bpp ? bpp : 4); al = 256; }
     MTLSizeAndAlign r = { sz, al }; return r;
 }
 - (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)d
@@ -3390,6 +3452,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 @end
 
 #import "NVMTLDevice_contract.m"
+#import "NVMTLPhotoBooth.m"
 
 #import "NVMTLObjects.m"
 #import "NVMTLMetalFXDLSS.m"

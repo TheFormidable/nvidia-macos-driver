@@ -947,12 +947,18 @@ pub(super) fn build_stage_input(
             // variable. One `[N x sampler]` variable at the first binding compiled, but on NVK its
             // element 1 read past that count-1 binding and sampled with the wrong sampler (GPU
             // probe 10-28: linear sampler in slot 1 returned the nearest result).
-            let array_count = declared_count.filter(|count| *count > 1);
+            let pointee = ptr_pointee(&defs, *pty);
+            let llvm_count = pointee.and_then(|ty| array_type(&defs, ty).map(|(_, length)| length));
+            // A one-element byval array still passes an address, unlike a scalar
+            // sampler handle. Descriptor count alone cannot distinguish their ABI.
+            // Metadata stores only counts above one; an omitted count means one,
+            // and the emitted pointee type identifies the byval array form.
+            let array_count = llvm_count.map(|_| declared_count.unwrap_or(1))
+                .or(declared_count.filter(|count| *count > 1));
             if let Some(count) = array_count {
-                let pointee = ptr_pointee(&defs, *pty).ok_or_else(|| {
+                pointee.ok_or_else(|| {
                     format!("sampler array parameter {pid} type {pty} is not a pointer")
                 })?;
-                let llvm_count = array_type(&defs, pointee).map(|(_, length)| length);
                 if llvm_count != Some(count) {
                     return Err(format!(
                         "entry parameter {idx} occupies {count} sampler descriptors per \
@@ -984,6 +990,13 @@ pub(super) fn build_stage_input(
                 ));
                 decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding + element);
                 ctx.interface_buffer_var(var);
+                if array_count.is_some() {
+                    if let Some(state) = ctx.runtime_sampler_states
+                        .get((metal_index + element) as usize).copied().flatten()
+                    {
+                        ctx.sampler_states.insert(var, state.lowering_state());
+                    }
+                }
                 elements.push(var);
             }
             let var = elements[0];
@@ -2568,8 +2581,11 @@ pub(in crate::passes) fn bindless_heap_var(
         binding,
     );
     ctx.interface_buffer_var(var);
+    let multisampled = type_def_of(ctx, image_ty).is_some_and(|ty| {
+        ty.operands.get(4) == Some(&Operand::LiteralBit32(1))
+    });
     ctx.image_array_vars
-        .insert(var, (image_ty, dims, comp, false));
+        .insert(var, (image_ty, dims, comp, multisampled));
     ctx.bindless_heap_vars.insert(image_ty, var);
     var
 }
@@ -2629,8 +2645,11 @@ pub(in crate::passes) fn bindless_storage_heap_var(
         binding,
     );
     ctx.interface_buffer_var(var);
+    let multisampled = type_def_of(ctx, image_ty).is_some_and(|ty| {
+        ty.operands.get(4) == Some(&Operand::LiteralBit32(1))
+    });
     ctx.image_array_vars
-        .insert(var, (image_ty, dims, comp, false));
+        .insert(var, (image_ty, dims, comp, multisampled));
     ctx.bindless_heap_vars.insert(image_ty, var);
     var
 }
@@ -2667,27 +2686,37 @@ fn register_embedded_textures(
                 tex.comp,
             )?;
             (
-                ctx.ty_storage_image(tex.dim, tex.arrayed, format, tex.comp),
+                ctx.ty_storage_image_ms(tex.dim, tex.arrayed, format, tex.comp, tex.multisampled),
                 state,
             )
         } else {
-            (ctx.ty_image(tex.dim, tex.arrayed, tex.comp), None)
+            (ctx.ty_image_ms(tex.dim, tex.arrayed, tex.comp, tex.multisampled), None)
         };
+        // An array of textures (array<texture2d<float>, N>) goes through the heap as well, each element by the slot its
+        // own handle carries: declared as an array binding, it would need N descriptors at one binding, and the host's
+        // layout has one per texture slot (a robust driver clamps the index to element 0). The heap (descriptor set 2,
+        // bindings 0 to 4) holds sampled images, samplers, storage images and texel buffers, so a single texture
+        // buffer reads through it as well; only an array of texture buffers keeps its binding.
         if crate::reflect::bindless_fixed_fields_on()
             && tex.storage_format.is_none()
-            && tex.array_length.is_none()
+            && (tex.array_length.is_none() || tex.dim != Dim::DimBuffer)
         {
             let off = u64::from(tex.field_offset);
+            let end = off + u64::from(tex.array_length.unwrap_or(1)) * 8;
+            let element = |at: u64| at >= off && at < end && (at - off) % 8 == 0;
             let heap_ids: std::collections::BTreeSet<Word> = ctx
                 .emit_sidecar
                 .buffer_pointer_heap_loads
                 .iter()
-                .filter(|f| f.root == buffer_root && f.byte_offset == off)
+                .filter(|f| f.root == buffer_root && element(f.byte_offset))
                 .map(|f| f.id)
                 .collect();
             let unrouted = ctx.emit_sidecar.buffer_pointer_field_loads.iter().any(|f| {
-                f.root == buffer_root && f.byte_offset == off && !heap_ids.contains(&f.id)
-            });
+                f.root == buffer_root && element(f.byte_offset) && !heap_ids.contains(&f.id)
+            }) || (tex.array_length.is_some()
+                && ctx.emit_sidecar.buffer_pointer_dynamic_field_loads.iter().any(|d| {
+                    d.root == buffer_root && d.byte_offset == off && !heap_ids.contains(&d.id)
+                }));
             if !heap_ids.is_empty() && !unrouted {
                 let heap = bindless_heap_var(ctx, image_ty, (tex.dim, tex.arrayed), tex.comp);
                 let facts: Vec<crate::emit_sidecar::BufferPointerHeapLoad> = ctx
@@ -2737,7 +2766,7 @@ fn register_embedded_textures(
         ctx.interface_buffer_var(var);
         if let Some(length) = tex.array_length {
             ctx.image_array_vars
-                .insert(var, (image_ty, (tex.dim, tex.arrayed), tex.comp, false));
+                .insert(var, (image_ty, (tex.dim, tex.arrayed), tex.comp, tex.multisampled));
             ctx.register_runtime_storage_image_value(
                 var,
                 tex.synthetic_texture_index,
@@ -2798,6 +2827,9 @@ fn register_embedded_textures(
         ));
         ctx.image_dims.insert(lid, (tex.dim, tex.arrayed));
         ctx.image_comp.insert(lid, tex.comp);
+        if tex.multisampled {
+            ctx.image_multisampled.insert(lid);
+        }
         if tex.storage_format.is_some() {
             ctx.image_storage.insert(lid);
             ctx.register_runtime_storage_image_value(

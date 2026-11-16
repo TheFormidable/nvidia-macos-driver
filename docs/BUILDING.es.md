@@ -86,12 +86,14 @@ comandos y opciones y la solución de problemas.
   para `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`, `NM_OGKM620` y `NM_OGKM620_PRISTINE` si los
   fijas.
 - Red para `fetch`, para `deps` y para cada compilación de NVK.
-- Las herramientas de compilación de NVK, el cargador de Vulkan y el traductor: de dónde salen lo dice
+- Las herramientas de compilación de NVK, el cargador de Vulkan, el traductor y OpenGL nativo: de dónde salen lo dice
   `NM_TOOLS_FROM`. En un
   **Mac Intel** (`auto` es allí `source`), `./build.sh deps` compila ninja, CMake, Python 3.14 (con OpenSSL, zstd y xz),
-  pkgconf, SPIRV-Tools, glslang y LLVM 22 con clang desde fuentes fijadas con `build/toolchain.sh`, en
+  pkgconf, SPIRV-Tools, glslang, LLVM 22 con clang y GNU Bison 3.8.2 (el Mesa de OpenGL nativo necesita Bison 3.0 o
+  posterior; el `/usr/bin/bison` de macOS es 2.3) desde fuentes fijadas con `build/toolchain.sh`, en
   `<directorio de trabajo>/tools/toolchain`: **no hace falta Homebrew** y nada se instala fuera del directorio de
-  trabajo. En un Mac Intel build.sh no usa Homebrew, aunque esté instalado: una copia de esas herramientas que
+  trabajo. La receta de Bison aún no se ha ejecutado en un Mac ni en ningún otro sitio: sus pruebas imitan la
+  compilación. En un Mac Intel build.sh no usa Homebrew, aunque esté instalado: una copia de esas herramientas que
   ofrezcan Homebrew o el `PATH` no se usa (`doctor` la nombra) y no se llama a `brew`; solo tus propios ajustes
   (`NM_PYTHON`, `NM_LLVM_PREFIX`, `NM_SPIRV_TOOLS_PREFIX`, `PKG_CONFIG_PATH`, `LIBCLANG_PATH`, `NVK_PATH`) se toman en
   su lugar, y `doctor` dice que son tuyos. Solo GNU patch no se compila: si el `patch` de macOS no puede crear archivos (los parches de NVK lo
@@ -153,11 +155,12 @@ Todo lo que `build.sh` crea, descarga o instala para sí mismo va al directorio 
 del autor original); `build.sh` lo marca con el archivo `.nullmoth-build-workdir` y solo borra dentro de una carpeta
 que lleve esa marca. Las herramientas compiladas desde fuentes van a su `tools/toolchain`, sus
 carpetas de compilación a `tools/toolchain-build`, sus registros a `logs/toolchain` y sus fuentes verificadas a
-`src/git/tc-*.git` y `src/toolchain`. El sello de cada herramienta (`tools/toolchain/.nm-toolchain/<herramienta>`)
-guarda su commit fijado y su receta: si cambian, `deps` vuelve a compilar esa herramienta y la que la lleva enlazada (Python
+`src/git/tc-*.git`, `src/git/tc-bison/bison-3.8.2.tar.gz` y `src/toolchain`. El sello de cada herramienta
+(`tools/toolchain/.nm-toolchain/<herramienta>`) guarda su commit fijado (el de Bison: el SHA-256 de su tarball de
+publicación) y su receta: si cambian, `deps` vuelve a compilar esa herramienta y la que la lleva enlazada (Python
 después de OpenSSL, zstd o xz; glslang después de SPIRV-Tools), y ninguna otra. Ninguna de ellas se distribuye: la
-compilación de NVK tiene LLVM y SPIRV-Tools desactivados y solo `mesa_clc`, un programa que se usa al compilar, los
-enlaza. Solo las fórmulas de Homebrew
+compilación de NVK tiene LLVM y SPIRV-Tools desactivados, solo `mesa_clc`, un programa que se usa al compilar, los
+enlaza, y Bison solo convierte en C las gramáticas de Mesa mientras se compila OpenGL nativo. Solo las fórmulas de Homebrew
 (`NM_TOOLS_FROM=homebrew`) van a la carpeta de Homebrew. Nada se escribe en
 tus archivos de inicio del shell, `~/.cargo`, `~/.rustup` ni `/Library`. Un Rust que tengas en otro sitio (en
 `~/.cargo`, por ejemplo) no se usa ni se toca: `doctor` dice que falta Rust hasta que `deps` pone el fijado en el
@@ -182,7 +185,8 @@ borra al terminarla; sus preguntas `brew info` (ninguna con `--offline` o `--no-
 `<directorio de trabajo>/tools/pip-cache`. Cada `brew install` se ejecuta con `HOMEBREW_NO_INSTALL_CLEANUP=1`: Homebrew
 no sigue la instalación con su limpieza propia, que borraría versiones anteriores de tus fórmulas (cada 30 días, de todas),
 fórmulas que ya nada necesita y enlaces rotos o carpetas vacías de su prefijo. Homebrew instala también lo que esas
-fórmulas necesitan y enlaza en su `bin` los comandos de las que no son keg-only (`llvm@22` lo es), que el `PATH` por
+fórmulas necesitan y enlaza en su `bin` los comandos de las que no son keg-only (`llvm@22` y `bison` lo son;
+`<directorio de trabajo>/tools/bin/bison` es un script de dos líneas que ejecuta el de Homebrew por su propia ruta), que el `PATH` por
 defecto de macOS pone antes de `/usr/bin` en un Mac Intel; cuando se leyó homebrew-core el 2026-11-13 eso incluía `python@3.15`, que `llvm@22` necesita para
 compilarse y que pasaría a ser el `python3` de una shell con ese `PATH` (la compilación usa `python@3.14`, desde la
 carpeta `opt` de Homebrew). Por eso, cuando las instalaciones dan al `bin` de Homebrew un `python3` que no tenía,
@@ -226,7 +230,10 @@ sudo ./install.sh && sudo shutdown -r now
 La primera línea con `install.sh` es una prueba: revisa el paquete y el Mac sin cambiar nada. Que pase no cubre el
 firmware, que la instalación real toma de la instalación anterior o descarga de NVIDIA antes de cambiar nada. Antes de
 instalar, lee en [README.md](../README.md) "Install — by hand" (OpenCore debe estar configurado). Para volver atrás,
-instala de la misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`; para quitar el driver
+instala de la misma forma el paquete publicado que usaste como base, desde su propio `pkgroot`. El instalador y el
+desinstalador de la versión 2.9 no conocen `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio; el
+acelerador de 2.9 no lo nombra, así que no se carga. El `sudo ./uninstall.sh` de este árbol lo quita, así que ejecútalo
+antes, o quita el bundle después con `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`. Para quitar el driver
 por completo: `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están en
 [BUILDING.md](BUILDING.md#installing-the-result-and-going-back).
 
@@ -320,6 +327,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_TC_SPIRVTOOLS_URL` | Réplica de SPIRV-Tools (vulkan-sdk-1.4.363.0), fuente de las herramientas que compila deps |
 | `NM_TC_GLSLANG_URL` | Réplica de glslang (16.6.0), fuente de las herramientas que compila deps |
 | `NM_TC_LLVM_URL` | Réplica de llvm-project (llvmorg-22.1.8), fuente de las herramientas que compila deps |
+| `NM_TC_BISON_URL` | Carpeta (URL) con `bison-3.8.2.tar.gz`, el tarball de publicación de GNU Bison (se comprueba su SHA-256), fuente de las herramientas que compila deps |
 | `NM_RUSTUP_URL` | De dónde se descarga `rustup-init` |
 | `RUSTUP_DIST_SERVER` | De dónde descarga rustup el compilador |
 | `DEVELOPER_DIR` | Otro Xcode distinto del seleccionado |
@@ -330,7 +338,7 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | `NM_OGKM620_PRISTINE` | Un árbol NVIDIA 620.70.06 ya descomprimido |
 | `NM_OGKM620` | Un árbol 620.70.06 con el RM ya compilado (se saltan `rm` y `kms`) |
 | `NM_OGKM610` | Un árbol NVIDIA 610.57.04 ya descomprimido |
-| `NM_MESA_GIT` | Un clon de Mesa con el commit 90a959eb, para NVK y para las pruebas de `./build.sh test`. El plugin no lo lee: se compila con `<workdir>/build/gpu-src/mesa/include`, que solo crea un `./build.sh fetch` sin este ajuste (o `--flavour dev` con `NM_VULKAN_INCLUDE`), y el paso del plugin se detiene si falta esa carpeta |
+| `NM_MESA_GIT` | Un clon de Mesa con el commit 90a959eb, para NVK y para las pruebas de `./build.sh test`. Si también tiene 0a6fa60a (mesa-26.3.0), Zink se compila desde él; si no, `fetch` añade ese commit a `<workdir>/src/git/mesa.git`. El plugin no lo lee: se compila con `<workdir>/build/gpu-src/mesa/include`, que solo crea un `./build.sh fetch` sin este ajuste (o `--flavour dev` con `NM_VULKAN_INCLUDE`), y el paso del plugin se detiene si falta esa carpeta |
 | `NM_VULKAN_INCLUDE` | Cabeceras de Vulkan para el plugin de desarrollo y para las pruebas de `./build.sh test` |
 | `NM_LILU_DEBUG_KEXT` | Para `nmkbl` y `nmhda` |
 | `NM_VIRTUALSMC_SRC` | Para `nmkbl` |
@@ -417,10 +425,12 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `osver` | libnvmtl_osver.dylib |
 | `nvk` | NVK, el driver Vulkan |
 | `boost` | nvmtl-boost |
+| `nvkbridge` | el runtime nativo de presentación Vulkan (libnvk_minecraft.dylib), que el paquete instala en `/Library/GPUBundles/nvmtl/minecraft` |
 | `vulkan` | el cargador de Vulkan de Khronos v1.4.367, que el paquete ofrece a las aplicaciones (`vulkan-for-apps.sh`); no es el cargador propio del plugin |
 | `plugin` | el plugin de Metal (NVMTLDriver) |
 | `xlate` | el traductor de shaders |
 | `nvencvt` | libnvencvt.dylib (video) |
+| `zink` | OpenGL nativo (docs/ZINK-OPENGL.md): Zink de Mesa 26.3.0, el adaptador CGL y NVKZinkGLDriver.bundle |
 | `selector` | NVPrimarySelector.kext (opcional) |
 | `nmkbl` | NMKbdBacklight.kext (opcional) |
 | `nmhda` | NMHDA.kext (opcional) |

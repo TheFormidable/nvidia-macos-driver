@@ -56,13 +56,14 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 # tools/spirv-llvm-translator, the step logs logs/<component>.log, the failure reports reports/, the package package/.
 # The tools deps builds from pinned sources (build/toolchain.sh) are installed in tools/toolchain, with one stamp per
 # finished tool in tools/toolchain/.nm-toolchain/, and each tool's log is logs/toolchain/<tool>.log; their sources are
-# src/git/tc-<tool>.git (fetched) and src/toolchain/<tool> (exported from it), their build trees tools/toolchain-build.
+# src/git/tc-<tool>.git (fetched) and src/toolchain/<tool> (exported from it), Bison's src/git/tc-bison/<release
+# tarball> and src/toolchain/bison (extracted from it), their build trees tools/toolchain-build.
 # When build.sh asks Homebrew anything it keeps Homebrew's cache in tools/homebrew-cache.
 tc_prefix() { printf '%s/tools/toolchain' "$1"; }
 tc_logs() { printf '%s/logs/toolchain' "$1"; }
 # the links build.sh makes in tools/bin (make_tool_links) once deps has every tool: a step that finds one of these
 # missing there would look for it on its PATH, which leads to macOS's own folders only, and stop
-TOOL_LINKS="bindgen cargo cbindgen cmake glslangValidator llvm-config llvm-spirv ninja patch pkg-config rustc"
+TOOL_LINKS="bindgen bison cargo cbindgen cmake glslangValidator llvm-config llvm-spirv ninja patch pkg-config rustc"
 
 # ---------------------------------------------------------------------------------------------------------- small tools
 sha256_file() { shasum -a 256 "$1" | cut -c1-64; }
@@ -468,7 +469,7 @@ prove_homebrew() {
 }
 
 # The tools the steps run: tools/bin (build.sh links each chosen tool there and puts it first on every step's PATH; its
-# patch is a two-line script that runs the chosen patch) and the Python environment's interpreter.
+# patch and its bison are small scripts that run the chosen patch and bison) and the Python environment's interpreter.
 prove_tools_used() {
   local w=$1 wr=$2 e name tg n=0 bad="" sys=""
   if [ ! -d "$w/tools/bin" ]; then skipped "the tools the steps use: $w/tools/bin does not exist"; return 0; fi
@@ -476,6 +477,7 @@ prove_tools_used() {
     name=${e##*/}
     if [ -L "$e" ]; then tg=$(resolve "$e")
     elif [ "$name" = patch ]; then tg=$(sed -n 's/^exec \(.*\) -f "\$@"$/\1/p' "$e" | sed "s/^'\(.*\)'\$/\1/")
+    elif [ "$name" = bison ]; then tg=$(sed -n 's/^exec \(.*\) "\$@"$/\1/p' "$e" | sed "s/^'\(.*\)'\$/\1/")
     else tg=$e; fi
     n=$((n + 1))
     case "$tg" in
@@ -519,10 +521,10 @@ prove_loads() {
   fi
   pr=$(tc_prefix "$w")
   machos "$pr" "$w/tools/spirv-llvm-translator" "$w/tools/cargo/bin" "$w/tools/rustup/toolchains" > "$t/tools.txt"
-  # the tools NVK's build runs, by name: each must be there, in the working directory
+  # the tools NVK's and zink's builds run, by name: each must be there, in the working directory
   named=""; missing=""
   for f in "$pr/bin/ninja" "$pr/bin/cmake" "$pr/python/bin/python3.14" "$pr/bin/pkgconf" "$pr/bin/spirv-val" "$pr/bin/spirv-opt" \
-           "$pr/bin/glslang" "$pr/llvm/bin/llvm-config" "$pr/llvm/lib/libLLVM.dylib" "$pr/llvm/lib/libclang-cpp.dylib"; do
+           "$pr/bin/glslang" "$pr/llvm/bin/llvm-config" "$pr/llvm/lib/libLLVM.dylib" "$pr/llvm/lib/libclang-cpp.dylib" "$pr/bin/bison"; do
     if [ -e "$f" ]; then
       g=$(resolve "$f"); named="$named ${f#"$pr"/}"
       # a link of the toolchain that leads out of the working directory is a tool taken from elsewhere
@@ -602,7 +604,7 @@ $rel: minos $m"; fi
 }
 
 # The logs of the build steps: a line that names Homebrew's prefix is a tool, header or library a step found there.
-COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost vulkan plugin xlate nvencvt package spirv-llvm-translator"
+COMPONENT_LOGS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink package spirv-llvm-translator"
 prove_logs() {
   local w=$1 p=$2 c f n=0 hits=""
   for c in $COMPONENT_LOGS; do
@@ -747,7 +749,7 @@ cmd_reads() {
   fi
   if [ ! -d "$r" ]; then
     for v in "text files of pkgroot that hold the home folder" VERSION NULLMOTH-LOCAL-BUILD.txt "links in pkgroot" "set-uid and set-gid files in pkgroot" \
-             "codesign -dv of each kext and of the four user-space products" "xattr -lr pkgroot: attributes and how many files carry each"; do
+             "codesign -dv of each kext and of the ten user-space products" "xattr -lr pkgroot: attributes and how many files carry each"; do
       rhead "$v"; cannot "no staged package ($r)"
     done
   else
@@ -757,11 +759,14 @@ cmd_reads() {
     rhead "NULLMOTH-LOCAL-BUILD.txt"; sed "s|$home|~|g" "$r/NULLMOTH-LOCAL-BUILD.txt" 2>&1
     rhead "links in pkgroot"; find "$r" -type l -exec ls -l {} \; 2>&1 | sed "s|$r/||g"; say "(end of list)"
     rhead "set-uid and set-gid files in pkgroot"; find "$r" \( -perm -4000 -o -perm -2000 \) -print 2>&1 | sed "s|$r/||"; say "(end of list)"
-    rhead "codesign -dv of each kext and of the four user-space products"
+    rhead "codesign -dv of each kext and of the ten user-space products"
     if ! command -v codesign > /dev/null 2>&1; then cannot "codesign is not there"
     else
       for f in $(cd "$r" && find Library -name '*.kext' -type d -prune 2>/dev/null | LC_ALL=C sort) Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib \
-               Library/GPUBundles/nvmtl/libnvmtl_translate.dylib Library/GPUBundles/NVMTLDriver.bundle Library/NullMoth/boost/nvmtl-boost; do
+               Library/GPUBundles/nvmtl/libnvmtl_translate.dylib Library/GPUBundles/NVMTLDriver.bundle Library/NullMoth/boost/nvmtl-boost \
+               Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib Library/GPUBundles/nvmtl/minecraft/lib/libnvk_renderer.dylib \
+               Library/GPUBundles/NVKZinkGLDriver.bundle Library/GPUBundles/nvmtl/zink/libnvk_zink.dylib \
+               Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib Library/GPUBundles/nvmtl/zink/libnvk_zink_vulkan.dylib; do
         say "== $f"
         if [ -e "$r/$f" ]; then codesign -dv "$r/$f" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier)|not signed' || say "(none of those lines)"
         else cannot "$f is not in the package"; fi

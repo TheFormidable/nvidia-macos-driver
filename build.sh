@@ -179,6 +179,7 @@ check_pins() {
     "$base"*) if [ -n "$base" ]; then say "  pin ok    Mesa = $NM_PIN_MESA_COMMIT (nvk/MESA_BASE $base)"; else say "  pin FAIL  nvk/MESA_BASE is empty"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)); fi ;;
     *) say "  pin FAIL  Mesa = $NM_PIN_MESA_COMMIT, but nvk/MESA_BASE says $base"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
   esac
+  pin_agree "Mesa (Zink)" "$NM_PIN_ZINKMESA_COMMIT" build/prepare_zink.py "MESA_COMMIT = '$NM_PIN_ZINKMESA_COMMIT'"
   pin_agree "Vulkan loader tag" "$NM_PIN_VKLOADER_REF" build/build_vulkan_loader.sh "TAG=$NM_PIN_VKLOADER_REF"
   pin_agree "Vulkan-Headers tag" "$NM_PIN_VKHEADERS_REF" build/build_vulkan_loader.sh "TAG=$NM_PIN_VKHEADERS_REF"
   pin_agree "Vulkan-Loader commit" "$NM_PIN_VKLOADER_COMMIT" build/build_vulkan_loader.sh "LOADER_SHA=$NM_PIN_VKLOADER_COMMIT"
@@ -203,6 +204,14 @@ check_pins() {
     "v$NM_PIN_TOOL_PYTHON_TESTS_MIN".*) say "  pin ok    Python (toolchain) = $NM_PIN_TCPYTHON_REF (Python $NM_PIN_TOOL_PYTHON_TESTS_MIN)" ;;
     *) say "  pin FAIL  Python (toolchain) = $NM_PIN_TCPYTHON_REF, but the Python wanted is $NM_PIN_TOOL_PYTHON_TESTS_MIN (NM_PIN_TOOL_PYTHON_TESTS_MIN)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1)) ;;
   esac
+  # Bison: build/toolchain.sh checks the version of the release the tarball pin names, which must be the minimum
+  # native OpenGL's build asks for (build_zink.sh, BISON_MIN) or later
+  base=${NM_PIN_TCBISON_URL##*/bison-}; base=${base%.tar.gz}
+  pin_agree "Bison (toolchain)" "$base" build/toolchain.sh "    bison) echo $base ;;"
+  pin_agree "Bison minimum (zink)" "$NM_PIN_TOOL_BISON_MIN" build/build_zink.sh "BISON_MIN=$NM_PIN_TOOL_BISON_MIN"
+  if ! ver_ge "$base" "$NM_PIN_TOOL_BISON_MIN"; then
+    say "  pin FAIL  Bison (toolchain) = $base, older than the $NM_PIN_TOOL_BISON_MIN native OpenGL's build needs (NM_PIN_TOOL_BISON_MIN)"; PIN_PROBLEMS=$((PIN_PROBLEMS + 1))
+  fi
   pin_agree "Rust (translator)" "$NM_PIN_RUST_VERSION" build/build_xlate_release.sh "RV=\${NULLMOTH_RUST_VERSION:-$NM_PIN_RUST_VERSION}"
   pin_agree "base package release" "$NM_PIN_BASE_RELEASE" build/package_local.sh "BASE_RELEASE=$NM_PIN_BASE_RELEASE "
   return 0
@@ -217,7 +226,7 @@ LOCATION_VARS="NM_OGKM_URL NM_MESA_URL NM_KHRONOS_URL NM_OPEN_GPU_DOC_URL NM_RYZ
 NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_SPIRV_TOOLS_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
 NM_VULKAN_INCLUDE NM_LILU_DEBUG_KEXT NM_VIRTUALSMC_SRC NM_MACKERNELSDK NULLMOTH_BUILD_ROOT NULLMOTH_BUILD_HOST NM_LOCAL_HOST_PATH
 NM_TC_NINJA_URL NM_TC_CMAKE_URL NM_TC_OPENSSL_URL NM_TC_ZSTD_URL NM_TC_XZ_URL NM_TC_PYTHON_URL NM_TC_PKGCONF_URL
-NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL"
+NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL NM_TC_BISON_URL"
 # read by the existing build scripts and passed through when set (their defaults are the scripts' own)
 SCRIPT_VARS="NV_VERSION KMS_ARCHIVE RE MINVER FB_DEFS KHDR KLIB MACOSX_DEPLOYMENT_TARGET NVK_PATH NVK_SYSROOT NVK_JOBS
 NVK_EXTRA_PATCHES NVK_SKIP_PATCHES NVK_REF_EXPORTS PKG_CONFIG_PATH LIBCLANG_PATH JOBS
@@ -611,7 +620,7 @@ path_tool() {
   case "$c" in /*) ;; *) return 0 ;; esac
   [ -n "$(foreign_reason "$c")" ] || printf '%s' "$c"
 }
-PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator"
+PATH_TOOL_NAMES="python3 gpatch patch ninja cmake pkg-config glslangValidator bison"
 
 # Each tool: the path the build will use ("" when none fits) and a status line. Homebrew's bin folder is never put on
 # the build's PATH: tools/bin gets a link to each chosen tool, so nothing else from Homebrew can leak into the build.
@@ -643,7 +652,9 @@ patch_works() {
 python_at_least() { local v; [ -n "$1" ] && v=$("$1" --version 2>&1 | version_of) && [ -n "$v" ] && ver_ge "$v" "$2"; }
 kext_python() { local p; p=$(PATH=$STEP_PATH command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
 host_python() { local p; p=$(PATH=${NM_LOCAL_HOST_PATH:-/usr/bin:/bin:/usr/sbin:/sbin} command -v python3 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_PYTHON_KEXT_MIN" && printf '%s' "$p"; return 0; }
-PATCH_NEW=0; T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""
+# step_bison: the bison zink's step finds first on its PATH, when it is NM_PIN_TOOL_BISON_MIN or later
+step_bison() { local p; p=$(PATH=$STEP_PATH command -v bison 2>/dev/null) && python_at_least "$p" "$NM_PIN_TOOL_BISON_MIN" && printf '%s' "$p"; return 0; }
+PATCH_NEW=0; T_PYTHON=""; T_PATCH=""; T_NINJA=""; T_CMAKE=""; T_PKGCONFIG=""; T_GLSLANG=""; T_LLVMCONFIG=""; T_LLVMSPIRV=""; T_BISON=""
 LLVM_PREFIX=""; PC_SPIRV_LLVM=""; PC_SPIRV_TOOLS=""; LIBCLANG_DIR=""
 pick() {   # <min version or ''> <version command arg> <candidates...>: the first executable at least that new
   local min=$1 arg=$2 c v; shift 2
@@ -688,11 +699,15 @@ find_tools() {
     T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(tc_path ninja bin/ninja)")
     T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(tc_path cmake bin/cmake)")
     T_PKGCONFIG=$(pick "" "" "$(tc_path pkgconf bin/pkg-config)")
+    T_BISON=$(pick "$NM_PIN_TOOL_BISON_MIN" --version "$(tc_path bison bin/bison)")
     cands=( "$(tc_path glslang bin/glslangValidator)" )
   else
     T_NINJA=$(pick "$NM_PIN_TOOL_NINJA_MIN" --version "$(tc_path ninja bin/ninja)" "$(brew_opt ninja)/bin/ninja" "$(path_tool ninja)")
     T_CMAKE=$(pick "$NM_PIN_TOOL_CMAKE_MIN" --version "$(tc_path cmake bin/cmake)" "$(brew_opt cmake)/bin/cmake" "$(path_tool cmake)")
     T_PKGCONFIG=$(pick "" "" "$(tc_path pkgconf bin/pkg-config)" "$(brew_opt pkgconf)/bin/pkg-config" "$(path_tool pkg-config)")
+    # Bison 3.0 or newer for native OpenGL's Mesa: macOS's /usr/bin/bison (2.3) is too old; Homebrew's bison is keg-only,
+    # reached through <prefix>/opt/bison like llvm@22
+    T_BISON=$(pick "$NM_PIN_TOOL_BISON_MIN" --version "$(tc_path bison bin/bison)" "$(brew_opt bison)/bin/bison" "$(path_tool bison)")
     cands=( "$(tc_path glslang bin/glslangValidator)" "$(brew_opt glslang)/bin/glslangValidator" "$(path_tool glslangValidator)" )
   fi
   T_GLSLANG=""
@@ -787,7 +802,7 @@ tc_unused() {
   [ "$(tools_from)" = source ] || return 0
   for x in "python3:$T_PYTHON:python@3.14 python@3.13 python@3.12 python@3.11 python@3.10" "ninja:$T_NINJA:ninja" "cmake:$T_CMAKE:cmake" \
            "pkg-config:$T_PKGCONFIG:pkgconf" "glslangValidator:$T_GLSLANG:glslang" "llvm-config:$T_LLVMCONFIG:llvm@$NM_PIN_TOOL_LLVM_MAJOR llvm" \
-           "SPIRV-Tools:$PC_SPIRV_TOOLS:spirv-tools" "llvm-spirv:$PC_SPIRV_LLVM:spirv-llvm-translator"; do
+           "SPIRV-Tools:$PC_SPIRV_TOOLS:spirv-tools" "llvm-spirv:$PC_SPIRV_LLVM:spirv-llvm-translator" "bison:$T_BISON:bison"; do
     n=${x%%:*}; x=${x#*:}; chosen=${x%%:*}; seen=""
     for f in ${x#*:}; do
       c=$(brew_opt "$f"); [ -e "$c" ] || continue
@@ -827,6 +842,7 @@ tool_versions() {   # one line per tool, for doctor and the report
   say "llvm:         ${LLVM_PREFIX:-none} $([ -n "$T_LLVMCONFIG" ] && "$T_LLVMCONFIG" --version 2>/dev/null)"
   say "spirv-llvm:   ${PC_SPIRV_LLVM:-none} $(pc_version "$PC_SPIRV_LLVM/LLVMSPIRVLib.pc" 2>/dev/null)"
   say "spirv-tools:  ${PC_SPIRV_TOOLS:-none} $(pc_version "$PC_SPIRV_TOOLS/SPIRV-Tools.pc" 2>/dev/null)"
+  say "bison:        ${T_BISON:-none} $([ -n "$T_BISON" ] && "$T_BISON" --version 2>/dev/null | first_line)"
   say "rustc:        $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version 2>/dev/null || echo "none at $RUST_BIN")"
   say "bindgen:      $([ -x "$CARGO_DIR/bin/bindgen" ] && "$CARGO_DIR/bin/bindgen" --version 2>/dev/null || echo none)"
   say "cbindgen:     $([ -x "$CARGO_DIR/bin/cbindgen" ] && "$CARGO_DIR/bin/cbindgen" --version 2>/dev/null || echo none)"
@@ -960,6 +976,8 @@ doctor() {   # prints; sets D_MISSING
   [ -n "$T_CMAKE" ] && d_ok "cmake $("$T_CMAKE" --version | first_line | version_of)" || d_missing "cmake $NM_PIN_TOOL_CMAKE_MIN or later ($(tc_hint cmake))"
   [ -n "$T_PKGCONFIG" ] && d_ok "pkg-config $T_PKGCONFIG" || d_missing "pkg-config ($(tc_hint pkgconf))"
   [ -n "$T_GLSLANG" ] && d_ok "glslangValidator $(glslang_version "$T_GLSLANG")" || d_missing "glslangValidator $NM_PIN_TOOL_GLSLANG_MIN or later ($(tc_hint glslang))"
+  [ -n "$T_BISON" ] && d_ok "bison $("$T_BISON" --version 2>/dev/null | first_line | version_of) ($T_BISON) for zink" \
+    || d_missing "bison $NM_PIN_TOOL_BISON_MIN or later for zink, native OpenGL ($(tc_hint bison)); macOS's /usr/bin/bison is 2.3"
   if [ -n "$LLVM_PREFIX" ]; then d_ok "LLVM $("$T_LLVMCONFIG" --version) at $LLVM_PREFIX"
   else d_missing "LLVM $NM_PIN_TOOL_LLVM_MAJOR.x with clang libraries ($(tc_hint "llvm@$NM_PIN_TOOL_LLVM_MAJOR"), or NM_LLVM_PREFIX)"; fi
   if [ -n "$PC_SPIRV_LLVM" ]; then
@@ -1162,6 +1180,27 @@ export_tree() {
   git_q -C "$repo" archive "$commit" | tar -x -C "$dir"
   printf '%s %s\n' "$commit" "$dir" > "$rec"
 }
+# extract_tarball <id> <tarball> <dir>: a release tarball fetch_file verified, as a plain tree like export_tree's: its
+# one top folder (bison-3.8.2/) becomes <dir>. It is extracted beside <dir> and moved into place only when whole, and
+# checked against the pin again first (a file changed since its download is not used). macOS's tar (bsdtar) and GNU tar
+# both take -xzf and keep the files' times, which the build needs (build/toolchain.sh's recipe_bison).
+extract_tarball() {
+  local id=$1 tb=$2 dir=$3 sha rec part top n
+  sha=$(pin "${id}_SHA256"); rec=$SRC/exports/$(printf '%s' "$dir" | sha256_stdin | cut -c1-16)
+  if [ -d "$dir" ] && [ "$(cat "$rec" 2>/dev/null)" = "$sha $dir" ]; then say "  ok       $dir"; return 0; fi
+  say "  extract  ${tb##*/} -> $dir"
+  if [ -e "$dir" ]; then in_workdir "$dir" || die "$dir exists and is outside the working directory: remove it or point the variable at it"; safe_rm "$dir"; fi
+  part=$dir.part
+  [ ! -e "$part" ] || safe_rm "$part"
+  [ "$NM_DRY_RUN" = 1 ] && { say "    tar -xzf $(q "$tb") -C $(q "$part"); mv $(q "$part")/<its one folder> $(q "$dir")"; return 0; }
+  [ "$(sha256_file "$tb")" = "$sha" ] || die "$tb has SHA-256 $(sha256_file "$tb"), the pin is $sha (build/pins.sh): remove it and fetch again"
+  mkdir -p "$part" "$SRC/exports"
+  tar -xzf "$tb" -C "$part" || { safe_rm "$part"; die "could not extract $tb"; }
+  n=$(ls -A "$part" | wc -l | tr -d ' '); top=$(ls -A "$part" | first_line)
+  [ "$n" = 1 ] && [ -d "$part/$top" ] && [ ! -L "$part/$top" ] || { safe_rm "$part"; die "$tb does not hold one folder at its top"; }
+  mv "$part/$top" "$dir"; rmdir "$part"
+  printf '%s %s\n' "$sha" "$dir" > "$rec"
+}
 # checkout_clone <id> <bare repo> <dir> [sparse paths...]: a work tree at the pinned commit whose origin is the bare repo
 checkout_clone() {
   local id=$1 repo=$2 dir=$3 commit; shift 3
@@ -1194,6 +1233,12 @@ verify_given_tree() {   # <what> <dir> <file with the version> <expected text>
   [ -f "$2/$3" ] && grep -q "$4" "$2/$3" || die "$1 at $2 is not the pinned one ($3 does not contain $4)"
   say "  ok       $1: $2 (given; $3 says $4)"
 }
+# zink_mesa_git: the repository build_zink.sh exports Zink's Mesa from (a given NM_MESA_GIT that has the commit, or the
+# bare repository ./build.sh fetch put it in)
+zink_mesa_git() {
+  if [ -n "${NM_MESA_GIT:-}" ] && git -C "$MESA" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null; then printf '%s\n' "$MESA"
+  else printf '%s\n' "$GITDIR/mesa.git"; fi
+}
 cmd_fetch() {
   say "== fetching the pinned sources into $W"
   local og=$GITDIR/open-gpu-kernel-modules.git
@@ -1214,6 +1259,10 @@ cmd_fetch() {
   else
     fetch_bare MESA "$GITDIR/mesa.git"
     checkout_clone MESA "$GITDIR/mesa.git" "$MESA"
+  fi
+  # Zink's Mesa (mesa-26.3.0): into the bare repository beside NVK's, unless a given NM_MESA_GIT has the commit
+  if [ -z "${NM_MESA_GIT:-}" ] || ! git -C "$MESA" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null; then
+    fetch_bare ZINKMESA "$GITDIR/mesa.git"
   fi
   fetch_bare VKHEADERS "$KHRONOS/Vulkan-Headers"
   fetch_bare VKLOADER "$KHRONOS/Vulkan-Loader"
@@ -1490,7 +1539,7 @@ tc_patch_hint() {   # patch is not built: GNU patch on PATH as gpatch, or Homebr
 }
 # The tools build/toolchain.sh builds, in its order, the pins of each one's sources (spirv-tools also needs the headers),
 # the folder of each source tree under TC_SRC, and the toolchain's own tools each build runs with.
-TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm"
+TC_ORDER="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm bison"
 TC_PREFIX=""; TC_WORK=""; TC_LOGS=""; TC_SRC=""; TC_PLAN=""; TC_OFFLINE_MISSING=""
 tc_pins() { case "$1" in spirv-tools) echo "TCSPIRVTOOLS TCSPIRVHEADERS" ;; *) printf 'TC%s\n' "$(printf '%s' "$1" | tr 'a-z' 'A-Z')" ;; esac; }
 tc_dir() { case "$1" in TCSPIRVHEADERS) echo spirv-headers ;; TCSPIRVTOOLS) echo spirv-tools ;; *) printf '%s\n' "${1#TC}" | tr 'A-Z' 'a-z' ;; esac; }
@@ -1508,9 +1557,10 @@ tc_needs() {
 # that deps, which removes each build tree, left 1.1 GB of toolchain; a build by hand with every build tree kept used
 # 6.7 GB in all (sources 3.2 GB, build trees 2.4 GB, installed 1.1 GB, LLVM 605 MB of it). deps asks for TC_SPACE_GB
 # free.
+# bison was added after that run and has not been built on a Mac yet: it has no time (0), and deps says so.
 tc_seconds() {
   case "$1" in ninja) echo 37 ;; cmake) echo 421 ;; openssl) echo 45 ;; zstd) echo 5 ;; xz) echo 11 ;; python) echo 108 ;;
-    pkgconf) echo 4 ;; spirv-tools) echo 119 ;; glslang) echo 21 ;; llvm) echo 1776 ;; *) echo 0 ;; esac
+    pkgconf) echo 4 ;; spirv-tools) echo 119 ;; glslang) echo 21 ;; llvm) echo 1776 ;; bison) echo 0 ;; *) echo 0 ;; esac
 }
 TC_SPACE_GB=10
 # build/toolchain.sh is run with the system's own folders as PATH: the bash that runs it and the helpers it calls (otool,
@@ -1519,24 +1569,32 @@ TC_SYSPATH=/usr/bin:/bin:/usr/sbin:/sbin
 tc_sh() { env "PATH=$TC_SYSPATH" bash "$HERE/build/toolchain.sh" "$@"; }
 # A tool of the toolchain is taken (find_tools) only when its stamp is there: build/toolchain.sh writes it after the
 # tool's checks passed, so a half-installed tool is never taken. It is up to date when the stamp is "<pinned
-# commit(s)> <toolchain.sh id>", followed for a tool that has others' code linked into it (tc_linked) by "; with "
+# commit(s), or the tarball's SHA-256> <toolchain.sh id>", followed for a tool that has others' code linked into it (tc_linked) by "; with "
 # and their own such text; otherwise deps builds it again. So a new OpenSSL, zstd or xz (a moved pin, a raised recipe)
 # builds Python again, whose static libraries hold them, and a new SPIRV-Tools builds glslang again: without that
 # the moved pin would change nothing, since those are built only for the tool that links them.
 tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ] && printf '%s' "$TC_PREFIX${2:+/$2}"; return 0; }
 tc_linked() { case "$1" in python) echo "openssl zstd xz" ;; glslang) echo spirv-tools ;; *) echo "" ;; esac; }
 tc_want() {
-  local t=$1 c="" id n w
-  for id in $(tc_pins "$t"); do c="$c${c:++}$(pin "${id}_COMMIT")"; done
+  local t=$1 c="" id n w v
+  # a source pinned by a commit is named by it, a release tarball (bison's) by its SHA-256
+  for id in $(tc_pins "$t"); do v=$(pin "${id}_COMMIT"); [ -n "$v" ] || v=$(pin "${id}_SHA256"); c="$c${c:++}$v"; done
   w="$c $(MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-15.0} tc_sh id "$t")"
   for n in $(tc_linked "$t"); do w="$w; with $(tc_want "$n")"; done
   printf '%s' "$w"
 }
 tc_current() { [ "$(cat "$TC_PREFIX/.nm-toolchain/$1" 2>/dev/null)" = "$(tc_want "$1")" ]; }
 tc_in() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
-tc_fetched() {   # <tool>: its sources are in the bare repositories (an offline deps builds only those)
-  local id; for id in $(tc_pins "$1"); do git_q -C "$GITDIR/tc-$(tc_dir "$id").git" cat-file -e "$(pin "${id}_COMMIT")^{commit}" 2>/dev/null || return 1; done
+tc_fetched() {   # <tool>: its sources are in the bare repositories, or its tarball is there (an offline deps builds only those)
+  local id; for id in $(tc_pins "$1"); do
+    if tc_is_file "$id"; then [ -f "$(tc_file "$id")" ] && [ "$(sha256_file "$(tc_file "$id")")" = "$(pin "${id}_SHA256")" ] || return 1
+    else git_q -C "$GITDIR/tc-$(tc_dir "$id").git" cat-file -e "$(pin "${id}_COMMIT")^{commit}" 2>/dev/null || return 1; fi
+  done
 }
+# A source pinned as a release tarball (bison's: a SHA-256 and no commit) is downloaded into <src>/git/tc-<tool>/, beside
+# the bare repositories, and extracted into TC_SRC/<tool> like a tree exported from one.
+tc_is_file() { [ -n "$(pin "$1_SHA256")" ] && [ -z "$(pin "$1_COMMIT")" ]; }
+tc_file() { local u; u=$(pin "$1_URL"); printf '%s/tc-%s/%s' "$GITDIR" "$(tc_dir "$1")" "${u##*/}"; }
 # TC_PLAN: what deps builds, in order. A tool is built when find_tools found none good enough (the conditions that put a
 # formula on the Homebrew list; with tools from source it looks only at the user's settings and the toolchain) or when the one it found is the toolchain's own and not up to date; then the toolchain's
 # ninja and cmake when a tool to be built runs them and they are not up to date (one tested path, whatever other ninja
@@ -1556,6 +1614,7 @@ tc_plan() {
   { [ -n "$T_GLSLANG" ] && ! { tc_mine "$T_GLSLANG" && ! tc_current glslang; }; } || want="$want glslang"
   { [ -n "$PC_SPIRV_TOOLS" ] && ! { tc_mine "$PC_SPIRV_TOOLS" && ! tc_current spirv-tools; }; } || want="$want spirv-tools"
   { [ -n "$LLVM_PREFIX" ] && ! { tc_mine "$LLVM_PREFIX" && ! tc_current llvm; }; } || want="$want llvm"
+  { [ -n "$T_BISON" ] && ! { tc_mine "$T_BISON" && ! tc_current bison; }; } || want="$want bison"
   # what those need, of the toolchain's own, when it is not up to date
   for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done
   for t in $want; do for n in $(tc_needs "$t"); do tc_in "$n" "$want" || tc_current "$n" || want="$want $n"; done; done
@@ -1582,6 +1641,7 @@ tc_free_kb() {   # free space, in KB, of the file system the working directory i
 }
 tc_fetch() {   # <tool>: its pinned sources, verified, as plain trees in TC_SRC
   local id; for id in $(tc_pins "$1"); do
+    if tc_is_file "$id"; then fetch_file "$id" "$(tc_file "$id")"; extract_tarball "$id" "$(tc_file "$id")" "$TC_SRC/$(tc_dir "$id")"; continue; fi
     fetch_bare "$id" "$GITDIR/tc-$(tc_dir "$id").git"; export_tree "$id" "$GITDIR/tc-$(tc_dir "$id").git" "$TC_SRC/$(tc_dir "$id")"
   done
 }
@@ -1599,24 +1659,34 @@ tc_build() {   # <tool>...: build each, in order; a failure stops deps as a fail
   done
 }
 deps_source() {   # <missing Xcode 0|1>: cmd_deps when NM_TOOLS_FROM means source
-  local missing_xcode=$1 t s=0 first="" second="" kb
+  local missing_xcode=$1 t s=0 first="" second="" kb untimed=""
   say "$(tools_from_why)."
   if [ -z "$T_PATCH" ] || [ "$PATCH_NEW" != 1 ]; then
     say "  note: NVK's patches need a patch that also creates files: put GNU patch on PATH as gpatch (Homebrew's formula is gpatch); deps does not build patch"
   fi
   tc_plan
-  for t in $TC_PLAN; do s=$((s + $(tc_seconds "$t"))); case "$t" in pkgconf|spirv-tools|glslang|llvm) second="$second $t" ;; *) first="$first $t" ;; esac; done
+  # pkgconf is built with the Python environment's meson, so after it; bison last of all (build/toolchain.sh's TOOLS)
+  for t in $TC_PLAN; do
+    s=$((s + $(tc_seconds "$t"))); [ "$(tc_seconds "$t")" != 0 ] || untimed="$untimed $t"
+    case "$t" in pkgconf|spirv-tools|glslang|llvm|bison) second="$second $t" ;; *) first="$first $t" ;; esac
+  done
   [ -z "$TC_OFFLINE_MISSING" ] || warn "offline: the sources of$(printf ' %s' $TC_OFFLINE_MISSING) are not fetched yet; they are not built (run ./build.sh deps with the network)"
   if [ -z "$TC_PLAN" ]; then say "toolchain: nothing to build ($(printf '%s' "$TC_PREFIX" | tilde))"
   else
     say "deps builds from pinned sources: $TC_PLAN"
     say "  into $(printf '%s' "$TC_PREFIX" | tilde) (sources in $(printf '%s' "$TC_SRC" | tilde), build trees in $(printf '%s' "$TC_WORK" | tilde), logs in $(printf '%s' "$TC_LOGS" | tilde))."
     say "  Nothing is installed outside the working directory and Homebrew is not used."
-    say "  On one 12-thread Intel Mac this takes about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 30)') once the sources are"
-    say "  downloaded; all of deps from an empty working directory took 46.5 minutes there and 3 hours 53 minutes on"
+    if [ "$s" -gt 0 ]; then
+      say "  On one 12-thread Intel Mac this takes about $(( (s + 59) / 60 )) minutes$(tc_in llvm "$TC_PLAN" && echo ' (LLVM alone 30)') once the sources are"
+      say "  downloaded; all of deps from an empty working directory took 46.5 minutes there and 3 hours 53 minutes on"
+    else
+      say "  How long that takes has not been measured. All of deps from an empty working directory, before bison was part"
+      say "  of it, took 46.5 minutes on one 12-thread Intel Mac and 3 hours 53 minutes on"
+    fi
     say "  GitHub's 4-processor Intel runner. It needs up to $TC_SPACE_GB GB of free space while it builds (6.7 GB measured"
     say "  in a build by hand that kept every build tree). Keep the Mac awake and on power: an interrupted tool is built"
     say "  again from the beginning by the next ./build.sh deps."
+    [ -z "$untimed" ] || [ "$s" = 0 ] || say "  Not in those times:$untimed, which no Mac has built yet."
   fi
   if [ -n "$TC_PLAN" ]; then
     if [ "$NM_NO_INSTALL" = 1 ]; then say "not building (--no-install)"; first=""; second=""
@@ -1683,6 +1753,7 @@ cmd_deps() {
   [ -n "$T_PKGCONFIG" ] || want+=( pkgconf )
   [ -n "$T_GLSLANG" ] || want+=( glslang )
   [ -n "$PC_SPIRV_TOOLS" ] || want+=( spirv-tools )
+  [ -n "$T_BISON" ] || want+=( bison )
   [ -n "$T_PYTHON" ] && "$T_PYTHON" --version 2>&1 | version_of | { read -r v; ver_ge "$v" "$NM_PIN_TOOL_PYTHON_TESTS_MIN"; } || want+=( "$NM_PIN_TOOL_PYTHON_FORMULA" )
   # a dry run does not ask Homebrew which LLVM formula it has: "brew info" may download Homebrew's formula list into
   # its cache, outside the working directory, and a dry run changes nothing. Offline it cannot download it.
@@ -1705,7 +1776,7 @@ cmd_deps() {
   fi
   if [ ${#want[@]} -gt 0 ]; then
     say "Homebrew formulas to install (only these; nothing of yours is upgraded or removed by build.sh): ${want[*]}"
-    say "Homebrew also installs what they need, and links the commands of those that are not keg-only (llvm@22 is) into"
+    say "Homebrew also installs what they need, and links the commands of those that are not keg-only (llvm@22 and bison are) into"
     say "$BREW_PREFIX/bin, where a shell that has that folder before /usr/bin finds them first. If that gives"
     say "$BREW_PREFIX/bin a python3 it does not have now, from a Python formula these installs add (llvm@22 needs"
     say "Homebrew's newest Python to build), build.sh unlinks that formula again (brew unlink; the build reaches Python"
@@ -1890,11 +1961,15 @@ deps_rust() {
 # output sent to /dev/null, so without -f the rm step stopped at a question nobody could see. With -f no patch asks:
 # a missing file is skipped and counted as failed, a change that looks applied is not reversed, and patch exits 1, so
 # the scripts go on to the next folder or stop. GNU patch reads -f the same way.
+# tools/bin/bison is such a script too: it starts the chosen bison by its own path. Mesa's build finds bison on PATH,
+# where tools/bin comes before /usr/bin, so it never runs macOS's /usr/bin/bison 2.3. A link would not do: Homebrew's
+# bison is built relocatable (--enable-relocatable) and may look for its skeletons beside the path it was started by,
+# which would be tools/bin.
 make_tool_links() {
   mkdir -p "$TBIN" "$THOST"
   local l
   for l in "$TBIN"/*; do [ -L "$l" ] && rm -f "$l"; done
-  rm -f "$TBIN/patch"
+  rm -f "$TBIN/patch" "$TBIN/bison"
   [ -z "$T_PATCH" ] || { printf '#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec %s -f "$@"\n' \
                            "$(q "$T_PATCH")" > "$TBIN/patch" && chmod 755 "$TBIN/patch"; }
   [ -n "$T_NINJA" ] && ln -s "$T_NINJA" "$TBIN/ninja"
@@ -1903,6 +1978,8 @@ make_tool_links() {
   [ -n "$T_GLSLANG" ] && ln -s "$T_GLSLANG" "$TBIN/glslangValidator"
   [ -n "$T_LLVMCONFIG" ] && ln -s "$T_LLVMCONFIG" "$TBIN/llvm-config"
   [ -n "$T_LLVMSPIRV" ] && ln -s "$T_LLVMSPIRV" "$TBIN/llvm-spirv"
+  [ -z "$T_BISON" ] || { printf '#!/bin/sh\n# made by build.sh: the bison it chose, started by its own path\nexec %s "$@"\n' \
+                           "$(q "$T_BISON")" > "$TBIN/bison" && chmod 755 "$TBIN/bison"; }
   # python3, meson and mako-render: from $VENV/bin, the second folder on every step's PATH (see derive_paths)
   for l in rustc cargo rustdoc; do [ -x "$RUST_BIN/$l" ] && ln -s "$RUST_BIN/$l" "$TBIN/$l"; done
   for l in bindgen cbindgen; do [ -x "$CARGO_DIR/bin/$l" ] && ln -s "$CARGO_DIR/bin/$l" "$TBIN/$l"; done
@@ -1911,7 +1988,7 @@ make_tool_links() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- components
-ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost vulkan plugin xlate nvencvt"
+ALL_COMPONENTS="rm kms nvrm fb accel agdc nmsmn ryzenadj airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink"
 EXTRA_COMPONENTS="selector nmkbl nmhda"
 # comp_info <name>: C_DEPS (components), C_SRC (checkout paths whose contents it is built from, scripts included),
 # C_VARS (variables it reads), C_PINS (the build/pins.sh entries it is built from, by name prefix), C_OUT (a file that
@@ -1948,6 +2025,9 @@ comp_info() {
            C_PINS="MESA_ OGKM610_ RUST_VERSION= BINDGEN_ CBINDGEN_ PY_ TOOL_LLVM_MAJOR= SPIRVLLVM_ SPIRVHEADERS_"
            C_TOOLS="xcode patch nvk rust"; C_OUT="$O/nvk/libvulkan_nouveau.dylib" ;;
     boost) C_DESC="nvmtl-boost"; C_DEPS="nvk"; C_SRC="tools/nvmtl-boost"; C_OUT="$O/boost/nvmtl-boost" ;;
+    # nvkbridge: the native Vulkan presentation runtime, built from this build's NVK (tools/nvk-bridge/README.md)
+    nvkbridge) C_DESC="the native Vulkan presentation runtime (libnvk_minecraft.dylib)"; C_DEPS="nvk"; C_SRC="tools/nvk-bridge"
+           C_OUT="$O/nvkbridge/lib/libnvk_minecraft.dylib" ;;
     vulkan) C_DESC="the Khronos Vulkan loader"; C_SRC="build/build_vulkan_loader.sh"; C_VARS="NM_KHRONOS_URL"; C_PINS="VKHEADERS_ VKLOADER_"; C_TOOLS="xcode cmake"
            C_OUT="$O/vulkan-loader/libvulkan.1.dylib" ;;
     plugin) C_DESC="the Metal plugin (NVMTLDriver, $NM_FLAVOUR)"; C_SRC="build/build_plugin_release.sh build/build_plugin_dev.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt plugin"
@@ -1957,6 +2037,11 @@ comp_info() {
     nvencvt) C_DESC="libnvencvt.dylib (video)"; C_DEPS="rm"
            C_SRC="build/build_nvencvt.sh build/local_build_host.sh build/warn_ceiling.sh build/warnings.txt vendor/nvenc tools/nvencvt_header_abi.py tools/nvk_header_abi.py"
            C_VARS="NULLMOTH_BUILD_HOST"; C_PINS="OGKM610_ OGKM620_ OPENGPUDOC_ WEBKIT_"; C_TOOLS="xcode hostpython"; C_OUT="$O/nvencvt/libnvencvt.dylib" ;;
+    # zink: native OpenGL through Mesa's Zink (docs/ZINK-OPENGL.md); its private Vulkan runtime is the nvkbridge
+    # component's, which build/package_local.sh copies beside it
+    zink)  C_DESC="native OpenGL: Zink, the CGL adapter and NVKZinkGLDriver.bundle"
+           C_SRC="build/build_zink.sh build/prepare_zink.py build/opengl_api.py build/generate_cgl_dispatch.py build/generate_gld_forward.py zink tools/zink_sync_probe.c tools/gld_bundle_probe.c"
+           C_VARS="NM_MESA_GIT"; C_PINS="ZINKMESA_ PY_ TOOL_BISON_MIN="; C_TOOLS="xcode meson bison"; C_OUT="$O/zink/zink/libnvk_cgl.dylib" ;;
     selector) C_DESC="NVPrimarySelector.kext (optional)"; C_SRC="build/build_primary_selector.sh kexts/NVPrimarySelector build/warn_ceiling.sh build/warnings.txt"
            C_VARS="KHDR KLIB"; C_OUT="$O/selector/NVPrimarySelector.kext/Contents/MacOS/NVPrimarySelector" ;;
     nmkbl) C_DESC="NMKbdBacklight.kext (optional; needs Lilu, VirtualSMC, MacKernelSDK)"; C_SRC="kexts/NMKbdBacklight build/check_kext_libraries.sh"
@@ -2011,7 +2096,15 @@ recipe() {   # <component>: everything its output depends on, as text
     say "glslang $([ -n "$T_GLSLANG" ] && "$T_GLSLANG" --version 2>/dev/null | first_line) meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version)"
     tc_used_stamps ;;
   esac
+  case " $C_TOOLS " in *" meson "*) say "meson $([ -x "$VENV/bin/meson" ] && "$VENV/bin/meson" --version) ninja $([ -n "$T_NINJA" ] && "$T_NINJA" --version)" ;; esac
   case " $C_TOOLS " in *" rust "*) say "rust $([ -x "$RUST_BIN/rustc" ] && "$RUST_BIN/rustc" --version)" ;; esac
+  # the bison Mesa's grammars are turned into C with, and the toolchain's stamp of it when it is the toolchain's
+  case " $C_TOOLS " in *" bison "*)
+    say "bison $([ -n "$T_BISON" ] && "$T_BISON" --version 2>/dev/null | first_line)$(tc_mine "$T_BISON" && printf ' toolchain %s' "$(cat "$TC_PREFIX/.nm-toolchain/bison" 2>/dev/null)")" ;;
+  esac
+  # NVKZinkGLDriver.bundle exports the build Mac's AppleMetalOpenGLRenderer names (build/generate_gld_forward.py), which
+  # a macOS update can change without any change to Xcode: the system's build is part of zink's recipe
+  if [ "$n" = zink ] && is_mac; then say "macos $(sw_vers -buildVersion 2>/dev/null || true)"; fi
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
   for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"; done
@@ -2159,7 +2252,11 @@ run_component() {
       if [ "$NM_DRY_RUN" = 0 ] && otool -L "$O/nvk/libvulkan_nouveau.dylib" | awk 'NR>1{print $1}' | grep -E '^(/usr/local/|/opt/homebrew/|/Users/)'; then
         say "STOP: libvulkan_nouveau.dylib loads a library from outside macOS (above): a Homebrew library leaked into the build" | tee -a "$CUR_LOG"; return 5
       fi ;;
+    zink) x "${STEP_ENV[@]}" bash "$HERE/build/build_zink.sh" "$(zink_mesa_git)" "$NM_PIN_ZINKMESA_COMMIT" "$O/zink" ;;
     boost) x mkdir -p "$O/boost"; x "${STEP_ENV[@]}" bash "$HERE/tools/nvmtl-boost/build.sh" "$O/nvk-build/mesa" "$O/boost/nvmtl-boost" ;;
+    nvkbridge)   # NVK's library and the Vulkan headers of the Mesa tree it was built from
+      [ ! -e "$O/nvkbridge" ] || safe_rm "$O/nvkbridge"
+      x "${STEP_ENV[@]}" bash "$HERE/tools/nvk-bridge/build.sh" "$O/nvk/libvulkan_nouveau.dylib" "$O/nvk-build/mesa/include" "$O/nvkbridge" ;;
     vulkan)
       x "${STEP_ENV[@]}" "NM_KHRONOS_URL=${NM_KHRONOS_URL:-file://$KHRONOS}" bash "$HERE/build/build_vulkan_loader.sh" "$O/vulkan-loader" ;;
     plugin)
@@ -2240,6 +2337,9 @@ prepare_build() {   # what every build command needs before its first step
 #   hostpython  nvencvt: python3 on the build Mac's PATH, the same minimum
 #   cmake       vulkan: cmake and ninja
 #   rust        xlate, nvk: Rust in the working directory
+#   meson       zink: the Python environment's meson and ninja
+#   bison       zink: a bison of NM_PIN_TOOL_BISON_MIN or later first on the step's PATH (tools/bin/bison; macOS's
+#               /usr/bin/bison is 2.3, too old for Mesa 26.3.0's grammars), and flex (macOS's)
 #   nvk         nvk: the Python environment (Python 3.10+, meson), LLVM 22, SPIRV-LLVM-Translator, SPIRV-Tools, glslang,
 #               bindgen, cbindgen
 need_tools_for() {   # stop early, naming what a component needs and does not have
@@ -2254,6 +2354,13 @@ need_tools_for() {   # stop early, naming what a component needs and does not ha
   case " $C_TOOLS " in *" hostpython "*) [ "$BUILD_HOST" != "$LOCAL_HOST" ] || [ -n "$(host_python)" ] || miss="$miss python3-$NM_PIN_TOOL_PYTHON_KEXT_MIN(build-Mac)" ;; esac
   case " $C_TOOLS " in *" cmake "*) { [ -n "$T_CMAKE" ] && [ -n "$T_NINJA" ]; } || miss="$miss cmake/ninja" ;; esac
   case " $C_TOOLS " in *" rust "*) [ -x "$RUST_BIN/rustc" ] || miss="$miss Rust-$NM_PIN_RUST_VERSION" ;; esac
+  case " $C_TOOLS " in *" meson "*)
+    [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$T_NINJA" ] || miss="$miss ninja" ;;
+  esac
+  case " $C_TOOLS " in *" bison "*)
+    [ -n "$(step_bison)" ] || miss="$miss bison-$NM_PIN_TOOL_BISON_MIN-or-later(macOS's-is-2.3)"
+    PATH=$STEP_PATH command -v flex >/dev/null 2>&1 || miss="$miss flex" ;;
+  esac
   case " $C_TOOLS " in *" nvk "*)
     [ -x "$VENV/bin/meson" ] || miss="$miss Python-$NM_PIN_TOOL_PYTHON_MIN-environment(meson)"; [ -n "$LLVM_PREFIX" ] || miss="$miss LLVM-$NM_PIN_TOOL_LLVM_MAJOR"
     spirv_llvm_ok || miss="$miss SPIRV-LLVM-Translator-$NM_PIN_TOOL_LLVM_MAJOR"; [ -n "$PC_SPIRV_TOOLS" ] || miss="$miss SPIRV-Tools"
@@ -2278,6 +2385,7 @@ need_sources_for() {
   esac
   case "$n" in
     nvk) [ -f "$OGKM610/version.mk" ] && git -C "$MESA" cat-file -e "$NM_PIN_MESA_COMMIT^{commit}" 2>/dev/null || die "nvk needs Mesa and NVIDIA $NM_PIN_OGKM610_REF: run ./build.sh fetch" ;;
+    zink) git -C "$(zink_mesa_git)" cat-file -e "$NM_PIN_ZINKMESA_COMMIT^{commit}" 2>/dev/null || die "zink needs Mesa $NM_PIN_ZINKMESA_REF: run ./build.sh fetch" ;;
     plugin)   # the folder build_plugin_release.sh / build_plugin_dev.sh compile against; NM_MESA_GIT does not move it
       local inc=$R/build/gpu-src/mesa/include
       [ "$NM_FLAVOUR" != dev ] || inc=${NM_VULKAN_INCLUDE:-$inc}
@@ -2294,7 +2402,7 @@ expand_components() {   # names and groups -> component names in build order
     case "$a" in
       all) out="$out$ALL_COMPONENTS " ;;
       kexts) out="$out rm kms nvrm fb accel agdc nmsmn " ;;
-      userland) out="$out airdis dlss osver nvk boost vulkan plugin xlate nvencvt " ;;
+      userland) out="$out airdis dlss osver nvk boost nvkbridge vulkan plugin xlate nvencvt zink " ;;
       *) comp_info "$a" >/dev/null 2>&1 || die "unknown component '$a'. Components: $ALL_COMPONENTS $EXTRA_COMPONENTS (groups: all kexts userland)"
          [ "$a" != package ] || die "use ./build.sh package"
          out="$out$a " ;;
@@ -2424,7 +2532,8 @@ print_env() {
   say "# -- mirrors (empty = the URL in build/pins.sh)"
   for v in NM_OGKM_URL NM_MESA_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL \
            NM_RUSTUP_URL RUSTUP_DIST_SERVER NM_TC_NINJA_URL NM_TC_CMAKE_URL NM_TC_OPENSSL_URL NM_TC_ZSTD_URL NM_TC_XZ_URL \
-           NM_TC_PYTHON_URL NM_TC_PKGCONF_URL NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL; do
+           NM_TC_PYTHON_URL NM_TC_PKGCONF_URL NM_TC_SPIRVHEADERS_URL NM_TC_SPIRVTOOLS_URL NM_TC_GLSLANG_URL NM_TC_LLVM_URL \
+           NM_TC_BISON_URL; do
     eval "if [ -n \"\${$v:-}\" ]; then say \"export $v=\$(qh \"\${$v}\")\"; else say \"# $v (not set)\"; fi"
   done
   say "# -- not used by build.sh: STEPS and NM_REV (build_release_inputs.sh, which build.sh replaces), X and RELEASE"

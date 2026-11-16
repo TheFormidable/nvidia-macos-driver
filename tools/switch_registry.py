@@ -33,7 +33,8 @@ removes the marks, so from then on a row with no code is an error again, and `ch
 tree has a release newer than 2.9 in CHANGELOG.md.
 
 Registry columns (tab separated, one switch per line, sorted by kind then name):
-  kind     env | bootarg | sysctl | file | procname | build
+  kind     env | bootarg | sysctl | file | procname | build | pref (a key of an application's preferences, read with
+           CFPreferences)
   name     the name as the source spells it
   tier     install    part of the documented install line; the driver does not start without it
            setting    a preference with a control (tools/nullmoth_settings.py); not a fix
@@ -83,7 +84,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REG = "tools/switches.tsv"
 GEN_MD = "docs/SWITCHES.md"
 GEN_H = "kexts/NVRM/nvrm_switch_table.h"
-KINDS = ("env", "bootarg", "sysctl", "file", "procname", "build")
+KINDS = ("env", "bootarg", "sysctl", "file", "procname", "build", "pref")
 # The order is the order of the columns in docs/SWITCHES.md and of the enum in nvrm_switch_table.h.
 TIERS = ("install", "setting", "hardware", "recovery", "escape", "test", "diag", "dev", "internal", "retired")
 BASE = "2.9"       # rows with this `since` (or older) are the switches the registry found when it was started
@@ -93,6 +94,8 @@ NEW_TIERS = ("escape", "test", "diag", "setting", "internal", "retired")
 WRITABLE_TIERS = ("setting", "hardware", "recovery", "diag", "dev")
 NONDEFAULT = ("escape", "test", "dev", "retired")   # what debug.nvrm_switches_nondefault and `doctor` count
 C_EXT = (".c", ".cpp", ".h", ".hpp", ".m", ".mm", ".inc")
+# a preference key read by name: CFPreferencesGetAppBooleanValue(CFSTR("Key"), ...) and its siblings
+PREF_READ = re.compile(r"\bCFPreferences(?:GetAppBooleanValue|GetAppIntegerValue|CopyAppValue|CopyValue)\s*\(\s*CFSTR\s*\(\s*\"([A-Za-z0-9_.]+)\"")
 # not kext sources: patches kept as documentation
 UNBUILT = ("kexts/NVRM/proposals/",)
 # The one function that may hand PE_parse_boot_argn a name it was given through a pointer: the kernel's report of
@@ -438,12 +441,14 @@ def scan(root):
                     elif not re.search(r"\b(?:char|NSString)\b", arg):     # not its own declaration or definition
                         env_by_variable(r, t, owner, m.start(), arg, w + "()")
 
-    # --- environment: C and Objective-C (plugin, DLSS host, vendor libraries)
-    for sub, owner in (("plugin", "plugin"), ("dlss", "dlss"), ("vendor", "nvencvt")):
+    # --- environment and preferences: C and Objective-C (plugin, DLSS host, vendor libraries, native OpenGL)
+    for sub, owner in (("plugin", "plugin"), ("dlss", "dlss"), ("vendor", "nvencvt"), ("zink", "zink")):
         for p in tracked(root, sub, C_EXT):
             r = str(p.relative_to(root)); t = strip_comments(p.read_text(errors="replace"))
             c_texts[r] = (t, owner)
             env_in(t, r, owner)
+            for m in PREF_READ.finditer(t):
+                add("pref", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
             for m in FILE_LIT.finditer(t):
                 add("file", m.group(1), f"{r}:{lineno(t, m.start())}", owner)
             if PROC_SRC.search(t):
@@ -1045,6 +1050,8 @@ def bootstrap(root, base_root=None):
                 default = "absent"
             elif kind == "build":
                 tier, purpose = ("dev", BUILD_DEV[name]) if name in BUILD_DEV else ("internal", "a build host setting (a path, a job count); nothing of it reaches the shipped driver")
+            elif kind == "pref":
+                tier, default = "dev", "unset"
             else:
                 tier, default, purpose = "internal", "-", "a branch on the process name; not a user switch"
             if tier == "dev":

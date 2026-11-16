@@ -1049,6 +1049,11 @@ fn split_trailing_addrspace(s: &str) -> Result<(&str, u32), String> {
     let Some(open) = s.strip_suffix(')').and_then(|s| s.rfind(" addrspace(")) else {
         return Ok((s, 0));
     };
+    // A function pointee can itself contain address-space-qualified parameters.
+    // Only consume a qualifier whose closing parenthesis ends the whole type.
+    if matching_paren(s, open + " addrspace".len()) != Some(s.len() - 1) {
+        return Ok((s, 0));
+    }
     let digits = &s[open + " addrspace(".len()..s.len() - 1];
     // `void (ptr addrspace(1))*` ends in a parenthesis that belongs to a function type, so text with brackets is left to
     // the caller; a plain word where the number belongs is a malformed address space and must not become space 0.
@@ -1059,7 +1064,7 @@ fn split_trailing_addrspace(s: &str) -> Result<(&str, u32), String> {
         return Err(format!("native emitter: bad addrspace `{digits}` in `{s}*`"));
     }
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Ok((s, 0));
+        return Err(format!("native emitter: bad addrspace in `{s}*`"));
     }
     let space = digits
         .parse()
@@ -1228,6 +1233,36 @@ mod parse_tests {
         assert_eq!(parse_type("i32 addrspace(1)**").unwrap(), LlType::Ptr(0));
         assert!(parse_type("notatype*").is_err());
         assert!(parse_type("i32 addrspace(x)*").is_err());
+    }
+
+    #[test]
+    fn typed_pointer_address_spaces_reject_malformed_or_overflowing_values() {
+        for text in [
+            "i32 addrspace()*",
+            "i32 addrspace(x)*",
+            "i32 addrspace(-1)*",
+            "i32 addrspace(+1)*",
+            "i32 addrspace(4294967296)*",
+            "i32 (i32) addrspace(x)*",
+        ] {
+            assert!(parse_type(text).is_err(), "accepted {text}");
+        }
+        assert_eq!(
+            parse_type("i32 addrspace(4294967295)*").unwrap(),
+            LlType::Ptr(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn typed_function_pointers_keep_parameter_and_result_address_spaces() {
+        for (text, space) in [
+            ("i32 (i8 addrspace(1)*)*", 0),
+            ("i32 (ptr addrspace(2), i32)*", 0),
+            ("i32 (i8 addrspace(1)*) addrspace(3)*", 3),
+            ("i32 addrspace(1)**", 0),
+        ] {
+            assert_eq!(parse_type(text).unwrap(), LlType::Ptr(space), "{text}");
+        }
     }
 
     #[test]

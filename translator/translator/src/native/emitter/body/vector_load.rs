@@ -627,6 +627,85 @@ impl Emitter {
         Ok(true)
     }
 
+    /// The leading lanes of a 32-bit vector read as a shorter vector of the other 32-bit type, one
+    /// scalar load and bitcast per lane. Apple's GL reads an ivec2 uniform (BSL's eyeBrightnessSmooth) as
+    /// `load <2 x i32>` through a GEP over the block's vec4 slots. Tried only after every other
+    /// width-changing load has declined, so a load that translated before keeps its instructions.
+    pub(in crate::native::emitter) fn emit_lane_prefix_bitcast_load(
+        &mut self,
+        result: Word,
+        pointee: &LlType,
+        result_ty: &LlType,
+        ptr_value: &TypedValue,
+        ptr: Word,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool, String> {
+        let (LlType::Vector(src_elem, src_lanes), LlType::Vector(dst_elem, dst_lanes)) =
+            (pointee, result_ty)
+        else {
+            return Ok(false);
+        };
+        let src_elem = self.resolve_type(src_elem)?;
+        let dst_elem = self.resolve_type(dst_elem)?;
+        // 32-bit words only: the float/int pair GL blocks hold, needing no 16-bit capability for the
+        // bitcast
+        let word = |ty: &LlType| matches!(ty, LlType::Float | LlType::Int(32));
+        if *dst_lanes < 2
+            || src_lanes <= dst_lanes
+            || !word(&src_elem)
+            || !word(&dst_elem)
+            || src_elem == dst_elem
+        {
+            return Ok(false);
+        }
+
+        let LlType::Ptr(addrspace) = self.resolve_type(&ptr_value.ty)? else {
+            return Ok(false);
+        };
+        let storage = self.pointer_storage_for(&ptr_value.value, addrspace)?;
+        let lane_ptr_type = self.ptr_type_id(storage, &src_elem)?;
+        let src_elem_type = self.type_id(&src_elem)?;
+        let dst_elem_type = self.type_id(&dst_elem)?;
+        let mut lanes = Vec::with_capacity(*dst_lanes as usize);
+        // The GEP's vector type describes its stride, not the bytes that the
+        // LLVM load is allowed to read. Loading the full source vector could
+        // run past a buffer whose final slot contains only the requested prefix.
+        for lane in 0..*dst_lanes {
+            let lane_index = self.const_uint(lane)?;
+            let lane_ptr = self.fresh();
+            instructions.push(Self::inst(
+                Op::AccessChain,
+                Some(lane_ptr_type),
+                Some(lane_ptr),
+                vec![Operand::IdRef(ptr), Operand::IdRef(lane_index)],
+            ));
+            let loaded = self.fresh();
+            instructions.push(Self::inst(
+                Op::Load,
+                Some(src_elem_type),
+                Some(loaded),
+                vec![Operand::IdRef(lane_ptr)],
+            ));
+            let cast = self.fresh();
+            instructions.push(Self::inst(
+                Op::Bitcast,
+                Some(dst_elem_type),
+                Some(cast),
+                vec![Operand::IdRef(loaded)],
+            ));
+            lanes.push(Operand::IdRef(cast));
+        }
+
+        let result_type = self.type_id(result_ty)?;
+        instructions.push(Self::inst(
+            Op::CompositeConstruct,
+            Some(result_type),
+            Some(result),
+            lanes,
+        ));
+        Ok(true)
+    }
+
     pub(in crate::native::emitter) fn emit_scalar_narrowing_load(
         &mut self,
         result: Word,

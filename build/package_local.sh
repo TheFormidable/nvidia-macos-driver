@@ -9,7 +9,7 @@
 #
 #   <base package>   nullmoth-nvidia-2.9.tar.gz, or its unpacked pkgroot folder. Refused: another release, and a base
 #                    that holds anything but folders, plain files and links to a file beside them
-#   <build out dir>  ./build.sh's out/ folder (kexts/, nvk/, xlate/, plugin/, nvencvt/, userland/, dlss-pkg/, ...)
+#   <build out dir>  ./build.sh's out/ folder (kexts/, nvk/, nvkbridge/, xlate/, plugin/, nvencvt/, userland/, ...)
 #   <package dir>    gets base/ (the unpacked base), pkgroot/ (the result) and the tarball
 # Environment: NM_BASE_PACKAGE_SHA256 (checked when set), NM_PACKAGE_VERSION (written to VERSION when set; install.sh
 # keeps only digits and dots; ./build.sh package always sets it, by default to CHANGELOG.md's top release, and run
@@ -123,6 +123,15 @@ if [ -f "$OUT/selector/NVPrimarySelector.kext/Contents/Info.plist" ] && [ -d "$R
   refresh_tree Library/Extensions/NVPrimarySelector.kext
 fi
 put_signed "$OUT/nvk/libvulkan_nouveau.dylib" Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib
+# the native Vulkan presentation runtime (tools/nvk-bridge/README.md), its folder whole. Its build step signed its two
+# libraries and wrote the frontend's SHA-256 into nvk-bridge-runtime.properties, so they are copied as they are.
+NB=Library/GPUBundles/nvmtl/minecraft
+drop_lines "$NB"; rm -rf "${R:?}/$NB"
+for f in lib/libnvk_minecraft.dylib lib/libnvk_renderer.dylib; do put_file "$OUT/nvkbridge/$f" "$NB/$f" 755; done
+for f in nvk_bridge_icd.json nvk-bridge-runtime.properties; do put_file "$OUT/nvkbridge/$f" "$NB/$f"; done
+# how an application selects it, at the top of the package beside install.sh (the runtime's README.md stays in the source)
+put_file "$HERE/tools/nvk-bridge/INSTALL.md" MINECRAFT-NVK.md
+put_file "$HERE/tools/nvk-bridge/APPLICATIONS.md" NVK-APPLICATIONS.md
 put_signed "$OUT/xlate/libnvmtl_translate.dylib" Library/GPUBundles/nvmtl/libnvmtl_translate.dylib
 if [ -f "$R/Library/GPUBundles/nvmtl/libnvmtl_osver.dylib" ]; then
   put_signed "$OUT/osver/libnvmtl_osver.dylib" Library/GPUBundles/nvmtl/libnvmtl_osver.dylib
@@ -131,6 +140,23 @@ else
 fi
 # the plugin binary goes in before finish_package.sh, whose reseal refreshes it with the bundle's seal
 put_file "$OUT/plugin/NVMTLDriver" Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver 755
+# --- native OpenGL (zink component, docs/ZINK-OPENGL.md) ---
+# The runtime goes in nvmtl/zink, which install.sh installs, backs up and restores with nvmtl; the GL driver bundle
+# beside NVMTLDriver.bundle. Zink opens its Vulkan driver by name (@rpath/libnvk_zink_vulkan.dylib): the nvkbridge
+# component's frontend, and beside it the copy of this build's NVK that the frontend loads (libnvk_renderer.dylib).
+ZO=$OUT/zink; ZR=Library/GPUBundles/nvmtl/zink
+for f in libnvk_zink.dylib libnvk_cgl.dylib zink_sync_probe gld_bundle_probe; do put_signed "$ZO/zink/$f" "$ZR/$f"; done
+for f in cgl-dispatch-map.json MESA-SOURCE.json; do put_file "$ZO/zink/$f" "$ZR/$f"; done
+[ -f "$OUT/nvkbridge/lib/libnvk_minecraft.dylib" ] && [ -f "$OUT/nvkbridge/lib/libnvk_renderer.dylib" ] ||
+  stop "native OpenGL needs the nvkbridge component's frontend and renderer ($OUT/nvkbridge/lib): build nvkbridge"
+put_signed "$OUT/nvkbridge/lib/libnvk_minecraft.dylib" "$ZR/libnvk_zink_vulkan.dylib"
+put_signed "$OUT/nvkbridge/lib/libnvk_renderer.dylib" "$ZR/libnvk_renderer.dylib"
+ZB=Library/GPUBundles/NVKZinkGLDriver.bundle
+[ -f "$ZO/NVKZinkGLDriver.bundle/Contents/Info.plist" ] || stop "$ZO/NVKZinkGLDriver.bundle was not built"
+drop_lines "$ZB"; rm -rf "${R:?}/$ZB"; mkdir -p "$(dirname "$R/$ZB")"; cp -pR "$ZO/NVKZinkGLDriver.bundle" "$R/$ZB"
+codesign --force --sign - "$R/$ZB" >/dev/null 2>&1 || stop "could not sign $ZB"
+refresh_tree "$ZB"; echo "replaced $ZB (signed ad hoc)"
+# --- end of native OpenGL ---
 if [ -d "$R/licenses" ]; then
   for f in "$HERE"/licenses/*; do if [ -f "$f" ]; then put_file "$f" "licenses/$(basename "$f")"; fi; done
   # This checkout's notice and licence too: install.sh copies licenses/ to /Library/NullMoth/licenses, and the base

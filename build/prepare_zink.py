@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""prepare_zink.py <Mesa tree> (--git DIR | --archive FILE | a checkout): the pinned Mesa for Zink, then its overlay.
+
+The tree must be Mesa 26.3.0 (MESA_COMMIT) as it is in the Mesa git DIR (build/build_zink.sh exports it with git archive
+and passes --git), in the release archive (ARCHIVE_SHA256), or a git checkout of that commit. Only the files that
+zink/mesa-zink-nvk.patch names may differ from it, and only by being the patched ones already. The overlay is applied,
+the native frontend (zink/) is copied to src/gallium/targets/nvk-zink, and the Khronos registry of the tree is reduced
+to the OpenGL contract the CGL adapter is generated against (cgl-api-requirements.json).
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tarfile
+import tempfile
+from opengl_api import requirements
+
+MESA_COMMIT = '0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4'
+ARCHIVE_SHA256 = 'cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4'
+ROOT = Path(__file__).resolve().parents[1]
+FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c',
+            'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_changed(path,data):
+    if not path.is_file() or path.read_bytes() != data:
+        path.write_bytes(data)
+
+
+def prepare(source, archive=None, git=None):
+    patch = ROOT / 'zink/mesa-zink-nvk.patch'
+    changed = re.findall(r'^\+\+\+ b/(.+)$', patch.read_text(), re.M)
+    identity = {'commit': MESA_COMMIT}
+    expected = {}
+    # Internal Zink resources are accessed directly by the presentation bridge.
+    # Patch applicability alone cannot establish a matching Mesa ABI.
+    if git:
+        # a fresh export of the pinned commit: each overlay file's original is the commit's own
+        subprocess.run(['git', '-C', str(git), 'cat-file', '-e', MESA_COMMIT + '^{commit}'], check=True)
+        identity['exported_from_git'] = True
+        expected = {name: subprocess.check_output(['git', '-C', str(git), 'show', MESA_COMMIT + ':' + name])
+                    for name in changed}
+    elif archive:
+        archive_digest = digest(archive.read_bytes())
+        if archive_digest != ARCHIVE_SHA256:
+            raise ValueError('Mesa archive does not match the pinned source digest')
+        identity['archive_sha256'] = archive_digest
+        with tarfile.open(archive) as tar:
+            for member in tar:
+                name = Path(*Path(member.name).parts[1:])
+                if not name.parts: continue
+                target = source / name
+                if member.issym():
+                    if not target.is_symlink() or os.readlink(target) != member.linkname:
+                        raise ValueError('Modified Mesa source link: '+str(name))
+                elif member.isfile():
+                    original = tar.extractfile(member).read()
+                    if str(name) in changed: expected[str(name)] = original
+                    elif not target.is_file() or digest(target.read_bytes()) != digest(original):
+                        raise ValueError('Modified Mesa source: '+str(name))
+    else:
+        commit = subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip()
+        if commit != MESA_COMMIT:
+            raise ValueError('Use a separate Mesa checkout at '+MESA_COMMIT)
+        dirty = subprocess.check_output(['git','diff','--name-only','HEAD'],cwd=source,text=True).splitlines()
+        if set(dirty)-set(changed):
+            raise ValueError('Unrelated changes in Mesa source: '+', '.join(sorted(set(dirty)-set(changed))))
+        expected = {name:subprocess.check_output(['git','show','HEAD:'+name],cwd=source) for name in changed}
+    with tempfile.TemporaryDirectory(prefix='zink-overlay-') as temp:
+        clean = Path(temp)
+        for name, data in expected.items():
+            path = clean/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(data)
+        subprocess.run(['git','apply',str(patch)],cwd=clean,check=True)
+        for name in changed:
+            actual = (source/name).read_bytes()
+            if actual not in (expected[name], (clean/name).read_bytes()):
+                raise ValueError('Unrecognized edits in Mesa overlay source: '+name)
+        # Overwrite only the verified overlay files. No unrelated tree is patched.
+        for name in changed: write_changed(source/name,(clean/name).read_bytes())
+    target = source / 'src/gallium/targets/nvk-zink'
+    target.mkdir(parents=True,exist_ok=True)
+    for name in FRONTEND:
+        directory = 'tools' if name == 'zink_sync_probe.c' else 'zink'
+        write_changed(target/name,(ROOT/directory/name).read_bytes())
+    registry = source/'src/mesa/glapi/glapi/registry/gl.xml'
+    contract = requirements(registry)
+    contract.update(mesa_commit=MESA_COMMIT, registry_sha256=digest(registry.read_bytes()),
+                    registry_license='Apache-2.0', registry_copyright='Copyright 2013-2020 The Khronos Group Inc.')
+    write_changed(target/'cgl-api-requirements.json', (json.dumps(contract,sort_keys=True)+'\n').encode())
+    identity['overlay_sha256'] = digest(patch.read_bytes())
+    identity['frontend_sha256'] = {name:digest((target/name).read_bytes()) for name in FRONTEND}
+    (target/'MESA-SOURCE.json').write_text(json.dumps(identity,indent=2)+'\n')
+    print('Pinned native Zink overlay ready: '+str(source))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('source',type=Path)
+    ap.add_argument('--archive',type=Path,help='Verified Mesa 26.3.0 source archive for a checkout without .git')
+    ap.add_argument('--git',type=Path,help='The Mesa git the tree was exported from at MESA_COMMIT')
+    args = ap.parse_args()
+    prepare(args.source.resolve(),args.archive,args.git)
+
+
+if __name__ == '__main__':
+    main()
