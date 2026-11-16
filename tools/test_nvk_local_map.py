@@ -21,15 +21,24 @@ carries it with 12 lines of context, so no Mesa tree is needed), compiles it wit
   the map       nvkmd_dev_alloc_mapped_mem compiled from the patch: a refused map of memory the default placed is
                 made again once in system RAM, the first memory let go exactly once; any other refused map fails as
                 before
+  the order     with USERD in system RAM the read of GPPut before a doorbell no longer goes through BAR1, so the
+  page          device keeps one page that the default places behind BAR1 and reads it before every doorbell.
+                nvkmd_nvrm_dev_bar_order_init and the read are compiled from the patch: the page is asked for as
+                plain LOCAL memory (a HOST_READ or SHARED request would be left in system RAM) only in the default
+                mode, kept only when it carries the default's mark, let go otherwise; the read really loads from the
+                page (the page is made unreadable and the load faults) and does nothing without a page or a device
   the text      the three allocations the CPU reads back say NVKMD_MEM_HOST_READ, the two flags are bits of their own,
-                an allocation the default placed is made in system RAM when the RM has no video memory for it, and the
-                patch touches the six files it names
+                an allocation the default placed is made in system RAM when the RM has no video memory for it, each
+                of the three doorbells the patch shows reads GPPut, then the order page, then rings; the device makes
+                the page last and lets it go first; a refused BAR1 map of memory the default placed is not reported
+                as an error; and the patch touches the nine files it names
   the chain     the patch is in the 3.0 chain after nvk-nvrm-fixes (it is made on top of it) and is not an
                 upstream-fix patch that NVK_SKIP_PATCHES may leave out; its header is prose patch(1) cannot misread
   the way back  CHANGELOG.md has NVK_LOCAL_MAP_SYSMEM=1 in 3.0.1's table of ways back, the registry row is a setting
                 and the settings tool shows the registry's words
   controls      the same checks fail on a copy of the rule that forgets WindowServer, shared memory, read-back memory
-                or NVK_BAR_VRAM=0, and on copies of the placement and of the map that are wrong in the ways listed
+                or NVK_BAR_VRAM=0, and on copies of the placement, of the map and of the order page that are wrong in
+                the ways listed
 
 Linux or macOS, a C compiler, no GPU. usage: test_nvk_local_map.py [driver checkout]"""
 import itertools, pathlib, re, shutil, subprocess, sys, tempfile
@@ -78,11 +87,15 @@ def hunk_of(path, func, has=""):
 
 
 MEMC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c"
+NVRMH = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h"
+CTXC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c"
+DEVC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c"
+RECC = "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_recover.c"
 FILES = ["src/nouveau/vulkan/nvk_descriptor_set.c", "src/nouveau/vulkan/nvk_device.c", "src/nouveau/vulkan/nvkmd/nvkmd.c",
-         "src/nouveau/vulkan/nvkmd/nvkmd.h", "src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c", MEMC]
+         "src/nouveau/vulkan/nvkmd/nvkmd.h", NVRMH, CTXC, DEVC, MEMC, RECC]
 
 # --- the text -------------------------------------------------------------------------------------------------------
-arm("the patch touches the six files of the change and nothing else",
+arm("the patch touches the nine files of the change and nothing else",
     sorted(re.findall(r"(?m)^diff --git a/(\S+) b/\1$", "diff --git " + body)) == FILES)
 arm("3.0's opt-in function is removed and nothing still calls it",
     "nvrm_local_map_stays_vram(struct nvkmd_nvrm_pdev *pdev)" in minus and "nvrm_local_map_stays_vram(" not in after)
@@ -152,6 +165,45 @@ b = mhunk.find("\n}\n", a)
 mapped = mhunk[a + 1:b + 3] if a >= 0 and b > a else ""
 arm("the body of nvkmd_dev_alloc_mapped_mem is whole in the patch's text",
     mhunk.startswith("                           struct nvkmd_mem **mem_out)\n{") and "*mem_out = mem;" in mapped)
+
+# --- the order page, in the text -------------------------------------------------------------------------------------
+# Every doorbell the patch shows: the write-combining buffers drained, GPPut read, the order page read, then the ring.
+RING = (r"__atomic_thread_fence\(__ATOMIC_SEQ_CST\);[^\n]*\n(?:\s*//[^\n]*\n)*\s*\(void\)\*\(volatile NvU32 \*\)&userD->GPPut;\n"
+        r"(?:\s*//[^\n]*\n)*\s*nvkmd_nvrm_dev_bar_order\(ctx->base\.dev\);\n"
+        r"\s*volatile NvU32 \*doorbell = [^;\n]*;\n\s*\*doorbell = ")
+for what, path, n in (("a submission and the flush that waits (nvkmd_nvrm_ctx.c)", CTXC, 2),
+                      ("the doorbell a stalled or rebuilt channel is rung with (nvkmd_nvrm_recover.c)", RECC, 1)):
+    text = "".join(t for _, t in hunks(path))
+    arm(f"{what}: GPPut is read, then the order page, then the doorbell is rung, at each of the {n}",
+        len(re.findall(RING, text)) == n and len(re.findall(r"(?m)^\s*\*doorbell = ", text)) == n,
+        (len(re.findall(RING, text)), len(re.findall(r"(?m)^\s*\*doorbell = ", text))))
+devt = "".join(t for _, t in hunks(DEVC))
+arm("the device makes the order page last, when it can allocate, and before it is handed out",
+    re.search(r"nvkmd_nvrm_dev_bar_order_init\(dev, log_obj\);\n\s*\*dev_out = &dev->base;\n\s*return VK_SUCCESS;", devt) is not None
+    and devt.count("nvkmd_nvrm_dev_bar_order_init(") == 1)
+arm("the device lets the order page go first, while the mapping table its unmap needs is still there",
+    re.search(r"dev->barOrder = NULL;\n\s*if \(dev->barOrderMem != NULL\)\n\s*nvkmd_mem_unref\(dev->barOrderMem\);\n"
+              r"\s*if \(dev->mappings != NULL\)\n\s*_mesa_hash_table_destroy\(dev->mappings, NULL\);", devt) is not None)
+hdrt = "".join(t for _, t in hunks(NVRMH))
+arm("the device keeps the page and the address read before a doorbell, and the read is declared where both files see it",
+    "   struct nvkmd_mem *barOrderMem;\n   const volatile NvU32 *barOrder;\n};" in hdrt
+    and "void nvkmd_nvrm_dev_bar_order_init(struct nvkmd_nvrm_dev *dev, struct vk_object_base *log_obj);" in hdrt)
+order_read = c_slice(hdrt, "static inline void\nnvkmd_nvrm_dev_bar_order(struct nvkmd_dev *dev)\n{", "\n}\n")
+order_init = c_slice(after, "void\nnvkmd_nvrm_dev_bar_order_init(struct nvkmd_nvrm_dev *dev, struct vk_object_base *log_obj)\n{",
+                     "\n}\n")
+arm("the order page's two functions are whole in the patch's text",
+    "(void)*p;" in order_read and "nvkmd_dev_alloc_mapped_mem(" in order_init and "dev->barOrder = mem->map;" in order_init)
+# a refused BAR1 map of memory the default placed: the caller takes system RAM, so no error is reported for it
+mapt = re.sub(r"/\*.*?\*/", " ", "".join(t for h, t in hunks(MEMC) if "nvkmd_nvrm_mem_map(" in h), flags=re.S)
+quiet = re.search(r"NV_STATUS nvRes = nvRmApiMapMemory\([^;]*\);\s*"
+                  r"if \(nvRes != NV_OK && \(mem->base\.flags & NVKMD_MEM_DEFAULT_BAR\)\) \{(.*?)\n   \}\s*"
+                  r"if \(nvRes != NV_OK\) \{\s*fprintf\(stderr, \"\[!\] nvRes", mapt, re.S)
+qb = quiet.group(1) if quiet else ""
+arm("a refused BAR1 map of memory the default placed frees its record and returns the error without reporting one "
+    "(a line under the diagnostics only); any other refused map is reported as before",
+    quiet is not None and "vk_errorf" not in qb and "[!]" not in qb and qb.count("free(mapping);") == 1
+    and re.search(r"if \(nvkmd_nvrm_diag_on\(\)\)\s*fprintf\(stderr,", qb) is not None
+    and qb.rstrip().endswith("return VK_ERROR_OUT_OF_DEVICE_MEMORY;"), qb[-200:])
 
 # --- the rule, compiled ---------------------------------------------------------------------------------------------
 FLAGS = r'''
@@ -466,11 +518,116 @@ def caught(res, check):
     return not isinstance(res, str) and bool(check(res))
 
 
+# --- the order page, compiled ---------------------------------------------------------------------------------------
+ORDER = r'''
+#include <setjmp.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <unistd.h>
+typedef int VkResult;
+typedef uint32_t NvU32;
+#define VK_SUCCESS 0
+''' + FLAGS + r'''
+%s
+enum nvkmd_mem_map_flags { NVKMD_MEM_MAP_RD = 1 << 0, NVKMD_MEM_MAP_WR = 1 << 1, NVKMD_MEM_MAP_RDWR = 3 };
+enum { NVRM_LOCAL_MAP_SYSMEM = 0, NVRM_LOCAL_MAP_VRAM_PRIVATE = 1, NVRM_LOCAL_MAP_VRAM_ALL = 2 };
+struct vk_object_base { int unused; };
+struct nvkmd_pdev { int unused; };
+struct nvkmd_dev { struct nvkmd_pdev *pdev; };
+struct nvkmd_mem { enum nvkmd_mem_flags flags; void *map; };
+struct nvkmd_nvrm_pdev { struct nvkmd_pdev base; };
+struct nvkmd_nvrm_dev { struct nvkmd_dev base; struct nvkmd_mem *barOrderMem; const volatile NvU32 *barOrder; };
+static struct nvkmd_nvrm_pdev *nvkmd_nvrm_pdev(struct nvkmd_pdev *p) { return (struct nvkmd_nvrm_pdev *)p; }
+static struct nvkmd_nvrm_dev *nvkmd_nvrm_dev(struct nvkmd_dev *d) { return (struct nvkmd_nvrm_dev *)d; }
+static int mode, alloc_res, n_mode, n_alloc, n_unref, bad_args;
+static unsigned mark, alloc_req;
+static void *page;
+static struct nvkmd_mem the_mem;
+static int nvrm_local_map_mode(struct nvkmd_nvrm_pdev *pdev) { (void)pdev; n_mode++; return mode; }
+/* The backend's allocation: what comes back carries `mark` (DEFAULT_BAR when the default placed it behind BAR1). */
+static VkResult nvkmd_dev_alloc_mapped_mem(struct nvkmd_dev *dev, struct vk_object_base *log_obj, uint64_t size_B, uint64_t align_B,
+                                           enum nvkmd_mem_flags flags, enum nvkmd_mem_map_flags map_flags, struct nvkmd_mem **mem_out)
+{
+   (void)dev; (void)log_obj; (void)align_B;
+   n_alloc++;
+   alloc_req = (unsigned)flags;
+   if (size_B == 0 || size_B > 0x10000 || !(map_flags & NVKMD_MEM_MAP_RD)) bad_args++;
+   if (alloc_res != VK_SUCCESS) return alloc_res;
+   the_mem.flags = (enum nvkmd_mem_flags)(flags | NVKMD_MEM_CAN_MAP | mark);
+   the_mem.map = page;
+   *mem_out = &the_mem;
+   return VK_SUCCESS;
+}
+static void nvkmd_mem_unref(struct nvkmd_mem *mem) { if (mem == &the_mem) n_unref++; else bad_args++; }
+/* ---- the patch's text ---- */
+%s
+%s
+/* ---- end ---- */
+static sigjmp_buf jb;
+static void on_fault(int sig) { (void)sig; siglongjmp(jb, 1); }
+int main(int argc, char **argv)
+{
+   /* the mode, the mark the allocation comes back with, the allocation's result */
+   if (argc != 4) return 2;
+   mode = atoi(argv[1]); mark = (unsigned)strtoul(argv[2], NULL, 0); alloc_res = atoi(argv[3]);
+   const long ps = sysconf(_SC_PAGESIZE);
+   page = mmap(NULL, (size_t)ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+   if (page == MAP_FAILED) return 3;
+   struct nvkmd_nvrm_pdev pdev = { { 0 } };
+   struct nvkmd_nvrm_dev dev = { { &pdev.base }, NULL, NULL };
+   struct vk_object_base log = { 0 };
+   nvkmd_nvrm_dev_bar_order_init(&dev, &log);
+   const int has = dev.barOrder != NULL, right = !has || ((const void *)dev.barOrder == page && dev.barOrderMem == &the_mem);
+   const int kept = dev.barOrderMem != NULL;
+   /* Does the read before a doorbell load from the page? Make the page unreadable: a load faults, nothing else does. */
+   if (mprotect(page, (size_t)ps, PROT_NONE) != 0) return 3;
+   signal(SIGSEGV, on_fault); signal(SIGBUS, on_fault);
+   int touched = 0, null_ok = 0;
+   if (sigsetjmp(jb, 1) == 0) nvkmd_nvrm_dev_bar_order(&dev.base); else touched = 1;
+   if (sigsetjmp(jb, 1) == 0) { nvkmd_nvrm_dev_bar_order(NULL); null_ok = 1; }
+   printf("page=%%d right=%%d kept=%%d modes=%%d allocs=%%d req=%%#x unrefs=%%d touched=%%d null=%%d args=%%s\n", has, right, kept, n_mode,
+          n_alloc, alloc_req, n_unref, touched, null_ok, bad_args ? "bad" : "ok");
+   return 0;
+}
+'''
+E_OOM_O = -2
+ORDER_CASES = [
+    # (what the arm holds, the mode, the mark of what comes back, the allocation's result, what comes out)
+    ("in the default mode the device asks once for plain LOCAL memory (not marked read-back or shared, which the default "
+     "would leave in system RAM), keeps the page the default placed behind BAR1, and the read before a doorbell loads from it",
+     1, "DBAR", 0, f"page=1 right=1 kept=1 modes=1 allocs=1 req={{LOCAL:#x}} unrefs=0 touched=1 null=1 args=ok"),
+    ("a page that came back without the default's mark (no room in the VRAM or in BAR1: it is in system RAM) is let go "
+     "once, and there is no read",
+     1, "0", 0, f"page=0 right=1 kept=0 modes=1 allocs=1 req={{LOCAL:#x}} unrefs=1 touched=0 null=1 args=ok"),
+    ("a refused allocation leaves the device without a page and without a read, nothing let go",
+     1, "DBAR", E_OOM_O, f"page=0 right=1 kept=0 modes=1 allocs=1 req={{LOCAL:#x}} unrefs=0 touched=0 null=1 args=ok"),
+    ("with NVK_LOCAL_MAP_SYSMEM=1, in WindowServer or with a small BAR1 (system RAM) nothing is allocated and nothing read",
+     0, "DBAR", 0, "page=0 right=1 kept=0 modes=1 allocs=0 req=0 unrefs=0 touched=0 null=1 args=ok"),
+    ("with NVK_LOCAL_MAP_SYSMEM=0 (USERD itself is behind BAR1, as in 3.0) nothing is allocated and nothing read",
+     2, "DBAR", 0, "page=0 right=1 kept=0 modes=1 allocs=0 req=0 unrefs=0 touched=0 null=1 args=ok"),
+]
+
+
+def run_order(init_text, read_text, d, tag):
+    """[(what, got, want)] of every case, or a string."""
+    err, exe = build(ORDER % (DEFINES, read_text, init_text), d, tag)
+    if err:
+        return err
+    out = []
+    for what, m, mk, ar, want in ORDER_CASES:
+        o = subprocess.run([str(exe), str(m), hex(DBAR) if mk == "DBAR" else "0", str(ar)], capture_output=True, text=True, timeout=30)
+        out.append((what, f"exit {o.returncode} " + o.stdout.strip() if o.returncode else o.stdout.strip(), want.format(LOCAL=LOCAL)))
+    return out
+
+
 cc = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
-if not cc or not code or not block or not mapped or len(defs) != 2:
-    found = bool(code and block and mapped and len(defs) == 2)
+if not cc or not code or not block or not mapped or not order_init or not order_read or len(defs) != 2:
+    found = bool(code and block and mapped and order_init and order_read and len(defs) == 2)
     arm("the patch's code to compile was found", found)
-    print("SKIP: no C compiler on PATH: the rule, the placement and the map were not compiled" if found else "FAILED")
+    print("SKIP: no C compiler on PATH: the rule, the placement, the map and the order page were not compiled" if found else "FAILED")
     sys.exit(2 if found and not fails else 1)
 with tempfile.TemporaryDirectory() as tmp:
     d = pathlib.Path(tmp)
@@ -558,6 +715,24 @@ with tempfile.TemporaryDirectory() as tmp:
     for i, (what, old, new) in enumerate(mmuts):
         arm(f"control: a map path that {what} fails",
             mapped.count(old) == 1 and caught(run_map(mapped.replace(old, new), d, f"mmut{i}"), map_problems))
+
+    ores = run_order(order_init, order_read, d, "order")
+    for (what, got, want) in (ores if not isinstance(ores, str) else [("the order page harness", ores, "")]):
+        arm(what, got == want, f"{got} != {want}")
+    omuts = [("is made in every mode", order_init, "if (nvrm_local_map_mode(pdev) != NVRM_LOCAL_MAP_VRAM_PRIVATE)",
+              "if (nvrm_local_map_mode(pdev) < 0)", None),
+             ("keeps a page that is not behind BAR1", order_init, "if (!(mem->flags & NVKMD_MEM_DEFAULT_BAR)) {",
+              "if (mem == NULL) {", None),
+             ("asks for the page as memory the CPU reads back", order_init, "0x1000, 0, NVKMD_MEM_LOCAL,",
+              "0x1000, 0, NVKMD_MEM_LOCAL | NVKMD_MEM_HOST_READ,", None),
+             ("keeps the memory but not its address", order_init, "   dev->barOrder = mem->map;\n", "", None),
+             ("does not load from the page before a doorbell", None, "      (void)*p;\n", "      (void)p;\n", order_read)]
+    for i, (what, init, old, new, read) in enumerate(omuts):
+        src = read if read is not None else init
+        ok = src.count(old) == 1
+        res = run_order(init.replace(old, new) if init is not None else order_init,
+                        read.replace(old, new) if read is not None else order_read, d, f"omut{i}")
+        arm(f"control: an order page that {what} fails", ok and caught(res, map_problems))
 
 # --- the chain ------------------------------------------------------------------------------------------------------
 bld = (R / "build/build_nvk.sh").read_text()
