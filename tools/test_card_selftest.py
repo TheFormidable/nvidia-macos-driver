@@ -420,9 +420,16 @@ elif mode == "slow":
 elif mode == "info":
     print("INFO speed 12 fps")
     print("PASS stand-in case")
+elif mode == "upload":
+    with open(os.environ["NVMTL_LOG_PATH"], "a") as f:
+        f.write("pid 7 NVMTL: vk: async texture upload ON (NVMTL_ASYNC_TEX_UPLOAD=unset)\\n"
+                "pid 7 NVMTL: vk: tex upload async: 256 pending uploads hold 67108864 bytes of staging (limits 256 and "
+                "268435456): an upload past a limit waits for its copy, as in 3.0\\n")
+    print("PASS stand-in case")
 elif mode == "leave":
     home = os.environ["HOME"]
-    for p in (os.path.join(os.path.dirname(S), "tmp", "nvmtl-left.log"), os.path.join(home, "Library", "Caches", "nvmtl", "entry"),
+    for p in (os.path.join(os.path.dirname(S), "tmp", "nvmtl-left.log"), os.path.join(os.path.dirname(S), "tmp", "nvk-diag-4242.log"),
+              os.path.join(home, "Library", "Caches", "nvmtl", "entry"),
               os.path.join(home, "Library", "Logs", "DiagnosticReports", "nvmtltest-2026-11-16-030000.ips"),
               os.path.join(home, "Library", "Logs", "DiagnosticReports", "Other-2026-11-16-030000.ips")):
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -775,6 +782,7 @@ try:
     arm("report.md names what appeared outside the run folder (the plugin's /tmp files, its cache entries, the crash "
         "reports of the programs it ran, not of others), by name and with the home folder scrubbed",
         rc == 0 and re.search(r"^- \S*/tmp/nvmtl-left\.log$", tail, re.M) and "~/Library/Caches/nvmtl: 1 entries newer" in tail
+        and re.search(r"^- \S*/tmp/nvk-diag-4242\.log$", tail, re.M)
         and "~/Library/Logs/DiagnosticReports/nvmtltest-2026-11-16-030000.ips" in tail and "Other-" not in tail
         and str(w.home) not in report, (rc, tail, text[-600:]))
 
@@ -933,6 +941,26 @@ try:
             os.killpg(int((w.state / "plugin.slow.main.pid").read_text()), signal.SIGKILL)
         except (OSError, ValueError):
             pass
+
+    # ------------------------------------------------------------- results.json after every row; the upload limit line
+    w = World(TOP, "partial")
+    w.checks({"checks_plugin.py": [prow("plugin.first", "upload", order=300), prow("plugin.slow", "slow", "20", order=301, limit=30),
+                                   prow("plugin.after", "pass", order=302)]})
+    out = w.base / "runs" / "p"
+    rc, text = w.run(["--out", str(out)], signal_when=("plugin.slow slow", signal.SIGKILL))
+    got, data = results(w, out)
+    arm("a runner killed by SIGKILL during a check leaves results.json, marked partial, with the rows it finished and the rest "
+        "null, and no DONE", rc == -signal.SIGKILL and data.get("partial") is True and data.get("exit") is None
+        and got.get("plugin.first", {}).get("result") == "pass" and got.get("plugin.slow", {}).get("result") is None
+        and got.get("plugin.after", {}).get("result") is None and not (out / "DONE").exists(), (rc, data, text[-600:]))
+    arm("the plugin's line of a row's nvmtl.log that says its pending uploads reached a limit is in that row's information",
+        got.get("plugin.first", {}).get("info") == ["driver: vk: tex upload async: 256 pending uploads hold 67108864 bytes of "
+                                                    "staging (limits 256 and 268435456): an upload past a limit waits for "
+                                                    "its copy, as in 3.0"], got.get("plugin.first"))
+    try:
+        os.killpg(int((w.state / "plugin.slow.main.pid").read_text()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
 
     # ---------------------------------------------------------------------------------- a window, caffeinate
     w = World(TOP, "window")
