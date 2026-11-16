@@ -21,12 +21,13 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 9 | 1 | 55 | 408 | 12 |  | 491 |
-| bootarg | 4 | 13 | 30 | 21 | 12 |  | 8 | 6 | 2 |  | 96 |
+| env |  | 6 |  |  | 11 | 1 | 55 | 408 | 12 |  | 493 |
+| bootarg | 4 | 13 | 30 | 21 | 13 |  | 8 | 6 | 2 |  | 97 |
 | sysctl |  | 5 | 4 | 12 |  |  | 366 |  |  |  | 387 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
+| pref |  |  |  |  |  |  |  |  |  |  | 0 |
 
 ## The ways back
 
@@ -38,7 +39,9 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_BUSY_DONE_EARLY` | on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch) | 3.2 | A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
+| env | `NVMTL_MANAGED_SURFACE_TILED` | on (NVMTL_MANAGED_SURFACE_TILED=0 in the settings file: a shader-writable Managed wrapper of a surface in the family's VRAM is drawn straight into the linear import, as in 3.0 before this switch) | 3.2 | A shader-writable Managed wrapper of a single-plane surface in the family's VRAM is drawn, sampled and read by framebuffer fetch through a tiled image of its own, which is copied into the linear VRAM import before the surface is marked and from it when another writer made the VRAM newer. |
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
+| env | `NVMTL_PHOTOBOOTH_FLIP` | on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9) | 3.2 | In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched. |
 | env | `NVMTL_PLANE_FOLLOW` | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. |
 | env | `NVMTL_SURFOUT_PLANES` | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. |
 | env | `NVMTL_YUV422` | on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9) | 3.2 | Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused. |
@@ -55,6 +58,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `nvrmnanowait` | on (nvrmnanowait=0: a cancel does not wait, as in 2.9) | 3.2 | Cancelling or destroying one of the RM's short timers waits for a callback that is still running, as Linux does. |
 | bootarg | `nvrmrctimer` | on (nvrmrctimer=0: no timer, as in 2.9) | 3.2 | The RM's once-a-second timer runs, so its periodic work (the check that the GPU is still on the bus, the video encoder's session statistics) happens. |
 | bootarg | `nvrmworkq` | on (nvrmworkq=0: every work item gets a thread of its own, as in 2.9) | 3.2 | The RM's deferred work runs in order on one queue per GPU and one shared queue, and sleep, shutdown and the stop of a GPU wait for it. |
+| bootarg | `nvzink` | on (nvzink=0: Apple's OpenGL over Metal, as in 2.9) | 3.2 | On macOS 15.5 or later the accelerator names NVKZinkGLDriver.bundle as its OpenGL driver, so OpenGL applications run on NVK through Mesa's Zink; nvzink=0, read once when the accelerator starts, keeps Apple's renderer for every application. |
 | build | `NVK_SKIP_PATCHES` | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT \<names> (NVK_SKIP_PATCHES)". |
 
 ## Test hooks
@@ -325,6 +329,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_M4_NOTE_FAST` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLMetal4.m |
 | `NVMTL_MANAGED_EAGER_ZERO` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_MANAGED_OWNED_VRAM` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice_contract.m |
+| `NVMTL_MANAGED_SURFACE_TILED` | escape | on (NVMTL_MANAGED_SURFACE_TILED=0 in the settings file: a shader-writable Managed wrapper of a surface in the family's VRAM is drawn straight into the linear import, as in 3.0 before this switch) | 3.0 | 3.2 | A shader-writable Managed wrapper of a single-plane surface in the family's VRAM is drawn, sampled and read by framebuffer fetch through a tiled image of its own, which is copied into the linear VRAM import before the surface is marked and from it when another writer made the VRAM newer. | plugin/NVMTLDevice.m |
 | `NVMTL_MANAGED_SYSMEM` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_MANAGED_VRAM_MIN` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice_contract.m |
 | `NVMTL_MATRIX8_CMLOAD_TRACE` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/passes/air_calls/matrix.rs |
@@ -438,6 +443,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_OS_VERSION` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m |
 | `NVMTL_PAR_SIGCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PERF_LOG` | diag | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_PHOTOBOOTH_FLIP` | escape | on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9) | 3.0 | 3.2 | In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched. | plugin/NVMTLPhotoBooth.m |
 | `NVMTL_PIPELINE_THREADS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_PLANE_FOLLOW` | escape | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.0 | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. | plugin/NVMTLObjects.m |
 | `NVMTL_PLANE_SEED` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -661,6 +667,7 @@ Each of these does nothing unless it is set.
 | `nvrtd3` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nv_rtd3.cpp |
 | `nvrtd3res` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/nv_rtd3.cpp |
 | `nvselector` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVPrimarySelector/NVPrimarySelector.cpp, kexts/NVRM/NVRM.cpp, kexts/NVRM/accel/nvrm-accel.cpp |
+| `nvzink` | escape | on (nvzink=0: Apple's OpenGL over Metal, as in 2.9) | 3.0 | 3.2 | On macOS 15.5 or later the accelerator names NVKZinkGLDriver.bundle as its OpenGL driver, so OpenGL applications run on NVK through Mesa's Zink; nvzink=0, read once when the accelerator starts, keeps Apple's renderer for every application. | kexts/NVRM/accel/nvrm-accel.cpp |
 
 ## sysctl
 
@@ -1117,3 +1124,8 @@ Each of these does nothing unless it is set.
 | `NVK_SKIP_PATCHES` | escape | on (unset: build/build_nvk.sh applies every patch of its chain) | 3.0 | 3.2 | Build time only: NVK_SKIP_PATCHES="name ..." builds NVK without the named upstream-fix patches of the chain (nvk-mesa-26.3.0, nvk-nak-fixes-main, nvk-nak-sched-main; the script accepts no other name), to tell whether one of them is behind a shader or rendering problem. Nothing in an installed driver reads it; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "WITHOUT \<names> (NVK_SKIP_PATCHES)". | build/build_nvk.sh |
 | `NVK_SYSROOT` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVRM_PRISTINE_OGKM` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvrm.sh |
+
+## pref
+
+| name | tier | default | since | review | purpose | read in |
+|---|---|---|---|---|---|---|

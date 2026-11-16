@@ -141,3 +141,37 @@ kexts/NMKbdBacklight  The keyboard backlight plugin follows the structure of Vir
              HALS, SALS), thinkpad_acpi (MLCG, MLCS), dell-laptop and dell-smbios-wmi (Dell SMBIOS keyboard light calls), msi-ec (BeardOverflow/msi-ec, GPL-2.0: the source of the MSI firmware-string table facts and the setter encoding; our code is our own), hid-asus (drivers/hid/hid-asus.c: the ASUS N-KEY handshake and brightness
              feature reports, tools/asus), and OpenRazer (the Razer feature report, tools/razer), which are GPL-2.0, and from the ACPI tables of laptops whose owners sent
              them in. No code was copied from them; the code here is NullMoth's own.
+
+translator/  The repairs of argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining and
+             WebGPU textures come from the HighDelay/nvidia-macos-driver-nvk fork
+             (https://github.com/HighDelay/nvidia-macos-driver-nvk), a fork of this project, whose translator/ is under
+             the same licence as this one: the GNU Lesser General Public License v3.0 or later (translator/LICENSE,
+             translator/COPYING).
+
+plugin       The Photo Booth preview adapter (plugin/NVMTLPhotoBooth.m), the A8 framebuffer-fetch remap
+             (plugin/nvmtl_a8_fetch.h), the tiled image of shader-writable Managed IOSurface wrappers and the tiled
+             stand-ins of linear attachments in framebuffer-fetch passes, the surface drawable usage rule, the
+             half-float mip filling, the storage view of Unknown-usage textures and the empty scheduled-present handler
+             come from the HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project
+             (LICENSE), written into this tree's plugin.
+
+tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/GPUBundles/nvmtl/minecraft (bridge.mm,
+             its host and smoke tests, ModFreeProbe.java and its documents) comes from nvk/native-macos of the
+             HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project (LICENSE), adapted
+             to this tree's NVK and plugin. Its lib/libnvk_renderer.dylib is a copy of this package's NVK (Mesa, MIT;
+             see NVK above).
+
+zink/        Native OpenGL (/Library/GPUBundles/NVKZinkGLDriver.bundle and /Library/GPUBundles/nvmtl/zink) is Mesa's
+             Zink from Mesa 26.3.0 (commit 0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4) with zink/mesa-zink-nvk.patch, MIT
+             (licenses/Mesa-license.rst). The frontend, the CGL adapter and the GL driver bundle in zink/,
+             build/build_zink.sh, build/opengl_api.py and tools/gld_bundle_probe.c come from the
+             HighDelay/nvidia-macos-driver-nvk fork, where they are MIT, Copyright (c) 2026 Dino Zink contributors
+             (licenses/Dino-Zink-MIT.txt); this tree's changes to them are under the same licence.
+             build/prepare_zink.py and build/generate_gld_forward.py also come from that fork, where commit eaf7d128
+             added them together with build/build_zink.sh; neither carries a licence line of its own, there or here.
+             That fork's docs/ZINK-OPENGL.md says of the contribution eaf7d128 is part of: "its original MIT
+             attribution is retained". The CGL dispatch table is generated when the driver is built from the macOS
+             SDK's public OpenGL headers. The capability lists generated beside it carry data of the Khronos
+             OpenGL registry (gl.xml as Mesa 26.3.0 ships it, https://github.com/KhronosGroup/OpenGL-Registry),
+             Apache-2.0, Copyright 2013-2020 The Khronos Group Inc. (licenses/Khronos-OpenGL-Registry-Apache-2.0.txt).
+             Zink's Vulkan driver in nvmtl/zink is the tools/nvk-bridge frontend and its copy of NVK.

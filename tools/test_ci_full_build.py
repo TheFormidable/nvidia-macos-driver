@@ -277,7 +277,7 @@ class Scene:
         tc = w / "tools/toolchain"
         (w / ".nullmoth-build-workdir").parent.mkdir(parents=True, exist_ok=True)
         (w / ".nullmoth-build-workdir").write_text("made by build.sh\n")
-        for b in ("ninja", "cmake", "pkgconf", "spirv-val", "spirv-opt", "glslang"):
+        for b in ("ninja", "cmake", "pkgconf", "spirv-val", "spirv-opt", "glslang", "bison"):
             mk.make(tc / "bin" / b, "bundle", ("/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib"))
         mk.make(tc / "python/bin/python3.14", "bundle", ("/usr/lib/libSystem.B.dylib", "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"))
         mk.make(tc / "python/lib/python3.14/lib-dynload/_ssl.cpython-314-darwin.so", "bundle")
@@ -308,6 +308,7 @@ class Scene:
                      ("bindgen", w / "tools/cargo/bin/bindgen"), ("cbindgen", w / "tools/cargo/bin/cbindgen")):
             (tb / n).symlink_to(t)
         (tb / "patch").write_text('#!/bin/sh\n# made by build.sh: the patch it chose, with -f so that it never waits for an answer\nexec /usr/bin/patch -f "$@"\n')
+        (tb / "bison").write_text(f'#!/bin/sh\n# made by build.sh: the bison it chose, started by its own path\nexec {tc}/bin/bison "$@"\n')
         (w / "tools/venv/bin").mkdir(parents=True)
         (w / "tools/venv/bin/python3").symlink_to(tc / "python/bin/python3.14")
         # out/: what the steps built, NVK's build tree with mesa_clc and object files among it
@@ -676,6 +677,10 @@ def main():
         good_patch = pt.read_text()
         control("a patch from Homebrew is caught", "lie outside the working directory",
                 lambda: pt.write_text(good_patch.replace("/usr/bin/patch", "/usr/local/opt/gpatch/bin/gpatch")), lambda: pt.write_text(good_patch))
+        bs = w / "tools/bin/bison"
+        good_bison = bs.read_text()
+        control("a bison from Homebrew is caught", "lie outside the working directory",
+                lambda: bs.write_text(good_bison.replace(str(tc / "bin/bison"), "/usr/local/opt/bison/bin/bison")), lambda: bs.write_text(good_bison))
         bad = w / "out/vulkan-loader/libvulkan.1.dylib"
         control("a library under out/ that loads from Homebrew's prefix is caught", "loads /usr/local/lib/libintl.8.dylib",
                 lambda: mk.make(bad, "dylib", ("/usr/lib/libSystem.B.dylib", "/usr/local/lib/libintl.8.dylib")), lambda: bad.unlink())
@@ -841,7 +846,7 @@ def main():
                  'tc_path() { [ -s "$TC_PREFIX/.nm-toolchain/$1" ]', '  VENV=$TOOLS/venv\n', '  RUSTUP_DIR=$TOOLS/rustup\n',
                  '  CARGO_DIR=$TOOLS/cargo\n', '  SPIRVLLVM_PREFIX=$TOOLS/spirv-llvm-translator\n', '  TBIN=$TOOLS/bin\n']
         gone = [n.strip() for n in names if n not in bsh]
-        links = set(re.findall(r'ln -s "\$\w+(?:/\$l)?" "\$TBIN/([\w-]+)"', bsh)) | {"patch"}
+        links = set(re.findall(r'ln -s "\$\w+(?:/\$l)?" "\$TBIN/([\w-]+)"', bsh)) | set(re.findall(r'> "\$TBIN/([\w-]+)" && chmod 755', bsh))
         loops = re.findall(r'for l in ([\w ]+); do \[ -x "\$(?:RUST_BIN|CARGO_DIR/bin)/\$l" \]', bsh)
         links |= {x for l in loops for x in l.split()} - {"rustdoc"}
         want_links = set(re.search(r'^TOOL_LINKS="([^"]*)"', own, re.M).group(1).split())
@@ -850,6 +855,9 @@ def main():
             not gone, gone)
         arm("the links prove expects in tools/bin are the ones build.sh makes (rustdoc aside: no step needs it, it is linked when Rust has it)",
             want_links == links, (sorted(want_links), sorted(links)))
+        want_logs = set(re.search(r'^COMPONENT_LOGS="([^"]*)"', own, re.M).group(1).split())
+        allc = set(re.search(r'^ALL_COMPONENTS="([^"]*)"', bsh, re.M).group(1).split())
+        arm("prove reads the build log of every component in build.sh's ALL_COMPONENTS", allc <= want_logs, sorted(allc - want_logs))
         arm("the scripts' toolchain folders are those", "tc_prefix() { printf '%s/tools/toolchain' \"$1\"; }" in own
             and "tc_logs() { printf '%s/logs/toolchain' \"$1\"; }" in own, "")
         cache = {"${{ runner.temp }}/nmw/tools/toolchain", "!${{ runner.temp }}/nmw/src/toolchain", "${{ runner.temp }}/nmw/tools/venv",

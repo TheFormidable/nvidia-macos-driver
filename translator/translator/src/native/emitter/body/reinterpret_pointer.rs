@@ -229,23 +229,31 @@ impl Emitter {
         if !matches!(object_ty, LlType::Ptr(_)) {
             return Ok(false);
         }
-        let leaf = if local_pointer_field_pointee(pointee) {
-            None
-        } else {
-            match first_field_pointer_leaf(pointee) {
-                Some((_, leaf)) => Some(leaf.clone()),
-                None => return Ok(false),
-            }
-        };
-        let pointee = leaf.as_ref().unwrap_or(pointee);
+        // A local pointer field, or an aggregate whose first field leads to one.
+        if !local_pointer_field_pointee(pointee) && first_field_pointer_leaf(pointee).is_none() {
+            return Ok(false);
+        }
         let Some(key) = self.local_pointer_field_key(ptr)? else {
             return Ok(false);
         };
 
         let ptr_id = self.value_id(&ptr.value, &ptr.ty)?;
-        if self.bda_device_pointers && *pointee == LlType::Int(64) {
+        // Local pointer fields are represented as 64-bit payloads in the
+        // physical-address model, including an LLVM alloca whose pointee is
+        // still spelled ptr rather than i64.
+        if self.bda_device_pointers {
             if let LlValue::Local(object_name) = &object.value {
-                if let Some(address) = self.bda_direct_addresses.get(object_name).copied() {
+                let address = match self.bda_direct_addresses.get(object_name).copied() {
+                    Some(address) => Some(address),
+                    None => self
+                        .raw_offsets
+                        .get(object_name)
+                        .cloned()
+                        .filter(|raw| raw.device_addr_base.is_some())
+                        .map(|raw| self.materialize_device_address(&raw, instructions))
+                        .transpose()?,
+                };
+                if let Some(address) = address {
                     self.emit_sidecar.local_pointer_field_stores.push(
                         crate::emit_sidecar::LocalPointerFieldStore {
                             id: address,

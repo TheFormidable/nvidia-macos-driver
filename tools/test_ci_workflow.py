@@ -118,7 +118,7 @@ def problems(y, root):
             or re.search(od.group(1), shown.replace("installondemand", "other")):
         out.append("host-tests does not fail when a test left the marker of an on-demand install of the command line tools "
                    "(a step that also runs after a failed test, with a pattern that finds the runner's line for the marker and no other)")
-    # the four tests that compile against vulkan/vulkan.h skip without headers: the job must hand them the release's
+    # the tests that compile against vulkan/vulkan.h skip or fail without headers: the job must hand them the release's
     hv = re.search(r"^\s*d=\$\(bash build/ci_vulkan_headers\.sh\)\n\s*echo \"NM_VULKAN_INCLUDE=\$d\" >> \"\$GITHUB_ENV\"", host, re.M)
     if not hv or hv.start() > host.find("tools/run_all_tests.py"):
         out.append("host-tests does not set NM_VULKAN_INCLUDE from build/ci_vulkan_headers.sh before the tests")
@@ -228,7 +228,7 @@ control("host tests that print only the end of a failed test's output are caught
         "output whole")
 control("a --tail too short for a failed test's whole output is caught", "--tail 20000 |", "--tail 1200 |", "output whole")
 control("host tests that pass with the Vulkan tests skipped are caught",
-        "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings",
+        "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge",
         "is skipped")
 control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
 ONDEMAND = "(the line above names the tests that were running)\"; exit 1\n"
@@ -248,7 +248,8 @@ control("a check for the marker made before the tests is caught", HOST_STEP + MA
 control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
 control("the compile-line check that runs only after a good link is caught", "        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}\n", "",
         "whenever the RM and NVKMS were compiled")
-arm("the Vulkan tests are found by what they read (four of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings", "test_opengl_perf"},
+arm("the Vulkan tests are found by what they read (five of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings",
+                                                                          "test_nvk_bridge", "test_opengl_perf"},
     " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
 

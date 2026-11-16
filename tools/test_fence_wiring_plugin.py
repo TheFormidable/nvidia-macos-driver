@@ -132,7 +132,7 @@ def check(f):
         'NVMTL_FENCE_POLL_US (nvmtl_fence.h) is not the length of the older poll, NVMTL_BUSY_WAIT_NS (NVMTLDevice.m)'
 
     sin = body(obj, '- (void)nvmtlSurfaceIn {')
-    unchanged = 'if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;'
+    unchanged = 'if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (direct || vgen == r->_surfGen)) return;'
     foreign = 'if (!r->_clientWritten && nvmtl_busy_foreign(r->_surf, r->_plane)) { r->_clientWritten = YES; nvmtl_busy_wait(r->_surf, r->_plane); }'
     assert sin.index(unchanged) < sin.index(foreign) < sin.index(ROW[12]), 'row 12: not after the unchanged-surface return and the busy-tag check'
 

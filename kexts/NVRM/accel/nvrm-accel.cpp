@@ -17,6 +17,7 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
+#include <libkern/version.h>
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -264,6 +265,27 @@ static bool nvaccelMultiGpu(void)
     if (on < 0) { uint32_t v = 0; on = (PE_parse_boot_argn("nvmultigpu", &v, sizeof v) && v) ? 1 : 0; }
     return on == 1;
 }
+#ifndef NMX_ACCEL
+// Native OpenGL (docs/ZINK-OPENGL.md): on macOS 15.5 (Darwin 24.5) or later the accelerator names
+// NVKZinkGLDriver.bundle as its OpenGL driver, which runs OpenGL on NVK through Mesa's Zink and forwards everything else
+// to Apple's renderer. Boot argument nvzink=0 keeps Apple's OpenGL over Metal, as in 2.9. Read once, at the first start.
+// The NMX build (AMD and Intel GPUs) keeps Apple's renderer: Zink's Vulkan driver here is NVK.
+static int gNvZink = -1;
+static void nvaccelReadZink(void)
+{
+    if (gNvZink >= 0) return;
+    uint32_t v = 1;
+    const bool given = PE_parse_boot_argn("nvzink", &v, sizeof v);
+    const bool os_ok = version_major > 24 || (version_major == 24 && version_minor >= 5);
+    gNvZink = (os_ok && !(given && v == 0)) ? 1 : 0;
+    ALOG("OpenGL: %s (%s, Darwin %d.%d)", gNvZink ? "NVKZinkGLDriver (Zink on NVK)" : "AppleMetalOpenGLRenderer",
+         given && v == 0 ? "nvzink=0" : os_ok ? "default" : "before macOS 15.5", version_major, version_minor);
+}
+static bool nvaccelZink(void) { return gNvZink == 1; }
+#else
+static void nvaccelReadZink(void) {}
+static bool nvaccelZink(void) { return false; }
+#endif
 class NVAccel;
 struct NVAccelStartScope {   // releases the start gate on every way out of start()
     bool multi; bool started;
@@ -682,8 +704,10 @@ public:
                  "can now load the plugin (already-running ones will not)");
         }
         if (!getProperty("IOGLBundleName")) {
-            setProperty("IOGLBundleName", "AppleMetalOpenGLRenderer");
-            ALOG("  IOGLBundleName=AppleMetalOpenGLRenderer -- NEW GL processes get a hardware renderer over Metal");
+            const bool zink = nvaccelZink();
+            setProperty("IOGLBundleName", zink ? "NVKZinkGLDriver" : "AppleMetalOpenGLRenderer");
+            ALOG("  IOGLBundleName=%s -- NEW GL processes get a hardware renderer %s",
+                 zink ? "NVKZinkGLDriver" : "AppleMetalOpenGLRenderer", zink ? "through Zink on NVK" : "over Metal");
         }
         ALOG("  debug.nvaccelfb now reads 1 -- armed-only Metal clients may have a device THIS BOOT ONLY "
              "(heads published 0x%x, registered 0x%x, piped 0x%x)", gNvHeadsPublished, gNvHeadsRegistered, gNvHeadsPiped);
@@ -858,6 +882,7 @@ public:
         // Without nvmultigpu=1 the gate is absent. With it, one accelerator starts at a time and an unmarked card waits for the
         // marked one, so cards never run overlapping start-ups (the four-card report).
         NVAccelStartScope scope = { nvaccelMultiGpu(), false };
+        nvaccelReadZink();
         {
             uint32_t selector = 0; PE_parse_boot_argn("nvselector", &selector, sizeof selector);
             const bool marked = provider && provider->getProperty("nullmoth-auto-primary") == kOSBooleanTrue;

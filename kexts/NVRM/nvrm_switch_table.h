@@ -101,6 +101,7 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvrtd3", NVRM_SW_HARDWARE },
     { "nvrtd3res", NVRM_SW_HARDWARE },
     { "nvselector", NVRM_SW_HARDWARE },
+    { "nvzink", NVRM_SW_ESCAPE },
 };
-#define NVRM_SWITCH_COUNT 96u
+#define NVRM_SWITCH_COUNT 97u
 #endif

@@ -39,7 +39,10 @@ scale-resolutions; the hybrid panel framebuffers' start order; NVK's uncached co
 fence clock, its refusal of a copy into a multisample image, its kept visible-link answers, its kept grid-only scans,
 its one VRAM mark per surface plane per commit, its done tags written before its holds close, WindowServer's early
 start of the two-plane round trip, its reading of the macOS version and its keeping of a device it
-refuses before Metal's own init; and the kernel extensions staying loaded once started. The way back from these is to
+refuses before Metal's own init, the usage its IOSurface drawables report, its no-op scheduled-present handler for
+drawables an application made itself, its half-float mip levels made on the GPU, the storage view of textures of
+Unknown usage, its A8 attachment views and the tiled stand-ins of linear attachments in framebuffer-fetch passes; the
+shader translator's repairs below; and the kernel extensions staying loaded once started. The way back from these is to
 reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nvrmnoshutdown`).
 
 ### Fixes and changes
@@ -189,6 +192,28 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   registered.
 - A display override's own HiDPI sizes (its scale-resolutions) are kept until the display is rotated: the framebuffer
   takes back only the scaled sizes it offered itself for a rotated display.
+- Metal plugin: the source fork reports Spotlight's minified half-float application icons missing, because Core
+  Animation leaves the lower levels of R16Float, RG16Float and RGBA16Float textures unwritten. The plugin now makes
+  those levels with the GPU's filtered blits. From the HighDelay/nvidia-macos-driver-nvk fork, which reports it on an
+  RTX 2060 SUPER, macOS 26.7.1; built and checked on Linux only here.
+- Metal plugin: the source fork reports stale layers in native applications' icons and in the Applications grid. A
+  shader-writable wrapper in Managed storage of a single-plane surface in the family's VRAM is now drawn, sampled and
+  read by framebuffer fetch through a tiled image of its own, which is copied into the linear VRAM import before the
+  surface is marked and copied back from it when another writer made the VRAM newer. With framebuffer fetch on (every
+  process but WindowServer), a pass that has a linear colour attachment beside a tiled, unaligned or depth attachment
+  draws the linear one through a tiled stand-in, at the cost of one more image and two GPU copies per such pass whether
+  or not a pipeline of the pass reads the attachment; that cost has not been measured. From the
+  HighDelay/nvidia-macos-driver-nvk fork, which reports fresh native icons and the Applications grid drawn correctly on
+  an RTX 2060 SUPER, macOS 26.7.1; built and checked on Linux only here. Way back for the tiled image:
+  `NVMTL_MANAGED_SURFACE_TILED=0` in `nvrm610.conf`; the stand-ins have no switch of their own (`NVMTL_NO_FBFETCH=1`
+  turns framebuffer fetch off, and them with it).
+- Metal plugin: a texture of Unknown usage gets a storage view when it is made, so shader writes through its mip and
+  slice views land; the first format queries of several threads at once no longer make textures without their storage
+  view; A8 colour attachments are attached through identity views, and a framebuffer-fetch read of one returns Metal's
+  (0,0,0,r) instead of (r,0,0,1). A linear alias of a buffer takes the format features of DRM modifier 0 when NVK lists
+  that modifier for the format, which can allow render-target use that plain LINEAR tiling's features do not; a format
+  for which NVK lists no modifier (B10G11R11_UFLOAT and E5B9G9R9_UFLOAT among them) keeps plain LINEAR tiling's
+  features. From the HighDelay/nvidia-macos-driver-nvk fork; built and checked on Linux only here.
 
 #### Applications and games
 - An application tells readers that a surface is finished (its done tag, then the close of its surface fence hold)
@@ -288,6 +313,81 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   channel recovery the same fault rebuilds the channel and drops the submission that was running (on the upload
   channel that work is replayed, and a second fault there ends the device). The command pool's own memory is
   unchanged and still follows `NVK_CMDPOOL_GPU_UNCACHED`.
+- OpenGL applications run on NVK through Mesa's Zink on macOS 15.5 and later. The accelerator names
+  `NVKZinkGLDriver.bundle` as its OpenGL driver (2.9 named Apple's AppleMetalOpenGLRenderer, and before macOS 15.5 it
+  still does). The bundle forwards every GLD entry to Apple's renderer and hands each new OpenGL context to a CGL
+  adapter, which points the context's dispatch table at Zink (Mesa 26.3.0) running on a private copy of this build's
+  NVK. A context with an AppKit view presents through its CAMetalLayer, its frames copied on the GPU into the IOSurface
+  of the layer's drawable; a context without a view, or whose layer cannot be used, presents through an IOSurface that
+  NVK imports. No frame goes through a CPU copy. The dispatch table is generated when the driver is built, from the
+  macOS SDK's public OpenGL headers. The adapter also reads and writes through offsets in GLEngine's private context
+  data that the source fork recorded on macOS 15.8.1 (24H32) and 26.7.1 (25G241); before any such read or write it
+  checks that the memory is shaped as recorded. That check runs before the process's Zink screen is made, so a refused
+  layout opens no NVK device. A context stays on Apple's renderer when that check fails (the first refusal in a process
+  is written to its standard error), when Zink cannot start in the process, when the adapter is missing, and in OBS:
+  there OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F (RGBA16F can fail before the
+  first frame on this driver). A Zink context stays allocated while it is current in Mesa on any thread: a context that
+  CGL destroys while it is still Mesa's current context on another thread is freed at that thread's next bind. When the
+  installed AppleMetalOpenGLRenderer lacks a GLD entry the bundle forwards, the bundle points that entry at a stub that
+  returns an error and forwards the others, unless it is gldGetVersion, gldCreateContext or gldDestroyContext, which the
+  bundle calls itself (or Apple's renderer cannot be opened at all): then the bundle offers no OpenGL for the card, and
+  a start with `nvzink=0` gives Apple's renderer back. From the HighDelay/nvidia-macos-driver-nvk fork; built and
+  checked on Linux only, it has not run on a Mac. Way back: boot argument `nvzink=0` (Apple's OpenGL for every
+  application, as in 2.9). See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
+- Minecraft 26.3, MPV and other Vulkan applications that draw into a window can render with NVK instead of MoltenVK: the
+  package installs a native Vulkan runtime at `/Library/GPUBundles/nvmtl/minecraft`, which renders with a private copy
+  of this build's NVK and copies each frame on the GPU into the window's CAMetalLayer drawable. Nothing selects it by
+  default; an application chooses it when it is launched. Minecraft takes the JVM argument
+  `-Dorg.lwjgl.vulkan.libname=/Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib` and Vulkan in its graphics
+  settings; MPV and other applications that use the Vulkan loader take
+  `VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json` in their environment. Applications that do
+  not ask for it are unchanged. Limits: one window per swapchain, B8G8R8A8 images (SRGB and UNORM), FIFO and immediate
+  present modes, no two identical NVIDIA GPUs, and for every frame a CPU wait and two kernel calls that take the
+  accelerator's lock (not measured on a card). The package carries the two guides beside `install.sh` as
+  `MINECRAFT-NVK.md` and `NVK-APPLICATIONS.md`. From the HighDelay/nvidia-macos-driver-nvk fork, which reports Minecraft
+  26.3 rendering through it on an RTX 2060 SUPER, macOS 26.7.1, with its own NVK build; this tree's runtime was built
+  and checked on Linux only. See [tools/nvk-bridge/INSTALL.md](tools/nvk-bridge/INSTALL.md) and
+  [tools/nvk-bridge/APPLICATIONS.md](tools/nvk-bridge/APPLICATIONS.md).
+- Photo Booth's camera preview shows, upright. QuartzCore wraps a drawable that is not framebuffer-only with a usage of
+  ShaderRead or Unknown, and Core Image refuses a destination without ShaderWrite, so the preview stayed black. An
+  application's single-plane IOSurface wrapper that is not framebuffer-only now asks for a storage view before the
+  family's VRAM is imported and reports ShaderWrite only when it has one; a writable wrapper whose linear import lost
+  the storage view or the colour attachment gets a private image instead. WindowServer's surfaces keep the usage they
+  asked for. In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the
+  rendered bounds: the source fork reports that Photo Booth's call writes the rows bottom first. From the
+  HighDelay/nvidia-macos-driver-nvk fork, which reports the preview visible and upright on an RTX 2060 SUPER, macOS
+  26.7.1, with a USB webcam; built and checked on Linux only here. Way back for the reflection:
+  `NVMTL_PHOTOBOOTH_FLIP=0` in `nvrm610.conf`; the usage rule has none. See
+  [docs/PHOTOBOOTH-PREVIEW.md](docs/PHOTOBOOTH-PREVIEW.md).
+- A drawable an application made itself (not a CAMetalDrawable) that answers `addPresentScheduledHandler:` is given an
+  empty handler before it is presented. The source fork reports that Parallels' AsyncDrawable calls that handler from
+  -present without checking it, so a command buffer that registered none crashed it there. Neither the source fork nor
+  this tree has run it in a Parallels virtual machine; built and checked on Linux only here.
+- Shader translator: an argument buffer's array of textures, and a single texture buffer in one, is read through the
+  bindless heap, each element by its own handle, so a shader that picks a texture by an index known only when it runs
+  gets that texture; declared as one array binding it had one descriptor, and a robust driver clamps the index to
+  element 0. Only an array of texture buffers keeps its binding. The developer switch `NVMTL_NO_TIER2_FIXED=1`, which
+  turns off the fixed-field argument-buffer path as a whole, keeps the descriptor path for these too.
+- Shader translator: Safari's WebGPU shaders keep a texture the optimizer copied through a 64-bit integer, read the
+  sample they ask for from a multisampled texture, and get a descriptor for a texture they only query for its size or
+  sample count. The source fork reports that a WebGPU game in Safari drew its scene after these repairs, on an RTX 2060
+  SUPER, macOS 26.7.1; it has not run here. See [docs/SAFARI-WEBGPU-TEXTURES.md](docs/SAFARI-WEBGPU-TEXTURES.md).
+- Shader translator: `array<sampler, 1>` is a sampler array, every element of a sampler array keeps its own run-time
+  sampler state, a sampler picked among 2 to 16 in a retry translates (the bound was 2 to 8), GL's ivec2 uniform read
+  through a vec4 slot translates, and inlining a helper keeps a constant-expression argument (a vector splat, for
+  example) whole.
+- Shader translator: a texture or sampler kept in a field of a local object reaches its sample call; address-space
+  parsing is strict; `array_ref<void>` table reads and stores of a device pointer into a local translate; the RGB10A2
+  packing residual is computed without contraction.
+- Shader translator: buffer-address lowering keeps the descriptor path for a shader whose address-table pointer
+  reaches a call, a phi or a return, instead of changing types under it. For a buffer that keeps its descriptor it
+  finds every chain of pointers first and then checks every use wherever the use stands in the function, so a loop
+  that picks the buffer by a phi's back-edge value no longer leaves it on a descriptor the phi cannot use.
+- Shader translator: static-initializer folding builds its token map once per function, and the plugin's sampler
+  entry point shares one parse per translation.
+- The shader translator's repairs above come from the HighDelay/nvidia-macos-driver-nvk fork and were built and checked
+  on Linux only here ([docs/TRANSLATOR-VALIDATION.md](docs/TRANSLATOR-VALIDATION.md) lists the checks and where each
+  ran).
 
 #### Video
 - RTX 50: H.264 video in Safari, QuickTime and FaceTime (green picture). The decoder from the vendored codec library is
@@ -405,6 +505,17 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   the same routine stop() uses.
 
 #### Installing and the way back
+- `install.sh` installs native OpenGL's `NVKZinkGLDriver.bundle` beside `NVMTLDriver.bundle`, backs it up with the
+  other bundles and puts the earlier one back (or none, when there was none) on a rollback and in the fallback job;
+  its runtime (`nvmtl/zink`) and the native Vulkan runtime (`nvmtl/minecraft`) go with `nvmtl`. A package without the
+  bundle or without `nvmtl/zink` is refused before anything changes, because the accelerator names that bundle as the
+  OpenGL driver. `uninstall.sh` removes the bundle with the others. Once the bundle is in place, `install.sh` asks
+  macOS's trusted GPU-bundle lookup for it with `nvmtl/zink/gld_bundle_probe` (`tools/gld_bundle_probe.c`, from the
+  HighDelay/nvidia-macos-driver-nvk fork), with `NVMTLDriver.bundle` as the control: when the lookup finds
+  `NVMTLDriver.bundle` but not the OpenGL bundle, the install stops and rolls back; when it does not find
+  `NVMTLDriver.bundle`, the installer says it could not check the OpenGL bundle and goes on. The installer and
+  uninstaller of 2.9 and of earlier 3.0 packages do not know the bundle: going back with one of them leaves
+  `/Library/GPUBundles/NVKZinkGLDriver.bundle` in place unless this package's `uninstall.sh` runs first.
 - The installer's fallback job (it puts the earlier driver back when the new one cannot start) copies the earlier
   kernel collection out of the backup before it changes anything and puts it in place by a rename. Before, it copied
   over the collection in place without checking the copy: one that failed half-way (a full volume) left a cut
@@ -498,6 +609,9 @@ has proven itself, renewed with a reason otherwise.
 | Capture frames on private images: both planes copied back together | `NVMTL_SURFOUT_PLANES=0` | `nvrm610.conf` |
 | Capture frames in VRAM: the other plane's tag follows a mark | `NVMTL_PLANE_FOLLOW=0` | `nvrm610.conf` |
 | Done tags and holds before scheduled and present | `NVMTL_BUSY_DONE_EARLY=0` | `nvrm610.conf` |
+| Photo Booth's preview reflected upright | `NVMTL_PHOTOBOOTH_FLIP=0` | `nvrm610.conf` |
+| Shader-writable Managed surface wrappers drawn through a tiled image | `NVMTL_MANAGED_SURFACE_TILED=0` (drawn straight into the linear VRAM import) | `nvrm610.conf` |
+| Native OpenGL through Zink on macOS 15.5 and later | `nvzink=0` (Apple's OpenGL over Metal for every application) | boot argument |
 
 `sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.
 
@@ -614,6 +728,25 @@ has proven itself, renewed with a reason otherwise.
 - The git calls of `./build.sh`'s build steps no longer read your global or system git configuration: your hooks, file
   system monitor, commit signing, filters and URL rewrites stay out of them (`fetch` already kept your hooks, file
   system monitor, attributes file and template folder out of its own).
+- `./build.sh` builds nineteen components: `nvkbridge` (the native Vulkan runtime, `tools/nvk-bridge/build.sh`, after
+  `boost`) and `zink` (native OpenGL, `build/build_zink.sh`, last) are new. Zink is built from Mesa 26.3.0 (commit
+  0a6fa60a, pin `NM_PIN_ZINKMESA`), which `fetch` adds to the same Mesa git as NVK's, for macOS 15.0 and later, with a
+  call to a newer macOS interface an error. The package step stops when native OpenGL lacks the `nvkbridge`
+  component's two libraries, which are its Vulkan driver. Built and checked on Linux only: a darwin cross-build of
+  Zink, and syntax-only compiles of the CGL adapter, the GL bundle and the runtime's three Objective-C++ files against
+  a stand-in SDK (Zink's two AppKit files were not compiled); neither component has been built on a Mac.
+- Native OpenGL's build needs Bison 3.0 or later (macOS's `/usr/bin/bison` is 2.3): `./build.sh deps` builds GNU
+  Bison 3.8.2 from its release tarball, SHA-256 checked, on an Intel Mac and installs Homebrew's `bison` on Apple
+  silicon. Without one, a build that includes `zink` (`all` and `package` do) stops before its first component's first
+  step, naming bison and `./build.sh deps`. Bison's recipe has not run on a Mac or anywhere else.
+- New host tests: `tools/test_nvk_bridge.py` (the runtime's interfaces with NVK and the plugin, and on a Mac with
+  Vulkan headers its host test built with ASan and UBSan), `tools/test_cgl_dispatch.py` and
+  `tools/test_cgl_gld_guard.py` (the dispatch generator's rules and the layout guard's checks, on synthetic input),
+  `tools/test_photobooth_preview.py`, `tools/test_surface_drawable_usage.py`, `tools/test_format_capability_init.py`,
+  `tools/test_a8_framebuffer_fetch.py` and `tools/test_buffer_tiling_features.py`. Programs that need a Mac with the
+  driver (`tools/test_*_gpu.m`, `tools/test_custom_drawable.m`, `tools/test_surface_render_formats.m`,
+  `tools/photobooth_surface_probe.m`) say in their header how to build and run them; `tools/run_all_tests.py` does
+  not run them, and none has run.
 - `NVK_SKIP_PATCHES` for `build/build_nvk.sh` leaves one of the three upstream patches out of an NVK build, to find the
   cause of a rendering fault; such a library says so in its build summary.
 - `./build.sh` refuses a working directory, `NULLMOTH_BUILD_ROOT`, `NULLMOTH_RUST_BIN`, `NULLMOTH_CARGO_HOME`,

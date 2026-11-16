@@ -365,6 +365,25 @@ largas que miden este camino.
    tenía; envíalo con el nombre del juego y la tarjeta. Si compilas desde el código fuente, `NVK_SKIP_PATCHES` compila
    NVK sin uno de los parches del compilador para encontrar cuál lo causa
    ([NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)).
+5. **OpenGL (macOS 15.5 o posterior).** El OpenGL nativo a través de Zink aún no se ha ejecutado en un Mac con este
+   árbol, y la disposición de GLEngine en la que se apoya se registró solo en macOS 15.8.1 (24H32) y 26.7.1 (25G241).
+   Primero mira qué renderizador nombró el acelerador:
+
+   ```bash
+   log show --last boot --predicate 'eventMessage CONTAINS "NVAccel: OpenGL:"'
+   ```
+
+   Nombra `NVKZinkGLDriver (Zink on NVK)`, o `AppleMetalOpenGLRenderer` con `nvzink=0` o antes de macOS 15.5. Luego
+   abre una aplicación OpenGL desde Terminal (un juego que use OpenGL, o Minecraft con su renderizador OpenGL) y
+   guarda lo que escribe. Bien: dibuja como con 2.9 y no escribe ninguna línea que empiece por `NVKZinkGLDriver:` ni
+   por `NVK Zink:`. Una línea `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record
+   (...)` quiere decir que el adaptador encontró distinta la disposición de esta compilación y dejó la aplicación en el
+   OpenGL de Apple, como debe: envía esa línea y la salida de `sw_vers`. Mal: un cierre inesperado, una ventana negra
+   o una imagen equivocada; reinicia una vez con el argumento de arranque `nvzink=0` y di si desaparece. Ver
+   [ZINK-OPENGL.md](ZINK-OPENGL.md). Para volver a la versión 2.9 o a un paquete 3.0 anterior, ejecuta primero el
+   `sudo ./uninstall.sh` de este paquete: los instaladores de esos paquetes no conocen
+   `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio. Su acelerador no lo nombra, así que no se
+   carga, y `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle` lo quita.
 
 ## 5. Video
 
@@ -450,6 +469,7 @@ kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantie
 | Gracia de imágenes | `NVMTL_IMAGE_GRACE=0` | `nvrm610.conf` |
 | Decodificación H.264 de RTX 50 en el servicio de decodificación | `NVMTL_NVENCVT=0` (la biblioteca de códecs apagada en todas partes) | `nvrm610.conf` |
 | Texturas de video 4:2:2 (fotogramas de cámara) | `NVMTL_YUV422=0` (las texturas 4:2:2 se rechazan) | `nvrm610.conf` |
+| OpenGL nativo a través de Zink | `nvzink=0` (el OpenGL de Apple sobre Metal para todas las aplicaciones) | argumento de arranque |
 | Correcciones del compilador de NVK | `NVK_SKIP_PATCHES="<nombres de parches>"` | al compilar desde el código fuente |
 
 CHANGELOG.md, "The ways back", y SWITCHES.md dicen qué devuelve cada una en detalle.

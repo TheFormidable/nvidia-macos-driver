@@ -50,6 +50,7 @@ INSTALLER = {
     "KEXTS": "NVRM NVAccel NVRMFB NVRMAGDC",
     "EXT": "/Library/Extensions",
     "GB": "/Library/GPUBundles",
+    "ZINK_GB": "NVKZinkGLDriver.bundle",   # native OpenGL's GL driver bundle (install.sh's delimited block)
     "FW": "/Library/NullMoth/nvfw",
     "FWOLD": "/Users/Shared/nvfw",
     "KC": "/Library/KernelCollections/AuxiliaryKernelExtensions.kc",

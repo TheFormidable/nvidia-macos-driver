@@ -74,7 +74,7 @@ check('control: a self-test run on the caller\'s thread is refused',
                                  'nvmtl_plane_selftest();', 1)))
 check('a command buffer\'s "scheduled" asks nvmtl_schedule_after_surface', scheduled(evs))
 check('control: the old rule in the loop is refused',
-      not scheduled(evs.replace('if (nvmtl_schedule_after_surface(after, r->_surf != NULL, r->_vramOn, planes, waits))',
+      not scheduled(evs.replace('if (nvmtl_schedule_after_surface(after, r->_surf != NULL, direct, planes, waits))',
                                 'if (after == 1 || (r->_surf && !r->_vramOn && (after != 3 || planes > 1)))', 1)))
 check('the ranged plane word is used on import only, never on a dirty mark', ranged_on_import_only(vkc))
 check('control: a dirty mark that carries the ranged word is refused',

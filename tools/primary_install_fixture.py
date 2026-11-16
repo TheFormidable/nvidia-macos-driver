@@ -85,7 +85,7 @@ class Install(unittest.TestCase):
     def setUpClass(cls):
         cls.guard_temp=tempfile.TemporaryDirectory()
         cls.guard=Path(cls.guard_temp.name)/'runtime-check'
-        cls.guard.write_text("#!/bin/bash\ncase \"$1\" in 15.4.*) echo 'requires macOS 15.5.0';exit 1;;esac\ncase \"$2\" in *.dylib) exit 0;;*) exit 3;;esac\n")
+        cls.guard.write_text("#!/bin/bash\ncase \"$1\" in 15.4.*) echo 'requires macOS 15.5.0';exit 1;;esac\ncase \"$2\" in *.dylib|*/Contents/MacOS/NVKZinkGLDriver) exit 0;;*) exit 3;;esac\n")
         cls.guard.chmod(0o755)
     @classmethod
     def tearDownClass(cls):cls.guard_temp.cleanup()
@@ -101,6 +101,11 @@ class Install(unittest.TestCase):
         for b in ['NVMTLDriver.bundle','nvmtl']:   # the package carries no NVIDIAShared.bundle; the old install below does
             p=self.payload/'Library/GPUBundles'/b;p.mkdir(parents=True);(p/'fixture').write_text('new-'+b)
         lib=self.payload/'Library/GPUBundles/NVMTLDriver.bundle/Contents/MacOS/libnvencvt.dylib';lib.parent.mkdir(parents=True);lib.write_text('new-codecs')
+        # native OpenGL: the GL driver bundle and its runtime in nvmtl/zink (install.sh stops without them)
+        for rel in ['Library/GPUBundles/NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver','Library/GPUBundles/nvmtl/zink/libnvk_cgl.dylib']:
+            z=self.payload/rel;z.parent.mkdir(parents=True,exist_ok=True);z.write_text('new-'+z.name)
+        # the trusted GPU-bundle lookup's probe, which install.sh runs on the installed bundle: here it finds every name
+        probe=self.payload/'Library/GPUBundles/nvmtl/zink/gld_bundle_probe';probe.write_text('#!/bin/bash\nexit 0\n');probe.chmod(0o755)
         (self.payload/'Library/GPUBundles/nvmtl-allow.txt').write_text('new-allow')
         load=struct.pack('<6I',0x32,24,1,0x000f0500,0x000f0500,0)
         runtime=self.payload/'Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib'
@@ -118,7 +123,7 @@ class Install(unittest.TestCase):
         self.old={}
         for k in KEXTS:
             p=self.root/f'Library/Extensions/{k}.kext/Contents/MacOS/{k}';p.parent.mkdir(parents=True);p.write_text('old-'+k);self.old[p]=p.read_bytes()
-        for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl']:
+        for b in ['NVMTLDriver.bundle','NVIDIAShared.bundle','nvmtl','NVKZinkGLDriver.bundle']:
             p=self.root/'Library/GPUBundles'/b/'fixture';p.parent.mkdir(parents=True);p.write_text('old-'+b);self.old[p]=p.read_bytes()
         for rel,value in [('Library/GPUBundles/nvmtl-allow.txt','old-allow'),('Users/Shared/nvfw/fixture','old-firmware'),('Library/NullMoth/kexts/old-marker','old-cache'),('Library/NullMoth/os-major','15'),('Library/KernelCollections/AuxiliaryKernelExtensions.kc','OLD15-AUX')]:
             p=self.root/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(value);self.old[p]=p.read_bytes()
