@@ -463,27 +463,6 @@ chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "firmware permissio
 # nothing reads the old location any more; leaving it behind leaves a writable folder with our name on it
 rm -rf "$FWOLD" 2>/dev/null || true
 for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "permissions for $k"; done
-# An update replaces kexts the user already allowed. macOS keeps that approval per bundle (kext_policy; these kexts have
-# no team) and the code hash of the copy it last loaded from each path (kext_load_history_v3). For a kext the user
-# already allowed at this path, record the new hash, so the record matches what the next start loads. A kext never
-# allowed is left to macOS. The database is SIP-protected; the driver's SIP setting (0x0A43) allows root to write it.
-# Measured on an update (Core Ultra 5 225F, macOS 26): while this script replaces the loaded kexts macOS shows a
-# "kext upgrade" notice, but the first restart loads the new kexts from the collection built below (kernelmanagerd:
-# every one "approved", 0 filtered), so an update needs one restart. ALLOWED counts the kexts macOS already allows.
-KPDB=/var/db/SystemPolicyConfiguration/KextPolicy; ALLOWED=0
-if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
-  for k in $KEXTS; do
-    id=$(primary_bundle_id "$k"); p="$EXT/$k.kext"
-    printf '%s' "$id" | grep -Eq '^[A-Za-z0-9.]+$' || continue
-    [ "$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)" = 1 ] || continue
-    ALLOWED=$((ALLOWED + 1))
-    # only NVRM is signed in the package; macOS records the unsigned ones' hashes itself
-    ch=$(codesign -dvvv "$p" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
-    printf '%s' "$ch" | grep -Eq '^[0-9a-f]{40}$' || continue
-    /usr/bin/sqlite3 "$KPDB" "update kext_load_history_v3 set cdhash='$ch' where path='$p' and bundle_id='$id' and ifnull(team_id,'')=''" 2>/dev/null \
-      || echo "   note: the approval record for $k is read-only here; macOS may ask to allow it again"
-  done
-fi
 chown -R root:wheel "$GB/NVMTLDriver.bundle" "$GB/nvmtl" "$GB/$ZINK_GB" "$GB/nvmtl-allow.txt" || die "bundle permissions"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted
@@ -499,6 +478,28 @@ if "$ZPROBE" NVMTLDriver >/dev/null 2>&1; then
   "$ZPROBE" NVKZinkGLDriver || die "macOS does not trust the installed OpenGL bundle $ZINK_GB (restore from $BK)"
 else
   echo "   note: macOS's GPU-bundle lookup does not answer for NVMTLDriver.bundle here, so $ZINK_GB was not checked by it"
+fi
+# An update replaces kexts the user already allowed. macOS keeps that approval per bundle (kext_policy; these kexts have
+# no team) and the code hash of the copy it last loaded from each path (kext_load_history_v3). For a kext the user
+# already allowed at this path, record the new hash, so the record matches what the next start loads. A kext never
+# allowed is left to macOS. The database is SIP-protected; the driver's SIP setting (0x0A43) allows root to write it.
+# Measured on an update (Core Ultra 5 225F, macOS 26): while this script replaces the loaded kexts macOS shows a
+# "kext upgrade" notice, but the first restart loads the new kexts from the collection built below (kernelmanagerd:
+# every one "approved", 0 filtered), so an update needs one restart. ALLOWED counts the kexts macOS already allows.
+# rollback_install does not undo this write, so it comes after the OpenGL bundle check above, which can still stop.
+KPDB=/var/db/SystemPolicyConfiguration/KextPolicy; ALLOWED=0
+if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
+  for k in $KEXTS; do
+    id=$(primary_bundle_id "$k"); p="$EXT/$k.kext"
+    printf '%s' "$id" | grep -Eq '^[A-Za-z0-9.]+$' || continue
+    [ "$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)" = 1 ] || continue
+    ALLOWED=$((ALLOWED + 1))
+    # only NVRM is signed in the package; macOS records the unsigned ones' hashes itself
+    ch=$(codesign -dvvv "$p" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
+    printf '%s' "$ch" | grep -Eq '^[0-9a-f]{40}$' || continue
+    /usr/bin/sqlite3 "$KPDB" "update kext_load_history_v3 set cdhash='$ch' where path='$p' and bundle_id='$id' and ifnull(team_id,'')=''" 2>/dev/null \
+      || echo "   note: the approval record for $k is read-only here; macOS may ask to allow it again"
+  done
 fi
 # Create the shared shader caches the plugin looks for. Without them NVMTL_AIRCACHE_DIR never resolves, so
 # WindowServer, which compiles the compositor's pipelines on demand, re-translates them from scratch at every start
