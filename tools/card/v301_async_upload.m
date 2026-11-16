@@ -18,7 +18,10 @@
  *              each write the CPU reads the surface through IOSurfaceLock with no command buffer between, which holds
  *              only when the copy is finished before the surface is marked newest
  *   gating     with NVMTL_SURFIN_ZERO=1 and NVMTL_WS_FREE_OFFMAIN=1 in its environment (the row sets them): both are
- *              WindowServer's only, so any line the driver writes about them says they are off in this process
+ *              WindowServer's only. A texture of a new IOSurface the CPU zeroed is read by a blit, which brings the
+ *              surface in and so asks NVMTL_SURFIN_ZERO's switch: its line must be there and say the surface is
+ *              uploaded as any other. The texture is then freed; when that free asks NVMTL_WS_FREE_OFFMAIN's switch
+ *              (gating-offmain), its line must say OFF, and when nothing asked it the case says so as INFO
  *   /usr/bin/xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -fobjc-arc -O2 tools/card/v301_async_upload.m \
  *     -framework Foundation -framework Metal -framework IOSurface -o <run>/bin/<id>/nvmtltest
  * It skips when NVMTL_PROCESS_ENV=1 or NVMTL_LOG_PATH is missing (a release plugin reads no switch and writes no log
@@ -397,17 +400,83 @@ static void case_iosurface(void)
         nm_pass(name, "40 writes through a texture of an IOSurface and a view of it, each read by the CPU at once");
 }
 
+// A texture of a new IOSurface, whose pages the CPU then zeroed, copied into a buffer by a blit. The blit brings the
+// surface in (nvmtl_surface_in_for_cb), and the surface-in of a surface the CPU wrote since it was last taken asks the
+// switch of NVMTL_SURFIN_ZERO before it uploads (plugin/NVMTLObjects.m, nvmtlSurfaceIn and nvmtl_surfin_zero_try),
+// which writes its line once per process. The texture is then released with the GPU idle: a free of a buffer the GPU no
+// longer uses, such as the texture's import of the surface's video memory, asks the switch of NVMTL_WS_FREE_OFFMAIN
+// (plugin/nvmtl_vk.c, nvmtl_vk_buffer_destroy and nvmtl_ws_free_offmain). Returns NO, with a FAIL line, when the blit
+// did not run or did not read zeros.
+static BOOL gating_surface_in(const char *name)
+{
+    BOOL ok = NO;
+    @autoreleasepool {
+        IOSurfaceRef s = make_surface();
+        if (!s) {
+            nm_setup(name, "IOSurfaceCreate of %ux%u", SW, SH);
+            return NO;
+        }
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                     width:SW
+                                                                                    height:SH
+                                                                                 mipmapped:NO];
+        d.storageMode = MTLStorageModeShared;
+        d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> t = [device newTextureWithDescriptor:d iosurface:s plane:0];
+        id<MTLBuffer> out = [device newBufferWithLength:(NSUInteger)SW * SH * 4 options:MTLResourceStorageModeShared];
+        // written after the texture was made, so that its seed has moved since anything the driver took at creation
+        if (!t || !out || IOSurfaceLock(s, 0, NULL) != kIOReturnSuccess) {
+            nm_setup(name, "%s", !t ? "a texture of the surface" : !out ? "a shared buffer" : "IOSurfaceLock");
+            t = nil;
+            CFRelease(s);
+            return NO;
+        }
+        memset(IOSurfaceGetBaseAddress(s), 0, IOSurfaceGetAllocSize(s));
+        IOSurfaceUnlock(s, 0, NULL);
+        memset(out.contents, 0xA5, out.length); // the blit must replace every byte with the surface's zeros
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:t
+                         sourceSlice:0
+                         sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(SW, SH, 1)
+                            toBuffer:out
+                   destinationOffset:0
+              destinationBytesPerRow:(NSUInteger)SW * 4
+            destinationBytesPerImage:(NSUInteger)SW * SH * 4];
+        [blit endEncoding];
+        if (nm_run(cb, name)) {
+            const uint8_t *p = out.contents;
+            size_t at = 0;
+            while (at < out.length && !p[at]) at++;
+            if (at < out.length)
+                nm_fail(name, "the blit of a surface the CPU zeroed read byte %zu as 0x%02x", at, p[at]);
+            else
+                ok = YES;
+        }
+        t = nil; // with the command buffer, at the end of this pool: the import is freed with the GPU idle
+        CFRelease(s);
+    }
+    return ok;
+}
+
 static void case_gating(void)
 {
     const char *name = "gating";
     const char *zero = getenv("NVMTL_SURFIN_ZERO"), *offmain = getenv("NVMTL_WS_FREE_OFFMAIN");
     if (!zero || !offmain) return; // only the row that sets them has this case
+    if (!gating_surface_in(name)) return;
     NSArray<NSString *> *lines = nm_log_lines();
     NSString *z = nm_log_find(lines, "surface-in zero: a surface whose pages are all zero is ", NULL);
     NSString *census = nm_log_find(lines, "surface-in zero census:", NULL);
     NSString *f = nm_log_find(lines, "vk: off-main frees of dead VRAM imports ", NULL);
     unsigned bad = 0;
-    if (z && [z rangeOfString:@" is uploaded as any other ("].location == NSNotFound) {
+    if (!z) {
+        nm_fail(name, "the driver wrote no line of NVMTL_SURFIN_ZERO although a surface the CPU wrote was brought in "
+                      "for a blit");
+        bad++;
+    } else if ([z rangeOfString:@" is uploaded as any other ("].location == NSNotFound) {
         nm_fail(name, "the driver says \"%s\" outside WindowServer", z.UTF8String);
         bad++;
     }
@@ -419,10 +488,16 @@ static void case_gating(void)
         nm_fail(name, "the driver says \"%s\" outside WindowServer", f.UTF8String);
         bad++;
     }
-    if (!z) nm_info("gating: the driver wrote no line of NVMTL_SURFIN_ZERO (no surface-in reached it)");
-    if (!f) nm_info("gating: the driver wrote no line of NVMTL_WS_FREE_OFFMAIN (no VRAM import was freed)");
-    if (!bad)
-        nm_pass(name, "NVMTL_SURFIN_ZERO=%s and NVMTL_WS_FREE_OFFMAIN=%s are off outside WindowServer", zero, offmain);
+    if (bad) return;
+    nm_pass(name,
+            "NVMTL_SURFIN_ZERO=%s is off outside WindowServer: a surface the CPU zeroed was uploaded as any other",
+            zero);
+    if (f)
+        nm_pass("gating-offmain", "NVMTL_WS_FREE_OFFMAIN=%s is off outside WindowServer: the driver says %s", offmain,
+                f.UTF8String);
+    else
+        nm_info("gating-offmain: the driver wrote no line of NVMTL_WS_FREE_OFFMAIN (no buffer was freed with the GPU "
+                "idle: the import is kept by the import cache or freed later), so its gate was not reached");
 }
 
 int main(int argc, char **argv)
