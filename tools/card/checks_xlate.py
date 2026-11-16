@@ -2,12 +2,13 @@
 ({P}) and translator ({X}) of this Mac.
 
   xlate.sampler-array      tools/test_sampler_array_gpu.m: array<sampler, 1>, per-element run-time sampler state, 15
-                           offscreen renders through the system's Metal device
+                           offscreen renders through the system's Metal device; its AIR is dumped
   xlate.int-handle         tools/test_integer_texture_handle_gpu.m with tools/fixtures/integer_texture_handle.metal:
                            a texture copied through a 64-bit integer and a uniform nested in an argument group; its AIR
                            is dumped and the row says whether Apple's compiler emitted the integer copy
   xlate.msaa               tools/test_webgpu_msaa_gpu.m with tools/fixtures/webgpu_msaa_resolve.metal: a multisampled
-                           argument-buffer texture keeps its samples, query-only textures get their descriptor
+                           argument-buffer texture keeps its samples, query-only textures get their descriptor; its
+                           AIR is dumped
   xlate.paths-*            tools/card/xlate_paths.m, one row per group of its cases: argument-buffer texture arrays
                            by a run-time index, a texture_buffer field, sampler picks among 8, 9 and 16, a back-edge
                            pointer phi, an escaping pointer, RGB10A2 and RGB565 packing, a splat argument, textures in
@@ -87,7 +88,11 @@ CHECKS = [
                for n in ("msaa_resolve", "msaa_query", "mip_query")], [r"^(msaa_resolve|msaa_query|mip_query) "],
               extra_sources=("tools/fixtures/webgpu_msaa_resolve.metal",)),
 ]
-CHECKS[1]["env"] = _airdump("xlate.int-handle")
+# The three dump the AIR text of every function they ask for into {OUT}/airdump/<id> (plugin/NVMTLObjects.m,
+# nvmtl_air_dump, before the translation, so a function the driver refuses is dumped too): which form Apple's compiler
+# gave a shape is then on file beside the row's verdict.
+for _c in CHECKS:   # the three rows above
+    _c["env"] = _airdump(_c["id"])
 
 _PATHS_ALARM = 75   # xlate_paths.m's ALARM_SECONDS
 for _i, (_s, _cases, _t) in enumerate((
