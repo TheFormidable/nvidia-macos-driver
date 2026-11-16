@@ -65,7 +65,7 @@ CATALOG = [
     S("app-profiles", "Performance", "Built-in per-application profiles", "conf", "NVMTL_APP_PROFILE", "bool",
       "On by default; off turns every shipped per-application profile off.", effect="relaunch the application"),
     S("local-map-sysmem", "Performance", "Keep CPU-written memory in system RAM", "conf", "NVK_LOCAL_MAP_SYSMEM", "bool",
-      "By default applications place it in video memory (faster in games) while the desktop (WindowServer) and memory shared between processes keep it in system RAM. On keeps it in system RAM everywhere, as before 3.0.1; off places it in video memory for the desktop too (unsafe for the desktop).", effect="restart"),
+      "By default applications place the part of it the processor does not read back in video memory (faster in some games), while the desktop (WindowServer), memory shared between processes and what the processor reads back keep system RAM. On keeps all of it in system RAM in every application, as before 3.0.1; off places all of it in video memory, for the desktop too (unsafe for the desktop).", effect="restart"),
 ]
 BY_ID = {s["id"]: s for s in CATALOG}
 

@@ -35,9 +35,10 @@
 #        then nvk-nvrm-fixes (3.0.1: the NVRM back end's table of CPU mappings under a lock, VK_EXT_map_memory_placed
 #        no longer offered on NVRM, which cannot place a map, and NVRM_FLUSH_TIMEOUT_MS, NVK_SYSMEM_GPU_UNCACHED and
 #        NVK_BAR_VRAM read once instead of on every flush or allocation).
-#        then nvk-local-map-vram (3.0.1: NVK's own mapped device-local memory, the shader heap and descriptors
-#        above all, stays in video memory behind BAR1 by default in every process but WindowServer, for memory that is
-#        not shared; NVK_LOCAL_MAP_SYSMEM=1 in nvrm610.conf keeps it in system RAM as in 3.0).
+#        then nvk-local-map-vram (3.0.1: NVK's own mapped device-local memory that the CPU only writes, shader code
+#        and the image and sampler tables above all, stays in video memory behind BAR1 by default in every process but
+#        WindowServer, for memory that is not shared; what the CPU reads back, descriptor pools above all, keeps system
+#        RAM; NVK_LOCAL_MAP_SYSMEM=1 in nvrm610.conf keeps all of it in system RAM as in 3.0).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),

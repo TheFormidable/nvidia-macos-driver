@@ -31,8 +31,8 @@ text unchanged; the header of each patch and `NOTICE` list them.
 2.9 listed two more commits in an opt-in file (`IDP.4A` never encoded with an immediate, input-attachment
 `texture_offset`); both are already in rc3, which is why that file did not apply and is gone.
 
-3.0.1 adds a fourth patch of upstream commits, `nvk/nvk-mesa-main-2.patch`, at the end of the chain after this
-driver's own patches: eight commits of Mesa main for NVK and the Vulkan runtime, text unchanged, listed in its header
+3.0.1 adds a fourth patch of upstream commits, `nvk/nvk-mesa-main-2.patch`, after `nvk-boost-policy` and before
+`nvk-nvrm-fixes` and `nvk-local-map-vram`: eight commits of Mesa main for NVK and the Vulkan runtime, text unchanged, listed in its header
 and in `NOTICE` (push descriptor sets uploaded only when they changed and only to the layout's size, the single
 color-write mode used when every target has the same mask, stencil usage in image format queries, the swapchain
 private-data mutex initialised outside Android, attachment locations of secondary command buffers). It touches no
@@ -64,8 +64,8 @@ encodes with it. On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) the libra
 and LLVM 22, and had the same bytes in three builds (one with tools built by hand, then with `./build.sh` at commits
 650db45 and 3933ff6, which do not differ in NVK's sources or patches), at 3933ff6 with no warning; GitHub's Intel
 runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) built it at that commit too.
-`nvk-stream-uncached`, added after commit aa27c73, and `nvk-mesa-main-2`, `nvk-nvrm-fixes` and `nvk-local-map-vram`,
-added in 3.0.1, have been compiled on Linux only. No check of the image on a card has
+`nvk-stream-uncached`, added after commit aa27c73, and `nvk-boost-policy`, `nvk-mesa-main-2`, `nvk-nvrm-fixes` and
+`nvk-local-map-vram`, added in 3.0.1, have been compiled on Linux only. No check of the image on a card has
 been reported. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa release. The library's build id
 changes, so shader caches written by a 2.9 build are not reused and shaders are compiled again once.
 
