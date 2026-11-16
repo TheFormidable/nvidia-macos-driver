@@ -23,7 +23,8 @@
  * for this compiler, which says nothing about the driver. A refusal by the driver (the library, the function or the
  * pipeline) is that case's FAIL. When NVMTL_AIR_DUMP names a folder, the plugin writes there the AIR text of each
  * function the program asks for (plugin/NVMTLObjects.m, nvmtl_air_dump), and the program reports as INFO lines
- * whether the shape a repair handles is in it: Apple's compiler may emit another shape, and a PASS then says less.
+ * whether the shape a repair handles is in it, also for a function the driver then refuses: Apple's compiler may emit
+ * another shape, and a PASS then says less.
  *
  * Output: one line per case, "PASS <case> ...", "FAIL <case>: ...", "SKIP <case>: ...", INFO lines, and last
  * "RESULT pass|fail|skip pass=N fail=N skip=N". Exit 0 every case that ran passed, 1 a case failed, 2 usage or a setup
@@ -224,12 +225,14 @@ static build_status build(const char *c, NSString *body, NSString *name, NSArray
         return BUILD_FAIL;
     }
     id<MTLFunction> f = [lib newFunctionWithName:name];
+    // the plugin writes a function's AIR text when it is asked for, before it translates it (nvmtl_air_dump at the
+    // top of newFunctionWithName), so the shape of a function it then refuses is reported too
+    shape(c, name, markers);
     if (!f) {
         snprintf(why, size, "the driver gave no function %s (it could not translate it; the plugin log says why)",
                  name.UTF8String);
         return BUILD_FAIL;
     }
-    shape(c, name, markers);
     id<MTLComputePipelineState> p = [g_device newComputePipelineStateWithFunction:f error:&e];
     if (!p) {
         char first[1024];
