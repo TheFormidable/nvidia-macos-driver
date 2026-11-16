@@ -446,9 +446,21 @@ tarjeta en esos contadores, o una activación pierde una; envía el registro del
 ## Comprobaciones automáticas en la tarjeta (tools/card_selftest.py)
 
 `tools/card_selftest.py` ejecuta las comprobaciones en la tarjeta de las partes nuevas (Vulkan nativo, OpenGL nativo
-con Zink, el plugin de Metal y el traductor) en una sola pasada sin atención, en el Mac con el paquete instalado y su
-driver cargado. Todavía no se ha ejecutado en un Mac: se escribió, y se ejecutó su prueba de host
-`tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta prueba también el programa.
+con Zink, el plugin de Metal y el traductor) y de los cambios propios de la versión 3.0.1 en una sola pasada sin
+atención, en el Mac con el paquete instalado y su driver cargado. Todavía no se ha ejecutado en un Mac: se escribió, y
+se ejecutó su prueba de host `tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta
+prueba también el programa.
+
+Hay 133 comprobaciones en seis partes: `install`, `xlate`, `plugin`, `vulkan`, `zink` y `v301`. Las diez de `v301`
+(`tools/card/checks_v301.py`) comprueban los cambios de la versión 3.0.1: la subida asíncrona de replaceRegion y la
+traducción en segundo plano de los shaders de un juego, las dos activas por defecto desde la 3.0.1, cada una junto a su
+vuelta atrás (`NVMTL_ASYNC_TEX_UPLOAD=0`, `NVMTL_PRETRANSLATE=0`); shaders, texturas y samplers nuevos usados enseguida
+con la memoria mapeada propia de NVK donde la pone la 3.0.1 y con `NVK_LOCAL_MAP_SYSMEM=1`; la retirada de
+`VK_EXT_map_memory_placed` e hilos que mapean y liberan memoria a la vez con el runtime de Vulkan nativo; y una lectura
+de la política de boost como la hace NVK. Cada una necesita un archivo que añadió la versión 3.0.1, así que en un
+checkout sin la 3.0.1 cada una se omite y nombra ese archivo, y una comprobación de un valor por defecto también se
+omite cuando `nvrm610.conf` fija ese interruptor. Ninguna de las comprobaciones de la 3.0.1 se ha ejecutado todavía en
+una tarjeta.
 
 Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que termine:
 
@@ -465,37 +477,48 @@ una opción equivocada (salida 2) no deja `DONE`; lo dice el archivo de salida. 
 compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y muestra qué se
 compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que abren una ventana;
 `--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del paquete instalado
-cuando no es el de por defecto.
+cuando no es el de por defecto. El de por defecto es el commit de la versión 3.0: para un paquete de la versión 3.0.1,
+da el commit con el que se compiló.
 
 Antes de compilar ninguna comprobación rechaza la pasada (salida 3) salvo que la carpeta de salida esté dentro de
 `~/nullmoth-claude`, fuera de `src` y de `build2`, vacía o inexistente y con 2 GB libres; el checkout esté limpio y sus
 fuentes del driver sean las del commit esperado; el paquete preparado en `~/nullmoth-claude/build2/package/pkgroot` sea
 de ese commit y cada archivo que pone en `/Library/GPUBundles` esté instalado sin cambios (`nvrm610.conf` no se
-compara); el acelerador esté en el IORegistry; y una pequeña sonda vea el dispositivo Metal del driver. Un rechazo de la
-carpeta de salida no escribe nada; cualquier rechazo posterior escribe `report.md` y `DONE` con el motivo.
+compara); el acelerador esté en el IORegistry; cuando el checkout tiene la política de boost de la versión 3.0.1, el
+NVRM.kext cargado responda a `debug.nvrm_boost_policy` (los kexts de un paquete anterior siguen cargados hasta un
+reinicio); y una pequeña sonda vea el dispositivo Metal del driver. Un rechazo de la carpeta de salida no escribe nada;
+cualquier rechazo posterior escribe `report.md` y `DONE` con el motivo.
 
 Solo escribe en la carpeta de salida (por defecto `~/nullmoth-claude/cardtest/<hora UTC>`): `report.md` (los datos de la
-máquina y una línea por comprobación), `results.json`, `logs/` (un registro por comprobación y por compilación, con la
+máquina, entre ellos la política de boost y el borrado con el motor de copia de la memoria de vídeo nueva al principio y
+al final, y una línea por comprobación), `results.json` (que también se escribe después de cada comprobación, marcado
+como parcial, para que un programa matado sin su informe deje las comprobaciones que terminó), `logs/` (un registro por
+comprobación y por compilación, con la
 salida del programa y su `nvmtl.log`), `bin/` (las comprobaciones compiladas), `tmp/` y `cache/` (el TMPDIR de cada
 comprobación y las cachés de shaders a las que se las dirige), y `DONE` al final. En `report.md`, `results.json`, los
 registros y cada línea que muestra, la carpeta personal pasa a ser `~`, el nombre de la cuenta `<user>`, el nombre del
 equipo `<host>` y las carpetas temporal y de caché del usuario `<usertmp>` y `<usercache>`. `report.md` termina con lo
-que apareció fuera de la carpeta mientras se ejecutaba, solo por nombre: archivos del plugin en `/tmp`, entradas nuevas
-de las cachés de shaders, informes de fallo de los programas que ejecutó.
+que apareció fuera de la carpeta mientras se ejecutaba, solo por nombre: archivos del plugin y registros de diagnóstico
+de NVK en `/tmp`, entradas nuevas de las cachés de shaders, informes de fallo de los programas que ejecutó.
 
 Código de salida: 0 pasó cada comprobación que se ejecutó (las omitidas y las inactivas aparecen con su motivo); 1 una
 comprobación falló, se quedó sin tiempo, se cayó, no se pudo parar o no compiló; 2 una opción equivocada; 3 rechazada; 4
 parada antes de tiempo (también si antes falló una comprobación, si se interrumpió o si falló el propio programa). Cada
 comprobación tiene un límite de tiempo. Una comprobación con un proceso que sigue vivo 15 s después de matar su grupo de
 procesos (en su límite o al terminar), una comprobación de GPU que se quedó sin tiempo, una subida de
-`debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state` o un proceso de WindowServer nuevo paran todas las
-comprobaciones de GPU que vienen después; una subida de `debug.nvrm_xid_count` hace fallar la comprobación en la que
-ocurrió. Pasados 40 minutos (`--deadline`) no empieza nada nuevo. Una comprobación que no se arrancó aparece como "not
-run" con el motivo.
+`debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state`, un proceso de WindowServer nuevo, una subida de
+`debug.nvrmfb_vram_ce_kept` (no se vio terminar el borrado con el motor de copia de un bloque nuevo de memoria de vídeo)
+o de `debug.nvrmfb_vram_power_events` (la GPU pasó por un reposo) paran todas las comprobaciones de GPU que vienen
+después. Una subida de `debug.nvrm_xid_count`, de `debug.nvrm_chan_recovered` (un canal que NVK reconstruyó) o de
+`debug.nvrm_chan_dropped` (los envíos que una reconstrucción descartó) hace fallar la comprobación en la que ocurrió; un
+canal atascado al que se volvió a llamar (`debug.nvrm_chan_kicks`) y un borrado con el motor de copia que dejó su estado
+de activo se anotan en la comprobación. Pasados 40 minutos (`--deadline`) no empieza nada nuevo. Una comprobación que no
+se arrancó aparece como "not run" con el motivo.
 
 Nunca usa sudo; no instala, carga ni copia nada en `/Library` ni en `/System`; no cambia ningún ajuste (ni
-`nvrm610.conf`, ni `defaults`, ni un argumento de arranque); no ejecuta `nvram`, `csrutil`, `bless`, `kmutil`,
-`kextload` ni `launchctl`; no lee la colección de kernels, el binario del kernel, la caché compartida de dyld ni el
+`nvrm610.conf`, ni `defaults`, ni un argumento de arranque, ni la política de boost); no ejecuta `nvram`, `csrutil`,
+`bless`, `kmutil`, `kextload` ni `launchctl`; ninguna comprobación pone `NVK_DIAG` (NVK escribiría en `/private/tmp`);
+no lee la colección de kernels, el binario del kernel, la caché compartida de dyld ni el
 binario de un framework; no abre ninguna conexión de red; no pide ningún permiso (cámara, micrófono, grabación de
 pantalla, accesibilidad, automatización, archivos de Escritorio, Documentos o Descargas); y solo mata los grupos de
 procesos de sus propios hijos. Para las comprobaciones con ventana se abren ventanas un momento; `caffeinate` mantiene
