@@ -35,11 +35,11 @@ folder itself writes nothing; every later refusal writes report.md and DONE.
 
 Each child starts from an environment built from nothing (HOME, USER, LOGNAME, LANG, PATH=/usr/bin:/bin:/usr/sbin:/sbin,
 TMPDIR=<out>/tmp/<id>, the plugin's log, AIR cache and Mesa cache pointed into <out>, then the row's env), with
-/dev/null as input, its output in files, in a session of its own, in <out>/tmp/<id>. At its limit its process group is
-killed and awaited for KILL_POLL seconds: a check still alive then is STUCK. A STUCK check, a GPU check that timed out,
-a rise of debug.nvrm_chan_gave_up, a change of debug.nvrm_fence_state or of WindowServer's pid stops every later GPU
-check; a rise of debug.nvrm_xid_count fails the check it happened in. caffeinate -d -i -w <this pid> holds the display
-awake only while windowed checks run.
+/dev/null as input, its output in files, in a session of its own, in <out>/tmp/<id>. At its limit, and when it ends, its
+process group is killed and awaited for KILL_POLL seconds: a check with a process still alive then (the program, or one
+it started) is STUCK. A STUCK check, a GPU check that timed out, a rise of debug.nvrm_chan_gave_up, a change of
+debug.nvrm_fence_state or of WindowServer's pid stops every later GPU check; a rise of debug.nvrm_xid_count fails the
+check it happened in. caffeinate -d -i -w <this pid> holds the display awake only while windowed checks run.
 
 Exit: 0 every check that ran passed (skips, inactive and fallback rows listed with their reason); 1 a FAIL, TIMEOUT,
 CRASH or build failure; 2 usage; 3 refused; 4 stopped early. --list prints every row (id, part, kind, order, title)
@@ -277,9 +277,38 @@ def quick(argv, env, limit=QUICK_LIMIT):
     return p.returncode, text_of(out), text_of(err)
 
 
+PS_ARGV = ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,command="]
+
+
+def group_lines(pgid):
+    """-> ps's lines of the processes of a group that are not zombies, or None when ps gives no answer"""
+    rc, out, _ = quick(PS_ARGV, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C"})
+    if rc != 0:
+        return None
+    return [l for l in out.splitlines() if len(l.split()) > 3 and l.split()[2] == str(pgid)
+            and not l.split()[3].startswith("Z")]
+
+
+def group_ended(pgid, until):
+    """True once no process of the group is left. A program can end while a process it started stays in its group:
+    the group is polled until the monotonic time until, then ps tells whether what is left is only zombies that their
+    new parent has not reaped yet."""
+    while True:
+        try:
+            _killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:      # a member this account cannot signal: still there
+            pass
+        if time.monotonic() >= until:
+            return group_lines(pgid) == []
+        time.sleep(0.1)
+
+
 def run_limited(argv, env, cwd, out_path, err_path, limit):
     """runs one check or build step with its output in files. -> dict: rc (or None), killed (at the limit), stuck
-    (still alive KILL_POLL s after SIGKILL), seconds, pid, start_error"""
+    (the program or a process of its group still alive KILL_POLL s after the group's SIGKILL), seconds, pid,
+    start_error"""
     res = {"rc": None, "killed": False, "stuck": False, "seconds": 0.0, "pid": None, "start_error": None}
     t0 = time.monotonic()
     try:
@@ -300,13 +329,15 @@ def run_limited(argv, env, cwd, out_path, err_path, limit):
             res["rc"] = p.wait(timeout=limit)
         except subprocess.TimeoutExpired:
             res["killed"] = True
-            kill_group(p.pid)
+        kill_group(p.pid)        # the program at its limit, or what it left running in its group
+        until = time.monotonic() + KILL_POLL
+        if res["rc"] is None:
             try:
                 res["rc"] = p.wait(timeout=KILL_POLL)
             except subprocess.TimeoutExpired:
                 res["stuck"] = True
-        if not res["stuck"]:
-            kill_group(p.pid)    # what it left running in its group
+        if not res["stuck"] and not group_ended(p.pid, until):
+            res["stuck"] = True
     finally:
         if not res["stuck"]:
             RUNNING.discard(p.pid)
@@ -1153,9 +1184,9 @@ class Run:
             self.decide(row, result, why, detail)
             argv_text = shlex.join(argv)
             if res["stuck"]:
-                rc, ps, _ = quick(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,command="], self.plain_env())
-                group = [l for l in ps.splitlines() if len(l.split()) > 2 and l.split()[2] == str(res["pid"])]
-                err_text += "\n--- ps of its process group ---\n" + ("\n".join(group) or "(ps showed none)") + "\n"
+                group = group_lines(res["pid"])
+                shown = "(ps gave no answer)" if group is None else "\n".join(group) or "(ps showed none)"
+                err_text += "\n--- ps of its process group ---\n" + shown + "\n"
                 self.stop(f"{cid} could not be stopped (STUCK): the GPU may be held until a restart")
             elif result == "TIMEOUT" and c["kind"] == "gpu":
                 self.stop(f"{cid} timed out: the GPU may be hung")
@@ -1190,8 +1221,9 @@ class Run:
         if res["start_error"]:
             return "FAIL", "could not start", res["start_error"], "the program could not be started", "not started"
         if res["stuck"]:
-            return ("STUCK", f"alive {KILL_POLL} s after SIGKILL", detail, "killed at the limit, and its process group did "
-                    f"not end within {KILL_POLL} s", "still running")
+            return ("STUCK", f"alive {KILL_POLL} s after SIGKILL", detail, "its process group was killed (at the limit, or "
+                    f"for what the program left running when it ended) and did not end within {KILL_POLL} s",
+                    "still running" if res["rc"] is None else f"rc {res['rc']}, a process of its group still running")
         if res["killed"]:
             return "TIMEOUT", f"no result within {limit} s", detail, "stopped at the outer limit", "killed at the limit"
         exit_text = f"signal {signame(-rc)}" if rc < 0 else f"rc {rc}"
