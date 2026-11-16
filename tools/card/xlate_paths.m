@@ -26,7 +26,10 @@
  * whether the shape a repair handles is in it, also for a function the driver then refuses: Apple's compiler may emit
  * another shape, and a PASS then says less.
  *
- * Output: one line per case, "PASS <case> ...", "FAIL <case>: ...", "SKIP <case>: ...", INFO lines, and last
+ * Output: one line per case, "PASS <case> ...", "FAIL <case>: ...", "SKIP <case>: ...", INFO lines, then
+ * "INFO translator: ..." (the plugin's own line that names the translator it opened in this process, by its LC_UUID
+ * and path: the plugin opens the libnvmtl_translate.dylib beside it in NVMTLDriver.bundle/Contents/MacOS when that file
+ * is there, else nvmtl/libnvmtl_translate.dylib, so the results are that translator's), and last
  * "RESULT pass|fail|skip pass=N fail=N skip=N". Exit 0 every case that ran passed, 1 a case failed, 2 usage or a setup
  * error only (the program could not make its own objects), 3 skip (no device of this driver: first line "SKIP: ...",
  * or every case skipped). It has its own alarm (ALARM_SECONDS); a command buffer that does not complete within
@@ -201,6 +204,35 @@ static void log_line_info(const char *c, NSString *needle)
     if (!text) { info("%s: the plugin log could not be read", c); return; }
     info("%s: the plugin log %s '%s'", c, [text rangeOfString:needle].location != NSNotFound ? "has" : "has no",
          needle.UTF8String);
+}
+
+/* Repeats, as "INFO translator: ...", the plugin's line of this process ("pid <pid> NVMTL: " in NVMTL_LOG_PATH) that
+   names the translator it opened, "translate: opened <LC_UUID> <path> (cache tag ...)", or the line of a dlopen that
+   failed, "translate: dlopen(...)". The plugin writes it once, at its first translation (plugin/NVMTLLibraryLoad.m,
+   nvmtl_xlate_ready). The file is read with stdio, line by line: a log line the plugin cut at its buffer's end may end
+   inside a UTF-8 character, which a whole-file UTF-8 read would refuse. */
+static void translator_info(void)
+{
+    const char *path = getenv("NVMTL_LOG_PATH");
+    if (!path || !*path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) { info("translator: the plugin log could not be read"); return; }
+    char mine[64], line[4096];
+    snprintf(mine, sizeof mine, "pid %d NVMTL: ", (int)getpid());
+    const size_t n = strlen(mine);
+    BOOL found = NO;
+    while (!found && fgets(line, sizeof line, f)) {
+        if (strncmp(line, mine, n)) continue;
+        const char *t = line + n;
+        if (strncmp(t, "translate: opened ", 18) && strncmp(t, "translate: dlopen(", 18)) continue;
+        line[strcspn(line, "\r\n")] = 0;
+        info("translator: %s", t);
+        found = YES;
+    }
+    fclose(f);
+    if (!found)
+        info("translator: no 'translate: opened' line of this process in the plugin log (the plugin opens its "
+             "translator at its first translation)");
 }
 
 typedef enum { BUILD_OK, BUILD_SKIP, BUILD_FAIL } build_status;
@@ -971,6 +1003,7 @@ int main(int argc, char **argv)
             if (!chosen[i]) continue;
             @autoreleasepool { cases[i].run(cases[i].name); }
         }
+        translator_info();
         result_line();
         if (g_fail) return g_fail > g_setup ? 1 : 2;
         return g_pass ? 0 : 3;
