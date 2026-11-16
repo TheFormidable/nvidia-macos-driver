@@ -17,8 +17,9 @@ default skips when the settings file sets that switch, since the default is then
   v301.async-upload          replaceRegion's asynchronous upload, on by default: 300 textures written one after
                              another and read by blits, the count limit of 256 pending uploads and its one log line,
                              overwrites, two threads on one texture, textures freed with their upload queued, an
-                             IOSurface texture and a view of it read by the CPU at once; NVMTL_SURFIN_ZERO=1 and
-                             NVMTL_WS_FREE_OFFMAIN=1 stay off outside WindowServer
+                             IOSurface texture and a view of it read by the CPU at once; NVMTL_SURFIN_ZERO=1 stays
+                             off outside WindowServer (a surface brought in for a blit says so), and so does
+                             NVMTL_WS_FREE_OFFMAIN=1 when a free asked it (otherwise INFO)
   v301.async-upload-off      the same cases with NVMTL_ASYNC_TEX_UPLOAD=0 (the way back: every upload waits)
   v301.half-mips-sync        plugin.half-mips (its replaceRegion uploads) with NVMTL_ASYNC_TEX_UPLOAD=0
   v301.pretranslate-game     background translation of a new library's shaders in a game (the program's own
@@ -75,7 +76,8 @@ _ASYNC_ON = _ASYNC_BOTH + [
     r"^PASS limit the driver said once: vk: tex upload async: 256 pending uploads hold \d+ bytes of staging "
     r"\(limits 256 and 268435456\): ",
     r"^PASS switch the driver says vk: async texture upload ON \(NVMTL_ASYNC_TEX_UPLOAD=unset\)$",
-    r"^PASS gating NVMTL_SURFIN_ZERO=1 and NVMTL_WS_FREE_OFFMAIN=1 are off outside WindowServer$"]
+    r"^PASS gating NVMTL_SURFIN_ZERO=1 is off outside WindowServer: a surface the CPU zeroed was uploaded as any "
+    r"other$"]
 _ASYNC_OFF = _ASYNC_BOTH + [
     r"^PASS limit no line of pending uploads at a limit: every upload waited for its copy$",
     r"^PASS switch the driver says vk: async texture upload OFF \(NVMTL_ASYNC_TEX_UPLOAD=0\)$"]
