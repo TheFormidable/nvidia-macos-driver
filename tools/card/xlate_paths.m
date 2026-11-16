@@ -3,8 +3,9 @@
  * runs it with the cases of one row (no case named: every case):
  *
  *   abarray-a abarray-c abarray-s  a texture picked by a run-time index from an argument buffer's array of eight:
- *                                  array<texture2d<float>, 8>, texture2d<float> t[8] (both read), and a nearest sample
- *                                  through the first form; each index 0-7 in its own dispatch
+ *                                  array<texture2d<float>, 8> and the C array texture2d<float> t [[id(0)]] [8] (both
+ *                                  read), and a nearest sample through the first form; each index 0-7 in its own
+ *                                  dispatch
  *   tbuf                           a single texture_buffer field of an argument buffer, read by 16 threads
  *   phi8 phi9 phi16                a sample through a sampler that a switch picks among 8, 9 and 16 samplers, each
  *                                  pick compared with the direct sample through that sampler
@@ -190,6 +191,17 @@ static void shape(const char *c, NSString *name, NSArray<NSString *> *markers)
     }
 }
 
+/* Reports whether the plugin's log of this process (NVMTL_LOG_PATH, which the runner sets) holds `needle`. */
+static void log_line_info(const char *c, NSString *needle)
+{
+    const char *path = getenv("NVMTL_LOG_PATH");
+    if (!path || !*path) return;
+    NSString *text = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+    if (!text) { info("%s: the plugin log could not be read", c); return; }
+    info("%s: the plugin log %s '%s'", c, [text rangeOfString:needle].location != NSNotFound ? "has" : "has no",
+         needle.UTF8String);
+}
+
 typedef enum { BUILD_OK, BUILD_SKIP, BUILD_FAIL } build_status;
 
 /* Compiles one case's source and makes the compute pipeline of `name`; on SKIP or FAIL, `why` says why. */
@@ -305,7 +317,9 @@ static void case_abarray(const char *c)
                 "                   device float4* o [[buffer(2)]]) { o[0] = g.t[k].read(uint2(0)); }\n";
     } else if (!strcmp(c, "abarray-c")) {
         name = @"pick_c";
-        body = @"struct C { texture2d<float> t[8] [[id(0)]]; };\n"
+        // the attribute goes right after the name: after "[8]" it would belong to the array type, which Apple's
+        // compiler refuses ("'id' attribute cannot be applied to types")
+        body = @"struct C { texture2d<float> t [[id(0)]] [8]; };\n"
                 "kernel void pick_c(constant C& g [[buffer(0)]], constant uint& k [[buffer(1)]],\n"
                 "                   device float4* o [[buffer(2)]]) { o[0] = g.t[k].read(uint2(0)); }\n";
     } else {
@@ -328,7 +342,8 @@ static void case_abarray(const char *c)
     }
     id<MTLArgumentEncoder> ae = [fn newArgumentEncoderWithBufferIndex:0];
     if (!ae) { fail(c, "the driver gave no argument encoder for buffer 0 of %s", name.UTF8String); return; }
-    id<MTLBuffer> args = buffer(ae.encodedLength ? ae.encodedLength : 16, 0);
+    // at least the eight handles' 64 bytes, whatever encodedLength says, so that the shader reads this buffer only
+    id<MTLBuffer> args = buffer(ae.encodedLength > 64 ? ae.encodedLength : 64, 0);
     id<MTLBuffer> ks = buffer(8 * 256, 0), out = buffer(8 * 256, 0xa5);
     if (!args || !ks || !out) { setup_fail(c, "buffers"); return; }
     [ae setArgumentBuffer:args offset:0];
@@ -336,6 +351,12 @@ static void case_abarray(const char *c)
         [ae setTexture:tex[k] atIndex:k];
         *(uint32_t *)((char *)ks.contents + 256 * k) = k;
     }
+    // This driver's encoder writes a texture as one 8-byte handle word, element k at byte 8k, where the shader reads
+    // it; a word left 0 is an element the encoder did not write (the plugin log says why, "REFUSED").
+    const uint64_t *handles = args.contents;
+    unsigned written = 0;
+    for (unsigned k = 0; k < 8; k++) written += handles[k] != 0;
+    info("%s encoder: encodedLength %lu, %u of 8 handle words written", c, (unsigned long)ae.encodedLength, written);
     id<MTLCommandBuffer> cb = [g_queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:pso];
@@ -349,19 +370,32 @@ static void case_abarray(const char *c)
     }
     [enc endEncoding];
     if (!finish(c, cb)) return;
-    unsigned bad = 0, texel0 = 0, first = 8;
+    // the plugin logs "tier2: <function> reads N argument-buffer texture(s) through the bindless heap" when the module
+    // reads them by their handles (plugin/NVMTLEmbedded.m); a module that declares one binding for the array gets none
+    log_line_info(c, [NSString stringWithFormat:@"tier2: %@ reads", name]);
+    static const float zero4[4] = {0};
+    unsigned bad = 0, texel0 = 0, zeros = 0, first = 8;
     float got[4] = {0};
     for (unsigned k = 0; k < 8; k++) {
         const char *slot = (const char *)out.contents + 256 * k;
         BOOL ok = !memcmp(slot, texel[k], 16) && guards_intact(slot, 4, 64);
         if (k && !memcmp(slot, texel[0], 16)) texel0++;
+        if (k && !memcmp(slot, zero4, 16)) zeros++;
         if (!ok && first == 8) { first = k; memcpy(got, slot, 16); }
         bad += !ok;
     }
     if (!bad) { pass(c, "indices 0-7 each read their own texture (8 dispatches)"); return; }
+    // Past one binding's one descriptor (plugin/nvmtl_vk.c gives each binding one) an index reads the next bindings'
+    // descriptors, which this program leaves empty, so zeros; bounds-checked compute (NVMTL_COMPUTE_ROBUST=1, or no
+    // VK_EXT_pipeline_robustness) holds the index at element 0 instead.
     fail(c, "%u of 8 indices wrong; first k=%u got=(%g,%g,%g,%g) expected=(%g,%g,%g,%g)%s", bad, first, got[0], got[1],
          got[2], got[3], texel[first][0], texel[first][1], texel[first][2], texel[first][3],
-         texel0 == 7 ? "; every index read texture 0, the old single-binding signature" : "");
+         texel0 == 7 ? "; every index read texture 0: the index did not reach the read (one binding for the whole "
+                       "array, its index held at element 0 by bounds-checked compute)"
+         : zeros == 7 ? "; every index past 0 read zeros: handle words the encoder left 0 (its INFO line above), or a "
+                        "module that reads the array through one binding (no 'tier2:' line above) and an index past "
+                        "that binding's one descriptor"
+         : "");
 }
 
 /* ---- a single texture_buffer field ------------------------------------------------------------------------------- */
@@ -557,17 +591,6 @@ static void case_walk(const char *c)
         return;
     }
     fail(c, "got=%08x expected=%08x%s", o[0], s, guards_intact(o, 1, 64) ? "" : "; guards overwritten");
-}
-
-/* the plugin's log of this process: whether address lowering refused a module for an escaping pointer */
-static void log_line_info(const char *c, NSString *needle)
-{
-    const char *path = getenv("NVMTL_LOG_PATH");
-    if (!path || !*path) return;
-    NSString *text = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
-    if (!text) { info("%s: the plugin log could not be read", c); return; }
-    info("%s: the plugin log %s '%s'", c, [text rangeOfString:needle].location != NSNotFound ? "has" : "has no",
-         needle.UTF8String);
 }
 
 static void case_esc(const char *c)
