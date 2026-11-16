@@ -104,7 +104,9 @@ for _i, (_s, _cases, _t) in enumerate((
         ("lanes", ("lanes",), "an int2 read through a float4 pointer at a run-time index"))):
     _cid = "xlate.paths-" + _s
     CHECKS.append({
-        "id": _cid, "part": "xlate", "title": _t, "kind": "gpu", "order": 310 + _i,
+        # abarray goes last but one: on a translator that misses the heap route it reads past one descriptor, and a
+        # GPU fault there stops every later GPU row
+        "id": _cid, "part": "xlate", "title": _t, "kind": "gpu", "order": 890 if _s == "abarray" else 310 + _i,
         "sources": ["tools/card/xlate_paths.m"],
         "build": [{"argv": _CC + ["-fobjc-arc", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter",
                                   "{SRC}/tools/card/xlate_paths.m", "-o", "{BIN}/%s/nvmtltest" % _cid,

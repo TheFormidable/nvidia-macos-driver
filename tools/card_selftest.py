@@ -912,7 +912,8 @@ class Run:
         self.deadline_hit = False
         self.build_stuck = False
         self.caffeinate = None
-        self.programs = {"nvmtltest"}
+        # crash reports are matched by program name; translator_readback is the child the readback script builds
+        self.programs = {"nvmtltest", "translator_readback", "python3", "Python"}
         self.gui_ok, self.gui_why = None, "decided by the device probe"
 
     # -- paths and environments
@@ -1280,7 +1281,8 @@ class Run:
                 return "TIMEOUT", "its own alarm (SIGALRM)", detail, "the program's own time limit ended it", exit_text
             return "CRASH", signame(-rc), detail, f"ended by {signame(-rc)}", exit_text
         if rc == 70:
-            m = re.search(r"^CRASH (\S+)", err, re.M)
+            # rows that merge stderr into stdout carry the handler's line on stdout
+            m = re.search(r"^CRASH (\S+)", err, re.M) or re.search(r"^CRASH (\S+)", out, re.M)
             if m:
                 return "CRASH", m.group(1), detail, f"its crash handler caught {m.group(1)} (exit 70)", exit_text
         e = c["expect"]
