@@ -443,6 +443,61 @@ secciones. Bien: `debug.nvrm_bh_thread` y `debug.nvrm_rc_armed` dan 2; el arranq
 registro del kernel; tras una activación vuelven las dos tarjetas y `debug.nvrm_fence_state` es 1. Mal: falta una
 tarjeta en esos contadores, o una activación pierde una; envía el registro del kernel de ese arranque.
 
+## Comprobaciones automáticas en la tarjeta (tools/card_selftest.py)
+
+`tools/card_selftest.py` ejecuta las comprobaciones en la tarjeta de las partes nuevas (Vulkan nativo, OpenGL nativo
+con Zink, el plugin de Metal y el traductor) en una sola pasada sin atención, en el Mac con el paquete instalado y su
+driver cargado. Todavía no se ha ejecutado en un Mac: se escribió, y se ejecutó su prueba de host
+`tools/test_card_selftest.py`, solo en Linux, así que su primera pasada en una tarjeta prueba también el programa.
+
+Arráncalo desde el checkout con el que se compiló el paquete, en segundo plano, y espera a que su carpeta tenga `DONE`:
+
+```
+mkdir -p ~/nullmoth-claude/cardtest
+cd ~/nullmoth-claude/src
+/usr/bin/python3 -B -I tools/card_selftest.py --out ~/nullmoth-claude/cardtest/run1 \
+  > ~/nullmoth-claude/cardtest/run1.txt 2>&1 &
+```
+
+La primera línea de `DONE` es el código de salida; `report.md`, a su lado, es la respuesta. `--list` muestra cada
+comprobación y no compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y
+muestra qué se compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que
+abren una ventana; `--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del
+paquete instalado cuando no es el de por defecto.
+
+Antes de compilar ninguna comprobación rechaza la pasada (salida 3) salvo que la carpeta de salida esté dentro de
+`~/nullmoth-claude`, fuera de `src` y de `build2`, vacía o inexistente y con 2 GB libres; el checkout esté limpio y sus
+fuentes del driver sean las del commit esperado; el paquete preparado en `~/nullmoth-claude/build2/package/pkgroot` sea
+de ese commit y cada archivo que pone en `/Library/GPUBundles` esté instalado sin cambios (`nvrm610.conf` no se
+compara); el acelerador esté en el IORegistry; y una pequeña sonda vea el dispositivo Metal del driver. Un rechazo de la
+carpeta de salida no escribe nada; cualquier rechazo posterior escribe `report.md` y `DONE` con el motivo.
+
+Solo escribe en la carpeta de salida (por defecto `~/nullmoth-claude/cardtest/<hora UTC>`): `report.md` (los datos de la
+máquina y una línea por comprobación), `results.json`, `logs/` (un registro por comprobación y por compilación, con la
+salida del programa y su `nvmtl.log`), `bin/` (las comprobaciones compiladas), `tmp/` y `cache/` (el TMPDIR de cada
+comprobación y las cachés de shaders a las que se las dirige), y `DONE` al final. En `report.md`, `results.json`, los
+registros y cada línea que muestra, la carpeta personal pasa a ser `~`, el nombre de la cuenta `<user>`, el nombre del
+equipo `<host>` y las carpetas temporal y de caché del usuario `<usertmp>` y `<usercache>`. `report.md` termina con lo
+que apareció fuera de la carpeta mientras se ejecutaba, solo por nombre: archivos del plugin en `/tmp`, entradas nuevas
+de las cachés de shaders, informes de fallo de los programas que ejecutó.
+
+Código de salida: 0 pasó cada comprobación que se ejecutó (las omitidas y las inactivas aparecen con su motivo); 1 una
+comprobación falló, se quedó sin tiempo, se cayó, no se pudo parar o no compiló; 2 una opción equivocada; 3 rechazada; 4
+parada antes de tiempo (también si antes falló una comprobación). Cada comprobación tiene un límite de tiempo. Una
+comprobación que sigue viva 15 s después de matarla en su límite, una comprobación de GPU que se quedó sin tiempo, una
+subida de `debug.nvrm_chan_gave_up`, un cambio de `debug.nvrm_fence_state` o un proceso de WindowServer nuevo paran
+todas las comprobaciones de GPU que vienen después; una subida de `debug.nvrm_xid_count` hace fallar la comprobación en
+la que ocurrió. Pasados 40 minutos no empieza nada nuevo. Una comprobación que no se arrancó aparece como "not run" con
+el motivo.
+
+Nunca usa sudo; no instala, carga ni copia nada en `/Library` ni en `/System`; no cambia ningún ajuste (ni
+`nvrm610.conf`, ni `defaults`, ni un argumento de arranque); no ejecuta `nvram`, `csrutil`, `bless`, `kmutil`,
+`kextload` ni `launchctl`; no lee la colección de kernels, el binario del kernel, la caché compartida de dyld ni el
+binario de un framework; no abre ninguna conexión de red; no pide ningún permiso (cámara, micrófono, grabación de
+pantalla, accesibilidad, automatización, archivos de Escritorio, Documentos o Descargas); y solo mata los grupos de
+procesos de sus propios hijos. Para las comprobaciones con ventana se abren ventanas un momento; `caffeinate` mantiene
+la pantalla despierta solo mientras se ejecutan.
+
 ## Las vueltas atrás
 
 Una por cambio; cada una devuelve el comportamiento de 2.9 solo de ese cambio. Están para saber si un cambio está
