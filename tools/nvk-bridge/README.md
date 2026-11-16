@@ -85,6 +85,9 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
   window with frames, a resize, a minimize and a restore. `NVKBRIDGE_VERIFY_PIXELS=1` reads every presented copy back
   and checks its pixels. To test the loader route, pass `libvulkan.1.dylib` as the entry with `VK_DRIVER_FILES` set to
   `nvk_bridge_icd.json` and `NVKBRIDGE_TEST_FRONTEND` set to the frontend's absolute path.
+- `window_check.mm` needs no SDL3: it presents through the installed runtime into an AppKit window of its own, reads
+  every copy back, and covers a resize, an old swapchain, a minimize and a restore. `tools/card_selftest.py` builds
+  and runs it and `smoke.mm`, directly and through the installed and the built loader (`tools/card/checks_vulkan.py`).
 - `ModFreeProbe.java` calls Minecraft 26.3's own `NativeLibrariesBootstrap.tryLoadingVulkan` with
   `-Dorg.lwjgl.vulkan.libname` set and checks that the game, LWJGL and SDL all use the frontend. It needs Java 25 and the
   game's and LWJGL 3.4.3's jars; it does not start the game.
