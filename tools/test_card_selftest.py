@@ -1,0 +1,931 @@
+#!/usr/bin/env python3
+"""tools/card_selftest.py, the card runner, without a card and without any of the Mac's own programs.
+
+The runner starts its system programs (git, xcrun, ioreg, sysctl, pgrep, ps, sw_vers, getconf, caffeinate, python3, sh)
+through its SYSTEM table. Here every entry points at a stand-in in a scratch folder, the installed driver is a scratch
+folder in place of /Library/GPUBundles, the home folder is a scratch one, and EXEC_ONLY_UNDER makes the runner refuse to
+start anything outside the scratch folder (and this Python). The runner is loaded from its path by a small wrapper
+that sets those names and calls main; it runs as a program of its own, as on the Mac. No GPU program, xcrun, ioreg,
+sysctl, git or any other of the Mac's programs runs; the stand-in check programs are Python and /bin/sh scripts.
+
+Static arms on the tree as it is: every tools/card/checks_*.py loads with the runner's own loader, with known keys,
+unique ids and known placeholders; every sources path exists; no build writes outside {BIN}/<id>/ and nothing names
+/tmp; every GPU program the checks build is named nvmtltest; no file in tools/card/ and no program a check names is a
+test_* file that run_all_tests.py would run on the card; the check files import only the standard library and do no
+I/O when loaded; the runner starts processes in one place, and every program it names is in its table. Controls: rows
+with an unknown key, an unknown placeholder, a build into /tmp, an -o outside {BIN}/<id>/, a forbidden command word, a
+program outside the allowed ones, a duplicate id, and a file named for no part are each refused.
+
+Runs with stand-ins: a run whose rows pass, fail by exit code, by a missing stdout pattern and by a forbidden stderr
+pattern, skip and are inactive by exit code, fail to build, lack a source, a file, the GUI or Zink, are left out with
+--no-window, raise the Xid counter, crash through the convention's exit 70 and by a signal (SIGTERM, which leaves no
+crash report), leave a program running in their group, print the home folder, the account, the host and the user
+temporary folder (all scrubbed in every file of the run), and print information lines; then a check that passes its
+limit (its process group is killed, later GPU checks are not run, a later CPU check runs, exit 4), one that its own
+alarm ends (TIMEOUT), one that cannot be killed (STUCK: the kill is made a no-op here), the three stop rules (channel
+give-up, fence state, WindowServer's pid), the deadline, caffeinate started with -d -i -w <runner pid> for a window
+check and stopped after it; the refusals (an --out outside the base or not empty, a dirty checkout, other driver
+sources, another package commit, an installed file that differs, a device of another class, an unknown key), --list
+and --plan (which start no check program and write nothing). The real tools/card/checks_install.py runs against a
+stand-in installation, once whole (every row passes) and once with a defect for each row. After every run: no file
+appeared outside the run folder and the stand-ins' own folder.
+
+Not a card check: it runs on Linux and on a Mac without the driver. Written and run on Linux only so far."""
+import sys
+sys.dont_write_bytecode = True   # nor for the runner and check files it loads
+import ast  # noqa: E402
+import hashlib
+import importlib.util
+import json
+import os
+import plistlib
+import pwd
+import re
+import shlex
+import shutil
+import signal
+import struct
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNNER = ROOT / "tools" / "card_selftest.py"
+CARD = ROOT / "tools" / "card"
+PY = os.path.realpath(sys.executable)
+fails = 0
+
+
+def arm(name, ok, detail=""):
+    global fails
+    fails += not ok
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else f" ({str(detail)[-1500:]})"), flush=True)
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("card_selftest_under_test", str(RUNNER))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+R = load_runner()
+
+
+# ------------------------------------------------------------------------------------------- the tree as it is
+def strings_of(c):
+    out = list(c.get("argv", []))
+    for st in c.get("build", []):
+        out += st["argv"]
+    out += [f"{k}={v}" for k, v in c.get("env", {}).items()]
+    out += [n[5:] for n in c.get("needs", []) if n.startswith("file:")]
+    return out
+
+
+checks, errors = R.load_checks(CARD)
+files = sorted(CARD.glob("checks_*.py"))
+arm("tools/card holds check files, checks_install.py among them", any(f.name == "checks_install.py" for f in files), files)
+arm("every tools/card/checks_*.py loads with known keys, unique ids and known placeholders", not errors, errors)
+arm("the rows were read (the check looked at something)", len(checks) >= 7, len(checks))
+missing = [(c["id"], s) for c in checks for s in c["sources"] if not (ROOT / s).exists()]
+arm("every sources path of every row exists in the checkout", not missing, missing)
+bad_ph = [(c["id"], s) for c in checks for s in strings_of(c) for p in R.PLACEHOLDER.findall(s) if p not in R.PLACEHOLDERS]
+arm("every placeholder the rows use is one the runner knows", not bad_ph, bad_ph)
+tmp_use = [(c["id"], s) for c in checks for s in strings_of(c) if re.search(r"(?<!\})/tmp\b", s) or "/private/tmp" in s]
+arm("no row names /tmp or /private/tmp (builds and runs stay inside the run folder)", not tmp_use, tmp_use)
+outs = [(c["id"], st["argv"][i + 1]) for c in checks for st in c["build"] for i, a in enumerate(st["argv"][:-1]) if a == "-o"]
+arm("every build writes into {BIN}/<its id>/ only",
+    all(o.startswith("{BIN}/" + cid + "/") for cid, o in outs) and
+    all("-o" in st["argv"] or st["argv"][0] != "/usr/bin/xcrun" for c in checks for st in c["build"]), outs)
+names = [c["id"] for c in checks if c["kind"] == "gpu" and c.get("argv", [""])[0].startswith("{BIN}/")
+         and os.path.basename(c["argv"][0]) != "nvmtltest"]
+arm("every GPU program a row builds runs as nvmtltest (the name the plugin always grants a device)", not names, names)
+host_tests = sorted(p.name for p in CARD.iterdir() if p.name.startswith("test_"))
+named = [(c["id"], s) for c in checks for s in strings_of(c) + c["sources"]
+         if re.search(r"(?:^|/)tools/test_[^/]*\.(?:c|cpp|sh|py)$", s)]
+arm("no file in tools/card is named test_*, and no row names a tools/test_*.c, .cpp, .sh or .py (run_all_tests.py would "
+    "run it on the card)", not host_tests and not named and not RUNNER.name.startswith("test_"), (host_tests, named))
+
+ALLOWED_IMPORTS = {"re", "os", "os.path", "json", "itertools", "functools", "string", "textwrap", "copy", "collections",
+                   "__future__"}
+IO_NAMES = {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
+IO_ATTRS = {"read_text", "write_text", "read_bytes", "write_bytes", "open", "mkdir", "unlink", "system", "popen",
+            "remove", "rename", "listdir", "walk", "scandir", "glob", "iterdir", "stat", "exists"}
+
+
+def import_time_problems(path):
+    """imports beyond a few pure modules of the standard library, or a call that reads, writes or starts something"""
+    tree = ast.parse(path.read_text(), feature_version=(3, 9))
+    probs = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            probs += [a.name for a in node.names if a.name not in ALLOWED_IMPORTS]
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "") not in ALLOWED_IMPORTS:
+                probs.append(node.module)
+        elif isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name) and f.id in IO_NAMES:
+                probs.append(f.id + "()")
+            elif isinstance(f, ast.Attribute) and f.attr in IO_ATTRS:
+                probs.append("." + f.attr + "()")
+    return probs
+
+
+probs = {f.name: import_time_problems(f) for f in files}
+probs = {k: v for k, v in probs.items() if v}
+arm("the check files import only pure standard modules and read, write or start nothing when loaded", not probs, probs)
+syntax = []
+for f in [RUNNER] + files:
+    try:
+        ast.parse(f.read_text(), feature_version=(3, 9))
+    except SyntaxError as e:
+        syntax.append(f"{f.name}: {e}")
+arm("the runner and the check files parse as Python 3.9 (Apple's /usr/bin/python3 on that Mac)", not syntax, syntax)
+
+src = RUNNER.read_text()
+tree = ast.parse(src)
+starts = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+          and (n.value.id, n.attr) in {("subprocess", "Popen"), ("subprocess", "run"), ("subprocess", "call"),
+                                       ("subprocess", "check_call"), ("subprocess", "check_output"), ("os", "system"),
+                                       ("os", "popen"), ("os", "fork"), ("os", "forkpty")}
+          or isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "os"
+          and re.match(r"^(exec|spawn|posix_spawn)", n.attr)]
+arm("the runner starts processes in one place (one subprocess.Popen, nothing else)",
+    [(n.value.id, n.attr) for n in starts] == [("subprocess", "Popen")], [(n.value.id, n.attr, n.lineno) for n in starts])
+literal = []
+for n in ast.walk(tree):
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("quick", "spawn") and n.args:
+        a = n.args[0]
+        if isinstance(a, ast.List) and a.elts and isinstance(a.elts[0], ast.Constant):
+            literal.append(a.elts[0].value)
+literal_bad = [p for p in literal if p not in R.SYSTEM and p not in R._DEFAULT_PATHS]
+arm("every program the runner names in its own calls is in its SYSTEM table", literal and not literal_bad, (literal, literal_bad))
+arm("the SYSTEM table names absolute paths of the system's own folders, and the programs a check may start are among them",
+    all(re.match(r"^/(usr/bin|usr/sbin|bin)/[a-z_0-9]+$", v) for v in R.SYSTEM.values())
+    and set(R.CHECK_PROGRAMS) <= set(R.SYSTEM.values()), R.SYSTEM)
+
+
+# --------------------------------------------------------------------------------------------- loader controls
+def refused_by_loader(rows_by_file):
+    with tempfile.TemporaryDirectory() as d:
+        for name, rows in rows_by_file.items():
+            Path(d, name).write_text("CHECKS = " + repr(rows) + "\n")
+        return R.load_checks(d)
+
+
+GOOD = {"id": "plugin.good", "part": "plugin", "title": "a row", "kind": "gpu", "order": 300,
+        "build": [{"argv": ["/usr/bin/xcrun", "clang", "{SRC}/tools/x.m", "-o", "{BIN}/plugin.good/nvmtltest"], "limit": 60}],
+        "argv": ["{BIN}/plugin.good/nvmtltest"], "limit": 90, "expect": {"rc": 0, "stdout": ["^PASS"]}}
+
+
+def variant(**kw):
+    c = json.loads(json.dumps(GOOD))
+    for k, v in kw.items():
+        if v is None:
+            c.pop(k, None)
+        else:
+            c[k] = v
+    return c
+
+
+rows, errs = refused_by_loader({"checks_plugin.py": [GOOD]})
+arm("control: a well-formed row loads", len(rows) == 1 and not errs, errs)
+for what, c, word in (
+        ("an unknown key", variant(timeout=5), "unknown key 'timeout'"),
+        ("an unknown placeholder", variant(argv=["{BIN}/plugin.good/nvmtltest", "{HOME}/x"]), "unknown placeholder {HOME}"),
+        ("a build into /tmp", variant(build=[{"argv": ["/usr/bin/xcrun", "clang", "x.m", "-o", "/tmp/x"], "limit": 9}]), "-o must name"),
+        ("/tmp in an argument", variant(argv=["{BIN}/plugin.good/nvmtltest", "/tmp/out"]), "'/tmp'"),
+        ("a forbidden command word", variant(argv=["/bin/sh", "-c", "defaults read x"]), "'defaults'"),
+        ("sysctl -w split over arguments", variant(argv=["/bin/sh", "-c", "sysctl", "-w", "x=1"]), "sysctl -w"),
+        ("a program that is neither built, installed nor allowed", variant(argv=["/usr/bin/open", "x"]), "'/usr/bin/open' is neither"),
+        ("the runner's own read programs", variant(argv=["/usr/sbin/ioreg", "-l"]), "'/usr/sbin/ioreg' is neither"),
+        ("a part that is not the file's", variant(part="zink"), "part must be 'plugin'"),
+        ("an id without its part", variant(id="good"), "must start with its part"),
+        ("an rc_map word that is not one", variant(rc_map={3: "pass"}), "rc_map must map"),
+        ("a func and an argv", variant(func="install_identity"), "either argv"),
+        ("an unknown need", variant(needs=["screen"]), "needs 'screen'")):
+    rows, errs = refused_by_loader({"checks_plugin.py": [c]})
+    arm(f"control: {what} is refused when the checks are loaded", not rows and any(word in e for e in errs), errs)
+ZX = variant(id="zink.x", part="zink", argv=["{BIN}/zink.x/nvmtltest"],
+             build=[{"argv": ["/usr/bin/xcrun", "clang", "x.m", "-o", "{BIN}/zink.x/nvmtltest"], "limit": 9}])
+rows, errs = refused_by_loader({"checks_zink.py": [ZX]})
+arm("control: the row of the next control loads alone", len(rows) == 1 and not errs, errs)
+rows, errs = refused_by_loader({"checks_plugin.py": [GOOD], "checks_zink.py": [ZX, ZX]})
+arm("control: a duplicate id is refused", any("also in" in e for e in errs), errs)
+rows, errs = refused_by_loader({"checks_other.py": [GOOD]})
+arm("control: a file named for no part is refused", any("is not a part" in e for e in errs), errs)
+
+
+# --------------------------------------------------------------------------------------------------- unit arms
+s = R.Scrub("/Users/tester", "tester", "Bench-Mac-7.local", "/var/folders/ab/cd/T", "/var/folders/ab/cd/C")
+got = s("/Users/tester/nullmoth-claude /System/Volumes/Data/Users/tester/x /private/var/folders/ab/cd/T/y /var/folders/ab/cd/C "
+        "Bench-Mac-7.local BENCH-MAC-7 user tester testers /Users/testerb tester-x")
+want = "~/nullmoth-claude ~/x <usertmp>/y <usercache> <host> <host> user <user> testers /Users/testerb <user>-x"
+arm("the scrub: home in its three forms, the user folders, the host and its first label, the account as a word", got == want, got)
+
+
+def macho_bytes(uuid, minos=(15, 0), ident=None, cpu=0x01000007):
+    cmds = struct.pack("<II", 0x1B, 24) + bytes.fromhex(uuid)
+    cmds += struct.pack("<IIIIII", 0x32, 24, 1, (minos[0] << 16) | (minos[1] << 8), 26 << 16, 0)
+    n = 2
+    if ident:
+        name = ident.encode() + b"\0"
+        name += b"\0" * (-(24 + len(name)) % 8)
+        cmds += struct.pack("<IIIIII", 0xD, 24 + len(name), 24, 2, 0x10000, 0x10000) + name
+        n += 1
+    return struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 3, 6, n, len(cmds), 0, 0) + cmds + b"\0" * 64
+
+
+U1, U2, U3 = "11" * 16, "22" * 16, "33" * 16
+with tempfile.TemporaryDirectory() as d:
+    thin = Path(d, "thin")
+    thin.write_bytes(macho_bytes(U1, (15, 0), "@loader_path/libx.dylib"))
+    fat = Path(d, "fat")
+    a, b = macho_bytes(U3, (11, 0), None, 0x0100000C), macho_bytes(U2, (15, 0))
+    fat.write_bytes(struct.pack(">II", 0xCAFEBABE, 2) + struct.pack(">iiIII", 0x0100000C, 0, 4096, len(a), 12)
+                    + struct.pack(">iiIII", 0x01000007, 3, 8192, len(b), 12) + b"\0" * (4096 - 48) + a
+                    + b"\0" * (4096 - len(a)) + b)
+    Path(d, "text").write_text("#!/bin/sh\n")
+    t, f, x = R.macho(thin), R.macho(fat), R.macho(Path(d, "text"))
+arm("the Mach-O reader: a thin x86_64 file's UUID, minos and install name", t == {"arches": ["x86_64"], "uuid": U1,
+                                                                                    "minos": "15.0", "id": "@loader_path/libx.dylib"}, t)
+arm("the Mach-O reader: a fat file's arches and its x86_64 slice; a script is not Mach-O",
+    f and f["arches"] == ["arm64", "x86_64"] and f["uuid"] == U2 and f["minos"] == "15.0" and x is None, (f, x))
+sums = R.sums_lines("a" * 64 + "  ./Library/GPUBundles/x\n" + "b" * 64 + " *Library/GPUBundles/y z\n" + "short line\n")
+arm("SHA256SUMS lines with and without ./, the path from column 67", sums == [("a" * 64, "Library/GPUBundles/x"),
+                                                                              ("b" * 64, "Library/GPUBundles/y z")], sums)
+
+
+# ------------------------------------------------------------------------------------------- the stand-in world
+WRAP = """import importlib.util, json, os, sys
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text())
+spec = importlib.util.spec_from_file_location("card_selftest_under_test", cfg["runner"])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.SYSTEM = dict(cfg["system"])
+m.SRC = Path(cfg["src"])
+m.GB = cfg["gb"]
+m.AUDIT_TMP_DIRS = tuple(cfg["audit_tmp"])
+m.ICD_DIR = cfg["icd"]
+m.EXEC_ONLY_UNDER = tuple(cfg["exec_only_under"])
+m.MIN_FREE = 0
+m.GB_OWNER_UID = os.getuid()
+m.KILL_POLL = cfg["kill_poll"]
+if cfg["no_kill"]:
+    m._killpg = lambda pgid, sig: None
+sys.exit(m.main(cfg["argv"]))
+"""
+
+SH_FAKES = {
+    "git": """case " $* " in
+  *" status "*) cat "$S/git_status" 2>/dev/null; exit 0 ;;
+  *" rev-parse "*) echo ffffffffffffffffffffffffffffffffffffffff; exit 0 ;;
+  *" diff "*) exit "$(cat "$S/git_diff_rc" 2>/dev/null || echo 0)" ;;
+esac
+exit 2""",
+    "ioreg": """[ -f "$S/no_accel" ] && exit 0
+echo '+-o NVAccel  <class NVAccel, id 0x100000abc, registered, matched, active, busy 0 (0 ms), retain 9>'
+echo '    "IOGLBundleName" = "'"$(cat "$S/gl_bundle")"'"'""",
+    "sysctl": """[ "$1" = -n ] || exit 2
+case "$2" in
+  machdep.cpu.brand_string) echo "Stand-in CPU" ;;
+  debug.nvrm_switches_nondefault) echo none ;;
+  *) [ -f "$S/counters/$2" ] && cat "$S/counters/$2" || { echo "sysctl: unknown oid '$2'" >&2; exit 1; } ;;
+esac""",
+    "pgrep": """[ -s "$S/ws" ] || exit 1
+cat "$S/ws\"""",
+    "ps": """echo "  4242     1  4242 S    00:03 stand-in"
+echo "  4243  4242  4242 S    00:03 stand-in-child\"""",
+    "sw_vers": """case "$1" in -productVersion) echo 26.7 ;; -buildVersion) echo 25X000 ;; *) exit 1 ;; esac""",
+    "getconf": """case "$1" in DARWIN_USER_TEMP_DIR) echo "$S/usertmp/" ;; DARWIN_USER_CACHE_DIR) echo "$S/usercache/" ;; *) exit 1 ;; esac""",
+    "xcrun": """out=; src=; prev=
+for a in "$@"; do
+  [ "$prev" = -o ] && out=$a
+  case "$a" in *.m|*.mm|*.c|*.cpp) src=$a ;; esac
+  prev=$a
+done
+echo "xcrun-env TMPDIR=$TMPDIR CLANG_MODULE_CACHE_PATH=$CLANG_MODULE_CACHE_PATH NVMTL_PROCESS_ENV=${NVMTL_PROCESS_ENV-unset}" >> "$S/calls.log"
+if grep -q BUILD-FAILS "$src"; then echo "$src:1:1: error: this stand-in source does not build" >&2; exit 1; fi
+cp "$src" "$out" && chmod 755 "$out\"""",
+    "caffeinate": """w=; prev=
+for a in "$@"; do [ "$prev" = -w ] && w=$a; prev=$a; done
+echo "$$" > "$S/caffeinate.pid"
+i=0
+while [ $i -lt 300 ] && kill -0 "$w" 2>/dev/null; do echo x >> "$S/caffeinate.beat"; sleep 0.1; i=$((i + 1)); done""",
+    "python3": """exec "$PYEXE" "$@\"""",
+    "sh": """exec /bin/sh "$@\"""",
+}
+
+PROG = """#!{py} -B
+# a stand-in card check: what it does is its first argument
+import json, os, signal, socket, sys, time
+S = {state!r}
+mode = sys.argv[1]
+me = os.path.basename(os.path.dirname(sys.argv[0]))
+with open(os.path.join(S, "ran.log"), "a") as f:
+    f.write(me + " " + mode + "\\n")
+
+
+def bump(name, by=1, to=None):
+    p = os.path.join(S, "counters", name)
+    with open(p) as f:
+        v = int(f.read().strip())
+    with open(p, "w") as f:
+        f.write(str(to if to is not None else v + by) + "\\n")
+
+
+def heartbeat_child(tag):
+    if os.fork() == 0:
+        with open(os.path.join(S, tag + ".pid"), "w") as f:
+            f.write(str(os.getpid()))
+        for _ in range(200):
+            with open(os.path.join(S, tag + ".beat"), "a") as f:
+                f.write("x")
+            time.sleep(0.1)
+        os._exit(0)
+
+
+if mode == "pass":
+    print("INFO home " + os.environ["HOME"] + "; account " + os.environ["USER"] + "; host " + os.uname().nodename
+          + " " + socket.gethostname() + "; usertmp " + os.path.join(S, "usertmp") + "/x")
+    for k in sorted(os.environ):
+        print("ENV " + k + "=" + os.environ[k])
+    with open(os.environ["NVMTL_LOG_PATH"], "a") as f:
+        f.write("plugin log line from " + os.environ["HOME"] + "\\n")
+    print("PASS stand-in case")
+    print("RESULT pass 1")
+elif mode == "fail":
+    print("FAIL stand-in case: got=1 expected=2")
+    sys.exit(1)
+elif mode == "skip":
+    print("SKIP: a precondition is missing")
+    sys.exit(3)
+elif mode == "inactive":
+    print("INACTIVE: the context is Apple's")
+    sys.exit(4)
+elif mode == "lacks":
+    print("nothing of what is expected")
+elif mode == "forbid":
+    print("PASS stand-in case")
+    sys.stderr.write("NVK Zink: no screen\\n")
+elif mode in ("xid", "gaveup", "fence", "ws"):
+    if mode == "xid":
+        bump("debug.nvrm_xid_count", 2)
+    elif mode == "gaveup":
+        bump("debug.nvrm_chan_gave_up", 1)
+    elif mode == "fence":
+        bump("debug.nvrm_fence_state", to=3)
+    else:
+        with open(os.path.join(S, "ws"), "w") as f:
+            f.write("999\\n")
+    print("PASS stand-in case")
+elif mode == "crash70":
+    sys.stderr.write("CRASH SIGBUS\\n")
+    sys.exit(70)
+elif mode == "sigterm":
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(5)
+elif mode == "alarm":
+    signal.alarm(1)
+    time.sleep(10)
+elif mode == "bg":
+    heartbeat_child(me)
+    print("PASS stand-in case")
+elif mode == "slow":
+    heartbeat_child(me)
+    with open(os.path.join(S, me + ".main.pid"), "w") as f:
+        f.write(str(os.getpid()))
+    time.sleep(float(sys.argv[2]))
+    print("PASS stand-in case")
+elif mode == "info":
+    print("INFO speed 12 fps")
+    print("PASS stand-in case")
+elif mode == "leave":
+    home = os.environ["HOME"]
+    for p in (os.path.join(os.path.dirname(S), "tmp", "nvmtl-left.log"), os.path.join(home, "Library", "Caches", "nvmtl", "entry"),
+              os.path.join(home, "Library", "Logs", "DiagnosticReports", "nvmtltest-2026-11-16-030000.ips"),
+              os.path.join(home, "Library", "Logs", "DiagnosticReports", "Other-2026-11-16-030000.ips")):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write("x")
+    print("PASS stand-in case")
+else:
+    sys.exit(2)
+"""
+
+PROBE = """#!/bin/sh
+echo "device-probe probe" >> "{state}/ran.log"
+cls=$(cat "{state}/probe_class"); gui=$(cat "{state}/probe_gui")
+[ "$cls" = NVMTLDevice ] || echo "SKIP: no device of this driver ($cls)"
+echo "DEVICE class=$cls name=Stand-in GPU (NVMTL over NVK stand-in)"
+echo "ALLDEVICES count=1"
+echo "ALLDEVICE 0 class=$cls name=Stand-in GPU (NVMTL over NVK stand-in)"
+echo "GUI $gui"
+echo "GUI lockkeys=CGSSessionScreenIsLocked"
+[ "$cls" = NVMTLDevice ] || exit 3
+echo "PASS device"
+"""
+
+MESA = "0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4"
+EXPECT = R.DEFAULT_EXPECT
+
+
+class World:
+    """a scratch home, checkout, staged package, installation and stand-in programs"""
+
+    def __init__(self, root, name):
+        self.root = Path(root, name)
+        self.home = self.root / "home"
+        self.base = self.home / "nullmoth-claude"
+        self.src = self.base / "src"
+        self.b = self.base / "build2"
+        self.pkgroot = self.b / "package" / "pkgroot"
+        self.gb = self.root / "GPUBundles"
+        self.state = self.root / "state"
+        self.fake = self.root / "fakebin"
+        for d in (self.src / "tools" / "card", self.src / "build", self.pkgroot, self.gb, self.state / "counters", self.fake,
+                  self.state / "usertmp", self.state / "usercache", self.root / "tmp", self.root / "icd",
+                  self.home / "Library" / "Logs" / "DiagnosticReports"):
+            d.mkdir(parents=True, exist_ok=True)
+        self.system = {}
+        for n, body in SH_FAKES.items():
+            p = self.fake / n
+            p.write_text(f'#!/bin/sh\nS={shlex.quote(str(self.state))}\nPYEXE={shlex.quote(PY)}\n'
+                         f'echo "{n} $*" >> "$S/calls.log"\n{body}\n')
+            p.chmod(0o755)
+            self.system[n] = str(p)
+        card = self.src / "tools" / "card"
+        (card / "device_probe.m").write_text(PROBE.format(state=self.state))
+        (card / "prog.m").write_text(PROG.format(py=PY, state=str(self.state)))
+        (card / "broken.m").write_text("BUILD-FAILS\n")
+        (self.src / "build" / "prepare_zink.py").write_text(f"MESA_COMMIT = '{MESA}'\n")
+        inc = self.b / "out" / "nvk-build" / "mesa" / "include" / "vulkan"
+        inc.mkdir(parents=True)
+        (inc / "vulkan_core.h").write_text("#define VK_HEADER_VERSION 363\n"
+                                           "#define VK_HEADER_VERSION_COMPLETE VK_MAKE_API_VERSION(0, 1, 4, VK_HEADER_VERSION)\n")
+        self.set(git_status="", git_diff_rc="0", gl_bundle="NVKZinkGLDriver", probe_class="NVMTLDevice",
+                 probe_gui="session=1 console=1 logindone=1 locked=0 asleep=0", ws="88\n")
+        for n, v in (("debug.nvrm_xid_count", 0), ("debug.nvrm_chan_recovered", 0), ("debug.nvrm_chan_gave_up", 0),
+                     ("debug.nvrm_fence_state", 1)):
+            (self.state / "counters" / n).write_text(f"{v}\n")
+        self.install()
+
+    def set(self, **kv):
+        for k, v in kv.items():
+            p = self.state / k
+            if v is None:
+                if p.exists():
+                    p.unlink()
+            else:
+                p.write_text(v)
+
+    def put(self, rel, data, mode=0o644):
+        p = self.gb / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data if isinstance(data, bytes) else data.encode())
+        p.chmod(mode)
+
+    def install(self, defects=()):
+        """the stand-in installation, then the staged package's SHA256SUMS and build record that describe it"""
+        if self.gb.exists():
+            shutil.rmtree(self.gb)
+        self.gb.mkdir()
+        front = macho_bytes(U2, (15, 0), "@loader_path/libnvk_minecraft.dylib")
+        rend = macho_bytes(U1, (15, 0), "@loader_path/libnvk_renderer.dylib")
+        self.put("NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver", macho_bytes(U3), 0o755)
+        self.put("nvmtl/libnvmtl_translate.dylib", macho_bytes(U3), 0o755)
+        self.put("nvmtl/libvulkan_nouveau.dylib", rend, 0o755)
+        self.put("nvmtl/libvulkan.1.4.362.dylib", macho_bytes(U3), 0o755)
+        os.symlink("libvulkan.1.4.362.dylib", self.gb / "nvmtl" / "libvulkan.1.dylib")
+        self.put("nvmtl/nvrm610.conf", "NVK_CURVES=1\n# --- my settings, kept on update ---\nNVMTL_X=1\n")
+        self.put("nvmtl-allow.txt", "*\n")
+        self.put("nvmtl/minecraft/lib/libnvk_minecraft.dylib", front, 0o755)
+        self.put("nvmtl/minecraft/lib/libnvk_renderer.dylib", rend, 0o755)
+        api = "1.4.362" if "manifest" in defects else "1.4.363"
+        self.put("nvmtl/minecraft/nvk_bridge_icd.json", json.dumps({"file_format_version": "1.0.0", "ICD": {
+            "library_path": "./lib/libnvk_minecraft.dylib", "api_version": api}}, indent=2))
+        sha = hashlib.sha256(front).hexdigest()
+        self.put("nvmtl/minecraft/nvk-bridge-runtime.properties", "\n".join(
+            ["schema.version=1", "target.os=macos", "target.arch=x86_64", "minecraft.version=26.3",
+             f"runtime.id=nvk-macos-gpu-copy-{sha[:12]}", "library.path=lib/libnvk_minecraft.dylib",
+             f"library.sha256={sha}", "presentation=gpu-copy"]) + "\n")
+        if "extra" in defects:
+            self.put("nvmtl/minecraft/README.txt", "a file the package does not put there\n")
+        for n in ("libnvk_zink.dylib", "libnvk_cgl.dylib"):
+            self.put(f"nvmtl/zink/{n}", macho_bytes(U3), 0o755)
+        self.put("nvmtl/zink/libnvk_zink_vulkan.dylib", front, 0o755)
+        self.put("nvmtl/zink/libnvk_renderer.dylib", rend, 0o755)
+        control = "exit 1" if "control" in defects else 'echo "Trusted GPU bundle: /Library/GPUBundles/$1.bundle"'
+        self.put("nvmtl/zink/gld_bundle_probe", f'#!/bin/sh\ncase "$1" in NVMTLDriver) {control} ;; '
+                 f'*) echo "Trusted GPU bundle: /Library/GPUBundles/$1.bundle" ;; esac\n', 0o755)
+        sync = "exit 1" if "sync" in defects else ("echo 'PASS: 1000 four-thread barrier generations, one serial return each; "
+                                                   "100 queue completion/teardown cycles'")
+        self.put("nvmtl/zink/zink_sync_probe", f"#!/bin/sh\n{sync}\n", 0o755)
+        self.put("nvmtl/zink/cgl-dispatch-map.json", json.dumps({"capabilities": {"core": {"version": 41},
+                                                                                  "compatibility": {"version": 21}}}))
+        self.put("nvmtl/zink/MESA-SOURCE.json", json.dumps({"commit": "0" * 40 if "mesa" in defects else MESA}))
+        self.put("NVKZinkGLDriver.bundle/Contents/Info.plist", plistlib.dumps({"CFBundleIdentifier": "com.nullmoth.NVKZinkGLDriver"}))
+        self.put("NVKZinkGLDriver.bundle/Contents/MacOS/NVKZinkGLDriver", macho_bytes(U3), 0o755)
+        lines = []
+        for i, p in enumerate(sorted(x for x in self.gb.rglob("*") if x.is_file() and not x.is_symlink())):
+            rel = "Library/GPUBundles/" + str(p.relative_to(self.gb))
+            h = hashlib.sha256(p.read_bytes()).hexdigest()
+            if rel.endswith("nvrm610.conf"):
+                h = "0" * 64        # the installer appends the user's block: never compared
+            lines.append(f"{h}  {'./' if i % 2 else ''}{rel}")
+        lines.append("f" * 64 + "  Library/Extensions/NVRM.kext/Contents/Info.plist")
+        (self.pkgroot / "SHA256SUMS").write_text("\n".join(lines) + "\n")
+        (self.pkgroot / "NULLMOTH-LOCAL-BUILD.txt").write_text(
+            "This package was built with ./build.sh from a checkout of the NullMoth driver, not by its release process.\n"
+            f"built:      2026-11-16T03:00:00Z\ncommit:     {EXPECT}\n")
+
+    def checks(self, by_file):
+        card = self.src / "tools" / "card"
+        for f in card.glob("checks_*.py"):
+            f.unlink()
+        for name, rows in by_file.items():
+            if isinstance(rows, str):
+                (card / name).write_text(rows)
+            else:
+                (card / name).write_text("CHECKS = " + repr(rows) + "\n")
+
+    def listing(self):
+        """every path in the scratch world but the stand-ins' own folder and the runs' folders"""
+        out = set()
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames if Path(dirpath, d) not in (self.state, self.base / "runs")]
+            out |= {str(Path(dirpath, n)) for n in dirnames + filenames}
+        return out
+
+    def run(self, argv, no_kill=False, kill_poll=3, timeout=180):
+        cfg = {"runner": str(RUNNER), "system": self.system, "src": str(self.src), "gb": str(self.gb),
+               "audit_tmp": [str(self.root / "tmp")], "icd": str(self.root / "icd"),
+               "exec_only_under": [os.path.realpath(str(self.root)), PY], "kill_poll": kill_poll, "no_kill": no_kill,
+               "argv": argv}
+        (self.state / "wrap.py").write_text(WRAP)
+        (self.state / "cfg.json").write_text(json.dumps(cfg))
+        for f in ("calls.log", "ran.log"):
+            if (self.state / f).exists():
+                (self.state / f).unlink()
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.root / "tmp"),
+               "NVK_INHERITED_KNOB": "1", "VK_ICD_FILENAMES": "/nowhere.json", "SDKROOT": "/nowhere"}
+        before = self.listing()
+        p = subprocess.Popen([PY, "-B", str(self.state / "wrap.py"), str(self.state / "cfg.json")], env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             start_new_session=True)
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            out, err = p.communicate(timeout=10)
+            out += "\n(the runner under test did not end in time)"
+        self.leftover = sorted(self.listing() - before)
+        return p.returncode, out + err
+
+    def calls(self):
+        p = self.state / "calls.log"
+        return p.read_text().splitlines() if p.exists() else []
+
+    def ran(self):
+        p = self.state / "ran.log"
+        return p.read_text().split() if p.exists() else []
+
+
+def prow(cid, mode, *extra, kind="gpu", order=300, source="prog.m", **kw):
+    """a stand-in row of tools/card/checks_plugin.py"""
+    c = {"id": cid, "part": cid.split(".")[0], "title": f"stand-in {mode}", "kind": kind, "order": order,
+         "build": [{"argv": ["/usr/bin/xcrun", "clang", "-fobjc-arc", "{SRC}/tools/card/" + source, "-o", "{BIN}/" + cid + "/nvmtltest"],
+                    "limit": 30}],
+         "argv": ["{BIN}/" + cid + "/nvmtltest", mode] + list(extra), "limit": 15, "expect": {"rc": 0, "stdout": ["^PASS"]}}
+    c.update(kw)
+    return c
+
+
+def results(w, out):
+    try:
+        data = json.loads(Path(out, "results.json").read_text())
+    except (OSError, ValueError):
+        return {}, {}
+    return {r["id"]: r for r in data["rows"]}, data
+
+
+def files_text(out):
+    text = {}
+    for p in Path(out).rglob("*"):
+        if p.is_file() and "bin" not in p.relative_to(out).parts:
+            text[str(p.relative_to(out))] = p.read_bytes().decode("utf-8", "replace")
+    return text
+
+
+def beats_stopped(path):
+    """a heartbeat file that no longer grows: what wrote it was stopped"""
+    if not path.exists():
+        return False
+    a = path.stat().st_size
+    time.sleep(0.6)
+    return path.stat().st_size == a
+
+
+TOP = tempfile.mkdtemp(prefix="card-selftest-")
+try:
+    user = pwd.getpwuid(os.getuid()).pw_name
+except KeyError:
+    user = ""
+host = os.uname().nodename
+try:
+    # ------------------------------------------------------------------------------------------ one whole run
+    w = World(TOP, "main")
+    rows = [
+        prow("plugin.pass", "pass", order=300, info=[r"^INFO speed"]),
+        prow("plugin.fail", "fail", order=301),
+        prow("plugin.skip", "skip", order=302),
+        prow("plugin.inactive", "inactive", order=303),
+        prow("plugin.lacks", "lacks", order=304),
+        prow("plugin.forbid", "forbid", order=305, expect={"rc": 0, "stdout": ["^PASS"], "stderr_forbid": [r"^NVK Zink: "]}),
+        prow("plugin.broken", "pass", order=306, source="broken.m"),
+        prow("plugin.nosource", "pass", order=307, sources=["tools/card/absent.m"]),
+        prow("plugin.nofile", "pass", order=308, needs=["file:{GB}/absent"]),
+        prow("plugin.window", "pass", order=700, window=True),
+        prow("plugin.zink", "pass", order=600, needs=["zink"]),
+        prow("plugin.xid", "xid", order=309),
+        prow("plugin.crash", "crash70", order=310),
+        prow("plugin.signal", "sigterm", order=311),
+        prow("plugin.bg", "bg", order=312),
+        prow("plugin.info", "info", order=313, info=[r"^INFO speed"]),
+        {"id": "plugin.mapped", "part": "plugin", "title": "a program started by the table's python3", "kind": "cpu",
+         "order": 200, "argv": ["/usr/bin/python3", "-B", "{SRC}/tools/card/prog.m", "pass"], "limit": 15,
+         "env": {"CARD_EXTRA": "x{OUT}y"}, "expect": {"rc": 0, "stdout": ["^PASS", r"^ENV CARD_EXTRA=x/.*y$"]}},
+    ]
+    w.checks({"checks_plugin.py": rows})
+    w.set(gl_bundle="AppleMetalOpenGLRenderer")
+    out = w.base / "runs" / "main"
+    rc, text = w.run(["--out", str(out), "--no-window"])
+    got, data = results(w, out)
+    want = {"plugin.pass": "pass", "plugin.fail": "FAIL", "plugin.skip": "skip", "plugin.inactive": "inactive",
+            "plugin.lacks": "FAIL", "plugin.forbid": "FAIL", "plugin.broken": "build failed", "plugin.nosource": "skip",
+            "plugin.nofile": "skip", "plugin.window": "skip", "plugin.zink": "inactive", "plugin.xid": "FAIL",
+            "plugin.crash": "CRASH", "plugin.signal": "CRASH", "plugin.bg": "pass", "plugin.info": "pass",
+            "plugin.mapped": "pass"}
+    arm("a whole run with stand-ins ends with exit 1 (a failure) and DONE", rc == 1 and (out / "DONE").read_text().startswith("exit 1"), text)
+    arm("each row's result", {k: got.get(k, {}).get("result") for k in want} == want,
+        {k: (got.get(k, {}).get("result"), got.get(k, {}).get("why")) for k in want})
+    why = {k: got.get(k, {}).get("why", "") for k in want}
+    arm("the reasons: rc, stdout lacks, stderr has, the build's error: line, the source, the file, --no-window, Zink, Xid, signals",
+        why["plugin.fail"] == "rc 1" and why["plugin.lacks"].startswith("stdout lacks") and "NVK Zink: no screen" in why["plugin.forbid"]
+        and "error: this stand-in source does not build" in why["plugin.broken"] and "not in this checkout" in why["plugin.nosource"]
+        and why["plugin.nofile"].startswith("needs ") and why["plugin.window"] == "left out with --no-window"
+        and "AppleMetalOpenGLRenderer" in why["plugin.zink"] and why["plugin.xid"] == "Xid +2"
+        and why["plugin.crash"] == "SIGBUS" and why["plugin.signal"] == "SIGTERM" and why["plugin.skip"] == "a precondition is missing",
+        why)
+    arm("a check's Xid rise is in results.json", got.get("plugin.xid", {}).get("xid_delta") == 2, got.get("plugin.xid"))
+    ran = w.ran()
+    arm("the rows that skip before running, and the build that failed, never started their program",
+        not any(x in ran for x in ("plugin.nosource", "plugin.nofile", "plugin.window", "plugin.zink", "plugin.broken")), ran)
+    arm("what a check left running in its group was stopped with it", beats_stopped(w.state / "plugin.bg.beat"))
+    report = (out / "report.md").read_text()
+    arm("report.md has the header, the table, the counts, the skips and why, the information and the audit",
+        "| # | part | check | result | seconds | Xid | detail |" in report and "IOGLBundleName AppleMetalOpenGLRenderer" in report
+        and "## Skipped and why" in report and "plugin.info: INFO speed 12 fps" in report
+        and "## Written outside the work folder" in report and re.search(r"\b\d+ ran, \d+ failed, \d+ skipped", report), report[-3000:])
+    logs = sorted(p.name for p in (out / "logs").iterdir())
+    arm("one log per row that ran, a build log per build, and no raw stdout, stderr or plugin log left beside them",
+        all(any(n.endswith("-" + k + ".log") for n in logs) for k in ("plugin.pass", "plugin.fail", "plugin.mapped"))
+        and any(n.endswith("plugin.broken.build.log") for n in logs) and not any(n.endswith((".out", ".err", ".nvmtl.log")) for n in logs), logs)
+    plog = next(((out / "logs" / n).read_text() for n in logs if n.endswith("-plugin.pass.log")), "")
+    env_lines = dict(l[4:].split("=", 1) for l in plog.splitlines() if l.startswith("ENV "))
+    arm("a check's environment is built from nothing: no knob, Vulkan or SDK variable of the runner's environment",
+        env_lines and not any(k in env_lines for k in ("NVK_INHERITED_KNOB", "VK_ICD_FILENAMES", "SDKROOT"))
+        and env_lines.get("PATH") == "/usr/bin:/bin:/usr/sbin:/sbin" and env_lines.get("NVMTL_PROCESS_ENV") == "1"
+        and env_lines.get("TMPDIR", "").endswith("runs/main/tmp/plugin.pass/") and env_lines.get("LANG") == "en_US.UTF-8"
+        and env_lines.get("NVMTL_LOG_PATH", "").endswith("-plugin.pass.nvmtl.log") and env_lines.get("NVMTL_NO_FAILED_AIR") == "1"
+        and "runs/main/cache/" in env_lines.get("NVMTL_AIRCACHE", "") and "runs/main/cache/" in env_lines.get("MESA_SHADER_CACHE_DIR", ""),
+        env_lines)
+    arm("the plugin's log of a check is in that check's log", "--- nvmtl.log ---\nplugin log line from ~" in plog, plog[-800:])
+    xc = [l for l in w.calls() if l.startswith("xcrun-env")]
+    arm("builds get their own TMPDIR and clang module cache in the run folder, and no NVMTL_ variable",
+        xc and all("runs/main/tmp/" in l and "runs/main/cache/clang" in l and "NVMTL_PROCESS_ENV=unset" in l for l in xc), xc)
+    arm("a row's env is added with its placeholders filled in; /usr/bin/python3 is the table's python3",
+        got.get("plugin.mapped", {}).get("result") == "pass" and any(l.startswith("python3 -B ") for l in w.calls()), w.calls())
+    texts = files_text(out)
+    raw = [w.home.as_posix(), str(w.state / "usertmp")]
+    leaks = {n: [r for r in raw if r in t] for n, t in texts.items()}
+    word = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(user) + r"(?![A-Za-z0-9_])") if len(user) > 1 else None
+    hostw = re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(host) + r"(?![A-Za-z0-9_-])", re.I) if len(host) > 1 else None
+    for n, t in texts.items():
+        if word and word.search(t):
+            leaks.setdefault(n, []).append("the account name")
+        if hostw and hostw.search(t):
+            leaks.setdefault(n, []).append("the host name")
+    leaks = {n: v for n, v in leaks.items() if v}
+    arm("no file of the run holds the home folder, the account, the host or the user temporary folder",
+        not leaks and "INFO home ~; account <user>; host <host>" in plog and "usertmp <usertmp>/x" in plog, (leaks, plog[:600]))
+    arm("nothing was written outside the run folder", not w.leftover, w.leftover)
+    arm("the runner's git calls only read (status, rev-parse, diff --quiet with --no-ext-diff and --no-textconv)",
+        all(re.match(r"^git -c core\.fsmonitor=false -C \S+ (status --porcelain|rev-parse HEAD|diff --quiet --no-ext-diff --no-textconv )", l)
+            for l in w.calls() if l.startswith("git ")) and any(l.startswith("git ") for l in w.calls()),
+        [l for l in w.calls() if l.startswith("git ")])
+    arm("no caffeinate for a run whose windowed rows are left out", not (w.state / "caffeinate.pid").exists())
+    arm("stdout carries one line per row and the table", text.count("\n| ") >= len(want) and "plugin.xid: FAIL (Xid +2)" in text, text[-2000:])
+
+    # ------------------------------------------------------------------------------ what a check leaves outside
+    w = World(TOP, "audit")
+    w.checks({"checks_plugin.py": [prow("plugin.leave", "leave", order=300)]})
+    out = w.base / "runs" / "l"
+    rc, text = w.run(["--out", str(out)])
+    report = (out / "report.md").read_text() if (out / "report.md").exists() else ""
+    tail = report.split("## Written outside the work folder", 1)[-1]
+    arm("report.md names what appeared outside the run folder (the plugin's /tmp files, its cache entries, the crash "
+        "reports of the programs it ran, not of others), by name and with the home folder scrubbed",
+        rc == 0 and re.search(r"^- \S*/tmp/nvmtl-left\.log$", tail, re.M) and "~/Library/Caches/nvmtl: 1 entries newer" in tail
+        and "~/Library/Logs/DiagnosticReports/nvmtltest-2026-11-16-030000.ips" in tail and "Other-" not in tail
+        and str(w.home) not in report, (rc, tail, text[-600:]))
+
+    # ----------------------------------------------------------------------- a timeout, its own alarm, a deadline
+    w = World(TOP, "timeout")
+    w.checks({"checks_plugin.py": [prow("plugin.slow", "slow", "20", order=300, limit=2),
+                                   prow("plugin.after", "pass", order=301),
+                                   prow("plugin.cpu", "pass", kind="cpu", order=302)]})
+    out = w.base / "runs" / "t"
+    t0 = time.monotonic()
+    rc, text = w.run(["--out", str(out)])
+    took = time.monotonic() - t0
+    got, _ = results(w, out)
+    arm("a GPU check at its limit is TIMEOUT, later GPU checks are not run, a later CPU check runs, exit 4",
+        rc == 4 and got.get("plugin.slow", {}).get("result") == "TIMEOUT" and got.get("plugin.after", {}).get("result") == "not run"
+        and "timed out" in got.get("plugin.after", {}).get("why", "") and got.get("plugin.cpu", {}).get("result") == "pass",
+        (rc, {k: (v["result"], v["why"]) for k, v in got.items()}, text[-1500:]))
+    arm("its whole process group was killed (its background child stopped too), well before the program's own 20 s",
+        beats_stopped(w.state / "plugin.slow.beat") and took < 15, took)
+    w = World(TOP, "alarm")
+    w.checks({"checks_plugin.py": [prow("plugin.alarm", "alarm", order=300), prow("plugin.after", "pass", order=301)]})
+    out = w.base / "runs" / "a"
+    rc, text = w.run(["--out", str(out)])
+    got, _ = results(w, out)
+    arm("a check ended by its own alarm (SIGALRM) is TIMEOUT and stops the later GPU checks",
+        rc == 4 and got.get("plugin.alarm", {}).get("result") == "TIMEOUT" and got.get("plugin.after", {}).get("result") == "not run",
+        (rc, got, text[-800:]))
+    w = World(TOP, "maxsec")
+    w.checks({"checks_plugin.py": [prow("plugin.slow", "slow", "20", order=300, limit=60)]})
+    out = w.base / "runs" / "m"
+    rc, text = w.run(["--out", str(out), "--max-seconds", "1"])
+    got, _ = results(w, out)
+    arm("--max-seconds caps a row's limit", got.get("plugin.slow", {}).get("result") == "TIMEOUT", (got, text[-800:]))
+    w = World(TOP, "deadline")
+    w.checks({"checks_plugin.py": [prow("plugin.slow", "slow", "1.5", order=300, kind="cpu"),
+                                   prow("plugin.after", "pass", order=301, kind="cpu")]})
+    out = w.base / "runs" / "d"
+    rc, text = w.run(["--out", str(out), "--deadline", "1"])
+    got, _ = results(w, out)
+    arm("past the deadline nothing more starts: the rest is not run, exit 4",
+        rc == 4 and got.get("plugin.slow", {}).get("result") == "pass" and got.get("plugin.after", {}).get("result") == "not run"
+        and "deadline" in got.get("plugin.after", {}).get("why", ""), (rc, got, text[-800:]))
+
+    # -------------------------------------------------------------------------------------------------- STUCK
+    w = World(TOP, "stuck")
+    w.checks({"checks_plugin.py": [prow("plugin.stuck", "slow", "20", order=300, limit=1),
+                                   prow("plugin.after", "pass", order=301),
+                                   prow("plugin.cpu", "pass", kind="cpu", order=302)]})
+    out = w.base / "runs" / "s"
+    rc, text = w.run(["--out", str(out)], no_kill=True, kill_poll=1)
+    got, _ = results(w, out)
+    log = next((p.read_text() for p in (out / "logs").glob("*-plugin.stuck.log")), "") if (out / "logs").exists() else ""
+    arm("a check still alive after its kill is STUCK: the later GPU checks are not run, the report is written, exit 4",
+        rc == 4 and got.get("plugin.stuck", {}).get("result") == "STUCK" and got.get("plugin.after", {}).get("result") == "not run"
+        and "could not be stopped" in got.get("plugin.after", {}).get("why", "") and got.get("plugin.cpu", {}).get("result") == "pass"
+        and (out / "DONE").exists(), (rc, got, text[-1500:]))
+    arm("the STUCK check's log holds ps's lines of its process group", "--- ps of its process group ---" in log, log[-600:])
+    for tag in ("plugin.stuck.main", "plugin.stuck"):
+        try:
+            pid = int((w.state / f"{tag}.pid").read_text())
+            os.killpg(pid, signal.SIGKILL) if tag.endswith("main") else os.kill(pid, signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+    # ---------------------------------------------------------------------------------------------- stop rules
+    for mode, word in (("gaveup", "debug.nvrm_chan_gave_up rose by 1"), ("fence", "debug.nvrm_fence_state changed from 1 to 3"),
+                       ("ws", "WindowServer's pid changed")):
+        w = World(TOP, "stop-" + mode)
+        w.checks({"checks_plugin.py": [prow("plugin.cause", mode, order=300), prow("plugin.after", "pass", order=301),
+                                       prow("plugin.cpu", "pass", kind="cpu", order=302)]})
+        out = w.base / "runs" / mode
+        rc, text = w.run(["--out", str(out)])
+        got, data = results(w, out)
+        arm(f"stop rule: {word} stops every later GPU check (exit 4), a later CPU check still runs",
+            rc == 4 and got.get("plugin.cause", {}).get("result") == "pass" and got.get("plugin.after", {}).get("result") == "not run"
+            and word in (data.get("stopped") or "") and got.get("plugin.cpu", {}).get("result") == "pass", (rc, data.get("stopped"), got, text[-800:]))
+
+    # ---------------------------------------------------------------------------------- a window, caffeinate
+    w = World(TOP, "window")
+    w.checks({"checks_plugin.py": [prow("plugin.cpu", "pass", kind="cpu", order=200),
+                                   prow("plugin.window", "pass", order=700, window=True)]})
+    out = w.base / "runs" / "w"
+    rc, text = w.run(["--out", str(out)])
+    got, _ = results(w, out)
+    caff = [l for l in w.calls() if l.startswith("caffeinate ")]
+    arm("a window check with a usable GUI runs, under caffeinate -d -i -w <the runner's pid>, and every row passed: exit 0",
+        rc == 0 and got.get("plugin.window", {}).get("result") == "pass" and len(caff) == 1
+        and re.match(r"^caffeinate -d -i -w \d+$", caff[0]), (rc, caff, got, text[-800:]))
+    arm("caffeinate was stopped after the last window check", beats_stopped(w.state / "caffeinate.beat"))
+    w.set(probe_gui="session=1 console=1 logindone=1 locked=1 asleep=0")
+    out = w.base / "runs" / "w2"
+    rc, text = w.run(["--out", str(out)])
+    got, _ = results(w, out)
+    arm("a locked screen makes a window check a skip (needs gui), not a failure",
+        rc == 0 and got.get("plugin.window", {}).get("result") == "skip" and "locked" in got.get("plugin.window", {}).get("why", ""),
+        (rc, got.get("plugin.window"), text[-600:]))
+
+    # --------------------------------------------------------------------------------------------- refusals
+    w = World(TOP, "refuse")
+    w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
+    outside = Path(TOP) / "elsewhere"
+    rc, text = w.run(["--out", str(outside)])
+    arm("an --out outside ~/nullmoth-claude is refused (exit 3) and nothing is made", rc == 3 and not outside.exists()
+        and "not inside" in text, text[-600:])
+    full = w.base / "runs" / "full"
+    full.mkdir(parents=True)
+    (full / "x").write_text("")
+    rc, text = w.run(["--out", str(full)])
+    arm("an --out that is not empty is refused (exit 3)", rc == 3 and "not an empty folder" in text, text[-600:])
+    rc, text = w.run(["--out", str(w.src / "out")])
+    arm("an --out inside the checkout is refused (exit 3)", rc == 3 and not (w.src / "out").exists(), text[-600:])
+    for what, setup, word in (
+            ("a dirty checkout", dict(git_status=" M plugin/NVMTLDevice.m\n"), "not clean"),
+            ("driver sources that differ from --expect", dict(git_diff_rc="1"), "differ from"),
+            ("no accelerator in the IORegistry", dict(no_accel=""), "no NVAccel"),
+            ("a device of another class", dict(probe_class="AMDRadeonDevice"), "no device of this driver")):
+        w = World(TOP, "refuse-" + re.sub(r"\W+", "-", what))
+        w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
+        w.set(**setup)
+        out = w.base / "runs" / "r"
+        rc, text = w.run(["--out", str(out)])
+        got, data = results(w, out)
+        arm(f"refused: {what} (exit 3, report.md and DONE written, no check ran)",
+            rc == 3 and word in (data.get("refused") or "") and (out / "DONE").exists() and "plugin.pass" not in w.ran(),
+            (rc, data.get("refused"), w.ran(), text[-600:]))
+    w = World(TOP, "refuse-commit")
+    w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
+    out = w.base / "runs" / "r"
+    rc, text = w.run(["--out", str(out), "--expect", "1234567"])
+    got, data = results(w, out)
+    arm("refused: a staged package of another commit than --expect", rc == 3 and "not 1234567" in (data.get("refused") or ""), text[-600:])
+    w = World(TOP, "refuse-hash")
+    w.checks({"checks_plugin.py": [prow("plugin.pass", "pass")]})
+    (w.gb / "nvmtl" / "zink" / "libnvk_cgl.dylib").write_bytes(b"another build")
+    out = w.base / "runs" / "r"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    arm("refused: an installed file that differs from the staged package (nvrm610.conf, whose line does not match, is not "
+        "compared)", rc == 3 and "1 of" in (data.get("refused") or "") and "libnvk_cgl.dylib" in (data.get("refused") or ""),
+        (data.get("refused"), text[-600:]))
+    w = World(TOP, "refuse-key")
+    w.checks({"checks_plugin.py": [prow("plugin.pass", "pass", timeout=3)]})
+    rc, text = w.run(["--list"])
+    arm("an unknown key refuses the run when the checks are loaded, naming the file, the row and the key",
+        rc == 3 and "tools/card/checks_plugin.py: plugin.pass: unknown key 'timeout'" in text and not w.calls(), text[-600:])
+
+    # ------------------------------------------------------------------------------------------- --list, --plan
+    w = World(TOP, "list")
+    w.checks({"checks_plugin.py": [prow("plugin.b", "pass", order=301), prow("plugin.a", "pass", order=300, kind="cpu")]})
+    rc, text = w.run(["--list"])
+    arm("--list prints each row's id, part, kind, order and title in order, and starts nothing",
+        rc == 0 and "plugin.a\tplugin\tcpu\t300\tstand-in pass\nplugin.b\tplugin\tgpu\t301\tstand-in pass" in text
+        and not w.calls() and not w.leftover, (text, w.calls()))
+    out = w.base / "runs" / "plan"
+    rc, text = w.run(["--plan", "--out", str(out)])
+    calls = [l.split()[0] for l in w.calls()]
+    arm("--plan runs the read gates and prints the build and run plan, builds nothing, starts no check program, writes nothing",
+        rc == 0 and "plan: no GPU program runs" in text and "run (15 s): " in text and "nvmtltest pass" in text
+        and "xcrun" not in calls and not w.ran() and not out.exists() and not w.leftover and "git" in calls, (text[-1500:], calls))
+
+    # ------------------------------------------------------------ the real install rows on a stand-in installation
+    w = World(TOP, "install")
+    w.checks({"checks_install.py": (CARD / "checks_install.py").read_text()})
+    out = w.base / "runs" / "i"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    arm("tools/card/checks_install.py on a whole stand-in installation: every row passes, exit 0",
+        rc == 0 and len(got) >= 7 and all(r["result"] == "pass" for r in got.values()),
+        (rc, {k: (v["result"], v["why"]) for k, v in got.items()}, text[-1500:]))
+    w.install(defects=("manifest", "extra", "mesa", "control", "sync"))
+    w.set(gl_bundle="AppleMetalOpenGLRenderer")
+    out = w.base / "runs" / "i2"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    want = {"install.identity": "pass", "install.zink-bundle": "inactive", "install.minecraft-files": "FAIL",
+            "install.zink-files": "pass", "install.mesa-source": "FAIL", "install.gl-bundle-trusted": "skip",
+            "install.zink-sync-probe": "FAIL"}
+    arm("and with a defect for each row: Apple's OpenGL named, an extra file and another api_version, another Mesa commit, a "
+        "lookup that does not find the control, a failing barrier probe", rc == 1 and {k: got.get(k, {}).get("result") for k in want} == want
+        and "README.txt" in got["install.minecraft-files"]["why"] and "1.4.362" in got["install.minecraft-files"]["why"],
+        (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
+    arm("and nothing was written outside the run folder", not w.leftover, w.leftover)
+finally:
+    shutil.rmtree(TOP, ignore_errors=True)
+
+if fails:
+    print(f"FAILED: {fails}")
+    sys.exit(1)
+print("PASS")
