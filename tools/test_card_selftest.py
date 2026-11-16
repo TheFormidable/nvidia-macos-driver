@@ -27,8 +27,10 @@ give-up, fence state, WindowServer's pid), the deadline, caffeinate started with
 check and stopped after it; the refusals (an --out outside the base or not empty, a dirty checkout, other driver
 sources, another package commit, an installed file that differs, a device of another class, an unknown key), --list
 and --plan (which start no check program and write nothing). The real tools/card/checks_install.py runs against a
-stand-in installation, once whole (every row passes) and once with a defect for each row. After every run: no file
-appeared outside the run folder and the stand-ins' own folder.
+stand-in installation, once whole (every row passes) and once with a defect for each row; install.plugin-translator
+also with a copy of the translator beside the plugin of the same build and of an older one, without nvmtl/'s copy, and
+on a checkout whose plugin loader has no preference for the copy beside it. After every run: no file appeared outside
+the run folder and the stand-ins' own folder.
 
 Not a card check: it runs on Linux and on a Mac without the driver. Written and run on Linux only so far."""
 import sys
@@ -463,6 +465,23 @@ echo "PASS device"
 """
 
 MESA = "0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4"
+# nvmtl/'s translator, and an older build of it with another LC_UUID
+XU, XU_OLD = "44" * 16, "29" * 16
+XLATE, XLATE_OLD = macho_bytes(XU), macho_bytes(XU_OLD) + b"older"
+# a plugin loader without the preference for a copy beside the plugin: its function that calls dladdr opens nvmtl/'s
+# copy by its absolute path, and the bare name is only in comments, a log line and a function that does not call dladdr
+LOADER_NO_BESIDE = """static const char *nvmtl_xlate_name(void) {
+    return /* dladdr(&x, &info) is not called here */ "libnvmtl_translate.dylib";
+}
+static int nvmtl_xlate_ready(void) {
+    Dl_info info; // dladdr(...) then @"libnvmtl_translate.dylib" beside the plugin: not in this loader
+    if (dladdr((const void *)&nvmtl_xlate_ready, &info))
+        nvlog("translate: no libnvmtl_translate.dylib beside %s", info.dli_fname);
+    /* { @"libnvmtl_translate.dylib" } */
+    void *h = dlopen("/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib", RTLD_NOW | RTLD_LOCAL);
+    return h != NULL;
+}
+"""
 EXPECT = R.DEFAULT_EXPECT
 
 
@@ -479,7 +498,8 @@ class World:
         self.gb = self.root / "GPUBundles"
         self.state = self.root / "state"
         self.fake = self.root / "fakebin"
-        for d in (self.src / "tools" / "card", self.src / "build", self.pkgroot, self.gb, self.state / "counters", self.fake,
+        for d in (self.src / "tools" / "card", self.src / "build", self.src / "plugin", self.pkgroot, self.gb,
+                  self.state / "counters", self.fake,
                   self.state / "usertmp", self.state / "usercache", self.root / "tmp", self.root / "icd",
                   self.home / "Library" / "Logs" / "DiagnosticReports"):
             d.mkdir(parents=True, exist_ok=True)
@@ -495,6 +515,8 @@ class World:
         (card / "prog.m").write_text(PROG.format(py=PY, state=str(self.state)))
         (card / "broken.m").write_text("BUILD-FAILS\n")
         (self.src / "build" / "prepare_zink.py").write_text(f"MESA_COMMIT = '{MESA}'\n")
+        # the checkout's own translator loader, which install.plugin-translator reads for the plugin's preference
+        (self.src / "plugin" / "NVMTLLibraryLoad.m").write_text((ROOT / "plugin" / "NVMTLLibraryLoad.m").read_text())
         inc = self.b / "out" / "nvk-build" / "mesa" / "include" / "vulkan"
         inc.mkdir(parents=True)
         (inc / "vulkan_core.h").write_text("#define VK_HEADER_VERSION 363\n"
@@ -529,7 +551,12 @@ class World:
         front = macho_bytes(U2, (15, 0), "@loader_path/libnvk_minecraft.dylib")
         rend = macho_bytes(U1, (15, 0), "@loader_path/libnvk_renderer.dylib")
         self.put("NVMTLDriver.bundle/Contents/MacOS/NVMTLDriver", macho_bytes(U3), 0o755)
-        self.put("nvmtl/libnvmtl_translate.dylib", macho_bytes(U3), 0o755)
+        if "noxlate" not in defects:
+            self.put("nvmtl/libnvmtl_translate.dylib", XLATE, 0o755)
+        if "beside-same" in defects:     # the same build signed apart: other bytes, the same LC_UUID
+            self.put("NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib", XLATE + b"its own signature", 0o755)
+        if "beside-old" in defects:      # an older release's copy, kept by a package staged onto that release
+            self.put("NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib", XLATE_OLD, 0o755)
         self.put("nvmtl/libvulkan_nouveau.dylib", rend, 0o755)
         self.put("nvmtl/libvulkan.1.4.362.dylib", macho_bytes(U3), 0o755)
         os.symlink("libvulkan.1.4.362.dylib", self.gb / "nvmtl" / "libvulkan.1.dylib")
@@ -1122,22 +1149,50 @@ try:
     rc, text = w.run(["--out", str(out)])
     got, data = results(w, out)
     arm("tools/card/checks_install.py on a whole stand-in installation: every row passes, exit 0",
-        rc == 0 and len(got) >= 7 and all(r["result"] == "pass" for r in got.values()),
+        rc == 0 and len(got) >= 8 and all(r["result"] == "pass" for r in got.values()),
         (rc, {k: (v["result"], v["why"]) for k, v in got.items()}, text[-1500:]))
-    w.install(defects=("manifest", "extra", "mesa", "control", "sync"))
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator with no copy beside the plugin: it passes, the plugin opens nvmtl/'s, and the "
+        "checkout's own loader is read as preferring the copy beside the plugin (nvmtl_xlate_ready)",
+        pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {w.gb}/nvmtl/libnvmtl_translate.dylib: no "
+        "copy beside it" and any(l.startswith("INFO plugin source: plugin/NVMTLLibraryLoad.m (nvmtl_xlate_ready) calls "
+                                              "dladdr") for l in pt.get("info", []))
+        and f"INFO translator nvmtl/libnvmtl_translate.dylib: x86_64, LC_UUID {XU}, {len(XLATE)} bytes, sha256 "
+            f"{hashlib.sha256(XLATE).hexdigest()[:12]}" in pt.get("info", []), pt)
+    w.install(defects=("manifest", "extra", "mesa", "control", "sync", "beside-old"))
     w.set(gl_bundle="AppleMetalOpenGLRenderer")
     out = w.base / "runs" / "i2"
     rc, text = w.run(["--out", str(out)])
     got, data = results(w, out)
     want = {"install.identity": "pass", "install.zink-bundle": "inactive", "install.minecraft-files": "FAIL",
-            "install.zink-files": "pass", "install.mesa-source": "FAIL", "install.gl-bundle-trusted": "skip",
-            "install.zink-sync-probe": "FAIL"}
-    arm("and with a defect for each row: Apple's OpenGL named, an extra file and another api_version, another Mesa commit, a "
-        "lookup that does not find the control, a failing barrier probe", rc == 1 and {k: got.get(k, {}).get("result") for k in want} == want
+            "install.zink-files": "pass", "install.mesa-source": "FAIL", "install.plugin-translator": "FAIL",
+            "install.gl-bundle-trusted": "skip", "install.zink-sync-probe": "FAIL"}
+    arm("and with a defect for each row: Apple's OpenGL named, an extra file and another api_version, another Mesa "
+        "commit, an older translator beside the plugin, a lookup that does not find the control, a failing barrier "
+        "probe",
+        rc == 1 and {k: got.get(k, {}).get("result") for k in want} == want
         and "README.txt" in got["install.minecraft-files"]["why"] and "1.4.362" in got["install.minecraft-files"]["why"],
         (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
+    pt = got.get("install.plugin-translator", {})
+    beside = f"{w.gb}/NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib"
+    arm("install.plugin-translator with an older build beside the plugin (install.identity still passes, as on the Mac "
+        "of round 11): one FAIL line naming the file the plugin opens, both LC_UUIDs, the plugin's preference and what "
+        "it means for the run",
+        got.get("install.identity", {}).get("result") == "pass"
+        and pt.get("why") == f"the Metal plugin opens {beside} (LC_UUID {XU_OLD}), not the build of "
+        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU}), because plugin/NVMTLLibraryLoad.m (nvmtl_xlate_ready) "
+        f"prefers the copy beside the plugin: this run's Metal rows translate with that copy, while its readback rows "
+        f"use {w.gb}/nvmtl/libnvmtl_translate.dylib" and f"INFO the plugin opens {beside}" in pt.get("info", []), pt)
+    report = (out / "report.md").read_text()
+    old_line = ("- install.plugin-translator: INFO translator "
+                "NVMTLDriver.bundle/Contents/MacOS/libnvmtl_translate.dylib: "
+                f"x86_64, LC_UUID {XU_OLD}, {len(XLATE_OLD)} bytes, "
+                f"sha256 {hashlib.sha256(XLATE_OLD).hexdigest()[:12]}")
+    arm("and report.md lists that failing read row's INFO lines (each copy's LC_UUID, size and SHA-256 prefix) under "
+        "Information", old_line in report.split("## Information", 1)[-1]
+        and f"| install.plugin-translator | FAIL (the Metal plugin opens {beside} " in report, report[-3000:])
     arm("and nothing was written outside the run folder", not w.leftover, w.leftover)
-    w.install(defects=("noprobe",))
+    w.install(defects=("noprobe", "beside-same"))
     w.set(gl_bundle="NVKZinkGLDriver")
     out = w.base / "runs" / "i3"
     rc, text = w.run(["--out", str(out)])
@@ -1145,6 +1200,41 @@ try:
     arm("and with gld_bundle_probe missing: the lookup row fails (it is not a skip) and so does the zink folder's row",
         rc == 1 and got.get("install.gl-bundle-trusted", {}).get("result") == "FAIL"
         and got.get("install.zink-files", {}).get("result") == "FAIL", (rc, {k: (v["result"], v["why"]) for k, v in got.items()}))
+    pt = got.get("install.plugin-translator", {})
+    arm("and with a copy beside the plugin of the same build, signed apart (other bytes, the same LC_UUID): "
+        "install.plugin-translator passes, the plugin opening that copy",
+        pt.get("result") == "pass" and pt.get("why") == f"the plugin opens {beside}, the same build as "
+        f"{w.gb}/nvmtl/libnvmtl_translate.dylib (LC_UUID {XU})", pt)
+    left = list(w.leftover)
+    only = ["--only", r"^install\.plugin-translator$"]
+    w.install(defects=("noxlate",))
+    out = w.base / "runs" / "i4"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator with nvmtl/libnvmtl_translate.dylib missing: it fails, exit 1",
+        rc == 1 and list(got) == ["install.plugin-translator"] and pt.get("result") == "FAIL"
+        and pt.get("why") == f"{w.gb}/nvmtl/libnvmtl_translate.dylib, the translator of the readback rows and the "
+        "plugin's fallback, is missing", (rc, pt, text[-800:]))
+    left += w.leftover
+    w.install(defects=("beside-old",))
+    (w.src / "plugin" / "NVMTLLibraryLoad.m").write_text(LOADER_NO_BESIDE)
+    out = w.base / "runs" / "i5"
+    rc, text = w.run(only + ["--out", str(out)])
+    got, data = results(w, out)
+    pt = got.get("install.plugin-translator", {})
+    arm("install.plugin-translator on a checkout whose plugin loader has no preference for a copy beside it (its "
+        "function that calls dladdr opens nvmtl/'s by its absolute path; the bare name only in comments, a log line "
+        "and a function without dladdr): it passes on nvmtl/'s alone though an older copy is beside the plugin, and "
+        "says so as information",
+        rc == 0 and pt.get("result") == "pass"
+        and pt.get("why") == f"the plugin opens {w.gb}/nvmtl/libnvmtl_translate.dylib: its source names no copy "
+        "beside it"
+        and "INFO plugin source: no function of plugin/NVMTLLibraryLoad.m calls dladdr and names "
+            "libnvmtl_translate.dylib: this plugin opens nvmtl/'s only, and a copy beside it does not matter"
+            in pt.get("info", []), (rc, pt, text[-800:]))
+    left += w.leftover
+    arm("and nothing was written outside the run folder by these three runs either", not left, left)
 finally:
     shutil.rmtree(TOP, ignore_errors=True)
 
