@@ -34,9 +34,10 @@ NV_STATUS nvrm_ce_clear_vidmem(nv_state_t *nv, NvU32 hClient, NvU32 hMemory, NvU
 volatile NvU64 nvrm_pageoff_last_runs, nvrm_pageoff_last_pages, nvrm_pageoff_coalesced, nvrm_pageoff_perpage;
 
 // Has the engine finished the work with this id? ceutilsUpdateProgress reads the channel's semaphore once, and a read
-// that failed comes back as 0: the RM then counts a wrap and stores a progress ahead of everything ever sent, for the
-// rest of the boot, so every later wait here would end at once. More finished than was sent cannot be: such an answer
-// is put back as it was and read as not finished.
+// that failed comes back as 0: the RM then counts a wrap and stores a progress ahead of everything ever sent, which
+// stays until the RM makes this utility again (a standby does), so every later wait of this file on it, the clear's and
+// the page-off's, would end at once. The RM's own waits read the semaphore itself and never saw it. More finished than
+// was sent cannot be: such an answer is put back as it was and read as not finished.
 static NvBool _nvrmCeReached(struct CeUtils *pCe, NvU64 workId)
 {
     const NvU64 before = pCe->lastCompletedPayload;
@@ -138,7 +139,8 @@ static NV_STATUS _nvrmCopyLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, con
 // NVRM_CE_CLEAR_WAIT_NS at most, by the clock and not by a count of polls: the locks and maybe the display gate are
 // held meanwhile. The block is only ever cleared from its start, and never beyond the RM's own size for it. Where the
 // RM made no copy-engine utility of its own (a platform it leaves out, or RmDisableGlobalCeUtils) none is made here:
-// that is nothing sent, and the framebuffer fills the block from the processor.
+// that is nothing sent, and the framebuffer fills the block from the processor. The page-off above still makes one
+// when it first runs, as it did in 3.0, and from then on the clear uses that one.
 static NV_STATUS _nvrmClearLocked(OBJGPU *pGpu, NvU32 hClient, NvU32 hMemory, NvU64 bytes, NvU64 *pCleared, NvU32 *pSent)
 {
     MemoryManager *pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
