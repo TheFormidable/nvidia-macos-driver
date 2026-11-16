@@ -24,7 +24,12 @@ NVMTLDriver in a process defines its classes twice. translator_readback.py runs 
 sets NVMTL_NO_TIER2_FIXED, and no case reads an array of texture buffers past element 0: on that old path an index
 past 0 is a descriptor read out of range. Every row builds into {BIN}/<id>/ and writes under {OUT} only (logs and
 caches by the runner's environment, AIR text into {OUT}/airdump/<id>, readback files into {OUT}/readback/<case>).
-Not yet run on a Mac."""
+
+{X} need not be the translator the plugin uses: the plugin opens the libnvmtl_translate.dylib beside it in
+NVMTLDriver.bundle/Contents/MacOS when that file is there, else nvmtl/libnvmtl_translate.dylib
+(plugin/NVMTLLibraryLoad.m, nvmtl_xlate_ready). The rows of xlate_paths.m end with an "INFO translator: " line that
+repeats the plugin's own line naming the translator it opened (its LC_UUID and path), and the readback rows translate
+with {X} itself. Not yet run on a Mac."""
 
 _CC = ["/usr/bin/xcrun", "clang", "-arch", "x86_64", "-mmacosx-version-min=15.0"]
 _PY = ["/usr/bin/python3", "-B", "-I"]
