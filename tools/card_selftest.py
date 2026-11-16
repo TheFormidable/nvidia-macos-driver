@@ -897,8 +897,13 @@ class Run:
     def plain_env(self, cid=None):
         env = {"HOME": self.home, "USER": self.user, "LOGNAME": self.user, "LANG": "en_US.UTF-8",
                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONDONTWRITEBYTECODE": "1"}
+        # TMPDIR in the run folder for every child, the runner's own reads included: Apple's /usr/bin/git is a shim
+        # that goes through xcrun, which keeps its cache of tool paths in TMPDIR, else in the user temporary folder.
+        # --plan makes no run folder, so its reads go without.
         if cid and self.out is not None:
             env["TMPDIR"] = str(self.tmp / cid) + "/"
+        elif self.out is not None and (self.tmp / "runner").is_dir():
+            env["TMPDIR"] = str(self.tmp / "runner") + "/"
         return env
 
     def caches_env(self):
