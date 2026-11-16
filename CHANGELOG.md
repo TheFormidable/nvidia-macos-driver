@@ -53,6 +53,18 @@ only.
   before), so the first run of a level does not stop for each new shader. Other processes are left as they were; `=1`
   still turns it on in any process. Neither of these two was measured on a card yet; the rules are in
   `plugin/nvmtl_switch_defaults.h` and `tools/test_switch_defaults.c`.
+- **NVK's own mapped memory stays in video memory outside WindowServer.** The shader heap, the descriptor tables and
+  sets and the other device-local memory NVK itself maps were kept in system RAM, uncached on the GPU side, so the GPU
+  fetched shader code and descriptors over PCIe; `NVK_LOCAL_MAP_SYSMEM=0` kept them in video memory behind BAR1, and
+  only the Cyberpunk profile set it (its comment says about twice the frame rate there; no record of that measurement
+  is in the tree). That placement is now the default in every process except WindowServer, for memory that is not
+  shared with another process, where BAR1 covers the whole VRAM (`nvk/nvk-local-map-vram.patch`). WindowServer keeps
+  system RAM: 3.0 made the placement opt-in after its channel stalled with it. That stall has the shape of a lost
+  doorbell that was fixed later, but nobody has shown on a card that the two are the same, so this is the change of
+  3.0.1 to suspect first if an app freezes: `NVK_LOCAL_MAP_SYSMEM=1` (the settings tool's "Keep CPU-written memory in
+  system RAM", on) brings 3.0's placement back everywhere. `=0` means what it meant, and `NVK_BAR_VRAM=0` also keeps
+  the new default off. With the video memory full, an allocation the default placed is made in system RAM as before
+  instead of failing. Not measured on a card; `tools/test_nvk_local_map.py` compiles the rule and holds every case.
 - **NVK's table of CPU mappings has a lock.** On the NVRM back end every CPU map of a Vulkan memory object adds its
   address to one hash table of the device, and every unmap or free removes it, with no lock: two threads mapping or
   freeing two different memories at once could corrupt the heap. Each insert, search and removal now holds a mutex of
@@ -80,6 +92,7 @@ One per change, as in 3.0 below; each restores the 3.0 behaviour of that change 
 | Copy-engine clear of new blocks of video memory | `nvfbceclear=0` | boot argument |
 | Asynchronous texture uploads outside WindowServer | `NVMTL_ASYNC_TEX_UPLOAD=0` | `nvrm610.conf` |
 | Shaders of a game translated ahead | `NVMTL_PRETRANSLATE=0` | `nvrm610.conf` |
+| NVK's own mapped memory in video memory outside WindowServer | `NVK_LOCAL_MAP_SYSMEM=1` | `nvrm610.conf` |
 
 ## 3.0
 

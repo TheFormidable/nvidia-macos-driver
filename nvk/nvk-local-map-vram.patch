@@ -1,0 +1,154 @@
+NVK's own mapped device-local memory stays in video memory by default outside WindowServer. NullMoth's own change (not
+an upstream Mesa commit).
+Device-local memory that NVK itself maps (the shader heap, descriptor tables and descriptor sets, the event and QMD
+heaps, USERD, the zero page) was moved to system RAM by the NVRM back end's rule for mappable memory, uncached on the
+GPU side, so the GPU fetched shader code and descriptors over PCIe. NVK_LOCAL_MAP_SYSMEM=0 kept it in video memory,
+reached through BAR1, where BAR1 covers the whole VRAM; that was opt-in since a stall of WindowServer's channel was
+seen with it, and only the Cyberpunk profile set it. It is now the default in every process except WindowServer, for
+memory that is not shared with another process or device (exported or imported memory keeps system RAM, as it does for
+application memory). WindowServer, the one process the stall was seen in, keeps system RAM as before. The stall has
+the shape of the lost doorbell that the read of GPPut through BAR1 before the doorbell fixed later
+(nvkmd_nvrm_ctx.c); that the two are the same was not shown on a card.
+NVK_LOCAL_MAP_SYSMEM=1 is the way back: system RAM in every process, 3.0's default. NVK_LOCAL_MAP_SYSMEM=0 means what
+it meant: video memory in every process, WindowServer and shared memory included. NVK_BAR_VRAM=0, which keeps an
+application's own host-visible device-local memory out of BAR1, also keeps the new default off, because the rule would
+otherwise place that application memory behind BAR1 again. Where BAR1 does not cover the VRAM nothing changes.
+When the RM has no video memory for an allocation the new default placed, the allocation is made in system RAM, as in
+release 3.0, instead of failing; one placed by NVK_LOCAL_MAP_SYSMEM=0 or by its caller still fails as before.
+The decision is in two functions without side effects (nvrm_local_map_rule, nvrm_local_map_wants_bar), which
+tools/test_nvk_local_map.py compiles and holds, and the settings are read once for the process with util_call_once_data
+instead of an unguarded static.
+
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+index fcebcf1..3a19302 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -11,6 +11,7 @@
+ 
+ #include "util/u_memory.h"
+ #include "util/hash_table.h"
++#include "util/u_call_once.h"
+ 
+ #include "class/cl003e.h" // NV01_MEMORY_SYSTEM
+ #include "class/cl0040.h" // NV01_MEMORY_LOCAL_USER
+@@ -31,21 +32,67 @@
+  * own submission (no fault, err 0x0) within 35-130 s under every other r3 bisect arm; with system RAM it held 180 s
+  * + the 10 min confirm, and GB7 still scored 81k. Apple's own WindowServer (dtrace on a reference Mac) makes ~1,584 textures per
+  * 15 s and keeps that CPU-written churn system-side; NVK's descriptor heap under that churn must not sit behind BAR1 WC. */
++/* 3.0.1: VRAM placement is the default in every process but WindowServer, for memory that is not shared with another
++ * process or device (NVKMD_MEM_SHARED: exported or imported memory keeps system RAM, as batch 36 keeps it for app
++ * memory). The stall above has the shape of the lost doorbell that the BAR1 read of GPPut before the doorbell fixed
++ * after r3 (nvkmd_nvrm_ctx.c); WindowServer, the one process it was seen in, keeps system RAM all the same.
++ * NVK_LOCAL_MAP_SYSMEM=1 keeps system RAM in every process (3.0's default: the way back). =0 places it in VRAM in every
++ * process, WindowServer and shared memory included (3.0's opt-in, unchanged). NVK_BAR_VRAM=0, which keeps an app's own
++ * host-visible device-local memory out of BAR1, also keeps this default out of it: without that, the rule below would
++ * put the app memory NVK_BAR_VRAM=0 left unplaced back behind BAR1. Where BAR1 does not cover the VRAM, nothing
++ * moves. */
++enum { NVRM_LOCAL_MAP_SYSMEM = 0, NVRM_LOCAL_MAP_VRAM_PRIVATE = 1, NVRM_LOCAL_MAP_VRAM_ALL = 2 };
++
++/* The rule alone (tools/test_nvk_local_map.py compiles it): e is NVK_LOCAL_MAP_SYSMEM's value or NULL when unset. */
++static int
++nvrm_local_map_rule(const char *e, bool bar_covers_vram, bool window_server, bool bar_vram_off)
++{
++   if (!bar_covers_vram)
++      return NVRM_LOCAL_MAP_SYSMEM;
++   if (e != NULL)
++      return e[0] == '0' ? NVRM_LOCAL_MAP_VRAM_ALL : NVRM_LOCAL_MAP_SYSMEM;
++   return (window_server || bar_vram_off) ? NVRM_LOCAL_MAP_SYSMEM : NVRM_LOCAL_MAP_VRAM_PRIVATE;
++}
++
++/* Whether a LOCAL allocation that NVK maps and that nobody placed behind BAR1 yet goes there under the mode. */
+ static bool
+-nvrm_local_map_stays_vram(struct nvkmd_nvrm_pdev *pdev)
++nvrm_local_map_wants_bar(int mode, enum nvkmd_mem_flags flags)
+ {
+-   static int on = -1;
+-   if (on < 0) {
+-      const char *e = nvmtl_cfg_getenv("NVK_LOCAL_MAP_SYSMEM");
+-      const bool bar_covers_vram = pdev->base.dev_info.bar_size_B >= pdev->base.dev_info.vram_size_B;
+-      on = (e && e[0] == '0') && bar_covers_vram;
+-      if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: LOCAL+mapped memory -> %s (BAR1 %llu MB, VRAM %llu MB%s)\n",
+-              on ? "VRAM through BAR1" : "system RAM",
+-              (unsigned long long)(pdev->base.dev_info.bar_size_B >> 20),
+-              (unsigned long long)(pdev->base.dev_info.vram_size_B >> 20),
+-              e && e[0] == '0' ? ", NVK_LOCAL_MAP_SYSMEM=0" : ", default");
+-   }
+-   return on;
++   return mode == NVRM_LOCAL_MAP_VRAM_ALL || (mode == NVRM_LOCAL_MAP_VRAM_PRIVATE && !(flags & NVKMD_MEM_SHARED));
++}
++
++static int nvrm_local_map_mode_value;
++static util_once_flag nvrm_local_map_mode_once = UTIL_ONCE_FLAG_INIT;
++
++static void
++nvrm_local_map_mode_read(const void *data)
++{
++   const struct nvkmd_nvrm_pdev *pdev = data;
++   const char *e = nvmtl_cfg_getenv("NVK_LOCAL_MAP_SYSMEM");
++   const bool set = e != NULL, zero = set && e[0] == '0';
++   const char *b = nvmtl_cfg_getenv("NVK_BAR_VRAM");
++   const bool bar_vram_off = b != NULL && b[0] == '0';
++   const char *pn = getprogname();
++   const bool ws = pn != NULL && strcmp(pn, "WindowServer") == 0;
++   const bool bar_covers_vram = pdev->base.dev_info.bar_size_B >= pdev->base.dev_info.vram_size_B;
++   const int m = nvrm_local_map_rule(set ? (zero ? "0" : "1") : NULL, bar_covers_vram, ws, bar_vram_off);
++   nvrm_local_map_mode_value = m;
++   if (nvkmd_nvrm_diag_on()) fprintf(stderr, "nvrm: LOCAL+mapped memory -> %s (BAR1 %llu MB, VRAM %llu MB, %s)\n",
++           m == NVRM_LOCAL_MAP_VRAM_ALL ? "VRAM through BAR1" :
++           m == NVRM_LOCAL_MAP_VRAM_PRIVATE ? "VRAM through BAR1 unless shared" : "system RAM",
++           (unsigned long long)(pdev->base.dev_info.bar_size_B >> 20),
++           (unsigned long long)(pdev->base.dev_info.vram_size_B >> 20),
++           set ? (zero ? "NVK_LOCAL_MAP_SYSMEM=0" : "NVK_LOCAL_MAP_SYSMEM set") :
++           ws ? "default, WindowServer" : bar_vram_off ? "default, NVK_BAR_VRAM=0" : "default");
++}
++
++/* Read once for the process, on the first allocation the rule could move: as with the static it replaces, the first
++ * device that asks decides for the process. */
++static int
++nvrm_local_map_mode(struct nvkmd_nvrm_pdev *pdev)
++{
++   util_call_once_data(&nvrm_local_map_mode_once, nvrm_local_map_mode_read, pdev);
++   return nvrm_local_map_mode_value;
+ }
+ 
+ /* item 7 share: the import record, staged by the plugin on the thread that then calls vkAllocateMemory. */
+@@ -174,10 +221,18 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+       flags &= ~(NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM);
+       flags |= NVKMD_MEM_GART;
+    }
+-   /* b80 B1/B2: see nvrm_local_map_stays_vram */
+-   if ((flags & NVKMD_MEM_LOCAL) && (flags & NVKMD_MEM_CAN_MAP) && !(flags & NVKMD_MEM_BAR) &&
+-       nvrm_local_map_stays_vram(pdev))
+-      flags |= NVKMD_MEM_BAR;
++   /* b80 B1/B2: see nvrm_local_map_rule. What the 3.0.1 default placed (not the caller, not NVK_LOCAL_MAP_SYSMEM=0) is
++    * remembered with the request as it came, for the way out below when the VRAM has no room. */
++   const enum nvkmd_mem_flags flags_in = flags;
++   const uint64_t size_in_B = size_B;
++   bool placed_by_default = false;
++   if ((flags & NVKMD_MEM_LOCAL) && (flags & NVKMD_MEM_CAN_MAP) && !(flags & NVKMD_MEM_BAR)) {
++      const int lm = nvrm_local_map_mode(pdev);
++      if (nvrm_local_map_wants_bar(lm, flags)) {
++         flags |= NVKMD_MEM_BAR;
++         placed_by_default = lm == NVRM_LOCAL_MAP_VRAM_PRIVATE;
++      }
++   }
+    /* NVMTL batch 36: BAR memory stays in VRAM; the map below goes through BAR1 (isSystemMem = 0). */
+    if ((flags & NVKMD_MEM_CAN_MAP) && !(flags & NVKMD_MEM_BAR)) {
+       flags &= ~(NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM);
+@@ -286,6 +341,16 @@ nvkmd_nvrm_alloc_tiled_mem(struct nvkmd_dev *_dev,
+ 
+ 	NvHandle hMemoryPhys = 0;
+    NV_STATUS nvRes = nvRmApiAlloc(&rm, pdev->hDevice, &hMemoryPhys, hClass, &params);
++   if (nvRes != NV_OK && placed_by_default) {
++      /* The 3.0.1 default asked for video memory and the RM has none to give: take system RAM, where 3.0 put this
++       * memory, instead of failing an allocation that 3.0 would have made. The request goes again as it came, with the
++       * placement the rule for mappable memory below would have given it, so the default cannot place it twice. */
++      if (nvkmd_nvrm_diag_on())
++         fprintf(stderr, "nvrm: LOCAL+mapped memory: no VRAM for %llu B (NV_STATUS %#x), system RAM instead\n",
++                 (unsigned long long)size_in_B, nvRes);
++      return nvkmd_nvrm_alloc_tiled_mem(_dev, log_obj, size_in_B, align_B, pte_kind, tile_mode,
++                                        (flags_in & ~(NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM)) | NVKMD_MEM_GART, mem_out);
++   }
+    if (nvRes != NV_OK) {
+       fprintf(stderr, "[!] nvRes: %#x\n", nvRes);
+       /* NVMTL apps-rmreason: the RM status rides back in the VkResult's message, not only on a stderr nobody reads */

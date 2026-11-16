@@ -208,7 +208,7 @@ Each of these does nothing unless it is set.
 | `NVK_HWRT_QUERY` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/ttu-rq.patch, plugin/nvmtl_app_profile.h |
 | `NVK_HWRT_WIDE` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/wide.patch |
 | `NVK_L2_TAIL` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_LOCAL_MAP_SYSMEM` | setting | unset | 2.9 | - | Keep CPU-written memory in system RAM: On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop). | nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
+| `NVK_LOCAL_MAP_SYSMEM` | setting | unset | 2.9 | - | Keep CPU-written memory in system RAM: By default applications place it in video memory (faster in games) while the desktop (WindowServer) and memory shared between processes keep it in system RAM. On keeps it in system RAM everywhere, as before 3.0.1; off places it in video memory for the desktop too (unsafe for the desktop). | nvk/nvk-local-map-vram.patch, nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
 | `NVK_NO_BIGPAGE` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_NO_NONCONTIG` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_PREEMPT_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
