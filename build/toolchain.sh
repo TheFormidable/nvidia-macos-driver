@@ -4,7 +4,8 @@
 #   build/toolchain.sh list                 the tool names in build order, one per line
 #   build/toolchain.sh id <name>            one line that changes whenever that tool's recipe changes
 #   build/toolchain.sh build <name>...      build, install and check each, in the order given; stop at the first failure
-#   build/toolchain.sh check <name>...      only the checks of what is installed
+#   build/toolchain.sh check <name>...      only the checks of what is installed (bison's runs a grammar in a temporary
+#                                           folder, which it removes)
 #
 # When homebrew-core was read on 2026-11-13 it had no ready-made builds for Intel Macs of the formulas build.sh would
 # install: there "brew install" compiles LLVM with every target, two Pythons and OpenSSL into /usr/local. This script
@@ -50,8 +51,9 @@ warn() { say "WARNING: $*" >&2; }
 die()  { say "STOP: $*" >&2; exit 2; }
 
 # ---------------------------------------------------------------------------------------------------------- the tools
-# bison is last: built from an empty prefix, no other tool's build finds it in bin/ (the first folder of every build
-# command's PATH), so they are built as they were before it was added.
+# bison is last, so that a toolchain built from an empty prefix builds the ten other tools without a bison in bin/ (the
+# first folder of every build command's PATH). A later build of one of them in a prefix that holds bison (a raised
+# recipe, a moved pin) finds bin/bison there.
 TOOLS="ninja cmake openssl zstd xz python pkgconf spirv-tools glslang llvm bison"
 
 # A recipe's number: raise it whenever that tool's recipe or checks change, so that build.sh, which compares the id
@@ -579,22 +581,27 @@ check_llvm() {
 # first m4 on PATH, and bison would look for "m4" on the PATH of whatever runs it). Turned off: translations (they would
 # look for libintl), dependency tracking (a one-time build), and the yacc command and its liby library, which nothing
 # here uses. Bison's own tests are not run. Homebrew's formula builds the same release with configure, its default
-# options and macOS's m4.
+# options and macOS's m4. configure (gnulib's javacomp.m4 and javaexec.m4, for Bison's Java tests and examples) looks
+# for javac, java and jre on PATH and runs the ones it finds; on a Mac /usr/bin/javac and /usr/bin/java are Apple's
+# stubs, which on a Mac without a JDK may ask to install one. The empty cache values on the configure line answer those
+# probes, and the gcj and jikes ones of older copies of those files, as "not found", so that none of them runs.
+BISON_NO_JAVA=(ac_cv_prog_HAVE_JAVAC_IN_PATH= ac_cv_prog_HAVE_JAVA_IN_PATH= ac_cv_prog_HAVE_JRE_IN_PATH=
+               ac_cv_prog_HAVE_GCJ_IN_PATH= ac_cv_prog_HAVE_JIKES_IN_PATH=)
 BISON_M4=$SYSBIN/m4
 recipe_bison() {
   [ -x "$BISON_M4" ] || die "bison is built to run $BISON_M4, which is not there (on a Mac it comes with Xcode's command line tools)"
   [ -x "$SRC/bison/configure" ] || die "bison: $SRC/bison has no configure: it is not the extracted release tarball"
   clean_env
   x cp -RPp "$SRC/bison" "$B/bison"; x chmod -R u+w "$B/bison"
-  xin "$B/bison" "${CLEAN[@]}" ./configure "--prefix=$P" --disable-nls --disable-dependency-tracking --disable-yacc "M4=$BISON_M4"
+  xin "$B/bison" "${CLEAN[@]}" ./configure "--prefix=$P" --disable-nls --disable-dependency-tracking --disable-yacc "M4=$BISON_M4" "${BISON_NO_JAVA[@]}"
   xin "$B/bison" "${CLEAN[@]}" make -j "$JOBS"
   xin "$B/bison" "${CLEAN[@]}" make install
 }
 # A grammar like Mesa 26.3.0's GLSL ones (a pure parser with locations and a parameter, glcpp-parse.y:179-180 and
 # glsl_parser.yy:86-87 for the two %define lines), which bin/bison must turn into C with a pure parser (YYPURE 1) and
 # verbose syntax errors (yysyntax_error, which only parse.error verbose or detailed writes); Bison 2.3 stops at its
-# first %define. Run as Mesa's build runs it (-o, --defines, -p), in a folder of the prefix's state that is removed
-# again.
+# first %define. Run as Mesa's build runs it (-o, --defines, -p), in a new folder of TMPDIR (the work folder's tmp/
+# during a build) that is removed again, so that a check writes nothing into the prefix.
 BISON_GRAMMAR='%define api.pure
 %define parse.error verbose
 %locations
@@ -612,11 +619,13 @@ input: %empty | input NUM { *nm_sum += $2; } ;
 static int yylex(YYSTYPE *lval, YYLTYPE *lloc, int *nm_sum) { (void)lval; (void)lloc; (void)nm_sum; return 0; }
 static void yyerror(YYLTYPE *lloc, int *nm_sum, const char *msg) { (void)lloc; (void)nm_sum; (void)msg; }'
 check_bison() {
-  local d=$P/.nm-toolchain/bison-check out rc=0
+  local d out rc=0
   need_file bin/bison; need_file share/bison/skeletons/yacc.c; need_file share/bison/m4sugar/m4sugar.m4
   [ -e "$P/bin/bison" ] || return 0
   answers_pin bison bin/bison --version
-  rm -rf "$d"; mkdir -p "$d"; printf '%s\n' "$BISON_GRAMMAR" > "$d/nm-check.y"
+  if [ -n "${TMPDIR:-}" ]; then d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX") || d=""; else d=$(mktemp -d) || d=""; fi
+  if [ -z "$d" ] || [ ! -d "$d" ]; then bad "no temporary folder for the grammar of bin/bison's check (mktemp -d failed)"; return 0; fi
+  printf '%s\n' "$BISON_GRAMMAR" > "$d/nm-check.y"
   out=$(cd "$d" && env -i "$P/bin/bison" -o nm-check.c --defines=nm-check.h -p nm_check_ nm-check.y 2>&1) || rc=$?
   if [ "$rc" != 0 ]; then
     bad "bin/bison refuses a grammar with %define api.pure and %define parse.error verbose (exit $rc): $(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"
@@ -803,7 +812,7 @@ build_one() {
 }
 
 # ---------------------------------------------------------------------------------------------------------- main
-usage() { sed -n '3,7p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,8p' "$0" | sed 's/^# \{0,1\}//'; }
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case "$cmd" in

@@ -48,10 +48,11 @@ or the arm's own check given a broken result):
   checkfail          an installed glslangValidator or llvm-config that fails: check still ends with its list of
                      FAIL lines and "STOP: N of M tools failed their checks"
   bison              Bison's recipe: configure in a copy of the extracted tarball that keeps the files' times, with the
-                     toolchain's prefix, no translations, no dependency tracking, no yacc and SYSBIN's m4; its check
-                     runs a grammar with Mesa's two %define lines and refuses a bison that stops at them (as 2.3 does)
-                     or writes C without a pure parser or verbose errors; the bison of this machine, when there is one,
-                     takes that grammar if it is 3.0 or newer and refuses it if older
+                     toolchain's prefix, no translations, no dependency tracking, no yacc, SYSBIN's m4 and the Java
+                     probes answered "not found"; its check runs a grammar with Mesa's two %define lines, in a new
+                     folder of TMPDIR that it removes (never in the prefix, also with check alone), and refuses a bison
+                     that stops at them (as 2.3 does) or writes C without a pure parser or verbose errors; the bison of
+                     this machine, when there is one, takes that grammar if it is 3.0 or newer and refuses it if older
   ids                the ids of the ten tools built before bison was added are the ones their stamps hold on a Mac
                      that built them ("<tool> recipe 2 Darwin-x86_64 macos15.0"); bison's is its own
 
@@ -234,6 +235,7 @@ esac
     # which stops at the first %define; control/bison-impure one that writes C without the pure parser
     "bison": r'''#!/bin/sh
 case "${1:-}" in --version) echo "bison (GNU Bison) 3.8.2"; echo "Written by Robert Corbett and Richard Stallman."; exit 0 ;; esac
+{ printf '@@ bison-run\nC %s\n' "$(pwd -P)"; printf '@@end\n'; } >> '@SB@/journal'
 out=""; hdr=""; g=""
 while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; --defines=*) hdr=${1#--defines=}; shift ;; -p) shift 2 ;; *) g=$1; shift ;; esac; done
 if [ -f '@SB@/control/bison-23' ]; then echo "$g:1.9-16: syntax error, unexpected identifier, expecting string" >&2; exit 1; fi
@@ -388,7 +390,7 @@ class Sandbox:
 
     def steps(self):
         """the build steps only (not the script's own helpers)"""
-        return [r for r in self.records() if r[0] not in ("xcrun", "security", "otool")
+        return [r for r in self.records() if r[0] not in ("xcrun", "security", "otool", "bison-run")
                 and not r[0].startswith(("POISON", "PATH-"))]
 
     def stamp(self, tool):
@@ -1268,7 +1270,7 @@ def main():
                 if not conf:
                     return p + ["bison's configure did not run"]
                 for a in (f"--prefix={sb.prefix}", "--disable-nls", "--disable-dependency-tracking", "--disable-yacc",
-                          f"M4={sb.sb}/sysbin/m4"):
+                          f"M4={sb.sb}/sysbin/m4") + NO_JAVA:
                     if a not in conf[2]:
                         p.append(f"configure lacks {a}: {conf[2]}")
                 copy = sb.work / "bison/bison"
@@ -1282,20 +1284,64 @@ def main():
                     p.append("the log does not say that the grammar became C")
                 if rc == 0 and sb.stamp("bison") is None:
                     p.append("bison has no stamp")
-                if (sb.prefix / ".nm-toolchain/bison-check").exists():
-                    p.append("the check's folder is left in the prefix")
+                p += grammar_run_problems(sb, sb.work / "tmp")
+                return p
+
+            NO_JAVA = tuple(f"ac_cv_prog_HAVE_{x}_IN_PATH=" for x in ("JAVAC", "JAVA", "JRE", "GCJ", "JIKES"))
+
+            def grammar_run_problems(sb, tmpdir):
+                """the check's last grammar run was in a new folder of tmpdir, which is gone, and none is left there"""
+                runs = [r for r in sb.records() if r[0] == "bison-run"]
+                if not runs:
+                    return ["the check's grammar did not run"]
+                cwd = runs[-1][1]
+                p = []
+                if os.path.dirname(cwd) != os.path.realpath(str(tmpdir)) or not os.path.basename(cwd).startswith("nm-bison-check."):
+                    p.append(f"the grammar ran in {cwd}, not in a new folder of {tmpdir}")
+                if os.path.exists(cwd):
+                    p.append(f"the check's folder {cwd} is left")
+                left = sorted(str(x) for x in pathlib.Path(tmpdir).glob("nm-bison-check.*"))
+                left += sorted(str(x) for x in sb.prefix.rglob("*nm-check*"))
+                if left:
+                    p.append(f"left behind: {left}")
                 return p
             sb = sandbox()
             p = bison_problems(sb)
             check("bison: configure in a copy of the tarball's tree that keeps its file times, with the prefix, no "
-                  "translations, no dependency tracking, no yacc and SYSBIN's m4; the check's grammar becomes C; stamped",
+                  "translations, no dependency tracking, no yacc, SYSBIN's m4 and the Java probes answered; the check's grammar "
+                  "becomes C in a new folder of the work folder's tmp/, which is removed; stamped",
                   not p, p)
             for what, muts in (("a copy that does not keep the file times",
                                 [('x cp -RPp "$SRC/bison" "$B/bison"', 'x cp -RP "$SRC/bison" "$B/bison"')]),
-                               ("a configure without the system's m4", [(' "M4=$BISON_M4"\n', '\n')]),
-                               ("a configure that builds yacc", [(' --disable-yacc ', ' ')])):
+                               ("a configure without the system's m4", [(' "M4=$BISON_M4" ', ' ')]),
+                               ("a configure that builds yacc", [(' --disable-yacc ', ' ')]),
+                               ("a configure that may run javac and java", [(' "${BISON_NO_JAVA[@]}"\n', '\n')]),
+                               ("a check that runs its grammar in the prefix",
+                                [('d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX")', 'd=$P/.nm-toolchain/bison-check; mkdir -p "$d"')])):
                 sb = sandbox()
                 control(f"bison's recipe with {what}", bison_problems(sb, mutate(sb, "bison-recipe", muts)))
+
+            # check alone (no work folder): the grammar runs in the caller's TMPDIR, and the prefix stays as it was
+            def check_alone_problems(script=None):
+                s = sandbox()
+                rc, out, err = s.run(["build", "bison"])
+                if rc != 0:
+                    return [f"build: exit {rc}: {err[-300:]}"]
+                before = tree_state(s.prefix)
+                rc, out, err = s.run(["check", "bison"], script=script, NM_TC_WORK=None, NM_TC_LOGS=None, NM_TC_SRC=None)
+                p = [] if rc == 0 and "bison:\n" in out and "  ok" in out else [f"check: exit {rc}: {out[-300:]} {err[-300:]}"]
+                if "into C: a pure parser with verbose errors" not in out:
+                    p.append("check does not say that the grammar became C")
+                if diff_states(before, tree_state(s.prefix)):
+                    p.append(f"check changed the prefix: {diff_states(before, tree_state(s.prefix))[:5]}")
+                return p + grammar_run_problems(s, s.sb / "tmp")
+            p = check_alone_problems()
+            check("check bison alone runs its grammar in a new folder of the caller's TMPDIR, removes it, and leaves the "
+                  "prefix as it was", not p, p)
+            s0 = sandbox()
+            control("check bison that runs its grammar in the prefix",
+                    check_alone_problems(mutate(s0, "bison-check-prefix", [
+                        ('d=$(mktemp -d "$TMPDIR/nm-bison-check.XXXXXX")', 'd=$P/.nm-toolchain/bison-check; mkdir -p "$d"')])))
 
             def refused_problems(control_file, words, script=None):
                 """a bison that does not do what the grammar asks: no stamp, exit status not 0, the terminal says why"""
@@ -1312,7 +1358,7 @@ def main():
                 p = refused_problems(cf, words)
                 check(f"{what}: no stamp, and the terminal says why", not p, p)
             sb = sandbox()
-            noparse = '  rm -rf "$d"; mkdir -p "$d"; printf \'%s\\n\' "$BISON_GRAMMAR" > "$d/nm-check.y"\n'
+            noparse = '  printf \'%s\\n\' "$BISON_GRAMMAR" > "$d/nm-check.y"\n'
             control("a check of bison that only asks its version stamps a bison that stops at the first %define",
                     refused_problems("bison-23", "refuses a grammar", mutate(sb, "bison-noparse", [(noparse, "  return 0\n")])))
 
