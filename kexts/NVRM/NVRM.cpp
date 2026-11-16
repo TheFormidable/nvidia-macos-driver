@@ -55,6 +55,7 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_fence.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
+extern "C" void nvrm_vidmem_clear(struct NVRMVidmemClear *q, void *nv);
 extern "C" task_t current_task(void);
 extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
@@ -3400,6 +3401,25 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
             return nvrm_surfshare_rm((struct NVRMSurfShareRm *)p1) ? kIOReturnIOError : kIOReturnSuccess;
         if (fn->isEqualTo(NVRM_SS_FN_PAGEOFF))
             return nvrm_surfshare_pageoff((struct NVRMSurfPageoff *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
+    }
+    // NVRMFB: clear a new block of video memory with the copy engine instead of from the processor (nvrm_vram_abi.h).
+    // Unlike the RM calls above it never waits at the power gate: the framebuffer asks with its display gate held, and
+    // a wait there for the end of a standby would hold that gate across the sleep, which the framebuffer's own wake
+    // needs. A GPU that is not running is answered at once, with nothing sent; the framebuffer then fills the block as
+    // before. Inside, a standby that begins waits for this call at the gate like for any other (nv_xnu_pm_close).
+    if (fn && fn->isEqualTo(NVRM_VRAM_FN_CLEAR)) {
+        struct NVRMVidmemClear *q = (struct NVRMVidmemClear *)p1;
+        if (!q || q->version != NVRM_VRAM_CLEAR_VERSION) return kIOReturnBadArgument;
+        q->result = NVRM_VRAM_CLEAR_NOT_RUN; q->cleared = 0; q->usec = 0; q->rmStatus = 0;
+        int counted = 0;
+        if (isInactive() || !fAdapter || !nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        IOReturn ret = kIOReturnNotReady;
+        if (OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
+            nvrm_vidmem_clear(q, &fNv);
+            ret = q->result == NVRM_VRAM_CLEAR_DONE ? kIOReturnSuccess : kIOReturnIOError;
+        }
+        nv_xnu_pm_exit(counted);
+        return ret;
     }
     if (fn && fn->isEqualTo(NVRM_VRAM_FN_CLEARED)) {   // NVRMFB: may it leave its zero fill of a granted block out?
         struct NVRMVidmemCleared *q = (struct NVRMVidmemCleared *)p1;

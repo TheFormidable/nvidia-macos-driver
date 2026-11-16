@@ -20,6 +20,7 @@ int nvrm_kapi_dev_handles(const void *dev, unsigned int *c, unsigned int *d, uns
 #define NVRM_SS_KERNEL_ABI 1
 #include "nvrm_surfshare_abi.h"
 #include "nvrm_dma.h"
+#include "nvrm_vram_abi.h"
 
 static inline void ssZero(void *p, unsigned long n) { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
 
@@ -70,4 +71,21 @@ extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *p, void *nv)
     p->status = nvrm_ce_copy_to_pages(nv, c, m, (const NvU64 *)p->pages, p->pageCount, p->length, &us);
     p->usec = us;
     return 0;
+}
+
+extern "C" NV_STATUS nvrm_ce_clear_vidmem(void *nv, NvU32 hClient, NvU32 hMemory, NvU64 bytes, NvU64 *pCleared, NvU32 *pSent,
+                                          NvU64 *pUsec);
+// A framebuffer's new block of video memory cleared by the copy engine (nvrm_vram_abi.h NVRM_VRAM_FN_CLEAR): the RM
+// handles of the NVKMS block, found as the page-off finds them, then nvrm_pageoff.c does the work. NVRM.cpp calls this
+// only with the GPU running and the power gate entered, and has set result to NOT_RUN already.
+extern "C" void nvrm_vidmem_clear(struct NVRMVidmemClear *q, void *nv)
+{
+    unsigned int c = 0, d = 0, s = 0;
+    if (!q->kapiDevice || !q->kapiMemory || !q->bytes || !nvrm_kapi_dev_handles(q->kapiDevice, &c, &d, &s) || !c) return;
+    unsigned int m = nvrm_kapi_mem_handle(q->kapiMemory);
+    if (!m) return;
+    NvU64 cleared = 0, us = 0; NvU32 sent = 0;
+    const NV_STATUS st = nvrm_ce_clear_vidmem(nv, c, m, q->bytes, &cleared, &sent, &us);
+    q->rmStatus = st; q->usec = us; q->cleared = cleared;
+    q->result = st == NV_OK ? NVRM_VRAM_CLEAR_DONE : sent ? NVRM_VRAM_CLEAR_LOST : NVRM_VRAM_CLEAR_NOT_RUN;
 }
