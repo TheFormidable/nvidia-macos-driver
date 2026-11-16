@@ -198,6 +198,11 @@ VX = variant(id="v301.x", part="v301", argv=["{BIN}/v301.x/nvmtltest"], needs=["
 rows, errs = refused_by_loader({"checks_v301.py": [VX]})
 arm("control: tools/card/checks_v301.py is a part of its own (release 3.0.1's checks) and its rows load",
     len(rows) == 1 and rows[0]["part"] == "v301" and not errs, errs)
+# a checkout without release 3.0.1 lacks the files these rows need, so each of them is a skip there that names one
+v301_rows = [c for c in checks if c["part"] == "v301"]
+no_marker = [c["id"] for c in v301_rows if not any(n.startswith("file:{SRC}/") for n in c.get("needs", []))]
+arm("every row of tools/card/checks_v301.py needs a file of the checkout (file:{SRC}/...), so that a checkout without "
+    "release 3.0.1 skips it", v301_rows and not no_marker, no_marker)
 arm("the driver sources the checkout gate compares include build/build_nvk.sh (the chain of NVK patches)",
     "build/build_nvk.sh" in R.DRIVER_PATHS and "nvk" in R.DRIVER_PATHS, R.DRIVER_PATHS)
 with tempfile.TemporaryDirectory() as d:
