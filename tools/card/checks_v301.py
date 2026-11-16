@@ -21,7 +21,8 @@ default skips when the settings file sets that switch, since the default is then
                              off outside WindowServer (a surface brought in for a blit says so), and so does
                              NVMTL_WS_FREE_OFFMAIN=1 when a free asked it (otherwise INFO)
   v301.async-upload-off      the same cases with NVMTL_ASYNC_TEX_UPLOAD=0 (the way back: every upload waits)
-  v301.half-mips-sync        plugin.half-mips (its replaceRegion uploads) with NVMTL_ASYNC_TEX_UPLOAD=0
+  v301.half-mips-sync        plugin.half-mips (its replaceRegion uploads) with NVMTL_ASYNC_TEX_UPLOAD=0; that the switch
+                             reaches the driver is v301.async-upload-off's to show (the older program does not say)
   v301.pretranslate-game     background translation of a new library's shaders in a game (the program's own
                              Info.plist has the games category): on by default, 32 of 32 processed ahead, pipelines
                              made while it runs, every kernel right
@@ -115,7 +116,12 @@ CHECKS = [
      "build": _build("v301.half-mips-sync", "tools/test_ca_half_float_mips_gpu.m", ["Foundation", "Metal"]),
      "argv": ["{BIN}/v301.half-mips-sync/nvmtltest"], "limit": 90, "needs": [_DEFAULTS],
      "env": {"NVMTL_ASYNC_TEX_UPLOAD": "0"},
-     # the older program: exit 2 (no device of this driver, or a setup step) is a failure, as in plugin.half-mips
+     # the older program: exit 2 (no device of this driver, or a setup step) is a failure, as in plugin.half-mips. It
+     # prints nothing of the switch, and a row has no key for a line of the driver's log: that NVMTL_ASYNC_TEX_UPLOAD=0
+     # reaches the driver in this environment is held by v301.async-upload-off just before, whose switch case requires
+     # the driver's "OFF (NVMTL_ASYNC_TEX_UPLOAD=0)" line; the runner copies no such line into this row's information.
+     # It has no crash handlers either: a crash ends it by the signal, and macOS may write a crash report for it, which
+     # the runner's audit names, as for plugin.half-mips
      "expect": {"rc": 0, "stdout": [r"^PASS: half-float mip levels, 0 wrong values$"]}, "rc_map": {2: "fail"}},
     _row("v301.pretranslate-game", 365,
          "a game's new shaders translated ahead by default; pipelines made while it runs; every kernel right",
