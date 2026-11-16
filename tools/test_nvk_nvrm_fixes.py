@@ -419,5 +419,8 @@ else:
     arm("control: a patch with a line no listed commit has fails",
         sorted(changed_lines(main2) + ["+   /* not upstream */"]) != sorted(want))
 
+if not cc and not fails:   # the readers were not compiled: not a pass (tools/run_all_tests.py counts exit 2 as a skip)
+    print("SKIP: no C compiler on PATH: the read-once readers were not compiled")
+    sys.exit(2)
 print("FAILED" if fails else "PASS")
 sys.exit(1 if fails else 0)
