@@ -36,7 +36,7 @@ _SDL = "/usr/local/lib/libSDL3.dylib"   # an x86_64 SDL3 where Homebrew on an In
 # The runtime's folder as the frontend and the loader may spell it: the loader joins the manifest's folder and its
 # "./lib/libnvk_minecraft.dylib", and the frontend names its renderer from its own path (bridge.mm:121-134).
 _LIB = r"/Library/GPUBundles/nvmtl/minecraft(?:/+\.)*/+lib/"
-# the frontend's lines for a failed renderer load, a missing Metal device and an uncertain copy (bridge.mm:128, :355,
+# the frontend's lines for a failed renderer load, a missing Metal device and an uncertain copy (bridge.mm:129, :355,
 # :431, :775)
 _FORBID = (r"^NVK Bridge: renderer load failed", r"^NVK Bridge: a matching NVIDIA Metal device",
            r"^NVK Bridge: presentation completion uncertain", r"^NVK Bridge: uncertain GPU completion")
