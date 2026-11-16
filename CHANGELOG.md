@@ -28,8 +28,7 @@ The check list for a first run on a card is [docs/TESTING-ON-HARDWARE.md](docs/T
 
 Nothing new in this release has to be switched on: every change below is active as installed. Each risky change that
 alters how the driver runs has one way back to the 2.9 behaviour, read once (a boot argument when the driver starts,
-a line of `/Library/GPUBundles/nvmtl/nvrm610.conf` when a process starts; native OpenGL's variables are read from the
-application's own environment). These are listed under "The ways back" below
+a line of `/Library/GPUBundles/nvmtl/nvrm610.conf` when a process starts). These are listed under "The ways back" below
 and in [docs/SWITCHES.md](docs/SWITCHES.md), and are there to tell whether a new path is behind a problem, not to be
 left set. Several default-on changes have no switch of their own: the interrupt path's closing at sleep, shutdown and
 stop; the adapter-teardown order and the idle power-down hold; the per-GPU interrupt mark and the real CPU count; the
@@ -318,20 +317,23 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   `NVKZinkGLDriver.bundle` as its OpenGL driver (2.9 named Apple's AppleMetalOpenGLRenderer, and before macOS 15.5 it
   still does). The bundle forwards every GLD entry to Apple's renderer and hands each new OpenGL context to a CGL
   adapter, which points the context's dispatch table at Zink (Mesa 26.3.0) running on a private copy of this build's
-  NVK. A window's frames are copied on the GPU into the IOSurface of its CAMetalLayer drawable, or presented through an
-  IOSurface when the context has no view. The dispatch table is generated when the driver is built, from the macOS SDK's
-  public OpenGL headers. The adapter also reads and writes through offsets in GLEngine's private context data that the
-  source fork recorded on macOS 15.8.1 (24H32) and 26.7.1 (25G241); before any such read or write it checks that the
-  memory is shaped as recorded. A context stays on Apple's renderer when that check fails (the first refusal in a
-  process is written to its standard error), when Zink cannot start in the process, when the adapter is missing, and in
-  OBS, whose screen capture then asks for BGRA8 instead of RGBA16F (RGBA16F can fail before the first frame on this
-  driver). When the installed AppleMetalOpenGLRenderer lacks a GLD entry the bundle forwards, the bundle points that
-  entry at a stub that returns an error and forwards the others, unless it is gldGetVersion, gldCreateContext or
-  gldDestroyContext, which the bundle calls itself (or Apple's renderer cannot be opened at all): then the bundle offers
-  no OpenGL for the card, and a start with `nvzink=0` gives Apple's renderer back. From the
-  HighDelay/nvidia-macos-driver-nvk fork; built and checked on Linux only, it has not run on a Mac. Way back: boot
-  argument `nvzink=0` (Apple's OpenGL for every application, as in 2.9); `NVKZINK_DISABLE=1` in one application's
-  environment keeps that application's OpenGL on Apple's renderer. See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
+  NVK. A context with an AppKit view presents through its CAMetalLayer, its frames copied on the GPU into the IOSurface
+  of the layer's drawable; a context without a view, or whose layer cannot be used, presents through an IOSurface that
+  NVK imports. No frame goes through a CPU copy. The dispatch table is generated when the driver is built, from the
+  macOS SDK's public OpenGL headers. The adapter also reads and writes through offsets in GLEngine's private context
+  data that the source fork recorded on macOS 15.8.1 (24H32) and 26.7.1 (25G241); before any such read or write it
+  checks that the memory is shaped as recorded. That check runs before the process's Zink screen is made, so a refused
+  layout opens no NVK device. A context stays on Apple's renderer when that check fails (the first refusal in a process
+  is written to its standard error), when Zink cannot start in the process, when the adapter is missing, and in OBS:
+  there OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F (RGBA16F can fail before the
+  first frame on this driver). A Zink context stays allocated while it is current in Mesa on any thread: a context that
+  CGL destroys while it is still Mesa's current context on another thread is freed at that thread's next bind. When the
+  installed AppleMetalOpenGLRenderer lacks a GLD entry the bundle forwards, the bundle points that entry at a stub that
+  returns an error and forwards the others, unless it is gldGetVersion, gldCreateContext or gldDestroyContext, which the
+  bundle calls itself (or Apple's renderer cannot be opened at all): then the bundle offers no OpenGL for the card, and
+  a start with `nvzink=0` gives Apple's renderer back. From the HighDelay/nvidia-macos-driver-nvk fork; built and
+  checked on Linux only, it has not run on a Mac. Way back: boot argument `nvzink=0` (Apple's OpenGL for every
+  application, as in 2.9). See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
 - Minecraft 26.3, MPV and other Vulkan applications that draw into a window can render with NVK instead of MoltenVK: the
   package installs a native Vulkan runtime at `/Library/GPUBundles/nvmtl/minecraft`, which renders with a private copy
   of this build's NVK and copies each frame on the GPU into the window's CAMetalLayer drawable. Nothing selects it by
@@ -507,7 +509,13 @@ reinstall 2.9 (and, for the power paths, the boot arguments `-nvrmnopm` and `-nv
   other bundles and puts the earlier one back (or none, when there was none) on a rollback and in the fallback job;
   its runtime (`nvmtl/zink`) and the native Vulkan runtime (`nvmtl/minecraft`) go with `nvmtl`. A package without the
   bundle or without `nvmtl/zink` is refused before anything changes, because the accelerator names that bundle as the
-  OpenGL driver. `uninstall.sh` removes the bundle with the others.
+  OpenGL driver. `uninstall.sh` removes the bundle with the others. Once the bundle is in place, `install.sh` asks
+  macOS's trusted GPU-bundle lookup for it with `nvmtl/zink/gld_bundle_probe` (`tools/gld_bundle_probe.c`, from the
+  HighDelay/nvidia-macos-driver-nvk fork), with `NVMTLDriver.bundle` as the control: when the lookup finds
+  `NVMTLDriver.bundle` but not the OpenGL bundle, the install stops and rolls back; when it does not find
+  `NVMTLDriver.bundle`, the installer says it could not check the OpenGL bundle and goes on. The installer and
+  uninstaller of 2.9 and of earlier 3.0 packages do not know the bundle: going back with one of them leaves
+  `/Library/GPUBundles/NVKZinkGLDriver.bundle` in place unless this package's `uninstall.sh` runs first.
 - The installer's fallback job (it puts the earlier driver back when the new one cannot start) copies the earlier
   kernel collection out of the backup before it changes anything and puts it in place by a rename. Before, it copied
   over the collection in place without checking the copy: one that failed half-way (a full volume) left a cut
@@ -604,15 +612,8 @@ has proven itself, renewed with a reason otherwise.
 | Photo Booth's preview reflected upright | `NVMTL_PHOTOBOOTH_FLIP=0` | `nvrm610.conf` |
 | Shader-writable Managed surface wrappers drawn through a tiled image | `NVMTL_MANAGED_SURFACE_TILED=0` (drawn straight into the linear VRAM import) | `nvrm610.conf` |
 | Native OpenGL through Zink on macOS 15.5 and later | `nvzink=0` (Apple's OpenGL over Metal for every application) | boot argument |
-| Native OpenGL in one application | `NVKZINK_DISABLE=1` (that application's OpenGL stays Apple's) | the application's environment |
-| Native OpenGL's presentation through the window's CAMetalLayer | `NVKZINK_PRESENT=gpu` (the IOSurface path) or `cpu` (a CPU copy) | the application's environment |
-| OBS keeps Apple's OpenGL and asks for BGRA8 screen capture | `NVKZINK_OBS_COMPAT=0` (OBS's OpenGL on Zink, capture in RGBA16F), or OBS's preference `NVKZinkCaptureCompatibility` set to NO | OBS's environment, or `defaults write com.obsproject.obs-studio NVKZinkCaptureCompatibility -bool NO` |
 
 `sysctl debug.nvrm_switches` shows which of the boot arguments a Mac carries.
-
-Native OpenGL reads its variables from the application's own environment, not from `nvrm610.conf`, so they act on an
-application started from a shell that sets them. The last three rows change one part of native OpenGL and do not give
-back 2.9's behaviour; `nvzink=0` does, for every application.
 
 ### Not turned on in this release, and why
 - `NVMTL_MISALIGNED_BUFFER_COPY` stays off. It binds a copy taken when the command is encoded, so it reads stale bytes
