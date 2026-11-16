@@ -179,7 +179,10 @@ for what, c, word in (
         ("an id without its part", variant(id="good"), "must start with its part"),
         ("an rc_map word that is not one", variant(rc_map={3: "pass"}), "rc_map must map"),
         ("a func and an argv", variant(func="install_identity"), "either argv"),
-        ("an unknown need", variant(needs=["screen"]), "needs 'screen'")):
+        ("an unknown need", variant(needs=["screen"]), "needs 'screen'"),
+        ("NVK_DIAG in a row's environment (NVK then writes /private/tmp/nvk-diag-<pid>.log)",
+         variant(env={"NVK_DIAG": "1"}), "'NVK_DIAG'"),
+        ("NVK_DIAG on a shell's command line", variant(argv=["/bin/sh", "-c", "NVK_DIAG=1 exec x"]), "'NVK_DIAG'")):
     rows, errs = refused_by_loader({"checks_plugin.py": [c]})
     arm(f"control: {what} is refused when the checks are loaded", not rows and any(word in e for e in errs), errs)
 ZX = variant(id="zink.x", part="zink", argv=["{BIN}/zink.x/nvmtltest"],
@@ -190,6 +193,13 @@ rows, errs = refused_by_loader({"checks_plugin.py": [GOOD], "checks_zink.py": [Z
 arm("control: a duplicate id is refused", any("also in" in e for e in errs), errs)
 rows, errs = refused_by_loader({"checks_other.py": [GOOD]})
 arm("control: a file named for no part is refused", any("is not a part" in e for e in errs), errs)
+VX = variant(id="v301.x", part="v301", argv=["{BIN}/v301.x/nvmtltest"], needs=["file:{SRC}/plugin/nvmtl_switch_defaults.h"],
+             build=[{"argv": ["/usr/bin/xcrun", "clang", "x.m", "-o", "{BIN}/v301.x/nvmtltest"], "limit": 9}])
+rows, errs = refused_by_loader({"checks_v301.py": [VX]})
+arm("control: tools/card/checks_v301.py is a part of its own (release 3.0.1's checks) and its rows load",
+    len(rows) == 1 and rows[0]["part"] == "v301" and not errs, errs)
+arm("the driver sources the checkout gate compares include build/build_nvk.sh (the chain of NVK patches)",
+    "build/build_nvk.sh" in R.DRIVER_PATHS and "nvk" in R.DRIVER_PATHS, R.DRIVER_PATHS)
 with tempfile.TemporaryDirectory() as d:
     mark = Path(d, "mark")
     Path(d, "checks_plugin.py").write_text(f"import subprocess\nopen({str(mark)!r}, 'w').close()\nCHECKS = []\n")
@@ -733,6 +743,8 @@ try:
         all(re.match(r"^git -c core\.fsmonitor=false -C \S+ (status --porcelain|rev-parse HEAD|diff --quiet --no-ext-diff --no-textconv )", l)
             for l in w.calls() if l.startswith("git ")) and any(l.startswith("git ") for l in w.calls()),
         [l for l in w.calls() if l.startswith("git ")])
+    arm("the checkout gate's git diff compares build/build_nvk.sh with the other driver sources",
+        any(" diff --quiet " in l and l.endswith(" build/build_nvk.sh") for l in w.calls()), [l for l in w.calls() if " diff " in l])
     genv = [l for l in w.calls() if l.startswith("git-env ")]
     arm("the runner's own reads (git through Apple's shim) get a TMPDIR in the run folder too",
         genv and all(l.endswith("runs/main/tmp/runner/") for l in genv), genv)
