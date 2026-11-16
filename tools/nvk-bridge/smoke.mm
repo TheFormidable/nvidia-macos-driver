@@ -78,6 +78,8 @@ static void verify_pixels(PFN_vkGetDeviceProcAddr gdpa,VkDevice device,VkQueue q
 }
 
 int main(int argc,char **argv) { @autoreleasepool { try {
+   // Whole lines when stdout and stderr share one pipe (tools/card/checks_vulkan.py merges them to read both).
+   setvbuf(stdout,nullptr,_IOLBF,0);
    require(argc>=2,"Usage: smoke entry.dylib [SDL3.dylib [images=3 [frames=90]]]");
    bool windowed=argc>=3;
    void *entry=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL|RTLD_FIRST);require(entry!=nullptr,dlerror()?:"entry load");
