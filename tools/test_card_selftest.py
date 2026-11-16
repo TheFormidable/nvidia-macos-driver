@@ -370,13 +370,27 @@ elif mode == "lacks":
 elif mode == "forbid":
     print("PASS stand-in case")
     sys.stderr.write("NVK Zink: no screen\\n")
-elif mode in ("xid", "gaveup", "fence", "ws"):
+elif mode in ("xid", "gaveup", "fence", "ws", "recovered", "kicks", "cekept", "power", "ceclear", "xidce"):
     if mode == "xid":
         bump("debug.nvrm_xid_count", 2)
+    elif mode == "xidce":
+        bump("debug.nvrm_xid_count", 1)
+        bump("debug.nvrmfb_vram_ce_cleared", 4)
     elif mode == "gaveup":
         bump("debug.nvrm_chan_gave_up", 1)
     elif mode == "fence":
         bump("debug.nvrm_fence_state", to=3)
+    elif mode == "recovered":
+        bump("debug.nvrm_chan_recovered", 1)
+        bump("debug.nvrm_chan_dropped", 3)
+    elif mode == "kicks":
+        bump("debug.nvrm_chan_kicks", 2)
+    elif mode == "cekept":
+        bump("debug.nvrmfb_vram_ce_kept", 1)
+    elif mode == "power":
+        bump("debug.nvrmfb_vram_power_events", 2)
+    elif mode == "ceclear":
+        bump("debug.nvrmfb_vram_ce_clear", to=2)
     else:
         with open(os.path.join(S, "ws"), "w") as f:
             f.write("999\\n")
@@ -844,8 +858,12 @@ try:
 
     # ---------------------------------------------------------------------------------------------- stop rules
     for mode, word in (("gaveup", "debug.nvrm_chan_gave_up rose by 1"), ("fence", "debug.nvrm_fence_state changed from 1 to 3"),
-                       ("ws", "WindowServer's pid changed")):
+                       ("ws", "WindowServer's pid changed"),
+                       ("cekept", "debug.nvrmfb_vram_ce_kept rose by 1 during plugin.cause: the copy engine's work"),
+                       ("power", "debug.nvrmfb_vram_power_events rose by 2 during plugin.cause: the GPU went through a standby")):
         w = World(TOP, "stop-" + mode)
+        for n in ("debug.nvrmfb_vram_ce_kept", "debug.nvrmfb_vram_power_events"):
+            (w.state / "counters" / n).write_text("0\n")
         w.checks({"checks_plugin.py": [prow("plugin.cause", mode, order=300), prow("plugin.after", "pass", order=301),
                                        prow("plugin.cpu", "pass", kind="cpu", order=302)]})
         out = w.base / "runs" / mode
@@ -854,6 +872,31 @@ try:
         arm(f"stop rule: {word} stops every later GPU check (exit 4), a later CPU check still runs",
             rc == 4 and got.get("plugin.cause", {}).get("result") == "pass" and got.get("plugin.after", {}).get("result") == "not run"
             and word in (data.get("stopped") or "") and got.get("plugin.cpu", {}).get("result") == "pass", (rc, data.get("stopped"), got, text[-800:]))
+
+    # ------------------------------------------------- a rebuilt channel, a kick, a copy-engine clear that stood down
+    w = World(TOP, "channel")
+    for n, v in (("debug.nvrm_chan_dropped", 0), ("debug.nvrm_chan_kicks", 0), ("debug.nvrmfb_vram_ce_clear", 1),
+                 ("debug.nvrmfb_vram_ce_cleared", 0)):
+        (w.state / "counters" / n).write_text(f"{v}\n")
+    w.checks({"checks_plugin.py": [prow("plugin.rebuilt", "recovered", order=300), prow("plugin.kicked", "kicks", order=301),
+                                   prow("plugin.cedown", "ceclear", order=302), prow("plugin.xidce", "xidce", order=303),
+                                   prow("plugin.after", "pass", order=304)]})
+    out = w.base / "runs" / "c"
+    rc, text = w.run(["--out", str(out)])
+    got, data = results(w, out)
+    why = {k: got.get(k, {}).get("why", "") for k in got}
+    arm("a channel NVK rebuilt during a check fails it with the rebuild and the dropped submissions; a stalled channel rung "
+        "again is noted on a check that passes; neither stops the later GPU checks (exit 1)",
+        rc == 1 and got.get("plugin.rebuilt", {}).get("result") == "FAIL" and why.get("plugin.rebuilt") == "channel rebuilt +1; dropped +3"
+        and got.get("plugin.kicked", {}).get("result") == "pass" and why.get("plugin.kicked") == "kicks +2"
+        and got.get("plugin.after", {}).get("result") == "pass" and not data.get("stopped"), (rc, why, data.get("stopped"), text[-800:]))
+    report = (out / "report.md").read_text() if (out / "report.md").exists() else ""
+    arm("the copy-engine clear leaving its on state is noted on the check it happened in and in the facts, and is no stop; an Xid "
+        "with copy-engine clears in the same check says so; the summary counts the checks with a kick",
+        got.get("plugin.cedown", {}).get("result") == "pass" and why.get("plugin.cedown") == "copy-engine clear went from 1 to 2"
+        and "went from 1 to 2 during plugin.cedown" in (data.get("facts", {}).get("ce_clear_left") or "")
+        and why.get("plugin.xidce") == "Xid +1; copy-engine clears +4 during it"
+        and "1 with a stalled channel rung again (debug.nvrm_chan_kicks)" in report, (why, data.get("facts"), report[-1500:]))
 
     # ------------------------------------------------------------------ an Xid in the probe, a fault of the runner
     w = World(TOP, "probe-xid")

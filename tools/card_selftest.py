@@ -39,9 +39,11 @@ Each child starts from an environment built from nothing (HOME, USER, LOGNAME, L
 TMPDIR=<out>/tmp/<id>, the plugin's log, AIR cache and Mesa cache pointed into <out>, then the row's env), with
 /dev/null as input, its output in files, in a session of its own, in <out>/tmp/<id>. At its limit, and when it ends, its
 process group is killed and awaited for KILL_POLL seconds: a check with a process still alive then (the program, or one
-it started) is STUCK. A STUCK check, a GPU check that timed out, a rise of debug.nvrm_chan_gave_up, a change of
-debug.nvrm_fence_state or of WindowServer's pid stops every later GPU check; a rise of debug.nvrm_xid_count fails the
-check it happened in. caffeinate -d -i -w <this pid> holds the display awake only while windowed checks run.
+it started) is STUCK. A STUCK check, a GPU check that timed out, a rise of debug.nvrm_chan_gave_up, of
+debug.nvrmfb_vram_ce_kept or of debug.nvrmfb_vram_power_events, a change of debug.nvrm_fence_state or of WindowServer's
+pid stops every later GPU check; a rise of debug.nvrm_xid_count, debug.nvrm_chan_recovered or debug.nvrm_chan_dropped
+fails the check it happened in, and one of debug.nvrm_chan_kicks is noted in its reason. caffeinate -d -i -w <this pid>
+holds the display awake only while windowed checks run.
 
 Exit: 0 every check that ran passed (skips, inactive and fallback rows listed with their reason); 1 a FAIL, TIMEOUT,
 CRASH or build failure; 2 usage; 3 refused; 4 stopped early. --list prints every row (id, part, kind, order, title)
@@ -132,8 +134,13 @@ CHECK_PROGRAMS = ("/usr/bin/xcrun", "/usr/bin/python3", "/bin/sh")
 # build/build_nvk.sh names the chain of NVK patches the package was built with (its CHAIN line)
 DRIVER_PATHS = ("plugin", "zink", "translator", "nvk", "kexts", "dlss", "vendor", "tools/nvk-bridge/bridge.mm",
                 "build/build_nvk.sh")
+# Read around every GPU check; a name the loaded kexts lack reads as None and its rule does nothing. The channel
+# counters are NVRM.kext's (kexts/NVRM/nvrm_chan_note.cpp: kicks, recovered and dropped are NVK's notes of a stalled or
+# rebuilt channel); the nvrmfb_vram ones are NVRMFB's (kexts/NVRMFB/fb/nvrm-fb.cpp): power_events counts the GPU's
+# standby, resume and lost messages, and the ce_ ones (3.0.1) its copy-engine clear of new video memory blocks.
 COUNTERS = ("debug.nvrm_xid_count", "debug.nvrm_chan_recovered", "debug.nvrm_chan_gave_up", "debug.nvrm_chan_dropped",
-            "debug.nvrm_fence_state")
+            "debug.nvrm_fence_state", "debug.nvrm_chan_kicks", "debug.nvrmfb_vram_power_events",
+            "debug.nvrmfb_vram_ce_clear", "debug.nvrmfb_vram_ce_cleared", "debug.nvrmfb_vram_ce_kept")
 FAILED = ("FAIL", "TIMEOUT", "CRASH", "STUCK", "build failed")
 BASE_ENV_NAMES = ("HOME", "USER", "LOGNAME", "LANG", "PATH", "TMPDIR", "PYTHONDONTWRITEBYTECODE")
 ZINK_FILES = ("libnvk_zink.dylib", "libnvk_cgl.dylib", "libnvk_zink_vulkan.dylib", "libnvk_renderer.dylib",
@@ -1310,19 +1317,48 @@ class Run:
         return "FAIL", f"rc {rc}", detail, f"exit {rc}, not the expected {e['rc']}", exit_text
 
     def watch(self, row, before, after):
-        """the driver's fault counters around a GPU check"""
+        """the driver's fault counters around a GPU check. A rise of the Xid count, of the channels NVK rebuilt or of
+        the submissions a rebuild dropped fails the check (a rebuilt channel can leave right-looking pixels); a rise of
+        the stalled channels NVK rang again, and a copy-engine clear that left its on state (3.0.1), are noted in its
+        reason; a give-up, a change of the fence state, a new WindowServer, copy-engine work whose end was not seen
+        (3.0.1) and a standby of the GPU stop every later GPU check."""
         (b, _), (a, aws) = before, after
+
+        def rise(name):
+            v0, v1 = b.get(name), a.get(name)
+            return v1 - v0 if isinstance(v0, int) and isinstance(v1, int) and v1 > v0 else 0
         x0, x1 = b.get("debug.nvrm_xid_count"), a.get("debug.nvrm_xid_count")
         if isinstance(x0, int) and isinstance(x1, int):
             row["xid_delta"] = x1 - x0
-            if x1 > x0:
-                if row["result"] in ("pass", "skip", "inactive", "fallback"):
-                    row["result"], row["why"] = "FAIL", f"Xid +{x1 - x0}"
-                else:
-                    row["why"] = (row["why"] + f"; Xid +{x1 - x0}").lstrip("; ")
+        faults = [f"{word} +{n}" for word, n in (("Xid", rise("debug.nvrm_xid_count")),
+                                                 ("channel rebuilt", rise("debug.nvrm_chan_recovered")),
+                                                 ("dropped", rise("debug.nvrm_chan_dropped"))) if n]
+        notes = []
+        if rise("debug.nvrm_chan_kicks"):
+            notes.append(f"kicks +{rise('debug.nvrm_chan_kicks')}")
+            self.facts["kicked"] = self.facts.get("kicked", 0) + 1
+        if faults and rise("debug.nvrmfb_vram_ce_cleared"):
+            notes.append(f"copy-engine clears +{rise('debug.nvrmfb_vram_ce_cleared')} during it")
+        c0, c1 = b.get("debug.nvrmfb_vram_ce_clear"), a.get("debug.nvrmfb_vram_ce_clear")
+        if c0 == 1 and isinstance(c1, int) and c1 != 1:
+            notes.append(f"copy-engine clear went from 1 to {c1}")
+            self.facts.setdefault("ce_clear_left", f"debug.nvrmfb_vram_ce_clear went from 1 to {c1} during {row['id']}")
+        if faults:
+            if row["result"] in ("pass", "skip", "inactive", "fallback"):
+                row["result"], row["why"] = "FAIL", "; ".join(faults)
+            else:
+                row["why"] = (row["why"] + "; " + "; ".join(faults)).lstrip("; ")
+        if notes:
+            row["why"] = (row["why"] + "; " + "; ".join(notes)).lstrip("; ")
         g0, g1 = b.get("debug.nvrm_chan_gave_up"), a.get("debug.nvrm_chan_gave_up")
         if isinstance(g0, int) and isinstance(g1, int) and g1 > g0:
             self.stop(f"debug.nvrm_chan_gave_up rose by {g1 - g0} during {row['id']}")
+        if rise("debug.nvrmfb_vram_ce_kept"):
+            self.stop(f"debug.nvrmfb_vram_ce_kept rose by {rise('debug.nvrmfb_vram_ce_kept')} during {row['id']}: the "
+                      f"copy engine's work on a new video memory block was not seen to end")
+        if rise("debug.nvrmfb_vram_power_events"):
+            self.stop(f"debug.nvrmfb_vram_power_events rose by {rise('debug.nvrmfb_vram_power_events')} during "
+                      f"{row['id']}: the GPU went through a standby")
         f1 = a.get("debug.nvrm_fence_state")
         if self.first_fence is not None and f1 is not None and f1 != self.first_fence:
             self.stop(f"debug.nvrm_fence_state changed from {self.first_fence} to {f1} during {row['id']}")
@@ -1429,7 +1465,8 @@ class Run:
         fake = {"id": "device-probe", "result": "pass", "why": "", "xid_delta": None}
         self.watch(fake, before, after)
         if fake["result"] == "FAIL":
-            self.stop(f"debug.nvrm_xid_count rose by {fake['xid_delta']} during the device probe")
+            self.stop(f"debug.nvrm_xid_count rose by {fake['xid_delta']} during the device probe" if fake["xid_delta"]
+                      else f"{fake['why']} during the device probe")
         return not self.stopped
 
     # -- the end
@@ -1518,7 +1555,8 @@ class Run:
             t.append(f"| {r['nn']} | {r['part']} | {r['id']} | {self.shown(r)} | {r['seconds']:.1f} | {xid} | "
                      f"{r['detail'].replace('|', '/')[:DETAIL_CUT]} |")
         t += ["", f"{ran} ran, {failed} failed, {counts['skip']} skipped, {counts['inactive']} inactive, "
-                  f"{counts['fallback']} fallback, {counts['not run']} not run"]
+                  f"{counts['fallback']} fallback, {counts['not run']} not run"
+              + (f"; {f['kicked']} with a stalled channel rung again (debug.nvrm_chan_kicks)" if f.get("kicked") else "")]
         why = [f"- {r['id']}: {self.shown(r)}" for r in rows if r["result"] in ("skip", "inactive", "fallback", "not run")]
         t += ["", "## Skipped and why", ""] + (why or ["none"])
         info = [f"- {r['id']}: {l}" for r in rows for l in r["info"]]
