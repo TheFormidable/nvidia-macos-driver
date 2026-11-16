@@ -63,6 +63,7 @@ static nvmtl_to_uniform_fn xlate_to_uniform;   /* the table of an unlowered modu
 static nvmtl_translate_fn xlate;
 #include "nvmtl_spvcache_name.h"
 #include "nvmtl_pretranslate.h"
+#include "nvmtl_switch_defaults.h"
 #include "nvmtl_cache_file.h"
 int nvmtl_vk_lost(void);
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
@@ -1268,12 +1269,14 @@ NSData *nvmtl_compile_library_entry(NSData *air, NSString *ll, NSString *stage, 
 }
 
 // ---- background pre-translation of a new library's shaders ----
-// NVMTL_PRETRANSLATE=1 (the Cyberpunk profile sets it): every entry point of a library the application creates is
+// On in a game by default from 3.0.1 (nvmtl_switch_defaults.h: NVMTL_PRETRANSLATE unset and nvmtl_process_is_game),
+// and in any process with NVMTL_PRETRANSLATE=1 (the Cyberpunk profile sets it): every entry point of a library the application creates is
 // translated and stored in the shader cache by a small low-priority pool, so a cold first run does not translate each
 // shader on the thread that asks. It does the work the application's own request would do, through the same
 // single-flight entry (nvmtl_compile_library_entry), so a shader is translated once whoever asks first. Only the plain
 // translation is made here: variants that depend on function-constant values, and functions that need linking at pipeline
-// creation, are left to the pipeline path. NVMTL_PRETRANSLATE=0 or unset: nothing runs. NVMTL_PRETRANSLATE_THREADS (1..4, 2).
+// creation, are left to the pipeline path. NVMTL_PRETRANSLATE=0 (the way back), or unset outside a game: nothing runs.
+// NVMTL_PRETRANSLATE_THREADS (1..4, 2).
 typedef struct { void *lib; void *name; } nvmtl_pre_job;
 static _Atomic unsigned long gPreQueued, gPreDone, gPreTranslated, gPreCached, gPreSkipped, gPreFailed;
 static nvmtl_pool *nvmtl_pre_pool(void) {
@@ -1308,9 +1311,19 @@ static void nvmtl_pre_run(void *ctx) {
               done, (unsigned long)atomic_load(&gPreQueued), (unsigned long)atomic_load(&gPreTranslated),
               (unsigned long)atomic_load(&gPreCached), (unsigned long)atomic_load(&gPreSkipped), (unsigned long)atomic_load(&gPreFailed));
 }
+extern int nvmtl_process_is_game(void);
+static int nvmtl_pretranslate_on(void) {
+    static int on; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVMTL_PRETRANSLATE");
+        on = nvmtl_pretranslate_default(e, e ? 0 : nvmtl_process_is_game());
+        nvlog("pretranslate: %s (NVMTL_PRETRANSLATE=%s%s)", on ? "ON" : "OFF", e ? e : "unset",
+              e ? "" : on ? ", a game" : ", not a game");
+    });
+    return on;
+}
 void nvmtl_pretranslate_library(NVMTLLibrary *lib) {
-    const char *on = getenv("NVMTL_PRETRANSLATE");
-    if (!on || strcmp(on, "1") || !lib || !lib->_fns.count || !lib->_airs || !nvmtl_xlate_ready()) return;
+    if (!lib || !lib->_fns.count || !lib->_airs || !nvmtl_pretranslate_on() || !nvmtl_xlate_ready()) return;
     unsigned long n = 0;
     for (NSString *name in lib->_fns) {
         nvmtl_pre_job *j = malloc(sizeof *j); if (!j) break;

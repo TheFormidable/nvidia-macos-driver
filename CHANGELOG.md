@@ -41,6 +41,18 @@ only.
   `_filled` / `_fill_us` count what was still filled from the processor. `kexts/NVRMFB/fb/nvrm-vram-clear.h` holds the
   rules, `tools/test_vram_clear.c` every answer against them. The cause of the 330 MB/s itself is not established:
   the RM asks for a write-combined mapping, and by the macOS 26 sources NVRM's way of making it gets one.
+- **Asynchronous texture uploads are on by default outside WindowServer.** `replaceRegion` submitted its copy and
+  waited for the GPU before it returned, so an app that uploads many textures per frame stalled once per upload. The
+  asynchronous path (`NVMTL_ASYNC_TEX_UPLOAD`, its own staging buffer and command buffer, finished before the image is
+  overwritten, read back or freed: `plugin/nvmtl_tex_upload.h`) had already run by default since 3.0 for CPU-written
+  surface uploads outside WindowServer; it now runs for every region upload outside WindowServer, whose uploads stay
+  synchronous. `=1` still turns it on anywhere.
+- **Shaders of a game are translated ahead.** In a game (the games category or `LSSupportsGameMode` in its
+  `Info.plist`, the test macOS's own Game Mode uses), every entry point of a new shader library is translated by a
+  small low-priority pool and stored in the shader cache (`NVMTL_PRETRANSLATE`, which only the Cyberpunk profile set
+  before), so the first run of a level does not stop for each new shader. Other processes are left as they were; `=1`
+  still turns it on in any process. Neither of these two was measured on a card yet; the rules are in
+  `plugin/nvmtl_switch_defaults.h` and `tools/test_switch_defaults.c`.
 
 ### The ways back
 
@@ -49,6 +61,8 @@ One per change, as in 3.0 below; each restores the 3.0 behaviour of that change 
 | Change | Way back | Kind |
 |---|---|---|
 | Copy-engine clear of new blocks of video memory | `nvfbceclear=0` | boot argument |
+| Asynchronous texture uploads outside WindowServer | `NVMTL_ASYNC_TEX_UPLOAD=0` | `nvrm610.conf` |
+| Shaders of a game translated ahead | `NVMTL_PRETRANSLATE=0` | `nvrm610.conf` |
 
 ## 3.0
 

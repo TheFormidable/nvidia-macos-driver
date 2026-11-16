@@ -10,10 +10,10 @@
 #ceiling dev dlss 13
 #ceiling dev nvencvt 50
 #ceiling dev nvk 77
-#ceiling dev plugin 227
+#ceiling dev plugin 225
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 487
+#ceiling unreviewed all 485
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -163,7 +163,7 @@ env	NVMTL_APP_PROFILE	setting	unset	2.9	-	Built-in per-application profiles: On 
 env	NVMTL_ARGBUF_SAMPLERS	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_COMMIT	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_SURFACE_UPLOAD	dev	unset	2.9	-	unreviewed
-env	NVMTL_ASYNC_TEX_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNC_TEX_UPLOAD	escape	on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0)	2.9	3.2	A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too.
 env	NVMTL_B78_DEBUG	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
@@ -392,7 +392,7 @@ env	NVMTL_POOL_COST_LIB	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_REUSE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRESENT_INLINE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRESUBMIT_PROLOGUE	dev	unset	2.9	-	unreviewed
-env	NVMTL_PRETRANSLATE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRETRANSLATE	escape	on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0)	2.9	3.2	In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process.
 env	NVMTL_PRETRANSLATE_THREADS	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRIVATE_CAPTURE_DIR	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRIVATE_CAPTURE_REQUEST	dev	unset	2.9	-	unreviewed
