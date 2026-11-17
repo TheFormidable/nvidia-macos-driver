@@ -491,8 +491,8 @@ una opción equivocada (salida 2) no deja `DONE`; lo dice el archivo de salida. 
 compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y muestra qué se
 compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que abren una ventana;
 `--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del paquete instalado
-cuando no es el de por defecto. El de por defecto es el commit de la versión 3.0: para un paquete de la versión 3.0.1,
-da el commit con el que se compiló.
+cuando no es el de por defecto. El de por defecto es el commit de la versión 3.0: para un paquete de la versión 3.0.1
+o posterior, da el commit con el que se compiló.
 
 Antes de compilar ninguna comprobación rechaza la pasada (salida 3) salvo que la carpeta de salida esté dentro de
 `~/nullmoth-claude`, fuera de `src` y de `build2`, vacía o inexistente y con 2 GB libres; el checkout esté limpio y sus

@@ -465,7 +465,7 @@ refusal before the folder is made (a wrong out folder or check file, exit 3) or 
 the next paragraph, all but the Metal probe, and prints what would be built and run, with no GPU program; `--no-window`
 leaves out the checks that open a window; `--only REGEX` runs only the checks whose id matches; `--expect COMMIT` names
 the commit of the installed package when it is not the default one. The default is release 3.0's commit: for a package
-of release 3.0.1, pass the commit it was built from.
+of release 3.0.1 or later, pass the commit it was built from.
 
 Before any check is built it refuses the run (exit 3) unless the out folder lies inside `~/nullmoth-claude`, outside
 `src` and `build2`, is empty or absent and has 2 GB free; the checkout is clean and its driver sources are those of the
