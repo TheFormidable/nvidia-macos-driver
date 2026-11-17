@@ -138,6 +138,12 @@ static volatile SInt32 gVramPoolOrphans = 0;   // a framebuffer stopped with the
 static volatile SInt64 gCntVramDirty, gCntVramFillSkipped, gCntVramFilled, gCntVramFillUs, gCntVramWakeClean, gCntVramWakeDirty;
 static volatile SInt64 gCntVramReadyHit, gCntVramReadyMiss, gCntVramReadyMade, gCntVramReadyBack;
 static volatile SInt64 gVramReadyBytes;
+// The copy engine's clear of a block that has to be zero (nvrm-vram-clear.h, 3.0.1): NVRM_VC_ON, NVRM_VC_OFF with boot
+// argument nvfbceclear=0 (read once in start(): every such block is filled from the processor, as in 3.0), or
+// NVRM_VC_DOWN once it stood down for this boot. debug.nvrmfb_vram_ce_clear shows it.
+#include "nvrm-vram-clear.h"
+static volatile SInt32 gVramCeClear = NVRM_VC_ON;
+static volatile SInt64 gCntVramCeCleared, gCntVramCeUs, gCntVramCeFallback, gCntVramCeKept;
 static nvrm_vp gVramPool;                      // every use holds vramPoolLock(), and nothing else is taken while it is held
 static IOLock *vramPoolLock()
 {
@@ -849,6 +855,7 @@ public:
     bool     vramGrantGated(struct NVRMVramRequest *r, bool *fillLater);
     bool     vramReleaseGated(struct NVRMVramRequest *r, bool counted);
     bool     vramFill(void *kva, NvU64 bytes, bool watched);
+    int      vramClear(struct NvKmsKapiMemory *mem, void *kva, NvU64 bytes, bool watched);
     bool     vramPoolUsable();
     bool     vramTakeReady(struct NVRMVramRequest *r, NvU64 want, bool note, bool *hot);
     void     vramPoolKick();
@@ -3308,6 +3315,9 @@ bool NVRMNVDAFramebuffer::start(IOService *provider)
             gVramFast = 0;
             FBLOG("boot-arg nvfbvramfast=0: every granted block is filled with zeros here and made on the caller's thread");
         }
+        uint32_t ce = 1;
+        if (PE_parse_boot_argn("nvfbceclear", &ce, sizeof ce) && !ce && OSCompareAndSwap(NVRM_VC_ON, NVRM_VC_OFF, (volatile UInt32 *)&gVramCeClear))
+            FBLOG("boot-arg nvfbceclear=0: a block that has to be zero is filled from the processor, not cleared by the copy engine");
     }
     FBLOG("reflip keep-alive NOT armed: enableController's modeset owns the head, no boot-time re-syncs");
     fBars = nvrmfbCall(barsFire, this);
@@ -4694,6 +4704,11 @@ SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_misses, CTLFLAG_RD | CTLFLAG_LOC
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_made,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyMade,   "blocks the worker made ahead of time that became ready");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_back,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramReadyBack,   "blocks made ahead of time that went back unused (ready ones, and ones that never became ready)");
 SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ready_bytes,  CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gVramReadyBytes,     "bytes of blocks ready now");
+SYSCTL_INT(_debug, OID_AUTO, nvrmfb_vram_ce_clear, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gVramCeClear, 0, "1 = a block that has to be zero is cleared by the GPU's copy engine; 0 = boot argument nvfbceclear=0: filled from the processor; 2 = stood down for this boot (an older NVRM, a block that did not read as zero after the engine, or work whose end was not seen)");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ce_cleared,   CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramCeCleared,   "new blocks cleared by the copy engine instead of filled from the processor");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ce_us,        CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramCeUs,        "microseconds spent clearing new blocks with the copy engine, probes included");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ce_fallbacks, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramCeFallback,  "new blocks the copy engine was asked to clear and that were filled from the processor after all");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrmfb_vram_ce_kept,      CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&gCntVramCeKept,      "new blocks kept until restart because the copy engine's work on them was not seen to end");
 static struct NVRMVramRequest gVramTest[256]; static int gVramTestN; static int gVramTestMode;
 static int nvrmfb_vramtest_sysctl SYSCTL_HANDLER_ARGS
 {
@@ -4788,6 +4803,9 @@ static void nvrmfbInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_hits); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_misses);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_made); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_back);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ready_bytes);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ce_clear); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ce_cleared);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ce_us); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ce_fallbacks);
+    sysctl_register_oid(&sysctl__debug_nvrmfb_vram_ce_kept);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_interval); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_sum);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_n); sysctl_register_oid(&sysctl__debug_nvrmfb_flip_us_max);
     sysctl_register_oid(&sysctl__debug_nvrmfb_flip_lean);
@@ -4905,6 +4923,77 @@ bool NVRMNVDAFramebuffer::vramFill(void *kva, NvU64 bytes, bool watched)
     // Counted only when whole, the time too: debug.nvrmfb_vram_fill_us / _filled is then the cost of one fill.
     if (whole) { OSAddAtomic64(1, &gCntVramFilled); OSAddAtomic64((SInt64)((nvrmNowNs() - t0) / 1000ull), &gCntVramFillUs); }
     return whole;
+}
+// Do the probes of a block read as zero? The places the RM's clearing is checked at: NVRM_VP_PROBES of them and the
+// end (nvrm-vram-pool.h). *at and *got name the first place that did not, for the log.
+static bool nvrmVramReadsZero(const void *kva, NvU64 want, NvU64 *at, NvU64 *got)
+{
+    const volatile NvU64 *probe = (const volatile NvU64 *)kva;
+    for (unsigned i = 0; i <= NVRM_VP_PROBES; i++) {
+        const NvU64 a = nvrm_vp_probe_at(want, i);
+        const NvU64 v = probe[a];
+        if (v) { *at = a; *got = v; return false; }
+    }
+    return true;
+}
+// Zeros for a new block that has to be zero (3.0.1; nvrm-vram-clear.h has the rules). The GPU's copy engine is asked
+// first, through NVRM: the processor took 27 ms for the 9 MB of a captured frame through BAR1, the engine a fraction of
+// a millisecond. NVRM never waits for a standby here (it answers at once when the GPU is not running), so a caller's
+// display gate is held no longer than the clear itself. The probes then check the engine as they check the RM's own
+// clearing, and whatever the engine did not do is filled from the processor as before (vramFill, `watched` as there).
+// Returns 1 when the block is zero, 0 when the worker's fill stopped short (a standby began: the block is not zero),
+// and -1 when the engine may still be writing zeros into the block: it must be kept until restart, neither handed out
+// nor given back, or the zeros could land in memory that is someone else's by then.
+int NVRMNVDAFramebuffer::vramClear(struct NvKmsKapiMemory *mem, void *kva, NvU64 bytes, bool watched)
+{
+    int what = NVRM_VC_FILL;
+    if (OSAddAtomic(0, &gVramCeClear) == NVRM_VC_ON && mem && fDev && kva && bytes) {
+        const UInt64 t0 = nvrmNowNs();
+        struct NVRMVidmemClear q = {};
+        q.version = NVRM_VRAM_CLEAR_VERSION; q.result = NVRM_VRAM_CLEAR_NOT_RUN;
+        q.kapiDevice = fDev; q.kapiMemory = mem; q.bytes = bytes;
+        IOService *rm = getProvider();
+        while (rm && strcmp(rm->getMetaClass()->getClassName(), "NVRM") != 0) rm = rm->getProvider();
+        const OSSymbol *fn = OSSymbol::withCString(NVRM_VRAM_FN_CLEAR);
+        const IOReturn ret = (rm && fn) ? rm->callPlatformFunction(fn, false, &q, NULL, NULL, NULL) : kIOReturnUnsupported;
+        OSSafeReleaseNULL(fn);
+        int st = NVRM_VC_ON;
+        NvU64 at = 0, got = 0;
+        bool readsZero = true;
+        what = nvrm_vc_answer(&st, ret != kIOReturnUnsupported, q.result, q.cleared, bytes);
+        if (what == NVRM_VC_PROBE) {
+            readsZero = nvrmVramReadsZero(kva, bytes, &at, &got);
+            what = nvrm_vc_probed(&st, readsZero);
+        }
+        if (what == NVRM_VC_ZERO) {
+            OSAddAtomic64(1, &gCntVramCeCleared); OSAddAtomic64((SInt64)((nvrmNowNs() - t0) / 1000ull), &gCntVramCeUs);
+        } else if (what == NVRM_VC_KEEP) {
+            OSAddAtomic64(1, &gCntVramCeKept);
+        } else {
+            OSAddAtomic64(1, &gCntVramCeFallback);
+            static volatile SInt32 said = 0;
+            if (st != NVRM_VC_DOWN && OSIncrementAtomic(&said) < 4)
+                FBLOG("the copy engine did not clear a block of %llu bytes (0x%x, RM status 0x%x, %llu of it cleared): "
+                      "filled from the processor", (unsigned long long)bytes, (unsigned)ret, q.rmStatus,
+                      (unsigned long long)q.cleared);
+        }
+        if (st == NVRM_VC_DOWN && OSCompareAndSwap(NVRM_VC_ON, NVRM_VC_DOWN, (volatile UInt32 *)&gVramCeClear)) {
+            if (ret == kIOReturnUnsupported)
+                FBLOG("NVRM does not clear video memory with the copy engine (an older NVRM): blocks that have to be zero "
+                      "are filled from the processor, as before");
+            else if (what == NVRM_VC_KEEP)
+                FBLOG("the copy engine's clear of a block of %llu bytes was not seen to end (RM status 0x%x): the block "
+                      "is kept until restart, and from now on blocks are filled from the processor",
+                      (unsigned long long)bytes, q.rmStatus);
+            else if (!readsZero)
+                FBLOG("the copy engine said it cleared a block of %llu bytes, but it reads 0x%llx at byte %llu: filled "
+                      "from the processor, and so is every block from now on", (unsigned long long)bytes,
+                      (unsigned long long)got, (unsigned long long)(at << 3));
+        }
+    }
+    if (what == NVRM_VC_ZERO) return 1;
+    if (what == NVRM_VC_KEEP) return -1;
+    return vramFill(kva, bytes, watched) ? 1 : 0;
 }
 // With the display gate held. fillLater (the worker makes a block ahead of time): the block is not a grant to the
 // accelerator yet (vramTakeReady counts it when it is handed out), a refusal for lack of room is silent, and a block
@@ -5092,18 +5181,14 @@ bool NVRMNVDAFramebuffer::vramGrantGated(struct NVRMVramRequest *r, bool *fillLa
     // there ends the belief until restart. So does the first standby: from then on every block is filled as before,
     // and what the same places read before the fill is only counted (debug.nvrmfb_vram_wake_clean / _wake_dirty), so
     // that a card can show whether its free memory comes back clean from a sleep.
+    // 3.0.1: a block that has to be zero is cleared by the GPU's copy engine, and filled from the processor only when
+    // the engine did not do it (vramClear).
     bool clean = false;
     const bool trusted = nvrmVramTrusted();
     const bool forTheRecord = !trusted && gVramFast && OSAddAtomic(0, &gVramRmClears) == 1 && !OSAddAtomic64(0, &gCntVramDirty);
     if (trusted || forTheRecord) {
-        const volatile NvU64 *probe = (const volatile NvU64 *)kva;
         NvU64 at = 0, got = 0;
-        clean = true;
-        for (unsigned i = 0; i <= NVRM_VP_PROBES && clean; i++) {
-            at = nvrm_vp_probe_at(want, i);
-            got = probe[at];
-            if (got) clean = false;
-        }
+        clean = nvrmVramReadsZero(kva, want, &at, &got);
         if (forTheRecord) {
             OSAddAtomic64(1, clean ? &gCntVramWakeClean : &gCntVramWakeDirty);
             clean = false;
@@ -5119,7 +5204,9 @@ bool NVRMNVDAFramebuffer::vramGrantGated(struct NVRMVramRequest *r, bool *fillLa
     }
     if (clean) OSAddAtomic64(1, &gCntVramFillSkipped);
     else if (fillLater) *fillLater = true;
-    else vramFill(kva, want, false);
+    // The copy engine may still write zeros into it: it stays as it is, allocated, mapped and counted in the budget
+    // (which is what it holds), until restart, and this grant is refused.
+    else if (vramClear(mem, kva, want, false) < 0) return false;
 
     const UInt64 allocationCookie = gAllocations.insert(mem, want);
     if (!allocationCookie) {
@@ -5256,7 +5343,11 @@ bool NVRMNVDAFramebuffer::vramPoolStep()
     }
     // A fill that stopped short (the GPU went to standby under it) leaves a block that is not zero: it is not stored,
     // whatever the pool would say (the message that makes it stale may not have arrived yet).
-    const bool whole = !fill || vramFill(r.kva, r.actualSize, true);
+    const int zero = fill ? vramClear((struct NvKmsKapiMemory *)r.handle, r.kva, r.actualSize, true) : 1;
+    // The copy engine may still write zeros into it: neither stored nor given back, it stays allocated (and in the
+    // table of allocations) until restart.
+    if (zero < 0) return true;
+    const bool whole = zero > 0;
     b.handle = r.handle; b.kva = r.kva; b.phys = r.phys; b.bytes = r.actualSize; b.cookie = r.allocationCookie; b.gen = gen;
     IOLockLock(pl);
     const bool stored = whole && b.bytes == bytes && nvrm_vp_store(&gVramPool, &b, nvrmNowNs(), budget) != 0;

@@ -18,8 +18,13 @@ typedef enum { NVMTL_UP_SUBMIT_WAIT = 0, NVMTL_UP_SUBMIT_ASYNC = 1 } nvmtl_up_su
 static inline nvmtl_up_submit nvmtl_up_before_upload(const nvmtl_up_state *s, int async_flag, uint64_t *finish_first){
     (void)s; *finish_first = 0; return async_flag ? NVMTL_UP_SUBMIT_ASYNC : NVMTL_UP_SUBMIT_WAIT; }
 static inline uint64_t nvmtl_up_before_consume(const nvmtl_up_state *s){ (void)s; return 0; }
-static inline void nvmtl_up_set(nvmtl_up_state *s, uint64_t i){ if(s) s->infl = i; }
+/* hand-back DISABLED: the replaced handle is dropped, as before 3.0.1 (two racing uploads lose one) */
+static inline uint64_t nvmtl_up_set(nvmtl_up_state *s, uint64_t i){ if(s) s->infl = i; return 0; }
 static inline void nvmtl_up_clear(nvmtl_up_state *s){ if(s) s->infl = 0; }
+#define NVMTL_UP_HELD_MAX       256u
+#define NVMTL_UP_HELD_BYTES_MAX (256ull << 20)
+static inline int nvmtl_up_room(uint64_t c, uint64_t h, uint64_t b){
+    return c < NVMTL_UP_HELD_MAX && b <= NVMTL_UP_HELD_BYTES_MAX && h <= NVMTL_UP_HELD_BYTES_MAX - b; }
 #endif
 '''
 

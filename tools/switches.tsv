@@ -10,10 +10,10 @@
 #ceiling dev dlss 13
 #ceiling dev nvencvt 50
 #ceiling dev nvk 77
-#ceiling dev plugin 227
+#ceiling dev plugin 225
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 487
+#ceiling unreviewed all 485
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -146,7 +146,7 @@ env	NVK_HOST_IMPORT	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_QUERY	dev	unset	2.9	-	unreviewed
 env	NVK_HWRT_WIDE	dev	unset	2.9	-	unreviewed
 env	NVK_L2_TAIL	dev	unset	2.9	-	unreviewed
-env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop).
+env	NVK_LOCAL_MAP_SYSMEM	setting	unset	2.9	-	Keep CPU-written memory in system RAM: By default applications place the part of it the processor does not read back in video memory (faster in some games), while the desktop (WindowServer), memory shared between processes and what the processor reads back keep system RAM. On keeps all of it in system RAM in every application, as before 3.0.1; off places all of it in video memory, for the desktop too (unsafe for the desktop).
 env	NVK_NO_BIGPAGE	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_NO_NONCONTIG	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVK_PREEMPT_LOG	diag	unset	2.9	-	unreviewed
@@ -163,7 +163,7 @@ env	NVMTL_APP_PROFILE	setting	unset	2.9	-	Built-in per-application profiles: On 
 env	NVMTL_ARGBUF_SAMPLERS	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_COMMIT	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_SURFACE_UPLOAD	dev	unset	2.9	-	unreviewed
-env	NVMTL_ASYNC_TEX_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNC_TEX_UPLOAD	escape	on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0)	2.9	3.2	A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too.
 env	NVMTL_B78_DEBUG	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
@@ -392,7 +392,7 @@ env	NVMTL_POOL_COST_LIB	dev	unset	2.9	-	unreviewed
 env	NVMTL_POOL_REUSE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRESENT_INLINE	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRESUBMIT_PROLOGUE	dev	unset	2.9	-	unreviewed
-env	NVMTL_PRETRANSLATE	dev	unset	2.9	-	unreviewed
+env	NVMTL_PRETRANSLATE	escape	on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0)	2.9	3.2	In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process.
 env	NVMTL_PRETRANSLATE_THREADS	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRIVATE_CAPTURE_DIR	dev	unset	2.9	-	unreviewed
 env	NVMTL_PRIVATE_CAPTURE_REQUEST	dev	unset	2.9	-	unreviewed
@@ -435,6 +435,7 @@ env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFIN_ZERO	escape	on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0)	3.0.1	3.2	WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0.
 env	NVMTL_SURFOUT_PLANES	escape	on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9)	3.0	3.2	The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use.
 env	NVMTL_SURFOUT_READBACK	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURF_IMPORT_CACHE	dev	unset	2.9	-	unreviewed
@@ -462,6 +463,7 @@ env	NVMTL_WG_ZERO_NEG	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_SKIP_EVERY	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_FREE_OFFMAIN	escape	on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0)	3.0.1	3.2	WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager.
 env	NVMTL_WS_FULL	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
@@ -553,6 +555,7 @@ bootarg	nvfb	install	absent: the framebuffer kext does not start (boot-loop guar
 bootarg	nvfb10bit	setting	unset	2.9	-	10-bit colour: Scan out 30-bit surfaces on mode changes.
 bootarg	nvfbbootretry	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
 bootarg	nvfbbpc	setting	unset	2.9	-	Output colour depth: Bits per colour channel on the link; default lets the driver pick.
+bootarg	nvfbceclear	escape	on (nvfbceclear=0: a new block of video memory that has to be zero is filled from the processor through BAR1, as in 3.0)	3.0.1	3.2	A new block of video memory that has to be zero (after the GPU's first standby, or once a block read as not zero although the RM clears) is cleared by the GPU's copy engine through NVRM instead of being filled with zeros from the processor through BAR1, which took 27 ms for the 9 MB of one captured frame of a screen share; the probes check the result, and the processor fills whatever the engine did not do.
 bootarg	nvfbdsr	setting	unset	2.9	-	Dynamic super resolution (render above the panel's resolution): Offer desktops larger than the panel and scale them down. Reserves scanout memory.
 bootarg	nvfbedpbl	setting	unset	2.9	-	Laptop panel brightness over the display link: On by default; off disables brightness control through the panel's AUX channel.
 bootarg	nvfbformat	setting	unset	2.9	-	Output colour format: Pixel format on the link; default lets the driver pick.
@@ -572,7 +575,7 @@ bootarg	nvfbsmall	recovery	unset	2.9	-	turns one part of the driver off or back 
 bootarg	nvfbsurround	setting	unset	2.9	-	Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off.
 bootarg	nvfbtrace	diag	unset	2.9	-	observes only
 bootarg	nvfbvib	setting	unset	2.9	-	Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone.
-bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
+bootarg	nvfbvramfast	escape	on (nvfbvramfast=0: every granted block of video memory is cleared again, by the copy engine or with nvfbceclear=0 from the processor as in 2.9, and made on the thread that asks)	3.0	3.2	A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate.
 bootarg	nvfbvrr	setting	unset	2.9	-	Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it.
 bootarg	nvfetchcopy	dev	unset	2.9	-	unreviewed
 bootarg	nvhud	diag	unset	2.9	-	observes only
@@ -750,6 +753,8 @@ sysctl	debug.nvrm_bh_runs	diag	read-only	3.0	-	RM bottom halves run
 sysctl	debug.nvrm_bh_stuck	diag	read-only	3.0	-	bottom-half threads that did not exit at stop
 sysctl	debug.nvrm_bh_thread	diag	read-only	3.0	-	GPUs whose RM bottom half runs on its own thread
 sysctl	debug.nvrm_bh_wake_max_us	diag	read-only	3.0	-	longest bottom-half request to run, microseconds
+sysctl	debug.nvrm_boost_policy	diag	read-only	3.0.1	-	boost policy: 0 undecided (NVRM_610_BOOST), 1 idle mode, 2 normal
+sysctl	debug.nvrm_boost_policy_sets	diag	read-only	3.0.1	-	boost policy changes accepted since boot
 sysctl	debug.nvrm_boot_arm_ms	diag	read-only	3.0	-	start-up: tries to arm the accelerator, ms
 sysctl	debug.nvrm_boot_gate_ms	diag	read-only	3.0	-	start-up: wait for start() to have returned, ms
 sysctl	debug.nvrm_boot_go_ms	diag	read-only	3.0	-	start-up: go(2), ms
@@ -968,6 +973,11 @@ sysctl	debug.nvrmfb_layout_classes	diag	read-only	3.0	-	Apple classes NVRMFB com
 sysctl	debug.nvrmfb_layout_vtables	diag	read-only	3.0	-	Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse
 sysctl	debug.nvrmfb_layout_vtdiff	diag	read-only	3.0	-	Apple vtables whose length differs from this build; reported, never a reason to refuse
 sysctl	debug.nvrmfb_vram_budget_bytes	diag	read-only	2.9	-	the BAR1 grant budget in force
+sysctl	debug.nvrmfb_vram_ce_clear	diag	read-only	3.0.1	-	1 = a block that has to be zero is cleared by the GPU's copy engine; 0 = boot argument nvfbceclear=0: filled from the processor; 2 = stood down for this boot (an older NVRM, a block that did not read as zero after the engine, or work whose end was not seen)
+sysctl	debug.nvrmfb_vram_ce_cleared	diag	read-only	3.0.1	-	new blocks cleared by the copy engine instead of filled from the processor
+sysctl	debug.nvrmfb_vram_ce_fallbacks	diag	read-only	3.0.1	-	new blocks the copy engine was asked to clear and that were filled from the processor after all
+sysctl	debug.nvrmfb_vram_ce_kept	diag	read-only	3.0.1	-	new blocks kept until restart because the copy engine's work on them was not seen to end
+sysctl	debug.nvrmfb_vram_ce_us	diag	read-only	3.0.1	-	microseconds spent clearing new blocks with the copy engine, probes included
 sysctl	debug.nvrmfb_vram_dirty	diag	read-only	3.0	-	1 once a new block did not read as zero although the RM clears: from then on every block is filled again
 sysctl	debug.nvrmfb_vram_display_aware	recovery	writable by root	2.9	-	1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction
 sysctl	debug.nvrmfb_vram_display_bytes	diag	read-only	2.9	-	scanout+cursor the framebuffer itself maps into BAR1

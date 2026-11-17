@@ -51,6 +51,7 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvfb10bit", NVRM_SW_SETTING },
     { "nvfbbootretry", NVRM_SW_RECOVERY },
     { "nvfbbpc", NVRM_SW_SETTING },
+    { "nvfbceclear", NVRM_SW_ESCAPE },
     { "nvfbdsr", NVRM_SW_SETTING },
     { "nvfbedpbl", NVRM_SW_SETTING },
     { "nvfbformat", NVRM_SW_SETTING },
@@ -103,5 +104,5 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvselector", NVRM_SW_HARDWARE },
     { "nvzink", NVRM_SW_ESCAPE },
 };
-#define NVRM_SWITCH_COUNT 97u
+#define NVRM_SWITCH_COUNT 98u
 #endif

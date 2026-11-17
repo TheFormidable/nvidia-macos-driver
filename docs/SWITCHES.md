@@ -21,9 +21,9 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 11 | 1 | 55 | 408 | 12 |  | 493 |
-| bootarg | 4 | 13 | 30 | 21 | 13 |  | 8 | 6 | 2 |  | 97 |
-| sysctl |  | 5 | 4 | 12 |  |  | 366 |  |  |  | 387 |
+| env |  | 6 |  |  | 15 | 1 | 55 | 406 | 12 |  | 495 |
+| bootarg | 4 | 13 | 30 | 21 | 14 |  | 8 | 6 | 2 |  | 98 |
+| sysctl |  | 5 | 4 | 12 |  |  | 373 |  |  |  | 394 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -36,6 +36,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
+| env | `NVMTL_ASYNC_TEX_UPLOAD` | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. |
 | env | `NVMTL_BUSY_DONE_EARLY` | on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch) | 3.2 | A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_IMAGE_GRACE` | on (NVMTL_IMAGE_GRACE=0 in the settings file: a released texture is freed at once, as in 2.9) | 3.2 | A texture the application released keeps its memory until no command buffer that could still read it is open or in flight, so a late read is stale instead of a GPU fault. |
@@ -43,13 +44,17 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_NVENCVT` | on for the cards known to decode correctly: RTX 30 and 40, and RTX 50 once its decode self-test has passed on the card (NVMTL_NVENCVT=0 in the settings file: never; 1: in every process, RTX 50 still behind its self-test) | 3.2 | Hardware video decode and encode through the driver's own VideoToolbox service. |
 | env | `NVMTL_PHOTOBOOTH_FLIP` | on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9) | 3.2 | In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched. |
 | env | `NVMTL_PLANE_FOLLOW` | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. |
+| env | `NVMTL_PRETRANSLATE` | on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0) | 3.2 | In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process. |
+| env | `NVMTL_SURFIN_ZERO` | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. |
 | env | `NVMTL_SURFOUT_PLANES` | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. |
+| env | `NVMTL_WS_FREE_OFFMAIN` | on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0) | 3.2 | WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager. |
 | env | `NVMTL_YUV422` | on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9) | 3.2 | Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused. |
 | env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
 | bootarg | `nvaccel_pageoff_locked` | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |
 | bootarg | `nvaccel_surf_planes` | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |
-| bootarg | `nvfbvramfast` | on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9) | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. |
+| bootarg | `nvfbceclear` | on (nvfbceclear=0: a new block of video memory that has to be zero is filled from the processor through BAR1, as in 3.0) | 3.2 | A new block of video memory that has to be zero (after the GPU's first standby, or once a block read as not zero although the RM clears) is cleared by the GPU's copy engine through NVRM instead of being filled with zeros from the processor through BAR1, which took 27 ms for the 9 MB of one captured frame of a screen share; the probes check the result, and the processor fills whatever the engine did not do. |
+| bootarg | `nvfbvramfast` | on (nvfbvramfast=0: every granted block of video memory is cleared again, by the copy engine or with nvfbceclear=0 from the processor as in 2.9, and made on the thread that asks) | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. |
 | bootarg | `nvlayout` | on (nvlayout=0: the layout is still checked and any difference logged, but it no longer stops the start; 2.9 did not check at all) | 3.2 | Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update. |
 | bootarg | `nvrmatomic` | on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9) | 3.2 | The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool. |
 | bootarg | `nvrmbhthread` | on (nvrmbhthread=0: the bottom half runs on the interrupt's work loop, as in 2.9) | 3.2 | The RM's interrupt bottom half runs on its own thread, so a long one no longer holds back the next GPU interrupt. |
@@ -185,7 +190,7 @@ Each of these does nothing unless it is set.
 | `NVENCVT_SYNC` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_TWOPASS` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVK_ACCEL_ID` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-card-select.patch, plugin/NVMTLDevice.m |
-| `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
 | `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. | nvk/nvk-channel-recover.patch |
 | `NVK_CMDMEM_CENSUS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
 | `NVK_CMDMEM_LIVE_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
@@ -205,13 +210,13 @@ Each of these does nothing unless it is set.
 | `NVK_HWRT_QUERY` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/ttu-rq.patch, plugin/nvmtl_app_profile.h |
 | `NVK_HWRT_WIDE` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/wide.patch |
 | `NVK_L2_TAIL` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_LOCAL_MAP_SYSMEM` | setting | unset | 2.9 | - | Keep CPU-written memory in system RAM: On by default for stability; off places it in video memory (faster in some games, unsafe for the desktop). | nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
+| `NVK_LOCAL_MAP_SYSMEM` | setting | unset | 2.9 | - | Keep CPU-written memory in system RAM: By default applications place the part of it the processor does not read back in video memory (faster in some games), while the desktop (WindowServer), memory shared between processes and what the processor reads back keep system RAM. On keeps all of it in system RAM in every application, as before 3.0.1; off places all of it in video memory, for the desktop too (unsafe for the desktop). | nvk/nvk-local-map-vram.patch, nvk/nvk-macos.patch, plugin/nvmtl_app_profile.h |
 | `NVK_NO_BIGPAGE` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_NO_NONCONTIG` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_PREEMPT_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_QUEUE_COUNT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
 | `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-unbound-stage.patch |
 | `NVMTL_AIRCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/NVMTLObjects.m |
 | `NVMTL_AIR_DUMP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -222,7 +227,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_ARGBUF_SAMPLERS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h, translator/translator/src/lib.rs |
 | `NVMTL_ASYNC_COMMIT` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
 | `NVMTL_ASYNC_SURFACE_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_ASYNC_TEX_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_ASYNC_TEX_UPLOAD` | escape | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 2.9 | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. | plugin/nvmtl_vk.c |
 | `NVMTL_B78_DEBUG` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/b78_tcg.rs |
 | `NVMTL_BDA_PROBE_FILE` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_BDA_PROBE_HASH` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
@@ -450,8 +455,8 @@ Each of these does nothing unless it is set.
 | `NVMTL_POOL_COST_LIB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_pool_cost.inc |
 | `NVMTL_POOL_REUSE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_PRESENT_INLINE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
-| `NVMTL_PRESUBMIT_PROLOGUE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_PRETRANSLATE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h |
+| `NVMTL_PRESUBMIT_PROLOGUE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m, plugin/nvmtl_vk.c |
+| `NVMTL_PRETRANSLATE` | escape | on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0) | 2.9 | 3.2 | In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process. | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h |
 | `NVMTL_PRETRANSLATE_THREADS` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_PRIVATE_CAPTURE_DIR` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PRIVATE_CAPTURE_REQUEST` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -494,6 +499,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SURFACE_BUSY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
 | `NVMTL_SURFIN_ORDERED` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_SURFIN_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
+| `NVMTL_SURFIN_ZERO` | escape | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.0.1 | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. | plugin/NVMTLObjects.m, plugin/nvmtl_vk.c |
 | `NVMTL_SURFOUT_PLANES` | escape | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.0 | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. | plugin/NVMTLObjects.m |
 | `NVMTL_SURFOUT_READBACK` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_SURF_IMPORT_CACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
@@ -521,6 +527,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_WIT_SKIP_EVERY` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WIT_WAIT_MS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_FILL_PCT` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_WS_FREE_OFFMAIN` | escape | on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0) | 3.0.1 | 3.2 | WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager. | plugin/nvmtl_vk.c |
 | `NVMTL_WS_FULL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_RESERVE_MB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_WS_RT_GATE_MB` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m, plugin/nvmtl_app_profile.h |
@@ -617,6 +624,7 @@ Each of these does nothing unless it is set.
 | `nvfb10bit` | setting | unset | 2.9 | - | 10-bit colour: Scan out 30-bit surfaces on mode changes. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbbootretry` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbbpc` | setting | unset | 2.9 | - | Output colour depth: Bits per colour channel on the link; default lets the driver pick. | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvfbceclear` | escape | on (nvfbceclear=0: a new block of video memory that has to be zero is filled from the processor through BAR1, as in 3.0) | 3.0.1 | 3.2 | A new block of video memory that has to be zero (after the GPU's first standby, or once a block read as not zero although the RM clears) is cleared by the GPU's copy engine through NVRM instead of being filled with zeros from the processor through BAR1, which took 27 ms for the 9 MB of one captured frame of a screen share; the probes check the result, and the processor fills whatever the engine did not do. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbdsr` | setting | unset | 2.9 | - | Dynamic super resolution (render above the panel's resolution): Offer desktops larger than the panel and scale them down. Reserves scanout memory. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbedpbl` | setting | unset | 2.9 | - | Laptop panel brightness over the display link: On by default; off disables brightness control through the panel's AUX channel. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbformat` | setting | unset | 2.9 | - | Output colour format: Pixel format on the link; default lets the driver pick. | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -636,7 +644,7 @@ Each of these does nothing unless it is set.
 | `nvfbsurround` | setting | unset | 2.9 | - | Surround (several displays as one): Bit mask of framebuffer indices that form one logical display, for example 3 for the first two. 0 or default turns it off. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbtrace` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbvib` | setting | unset | 2.9 | - | Digital vibrance: Saturation gain, 0 to 200; 100 leaves colours alone. | kexts/NVRMFB/fb/nvrm-fb.cpp |
-| `nvfbvramfast` | escape | on (nvfbvramfast=0: every granted block of video memory is filled with zeros from the processor and made on the thread that asks, as in 2.9) | 3.0 | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvfbvramfast` | escape | on (nvfbvramfast=0: every granted block of video memory is cleared again, by the copy engine or with nvfbceclear=0 from the processor as in 2.9, and made on the thread that asks) | 3.0 | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfbvrr` | setting | unset | 2.9 | - | Variable refresh rate (G-Sync Compatible / Adaptive-Sync): Let WindowServer request variable refresh on displays that support it. | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `nvfetchcopy` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `nvhud` | diag | unset | 2.9 | - | observes only | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -819,6 +827,8 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_bh_stuck` | diag | read-only | 3.0 | - | bottom-half threads that did not exit at stop | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_thread` | diag | read-only | 3.0 | - | GPUs whose RM bottom half runs on its own thread | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_bh_wake_max_us` | diag | read-only | 3.0 | - | longest bottom-half request to run, microseconds | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boost_policy` | diag | read-only | 3.0.1 | - | boost policy: 0 undecided (NVRM_610_BOOST), 1 idle mode, 2 normal | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_boost_policy_sets` | diag | read-only | 3.0.1 | - | boost policy changes accepted since boot | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_arm_ms` | diag | read-only | 3.0 | - | start-up: tries to arm the accelerator, ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_gate_ms` | diag | read-only | 3.0 | - | start-up: wait for start() to have returned, ms | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_boot_go_ms` | diag | read-only | 3.0 | - | start-up: go(2), ms | kexts/NVRM/NVRM.cpp |
@@ -1037,6 +1047,11 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_layout_vtables` | diag | read-only | 3.0 | - | Apple vtables NVRMFB compared by length (0: not compared on this kernel); reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
 | `debug.nvrmfb_layout_vtdiff` | diag | read-only | 3.0 | - | Apple vtables whose length differs from this build; reported, never a reason to refuse | kexts/NVRMFB/fb/nvrmfb_layout.h |
 | `debug.nvrmfb_vram_budget_bytes` | diag | read-only | 2.9 | - | the BAR1 grant budget in force | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ce_clear` | diag | read-only | 3.0.1 | - | 1 = a block that has to be zero is cleared by the GPU's copy engine; 0 = boot argument nvfbceclear=0: filled from the processor; 2 = stood down for this boot (an older NVRM, a block that did not read as zero after the engine, or work whose end was not seen) | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ce_cleared` | diag | read-only | 3.0.1 | - | new blocks cleared by the copy engine instead of filled from the processor | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ce_fallbacks` | diag | read-only | 3.0.1 | - | new blocks the copy engine was asked to clear and that were filled from the processor after all | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ce_kept` | diag | read-only | 3.0.1 | - | new blocks kept until restart because the copy engine's work on them was not seen to end | kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `debug.nvrmfb_vram_ce_us` | diag | read-only | 3.0.1 | - | microseconds spent clearing new blocks with the copy engine, probes included | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_dirty` | diag | read-only | 3.0 | - | 1 once a new block did not read as zero although the RM clears: from then on every block is filled again | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_aware` | recovery | writable by root | 2.9 | - | 1 = the accel budget reserves the BAR1 the display holds; 0 = the old fixed fraction | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_vram_display_bytes` | diag | read-only | 2.9 | - | scanout+cursor the framebuffer itself maps into BAR1 | kexts/NVRMFB/fb/nvrm-fb.cpp |

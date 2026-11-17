@@ -50,10 +50,12 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_surfshare_abi.h"
 #include "nvrm_vram_abi.h"
 #include "nvrm_chan_note_abi.h"
+#include "nvrm_boost_policy_abi.h"
 #include "nvrm_evwait.h"
 #include "nvrm_fence.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
 extern "C" int nvrm_surfshare_pageoff(struct NVRMSurfPageoff *, void *nv);
+extern "C" void nvrm_vidmem_clear(struct NVRMVidmemClear *q, void *nv);
 extern "C" task_t current_task(void);
 extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
@@ -355,6 +357,15 @@ SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_arm_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gN
 SYSCTL_UINT(_debug, OID_AUTO, nvrm_boot_hold_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBootHoldMs, 0, "start-up: registry held busy for the display, ms");
 SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_fb, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutFb, 0, "framebuffer layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
 SYSCTL_UINT(_debug, OID_AUTO, nvrm_layout_accel, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvLayoutAccel, 0, "accelerator layout verdict NVRM read: 0 none 1 ok 2 refused 3 overridden 4 unknown");
+// The boost policy (nvrm_boost_policy_abi.h): whether NVK may ask for full clocks while a process works, changed by a
+// root process through user-client selector 13 and read by NVK through the same selector at each renewal. A global of
+// the kext, not of a card: it survives sleep and a stop of the card, and a reboot starts it at "undecided".
+//   debug.nvrm_boost_policy       0 undecided (each process follows NVRM_610_BOOST), 1 idle mode, 2 normal
+//   debug.nvrm_boost_policy_sets  changes since boot (a set of the value it already has is not one)
+static int gNvBoostPolicy = NVRM_BP_UNDECIDED;
+static volatile SInt64 gNvBoostPolicySets = 0;
+SYSCTL_INT(_debug, OID_AUTO, nvrm_boost_policy, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvBoostPolicy, 0, "boost policy: 0 undecided (NVRM_610_BOOST), 1 idle mode, 2 normal");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_boost_policy_sets, CTLFLAG_RD | CTLFLAG_LOCKED, (int64_t *)&gNvBoostPolicySets, "boost policy changes accepted since boot");
 static uint64_t nvrmNowNs(void) { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns; }
 static unsigned nvrmMsSince(uint64_t ns0) { const uint64_t now = nvrmNowNs(); return now > ns0 ? (unsigned)((now - ns0) / 1000000ULL) : 0; }
 // The verdict another kext published on this card's PCI device about Apple's class layouts (nvrm_layout.h), and its
@@ -622,6 +633,7 @@ private:
     static IOReturn sForgetToken(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sEvtNote(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sFence(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sBoostPolicy(OSObject *target, void *reference, IOExternalMethodArguments *args);
     // This connection's owner id in the surface fence: zero when the client is made, assigned by the fence itself on
     // the first request that needs one, and handed back to it when the client closes (nvrm_fence_owner_gone).
     volatile UInt64 fFenceOwner = 0;
@@ -1048,6 +1060,7 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_polls); sysctl_register_oid(&sysctl__debug_nvrm_boot_heads_why);
             sysctl_register_oid(&sysctl__debug_nvrm_boot_arm_ms); sysctl_register_oid(&sysctl__debug_nvrm_boot_hold_ms);
             sysctl_register_oid(&sysctl__debug_nvrm_layout_fb); sysctl_register_oid(&sysctl__debug_nvrm_layout_accel);
+            sysctl_register_oid(&sysctl__debug_nvrm_boost_policy); sysctl_register_oid(&sysctl__debug_nvrm_boost_policy_sets);
             nvrm_chan_note_sysctls();
             nv_xnu_kcore_sysctls_register();
             nv_xnu_timers_sysctls();
@@ -3389,6 +3402,25 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         if (fn->isEqualTo(NVRM_SS_FN_PAGEOFF))
             return nvrm_surfshare_pageoff((struct NVRMSurfPageoff *)p1, &fNv) ? kIOReturnIOError : kIOReturnSuccess;
     }
+    // NVRMFB: clear a new block of video memory with the copy engine instead of from the processor (nvrm_vram_abi.h).
+    // Unlike the RM calls above it never waits at the power gate: the framebuffer asks with its display gate held, and
+    // a wait there for the end of a standby would hold that gate across the sleep, which the framebuffer's own wake
+    // needs. A GPU that is not running is answered at once, with nothing sent; the framebuffer then fills the block as
+    // before. Inside, a standby that begins waits for this call at the gate like for any other (nv_xnu_pm_close).
+    if (fn && fn->isEqualTo(NVRM_VRAM_FN_CLEAR)) {
+        struct NVRMVidmemClear *q = (struct NVRMVidmemClear *)p1;
+        if (!q || q->version != NVRM_VRAM_CLEAR_VERSION) return kIOReturnBadArgument;
+        q->result = NVRM_VRAM_CLEAR_NOT_RUN; q->cleared = 0; q->usec = 0; q->rmStatus = 0;
+        int counted = 0;
+        if (isInactive() || !fAdapter || !nv_xnu_pm_try_enter(&counted)) return kIOReturnNotReady;
+        IOReturn ret = kIOReturnNotReady;
+        if (OSAddAtomic(0, &fGpuPm) == kGpuPmRunning) {
+            nvrm_vidmem_clear(q, &fNv);
+            ret = q->result == NVRM_VRAM_CLEAR_DONE ? kIOReturnSuccess : kIOReturnIOError;
+        }
+        nv_xnu_pm_exit(counted);
+        return ret;
+    }
     if (fn && fn->isEqualTo(NVRM_VRAM_FN_CLEARED)) {   // NVRMFB: may it leave its zero fill of a granted block out?
         struct NVRMVidmemCleared *q = (struct NVRMVidmemCleared *)p1;
         if (!q || q->version != NVRM_VRAM_ABI_VERSION) return kIOReturnBadArgument;
@@ -3755,6 +3787,7 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sRetired, 0, 0, 0, 0 },                     // 10 and 11: placeholders that answer an error
         { sRetired, 0, 0, 0, 0 },
         { sFence, 0, sizeof(struct NVRMFenceReq), 0, sizeof(struct NVRMFenceReq) },   // 12: NVRM_FENCE_SELECTOR, no fGate
+        { sBoostPolicy, 2, 0, 1, 0 },                 // 13: NVRM_BOOST_POLICY_SELECTOR, no fGate, no RM call
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];
@@ -3771,6 +3804,28 @@ extern "C" unsigned nv_xnu_gpu_count(void) { return gNVRMTab.count(); }
 // (flip heads, LUT ramps, clip lists) as kernel addresses: root could make the kernel read and write where it chose.
 // Nothing the driver ships used them; the display path reaches NVKMS through its in-kernel API.
 IOReturn NVRMUserClient::sRetired(OSObject *, void *, IOExternalMethodArguments *) { return kIOReturnUnsupported; }
+// Selector 13: read the boost policy, or (root only) set it; the answer is the policy after the call. It reads and
+// writes one kext global and nothing else: no RM call, neither this connection's gate nor the power gate, so it answers
+// at once during a GPU suspend too. NVK calls it once a second per busy process (nvrm_boost_policy_abi.h).
+IOReturn NVRMUserClient::sBoostPolicy(OSObject *target, void *, IOExternalMethodArguments *args)
+{
+    if (!OSDynamicCast(NVRMUserClient, target)) return kIOReturnNotAttached;
+    const uint64_t op = args->scalarInput[0], value = args->scalarInput[1];
+    if (op == NVRM_BP_OP_SET) {
+        if (value >= NVRM_BP_COUNT) return kIOReturnBadArgument;
+        if (!kauth_cred_issuser(kauth_cred_get())) return kIOReturnNotPrivileged;
+        const int was = __atomic_exchange_n(&gNvBoostPolicy, (int)value, __ATOMIC_ACQ_REL);
+        if (was != (int)value) {
+            static const char *const kName[NVRM_BP_COUNT] = { "undecided", "idle mode", "normal" };
+            OSIncrementAtomic64(&gNvBoostPolicySets);   // changes, not calls: NVMetrics sets "normal" at every switch-off
+            LOG("boost policy %s -> %s (pid %d)", (was >= 0 && was < NVRM_BP_COUNT) ? kName[was] : "?", kName[value], proc_selfpid());
+        }
+    } else if (op != NVRM_BP_OP_READ) {
+        return kIOReturnBadArgument;
+    }
+    args->scalarOutput[0] = (uint64_t)(uint32_t)__atomic_load_n(&gNvBoostPolicy, __ATOMIC_ACQUIRE);
+    return kIOReturnSuccess;
+}
 IOReturn NVRMUserClient::sGetFd(OSObject *target, void *reference, IOExternalMethodArguments *args)
 {
     NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);

@@ -28,6 +28,33 @@ struct NVRMVidmemCleared {
     unsigned int cleared;
 };
 
+// Asked of NVRM by a framebuffer (3.0.1): clear the first `bytes` of one of its blocks of video memory with the GPU's
+// copy engine, instead of writing zeros through BAR1 from the processor (27 ms for the 9 MB of a captured frame).
+// kapiDevice and kapiMemory are the framebuffer's NVKMS device and the block. The call never waits for a standby:
+// with the GPU not running it answers kIOReturnNotReady and runs nothing. result says what the block holds after it:
+//   NVRM_VRAM_CLEAR_DONE     the engine finished before the call returned: `cleared` bytes from the start are zero
+//   NVRM_VRAM_CLEAR_NOT_RUN  nothing was sent to the engine: the block is as it was, fill it as before
+//   NVRM_VRAM_CLEAR_LOST     work was sent and its end was not seen: the engine may still write zeros into the block,
+//                            so it must never be handed out or freed (keep it until restart)
+// rmStatus is the RM's NV_STATUS and usec the time NVRM spent, for the log and the counters. An NVRM that does not
+// know the name passes it up its providers, where nobody answers: the framebuffer keeps its own fill.
+#define NVRM_VRAM_FN_CLEAR       "nvVidmemClear"
+#define NVRM_VRAM_CLEAR_VERSION  1u
+#define NVRM_VRAM_CLEAR_DONE     0u
+#define NVRM_VRAM_CLEAR_NOT_RUN  1u
+#define NVRM_VRAM_CLEAR_LOST     2u
+struct NVRMVidmemClear {
+    unsigned int       version;
+    unsigned int       result;
+    void              *kapiDevice;
+    void              *kapiMemory;
+    unsigned long long bytes;
+    unsigned long long cleared;
+    unsigned long long usec;
+    unsigned int       rmStatus;
+    unsigned int       pad;
+};
+
 struct NVRMVramRequest {
     unsigned int       version;
     unsigned int       flags;
