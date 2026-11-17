@@ -1783,10 +1783,13 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
  * that AIR text, every other recorded variant whose cache file is missing is queued for the background, which
  * translates it into the same cache file. The main thread then reads a file, or waits a bounded time for the
  * translation already running for it, instead of starting its own. It never waits for a variant the background has not
- * started: it takes that one out of the queue and translates it itself, as any miss, so it never sits behind the queue
- * (the watchdog killed WindowServer once more that way, its main thread waiting up to 60 s for a variant that was still
- * queued behind others). Entries are written by the same code with the same key bytes (recorded verbatim) and the same
- * translator, so a warmed file is the file a live miss would have written. NVMTL_FCWARM_OFF=1 turns it off. */
+ * started: it takes that one out of the queue and translates it itself, as any miss, so no one call waits behind the
+ * queue (the watchdog killed WindowServer once more while its main thread waited here, up to 60 s; no translation takes
+ * that long, so what it waited for was queued behind others). Many calls in a row still add up: n cold variants of t
+ * seconds each cost the main thread about n*t/3 to n*t/2 while the two workers are free, and n*t while both are busy
+ * with another function's variants. Entries are written by the same code with the same key bytes (recorded verbatim)
+ * and the same translator, so a warmed file is the file a live miss would have written. NVMTL_FCWARM_OFF=1 turns it
+ * off. */
 #define NVMTL_FCWARM_RECORD_MS 100      // chosen: a cached variant costs < 5 ms; the uber-shader variants cost 300-2000
 #define NVMTL_FCWARM_MAX_RECORDS 1024   // chosen: WindowServer held 67 such variants; bounds the file at ~1 MB
 #define NVMTL_FCWARM_JOIN_MS 5000       // chosen: above any measured translation (3.2 s), 1/8 of the 40 s watchdog
@@ -1811,7 +1814,8 @@ static NSString *nvmtl_fcwarm_air_hex(NVMTLAirDigest *ad) {
 }
 // One recorded variant for the background. It is pending while it waits in gFcWarmPending; a worker sets running when
 // it takes it (under gFcWarmLock) and enters done then, so only a running job is ever waited for, and leaves done once
-// the file is written and the job is out of gFcWarmInFlight.
+// the job is out of gFcWarmInFlight, which is after its file is written (or found there, or not made: a failed
+// translation or write).
 @interface NVMTLFcWarmJob : NSObject {
 @public
     NSString *_path, *_ll, *_stage; NSData *_packed; size_t _n; BOOL _running; dispatch_group_t _done;
