@@ -3,11 +3,12 @@
 writes, and the caller never waits for a variant the background has not started.
 
 WindowServer's main thread translated Core Animation's fixed_frag variants one after another after a driver update
-(each 0.5-2 s; the watchdog kills it after 40 s without a check-in). The plugin records slow sets beside the cache
-and, the first time a process asks for any variant of that AIR text, queues the recorded siblings for two background
-workers. Then the main thread waited up to 60 s for a sibling that was still queued behind others, and the watchdog
-killed it again; now a caller takes a pending sibling over and translates it itself, and waits for a running one for
-at most NVMTL_FCWARM_JOIN_MS. This compiles the production code (the cache key, nvmtl_translate_with_fc,
+(each 0.5-2 s; the watchdog kills it after 40 s without a check-in). Since 2.9 the plugin records slow sets beside the
+cache and, the first time a process asks for any variant of that AIR text, hands the recorded siblings to the
+background. Up to 3.0.1 each sibling had a block of its own behind a two-slot semaphore, and the main thread waited up
+to 60 s for one still queued, so the watchdog killed it again. Now two workers take the siblings from a queue, and a
+caller reads a file already on disk at once, takes a pending sibling over and translates it itself, and waits for a
+running one for at most NVMTL_FCWARM_JOIN_MS. This compiles the production code (the cache key, nvmtl_translate_with_fc,
 nvmtl_translate_with_fc_cached and the warm-up) out of NVMTLLibraryLoad.m against the real libnvmtl_translate.dylib,
 and runs "boots":
 
@@ -24,15 +25,19 @@ and runs "boots":
   pending  the background held slow (TEST_BG_MS): a sibling no worker has started is taken over, the caller returns
            after about one translation of its own, and the background never translates it
   running  a sibling a worker is translating is joined: the caller gets the worker's file and translates nothing
+  hit      a sibling a worker is translating, whose file another writer has already put on disk: the caller reads it at
+           once and does not wait for the worker
   late     a worker slower than the bound: the caller stops waiting after NVMTL_FCWARM_JOIN_MS and translates itself
   workers  the background translates at most two at a time, on at most two threads
 
 The harness wraps the translator: it counts each translation per set and per thread (the asking thread or the
 warm-up's), adds --pad-ms to every translation, so that a small shader stands in for the 1.3-2 s uber-shader and its
 misses are recorded (100 ms), and adds TEST_BG_MS to the warm-up's translations in the scenes that hold the background
-back. The scenes pending, late and workers fail against the warm-up of 44091839 (the caller waits for the queue or for
-60 s; each queued variant has a thread of its own), and bound fails there too (60 s). running passes there as well,
-as 44091839 also waited for a variant that was running; late is the scene that tells the two apart.
+back. The scenes pending, late and workers fail against the warm-up of 44091839 (the caller waits for the queue, or for
+as long as the worker takes, up to 60 s; on Linux each queued variant held a thread of its own), and bound fails there
+too (60 s). running passes there as well, as 44091839 also waited for a variant that was running; late is the scene
+that tells the two apart. hit passes there too, as 44091839 read the file first; it fails when the warm-up is asked
+before the file is read.
 
 usage: test_fcwarm.py [--pad-ms N] <libnvmtl_translate.dylib> <fixed_frag .ll> <sets file: idx:hex,... per line, six or
 more> [repo root]"""
@@ -221,7 +226,8 @@ static void test_wait_warm(void) {
     nvmtl_cache_io_drain();
 }
 // "p:1,2,3" asks for one of those sets that the warm-up has not started while two of its translations run (pending);
-// "r:1,2,3" asks for one the warm-up is translating now (running). Each waits up to 30 s for that state.
+// "r:1,2,3" asks for one the warm-up is translating now (running). Each waits up to 30 s for that state. "h:1,2,3"
+// picks a running one as r: does, then writes its cache file as another writer would (test_plant) and asks for it.
 static int test_pick(const char *spec, int running) {
     NSArray *cands = [@(spec + 2) componentsSeparatedByString:@","];
     for (int t = 0; t < 3000; t++) {
@@ -239,6 +245,25 @@ static int test_pick(const char *spec, int running) {
     }
     return -1;
 }
+// The set's cache file, written as a live miss writes it (the plugin's key, translator and framed file), by a call
+// the wrapper does not count.
+static void test_plant(NSString *ll, NSDictionary *c) {
+    size_t n = c.count, k = 0;
+    uint32_t idx[256], sz[256]; const uint8_t *pay[256]; uint8_t bytes[256][16];
+    for (NSString *key in c) {
+        NSArray *a = c[key]; idx[k] = (uint32_t)key.integerValue; sz[k] = (uint32_t)a.count;
+        for (NSUInteger j = 0; j < a.count; j++) bytes[k][j] = [a[j] unsignedCharValue];
+        pay[k] = bytes[k]; k++;
+    }
+    NSDictionary *config = @{ @"stage": @"fragment", @"entry": @"fixed_frag_lph_cpf", @"constants": c };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingSortedKeys error:NULL];
+    NSString *path = nvmtl_spvcache_path_air(nvmtl_air_state(ll), json, @"fc1");
+    uint8_t *out = NULL; size_t len = 0; char e[512] = "";
+    const int rc = real_fc(ll.UTF8String, "fragment", idx, sz, pay, n, &out, &len, e, sizeof e);
+    const int w = rc == 0 && out ? nvmtl_cache_write(path, [NSData dataWithBytes:out length:len]) : -1;
+    if (out && xlate_free) xlate_free(out, len);
+    printf("PLANTED rc %d write %d\n", rc, w);
+}
 int main(int argc, char **argv) {
     @autoreleasepool {
         t_asker = 1;
@@ -253,10 +278,11 @@ int main(int argc, char **argv) {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "w")) { test_wait_warm(); continue; }
             int k = atoi(argv[i]);
-            if (argv[i][0] == 'p' || argv[i][0] == 'r') {
-                k = test_pick(argv[i], argv[i][0] == 'r');
-                printf("PICKED %s %d\n", argv[i][0] == 'r' ? "running" : "pending", k);
+            if (argv[i][0] == 'p' || argv[i][0] == 'r' || argv[i][0] == 'h') {
+                k = test_pick(argv[i], argv[i][0] != 'p');
+                printf("PICKED %s %d\n", argv[i][0] != 'p' ? "running" : "pending", k);
                 if (k < 0) continue;
+                if (argv[i][0] == 'h') test_plant(ll, sets[(NSUInteger)k]);
             }
             double ms = 0; NSData *d = test_live(ll, sets[(NSUInteger)k], &ms);
             printf("ASKED %d %lu B %.0f ms\n", k, (unsigned long)d.length, ms);
@@ -405,6 +431,20 @@ k, ms, x = picked(p.stdout), asked(p.stdout), xlate(p.stdout)
 arm("a sibling the background is translating is joined: the caller gets its file and translates nothing",
     k > 0 and x.get(k) == (0, 1) and "JOINED the background translation" in p.stderr
     and "did not finish in time" not in p.stderr and ms.get(k, 1e9) <= t_max + 500 + 1000, p.stdout + p.stderr[-800:])
+
+# hit: a worker is translating a sibling whose file is already on disk (another process, or a caller's own miss, wrote
+# it); the caller reads the file and does not wait for the worker
+G2 = work / "G2"; G2.mkdir()
+shutil.copy(A / ".fcwarm.v1", G2 / ".fcwarm.v1")
+hold_ms = int(2 * t_max) + 3000
+p, _ = boot(G2, ["0", "h:1,2,3,4", "w"], {"TEST_BG_MS": str(hold_ms)})
+k, ms, x = picked(p.stdout), asked(p.stdout), xlate(p.stdout)
+arm(f"a sibling whose file is on disk is read at once while a worker translates it (within 1000 ms; the worker is "
+    f"held {hold_ms} ms): no wait, no translation by the caller",
+    k > 0 and "PLANTED rc 0 write 0" in p.stdout and ms.get(k, 1e9) <= 1000 and x.get(k) == (0, 1)
+    and "JOINED" not in p.stderr and "fc cache: HIT" in p.stderr,
+    p.stderr[-300:] + f" | set {k} asked in {ms.get(k)} ms, translations (caller, background) {x.get(k)}, "
+    f"planted: {'PLANTED rc 0 write 0' in p.stdout}")
 
 # late: a worker slower than the bound; the caller stops waiting at the bound and translates the sibling itself
 H = work / "H"; H.mkdir()
