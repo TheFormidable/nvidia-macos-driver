@@ -44,8 +44,12 @@ def cut(start, end):
 
 
 parts = [
+    # the entry points of the one-module path; this test leaves them unloaded, as NVMTL_FC_SPEC is off by default
+    cut("// One translation per function for every set of function constants", "static nvmtl_refl_fn xlate_refl;"),
     cut("static _Atomic unsigned long gSpvHit, gSpvMiss, gSpvStored;", "static _Atomic unsigned long long gSpvAdded;"),
     cut("@interface NVMTLAirDigest : NSObject", "static BOOL nvmtl_air_unroll_wanted(NSData *air);"),
+    # the framed cache files (nvmtl_cache_read, nvmtl_cache_write) the warm-up and a live miss write
+    cut("// ---- cache files that prove they are whole", "// ---- one translation per module"),
     cut("static __thread int g_fc_expect_link;", "static int nvmtl_reflect_air("),
 ]
 HARNESS = r'''
@@ -62,7 +66,9 @@ HARNESS = r'''
 #include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
+#include "nvmtl_cache_file.h"
 #define nvlog(...) (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
+static int nvmtl_vk_lost(void) { return 0; }   // no device in this test, so never lost
 typedef int (*nvmtl_fc_fn)(const char *ll, const char *stage, const uint32_t *idx, const uint32_t *sizes,
                            const uint8_t *const *payloads, size_t n, uint8_t **out, size_t *out_len, char *err, size_t err_len);
 typedef void (*nvmtl_free_fn)(uint8_t *p, size_t len);
@@ -145,8 +151,8 @@ int main(int argc, char **argv) {
 
 work = pathlib.Path(tempfile.mkdtemp(prefix="fcwarm-"))
 (work / "t.m").write_text(HARNESS)
-cc = subprocess.run(["clang", "-fobjc-arc", "-O1", "-w", "-framework", "Foundation", str(work / "t.m"), "-o", str(work / "t")],
-                    capture_output=True, text=True)
+cc = subprocess.run(["clang", "-fobjc-arc", "-O1", "-w", "-I", str(root / "plugin"), "-framework", "Foundation",
+                     str(work / "t.m"), "-o", str(work / "t")], capture_output=True, text=True)
 arm("the production warm-up and cache code compile out of NVMTLLibraryLoad.m", cc.returncode == 0, cc.stderr)
 if cc.returncode:
     sys.exit(1)
