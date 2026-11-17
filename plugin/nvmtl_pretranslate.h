@@ -8,7 +8,10 @@
      background or application, waits for the owner's result instead of translating again. A published result stays
      available until its owner retires it, which the owner does after the result is stored where the next lookup will
      find it (the cache file is written later than the translation ends).
-   - a bounded worker pool that runs jobs at background quality of service. */
+   - a bounded worker pool that runs jobs at utility quality of service, with an optional bound on its queue.
+     Not background: the application's own thread waits on a worker that owns the shader it asks for (nvmtl_sf_begin
+     with wait set), a condition variable lends that worker no priority, and a background thread can be starved for a
+     long time while a game keeps every core busy. Utility still yields to the game's own threads. */
 #ifndef NVMTL_PRETRANSLATE_H
 #define NVMTL_PRETRANSLATE_H
 #include <pthread.h>
@@ -94,21 +97,23 @@ static inline void nvmtl_sf_retire(nvmtl_sf *s, const char *key)
 typedef struct nvmtl_job { void (*fn)(void *); void *ctx; struct nvmtl_job *next; } nvmtl_job;
 typedef struct {
     pthread_mutex_t mu; pthread_cond_t work, idle;
-    nvmtl_job *head, *tail; int max, started, running, queued; int background_qos;
+    nvmtl_job *head, *tail; int max, started, running, queued; int low_qos;
 } nvmtl_pool;
 
-static inline void nvmtl_pool_init(nvmtl_pool *p, int max_threads, int background_qos)
+/* low_qos: the workers run at utility quality of service (see the header comment for why not background). */
+static inline void nvmtl_pool_init(nvmtl_pool *p, int max_threads, int low_qos)
 {
     memset(p, 0, sizeof *p);
     pthread_mutex_init(&p->mu, NULL); pthread_cond_init(&p->work, NULL); pthread_cond_init(&p->idle, NULL);
-    p->max = max_threads < 1 ? 1 : max_threads; p->background_qos = background_qos;
+    p->max = max_threads < 1 ? 1 : max_threads; p->low_qos = low_qos;
 }
 
 static inline void *nvmtl_pool_main(void *arg)
 {
     nvmtl_pool *p = arg;
 #ifdef __APPLE__
-    if (p->background_qos) pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+    /* utility, not background: an application thread may be waiting for this worker's result */
+    if (p->low_qos) pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #endif
     pthread_mutex_lock(&p->mu);
     for (;;) {
@@ -124,12 +129,16 @@ static inline void *nvmtl_pool_main(void *arg)
     return NULL;
 }
 
-/* Threads start on demand, never more than max. Jobs run in the order submitted. */
-static inline int nvmtl_pool_submit(nvmtl_pool *p, void (*fn)(void *), void *ctx)
+/* Threads start on demand, never more than max. Jobs run in the order submitted. Returns 0 when queued, -1 when out of
+   memory, and NVMTL_POOL_FULL when max_queued jobs (0: no bound) are already waiting: the job is not queued, and the
+   caller still owns ctx and frees what it holds. */
+#define NVMTL_POOL_FULL 1
+static inline int nvmtl_pool_submit_bounded(nvmtl_pool *p, void (*fn)(void *), void *ctx, int max_queued)
 {
     nvmtl_job *j = calloc(1, sizeof *j); if (!j) return -1;
     j->fn = fn; j->ctx = ctx;
     pthread_mutex_lock(&p->mu);
+    if (max_queued > 0 && p->queued >= max_queued) { pthread_mutex_unlock(&p->mu); free(j); return NVMTL_POOL_FULL; }
     if (p->tail) p->tail->next = j; else p->head = j;
     p->tail = j; p->queued++;
     if (p->started < p->max) {
@@ -141,6 +150,11 @@ static inline int nvmtl_pool_submit(nvmtl_pool *p, void (*fn)(void *), void *ctx
     pthread_cond_signal(&p->work);
     pthread_mutex_unlock(&p->mu);
     return 0;
+}
+
+static inline int nvmtl_pool_submit(nvmtl_pool *p, void (*fn)(void *), void *ctx)
+{
+    return nvmtl_pool_submit_bounded(p, fn, ctx, 0);
 }
 
 /* Blocks until every submitted job has finished (tests; the plugin never waits for the pool). */

@@ -1,5 +1,181 @@
 # Changelog
 
+## 3.0.1
+
+**Not released.** This section describes the branch being prepared as 3.0.1, on top of the 3.0 branch below (`fable` at
+9f85871b). A package built from b80056ef, before the fix in "Metal apps get this build's shader translator" below, has
+been installed on one Mac with an RTX 5050 (macOS 26.7.3), and card checks were run on it there; the fault that entry
+fixes was found from them. Nothing committed after b80056ef has run on a card or on a Mac: it was compiled and its host
+tests were run on Linux only.
+
+### Fixes and changes
+
+- **Idle mode switches while apps run.** NVK's boost lease took its shape from `NVRM_610_BOOST` once, when a process
+  opened the device, so NVMetrics' idle mode (`NVRM_610_BOOST=0` in `nvrm610.conf`) reached only the apps started after
+  it, and switching it off left the open ones without boost until they restarted. NVRM.kext now holds a boost policy of
+  three values: undecided (every boot starts there, and each process follows `NVRM_610_BOOST` as in 3.0), idle mode and
+  normal. A root process sets it through a new user-client selector (13); there is no writable sysctl, and
+  `debug.nvrm_boost_policy` shows it read-only, with the number of changes in `debug.nvrm_boost_policy_sets`. Each
+  Vulkan process reads it at most once a second, just before it would renew its lease (`nvk/nvk-boost-policy.patch`):
+  in idle mode it asks for nothing and clears what it still has, in normal it boosts per burst again (or holds, with
+  `NVRM_610_BOOST=hold`). A process that holds and submits nothing is not reached: it keeps its hold until it submits
+  again or exits. A hold is cleared as it was asked (with the CUDA bit) and then as 3.0 cleared it, since which of the
+  two the firmware honours is not in the open sources, and one renewal runs at a time in a process, also when an RM
+  call waits through a sleep. The selector takes no gate and makes no RM call, so it answers during a sleep too; a 3.0
+  kext does not have it, and NVK then keeps `NVRM_610_BOOST` as before. Boosts of other RM clients, such as NVMetrics'
+  own Automático/Máximo or the optional `nvmtl-boost` daemon, are theirs and are not touched. NVMetrics switches both
+  the file (for after a reboot) and the policy in one password prompt (`nvmetrics-agent policy idle|normal`).
+- **`NVRM_610_BOOST` in `nvrm610.conf` reaches every Vulkan app.** NVK's own reader matched only 2.9's short spelling
+  `BOOST=` in the file, and only when its first appearance started a line, so a Vulkan app without the Metal plugin
+  (the plugin copies the file into the environment) ignored the `NVRM_610_BOOST=0` line NVMetrics writes. The full
+  name is now read first (the last such line wins), then the short one, without printing anything.
+- **A refused boost is asked again after 30 s.** 3.0 stopped asking for the rest of the process after one refusal, so a
+  refusal while the GPU came back from sleep left that app without boost until it was restarted.
+- **New blocks of video memory are cleared by the copy engine.** 3.0 stopped filling a granted block with zeros while
+  the RM's own clearing is believed, but only until the GPU's first standby (a system sleep): from then on, and for good
+  once a block read as not zero, every new block was filled from the processor through BAR1 again, at about 330 MB/s, 27
+  ms for the 9 MB of each captured frame of a screen share, with the display gate held when the block was made on the
+  caller's thread (the worker that makes blocks ahead filled them after letting go of the gate). Such a block is now
+  cleared by the GPU's copy engine: NVRMFB asks NVRM (`nvVidmemClear`), and NVRM runs the RM's own memset on the block
+  (`kexts/NVRM/nvrm_pageoff.c`, the way the page-off copy already runs) with the API and GPU locks held for the clear
+  only. NVRM never waits for a standby there: with the GPU not running it answers at once and the block is filled from
+  the processor as before, as it is where the RM made no copy-engine utility of its own (the clear makes none; the
+  page-off still makes one when it first runs, as in 3.0, and the clear then uses it). The engine's end is waited for a
+  quarter of a second at most, by the clock. A reading of the engine's progress that cannot be right (more finished than
+  was ever sent, which is what a failed read of its semaphore gives) is not believed, here and in the page-off's own
+  waits, where it would have ended every later wait of NVRM on the engine at once until the RM made its copy-engine
+  utility again at the next sleep. The same 65 probes that check the RM's clearing then check the engine's; a block that
+  does not read as zero is filled from the processor, and so is every block for the rest of the boot. Work whose end was
+  not seen leaves its block allocated until restart, never handed out or freed, so that late zeros cannot land in
+  someone else's memory. `debug.nvrmfb_vram_ce_clear` says whether the clear is on (1), off by boot argument (0) or
+  stood down (2); `debug.nvrmfb_vram_ce_cleared`, `_ce_us`, `_ce_fallbacks` and `_ce_kept` count it, and the old
+  `_filled` / `_fill_us` count what was still filled from the processor. `kexts/NVRMFB/fb/nvrm-vram-clear.h` holds the
+  rules, `tools/test_vram_clear.c` every answer against them. The cause of the 330 MB/s itself is not established: the
+  RM asks for a write-combined mapping, and by the macOS 26 sources NVRM's way of making it gets one.
+- **Asynchronous texture uploads are on by default outside WindowServer.** `replaceRegion` submitted its copy and waited
+  for the GPU before it returned, so an app that uploads many textures per frame stalled once per upload. The
+  asynchronous path (its own staging buffer and command buffer, finished before the image is overwritten, read back or
+  freed: `plugin/nvmtl_tex_upload.h`) had already run by default since 2.6.3 for CPU-written surface uploads outside
+  WindowServer (`NVMTL_ASYNC_SURFACE_UPLOAD`); with `NVMTL_ASYNC_TEX_UPLOAD` it now runs for every region upload outside
+  WindowServer, whose uploads stay synchronous. `=1` still turns it on anywhere. What waits is limited: at most 256
+  uploads and 256 MiB of staging memory per process, and past either an upload waits for its copy as in 3.0 (the first
+  one is logged), so an app that uploads many textures once and never reads them back does not keep a staging copy of
+  each. The limits are judged without a lock, so threads uploading at the same moment can pass them by one upload each.
+  An upload into a texture over an IOSurface is finished before the surface is published, because for a surface in the
+  family's video memory publishing copies nothing and another process could read the old pixels as the new ones. Two
+  threads uploading into one texture at once no longer lose the bookkeeping of one upload. Known and left as it was:
+  after the GPU channel was rebuilt, an upload it dropped is made again the next time the texture is finished, over any
+  copy or blit made into the texture in between (3.0's synchronous upload logged the failure and did not repeat it).
+- **Shaders of a game are translated ahead.** In a game (the games category or `LSSupportsGameMode` in its `Info.plist`,
+  the test macOS's own Game Mode uses), every entry point of a new shader library is translated by a small pool and
+  stored in the shader cache (`NVMTL_PRETRANSLATE`, which only the Cyberpunk profile set before), so the first run of a
+  level does not stop for each new shader. Other processes are left as they were; `=1` still turns it on in any process.
+  The pool's threads run at utility priority, no longer background: a game's thread that needs a shader the pool is
+  translating waits for it on a condition variable, which lends the pool no priority. At most 512 shaders wait in the
+  pool's queue; one past that is counted as skipped and translated when it is first asked for, as without the pool.
+  Neither of these two was measured on a card yet; the rules are in `plugin/nvmtl_switch_defaults.h`,
+  `plugin/nvmtl_tex_upload.h` and `plugin/nvmtl_pretranslate.h`, and `tools/test_switch_defaults.c`,
+  `tools/test_tex_upload.c`, `tools/test_pretranslate.c` and `tools/test_plugin_defaults_wiring.py` hold them.
+- **WindowServer does not upload a surface whose pages are all zero.** While the screen is shared, WindowServer's
+  main thread spent about 16 ms of each captured frame in the Metal plugin, by spindump samples taken before 3.0's
+  fast grants. 4.2 ms of it were the surface-in of the new capture surface, which nobody had written: its CPU pages
+  were imported, copied into the video memory the kernel had just granted, and waited for. On a surface's first
+  surface-in the plugin now reads its pages under the same read-only lock the upload takes (`NVMTL_SURFIN_ZERO`,
+  `plugin/nvmtl_zero_scan.h`); when every byte is zero it clears the surface's video memory with a GPU fill ahead of
+  the next command buffer and does not upload. Only single-plane surfaces in the family's video memory that no other
+  process has drawn into are taken this way, and no VRAM tag is published for them, so other processes upload as
+  before; a fill that does not run (its prologue failed or rode a dropped submission) makes the surface decide again at
+  its next use, though the command buffers already submitted by then read the video memory as it was, as after a
+  failed upload in 3.0. When the prologue's End fails, WindowServer now also marks the managed uploads it carried to be
+  made again (they were lost there before); other processes keep 3.0's handling. It is off with
+  `NVMTL_PRESUBMIT_PROLOGUE=0`, whose fills would not be ordered against other threads' submits. A later change of the
+  surface is uploaded at once, without a second scan. The scan itself costs from
+  about 0.5 ms (pages resident) to about 3 ms (pages faulted in), so the saving is an estimate of 1.2 to 3.7 ms per
+  captured frame from those samples, NOT measured; the census line "surface-in zero census" counts scans, zero
+  answers, their mean time and the full scans that ended non-zero. `tools/test_zero_scan.c`,
+  `tools/test_ws_capture.c`, `tools/test_surfin_zero.py` and `tools/test_surfin_zero_plugin.py` hold it.
+- **WindowServer frees a dead texture's video-memory import on a thread of its own.** When Core Animation released a
+  texture over a surface in the family's video memory and no submitted work could still read it, the RM frees of its
+  import ran on WindowServer's main thread: about 1.2 ms of each captured frame in the same samples. Such a free now
+  goes to a serial queue (`NVMTL_WS_FREE_OFFMAIN`, `plugin/nvmtl_ws_capture.h`); only imports of the family's video
+  memory move, at most 64 MB of them wait at a time (past that a free runs where it did), and the death is recorded
+  for fault reports before the free is queued. A free that waited for a submit already ran this way, after the surface
+  was released. The free still takes the RM's per-client gate on that thread, so part of the saving can come back as
+  waits there, and with the change above on fewer of these frees find no work in flight (the rest are freed later on
+  the completion thread, as before), so the two savings overlap; it is an estimate from samples taken before 3.0's
+  fast grants, NOT measured.
+  `tools/test_ws_capture.c` and `tools/test_surfin_zero_plugin.py` hold it.
+- **NVK's own mapped memory that the processor only writes stays in video memory outside WindowServer.** The shader
+  heap, the descriptor tables and sets and the other device-local memory NVK itself maps were kept in system RAM,
+  uncached on the GPU side, so the GPU fetched shader code and descriptors over PCIe; `NVK_LOCAL_MAP_SYSMEM=0` kept them
+  in video memory behind BAR1, and only the Cyberpunk profile set it (its comment says about twice the frame rate there;
+  no record of that measurement is in the tree). Video memory is now the default in every process except WindowServer,
+  where BAR1 covers the whole VRAM, for the part of that memory that is not shared with another process and that the
+  processor does not read back while the app runs: shader code, the image and sampler tables, the zero page and indirect
+  execution sets (`nvk/nvk-local-map-vram.patch`). What it reads back keeps system RAM: descriptor pools (a descriptor
+  copy reads its source set, the Metal plugin copies unchanged descriptors on every draw, a read through BAR1 is a trip
+  to the card, and the plugin's pool alone is 21 MB per process), USERD and the event heap. WindowServer keeps system
+  RAM: 3.0 made the placement opt-in after its channel stalled with it. That stall has the shape of a lost doorbell that
+  was fixed later, but nobody has shown on a card that the two are the same, so this is the change of 3.0.1 to suspect
+  first if an app freezes: `NVK_LOCAL_MAP_SYSMEM=1` (the settings tool's "Keep CPU-written memory in system RAM", on)
+  keeps all of it in system RAM in every process, as 3.0 did. `=0` means what it meant (everything in video memory,
+  WindowServer included), and `NVK_BAR_VRAM=0` also keeps the new default off. When the video memory is full, or BAR1
+  has no room for the map, an allocation the default placed is made in system RAM as before instead of failing. Since
+  USERD keeps system RAM, the read of GPPut before a doorbell no longer goes through BAR1, where it used to hold the
+  doorbell back until everything written through BAR1 ahead of it had landed; that was the order of the one placement
+  that ran on a card (`=0`). Each device therefore keeps one page behind BAR1 (64 KiB of video memory with big pages)
+  and reads a word of it before it writes GPPut for a doorbell, so shader code and table entries written just before a
+  submission are in the video memory before the GPU can see the work. NVIDIA's own driver does the same where GPPut is
+  in system RAM. The read orders what has left the processor's write-combining buffers, so a shader upload and a sync of
+  memory the default placed now drain them when they are done. Memory an app maps itself is behind BAR1 in system-RAM
+  mode too, as in 3.0, and gets this read only under the default. That the GPU could otherwise fetch them too early was
+  never seen on a card; the read costs one trip to the card per doorbell. If the RM's standby fails at a sleep, what the
+  default placed is lost with the rest of the video memory, in every process and not only in WindowServer. Not measured
+  on a card; `tools/test_nvk_local_map.py` compiles the rule, the placement and the fallback and holds every case.
+- **NVK's table of CPU mappings has a lock.** On the NVRM back end every CPU map of a Vulkan memory object adds its
+  address to one hash table of the device, and every unmap or free removes it, with no lock: two threads mapping or
+  freeing two different memories at once could corrupt the heap. Each insert, search and removal now holds a mutex of
+  the device that is taken around the table alone, and an unmap takes its entry out before the kernel unmaps, so a new
+  mapping given the same address cannot lose its entry (`nvk/nvk-nvrm-fixes.patch`). A device whose table could not
+  be created no longer closes the process's standard input on its way out.
+- **`VK_EXT_map_memory_placed` is no longer offered on NVRM.** The NVRM back end ignored the address the application
+  asked for and could not map over a reserved range, but the extension was advertised, and Zink turns on client-pointer
+  maps when it sees it. It is now offered only where the back end can place a map (Linux nouveau keeps it).
+- **Three settings read once.** `NVRM_FLUSH_TIMEOUT_MS` was read on every synchronous flush, and
+  `NVK_SYSMEM_GPU_UNCACHED` and `NVK_BAR_VRAM` on every memory allocation, each time with a scan of `nvrm610.conf` and a
+  line on stderr when the file set them. They are now read once per process; their values mean what they did.
+- **Upstream NVK fixes from Mesa main.** `nvk/nvk-mesa-main-2.patch` carries eight Mesa main commits, unchanged:
+  push descriptor sets are uploaded only when they changed and only to their layout's size (they were uploaded again
+  at every draw), the single color-write mode is used when every target has the same mask, image format queries take
+  stencil usage into account, the swapchain private-data mutex is initialised on macOS too, attachment locations
+  of secondary command buffers are read from the right structure, and the range of a map that is synchronised is
+  computed correctly (no effect on NVRM, whose maps are coherent). Mesa's NAK compiler changes since are not taken.
+  These four entries were compiled on Linux only; nothing in them has run on a card.
+- **Metal apps get this build's shader translator.** The Metal plugin opens the `libnvmtl_translate.dylib` beside it
+  in `NVMTLDriver.bundle` whenever there is one, and the one in `nvmtl/` only when there is none. Release 2.9, the
+  package `./build.sh package` starts from, carries its translator beside the plugin, and the packages built from the
+  3.0 branch, and those built from this branch up to b80056ef (which record version 3.0.1 like the fixed ones), put
+  this build's in `nvmtl/` only: Metal apps translated with release 2.9's translator, so none of the translator's
+  repairs since 2.9 reached them. The package now puts this build's translator beside the plugin too, and the package
+  step stops when the two copies are not the same build. Shaders cached with 2.9's translator are translated again
+  once: the name of each shader cache entry carries the SHA-256 of the translator file that made it.
+
+### The ways back
+
+One for each change that has a switch, as in 3.0 below; each restores the 3.0 behaviour of that change only. The
+changes above that are not in the table have none. One exception: in Cyberpunk 2077 the built-in profile already set
+`NVK_LOCAL_MAP_SYSMEM=0` and `NVMTL_PRETRANSLATE=1` in 3.0, and a line in your own block of the file overrides the
+profile too, so `NVK_LOCAL_MAP_SYSMEM=1` or `NVMTL_PRETRANSLATE=0` there turns off what 3.0 had on in that game.
+
+| Change | Way back | Kind |
+|---|---|---|
+| Copy-engine clear of new blocks of video memory | `nvfbceclear=0` | boot argument |
+| Asynchronous texture uploads outside WindowServer | `NVMTL_ASYNC_TEX_UPLOAD=0` | `nvrm610.conf` |
+| Shaders of a game translated ahead | `NVMTL_PRETRANSLATE=0` | `nvrm610.conf` |
+| NVK's own write-only mapped memory in video memory outside WindowServer | `NVK_LOCAL_MAP_SYSMEM=1` | `nvrm610.conf` |
+| WindowServer clears an all-zero surface on the GPU instead of uploading it | `NVMTL_SURFIN_ZERO=0` | `nvrm610.conf` |
+| WindowServer frees dead video-memory imports on a thread of its own | `NVMTL_WS_FREE_OFFMAIN=0` | `nvrm610.conf` |
+
 ## 3.0
 
 **Not released.** This section describes the branch being prepared as 3.0. No test of it on an NVIDIA card has been

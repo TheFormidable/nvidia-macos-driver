@@ -1,0 +1,278 @@
+Fixes in NVK's NVRM back end and in two readers of nvrm610.conf. NullMoth's own change (not an upstream Mesa commit).
+The table of CPU mappings had no lock. Each CPU map of a memory object adds its address to the device's table
+(dev->mappings) and each unmap looks it up and removes it. nvkmd.c serialises the maps of one memory object only
+(map_mutex), and client maps and the unmaps of nvkmd_mem_unref not at all, so two threads mapping or freeing two
+different memories changed the hash table at the same time and could corrupt the heap. Every insert, search and
+remove now holds a mutex of the device (mappings_mutex), created and destroyed with the table. It is held only around
+the table operation, never across an RM call and never while another lock is taken, so it cannot be part of a lock
+cycle. An unmap now removes its entry before the RM unmap instead of after it: once RM has unmapped, another thread
+can be given the same address and insert it, and the old order then removed that new mapping's entry.
+VK_EXT_map_memory_placed is no longer offered on the NVRM back end. The NVRM map ignores the address the application
+asks for (only the host-pointer import looks at it, to refuse it) and its overmap, which a reserved unmap needs, only
+returns an error; Zink turns on client-pointer maps when it sees the extension with memoryMapPlaced and
+memoryUnmapReserve. The extension is now offered where the back end has has_map_fixed and has_overmap: the nouveau
+back end sets both, so it keeps it unchanged.
+NVRM_FLUSH_TIMEOUT_MS was read on every synchronous flush (NVRM_ASYNC=0, or a channel with no submission slot), and
+NVK_SYSMEM_GPU_UNCACHED and NVK_BAR_VRAM on every vkAllocateMemory: a getenv and, with the variable unset, a scan of
+nvrm610.conf that writes a line to stderr each time the file sets the name. Each is now read once for the process with
+util_call_once, which also makes the read safe from two threads (nvmtl_cfg_getenv's static buffers are not). The
+values mean what they meant: NVRM_FLUSH_TIMEOUT_MS is atol of the value or 5000, NVK_SYSMEM_GPU_UNCACHED=1 keeps app
+memory volatile, NVK_BAR_VRAM=0 keeps host-visible device-local memory out of BAR1.
+A failure to create the mapping table closed the process's standard input: CALLOC left osEvent at 0 and the destroy
+path closes it when it is not negative. osEvent is now -1 before the first way out.
+
+diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
+index f87935f..b6aa5a5 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.c
++++ b/src/nouveau/vulkan/nvk_device_memory.c
+@@ -13,6 +13,7 @@
+ #include "vk_fence.h"
+ 
+ #include "util/u_atomic.h"
++#include "util/u_call_once.h"
+ 
+ #include <inttypes.h>
+ #include <sys/mman.h>
+@@ -54,6 +55,41 @@ const VkExternalMemoryProperties nvk_host_mem_props = {
+    .compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+ };
+ 
++/* NVK_SYSMEM_GPU_UNCACHED=1 and NVK_BAR_VRAM=0, each read once for the process on its first use. They were read on
++ * every vkAllocateMemory: a getenv, and with the variable unset a scan of nvrm610.conf and, when the file sets it, a
++ * line on stderr each time; nvmtl_cfg_getenv's buffers are also not safe for two allocating threads. */
++static bool nvk_sysmem_gpu_uncached_value, nvk_bar_vram_off_value;
++static util_once_flag nvk_sysmem_gpu_uncached_once = UTIL_ONCE_FLAG_INIT;
++static util_once_flag nvk_bar_vram_off_once = UTIL_ONCE_FLAG_INIT;
++
++static void
++nvk_sysmem_gpu_uncached_read(void)
++{
++   const char *e = nvmtl_cfg_getenv("NVK_SYSMEM_GPU_UNCACHED");
++   nvk_sysmem_gpu_uncached_value = e && e[0] == '1';
++}
++
++static void
++nvk_bar_vram_off_read(void)
++{
++   const char *e = nvmtl_cfg_getenv("NVK_BAR_VRAM");
++   nvk_bar_vram_off_value = e && e[0] == '0';
++}
++
++static bool
++nvk_sysmem_gpu_uncached(void)
++{
++   util_call_once(&nvk_sysmem_gpu_uncached_once, nvk_sysmem_gpu_uncached_read);
++   return nvk_sysmem_gpu_uncached_value;
++}
++
++static bool
++nvk_bar_vram_off(void)
++{
++   util_call_once(&nvk_bar_vram_off_once, nvk_bar_vram_off_read);
++   return nvk_bar_vram_off_value;
++}
++
+ static enum nvkmd_mem_flags
+ nvk_memory_type_flags(const VkMemoryType *type,
+                       VkExternalMemoryHandleTypeFlagBits handle_types,
+@@ -80,20 +116,14 @@ nvk_memory_type_flags(const VkMemoryType *type,
+     * every submission with the write-back + clean-line invalidate that keeps it coherent. Exported or
+     * imported memory stays volatile: another process or device reaches it outside our submissions.
+     * NVK_SYSMEM_GPU_UNCACHED=1 restores the volatile mapping everywhere (the speed control). */
+-   else {
+-      const char *e = nvmtl_cfg_getenv("NVK_SYSMEM_GPU_UNCACHED");
+-      if (!(e && e[0] == '1'))
+-         flags |= NVK69_MEM_GPU_CACHED;
+-   }
++   else if (!nvk_sysmem_gpu_uncached())
++      flags |= NVK69_MEM_GPU_CACHED;
+ 
+    /* NVMTL batch 36: an app's DEVICE_LOCAL|HOST_VISIBLE memory really lives in VRAM, mapped through
+     * BAR1. Exported/imported memory keeps the old GART placement. NVK_BAR_VRAM=0 restores it everywhere. */
+    if ((type->propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+-       (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && handle_types == 0) {
+-      const char *e = nvmtl_cfg_getenv("NVK_BAR_VRAM");
+-      if (!(e && e[0] == '0'))
+-         flags |= NVKMD_MEM_BAR;
+-   }
++       (type->propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && handle_types == 0 && !nvk_bar_vram_off())
++      flags |= NVKMD_MEM_BAR;
+ 
+    return flags;
+ }
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+index 567a3ba..340353e 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -764,9 +764,9 @@ nvk_get_device_features(const struct nv_device_info *info,
+       .legacyVertexAttributes = true,
+ 
+       /* VK_EXT_map_memory_placed */
+-      .memoryMapPlaced = true,
++      .memoryMapPlaced = supported_extensions->EXT_map_memory_placed,
+       .memoryMapRangePlaced = false,
+-      .memoryUnmapReserve = true,
++      .memoryUnmapReserve = supported_extensions->EXT_map_memory_placed,
+ 
+       /* VK_EXT_mesh_shader */
+       .taskShader = info->cls_eng3d >= TURING_A,
+@@ -1627,6 +1627,9 @@ nvk_create_physical_device(struct nvkmd_pdev *nvkmd,
+                              nvkmd->kmd_info.has_alloc_tiled,
+                              &supported_extensions);
+    supported_extensions.EXT_external_memory_host = nvkmd->kmd_info.has_host_import;   /* b72 host-pointer import: probe-gated */
++   /* A placed map needs a CPU map at the caller's address and a map over a reserved range on unmap. The NVRM back end
++    * has neither (it ignores the address, and its overmap only fails), so the extension is offered where both are. */
++   supported_extensions.EXT_map_memory_placed = nvkmd->kmd_info.has_map_fixed && nvkmd->kmd_info.has_overmap;
+ 
+    struct vk_features supported_features;
+    nvk_get_device_features(&nvkmd->dev_info, &supported_extensions,
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+index e951701..559aecb 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm.h
+@@ -84,7 +84,11 @@ VkResult nvkmd_nvrm_try_create_pdev(struct _drmDevice *drm_device,
+ 
+ struct nvkmd_nvrm_dev {
+    struct nvkmd_dev base;
++   /* CPU address -> NvRmApiMapping of every CPU map of this device's memory (nvkmd_nvrm_mem.c). Any thread can map or
++    * unmap a memory object, so every insert, search and remove holds mappings_mutex. It is a leaf lock: nothing else is
++    * taken while it is held, and it is never held across an RM call. */
+    struct hash_table *mappings;
++   simple_mtx_t mappings_mutex;
+    /* b73 ONE graphics non-stall event per device (patch_evdev.py): engine-wide in RM, so per-channel events only
+     * multiplied RM's per-interrupt list walk. Waits sleep on osEvent (kext selector 6). -1 / 0 = none. */
+    int osEvent;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+index a8ae5b0..3d7c609 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_ctx.c
+@@ -20,6 +20,7 @@
+ #include "vk_log.h"
+ 
+ #include "util/u_memory.h"
++#include "util/u_call_once.h"
+ #include "nv_push_clc36f.h"
+ #include "nv_push_clc86f.h" // nvk69: host MEM_OP (same methods C86F..CA6F, NVK pushes them on Hopper+)
+ 
+@@ -135,15 +136,23 @@ nvkmd_nvrm_diag_dump(const char *why, const char *heads)
+    pthread_mutex_unlock(&nvkmd_nvrm_gsub_mtx);
+ }
+ 
++/* NVRM_FLUSH_TIMEOUT_MS, read once for the process (default 5000). Every waiter and every synchronous flush asks for
++ * it, from any thread; util_call_once makes the one read race-free (nvmtl_cfg_getenv's buffers are not). */
++static long nvkmd_nvrm_flush_timeout_value;
++static util_once_flag nvkmd_nvrm_flush_timeout_once = UTIL_ONCE_FLAG_INIT;
++
++static void
++nvkmd_nvrm_flush_timeout_read(void)
++{
++   const char *e = nvmtl_cfg_getenv("NVRM_FLUSH_TIMEOUT_MS");
++   nvkmd_nvrm_flush_timeout_value = e ? atol(e) : 5000;
++}
++
+ long
+ nvkmd_nvrm_flush_timeout_ms(void)
+ {
+-   static long ms = -1;
+-   if (ms < 0) {
+-      const char *e = nvmtl_cfg_getenv("NVRM_FLUSH_TIMEOUT_MS");
+-      ms = e ? atol(e) : 5000;
+-   }
+-   return ms;
++   util_call_once(&nvkmd_nvrm_flush_timeout_once, nvkmd_nvrm_flush_timeout_read);
++   return nvkmd_nvrm_flush_timeout_value;
+ }
+ 
+ void
+@@ -1994,7 +2003,7 @@ nvrm_exec_ctx_flush_held(struct nvkmd_nvrm_exec_ctx *ctx, struct vk_object_base
+    // bounded wait: unbounded before. On macOS osEvent is a dup of /dev/null (always readable), so
+    // poll returned at once and a hung channel spun a core forever with no diagnostic. NVRM_FLUSH_TIMEOUT_MS (default 5000).
+    struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+-   const char *toEnv = nvmtl_cfg_getenv("NVRM_FLUSH_TIMEOUT_MS"); long timeoutMs = toEnv ? atol(toEnv) : 5000;
++   const long timeoutMs = nvkmd_nvrm_flush_timeout_ms();   /* read once, not on every flush */
+    // The error notifier is where RM reports a real channel exception. Sample it BEFORE the wait so a
+    // notifier still carrying an older exception cannot kill the first healthy flush after it.
+    NvNotification *errN = &notifiers[NV_CHANNELGPFIFO_NOTIFICATION_TYPE_ERROR];
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
+index 2db6f55..ded2acc 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_dev.c
+@@ -36,6 +36,10 @@ nvkmd_nvrm_create_dev(struct nvkmd_pdev *_pdev,
+    list_inithead(&dev->base.mems);
+    simple_mtx_init(&dev->base.mems_mutex, mtx_plain);
+ 
++   /* Before the first way out through nvkmd_dev_destroy: it closes osEvent when it is not negative, and CALLOC left it
++    * 0, so a failure here closed the process's standard input. */
++   dev->osEvent = -1;
++   simple_mtx_init(&dev->mappings_mutex, mtx_plain);
+    dev->mappings = _mesa_hash_table_create(NULL, _mesa_hash_pointer, _mesa_key_pointer_equal);
+    if (dev->mappings == NULL) {
+    	  nvkmd_dev_destroy(&dev->base);
+@@ -43,7 +47,6 @@ nvkmd_nvrm_create_dev(struct nvkmd_pdev *_pdev,
+    }
+ 
+    /* b73: the device's ONE graphics non-stall event. Best effort: without it waits keep the polling backoff. */
+-   dev->osEvent = -1;
+    dev->hEvent = 0;
+    {
+       struct NvRmApi rm;
+@@ -84,6 +87,7 @@ nvkmd_nvrm_dev_destroy(struct nvkmd_dev *_dev)
+ 
+    if (dev->mappings != NULL)
+       _mesa_hash_table_destroy(dev->mappings, NULL);
++   simple_mtx_destroy(&dev->mappings_mutex);
+ 
+    if (dev->hEvent != 0) {   /* b73 device event */
+       struct NvRmApi rm;
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+index 5c424c4..fcebcf1 100644
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -450,7 +450,10 @@ nvkmd_nvrm_mem_map(struct nvkmd_mem *_mem,
+                        (unsigned long long)mem->base.size_B, mem->isSystemMem ? "system" : "vidmem", nvRes);
+    }
+ 
+-   if (_mesa_hash_table_insert(dev->mappings, mapping->address, mapping) == NULL) {
++   simple_mtx_lock(&dev->mappings_mutex);
++   struct hash_entry *added = _mesa_hash_table_insert(dev->mappings, mapping->address, mapping);
++   simple_mtx_unlock(&dev->mappings_mutex);
++   if (added == NULL) {
+    	nvRmApiUnmapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mapping);
+       free(mapping);
+       return vk_error(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY);
+@@ -475,23 +478,28 @@ nvkmd_nvrm_mem_unmap(struct nvkmd_mem *_mem,
+    if (mem->hostPtr)
+       return;   /* b72 host-pointer import: the caller's pages were never mapped by us */
+ 
++   /* Drop the table's reference before freeing: a later lookup of the same
++    * address would otherwise return this freed mapping and free it again,
++    * corrupting the heap when device creation fails and tears the mappings
++    * down (every process that enumerates Metal devices then aborts in malloc).
++    * The entry goes before the RM unmap, under the same lock as the search: once RM has unmapped, another thread
++    * can be given the same address and insert it, and a remove after that would take the new mapping's entry. */
++   simple_mtx_lock(&dev->mappings_mutex);
+    struct hash_entry *ent = _mesa_hash_table_search(dev->mappings, map);
+-   if (ent == NULL) {
++   NvRmApiMapping *mapping = ent != NULL ? ent->data : NULL;
++   if (ent != NULL)
++      _mesa_hash_table_remove(dev->mappings, ent);
++   simple_mtx_unlock(&dev->mappings_mutex);
++   if (mapping == NULL) {
+       fprintf(stderr, "[!] ent == NULL\n");
+       return;
+    }
+-   NvRmApiMapping *mapping = ent->data;
+ 
+    NV_STATUS nvRes = nvRmApiUnmapMemory(&rm, pdev->hSubdevice, mem->hMemoryPhys, 0, mapping);
+    if (nvRes != NV_OK) {
+       fprintf(stderr, "[!] nvRes: %#x\n", nvRes);
+    }
+ 
+-   /* Drop the table's reference before freeing: a later lookup of the same
+-    * address would otherwise return this freed mapping and free it again,
+-    * corrupting the heap when device creation fails and tears the mappings
+-    * down (every process that enumerates Metal devices then aborts in malloc). */
+-   _mesa_hash_table_remove(dev->mappings, ent);
+    free(mapping);
+ }
+ 
