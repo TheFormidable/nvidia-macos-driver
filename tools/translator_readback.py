@@ -8,8 +8,8 @@ Each case is translated through the translator's C entry point (nvmtl_translate)
 Mac, run by tools/translator_readback.cpp, which this script builds with xcrun clang++ and which loads the named
 plugin binary into its own process and dispatches the kernel offscreen on the GPU. --prepare-only stops after the
 translation and the validation (the plugin is then only hashed), so it also runs where there is no GPU. Outputs,
-SPIR-V and RESULTS.json go to --out. It is not one of the host tests run by run_all_tests.py: it needs those built
-binaries.
+SPIR-V and RESULTS.json go to --out. A case whose program gives no result within 30 s ends the script by SIGALRM.
+It is not one of the host tests run by run_all_tests.py: it needs those built binaries.
 
 No files are installed and no application is restarted. The original unit-test
 LLVM fixtures supply the pointer/resource shapes. The phi fixture's loop inputs
@@ -20,8 +20,10 @@ import argparse
 import ctypes
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -197,6 +199,70 @@ bits = kernels['wrapped-float'].replace('<4 x float>', '<4 x i32>')
 bits = replace(bits, '  %pos = fadd fast <4 x i32> %copyload, %rect\n', '')
 kernels['wrapped-bitcopy'] = replace(bits, 'store <4 x i32> %pos', 'store <4 x i32> %copyload')
 
+KERNEL_META = '!air.kernel = !{!0}\n!0 = !{ptr @k, !1, !2}\n!1 = !{}\n'
+
+def buffer_meta(index, location, access, space, size, name, type_name):
+    return (f'!{{i32 {index}, !"air.buffer", !"air.location_index", i32 {location}, i32 1, !"air.{access}", '
+            f'!"air.address_space", i32 {space}, !"air.arg_type_size", i32 {size}, !"air.arg_type_align_size", '
+            f'i32 {size}, !"air.arg_type_name", !"{type_name}", !"air.arg_name", !"{name}"}}')
+
+# Apple's GL reads an ivec2 uniform as load <2 x i32> through a GEP over the block's vec4 slots
+# (translator/tests/fixtures/gl/ivec2_uniform_through_vec4_gep.ll). The same shape in a kernel reads slot 1 of a
+# 32-byte constant buffer; the translator without vector_load.rs's lane prefix load refuses it ("reinterpret load bit
+# width mismatch").
+kernels['ivec2-gep'] = '''define void @k(ptr addrspace(1) %out, ptr addrspace(2) %ubo) {
+entry:
+  %slot = getelementptr <4 x float>, ptr addrspace(2) %ubo, i32 1
+  %v = load <2 x i32>, ptr addrspace(2) %slot, align 8
+  store <2 x i32> %v, ptr addrspace(1) %out, align 8
+  ret void
+}
+''' + KERNEL_META + '!2 = !{!3, !4}\n!3 = ' + buffer_meta(0, 0, 'write', 1, 8, 'out', 'int2*') + '''
+!4 = !{i32 1, !"air.buffer", !"air.buffer_size", i32 32, !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"uchar", !"air.arg_name", !"ubo"}
+'''
+
+# A helper that consumes a pointer select is inlined before emission (inline.rs, inline_pointer_select_consumers);
+# its other argument here is a constant expression, the 'splat (float 0x3FA47AE140000000)' of three.js clearcoat.
+# Keeping only the last token of that argument left the multiply without its operand, and the module was refused.
+kernels['splat-inline'] = '''define internal <4 x float> @clearcoat(ptr addrspace(1) %p, <4 x float> %f0) {
+entry:
+  %c = load <4 x float>, ptr addrspace(1) %p, align 16
+  %s = fmul <4 x float> %c, %f0
+  ret <4 x float> %s
+}
+define void @k(ptr addrspace(1) %out, ptr addrspace(1) %in, ptr addrspace(1) %alt, ptr addrspace(1) %pick) {
+entry:
+  %which = load i32, ptr addrspace(1) %pick, align 4
+  %first = icmp eq i32 %which, 0
+  %p = select i1 %first, ptr addrspace(1) %in, ptr addrspace(1) %alt
+  %r = call <4 x float> @clearcoat(ptr addrspace(1) %p, <4 x float> splat (float 0x3FA47AE140000000))
+  store <4 x float> %r, ptr addrspace(1) %out, align 16
+  ret void
+}
+''' + KERNEL_META + '!2 = !{!3, !4, !5, !6}\n' + '\n'.join(
+    f'!{3 + i} = ' + buffer_meta(i, i, access, 1, size, name, type_name) for i, (access, size, name, type_name) in
+    enumerate([('write', 16, 'out', 'float4*'), ('read', 16, 'in', 'float4*'), ('read', 16, 'alt', 'float4*'),
+               ('read', 4, 'pick', 'uint*')])) + '\n'
+
+# Textures and samplers kept in the fields of a local object and read by an internal helper
+# (translator/tests/opaque_texture_fields.ll) reach their sample. The fragment fixture becomes a kernel whose page
+# comes from a buffer and whose colour is stored; its arrays are bound where the texture-array cases bind theirs.
+ll = (ROOT / 'translator/translator/tests/opaque_texture_fields.ll').read_text()
+ll = replace(ll, 'define <4 x float> @local_textures(ptr byval([2 x ptr addrspace(1)]) %textures, '
+             'ptr byval([2 x ptr addrspace(2)]) %samplers, <2 x float> %uv, i32 %page) {\nentry:\n',
+             'define void @k(ptr byval([2 x ptr addrspace(1)]) %textures, ptr byval([2 x ptr addrspace(2)]) %samplers, '
+             'ptr addrspace(1) %out, ptr addrspace(1) %input) {\nentry:\n  %page = load i32, ptr addrspace(1) %input, '
+             'align 4\n')
+ll = replace(ll, '  %color = call <4 x float> @read_env(ptr %envs, <2 x float> %uv, i32 %page)\n'
+             '  ret <4 x float> %color\n',
+             '  %color = call <4 x float> @read_env(ptr %envs, <2 x float> <float 0.5, float 0.5>, i32 %page)\n'
+             '  store <4 x float> %color, ptr addrspace(1) %out, align 16\n  ret void\n')
+assert ll.count('!air.fragment = ') == 1
+kernels['object-fields'] = ll[:ll.index('!air.fragment = ')] + KERNEL_META + '''!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 40, i32 2, !"air.sample", !"air.arg_type_name", !"array<texture2d<float, sample>, 2>", !"air.arg_name", !"textures"}
+!4 = !{i32 1, !"air.sampler", !"air.location_index", i32 14, i32 2, !"air.arg_type_name", !"array<sampler, 2>", !"air.arg_name", !"samplers"}
+!5 = !{i32 2, ''' + BUFFER_OUT + '}\n!6 = ' + buffer_meta(3, 1, 'read', 1, 4, 'input', 'uint*') + '\n'
+
 translator = ctypes.CDLL(str(args.translator.resolve()))
 translator.nvmtl_translate.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
 translator.nvmtl_translate.restype = ctypes.c_int
@@ -240,7 +306,18 @@ for mode in args.cases or kernels:
                        for v in lines), (mode, 'device pointer serialized as zero')
     row = {'case': mode, 'spirv_sha256': hashlib.sha256(data).hexdigest(), 'spirv_valid': True}
     if not args.prepare_only:
-        result = subprocess.run([str(binary), str(args.plugin.resolve()), str(spv), mode], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
+        try:
+            result = subprocess.run([str(binary), str(args.plugin.resolve()), str(spv), mode], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
+        except subprocess.TimeoutExpired as late:
+            # One small dispatch with no result in 30 s means a GPU that may be hung. The script then ends by SIGALRM,
+            # as a program's own alarm would, so that a runner that stops every later GPU check after a time limit
+            # (tools/card_selftest.py) stops them here too, instead of reading an exception as one failed case.
+            seen = late.stdout.decode(errors='replace') if isinstance(late.stdout, bytes) else late.stdout or ''
+            (args.out / (mode + '.log')).write_text(seen + f'TIMEOUT {mode}: no result within 30 s\n')
+            print(seen + f'TIMEOUT {mode}: the readback program gave no result within 30 s', flush=True)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGALRM)
+            raise
         (args.out / (mode + '.log')).write_text(result.stdout)
         row.update(exit_code=result.returncode, output=result.stdout)
         results.append(row)

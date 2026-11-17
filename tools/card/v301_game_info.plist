@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The Info.plist that tools/card/v301_pretranslate.m is linked with (-sectcreate __TEXT __info_plist) for the rows
+     that run it as a game: the games category is what the driver reads to call a process a game. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>nvmtltest</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+</dict>
+</plist>

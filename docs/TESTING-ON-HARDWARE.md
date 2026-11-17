@@ -419,6 +419,95 @@ with `nvmultigpu=1` ([MULTI-GPU-DESIGN.md](MULTI-GPU-DESIGN.md)) and repeat both
 cards are back and `debug.nvrm_fence_state` is 1. Fail: a card missing from those counters, or a wake that loses one;
 send the kernel log of that boot.
 
+## Automatic card checks (tools/card_selftest.py)
+
+`tools/card_selftest.py` runs the card checks of the new parts (native Vulkan, native OpenGL through Zink, the Metal
+plugin and the translator) and of release 3.0.1's own changes in one unattended run, on the Mac with the package
+installed and its driver loaded. It has run once on a card, on macOS 26.7.3 (25G342) with release 3.0.1's package.
+Since then `install.plugin-translator` was added, the `abarray-c` case of `xlate.paths-abarray`, which Apple's compiler
+refused there, was respelled, and `plugin.photobooth-surface`, which did not build there, now links CoreGraphics: these
+have not yet run on a card. Its host test `tools/test_card_selftest.py` has run on Linux only.
+
+There are 134 checks in six parts: `install`, `xlate`, `plugin`, `vulkan`, `zink` and `v301`. The ten of `v301`
+(`tools/card/checks_v301.py`) check release 3.0.1's changes: replaceRegion's asynchronous upload and the background
+translation of a game's shaders, both on by default from 3.0.1, each beside its way back (`NVMTL_ASYNC_TEX_UPLOAD=0`,
+`NVMTL_PRETRANSLATE=0`); new shaders, textures and samplers used at once with NVK's own mapped memory where 3.0.1 puts
+it and with `NVK_LOCAL_MAP_SYSMEM=1`; the withdrawal of `VK_EXT_map_memory_placed` and threads mapping and freeing
+memory at once through the native Vulkan runtime; and a read of the boost policy as NVK makes it. Each needs a file
+that release 3.0.1 added, so on a checkout without 3.0.1 each is a skip that names that file, and a check of a default
+also skips when `nvrm610.conf` sets that switch. All ten ran in that run.
+
+The eight of `install` (`tools/card/checks_install.py`) touch no GPU: six read the installed files (every file against
+the staged package, the OpenGL bundle the accelerator names, native Vulkan's and native OpenGL's folders, the Mesa
+commit native OpenGL was built from, and the translator the Metal plugin opens) and two run native OpenGL's installed
+probes. The translator's check, `install.plugin-translator`, is there because the plugin opens the
+`libnvmtl_translate.dylib` beside it in `NVMTLDriver.bundle/Contents/MacOS` whenever that file is there, and
+`nvmtl/libnvmtl_translate.dylib` only otherwise, while the readback checks of `xlate` translate with the `nvmtl/` copy
+directly: a package staged onto an older one can keep the older copy in the bundle, and the Metal checks then test
+another translator than the readback checks. It fails when the copy the plugin opens is not the same build as
+`nvmtl/`'s (by LC_UUID) or is not Mach-O. When it does not find that preference in the checkout's
+`plugin/NVMTLLibraryLoad.m`, it fails whenever a readable copy beside the plugin is not that build, since every release
+from 1.0.0 to 3.0.1 opens that copy. It gives each copy's LC_UUID, written as the plugin's log writes it, its size and
+its SHA-256 prefix.
+
+Start it from the checkout the package was built from, in the background, and wait until it has ended:
+
+```
+mkdir -p ~/nullmoth-claude/cardtest
+cd ~/nullmoth-claude/src
+/usr/bin/python3 -B -I tools/card_selftest.py --out ~/nullmoth-claude/cardtest/run1 \
+  > ~/nullmoth-claude/cardtest/run1.txt 2>&1 &
+```
+
+Its folder then holds `DONE`, whose first line is the exit status, and `report.md` beside it is the answer. Only a
+refusal before the folder is made (a wrong out folder or check file, exit 3) or a wrong option (exit 2) leaves no
+`DONE`; the output file says why. `--list` prints every check and builds nothing; `--plan` looks at the conditions of
+the next paragraph, all but the Metal probe, and prints what would be built and run, with no GPU program; `--no-window`
+leaves out the checks that open a window; `--only REGEX` runs only the checks whose id matches; `--expect COMMIT` names
+the commit of the installed package when it is not the default one. The default is release 3.0's commit: for a package
+of release 3.0.1, pass the commit it was built from.
+
+Before any check is built it refuses the run (exit 3) unless the out folder lies inside `~/nullmoth-claude`, outside
+`src` and `build2`, is empty or absent and has 2 GB free; the checkout is clean and its driver sources are those of the
+expected commit; the staged package in `~/nullmoth-claude/build2/package/pkgroot` is of that commit and every file it
+puts under `/Library/GPUBundles` is installed unchanged (`nvrm610.conf` is not compared); the accelerator is in the
+IORegistry; when the checkout has release 3.0.1's boost policy, the loaded NVRM.kext answers `debug.nvrm_boost_policy`
+(the kexts of an older package stay loaded until a restart); and a small probe sees the driver's Metal device. A refusal
+of the out folder writes nothing; any later refusal writes `report.md` and `DONE` with the reason.
+
+It writes only into the out folder (by default `~/nullmoth-claude/cardtest/<UTC time>`): `report.md` (the machine's
+facts, among them the boost policy and the copy-engine clear of new video memory at the start and the end, and one line
+per check), `results.json` (also written after every check, marked partial, so that a runner killed without its report
+leaves the checks it finished), `logs/` (one log per check and per build, with the program's output and
+its `nvmtl.log`), `bin/` (the built checks), `tmp/` and `cache/` (each check's TMPDIR and the shader caches the checks
+are pointed at), and `DONE` last. In `report.md`, `results.json`, the logs and every line it prints, the home folder
+becomes `~`, the account name `<user>`, the host name `<host>` and the user temporary and cache folders `<usertmp>` and
+`<usercache>`. `report.md` ends with what appeared outside the folder while it ran, by name only: files of the plugin
+and NVK's diagnostic logs in `/tmp`, new shader cache entries, crash reports of the programs it ran.
+
+Exit status: 0 every check that ran passed (the skipped and inactive ones are listed with their reason); 1 a check
+failed, ran out of time, crashed, could not be stopped or did not build; 2 a wrong option; 3 refused; 4 stopped early
+(also when a check failed before the stop, when it was interrupted or when the runner itself failed). Every check has a
+time limit. A check with a process still alive 15 s after its process group was killed (at its limit, or when it ended),
+a GPU check that ran out of time, a rise of `debug.nvrm_chan_gave_up`, a change of `debug.nvrm_fence_state`, a new
+WindowServer process, a rise of `debug.nvrmfb_vram_ce_kept` (the copy engine's clear of a new video memory block was not
+seen to end), a change of `debug.nvrmfb_vram_ce_clear` from 1 (the copy engine's clear stood down for this boot, for
+example because a block it said it cleared did not read as zero) or a rise of `debug.nvrmfb_vram_power_events` (the GPU
+went through a standby) stops every later GPU check. A rise of `debug.nvrm_xid_count`, of `debug.nvrm_chan_recovered` (a
+channel NVK rebuilt) or of `debug.nvrm_chan_dropped` (the submissions a rebuild dropped) fails the check it happened in,
+and the second GPU check with such a rise stops every later GPU check; a stalled channel rung again
+(`debug.nvrm_chan_kicks`) is noted on the check. After 40 minutes (`--deadline`) nothing new starts. A check that was
+not started is listed as "not run" with the reason.
+
+It never uses sudo; installs, loads or copies nothing into `/Library` or `/System`; changes no setting (not
+`nvrm610.conf`, not `defaults`, not a boot argument, not the boost policy); runs none of `nvram`, `csrutil`, `bless`,
+`kmutil`, `kextload` or `launchctl`; runs every check with `NVK_DIAG=0`, which wins over a `NVK_DIAG=1` line in
+`nvrm610.conf` (NVK would write into `/private/tmp`), and lets no check set it; reads no kernel collection, kernel
+binary, dyld shared cache or framework binary; opens no network connection; asks for no permission (camera, microphone,
+screen recording, accessibility, automation, files in Desktop, Documents or Downloads); and kills only the process
+groups of its own children. Windows open briefly for the window checks; `caffeinate` keeps the display awake only while
+those run.
+
 ## The ways back
 
 One per change; each restores the 2.9 behaviour of that change only. They exist to tell whether a change is behind a

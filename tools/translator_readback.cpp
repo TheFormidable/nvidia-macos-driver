@@ -81,6 +81,9 @@ int main(int argc, char **argv) {
     uint32_t threads[3] = {1, 1, 1};
     const float texture_a[4] = {0.125f, 0.25f, 0.5f, 1.f};
     const float texture_b[4] = {0.75f, 0.5f, 0.25f, 0.f};
+    // splat-inline multiplies the buffer its pick selects by the splat constant 0x3FA47AE140000000, which is 0.04f
+    const float splat_inputs[2][4] = {{1.f, 2.f, 0.5f, -4.f}, {8.f, -3.f, 0.25f, 64.f}};
+    const uint32_t ivec2_slot[4] = {(uint32_t)-7, 123456789u, 0x7fc00001u, 5u};
     nvk_cmdbuf command{};
     if (wrapped) {
         const size_t stride = mode == "wrapped-trailing" || mode == "wrapped-array" ? 32 : 16;
@@ -112,18 +115,27 @@ int main(int argc, char **argv) {
     } else if (mode == "i64") {
         ((uint64_t *)buffers[1].map)[0] = call_nvmtl_vk_buffer_address(&buffers[2]);
         ((uint64_t *)buffers[2].map)[1] = 0x1122334455667788ull;
+    } else if (mode == "ivec2-gep") {
+        // slot 1 of the constant buffer (bytes 16..31): the two lanes the load asks for, then two it must not need
+        memcpy((char *)buffers[1].map + 16, ivec2_slot, 16);
+    } else if (mode == "splat-inline") {
+        memcpy(buffers[1].map, splat_inputs[0], 16);
+        memcpy(buffers[2].map, splat_inputs[1], 16);
     }
 
     const bool texture_array = mode.rfind("texture-array", 0) == 0;
     const bool sampler_array = mode.rfind("sampler-array", 0) == 0;
-    const bool texture = mode == "texture5" || mode == "texture127" || mode == "texture1d" || mode == "storage40" || texture_array || sampler_array;
+    // object-fields binds its two textures and two samplers where the texture-array cases bind theirs
+    const bool object_fields = mode == "object-fields";
+    const bool texture_pair = texture_array || object_fields;
+    const bool texture = mode == "texture5" || mode == "texture127" || mode == "texture1d" || mode == "storage40" || texture_array || sampler_array || object_fields;
     if (texture) {
         // Metal type 0 is 1D; type 2 is 2D. Vulkan format 109 is RGBA32F.
         check(call_nvmtl_vk_image_create_typed(sampler_array ? 2 : 1, 1, 109, 16, 0, 1, 1,
                                               mode == "texture1d" ? 0 : 2, 1, &images[0]), "source image");
         float pixels[8]; memcpy(pixels, texture_a, 16); memcpy(pixels + 4, texture_b, 16);
         check(call_nvmtl_vk_image_write(&queue, &images[0], pixels, sampler_array ? 32 : 16), "source upload");
-        if (mode == "storage40" || mode == "texture127" || texture_array) {
+        if (mode == "storage40" || mode == "texture127" || texture_pair) {
             check(call_nvmtl_vk_image_create_typed(1, 1, 109, 16, 0, 1, 1, 2, 1, &images[1]), "second image");
             check(call_nvmtl_vk_image_write(&queue, &images[1], texture_b, 16), "second upload");
         }
@@ -139,9 +151,12 @@ int main(int argc, char **argv) {
     const uint16_t half_controls[][3] = {{0x3c00, 0x3800, 0}, {0x7e00, 0x3c00, 0x3800},
         {0xbc00, 0x4000, 0x3400}, {0x3800, 0x3800, 0x3800}, {0x7c00, 0xfc00, 1}};
     const unsigned runs = wrapped ? 3 : mode == "pack10" ? sizeof(controls) / sizeof(controls[0])
-        : mode == "pack565dyn" ? sizeof(half_controls) / sizeof(half_controls[0]) : 1;
+        : mode == "pack565dyn" ? sizeof(half_controls) / sizeof(half_controls[0])
+        : object_fields || mode == "splat-inline" ? 2 : 1;
     for (unsigned run = 0; run < runs; run++) {
         if (wrapped) ((uint32_t *)buffers[1].map)[1] = run+1;
+        if (object_fields) ((uint32_t *)buffers[1].map)[0] = run;   // the page: texture and sampler 0, then 1
+        if (mode == "splat-inline") ((uint32_t *)buffers[3].map)[0] = run;   // 0 picks the input, 1 the other one
         std::vector<char> input_snapshot;
         if (wrapped) input_snapshot.assign((char *)buffers[1].map,(char *)buffers[1].map+4096);
         if (mode == "pack10") memcpy(buffers[1].map, controls[run], 16);
@@ -149,7 +164,7 @@ int main(int argc, char **argv) {
         check(call_nvmtl_vk_cmd_begin(&queue, &command), "command begin");
         for (unsigned i = 0; i < 4; i++) check(call_nvmtl_vk_bind_buffer(&command, 0, i, &buffers[i], 0), "bind buffer");
         if (texture) {
-            unsigned index = mode == "texture5" ? 5 : mode == "texture127" || mode == "storage40" || texture_array || sampler_array ? 40 : 0;
+            unsigned index = mode == "texture5" ? 5 : mode == "texture127" || mode == "storage40" || texture_pair || sampler_array ? 40 : 0;
             check(call_nvmtl_vk_bind_texture_view(&command, 0, index, images[0].view), "bind sampled image and heap slot");
             check(call_nvmtl_vk_bind_sampler(&command, 0, 2, &sampler), "bind sampler 2");
             if (mode == "texture127") {
@@ -158,9 +173,10 @@ int main(int argc, char **argv) {
                 check(call_nvmtl_vk_bind_sampler(&command, 0, 15, &sampler), "bind sampler 15");
             }
             if (mode == "storage40") check(call_nvmtl_vk_bind_storage_view(&command, 0, 40, images[1].view), "bind storage image 40");
-            if (texture_array) check(call_nvmtl_vk_bind_texture_view(&command, 0, 41, images[1].view), "bind array element 1");
-            if (texture_array || sampler_array) check(call_nvmtl_vk_bind_sampler(&command, 0, 14, &sampler), "bind array sampler 0");
+            if (texture_pair) check(call_nvmtl_vk_bind_texture_view(&command, 0, 41, images[1].view), "bind array element 1");
+            if (texture_pair || sampler_array) check(call_nvmtl_vk_bind_sampler(&command, 0, 14, &sampler), "bind array sampler 0");
             if (sampler_array) check(call_nvmtl_vk_bind_sampler(&command, 0, 15, &linear_sampler), "bind array sampler 1");
+            if (object_fields) check(call_nvmtl_vk_bind_sampler(&command, 0, 15, &sampler), "bind array sampler 1");
         }
         call_nvmtl_vk_cmd_dispatch_threads(&command, &pipeline, threads, one);
         require(!command.nobind && !command.skipped, "dispatch recorded");
@@ -201,6 +217,26 @@ int main(int argc, char **argv) {
             }
             require(((uint32_t *)buffers[1].map)[8] == 0xa5a5a5a5, "helper output bounds");
         } else if (mode == "i64") require(((uint64_t *)buffers[0].map)[0] == 0x1122334455667788ull, "guarded 64-bit address load");
+        else if (mode == "ivec2-gep") {
+            const uint32_t *o = (const uint32_t *)buffers[0].map;
+            if (o[0] != ivec2_slot[0] || o[1] != ivec2_slot[1])
+                fprintf(stderr, "ivec2 lanes: got %d %d expected %d %d\n", (int)o[0], (int)o[1],
+                        (int)ivec2_slot[0], (int)ivec2_slot[1]);
+            require(o[0] == ivec2_slot[0] && o[1] == ivec2_slot[1],
+                    "ivec2 read through a vec4 slot keeps both lanes' bits");
+            for (unsigned i = 2; i < 4096 / 4; ++i) require(o[i] == 0xa5a5a5a5, "ivec2 output stays inside int2");
+            require(!memcmp((char *)buffers[1].map + 16, ivec2_slot, 16), "ivec2 input is read-only");
+        } else if (mode == "splat-inline") {
+            const float *o = (const float *)buffers[0].map;
+            for (unsigned i = 0; i < 4; i++) {
+                const float expected = splat_inputs[run][i] * 0.04f;
+                if (memcmp(&o[i], &expected, 4))
+                    fprintf(stderr, "splat run %u lane %u: got %.9g expected %.9g\n", run, i, o[i], expected);
+                require(!memcmp(&o[i], &expected, 4), "inlined helper keeps its splat argument");
+            }
+            for (unsigned i = 4; i < 4096 / 4; ++i)
+                require(((uint32_t *)buffers[0].map)[i] == 0xa5a5a5a5, "splat output stays inside float4");
+        }
         else if (mode == "pack565") require(((uint16_t *)buffers[0].map)[0] == 0x041f, "RGB565 round-to-even");
         else if (mode == "pack565dyn") {
             const uint16_t *v = half_controls[run];
@@ -223,10 +259,11 @@ int main(int argc, char **argv) {
                 float expected = texture_a[i] + (mode == "texture127" ? texture_b[i] : 0.f);
                 if (texture_array && mode != "texture-array0") expected = texture_b[i];
                 if (sampler_array) expected = mode == "sampler-array0" ? texture_b[i] : (texture_a[i] + texture_b[i]) * 0.5f;
+                if (object_fields) expected = run ? texture_b[i] : texture_a[i];
                 if (result[i] != expected) fprintf(stderr, "channel %u: got %.9g expected %.9g\n", i, result[i], expected);
                 require(result[i] == expected, "texture/sampler/storage binding and pixels");
             }
-            if (texture_array || sampler_array) require(((uint32_t *)buffers[0].map)[4] == 0xa5a5a5a5, "array output bounds");
+            if (texture_pair || sampler_array) require(((uint32_t *)buffers[0].map)[4] == 0xa5a5a5a5, "array output bounds");
         } else require(mode == "control" && ((uint32_t *)buffers[0].map)[0] == 0x12345678, "control output");
     }
     for (auto &image : images) if (image.img) call_nvmtl_vk_image_destroy(&image);

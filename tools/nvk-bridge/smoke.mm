@@ -22,7 +22,24 @@
 #include <vector>
 #include <deque>
 #include <mutex>
+#include <execinfo.h>
+#include <signal.h>
 #include <unistd.h>
+
+// A crash ends as exit 70 with "CRASH <signal>" and a backtrace on stderr instead of as the signal, as the programs of
+// tools/card do, so that macOS is expected to write no crash report for it (not yet run on a Mac).
+static void on_crash(int sig) {
+   const char *name=sig==SIGSEGV?"CRASH SIGSEGV\n":sig==SIGBUS?"CRASH SIGBUS\n":sig==SIGILL?"CRASH SIGILL\n":
+                    sig==SIGFPE?"CRASH SIGFPE\n":"CRASH SIGABRT\n";
+   write(STDERR_FILENO,name,strlen(name));
+   void *frames[64];int count=backtrace(frames,64);backtrace_symbols_fd(frames,count,STDERR_FILENO);
+   _exit(70);
+}
+static void install_crash_handlers() {
+   void *warm[4];(void)backtrace(warm,4);   // binds backtrace's lazy symbols now, outside a signal handler
+   struct sigaction sa{};sa.sa_handler=on_crash;sigemptyset(&sa.sa_mask);
+   for (int sig:{SIGSEGV,SIGBUS,SIGILL,SIGFPE,SIGABRT}) sigaction(sig,&sa,nullptr);
+}
 
 static void check(VkResult r,const char *name) { if (r!=VK_SUCCESS) throw std::runtime_error(std::string(name)+" -> "+std::to_string(r)); }
 static void require(bool value,const char *name) { if (!value) throw std::runtime_error(name); }
@@ -78,6 +95,9 @@ static void verify_pixels(PFN_vkGetDeviceProcAddr gdpa,VkDevice device,VkQueue q
 }
 
 int main(int argc,char **argv) { @autoreleasepool { try {
+   // Whole lines when stdout and stderr share one pipe (tools/card/checks_vulkan.py merges them to read both).
+   setvbuf(stdout,nullptr,_IOLBF,0);
+   install_crash_handlers();
    require(argc>=2,"Usage: smoke entry.dylib [SDL3.dylib [images=3 [frames=90]]]");
    bool windowed=argc>=3;
    void *entry=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL|RTLD_FIRST);require(entry!=nullptr,dlerror()?:"entry load");
