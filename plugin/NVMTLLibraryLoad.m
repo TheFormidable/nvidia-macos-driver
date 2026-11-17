@@ -1963,12 +1963,14 @@ static void nvmtl_fcwarm_kick(NSString *ll, NVMTLAirDigest *ad, NSString *mine) 
     for (unsigned i = 0; i < start; i++) dispatch_async(nvmtl_fcwarm_queue(), ^{ nvmtl_fcwarm_work(); });
     if (queued) nvlog("fc warm-up: %u recorded variant(s) of this function translating in the background", queued);
 }
-// Before a miss reads its cache file: a variant still pending in the background is taken out of the queue, so the
+// A miss whose cache file is not on disk: a variant still pending in the background is taken out of the queue, so the
 // caller translates it on its own miss path and the background never does; a variant the background is translating is
-// waited for, for at most NVMTL_FCWARM_JOIN_MS, after which the caller translates it too. The job leaves
-// gFcWarmInFlight only after its file is written, so a caller that finds no job finds the file, if there is one.
-static void nvmtl_fcwarm_take_or_join(NSString *path) {
-    if (!path || !nvmtl_fcwarm_on()) return;
+// waited for, for at most NVMTL_FCWARM_JOIN_MS, after which the caller translates it too. YES when the file is worth
+// reading again: the background finished it, or there was no job (one may have finished since the caller's read; a
+// job leaves gFcWarmInFlight only after its file is written). Two callers that ask for the same pending variant at once
+// both translate it, as they would without the warm-up: the first takes the job, the second finds no job and no file.
+static BOOL nvmtl_fcwarm_take_or_join(NSString *path) {
+    if (!path || !nvmtl_fcwarm_on()) return NO;
     dispatch_group_t g = NULL;
     os_unfair_lock_lock(&gFcWarmLock);
     NVMTLFcWarmJob *job = gFcWarmInFlight[path];
@@ -1977,11 +1979,11 @@ static void nvmtl_fcwarm_take_or_join(NSString *path) {
         [gFcWarmPending removeObjectIdenticalTo:job];
     } else if (job) g = job->_done;
     os_unfair_lock_unlock(&gFcWarmLock);
-    if (!job) return;
+    if (!job) return YES;
     if (!g) {
         nvlog("fc warm-up: TOOK OVER a recorded variant the background had not started (%lu so far)",
               atomic_fetch_add(&gFcWarmTaken, 1) + 1);
-        return;
+        return NO;
     }
     const long timedOut = dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW,
                                                                (int64_t)NVMTL_FCWARM_JOIN_MS * NSEC_PER_MSEC));
@@ -1989,6 +1991,7 @@ static void nvmtl_fcwarm_take_or_join(NSString *path) {
     nvlog("fc warm-up: JOINED the background translation%s [%lu joined, %lu ran out, %lu taken over]",
           timedOut ? " - it did not finish in time, translating here" : "", (unsigned long)gFcWarmJoined,
           (unsigned long)gFcWarmLate, (unsigned long)gFcWarmTaken);
+    return !timedOut;
 }
 
 NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *name, NSDictionary *constants,
@@ -2008,7 +2011,8 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     if (fcCacheOn) nvmtl_fcwarm_kick(ll, airDigest, path);
     NSData *hit = fcCacheOn ? [nvmtl_memo() objectForKey:memoKey] : nil;
     if (hit) { gFcHit++; gFcMemoHit++; nvmtl_cache_touch(path); nvmtl_fc_note_lookup(); return hit; }   // keep the trimmer's age order (off the caller)
-    if (fcCacheOn && path) { nvmtl_fcwarm_take_or_join(path); hit = nvmtl_cache_read(path); }
+    if (fcCacheOn && path) hit = nvmtl_cache_read(path);   // a file on disk is a hit, whatever the warm-up is doing
+    if (fcCacheOn && path && !hit && nvmtl_fcwarm_take_or_join(path)) hit = nvmtl_cache_read(path);
     uint32_t magic = 0;
     if (hit.length >= 20 && hit.length % 4 == 0) {
         memcpy(&magic, hit.bytes, 4);
