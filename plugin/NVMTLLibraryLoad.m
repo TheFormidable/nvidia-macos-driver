@@ -1780,13 +1780,20 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
  * translated Core Animation's fixed_frag variants one after another, 1.3-2 s each: the update's new translator build
  * swept every cached variant, and the main thread asked for dozens. A set that took long is recorded beside the cache
  * (.fcwarm.v1: the AIR text's digest and the exact key bytes), and the first time a process asks for any variant of
- * that AIR text, every other recorded variant whose cache file is missing is translated on background threads into the
- * same cache files. The main thread then reads a file, or waits for the translation already running for it, instead
- * of starting its own. Entries are written by the same code with the same key bytes (recorded verbatim) and the same
- * translator, so a warmed file is the file a live miss would have written. NVMTL_FCWARM_OFF=1 turns it off. */
+ * that AIR text, every other recorded variant whose cache file is missing is queued for the background, which
+ * translates it into the same cache file. The main thread then reads a file, or waits a bounded time for the
+ * translation already running for it, instead of starting its own. It never waits for a variant the background has not
+ * started: it takes that one out of the queue and translates it itself, as any miss, so no one call waits behind the
+ * queue (the watchdog killed WindowServer once more while its main thread waited here, up to 60 s; no translation takes
+ * that long, so what it waited for was queued behind others). Many calls in a row still add up: n cold variants of t
+ * seconds each cost the main thread about n*t/3 to n*t/2 while the two workers are free, and n*t while both are busy
+ * with another function's variants. Entries are written by the same code with the same key bytes (recorded verbatim)
+ * and the same translator, so a warmed file is the file a live miss would have written. NVMTL_FCWARM_OFF=1 turns it
+ * off. */
 #define NVMTL_FCWARM_RECORD_MS 100      // chosen: a cached variant costs < 5 ms; the uber-shader variants cost 300-2000
 #define NVMTL_FCWARM_MAX_RECORDS 1024   // chosen: WindowServer held 67 such variants; bounds the file at ~1 MB
-#define NVMTL_FCWARM_JOIN_SEC 60        // chosen: longer than any measured translation (3.2 s), shorter than a hang
+#define NVMTL_FCWARM_JOIN_MS 5000       // chosen: above any measured translation (3.2 s), 1/8 of the 40 s watchdog
+#define NVMTL_FCWARM_WORKERS 2          // chosen: each uber-shader translation holds a few hundred MB
 static int nvmtl_fcwarm_on(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("NVMTL_FCWARM_OFF"); on = (e && *e && *e != '0') ? 0 : 1; }
@@ -1805,13 +1812,32 @@ static NSString *nvmtl_fcwarm_air_hex(NVMTLAirDigest *ad) {
     for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) snprintf(hex + 2 * i, 3, "%02x", h[i]);
     return @(hex);
 }
+// One recorded variant for the background. It is pending while it waits in gFcWarmPending; a worker sets running when
+// it takes it (under gFcWarmLock) and enters done then, so only a running job is ever waited for, and leaves done once
+// the job is out of gFcWarmInFlight, which is after its file is written (or found there, or not made: a failed
+// translation or write).
+@interface NVMTLFcWarmJob : NSObject {
+@public
+    NSString *_path, *_ll, *_stage; NSData *_packed; size_t _n; BOOL _running; dispatch_group_t _done;
+}
+@end
+@implementation NVMTLFcWarmJob
+@end
+// gFcWarmLock guards the five below and each job's _running. It is the innermost lock: nothing else of ours is taken
+// while it is held, and it is never held across a translation, a file write or a wait.
 static os_unfair_lock gFcWarmLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableSet<NSString *> *gFcWarmRecorded;          // "<airhex> <base64 key>" lines in the file
 static NSMutableSet<NSString *> *gFcWarmKicked;            // AIR digests this process has warmed
-static NSMutableDictionary<NSString *, dispatch_group_t> *gFcWarmInFlight;   // cache path -> its background translation
+static NSMutableDictionary<NSString *, NVMTLFcWarmJob *> *gFcWarmInFlight;   // cache path -> pending or running job
+static NSMutableArray<NVMTLFcWarmJob *> *gFcWarmPending;   // the jobs no worker has taken yet, oldest first
+static unsigned gFcWarmWorkers;                            // workers started and not finished (<= NVMTL_FCWARM_WORKERS)
+// Counted for the log and for tools/test_fcwarm.py: variants a caller took over before the background started them,
+// background translations a caller waited for, and those waits that ran out.
+static _Atomic unsigned long gFcWarmTaken, gFcWarmJoined, gFcWarmLate;
 static void nvmtl_fcwarm_load_locked(NSString *file) {
     if (gFcWarmRecorded) return;
     gFcWarmRecorded = [NSMutableSet set]; gFcWarmKicked = [NSMutableSet set]; gFcWarmInFlight = [NSMutableDictionary dictionary];
+    gFcWarmPending = [NSMutableArray array];
     NSString *text = file ? [NSString stringWithContentsOfFile:file encoding:NSUTF8StringEncoding error:NULL] : nil;
     for (NSString *line in [text componentsSeparatedByString:@"\n"])
         if (line.length > 65 && [line characterAtIndex:64] == ' ' && gFcWarmRecorded.count < NVMTL_FCWARM_MAX_RECORDS)
@@ -1866,13 +1892,38 @@ static dispatch_queue_t nvmtl_fcwarm_queue(void) {
     dispatch_once(&once, ^{ q = dispatch_queue_create("nvmtl.fc-warm", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_UTILITY, 0)); });
     return q;
 }
-static dispatch_semaphore_t nvmtl_fcwarm_slots(void) {
-    // two at a time: each translation of an uber-shader holds a few hundred MB, and WindowServer keeps the other cores
-    static dispatch_semaphore_t s; static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = dispatch_semaphore_create(2); });
-    return s;
+// One of at most NVMTL_FCWARM_WORKERS blocks on the queue: it takes the oldest pending job until none is left, so the
+// warm-up holds at most that many threads however many variants are queued, and none of them waits for a slot.
+static void nvmtl_fcwarm_work(void) {
+    for (;;) {
+        NVMTLFcWarmJob *job = nil;
+        os_unfair_lock_lock(&gFcWarmLock);
+        if (gFcWarmPending.count) {
+            job = gFcWarmPending.firstObject;
+            [gFcWarmPending removeObjectAtIndex:0];
+            job->_running = YES;
+            dispatch_group_enter(job->_done);   // before the unlock: whoever sees running finds the group entered
+        } else gFcWarmWorkers--;
+        os_unfair_lock_unlock(&gFcWarmLock);
+        if (!job) return;
+        @autoreleasepool {
+            const uint32_t *idx = job->_packed.bytes, *sz = idx + job->_n;
+            const uint8_t *const *pay = (const uint8_t *const *)(sz + job->_n);
+            NSString *e = nil;
+            NSData *spv = [[NSFileManager defaultManager] fileExistsAtPath:job->_path] ? nil
+                        : nvmtl_translate_with_fc(job->_ll, job->_stage, idx, sz, pay, job->_n, &e);
+            // Written here, not on the cache-io queue, so the file is there when the job leaves gFcWarmInFlight, in the
+            // same framed format the reader proves.
+            if (spv && nvmtl_is_spirv(spv) && nvmtl_cache_write(job->_path, spv) == 0) gFcStored++;
+            else if (!spv && e) nvlog("fc warm-up: a recorded set no longer translates: %s", e.UTF8String);
+        }
+        os_unfair_lock_lock(&gFcWarmLock);
+        [gFcWarmInFlight removeObjectForKey:job->_path];
+        os_unfair_lock_unlock(&gFcWarmLock);
+        dispatch_group_leave(job->_done);
+    }
 }
-// First variant of this AIR text in this process: translate every recorded sibling whose cache file is missing. The
+// First variant of this AIR text in this process: queue every recorded sibling whose cache file is missing. The
 // caller's own set (mine) is left to the caller, which translates it at once instead of queueing behind the others.
 static void nvmtl_fcwarm_kick(NSString *ll, NVMTLAirDigest *ad, NSString *mine) {
     NSString *file = nvmtl_fcwarm_records_path();
@@ -1892,46 +1943,61 @@ static void nvmtl_fcwarm_kick(NSString *ll, NVMTLAirDigest *ad, NSString *mine) 
     }
     os_unfair_lock_unlock(&gFcWarmLock);
     if (!keys.count) return;
-    unsigned queued = 0;
+    unsigned queued = 0, start = 0;
     for (NSData *key in keys) {
         NSString *path = nvmtl_spvcache_path_air(ad, key, @"fc1");
         if (!path || [path isEqualToString:mine] || [[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
         NSString *stage = nil; NSMutableData *packed = nil; size_t n = 0;
         if (!nvmtl_fcwarm_unpack(key, &stage, &packed, &n)) continue;
-        dispatch_group_t g = dispatch_group_create();
+        // released after the unlock below, never under the lock
+        __attribute__((objc_precise_lifetime)) NVMTLFcWarmJob *job = [NVMTLFcWarmJob new];
+        job->_path = path; job->_ll = ll; job->_stage = stage; job->_packed = packed; job->_n = n;
+        job->_done = dispatch_group_create();
+        // queued as soon as it is made, not after all of them: a caller that asks for it before then finds neither
+        // the file nor the job and translates it itself, and the background may translate it again
         os_unfair_lock_lock(&gFcWarmLock);
-        const BOOL taken = gFcWarmInFlight[path] != nil;
-        if (!taken) gFcWarmInFlight[path] = g;
+        if (!gFcWarmInFlight[path]) {
+            gFcWarmInFlight[path] = job;
+            [gFcWarmPending addObject:job];
+            queued++;
+        }
         os_unfair_lock_unlock(&gFcWarmLock);
-        if (taken) continue;
-        queued++;
-        dispatch_group_async(g, nvmtl_fcwarm_queue(), ^{
-            dispatch_semaphore_wait(nvmtl_fcwarm_slots(), DISPATCH_TIME_FOREVER);
-            const uint32_t *idx = packed.bytes, *sz = idx + n;
-            const uint8_t *const *pay = (const uint8_t *const *)(sz + n);
-            NSString *e = nil;
-            NSData *spv = [[NSFileManager defaultManager] fileExistsAtPath:path] ? nil
-                        : nvmtl_translate_with_fc(ll, stage, idx, sz, pay, n, &e);
-            // written here, not on the cache-io queue, so the file is there when the group finishes
-            if (spv && nvmtl_is_spirv(spv) && nvmtl_cache_write(path, spv) == 0) gFcStored++;   // same framed format the reader proves
-            else if (!spv && e) nvlog("fc warm-up: a recorded set no longer translates: %s", e.UTF8String);
-            dispatch_semaphore_signal(nvmtl_fcwarm_slots());
-            os_unfair_lock_lock(&gFcWarmLock);
-            [gFcWarmInFlight removeObjectForKey:path];
-            os_unfair_lock_unlock(&gFcWarmLock);
-        });
     }
+    if (!queued) return;
+    os_unfair_lock_lock(&gFcWarmLock);
+    while (gFcWarmWorkers < NVMTL_FCWARM_WORKERS && start < gFcWarmPending.count) { gFcWarmWorkers++; start++; }
+    os_unfair_lock_unlock(&gFcWarmLock);
+    for (unsigned i = 0; i < start; i++) dispatch_async(nvmtl_fcwarm_queue(), ^{ nvmtl_fcwarm_work(); });
     if (queued) nvlog("fc warm-up: %u recorded variant(s) of this function translating in the background", queued);
 }
-// A miss whose file a background translation is writing waits for it rather than translating again.
-static BOOL nvmtl_fcwarm_join(NSString *path) {
+// A miss whose cache file is not on disk: a variant still pending in the background is taken out of the queue, so the
+// caller translates it on its own miss path and the background never does; a variant the background is translating is
+// waited for, for at most NVMTL_FCWARM_JOIN_MS, after which the caller translates it too. YES when the file is worth
+// reading again: the background finished it, or there was no job (one may have finished since the caller's read; a
+// job leaves gFcWarmInFlight only after its file is written). Two callers that ask for the same pending variant at once
+// both translate it, as they would without the warm-up: the first takes the job, the second finds no job and no file.
+static BOOL nvmtl_fcwarm_take_or_join(NSString *path) {
     if (!path || !nvmtl_fcwarm_on()) return NO;
+    dispatch_group_t g = NULL;
     os_unfair_lock_lock(&gFcWarmLock);
-    dispatch_group_t g = gFcWarmInFlight[path];
+    NVMTLFcWarmJob *job = gFcWarmInFlight[path];
+    if (job && !job->_running) {
+        [gFcWarmInFlight removeObjectForKey:path];
+        [gFcWarmPending removeObjectIdenticalTo:job];
+    } else if (job) g = job->_done;
     os_unfair_lock_unlock(&gFcWarmLock);
-    if (!g) return NO;
-    const long timedOut = dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, (int64_t)NVMTL_FCWARM_JOIN_SEC * NSEC_PER_SEC));
-    nvlog("fc warm-up: JOINED the background translation%s", timedOut ? " - it did not finish in time, translating here" : "");
+    if (!job) return YES;
+    if (!g) {
+        nvlog("fc warm-up: TOOK OVER a recorded variant the background had not started (%lu so far)",
+              atomic_fetch_add(&gFcWarmTaken, 1) + 1);
+        return NO;
+    }
+    const long timedOut = dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW,
+                                                               (int64_t)NVMTL_FCWARM_JOIN_MS * NSEC_PER_MSEC));
+    atomic_fetch_add(timedOut ? &gFcWarmLate : &gFcWarmJoined, 1);
+    nvlog("fc warm-up: JOINED the background translation%s [%lu joined, %lu ran out, %lu taken over]",
+          timedOut ? " - it did not finish in time, translating here" : "", (unsigned long)gFcWarmJoined,
+          (unsigned long)gFcWarmLate, (unsigned long)gFcWarmTaken);
     return !timedOut;
 }
 
@@ -1952,8 +2018,8 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     if (fcCacheOn) nvmtl_fcwarm_kick(ll, airDigest, path);
     NSData *hit = fcCacheOn ? [nvmtl_memo() objectForKey:memoKey] : nil;
     if (hit) { gFcHit++; gFcMemoHit++; nvmtl_cache_touch(path); nvmtl_fc_note_lookup(); return hit; }   // keep the trimmer's age order (off the caller)
-    if (fcCacheOn && path) hit = nvmtl_cache_read(path);
-    if (fcCacheOn && path && !hit && nvmtl_fcwarm_join(path)) hit = nvmtl_cache_read(path);
+    if (fcCacheOn && path) hit = nvmtl_cache_read(path);   // a file on disk is a hit, whatever the warm-up is doing
+    if (fcCacheOn && path && !hit && nvmtl_fcwarm_take_or_join(path)) hit = nvmtl_cache_read(path);
     uint32_t magic = 0;
     if (hit.length >= 20 && hit.length % 4 == 0) {
         memcpy(&magic, hit.bytes, 4);

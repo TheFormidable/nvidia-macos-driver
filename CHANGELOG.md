@@ -1,5 +1,97 @@
 # Changelog
 
+## 3.0.2
+
+**Not released.** This section describes the branch being prepared as 3.0.2, a patch on top of `fable` at b1b09c1b. That
+commit holds the 3.0.1 changes below, merged and not released either (their last commit is 44091839), and the card
+checks (`tools/card_selftest.py`). A package built from 44091839 has been installed on one Mac with an RTX 5050 (macOS
+26.7.3); the fault below was found on its first boot there. Nothing committed after b1b09c1b has run on a card or on a
+Mac: it was compiled and its host tests were run on Linux only (below, "What ran where").
+
+### Fixes and changes
+
+- **WindowServer's main thread no longer waits for a shader variant the warm-up has not started.** On the first boot
+  after that package was installed, the userspace watchdog killed WindowServer 130 s after it started (bug_type 409, its
+  main thread 40 s without a check-in); the WindowServer started next came up normally. The package was the first whose
+  Metal plugin used this build's translator (3.0.1, "Metal apps get this build's shader translator"), so every cached
+  function-constant variant was translated again. In all 12 samples of the watchdog's spindump the main thread was in
+  `newFunctionWithName:constantValues:error:`, waiting, for up to 60 s, for the function-constant warm-up of 2.9 to
+  translate one variant, while four of the warm-up's threads took turns on its two slots; no translation takes 40 s, so
+  what it waited for was queued behind others. (The warm-up exists because that main thread, made to translate dozens of
+  Core Animation's variants one after another, 1.3 to 2 s each, was killed by the same watchdog.) Now a variant whose
+  cache file is on disk is read at once, whatever the warm-up is doing. A variant the warm-up has not started is taken
+  out of its queue by the thread that asks for it, which translates it as any miss (the same cache file, the same
+  records and logs), and the warm-up never translates it; two threads that ask for it at once both translate it, as they
+  would without the warm-up. A variant the warm-up is translating is waited for, for at most 5 s
+  (`NVMTL_FCWARM_JOIN_MS`, a constant in `plugin/NVMTLLibraryLoad.m`; it was 60 s, and the longest translation measured
+  is 3.2 s), and then translated by the caller, as before. Two workers take the queued variants one after another,
+  oldest queued first, so the warm-up runs at most two translations at a time on at most two threads; it used to give
+  its queue one block per recorded variant, up to 1024, each of which first waited for one of the two slots on a thread
+  of the queue (four of them in the spindump). A development build's log, or in a release build the `nvmtl.log` of a
+  process started with `NVMTL_PROCESS_ENV=1`, says "TOOK OVER" for each variant taken out of the queue and "JOINED" for
+  each wait; a release WindowServer writes neither line to the system log. `NVMTL_FCWARM_OFF=1` still turns the warm-up
+  off, and its records (`.fcwarm.v1`) and the cache files are as in 3.0.1. Not measured on a card.
+
+  This bounds each call, not a run of them. One call now waits at most 5 s before it translates its variant itself,
+  where it could wait 60 s and more. When Core Animation asks for dozens of cold variants in one turn of the main
+  thread, as it did here, their times still add up: the main thread spends about a third to a half of their translation
+  times added up while both workers are free (a half when it asks for them in the order the workers take them, which is
+  what 3.0.1 cost in any order), and all of it while both workers are busy with another function's variants. The workers
+  run at utility priority, so on a busy Mac a wait can last longer than the caller's own translation would have, up to
+  the 5 s. For 67 variants (as many as WindowServer held when the warm-up was written) at 1.3 to 2 s each, that is about
+  29 to 67 s while the workers are free. So the first boot after a translator change can still pass the watchdog's 40 s
+  and lose WindowServer once, as it did here; the WindowServer started next finds a warmer cache. A translator change is
+  any package whose `libnvmtl_translate.dylib` differs by one byte from the installed one, as the cache is named after
+  its SHA-256; the translator sources of 3.0.2 are those of 3.0.1, but whether a rebuild gives the same bytes has not
+  been checked.
+
+### The ways back
+
+None new. `NVMTL_FCWARM_OFF=1` in `nvrm610.conf` turns the whole warm-up off, as before; then every variant missing from
+the cache is translated by the thread that asks for it, as before 2.9.
+
+### What ran where
+
+On Linux only (x86_64, clang 18 with GNUstep's Objective-C runtime and Foundation, and swift-corelibs-libdispatch);
+nothing of 3.0.2 has been built on a Mac or run on a card.
+
+- `tools/test_fcwarm.py` compiles the warm-up and the cache code out of `plugin/NVMTLLibraryLoad.m` against a
+  `libnvmtl_translate` built on Linux from the translator sources of b1b09c1b. At b1b09c1b its harness did not compile
+  (the cache code it cuts out of the plugin had moved); it builds again. Core Animation's fixed_frag shader is not in
+  the tree, so the AIR fixture `translator/translator/tests/fixtures/gl/texture_env_three_sites_behind_a_switch.ll`
+  (three Boolean function constants) stood in for it, with `--pad-ms 300` so that each of its misses is recorded: 23 of
+  23 checks passed in six runs, one of them with every processor busy. Against the warm-up of b1b09c1b (its dispatch
+  groups boxed in `NSValue`, as Linux's libdispatch objects are not Objective-C objects) 6 of the 23 fail, in each of
+  two runs: the bound (60 s), the three checks of the queued variant (the caller waited 5.7 s for the queue, the
+  background translated it, nothing was taken over), the slow worker (waited for 13 s) and the threads (4). The check of
+  a file on disk while a worker translates its variant passes there, and fails when the warm-up is asked before the file
+  is read (the caller then waited 3.7 s for the worker).
+- The same test's harness built with ThreadSanitizer, in six scenes with one asking thread (a queued variant taken over,
+  a running one joined, one that outlasts the bound, a file on disk while its variant is translated, five asked for in a
+  row, two one after the other), and a stress harness made from it, with `gFcWarmLock` marked as a mutex, in 16 boots of
+  four threads asking for random variants at once. No report is about the warm-up's queue, jobs, lock or counters, and
+  none is a lock-order inversion of the plugin's locks. The reports are in GNUstep's runtime and Foundation; in
+  hand-offs through libdispatch and Objective-C reference counts, which ThreadSanitizer does not see there (blocks
+  copied for `dispatch_async`, objects freed by the last of two threads, `dispatch_once`); and in two switches the
+  plugin reads once from the environment into a plain `static int`, `nvmtl_fcwarm_on` (in all 16 boots) and
+  `nvmtl_fc_spec_on`, which two threads' first lookups can set at the same time, both to the same value. Both have been
+  so since 2.9, like most of the plugin's switches. In the scenes with one asking thread the warm-up of b1b09c1b gives
+  the same kinds of reports, and more hand-offs.
+- The stress harness without ThreadSanitizer, in 30 boots of four asking threads at the 5 s bound and 30 at a bound of
+  150 ms, so that waits run out and a caller and a worker write the same file at once: every boot ended with no worker,
+  job or queued variant left; the background translated no recorded variant twice and never the one not recorded; every
+  cache file had a live miss's name and bytes, and every call the same bytes; no call outlasted the bound by more than
+  3.1 s (two padded translations and a margin); and no log line, dispatch, wait, cache write or translation was made
+  with an `os_unfair_lock` held.
+- The plugin's Objective-C compiled with `-fsyntax-only` against a stand-in macOS SDK, at the SDK level of macOS 15.5
+  and at that of Xcode 26.5: no new diagnostic. Its C and the C and C++ host tests, compiled for x86_64 macOS: the same
+  diagnostics as at b1b09c1b (two C++ host tests do not link here at either). The host tests that read
+  `NVMTLLibraryLoad.m` or `CHANGELOG.md` pass as they do at b1b09c1b, `tools/test_card_selftest.py` among them;
+  `test_aircache_dir.py` and `test_spvcache_dir.py` fail at both, the same checks, because they need a folder the test's
+  user cannot write and they ran as root.
+- `tools/test_build_sh.py` (build.sh against stand-in tools, under bash 5.2, not macOS's bash 3.2): 393 of 393 checks
+  passed, as at b1b09c1b; the one that differs says that a package records 3.0.2, CHANGELOG.md's first heading.
+
 ## 3.0.1
 
 **Not released.** This section describes the branch being prepared as 3.0.1, on top of the 3.0 branch below (`fable` at
