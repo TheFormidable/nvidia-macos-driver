@@ -63,6 +63,7 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_free(struct NVRMGpuVaRequest *);
 extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, NvU32 *pStatus);
+extern "C" void nvrm_query_gpu_caps(NvU32 gpuId, uint8_t *out);
 extern "C" bool nvrm_query_vidmem_cleared(NvU32 gpuId, NvU32 *pCleared, NvU32 *pStatus);
 extern "C" bool nvrm_query_gpu_profile(NvU32 gpuId, NvU32 *pArch, NvU32 *pImpl, NvU32 *pCls3d, NvU32 *pClsCompute,
                                        NvU32 *pClsCopy, NvU32 *pClsEnc, NvU32 *pClsDec, NvU32 *pStatus);
@@ -3839,16 +3840,30 @@ extern "C" unsigned nv_xnu_gpu_count(void) { return gNVRMTab.count(); }
 void NVRM::gpuCapsPublish(bool refresh)
 {
     if (!fGpuCapsLock || !fGpuCapsBlock) return;
+    uint8_t *next = (uint8_t *)kern_os_malloc(NVRM_GC_BUF_BYTES);
+    if (!next) return;
+    uint32_t generation = 0, cycle = 0;
     IOLockLock(fGpuCapsLock);
     const uint32_t flags = nvrm_gc_rd32(fGpuCapsBlock, NVRM_GC_HO_FLAGS);
     if (!fGpuCapsStopped && !(flags & NVRM_GC_F_OFF) && (!refresh || (flags & NVRM_GC_F_PRODUCED))) {
         if (!refresh) fGpuCapsIdentity.gpu_id = fNv.gpu_id;
-        uint32_t generation = nvrm_gc_rd32(fGpuCapsBlock, NVRM_GC_HO_GENERATION) + 1u;
+        generation = nvrm_gc_rd32(fGpuCapsBlock, NVRM_GC_HO_GENERATION) + 1u;
         if (!generation) generation = 1;
-        nvrm_gc_static_publish(fGpuCapsBlock, &fGpuCapsIdentity, generation,
-                              __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE), NV_VERSION_STRING);
+        cycle = __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE);
+        nvrm_gc_static_publish(next, &fGpuCapsIdentity, generation, cycle, NV_VERSION_STRING);
     }
     IOLockUnlock(fGpuCapsLock);
+    if (generation) {
+        // RM must never run under the selector's leaf lock.
+        nvrm_query_gpu_caps(fNv.gpu_id, next);
+        IOLockLock(fGpuCapsLock);
+        if (!fGpuCapsStopped && cycle == __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE) &&
+            nvrm_gc_check(next, nvrm_gc_rd32(next, NVRM_GC_HO_TOTAL)) == NVRM_GC_OK) {
+            for (uint32_t i = 0; i < NVRM_GC_BUF_BYTES; ++i) fGpuCapsBlock[i] = next[i];
+        }
+        IOLockUnlock(fGpuCapsLock);
+    }
+    kern_os_free(next);
 }
 
 IOReturn NVRMUserClient::sGpuCaps(OSObject *target, void *, IOExternalMethodArguments *args)
