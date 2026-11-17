@@ -29,9 +29,26 @@ def report(records):
     header = next((x for x in records if x.get("probe") == "nvcaps"), None)
     if header is None or header.get("rev") != 1 or header.get("mode") != "card":
         raise ValueError("missing real-hardware nvcaps rev=1 header (mock data refused)")
+    # Probe JSONL uses published command names, not ROW_LIST enum tags.
+    # Match exact command IDs; never infer capability from an arbitrary label.
+    cmd_alias = {
+        "0x2080183c": "PCI_IDS_V2", "0x20801801": "PCI_IDS",
+        "0x20801701": "ARCH", "0x20800110": "NAME",
+        "0x20800111": "SHORT_NAME", "0x20800808": "SKU",
+        "0x20800810": "VBIOS", "0x20800156": "INFOROM",
+        "0x20803601": "GSP_FEATURES", "0x20800513": "THERMAL",
+        "0x20808530": "FAN_BLOCK",
+    }
     rows = {}
     for x in records:
         name = x.get("q")
+        if not isinstance(name, str):
+            continue
+        cmd = x.get("cmd")
+        if cmd is not None:
+            name = cmd_alias.get(cmd)
+            if name is None:
+                continue
         if isinstance(name, str):
             rows.setdefault(name, []).append(x)
     def selected(name, pred=lambda x: True):
