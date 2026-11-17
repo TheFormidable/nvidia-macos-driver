@@ -55,9 +55,11 @@ change no setting. None has run on a Mac from this tree; on Linux they were chec
   into that program's own process, comparing the output and neighbouring guard words. Cases: direct and helper
   address-table reads, local pointer stores, both arms of an address phi, 64-bit loads, RGB565 and RGB10A2 packing
   with NaN, clamp and half-way rounding, 1D textures, texture and sampler slots up to 127 and 15, distinct sampled and
-  storage views, and dynamic uniform slots read lane by lane. `--prepare-only` stops after translation and
-  validation and needs no GPU. On Linux, with the Linux build of the wrapper, `--prepare-only` translated all 27
-  cases and `spirv-val --target-env vulkan1.2` accepted each.
+  storage views, dynamic uniform slots read lane by lane, an `int2` read through a `float4` slot, a helper inlined
+  with a vector splat argument, and texture and sampler fields of an object. `--prepare-only` stops after translation
+  and validation and needs no GPU. A case whose program gives no result within 30 s ends the script by SIGALRM, since
+  that may be a hung GPU. On Linux, with the Linux build of the wrapper, `--prepare-only` translated all 30 cases and
+  `spirv-val --target-env vulkan1.2` accepted each. `tools/card_selftest.py` runs each case as its own row.
 
   ```sh
   python3 tools/translator_readback.py --plugin /path/to/NVMTLDriver \
