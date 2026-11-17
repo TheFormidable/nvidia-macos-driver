@@ -1939,25 +1939,28 @@ static void nvmtl_fcwarm_kick(NSString *ll, NVMTLAirDigest *ad, NSString *mine) 
     }
     os_unfair_lock_unlock(&gFcWarmLock);
     if (!keys.count) return;
-    NSMutableArray<NVMTLFcWarmJob *> *jobs = [NSMutableArray array];
+    unsigned queued = 0, start = 0;
     for (NSData *key in keys) {
         NSString *path = nvmtl_spvcache_path_air(ad, key, @"fc1");
         if (!path || [path isEqualToString:mine] || [[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
         NSString *stage = nil; NSMutableData *packed = nil; size_t n = 0;
         if (!nvmtl_fcwarm_unpack(key, &stage, &packed, &n)) continue;
-        NVMTLFcWarmJob *job = [NVMTLFcWarmJob new];
+        // released after the unlock below, never under the lock
+        __attribute__((objc_precise_lifetime)) NVMTLFcWarmJob *job = [NVMTLFcWarmJob new];
         job->_path = path; job->_ll = ll; job->_stage = stage; job->_packed = packed; job->_n = n;
         job->_done = dispatch_group_create();
-        [jobs addObject:job];
+        // queued as soon as it is made, not after all of them: a caller that asks for it before then finds neither
+        // the file nor the job and translates it itself, and the background may translate it again
+        os_unfair_lock_lock(&gFcWarmLock);
+        if (!gFcWarmInFlight[path]) {
+            gFcWarmInFlight[path] = job;
+            [gFcWarmPending addObject:job];
+            queued++;
+        }
+        os_unfair_lock_unlock(&gFcWarmLock);
     }
-    unsigned queued = 0, start = 0;
+    if (!queued) return;
     os_unfair_lock_lock(&gFcWarmLock);
-    for (NVMTLFcWarmJob *job in jobs) {
-        if (gFcWarmInFlight[job->_path]) continue;
-        gFcWarmInFlight[job->_path] = job;
-        [gFcWarmPending addObject:job];
-        queued++;
-    }
     while (gFcWarmWorkers < NVMTL_FCWARM_WORKERS && start < gFcWarmPending.count) { gFcWarmWorkers++; start++; }
     os_unfair_lock_unlock(&gFcWarmLock);
     for (unsigned i = 0; i < start; i++) dispatch_async(nvmtl_fcwarm_queue(), ^{ nvmtl_fcwarm_work(); });
