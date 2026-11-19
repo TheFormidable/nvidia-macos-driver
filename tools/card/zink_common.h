@@ -510,6 +510,11 @@ static const char *zk_last_error(void)
    return fn ? fn() : "(nvk_cgl_last_error not found)";
 }
 
+/* The last adapter failure of the thread that read the renderer zk_gate is handed, where that is not the thread
+ * that calls zk_gate; NULL otherwise. nvk_cgl_last_error answers for the calling thread, with a string in the
+ * adapter's static data. */
+static const char *zk_gate_error;
+
 /* ---- the Metal device and the renderer of a context ------------------------------------------------------------ */
 
 static uint64_t zk_device_registry;
@@ -545,8 +550,9 @@ static bool zk_is_software(const char *renderer)
    return renderer && strstr(renderer, "Apple Software Renderer") != NULL;
 }
 
-/* Never returns: a hardware context that is not Zink's. Only the layout guard's refusal makes the check inactive
- * (zink/nvk_cgl.c:712-719, printed once per process, for the first context it refuses): the guard keeps Apple's
+/* Never returns: a hardware context that is not Zink's, or one whose GL_RENDERER is null (that one fails, below).
+ * Of the others, only the layout guard's refusal makes the check inactive
+ * (zink/nvk_cgl.c:718-725, printed once per process, for the first context it refuses): the guard keeps Apple's
  * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
  * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
  * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
@@ -558,17 +564,20 @@ static _Noreturn void zk_not_zink(const char *renderer)
    char line[ZK_LINE_MAX];
    const char *shown = renderer ? renderer : "(null)";
    zk_tee_sync();
-   if (zk_tee_find("NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (", line,
-                   sizeof(line)))
-      zk_inactive("%s", line + strlen("NVK Zink: "));
    if (!renderer || !strcmp(renderer, "(null)")) {
-      /* glGetString gave 0, which zk_string hands on as "(null)". On the Zink path every call returns 0 when the
-       * capability table cannot be built (nvk_cgl.c:391-398) and when the adapter drops the call (:265-278); the
-       * driver's line, where it wrote one, says which. */
+      /* glGetString gave 0, which zk_string hands on as "(null)". With a context current Apple's renderer gives a
+       * string, so the context is Zink's: on the Zink path every call returns 0 when the capability table cannot be
+       * built (nvk_cgl.c:392-399) and when the adapter drops the call (:266-279). The row fails whatever else the
+       * process printed, the refusal line of another context included; the driver's first line, where it wrote
+       * one, is added. */
       int said = zk_tee_driver_line(line, sizeof(line));
-      zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s%s%s", zk_last_error(),
-              said ? "; the driver wrote: " : "", said ? line : "");
+      zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s%s%s",
+              zk_gate_error ? zk_gate_error : zk_last_error(), said ? "; the driver wrote: " : "",
+              said ? line : "");
    }
+   else if (zk_tee_find("NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (", line,
+                        sizeof(line)))
+      zk_inactive("%s", line + strlen("NVK Zink: "));
    else if (zk_tee_driver_line(line, sizeof(line)))
       zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", shown, line);
    else if (!zk_image(ZK_BUNDLE, NULL, 0))
