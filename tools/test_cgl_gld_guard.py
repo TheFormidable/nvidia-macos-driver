@@ -183,6 +183,10 @@ static void expect_room(const char *name, size_t got, size_t want, const void *b
    printf("%s %s got=0x%zx want=0x%zx\n", ok ? "ok  " : "FAIL", name, got, want);
    if (!ok) failed = 1;
 }
+static void expect_int(const char *name, int got, int want) {
+   printf("%s %s got=%d want=%d\n", got == want ? "ok  " : "FAIL", name, got, want);
+   if (got != want) failed = 1;
+}
 static long g_static_words[1024];
 
 /* Build an engine that passes every check: a big engine block, a CGL context
@@ -491,16 +495,20 @@ int main(void) {
      expect("rend_bad_and_saved_runs_into_engine", run(e, &profile, &octx, &oback), NVK_CGL_LAYOUT_CONTEXT_REND);
      free(arena); free(b2); }
 
-   /* the sizes a refusal prints are those of the blocks: rend and the engine are blocks of different sizes */
+   /* the sizes a refusal prints are those of the blocks: rend, the engine, the context and the saved table are
+    * blocks of four different sizes (the table's block here is 0x400 bytes larger than a GLIFunctionDispatch, so
+    * that an allocator with 512-byte size classes does not round it to the context's size) */
    build(&engine, &context, &back, 1);
    { char *big = calloc(1, ENGINE_SIZE + 0x400); reg(big); put_ptr(context, 0, big);
+     void **wide = calloc(1, DISPATCH_TABLE_SIZE + 0x400); reg(wide); put_ptr(engine, GLI_SAVED_DISPATCH, wide);
      char want[512];
      expect("rend_block_sizes", run(engine, &profile, &octx, &oback), NVK_CGL_LAYOUT_CONTEXT_REND);
      snprintf(want, sizeof(want), "the CGL context's renderer word is a heap block of 0x%zx bytes; the saved dispatch "
               "table is a heap block of 0x%zx bytes; this GLI engine is a heap block of 0x%zx bytes and the CGL context "
-              "one of 0x%zx bytes", usable(big), usable(back), usable(engine), usable(context));
+              "one of 0x%zx bytes", usable(big), usable(wide), usable(engine), usable(context));
      expect_reason_is("reason_rend_block_sizes", want);
-     int distinct = usable(big) != usable(engine) && usable(engine) != usable(context) && usable(context) != usable(back);
+     int distinct = usable(big) != usable(engine) && usable(engine) != usable(context) && usable(context) != usable(wide)
+                    && usable(wide) != usable(big) && usable(wide) != usable(engine) && usable(big) != usable(context);
      printf("%s reason_sizes_distinct\n", distinct ? "ok  " : "FAIL"); if (!distinct) failed = 1;
      put_ptr(context, 0, engine);
      { void **small = calloc(1, 0x40); reg(small); put_ptr(engine, GLI_SAVED_DISPATCH, small);
@@ -510,7 +518,7 @@ int main(void) {
                 "GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes", usable(small),
                 usable(engine), usable(context));
        expect_reason_is("reason_saved_small_sizes", want); free(small); }
-     free(big); }
+     free(big); free(wide); }
 
    /* a dispatch word of 8 derives a null context, said as null */
    build(&engine, &context, &back, 1);
@@ -569,6 +577,8 @@ int main(void) {
      expect("saved_context_tail_unaligned", r, NVK_CGL_LAYOUT_SAVED_BLOCK);
      expect_out("saved_context_tail_unaligned_outputs", r, profile, octx, oback, 0, NULL, NULL);
      expect_reason("reason_saved_context_tail_unaligned", "the saved dispatch table is inside the CGL context at +0x1e93,");
+     put_ptr(e, GLI_SAVED_DISPATCH, c + CGL_CONTEXT_SIZE + 4);   /* aligned for an int, not for a pointer */
+     expect("saved_context_tail_half_aligned", run(e, &profile, &octx, &oback), NVK_CGL_LAYOUT_SAVED_BLOCK);
      reg_span(e + ENGINE_SIZE, DISPATCH_TABLE_SIZE);
      put_ptr(e, GLI_SAVED_DISPATCH, e + ENGINE_SIZE);
      r = run(e, &profile, &octx, &oback);
@@ -584,6 +594,15 @@ int main(void) {
      put_ptr(e, GLI_SAVED_DISPATCH, c - DISPATCH_TABLE_SIZE + 8);
      expect("saved_runs_into_context_one_word", run(e, &profile, &octx, &oback), NVK_CGL_LAYOUT_SAVED_BLOCK);
      expect_reason("reason_saved_runs_into_context_one_word", "which would run into the CGL context;");
+     /* a small heap block that ends where the engine starts is refused for its size, and only for that */
+     reg_span(e - 0x40, 0x40);
+     put_ptr(e, GLI_SAVED_DISPATCH, e - 0x40);
+     expect("saved_small_below_engine", run(e, &profile, &octx, &oback), NVK_CGL_LAYOUT_SAVED_BLOCK);
+     { char want[512];
+       snprintf(want, sizeof(want), "the saved dispatch table is a heap block of 0x40 bytes, where the record rules "
+                "out a GLIFunctionDispatch of 0x1e78 bytes; the CGL context's renderer word is null; this GLI engine "
+                "is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes", usable(e), usable(c));
+       expect_reason_is("reason_saved_small_below_engine", want); }
      free(arena); }
 
    /* the engine's block holds the profile byte, the highest recorded read, exactly (accepted) or ends one byte
@@ -627,27 +646,115 @@ int main(void) {
 
    /* nvk_cgl_renderer_reason: what bridge_current says of a call that does not come with the adopted engine */
    build(&engine, &context, &back, 1);
-   { char why[768], want[768]; void *e2 = other_engine(context, 1); char *plain = calloc(1, 0x300); reg(plain);
-     nvk_cgl_renderer_reason(why, sizeof(why), e2, e2, engine, usable(engine), context, usable(context),
-                             GLI_PROFILE, GLI_CGL_DISPATCH, DISP_OFFSET);
+   { char why[768], want[768]; void *e2 = other_engine(context, 1);
+     char *plain = calloc(1, 0x300), *twin = calloc(1, 0x300); reg(plain); reg(twin);
+#define RENDERER_REASON(call, rend) \
+     nvk_cgl_renderer_reason(why, sizeof(why), (call), (rend), engine, usable(engine), context, usable(context), \
+                             GLI_PROFILE, GLI_CGL_DISPATCH, DISP_OFFSET)
+     RENDERER_REASON(e2, e2);
      snprintf(want, sizeof(want), "the call came with another GLI engine of this CGL context, a heap block of 0x%zx "
               "bytes and the CGL context's renderer word is another GLI engine of this CGL context, a heap block of "
-              "0x%zx bytes; this GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes",
-              usable(e2), usable(e2), usable(engine), usable(context));
+              "0x%zx bytes, the same value; this GLI engine is a heap block of 0x%zx bytes and the CGL context one of "
+              "0x%zx bytes", usable(e2), usable(e2), usable(engine), usable(context));
      expect_text("renderer_reason_sibling", why, want);
-     nvk_cgl_renderer_reason(why, sizeof(why), plain, engine, engine, usable(engine), context, usable(context),
-                             GLI_PROFILE, GLI_CGL_DISPATCH, DISP_OFFSET);
+     RENDERER_REASON(plain, engine);
      snprintf(want, sizeof(want), "the call came with a heap block of 0x%zx bytes and the CGL context's renderer word "
-              "is this GLI engine; this GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx "
-              "bytes", usable(plain), usable(engine), usable(context));
+              "is this GLI engine, a different value; this GLI engine is a heap block of 0x%zx bytes and the CGL "
+              "context one of 0x%zx bytes", usable(plain), usable(engine), usable(context));
      expect_text("renderer_reason_other_block", why, want);
-     nvk_cgl_renderer_reason(why, sizeof(why), NULL, NULL, engine, usable(engine), context, usable(context),
-                             GLI_PROFILE, GLI_CGL_DISPATCH, DISP_OFFSET);
-     snprintf(want, sizeof(want), "the call came with null and the CGL context's renderer word is null; this GLI "
-              "engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes", usable(engine),
-              usable(context));
+     RENDERER_REASON(NULL, NULL);
+     snprintf(want, sizeof(want), "the call came with null and the CGL context's renderer word is null, the same "
+              "value; this GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes",
+              usable(engine), usable(context));
      expect_text("renderer_reason_null", why, want);
-     free(plain); }
+     /* two heap blocks of one size read alike; the clause tells one value from two */
+     RENDERER_REASON(plain, twin);
+     snprintf(want, sizeof(want), "the call came with a heap block of 0x%zx bytes and the CGL context's renderer word "
+              "is a heap block of 0x%zx bytes, a different value; this GLI engine is a heap block of 0x%zx bytes and "
+              "the CGL context one of 0x%zx bytes", usable(plain), usable(twin), usable(engine), usable(context));
+     expect_text("renderer_reason_twin_blocks", why, want);
+     RENDERER_REASON(plain, plain);
+     snprintf(want, sizeof(want), "the call came with a heap block of 0x%zx bytes and the CGL context's renderer word "
+              "is a heap block of 0x%zx bytes, the same value; this GLI engine is a heap block of 0x%zx bytes and "
+              "the CGL context one of 0x%zx bytes", usable(plain), usable(plain), usable(engine), usable(context));
+     expect_text("renderer_reason_one_block", why, want);
+     /* each word is classified against the adopted engine's block and the context's block, in both positions */
+     RENDERER_REASON((char *)engine + 0x40, (char *)context + 0x10);
+     snprintf(want, sizeof(want), "the call came with inside this GLI engine at +0x40 and the CGL context's renderer "
+              "word is inside the CGL context at +0x10, a different value; this GLI engine is a heap block of 0x%zx "
+              "bytes and the CGL context one of 0x%zx bytes", usable(engine), usable(context));
+     expect_text("renderer_reason_interior", why, want);
+     RENDERER_REASON((char *)context + 0x10, (char *)engine + 0x40);
+     snprintf(want, sizeof(want), "the call came with inside the CGL context at +0x10 and the CGL context's renderer "
+              "word is inside this GLI engine at +0x40, a different value; this GLI engine is a heap block of 0x%zx "
+              "bytes and the CGL context one of 0x%zx bytes", usable(engine), usable(context));
+     expect_text("renderer_reason_interior_swapped", why, want);
+#undef RENDERER_REASON
+     free(plain); free(twin); }
+
+   /* nvk_cgl_layout_has_context: the verdicts whose report names the CGL context */
+   expect_int("has_context_ok", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_OK), 1);
+   expect_int("has_context_engine_block", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_ENGINE_BLOCK), 0);
+   expect_int("has_context_profile", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_PROFILE), 0);
+   expect_int("has_context_context_null", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_CONTEXT_NULL), 0);
+   expect_int("has_context_context_block", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_CONTEXT_BLOCK), 0);
+   expect_int("has_context_context_rend", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_CONTEXT_REND), 1);
+   expect_int("has_context_saved_block", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_SAVED_BLOCK), 1);
+
+   /* nvk_cgl_further_engine, on the reports of real checks: e1 is the engine the context's bridge would hold, or
+    * the engine that passed the check and was not adopted; the engine under check is a further one */
+   build_null(&engine, &context, &back, 1);
+   { void *e1 = other_engine(context, 1), *e3 = other_engine(context, 1);
+     char *plain = calloc(1, 0x300); void **small = calloc(1, 0x40); reg(plain); reg(small);
+#define FURTHER(adopted, unadopted) (int)nvk_cgl_further_engine(r, &g_report, (adopted), (unadopted))
+     r = run(engine, &profile, &octx, &oback);                       /* rend unset: the check passes */
+     expect("further_base_ok", r, NVK_CGL_LAYOUT_OK);
+     expect_reason_is("reason_accepted", "the layout matches the record");
+     expect_int("further_ok_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_ok_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_ok_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
+     put_ptr(engine, GLI_SAVED_DISPATCH, small);                     /* rend unset, its own saved table refused */
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_saved", r, NVK_CGL_LAYOUT_SAVED_BLOCK);
+     expect_int("further_saved_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_saved_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_saved_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
+     put_ptr(engine, GLI_SAVED_DISPATCH, back); put_ptr(context, 0, e1);   /* rend is e1, an engine of the context */
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_rend_sibling", r, NVK_CGL_LAYOUT_CONTEXT_REND);
+     expect_int("further_rend_is_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_is_adopted_both", FURTHER(e1, 1), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_other_sibling", FURTHER(e3, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_rend_other_sibling_unadopted", FURTHER(e3, 1), NVK_CGL_FURTHER_UNADOPTED);
+     expect_int("further_rend_sibling_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_UNADOPTED);
+     expect_int("further_rend_sibling_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
+     /* the same report under a verdict no check gives with it: the verdict is asked for as well as the word */
+     expect_int("further_sibling_word_saved_verdict",
+                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_SAVED_BLOCK, &g_report, NULL, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_sibling_word_ok_verdict",
+                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_OK, &g_report, NULL, 1), NVK_CGL_FURTHER_NO);
+     put_ptr(context, 0, plain);                                     /* rend is a heap block that is no engine */
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_rend_block", r, NVK_CGL_LAYOUT_CONTEXT_REND);
+     expect_int("further_rend_block_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_rend_block_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_rend_block_is_adopted", FURTHER(plain, 0), NVK_CGL_FURTHER_ADOPTED);
+     put_ptr(context, 0, NULL); ((char *)engine)[GLI_PROFILE] = 2;   /* a check before the context's refuses */
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_profile", r, NVK_CGL_LAYOUT_PROFILE);
+     expect_int("further_profile_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
+     ((char *)engine)[GLI_PROFILE] = 1; put_ptr(engine, GLI_SAVED_DISPATCH, NULL);
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_context_null", r, NVK_CGL_LAYOUT_CONTEXT_NULL);
+     expect_int("further_context_null_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
+     put_ptr(engine, GLI_SAVED_DISPATCH, back); put_ptr(engine, GLI_CGL_DISPATCH, (char *)engine + DISP_OFFSET);
+     r = run(engine, &profile, &octx, &oback);
+     expect("further_base_context_block", r, NVK_CGL_LAYOUT_CONTEXT_BLOCK);
+     expect_int("further_context_block_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_engine_block_adopted",
+                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_ENGINE_BLOCK, &g_report, e1, 1), NVK_CGL_FURTHER_NO);
+#undef FURTHER
+     free(plain); free(small); }
 
    /* nvk_cgl_room: what integer_dispatch_slot asks of the CGL private object and of its engine list */
    reset();
@@ -760,7 +867,21 @@ def main():
                     "saved_runs_into_context_one_word", "reason_saved_runs_into_context_one_word",
                     "renderer_reason_sibling", "renderer_reason_other_block", "renderer_reason_null",
                     "accept_engine_exact", "accept_context_engine_sized", "engine_one_byte_short",
-                    "reason_engine_one_byte_short"}
+                    "reason_engine_one_byte_short", "saved_context_tail_half_aligned", "saved_small_below_engine",
+                    "reason_saved_small_below_engine", "renderer_reason_twin_blocks", "renderer_reason_one_block",
+                    "renderer_reason_interior", "renderer_reason_interior_swapped",
+                    "has_context_ok", "has_context_engine_block", "has_context_profile", "has_context_context_null",
+                    "has_context_context_block", "has_context_context_rend", "has_context_saved_block",
+                    "further_base_ok", "further_ok_adopted", "further_ok_none", "further_ok_unadopted",
+                    "further_base_saved", "further_saved_adopted", "further_saved_none", "further_saved_unadopted",
+                    "further_base_rend_sibling", "further_rend_is_adopted", "further_rend_is_adopted_both",
+                    "further_rend_other_sibling", "further_rend_other_sibling_unadopted",
+                    "further_rend_sibling_unadopted", "further_rend_sibling_none", "further_base_rend_block",
+                    "further_rend_block_adopted", "further_rend_block_unadopted", "further_rend_block_is_adopted",
+                    "further_base_profile", "further_profile_adopted", "further_base_context_null",
+                    "further_context_null_adopted", "further_base_context_block", "further_context_block_adopted",
+                    "further_engine_block_adopted", "reason_accepted", "further_sibling_word_saved_verdict",
+                    "further_sibling_word_ok_verdict"}
         expected |= {f"saved_tag_{t}" for t in range(32)} | {f"rend_tag_{t}" for t in range(32)}
         expected |= {f"saved_prot_{p}" for p in range(8)}
         check("the recorded layout is accepted and each mismatch has its own case, and no case runs unlisted",
@@ -770,88 +891,179 @@ def main():
         check("the C program reports all cases passed", "ALL CASES PASSED" in out and rp.returncode == 0)
 
     # the source wires the checks: prepare_gld refuses on any nonzero verdict and never reads or writes first
+    def flat(text):
+        """text with every run of white space as one space, so that a statement compares whatever its line breaks"""
+        return re.sub(r"\s+", " ", text)
+
+    def function(text, header):
+        """The definition whose first line is header (a regular expression), to its closing brace, or ""."""
+        m = re.search("^" + header + r"\n\{.*?\n\}\n", text, re.S | re.M)
+        return m.group(0) if m else ""
+
     cgl = (ZINK / "nvk_cgl.c").read_text()
-    m = re.search(r"EXPORT int nvk_cgl_prepare_gld\(.*?\n\}\n", cgl, re.S)
-    body = m.group(0) if m else ""
+    body = function(cgl, r"EXPORT int nvk_cgl_prepare_gld\(void \*engine, void \*driver\)")
+    further_text = ("enum nvk_cgl_further further = NVK_CGL_FURTHER_NO; "
+                    "if (nvk_cgl_layout_has_context(layout)) { "
+                    "pthread_mutex_lock(&bridges_lock); "
+                    "struct nvk_cgl_bridge *other = find_bridge((CGLContextObj)(void *)report.context.value); "
+                    "further = nvk_cgl_further_engine(layout, &report, other ? other->engine : NULL, "
+                    "unadopted.context == (void *)report.context.value); "
+                    "pthread_mutex_unlock(&bridges_lock); } "
+                    'if (further == NVK_CGL_FURTHER_ADOPTED) return fail("The CGL context already has a GLI engine '
+                    'served by Zink"); '
+                    "if (further == NVK_CGL_FURTHER_UNADOPTED) return 0; "
+                    "if (layout != NVK_CGL_LAYOUT_OK) {")
     at = {k: body.find(v) for k, v in {
         "check": "nvk_cgl_check_gld_layout(engine, GLI_PROFILE, GLI_CGL_DISPATCH, GLI_SAVED_DISPATCH,",
-        "find": "find_bridge((CGLContextObj)(void *)report.context.value)",
-        "adopted": 'if (adopted) return fail("The CGL context already has a GLI engine served by Zink");',
+        "further": "enum nvk_cgl_further further = NVK_CGL_FURTHER_NO;",
         "refuse": "if (layout != NVK_CGL_LAYOUT_OK) {",
-        "screen": "if (!nvk_zink_screen_ready()) return 0;",
+        "screen": "if (!nvk_zink_screen_ready()) return leave_unadopted(context_ptr, driver);",
+        "alloc": "if (!b) return leave_unadopted(context_ptr, driver);",
         "copy": "memcpy(b->original, context, PREFIX_BYTES);",
         "write": "back[BACK_INDEX(entries[i].offset)] = entries[i].adapter;",
         "redirect": "*(void ***)((char *)engine + GLI_SAVED_DISPATCH) = b->apple_back;"}.items()}
     refusal = braced(body, "if (layout != NVK_CGL_LAYOUT_OK) {")
     check("prepare_gld runs nvk_cgl_check_gld_layout and its refusal block ends in return 0",
           at["check"] >= 0 and refusal.rstrip().endswith("return 0;") and refusal.count("return") == 1, refusal)
+    check("prepare_gld leaves a call without an engine or without a GLD context alone",
+          flat(body).startswith("EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver) { "
+                                "if (!engine || !driver) return 0; "), body[:120])
     check("prepare_gld reads or writes through no recorded offset before the check, and through one only after "
           "every refusal",
           at["check"] >= 0 and re.search(r"\+\s*GLI_|\[\s*GLI_", body[:at["check"]]) is None
           and len(re.findall(r"\+\s*GLI_", body)) == 1 and 0 <= at["refuse"] < at["screen"] < at["redirect"],
           body[:200])
-    check("prepare_gld proves the layout before it makes the Zink screen, so a refusal opens no NVK device",
+    check("prepare_gld checks the layout before it makes the Zink screen, so a refusal opens no NVK device",
           0 <= at["check"] < at["refuse"] < at["screen"] and body.count("nvk_zink_screen_ready()") == 1, body[:200])
     check("prepare_gld prints the guard's own reason text once per process, and only when it refuses",
           "if (first_time(&context_refusal_said)) {" in refusal and "nvk_cgl_layout_reason(why, sizeof(why), &report);"
           in refusal and 'say("OpenGL stays Apple\'s; " LAYOUT_DIFFERS, why);' in refusal
           and cgl.count("context_refusal_said") == 2 and body.count("say(") == 1, refusal)
-    check("prepare_gld adopts one GLI engine per CGL context: a further one returns before the refusal line, the "
-          "screen and any write",
-          0 <= at["check"] < at["find"] < at["adopted"] < at["refuse"] < at["screen"] < at["copy"] < at["write"]
-          and body.count("if (adopted) return") == 1, str(at))
-    check("a further engine whose context's rend is the adopted engine is that case, not a refusal with a line",
-          "(layout == NVK_CGL_LAYOUT_CONTEXT_REND && report.rend.kind == NVK_CGL_WORD_SIBLING)" in body[:at["adopted"]]
-          and "adopted = other && (layout == NVK_CGL_LAYOUT_OK || (uintptr_t)other->engine == report.rend.value);"
-          in body[:at["adopted"]])
-    m = re.search(r"static struct nvk_cgl_bridge \*bridge_current\(.*?\n\}\n", cgl, re.S)
-    current = m.group(0) if m else ""
+    check("prepare_gld asks nvk_cgl_further_engine about the context's bridge and about an engine left unadopted, "
+          "and a further engine returns before the refusal line, the screen and any write",
+          further_text in flat(body)
+          and all(len(re.findall(rf"\b{w}\b", re.sub(r"/\*.*?\*/", "", body, flags=re.S)))
+                  == len(re.findall(rf"\b{w}\b", further_text)) for w in ("further", "other"))
+          and 0 <= at["check"] < at["further"] < at["refuse"] < at["screen"] < at["alloc"] < at["copy"] < at["write"],
+          str(at))
+    leave = function(cgl, r"static int leave_unadopted\(void \*context, void \*driver\)")
+    destroy = function(cgl, r"EXPORT void nvk_cgl_destroy_gld\(void \*driver\)")
+    check("an engine that passed the check and is not adopted is remembered with its context, under the lock, and "
+          "forgotten when its GLD context is destroyed",
+          flat(leave) == "static int leave_unadopted(void *context, void *driver) { "
+          "pthread_mutex_lock(&bridges_lock); unadopted.context = context; unadopted.driver = driver; "
+          "pthread_mutex_unlock(&bridges_lock); return 0; } "
+          and "static struct { void *context, *driver; } unadopted;" in cgl
+          and body.count("return leave_unadopted(context_ptr, driver);") == 2
+          and flat(destroy).startswith("EXPORT void nvk_cgl_destroy_gld(void *driver) { "
+                                       "pthread_mutex_lock(&bridges_lock); "
+                                       "if (unadopted.driver == driver) unadopted.context = unadopted.driver = NULL; ")
+          and len(re.findall(r"\bunadopted\.", cgl)) == 6 and len(re.findall(r"\bleave_unadopted\(", cgl)) == 3,
+          leave)
+    current = function(cgl, r"static struct nvk_cgl_bridge \*bridge_current\(void \*engine\)")
     dropped = braced(current, "if (thread_bridge && thread_bridge->engine != engine) {")
-    check("bridge_current drops a call that does not come with the adopted engine, saying so once per process",
+    dropped_line = ("a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for "
+                    "the current CGL context")
+    said = "".join(re.findall(r'"([^"]*)"', braced(dropped, "if (first_time(&dropped_call_said)) {").split("say(")[-1]))
+    check("bridge_current drops a call that does not come with the adopted engine, saying so once per process with "
+          "what the call came with, what rend holds and both blocks' sizes",
           dropped.rstrip().endswith("return NULL;") and "if (first_time(&dropped_call_said)) {" in dropped
-          and "nvk_cgl_renderer_reason(why, sizeof(why), engine, *(void **)context," in dropped
-          and 'say("a call through a Zink context was dropped;' in dropped
+          and "nvk_cgl_renderer_reason(why, sizeof(why), engine, *(void **)context, thread_bridge->engine, "
+          "malloc_size(thread_bridge->engine), context, malloc_size(context), GLI_PROFILE, GLI_CGL_DISPATCH, "
+          "offsetof(struct _CGLContextObject, disp));" in flat(dropped)
+          and said == dropped_line and dropped.count("say(") == 1
           and 'fail("The current CGL context\'s renderer is not the GLI engine its bridge was prepared for");'
           in dropped and 0 <= current.find("if (thread_bridge && thread_bridge->engine != engine) {")
-          < current.find("materialize(thread_bridge)"), dropped)
+          < current.find("materialize(thread_bridge)")
+          and 'fail("No attached Zink context current on this thread"); return NULL; }' in flat(current), dropped)
     check("nvk_cgl.c answers the guard's VM question from this task's VM map, reading no memory through the pointer",
           "#define NVK_CGL_VM_REGION(p, v) nvk_cgl_vm_region((p), (v))" in cgl
           and "mach_vm_region_recurse(mach_task_self()" in cgl
           and "VM_MEMORY_MALLOC_PROB_GUARD == 13" in cgl and "VM_MEMORY_MALLOC_PGUARD == 13" in cgl)
-    m = re.search(r"static void \*\*\*integer_dispatch_slot\(.*?\n\}\n", cgl, re.S)
-    slot = m.group(0) if m else ""
+    slot = function(cgl, r"static void \*\*\*integer_dispatch_slot\(struct nvk_cgl_bridge \*b, char \*why, size_t "
+                    r"why_size\)")
     order = [slot.find(t) for t in (
         "nvk_cgl_room(meta, b->context, malloc_size(b->context), sizeof(struct _CGLContextObject),",
         "&block, &block_size) < head) {",
         "*(char **)(meta+PRIV_ENGINES)",
+        "if (!items || count<1 || count>16) {",
         "nvk_cgl_room(items, block, block_size, (size_t)(meta-(const char *)block)+head,",
         "&list_block, &list_block_size) < (size_t)count*PRIV_ENGINE_STRIDE) {",
         "for (int i=0;i<count;++i)")]
-    refusals = [braced(slot, "&block, &block_size) < head) {"),
+    refusals = [braced(slot, "&block, &block_size) < head) {"), braced(slot, "if (!items || count<1 || count>16) {"),
                 braced(slot, "&list_block, &list_block_size) < (size_t)count*PRIV_ENGINE_STRIDE) {")]
+    slot_texts = ["the CGL private object is neither a heap block nor a span of the CGL context's block that holds "
+                  "the recorded engine count and list",
+                  "the CGL private object's engine list pointer is %s and its engine count is %d, where the record "
+                  "has a list of 1 to 16 engines",
+                  "the CGL engine list is neither a heap block nor a span of the CGL private object's block that "
+                  "holds its %d records",
+                  "none of the %d records of the CGL engine list names this GLI engine"]
+
+    def formats(text):
+        """The format string of each snprintf(why, ...) in text, its adjacent literals joined."""
+        return ["".join(re.findall(r'"([^"]*)"', m.group(1)))
+                for m in re.finditer(r'snprintf\(why,\s*(?:why_size|sizeof\(why\)),\s*((?:"[^"]*"\s*)+)', text)]
+
     check("integer_dispatch_slot reads the CGL private object and the engine list only as memory the allocator "
           "vouches for, and returns NULL otherwise",
           order[0] >= 0 and order == sorted(order) and len(set(order)) == len(order)
-          and all(r.rstrip().endswith("return NULL;") for r in refusals), slot[:300])
-    check("a refusal there says CGLTexImageIOSurface2D stays Apple's, not OpenGL, under its own once-flag",
-          all("if (first_time(&iosurface_refusal_said))" in r
-              and 'say("CGLTexImageIOSurface2D in a Zink context stays Apple\'s; " LAYOUT_DIFFERS,' in r
-              for r in refusals) and cgl.count("iosurface_refusal_said") == 3)
+          and all(r.rstrip().endswith("return NULL;") and r.count("snprintf(why, why_size,") == 1 for r in refusals),
+          slot[:300])
+    check("integer_dispatch_slot prints nothing; each of its four ways of finding no slot gives its reason",
+          "say(" not in slot and "first_time(" not in slot and "stderr" not in slot
+          and formats(slot) == slot_texts and slot.count("return NULL;") == 4
+          and flat(slot).rstrip().endswith('names this GLI engine", count); return NULL; }')
+          and "if (!why) { why = unused; why_size = sizeof(unused); }" in slot
+          and "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t);" in slot, str(formats(slot)))
+    install = function(cgl, r"static void install_integer_dispatch\(struct nvk_cgl_bridge \*b\)")
+    select = function(cgl, r"static bool select_integer_dispatch\(struct nvk_cgl_bridge \*b, bool zink\)")
+    placed = braced(install, "      else {")
+    check("install_integer_dispatch says once per process, under its own flag, why CGLTexImageIOSurface2D stays "
+          "Apple's in a Zink context: every way that leaves the hook out reaches the line",
+          "void ***slot=integer_dispatch_slot(b,why,sizeof(why));" in install
+          and formats(install) == [
+              "the callback vector in this GLI engine's record is null",
+              "the callback vector in this GLI engine's record is a heap block of 0x%zx bytes, where the record has "
+              "one of 0x80 to 0x1000 bytes",
+              "dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this GLI engine's record "
+              "gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion"]
+          and flat(install).rstrip().endswith(
+              "if (first_time(&iosurface_refusal_said)) say(\"CGLTexImageIOSurface2D in a Zink context stays "
+              "Apple's; \" LAYOUT_DIFFERS, why); }")
+          and flat(placed).strip() == "void **copy=malloc(bytes); if (!copy) return; memcpy(copy,vector,bytes); "
+          "copy[9]=(void *)iosurface_integer; b->integer_original=vector; b->integer_zink=copy; *slot=copy; return;"
+          and "if (!vector) snprintf(" in flat(install)
+          and "else if (bytes<16*sizeof(void *) || bytes>4096) snprintf(" in flat(install)
+          and install.count("return;") == 2 and install.count("say(") == 1
+          and cgl.count("iosurface_refusal_said") == 2
+          and "void ***slot=integer_dispatch_slot(b,NULL,0);" in select and "say(" not in select
+          and len(re.findall(r"\binteger_dispatch_slot\(", cgl)) == 3, install)
     says = re.findall(r"\bsay\(", cgl)
     check("nvk_cgl.c prints to standard error in one place, each of its three kinds of line once per process",
           cgl.count("fprintf(stderr") == 1 and cgl.count("stderr") == 1
           and 'static void say(const char *what, const char *why) { fprintf(stderr, "NVK Zink: %s (%s)\\n", what, why); }'
-          in cgl and len(says) == 5   # the definition and four calls, each under first_time
-          and cgl.count("if (first_time(&") == 4
+          in cgl and len(says) == 4   # the definition and three calls, each under first_time
+          and cgl.count("if (first_time(&") == 3
           and "static bool first_time(atomic_flag *said) { return !atomic_flag_test_and_set(said); }" in cgl,
           str(len(says)))
     # the card checks mark a row inactive on the line prepare_gld prints, and on no other
     common = (ROOT / "tools" / "card" / "zink_common.h").read_text()
     m = re.search(r'#define LAYOUT_DIFFERS "([^"]*)"', cgl)
-    line = "NVK Zink: OpenGL stays Apple's; " + (m.group(1) if m else "?") + " ("
+    differs = m.group(1) if m else "?"
+    line = "NVK Zink: OpenGL stays Apple's; " + differs + " ("
     check("the line of a refused context starts with the text tools/card/zink_common.h reads as inactive",
           f'zk_tee_find("{line}", line,' in common and common.count("zk_tee_find(") == 2
           and cgl.count('say("OpenGL stays Apple\'s; " LAYOUT_DIFFERS,') == 1, line)
+    # the documents quote the three lines as the code builds them
+    quotes = ["NVK Zink: OpenGL stays Apple's; " + differs + " (",
+              "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; " + differs + " (",
+              "NVK Zink: " + dropped_line + " ("]
+    for name in ("docs/ZINK-OPENGL.md", "docs/TESTING-ON-HARDWARE.md", "docs/TESTING-ON-HARDWARE.es.md",
+                 "CHANGELOG.md"):
+        text = flat((ROOT / name).read_text().replace("\n  ", "\n").replace("\n   ", "\n"))
+        check(f"{name} quotes each of the three lines as nvk_cgl.c prints it",
+              all(q in text for q in quotes), str([q for q in quotes if q not in text]))
     guard = (ZINK / "nvk_cgl_guard.h").read_text()
     check("the guard header derives its checks from the three run-time facts the includer supplies",
           "#error" in guard and "NVK_CGL_BLOCK_SIZE(p)" in guard and "NVK_CGL_IN_ZONE(p)" in guard
