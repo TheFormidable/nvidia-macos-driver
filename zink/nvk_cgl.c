@@ -178,10 +178,10 @@ static struct nvk_cgl_bridge *find_bridge(CGLContextObj context)
 }
 
 /* The CGL context and the GLD context of the last GLI engine that passed the
- * layout check and was not adopted for another reason: no Zink screen, or no
- * memory for its bridge. One slot: an engine left unadopted in another context
- * replaces it. bridges_lock guards it; nvk_cgl_destroy_gld clears it with that
- * GLD context. */
+ * layout check and was not adopted for another reason: the Zink screen is not
+ * ready (it could not be made, or it is marked uncertain), or no memory for its
+ * bridge. One slot: an engine left unadopted in another context replaces it.
+ * bridges_lock guards it; nvk_cgl_destroy_gld clears it with that GLD context. */
 static struct { void *context, *driver; } unadopted;
 
 static int leave_unadopted(void *context, void *driver)
@@ -701,11 +701,11 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
                                sizeof(struct _CGLContextObject), sizeof(GLIFunctionDispatch),
                                &profile, &context_ptr, &back, &report);
    /* One bridge per CGL context: find_bridge and the restore on destroy key on
-    * the context. A further GLI engine of a context the adapter adopted or left
-    * unadopted (another renderer of its pixel format) is left unadapted, whatever
-    * its own check says: nothing is written, and no line says that the layout
-    * differs. In a context Zink serves, a call that comes with such an engine is
-    * dropped (bridge_current). */
+    * the context. A further GLI engine (another renderer of the pixel format) of
+    * a context the adapter adopted, or of the last one it left unadopted, is left
+    * unadapted, whatever its own check says: nothing is written, and no line says
+    * that the layout differs. In a context Zink serves, a call that comes with
+    * such an engine is dropped (bridge_current). */
    enum nvk_cgl_further further = NVK_CGL_FURTHER_NO;
    if (nvk_cgl_layout_has_context(layout)) {
       pthread_mutex_lock(&bridges_lock);

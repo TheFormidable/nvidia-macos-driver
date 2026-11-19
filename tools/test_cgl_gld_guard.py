@@ -896,6 +896,11 @@ def main():
         """text without its C comments"""
         return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
+    def code(text):
+        """text as its statements: no comments, one space for each run of white space, adjacent string literals
+        joined. Two texts that differ only in line breaks, comments or where a string is split compare equal."""
+        return re.sub(r'"\s+"', "", flat(uncommented(text))).strip()
+
     def function(text, header):
         """The definition whose first line is header (a regular expression), to its closing brace, or ""."""
         m = re.search("^" + header + r"\n\{.*?\n\}\n", text, re.S | re.M)
@@ -1006,7 +1011,23 @@ def main():
           "malloc_size(thread_bridge->engine), context, malloc_size(context), GLI_PROFILE, GLI_CGL_DISPATCH, "
           "offsetof(struct _CGLContextObject, disp));" in flat(dropped)
           and said == dropped_line and dropped.count("say(") == 1
-          and re.sub(r'"\s+"', "", flat(uncommented(dropped))).strip() == dropped_text
+          and code(dropped) == dropped_text
+          # every statement from the function's first to the branch that needs a Zink context: nothing before the
+          # dropped branch takes the bridge away, and nothing else in the file sets the flag or the bridge
+          and code(current).startswith(
+              "static struct nvk_cgl_bridge *bridge_current(void *engine) { "
+              "unsigned current_generation = atomic_load(&generation); "
+              "CGLContextObj context = CGLGetCurrentContext(); "
+              "if (thread_generation != current_generation || !thread_bridge || thread_context != context || "
+              "thread_engine != engine) { pthread_mutex_lock(&bridges_lock); "
+              "thread_bridge = find_bridge(context); thread_context = context; thread_engine = engine; "
+              "thread_generation = atomic_load(&generation); pthread_mutex_unlock(&bridges_lock); } "
+              "if (thread_bridge && thread_bridge->engine != engine) { " + dropped_text + " } "
+              "if (!thread_bridge || (!thread_bridge->zink && !materialize(thread_bridge)) || "
+              "!nvk_zink_make_current(thread_bridge->zink)) { "
+              'fail("No attached Zink context current on this thread"); return NULL; } ')
+          and cgl.count("dropped_call_said") == 2
+          and len(re.findall(r"\bthread_bridge\s*=[^=]", uncommented(cgl))) == 1
           and 'fail("The current CGL context\'s renderer is not the GLI engine its bridge was prepared for");'
           in dropped and 0 <= current.find("if (thread_bridge && thread_bridge->engine != engine) {")
           < current.find("materialize(thread_bridge)")
@@ -1041,6 +1062,21 @@ def main():
         the format and the arguments."""
         return [re.sub(r'"\s+"', "", m.group(0)) for m in re.finditer(r"snprintf\(why\b.*?\);", flat(text))]
 
+    slot_text = (
+        "static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b, char *why, size_t why_size) { "
+        "char unused[1]; if (!why) { why = unused; why_size = sizeof(unused); } "
+        "char *meta=*(char **)((char *)b->context+PREFIX_BYTES); "
+        "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t); const void *block; size_t block_size; "
+        "if (nvk_cgl_room(meta, b->context, malloc_size(b->context), sizeof(struct _CGLContextObject), "
+        "&block, &block_size) < head) { " + slot_reasons[0] + " return NULL; } "
+        "char *items=*(char **)(meta+PRIV_ENGINES); int count=*(int16_t *)(meta+PRIV_ENGINE_COUNT); "
+        "if (!items || count<1 || count>16) { " + slot_reasons[1] + " return NULL; } "
+        "const void *list_block; size_t list_block_size; "
+        "if (nvk_cgl_room(items, block, block_size, (size_t)(meta-(const char *)block)+head, "
+        "&list_block, &list_block_size) < (size_t)count*PRIV_ENGINE_STRIDE) { " + slot_reasons[2] + " return NULL; } "
+        "for (int i=0;i<count;++i) { char *entry=items+(size_t)i*PRIV_ENGINE_STRIDE; "
+        "if (*(void **)entry==b->engine) return (void ***)(entry+PRIV_ENGINE_CALLBACKS); } "
+        + slot_reasons[3] + " return NULL; }")
     check("integer_dispatch_slot reads the CGL private object and the engine list only as memory the allocator "
           "vouches for, and returns NULL otherwise",
           order[0] >= 0 and order == sorted(order) and len(set(order)) == len(order)
@@ -1059,6 +1095,9 @@ def main():
           # else names the buffer or its size, so nothing else writes a reason or blanks one
           and len(re.findall(r"\bwhy\b", slot_code)) == 3 + len(slot_reasons)
           and len(re.findall(r"\bwhy_size\b", slot_code)) == 2 + len(slot_reasons)
+          # the function whole: no read through the private object or the list before nvk_cgl_room has answered
+          # for it, and no return but the four with a reason and the one with the slot
+          and code(slot) == slot_text
           and "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t);" in slot, str(reasons(slot)))
     install = function(cgl, r"static void install_integer_dispatch\(struct nvk_cgl_bridge \*b\)")
     select = function(cgl, r"static bool select_integer_dispatch\(struct nvk_cgl_bridge \*b, bool zink\)")
@@ -1071,6 +1110,19 @@ def main():
         'bytes, where the record has one of 0x80 to 0x1000 bytes",bytes);',
         'snprintf(why,sizeof(why),"dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this '
         'GLI engine\'s record gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion");']
+    install_text = (
+        "static void install_integer_dispatch(struct nvk_cgl_bridge *b) { char why[256]; "
+        "void ***slot=integer_dispatch_slot(b,why,sizeof(why)); if (slot) { void **vector=*slot; "
+        "size_t bytes=vector && malloc_zone_from_ptr(vector) ? malloc_size(vector) : 0; "
+        "if (!vector) " + install_reasons[0] + " else if (!bytes) " + install_reasons[1]
+        + " else if (bytes<16*sizeof(void *) || bytes>4096) " + install_reasons[2]
+        + ' else if (!named_callback(vector[4],"gliCreateContext") || '
+        '!named_callback(vector[6],"gliDestroyContext") || !named_callback(vector[9],"gliSetInteger") || '
+        '!named_callback(vector[15],"gliGetVersion")) ' + install_reasons[3]
+        + " else { void **copy=malloc(bytes); if (!copy) return; memcpy(copy,vector,bytes); "
+        "copy[9]=(void *)iosurface_integer; b->integer_original=vector; b->integer_zink=copy; *slot=copy; "
+        "return; } } if (first_time(&iosurface_refusal_said)) "
+        "say(\"CGLTexImageIOSurface2D in a Zink context stays Apple's; \" LAYOUT_DIFFERS, why); }")
     check("install_integer_dispatch says once per process, under its own flag, why CGLTexImageIOSurface2D stays "
           "Apple's in a Zink context: every way that leaves the hook out, except a failed allocation of the clone, "
           "writes its reason and reaches the line",
@@ -1082,6 +1134,8 @@ def main():
           # the declaration, the buffer and its size handed to integer_dispatch_slot, two per reason and the one in
           # the line: nothing else names the buffer, so nothing blanks a reason between its write and the line
           and len(re.findall(r"\bwhy\b", uncommented(install))) == 4 + 2 * len(install_reasons)
+          # the function whole: its two returns are the placed hook and the failed allocation of the clone
+          and code(install) == install_text
           and flat(install).rstrip().endswith(
               "if (first_time(&iosurface_refusal_said)) say(\"CGLTexImageIOSurface2D in a Zink context stays "
               "Apple's; \" LAYOUT_DIFFERS, why); }")
@@ -1106,6 +1160,18 @@ def main():
           and cgl.count("if (first_time(&") == 3
           and "static bool first_time(atomic_flag *said) { return !atomic_flag_test_and_set(said); }" in cgl,
           str(len(says)))
+    # The names the three lines go through keep their meaning to the end of the file: LAYOUT_DIFFERS has one
+    # definition, and neither nvk_cgl.c nor a header of this directory that it includes makes a macro of say,
+    # first_time or of the library calls they rest on, or takes a definition away.
+    through = r"LAYOUT_DIFFERS|say|first_time|fprintf|snprintf|stderr|atomic_flag_test_and_set"
+    included = [ZINK / name for name in re.findall(r'^#include "([^"]+)"', cgl, re.M) if (ZINK / name).is_file()]
+    redefined = {p.name: re.findall(rf"^\s*#\s*(?:define|undef)\s+(?:{through})\b", p.read_text(), re.M)
+                 for p in [ZINK / "nvk_cgl.c"] + included}
+    check("nvk_cgl.c defines LAYOUT_DIFFERS once, takes no definition away, and no macro there or in the zink "
+          "headers it includes replaces say, first_time or the calls the lines are printed with",
+          redefined.pop("nvk_cgl.c") == ['#define LAYOUT_DIFFERS'] and not any(redefined.values())
+          and cgl.count("#define LAYOUT_DIFFERS") == 1 and not re.search(r"^\s*#\s*undef\b", cgl, re.M)
+          and (ZINK / "nvk_cgl_guard.h") in included, str(redefined))
     # the card checks mark a row inactive on the line prepare_gld prints, and on no other
     common = (ROOT / "tools" / "card" / "zink_common.h").read_text()
     m = re.search(r'#define LAYOUT_DIFFERS "([^"]*)"', cgl)
