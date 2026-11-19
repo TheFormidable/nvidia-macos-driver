@@ -6,11 +6,13 @@
  * (25G241), x86_64. A build whose layout differs would have those reads and
  * writes land in the wrong memory of an OpenGL application. These helpers check
  * at run time, from facts the process already has, that the memory is shaped as
- * the record says. Where a check fails for the first GLI engine of a CGL
- * context, nvk_cgl_prepare_gld keeps Apple's renderer for that context (returns
- * 0, writing nothing), and it prints what the memory held for the first context
- * it refuses in a process. A later GLI engine of a context it has already
- * decided on is left unadapted, with no line (nvk_cgl_further_engine).
+ * the record says. Where a check fails, nvk_cgl_prepare_gld leaves the GLI
+ * engine it was handed unadapted (returns 0, writing nothing), which for the
+ * first GLI engine of a CGL context leaves that context on Apple's renderer,
+ * and it prints what the memory held for the first context it refuses in a
+ * process. A later GLI engine of a context it adopted, or left unadopted for a
+ * reason that is not the layout, is left unadapted too, with no line
+ * (nvk_cgl_further_engine).
  * GLEngine's per-context object, the pointer gldCreateContext hands over
  * (Apple's headers type it GLIContext), is called the GLI engine here and in
  * the lines the adapter prints.
@@ -375,13 +377,16 @@ static inline int nvk_cgl_layout_has_context(enum nvk_cgl_layout layout)
           layout == NVK_CGL_LAYOUT_SAVED_BLOCK;
 }
 
-/* nvk_cgl_prepare_gld decides once for a CGL context, with the first of its
- * GLI engines whose check reaches the context: it adopts that engine, refuses
- * it, or leaves it unadopted for a reason that is not the layout (no Zink
- * screen, no memory). A later engine of a context it adopted or left unadopted
- * is a further engine: prepare leaves it unadapted and prints no line for it,
- * whatever its own check says, because the line would say that OpenGL stays
- * Apple's for a layout that differs, which is not what decided that context. */
+/* nvk_cgl_prepare_gld remembers two outcomes for a CGL context: that it
+ * adopted one of its GLI engines (the context has a bridge), and that it left
+ * one unadopted for a reason that is not the layout (no Zink screen, no
+ * memory; it remembers one such context, the last). A later engine of such a
+ * context is a further engine: prepare leaves it unadapted and prints no line
+ * for it, whatever its own check says, because the line would say that OpenGL
+ * stays Apple's for a layout that differs, which is not what decided that
+ * context. A refusal is not remembered: a later engine of a context whose
+ * earlier engine was refused is checked like a first engine, and adopted when
+ * its own check passes. */
 enum nvk_cgl_further {
    NVK_CGL_FURTHER_NO = 0,
    NVK_CGL_FURTHER_ADOPTED,     /* the context has a bridge: Zink serves it with another engine */
