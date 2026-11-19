@@ -1287,7 +1287,9 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     free(_bpk); _bpk = NULL; _nbpk = 0;
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     // A retire that did not take the buffer (the device is lost: nothing destroys it) leaves the record as it was; the
-    // pages are then given back here, as before. A retire that took it cleared the record.
+    // pages are then given back here, as before. A retire that took it cleared the record. If the device is lost after
+    // a buffer grace took the import, neither the import nor the pages are given back and the deallocator never runs:
+    // like every GPU object after a loss, they are kept, since the GPU may still be reading or writing those pages.
     if (host->host_release) { void *context = host->host_context; host->host_release = NULL; host->host_context = NULL;
                               nvmtl_host_buffer_release(context); }
     if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
@@ -7506,6 +7508,21 @@ static NVMTLTexture *nvmtl_rb_temp(NVMTLCommandBuffer *cb, id<MTLDevice> dev, NS
     return t;
 }
 static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbSwap; }
+// The source buffer of copyFromBuffer:toBuffer: and copyFromBuffer:toTexture: is recorded read only, so a caller copy
+// of it (a newBufferWithBytesNoCopy buffer the driver copies, _hostPtr) is not copied back at completion when nothing
+// else in the command buffer used it (pull request 578 of the original project). NVMTL_BLIT_READONLY=0 records it as
+// written, so it is copied back, as in 3.0.3.
+static int nvmtl_blit_readonly_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_BLIT_READONLY"); on = !(e && e[0] == '0');
+        if (!on) nvlog("blit: a copy's source buffer is recorded as written and copied back (NVMTL_BLIT_READONLY=0)"); }
+    return on;
+}
+static void nvmtl_blit_source(NVMTLResSet *set, id o)
+{
+    if (nvmtl_blit_readonly_on()) [set addReadOnlyObject:o]; else [set addObject:o];
+}
 @implementation NVMTLBlitCommandEncoder
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 - (void)copyFromBuffer:(id<MTLBuffer>)src sourceOffset:(NSUInteger)so toBuffer:(id<MTLBuffer>)dst
@@ -7514,7 +7531,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *s = (NVMTLBuffer *)src, *d = (NVMTLBuffer *)dst;
     if (!s || !d) { nvlog("blit copyFromBuffer: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:s];
+    nvmtl_blit_source((NVMTLResSet *)_cb->_resources, s);
     [_cb->_resources addObject:d];
     if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_b, so, &d->_b, dof, size)) nvlog("blit copyFromBuffer: FAILED");
 }
@@ -7673,7 +7690,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:b];
+    nvmtl_blit_source((NVMTLResSet *)_cb->_resources, b);
     [_cb->_resources addObject:t];
     if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
         NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);

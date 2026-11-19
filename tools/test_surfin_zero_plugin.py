@@ -144,11 +144,12 @@ def chk_free(vk):
     run = body(vk, "static void nvmtl_free_offmain_run(void *p)")
     db = body(vk, "static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)\n{")
     return (order(d, "const int now = nvmtl_pl_release(", "pthread_mutex_unlock(&g_bg_lock);",
-                  "if (now && nvmtl_ws_free_offmain(g)) {", "if (now) { t_grace_reaping = 1;")
+                  "if (now && nvmtl_ws_free_offmain(g)) {", "if (now) { const int was = t_grace_reaping; t_grace_reaping = 1;")
             and order(w, "nvmtl_ws_free_offmain_on()", "nvmtl_free_offmain_ok(1, g->b.imported, g->b.map != NULL, "
                       "g->b.pool != NULL, g->b.placed,", "g->b.bind_lost,", "nvmtl_live_remove(&g->b);",
                       "dispatch_async_f(q, g, nvmtl_free_offmain_run);")
-            and order(run, "t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0;", "free(g);")
+            and order(run, "const int was = t_grace_reaping;",
+                      "t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = was;", "free(g);")
             and "__atomic_add_fetch(&g_buf_gone, 1, __ATOMIC_RELAXED);" in db and "g_buf_gone++" not in db)
 
 

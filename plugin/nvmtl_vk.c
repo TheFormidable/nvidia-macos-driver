@@ -309,7 +309,8 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLOb
 // Buffer grace: a destroyed buffer keeps its VkBuffer (and so its GPU address) until the queue has completed every
 // submit that was in flight when the app freed it. vkDestroyBuffer releases the address at once, and NVK does not
 // wait for the GPU, so a per-frame buffer freed while a submit still stored through it was a page-table fault
-// attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off.
+// attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off;
+// the caller's deallocator of an imported newBufferWithBytesNoCopy buffer then runs at once, inside -dealloc.
 typedef struct nvmtl_bgrace { nvk_buffer b; nvmtl_pl_node life; } nvmtl_bgrace;
 static nvmtl_pl_state g_bg; static pthread_mutex_t g_bg_lock = PTHREAD_MUTEX_INITIALIZER;
 static int nvmtl_buffer_grace_on(void)
@@ -9290,7 +9291,8 @@ static void nvmtl_free_offmain_run(void *p)
 {
     nvmtl_bgrace *g = p;
     const uint64_t sz = g->b.size;
-    t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0;
+    const int was = t_grace_reaping;
+    t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = was;
     free(g);
     atomic_fetch_sub(&g_free_pending_b, sz);
 }
@@ -9341,7 +9343,9 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
             const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
             pthread_mutex_unlock(&g_bg_lock);
             if (now && nvmtl_ws_free_offmain(g)) { nvmtl_perf_note(NVP_BUFDEL, t0, n); return; }
-            if (now) { t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0; free(g); }
+            // The flag is put back, not cleared: this can run inside a reap, from a caller's deallocator.
+            if (now) { const int was = t_grace_reaping; t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b);
+                       t_grace_reaping = was; free(g); }
             nvmtl_perf_note(NVP_BUFDEL, t0, n);
             return;
         }
@@ -9397,10 +9401,12 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
         if (b->alloc) { g_alloc_bytes -= b->alloc; if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
     }
     // The caller's deallocator of an imported buffer runs after vkFreeMemory, outside every lock (it can call back in).
+    // It runs as code outside the reap: a buffer it frees is noted dead by its own path, and the reap's flag is put back
+    // for the buffers after this one.
     void (*const release)(void *) = b->host_release;
     void *const context = b->host_context;
     memset(b, 0, sizeof *b);
-    if (release) release(context);
+    if (release) { const int was = t_grace_reaping; t_grace_reaping = 0; release(context); t_grace_reaping = was; }
 }
 
 void nvmtl_vk_buffer_retire(nvk_buffer *b)

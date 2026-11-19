@@ -165,6 +165,15 @@ plugin       The Photo Booth preview adapter (plugin/NVMTLPhotoBooth.m), the A8 
              come from the HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project
              (LICENSE), written into this tree's plugin.
 
+plugin, translator/wrapper  The GL and ANGLE uniform promotion (573, 579), the reuse and building of address tables
+             (577, 580), the bounds check of textures over buffers (nvmtl_buffer_texture.h, 575), the read-only blit
+             sources that are not copied back (578) and the deallocator of imported caller pages (half of 576) come
+             from pull requests 573 and 575 to 580 by luckiest-luk to the original project
+             (https://github.com/nullmoth/nvidia-macos-driver), closed there without being merged. Their commits keep
+             their author; plugin/ is under PolyForm Noncommercial 1.0.0 like this project (LICENSE), and
+             translator/wrapper under the translator's GNU Lesser General Public License v3.0 or later
+             (translator/LICENSE, translator/COPYING).
+
 tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/GPUBundles/nvmtl/minecraft (bridge.mm,
              its host and smoke tests, ModFreeProbe.java and its documents) comes from nvk/native-macos of the
              HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project (LICENSE), adapted
