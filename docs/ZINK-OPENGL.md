@@ -88,9 +88,11 @@ GLEngine's context; Apple's headers type it `GLIContext`). The checks are:
 - the profile byte is legacy (0) or core (1);
 - the CGL context derived from the recorded dispatch pointer is the start of a heap block of its own, not the GLI
   engine, that holds a whole `struct _CGLContextObject`. This ties the recorded pointer to the public layout: a
-  pointer read from a wrong offset, minus 8, almost never lands on the start of a block that size. On 26.7.3 (25G342)
-  this check passed for the first context the guard looked at in each of the 39 processes of card-test round 11 that
-  printed the refusal below; whether that block is the CGL context was not checked there;
+  pointer read from a wrong offset, minus 8, almost never lands on the start of a block that size. Card-test round
+  11 on 26.7.3 (25G342) ran the guard of 3.0.1, which asked there only for a heap block of at least 0x1e90 bytes:
+  that held for the context the refusal below was printed for (the first the guard refused) in each of the 39
+  processes that printed it. Whether that block is the CGL context, and that it is not the GLI engine itself, was not
+  checked there;
 - the context's first member (`rend`) is null, this GLI engine, a value that is no aligned user address, or one that
   starts no heap block, points into neither the engine nor the context and lies in heap memory or in no mapped
   region. This check rests on an assumption no record confirms: that CGL stores the new GLI engine in `rend` only
@@ -111,10 +113,15 @@ GLEngine's context; Apple's headers type it `GLIContext`). The checks are:
   CGL context before a `GLIFunctionDispatch` ends, an address in an image, a stack, read-only or unmapped memory, or a
   value that is no aligned user address.
 
-`nvk_cgl_prepare_gld` also adopts one GLI engine per CGL context: a further engine of a context already adopted (another
-renderer of its pixel format) keeps Apple's renderer, having written nothing, and `nvk_cgl_last_error` says "The CGL
-context already has a GLI engine served by Zink". That holds whether the context's `rend` is still unset or already
-the adopted engine; neither prints a line.
+`nvk_cgl_prepare_gld` also adopts one GLI engine per CGL context. A further engine of a context that already has one
+(another renderer of its pixel format) is left unadapted: prepare writes nothing, and `nvk_cgl_last_error` says "The
+CGL context already has a GLI engine served by Zink". No line is printed for it when its own check passes, when only
+its own saved table is refused, or when its context's `rend` is refused and is the adopted engine. Nor is one printed,
+and prepare sets no last error, for an engine whose `rend` is refused as another GLI engine of the context after an
+engine of that context passed the check and was not adopted because the Zink screen could not be made or memory ran
+out: the layout is not why that context stays Apple's. A further engine that any other check refuses is a refusal like
+any other and can print the first line below. Leaving an engine unadapted does not hand its calls to Apple's renderer:
+a call that reaches the context's adapters with it is dropped, with the third line below.
 
 The adapter prints three kinds of line on standard error, each once per process, the first time it happens:
 
@@ -124,30 +131,36 @@ The adapter prints three kinds of line on standard error, each once per process,
   a named block at an offset, or the value itself with the VM tag, protection and remaining bytes of the region that
   holds it. Past the context check, it gives the sizes of the GLI engine's and the CGL context's blocks too. A later
   context refused for another reason prints nothing.
-- "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private layout does not match the
-  record (...)". `integer_dispatch_slot` runs when Zink first serves a context (at its first GL call), in every
-  process, whether or not the application ever calls CGLTexImageIOSurface2D: it finds the GLI integer callback vector
-  that call goes through. The CGL private object and its engine list are memory the guard above did not prove, so it
-  reads the private object only as a heap block of its own, or as a pointer-aligned span of the CGL context's block
-  past the public struct, that holds the recorded engine count and list pointer; and the engine list only as a heap
-  block of its own, or as a pointer-aligned span of the private object's block past those two members, that holds the
-  records the count says (`nvk_cgl_room` in `zink/nvk_cgl_guard.h`). The vector is then cloned only when it is a heap
-  block whose entries `dladdr` names as GLEngine's callbacks. When the private object or the list is anywhere else,
-  the context stays Zink's and only CGLTexImageIOSurface2D keeps Apple's handler in it. On a Mac where that happens
-  the line appears in every OpenGL process Zink serves, and every Zink row of the card checks fails its "messages"
-  check.
-- "NVK Zink: a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for the
-  current CGL context (...)". Every adapted call compares the GLI engine it comes with (CGL passes the context's
-  `rend`) with the engine adopted for the current context. When they differ the call is dropped: it returns 0 or
-  nothing, and neither Zink nor Apple's renderer runs it. The text in parentheses says what the call came with and
-  what `rend` holds. The source fork drops such a call the same way, without a line.
+- "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private layout does not match the record
+  (...)". When Zink first serves a context (at its first GL call), in every process and whether or not the application
+  ever calls CGLTexImageIOSurface2D, `install_integer_dispatch` places a hook in the GLI integer callback vector that
+  call goes through; `integer_dispatch_slot` finds the vector in the CGL private object's record of the engine. The CGL
+  private object and its engine list are memory the guard above did not check, so it reads the private object only as a
+  heap block of its own, or as a pointer-aligned span of the CGL context's block past the public struct, that holds the
+  recorded engine count and list pointer; and the engine list only as a heap block of its own, or as a pointer-aligned
+  span of the private object's block past those two members, that holds the records the count says (`nvk_cgl_room` in
+  `zink/nvk_cgl_guard.h`). The vector is cloned only when it is a heap block of 16 to 512 pointers whose entries
+  `dladdr` names as GLEngine's callbacks. In every other case (the private object or the list is anywhere else, the list
+  pointer is null or the count is outside 1 to 16, no record names the engine, the vector is null or a block of another
+  size, `dladdr` does not name its entries) the context stays Zink's, only CGLTexImageIOSurface2D keeps Apple's handler
+  in it, and the text in parentheses says which case it was. On a Mac where that happens the line appears in every
+  OpenGL process Zink serves, and every Zink row of the card checks fails its "messages" check. The one case that prints
+  nothing is a failed allocation of the clone.
+- "NVK Zink: a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for the current
+  CGL context (...)". Every adapted call compares the GLI engine it comes with (CGL passes the context's `rend`) with
+  the engine adopted for the current context. When they differ the call is dropped: it returns 0 or nothing, and neither
+  Zink nor Apple's renderer runs it. The text in parentheses says what the call came with, what `rend` holds and whether
+  the two are one value. The line is printed for the first such call in the process; calls that come with the adopted
+  engine, and the process's other contexts, are served. The source fork drops such a call the same way, without a line.
 
 What the checks do not prove:
 
 - Accepting `rend` at creation says nothing about what CGL stores there afterwards. If the assumption above is wrong
   in a way the guard cannot see (`rend` never becomes the adopted engine), prepare has already put the adapters in
-  the context's table and nothing gives the context back to Apple's renderer: the application's GL calls are dropped,
-  it draws nothing, and the third line above says so once. Boot argument `nvzink=0` is the way out.
+  the context's table and nothing gives the context back to Apple's renderer: every GL call of that context is
+  dropped and returns 0 or nothing, `glGetString` included. The context draws nothing, and an application that
+  checks what `glGetString` gives may report that OpenGL is unavailable or stop at start. The third line above says
+  so once. Boot argument `nvzink=0` is the way out.
 - The verdict on `rend` is per context. Where CGL does not clear the context's block, a word left by the block's
   previous owner (a pointer to a live heap block, say) is refused in one context while another context of the same
   process is adopted. Contexts of one share group can then be split between Apple's renderer and Zink, which cannot
@@ -214,16 +227,23 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   another engine of the context, unaligned, unmapped, in an image's data, read-only, running past its heap region, or
   reaching the start of the GLI engine or of the CGL context (refused); a span of memory at no block start under
   each VM tag from 0 to 31 and each protection (a saved table only under the tags malloc gives, readable and
-  writable); each refusal's text, with the sizes it prints; the text of the dropped-call line; and `nvk_cgl_room`,
-  the question `integer_dispatch_slot` asks of the CGL private object and its engine list. Its other checks read
-  `zink/nvk_cgl.c`, which the host cannot compile: that prepare reads through no recorded offset before the check,
-  returns from every refusal before the screen and any write, and that the three lines are printed where this
-  document says. It loads no Apple framework and touches no GPU; `malloc_size` has no Linux name, so a shim behind
-  the header's macros uses `malloc_usable_size`, and a table of synthetic regions stands in for the VM map.
+  writable); each refusal's text, with the sizes it prints; the text of the dropped-call line; which engines count
+  as further engines of a context already decided on; and `nvk_cgl_room`, the question `integer_dispatch_slot` asks
+  of the CGL private object and its engine list. Its other checks read `zink/nvk_cgl.c`, which the host cannot
+  compile: that prepare reads through no recorded offset before the check, returns from every refusal before the
+  screen and any write, and that the three lines are printed where this document says and are quoted here, in
+  TESTING-ON-HARDWARE and in the CHANGELOG as the code builds them. It loads no Apple framework and touches no GPU;
+  `malloc_size` has no Linux name, so a shim behind the header's macros uses `malloc_usable_size`, and a table of
+  synthetic regions stands in for the VM map. It has run on Linux only.
 - `nvk_cgl.c` and `appkit.m` with clang 18 `-fsyntax-only` on Linux against the public macOS 11.3 SDK's own headers
   (`-isysroot`, target `x86_64-apple-macos15.0`, the flags of `build/build_zink.sh`): no diagnostic. This covers
   `nvk_cgl_vm_region`'s call of `mach_vm_region_recurse` and the VM tag names; the 11.3 SDK names tag 13
   `VM_MEMORY_MALLOC_PGUARD`.
+- The card checks' two programs, `tools/card/zink_gl_check.m` and `tools/card/zink_win_check.m` (both include
+  `tools/card/zink_common.h`), with clang 18 `-fsyntax-only` on Linux against the same SDK, with the flags of their
+  rows and Mesa's Vulkan headers: no error, and no warning but three that say `NSOpenGLContext`'s `view` is
+  deprecated, in lines this change does not touch. The shell fragment of the glbench row under sh and bash, with a
+  first line that names Zink, "(null)", another renderer and none.
 - Not checked: `native_drawable.m` (it names `kIOMainPortDefault`, which the 11.3 SDK does not have), a compile with
   Xcode against a current SDK, the real link, running anything; where the recorded builds keep the CGL private object
   and its engine list (`integer_dispatch_slot` has not run on a Mac); when CGL stores `rend` relative to
