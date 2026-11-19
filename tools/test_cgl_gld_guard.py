@@ -8,12 +8,12 @@ own block, past the context's public part or a span of heap memory at no block s
 one per way the layout can differ (each refused, naming what the memory held), with controls. It also feeds
 nvk_cgl_room, the question integer_dispatch_slot asks of the CGL private object and of its engine list,
 nvk_cgl_renderer_reason, the text of the line bridge_current prints when it drops a call, and nvk_cgl_further_engine,
-which says whether an engine is a later engine of a context the adapter has already decided on. zink/nvk_cgl.c compiles
-only against the macOS SDK, so what it does around those checks (what prepare reads before the check, where each
-refusal returns, what is printed and how often, what bridge_current does with a call that came with another engine)
-is checked by reading its text. It touches no GPU, loads no Apple framework and installs nothing, so it is safe to
-run on any Mac; malloc_size has no Linux name, so a shim behind the header's macros uses malloc_usable_size on Linux
-and malloc_size on a Mac, and a table of synthetic regions stands in for the VM map.
+which says whether an engine is a later engine of a context the adapter adopted or left unadopted. zink/nvk_cgl.c
+compiles only against the macOS SDK, so what it does around those checks (what prepare reads before the check, where
+each refusal returns, what is printed and how often, what bridge_current does with a call that came with another
+engine) is checked by reading its text. It touches no GPU, loads no Apple framework and installs nothing, so it is
+safe to run on any Mac; malloc_size has no Linux name, so a shim behind the header's macros uses malloc_usable_size
+on Linux and malloc_size on a Mac, and a table of synthetic regions stands in for the VM map.
 usage: test_cgl_gld_guard.py"""
 import os
 import re
@@ -924,8 +924,32 @@ def main():
         "write": "back[BACK_INDEX(entries[i].offset)] = entries[i].adapter;",
         "redirect": "*(void ***)((char *)engine + GLI_SAVED_DISPATCH) = b->apple_back;"}.items()}
     refusal = braced(body, "if (layout != NVK_CGL_LAYOUT_OK) {")
+    refusal_text = ("if (first_time(&context_refusal_said)) { char why[768]; "
+                    "nvk_cgl_layout_reason(why, sizeof(why), &report); "
+                    'say("OpenGL stays Apple\'s; " LAYOUT_DIFFERS, why); } return 0;')
     check("prepare_gld runs nvk_cgl_check_gld_layout and its refusal block ends in return 0",
           at["check"] >= 0 and refusal.rstrip().endswith("return 0;") and refusal.count("return") == 1, refusal)
+    # Everything prepare does up to the allocation of the bridge, statement by statement: a return or a write to the
+    # reason added anywhere in it would leave a refusal without its line or the line without its reason.
+    head_text = ("EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver) { "
+                 "if (!engine || !driver) return 0; "
+                 "if (nvk_cgl_obs_compatibility_enabled()) return 0; "
+                 "if (native_surface_copy_context()) return 0; "
+                 "unsigned char profile = 0; void *context_ptr = NULL; void **back = NULL; "
+                 "struct nvk_cgl_layout_report report; "
+                 "enum nvk_cgl_layout layout = "
+                 "nvk_cgl_check_gld_layout(engine, GLI_PROFILE, GLI_CGL_DISPATCH, GLI_SAVED_DISPATCH, "
+                 "offsetof(struct _CGLContextObject, disp), sizeof(struct _CGLContextObject), "
+                 "sizeof(GLIFunctionDispatch), &profile, &context_ptr, &back, &report); "
+                 + further_text + " " + refusal_text + " } "
+                 "if (!nvk_zink_screen_ready()) return leave_unadopted(context_ptr, driver); "
+                 "CGLContextObj context = (CGLContextObj)context_ptr; "
+                 "struct nvk_cgl_bridge *b = calloc(1, sizeof(*b)); "
+                 "if (!b) return leave_unadopted(context_ptr, driver); ")
+    check("prepare_gld does nothing else between its first statement and the allocation of the bridge: no other "
+          "return, and no other write to the reason of the refusal line",
+          flat(uncommented(body)).startswith(head_text) and flat(uncommented(refusal)).strip() == refusal_text,
+          flat(uncommented(body))[:len(head_text)])
     check("prepare_gld leaves a call without an engine or without a GLD context alone",
           flat(body).startswith("EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver) { "
                                 "if (!engine || !driver) return 0; "), body[:120])
@@ -968,6 +992,13 @@ def main():
     dropped_line = ("a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for "
                     "the current CGL context")
     said = "".join(re.findall(r'"([^"]*)"', braced(dropped, "if (first_time(&dropped_call_said)) {").split("say(")[-1]))
+    dropped_text = ("if (first_time(&dropped_call_said)) { char why[768]; "
+                    "nvk_cgl_renderer_reason(why, sizeof(why), engine, *(void **)context, thread_bridge->engine, "
+                    "malloc_size(thread_bridge->engine), context, malloc_size(context), GLI_PROFILE, "
+                    "GLI_CGL_DISPATCH, offsetof(struct _CGLContextObject, disp)); "
+                    'say("' + dropped_line + '", why); } '
+                    'fail("The current CGL context\'s renderer is not the GLI engine its bridge was prepared for"); '
+                    "return NULL;")
     check("bridge_current drops a call that does not come with the adopted engine, saying so once per process with "
           "what the call came with, what rend holds and both blocks' sizes",
           dropped.rstrip().endswith("return NULL;") and "if (first_time(&dropped_call_said)) {" in dropped
@@ -975,6 +1006,7 @@ def main():
           "malloc_size(thread_bridge->engine), context, malloc_size(context), GLI_PROFILE, GLI_CGL_DISPATCH, "
           "offsetof(struct _CGLContextObject, disp));" in flat(dropped)
           and said == dropped_line and dropped.count("say(") == 1
+          and re.sub(r'"\s+"', "", flat(uncommented(dropped))).strip() == dropped_text
           and 'fail("The current CGL context\'s renderer is not the GLI engine its bridge was prepared for");'
           in dropped and 0 <= current.find("if (thread_bridge && thread_bridge->engine != engine) {")
           < current.find("materialize(thread_bridge)")
@@ -1023,24 +1055,33 @@ def main():
           and "char unused[1]; if (!why) { why = unused; why_size = sizeof(unused); } char *meta=" in flat(slot_code)
           and len(re.findall(r"\bwhy\s*=[^=]", slot_code)) == 1
           and len(re.findall(r"\bwhy_size\s*=[^=]", slot_code)) == 1 and "sizeof(why)" not in slot_code
+          # the parameter, the two uses in the statement that gives a null one a buffer, and one per reason: nothing
+          # else names the buffer or its size, so nothing else writes a reason or blanks one
+          and len(re.findall(r"\bwhy\b", slot_code)) == 3 + len(slot_reasons)
+          and len(re.findall(r"\bwhy_size\b", slot_code)) == 2 + len(slot_reasons)
           and "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t);" in slot, str(reasons(slot)))
     install = function(cgl, r"static void install_integer_dispatch\(struct nvk_cgl_bridge \*b\)")
     select = function(cgl, r"static bool select_integer_dispatch\(struct nvk_cgl_bridge \*b, bool zink\)")
     placed = braced(install, "      else {")
+    install_reasons = [
+        'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is null");',
+        'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is 0x%jx, which starts no '
+        'heap block",(uintmax_t)(uintptr_t)vector);',
+        'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is a heap block of 0x%zx '
+        'bytes, where the record has one of 0x80 to 0x1000 bytes",bytes);',
+        'snprintf(why,sizeof(why),"dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this '
+        'GLI engine\'s record gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion");']
     check("install_integer_dispatch says once per process, under its own flag, why CGLTexImageIOSurface2D stays "
-          "Apple's in a Zink context: every way that leaves the hook out writes its reason and reaches the line",
+          "Apple's in a Zink context: every way that leaves the hook out, except a failed allocation of the clone, "
+          "writes its reason and reaches the line",
           flat(install).startswith("static void install_integer_dispatch(struct nvk_cgl_bridge *b) { char why[256]; "
                                    "void ***slot=integer_dispatch_slot(b,why,sizeof(why)); if (slot) { "
                                    "void **vector=*slot; size_t bytes=vector && malloc_zone_from_ptr(vector) ? "
                                    "malloc_size(vector) : 0; if (!vector) snprintf(")
-          and reasons(install) == [
-              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is null");',
-              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is 0x%jx, which starts no '
-              'heap block",(uintmax_t)(uintptr_t)vector);',
-              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is a heap block of 0x%zx '
-              'bytes, where the record has one of 0x80 to 0x1000 bytes",bytes);',
-              'snprintf(why,sizeof(why),"dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this '
-              'GLI engine\'s record gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion");']
+          and reasons(install) == install_reasons
+          # the declaration, the buffer and its size handed to integer_dispatch_slot, two per reason and the one in
+          # the line: nothing else names the buffer, so nothing blanks a reason between its write and the line
+          and len(re.findall(r"\bwhy\b", uncommented(install))) == 4 + 2 * len(install_reasons)
           and flat(install).rstrip().endswith(
               "if (first_time(&iosurface_refusal_said)) say(\"CGLTexImageIOSurface2D in a Zink context stays "
               "Apple's; \" LAYOUT_DIFFERS, why); }")

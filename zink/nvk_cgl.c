@@ -616,9 +616,10 @@ static bool named_callback(void *pointer, const char *name)
 /* Runs once for a context, when Zink first serves it. The hook is placed only
  * where the engine's record holds a callback vector that is a heap block of 16
  * to 512 pointers whose entries 4, 6, 9 and 15 dladdr names gliCreateContext,
- * gliDestroyContext, gliSetInteger and gliGetVersion. In every other case the
- * context stays Zink's, CGLTexImageIOSurface2D keeps Apple's handler, and the
- * line says what was found, once for the process. */
+ * gliDestroyContext, gliSetInteger and gliGetVersion, and the clone can be
+ * allocated. In every other case the context stays Zink's and
+ * CGLTexImageIOSurface2D keeps Apple's handler; the line says what was found,
+ * once for the process, except where it was the allocation that failed. */
 static void install_integer_dispatch(struct nvk_cgl_bridge *b)
 {
    char why[256];
@@ -688,8 +689,8 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
    /* Check that the recorded private offsets land in memory shaped as the record
     * says before any read past a pointer or any write through one, and before the
     * Zink screen (a Vulkan instance and an NVK device) exists. On a build whose
-    * layout differs, keep Apple's renderer for this context: return 0, having
-    * written nothing and opened no device. */
+    * layout differs, leave this GLI engine unadapted: return 0, having written
+    * nothing and opened no device. */
    unsigned char profile = 0;
    void *context_ptr = NULL;
    void **back = NULL;
