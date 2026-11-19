@@ -10,10 +10,10 @@
 #ceiling dev dlss 13
 #ceiling dev nvencvt 50
 #ceiling dev nvk 77
-#ceiling dev plugin 225
+#ceiling dev plugin 224
 #ceiling dev translator 53
 #ceiling test all 1
-#ceiling unreviewed all 485
+#ceiling unreviewed all 484
 env	ANGLE_FEATURE_OVERRIDES_DISABLED	internal	unset	2.9	-	a variable of ANGLE (the GL layer of Chrome-family browsers), not of this driver: the plugin adds disableMetalOnNvidia to it, so that ANGLE draws with Metal on this card, and keeps what the process already had there. NVMTL_ANGLE_METAL=0 leaves it alone
 env	DLSS_DUMP	diag	unset	2.9	-	unreviewed
 env	DLSS_MAXL	dev	unset	2.9	-	unreviewed
@@ -101,6 +101,7 @@ env	NVENCVT_ANY_GPU	dev	unset	2.9	-	Developer only (the video library's own over
 env	NVENCVT_BFRAMES	dev	unset	2.9	-	unreviewed
 env	NVENCVT_BT	dev	unset	2.9	-	unreviewed
 env	NVENCVT_CONF	dev	unset	2.9	-	unreviewed
+env	NVENCVT_DEC_HOLD	escape	on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4)	3.0.5	3.2	In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project.
 env	NVENCVT_DEPTH	dev	unset	2.9	-	unreviewed
 env	NVENCVT_DPB_EXTRA	dev	unset	2.9	-	unreviewed
 env	NVENCVT_ENGINE	dev	unset	2.9	-	unreviewed
@@ -167,6 +168,7 @@ env	NVMTL_ASYNC_TEX_UPLOAD	escape	on except in WindowServer (NVMTL_ASYNC_TEX_UPL
 env	NVMTL_B78_DEBUG	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
+env	NVMTL_BLIT_READONLY	escape	on (NVMTL_BLIT_READONLY=0: a buffer with a caller copy that a command buffer used only as a blit copy's source is copied back to the caller's memory at completion, as in 3.0.3)	3.0.4	3.2	A buffer with a caller copy (newBufferWithBytesNoCopy pages the driver copies) that a command buffer used only as the source of copyFromBuffer:toBuffer: or copyFromBuffer:toTexture: is not copied back at completion; any other use in the command buffer still copies it back. From pull request 578 of the original project.
 env	NVMTL_BUFFER_GRACE	dev	unset	2.9	-	unreviewed
 env	NVMTL_BUF_GUARD	dev	unset	2.9	-	unreviewed
 env	NVMTL_BUSY_DONE_EARLY	escape	on (NVMTL_BUSY_DONE_EARLY=0 in the settings file: the done tags and the holds go out at the end of the command buffer, after its scheduled report and its presentations: the done tags as in 2.9, the holds as in 3.0 before this switch)	3.0	3.2	A command buffer that completed writes its surfaces' done tags and closes its surface fence holds before it reports scheduled or hands its drawables over, so WindowServer does not wait for an application that already finished.
@@ -237,6 +239,7 @@ env	NVMTL_GDQ_RESCAP	dev	unset	2.9	-	unreviewed
 env	NVMTL_GDQ_STATS	diag	unset	2.9	-	unreviewed
 env	NVMTL_GPU_ICB	dev	unset	2.9	-	unreviewed
 env	NVMTL_GSUB_HOSTPTR_LIFT	dev	unset	2.9	-	unreviewed
+env	NVMTL_GSUB_HOST_READS	escape	on (NVMTL_GSUB_HOST_READS=0: a part with any caller copy waits for the worker instead of being submitted ahead, as in 3.0.4)	3.0.5	3.2	A part whose caller copies (newBufferWithBytesNoCopy pages the driver copies) are all buffers it only reads, and that no sealed part may have written, can be submitted ahead of the worker; one that a part may write still holds every later reader. From pull request 524 of the original project.
 env	NVMTL_GSUB_INFLIGHT	setting	unset	2.9	-	Low-latency mode (GPU work queued ahead): How many parts of GPU work may be queued ahead, 1 to 32 (default 16). A low number cuts input lag and can cost frame rate. 
 env	NVMTL_HAZARD	dev	unset	2.9	-	unreviewed
 env	NVMTL_HAZARD_DISPATCH	dev	unset	2.9	-	unreviewed
@@ -417,7 +420,10 @@ env	NVMTL_SASS_TABLELOG	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_TEST_CODE	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_TEST_RECORD	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_UPLOADLOG	dev	unset	2.9	-	unreviewed
+env	NVMTL_SCHEDULED_AFTER_SUBMIT	escape	on (NVMTL_SCHEDULED_AFTER_SUBMIT=0: scheduled is reported before the part is handed to the queue, as in 3.0.4)	3.0.5	3.2	A command buffer reports scheduled once the queue has accepted its part and the part's kernel fence is armed, not before the submission, so a scheduled handler that hands a surface to another process runs after something holds it. A command buffer whose first part is empty (one that begins with an event wait) still reports when that part is retired, as in 3.0.4. The worker's report after vkQueueSubmit is from pull request 524 of the original project; the same order in the submit-ahead pass and after the synchronous submit is this tree's.
 env	NVMTL_SCHEDULE_AFTER_SURFACE_WRITES	dev	unset	2.9	-	unreviewed
+env	NVMTL_SCHEDULE_EARLY	escape	on (NVMTL_SCHEDULE_EARLY=0: a command buffer held until its surface writes are published reports scheduled only when it has finished, as in 3.0.4)	3.0.5	3.2	A command buffer held until its surface writes are published reports scheduled as soon as they are, when a later part of it waits for an event (the iOS Simulator waits for one its scheduled handler leads to, and hung). From pull request 524 of the original project.
+env	NVMTL_SCHEDULE_SIMULATOR	escape	on (NVMTL_SCHEDULE_SIMULATOR=0 in the settings file: SimMetalHost and SimRenderServer keep schedule mode 3, as in 3.0.4; no other process changes)	3.0.5	3.2	The iOS Simulator's GPU processes, SimMetalHost and SimRenderServer, publish every surface write before they report scheduled (schedule mode 1, as the Chromium family does), so the simulated screen is not composed from a surface the GPU has not finished. An explicit NVMTL_SCHEDULE_AFTER_SURFACE_WRITES digit still wins. From pull request 524 of the original project (its part P5, which took a token of that setting instead).
 env	NVMTL_SHARED_POOL_VRAM	dev	unset	2.9	-	unreviewed
 env	NVMTL_SHARED_VRAM	dev	unset	2.9	-	unreviewed
 env	NVMTL_SHARED_VRAM_BUDGET_MB	dev	unset	2.9	-	unreviewed
@@ -433,6 +439,7 @@ env	NVMTL_SPVCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVMTL_SPVCACHE_REARM_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFACE_VRAM_PIPE	escape	on (NVMTL_SURFACE_VRAM_PIPE=0 in the settings file: the family VRAM import opens /dev/null with a plain open(), so a process whose sandbox refuses it, as Firefox's do, draws its surfaces through private images and copies, as in 3.0.4)	3.0.5	3.2	A process whose sandbox refuses /dev/null (Firefox's) imports a surface's family VRAM with the read end of an empty pipe as its descriptor, as NVK's own opens there already do, instead of failing the import without a word; a process that may open /dev/null is not changed. From pull request 487 of the original project.
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ZERO	escape	on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0)	3.0.1	3.2	WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0.
@@ -450,7 +457,7 @@ env	NVMTL_TILE_SHADING	dev	unset	2.9	-	unreviewed
 env	NVMTL_TSPOOL_KEEP	dev	unset	2.9	-	unreviewed
 env	NVMTL_TWINURL_NOGUARD_TEST	dev	unset	2.9	-	unreviewed
 env	NVMTL_TYPED_DUMMIES	dev	unset	2.9	-	unreviewed
-env	NVMTL_UNIFORM_CBUF	dev	unset	2.9	-	unreviewed
+env	NVMTL_UNIFORM_CBUF	escape	on (NVMTL_UNIFORM_CBUF=0: GL and ANGLE uniforms stay in the address table, as in 3.0.3, where the promotion never ran)	2.9	3.2	OpenGL (vs_uniform_buffer, fs_uniform_buffer) and ANGLE (ANGLE_userUniforms) uniform buffers that are only read are promoted to an NVK constant bank; it is on since 3.0.4 (pull requests 573, 579 and 580 of the original project). Also read from the settings file.
 env	NVMTL_UNIFORM_CBUF_STATS	diag	unset	2.9	-	unreviewed
 env	NVMTL_VENDOR_COMPILER	dev	unset	2.9	-	unreviewed
 env	NVMTL_VENDOR_PLUGIN_PATH	dev	unset	2.9	-	unreviewed
@@ -460,11 +467,13 @@ env	NVMTL_VRAM_WS_NONIMAGE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO_ALL	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO_NEG	dev	unset	2.9	-	unreviewed
+env	NVMTL_WHOLE_VIEWS	escape	on (NVMTL_WHOLE_VIEWS=0 in the settings file: the shader translator retypes a local variable through any pointer derived from it, a pointer-free local that a helper reads as bytes keeps its declared type, and a parameter read both as its members and as bytes keeps the type it first saw, as in 3.0.4)	3.0.5	3.2	The shader translator retypes a local variable only through a pointer proven to address all of it, makes a pointer-free local that a helper reads as bytes one byte array of the local's size, and gives a pointer parameter read both as a pointer-free struct or array and as bytes one byte array of that size, so such shaders of League of Legends and of apps in the iOS Simulator translate instead of falling back (from pull request 524 of the original project). The plugin adds -wv0 to its shader cache tag when it is 0, so the two modes never share a cached module.
 env	NVMTL_WIT_SKIP_EVERY	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FREE_OFFMAIN	escape	on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0)	3.0.1	3.2	WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager.
 env	NVMTL_WS_FULL	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_NOCOPY_ONCE	escape	on (NVMTL_WS_NOCOPY_ONCE=0: in WindowServer, a newBufferWithBytesNoCopy range mapped read only and private is copied before each submission and written back after it, as in 3.0.4)	3.0.5	3.2	WindowServer's newBufferWithBytesNoCopy ranges that the GPU cannot import and that are mapped read only, privately and with no file or device behind them are copied once when the buffer is made; the copy back into such pages faulted. From pull request 524 of the original project.
 env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_WAIT_COMPLETION	dev	unset	2.9	-	unreviewed
@@ -1039,11 +1048,14 @@ procname	Discord	internal	-	2.9	-	a branch on the process name; not a user switc
 procname	Electron	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	Google Chrome	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	Microsoft Edge	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	SimMetalHost	internal	-	3.0.5	-	a branch on the process name; not a user switch
+procname	SimRenderServer	internal	-	3.0.5	-	a branch on the process name; not a user switch
 procname	VTDecoderXPCService	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	plugin-container	internal	-	3.0.5	-	a branch on the process name, Firefox's child processes, where the video library's decoders keep their last emitted pictures (NVENCVT_DEC_HOLD); not a user switch
 build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS <names> (NVK_EXTRA_PATCHES)"
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver

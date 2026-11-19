@@ -7,6 +7,54 @@
 #import <Metal/Metal.h>
 #import "NVMTLObjects.h"
 #import <IOSurface/IOSurfaceRef.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include "nvmtl_nocopy_once.h"
+_Static_assert(VM_PROT_WRITE == NVMTL_NCO_PROT_WRITE && SM_COW == NVMTL_NCO_SM_COW && SM_PRIVATE == NVMTL_NCO_SM_PRIVATE &&
+               SM_EMPTY == NVMTL_NCO_SM_EMPTY && SM_SHARED == NVMTL_NCO_SM_SHARED && SM_TRUESHARED == NVMTL_NCO_SM_TRUESHARED &&
+               SM_PRIVATE_ALIASED == NVMTL_NCO_SM_PRIVATE_ALIASED && SM_SHARED_ALIASED == NVMTL_NCO_SM_SHARED_ALIASED,
+               "nvmtl_nocopy_once.h no longer has the values of <mach/vm_prot.h> and <mach/vm_region.h>");
+// The mapping region of this task that holds addr, or the first one above it (nvmtl_nocopy_once.h). The basic answer
+// is asked first: it reads the region's map entry only. The extended answer, which says how the region is shared and
+// whether a pager backs it, walks every page of the entry, so it is asked only of a region the basic answer leaves
+// possible (no write access, not shared); the others are refused from the basic answer as they are.
+static int nvmtl_nco_query_task(void *context, uint64_t addr, nvmtl_nco_region *out)
+{
+    (void)context;
+    mach_vm_address_t at = (mach_vm_address_t)addr; mach_vm_size_t size = 0;
+    mach_port_t object = MACH_PORT_NULL;
+    vm_region_basic_info_data_64_t basic; mach_msg_type_number_t bcount = VM_REGION_BASIC_INFO_COUNT_64;
+    if (mach_vm_region(mach_task_self(), &at, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&basic, &bcount, &object) != KERN_SUCCESS)
+        return -1;
+    if (object != MACH_PORT_NULL) { mach_port_deallocate(mach_task_self(), object); object = MACH_PORT_NULL; }
+    out->start = (uint64_t)at; out->size = (uint64_t)size;
+    out->protection = basic.protection; out->share_mode = basic.shared ? NVMTL_NCO_SM_SHARED : 0; out->external_pager = 0;
+    if ((basic.protection & VM_PROT_WRITE) || basic.shared) return 0;
+    mach_vm_address_t start = at; mach_vm_size_t extent = 0;
+    vm_region_extended_info_data_t info; mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+    if (mach_vm_region(mach_task_self(), &start, &extent, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS)
+        return -1;
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    if (start != at) return -1;   // the map changed between the two answers: no answer
+    out->size = (uint64_t)extent;
+    out->protection = info.protection; out->share_mode = info.share_mode; out->external_pager = info.external_pager;
+    return 0;
+}
+// A no-copy range the GPU cannot import that WindowServer has mapped read only, privately: copied once, when the buffer
+// is made (nvmtl_nocopy_once.h says which ranges and why only those). From pull request 524 of the original project,
+// adapted. NVMTL_WS_NOCOPY_ONCE=0: copied before every submission and back after each part, as in 3.0.4. Read once.
+static BOOL nvmtl_nocopy_once(const void *p, NSUInteger n)
+{
+    static int applies = -1;
+    if (applies < 0) {
+        const char *e = getenv("NVMTL_WS_NOCOPY_ONCE");
+        applies = nvmtl_nco_applies(getprogname(), e);
+        if (nvmtl_nco_applies(getprogname(), NULL))
+            nvlog("newBufferWithBytesNoCopy: a range that cannot be imported and is mapped read only %s (NVMTL_WS_NOCOPY_ONCE=%s)",
+                  applies ? "is copied once" : "is copied at every submission", e ? e : "unset");
+    }
+    return applies && nvmtl_nco_range_sealed((uint64_t)(uintptr_t)p, (uint64_t)n, nvmtl_nco_query_task, NULL);
+}
 @implementation NVMTLDevice (Contract)
 - (NSUInteger)doubleFPConfig { return 0; }
 - (NSUInteger)featureProfile { return 10002; }
@@ -102,6 +150,18 @@ static void nvbt(const char *tag, int *count, int max);
         return nil;
     }
     memcpy(b->_b.map, a0, a1);
+    if (nvmtl_nocopy_once(a0, a1)) {
+        // no host pointer: nothing copies to or from the caller's pages again. contents still returns them, and the
+        // deallocator still gets the caller's pointer and length rather than the copy's.
+        b->_callerPages = a0;
+        if (b->_hostDealloc) {
+            void (^user)(void *, NSUInteger) = b->_hostDealloc; void *const caller = a0; const NSUInteger n = a1;
+            b->_hostDealloc = ^(void *p, NSUInteger l) { (void)p; (void)l; user(caller, n); };
+        }
+        { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED ONCE %lu bytes at %p (import alignment %zu): mapped read only and private, never copied again",
+                                              (unsigned long)a1, a0, nvmtl_vk_host_import_align()); }
+        return b;
+    }
     b->_hostPtr = a0; b->_hostLen = (size_t)a1;
     { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED %lu bytes at %p (import alignment %zu) \u2014 resynced at every submission",
                                           (unsigned long)a1, a0, nvmtl_vk_host_import_align()); }

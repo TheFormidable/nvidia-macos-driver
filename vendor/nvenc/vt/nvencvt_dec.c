@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <time.h>
 static double nowms(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e6; }
 
@@ -65,8 +66,30 @@ typedef struct { CMBaseVTable base; const DecoderClass *decoderClass; } DecoderV
 static bool is_mpeg12(FourCharCode c) { return c == kCMVideoCodecType_MPEG2Video || c == kCMVideoCodecType_MPEG1Video; }
 enum { CODEC_VP9 = 0x76703039, CODEC_AV1 = 0x61763031 };   // 'vp09', 'av01' (kCMVideoCodecType_VP9 / _AV1)
 enum { CODEC_HEV1 = 0x68657631, CODEC_AVC3 = 0x61766333 };  // 'hev1', 'avc3': sample entries macOS has no decoder for
-static bool gDLog; static FILE *gDLogF;
-#define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; fprintf(lf_, "nvdecvt: " __VA_ARGS__); fputc('\n', lf_); fflush(lf_); } } while (0)
+static bool gDLog, gDLogAll; static FILE *gDLogF;   // gDLogAll: NVENCVT_LOG=2, a line for every VP9 and AV1 frame
+// Each line starts with the wall-clock time (HH:MM:SS.mmm), so that the log can be set beside what was seen on screen
+// (from pull request 487 of the original project).
+#define DLOG(...) do { if (gDLog) { FILE *lf_ = gDLogF ? gDLogF : stderr; struct timeval tv_; gettimeofday(&tv_, NULL); struct tm tm_; \
+    localtime_r(&tv_.tv_sec, &tm_); flockfile(lf_); \
+    fprintf(lf_, "%02d:%02d:%02d.%03d nvdecvt: ", tm_.tm_hour, tm_.tm_min, tm_.tm_sec, (int)(tv_.tv_usec / 1000)); \
+    fprintf(lf_, __VA_ARGS__); fputc('\n', lf_); fflush(lf_); funlockfile(lf_); } } while (0)
+
+// The pictures a session has emitted stay referenced here for a while (from pull request 487 of the original project).
+// Firefox decodes in one process and draws in another: its media process passes the picture's IOSurface on by number,
+// and its GPU process takes the surface a few milliseconds after the decoder let go of it. Released at once, the pixel
+// buffer could go back to its pool in between and the next picture was written into the one about to be drawn: older
+// or half-written pictures, which the pull request's author saw in Firefox on an RTX 4060 Ti. So in Firefox's processes
+// (plugin-container) each picture is released only when NVDEC_HOLD_PICTURES later ones have been emitted. The pull
+// request held them in every process; elsewhere (the decode service that Safari and QuickTime use, Chromium's GPU
+// process, ffmpeg) nothing showed the need, and the hold would only cost memory: 8 pictures are about 25 MB at 1080p
+// and 100 to 200 MB at 4K, per session. NVENCVT_DEC_HOLD=0 releases every picture at once, as in 3.0.4.
+#define NVDEC_HOLD_PICTURES 8
+static unsigned dec_hold_pictures(const char *env, const char *me)
+{
+    if (env && env[0] == '0') return 0;
+    return me && !strcmp(me, "plugin-container") ? NVDEC_HOLD_PICTURES : 0;
+}
+static unsigned gDecHold;   // dec_hold_pictures for this process, set when the decoders register, before any session exists
 
 typedef struct {
     pthread_mutex_t lock;
@@ -89,6 +112,8 @@ typedef struct {
     // asynchronous output (T8.09): pictures waiting for the output thread (copy, emit, release), in decode order
     struct OutJob { VTVideoDecoderFrame frame; OSStatus res; VTDecodeInfoFlags fl; CVPixelBufferRef pb; int surf, rel; unsigned w, h, cx, cy, usCopy, usEmit; } q[4];
     unsigned qh, qt; bool async, thrOn, stop; pthread_t thr; pthread_cond_t cv;
+    // the last pictures emitted, still referenced here (hold_picture); hold is gDecHold when the session was made
+    CVPixelBufferRef held[NVDEC_HOLD_PICTURES]; unsigned heldNext, hold; pthread_mutex_t heldLock;
 } DState;
 typedef struct OutJob OutJob;
 
@@ -173,6 +198,7 @@ static int open_vp9(DState *s, unsigned w, unsigned h, int depth)
 
 // ---- base object ----
 static void out_drain(DState *s);
+static void hold_release_all(DState *s);
 static OSStatus b_invalidate(CMBaseObjectRef o)
 {
     DState *s = dstate(o); if (!s) return noErr;
@@ -193,6 +219,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
         s->opened = false;
     }
     if (s->fmt) { CFRelease(s->fmt); s->fmt = NULL; }
+    hold_release_all(s);
     if (s->ownPool) { CVPixelBufferPoolRelease(s->ownPool); s->ownPool = NULL; }
     if (s->colour) { CFRelease(s->colour); s->colour = NULL; }
     if (s->frames) DLOG("per frame: decodeFrame %.2f ms (engine %.2f, pool %.2f, copy %.2f, emit %.2f), outside %.2f ms",
@@ -204,7 +231,7 @@ static OSStatus b_invalidate(CMBaseObjectRef o)
 static void b_finalize(CMBaseObjectRef o)
 {
     DState *s = dstate(o); if (!s) return;
-    b_invalidate(o); pthread_cond_destroy(&s->cv); pthread_mutex_destroy(&s->lock); free(s->tmp); free(s);
+    b_invalidate(o); pthread_cond_destroy(&s->cv); pthread_mutex_destroy(&s->heldLock); pthread_mutex_destroy(&s->lock); free(s->tmp); free(s);
     *(DState **)CMBaseObjectGetDerivedStorage(o) = NULL;
 }
 static CFStringRef b_desc(CMBaseObjectRef o)
@@ -592,11 +619,32 @@ static void out_release(DState *s, const OutJob *j)   // lock held
     else h264dec_release(&s->dec, j->rel);
 }
 
+// Takes over the caller's reference to pb; the picture it displaces goes back to its pool. Its own lock: the output
+// thread emits without the session's.
+static void hold_picture(DState *s, CVPixelBufferRef pb)
+{
+    const unsigned n = s->hold;
+    if (!n) { CVPixelBufferRelease(pb); return; }
+    pthread_mutex_lock(&s->heldLock);
+    CVPixelBufferRef old = s->held[s->heldNext % n];
+    s->held[s->heldNext % n] = pb; s->heldNext++;
+    pthread_mutex_unlock(&s->heldLock);
+    if (old) CVPixelBufferRelease(old);
+}
+static void hold_release_all(DState *s)
+{
+    CVPixelBufferRef gone[NVDEC_HOLD_PICTURES];
+    pthread_mutex_lock(&s->heldLock);
+    memcpy(gone, s->held, sizeof gone); memset(s->held, 0, sizeof s->held); s->heldNext = 0;
+    pthread_mutex_unlock(&s->heldLock);
+    for (int i = 0; i < NVDEC_HOLD_PICTURES; i++) if (gone[i]) CVPixelBufferRelease(gone[i]);
+}
+
 static void out_emit(DState *s, OutJob *j)
 {
     const double te = nowms();
     VTDecoderSessionEmitDecodedFrame(s->session, j->frame, j->res, j->fl, j->pb);
-    if (j->pb) CVPixelBufferRelease(j->pb);
+    if (j->pb) hold_picture(s, j->pb);
     j->pb = NULL; j->usEmit = (unsigned)((nowms() - te) * 1000);
 }
 
@@ -676,8 +724,10 @@ static OSStatus decode_vp9(DState *s, VTVideoDecoderFrame frame, const uint8_t *
         s->tPool += nowms() - tp;
         s->frames++;
     }
-    if (gDLog && (s->frames <= 3 || res)) DLOG("decodeFrame %p: %zu bytes, %d frames -> %d, shown %d, status 0x%x, %.2f ms", frame, len, nf,
-                                              (int)res, shown, s->vp9->err_status, s->vp9->engine_ms);
+    // NVENCVT_LOG=2: every frame, with NVDEC's status, to tell a frame the engine did not finish from one shown wrong later
+    if (gDLog && (s->frames <= 3 || res || gDLogAll))
+        DLOG("decodeFrame %p #%u: %zu bytes, %d frames -> %d, shown %d, status 0x%x ok %u err %u, %.2f ms", frame, s->frames, len, nf,
+             (int)res, shown, s->vp9->err_status, s->vp9->ok_blocks, s->vp9->err_blocks, s->vp9->engine_ms);
     j.res = res; j.fl = (!res && shown < 0) ? kVTDecodeInfo_FrameDropped : 0;
     out_deliver(s, &j);
     return res;
@@ -709,8 +759,10 @@ static OSStatus decode_av1(DState *s, VTVideoDecoderFrame frame, const uint8_t *
         s->tPool += nowms() - tp;
         s->frames++;
     }
-    if (gDLog && (s->frames <= 3 || res)) DLOG("decodeFrame %p: %zu bytes -> %d, shown %d, status 0x%x, %.2f ms", frame, len, (int)res, shown,
-                                              s->av1->err_status, s->av1->engine_ms);
+    if (gDLog && (s->frames <= 3 || res || gDLogAll))
+        DLOG("decodeFrame %p #%u: %zu bytes -> %d, shown %d (decoded %d, twin %d), tiles %d, status 0x%x ok %u err %u, %.2f ms", frame,
+             s->frames, len, (int)res, shown, s->av1->dec_surf, s->av1->dec_surf >= 0 ? s->av1->twin[s->av1->dec_surf] : -1, s->av1->ntiles,
+             s->av1->err_status, s->av1->ok_blocks, s->av1->err_blocks, s->av1->engine_ms);
     j.res = res; j.fl = (!res && shown < 0) ? kVTDecodeInfo_FrameDropped : 0;
     out_deliver(s, &j);
     return res;
@@ -934,8 +986,8 @@ __attribute__((visibility("default"))) OSStatus NVDecVT_CreateInstance(FourCharC
     OSStatus st = CMDerivedObjectCreate(al, &gDVT.base, VTVideoDecoderGetClassID(), &obj);
     if (st) return st;
     DState *s = calloc(1, sizeof *s);
-    pthread_mutex_init(&s->lock, NULL); pthread_cond_init(&s->cv, NULL);
-    s->codec = codec;
+    pthread_mutex_init(&s->lock, NULL); pthread_mutex_init(&s->heldLock, NULL); pthread_cond_init(&s->cv, NULL);
+    s->codec = codec; s->hold = gDecHold;
     *(DState **)CMBaseObjectGetDerivedStorage(obj) = s;
     *out = obj;
     DLOG("instance %p (%s)", obj, entry == CODEC_HEV1 ? "hev1" : entry == CODEC_AVC3 ? "avc3" : codec == CODEC_VP9 ? "vp09" : codec == CODEC_AV1 ? "av01" : codec == kCMVideoCodecType_HEVC ? "hvc1" :
@@ -966,8 +1018,11 @@ static NvU32 nvdec_class(void)
 // them all anyway.
 OSStatus NVDecVT_Register(int rating)
 {
-    gDLog = getenv("NVENCVT_LOG") != NULL;
+    const char *lv = getenv("NVENCVT_LOG");
+    gDLog = lv != NULL; gDLogAll = lv && !strcmp(lv, "2");
     if (!gDLog && nvencvt_flag("/tmp/nvencvt.log") == 0) { char p[64]; snprintf(p, sizeof p, "/tmp/nvencvt-%d.log", (int)getpid()); if ((gDLogF = nvencvt_out(p, "a"))) gDLog = true; }
+    gDecHold = dec_hold_pictures(getenv("NVENCVT_DEC_HOLD"), getprogname());
+    DLOG("emitted pictures kept: %u (in plugin-container only; NVENCVT_DEC_HOLD=0 keeps none)", gDecHold);
     if (getenv("NVENCVT_NO_DEC")) return kVTCouldNotFindVideoDecoderErr;
     extern int gNvencvtGpu;   // vt/nvencvt.c: 1 Ada, 2 TU117 (GTX 1650: NVDEC 0xc4b0 has no AV1), 3 GA10x (RTX 30)
     const bool ampere = gNvencvtGpu == 3;

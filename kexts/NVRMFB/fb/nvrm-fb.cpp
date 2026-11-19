@@ -752,6 +752,10 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     bool fSysSlept = false;               // NVRM put the GPU in standby since this framebuffer last powered on
 
     thread_call_t fGpuWake = nullptr;
+    // The attempts made to light the head in this wake, setPowerState(1)'s and gpuWakeFire's (kGpuWakeAttempts at
+    // most). Zero again once the head is lit, once the call gives up or finds nothing to do, and at a GPU standby; one
+    // after setPowerState(1) failed, which starts a new wake's count.
+    volatile SInt32 fGpuWakeTries = 0;
     static void gpuWakeFire(thread_call_param_t p0, thread_call_param_t);
     bool rmGpuReady();
     void familyDidWake();
@@ -5412,8 +5416,12 @@ IOReturn NVRMNVDAFramebuffer::callPlatformFunction(const OSSymbol *functionName,
         if (st == 0) {
             if (fModeSet && fSurf) fHeadSlept = true;   // nvKmsSuspend shuts every head down
             fSysSlept = true;                            // the next power-on is a system wake (familyDidWake)
+            fGpuWakeTries = 0;                           // and the wake after the standby gets every attempt
             FBLOG("GPU going to standby: head %u off with it", fHead);
         } else if (st == 1) {
+            // The count of attempts is left as it is: it is zero after the standby unless setPowerState(1) of this
+            // same wake failed a moment ago, and then its retry runs now and the wake keeps kGpuWakeAttempts in all.
+            // NVRM marks the GPU running before NVKMS has resumed, so that failure may have come from this alone.
             if (fGpuWake) scheduleCall(fGpuWake, 0);
             // Asked for after the head's own wake, which needs the display gate too (the worker holds it for one
             // operation at most). Only a framebuffer whose worker has run before runs it again, so that not every
@@ -5904,6 +5912,10 @@ bool NVRMNVDAFramebuffer::setHeadPower(bool awake)
     FBLOG("display sleep: head %u off -> %s", fHead, ok ? "ok (monitor goes to standby)" : "FAILED (last frame stays)");
     return ok;
 }
+// The attempts to light the head after one wake, setPowerState(1)'s and the GPU wake call's together, and the wait
+// before each retry (gpuWakeFire; from pull request 597 of the original project).
+static const SInt32 kGpuWakeAttempts = 3;
+static const unsigned kGpuWakeRetryMs = 500;
 IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *device)
 {
     FBLOG("setPowerState %lu", (unsigned long)ordinal);
@@ -5912,7 +5924,24 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
         fPowerOn = true;
         // a failed wake stays retryable (fHeadSlept kept) but WindowServer is still told the display is on, as 1.14.7 did:
         // without the notification it never redraws, and the head can sit black with nothing left to retry it (review)
-        (void)setHeadPower(true);
+        // The failure itself used to be dropped. The GPU's own wake work ("NVRMGpuPower" 1, gpuWakeFire) can run before
+        // this call arrives, find fPowerOn still false and leave the head to this call; after a display sleep this call
+        // is the only one that lights the head. Either way nothing tried again, and the display stayed dark while
+        // WindowServer drew. A failure now queues the GPU wake call kGpuWakeRetryMs later (from pull request 597 of
+        // the original project, whose report is a system wake that stayed dark this way). This attempt counts as the
+        // wake's first, so the call makes the others and the wake has kGpuWakeAttempts in all. None of them comes
+        // straight after another failure, unless NVRM reports the GPU back in between ("NVRMGpuPower" 1 runs the
+        // queued call at once): the scanout allocation the pull request names as the usual cause needs time to return.
+        if (!setHeadPower(true)) {
+            if (fGpuWake) {
+                FBLOG("power on: head %u did not light - the GPU wake call tries again in %u ms", fHead, kGpuWakeRetryMs);
+                fGpuWakeTries = 1;   // a new wake, and this was its first attempt
+                uint64_t deadline; clock_interval_to_deadline(kGpuWakeRetryMs, kMillisecondScale, &deadline);
+                scheduleCall(fGpuWake, deadline);
+            } else {
+                FBLOG("power on: head %u did not light and there is no wake call to try again", fHead);
+            }
+        }
         // A system sleep cleared pagingState (IOGraphics' system work, with kIOFBNotifyWillSleep to every client).
         // This override replaces IOFramebuffer::setPowerState, so the family's wake work never runs, and
         // handleEvent() does nothing off the controller's power thread - so no client ever saw kIOFBNotifyDidWake,
@@ -5921,7 +5950,16 @@ IOReturn NVRMNVDAFramebuffer::setPowerState(unsigned long ordinal, IOService *de
         // DidPowerOn too. Only after a real system sleep: at start pagingState is still clear too, and the wake work
         // then sent every client a DidWake at boot.
         if (!pagingState && fSysSlept) { fSysSlept = false; familyDidWake(); }
-        else handleEvent(kIOFBNotifyDidPowerOn);
+        else {
+            // Which of the two conditions sent the power-on here is logged (from pull request 597 of the original
+            // project). With paging on this is a display wake, and DidPowerOn is all it needs. Paging off with no GPU
+            // standby seen is normal at the first power-on after start, once for each framebuffer: the family turns
+            // paging on itself later in the start-up. Only after a system sleep that NVRM did not report does it point
+            // to the hang described above, a WindowServer that waits for paging which nothing here turns on.
+            FBLOG("power on: paging %u, GPU standby seen %u - DidPowerOn only, no family wake work",
+                  (unsigned)pagingState, (unsigned)fSysSlept);
+            handleEvent(kIOFBNotifyDidPowerOn);
+        }
     } else {
         handleEvent(kIOFBNotifyWillPowerOff);
         fPowerOn = false;
@@ -5994,13 +6032,18 @@ IOReturn NVRMNVDAFramebuffer::familyDidWakeGated(void *, void *, void *, void *)
     const SInt32 owed = fWillSleepOff;
     IOReturn r1 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)true);
     IOReturn r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    // The owed DidWake(false) are one synchronous round to every client per sleep since the last full wake, and
+    // WindowServer waits behind them: how long they took is logged (from pull request 597 of the original project).
+    const UInt64 replayStart = nvrmNowNs();
     for (SInt32 i = 1; i < owed; ++i)
         r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    const UInt64 replayMs = (nvrmNowNs() - replayStart) / 1000000ULL;
     IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
     pagingState = true;
     fWakeGate->commandWakeup(&fServerConnect, false);   // IOGraphicsWorkLoop::wakeupGate, as handleEvent(DidWake) does
-    FBLOG("system wake: clients told DidWake true and %d x false (0x%x/0x%x) for %d sleep(s), DidPowerOn (0x%x), "
-          "paging on, WindowServer woken", owed > 1 ? (int)owed : 1, r1, r2, (int)owed, r3);
+    FBLOG("system wake: clients told DidWake true and %d x false (0x%x/0x%x) for %d sleep(s), replay %llu ms, "
+          "DidPowerOn (0x%x), paging on, WindowServer woken", owed > 1 ? (int)owed : 1, r1, r2, (int)owed,
+          (unsigned long long)replayMs, r3);
     fWillSleepOff = 0;
     return kIOReturnSuccess;
 }
@@ -6016,7 +6059,15 @@ bool NVRMNVDAFramebuffer::rmGpuReady()
     return r != kIOReturnNotReady;
 }
 // After NVRM resumed the GPU: commit the mode and the front surface again (NVKMS shut every head down for the
-// standby), unless the display itself is still asleep - then setPowerState(1) does it.
+// standby), unless the display itself is still asleep - then setPowerState(1) does it. setPowerState(1) asks for this
+// call too when its own attempt failed, after a system sleep or a display sleep alike.
+// A failed attempt queues the call again kGpuWakeRetryMs later, up to kGpuWakeAttempts attempts in all: after a system
+// wake nothing else asks for head power, so one failure left the display dark until it slept and woke again. The retry
+// is from pull request 597 of the original project, which names a scanout allocation that is not back yet as the usual
+// cause; it slept 500 ms inside this call and tried once more. Here the call is queued again instead, so that the
+// display gate is not held through the wait: it is one recursive lock for every framebuffer, and the flips, the cursor,
+// mode changes and the video memory worker take it as well. A new wake starts the count again: a GPU standby clears it
+// for the next system wake, and a failed setPowerState(1) sets it to the one attempt that call made.
 void NVRMNVDAFramebuffer::gpuWakeFire(thread_call_param_t p0, thread_call_param_t)
 {
     NVRMNVDAFramebuffer *me = (NVRMNVDAFramebuffer *)p0;
@@ -6024,11 +6075,28 @@ void NVRMNVDAFramebuffer::gpuWakeFire(thread_call_param_t p0, thread_call_param_
     if (OSAddAtomic(0, &me->fStopping)) return;
     NVRMDisplayGate gate; if (!gate.valid()) return;
     if (!me->fHeadSlept || !me->fPowerOn || !me->fModeSet || !me->fSurf) {
+        me->fGpuWakeTries = 0;
         FBLOG("GPU back: head %u left as is (slept %u, power %u)", me->fHead, (unsigned)me->fHeadSlept, (unsigned)me->fPowerOn);
         return;
     }
-    const bool ok = me->setHeadPower(true);   // a rejected wake stays retryable on the next power request
-    FBLOG("GPU back: head %u re-lit -> %s", me->fHead, ok ? "ok" : "FAILED");
+    const SInt32 attempt = OSIncrementAtomic(&me->fGpuWakeTries) + 1;
+    const bool ok = me->setHeadPower(true);   // a rejected wake stays retryable (fHeadSlept kept)
+    if (ok) {
+        me->fGpuWakeTries = 0;
+        if (attempt == 1) FBLOG("GPU back: head %u re-lit -> ok", me->fHead);
+        else FBLOG("GPU back: head %u re-lit -> ok on attempt %d of %d", me->fHead, (int)attempt, (int)kGpuWakeAttempts);
+        return;
+    }
+    if (attempt >= kGpuWakeAttempts) {
+        me->fGpuWakeTries = 0;
+        FBLOG("GPU back: head %u re-lit -> FAILED on attempt %d of %d - left dark until the next power request",
+              me->fHead, (int)attempt, (int)kGpuWakeAttempts);
+        return;
+    }
+    uint64_t deadline; clock_interval_to_deadline(kGpuWakeRetryMs, kMillisecondScale, &deadline);
+    me->scheduleCall(me->fGpuWake, deadline);   // THREAD_CALL_OPTIONS_ONCE: queued to run again after this run returns
+    FBLOG("GPU back: head %u re-lit -> FAILED on attempt %d of %d - trying again in %u ms",
+          me->fHead, (int)attempt, (int)kGpuWakeAttempts, kGpuWakeRetryMs);
 }
 IOReturn NVRMNVDAFramebuffer::setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value)
 {

@@ -1,5 +1,473 @@
 # Changelog
 
+## 3.0.5
+
+**Not released.** This section describes the branch being prepared as 3.0.5, on top of 3.0.4 (below, in the same pull
+request and not released either). It brings into this tree, adapted, three pull requests that are still open in the
+original project (https://github.com/nullmoth/nvidia-macos-driver): 597 by Geek (a display that stays dark after a
+wake), the parts of 487 by dreamelite96 that apply to Firefox, and what 3.0.4 had not taken of 524 by emretascii (its
+commits are signed "Antigravity (local port)"): the shader translator's whole-object views (League of Legends, the
+iOS Simulator), and in the plugin protected video, the 4K 240 Hz WindowServer crash, the order of "scheduled" and the
+Simulator. 596 is left aside. Every change of what runs by default has one way back, a new row of tier escape in
+`tools/switches.tsv`. On an RTX 50, 487 brings no VP9 or AV1 decoding (below). Nothing of 3.0.5 has been built on a
+Mac or run on a card: it was compiled and its host tests were run on Linux only (below, "What ran where").
+
+### Fixes and changes
+
+#### A display that stays dark after a wake (597)
+
+- **A head that does not light at power-on is tried again (597, adapted).** NVRMFB's `setPowerState(1)` threw away the
+  result of its own attempt to light the head. After a display sleep it is the only thing that lights the head, and
+  after a system wake the GPU wake call (`gpuWakeFire`, queued by NVRM's `NVRMGpuPower` 1) can run first, find the
+  framebuffer still powered off and leave the head to it. Either way a failure there was not tried again, and only a
+  failed commit of the mode was logged: the display stayed dark while WindowServer kept drawing (597's report: a system
+  wake whose log ends at "GPU back: head 0 left as is (slept 1, power 0)" and "setPowerState 1"). A failure in
+  `setPowerState(1)` now queues the GPU wake call 500 ms later and counts as the first attempt. A failed attempt of the
+  call queues it again 500 ms later, so a wake gets three attempts in all, whichever of the two makes the first. The
+  count starts again when the head is lit, when the call gives up or finds nothing to do, at a GPU standby, and with a
+  failed `setPowerState(1)`. `NVRMGpuPower` 1 keeps the count: when it comes just after a failed `setPowerState(1)`
+  (NVRM marks the GPU running before NVKMS has resumed), it runs the queued retry at once, and the wake still gets three
+  attempts, not four (`kexts/NVRMFB/fb/nvrm-fb.cpp`). Adapted: 597 queued the call at once from `setPowerState(1)`, then
+  slept 500 ms inside the call and tried once more, which held the display gate through the wait. That gate is one
+  recursive lock for every framebuffer, and flips, the cursor, mode changes and the video memory worker take it too.
+  Here the call is queued again through `scheduleCall` with a deadline (`THREAD_CALL_OPTIONS_ONCE`, as the video memory
+  worker does). Also from 597, two log lines: which branch a power-on took (`power on: paging N, GPU standby seen N`;
+  with 0 and 0 it is normal at the first power-on after start, once for each framebuffer), and how long a system wake's
+  replay of the `DidWake(false)` owed beyond the first took, one for each further sleep since the last full wake
+  (`replay N ms` in the `system wake:` line; the first is not timed, so after a single sleep it says 0 ms). Not taken
+  from 597: moving `pagingState` and WindowServer's wakeup ahead of that replay. That change would affect every system
+  wake. The replay already runs under the IOGraphics work loop gate that WindowServer sleeps on, so moving the wakeup
+  earlier gives it nothing until the gate is let go. It could also let WindowServer in before the accelerators are
+  enabled again. The new `replay N ms` line will show whether that replay, after several sleeps, is ever slow enough to
+  matter. 597's `tools/test_nvrmfb_wake_order.py` is not taken with it. `docs/SLEEP-WAKE.md` describes the path ("A head
+  that does not light").
+
+#### Firefox (487)
+
+- **Firefox's sandbox no longer leaves the video library and the plugin's surface imports without a descriptor (487).**
+  Firefox's sandboxes refuse `/dev/null`. libnvencvt bound each of its kernel connections to the descriptor that open
+  returned, -1 there, which the kernel takes as "detached", and went on with it; `rm_fd_token` (`vendor/nvenc/src/rm.c`)
+  now gives the read end of an empty pipe when the open is refused (EPERM, EACCES), and when no descriptor can be had at
+  all the connection is closed and the open fails, with a line on standard error. On RTX 30 and 40, where the plugin
+  registers libnvencvt by default in every process that creates a Metal device (`nvmtl_nvencvt_selected`,
+  `plugin/NVMTLDevice.m`), this is what lets its decoders run in Firefox's sandboxed processes: bound to -1, all of the
+  library's connections had the same number, the kernel finds the connection that a mapping or an event names by that
+  number (`nv_xnu_lookup_fd`, the first one), and a session could not start. Where the library has registered in a
+  Firefox process, VP9 and AV1 (on RTX 40 also H.264 and HEVC) now go to its hardware decoders by default; this has not
+  run with Firefox here. On RTX 50 the library registers only in the decode service, so this changes nothing there. The
+  plugin's import of a surface's family VRAM (`nvmtl_vk_surface_vram_words`, `plugin/nvmtl_vk.c`) opened `/dev/null`
+  with a plain `open()`, failed there without a word and left the surface on a private image and its copies; it now
+  opens it with `nvmtl_icd_open` (`plugin/nvmtl_fd_token.h`), as NVK's own opens already did, and logs the import it
+  could not make when even that fails. This is the one change of the group that acts on an RTX 50 by default: in a
+  Firefox process whose sandbox refuses `/dev/null` and that draws with Metal, IOSurface textures now live in the
+  surface's own video memory, as in every other process, instead of private images and their copies. No sandboxed
+  Firefox process has run that path here, so it has one way back, `NVMTL_SURFACE_VRAM_PIPE=0`. The library keeps a copy
+  of the fallback of its own: `vendor/nvenc` is MIT and the plugin's header is not.
+- **In Firefox's processes the video library keeps each picture it emitted until eight later ones are out (487,
+  adapted; `NVENCVT_DEC_HOLD=0` turns it off).** Firefox's media process passes a decoded picture's IOSurface on by
+  number and its GPU process takes it a few milliseconds later; the pull request's author saw the pool hand the pixel
+  buffer out again in between, and older or half-written pictures, on an RTX 4060 Ti. `vendor/nvenc/vt/nvencvt_dec.c`
+  holds the reference in a ring of eight per session (its own lock; released when the session is invalidated, after
+  the output thread has ended and before the session's pool). The pull request held `NVDEC_HOLD` pictures (0 to 16,
+  default 8) in every process and took the count from a variable read on each session's start; here the count is
+  fixed, the switch is read once when the decoders register, and the hold is kept to `plugin-container`, where the race
+  was seen. Elsewhere (the decode service that Safari and QuickTime use, Chromium's GPU process, ffmpeg) nothing has
+  shown it, and the hold would only cost memory: about 25 MB per 1080p session, 100 to 200 MB at 4K.
+- **The VP9 and AV1 decoders keep NVDEC's count of blocks in error, and their log says it (487).** `err_blocks` in
+  `src/vp9dec.c` and `src/av1dec.c`; the decode log lines print it with the frame's number (AV1 also the decoded
+  surface, its film-grain twin and the tiles), `NVENCVT_LOG=2` logs every VP9 and AV1 frame instead of the first three
+  and the errors, and each line of the decoders' log starts with the time of day.
+- **The shared import cache gives an 8 GB card the large card's limit (487).** With `NVMTL_SURF_IMPORT_CACHE=1` (off by
+  default) surfaces up to 64 MB are kept on a card with 7 GiB of VRAM or more, 16 MB below: the line was 8 GiB, and an
+  8 GB card reports a little less (an RTX 4060 Ti 8188 MB), so it got 16 MB and the 4K and 5K surfaces WindowServer
+  composites were left out (`plugin/NVMTLDevice.m`).
+- `docs/WINDOWS-PARITY-MEDIA.md` has a Firefox section: what NVEncVT offers it on RTX 30 and 40, these changes, and that
+  on RTX 50 none of this brings VP9 or AV1 decoding (NVEncVT does not register those decoders on Blackwell; Firefox
+  decodes them in software as before), while Firefox's H.264 there stays on the driver's own decoder.
+  `vendor/nvenc/SOURCE` lists the library's changes.
+- Not taken from 487: the launcher `tools/firefox-nvdec` (it preloads a small loader, `libnvencvt-loader.dylib`,
+  into every Firefox process with `DYLD_INSERT_LIBRARIES`, which works only because the driver's AMFI boot arguments
+  let Firefox's runtime accept it; the loader opens the library only in the processes `NVENCVT_INJECT_ONLY` names,
+  `plugin-container`, and that variable would be a switch to set to get the decoders, which the switch registry
+  refuses); compiling the `/tmp` diagnostics out behind `NVENCVT_TMP_DIAGNOSTICS`
+  (this tree honours a flag file only when root made it and writes its outputs without following links, 0600,
+  `vt/nvencvt_diag.h`), with the bound of the barcode check that came in the same hunk; compiling out the renaming of
+  the encoders' names behind `NVENCVT_REGISTRY_RENAME` (it would take away the names apps show for a working path
+  that has `NVENCVT_NO_RENAME` already, and has nothing to do with Firefox); `docs/NVENCVT.md`, which this tree does
+  not have. Zink's presentation (`zink/nvk_present.c`) and the nvk-bridge (`tools/nvk-bridge/bridge.mm`) open
+  `/dev/null` the same way, but there the fallback alone would not help: their copy of NVK opens `/dev/null` for its own
+  kernel connections with nothing rebound, so in such a sandbox Zink gets no device and leaves the context with
+  Apple's renderer before it imports anything.
+
+#### The shader translator: League of Legends and the iOS Simulator (524)
+
+- **The shader translator retypes a local variable only through a pointer proven to address all of it (524, League
+  of Legends).** `infer_local_alloca_pointees` (`translator/translator/src/native/ir/alloca.rs`) let a GEP through any
+  pointer derived from a local offer its source type as the local's own type: a pointer to one member, a dynamic
+  offset, or a phi with a null or unknown arm. A member array as large as the struct around it (a matrix's columns)
+  could then replace the struct's storage. Now a new graph of whole-object aliases (`whole_object_aliases`: identity
+  casts, GEPs whose only index is zero, and phis whose every arm is a local pointer, followed through loops) must
+  prove that the pointer addresses the whole of exactly one local, and that every pointer on the way leads back to
+  that local. Only then does the pointer retype the local. Those proven pointers also count for the two rules that 3.0.4
+  applied only to the local and its identity casts: a load or store through a zero-index GEP or such a phi that reads
+  the local's float3 rows or a shorter vector wide now retypes the local, and so does a helper that takes such a
+  pointer. And a helper's byte view of a whole local that holds no pointers now makes the local a byte array of its
+  size (`infer_local_alloca_pointees`, at the call). That is what the iOS Simulator's shaders need: without it the
+  translator of 3.0.4 refused six of the ten Simulator fixtures of 524 (a union of scalars, vectors or 32-bit words,
+  read by a helper through a byte view at a dynamic index): "a struct member index must be an OpConstant", and the
+  shader fell back. All ten now translate and pass the validator (`translator/wrapper/tests/simulator_owned.rs`). On
+  the tree's other fixtures nothing changes: 128 of the 130 modules that 3.0.4 produced come out byte for byte the
+  same. The other two (one Simulator fixture, translated as a kernel and with the stage detected) come out different
+  but still valid. The 12 modules 3.0.4 did not produce are the six Simulator fixtures that now translate, each under
+  both stages. The rule and its 21 unit tests come from pull request 524 of the original
+  project (its part T3), unchanged but for formatting; the tests are in `native/ir/whole_view_tests.rs`.
+- **A pointer parameter read both as a pointer-free struct or array and as bytes gets one byte array of that size
+  (524).** `infer_pointer_pointees` (`native/ir/pointer_pointees.rs`) gave up on such a parameter or kept the type it
+  saw first. Now, when every aggregate view of the parameter has one size, the parameter gets a byte array of that
+  size. This is not limited to helpers: it applies to every pointer parameter of every function, a kernel's own
+  device, constant and threadgroup buffer arguments included, in place of their metadata type, and the unit tests
+  have no such buffer. A pointee that holds pointers, or one whose declared size (`air.arg_type_size`) is a different
+  size, stays as it was. A typed pointee of the same size that holds no pointers and came from the function's own
+  GEPs now also gives way to a callee's pure byte image of the object, as one from metadata already did in 3.0.4 (that
+  case does not depend on the switch). None of the ten Simulator fixtures needs this rule: their helpers read the
+  union only as bytes, and the rule above makes them translate.
+- **Not taken from 524:** the emitter half of its part T4. That half gives a pointer select deferred typed arms and a
+  branched load per select, and rewrites raw select and GEP chains (`native/emitter/pointers/raw_select.rs`,
+  `select_gep.rs`). Four of its select fixtures were left out with it. On this tree it breaks 11 translator tests
+  that pass without it, two of them with translation errors: 3.0.4 loads both arms of a pointer select and selects
+  the value, and those tests hold that. 524's `raw-select-then-gep` fixture has the same shape as one of them, so no
+  narrower version satisfies both. 524's parts T1 (strict `native_powr`) and T2 (scalar atomics on a threadgroup
+  argument's root) were already in this tree, and T2's test passes on it unchanged.
+
+#### Metal: protected video, WindowServer at 4K 240 Hz, the order of "scheduled", the iOS Simulator (524)
+
+- **A protected IOSurface (DRM video) whose pixels live in its own VRAM is published on the GPU side instead of failing
+  the command buffer (524, P3, adapted).** Such a surface gives the process no CPU mapping (`IOSurfaceGetBaseAddress`
+  is NULL), so `nvmtlSurfaceOutDirtied:` could never copy it out and the command buffer failed with "Could not publish
+  event segment writes". When the surface's family VRAM is on (`_vramOn`), it is now marked newest in the kernel as any
+  other surface is, after the GPU copy of a tiled image into it. Two parts of P3 are not taken as written: it also
+  returned YES for a protected surface drawn through a private image and for one whose VRAM mark the kernel refused,
+  which would leave the surface's old pixels in place without a word. Both still fail here, as in 3.0.4, now with a log
+  line that names the surface as a protected one (`nvmtlSurfaceCopyable` says so too). P3 also skipped the GPU copy of a
+  tiled image; it is kept. No switch: nothing that worked before changes.
+- **WindowServer's no-copy buffers that cannot be imported and are mapped read only are copied once (524, "fix 4K 240 Hz
+  WindowServer crash", adapted; on, `NVMTL_WS_NOCOPY_ONCE=0` turns it off).** In 3.0.4 such a buffer is copied from the
+  caller's pages before every submission and written back after every part that may have written it; the write back into
+  read-only pages faults, and in WindowServer that is a crash. The pull request copied every such range of WindowServer
+  once and handed WindowServer the driver's copy. Nothing in this tree shows how WindowServer fills those pages, and if
+  it wrote them after making the buffer the GPU would draw stale bytes with no message, so this takes it only where
+  nothing can write them behind the driver's back: every page of the range is mapped without write access, privately
+  (copy-on-write or private, not shared, not aliased, not "empty") and with no file or device pager, as `mach_vm_region`
+  reports it (`plugin/nvmtl_nocopy_once.h`). The basic answer (`VM_REGION_BASIC_INFO_64`) is asked first, and the
+  extended one, which walks the region's pages, only for a region that the basic answer leaves possible (read only, not
+  shared): a writable range costs one cheap call. It relies on WindowServer not making those pages writable again and
+  writing them while the buffer lives. Such a buffer keeps no caller copy (`_hostPtr`): it is not copied at any
+  submission, and a WindowServer part that uses it is no longer held for the worker but can be submitted ahead, with
+  `NVMTL_GSUB_HOST_READS=0` too; `NVMTL_WS_NOCOPY_ONCE=0` holds those parts again. `-contents` still returns the
+  caller's pointer, the deallocator still gets the caller's pointer and length, and the buffer stays non-purgeable.
+- **A part whose caller copies are all buffers it only reads, and that no sealed part may have written, is submitted
+  ahead (524, adapted; on, `NVMTL_GSUB_HOST_READS=0` turns it off).** In 3.0.4 any caller copy (`_hostPtr`) held the
+  part for the worker. A buffer that a sealed part may write is now marked at the seal (`_gpuWritten`, never cleared),
+  and the submit-ahead pass asks again at every try, under the class lock, whether one of the part's read-only caller
+  copies has been marked since. The pull request decided once, when the part was prepared, so a writer sealed after the
+  reader could have its write in flight under the reader's copy in. A caller copy reached through a texture, a heap or
+  a texture alias still holds, as does any part whose resources are not a tracked set.
+- **"Scheduled" is reported once the queue has accepted the part and its kernel fence is armed (524, in part; on,
+  `NVMTL_SCHEDULED_AFTER_SUBMIT=0` turns it off).** In 3.0.4 it was reported before the submission (in the worker before
+  the copies in too, in the submit-ahead pass right after them), so a scheduled handler that hands a surface to another
+  process could run before anything held it. The worker's order is 524's; the same order in the submit-ahead pass and
+  after the synchronous submit is this tree's. A part the queue refused is still reported, by the worker, before its
+  command buffer fails, and a command buffer whose first part is empty (one that begins with an event wait) still
+  reports when that part is retired, as in 3.0.4.
+- **The iOS Simulator's GPU processes publish every surface write before they report "scheduled" (524, P5, adapted).**
+  `SimMetalHost` and `SimRenderServer` get mode 1 of `NVMTL_SCHEDULE_AFTER_SURFACE_WRITES` by process name, as the
+  Chromium family does (`plugin/nvmtl_schedule_policy.h`); P5 asked for a `simulator` value of the switch instead, which
+  is not taken. An explicit digit still wins, and `NVMTL_SCHEDULE_SIMULATOR=0` (new) keeps the two on mode 3.
+- **A command buffer held until its surface writes are published reads the hold under its completion lock, and
+  reports "scheduled" as soon as those writes are published when a later part of it waits for an event (524, P5,
+  adapted; on, `NVMTL_SCHEDULE_EARLY=0` turns the early report off).** Held to the end, a command buffer whose later
+  part waits for an event that only a command buffer committed from its scheduled handler signals never finished (the
+  Simulator does this). P5 reported early whenever no later part held; here the early report also needs a later event
+  wait (so a reader handed a surface from the scheduled handler does not find its busy tag still pending), and in
+  WindowServer it waits while a texture of the command buffer is still deferred for another holder or a later part
+  writes any surface. The hold was read before the lock in 3.0.4; it is now set by the seal and read and released
+  under the completion lock.
+- Not taken from 524: P1 (the surface import cache of 128 slots with its kept host pages), P4, its deallocator
+  changes, its read-only blit copy back (578 already brought that, in 3.0.4), P6 and the submit-ahead scan from
+  `_nextSubmit`, P8, its skip of the first copy of non-WindowServer no-copy buffers of 1 MiB or more, and the copy once
+  of writable or shared WindowServer pages.
+
+### The ways back
+
+- None for 597: the retry runs only after an attempt to light the head has failed. When the head lights, the only
+  change is log lines: one more line for each power-on that does not do the family's wake work, and `replay N ms` in
+  the system wake line. No switch was added.
+
+- `NVMTL_SURFACE_VRAM_PIPE=0` (a line of `nvrm610.conf`; new, tier escape, row in `tools/switches.tsv`): the plugin's
+  family VRAM import opens `/dev/null` with a plain `open()` again, so a process whose sandbox refuses it draws its
+  surfaces through private images and copies, as in 3.0.4. The way back from the import alone is narrower than
+  `NVMTL_NO_SURFACE_SHARE=1`, which turns surface sharing off in every process. Whether a sandbox that refuses
+  `/dev/null` lets the plugin read `nvrm610.conf` has not been checked.
+- `NVENCVT_DEC_HOLD=0` (environment, or a line of the root-owned `/usr/local/etc/nvencvt.conf`; new, tier escape, row
+  in `tools/switches.tsv`) releases every decoded picture when it is emitted, in Firefox's processes too, as in 3.0.4.
+
+The library's connections in such a sandbox have no switch of their own: `NVMTL_NVENCVT=0` (not new) turns the
+library off in every process. 487's other changes have no switch either: they correct what was there (a limit that
+missed the cards it named, a log without the engine's error count).
+
+- `NVMTL_WHOLE_VIEWS=0` (the settings file; new, tier escape, row in `tools/switches.tsv`) turns both translator changes
+  off. Any pointer derived from a local then retypes it, a pointer-free local that a helper reads as bytes keeps its
+  declared type, and a parameter's mixed views keep the type they had, as in 3.0.4. The translator reads the variable
+  once per process (`translator/translator/src/native/view_switches.rs`), by the first byte of its raw value, as the
+  plugin reads it, so a value that is not UTF-8 means the same to both. When it is 0 the plugin adds `-wv0` to its
+  shader cache tag (`nvmtl_spvcache_escape_tag` in `plugin/nvmtl_spvcache_name.h`, called from `nvmtl_xlate_ready` in
+  `plugin/NVMTLLibraryLoad.m`), so the two modes never share a cached module. If the tag with its mark does not fit, the
+  shader cache is off for that process, as when the mode marks (`nvmtl_spvcache_mode_tag`) do not fit. With it at 0, the
+  translator gives exactly the bytes of 3.0.4 on every `.ll` fixture of the tree, and refuses the same 30 translations.
+
+- `NVMTL_WS_NOCOPY_ONCE=0` (the settings file; new, tier escape) copies WindowServer's read-only no-copy ranges before
+  each submission and writes them back, as in 3.0.4.
+- `NVMTL_GSUB_HOST_READS=0` (the settings file; new, tier escape) holds every part with a caller copy for the worker, as
+  in 3.0.4.
+- `NVMTL_SCHEDULED_AFTER_SUBMIT=0` (the settings file; new, tier escape) reports "scheduled" before the submission, as
+  in 3.0.4.
+- `NVMTL_SCHEDULE_EARLY=0` (the settings file; new, tier escape) keeps a held command buffer's "scheduled" until it has
+  finished, as in 3.0.4.
+- `NVMTL_SCHEDULE_SIMULATOR=0` (the settings file; new, tier escape) puts `SimMetalHost` and `SimRenderServer` back
+  on mode 3, as in 3.0.4, and changes no other process. `NVMTL_SCHEDULE_AFTER_SURFACE_WRITES=3` does it too, but for
+  every process, the Chromium family's included.
+
+The protected-surface publication and the hold read under the lock have no switch: the first only changes a path that
+always failed, the second corrects an unlocked read.
+
+### What ran where
+
+Each group was ported and tested on a tree of 3.0.4 (the branch at e3ea9d6b; called 3.0.4 below), before the
+review fixes of 0db28f63 and the merge with `fable` at 2976003c, where `tools/test_switch_registry.py` still
+reported the boot argument `nvgpucaps` without a row. The last part gives the runs on the branch with all of it.
+
+#### 597
+
+- 597, on Linux only; nothing was built on a Mac or taken through a sleep or a display sleep on a card.
+  `tools/test_display_power_retry.py` is extended as 597 extends it, with the delay changed: a failed power-on queues
+  the wake call 500 ms later and counts its own attempt. It also checks that a lit head and a wake before the GPU has
+  resumed queue nothing, a failed system wake, and a framebuffer without a wake call. The new
+  `tools/test_gpu_wake_retry.py` compiles `gpuWakeFire`, the `NVRMGpuPower` 0 branch and the lines of the 1 branch that
+  queue the wake call, as they are, and checks the retry 500 ms later, the limit of three attempts (also after a failed
+  `setPowerState(1)`, and when `NVRMGpuPower` 1 follows one), the count starting again (on success, on giving up, at a
+  GPU standby), and that nothing waits under the display gate. Both tests pass on this branch and fail on 3.0.4
+  (`--baseline e3ea9d6b`). They also fail on 597's own commit (b93d8ac0, `--baseline upstream/pr597`), which queues the
+  call at once and sleeps under the gate. `build/kext_check.sh` (clang 18 with Apple's kext warning groups, MacKernelSDK
+  headers, the NVIDIA 620.70.06 tree with this repository's patches): all 31 units compile as on 3.0.4, NVRMFB has 0
+  warnings and imports the same 512 symbols, and every import is provided by macOS 15 and 26. Through
+  `tools/run_all_tests.py`: the 59 `tools/test_*` that read `nvrm-fb.cpp` (`tools/test_display_power_retry.py` among
+  them), `tools/test_gpu_wake_retry.py`, `tools/test_irq_timer_wiring.py` and `tools/test_rtd3_hold.cpp` (they cover
+  NVRM's own `setPowerState` in `kexts/NVRM/NVRM.cpp`, which 597 does not change, the second through a copy of it), and
+  the CI's switch and kext checks: 66 tests on this branch and 65 on 3.0.4. All pass on both except
+  `tools/test_switch_registry.py` (the row of `nvgpucaps`, above). Not run: `tools/card_selftest.py` (it needs a card).
+  `tools/check_nvrmfb_backlight_target.py` and `tools/check_nvrmfb_display_audio_mapping.py` read the file too, but
+  `run_all_tests.py` does not run them, and they fail the same way on 3.0.4 and on this branch (out of date). 597's
+  author tested their version, not this one, on an RTX 3080 with macOS 26.7.3 over 20 sleep and wake cycles.
+
+#### 487
+
+On Linux only (x86_64, clang 18); nothing of this has been built on a Mac or run on a card, and nothing of it has run
+with Firefox. libnvencvt was not compiled whole: there is no macOS SDK and no open-gpu-doc tree here.
+
+- Four new host tests, each run with this change and on the base (the staged 3.0.4 tree, and HEAD e3ea9d6b): all
+  pass with it and fail without it. `tools/test_surface_vram_fd.py` (the plugin's import under a sandbox that refuses
+  `/dev/null`, with the pipe failing, with NVK refusing the import, and no descriptor left open; run again with
+  `NVMTL_SURFACE_VRAM_PIPE=0`, where the plain `open()` is back, and with `=1`; a copy whose switch did nothing failed
+  it),
+  `tools/test_nvencvt_rm_fd.py` (the library's connections the same way; nothing bound and the connection closed when
+  there is no descriptor), `tools/test_nvencvt_dec_hold.py` (the hold in `plugin-container`, at `NVENCVT_DEC_HOLD=0` and
+  in other processes, two threads emitting into one session, also under ThreadSanitizer; the log lines compiled with
+  `-Wformat=2 -Werror`; `err_blocks`; the wiring) and `tools/test_import_cache_limit.py`. Each compiles the functions
+  it checks from the source as they are.
+- `vendor/nvenc/src/rm.c` was also compiled whole (`-fsyntax-only -Wall -Wextra -Wshadow`) against
+  open-gpu-kernel-modules 620.70.06 and a stand-in for IOKit: no diagnostic, as on the base.
+- The tests that read the changed files, or the registry (135 with the four new ones, through `tools/run_all_tests.py`):
+  121 pass, 2 are skipped (`test_h264_kat_selftest.py` and `test_nvenc_parsers.py` need NVIDIA's headers), 2 are not
+  run (no build line), and 10 fail as they fail on the base on this machine: six need macOS headers (`libproc.h`,
+  `mach/mach.h`), `test_nvencvt_diag.py` runs as root, `test_build_sh.py` fails its arm "a changed NVRM patch re-runs
+  the RM" as on `fable`, `test_evwait_wiring_kernel.py` fails "selector 7 answers both bits" in kernel code this group
+  does not touch (the same on an export of the base), and `test_switch_registry.py` reports only the boot argument
+  `nvgpucaps` without a row, which `fable` already has. `test_nvencvt_blackwell.py` caught a comment that named the
+  registering function a second time; it was reworded.
+
+#### 524, the translator
+
+On Linux only (x86_64, rustc and cargo 1.97.0, gcc 13 and clang 18, `cargo --offline`). Nothing of this was built on
+a Mac or run on a card. SPIR-V was checked with the validator of the `spirv-tools` crate (Vulkan 1.2), standing in
+for `spirv-val`.
+
+- `tools/test_translator_whole_views.py` (new) runs the 21 unit tests of 524, the 2 tests of the way back and the
+  switch's own 2 tests with cargo: 25 pass on this branch. With `--baseline e3ea9d6b` it runs 524's tests on the
+  translator of 3.0.4: 8 of 21 fail, so the test fails (`--baseline` alone means HEAD, which on this branch already
+  has the change). The baseline is built in a cargo folder of its own
+  (`<target>/whole-views-baseline`), so a plain run after it, or a plain `cargo test`, still runs this tree's tests:
+  checked here in that order (plain, baseline, plain: 25 pass, 8 fail, 25 pass). It skips (exit 2) without cargo or
+  without the crates offline.
+- `tools/test_xlate_cache_tag.py` (new) compiles the tag statements of `nvmtl_xlate_ready` as they are and runs them:
+  12 checks pass (`-wv0` for 0, 00 and a value that is not UTF-8 but starts with the byte 0, after `-td1`; no mark for
+  1, empty, off or " 0"; untagged without a translator, and when the mark does not fit). On 3.0.4 5 of them fail. It
+  also fails when the call is moved below the line that gives up without a translator.
+- `translator/wrapper/tests/simulator_owned.rs` passes on this branch; on 3.0.4, and here with `NVMTL_WHOLE_VIEWS=0`,
+  6 of its 10 fixtures fail. 524's T2 test (`workgroup_atomic_root.rs`, not added) passes 2 of 2 on 3.0.4 and here.
+- `cargo test --no-fail-fast` in `translator/translator`: 2507 pass, 27 fail. 3.0.4 gives 2482 pass and the same 27
+  failures, each at the same line: 24 corpus and reflection tests, most of which say they found almost nothing to
+  read in `validation/fixtures/public` (5 fixtures in this checkout), and 3 `psb_value_select` tests whose module is
+  SPIR-V 1.6, which the stand-in validator refuses under Vulkan 1.2. With `NVMTL_WHOLE_VIEWS=0`: 2499 pass, and the
+  same 27 fail plus the 8 of 524's tests that hold the new rule. In `translator/wrapper`: 52 pass, 2 ignored, and 2
+  fail as on 3.0.4 (`ca_named_modules_validate` and `compositor_pixel_sampler_spirv_validates`: they read shader
+  files from the relative path `$HOME/nvmtl-tests/...`, which Rust does not expand, so they fail on any machine).
+- Every `.ll` file of the translator (80), translated as a kernel and with the stage detected, by the CLI of 3.0.4
+  and by this branch with the switch at 0 and unset: the switch at 0 gives the bytes of 3.0.4 on all 130 modules and
+  the same 30 refusals. With the switch unset, only the Simulator fixtures change (above): 128 of 3.0.4's 130 modules
+  are the same, 2 differ, 12 are new, and 18 translations are refused.
+- `tools/test_app_profile.c` (four new checks of the `-wv0` mark, also with AddressSanitizer and UBSan): 60 pass. On
+  3.0.4 it does not build, because `nvmtl_spvcache_escape_tag` does not exist there.
+- `tools/switch_registry.py check` and `tools/run_all_tests.py test_switch_registry test_switch_report
+  test_kext_check test_ci_workflow test_sysctl_allowlist`: 4 of 5 pass, and
+  `test_switch_registry` reports only the row of `nvgpucaps` (above).
+- The tools tests that read the changed files (17, through `tools/run_all_tests.py`): 15 pass.
+  `tools/test_spvcache_dir.py` and `tools/test_aircache_dir.py` fail the same way on 3.0.4: they run as root here,
+  and root can write to the folders they make read-only. `tools/test_fcwarm.py` needs a built translator library and
+  was not run.
+
+#### 524, the plugin
+
+On Linux only (x86_64, clang; the Objective-C tests through libobjc2 and gnustep-base, not Apple's Foundation);
+nothing of this has been built on a Mac or run on a card, and neither the 4K 240 Hz crash, a DRM video, nor the iOS
+Simulator has been tried.
+
+- Five new host tests, each run on this branch and on 3.0.4 (the staged tree): `tools/test_protected_surface_out.py`
+  (P3), `tools/test_nocopy_once.py` (the copy once, with real read-only pages, a file mapping and the copy back's fault;
+  the region query reads /proc/self/maps on Linux and calls `mach_vm_region` on a Mac; a writable range never asks for
+  the extended answer), `tools/test_host_reads_ahead.py` (the read-only submit-ahead, the re-check after a later seal
+  and the place of "scheduled", on the production `NVMTLResSet`, `-nvmtlSubmitAhead` and `-nvmtlAdvancePart`),
+  `tools/test_schedule_hold.py` (the hold under the lock, with a second thread, and the early report) and new arms of
+  `tools/test_schedule_policy.c` (the Simulator, and `NVMTL_SCHEDULE_SIMULATOR=0`). All pass on this branch, with each
+  switch on and off, and fail on 3.0.4.
+- The tests that read the changed code pass: `tools/test_submission_copies.py` (adapted to the new fields) and
+  `tools/test_fence_wiring_plugin.py` (adapted to the hold released under the lock), `tools/test_readonly_copyback.py`,
+  `tools/test_bytes_dup_seal.py`, `tools/test_surface_publication.py`, `tools/test_surface_alloc_bound.py`,
+  `tools/test_surfin_zero.py`, `tools/test_surfin_zero_plugin.py`, `tools/test_surface_queue.py`,
+  `tools/test_surf_planes_plugin.py`, `tools/test_host_buffer_release.py`, `tools/test_resset_lifetime.py`,
+  `tools/test_resset_seal.py`, `tools/test_macos26_gaps.py` and `tools/test_buffer_texture_bounds.py` (with the scratch
+  Metal stand-in). `tools/test_switch_registry.py` reports only the row of `nvgpucaps` (above).
+
+#### The branch with all of it
+
+- `tools/run_all_tests.py` on the branch with 3.0.4 and 3.0.5 and the merge with `fable` at 2976003c: 339 of 376
+  passed, 23 failed, 4 skipped, 10 not run (they need a built library, a pristine NVIDIA tree or a build line). Each of
+  the 23 also failed in the 3.0.4 run (above), with the same checks failing, for the reasons given there: they fail on
+  `fable` too, or need what this machine lacks (the tag v2.8.1, a normal user instead of root, a Mac or its tools such
+  as `-arch`, `plutil` and `flex`, Metal's texture descriptor). One check more failed in `tools/test_build_sh.py` ("a
+  changed NVRM patch re-runs the RM and everything built from it"); run alone, the test fails the same checks on this
+  branch and on `fable` at ac9bb6e4, because this machine has no `flex`. A first run
+  ran out of disk on this machine in two installer tests (`tools/test_lastgood_install_twice.py` and
+  `tools/test_lastgood_refusal.py`); with the disk freed, both pass.
+- `tools/switch_registry.py check`: 0 problems, and `tools/test_switch_registry.py` passes.
+
+## 3.0.4
+
+**Not released.** This section describes the branch being prepared as 3.0.4, a patch on top of `fable` at ac9bb6e4
+(3.0.3, not released either), since merged with `fable` at 2976003c (its documentation refresh). It brings into this tree seven pull requests to the original project by luckiest-luk
+(https://github.com/nullmoth/nvidia-macos-driver, pull requests 573 and 575 to 580), which were closed there on
+2026-11-18 without being merged. Six are taken with their author, 575 with one correction of ours; of 576 only the
+half that gives back the caller's pages is taken, applied by hand (below). Nothing of 3.0.4 has been built on a Mac or
+run on a card: it was compiled and its host tests were run on Linux only (below, "What ran where").
+
+### Fixes and changes
+
+- **OpenGL and WebGL uniforms go through a constant buffer, as the code meant them to (573).** `nvmtl_gl_uniform_index`
+  (`plugin/NVMTLLibraryLoad.m`) also required `names[@"access"][key]` to be `read`, but the AIR name table
+  (`nvmtl_air_names`) has no `access` key, so no GL function ever had a promotable uniform buffer and the promotion
+  of the uniform buffer to an NVK constant bank (`nvmtl_uniform_cbuf_on`) never ran, here or in the original project.
+  The check that the buffer is read only stays, on the reflection (address space 2, access ReadOnly). This turns on,
+  by default, a path that had not run in this tree; `NVMTL_UNIFORM_CBUF=0` turns it off.
+- **ANGLE's uniforms (Chrome, Safari's WebGL and other browsers) are promoted too (579).** The plugin accepts the
+  buffer ANGLE names `ANGLE_userUniforms`, and `translator/wrapper/src/uniform_cbuf.rs` promotes scalar and vector
+  32-bit members, fixed arrays and nested structs when it can prove every access is a read at a constant, in-bounds
+  index; anything else (a write, a volatile or escaping pointer, a dynamic index, a matrix, an unknown layout) keeps the
+  path it had.
+- **A draw that changes only the promoted uniforms' offset keeps its address table (580),** and **an address table is
+  built in ordinary memory and copied to its mapped page in one go, with the empty slot's address asked once (577).**
+- **A texture over a buffer is bounds-checked without overflow (575).** `nvmtl_buffer_texture_fits`
+  (`plugin/nvmtl_buffer_texture.h`) checks with subtractions and divisions instead of sums and products that could
+  wrap, and does not require padding after the last row. It is used by the buffer-aliased texture of `nvmtl_vk.c` and
+  by the copy fallback of `newTiledTextureWithDescriptor`, which also refuses what it cannot copy (not 2D, depth,
+  layers or samples). Two parts of 575 are not taken as written: it refused a mipmapped texture and any format the
+  public table does not describe as uncompressed. Core Animation asks for mipmapped textures over buffers (the Dock's
+  badges, Spotlight's half-float icons), and `nvmtl_mip_autofill` fills their other levels from level 0 (d39bc6e3), so
+  level 0 is still copied; a compressed or unlisted format keeps the check it had in 3.0.3, `bytesPerRow` bytes for
+  each row, now written so it cannot wrap. `tools/test_buffer_texture_bounds.py` holds both cases.
+- **A buffer the GPU only read in a blit is not copied back to the caller's memory (578, on;
+  `NVMTL_BLIT_READONLY=0` turns it off).** The command buffer's
+  resource set marks the source of `copyFromBuffer:toBuffer:` and `copyFromBuffer:toTexture:` read only, any other use
+  makes it writable again, and the copy back at completion skips a read-only buffer with a caller copy (not a managed
+  shadow, not under a texture alias). The set taken when a command buffer is sealed is returned retained, so it does
+  not wait in the application's autorelease pool.
+- **The caller's pages of an imported `newBufferWithBytesNoCopy` buffer are given back after their GPU memory is freed,
+  and with their address (576, half).** Such a buffer has no `_hostPtr`, and `-dealloc` retired it before calling the
+  caller's deallocator, so the deallocator got NULL and 0, and got them at once, while the buffer grace could still hold
+  the import for a submit in flight. The pointer and length are now taken before retiring, and for an import the
+  deallocator runs in `nvmtl_vk_buffer_destroy_body` after `vkFreeMemory`, outside every lock. A lost device (nothing
+  destroys the buffer) runs it in `-dealloc`, as before; a grace record that cannot be allocated keeps the import and
+  its pages. If the device is lost after the grace took the import, neither the import nor the pages are given back and
+  the deallocator does not run, like every GPU object after a loss, since the GPU may still use them. A deallocator that
+  frees another buffer while the grace's reaper runs it leaves each death noted once in the fault report (the reaper's
+  flag is put back around it, and around the immediate destroy, instead of cleared). Not taken from 576: its changes to
+  how submits and the prologue are counted, which this tree had already made its own way (`nvmtl_cmd_life.h`).
+
+### The ways back
+
+- `NVMTL_UNIFORM_CBUF=0` (environment, or the settings file; its row is now tier escape, since it turns off what is
+  on by default) keeps GL and ANGLE uniforms in the address table, as in 3.0.3 (573, 579, 580).
+- `NVMTL_BLIT_READONLY=0` (the settings file; new, tier escape, row in `tools/switches.tsv`) records a blit's source
+  buffer as written, so a caller copy of it is copied back at completion, as in 3.0.3 (578).
+- `NVMTL_BUFFER_GRACE=0` (environment; not new) turns off the buffer grace, and with it an import's deallocator runs at
+  once in `-dealloc`, now with the caller's pointer and length (576's half).
+
+The other changes have no switch: they correct what was there (a bound that could wrap, a deallocator called with
+NULL, 0 and too early, an address table written word by word into mapped memory).
+
+### What ran where
+
+On Linux only (x86_64, clang 18; the Objective-C tests through libobjc2 and gnustep-base, not Apple's Foundation);
+nothing of 3.0.4 has been built on a Mac or run on a card.
+
+- Five new host tests, each run on this branch and on `fable` at ac9bb6e4: `tools/test_gl_uniform_index.py` (573),
+  `tools/test_uniform_snapshot.py` (580), `tools/test_address_snapshot.py` (577), `tools/test_readonly_copyback.py`
+  (578; also run sanitized) and `tools/test_host_buffer_release.py` (576, written here: imported, managed and copied
+  buffers, a submit in flight, the grace off, a lost device, a failed grace allocation, no grace lock held in the
+  deallocator, a deallocator that frees another buffer during a reap; release and sanitized). All pass on this branch
+  and fail on ac9bb6e4. `tools/test_readonly_copyback_gpu.m` (578) needs Metal and a card and was not run.
+- `tools/test_buffer_texture_bounds.py` (575) needs Metal's texture descriptor, which the Linux Foundation stand-in
+  lacks; it was run with a scratch stand-in that adds `MTLPixelFormat`, `MTLTextureDescriptor` and `replaceRegion`
+  (not committed): it passes on this branch and fails on ac9bb6e4, and 575 as written fails its mipmapped case.
+- The tests that read the changed code: `tools/test_submission_copies.py`, `tools/test_bytes_dup_seal.py` (it now
+  accepts 578's restart loop), `tools/test_ci_workflow.py` (`ci.yml` skips the two new tests that need Vulkan headers,
+  as it skips the other five), `tools/test_surfin_zero_plugin.py` and `tools/test_switch_registry.py`: all pass
+  (the last since the merge with 2976003c, which gave the boot argument `nvgpucaps` its row);
+  `tools/switch_registry.py check`: 0 problems.
+- The translator: `cargo test --release` in `translator/wrapper`: 52 pass, including the 14 of `uniform_cbuf` (579's
+  new ones among them), 2 ignored, and 2 fail as on ac9bb6e4, `ca_named_modules_validate` and
+  `compositor_pixel_sampler_spirv_validates`, which read shader files from the relative path `$HOME/nvmtl-tests/...`
+  (Rust does not expand it, so they fail on any machine).
+- `tools/run_all_tests.py`: 323 of 365 passed, 28 failed, 4 skipped, 10 not run (they need a built library). Of the
+  28, two were this branch's, `tools/test_bytes_dup_seal.py` and `tools/test_ci_workflow.py`, corrected above, and
+  `tools/test_buffer_texture_bounds.py` needs Metal's descriptor (above). Ten others, the ones near the changed code,
+  were run on ac9bb6e4 and fail there the same way. The last fifteen fail for this machine: the tag v2.8.1 is missing
+  from this checkout, the tests run as root, and some need a Mac or its tools.
+- Three reviews of the diff, for the uniforms (573, 579, 580, 577), for the copies (575, 578) and for 576's half,
+  each finding checked by a second reader. They found the mipmapped textures 575 refused, that 578 had no way back,
+  and the reaper's flag a deallocator could clear; all three are corrected above. A separate switch for 576's half was
+  not added: `NVMTL_BUFFER_GRACE=0` already runs the deallocator at once in `-dealloc`, and giving the pages back
+  there while the grace still holds the import would hand the caller pages a submit may still read.
+  `tools/test_surfin_zero_plugin.py` reads the reaper's flag and follows the change.
+
 ## 3.0.3
 
 **Not released.** This section describes the branch being prepared as 3.0.3, a patch on top of `fable` at ae84aec7

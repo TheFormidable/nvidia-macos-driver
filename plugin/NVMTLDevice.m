@@ -1558,7 +1558,9 @@ static void nvmtl_busy_wait(IOSurfaceRef surf, NSUInteger plane)
 // Shared family-VRAM imports (nvmtl_import_cache.h). OFF unless NVMTL_SURF_IMPORT_CACHE=1: it is proven by
 // tools/test_import_cache.c, but its effect on screen capture has to be measured on a card before it is the default.
 // NVMTL_SURF_IMPORT_CACHE_IDLE_MS (default 2000) is how long an import outlives its last wrapper; surfaces larger than
-// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64, 16 below 8 GB of VRAM) are imported per wrapper as without the cache.
+// NVMTL_SURF_IMPORT_CACHE_MAX_MB (default 64, 16 below 7 GiB of VRAM) are imported per wrapper as without the cache.
+// 7 GiB, not 8: an 8 GB card reports a little less (an RTX 4060 Ti 8188 MB) and got the small card's limit, which leaves
+// out the 4K and 5K surfaces WindowServer composites (from pull request 487 of the original project).
 #include "nvmtl_import_cache.h"
 #include <os/lock.h>
 _Static_assert(sizeof(nvk_buffer) <= NVMTL_IC_PAYLOAD, "an import cache slot must hold a whole nvk_buffer");
@@ -1580,7 +1582,7 @@ static uint64_t nvmtl_ic_idle_ns(void) { static uint64_t v; static dispatch_once
 static uint64_t nvmtl_ic_max_bytes(void)
 {
     static uint64_t v; static dispatch_once_t o;
-    dispatch_once(&o, ^{ v = nvmtl_ic_env_u64("NVMTL_SURF_IMPORT_CACHE_MAX_MB", nvmtl_vk_vram_bytes() >= (8ull << 30) ? 64 : 16) << 20; });
+    dispatch_once(&o, ^{ v = nvmtl_ic_env_u64("NVMTL_SURF_IMPORT_CACHE_MAX_MB", nvmtl_vk_vram_bytes() >= (7ull << 30) ? 64 : 16) << 20; });
     return v;
 }
 // The cookie an import stores in its surface; a surface id that is reused after the surface is freed carries none.

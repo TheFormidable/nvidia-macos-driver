@@ -157,6 +157,13 @@ static int nvmtl_xlate_ready(void) {
         // SPIR-V never shares a cache entry with the other mode.
         { extern int nvmtl_typed_dummies_wanted(void);
           if (h && strcmp(gXlateTag, "untagged") && nvmtl_typed_dummies_wanted()) strlcat(gXlateTag, "-td1", sizeof gXlateTag); }
+        // So does the translator's way back from the whole-object views of pull request 524 of the original project,
+        // NVMTL_WHOLE_VIEWS=0: without its mark, a module cached with the views on would still be served after they
+        // were turned off in the settings file.
+        if (h && strcmp(gXlateTag, "untagged") && !nvmtl_spvcache_escape_tag(gXlateTag, sizeof gXlateTag, getenv("NVMTL_WHOLE_VIEWS"))) {
+            strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
+            nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
+        }
         if (!h) { nvlog("translate: dlopen(%s): %s", NVMTL_XLATE_LIB, dlerror()); return; }
         xlate = (nvmtl_translate_fn)dlsym(h, "nvmtl_translate");
         { char tid[1200];
@@ -2339,8 +2346,10 @@ static uint32_t nvmtl_gl_uniform_index(id function)
     NSDictionary *names = nvmtl_air_names(fn);
     uint32_t found = UINT32_MAX;
     for (NSString *key in names[@"args"]) {
-        if (![key hasPrefix:@"buffer:"] || ![names[@"args"][key] isEqual:expected]
-            || ![names[@"access"][key] isEqual:@"read"]) continue;
+        // AIR names contain argument names, not access qualifiers. The reflected
+        // address space and ReadOnly access below decide whether promotion is safe.
+        NSString *name = names[@"args"][key];
+        if (![key hasPrefix:@"buffer:"] || (![name isEqual:expected] && ![name isEqual:@"ANGLE_userUniforms"])) continue;
         NSUInteger slot = [[key substringFromIndex:7] integerValue];
         if (slot >= 32 || found != UINT32_MAX) return UINT32_MAX;
         for (NSDictionary *binding in nvmtl_function_reflection(fn)[@"bindings"])

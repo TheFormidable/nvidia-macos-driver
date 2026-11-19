@@ -142,6 +142,25 @@ int main(int argc, char **argv)
     arm("with and without the profile's translator switches the tags differ", strcmp(prof, plain) != 0);
     arm("with and without argument-buffer samplers the tags differ", strcmp(prof, noas) != 0);
     {
+        /* the translator's way back from the whole-object views of pull request 524: off has its own mark, a value that
+           starts with 0 turns them off (as the translator reads it), and a tag the mark does not fit in is refused */
+        char on[NVMTL_SPVCACHE_TAG_MAX], one[NVMTL_SPVCACHE_TAG_MAX], off[NVMTL_SPVCACHE_TAG_MAX], zeros[NVMTL_SPVCACHE_TAG_MAX];
+        strcpy(on, prof); strcpy(one, prof); strcpy(off, prof); strcpy(zeros, prof);
+        int ok = nvmtl_spvcache_escape_tag(on, sizeof on, NULL) && nvmtl_spvcache_escape_tag(one, sizeof one, "1")
+              && nvmtl_spvcache_escape_tag(off, sizeof off, "0") && nvmtl_spvcache_escape_tag(zeros, sizeof zeros, "00");
+        arm("with the views on (NVMTL_WHOLE_VIEWS unset, or a value that does not start with 0) the tag is the one before them",
+            ok && !strcmp(on, prof) && !strcmp(one, prof));
+        arm("NVMTL_WHOLE_VIEWS=0 adds -wv0, so the two modes have two tags",
+            ok && !strcmp(off + strlen(prof), "-wv0") && !strcmp(zeros, off) && strcmp(on, off) != 0);
+        char room[NVMTL_SPVCACHE_TAG_MAX]; snprintf(room, sizeof room, "%s-u2-p5", build);
+        char full[NVMTL_SPVCACHE_TAG_MAX + 8]; memset(full, 'x', sizeof full - 1); full[sizeof full - 1] = 0;
+        arm("a mark that does not fit is refused and the tag is left as it was, not cut",
+            !nvmtl_spvcache_escape_tag(room, strlen(room) + 3, "0") && !strcmp(room + strlen(build), "-u2-p5")
+            && !nvmtl_spvcache_escape_tag(full, sizeof full - 1, NULL));
+        arm("the sweep still keeps an entry of the same build that carries the mark",
+            nvmtl_spvcache_same_build("00ff.kernel.sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828-u2-wv0.c3.spv", build));
+    }
+    {
         char dir[] = "/tmp/test_app_profile_spv_XXXXXX"; int okdir = mkdtemp(dir) != NULL;
         char a1[512], a2[512];
         snprintf(a1, sizeof a1, "%s/00ff.kernel.%s.c3.spv", dir, prof);
