@@ -9345,6 +9345,13 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
             nvmtl_perf_note(NVP_BUFDEL, t0, n);
             return;
         }
+        if (b->host_release) {
+            // No grace record for an import of the caller's pages: keep the buffer and the pages (both leak) rather than
+            // give the pages back while a submit in flight may still read them (pull request 576 of the original project).
+            nvlog("buffer grace: allocation failed; an import of the caller's pages and those pages are kept");
+            memset(b, 0, sizeof *b);
+            return;
+        }
     }
     nvmtl_vk_buffer_destroy_body(b);
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
@@ -9389,7 +9396,11 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
         pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
         if (b->alloc) { g_alloc_bytes -= b->alloc; if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
     }
+    // The caller's deallocator of an imported buffer runs after vkFreeMemory, outside every lock (it can call back in).
+    void (*const release)(void *) = b->host_release;
+    void *const context = b->host_context;
     memset(b, 0, sizeof *b);
+    if (release) release(context);
 }
 
 void nvmtl_vk_buffer_retire(nvk_buffer *b)

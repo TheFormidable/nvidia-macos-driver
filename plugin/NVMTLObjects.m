@@ -1145,6 +1145,16 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
           st ? "read/write" : "read", (unsigned long)offset, (__bridge void *)t);
     return t;
 }
+// The caller's deallocator of an imported newBufferWithBytesNoCopy buffer, run once its VkDeviceMemory is freed
+// (nvmtl_vk_buffer_destroy_body), which can be on the grace reaper's thread.
+static void nvmtl_host_buffer_release(void *retained)
+{
+    @autoreleasepool {
+        void (^release)(void) = CFBridgingRelease(retained);
+        release();
+    }
+}
+
 @implementation NVMTLBuffer
 @dynamic sparseBufferTier;
 - (IOSurfaceRef)iosurface { return NULL; }
@@ -1250,16 +1260,35 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
 - (void)removeAllDebugMarkers {}
 void nvmtl_vk_buffer_retire(nvk_buffer *b);
 - (void)dealloc {
+    // Retiring clears _b and _shadow, so the caller's pointer and length are taken first: with the caller's pages
+    // imported (_b, or the managed path's _shadow) _hostPtr is not set and the deallocator was given NULL and 0. Such
+    // pages are given back only after vkFreeMemory, which a buffer grace puts off until the GPU work that could still
+    // read them has completed; before, the deallocator ran here, while that work could still be in flight.
+    // From pull request 576 of the original project (luckiest-luk), the deallocator half.
+    nvk_buffer *host = _shadow.imported ? &_shadow : &_b;
+    void *hostPtr = _hostPtr ?: host->map;
+    NSUInteger hostLen = (NSUInteger)(_hostLen ?: host->size);
+    void (^hostDealloc)(void *, NSUInteger) = _hostDealloc;
+    _hostDealloc = nil;
+    if (hostDealloc && host->imported && host->buf) {
+        void (^release)(void) = ^{ hostDealloc(hostPtr, hostLen); };
+        host->host_release = nvmtl_host_buffer_release;
+        host->host_context = (__bridge_retained void *)release;
+        hostDealloc = nil;
+    }
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
+    // A retire that did not take the buffer (the device is lost: nothing destroys it) leaves the record as it was; the
+    // pages are then given back here, as before. A retire that took it cleared the record.
+    if (host->host_release) { void *context = host->host_context; host->host_release = NULL; host->host_context = NULL;
+                              nvmtl_host_buffer_release(context); }
     if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
-    if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
-                        d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
+    if (hostDealloc) hostDealloc(hostPtr, hostLen); }
 - (MTLStorageMode)storageMode { return _storage; }
 - (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
