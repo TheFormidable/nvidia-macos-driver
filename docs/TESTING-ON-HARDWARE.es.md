@@ -584,6 +584,7 @@ kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantie
 | Decodificación H.264 de RTX 50 en el servicio de decodificación | `NVMTL_NVENCVT=0` (la biblioteca de códecs apagada en todas partes) | `nvrm610.conf` |
 | Texturas de video 4:2:2 (fotogramas de cámara) | `NVMTL_YUV422=0` (las texturas 4:2:2 se rechazan) | `nvrm610.conf` |
 | OpenGL nativo a través de Zink | `nvzink=0` (el OpenGL de Apple sobre Metal para todas las aplicaciones) | argumento de arranque |
+| Consultas de capacidades de la GPU | `nvgpucaps=0` (no se hace ninguna; el selector 14 responde que el productor está apagado) | argumento de arranque |
 | Correcciones del compilador de NVK | `NVK_SKIP_PATCHES="<nombres de parches>"` | al compilar desde el código fuente |
 
 CHANGELOG.md, "The ways back", y SWITCHES.md dicen qué devuelve cada una en detalle.

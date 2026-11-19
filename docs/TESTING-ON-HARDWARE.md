@@ -550,6 +550,7 @@ restart).
 | RTX 50 H.264 decode in the decode service | `NVMTL_NVENCVT=0` (the codec library off everywhere) | `nvrm610.conf` |
 | 4:2:2 video textures (camera frames) | `NVMTL_YUV422=0` (4:2:2 textures are refused) | `nvrm610.conf` |
 | Native OpenGL through Zink | `nvzink=0` (Apple's OpenGL over Metal for every application) | boot argument |
+| GPU capability queries | `nvgpucaps=0` (none are made; selector 14 answers that the producer is off) | boot argument |
 | Upstream compiler fixes in NVK | `NVK_SKIP_PATCHES="<patch names>"` | building from source |
 
 CHANGELOG.md, "The ways back", and SWITCHES.md say what each one restores in full.

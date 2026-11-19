@@ -98,7 +98,9 @@ tests were run on Linux only (below, "What ran where").
 
 ### The ways back
 
-None new. Boot argument `nvzink=0` keeps Apple's OpenGL for every application, as before.
+None new for this change: boot argument `nvzink=0` keeps Apple's OpenGL for every application, as before. The GPU
+capability producer that came into `fable` beside it has its own, `nvgpucaps=0` ("GPU Caps experimental branch",
+below).
 
 ### What ran where
 
@@ -159,6 +161,9 @@ On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac 
 - Phase 1: versioned read-only selector 14 and per-GPU capability cache.
 - Phase 2B: additional RM observations, refreshed on lifecycle changes; validated on one RTX 5050. The reported verified count increased from 9 to 15; manual authorization remained false. No fan-write policy was changed.
 - See [GPU Caps integration and evidence](docs/GPU-CAPS.md). This is not a general 3.0.2 release certification.
+- The way back: boot argument `nvgpucaps=0`, read once when NVRM starts. NVRM then asks the RM for no capabilities,
+  and selector 14 answers a header that says the producer is off, with no records. Its row is in
+  `tools/switches.tsv` (tier escape, since 3.0.3, review 3.2) and in `docs/SWITCHES.md`.
 
 ## 3.0.2
 
