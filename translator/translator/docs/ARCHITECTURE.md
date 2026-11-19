@@ -183,7 +183,8 @@ The reflected and non-reflected entry points return identical SPIR-V bytes for i
 
 ## Verification
 
-Match evidence to the claim. The complete developer ladder is in [VALIDATION.md](VALIDATION.md).
+Match evidence to the claim. The upstream private playbook is not included; see the
+[driver translator validation guide](../../../docs/TRANSLATOR-VALIDATION.md) for available checks.
 
 | Check | Catches |
 |---|---|
