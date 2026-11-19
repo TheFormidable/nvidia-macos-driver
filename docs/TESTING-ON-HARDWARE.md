@@ -357,9 +357,14 @@ cast, an old frame, frames that flicker between two, one of those counters above
    `NVK Zink:`. A line `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (...)`
    means the adapter found this build's layout different and left the application on Apple's OpenGL, as it is meant
    to: send that line and the output of `sw_vers`. A line `NVK Zink: CGLTexImageIOSurface2D in a Zink context stays
-   Apple's; (...)` means Zink is drawing and only that one call was left to Apple's handler: send it the same way and
-   say whether anything in the application draws wrong. Fail: a crash, a black window or a wrong picture; restart
-   once with the boot argument `nvzink=0` and say whether it goes away. See [ZINK-OPENGL.md](ZINK-OPENGL.md).
+   Apple's; GLEngine's private layout does not match the record (...)` means Zink is drawing and only that one call
+   was left to Apple's handler; where it appears, every OpenGL application Zink serves prints it, whether or not it
+   uses that call: send it the same way and say whether anything in the application draws wrong. A line
+   `NVK Zink: a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for the
+   current CGL context (...)` means Zink took the application's OpenGL and its calls then did not reach it, so the
+   application draws nothing: send that line and the output of `sw_vers`, and restart with the boot argument
+   `nvzink=0`, which gives every application Apple's OpenGL back. Fail: a crash, a black window or a wrong picture;
+   restart once with the boot argument `nvzink=0` and say whether it goes away. See [ZINK-OPENGL.md](ZINK-OPENGL.md).
    To go back to release 2.9 or to an earlier 3.0 package, run this package's `sudo ./uninstall.sh` first: the
    installers of those packages do not know `/Library/GPUBundles/NVKZinkGLDriver.bundle` and leave it in place. Their
    accelerator does not name it, so it is not loaded, and `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle`
