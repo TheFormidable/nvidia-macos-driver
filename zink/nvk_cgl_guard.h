@@ -8,6 +8,9 @@
  * at run time, from facts the process already has, that the memory is shaped as
  * the record says; nvk_cgl_prepare_gld keeps Apple's renderer (returns 0,
  * writing nothing) whenever a check fails, and names what the memory held.
+ * GLEngine's per-context object, the pointer gldCreateContext hands over
+ * (Apple's headers type it GLIContext), is called the GLI engine here and in
+ * the lines the adapter prints.
  *
  * The includer supplies the run-time facts as macros, so the same checks
  * compile on a Mac against Apple's allocator and VM map and on Linux against a
@@ -66,10 +69,10 @@ static inline int nvk_cgl_block_spans(const void *p, size_t need)
 
 enum nvk_cgl_layout {
    NVK_CGL_LAYOUT_OK = 0,
-   NVK_CGL_LAYOUT_ENGINE_BLOCK,   /* the GLI context is not a heap block spanning the recorded reads */
+   NVK_CGL_LAYOUT_ENGINE_BLOCK,   /* the GLI engine is not a heap block spanning the recorded reads */
    NVK_CGL_LAYOUT_PROFILE,        /* the profile byte is neither legacy (0) nor core (1) */
    NVK_CGL_LAYOUT_CONTEXT_NULL,   /* the CGL dispatch pointer or the saved dispatch pointer is null */
-   NVK_CGL_LAYOUT_CONTEXT_BLOCK,  /* the derived CGL context is the GLI context, or not a heap block holding the
+   NVK_CGL_LAYOUT_CONTEXT_BLOCK,  /* the derived CGL context is the GLI engine, or not a heap block holding the
                                      whole struct */
    NVK_CGL_LAYOUT_CONTEXT_REND,   /* the CGL context's first member (rend) is a heap object other than this GLI
                                      engine, or points into mapped memory malloc did not make */
@@ -113,9 +116,9 @@ struct nvk_cgl_layout_report {
 };
 
 /* The bytes the allocator vouches for at p: p starts a heap block (that block's
- * size), or p lies at least min_off bytes into the block outer starts, whose
- * size is outer_size (the bytes from p to that block's end). Zero otherwise.
- * *block and *block_size give the block that holds p. */
+ * size), or p is pointer-aligned and lies at least min_off bytes into the block
+ * outer starts, whose size is outer_size (the bytes from p to that block's
+ * end). Zero otherwise. *block and *block_size give the block that holds p. */
 static inline size_t nvk_cgl_room(const void *p, const void *outer, size_t outer_size, size_t min_off,
                                   const void **block, size_t *block_size)
 {
@@ -125,7 +128,7 @@ static inline size_t nvk_cgl_room(const void *p, const void *outer, size_t outer
       return *block_size;
    }
    uintptr_t off = (uintptr_t)p - (uintptr_t)outer;
-   if (!p || !outer || off < min_off || off >= outer_size) return 0;
+   if (!p || !outer || ((uintptr_t)p & (sizeof(void *) - 1)) || off < min_off || off >= outer_size) return 0;
    *block = outer; *block_size = outer_size;
    return outer_size - off;
 }
@@ -168,32 +171,39 @@ nvk_cgl_classify(const void *p, const void *engine, size_t engine_size,
  *
  * gli_cgl_dispatch holds &context->disp (CGL + disp_offset), so the context is
  * that pointer minus disp_offset; it must be the start of a heap block, other
- * than the GLI engine, that holds the whole public struct. gldCreateContext runs
- * inside GLEngine's context creation, before CGL can store the new GLI context
- * in the context's first member (rend), so rend is accepted when it is null,
- * this engine, no aligned user address, or a value that starts no heap block,
- * points into neither the engine nor the context and lies in heap memory or in
- * no mapped region (what a block CGL has not cleared holds: a free-list link,
- * MallocPreScribble's 0xaa bytes). A rend that starts another heap block,
- * points into the engine or the context, or points into an image, a stack or
- * other memory malloc did not map (a vtable or class pointer) is refused: that
- * is an object the record does not put there. The adapter compares rend with
- * the engine again on every call through the current context (bridge_current,
- * original_noncurrent, swap_drawable).
+ * than the GLI engine, that holds the whole public struct.
+ *
+ * The check of the context's first member (rend) rests on an assumption no
+ * record confirms: that CGL stores the new GLI engine in rend only after
+ * GLEngine's context creation, which calls gldCreateContext, has returned, so
+ * that rend holds at this point whatever the new block holds. rend is accepted
+ * when it is null, this engine, no aligned user address, or a value that starts
+ * no heap block, points into neither the engine nor the context and lies in
+ * heap memory or in no mapped region (a free-list link, MallocPreScribble's
+ * 0xaa bytes). A rend that starts another heap block, points into the engine or
+ * the context, or points into an image, a stack or other memory malloc did not
+ * map (a vtable or class pointer) is refused: that is an object the record does
+ * not put there. The verdict is per context: a word left by the block's
+ * previous owner can be refused in one context of a process and not in
+ * another. Accepting rend here proves nothing about what CGL stores later;
+ * bridge_current compares the engine a call comes with against the adopted one
+ * on every call, and drops the call when they differ.
  *
  * The saved dispatch table is the one CGL restores the context's dispatch
  * from, so it is CGL's memory, not GLEngine's, and prepare writes adapters
- * into it. It is accepted as its own heap block spanning GLIFunctionDispatch,
- * as a span of the CGL context's block past the public struct, or as a span
- * of readable, writable heap memory starting at no block start (a table inside
- * a CGL heap object this check cannot see: the CGL private object's engine
- * records are 0x1e90 bytes apart, room for a 0x18-byte head and a
- * GLIFunctionDispatch).
+ * into it. It is accepted as its own heap block spanning GLIFunctionDispatch
+ * (any such block that is not another GLI engine of this CGL context: the
+ * allocator cannot say whose it is), as a pointer-aligned span of the CGL
+ * context's block past the public struct, or as a span of readable, writable
+ * heap memory starting at no block start (a table inside a CGL heap object
+ * this check cannot see: the CGL private object's engine records are 0x1e90
+ * bytes apart, room for a 0x18-byte head and a GLIFunctionDispatch).
  * It is refused as a smaller heap block, the GLI engine or a span inside it,
- * another GLI engine, the CGL context's public part, a span running past the
- * context's block or past its heap region, a span that would reach the start
- * of the GLI engine or of the CGL context, an address in an image, a stack,
- * read-only or unmapped memory, or a value that is no aligned user address. */
+ * another GLI engine of this CGL context, the CGL context's public part, a
+ * span running past the context's block or past its heap region, a span that
+ * would reach the start of the GLI engine or of the CGL context, an address in
+ * an image, a stack, read-only or unmapped memory, or a value that is no
+ * aligned user address. */
 static inline enum nvk_cgl_layout
 nvk_cgl_check_gld_layout(void *engine,
                          size_t gli_profile, size_t gli_cgl_dispatch, size_t gli_saved_dispatch,
@@ -218,7 +228,9 @@ nvk_cgl_check_gld_layout(void *engine,
    r->saved_dispatch_null = !back;
    if (!dispatch || !back)
       return r->layout = NVK_CGL_LAYOUT_CONTEXT_NULL;
-   void *context = (char *)dispatch - disp_offset;
+   /* An integer subtraction: dispatch is a word of unknown meaning, not yet a
+    * pointer into any object. */
+   void *context = (void *)((uintptr_t)dispatch - disp_offset);
    r->context = nvk_cgl_classify(context, engine, r->engine_size, NULL, 0,
                                  gli_profile, gli_cgl_dispatch, disp_offset);
    if (r->context.kind != NVK_CGL_WORD_BLOCK || r->context.size < cgl_context_size)
@@ -236,7 +248,7 @@ nvk_cgl_check_gld_layout(void *engine,
    case NVK_CGL_WORD_BLOCK:
       back_ok = r->back.size >= dispatch_table_size; break;
    case NVK_CGL_WORD_IN_CONTEXT:
-      back_ok = r->back.offset >= cgl_context_size &&
+      back_ok = !(r->back.value & (sizeof(void *) - 1)) && r->back.offset >= cgl_context_size &&
                 r->back.offset + dispatch_table_size <= r->context_size;
       break;
    case NVK_CGL_WORD_LOOSE:
@@ -285,8 +297,8 @@ static inline const char *nvk_cgl_word_phrase(char *buf, size_t n, const struct 
    return buf;
 }
 
-/* The text layout_refused_once prints between the parentheses: the check that
- * refused and what the memory held. It holds no parenthesis. */
+/* The text nvk_cgl_prepare_gld's line gives between the parentheses: the check
+ * that refused and what the memory held. It holds no parenthesis. */
 static inline void nvk_cgl_layout_reason(char *buf, size_t n, const struct nvk_cgl_layout_report *r)
 {
    char a[256], b[256];
@@ -295,21 +307,21 @@ static inline void nvk_cgl_layout_reason(char *buf, size_t n, const struct nvk_c
       snprintf(buf, n, "the layout matches the record"); break;
    case NVK_CGL_LAYOUT_ENGINE_BLOCK:
       if (r->engine_size)
-         snprintf(buf, n, "the GLI context is a heap block of 0x%zx bytes, too small for the recorded reads",
+         snprintf(buf, n, "this GLI engine is a heap block of 0x%zx bytes, too small for the recorded reads",
                   r->engine_size);
       else
-         snprintf(buf, n, "the GLI context starts no heap block");
+         snprintf(buf, n, "this GLI engine starts no heap block");
       break;
    case NVK_CGL_LAYOUT_PROFILE:
       snprintf(buf, n, "the GLI profile byte is %u, neither 0 for legacy nor 1 for core", r->profile); break;
    case NVK_CGL_LAYOUT_CONTEXT_NULL:
-      snprintf(buf, n, "the GLI context's %s null",
+      snprintf(buf, n, "the GLI engine's %s null",
                r->cgl_dispatch_null && r->saved_dispatch_null ? "CGL and saved dispatch pointers are"
                : r->cgl_dispatch_null ? "CGL dispatch pointer is" : "saved dispatch pointer is");
       break;
    case NVK_CGL_LAYOUT_CONTEXT_BLOCK:
-      snprintf(buf, n, "the CGL context derived from the GLI context is %s, not a heap block of its own "
-               "holding struct _CGLContextObject", nvk_cgl_word_phrase(a, sizeof(a), &r->context));
+      snprintf(buf, n, "the CGL context derived from the GLI engine's CGL dispatch pointer is %s, not a heap block "
+               "of its own holding struct _CGLContextObject", nvk_cgl_word_phrase(a, sizeof(a), &r->context));
       break;
    case NVK_CGL_LAYOUT_CONTEXT_REND:
       snprintf(buf, n, "the CGL context's renderer word is %s; the saved dispatch table is %s; "
@@ -327,6 +339,26 @@ static inline void nvk_cgl_layout_reason(char *buf, size_t n, const struct nvk_c
                nvk_cgl_word_phrase(b, sizeof(b), &r->rend), r->engine_size, r->context_size);
       break;
    }
+}
+
+/* The text bridge_current's line gives between the parentheses when a call
+ * through a context Zink adopted does not come with the adopted GLI engine:
+ * what the call came with (call_engine) and what the context's first member
+ * holds (rend), each classified as the layout check classifies a word. It
+ * holds no parenthesis. */
+static inline void nvk_cgl_renderer_reason(char *buf, size_t n, const void *call_engine, const void *rend,
+                                           const void *engine, size_t engine_size,
+                                           const void *context, size_t context_size,
+                                           size_t gli_profile, size_t gli_cgl_dispatch, size_t disp_offset)
+{
+   char a[256], b[256];
+   struct nvk_cgl_word_class c = nvk_cgl_classify(call_engine, engine, engine_size, context, context_size,
+                                                  gli_profile, gli_cgl_dispatch, disp_offset);
+   struct nvk_cgl_word_class d = nvk_cgl_classify(rend, engine, engine_size, context, context_size,
+                                                  gli_profile, gli_cgl_dispatch, disp_offset);
+   snprintf(buf, n, "the call came with %s and the CGL context's renderer word is %s; "
+            "this GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes",
+            nvk_cgl_word_phrase(a, sizeof(a), &c), nvk_cgl_word_phrase(b, sizeof(b), &d), engine_size, context_size);
 }
 
 #endif
