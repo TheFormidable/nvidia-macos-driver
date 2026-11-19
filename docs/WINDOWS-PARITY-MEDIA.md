@@ -1,6 +1,8 @@
 # Media and power: what NVIDIA's Windows driver offers that this driver does not
 
 Each row names the Windows feature, the state in this tree, and what closes it or why it cannot be closed.
+See [STATUS.md](STATUS.md) for the scope of actual fork hardware results, and
+[NVMETRICS.md](NVMETRICS.md) for companion runtime findings.
 
 | feature (Windows) | state here | to close, or the hard reason |
 |---|---|---|
@@ -13,8 +15,8 @@ Each row names the Windows feature, the state in this tree, and what closes it o
 | Low-latency rate control | vendored H.264/HEVC encoders only | the built-in encoders are closed libraries |
 | HDR video decode and tone mapping, RTX Video HDR, RTX Video Super Resolution | none | these are Windows driver features built on closed code; not reproducible from public sources |
 | GPU idle power states | NVK per-burst boost (this branch); RM dynamic power is the kernel area's | measured idle clocks need hardware |
-| Laptop dGPU power-off (Optimus RTD3 / GC6) | none | needs ACPI power-resource evaluation on a hybrid laptop; no such machine to prove it on |
+| Laptop dGPU power-off (Optimus RTD3 / GC6) | opt-in D3cold monitor (`nvrtd3=1`) | needs ACPI power-resource evaluation and a hybrid laptop hardware test |
 | Power limit and clock lock (NVML, nvidia-smi) | none | the public 620 headers carry no control for either; RATED_TDP SET_CONTROL was reported to change nothing, and the PFM controls answer NOT_SUPPORTED to a user client |
-| Fan curve, clock and voltage offsets (NVAPI) | none | no public control in the 620 headers (ctrl2080fan.h is read-side); fans on a desktop card are VBIOS-controlled |
-| Telemetry (power, clocks, temperature, utilisation, throttle reasons, fan) | `tools/nvmtl-smi` (read-only, from the RUSD block, class 0xde) | a graphical overlay is not built; readings on a real card are a studio check |
+| Fan curve, clock and voltage offsets (NVAPI) | no general driver write API; separate NVMetrics guarded manual fan experiment | verified only on the tested RTX 5050 RM record layout; not a universal fan curve, clock or voltage interface |
+| Telemetry (power, clocks, temperature, utilisation, throttle reasons, fan) | `tools/nvmtl-smi` and separate NVMetrics dashboard; GPU Caps read-only ABI | RUSD data requires coherent fresh reads; GPU Caps evidence is partial |
 | Video engine utilisation counters | `tools/nvmtl-smi` prints what RUSD reports for the video engines | the same studio check |

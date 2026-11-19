@@ -8,7 +8,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 
 > **What has run, and where.** A package made by `./build.sh package` at commit aa27c73 on the Intel Mac below has been
 > installed over release 2.9 and started on one machine with an RTX 5050: the machine started with it twice, and the
-> installer's fallback job did not put 2.9 back. No test of it on an NVIDIA card has been reported. What has run:
+> installer's fallback job did not put 2.9 back. This is the historical build record through aa27c73.
+> Later RTX 5050 card checks and GPU Caps builds are recorded in [STATUS.md](STATUS.md).
+> The combined 3.0.3 source tree has no recorded native build yet. What ran in the earlier build campaign:
 >
 > - On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5). At commit 650db45, `./build.sh deps` started from an empty
 >   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
@@ -120,11 +122,10 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 
 ## Quick start
 
-Clone the repository and the branch this file came from, with its owner and branch name in place of `<owner>` and
-`<branch>`. The original project's repository does not have `build.sh`; a clone of it gives a tree without the script.
+Clone the development branch of this fork, which carries `build.sh`:
 
 ```bash
-git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
+git clone -b fable https://github.com/TheFormidable/nvidia-macos-driver.git
 cd nvidia-macos-driver
 ./build.sh doctor
 ./build.sh
@@ -511,10 +512,9 @@ account that built it, and it carries none of your Mac's extended attributes (th
 base names your browser), so it can be passed on. The ryzenadj built here has another SHA-256 than the
 one the 1401 app pins, so the app will not install it; the driver is not affected.
 
-A package made by `./build.sh package` at commit aa27c73 has been installed over release 2.9 and started on one machine
-with an RTX 5050, and no test of it on an NVIDIA card has been reported: whoever installs one is testing it. The sizes
-of Apple's IOKit classes on macOS 26.7 have not been reported either; the kexts compare them with their own when they
-start (the layout check).
+Earlier local packages started on an RTX 5050; later builds and card checks have scoped results in [STATUS.md](STATUS.md).
+The merged 3.0.3 tree still needs native acceptance. The kexts compare the running macOS's IOKit class layouts with
+their own when they start (the layout check); a successful build does not prove those checks will accept a new OS.
 
 Install it yourself, as for a release (read [README.md](../README.md), "Install — by hand", first: OpenCore must be
 set up):

@@ -7,8 +7,9 @@ the core channel spun in `nvEvoMakeRoom` forever, and the Mac needed a hard rese
 
 Tested on an RTX 5050 (GB207, FSP boot), MacPro7,1 SMBIOS, macOS 15.8.1: repeated sleep and wake with the desktop,
 windows and Metal apps intact. That test was of 2.9. The additions of release 3.0 (the interrupt gate, the paused 1 Hz
-timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d): no run of them through a sleep
-on a card has been reported yet; they are marked "(3.0)" below.
+timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d) are marked "(3.0)" below.
+GPU Caps Phase 1/2B later observed a cache generation advance after resume on an RTX 5050, macOS 26.7.3
+([GPU-CAPS.md](GPU-CAPS.md)). That is lifecycle evidence, not a dedicated validation of every 3.0 sleep path.
 
 ## What happens
 

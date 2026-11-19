@@ -3,7 +3,7 @@
 ## 3.0.4
 
 **Not released.** This section describes the branch being prepared as 3.0.4, a patch on top of `fable` at ac9bb6e4
-(3.0.3, not released either). It brings into this tree seven pull requests to the original project by luckiest-luk
+(3.0.3, not released either), since merged with `fable` at 2976003c (its documentation refresh). It brings into this tree seven pull requests to the original project by luckiest-luk
 (https://github.com/nullmoth/nvidia-macos-driver, pull requests 573 and 575 to 580), which were closed there on
 2026-11-18 without being merged. Six are taken with their author, 575 with one correction of ours; of 576 only the
 half that gives back the caller's pages is taken, applied by hand (below). Nothing of 3.0.4 has been built on a Mac or
@@ -79,8 +79,9 @@ nothing of 3.0.4 has been built on a Mac or run on a card.
   (not committed): it passes on this branch and fails on ac9bb6e4, and 575 as written fails its mipmapped case.
 - The tests that read the changed code: `tools/test_submission_copies.py`, `tools/test_bytes_dup_seal.py` (it now
   accepts 578's restart loop), `tools/test_ci_workflow.py` (`ci.yml` skips the two new tests that need Vulkan headers,
-  as it skips the other five) and `tools/test_switch_registry.py`: all pass but the last, which reports one problem
-  that `fable` already has, the boot argument `nvgpucaps` without a row.
+  as it skips the other five), `tools/test_surfin_zero_plugin.py` and `tools/test_switch_registry.py`: all pass
+  (the last since the merge with 2976003c, which gave the boot argument `nvgpucaps` its row);
+  `tools/switch_registry.py check`: 0 problems.
 - The translator: `cargo test --release` in `translator/wrapper`: 52 pass, including the 14 of `uniform_cbuf` (579's
   new ones among them), 2 ignored, and 2 fail as on ac9bb6e4, `ca_named_modules_validate` and
   `compositor_pixel_sampler_spirv_validates`, which read shader files from `$HOME/nvmtl-tests` that this machine lacks.
@@ -99,8 +100,10 @@ nothing of 3.0.4 has been built on a Mac or run on a card.
 ## 3.0.3
 
 **Not released.** This section describes the branch being prepared as 3.0.3, a patch on top of `fable` at ae84aec7
-(3.0.2). Nothing committed after ae84aec7 has been built on a Mac or run on a card: it was compiled and its host
-tests were run on Linux only (below, "What ran where").
+(3.0.2), now merged with GPU Caps Phase 1/2B on `fable` (PRs #6 and #7). The Zink correction itself was
+compiled and host-tested on Linux only (below, "What ran where"); GPU Caps has separate physical evidence
+from an RTX 5050. No native build or card result for the combined 3.0.3 tree is recorded yet.
+See [current status](docs/STATUS.md).
 
 ### Fixes and changes
 
@@ -198,7 +201,7 @@ None new. Boot argument `nvzink=0` keeps Apple's OpenGL for every application, a
 
 ### What ran where
 
-On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac or run on a card.
+Zink correction: on Linux only (x86_64, gcc and clang); no native build or physical result for this correction yet.
 
 - `tools/test_cgl_gld_guard.py` compiles `zink/nvk_cgl_guard.h` for the host with `-Wall -Wextra -Werror` under gcc 13
   and clang 18 and feeds it synthetic heap blocks and VM regions: 266 cases (placements of the CGL context, `rend` and
@@ -250,11 +253,12 @@ On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac 
   The glbench row's shell fragment was run under sh and bash with a first line that names Zink, "(null)", another
   renderer and none. Not compiled with Xcode, not linked, not run.
 
-## GPU Caps experimental branch (2026-11-17)
+## GPU Caps experimental integration (2026-11-17 to 2026-11-19)
 
 - Phase 1: versioned read-only selector 14 and per-GPU capability cache.
 - Phase 2B: additional RM observations, refreshed on lifecycle changes; validated on one RTX 5050. The reported verified count increased from 9 to 15; manual authorization remained false. No fan-write policy was changed.
-- See [GPU Caps integration and evidence](docs/GPU-CAPS.md). This is not a general 3.0.2 release certification.
+- Both phases are merged into `fable`. See [GPU Caps integration and evidence](docs/GPU-CAPS.md).
+  This is not a certification of the combined 3.0.3 source tree.
 
 ## 3.0.2
 

@@ -2,8 +2,8 @@
 
 Status: the kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and
 macOS 26 export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real threads.
-**No test of it on a card has been reported yet**; a package of commit aa27c73 has been installed and started on one
-machine with an RTX 5050. It is on by default. Boot-arg `nvrmfence=0` switches it off, and the driver's surface sync
+Earlier fork builds started on an RTX 5050 (see [STATUS.md](STATUS.md)); the fence-specific acceptance
+criteria below still require dedicated evidence. It is on by default. Boot-arg `nvrmfence=0` switches it off, and the driver's surface sync
 then behaves as 2.9's did ("The one switch" lists what still differs).
 Nothing of 2.9's surface sync was removed: it is what every fallback below lands on.
 

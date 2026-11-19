@@ -1,7 +1,7 @@
 # Contributing
 
-Bug reports and pull requests are welcome. Please read this first; it keeps the queue small enough that every PR
-gets a real review.
+Bug reports and pull requests are welcome in TheFormidable's fork. Target `fable` for development changes and
+consult [current status](docs/STATUS.md) before proposing a new feature.
 
 ## Reporting a bug
 
@@ -11,16 +11,17 @@ gets a real review.
 
 One problem per issue. If you found the cause, say how you know: what you ran and what it printed.
 
-## No AI-written contributions
+## Assisted development and upstream
 
-Pull requests, issues and review comments must be written by a person who understands them. AI-written code,
-descriptions and bug reports are closed without review.
+AI-assisted contributions are permitted in this fork. The submitter remains responsible for correctness,
+provenance, licensing, review and testing; disclose significant AI assistance and do not invent hardware evidence.
+This policy applies only to this fork. NullMoth's upstream contribution rules remain independent; do not submit
+AI-generated contributions there contrary to its policy.
 
 ## Pull requests
 
-- Write it yourself and understand it. You have to be able to explain every line and answer review questions about
-  it. PRs that are pasted tool output (long generated descriptions, "say the word and I will add it", changes the
-  author can't explain) are closed without review.
+- Understand the change and be able to explain its behavior and answer review questions. Review generated code
+  and descriptions before submitting.
 - One change per PR. A fix, a feature or a cleanup, not all three. Small PRs get merged; 2,000-line PRs sit.
 - Say what you tested. Your card, macOS version, and what you did to check it. "Builds" is not tested.
 - Keep the description short: what was wrong, what you changed, how you tested it. Link the issue.
@@ -28,8 +29,9 @@ descriptions and bug reports are closed without review.
   plain explanation if one is needed.
 - Comments in code explain why the code does what it does. They are not a log of when you found something.
 
-Kernel changes (`kexts/`) need a boot on real hardware before they can be merged, because a bad kext stops the
-machine from starting. Say which card you booted it on.
+Kernel changes (`kexts/`) require real hardware validation before being declared release-ready, because a bad kext
+can stop the machine from starting. Experimental changes may be integrated into `fable` with explicit evidence
+limits, a recovery path and host tests. Say which card and exact revision you booted, or state that no boot test ran.
 
 ## Where help is needed
 

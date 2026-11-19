@@ -1,7 +1,7 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
-Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. **No test of it on a GPU has
-been reported yet**; a package of commit aa27c73 has been installed and started on one machine with an RTX 5050. Apple's
+Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. Earlier fork builds have
+run on an RTX 5050 ([STATUS.md](STATUS.md)); these specific timer/interrupt acceptance results remain unreported. Apple's
 compiler has built this code as it stands at commit 3933ff6, every change below included: on one Intel Mac (12 threads,
 macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
 Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
