@@ -4,10 +4,11 @@
 /* nvk_cgl.c reads and writes through private GLEngine offsets that the source
  * fork this code is ported from recorded on macOS 15.8.1 (24H32) and 26.7.1
  * (25G241), x86_64. A build whose layout differs would have those reads and
- * writes land in the wrong memory of an OpenGL application. These helpers prove
+ * writes land in the wrong memory of an OpenGL application. These helpers check
  * at run time, from facts the process already has, that the memory is shaped as
  * the record says; nvk_cgl_prepare_gld keeps Apple's renderer (returns 0,
- * writing nothing) whenever a check fails, and names what the memory held.
+ * writing nothing) whenever a check fails, and prints what the memory held for
+ * the first context it refuses in a process.
  * GLEngine's per-context object, the pointer gldCreateContext hands over
  * (Apple's headers type it GLIContext), is called the GLI engine here and in
  * the lines the adapter prints.
@@ -176,11 +177,11 @@ nvk_cgl_classify(const void *p, const void *engine, size_t engine_size,
  * The check of the context's first member (rend) rests on an assumption no
  * record confirms: that CGL stores the new GLI engine in rend only after
  * GLEngine's context creation, which calls gldCreateContext, has returned, so
- * that rend holds at this point whatever the new block holds. rend is accepted
- * when it is null, this engine, no aligned user address, or a value that starts
- * no heap block, points into neither the engine nor the context and lies in
- * heap memory or in no mapped region (a free-list link, MallocPreScribble's
- * 0xaa bytes). A rend that starts another heap block, points into the engine or
+ * that rend holds at this point whatever the new block holds (zero, a free-list
+ * link, MallocPreScribble's 0xaa bytes). rend is accepted when it is null, this
+ * engine, no aligned user address, or a value that starts no heap block, points
+ * into neither the engine nor the context and lies in heap memory or in no
+ * mapped region. A rend that starts another heap block, points into the engine or
  * the context, or points into an image, a stack or other memory malloc did not
  * map (a vtable or class pointer) is refused: that is an object the record does
  * not put there. The verdict is per context: a word left by the block's
@@ -213,7 +214,7 @@ nvk_cgl_check_gld_layout(void *engine,
 {
    *r = (struct nvk_cgl_layout_report){ .dispatch_table_size = dispatch_table_size };
    /* The profile byte at gli_profile is the highest offset read in the GLI
-    * context (gli_cgl_dispatch, gli_saved_dispatch and the share group are all
+    * engine (gli_cgl_dispatch, gli_saved_dispatch and the share group are all
     * below it), so a block that spans it spans every read here. */
    if (engine && NVK_CGL_IN_ZONE(engine)) r->engine_size = NVK_CGL_BLOCK_SIZE(engine);
    if (!nvk_cgl_block_spans(engine, gli_profile + 1))
@@ -344,7 +345,8 @@ static inline void nvk_cgl_layout_reason(char *buf, size_t n, const struct nvk_c
 /* The text bridge_current's line gives between the parentheses when a call
  * through a context Zink adopted does not come with the adopted GLI engine:
  * what the call came with (call_engine) and what the context's first member
- * holds (rend), each classified as the layout check classifies a word. It
+ * holds (rend), each classified as the layout check classifies a word, and
+ * whether the two are one value (two heap blocks of one size read alike). It
  * holds no parenthesis. */
 static inline void nvk_cgl_renderer_reason(char *buf, size_t n, const void *call_engine, const void *rend,
                                            const void *engine, size_t engine_size,
@@ -356,9 +358,54 @@ static inline void nvk_cgl_renderer_reason(char *buf, size_t n, const void *call
                                                   gli_profile, gli_cgl_dispatch, disp_offset);
    struct nvk_cgl_word_class d = nvk_cgl_classify(rend, engine, engine_size, context, context_size,
                                                   gli_profile, gli_cgl_dispatch, disp_offset);
-   snprintf(buf, n, "the call came with %s and the CGL context's renderer word is %s; "
+   snprintf(buf, n, "the call came with %s and the CGL context's renderer word is %s, %s; "
             "this GLI engine is a heap block of 0x%zx bytes and the CGL context one of 0x%zx bytes",
-            nvk_cgl_word_phrase(a, sizeof(a), &c), nvk_cgl_word_phrase(b, sizeof(b), &d), engine_size, context_size);
+            nvk_cgl_word_phrase(a, sizeof(a), &c), nvk_cgl_word_phrase(b, sizeof(b), &d),
+            call_engine == rend ? "the same value" : "a different value", engine_size, context_size);
+}
+
+/* The verdicts of the checks that come after the CGL context's: for these,
+ * r->context is the context derived from the engine, a heap block of its own
+ * that holds the public struct. */
+static inline int nvk_cgl_layout_has_context(enum nvk_cgl_layout layout)
+{
+   return layout == NVK_CGL_LAYOUT_OK || layout == NVK_CGL_LAYOUT_CONTEXT_REND ||
+          layout == NVK_CGL_LAYOUT_SAVED_BLOCK;
+}
+
+/* A GLI engine of a CGL context the adapter has already decided on is not a
+ * layout that differs: nvk_cgl_prepare_gld leaves it unadapted and prints no
+ * line for it. */
+enum nvk_cgl_further {
+   NVK_CGL_FURTHER_NO = 0,
+   NVK_CGL_FURTHER_ADOPTED,     /* the context has a bridge: Zink serves it with another engine */
+   NVK_CGL_FURTHER_UNADOPTED,   /* an engine of the context passed the check and was not adopted */
+};
+
+/* Whether the engine whose check gave layout and *r is such a further engine.
+ * adopted_engine is the engine of the context's bridge, or null when the
+ * context has none. unadopted is nonzero when an engine of this context passed
+ * the layout check and was not adopted for another reason (no Zink screen, no
+ * memory).
+ *
+ * In an adopted context a further engine is one whose check passed, one whose
+ * own saved table alone was refused (rend, which decides first, was accepted),
+ * or one whose rend was refused and is the adopted engine. In a context whose
+ * earlier engine was not adopted the one case is a rend refused as another GLI
+ * engine of this context, which CGL may have stored there. Any other refused
+ * rend is a refusal like any other, and so is the verdict of a check before
+ * the context's, which names no context. */
+static inline enum nvk_cgl_further
+nvk_cgl_further_engine(enum nvk_cgl_layout layout, const struct nvk_cgl_layout_report *r,
+                       const void *adopted_engine, int unadopted)
+{
+   if (!nvk_cgl_layout_has_context(layout)) return NVK_CGL_FURTHER_NO;
+   if (adopted_engine &&
+       (layout != NVK_CGL_LAYOUT_CONTEXT_REND || r->rend.value == (uintptr_t)adopted_engine))
+      return NVK_CGL_FURTHER_ADOPTED;
+   if (unadopted && layout == NVK_CGL_LAYOUT_CONTEXT_REND && r->rend.kind == NVK_CGL_WORD_SIBLING)
+      return NVK_CGL_FURTHER_UNADOPTED;
+   return NVK_CGL_FURTHER_NO;
 }
 
 #endif

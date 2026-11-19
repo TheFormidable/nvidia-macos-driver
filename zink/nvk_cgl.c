@@ -40,7 +40,8 @@ _Static_assert(VM_MEMORY_MALLOC == 1 && VM_MEMORY_MALLOC_LARGE_REUSED == 9 && VM
 _Static_assert(VM_MEMORY_MALLOC_PGUARD == 13, "the SDK's tag 13 is not the guarded malloc tag nvk_cgl_guard.h names");
 #endif
 #ifdef VM_MEMORY_MALLOC_PROB_GUARD
-_Static_assert(VM_MEMORY_MALLOC_PROB_GUARD == 13, "the SDK's tag 13 is not the guarded malloc tag nvk_cgl_guard.h names");
+_Static_assert(VM_MEMORY_MALLOC_PROB_GUARD == 13,
+               "the SDK's tag 13 is not the guarded malloc tag nvk_cgl_guard.h names");
 #endif
 /* The region of this task's VM map that holds p, at the top level (a submap
  * such as the shared cache is reported as one region). It reads no memory. */
@@ -75,10 +76,10 @@ static int nvk_cgl_vm_region(const void *p, struct nvk_cgl_vm *v)
 _Static_assert(PREFIX_BYTES == 0x1e80 && DISPATCH_SLOT(swap_APPLE) == 0x1278,
                "the SDK's CGL context prefix differs from the one GLEngine's recorded offsets go with");
 enum {
-   GLI_SHARE_GROUP = 0x5b00,      /* GLI context: the share group's identity (compared, never followed) */
-   GLI_CGL_DISPATCH = 0xb2c8,     /* GLI context: points at the CGL context's dispatch table (CGL + 8) */
-   GLI_SAVED_DISPATCH = 0xb2d0,   /* GLI context: the saved public dispatch table that gliInitDispatchTable fills */
-   GLI_PROFILE = 0xc6a6,          /* GLI context: 0 legacy, 1 core, other values not adapted */
+   GLI_SHARE_GROUP = 0x5b00,      /* GLI engine: the share group's identity (compared, never followed) */
+   GLI_CGL_DISPATCH = 0xb2c8,     /* GLI engine: points at the CGL context's dispatch table (CGL + 8) */
+   GLI_SAVED_DISPATCH = 0xb2d0,   /* GLI engine: the saved public dispatch table that gliInitDispatchTable fills */
+   GLI_PROFILE = 0xc6a6,          /* GLI engine: 0 legacy, 1 core, other values not adapted */
    PRIV_ENGINES = 0x78,           /* CGL private object: the per-renderer engine records */
    PRIV_ENGINE_COUNT = 0x82,      /* CGL private object: how many records, int16 */
    PRIV_ENGINE_STRIDE = 0x1e90,   /* bytes per record */
@@ -159,9 +160,9 @@ EXPORT const char *nvk_cgl_last_error(void) { return last_error ? last_error : "
  * happened and, in parentheses, why. There are three, each printed once for the
  * process, the first time it happens, so that a user's report can say why:
  * OpenGL stays Apple's for a context nvk_cgl_prepare_gld refuses; only
- * CGLTexImageIOSurface2D stays Apple's in a Zink context whose CGL private
- * object integer_dispatch_slot refuses; a call through a Zink context is
- * dropped because it does not come with the adopted GLI engine. */
+ * CGLTexImageIOSurface2D stays Apple's in a Zink context where
+ * install_integer_dispatch cannot place its hook; a call through a Zink
+ * context is dropped because it does not come with the adopted GLI engine. */
 static void say(const char *what, const char *why) { fprintf(stderr, "NVK Zink: %s (%s)\n", what, why); }
 static bool first_time(atomic_flag *said) { return !atomic_flag_test_and_set(said); }
 static atomic_flag context_refusal_said = ATOMIC_FLAG_INIT;
@@ -174,6 +175,20 @@ static struct nvk_cgl_bridge *find_bridge(CGLContextObj context)
    struct nvk_cgl_bridge *b;
    for (b = bridges; b && b->context != context; b = b->next) {}
    return b;
+}
+
+/* The CGL context and the GLD context of the last GLI engine that passed the
+ * layout check and was not adopted for another reason: no Zink screen, or no
+ * memory for its bridge. bridges_lock guards it; nvk_cgl_destroy_gld clears it
+ * with that GLD context. */
+static struct { void *context, *driver; } unadopted;
+
+static int leave_unadopted(void *context, void *driver)
+{
+   pthread_mutex_lock(&bridges_lock);
+   unadopted.context = context; unadopted.driver = driver;
+   pthread_mutex_unlock(&bridges_lock);
+   return 0;
 }
 
 void nvk_cgl_lwjgl_drawable_size(CGLContextObj context, unsigned width, unsigned height)
@@ -502,11 +517,16 @@ static void use_zink(struct nvk_cgl_bridge *b)
 
 /* CGLTexImageIOSurface2D sends an eight-word IOSurface packet through the
  * GLI integer callback. Clone the context's callback vector: the original
- * vector is shared by Apple's engines and must never be edited globally. */
-static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b)
+ * vector is shared by Apple's engines and must never be edited globally.
+ * This finds the place of that vector's pointer in the CGL private object's
+ * record of the bridge's engine. Where it finds none it returns NULL and why,
+ * when not null, receives what the memory held; it prints nothing. */
+static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b, char *why, size_t why_size)
 {
+   char unused[1];
+   if (!why) { why = unused; why_size = sizeof(unused); }
    char *meta=*(char **)((char *)b->context+PREFIX_BYTES);
-   /* The CGL private object is memory nvk_cgl_prepare_gld did not prove. It is
+   /* The CGL private object is memory nvk_cgl_prepare_gld did not check. It is
     * read only as a heap block of its own, or as a pointer-aligned span of the
     * CGL context's block past the public struct, that holds the record's engine
     * count and list pointer; the engine list only as a heap block of its own,
@@ -516,28 +536,29 @@ static void ***integer_dispatch_slot(struct nvk_cgl_bridge *b)
    const void *block; size_t block_size;
    if (nvk_cgl_room(meta, b->context, malloc_size(b->context), sizeof(struct _CGLContextObject),
                     &block, &block_size) < head) {
-      if (first_time(&iosurface_refusal_said))
-         say("CGLTexImageIOSurface2D in a Zink context stays Apple's; " LAYOUT_DIFFERS,
-             "the CGL private object is neither a heap block nor a span of the CGL context's block that holds "
-             "the recorded engine count and list");
+      snprintf(why, why_size, "the CGL private object is neither a heap block nor a span of the CGL context's block "
+               "that holds the recorded engine count and list");
       return NULL;
    }
    char *items=*(char **)(meta+PRIV_ENGINES);
    int count=*(int16_t *)(meta+PRIV_ENGINE_COUNT);
-   if (!items || count<1 || count>16) return NULL;
+   if (!items || count<1 || count>16) {
+      snprintf(why, why_size, "the CGL private object's engine list pointer is %s and its engine count is %d, where "
+               "the record has a list of 1 to 16 engines", items ? "not null" : "null", count);
+      return NULL;
+   }
    const void *list_block; size_t list_block_size;
    if (nvk_cgl_room(items, block, block_size, (size_t)(meta-(const char *)block)+head,
                     &list_block, &list_block_size) < (size_t)count*PRIV_ENGINE_STRIDE) {
-      if (first_time(&iosurface_refusal_said))
-         say("CGLTexImageIOSurface2D in a Zink context stays Apple's; " LAYOUT_DIFFERS,
-             "the CGL engine list is neither a heap block nor a span of the CGL private object's block that holds "
-             "its records");
+      snprintf(why, why_size, "the CGL engine list is neither a heap block nor a span of the CGL private object's "
+               "block that holds its %d records", count);
       return NULL;
    }
    for (int i=0;i<count;++i) {
       char *entry=items+(size_t)i*PRIV_ENGINE_STRIDE;
       if (*(void **)entry==b->engine) return (void ***)(entry+PRIV_ENGINE_CALLBACKS);
    }
+   snprintf(why, why_size, "none of the %d records of the CGL engine list names this GLI engine", count);
    return NULL;
 }
 
@@ -591,26 +612,45 @@ static bool named_callback(void *pointer, const char *name)
    return pointer && dladdr(pointer,&info) && info.dli_sname && !strcmp(info.dli_sname,name);
 }
 
+/* Runs once for a context, when Zink first serves it. The hook is placed only
+ * where the engine's record holds a callback vector that is a heap block of 16
+ * to 512 pointers whose entries dladdr names as GLEngine's. In every other
+ * case the context stays Zink's, CGLTexImageIOSurface2D keeps Apple's handler,
+ * and the line says what was found, once for the process. */
 static void install_integer_dispatch(struct nvk_cgl_bridge *b)
 {
-   void ***slot=integer_dispatch_slot(b);
-   if (!slot || !*slot || !malloc_zone_from_ptr(*slot)) return;
-   size_t bytes=malloc_size(*slot);
-   if (bytes<16*sizeof(void *) || bytes>4096 ||
-       !named_callback((*slot)[4],"gliCreateContext") ||
-       !named_callback((*slot)[6],"gliDestroyContext") ||
-       !named_callback((*slot)[9],"gliSetInteger") ||
-       !named_callback((*slot)[15],"gliGetVersion")) return;
-   void **copy=malloc(bytes); if (!copy) return;
-   memcpy(copy,*slot,bytes); copy[9]=(void *)iosurface_integer;
-   b->integer_original=*slot; b->integer_zink=copy;
-   *slot=copy;
+   char why[256];
+   void ***slot=integer_dispatch_slot(b,why,sizeof(why));
+   if (slot) {
+      void **vector=*slot;
+      size_t bytes=vector && malloc_zone_from_ptr(vector) ? malloc_size(vector) : 0;
+      if (!vector)
+         snprintf(why,sizeof(why),"the callback vector in this GLI engine's record is null");
+      else if (bytes<16*sizeof(void *) || bytes>4096)
+         snprintf(why,sizeof(why),"the callback vector in this GLI engine's record is a heap block of 0x%zx bytes, "
+                  "where the record has one of 0x80 to 0x1000 bytes",bytes);
+      else if (!named_callback(vector[4],"gliCreateContext") ||
+               !named_callback(vector[6],"gliDestroyContext") ||
+               !named_callback(vector[9],"gliSetInteger") ||
+               !named_callback(vector[15],"gliGetVersion"))
+         snprintf(why,sizeof(why),"dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this GLI "
+                  "engine's record gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion");
+      else {
+         void **copy=malloc(bytes); if (!copy) return;
+         memcpy(copy,vector,bytes); copy[9]=(void *)iosurface_integer;
+         b->integer_original=vector; b->integer_zink=copy;
+         *slot=copy;
+         return;
+      }
+   }
+   if (first_time(&iosurface_refusal_said))
+      say("CGLTexImageIOSurface2D in a Zink context stays Apple's; " LAYOUT_DIFFERS, why);
 }
 
 static bool select_integer_dispatch(struct nvk_cgl_bridge *b, bool zink)
 {
    if (!b->integer_zink) return true;
-   void ***slot=integer_dispatch_slot(b);
+   void ***slot=integer_dispatch_slot(b,NULL,0);
    if (!slot || (*slot!=b->integer_zink && *slot!=b->integer_original)) return false;
    *slot=zink?b->integer_zink:b->integer_original;
    return true;
@@ -630,7 +670,7 @@ static void release_integer_dispatch(struct nvk_cgl_bridge *b)
  * Give GLEngine a private table to populate, and leave adapters in the
  * original saved table for CGL's final restore. This is distinct from the HAL
  * table. The GLD proxy owns this registration and calls destroy during
- * teardown. The Zink screen is made only once a context's layout is proven;
+ * teardown. The Zink screen is made only once a context's layout passes the check;
  * a process whose screen cannot be made (no private NVK runtime, no NVIDIA
  * device) keeps Apple's renderer for every context. */
 EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
@@ -640,8 +680,8 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
     * CGL/IOSurface interop. Never switch a live context. */
    if (nvk_cgl_obs_compatibility_enabled()) return 0;
    if (native_surface_copy_context()) return 0;
-   /* Prove the recorded private offsets land in memory shaped as the record says
-    * before any read past a pointer or any write through one, and before the
+   /* Check that the recorded private offsets land in memory shaped as the record
+    * says before any read past a pointer or any write through one, and before the
     * Zink screen (a Vulkan instance and an NVK device) exists. On a build whose
     * layout differs, keep Apple's renderer for this context: return 0, having
     * written nothing and opened no device. */
@@ -655,20 +695,20 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
                                sizeof(struct _CGLContextObject), sizeof(GLIFunctionDispatch),
                                &profile, &context_ptr, &back, &report);
    /* One bridge per CGL context: find_bridge and the restore on destroy key on
-    * the context. A further GLI engine of a context already adopted (another
-    * renderer of its pixel format) keeps Apple's renderer, having written
-    * nothing. Where the context's rend is the adopted engine itself, the layout
-    * check refuses rend as another GLI engine of this CGL context; that is this
-    * same case, not a layout that differs, and prints no line. */
-   bool adopted = false;
-   if (layout == NVK_CGL_LAYOUT_OK ||
-       (layout == NVK_CGL_LAYOUT_CONTEXT_REND && report.rend.kind == NVK_CGL_WORD_SIBLING)) {
+    * the context. A further GLI engine of a context the adapter has already
+    * decided on (another renderer of its pixel format) is left unadapted:
+    * nothing is written, and no line says that the layout differs.
+    * nvk_cgl_further_engine says which engines those are. */
+   enum nvk_cgl_further further = NVK_CGL_FURTHER_NO;
+   if (nvk_cgl_layout_has_context(layout)) {
       pthread_mutex_lock(&bridges_lock);
       struct nvk_cgl_bridge *other = find_bridge((CGLContextObj)(void *)report.context.value);
-      adopted = other && (layout == NVK_CGL_LAYOUT_OK || (uintptr_t)other->engine == report.rend.value);
+      further = nvk_cgl_further_engine(layout, &report, other ? other->engine : NULL,
+                                       unadopted.context == (void *)report.context.value);
       pthread_mutex_unlock(&bridges_lock);
    }
-   if (adopted) return fail("The CGL context already has a GLI engine served by Zink");
+   if (further == NVK_CGL_FURTHER_ADOPTED) return fail("The CGL context already has a GLI engine served by Zink");
+   if (further == NVK_CGL_FURTHER_UNADOPTED) return 0;
    if (layout != NVK_CGL_LAYOUT_OK) {
       if (first_time(&context_refusal_said)) {
          char why[768];
@@ -677,10 +717,10 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
       }
       return 0;
    }
-   if (!nvk_zink_screen_ready()) return 0;
+   if (!nvk_zink_screen_ready()) return leave_unadopted(context_ptr, driver);
    CGLContextObj context = (CGLContextObj)context_ptr;
    struct nvk_cgl_bridge *b = calloc(1, sizeof(*b));
-   if (!b) return 0;
+   if (!b) return leave_unadopted(context_ptr, driver);
    b->context = context; b->engine = engine; b->driver = driver;
    b->legacy = profile == 0;
    b->automatic = true; b->engine_back = back;
@@ -732,6 +772,7 @@ static int materialize(struct nvk_cgl_bridge *b)
 EXPORT void nvk_cgl_destroy_gld(void *driver)
 {
    pthread_mutex_lock(&bridges_lock);
+   if (unadopted.driver == driver) unadopted.context = unadopted.driver = NULL;
    struct nvk_cgl_bridge **link = &bridges;
    while (*link && (*link)->driver != driver) link = &(*link)->next;
    struct nvk_cgl_bridge *b = *link;
