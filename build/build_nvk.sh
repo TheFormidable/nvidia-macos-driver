@@ -83,7 +83,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;

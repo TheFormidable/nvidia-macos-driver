@@ -154,6 +154,12 @@ On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac 
   The glbench row's shell fragment was run under sh and bash with a first line that names Zink, "(null)", another
   renderer and none. Not compiled with Xcode, not linked, not run.
 
+## GPU Caps experimental branch (2026-11-17)
+
+- Phase 1: versioned read-only selector 14 and per-GPU capability cache.
+- Phase 2B: additional RM observations, refreshed on lifecycle changes; validated on one RTX 5050. The reported verified count increased from 9 to 15; manual authorization remained false. No fan-write policy was changed.
+- See [GPU Caps integration and evidence](docs/GPU-CAPS.md). This is not a general 3.0.2 release certification.
+
 ## 3.0.2
 
 **Not released.** This section describes the branch being prepared as 3.0.2, a patch on top of `fable` at b1b09c1b. That
