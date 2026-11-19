@@ -228,7 +228,7 @@ control("host tests that print only the end of a failed test's output are caught
         "output whole")
 control("a --tail too short for a failed test's whole output is caught", "--tail 20000 |", "--tail 1200 |", "output whole")
 control("host tests that pass with the Vulkan tests skipped are caught",
-        "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge|test_opengl_perf", "test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge",
+        "test_address_snapshot|test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge|test_opengl_perf|test_uniform_snapshot", "test_address_snapshot|test_bc_small_mips|test_copy_null_image|test_graphics_bindings|test_nvk_bridge|test_opengl_perf",
         "is skipped")
 control("a skip check that only prints is caught", 'NM_VULKAN_INCLUDE did not reach it"; exit 1\n', 'NM_VULKAN_INCLUDE did not reach it"\n', "is skipped")
 ONDEMAND = "(the line above names the tests that were running)\"; exit 1\n"
@@ -248,8 +248,9 @@ control("a check for the marker made before the tests is caught", HOST_STEP + MA
 control("the kext job on the image's default Xcode is caught", '          echo "DEVELOPER_DIR=$best/Contents/Developer" >> "$GITHUB_ENV"\n', "", "does not select an Xcode")
 control("the compile-line check that runs only after a good link is caught", "        if: ${{ !cancelled() && steps.rm.outcome == 'success' }}\n", "",
         "whenever the RM and NVKMS were compiled")
-arm("the Vulkan tests are found by what they read (five of them)", vulkan_tests(ROOT) == {"test_bc_small_mips", "test_copy_null_image", "test_graphics_bindings",
-                                                                          "test_nvk_bridge", "test_opengl_perf"},
+arm("the Vulkan tests are found by what they read (seven of them)", vulkan_tests(ROOT) == {"test_address_snapshot", "test_bc_small_mips",
+                                                                           "test_copy_null_image", "test_graphics_bindings", "test_nvk_bridge",
+                                                                           "test_opengl_perf", "test_uniform_snapshot"},
     " ".join(sorted(vulkan_tests(ROOT))))
 arm("a name in a comment is not what the workflow runs", problems(y + "\n# bash build/no_such_script.sh ${{ secrets.X }}\n", ROOT) == [])
 
