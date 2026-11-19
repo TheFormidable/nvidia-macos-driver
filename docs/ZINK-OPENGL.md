@@ -79,19 +79,62 @@ the record says, using only facts the process already has and the sizes the publ
 any mismatch it keeps Apple's renderer for that context, having written nothing and opened no device. The checks are:
 
 - the GLI context is a heap block that spans every recorded read (its own allocator reports the block's start and size:
-  `malloc_zone_from_ptr` and `malloc_size`);
+  `malloc_zone_from_ptr` and `malloc_size`; where a pointer that starts no block lies, this task's VM map says:
+  `mach_vm_region_recurse`, which gives the region's tag and protection and reads no memory);
 - the profile byte is legacy (0) or core (1);
-- the CGL context derived from the recorded dispatch pointer is a heap block holding a whole `struct
-  _CGLContextObject`, and its first member (`rend`) is this GLI context, which ties the recorded pointer to the public
-  layout: on a mismatched layout that near never holds;
-- the saved dispatch table is a heap block that spans a whole `GLIFunctionDispatch`, the table the adapter writes
-  into.
+- the CGL context derived from the recorded dispatch pointer is the start of a heap block of its own, not the GLI
+  context, that holds a whole `struct _CGLContextObject`. This ties the recorded pointer to the public layout: a
+  pointer read from a wrong offset, minus 8, almost never lands on the start of a block that size. On 26.7.3 (25G342)
+  the derived context started a heap block of at least 0x1e90 bytes in every OpenGL test process of card-test round
+  11; whether it is the GLI context was not checked there;
+- the context's first member (`rend`) is null, this GLI context, a value that is no aligned user address, or one that
+  starts no heap block, points into neither context and lies in heap memory or in no mapped region. gldCreateContext
+  runs inside GLEngine's context creation, before CGL can store the new GLI context in `rend`; until then `rend` holds
+  whatever the new block holds (zero from a cleared block; a free-list link or MallocPreScribble's 0xaa bytes from one
+  that is not). A `rend` that is another GLI engine of the same CGL context, another heap block, a pointer into either
+  context, or a pointer into an image, a stack or other memory malloc did not map (the vtable or class pointer of a
+  foreign object) is refused. The adapter compares `rend` with the GLI context again on every call through the current
+  context;
+- the saved dispatch table, the one CGL restores the context's table from, is CGL's memory, and prepare writes the
+  adapters into it. It is accepted as its own heap block spanning a whole `GLIFunctionDispatch`, as a span of the CGL
+  context's block past the public struct, or as a span of readable, writable heap memory (a region malloc made) that
+  starts at no block start and holds a whole `GLIFunctionDispatch` before the region ends: a table inside a CGL heap
+  object the guard cannot see, such as the CGL private object's engine records, which are 0x1e90 bytes apart, room for
+  a 0x18-byte head and a `GLIFunctionDispatch`. It is refused as a smaller block, the GLI context or a span inside it,
+  another GLI engine, the CGL context's public part, a span running past the context's block or its heap region, a
+  span that would reach the start of the GLI context or of the CGL context before a `GLIFunctionDispatch` ends, an
+  address in an image, a stack, read-only or unmapped memory, or a value that is no aligned user address.
 
-`integer_dispatch_slot` applies the same test to the CGL private object and its engine list before reading through
-them. The first refusal in a process is written once to standard error, naming the check that refused, so a user's
-report can say why OpenGL stayed Apple's. The `malloc_size` of a pointer read from a wrong offset is almost never the
-size of a real block, so a wrong layout is refused rather than written into; a layout the checks cannot confirm is
-also refused, which keeps Apple's OpenGL working even where it costs the Zink path.
+`nvk_cgl_prepare_gld` also adopts one GLI engine per CGL context: a further engine of a context already adopted (another
+renderer of its pixel format) keeps Apple's renderer, having written nothing, and `nvk_cgl_last_error` says "The CGL
+context already has a GLI engine served by Zink".
+
+The first context `nvk_cgl_prepare_gld` refuses in a process is written once to standard error, as "NVK Zink: OpenGL
+stays Apple's; GLEngine's private layout does not match the record (...)". The text in parentheses names the check
+that refused and what the memory held, word by word: null, this GLI engine, another GLI engine of this CGL context, a
+heap block of a given size, a pointer into a named block at an offset, or the value itself with the VM tag, protection
+and remaining bytes of the region that holds it. Past the context check, it gives the sizes of the GLI engine's and
+the CGL context's blocks too, so a report needs that one line and `sw_vers`.
+
+`integer_dispatch_slot` runs later, on a context Zink already serves, to find the GLI integer callback vector that
+CGLTexImageIOSurface2D goes through. The CGL private object and its engine list are memory the guard above did not
+prove, so it reads the private object only as a heap block of its own, or as a span of the CGL context's block past
+the public struct, that holds the recorded engine count and list pointer; and the engine list only as a heap block of
+its own, or as a span of the private object's block past those two members, that holds the records the count says
+(`nvk_cgl_room` in `zink/nvk_cgl_guard.h`). The vector is then cloned only when it is a heap block whose entries
+`dladdr` names as GLEngine's callbacks. When the private object or the list is anywhere else, the context stays
+Zink's, CGLTexImageIOSurface2D keeps Apple's handler in it, and the first such refusal in a process is written once
+as "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private layout does not match the
+record (...)".
+
+What the checks do not prove: a `rend` that is null, no aligned user address, or no heap object in heap or unmapped
+memory is accepted on the strength of the context check alone, and so is a saved table that is a span of heap memory
+at no block start. The context check covers the word at 0xb2c8; nothing ties the word at 0xb2d0 to it but the record,
+which puts the saved table's pointer in the next word. A wrong layout passes the context check only with a pointer
+exactly 8 bytes into a heap block of at least 0x1e90 bytes. A build that changes only the word at 0xb2d0 is refused
+when that word is a smaller block, the GLI context, another GLI engine, the CGL context's public part, or an address
+outside writable heap memory, and is written into when it points at least 0x1e78 bytes before the end of a writable
+heap region: a span inside a foreign heap object, whose memory the adapters' pointers then overwrite.
 
 ## Presentation
 
@@ -136,12 +179,25 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   prints no version, a missing bison and a missing flex each stop the script before meson, naming `./build.sh deps`
   where a bison is the reason.
 - `tools/test_cgl_gld_guard.py`: the layout guard's checks, compiled for the Linux host from `zink/nvk_cgl_guard.h`
-  and fed synthetic heap blocks. It accepts the recorded layout and refuses each way the layout can differ (a GLI
-  context that is not a block or is too small, a profile byte out of range, a null or interior dispatch pointer, a CGL
-  context whose `rend` is not the engine, a saved table that is not a block or is too small), each with its own reason,
-  with controls. It loads no Apple framework and touches no GPU; `malloc_size` has no Linux name, so a shim behind the
-  header's two macros uses `malloc_usable_size`.
-- Not checked: `appkit.m` and `native_drawable.m` (no AppKit headers on Linux), the real link, running anything, and
-  whether the recorded builds' saved dispatch table and CGL private object are their own heap blocks (the guard assumes
-  so, as the adapter already assumes of the GLI integer callback vector; if one is interior on a Mac, those builds fall
-  back to Apple's OpenGL, which is safe).
+  and fed synthetic heap blocks and VM regions. It accepts the layouts the record allows and refuses each way the
+  layout can differ, with controls: a GLI context that is not a block or is too small, a profile byte out of range, a
+  null, unaligned or interior dispatch pointer, a CGL context that is the GLI context; a `rend` that is null, stale,
+  not a heap pointer, or inside heap memory at no block start (accepted) or another GLI engine, another heap block, a
+  pointer into either context, or a pointer into an image's data or a stack (refused); a saved table past the
+  context's public part or a span of writable heap memory at no block start (accepted) or too small, inside the GLI
+  context, in the CGL context's public part, past its block, another engine, unaligned, unmapped, in an image's data,
+  read-only, under a tag malloc does not use, running past its heap region, or reaching the start of the GLI context
+  or of the CGL context (refused); each refusal's text; and `nvk_cgl_room`, the question `integer_dispatch_slot` asks
+  of the CGL private object and its engine list. It loads no Apple framework and touches no GPU; `malloc_size` has no
+  Linux name, so a shim behind the header's macros uses `malloc_usable_size`, and a table of synthetic regions stands
+  in for the VM map.
+- `nvk_cgl.c` and `appkit.m` with clang 18 `-fsyntax-only` on Linux against the public macOS 11.3 SDK's own headers
+  (`-isysroot`, target `x86_64-apple-macos15.0`, the flags of `build/build_zink.sh`): no diagnostic. This covers
+  `nvk_cgl_vm_region`'s call of `mach_vm_region_recurse` and the VM tag names; the 11.3 SDK names tag 13
+  `VM_MEMORY_MALLOC_PGUARD`.
+- Not checked: `native_drawable.m` (it names `kIOMainPortDefault`, which the 11.3 SDK does not have), a compile with
+  Xcode against a current SDK, the real link, running anything; where the recorded builds keep the CGL private object
+  and its engine list (`integer_dispatch_slot` has not run on a Mac); when CGL stores `rend` relative to
+  gldCreateContext and how it allocates the context, on any build (25G342 refused at the earlier `rend == engine`
+  check: card-test round 11); where the saved dispatch table is on any build (the saved-table check has not run on a
+  Mac); and the VM tags malloc gives its regions on macOS 26.7.3.
