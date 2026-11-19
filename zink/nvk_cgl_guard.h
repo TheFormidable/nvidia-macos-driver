@@ -10,9 +10,9 @@
  * engine it was handed unadapted (returns 0, writing nothing), which for the
  * first GLI engine of a CGL context leaves that context on Apple's renderer,
  * and it prints what the memory held for the first context it refuses in a
- * process. A later GLI engine of a context it adopted, or left unadopted for a
- * reason that is not the layout, is left unadapted too, with no line
- * (nvk_cgl_further_engine).
+ * process. A later GLI engine of a context it adopted, or of the last context
+ * it left unadopted for a reason that is not the layout, is left unadapted too,
+ * with no line (nvk_cgl_further_engine).
  * GLEngine's per-context object, the pointer gldCreateContext hands over
  * (Apple's headers type it GLIContext), is called the GLI engine here and in
  * the lines the adapter prints.
@@ -379,14 +379,14 @@ static inline int nvk_cgl_layout_has_context(enum nvk_cgl_layout layout)
 
 /* nvk_cgl_prepare_gld remembers two outcomes for a CGL context: that it
  * adopted one of its GLI engines (the context has a bridge), and that it left
- * one unadopted for a reason that is not the layout (no Zink screen, no
- * memory; it remembers one such context, the last). A later engine of such a
- * context is a further engine: prepare leaves it unadapted and prints no line
- * for it, whatever its own check says, because the line would say that OpenGL
- * stays Apple's for a layout that differs, which is not what decided that
- * context. A refusal is not remembered: a later engine of a context whose
- * earlier engine was refused is checked like a first engine, and adopted when
- * its own check passes. */
+ * one unadopted for a reason that is not the layout (a Zink screen that is not
+ * ready, no memory; it remembers one such context, the last). A later engine
+ * of such a context is a further engine: prepare leaves it unadapted and
+ * prints no line for it, whatever its own check says, because the line would
+ * say that OpenGL stays Apple's for a layout that differs, which is not what
+ * decided that context. A refusal is not remembered: a later engine of a
+ * context whose earlier engine was refused is checked like a first engine, and
+ * adopted when its own check passes. */
 enum nvk_cgl_further {
    NVK_CGL_FURTHER_NO = 0,
    NVK_CGL_FURTHER_ADOPTED,     /* the context has a bridge: Zink serves it with another engine */
