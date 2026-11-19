@@ -100,7 +100,7 @@ def check(f):
     assert done.index('nvmtl_busy_write(t->_surf, t->_plane, seq, 1);') < done.index(ROW[7]), 'row 7 comes before the done tags'
     fin = body(es, '- (void)nvmtlFinishExecution:(NSError *)error {')
     early = 'if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);'
-    held = 'if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }'
+    held = 'if ([self nvmtlReleaseScheduleHold]) [self nvmtlMarkScheduled];'   # 3.0.5: released under the completion lock
     assert fin.count(early) == 1 and fin.index('_partsRetiring = YES;') < fin.index(early) < fin.index(held) < fin.index('if (!error && _presentations.count)'), \
         'the early done tags are not between the retiring of the parts and the held-back scheduled report'
     assert re.search(r'nvmtl_surface_finish_writes\(self\);\n\s*nvmtl_busy_mark_done\(self\);', fin), 'the call at the end is gone'
@@ -210,7 +210,7 @@ controls = [
     ('row 7 before the done tags', move_after('NVMTLEventSync.m', ROW[7], 'static void nvmtl_busy_mark_done(NVMTLCommandBuffer *cb) {')),
     ('a return before row 7', mutate('NVMTLEventSync.m', '    cb->_busyMarks = nil;\n', '    cb->_busyMarks = nil;\n    if (!marks) return;\n')),
     ('the early done tags after the scheduled report', move_after('NVMTLEventSync.m', 'if (!error && nvmtl_busy_done_early_on()) nvmtl_busy_mark_done(self);',
-                                                                 'if (_scheduleAfterPublish) { _scheduleAfterPublish = NO; [self nvmtlMarkScheduled]; }')),
+                                                                 'if ([self nvmtlReleaseScheduleHold]) [self nvmtlMarkScheduled];')),
     ('the early done tags after an error too', mutate('NVMTLEventSync.m', 'if (!error && nvmtl_busy_done_early_on())', 'if (nvmtl_busy_done_early_on())')),
     ('the early done tags in WindowServer too', mutate('NVMTLEventSync.m', 'on = nvmtl_busy_marks_on() && ', 'on = ')),
     ('row 8 missing', mutate('NVMTLEventSync.m', ROW[8], '')),

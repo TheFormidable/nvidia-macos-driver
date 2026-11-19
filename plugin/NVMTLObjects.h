@@ -280,6 +280,8 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   int _resRefs, _rstate, _lruReg, _wantOn; uint64_t _lastUse;
   uint64_t _useEp;
   BOOL _texSeen;
+  BOOL _gpuWritten;     /* a buffer with a caller copy (_hostPtr) that a sealed part may have written; never cleared */
+  void *_callerPages;   /* the caller's pages of a no-copy buffer copied once (nvmtl_nocopy_once.h): contents only */
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
