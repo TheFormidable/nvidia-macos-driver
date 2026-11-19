@@ -3,9 +3,9 @@
 This page follows a frame from a Metal app down to the GPU, then covers how the driver is installed, removed, and
 recovered. Paths are the ones on an installed Mac; the source folder for each piece is in brackets.
 
-> The driver is new. Release 2.9 was tested on an RTX 5060 under macOS 15.7.x; a package of the 3.0 branch at commit
-> aa27c73 has been installed and started on one machine with an RTX 5050, and no test of it on a card has been
-> reported yet ([TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md)). The driver may not work on every card, board or
+> Release 2.9 has upstream RTX 5060 evidence; earlier 3.0.x fork builds ran on an RTX 5050 and GPU Caps
+> has scoped native evidence. The combined 3.0.3 development tree still needs validation
+> ([STATUS.md](STATUS.md)). The driver may not work on every card, board or
 > OpenCore setup. If your Mac does not boot macOS with OpenCore yet, set that up first with the
 > [OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/), then install the driver.
 
@@ -35,6 +35,10 @@ WindowServer -> IOFramebuffer = NVRMFB.kext            (NVKMS heads, modes, vbla
              -> AppleGraphicsDeviceControl policy = NVRMAGDC.kext                           [kexts/NVRMAGDC]
 ```
 
+Zink is a separate OpenGL route (OpenGL → Zink → NVK → NVRM), not the Metal translator.
+The opt-in application Vulkan bridge also uses NVK directly. See [ZINK-OPENGL.md](ZINK-OPENGL.md) and
+[the Vulkan runtime installation guide](../tools/nvk-bridge/INSTALL.md).
+
 ## 2. Kernel side
 
 **NVRM.kext.** NVIDIA's open-source resource manager, built for macOS with an XNU OS layer (`os-xnu*.cpp`) in place of
@@ -47,6 +51,10 @@ Linux's. At start it:
 4. brings up NVKMS (NVIDIA's mode-setting) and releases the hold once the display is armed.
 
 The boot argument `-nvoff` makes NVRM leave the card alone. The recovery path below uses it.
+
+NVRM also exposes versioned read-only GPU Caps through selector 14 and live boost policy through selector 13.
+The capability snapshot is not a write-permission API. [GPU-CAPS.md](GPU-CAPS.md) and
+[NVMETRICS.md](NVMETRICS.md) describe their userspace consumers and limits.
 
 NVRM is also a power child of the GPU's PCI device: on system sleep it suspends NVKMS and puts RM in standby with all of
 video memory preserved, and on wake it restores the PCI state and resumes both. NVRMFB then does the wake work

@@ -3,9 +3,9 @@
 Status: at commit 3933ff6 the kext's, NVK's and the Metal plugin's parts were compiled and linked with Apple's own tools
 on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors,
 macOS 15, Xcode 26.3 with the 26.2 SDK). Their pure logic runs in host tests. The corrections made after commit ee7f332
-were built and their host tests run on that Mac at commit aa27c73; nothing committed after aa27c73 has been built or
-tested on a Mac. **A package of commit aa27c73 has been installed and started on one machine with an RTX 5050, and no
-rebuild of a real channel has been reported.** It is on by default. `NVK_CHANNEL_RECOVER=0` in
+were built and their host tests run on that Mac at commit aa27c73. Later native evidence is tracked in
+[STATUS.md](STATUS.md); **no specific successful rebuild of a real channel has been reported here.**
+It is on by default. `NVK_CHANNEL_RECOVER=0` in
 `/Library/GPUBundles/nvmtl/nvrm610.conf` switches it off, and NVK then runs the 2.9 code.
 
 ## What changed

@@ -1,8 +1,10 @@
 # What NVIDIA's Windows driver offers, and what this driver offers on macOS
 
-This is the 2.9 audit for GTX 16 / RTX 20 to RTX 50 cards on macOS 15 and 26. Each row names the Windows feature, the
+This is the 2.9 baseline audit with 3.0.3 fork updates for GTX 16 / RTX 20 to RTX 50 cards on macOS 15 and 26. Each row names the Windows feature, the
 state in this tree (file, switch or document), and what is missing. "Blocked" always carries the reason. Media rows are
 detailed in [WINDOWS-PARITY-MEDIA.md](WINDOWS-PARITY-MEDIA.md); card coverage in [CARD-SUPPORT.md](CARD-SUPPORT.md).
+See [STATUS.md](STATUS.md) for test scope; inherited features and new experimental implementations are not a
+claim of equivalent performance or compatibility.
 
 Settings that are boot arguments or `nvrm610.conf` lines are all listed, validated, and changed safely by
 `tools/nullmoth_settings.py` (`list`, `get`, `set`, `--selftest`). It never touches a boot argument or conf line it was not
@@ -48,7 +50,7 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | OpenCL | owned by the compute/OpenCL area (`rel/driver-opencl`) | see that area's report |
 | DirectML-equivalent | Metal Performance Shaders and Core ML run on the Metal path | none |
 | Vulkan for applications | **built:** `package/vulkan-for-apps.sh --install` writes a loader manifest for the driver's NVK library, off by default (`tools/test_vulkan_for_apps.sh`, 12 arms). `nvk/nvk-metal-wsi.patch` adds `VK_EXT_metal_surface` windows (copy-based present into a `CAMetalLayer`). | Window presentation is proven to build only (see the report); the copy path is slower than a native one. The Khronos loader (Apache-2.0) is in the package as `Library/NullMoth/vulkan/libvulkan.1.dylib` and is installed with `--with-loader`. |
-| OpenGL | translation layer `plugin/NVMTLGL.m` over the Metal path | no native OpenGL driver; version is whatever Apple's OpenGL front end reports |
+| OpenGL | Zink on NVK via GLD on macOS 15.5+, with Apple's OpenGL-on-Metal fallback | 3.0.3 guard fix host-tested only; validate GL_RENDERER after installation. See [ZINK-OPENGL.md](ZINK-OPENGL.md). |
 
 ## Gaming
 
@@ -67,11 +69,12 @@ asked about, and writes conf settings only into the block the installer keeps ac
 |---|---|---|
 | Idle power states | NVK burst boost, RM standby; ASPM L1 on request (nvrmaspm=1), the link otherwise stays as the firmware set it | measured idle clocks need hardware |
 | Laptop dGPU power-off | opt-in D3cold monitor (`nvrtd3=1`, `nvrtd3res=`) | needs a hybrid laptop to prove |
-| Power limit, clock offsets, fan curve | none | the public 620 headers carry no write control for them; desktop fans are VBIOS-controlled: blocked |
+| Power limit, clock/voltage offsets, fan curve | no general driver write API; GPU Caps reads selected capabilities | NVMetrics separately tested supervised RM manual fan control on one RTX 5050; not a generic fan curve or overclocking interface. See [NVMETRICS.md](NVMETRICS.md). |
 | Notebook power budget (Dynamic Boost's TGP step) | opt-in `nvrmtgp=1`: the GPU firmware is told to run at the platform limit while on mains power and released on battery, live switch `debug.nvrm_tgp_enable`, state in `debug.nvrm_tgp_*` and `nvmtl-smi` (`kexts/NVRM/nvrm_power.cpp`, policy `nvrm_power_policy.h`) | needs a notebook to measure the enforced limit; the CPU/GPU power split (NVPCF) is `nvrmnvpcf=1` and the platform request handler (GPS) is `nvrmgps=1`, both served from the firmware's own ACPI methods (`nvrm_dsm_route.h`) |
 | Run-time GPU boost switch | opt-in `sudo env NULLMOTH_GPU_BOOST=1 ./install.sh` installs `nvmtl-boost` as a LaunchDaemon; `package/boost_daemon.sh set on\|off` (the Mac app's toggle) edits `/Library/NullMoth/gpuboost` and the daemon follows within two seconds (`tools/nvmtl-boost`, `tools/test_boost_daemon.py`) | needs a GPU run to measure the clocks |
 | Hybrid laptop whose panel is on the integrated GPU | opt-in `nvfbigpu=1`: the framebuffer starts as a proxy head for the firmware console and the accelerator copies frames into it (`kexts/NVRMFB/nvrm_igpu_proxy.h`) | needs a BIOS Hybrid notebook to prove the copy path; see `docs/HYBRID-LAPTOPS.md` |
-| Telemetry overlay | `tools/nvmtl-smi` reads power, clocks, temperature, pstate, utilisation, throttle reasons and fan from RUSD | a graphical overlay is not built |
+| Telemetry dashboard | `tools/nvmtl-smi` reads RUSD; [NVMetrics](NVMETRICS.md) supplies the separate graphical app and uses read-only GPU Caps | 15 verified / 150 unknown records on the tested GPU; no universal write authorization |
+| Live boost policy | NVRM selector 13, root-controlled; NVK refreshes policy at lease renewal | separate from fan mode and clock offsets; idle applications may retain a hold until submitting again or exiting |
 | Crash recovery (TDR equivalent) | GPU fault handling and device-lost recovery in the plugin; boot guard switches the driver off after a failed boot | none |
 | Driver control panel | CLI above and the Mac app's Driver settings window | none |
 

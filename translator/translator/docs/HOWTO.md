@@ -286,5 +286,5 @@ cargo test -p metal2vulkan --all-features
 ```
 
 `spirv-val` checks structural validity, not Metal equivalence. For a semantic claim, follow the
-[validation playbook](VALIDATION.md): use an owned synthetic regression, exact byte A/B where
+[driver translator validation guide](../../../docs/TRANSLATOR-VALIDATION.md): use an owned synthetic regression, exact byte A/B where
 appropriate, and an authored Metal/Vulkan case when output behavior changes.

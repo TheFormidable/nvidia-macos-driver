@@ -8,8 +8,9 @@ comandos y opciones y la solución de problemas.
 
 > **Qué se ha ejecutado, y dónde.** Un paquete hecho con `./build.sh package` en el commit aa27c73 en el Mac Intel de
 > abajo se ha instalado sobre la versión 2.9 y ha arrancado en una máquina con una RTX 5050: la máquina arrancó con él
-> dos veces, y la tarea del instalador que devuelve la versión anterior no devolvió la 2.9. No se ha informado de
-> ninguna prueba suya en una tarjeta NVIDIA. Lo que se ha ejecutado:
+> dos veces, y la tarea del instalador que devuelve la versión anterior no devolvió la 2.9. Este es el registro
+> histórico hasta aa27c73; las pruebas posteriores con RTX 5050 y GPU Caps están en [STATUS.md](STATUS.md).
+> No hay todavía una compilación nativa registrada del árbol combinado 3.0.3. Lo que se ejecutó entonces:
 >
 > - En un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5). En el commit 650db45, `./build.sh deps` empezó con un
 >   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
@@ -133,12 +134,10 @@ comandos y opciones y la solución de problemas.
 
 ## Inicio rápido
 
-Clona el repositorio y la rama de los que viene este archivo, con su propietario y el nombre de la rama en lugar de
-`<owner>` y `<branch>`. El repositorio del proyecto original no tiene `build.sh`; un clon de él da un árbol sin el
-script.
+Clona la rama de desarrollo de este fork, que contiene `build.sh`.
 
 ```bash
-git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
+git clone -b fable https://github.com/TheFormidable/nvidia-macos-driver.git
 cd nvidia-macos-driver
 ./build.sh doctor
 ./build.sh
@@ -210,10 +209,10 @@ Todas las fuentes salen de las versiones fijadas en [build/pins.sh](../build/pin
 lo fijado detiene la compilación y no se usa nada de ella. `./build.sh doctor` compara lo fijado con los scripts que
 usan las mismas fuentes.
 
-Un paquete hecho con `./build.sh package` en el commit aa27c73 se ha instalado sobre la versión 2.9 y ha arrancado en
-una máquina con una RTX 5050, y no se ha informado de ninguna prueba suya en una tarjeta NVIDIA: quien instale uno lo
-está probando. Tampoco se ha informado de los tamaños de las clases IOKit de Apple en macOS 26.7; los kexts los comparan
-con los suyos al arrancar (la comprobación de la disposición de las clases).
+Paquetes locales anteriores arrancaron en una RTX 5050; compilaciones y pruebas posteriores tienen resultados
+de alcance limitado en [STATUS.md](STATUS.md). El árbol combinado 3.0.3 aún necesita validación nativa.
+Los kexts comparan las clases IOKit del macOS en ejecución con las suyas al arrancar; compilar correctamente
+no demuestra que esas comprobaciones acepten otra versión del sistema.
 
 Para hacer un paquete instalable hace falta el paquete publicado de la versión 2.9 como base, porque algunos archivos
 que `install.sh` necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo

@@ -21,4 +21,5 @@ Platform: macOS Tahoe 26.7.3 x86_64, Xcode 26.5, NVIDIA RTX 5050 (PCI 10DE:2D83,
 
 Validated on one card and one macOS environment, not a general compatibility guarantee. Thermal/fan/power capabilities remain unknown, not verified. The selector does not implement RPM discovery or manual fan control. Full system reliability, multiple GPUs, kernel memory stress, crash recovery, and long-duration regression remain to be evaluated.
 
-This source change is proposed for code review on `fable` and should not by itself be treated as a stable release.
+This is the historical Phase 1 evidence. Phase 1 and Phase 2B are now merged into `fable` (PR #7); see
+[GPU-CAPS.md](GPU-CAPS.md) for the newer counts and boundaries. Neither result certifies a stable release.
