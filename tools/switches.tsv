@@ -463,6 +463,7 @@ env	NVMTL_VRAM_WS_NONIMAGE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO_ALL	dev	unset	2.9	-	unreviewed
 env	NVMTL_WG_ZERO_NEG	dev	unset	2.9	-	unreviewed
+env	NVMTL_WHOLE_VIEWS	escape	on (NVMTL_WHOLE_VIEWS=0 in the settings file: the shader translator retypes a local variable through any pointer derived from it, and a helper that reads a pointer-free local both as its members and as bytes keeps the type it first saw, as in 3.0.4)	3.0.5	3.2	The shader translator retypes a local variable only through a pointer proven to address all of it, and gives a helper that reads a pointer-free local both as its members and as bytes one byte array of the local's size, so such shaders of League of Legends and of apps in the iOS Simulator translate instead of falling back (from pull request 524 of the original project). The plugin adds -wv0 to its shader cache tag when it is 0, so the two modes never share a cached module.
 env	NVMTL_WIT_SKIP_EVERY	dev	unset	2.9	-	unreviewed
 env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed

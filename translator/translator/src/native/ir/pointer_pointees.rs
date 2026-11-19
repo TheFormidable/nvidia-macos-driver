@@ -2,6 +2,10 @@ use super::*;
 
 impl LlModule {
     pub(in crate::native) fn infer_pointer_pointees(&mut self) {
+        // The two byte-view rules marked below come from pull request 524 of the original project
+        // (the iOS Simulator's helpers that read a local union both as its members and as bytes);
+        // NVMTL_WHOLE_VIEWS=0 leaves both out, as in 3.0.4.
+        let whole_views = crate::native::view_switches::whole_views_on();
         for f in &self.functions {
             for ((name, ty), pointee) in f.params.iter().zip(&f.byval_param_pointees) {
                 if matches!(ty, LlType::Ptr(_)) {
@@ -219,10 +223,40 @@ impl LlModule {
                 let mut seen = seen.into_iter().collect::<Vec<_>>();
                 seen.sort_by_key(|ty| format!("{ty:?}"));
                 seen.dedup();
-                let [pointee] = seen.as_slice() else {
+                // A local union helper can use both a typed aggregate and its byte image: keep one
+                // allocation extent instead of letting its first GEP choose the storage.
+                let byte_image = whole_views
+                    .then(|| self.mixed_aggregate_byte_image(&seen))
+                    .flatten();
+                let pointee = if let Some(byte_image) = byte_image.as_ref() {
+                    byte_image
+                } else if let [pointee] = seen.as_slice() {
+                    pointee
+                } else {
                     continue;
                 };
                 let key = (f.name.clone(), param);
+                if byte_image.is_some() {
+                    // A pointer-bearing pointee is kept, and so is a pointee whose declared size
+                    // is not the size of the byte image.
+                    if self
+                        .ptr_pointees
+                        .get(&key)
+                        .is_some_and(|ty| self.type_contains_pointer(ty))
+                        || self
+                            .metadata_pointee_sizes
+                            .get(&key)
+                            .is_some_and(|declared| {
+                                self.native_memcpy_type_size_align(pointee)
+                                    .is_none_or(|(size, _)| size != *declared)
+                            })
+                    {
+                        continue;
+                    }
+                    self.metadata_pointee_params.remove(&key);
+                    self.ptr_pointees.insert(key, pointee.clone());
+                    continue;
+                }
                 if self.gep_source_should_override(&key, pointee) {
                     self.metadata_pointee_params.remove(&key);
                     self.ptr_pointees.insert(key, pointee.clone());
@@ -264,6 +298,18 @@ impl LlModule {
                         self.metadata_pointee_params.remove(&key);
                         changed = true;
                     }
+                    // A pointer-free typed aggregate of the same size, whether it came from metadata
+                    // or from the function's own GEPs, yields to a callee's byte image of the object.
+                    Some(existing)
+                        if whole_views
+                            && !self.is_pure_byte_image(&existing)
+                            && self.is_pure_byte_image(pointee)
+                            && self.metadata_pointee_can_yield_to_call(&existing, pointee) =>
+                    {
+                        self.ptr_pointees.insert(key.clone(), pointee.clone());
+                        self.metadata_pointee_params.remove(&key);
+                        changed = true;
+                    }
                     Some(_) => {}
                     None => {
                         self.ptr_pointees.insert(key, pointee.clone());
@@ -272,6 +318,37 @@ impl LlModule {
                 }
             }
         }
+    }
+
+    /// The byte array that stands for every view in `seen` of one pointer-free object: there is a
+    /// byte view (i8), every aggregate view has the same size above one byte, and no view is
+    /// larger. None otherwise.
+    fn mixed_aggregate_byte_image(&self, seen: &[LlType]) -> Option<LlType> {
+        if !seen.contains(&LlType::Int(8)) || seen.iter().any(|ty| self.type_contains_pointer(ty)) {
+            return None;
+        }
+        let mut extent = None;
+        for ty in seen {
+            if !matches!(ty, LlType::Struct(_) | LlType::Array(_, _)) {
+                continue;
+            }
+            let (size, _) = self.native_memcpy_type_size_align(ty)?;
+            if size <= 1 || extent.is_some_and(|old| old != size) {
+                return None;
+            }
+            extent = Some(size);
+        }
+        let extent = extent?;
+        if seen.iter().any(|ty| {
+            self.native_memcpy_type_size_align(ty)
+                .is_none_or(|(size, _)| size > extent)
+        }) {
+            return None;
+        }
+        Some(LlType::Array(
+            Box::new(LlType::Int(8)),
+            u32::try_from(extent).ok()?,
+        ))
     }
 
     pub(in crate::native) fn gep_source_should_override(

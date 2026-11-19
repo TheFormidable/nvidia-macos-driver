@@ -37,6 +37,7 @@ mod stencil_export;
 mod punned_access_chain;
 mod short_access_chain;
 mod wg_atomic;
+mod view_switches;
 
 mod tir;
 mod cl_constant;
