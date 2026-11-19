@@ -41,9 +41,9 @@ body:
   - type: checkboxes
     id: own-words
     attributes:
-      label: Written by you
+      label: Verified report
       options:
-        - label: I wrote this report myself. AI-written issues are closed without review (see CONTRIBUTING.md).
+        - label: I reviewed this report and confirm that it describes real observations, not invented results (see CONTRIBUTING.md).
           required: true
   - type: input
     id: app

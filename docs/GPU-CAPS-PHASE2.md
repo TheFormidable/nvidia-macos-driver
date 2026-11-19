@@ -1,8 +1,9 @@
-# GPU Caps — Phase 2, read-only discovery (work in progress)
+# GPU Caps — Phase 2, read-only discovery and integration
 
-This adds a **host-side evidence interpreter** to the already validated Phase 1
-branch. It does not alter NVRM selector 14, does not change the installed driver,
-and does not permit manual fan control.
+Phase 2A adds a **host-side evidence interpreter** to Phase 1. The interpreter
+does not alter the installed driver or permit manual fan control. Phase 2B adds
+the bounded RM observations to the kernel cache and is now integrated into
+`fable`; see [GPU-CAPS.md](GPU-CAPS.md) for the physical RTX 5050 results.
 
 ## Inputs and real-hardware evidence
 
@@ -29,14 +30,14 @@ python3 tools/gpu_caps_phase2_evidence.py probe.jsonl --output evidence.json
 The collector/analyser makes no driver writes. Do not run untrusted captures
 through other consumers and do not upgrade experimental fan records into verified
 write authorization. Read-only evidence from a capture is a snapshot, not
-a freshly revalidated kernel cache: `NVRMUserClient::sGpuCaps` still advertises
-only the Phase 1 identity records.
+a freshly revalidated kernel cache. `NVRMUserClient::sGpuCaps` serves the
+current Phase 2B cache; the capture interpreter does not populate it.
 
-## Next work to complete Phase 2
+## Phase 2B and remaining work
 
-Integrate published RM queries with the per-GPU cache on the *driver's work
-queue* (not in selector 14), strictly bounded after a successful RM bring-up and
-repeated after GPU resume. RUSD section freshness and RM failure statuses must
-be preserved. Add end-to-end native tests and only then mark thermal/RPM/firmware
-capabilities verified in selector 14. Avoid running private RM probes while
-holding the cache lock or on interrupt/shutdown paths. Manual writes remain off.
+Phase 2B performs selected RM queries outside the leaf cache lock, after bring-up
+and on lifecycle refresh; selector 14 only copies the cache. Native evidence
+increased the verified count from 9 to 15. RUSD discovery is still userspace-only.
+Remaining work: broader OS/card coverage, failure and lifecycle regressions and
+evidence for any currently unknown record. Preserve RM failure statuses and RUSD
+freshness independently; manual writes remain unauthorized by the ABI.
