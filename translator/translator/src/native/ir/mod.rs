@@ -13,6 +13,10 @@ pub(crate) mod parse_cache;
 mod pointer_pointees;
 mod raw_buffer;
 mod static_init;
+#[cfg(test)]
+mod whole_view_tests;
+#[cfg(test)]
+mod whole_view_way_back_tests;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum LlType {

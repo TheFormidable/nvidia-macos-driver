@@ -17,6 +17,21 @@ static inline int nvmtl_spvcache_mode_tag(char *tag, size_t cap, const char *bui
                            argbuf_samplers ? "-as1" : "", no_ptr_phi_load ? "-np" : "", no_pixel_hw_filter ? "-nf" : "");
     return k > 0 && (size_t)k < cap;
 }
+/* Appends to `tag` the mark of the translator's way back from the whole-object views of pull request 524 of the
+   original project: "-wv0" for NVMTL_WHOLE_VIEWS=0 (`whole_views` is the variable's value after the settings file
+   was read, NULL when unset). The translator reads it once (translator/translator/src/native/view_switches.rs) and,
+   as here, a value that starts with 0 turns the change off, so a module translated with it off is never served to a
+   process that has it on, nor the other way. Returns 1, or 0 when the tag with its mark does not fit in `cap`; on 0
+   the tag is left as it was and the caller must not cache. */
+static inline int nvmtl_spvcache_escape_tag(char *tag, size_t cap, const char *whole_views)
+{
+    if (!tag || !cap) return 0;
+    const size_t n = strnlen(tag, cap);
+    if (n == cap) return 0;
+    const int k = snprintf(tag + n, cap - n, "%s", whole_views && whole_views[0] == '0' ? "-wv0" : "");
+    if (k < 0 || (size_t)k >= cap - n) { tag[n] = 0; return 0; }
+    return 1;
+}
 /* 1 when `name` is an entry of translator build `build` (any mode); 0 for another build's entry or a foreign file. */
 static inline int nvmtl_spvcache_same_build(const char *name, const char *build)
 {
