@@ -552,7 +552,7 @@ static bool zk_is_software(const char *renderer)
 
 /* Never returns: a hardware context that is not Zink's, or one whose GL_RENDERER is null (that one fails, below).
  * Of the others, only the layout guard's refusal makes the check inactive
- * (zink/nvk_cgl.c:718-725, printed once per process, for the first context it refuses): the guard keeps Apple's
+ * (zink/nvk_cgl.c:719-726, printed once per process, for the first context it refuses): the guard keeps Apple's
  * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
  * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
  * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
