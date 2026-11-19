@@ -20,7 +20,7 @@ GPU Caps Phase 1/2B later observed a cache generation advance after resume on an
 | NVRM `setPowerState(0)` | NVRM | Pause the notebook power manager; then (3.0) the surface fence (every hold ends and new ones are refused until the wake) and the RM's 1 Hz timer; tell the framebuffers; `nvKmsSuspend` (heads off, while the GPU still serves the core channel); close the RM gate; stop user channels; save PCI config, Resizable BAR control and the root port window; (3.0) wait for the RM's global work queue, 5 s at most; `rm_power_management(STANDBY)`. Then (3.0) the interrupt source is turned off and the interrupt path is closed: no handler enters the RM from here on, and the driver waits (2 s at most) until no handler is inside and no bottom half is pending or running. |
 | — | RM | With `PreserveVideoMemoryAllocations=1` RM copies **every** VRAM allocation out through its temporary-file interface. NVRM backs that "file" with pageable kernel memory (no disk I/O). GSP-RM is unloaded. |
 | Slot powered again, NVRM `setPowerState(1)` | NVRM | Restore the root port window and the Resizable BAR size (the firmware resets BAR1 to 256 MB), check `PMC_BOOT_0`; open the interrupt path again before the interrupt source is turned on, so that the RM's resume gets its interrupts (3.0); `rm_power_management(RESUME)` (GSP boots again through FSP and VRAM is copied back), restart user channels, `nvKmsResume`, open the RM gate; when the resume worked, resume the power manager and (3.0) the 1 Hz timer; tell the surface fence that the GPU is back, or that it is lost, after which the fence stays off until the next boot (3.0); tell the framebuffers. |
-| NVRMFB `setPowerState(1)` | NVRMFB | Re-light the head once NVRM says the GPU is back, then do IOGraphics' own wake work (below). |
+| NVRMFB `setPowerState(1)` | NVRMFB | Re-light the head once NVRM says the GPU is back, then do IOGraphics' own wake work (below). If the head does not light, queue the GPU wake call 500 ms later; it tries up to twice more, 500 ms apart (see "A head that does not light" below). |
 | CPU back on | NVAccel | The sleep window closes: page-offs give VRAM back again. |
 
 ## Why each part is needed
@@ -53,6 +53,23 @@ NVRMFB now does what IOGraphics does (`IOFBController::computeState` and `handle
 IOGraphics-599): deliver `DidWake` with `true` and then `false` (the second re-enables the accelerators), deliver
 `DidPowerOn`, set `pagingState` and wake WindowServer on `fServerConnect`, under the framebuffer's work loop gate. It
 never pushes to NVKMS before NVRM has resumed the GPU (`NVRMGpuReady`, `NVRMGpuPower`).
+
+**A head that does not light.** Two things light the head after a sleep: NVRMFB's `setPowerState(1)` and the GPU wake
+call (`gpuWakeFire`), which NVRM's `NVRMGpuPower` 1 queues once the GPU is back. They can arrive in either order. If
+the wake call runs first it finds the framebuffer still powered off and leaves the head to `setPowerState(1)`; after a
+display sleep (DPMS) `setPowerState(1)` is the only one. `setPowerState(1)` used to drop a failure of its own attempt,
+so nothing tried again and the display stayed dark while WindowServer kept drawing. A failure there now queues the GPU
+wake call 500 ms later, and a failed attempt of that call queues it again 500 ms later: three attempts in one wake,
+whichever of the two makes the first. A GPU standby starts the count again, and so does a failed `setPowerState(1)`,
+which counts its own attempt as the first. No retry comes straight after a failure, with one exception: NVRM marks the
+GPU running before NVKMS has resumed, so `setPowerState(1)` can try and fail just before `NVRMGpuPower` 1 arrives, and
+that message runs the queued retry at once, keeping the count. The call is queued again rather than made to wait,
+because it holds the display gate: one lock for every framebuffer, which the flips, the cursor, mode changes and the
+video memory worker take as well. The kernel log says which way a power-on went:
+`power on: paging N, GPU standby seen N` when it did not do the family's wake work (`paging 0, GPU standby seen 0` is
+normal at the first power-on after start, once for each framebuffer), and `replay N ms` in the `system wake:` line for
+how long the owed `DidWake(false)` replay took. From pull request 597 of the original project, adapted: it slept 500
+ms under the display gate and tried once more. Not run through a sleep on a card yet.
 
 **NVAccel and VRAM across sleep.** At sleep IOGraphicsAccelerator2 pages off its VRAM resources, and the wake's mode
 change pages them back on. If page-on got fresh VRAM, WindowServer kept drawing into the memory it had imported before
