@@ -3111,6 +3111,22 @@ int nvmtl_vk_accel_surface_wait(void)
     IOObjectRelease(s);
     return on == 1;
 }
+/* Whether the descriptor of the family VRAM import below is opened the way NVK's own opens are (nvmtl_fd_token.h), so a
+   process whose sandbox refuses /dev/null, as Firefox's do, still imports (from pull request 487 of the original
+   project). It is read once. NVMTL_SURFACE_VRAM_PIPE=0, in the environment or the settings file, opens /dev/null with a
+   plain open() again: in such a sandbox the import then fails and its surfaces go through private images and their
+   copies, as in 3.0.4. Processes that may open /dev/null are the same either way. */
+static int nvmtl_vk_surface_vram_pipe_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SURFACE_VRAM_PIPE");
+        on = !(e && e[0] == '0');
+        if (!on) nvlog("item 7: the family VRAM import opens /dev/null with a plain open() (NVMTL_SURFACE_VRAM_PIPE=0): "
+                       "a sandbox that refuses it leaves its surfaces on private images and copies");
+    }
+    return on;
+}
 /* The family's VRAM for one plane of a surface, granted by the kernel through NVK's import, as a buffer of `need` bytes.
    planeWord and sizeWord are the grant's words as the kernel reads them: the plane alone and the bytes needed, or a
    ranged grant's (nvmtl_plane_alias.h). */
@@ -3123,9 +3139,21 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) return -1;
     nvmtl_vram_rec r = { 3, surfaceID, planeWord, 0, sizeWord };
+    /* The descriptor carries nothing (the staged record names the surface), and NVK takes it over. It is opened the way
+       NVK's own opens are (nvmtl_fd_token.h): a sandbox that refuses /dev/null, as Firefox's does, gets the read end
+       of an empty pipe. With a plain open() the import failed there without a word and every such surface went through
+       a private image and its copies (from pull request 487 of the original project). NVMTL_SURFACE_VRAM_PIPE=0 goes
+       back to the plain open(). */
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-                                    open("/dev/null", O_RDONLY | O_CLOEXEC) };
-    if (imp.fd < 0) return -1;
+                                    nvmtl_vk_surface_vram_pipe_on() ? nvmtl_icd_open("/dev/null", O_RDONLY | O_CLOEXEC)
+                                                                    : open("/dev/null", O_RDONLY | O_CLOEXEC) };
+    if (imp.fd < 0) {
+        const int e = errno;
+        static unsigned nfd; if (nfd++ < 8 || nfd % 1000 == 0)
+            nvlog("item 7: surface %u plane %u%s: no descriptor for the family VRAM import (errno %d) - private image + copies (%u so far)",
+                  surfaceID, plane, plane != planeWord ? " (its byte range)" : "", e, nfd);
+        return -1;
+    }
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, need, (uint32_t)mt };
     VkDeviceMemory m = VK_NULL_HANDLE;
     pnvk_stage_import(&r);

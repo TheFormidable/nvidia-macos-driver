@@ -1,5 +1,6 @@
 // rm.c: see rm.h.
 #include "rm.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,20 @@
 
 enum { SEL_ESC = 1, SEL_BINDFD = 3, SEL_EVWAIT = 6 };
 
+// The descriptor the user client keys its RM file on: only its number counts. A sandbox that refuses /dev/null (Firefox's
+// media process) gets the read end of an empty pipe instead, as the plugin's own opens do (plugin/nvmtl_fd_token.h);
+// any other failure stays a failure. From pull request 487 of the original project.
+static int rm_fd_token(void)
+{
+    const int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 || (errno != EACCES && errno != EPERM)) return fd;
+    int ends[2];
+    if (pipe(ends)) return -1;
+    close(ends[1]);
+    if (fcntl(ends[0], F_SETFD, FD_CLOEXEC) < 0) { const int e = errno; close(ends[0]); errno = e; return -1; }
+    return ends[0];
+}
+
 static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
 {
     // NVAccel's bridge first (0x4E56xxxx), then NVRM itself, as NVK's nvrm_xnu_open does
@@ -32,7 +47,11 @@ static io_connect_t open_conn_fd(NvU32 type, int *fdOut)
         kr = IOServiceOpen(svc, mach_task_self(), type, &conn); IOObjectRelease(svc);
         if (kr != KERN_SUCCESS) return 0;
     }
-    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);   // the user client keys its RM file on an fd number
+    // Without a descriptor the connection is closed and the open fails. Bound to -1 it counted as detached, and the
+    // kernel finds a connection by the number it is bound to (nv_xnu_lookup_fd), so the library went on with a
+    // connection nothing could name.
+    const int fd = rm_fd_token();
+    if (fd < 0) { fprintf(stderr, "rm: no descriptor to bind the user client to (errno %d)\n", errno); IOServiceClose(conn); return 0; }
     uint64_t in = (uint64_t)fd;
     IOConnectCallScalarMethod(conn, SEL_BINDFD, &in, 1, NULL, NULL);
     if (fdOut) *fdOut = fd;

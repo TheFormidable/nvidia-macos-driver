@@ -21,11 +21,11 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 17 | 1 | 55 | 405 | 12 |  | 496 |
+| env |  | 6 |  |  | 19 | 1 | 55 | 405 | 12 |  | 498 |
 | bootarg | 4 | 13 | 30 | 21 | 15 |  | 8 | 6 | 2 |  | 99 |
 | sysctl |  | 5 | 4 | 12 |  |  | 373 |  |  |  | 394 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
-| procname |  |  |  |  |  |  |  |  | 12 |  | 12 |
+| procname |  |  |  |  |  |  |  |  | 13 |  | 13 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
 | pref |  |  |  |  |  |  |  |  |  |  | 0 |
 
@@ -35,6 +35,7 @@ Each of these turns one change that is on by default back off. None is needed on
 
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
+| env | `NVENCVT_DEC_HOLD` | on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4) | 3.2 | In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project. |
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
 | env | `NVMTL_ASYNC_TEX_UPLOAD` | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. |
 | env | `NVMTL_BLIT_READONLY` | on (NVMTL_BLIT_READONLY=0: a buffer with a caller copy that a command buffer used only as a blit copy's source is copied back to the caller's memory at completion, as in 3.0.3) | 3.2 | A buffer with a caller copy (newBufferWithBytesNoCopy pages the driver copies) that a command buffer used only as the source of copyFromBuffer:toBuffer: or copyFromBuffer:toTexture: is not copied back at completion; any other use in the command buffer still copies it back. From pull request 578 of the original project. |
@@ -46,6 +47,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_PHOTOBOOTH_FLIP` | on (NVMTL_PHOTOBOOTH_FLIP=0 in the settings file: Photo Booth's preview is shown as Core Image renders it into the drawable, as in 2.9) | 3.2 | In Photo Booth only, the image Core Image renders into the preview's drawables is reflected within the rendered bounds, so the preview is upright; camera buffers, saved photos and other processes are not touched. |
 | env | `NVMTL_PLANE_FOLLOW` | on where each process's planar self-test saw every mark move the surface's seed by exactly one (NVMTL_PLANE_FOLLOW=0 in the settings file: marking one plane leaves the other planes' tags one seed behind, as in 3.0 before this switch) | 3.2 | When the driver marks one plane of a surface whose planes sit in their own video memory, the other planes stay marked as current, so the frames WindowServer draws for a screen share are not locked, copied back and uploaded again at their next use. It acts only in a process whose self-test measured that a mark moves the surface's seed by exactly one; the log line 'planar surfaces: each of the self-test's ... marks' says so. |
 | env | `NVMTL_PRETRANSLATE` | on in games (NVMTL_PRETRANSLATE=0 in the settings file: shaders are translated when first asked for, as in 3.0) | 3.2 | In a game (the games category or LSSupportsGameMode in its Info.plist) every entry point of a new shader library is translated ahead by a small low-priority pool and stored in the shader cache, so the first run of a level does not stop for each new shader; =1 turns it on in any process. |
+| env | `NVMTL_SURFACE_VRAM_PIPE` | on (NVMTL_SURFACE_VRAM_PIPE=0 in the settings file: the family VRAM import opens /dev/null with a plain open(), so a process whose sandbox refuses it, as Firefox's do, draws its surfaces through private images and copies, as in 3.0.4) | 3.2 | A process whose sandbox refuses /dev/null (Firefox's) imports a surface's family VRAM with the read end of an empty pipe as its descriptor, as NVK's own opens there already do, instead of failing the import without a word; a process that may open /dev/null is not changed. From pull request 487 of the original project. |
 | env | `NVMTL_SURFIN_ZERO` | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. |
 | env | `NVMTL_SURFOUT_PLANES` | on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9) | 3.2 | The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use. |
 | env | `NVMTL_UNIFORM_CBUF` | on (NVMTL_UNIFORM_CBUF=0: GL and ANGLE uniforms stay in the address table, as in 3.0.3, where the promotion never ran) | 3.2 | OpenGL (vs_uniform_buffer, fs_uniform_buffer) and ANGLE (ANGLE_userUniforms) uniform buffers that are only read are promoted to an NVK constant bank; it is on since 3.0.4 (pull requests 573, 579 and 580 of the original project). Also read from the settings file. |
@@ -168,6 +170,7 @@ Each of these does nothing unless it is set.
 | `NVENCVT_BFRAMES` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_BT` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_CONF` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
+| `NVENCVT_DEC_HOLD` | escape | on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4) | 3.0.5 | 3.2 | In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project. | vendor/nvenc/vt/nvencvt_dec.c |
 | `NVENCVT_DEPTH` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_DPB_EXTRA` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVENCVT_ENGINE` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
@@ -501,6 +504,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SPVCACHE_REARM_MB` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_SPVCACHE_TARGET_PCT` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_SURFACE_BUSY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLEventSync.m |
+| `NVMTL_SURFACE_VRAM_PIPE` | escape | on (NVMTL_SURFACE_VRAM_PIPE=0 in the settings file: the family VRAM import opens /dev/null with a plain open(), so a process whose sandbox refuses it, as Firefox's do, draws its surfaces through private images and copies, as in 3.0.4) | 3.0.5 | 3.2 | A process whose sandbox refuses /dev/null (Firefox's) imports a surface's family VRAM with the read end of an empty pipe as its descriptor, as NVK's own opens there already do, instead of failing the import without a word; a process that may open /dev/null is not changed. From pull request 487 of the original project. | plugin/nvmtl_vk.c |
 | `NVMTL_SURFIN_ORDERED` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_SURFIN_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_SURFIN_ZERO` | escape | on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0) | 3.0.1 | 3.2 | WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0. | plugin/NVMTLObjects.m, plugin/nvmtl_vk.c |
@@ -1132,6 +1136,7 @@ Each of these does nothing unless it is set.
 | `mtlprobe` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtlrender` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtltest` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
+| `plugin-container` | internal | - | 3.0.5 | - | a branch on the process name, Firefox's child processes, where the video library's decoders keep their last emitted pictures (NVENCVT_DEC_HOLD); not a user switch | vendor/nvenc/vt/nvencvt_dec.c |
 
 ## build
 

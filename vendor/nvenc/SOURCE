@@ -61,6 +61,18 @@ Changes made here, in this order of importance:
                    cannot put the untested decoder into the decode service. build/build_nvencvt.sh lists it among the
                    five symbols the library may export.
 
+  From pull request 487 to the original NullMoth project, by dreamelite96, adapted (tools/test_nvencvt_rm_fd.py,
+  tools/test_nvencvt_dec_hold.py):
+                 - src/rm.c: where a sandbox refuses /dev/null (Firefox's media process), each user-client connection is
+                   bound to the read end of an empty pipe; with no descriptor at all the connection is closed and the open
+                   fails, where it used to be bound to -1 and used;
+                 - vt/nvencvt_dec.c: in Firefox's processes (plugin-container) each emitted picture stays referenced until
+                   eight later ones have been emitted, so that Firefox's GPU process takes the surface before the pool
+                   hands the buffer out again; NVENCVT_DEC_HOLD=0 releases at once. The pull request kept NVDEC_HOLD
+                   (0 to 16, default 8) pictures in every process;
+                 - src/vp9dec.c, src/av1dec.c: NVDEC's count of blocks in error (err_blocks); vt/nvencvt_dec.c prints it, logs
+                   every VP9 and AV1 frame with NVENCVT_LOG=2, and starts each log line with the time of day.
+
 Where upstream's own facts come from (read before calling this library clean of NVIDIA's closed driver): the decoders'
 picture setups are open-gpu-doc's nvdec_drv.h. The ENCODERS' per-picture control blocks (src/h264enctmpl.h,
 hevcenctmpl.h, av1enctmpl.h) are byte tables that upstream generated from traces of NVIDIA's Linux driver encoding on
