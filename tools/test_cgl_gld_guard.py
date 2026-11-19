@@ -6,8 +6,9 @@ checks for the host and feeds nvk_cgl_check_gld_layout synthetic heap blocks and
 (accepted: the CGL context's rend null, this engine, or no heap object in heap or unmapped memory; the saved table its
 own block, past the context's public part or a span of heap memory at no block start that reaches neither block) and
 one per way the layout can differ (each refused, naming what the memory held), with controls. It also feeds
-nvk_cgl_room, the question integer_dispatch_slot asks of the CGL private object and of its engine list, and
-nvk_cgl_renderer_reason, the text of the line bridge_current prints when it drops a call. zink/nvk_cgl.c compiles
+nvk_cgl_room, the question integer_dispatch_slot asks of the CGL private object and of its engine list,
+nvk_cgl_renderer_reason, the text of the line bridge_current prints when it drops a call, and nvk_cgl_further_engine,
+which says whether an engine is a later engine of a context the adapter has already decided on. zink/nvk_cgl.c compiles
 only against the macOS SDK, so what it does around those checks (what prepare reads before the check, where each
 refusal returns, what is printed and how often, what bridge_current does with a call that came with another engine)
 is checked by reading its text. It touches no GPU, loads no Apple framework and installs nothing, so it is safe to
@@ -701,58 +702,53 @@ int main(void) {
    expect_int("has_context_context_rend", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_CONTEXT_REND), 1);
    expect_int("has_context_saved_block", nvk_cgl_layout_has_context(NVK_CGL_LAYOUT_SAVED_BLOCK), 1);
 
-   /* nvk_cgl_further_engine, on the reports of real checks: e1 is the engine the context's bridge would hold, or
-    * the engine that passed the check and was not adopted; the engine under check is a further one */
+   /* nvk_cgl_further_engine, on the verdicts of real checks of an engine of a context that has another engine */
    build_null(&engine, &context, &back, 1);
-   { void *e1 = other_engine(context, 1), *e3 = other_engine(context, 1);
+   { void *e1 = other_engine(context, 1);
      char *plain = calloc(1, 0x300); void **small = calloc(1, 0x40); reg(plain); reg(small);
-#define FURTHER(adopted, unadopted) (int)nvk_cgl_further_engine(r, &g_report, (adopted), (unadopted))
+#define FURTHER(adopted, unadopted) (int)nvk_cgl_further_engine(r, (adopted), (unadopted))
      r = run(engine, &profile, &octx, &oback);                       /* rend unset: the check passes */
      expect("further_base_ok", r, NVK_CGL_LAYOUT_OK);
      expect_reason_is("reason_accepted", "the layout matches the record");
-     expect_int("further_ok_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
-     expect_int("further_ok_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
-     expect_int("further_ok_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_ok_adopted", FURTHER(1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_ok_both", FURTHER(1, 1), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_ok_none", FURTHER(0, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_ok_unadopted", FURTHER(0, 1), NVK_CGL_FURTHER_UNADOPTED);
      put_ptr(engine, GLI_SAVED_DISPATCH, small);                     /* rend unset, its own saved table refused */
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_saved", r, NVK_CGL_LAYOUT_SAVED_BLOCK);
-     expect_int("further_saved_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
-     expect_int("further_saved_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
-     expect_int("further_saved_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_saved_adopted", FURTHER(1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_saved_none", FURTHER(0, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_saved_unadopted", FURTHER(0, 1), NVK_CGL_FURTHER_UNADOPTED);
      put_ptr(engine, GLI_SAVED_DISPATCH, back); put_ptr(context, 0, e1);   /* rend is e1, an engine of the context */
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_rend_sibling", r, NVK_CGL_LAYOUT_CONTEXT_REND);
-     expect_int("further_rend_is_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_ADOPTED);
-     expect_int("further_rend_is_adopted_both", FURTHER(e1, 1), NVK_CGL_FURTHER_ADOPTED);
-     expect_int("further_rend_other_sibling", FURTHER(e3, 0), NVK_CGL_FURTHER_NO);
-     expect_int("further_rend_other_sibling_unadopted", FURTHER(e3, 1), NVK_CGL_FURTHER_UNADOPTED);
-     expect_int("further_rend_sibling_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_UNADOPTED);
-     expect_int("further_rend_sibling_none", FURTHER(NULL, 0), NVK_CGL_FURTHER_NO);
-     /* the same report under a verdict no check gives with it: the verdict is asked for as well as the word */
-     expect_int("further_sibling_word_saved_verdict",
-                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_SAVED_BLOCK, &g_report, NULL, 1), NVK_CGL_FURTHER_NO);
-     expect_int("further_sibling_word_ok_verdict",
-                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_OK, &g_report, NULL, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_rend_sibling_adopted", FURTHER(1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_sibling_both", FURTHER(1, 1), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_sibling_unadopted", FURTHER(0, 1), NVK_CGL_FURTHER_UNADOPTED);
+     expect_int("further_rend_sibling_none", FURTHER(0, 0), NVK_CGL_FURTHER_NO);
      put_ptr(context, 0, plain);                                     /* rend is a heap block that is no engine */
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_rend_block", r, NVK_CGL_LAYOUT_CONTEXT_REND);
-     expect_int("further_rend_block_adopted", FURTHER(e1, 0), NVK_CGL_FURTHER_NO);
-     expect_int("further_rend_block_unadopted", FURTHER(NULL, 1), NVK_CGL_FURTHER_NO);
-     expect_int("further_rend_block_is_adopted", FURTHER(plain, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_block_adopted", FURTHER(1, 0), NVK_CGL_FURTHER_ADOPTED);
+     expect_int("further_rend_block_unadopted", FURTHER(0, 1), NVK_CGL_FURTHER_UNADOPTED);
+     expect_int("further_rend_block_none", FURTHER(0, 0), NVK_CGL_FURTHER_NO);
      put_ptr(context, 0, NULL); ((char *)engine)[GLI_PROFILE] = 2;   /* a check before the context's refuses */
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_profile", r, NVK_CGL_LAYOUT_PROFILE);
-     expect_int("further_profile_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_profile_both", FURTHER(1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_profile_adopted", FURTHER(1, 0), NVK_CGL_FURTHER_NO);
+     expect_int("further_profile_unadopted", FURTHER(0, 1), NVK_CGL_FURTHER_NO);
      ((char *)engine)[GLI_PROFILE] = 1; put_ptr(engine, GLI_SAVED_DISPATCH, NULL);
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_context_null", r, NVK_CGL_LAYOUT_CONTEXT_NULL);
-     expect_int("further_context_null_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_context_null_both", FURTHER(1, 1), NVK_CGL_FURTHER_NO);
      put_ptr(engine, GLI_SAVED_DISPATCH, back); put_ptr(engine, GLI_CGL_DISPATCH, (char *)engine + DISP_OFFSET);
      r = run(engine, &profile, &octx, &oback);
      expect("further_base_context_block", r, NVK_CGL_LAYOUT_CONTEXT_BLOCK);
-     expect_int("further_context_block_adopted", FURTHER(e1, 1), NVK_CGL_FURTHER_NO);
-     expect_int("further_engine_block_adopted",
-                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_ENGINE_BLOCK, &g_report, e1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_context_block_both", FURTHER(1, 1), NVK_CGL_FURTHER_NO);
+     expect_int("further_engine_block_both",
+                (int)nvk_cgl_further_engine(NVK_CGL_LAYOUT_ENGINE_BLOCK, 1, 1), NVK_CGL_FURTHER_NO);
 #undef FURTHER
      free(plain); free(small); }
 
@@ -774,6 +770,8 @@ int main(void) {
      expect_room("room_at_outer_end", got, 0, blk, NULL, blk_size, 0);
      got = nvk_cgl_room(outer - 0x10, outer, outer_size, 0, &blk, &blk_size);
      expect_room("room_before_outer", got, 0, blk, NULL, blk_size, 0);
+     got = nvk_cgl_room(outer - 8, outer, outer_size, 0, &blk, &blk_size);   /* the offset wraps to the top word */
+     expect_room("room_one_word_before_outer", got, 0, blk, NULL, blk_size, 0);
      got = nvk_cgl_room(g_static_words, outer, outer_size, 0, &blk, &blk_size);
      expect_room("room_elsewhere", got, 0, blk, NULL, blk_size, 0);
      got = nvk_cgl_room(NULL, outer, outer_size, 0, &blk, &blk_size);
@@ -872,16 +870,15 @@ def main():
                     "renderer_reason_interior", "renderer_reason_interior_swapped",
                     "has_context_ok", "has_context_engine_block", "has_context_profile", "has_context_context_null",
                     "has_context_context_block", "has_context_context_rend", "has_context_saved_block",
-                    "further_base_ok", "further_ok_adopted", "further_ok_none", "further_ok_unadopted",
-                    "further_base_saved", "further_saved_adopted", "further_saved_none", "further_saved_unadopted",
-                    "further_base_rend_sibling", "further_rend_is_adopted", "further_rend_is_adopted_both",
-                    "further_rend_other_sibling", "further_rend_other_sibling_unadopted",
-                    "further_rend_sibling_unadopted", "further_rend_sibling_none", "further_base_rend_block",
-                    "further_rend_block_adopted", "further_rend_block_unadopted", "further_rend_block_is_adopted",
-                    "further_base_profile", "further_profile_adopted", "further_base_context_null",
-                    "further_context_null_adopted", "further_base_context_block", "further_context_block_adopted",
-                    "further_engine_block_adopted", "reason_accepted", "further_sibling_word_saved_verdict",
-                    "further_sibling_word_ok_verdict"}
+                    "further_base_ok", "reason_accepted", "further_ok_adopted", "further_ok_both", "further_ok_none",
+                    "further_ok_unadopted", "further_base_saved", "further_saved_adopted", "further_saved_none",
+                    "further_saved_unadopted", "further_base_rend_sibling", "further_rend_sibling_adopted",
+                    "further_rend_sibling_both", "further_rend_sibling_unadopted", "further_rend_sibling_none",
+                    "further_base_rend_block", "further_rend_block_adopted", "further_rend_block_unadopted",
+                    "further_rend_block_none", "further_base_profile", "further_profile_both",
+                    "further_profile_adopted", "further_profile_unadopted", "further_base_context_null",
+                    "further_context_null_both", "further_base_context_block", "further_context_block_both",
+                    "further_engine_block_both", "room_one_word_before_outer"}
         expected |= {f"saved_tag_{t}" for t in range(32)} | {f"rend_tag_{t}" for t in range(32)}
         expected |= {f"saved_prot_{p}" for p in range(8)}
         check("the recorded layout is accepted and each mismatch has its own case, and no case runs unlisted",
@@ -895,6 +892,10 @@ def main():
         """text with every run of white space as one space, so that a statement compares whatever its line breaks"""
         return re.sub(r"\s+", " ", text)
 
+    def uncommented(text):
+        """text without its C comments"""
+        return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
     def function(text, header):
         """The definition whose first line is header (a regular expression), to its closing brace, or ""."""
         m = re.search("^" + header + r"\n\{.*?\n\}\n", text, re.S | re.M)
@@ -906,7 +907,7 @@ def main():
                     "if (nvk_cgl_layout_has_context(layout)) { "
                     "pthread_mutex_lock(&bridges_lock); "
                     "struct nvk_cgl_bridge *other = find_bridge((CGLContextObj)(void *)report.context.value); "
-                    "further = nvk_cgl_further_engine(layout, &report, other ? other->engine : NULL, "
+                    "further = nvk_cgl_further_engine(layout, other != NULL, "
                     "unadopted.context == (void *)report.context.value); "
                     "pthread_mutex_unlock(&bridges_lock); } "
                     'if (further == NVK_CGL_FURTHER_ADOPTED) return fail("The CGL context already has a GLI engine '
@@ -958,6 +959,8 @@ def main():
           and flat(destroy).startswith("EXPORT void nvk_cgl_destroy_gld(void *driver) { "
                                        "pthread_mutex_lock(&bridges_lock); "
                                        "if (unadopted.driver == driver) unadopted.context = unadopted.driver = NULL; ")
+          # the declaration and six member uses: nothing else names the slot, so nothing else writes it
+          and len(re.findall(r"\bunadopted\b", uncommented(cgl))) == 7
           and len(re.findall(r"\bunadopted\.", cgl)) == 6 and len(re.findall(r"\bleave_unadopted\(", cgl)) == 3,
           leave)
     current = function(cgl, r"static struct nvk_cgl_bridge \*bridge_current\(void \*engine\)")
@@ -992,51 +995,66 @@ def main():
         "for (int i=0;i<count;++i)")]
     refusals = [braced(slot, "&block, &block_size) < head) {"), braced(slot, "if (!items || count<1 || count>16) {"),
                 braced(slot, "&list_block, &list_block_size) < (size_t)count*PRIV_ENGINE_STRIDE) {")]
-    slot_texts = ["the CGL private object is neither a heap block nor a span of the CGL context's block that holds "
-                  "the recorded engine count and list",
-                  "the CGL private object's engine list pointer is %s and its engine count is %d, where the record "
-                  "has a list of 1 to 16 engines",
-                  "the CGL engine list is neither a heap block nor a span of the CGL private object's block that "
-                  "holds its %d records",
-                  "none of the %d records of the CGL engine list names this GLI engine"]
+    slot_reasons = [
+        'snprintf(why, why_size, "the CGL private object is neither a heap block nor a span of the CGL context\'s '
+        'block that holds the recorded engine count and list");',
+        'snprintf(why, why_size, "the CGL private object\'s engine list pointer is %s and its engine count is %d, '
+        'where the record has a list of 1 to 16 engines", items ? "not null" : "null", count);',
+        'snprintf(why, why_size, "the CGL engine list is neither a heap block nor a span of the CGL private '
+        'object\'s block that holds its %d records", count);',
+        'snprintf(why, why_size, "none of the %d records of the CGL engine list names this GLI engine", count);']
 
-    def formats(text):
-        """The format string of each snprintf(why, ...) in text, its adjacent literals joined."""
-        return ["".join(re.findall(r'"([^"]*)"', m.group(1)))
-                for m in re.finditer(r'snprintf\(why,\s*(?:why_size|sizeof\(why\)),\s*((?:"[^"]*"\s*)+)', text)]
+    def reasons(text):
+        """Each snprintf into why in text as one line, its adjacent string literals joined: the buffer, its size,
+        the format and the arguments."""
+        return [re.sub(r'"\s+"', "", m.group(0)) for m in re.finditer(r"snprintf\(why\b.*?\);", flat(text))]
 
     check("integer_dispatch_slot reads the CGL private object and the engine list only as memory the allocator "
           "vouches for, and returns NULL otherwise",
           order[0] >= 0 and order == sorted(order) and len(set(order)) == len(order)
           and all(r.rstrip().endswith("return NULL;") and r.count("snprintf(why, why_size,") == 1 for r in refusals),
           slot[:300])
-    check("integer_dispatch_slot prints nothing; each of its four ways of finding no slot gives its reason",
+    slot_code = uncommented(slot)
+    check("integer_dispatch_slot prints nothing; each of its four ways of finding no slot writes its reason, whole, "
+          "into the caller's buffer",
           "say(" not in slot and "first_time(" not in slot and "stderr" not in slot
-          and formats(slot) == slot_texts and slot.count("return NULL;") == 4
+          and reasons(slot) == slot_reasons and slot.count("return NULL;") == 4
           and flat(slot).rstrip().endswith('names this GLI engine", count); return NULL; }')
-          and "if (!why) { why = unused; why_size = sizeof(unused); }" in slot
-          and "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t);" in slot, str(formats(slot)))
+          and "char unused[1]; if (!why) { why = unused; why_size = sizeof(unused); } char *meta=" in flat(slot_code)
+          and len(re.findall(r"\bwhy\s*=[^=]", slot_code)) == 1
+          and len(re.findall(r"\bwhy_size\s*=[^=]", slot_code)) == 1 and "sizeof(why)" not in slot_code
+          and "const size_t head=PRIV_ENGINE_COUNT+sizeof(int16_t);" in slot, str(reasons(slot)))
     install = function(cgl, r"static void install_integer_dispatch\(struct nvk_cgl_bridge \*b\)")
     select = function(cgl, r"static bool select_integer_dispatch\(struct nvk_cgl_bridge \*b, bool zink\)")
     placed = braced(install, "      else {")
     check("install_integer_dispatch says once per process, under its own flag, why CGLTexImageIOSurface2D stays "
-          "Apple's in a Zink context: every way that leaves the hook out reaches the line",
-          "void ***slot=integer_dispatch_slot(b,why,sizeof(why));" in install
-          and formats(install) == [
-              "the callback vector in this GLI engine's record is null",
-              "the callback vector in this GLI engine's record is a heap block of 0x%zx bytes, where the record has "
-              "one of 0x80 to 0x1000 bytes",
-              "dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this GLI engine's record "
-              "gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion"]
+          "Apple's in a Zink context: every way that leaves the hook out writes its reason and reaches the line",
+          flat(install).startswith("static void install_integer_dispatch(struct nvk_cgl_bridge *b) { char why[256]; "
+                                   "void ***slot=integer_dispatch_slot(b,why,sizeof(why)); if (slot) { "
+                                   "void **vector=*slot; size_t bytes=vector && malloc_zone_from_ptr(vector) ? "
+                                   "malloc_size(vector) : 0; if (!vector) snprintf(")
+          and reasons(install) == [
+              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is null");',
+              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is 0x%jx, which starts no '
+              'heap block",(uintmax_t)(uintptr_t)vector);',
+              'snprintf(why,sizeof(why),"the callback vector in this GLI engine\'s record is a heap block of 0x%zx '
+              'bytes, where the record has one of 0x80 to 0x1000 bytes",bytes);',
+              'snprintf(why,sizeof(why),"dladdr does not name entries 4, 6, 9 and 15 of the callback vector in this '
+              'GLI engine\'s record gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion");']
           and flat(install).rstrip().endswith(
               "if (first_time(&iosurface_refusal_said)) say(\"CGLTexImageIOSurface2D in a Zink context stays "
               "Apple's; \" LAYOUT_DIFFERS, why); }")
           and flat(placed).strip() == "void **copy=malloc(bytes); if (!copy) return; memcpy(copy,vector,bytes); "
           "copy[9]=(void *)iosurface_integer; b->integer_original=vector; b->integer_zink=copy; *slot=copy; return;"
-          and "if (!vector) snprintf(" in flat(install)
+          and "else if (!bytes) snprintf(" in flat(install)
           and "else if (bytes<16*sizeof(void *) || bytes>4096) snprintf(" in flat(install)
+          and 'else if (!named_callback(vector[4],"gliCreateContext") || '
+          '!named_callback(vector[6],"gliDestroyContext") || !named_callback(vector[9],"gliSetInteger") || '
+          '!named_callback(vector[15],"gliGetVersion")) snprintf(' in flat(install)
           and install.count("return;") == 2 and install.count("say(") == 1
+          and len(re.findall(r"\bwhy\s*=[^=]", uncommented(install))) == 0
           and cgl.count("iosurface_refusal_said") == 2
+          and cgl.count("char why[256];") == 1 and cgl.count("char why[768];") == 2 and cgl.count("char why[") == 3
           and "void ***slot=integer_dispatch_slot(b,NULL,0);" in select and "say(" not in select
           and len(re.findall(r"\binteger_dispatch_slot\(", cgl)) == 3, install)
     says = re.findall(r"\bsay\(", cgl)
@@ -1062,8 +1080,9 @@ def main():
     for name in ("docs/ZINK-OPENGL.md", "docs/TESTING-ON-HARDWARE.md", "docs/TESTING-ON-HARDWARE.es.md",
                  "CHANGELOG.md"):
         text = flat((ROOT / name).read_text().replace("\n  ", "\n").replace("\n   ", "\n"))
-        check(f"{name} quotes each of the three lines as nvk_cgl.c prints it",
-              all(q in text for q in quotes), str([q for q in quotes if q not in text]))
+        # with "..." for the reason, so that a quote of another release's output does not stand in for it
+        check(f"{name} quotes each of the three lines as nvk_cgl.c prints it, with ... for its reason",
+              all(q + "...)" in text for q in quotes), str([q for q in quotes if q + "...)" not in text]))
     guard = (ZINK / "nvk_cgl_guard.h").read_text()
     check("the guard header derives its checks from the three run-time facts the includer supplies",
           "#error" in guard and "NVK_CGL_BLOCK_SIZE(p)" in guard and "NVK_CGL_IN_ZONE(p)" in guard
