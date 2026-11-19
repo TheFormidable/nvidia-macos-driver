@@ -377,17 +377,21 @@ largas que miden este camino.
    abre una aplicación OpenGL desde Terminal (un juego que use OpenGL, o Minecraft con su renderizador OpenGL) y
    guarda lo que escribe. Bien: dibuja como con 2.9 y no escribe ninguna línea que empiece por `NVKZinkGLDriver:` ni
    por `NVK Zink:`. Una línea `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record
-   (...)` quiere decir que el adaptador encontró distinta la disposición de esta compilación y dejó la aplicación en el
-   OpenGL de Apple, como debe: envía esa línea y la salida de `sw_vers`. Una línea `NVK Zink: CGLTexImageIOSurface2D
+   (...)` quiere decir que el adaptador encontró distinta la disposición de esta compilación y dejó un contexto OpenGL
+   de la aplicación en el OpenGL de Apple, como debe. La línea se escribe solo para el primer contexto rechazado en
+   un proceso, y otros contextos de la aplicación pueden seguir siendo de Zink: envía esa línea y la salida de
+   `sw_vers`, y di si la aplicación dibuja como debe. Una línea `NVK Zink: CGLTexImageIOSurface2D
    in a Zink context stays Apple's; GLEngine's private layout does not match the record (...)` quiere decir que Zink
    está dibujando y que solo esa llamada quedó con el manejador de Apple; donde aparece, la escribe toda aplicación
    OpenGL que Zink atiende, use o no esa llamada: envíala igual y di si algo de la aplicación se dibuja mal. Una
    línea `NVK Zink: a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for
-   the current CGL context (...)` quiere decir que Zink tomó el OpenGL de la aplicación y que sus llamadas no le
-   llegaron después, así que la aplicación no dibuja nada: envía esa línea y la salida de `sw_vers`, y reinicia con
-   el argumento de arranque `nvzink=0`, que devuelve a todas las aplicaciones el OpenGL de Apple. Mal: un cierre
-   inesperado, una ventana negra o una imagen equivocada; reinicia una vez con el argumento de arranque `nvzink=0` y
-   di si desaparece.
+   the current CGL context (...)` quiere decir que Zink tomó un contexto OpenGL de la aplicación y descartó después
+   una llamada que venía para él; la línea se escribe solo para la primera llamada descartada. Donde se descartan
+   todas las llamadas del contexto, ninguna devuelve nada, así que la aplicación puede mostrar una ventana vacía,
+   decir que OpenGL no está disponible o cerrarse al abrir. Envía esa línea y la salida de `sw_vers`, di qué hizo la
+   aplicación, y reinicia con el argumento de arranque `nvzink=0`, que devuelve a todas las aplicaciones el OpenGL de
+   Apple. Mal: un cierre inesperado, una ventana negra o una imagen equivocada; reinicia una vez con el argumento de
+   arranque `nvzink=0` y di si desaparece.
    Ver [ZINK-OPENGL.md](ZINK-OPENGL.md). Para volver a la versión 2.9 o a un paquete 3.0 anterior, ejecuta primero el
    `sudo ./uninstall.sh` de este paquete: los instaladores de esos paquetes no conocen
    `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio. Su acelerador no lo nombra, así que no se
