@@ -502,7 +502,7 @@ __attribute__((unused)) static const char *zk_owner(const void *address, char *o
    return out;
 }
 
-/* nvk_cgl_last_error() of zink/nvk_cgl.c:121: the calling thread's last adapter failure, or "none". */
+/* nvk_cgl_last_error() of zink/nvk_cgl.c:156: the calling thread's last adapter failure, or "none". */
 static const char *zk_last_error(void)
 {
    static const char *(*fn)(void);
@@ -546,7 +546,7 @@ static bool zk_is_software(const char *renderer)
 }
 
 /* Never returns: a hardware context that is not Zink's. Only the layout guard's refusal makes the check inactive
- * (zink/nvk_cgl.c:125-130, printed once per process, for the first context it refuses): the guard keeps Apple's
+ * (zink/nvk_cgl.c:163-168, printed once per process, for the first context it refuses): the guard keeps Apple's
  * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
  * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
  * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
@@ -562,7 +562,7 @@ static _Noreturn void zk_not_zink(const char *renderer)
                    sizeof(line)))
       zk_inactive("%s", line + strlen("NVK Zink: "));
    if (!renderer)
-      /* On the Zink path every call returns 0 when the capability table cannot be built (nvk_cgl.c:323-330). */
+      /* On the Zink path every call returns 0 when the capability table cannot be built (nvk_cgl.c:365-372). */
       zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s", zk_last_error());
    else if (zk_tee_driver_line(line, sizeof(line)))
       zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", shown, line);
