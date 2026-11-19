@@ -442,9 +442,9 @@ static void zk_gate_on_main(CGLPixelFormatObj pf)
 
 /* ---- the strings and images of a context ------------------------------------------------------------------------ */
 
-/* The adapter's strings (zink/nvk_cgl.c:365-423): GL_VERSION is "<v/10>.<v%10>" plus Mesa's text after its first
- * space, with v = min(Mesa's version, the profile's cap) (:388-391); GL_SHADING_LANGUAGE_VERSION is "%u.%02u Mesa CGL"
- * of v*10 for v >= 33, else 150, 140 or 130 (:392-393); GL_MAJOR_VERSION and GL_MINOR_VERSION come from v (:415-423).
+/* The adapter's strings (zink/nvk_cgl.c:376-434): GL_VERSION is "<v/10>.<v%10>" plus Mesa's text after its first
+ * space, with v = min(Mesa's version, the profile's cap) (:399-402); GL_SHADING_LANGUAGE_VERSION is "%u.%02u Mesa CGL"
+ * of v*10 for v >= 33, else 150, 140 or 130 (:403-404); GL_MAJOR_VERSION and GL_MINOR_VERSION come from v (:426-434).
  * GL_VENDOR and GL_RENDERER are Mesa's: "Mesa" and "zink Vulkan <maj>.<min>(<device> (MESA_NVK))" (Mesa 26.3.0
  * src/gallium/drivers/zink/zink_screen.c:162-165 and :186-197). Mesa's own text says "(Core Profile)" for core and
  * "(Compatibility Profile)" for a compatibility context of 3.2 or more (src/mesa/main/version.c:129-143). */
@@ -488,7 +488,7 @@ static void zk_check_strings(bool legacy)
 }
 
 /* ctx->disp is the public dispatch of struct _CGLContextObject (<OpenGL/CGLContext.h>); on the Zink path the adapter
- * puts its own entries there (zink/nvk_cgl.c:483-488, use_zink). */
+ * puts its own entries there (zink/nvk_cgl.c:495-501, use_zink). */
 static void zk_check_dispatch(CGLContextObj ctx)
 {
    char owner[PATH_MAX], swap[PATH_MAX];
@@ -535,7 +535,7 @@ static void sub_path(void)
    zk_owner((const void *)ctx->disp.swap_APPLE, swap, sizeof(swap));
    zk_info("before the first GL call: get_string in %s, swap_APPLE in %s", owner, swap);
    zk_make_current(ctx);
-   zk_gate(zk_string(GL_RENDERER)); /* the first GL call: the Zink context is made now (zink/nvk_cgl.c:684-708) */
+   zk_gate(zk_string(GL_RENDERER)); /* the first GL call: the Zink context is made now (zink/nvk_cgl.c:706-730) */
    zk_check_strings(false);
    zk_check_dispatch(ctx);
    zk_check_images();
@@ -616,7 +616,7 @@ static void zk_check_extensions(bool legacy)
          }
          p = end;
       }
-      /* The adapter answers GL_NUM_EXTENSIONS from the same table in legacy contexts too (zink/nvk_cgl.c:415-423). */
+      /* The adapter answers GL_NUM_EXTENSIONS from the same table in legacy contexts too (zink/nvk_cgl.c:426-434). */
       GLint n = -1;
       glGetIntegerv(GL_NUM_EXTENSIONS, &n);
       GLenum e = zk_gl_error();
@@ -638,7 +638,7 @@ static void zk_check_extensions(bool legacy)
       }
       if (nulls) zk_fail("extensions-indexed", "glGetStringi gave NULL for %d of %d valid indices", nulls, (int)n);
       zk_gl_error();
-      /* An index past the end goes to Mesa as UINT32_MAX, which keeps Mesa's error (zink/nvk_cgl.c:406-413). */
+      /* An index past the end goes to Mesa as UINT32_MAX, which keeps Mesa's error (zink/nvk_cgl.c:417-424). */
       const GLubyte *past = glGetStringi(GL_EXTENSIONS, (GLuint)n);
       GLenum e = glGetError();
       zk_gl_error();
@@ -668,7 +668,7 @@ static void sub_profile(int profile, bool double_buffer, bool alpha)
    CGLContextObj ctx = zk_context(pf, NULL);
    zk_make_current(ctx);
    /* A gl3 context whose GLI profile byte is neither 0 nor 1 stays Apple's with the layout line "the GLI profile byte
-    * is <n>, neither 0 for legacy nor 1 for core" (zink/nvk_cgl.c:81, :644-649; nvk_cgl_layout_reason in
+    * is <n>, neither 0 for legacy nor 1 for core" (zink/nvk_cgl.c:81, :672-679; nvk_cgl_layout_reason in
     * zink/nvk_cgl_guard.h): zk_gate makes the row inactive with that text. */
    zk_gate(zk_string(GL_RENDERER));
    zk_info("profile byte: the %s context is served by Zink", zk_profile_names[profile]);
@@ -676,7 +676,7 @@ static void sub_profile(int profile, bool double_buffer, bool alpha)
    zk_check_dispatch(ctx);
 
    /* The default framebuffer mirrors double buffering and alpha of the pixel format: RGBA8 when the described alpha
-    * size is above 0, else RGBX8 (zink/nvk_cgl.c:686-689, :702-703; zink/nvk_zink.c:186-190). */
+    * size is above 0, else RGBX8 (zink/nvk_cgl.c:708-711, :724-725; zink/nvk_zink.c:186-190). */
    GLboolean db = GL_FALSE;
    glGetBooleanv(GL_DOUBLEBUFFER, &db);
    GLint alpha_bits = -1;
@@ -750,7 +750,7 @@ static void sub_offscreen(void)
    CGLPixelFormatObj pf = zk_pixel_format(ZK_GL4, false, true);
    CGLContextObj ctx = zk_offscreen_context(pf);
    /* Zink sizes the default drawable from Apple's GL_VIEWPORT at the first call: 1x1 without a drawable
-    * (zink/nvk_cgl.c:690-695). Information only. */
+    * (zink/nvk_cgl.c:712-717). Information only. */
    GLint viewport[4] = {-1, -1, -1, -1};
    glGetIntegerv(GL_VIEWPORT, viewport);
    zk_info("default framebuffer GL_VIEWPORT %d,%d,%d,%d", viewport[0], viewport[1], viewport[2], viewport[3]);
@@ -837,7 +837,7 @@ static void sub_offscreen(void)
    glDeleteTextures(1, &tex);
 
    /* No view and no drawable: present_drawable returns 2 without a failure, so the adapter's last error is NULL,
-    * which nvk_cgl_last_error() reports as "none" (zink/nvk_cgl.c:156, :1047-1077). */
+    * which nvk_cgl_last_error() reports as "none" (zink/nvk_cgl.c:156, :1069-1099). */
    CGLError flushed[3];
    for (int i = 0; i < 3; ++i) flushed[i] = CGLFlushDrawable(ctx);
    GLenum flush_error = zk_gl_error();
@@ -922,7 +922,7 @@ static void sub_legacy(void)
    else zk_fail("extensions", "glGetString(GL_EXTENSIONS) got=NULL");
    zk_gl_error();
    if (!zk_software) {
-      /* Answered by the adapter even in legacy contexts (zink/nvk_cgl.c:415-423); Apple's 2.1 path may give
+      /* Answered by the adapter even in legacy contexts (zink/nvk_cgl.c:426-434); Apple's 2.1 path may give
        * GL_INVALID_ENUM, so this is judged on Zink only. */
       GLint major = -1;
       glGetIntegerv(GL_MAJOR_VERSION, &major);
@@ -932,7 +932,7 @@ static void sub_legacy(void)
          zk_pass("major-version", "GL_MAJOR_VERSION %d matches GL_VERSION %s", major, version);
       else zk_fail("major-version", "GL_MAJOR_VERSION got=%d (glGetError 0x%x) expected=at least 2 and the major of %s",
                    major, e, version);
-      /* Apple's VAO names are mapped onto Mesa's core names (zink/nvk_cgl.c:303-320). */
+      /* Apple's VAO names are mapped onto Mesa's core names (zink/nvk_cgl.c:314-331). */
       GLuint vao = 0;
       glGenVertexArraysAPPLE(1, &vao);
       glBindVertexArrayAPPLE(vao);
@@ -1057,8 +1057,8 @@ static void sub_iosurface(void)
    CGLContextObj ctx = zk_offscreen_context(pf);
    char why[200];
    /* (i) read. The adapter gets the call through a cloned GLI integer callback, slot 9, parameter 910 (zink/nvk_cgl.c:
-    * 531-573), and only when dladdr names GLEngine's callbacks; otherwise it gives up without a line (:581-595).
-    * When the CGL private object or its engine list is not where the adapter can read it (:495-529), it gives up
+    * 544-586), and only when dladdr names GLEngine's callbacks; otherwise it gives up without a line (:594-608).
+    * When the CGL private object or its engine list is not where the adapter can read it (:506-542), it gives up
     * with the line "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; ...", which this row's
     * messages check reports. */
    IOSurfaceRef s = zk_surface(64, 64, 4, 0x42475241 /* 'BGRA' */);
@@ -1069,7 +1069,7 @@ static void sub_iosurface(void)
    if (bound) {
       if (zk_software) zk_skip("Apple's software renderer refused CGLTexImageIOSurface2D (%d)", (int)bound);
       zk_fail("bind", "CGLTexImageIOSurface2D(BGRA 64x64) got=%d expected=0; on Zink only, this points at the "
-              "integer-callback clone (zink/nvk_cgl.c:581-595 gives up silently when dladdr does not name "
+              "integer-callback clone (zink/nvk_cgl.c:594-608 gives up silently when dladdr does not name "
               "gliCreateContext, gliDestroyContext, gliSetInteger and gliGetVersion)", (int)bound);
       zk_finish();
    }
@@ -1086,7 +1086,7 @@ static void sub_iosurface(void)
    zk_no_error("read", "the IOSurface read");
 
    /* (ii) write-back: published to the surface on glFlush, glFinish, glFenceSync and present
-    * (zink/nvk_cgl.c:338-341 and the generated wrappers). */
+    * (zink/nvk_cgl.c:349-352 and the generated wrappers). */
    glEnable(GL_SCISSOR_TEST);
    glScissor(0, 0, 32, 64);
    glClearColor(1, 0, 0, 1);
@@ -1118,7 +1118,7 @@ static void sub_iosurface(void)
 
    /* (iii) refresh: a CPU write inside IOSurfaceLock and IOSurfaceUnlock changes the seed, then glBindTexture and
     * glBindFramebuffer of the names already bound. The adapter copies the surface in again on every such bind when
-    * the seed changed (build/generate_cgl_dispatch.py:290-293, zink/nvk_cgl.c:343-347, zink/nvk_iosurface.c:299-332),
+    * the seed changed (build/generate_cgl_dispatch.py:290-293, zink/nvk_cgl.c:354-358, zink/nvk_iosurface.c:299-332),
     * so this is judged on Zink only. Apple's software renderer kept its own contents through the same binds on macOS
     * 26.7.3 (25G342): the control reports what it reads, after these binds and after an unbind and a bind, as
     * information. */
@@ -1259,7 +1259,7 @@ static void sub_iosurface(void)
 /* ---- share ------------------------------------------------------------------------------------------------------- */
 
 /* A materializing context shares Mesa objects with an already materialized bridge whose GLI_SHARE_GROUP word is equal
- * (zink/nvk_cgl.c:696-704); the guard does not verify that word (nvk_cgl.c:78). */
+ * (zink/nvk_cgl.c:718-726); the guard does not verify that word (nvk_cgl.c:78). */
 static void sub_share(char which)
 {
    CGLPixelFormatObj pf = zk_pixel_format(ZK_GL4, false, true);
@@ -1348,7 +1348,7 @@ static void sub_share(char which)
       CGLDestroyContext(a);
    } else {
       /* B shares A but makes its first GL call only after A is destroyed. Apple's CGL keeps the share group alive;
-       * the adapter looks only at live, materialized bridges (zink/nvk_cgl.c:696-704 and :710-734), so per code B
+       * the adapter looks only at live, materialized bridges (zink/nvk_cgl.c:718-726 and :732-756), so per code B
        * gets a new, empty group. */
       CGLContextObj a = zk_context(pf, NULL);
       zk_make_current(a);
@@ -1368,7 +1368,7 @@ static void sub_share(char which)
          else if (!is_t && !zk_software)
             zk_known_difference("partner-destroyed",
                                 "B, first used after A was destroyed, does not see A's texture %u: the adapter shares "
-                                "only with a live, materialized bridge (zink/nvk_cgl.c:696-704); Apple's CGL keeps it",
+                                "only with a live, materialized bridge (zink/nvk_cgl.c:718-726); Apple's CGL keeps it",
                                 t);
          else zk_fail("partner-destroyed", "in B glIsTexture(%u) got=%d%s%s expected=1 and the pattern", t, (int)is_t,
                       is_t ? ", " : "", is_t ? why : "");
