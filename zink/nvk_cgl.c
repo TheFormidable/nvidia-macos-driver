@@ -179,8 +179,9 @@ static struct nvk_cgl_bridge *find_bridge(CGLContextObj context)
 
 /* The CGL context and the GLD context of the last GLI engine that passed the
  * layout check and was not adopted for another reason: no Zink screen, or no
- * memory for its bridge. bridges_lock guards it; nvk_cgl_destroy_gld clears it
- * with that GLD context. */
+ * memory for its bridge. One slot: an engine left unadopted in another context
+ * replaces it. bridges_lock guards it; nvk_cgl_destroy_gld clears it with that
+ * GLD context. */
 static struct { void *context, *driver; } unadopted;
 
 static int leave_unadopted(void *context, void *driver)
@@ -614,9 +615,10 @@ static bool named_callback(void *pointer, const char *name)
 
 /* Runs once for a context, when Zink first serves it. The hook is placed only
  * where the engine's record holds a callback vector that is a heap block of 16
- * to 512 pointers whose entries dladdr names as GLEngine's. In every other
- * case the context stays Zink's, CGLTexImageIOSurface2D keeps Apple's handler,
- * and the line says what was found, once for the process. */
+ * to 512 pointers whose entries 4, 6, 9 and 15 dladdr names gliCreateContext,
+ * gliDestroyContext, gliSetInteger and gliGetVersion. In every other case the
+ * context stays Zink's, CGLTexImageIOSurface2D keeps Apple's handler, and the
+ * line says what was found, once for the process. */
 static void install_integer_dispatch(struct nvk_cgl_bridge *b)
 {
    char why[256];
@@ -626,6 +628,9 @@ static void install_integer_dispatch(struct nvk_cgl_bridge *b)
       size_t bytes=vector && malloc_zone_from_ptr(vector) ? malloc_size(vector) : 0;
       if (!vector)
          snprintf(why,sizeof(why),"the callback vector in this GLI engine's record is null");
+      else if (!bytes)
+         snprintf(why,sizeof(why),"the callback vector in this GLI engine's record is 0x%jx, which starts no heap "
+                  "block",(uintmax_t)(uintptr_t)vector);
       else if (bytes<16*sizeof(void *) || bytes>4096)
          snprintf(why,sizeof(why),"the callback vector in this GLI engine's record is a heap block of 0x%zx bytes, "
                   "where the record has one of 0x80 to 0x1000 bytes",bytes);
@@ -695,15 +700,16 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
                                sizeof(struct _CGLContextObject), sizeof(GLIFunctionDispatch),
                                &profile, &context_ptr, &back, &report);
    /* One bridge per CGL context: find_bridge and the restore on destroy key on
-    * the context. A further GLI engine of a context the adapter has already
-    * decided on (another renderer of its pixel format) is left unadapted:
-    * nothing is written, and no line says that the layout differs.
-    * nvk_cgl_further_engine says which engines those are. */
+    * the context. A further GLI engine of a context the adapter adopted or left
+    * unadopted (another renderer of its pixel format) is left unadapted, whatever
+    * its own check says: nothing is written, and no line says that the layout
+    * differs. In a context Zink serves, a call that comes with such an engine is
+    * dropped (bridge_current). */
    enum nvk_cgl_further further = NVK_CGL_FURTHER_NO;
    if (nvk_cgl_layout_has_context(layout)) {
       pthread_mutex_lock(&bridges_lock);
       struct nvk_cgl_bridge *other = find_bridge((CGLContextObj)(void *)report.context.value);
-      further = nvk_cgl_further_engine(layout, &report, other ? other->engine : NULL,
+      further = nvk_cgl_further_engine(layout, other != NULL,
                                        unadopted.context == (void *)report.context.value);
       pthread_mutex_unlock(&bridges_lock);
    }

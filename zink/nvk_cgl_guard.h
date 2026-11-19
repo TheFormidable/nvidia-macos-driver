@@ -6,9 +6,11 @@
  * (25G241), x86_64. A build whose layout differs would have those reads and
  * writes land in the wrong memory of an OpenGL application. These helpers check
  * at run time, from facts the process already has, that the memory is shaped as
- * the record says; nvk_cgl_prepare_gld keeps Apple's renderer (returns 0,
- * writing nothing) whenever a check fails, and prints what the memory held for
- * the first context it refuses in a process.
+ * the record says. Where a check fails for the first GLI engine of a CGL
+ * context, nvk_cgl_prepare_gld keeps Apple's renderer for that context (returns
+ * 0, writing nothing), and it prints what the memory held for the first context
+ * it refuses in a process. A later GLI engine of a context it has already
+ * decided on is left unadapted, with no line (nvk_cgl_further_engine).
  * GLEngine's per-context object, the pointer gldCreateContext hands over
  * (Apple's headers type it GLIContext), is called the GLI engine here and in
  * the lines the adapter prints.
@@ -373,38 +375,30 @@ static inline int nvk_cgl_layout_has_context(enum nvk_cgl_layout layout)
           layout == NVK_CGL_LAYOUT_SAVED_BLOCK;
 }
 
-/* A GLI engine of a CGL context the adapter has already decided on is not a
- * layout that differs: nvk_cgl_prepare_gld leaves it unadapted and prints no
- * line for it. */
+/* nvk_cgl_prepare_gld decides once for a CGL context, with the first of its
+ * GLI engines whose check reaches the context: it adopts that engine, refuses
+ * it, or leaves it unadopted for a reason that is not the layout (no Zink
+ * screen, no memory). A later engine of a context it adopted or left unadopted
+ * is a further engine: prepare leaves it unadapted and prints no line for it,
+ * whatever its own check says, because the line would say that OpenGL stays
+ * Apple's for a layout that differs, which is not what decided that context. */
 enum nvk_cgl_further {
    NVK_CGL_FURTHER_NO = 0,
    NVK_CGL_FURTHER_ADOPTED,     /* the context has a bridge: Zink serves it with another engine */
    NVK_CGL_FURTHER_UNADOPTED,   /* an engine of the context passed the check and was not adopted */
 };
 
-/* Whether the engine whose check gave layout and *r is such a further engine.
- * adopted_engine is the engine of the context's bridge, or null when the
- * context has none. unadopted is nonzero when an engine of this context passed
- * the layout check and was not adopted for another reason (no Zink screen, no
- * memory).
- *
- * In an adopted context a further engine is one whose check passed, one whose
- * own saved table alone was refused (rend, which decides first, was accepted),
- * or one whose rend was refused and is the adopted engine. In a context whose
- * earlier engine was not adopted the one case is a rend refused as another GLI
- * engine of this context, which CGL may have stored there. Any other refused
- * rend is a refusal like any other, and so is the verdict of a check before
- * the context's, which names no context. */
+/* Whether the engine whose check gave layout is a further engine. adopted is
+ * nonzero when the context the check derived has a bridge; unadopted is nonzero
+ * when an engine of that context passed the check and was not adopted. The
+ * verdict of a check before the context's names no context, so the answer for
+ * it is no: prepare refuses such an engine like any other, with the line. */
 static inline enum nvk_cgl_further
-nvk_cgl_further_engine(enum nvk_cgl_layout layout, const struct nvk_cgl_layout_report *r,
-                       const void *adopted_engine, int unadopted)
+nvk_cgl_further_engine(enum nvk_cgl_layout layout, int adopted, int unadopted)
 {
    if (!nvk_cgl_layout_has_context(layout)) return NVK_CGL_FURTHER_NO;
-   if (adopted_engine &&
-       (layout != NVK_CGL_LAYOUT_CONTEXT_REND || r->rend.value == (uintptr_t)adopted_engine))
-      return NVK_CGL_FURTHER_ADOPTED;
-   if (unadopted && layout == NVK_CGL_LAYOUT_CONTEXT_REND && r->rend.kind == NVK_CGL_WORD_SIBLING)
-      return NVK_CGL_FURTHER_UNADOPTED;
+   if (adopted) return NVK_CGL_FURTHER_ADOPTED;
+   if (unadopted) return NVK_CGL_FURTHER_UNADOPTED;
    return NVK_CGL_FURTHER_NO;
 }
 
