@@ -1,5 +1,101 @@
 # Changelog
 
+## 3.0.4
+
+**Not released.** This section describes the branch being prepared as 3.0.4, a patch on top of `fable` at ac9bb6e4
+(3.0.3, not released either). It brings into this tree seven pull requests to the original project by luckiest-luk
+(https://github.com/nullmoth/nvidia-macos-driver, pull requests 573 and 575 to 580), which were closed there on
+2026-11-18 without being merged. Six are taken with their author, 575 with one correction of ours; of 576 only the
+half that gives back the caller's pages is taken, applied by hand (below). Nothing of 3.0.4 has been built on a Mac or
+run on a card: it was compiled and its host tests were run on Linux only (below, "What ran where").
+
+### Fixes and changes
+
+- **OpenGL and WebGL uniforms go through a constant buffer, as the code meant them to (573).** `nvmtl_gl_uniform_index`
+  (`plugin/NVMTLLibraryLoad.m`) also required `names[@"access"][key]` to be `read`, but the AIR name table
+  (`nvmtl_air_names`) has no `access` key, so no GL function ever had a promotable uniform buffer and the promotion
+  of the uniform buffer to an NVK constant bank (`nvmtl_uniform_cbuf_on`) never ran, here or in the original project.
+  The check that the buffer is read only stays, on the reflection (address space 2, access ReadOnly). This turns on,
+  by default, a path that had not run in this tree; `NVMTL_UNIFORM_CBUF=0` turns it off.
+- **ANGLE's uniforms (Chrome, Safari's WebGL and other browsers) are promoted too (579).** The plugin accepts the
+  buffer ANGLE names `ANGLE_userUniforms`, and `translator/wrapper/src/uniform_cbuf.rs` promotes scalar and vector
+  32-bit members, fixed arrays and nested structs when it can prove every access is a read at a constant, in-bounds
+  index; anything else (a write, a volatile or escaping pointer, a dynamic index, a matrix, an unknown layout) keeps the
+  path it had.
+- **A draw that changes only the promoted uniforms' offset keeps its address table (580),** and **an address table is
+  built in ordinary memory and copied to its mapped page in one go, with the empty slot's address asked once (577).**
+- **A texture over a buffer is bounds-checked without overflow (575).** `nvmtl_buffer_texture_fits`
+  (`plugin/nvmtl_buffer_texture.h`) checks with subtractions and divisions instead of sums and products that could
+  wrap, and does not require padding after the last row. It is used by the buffer-aliased texture of `nvmtl_vk.c` and
+  by the copy fallback of `newTiledTextureWithDescriptor`, which also refuses what it cannot copy (not 2D, depth,
+  layers or samples). Two parts of 575 are not taken as written: it refused a mipmapped texture and any format the
+  public table does not describe as uncompressed. Core Animation asks for mipmapped textures over buffers (the Dock's
+  badges, Spotlight's half-float icons), and `nvmtl_mip_autofill` fills their other levels from level 0 (d39bc6e3), so
+  level 0 is still copied; a compressed or unlisted format keeps the check it had in 3.0.3, `bytesPerRow` bytes for
+  each row, now written so it cannot wrap. `tools/test_buffer_texture_bounds.py` holds both cases.
+- **A buffer the GPU only read in a blit is not copied back to the caller's memory (578, on;
+  `NVMTL_BLIT_READONLY=0` turns it off).** The command buffer's
+  resource set marks the source of `copyFromBuffer:toBuffer:` and `copyFromBuffer:toTexture:` read only, any other use
+  makes it writable again, and the copy back at completion skips a read-only buffer with a caller copy (not a managed
+  shadow, not under a texture alias). The set taken when a command buffer is sealed is returned retained, so it does
+  not wait in the application's autorelease pool.
+- **The caller's pages of an imported `newBufferWithBytesNoCopy` buffer are given back after their GPU memory is
+  freed, and with their address (576, half).** Such a buffer has no `_hostPtr`, and `-dealloc` retired it before
+  calling the caller's deallocator, so the deallocator got NULL and 0, and got them at once, while the buffer grace
+  could still hold the import for a submit in flight. The pointer and length are now taken before retiring, and for an
+  import the deallocator runs in `nvmtl_vk_buffer_destroy_body` after `vkFreeMemory`, outside every lock. A lost device
+  (nothing destroys the buffer) runs it in `-dealloc`, as before; a grace record that cannot be allocated keeps the
+  import and its pages. If the device is lost after the grace took the import, neither the import nor the pages are
+  given back and the deallocator does not run, like every GPU object after a loss, since the GPU may still use them. A
+  deallocator that frees another buffer while the grace's reaper runs it leaves each death noted once in the fault
+  report (the reaper's flag is put back around it, and around the immediate destroy, instead of cleared). Not taken from 576: its changes to how submits and the prologue are counted, which this tree
+  had already made its own way (`nvmtl_cmd_life.h`).
+
+### The ways back
+
+- `NVMTL_UNIFORM_CBUF=0` (environment, or the settings file; its row is now tier escape, since it turns off what is
+  on by default) keeps GL and ANGLE uniforms in the address table, as in 3.0.3 (573, 579, 580).
+- `NVMTL_BLIT_READONLY=0` (environment; new, tier escape, row in `tools/switches.tsv`) records a blit's source buffer
+  as written, so a caller copy of it is copied back at completion, as in 3.0.3 (578).
+- `NVMTL_BUFFER_GRACE=0` (environment; not new) turns off the buffer grace, and with it an import's deallocator runs at
+  once in `-dealloc`, now with the caller's pointer and length (576's half).
+
+The other changes have no switch: they correct what was there (a bound that could wrap, a deallocator called with
+NULL, 0 and too early, an address table written word by word into mapped memory).
+
+### What ran where
+
+On Linux only (x86_64, clang 18; the Objective-C tests through libobjc2 and gnustep-base, not Apple's Foundation);
+nothing of 3.0.4 has been built on a Mac or run on a card.
+
+- Five new host tests, each run on this branch and on `fable` at ac9bb6e4: `tools/test_gl_uniform_index.py` (573),
+  `tools/test_uniform_snapshot.py` (580), `tools/test_address_snapshot.py` (577), `tools/test_readonly_copyback.py`
+  (578; also run sanitized) and `tools/test_host_buffer_release.py` (576, written here: imported, managed and copied
+  buffers, a submit in flight, the grace off, a lost device, a failed grace allocation, no grace lock held in the
+  deallocator, a deallocator that frees another buffer during a reap; release and sanitized). All pass on this branch and fail on ac9bb6e4. `tools/test_readonly_copyback_gpu.m`
+  (578) needs Metal and a card and was not run.
+- `tools/test_buffer_texture_bounds.py` (575) needs Metal's texture descriptor, which the Linux Foundation stand-in
+  lacks; it was run with a scratch stand-in that adds `MTLPixelFormat`, `MTLTextureDescriptor` and `replaceRegion`
+  (not committed): it passes on this branch and fails on ac9bb6e4, and 575 as written fails its mipmapped case.
+- The tests that read the changed code: `tools/test_submission_copies.py`, `tools/test_bytes_dup_seal.py` (it now
+  accepts 578's restart loop), `tools/test_ci_workflow.py` (`ci.yml` skips the two new tests that need Vulkan headers,
+  as it skips the other five) and `tools/test_switch_registry.py`: all pass but the last, which reports one problem
+  that `fable` already has, the boot argument `nvgpucaps` without a row.
+- The translator: `cargo test --release` in `translator/wrapper`: 52 pass, including the 14 of `uniform_cbuf` (579's
+  new ones among them), 2 ignored, and 2 fail as on ac9bb6e4, `ca_named_modules_validate` and
+  `compositor_pixel_sampler_spirv_validates`, which read shader files from `$HOME/nvmtl-tests` that this machine lacks.
+- `tools/run_all_tests.py`: 323 of 365 passed, 28 failed, 4 skipped, 10 not run (they need a built library). Of the
+  28, two were this branch's, `tools/test_bytes_dup_seal.py` and `tools/test_ci_workflow.py`, corrected above, and
+  `tools/test_buffer_texture_bounds.py` needs Metal's descriptor (above). Ten others, the ones near the changed code,
+  were run on ac9bb6e4 and fail there the same way. The last fifteen fail for this machine: the tag v2.8.1 is missing
+  from this checkout, the tests run as root, and some need a Mac or its tools.
+- Three reviews of the diff, for the uniforms (573, 579, 580, 577), for the copies (575, 578) and for 576's half,
+  each finding checked by a second reader. They found the mipmapped textures 575 refused, that 578 had no way back,
+  and the reaper's flag a deallocator could clear; all three are corrected above. A separate switch for 576's half was
+  not added: `NVMTL_BUFFER_GRACE=0` already runs the deallocator at once in `-dealloc`, and giving the pages back
+  there while the grace still holds the import would hand the caller pages a submit may still read.
+  `tools/test_surfin_zero_plugin.py` reads the reaper's flag and follows the change.
+
 ## 3.0.3
 
 **Not released.** This section describes the branch being prepared as 3.0.3, a patch on top of `fable` at ae84aec7

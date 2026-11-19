@@ -3,7 +3,8 @@
 gets the caller's pointer and length, and runs only after the import's VkDeviceMemory is freed, so it also waits out
 the buffer grace; it runs once, with no lock of the grace held; a copied buffer's deallocator still runs at once; a lost
 device (nothing destroys the buffer) gives the pages back in dealloc, as before; a grace record that cannot be allocated
-keeps an import and its pages instead of giving them back early.
+keeps an import and its pages instead of giving them back early; a deallocator that frees another buffer during a reap
+leaves each buffer's death noted once for the fault report.
 
 Compiles NVMTLBuffer's -dealloc and nvmtl_host_buffer_release from plugin/NVMTLObjects.m and nvmtl_vk_buffer_destroy,
 nvmtl_buffer_grace_reap and nvmtl_vk_buffer_destroy_body from plugin/nvmtl_vk.c, as they are, with stand-ins for
@@ -75,7 +76,7 @@ static uint64_t g_cmd_submitted, g_cmd_finished_seq, g_alloc_bytes, g_bar1_bytes
 static uint64_t g_buf_gone;
 static void *g_dev;
 static __thread int t_grace_reaping;
-static unsigned destroyed, freed, callbacks;
+static unsigned destroyed, freed, callbacks, notes, nest;
 enum { NVP_BUFDEL, NVMTL_FX_POOLED = 1, NVMTL_FX_PLACED = 2, NVMTL_LV_DYING };
 #define nvlog(...) ((void)0)
 #define nvtrace(...) ((void)0)
@@ -84,7 +85,7 @@ static uint64_t nvmtl_vk_buffer_address(nvk_buffer *b) { (void)b; return 0; }
 static uint64_t nvmtl_perf_now(void) { return 0; }
 static void nvmtl_perf_note(int kind, uint64_t time, size_t bytes) { (void)kind; (void)time; (void)bytes; }
 static int nvmtl_buffer_grace_on(void) { return grace; }
-static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, unsigned flags) { (void)b; (void)flags; }
+static void nvmtl_fx_note_buffer_gone(nvk_buffer *b, unsigned flags) { (void)b; (void)flags; notes++; }
 static void nvmtl_live_relabel(nvk_buffer *b, unsigned kind) { (void)b; (void)kind; }
 static void nvmtl_live_remove(nvk_buffer *b) { (void)b; }
 static void pool_buffer_release(nvk_buffer *b) { (void)b; }
@@ -127,9 +128,17 @@ static void reset(void) {
     assert(!g_bg.ncool);
     g_state = 1; grace = 1; failAllocation = 0;
     g_cmd_submitted = 7; g_cmd_finished_seq = 6;   /* submit 7, which may read the buffer, is in flight */
-    destroyed = freed = callbacks = 0; g_alloc_bytes = 1 << 20;
+    destroyed = freed = callbacks = notes = nest = 0; g_alloc_bytes = 1 << 20;
 }
 enum kind { IMPORTED, MANAGED, COPIED };
+/* a buffer of the driver's own with no deallocator, freed by its last reference */
+static void drop_plain(void) {
+    @autoreleasepool {
+        NVMTLBuffer *b = [NVMTLBuffer new];
+        b->_b = (nvk_buffer){ .buf = (void *)5, .mem = (void *)6, .map = cpu, .size = 32, .alloc = 32 };
+        b = nil;
+    }
+}
 /* one buffer of 32 bytes over cpu, freed by its last reference; the deallocator checks what it is given and when */
 static void drop(enum kind k) {
     @autoreleasepool {
@@ -138,7 +147,7 @@ static void drop(enum kind k) {
         if (k == MANAGED) {   /* NVMTLDevice_contract.m: the caller's pages imported as the VRAM copy's shadow */
             b->_b = (nvk_buffer){ .buf = (void *)1, .mem = (void *)2, .size = 32, .alloc = 32 };
             b->_shadow = (nvk_buffer){ .buf = (void *)3, .mem = (void *)4, .map = cpu, .size = 32, .imported = 1 };
-            b->_hostPtr = cpu; b->_hostLen = 32;
+            /* no _hostPtr: the pointer and the length come from the shadow import */
         } else if (k == COPIED) {   /* an allocation of the driver's own, the bytes copied from the caller's */
             b->_b = (nvk_buffer){ .buf = (void *)1, .mem = (void *)2, .map = cpu + 16, .size = 32, .alloc = 32 };
             b->_hostPtr = cpu; b->_hostLen = 32;
@@ -151,6 +160,7 @@ static void drop(enum kind k) {
             /* the caller's deallocator can call back into the driver: no lock of the grace may be held */
             assert(!pthread_mutex_trylock(&g_bg_lock)); pthread_mutex_unlock(&g_bg_lock);
             callbacks++;
+            if (nest) { nest = 0; drop_plain(); }   /* the block lets go of a buffer it held */
         };
         b = nil;
     }
@@ -187,9 +197,15 @@ int main(void) { @autoreleasepool {
     reset(); failAllocation = 1; drop(IMPORTED);
     assert(callbacks == 0 && freed == 0 && destroyed == 0);
     failAllocation = 0; reap_all(); assert(callbacks == 0);
+
+    /* a deallocator run by the reap frees another buffer, which nothing is reading: that buffer's death is noted by
+       its own path, and the reap's next buffer is not noted a second time */
+    reset(); drop(IMPORTED); drop_plain(); assert(g_bg.ncool == 2 && notes == 2);
+    nest = 1; reap_all();
+    assert(callbacks == 1 && notes == 3 && !t_grace_reaping && !g_bg.ncool && destroyed == 3 && freed == 3);
     puts("PASS: an imported buffer's deallocator gets the caller's pointer and length, runs once after vkFreeMemory and "
          "after the grace, with no grace lock held; a copied buffer's runs at once; a lost device runs it in dealloc; "
-         "no grace record keeps the import and its pages");
+         "no grace record keeps the import and its pages; a buffer freed by a deallocator in a reap is noted once");
 } }
 '''
 for token, value in {'BUFFER_TYPE': buffer_type, 'GRACE_TYPE': grace_type, 'BACKEND': backend,
