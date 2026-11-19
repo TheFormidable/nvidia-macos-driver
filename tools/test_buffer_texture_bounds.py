@@ -94,9 +94,13 @@ int main(void) { @autoreleasepool {
     d.height=0; check(b,d,0,32,NO);
     d.height=2; d.width=0; check(b,d,0,32,NO); d.width=4;
     d.height=2; d.pixelFormat=MTLPixelFormatInvalid; check(b,d,0,32,NO);
-    d.pixelFormat=MTLPixelFormatBC1_RGBA; check(b,d,0,32,NO);
+    // A compressed format keeps the check it had in 3.0.3, bpr bytes for each row, without overflow.
+    d.pixelFormat=MTLPixelFormatBC1_RGBA; check(b,d,0,32,YES);
+    b->_b.size=63; check(b,d,0,32,NO);
+    b->_b.size=96; check(b,d,SIZE_MAX-15,32,NO); check(b,d,0,SIZE_MAX/2+1,NO); check(b,d,0,0,NO);
     d.pixelFormat=MTLPixelFormatRGBA8Unorm; d.arrayLength=2; check(b,d,0,32,NO);
-    d.arrayLength=1; d.mipmapLevelCount=2; check(b,d,0,32,NO);
+    // Level 0 of a mipmapped texture is copied; nvmtl_mip_autofill makes the rest (Core Animation's badges and icons).
+    d.arrayLength=1; d.mipmapLevelCount=2; check(b,d,0,32,YES);
     d.mipmapLevelCount=1; d.sampleCount=4; check(b,d,0,32,NO);
     puts("PASS: 16-mod-32 starts preserve exact bytes; partial final rows work; short rows, overflows and unsupported layouts are rejected");
 } }
