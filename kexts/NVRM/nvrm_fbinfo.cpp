@@ -6,6 +6,7 @@
 
 #include "nv-xnu.h"
 #include "nvrm_utilization.h"
+#include "nvrm_gpu_capabilities_abi.h"
 #include <IOKit/IOLib.h>
 
 extern "C" {
@@ -90,6 +91,53 @@ static NvV32 fbiFree(NvU32 hRoot, NvU32 hParent, NvU32 hObject)
     ops.params.free.hObjectOld    = hObject;
     rm_kernel_rmapi_op(NULL, &ops);
     return ops.params.free.status;
+}
+
+/* Phase 2B: published read-only controls, using the same GPU-specific RM
+ * client lifecycle as fbinfo. No private command or fan setter is issued. */
+extern "C" void nvrm_query_gpu_caps(NvU32 gpuId, uint8_t *out)
+{
+    NvU32 root = 0, device = 0, sub = 0;
+    struct FbiAttachIds at;
+    NV0080_ALLOC_PARAMETERS dp;
+    NV2080_ALLOC_PARAMETERS sp;
+    uint32_t b[32];
+    const uint32_t cpu = NVRM_GC_SRC_RM_CPU, fwd = NVRM_GC_SRC_RM_FORWARDED;
+    do {
+        if (fbiAlloc(0, 0, kClsRootClient, nullptr, 0, &root) || !root) break;
+        fbiZero(&at, sizeof at); at.gpuIds[0] = gpuId; at.gpuIds[1] = kGpuInvalidId;
+        if (fbiControl(root, root, kCmdGpuAttachIds, &at, sizeof at)) break;
+        fbiZero(b, sizeof b); b[0] = gpuId;
+        if (fbiControl(root, root, 0x00000205u, b, 32) || b[0] != gpuId) break;
+        const uint32_t deviceInstance = b[2], subdeviceInstance = b[3];
+        fbiZero(&dp, sizeof dp); dp.hClientShare = root; dp.deviceId = deviceInstance;
+        if (fbiAlloc(root, root, kClsDevice0, &dp, sizeof dp, &device) || !device) break;
+        fbiZero(&sp, sizeof sp); sp.subDeviceId = subdeviceInstance;
+        if (fbiAlloc(root, device, kClsSubdevice0, &sp, sizeof sp, &sub) || !sub) break;
+        fbiZero(b, sizeof b);
+        if (!fbiControl(root, sub, kCmdMcGetArch, b, 16) && b[0])
+            nvrm_gc_put(out, NVRM_GC_CAP_CHIP, 0, cpu, NVRM_GC_ANS_VALID, 0, 0, 0, b[0], b[1], b[2], 0);
+        fbiZero(b, sizeof b);
+        if (!fbiControl(root, sub, 0x20800111u, b, 64) && !((char *)b)[63]) {
+            nvrm_gc_put_string(out, NVRM_GC_CAP_CHIP_NAME, 0, cpu, NVRM_GC_ANS_VALID, 0, 0, 0, (char *)b);
+        }
+        fbiZero(b, sizeof b);
+        if (!fbiControl(root, sub, 0x20800110u, b, 68) && !((char *)b)[67]) {
+            nvrm_gc_put_string(out, NVRM_GC_CAP_MARKETING_NAME, 0, cpu, NVRM_GC_ANS_VALID, 0, 0, 0, (char *)b + 4);
+        }
+        fbiZero(b, sizeof b);
+        if (!fbiControl(root, sub, 0x20803601u, b, 72) && ((uint8_t *)b)[4] == 1 && !((char *)b)[69]) {
+            nvrm_gc_put_string(out, NVRM_GC_CAP_GSP_FW_VERSION, 0, NVRM_GC_SRC_KERNEL_STATE, NVRM_GC_ANS_VALID, 0, 0, 0, (char *)b + 6);
+        }
+        fbiZero(b, sizeof b); b[0] = 2; b[3] = 1;
+        if (!fbiControl(root, sub, 0x20800810u, b, 124) && b[0] == 2 && b[1] == 0 && b[3] == 1 && b[2] && b[2] != 0xffffffffu)
+            nvrm_gc_put(out, NVRM_GC_CAP_VBIOS_VERSION, 0, fwd, NVRM_GC_ANS_VALID, 0, 0, 0, b[2], b[4], 0, 0);
+        fbiZero(b, sizeof b);
+        if (!fbiControl(root, sub, 0x20800156u, b, 16) && !((char *)b)[15]) {
+            nvrm_gc_put_string(out, NVRM_GC_CAP_INFOROM_VERSION, 0, fwd, NVRM_GC_ANS_VALID, 0, 0, 0, (char *)b);
+        }
+    } while (0);
+    if (root) fbiFree(root, root, root);
 }
 
 struct NvrmUtilizationState {

@@ -1,0 +1,1148 @@
+/*
+ * NullMoth NVIDIA driver for macOS
+ * Copyright (c) 2026 NullMoth Systems.
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
+/* nvrm_gpu_capabilities_abi.h - what one GPU and this driver can do, read-only, per GPU, with how sure the driver is
+ * of each answer: a small header, a table of uniform records (one record per fact), and a string area.
+ *
+ * NEVER A YES/NO. Every fact has one of four states:
+ *   UNKNOWN       0  not enough information. Also: not asked, may not be asked here, failed, an answer that did not
+ *                    pass validation, a refusal of an unpublished command, a record that is absent, and anything this
+ *                    reader does not understand (an id, a source, a state number it does not know)
+ *   UNSUPPORTED   1  the hardware or the driver confirms that it does not exist: a published query was refused for
+ *                    the thing itself (NV_ERR_NOT_SUPPORTED, or a published "absent" flag), or this driver build has
+ *                    no such feature (only for facts about the driver)
+ *   EXPERIMENTAL  2  identified by reverse engineering or inference, or reported/observed but not checked physically
+ *   VERIFIED      3  checked physically on exactly this platform (a PHYSICAL row of the driver's evidence table), or
+ *                    a fact the driver states about itself, or (only under policy NVRM_GC_POL_PUBLISHED_COUNTS) stated
+ *                    directly by a published interface
+ * The numbers are names, not a scale. Never test a state for truth: `if (state)` takes UNSUPPORTED (1) as "yes". Never
+ * compare states with < or >=. Use nvrm_gc_usable() (EXPERIMENTAL or VERIFIED) and nvrm_gc_all(). A value is given out
+ * only when its state is usable; otherwise the getters write zeros and read_caps.py writes None.
+ *
+ * THE STATE IS NEVER TAKEN ON TRUST. The producer records, per fact, where the value came from (source, NVRM_GC_SRC_*),
+ * how the asking ended (answer, NVRM_GC_ANS_*) and the level of the evidence row that applied (NVRM_GC_LV_*);
+ * nvrm_gc_put() derives the state with nvrm_gc_state() under the policy written in the header, refuses a source the
+ * capability may not take (the fixed map in NVRM_GC_CAPS below), and zeroes the value of a fact that is not usable.
+ * Every getter derives the state again from the same fields and reads UNKNOWN when anything disagrees, so a producer
+ * bug or a forged reply can lower a state but never raise one.
+ *
+ * NOT TELEMETRY. No RPM, temperature or power reading is in the block: those stay in RUSD (class 0xde). The block may
+ * say "RUSD tachometer slot 1 answers", never what it reads. No serial number, no GPU UUID, nothing that names one
+ * physical unit: any local process can open the user client. The PCI location and the RM gpu id name a slot.
+ *
+ * WHO CALLS, HOW. NVRMUserClient external method NVRM_GPU_CAPS_SELECTOR (14), dispatch row
+ * { sGpuCaps, 1, 0, 0, kIOUCVariableStructureSize }: one scalar in (the abi_major the caller reads, NVRM_GC_ABI_MAJOR),
+ * a structure out. The caller passes a buffer of NVRM_GC_BUF_BYTES (4096). Exactly 4096 bytes travel inline: Apple's
+ * io_struct_inband_t is char[4096] (device_types.h:99), IOKitLib sends a structure output inline when
+ * size <= sizeof(io_struct_inband_t) (IOKitLib.c:1875), and the kernel refuses an out-of-line output of 4096 bytes or
+ * fewer (IOUserClient.cpp:5177-5180). The kext writes total_bytes (never more than 4096 for the life of major 1) and
+ * sets the output size to it. Any process that can open the user client may call; there is no privilege check, no
+ * setting and no writable sysctl. The GPU is the one whose NVRM service (or NVAccel bridge) the caller opened; there is
+ * no index argument.
+ *   - Old kext: a kext without the selector answers kIOReturnBadArgument (the selector is past the end of its table,
+ *     NVRM.cpp:3792). The caller then treats every capability as UNKNOWN, stays read-only and stops asking for the
+ *     life of that connection. There is no fallback to a model name. A kext that has this selector also sets
+ *     NVRM_GC_SEL7_HAS_GPU_CAPS in the answer of selector 7 (NVRM.cpp:3751-3756, nvrm_evwait.h:28-29; bits 0 and 1 are
+ *     taken, a 2.9 user space tests bit 0 only), so a caller that read selector 7 can tell "old kext" from "I called it
+ *     wrongly" (IOKit itself answers kIOReturnBadArgument to a wrong scalar count, IOUserClient.cpp:6625-6627).
+ *   - A buffer shorter than the reply, or an out-of-line descriptor (a buffer larger than 4096): kIOReturnNoSpace,
+ *     never kIOReturnBadArgument. That is a caller bug, not an old kext.
+ *   - Another major asked: the kext answers its header alone (header_size bytes, no records), whose abi_major names the
+ *     major it speaks. nvrm_gc_verdict() says NVRM_GC_V_OTHER_MAJOR: everything UNKNOWN, ask again only with a major
+ *     you read.
+ *   - Pending: from NVRM::start(), before registerService() (NVRM.cpp:1179), the cache holds a valid header with
+ *     generation 0, NVRM_GC_F_PENDING and no records; it stays so until the producer's first publish. Pending means
+ *     "ask again in a few seconds", never "stop".
+ *   - Producer off: boot argument nvgpucaps=0. The header says NVRM_GC_F_OFF, no records, for the whole boot.
+ *
+ * SLEEP. The selector makes no RM call and takes neither the connection's gate nor the power gate. It copies the
+ * per-GPU cache under one leaf lock, so it answers at once during a sleep, during a wake and on a lost GPU. On its own
+ * copy, at call time, it sets NVRM_GC_F_ASLEEP (the GPU is suspended now), NVRM_GC_F_STALE (the GPU slept since the
+ * block was made: fPmCycles moved) and NVRM_GC_F_GPU_LOST (the last wake failed), from the NVRM object's fGpuPm and
+ * fPmCycles (NVRM.cpp:213-223, :2956, :3006), with nvrm_gc_mark_copy(). The cached block never holds these three bits,
+ * so a late publish cannot clear them. While STALE or GPU_LOST, every getter reads a fact that is not marked
+ * NVRM_GC_CF_STATIC (identity, versions, driver facts) as UNKNOWN. The producer runs again after each wake.
+ *
+ * GROWTH. A later minor adds capability ids, enum values, and bytes appended to the header or to a record. A reader
+ * walks by the header's header_size, record_size, record_offset, record_count, string_offset and string_size, never by
+ * the 1.0 constants below; it skips ids it does not know and reads unknown enum values as UNKNOWN. A newer reader on an
+ * older kext finds no record for a newer id: UNKNOWN. A different abi_major is a different layout: do not read it.
+ *
+ * SHARED by the kext (C++), the host test (C) and NVMetrics (C, its agent turns the block into the JSON line the GUI
+ * reads; read_caps.py is the reference reader in Python). NVMetrics gets this file the way it gets
+ * nvrm_boost_policy_abi.h: a patch in nvk/ of the default chain (nvk/nvk-gpu-caps.patch) adds a byte-identical copy under nvkmd/nvrm/, which
+ * rm-controller/agent/extract_rm_layer.py extracts (it reads only the NVK patch chain), and tools/test_shared_headers.py
+ * gets a SHARED row for it. Plain C11 / C++17, <stdint.h> only. The wire is little-endian and every reader access is a
+ * byte load (no alignment needed); read_caps.py is a line-for-line port; Swift reads the agent's JSON line. */
+#pragma once
+#include <stdint.h>
+
+/* NVRMUserClient external method: one scalar in, a structure out of up to NVRM_GC_BUF_BYTES. 13 is
+ * NVRM_BOOST_POLICY_SELECTOR, 12 is NVRM_FENCE_SELECTOR, 10 and 11 are retired placeholders. */
+#define NVRM_GPU_CAPS_SELECTOR      14u
+/* Bit in the scalar that selector 7 (NVRM_EVW_SEL_CAPS) answers: "selector 14 exists". nvrm_evwait.h names the same
+ * bit NVRM_EVW_CAP_GPU_CAPS when this header lands (bits 0x1 and 0x2 are NVRM_EVW_CAP_WAIT and NVRM_EVW_CAP_REASON). */
+#define NVRM_GC_SEL7_HAS_GPU_CAPS   0x4u
+
+#define NVRM_GC_MAGIC               0x4347564Eu  /* bytes 'N' 'V' 'G' 'C' in memory order */
+#define NVRM_GC_ABI_MAJOR           1u
+#define NVRM_GC_ABI_MINOR           0u
+#define NVRM_GC_BUF_BYTES           4096u        /* the caller's buffer; the most a reply of major 1 ever holds */
+#define NVRM_GC_HEADER_BYTES_1_0    64u          /* header_size of a 1.0 producer; a reader requires >= 64 */
+#define NVRM_GC_RECORD_BYTES_1_0    32u          /* record_size of a 1.0 producer; a reader requires >= 32 */
+#define NVRM_GC_MAX_RECORDS_1_0     108u         /* 64 + 108 * 32 = 3520 */
+#define NVRM_GC_STRINGS_BYTES_1_0   576u         /* string area of a 1.0 producer: 3520 .. 4096 */
+#define NVRM_GC_STRING_MAX          64u          /* one string, its NUL included */
+#define NVRM_GC_MAX_COOLERS         16u          /* RUSD_FAN_COOLER_MAX_COOLERS (cl00de.h:301); the firmware block's 16 */
+#define NVRM_GC_THERMAL_TARGETS     5u           /* RUSD_TEMPERATURE_TYPE_MAX (cl00de.h:221-228) */
+
+/* ---- states ------------------------------------------------------------------------------------------------------ */
+enum { NVRM_GC_ST_UNKNOWN = 0, NVRM_GC_ST_UNSUPPORTED = 1, NVRM_GC_ST_EXPERIMENTAL = 2, NVRM_GC_ST_VERIFIED = 3 };
+
+/* ---- where a value came from (provenance) ------------------------------------------------------------------------ */
+enum {
+    NVRM_GC_SRC_NONE         = 0,  /* nothing was read */
+    NVRM_GC_SRC_PCI_CONFIG   = 1,  /* the card's PCI configuration space, read by the kext */
+    NVRM_GC_SRC_KERNEL_STATE = 2,  /* kext or CPU-side RM state already held (nv_state_t, GSP static configuration);
+                                      never cached_gpu_info's VBIOS string, which is a forwarded answer (osinit.c:655) */
+    NVRM_GC_SRC_RM_CPU       = 3,  /* a published RM control that the CPU-side RM answers itself */
+    NVRM_GC_SRC_RM_FORWARDED = 4,  /* a published RM control that the CPU-side RM forwards to GSP firmware
+                                      (ROUTE_TO_PHYSICAL): the answer, a refusal included, is GSP's */
+    NVRM_GC_SRC_RUSD         = 5,  /* a published RM_USER_SHARED_DATA field (filled by GSP), with a valid timestamp */
+    NVRM_GC_SRC_RM_PRIVATE   = 6,  /* an RM control whose id or format nobody published (reverse engineered) */
+    NVRM_GC_SRC_EVIDENCE     = 7,  /* the fact cannot be read without writing; the evidence table supplies it */
+    NVRM_GC_SRC_DRIVER_BUILD = 8,  /* a fact this driver build states about itself */
+    NVRM_GC_SRC_DERIVED      = 9,  /* derived by the kext from other facts of this run, by a rule stated per fact */
+    NVRM_GC_SRC_COUNT        = 10
+};
+/* ---- how the asking ended ---------------------------------------------------------------------------------------- */
+enum {
+    NVRM_GC_ANS_NOT_ASKED    = 0,  /* not asked (no way to ask, phase not run, not implemented) */
+    NVRM_GC_ANS_VALID        = 1,  /* answered, and the answer passed validation */
+    NVRM_GC_ANS_INVALID      = 2,  /* answered, and the answer failed validation (range, placeholder, layout) */
+    NVRM_GC_ANS_REFUSED      = 3,  /* NV_ERR_NOT_SUPPORTED, or a published flag says the thing itself is absent */
+    NVRM_GC_ANS_FAILED       = 4,  /* any other error: timeout, busy, asleep, lost, permission, size */
+    NVRM_GC_ANS_WITHHELD     = 5,  /* the kext may not ask on this platform (no evidence row permits it) */
+    NVRM_GC_ANS_INCONCLUSIVE = 6,  /* answered and well formed, but it does not decide the fact (a tachometer slot
+                                      reading 0, a RUSD section with timestamp 0, a missing delivery channel) */
+    NVRM_GC_ANS_NOT_IN_BUILD = 7,  /* this driver build has no such feature (only with NVRM_GC_SRC_DRIVER_BUILD) */
+    NVRM_GC_ANS_COUNT        = 8
+};
+/* ---- level of the evidence row that applied. Unlike the states this IS a scale, on purpose ----------------------- */
+enum {
+    NVRM_GC_LV_NONE     = 0,
+    NVRM_GC_LV_REPORTED = 1,  /* a written report by the owner or a tester; its logs are not committed */
+    NVRM_GC_LV_OBSERVED = 2,  /* a committed log or probe result */
+    NVRM_GC_LV_PHYSICAL = 3,  /* a committed physical-verification record on the exact identity */
+    NVRM_GC_LV_COUNT    = 4
+};
+/* ---- the policy the producer ran with (header byte `policy`); the owner's open decision -------------------------- */
+enum {
+    NVRM_GC_POL_NONE             = 0,  /* never written by a producer; read as PHYSICAL_ONLY */
+    NVRM_GC_POL_PUBLISHED_COUNTS = 1,  /* a fact stated directly by a published interface is VERIFIED */
+    NVRM_GC_POL_PHYSICAL_ONLY    = 2   /* only a PHYSICAL row (or the driver about itself) makes VERIFIED */
+};
+
+/* NV_STATUS of an RM call, plus whether the answer passed validation, as an answer. 0x56 is NV_ERR_NOT_SUPPORTED
+ * (nvstatuscodes.h:115); every other error, permission and NV_ERR_GPU_IS_LOST (0xF) included, is FAILED. */
+#define NVRM_GC_NV_OK                0x00000000u
+#define NVRM_GC_NV_ERR_NOT_SUPPORTED 0x00000056u
+static inline uint32_t nvrm_gc_answer_from_nvstatus(uint32_t nvstatus, int valid)
+{
+    if (nvstatus == NVRM_GC_NV_OK) return valid ? NVRM_GC_ANS_VALID : NVRM_GC_ANS_INVALID;
+    if (nvstatus == NVRM_GC_NV_ERR_NOT_SUPPORTED) return NVRM_GC_ANS_REFUSED;
+    return NVRM_GC_ANS_FAILED;
+}
+
+/* ---- the state function (pure; tests/test_gpu_caps.c sweeps every input against its own table) -------------------
+ * answer NVRM_GC_ANS_*, source NVRM_GC_SRC_*, level NVRM_GC_LV_* of the row that applied, policy NVRM_GC_POL_*. In order:
+ *   any input this side does not know                                                          -> UNKNOWN
+ *   NOT_IN_BUILD: with source DRIVER_BUILD                                                     -> UNSUPPORTED
+ *                 with any other source                                                        -> UNKNOWN
+ *   REFUSED through a published source (PCI_CONFIG, KERNEL_STATE, RM_CPU, RM_FORWARDED, RUSD)  -> UNSUPPORTED
+ *   REFUSED through anything else (the unpublished control, the evidence table, derived)       -> UNKNOWN
+ *   not asked, withheld, inconclusive, failed, invalid                                         -> UNKNOWN
+ *   VALID, source NONE                                                                         -> UNKNOWN
+ *   VALID, a PHYSICAL row applied                                                              -> VERIFIED
+ *   VALID, DRIVER_BUILD (the driver about itself)                                              -> VERIFIED
+ *   VALID, published source: PUBLISHED_COUNTS -> VERIFIED; any other policy                    -> EXPERIMENTAL
+ *   VALID, DERIVED                                                                             -> EXPERIMENTAL
+ *   VALID, RM_PRIVATE or EVIDENCE, with a REPORTED or OBSERVED row                             -> EXPERIMENTAL
+ *   VALID, RM_PRIVATE or EVIDENCE, with no row                                                 -> UNKNOWN
+ * A row never lowers a state and never produces UNSUPPORTED. For RM_PRIVATE and EVIDENCE facts, VALID means that this
+ * run's fan-interface read was valid (the getters check it: NVRM_GC_CF_NEEDS_IFACE), and the row's match required the
+ * fingerprint of this run's read (nvrm_gc_row_level). */
+static inline int nvrm_gc_src_published(uint32_t source)
+{
+    return source == NVRM_GC_SRC_PCI_CONFIG || source == NVRM_GC_SRC_KERNEL_STATE || source == NVRM_GC_SRC_RM_CPU ||
+           source == NVRM_GC_SRC_RM_FORWARDED || source == NVRM_GC_SRC_RUSD;
+}
+static inline uint32_t nvrm_gc_state(uint32_t answer, uint32_t source, uint32_t level, uint32_t policy)
+{
+    if (answer >= NVRM_GC_ANS_COUNT || source >= NVRM_GC_SRC_COUNT || level >= NVRM_GC_LV_COUNT)
+        return NVRM_GC_ST_UNKNOWN;
+    if (answer == NVRM_GC_ANS_NOT_IN_BUILD)
+        return source == NVRM_GC_SRC_DRIVER_BUILD ? NVRM_GC_ST_UNSUPPORTED : NVRM_GC_ST_UNKNOWN;
+    if (answer == NVRM_GC_ANS_REFUSED)
+        return nvrm_gc_src_published(source) ? NVRM_GC_ST_UNSUPPORTED : NVRM_GC_ST_UNKNOWN;
+    if (answer != NVRM_GC_ANS_VALID || source == NVRM_GC_SRC_NONE) return NVRM_GC_ST_UNKNOWN;
+    if (level == NVRM_GC_LV_PHYSICAL) return NVRM_GC_ST_VERIFIED;
+    if (source == NVRM_GC_SRC_DRIVER_BUILD) return NVRM_GC_ST_VERIFIED;
+    if (nvrm_gc_src_published(source))
+        return policy == NVRM_GC_POL_PUBLISHED_COUNTS ? NVRM_GC_ST_VERIFIED : NVRM_GC_ST_EXPERIMENTAL;
+    if (source == NVRM_GC_SRC_DERIVED) return NVRM_GC_ST_EXPERIMENTAL;
+    /* RM_PRIVATE, EVIDENCE */
+    return (level == NVRM_GC_LV_REPORTED || level == NVRM_GC_LV_OBSERVED) ? NVRM_GC_ST_EXPERIMENTAL : NVRM_GC_ST_UNKNOWN;
+}
+/* A value may be used only when this is 1. UNSUPPORTED is a definite answer, but it carries no value. */
+static inline int nvrm_gc_usable(uint32_t state)
+{
+    return state == NVRM_GC_ST_EXPERIMENTAL || state == NVRM_GC_ST_VERIFIED;
+}
+/* The combined state of facts that are all needed (a rule, not arithmetic on the numbers): a state this side does not
+ * know -> UNKNOWN; any UNSUPPORTED -> UNSUPPORTED; else any UNKNOWN -> UNKNOWN; else any EXPERIMENTAL -> EXPERIMENTAL;
+ * else VERIFIED. */
+static inline uint32_t nvrm_gc_all(uint32_t x, uint32_t y)
+{
+    if (x > NVRM_GC_ST_VERIFIED || y > NVRM_GC_ST_VERIFIED) return NVRM_GC_ST_UNKNOWN;
+    if (x == NVRM_GC_ST_UNSUPPORTED || y == NVRM_GC_ST_UNSUPPORTED) return NVRM_GC_ST_UNSUPPORTED;
+    if (x == NVRM_GC_ST_UNKNOWN || y == NVRM_GC_ST_UNKNOWN) return NVRM_GC_ST_UNKNOWN;
+    if (x == NVRM_GC_ST_EXPERIMENTAL || y == NVRM_GC_ST_EXPERIMENTAL) return NVRM_GC_ST_EXPERIMENTAL;
+    return NVRM_GC_ST_VERIFIED;
+}
+
+/* ---- shapes, index kinds, units, capability flags, allowed sources ----------------------------------------------- */
+enum {
+    NVRM_GC_VT_FLAG   = 0,   /* no value: the state is the whole answer */
+    NVRM_GC_VT_U32    = 1,   /* v[0] */
+    NVRM_GC_VT_U32X2  = 2,   /* v[0], v[1] */
+    NVRM_GC_VT_U32X3  = 3,   /* v[0], v[1], v[2] */
+    NVRM_GC_VT_U32X4  = 4,   /* v[0] .. v[3] */
+    NVRM_GC_VT_I32X2  = 5,   /* v[0], v[1] as int32_t */
+    NVRM_GC_VT_STRING = 6,   /* v[0] = offset in the string area, v[1] = length without the NUL */
+    NVRM_GC_VT_COUNT  = 7
+};
+enum {
+    NVRM_GC_IX_NONE    = 0,  /* per GPU: index 0 */
+    NVRM_GC_IX_THERMAL = 1,  /* RUSD_TEMPERATURE_TYPE order: GPU 0, MEMORY 1, BOARD 2, POWER_SUPPLY 3, HBM 4 */
+    NVRM_GC_IX_TACH    = 2,  /* 0..15: a RUSD fanCoolerStatus.rpmCurr[] slot (published) */
+    NVRM_GC_IX_FWREC   = 3   /* 0..15: a record of the firmware's unpublished fan block. Record i and tachometer slot
+                                i are NOT assumed to be the same fan: NVRM_GC_CAP_FW_RECORD_TACH says so, or not */
+};
+enum { NVRM_GC_U_NONE = 0, NVRM_GC_U_COUNT = 1, NVRM_GC_U_RPM = 2, NVRM_GC_U_PERCENT = 3, NVRM_GC_U_MILLI_C = 4,
+       NVRM_GC_U_MILLIWATT = 5, NVRM_GC_U_ENUM = 6, NVRM_GC_U_BYTES = 7, NVRM_GC_U_ID = 8, NVRM_GC_U_TEXT = 9,
+       NVRM_GC_U_BITS = 10 };
+/* Capability flags: fixed per id, never stored, so a reply cannot change them. */
+#define NVRM_GC_CF_STATIC        0x0001u  /* holds across a sleep and a lost GPU (identity, versions, driver facts) */
+#define NVRM_GC_CF_DRIVER        0x0002u  /* a fact about this driver; the only kind that may take DRIVER_BUILD */
+#define NVRM_GC_CF_NEEDS_IFACE   0x0004u  /* usable only while FAN_INTERFACE is usable in the same reply */
+#define NVRM_GC_CF_UNPROVEN      0x0008u  /* the value is what the firmware reports; what it means is not established */
+#define NVRM_GC_CF_INFERRED      0x0010u  /* what the value means is inferred (e.g. from a public API's vocabulary) */
+#define NVRM_GC_CF_PHYSICAL_ONLY 0x0020u  /* usable only with a PHYSICAL row (a proven range, not a reported one) */
+#define NVRM_GC_CF_DOTTED        0x0040u  /* a string of 2..4 groups of 1..4 digits joined by dots, e.g. "620.70.06" */
+/* Allowed sources, as bits 1 << NVRM_GC_SRC_*. NONE is always allowed (it never makes a usable state). */
+#define NVRM_GC_S_PCI   (1u << NVRM_GC_SRC_PCI_CONFIG)
+#define NVRM_GC_S_KST   (1u << NVRM_GC_SRC_KERNEL_STATE)
+#define NVRM_GC_S_CPU   (1u << NVRM_GC_SRC_RM_CPU)
+#define NVRM_GC_S_FWD   (1u << NVRM_GC_SRC_RM_FORWARDED)
+#define NVRM_GC_S_RUSD  (1u << NVRM_GC_SRC_RUSD)
+#define NVRM_GC_S_PRIV  (1u << NVRM_GC_SRC_RM_PRIVATE)
+#define NVRM_GC_S_EVD   (1u << NVRM_GC_SRC_EVIDENCE)
+#define NVRM_GC_S_DRV   (1u << NVRM_GC_SRC_DRIVER_BUILD)
+#define NVRM_GC_S_DER   (1u << NVRM_GC_SRC_DERIVED)
+#define NVRM_GC_S_ID    (NVRM_GC_S_PCI | NVRM_GC_S_KST | NVRM_GC_S_CPU | NVRM_GC_S_FWD)
+#define NVRM_GC_S_RM    (NVRM_GC_S_KST | NVRM_GC_S_CPU | NVRM_GC_S_FWD)
+
+/* ---- the capability list of 1.0 ----------------------------------------------------------------------------------
+ * X(name, id, index kind, shape, unit, flags, allowed sources). Ids are never reused or renumbered; a new capability
+ * is a new id and a minor bump. The high byte of an id is its group. The comment says what the value means and where
+ * the owner's RTX 5050 gets it today (caps1 = the read-only probe of 2026-11-17, caps1-findings.md). */
+#define NVRM_GC_CAPS(X) \
+    /* 01 identity: from PCI configuration space or the RM; each id has its own state */ \
+    X(PCI_VENDOR,        0x0101u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* config 0x00 */ \
+    X(PCI_DEVICE,        0x0102u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* config 0x02 */ \
+    X(PCI_REVISION,      0x0103u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* config 0x08 */ \
+    X(PCI_SUBSYS_VENDOR, 0x0104u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* config 0x2C */ \
+    X(PCI_SUBSYS_DEVICE, 0x0105u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* config 0x2E */ \
+    X(PCI_CLASS,         0x0106u, NONE,    U32X3,  ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* base, sub, prog-if */ \
+    X(PCI_LOCATION,      0x0107u, NONE,    U32X3,  ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_ID)  /* domain, bus, slot */ \
+    X(RM_GPU_ID,         0x0108u, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* GPU_GET_ATTACHED_IDS */ \
+    X(CHIP,              0x0109u, NONE,    U32X3,  ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* MC_GET_ARCH_INFO arch,
+                                                                                    implementation, revision */ \
+    X(CHIP_DETAILS,      0x010Au, NONE,    U32X2,  ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* GPU_GET_CHIP_DETAILS
+                                                                                    chip major, minor */ \
+    X(CHIP_NAME,         0x010Bu, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* short name, "GB207-A" */ \
+    X(MARKETING_NAME,    0x010Cu, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* the RM's name string;
+                                                                                    never a build-table lookup */ \
+    X(BOARD_ID,          0x010Du, NONE,    U32,    ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* BIOS_GET_SKU_INFO */ \
+    X(CHIP_SKU,          0x010Eu, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* BIOS_GET_SKU_INFO */ \
+    X(BOARD_PROJECT,     0x010Fu, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* BIOS_GET_SKU_INFO */ \
+    X(BOARD_PROJECT_SKU, 0x0110u, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_RM)  /* BIOS_GET_SKU_INFO */ \
+    /* 02 versions */ \
+    X(KEXT_VERSION,      0x0201u, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC | NVRM_GC_CF_DRIVER, NVRM_GC_S_DRV) \
+    X(RM_VERSION,        0x0202u, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC | NVRM_GC_CF_DRIVER | NVRM_GC_CF_DOTTED, \
+                                                                                    NVRM_GC_S_DRV)  /* built from */ \
+    X(VBIOS_VERSION,     0x0203u, NONE,    U32X2,  ID,   NVRM_GC_CF_STATIC, NVRM_GC_S_FWD) /* BIOS_GET_INFO_V2: v0
+                                    revision, v1 OEM revision; text "%02x.%02x.%02x.%02x.%02x" (osinit.c:664) */ \
+    X(GSP_FW_VERSION,    0x0204u, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC | NVRM_GC_CF_DOTTED, \
+                                                                 NVRM_GC_S_KST | NVRM_GC_S_FWD) /* GSP_GET_FEATURES */ \
+    X(INFOROM_VERSION,   0x0205u, NONE,    STRING, TEXT, NVRM_GC_CF_STATIC, NVRM_GC_S_FWD) /* INFOROM_IMAGE_VERSION */ \
+    X(RUSD_LAYOUT,       0x0206u, NONE,    U32X2,  BYTES, NVRM_GC_CF_STATIC | NVRM_GC_CF_DRIVER, NVRM_GC_S_DRV) \
+                                    /* sizeof(NV00DE_SHARED_DATA), offsetof fanCoolerStatus, as this kext is built */ \
+    /* 03 thermal (no thermal LIMIT has a published source in RM 620: UNKNOWN until one exists) */ \
+    X(THERMAL_LIST,      0x0301u, NONE,    U32X3,  COUNT, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* THERMAL_SYSTEM_EXECUTE_V2:
+                                    targets, sensors, NVRM_GC_TT_* bits of the target types it names */ \
+    X(THERMAL_SENSOR,    0x0302u, THERMAL, FLAG,   NONE, 0, NVRM_GC_S_RUSD | NVRM_GC_S_CPU | NVRM_GC_S_FWD) \
+                                    /* a published source fills readings for this target */ \
+    X(THERMAL_READ_RANGE, 0x0303u, THERMAL, I32X2, MILLI_C, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* the sensor's reading
+                                    range from the thermal list; not a limit */ \
+    X(TEMP_SLOWDOWN,     0x0310u, NONE,    I32X2,  MILLI_C, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* v0 limit, v1 TREF */ \
+    X(TEMP_SHUTDOWN,     0x0311u, NONE,    I32X2,  MILLI_C, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) \
+    X(TEMP_GPU_MAX,      0x0312u, NONE,    I32X2,  MILLI_C, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) \
+    X(TEMP_MEM_MAX,      0x0313u, NONE,    I32X2,  MILLI_C, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) \
+    /* 04 fans. Tachometer slots (published) and firmware fan records (unpublished) are kept apart */ \
+    X(COOLER_COUNT,      0x0401u, NONE,    U32,    COUNT, 0, NVRM_GC_S_DER | NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* DERIVED:
+                                    tachometer slots that answer, when the firmware's records agree */ \
+    X(TACH_SLOT,         0x0402u, TACH,    FLAG,   NONE, 0, NVRM_GC_S_RUSD) /* this rpmCurr slot answers (non-zero) */ \
+    X(FAN_INTERFACE,     0x0410u, NONE,    U32X4,  ENUM, 0, NVRM_GC_S_PRIV) /* v0 NVRM_GC_FANIF_*, v1 fingerprint
+                                    (nvrm_gc_fan_fingerprint), v2 NVRM_GC_FANIF_CHK_* passed, v3 reply bytes */ \
+    X(FAN_MODE_READBACK, 0x0411u, NONE,    FLAG,   NONE, NVRM_GC_CF_NEEDS_IFACE, NVRM_GC_S_PRIV) /* the block reports
+                                    whether the firmware controls the fans itself (mode word 0 in AUTO) */ \
+    X(FAN_MANUAL_FW,     0x0412u, NONE,    U32,    ENUM, NVRM_GC_CF_NEEDS_IFACE, NVRM_GC_S_EVD) /* the firmware takes
+                                    a level set by software; v0 NVRM_GC_LVL_* of that level */ \
+    X(FAN_RESTORE_AUTO_FW, 0x0413u, NONE,  FLAG,   NONE, NVRM_GC_CF_NEEDS_IFACE, NVRM_GC_S_EVD) /* the firmware takes
+                                    its own control back when asked */ \
+    X(FAN_LEVELS_DRIVEN, 0x0414u, NONE,    U32X2,  PERCENT, NVRM_GC_CF_NEEDS_IFACE, NVRM_GC_S_EVD) /* lowest, highest
+                                    level a person has set and seen followed: what was done, not a limit */ \
+    X(FAN_STOP,          0x0415u, NONE,    FLAG,   NONE, 0, NVRM_GC_S_RM | NVRM_GC_S_EVD) /* the fans stop at low load
+                                    under the firmware's own control */ \
+    X(FAN_STOP_TEMPS,    0x0416u, NONE,    I32X2,  MILLI_C, 0, NVRM_GC_S_RM | NVRM_GC_S_EVD) /* stop below v0, start
+                                    above v1 */ \
+    X(FW_FAN_RECORD,     0x0420u, FWREC,   U32,    ID,   NVRM_GC_CF_NEEDS_IFACE | NVRM_GC_CF_UNPROVEN, NVRM_GC_S_PRIV) \
+                                    /* the firmware block has record i; v0 its word +0 (meaning unknown) */ \
+    X(FW_RPM_PAIR,       0x0421u, FWREC,   U32X2,  RPM,  NVRM_GC_CF_NEEDS_IFACE | NVRM_GC_CF_UNPROVEN, NVRM_GC_S_PRIV) \
+                                    /* words +8, +12: two RPM values the firmware reports; NOT a proven min/max */ \
+    X(FW_LEVEL_RANGE,    0x0422u, FWREC,   U32X4,  PERCENT, NVRM_GC_CF_NEEDS_IFACE | NVRM_GC_CF_INFERRED, \
+                                    NVRM_GC_S_PRIV) /* words +24, +28 read as the settable level range: v0, v1 in
+                                    percent (rounded), v2, v3 the raw Q16.16 words */ \
+    X(FW_RECORD_TACH,    0x0423u, FWREC,   U32,    ID,   0, NVRM_GC_S_EVD) /* record i drives tachometer slot v0 - 1
+                                    (stored + 1, so 0 is never a slot) */ \
+    X(COOLER_ID,         0x0424u, FWREC,   U32,    ID,   0, NVRM_GC_S_RM | NVRM_GC_S_PRIV) /* the firmware's own id */ \
+    X(COOLER_RPM_RANGE,  0x0425u, FWREC,   U32X2,  RPM,  NVRM_GC_CF_PHYSICAL_ONLY, NVRM_GC_S_EVD) /* proven lowest,
+                                    highest RPM of the fan behind record i */ \
+    /* 05 power and boost */ \
+    X(POWER_LIMIT_READ,  0x0501u, NONE,    FLAG,   NONE, 0, NVRM_GC_S_RUSD) /* the enforced limit is published */ \
+    X(POWER_LIMIT_RANGE, 0x0502u, NONE,    U32X3,  MILLIWATT, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* min, max, default */ \
+    X(TGP_READ,          0x0503u, NONE,    FLAG,   NONE, 0, NVRM_GC_S_RUSD) /* powerPolicyStatus is published */ \
+    X(RATED_TDP_READ,    0x0504u, NONE,    U32,    BITS, 0, NVRM_GC_S_CPU | NVRM_GC_S_FWD) /* RATED_TDP_GET_CONTROL
+                                    ("Eco") answers; v0 bit c = client c answered. caps1 saw all five
+                                    clients answer a user-space caller (caps1-findings.md:29); what a kernel
+                                    caller gets is not known. A refusal is GSP's answer to the kext's call
+                                    (forwarded), not a statement about Eco on the card */ \
+    X(PERF_BOOST,        0x0505u, NONE,    FLAG,   NONE, 0, NVRM_GC_S_EVD) /* PERF_BOOST takes effect (an action: a
+                                    read-only producer never sends it) */ \
+    /* 06 the driver about itself */ \
+    X(DRIVER_SELECTORS,  0x0601u, NONE,    U32,    BITS, NVRM_GC_CF_STATIC | NVRM_GC_CF_DRIVER, NVRM_GC_S_DRV) \
+                                    /* bit n = user-client selector n answers (13 = boost policy, 14 = this) */ \
+    X(DRIVER_FAN_WRITE,  0x0602u, NONE,    FLAG,   NONE, NVRM_GC_CF_STATIC | NVRM_GC_CF_DRIVER, NVRM_GC_S_DRV) \
+                                    /* this driver has a validated way to set the fans (none in 1.0: UNSUPPORTED) */ \
+    /* 07 published shared data */ \
+    X(RUSD_FILLED,       0x0701u, NONE,    U32X2,  BITS, 0, NVRM_GC_S_RUSD) /* v0 NVRM_GC_RUSD_* sections filled
+                                    (valid timestamp), v1 sections polled and examined */
+
+#define NVRM_GC_ENUM_(name, id, ix, vt, unit, fl, src) NVRM_GC_CAP_##name = id,
+enum { NVRM_GC_CAPS(NVRM_GC_ENUM_) NVRM_GC_CAP_END_ = 0xFFFFu };
+#undef NVRM_GC_ENUM_
+
+/* Value vocabularies. */
+enum { NVRM_GC_TREF_UNKNOWN = 0, NVRM_GC_TREF_ABSOLUTE = 1, NVRM_GC_TREF_TLIMIT = 2 };
+/* THERMAL_LIST v2: target types as the thermal list publishes them (ctrl2080thermal.h, U3 table line for 0x101). */
+#define NVRM_GC_TT_GPU          0x1u
+#define NVRM_GC_TT_MEMORY       0x2u
+#define NVRM_GC_TT_POWER_SUPPLY 0x4u
+#define NVRM_GC_TT_BOARD        0x8u
+/* RUSD_FILLED bits. */
+#define NVRM_GC_RUSD_FAN_TACH     0x0001u  /* fanCoolerStatus */
+#define NVRM_GC_RUSD_TEMP_GPU     0x0002u  /* temperatures[GPU] */
+#define NVRM_GC_RUSD_TEMP_MEMORY  0x0004u
+#define NVRM_GC_RUSD_TEMP_BOARD   0x0008u
+#define NVRM_GC_RUSD_TEMP_PSU     0x0010u
+#define NVRM_GC_RUSD_TEMP_HBM     0x0020u
+#define NVRM_GC_RUSD_POWER_LIMIT  0x0040u  /* powerLimitGpu */
+#define NVRM_GC_RUSD_POWER_AVG    0x0080u  /* avgPowerUsage */
+#define NVRM_GC_RUSD_POWER_INST   0x0100u  /* instPowerUsage */
+#define NVRM_GC_RUSD_TGP          0x0200u  /* powerPolicyStatus */
+#define NVRM_GC_RUSD_PSTATE       0x0400u  /* perfCurrentPstate */
+#define NVRM_GC_RUSD_THROTTLE     0x0800u  /* clkThrottleInfo */
+/* The fan-control wire format the producer recognised: a family name, never a command id. */
+enum { NVRM_GC_FANIF_NONE = 0, NVRM_GC_FANIF_GSS_980 = 1 /* 980 bytes: 20-byte header, 16 records of 60 bytes, the
+                                                           format NVMetrics' agent/fan_rm_wire.h decodes */ };
+#define NVRM_GC_FAN980_BYTES      980u
+#define NVRM_GC_FAN980_HDR_BYTES  20u
+#define NVRM_GC_FAN980_REC_BYTES  60u
+/* FAN_INTERFACE v2: the structural checks the reply passed (all four, or the answer is INVALID). */
+#define NVRM_GC_FANIF_CHK_SIZE    0x1u   /* both replies are 980 bytes */
+#define NVRM_GC_FANIF_CHK_ECHO    0x2u   /* header word 3 echoes the record mask sent, word 4 the "default" flag */
+#define NVRM_GC_FANIF_CHK_RECORDS 0x4u   /* the normal reply names a record, and each has a non-zero word +0 and a
+                                            non-zero RPM pair with +8 <= +12 */
+#define NVRM_GC_FANIF_CHK_DEFAULT 0x8u   /* the "default" reply passes the same record check */
+#define NVRM_GC_FANIF_CHK_ALL     0xFu
+enum { NVRM_GC_LVL_UNKNOWN = 0, NVRM_GC_LVL_Q16_PERCENT = 1 /* a Q16.16 fraction of 100 % */ };
+/* The power states selector 14 reads from the NVRM object (= kGpuPmRunning / Suspended / Lost, NVRM.cpp:213). */
+enum { NVRM_GC_PM_RUNNING = 0, NVRM_GC_PM_SUSPENDED = 1, NVRM_GC_PM_LOST = 2 };
+
+/* ---- header flags ------------------------------------------------------------------------------------------------- */
+#define NVRM_GC_F_PENDING     0x00000001u  /* no producer run has published yet: ask again in a few seconds */
+#define NVRM_GC_F_PRODUCED    0x00000002u  /* a producer run published this block */
+#define NVRM_GC_F_PARTIAL     0x00000004u  /* the fast phase ran; the slow phase (RUSD, forwarded controls) did not yet */
+#define NVRM_GC_F_OFF         0x00000008u  /* nvgpucaps=0: no producer this boot; no records */
+#define NVRM_GC_F_TRUNCATED   0x00000010u  /* records or strings did not fit; what is missing reads UNKNOWN */
+/* Set only by the selector, on its copy, at call time (nvrm_gc_mark_copy); never in the cached block. */
+#define NVRM_GC_F_STALE       0x00000100u  /* the GPU slept since this block was made, and it was not made again */
+#define NVRM_GC_F_ASLEEP      0x00000200u  /* the GPU is suspended right now (implies STALE) */
+#define NVRM_GC_F_GPU_LOST    0x00000400u  /* the last wake failed; the card does not answer */
+#define NVRM_GC_F_SELECTOR_   (NVRM_GC_F_STALE | NVRM_GC_F_ASLEEP | NVRM_GC_F_GPU_LOST)
+
+/* ---- wire layout -------------------------------------------------------------------------------------------------- */
+struct NVRMGpuCapsHeader {          /* 64 bytes in 1.0 */
+    uint32_t magic;                 /* NVRM_GC_MAGIC                                                         offset  0 */
+    uint16_t abi_major;             /* the major this reply is laid out in                                   offset  4 */
+    uint16_t abi_minor;             /* the producer's minor; a larger one than the reader knows is fine      offset  6 */
+    uint16_t header_size;           /* bytes of this header; >= 64                                           offset  8 */
+    uint16_t record_size;           /* bytes of one record; >= 32                                            offset 10 */
+    uint32_t total_bytes;           /* bytes of the reply that mean something; <= NVRM_GC_BUF_BYTES          offset 12 */
+    uint32_t generation;            /* producer runs that published since the kext started; 0 = none        offset 16 */
+    uint32_t flags;                 /* NVRM_GC_F_*                                                           offset 20 */
+    uint32_t pm_cycles;             /* fPmCycles of this GPU when the block was made                        offset 24 */
+    uint16_t record_offset;         /* first record, from the start of the reply                            offset 28 */
+    uint16_t record_count;          /*                                                                       offset 30 */
+    uint16_t string_offset;         /* the string area, from the start of the reply                         offset 32 */
+    uint16_t string_size;           /* bytes of the string area in use                                      offset 34 */
+    uint8_t  policy;                /* NVRM_GC_POL_* the states were computed with                          offset 36 */
+    uint8_t  reserved0;             /* 0                                                                     offset 37 */
+    uint16_t evidence_rows;         /* rows in the evidence table built into this kext                      offset 38 */
+    uint32_t evidence_table;        /* NVRM_GC_EVIDENCE_TABLE_ID of that table; 0 = none                    offset 40 */
+    uint32_t reserved1[5];          /* 0                                                                     offset 44 */
+};
+struct NVRMGpuCapsRecord {          /* 32 bytes in 1.0 */
+    uint16_t cap;                   /* NVRM_GC_CAP_*                                                         offset  0 */
+    uint8_t  index;                 /* by the id's index kind; 0 for a per-GPU fact                         offset  2 */
+    uint8_t  state;                 /* NVRM_GC_ST_* as the producer derived it; recomputed by every getter  offset  3 */
+    uint8_t  source;                /* NVRM_GC_SRC_*                                                         offset  4 */
+    uint8_t  answer;                /* NVRM_GC_ANS_*                                                         offset  5 */
+    uint8_t  level;                 /* NVRM_GC_LV_* of the evidence row that applied                        offset  6 */
+    uint8_t  vtype;                 /* NVRM_GC_VT_* (repeats the id's shape)                                offset  7 */
+    uint16_t evidence_row;          /* id of that row (tools/gpu_caps_evidence.tsv); 0 = none               offset  8 */
+    uint16_t reserved;              /* 0                                                                     offset 10 */
+    uint32_t rm_status;             /* the NV_STATUS the RM answered (diagnostics only; kept even when the  offset 12
+                                       value is zeroed) */
+    uint32_t v[4];                  /* the value, shaped by vtype; all zero unless the state is usable      offset 16 */
+};
+
+/* Offsets the helpers use; each is proven against offsetof below, so no literal can drift from the structs. */
+enum {
+    NVRM_GC_HO_MAGIC = 0, NVRM_GC_HO_MAJOR = 4, NVRM_GC_HO_MINOR = 6, NVRM_GC_HO_HEADER_SIZE = 8,
+    NVRM_GC_HO_RECORD_SIZE = 10, NVRM_GC_HO_TOTAL = 12, NVRM_GC_HO_GENERATION = 16, NVRM_GC_HO_FLAGS = 20,
+    NVRM_GC_HO_PM_CYCLES = 24, NVRM_GC_HO_RECORD_OFFSET = 28, NVRM_GC_HO_RECORD_COUNT = 30,
+    NVRM_GC_HO_STRING_OFFSET = 32, NVRM_GC_HO_STRING_SIZE = 34, NVRM_GC_HO_POLICY = 36, NVRM_GC_HO_RESERVED0 = 37,
+    NVRM_GC_HO_EVIDENCE_ROWS = 38, NVRM_GC_HO_EVIDENCE_TABLE = 40, NVRM_GC_HO_RESERVED1 = 44
+};
+enum {
+    NVRM_GC_RO_CAP = 0, NVRM_GC_RO_INDEX = 2, NVRM_GC_RO_STATE = 3, NVRM_GC_RO_SOURCE = 4, NVRM_GC_RO_ANSWER = 5,
+    NVRM_GC_RO_LEVEL = 6, NVRM_GC_RO_VTYPE = 7, NVRM_GC_RO_ROW = 8, NVRM_GC_RO_RESERVED = 10, NVRM_GC_RO_RM_STATUS = 12,
+    NVRM_GC_RO_V = 16
+};
+
+#ifdef __cplusplus
+#define NVRM_GC_SASSERT(c, n) static_assert(c, #n)
+#else
+#define NVRM_GC_SASSERT(c, n) _Static_assert(c, #n)
+#endif
+#define NVRM_GC_OFF(T, f, o) NVRM_GC_SASSERT(__builtin_offsetof(struct T, f) == (o), T##_##f##_offset)
+NVRM_GC_SASSERT(sizeof(struct NVRMGpuCapsHeader) == NVRM_GC_HEADER_BYTES_1_0, gc_header_size);
+NVRM_GC_SASSERT(sizeof(struct NVRMGpuCapsRecord) == NVRM_GC_RECORD_BYTES_1_0, gc_record_size);
+NVRM_GC_SASSERT(NVRM_GC_HEADER_BYTES_1_0 + NVRM_GC_MAX_RECORDS_1_0 * NVRM_GC_RECORD_BYTES_1_0
+                + NVRM_GC_STRINGS_BYTES_1_0 == NVRM_GC_BUF_BYTES, gc_reply_budget);
+NVRM_GC_SASSERT(NVRM_GC_BUF_BYTES <= 4096u, gc_fits_inline);   /* sizeof(io_struct_inband_t), device_types.h:99 */
+NVRM_GC_OFF(NVRMGpuCapsHeader, magic, NVRM_GC_HO_MAGIC);
+NVRM_GC_OFF(NVRMGpuCapsHeader, abi_major, NVRM_GC_HO_MAJOR);
+NVRM_GC_OFF(NVRMGpuCapsHeader, abi_minor, NVRM_GC_HO_MINOR);
+NVRM_GC_OFF(NVRMGpuCapsHeader, header_size, NVRM_GC_HO_HEADER_SIZE);
+NVRM_GC_OFF(NVRMGpuCapsHeader, record_size, NVRM_GC_HO_RECORD_SIZE);
+NVRM_GC_OFF(NVRMGpuCapsHeader, total_bytes, NVRM_GC_HO_TOTAL);
+NVRM_GC_OFF(NVRMGpuCapsHeader, generation, NVRM_GC_HO_GENERATION);
+NVRM_GC_OFF(NVRMGpuCapsHeader, flags, NVRM_GC_HO_FLAGS);
+NVRM_GC_OFF(NVRMGpuCapsHeader, pm_cycles, NVRM_GC_HO_PM_CYCLES);
+NVRM_GC_OFF(NVRMGpuCapsHeader, record_offset, NVRM_GC_HO_RECORD_OFFSET);
+NVRM_GC_OFF(NVRMGpuCapsHeader, record_count, NVRM_GC_HO_RECORD_COUNT);
+NVRM_GC_OFF(NVRMGpuCapsHeader, string_offset, NVRM_GC_HO_STRING_OFFSET);
+NVRM_GC_OFF(NVRMGpuCapsHeader, string_size, NVRM_GC_HO_STRING_SIZE);
+NVRM_GC_OFF(NVRMGpuCapsHeader, policy, NVRM_GC_HO_POLICY);
+NVRM_GC_OFF(NVRMGpuCapsHeader, reserved0, NVRM_GC_HO_RESERVED0);
+NVRM_GC_OFF(NVRMGpuCapsHeader, evidence_rows, NVRM_GC_HO_EVIDENCE_ROWS);
+NVRM_GC_OFF(NVRMGpuCapsHeader, evidence_table, NVRM_GC_HO_EVIDENCE_TABLE);
+NVRM_GC_OFF(NVRMGpuCapsHeader, reserved1, NVRM_GC_HO_RESERVED1);
+NVRM_GC_OFF(NVRMGpuCapsRecord, cap, NVRM_GC_RO_CAP);
+NVRM_GC_OFF(NVRMGpuCapsRecord, index, NVRM_GC_RO_INDEX);
+NVRM_GC_OFF(NVRMGpuCapsRecord, state, NVRM_GC_RO_STATE);
+NVRM_GC_OFF(NVRMGpuCapsRecord, source, NVRM_GC_RO_SOURCE);
+NVRM_GC_OFF(NVRMGpuCapsRecord, answer, NVRM_GC_RO_ANSWER);
+NVRM_GC_OFF(NVRMGpuCapsRecord, level, NVRM_GC_RO_LEVEL);
+NVRM_GC_OFF(NVRMGpuCapsRecord, vtype, NVRM_GC_RO_VTYPE);
+NVRM_GC_OFF(NVRMGpuCapsRecord, evidence_row, NVRM_GC_RO_ROW);
+NVRM_GC_OFF(NVRMGpuCapsRecord, reserved, NVRM_GC_RO_RESERVED);
+NVRM_GC_OFF(NVRMGpuCapsRecord, rm_status, NVRM_GC_RO_RM_STATUS);
+NVRM_GC_OFF(NVRMGpuCapsRecord, v, NVRM_GC_RO_V);
+
+/* ---- the capability table as data -------------------------------------------------------------------------------- */
+struct nvrm_gc_cap_info { uint16_t id; uint8_t ix, vt, unit; uint16_t flags, sources; };
+/* 1 and the facts about id `id`; 0 for an id this side does not know. */
+static inline int nvrm_gc_cap_lookup(uint32_t id, struct nvrm_gc_cap_info *ci)
+{
+    switch (id) {
+#define NVRM_GC_INFO_(name, cid, k, t, u, fl, src)                                                                   \
+    case cid: ci->id = (uint16_t)(cid); ci->ix = NVRM_GC_IX_##k; ci->vt = NVRM_GC_VT_##t; ci->unit = NVRM_GC_U_##u; \
+              ci->flags = (uint16_t)(fl); ci->sources = (uint16_t)(src); return 1;
+    NVRM_GC_CAPS(NVRM_GC_INFO_)
+#undef NVRM_GC_INFO_
+    default: return 0;
+    }
+}
+static inline uint32_t nvrm_gc_index_limit(uint32_t ix)
+{
+    return ix == NVRM_GC_IX_THERMAL ? NVRM_GC_THERMAL_TARGETS
+         : (ix == NVRM_GC_IX_TACH || ix == NVRM_GC_IX_FWREC) ? NVRM_GC_MAX_COOLERS : 1u;
+}
+/* How many of v[0..3] a shape uses. */
+static inline uint32_t nvrm_gc_vt_words(uint32_t vt)
+{
+    switch (vt) {
+    case NVRM_GC_VT_U32: return 1;
+    case NVRM_GC_VT_U32X2: case NVRM_GC_VT_I32X2: case NVRM_GC_VT_STRING: return 2;
+    case NVRM_GC_VT_U32X3: return 3;
+    case NVRM_GC_VT_U32X4: return 4;
+    default: return 0;
+    }
+}
+
+/* ---- byte access (little-endian, any alignment) ------------------------------------------------------------------ */
+static inline uint32_t nvrm_gc_rd8(const uint8_t *p, uint32_t o) { return p[o]; }
+static inline uint32_t nvrm_gc_rd16(const uint8_t *p, uint32_t o) { return (uint32_t)p[o] | (uint32_t)p[o + 1] << 8; }
+static inline uint32_t nvrm_gc_rd32(const uint8_t *p, uint32_t o)
+{
+    return (uint32_t)p[o] | (uint32_t)p[o + 1] << 8 | (uint32_t)p[o + 2] << 16 | (uint32_t)p[o + 3] << 24;
+}
+static inline void nvrm_gc_wr8(uint8_t *p, uint32_t o, uint32_t v) { p[o] = (uint8_t)v; }
+static inline void nvrm_gc_wr16(uint8_t *p, uint32_t o, uint32_t v) { p[o] = (uint8_t)v; p[o + 1] = (uint8_t)(v >> 8); }
+static inline void nvrm_gc_wr32(uint8_t *p, uint32_t o, uint32_t v)
+{
+    p[o] = (uint8_t)v; p[o + 1] = (uint8_t)(v >> 8); p[o + 2] = (uint8_t)(v >> 16); p[o + 3] = (uint8_t)(v >> 24);
+}
+
+/* ---- strings and version numbers (also the evidence keys) -------------------------------------------------------- */
+/* 1 for a string the block may carry: 1..63 printable ASCII characters, NUL-terminated within NVRM_GC_STRING_MAX, not
+ * "N/A" (the RM's marker for a failed version query) and without "??" (the RM's placeholder before a VBIOS query,
+ * "??.??.??.??.??", nv-pci.c:1255). */
+static inline int nvrm_gc_text_ok(const char *s)
+{
+    uint32_t n = 0;
+    if (!s) return 0;
+    for (; n < NVRM_GC_STRING_MAX && s[n]; n++) {
+        const unsigned char c = (unsigned char)s[n];
+        if (c < 0x20 || c > 0x7e) return 0;
+        if (c == '?' && n > 0 && s[n - 1] == '?') return 0;
+    }
+    if (n == 0 || n >= NVRM_GC_STRING_MAX) return 0;
+    return !(n == 3 && s[0] == 'N' && s[1] == '/' && s[2] == 'A');
+}
+/* 1 for 2..4 groups of 1..4 decimal digits joined by single dots, as "620.70.06" (RM and GSP firmware versions). */
+static inline int nvrm_gc_dotted_ok(const char *s)
+{
+    uint32_t groups = 0, digits = 0, n = 0;
+    if (!s) return 0;
+    for (; s[n] && n < NVRM_GC_STRING_MAX; n++) {
+        if (s[n] >= '0' && s[n] <= '9') { if (++digits > 4) return 0; continue; }
+        if (s[n] != '.' || digits == 0) return 0;
+        groups++; digits = 0;
+    }
+    if (s[n] || digits == 0) return 0;
+    groups++;
+    return groups >= 2 && groups <= 4;
+}
+static inline int nvrm_gc_hexval_(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+/* Strict parse of the RM's VBIOS text, "%02x.%02x.%02x.%02x.%02x" (osinit.c:664): exactly five pairs of hex digits
+ * separated by dots, nothing else. Gives the revision (pairs 1..4, big-endian) and the OEM revision (pair 5) as
+ * BIOS_GET_INFO_V2 returns them. 0 (and both outputs 0) for anything else: "??.??.??.??.??", "N/A", "", one digit. */
+static inline int nvrm_gc_vbios_parse(const char *s, uint32_t *revision, uint32_t *oem)
+{
+    uint32_t r = 0, o = 0;
+    if (revision) *revision = 0;
+    if (oem) *oem = 0;
+    if (!s) return 0;
+    for (uint32_t i = 0; i < 5; i++) {
+        const int h = nvrm_gc_hexval_(s[3 * i]), l = h < 0 ? -1 : nvrm_gc_hexval_(s[3 * i + 1]);
+        if (h < 0 || l < 0) return 0;
+        if (s[3 * i + 2] != (i < 4 ? '.' : '\0')) return 0;
+        if (i < 4) r = r << 8 | (uint32_t)(h << 4 | l); else o = (uint32_t)(h << 4 | l);
+    }
+    if (revision) *revision = r;
+    if (oem) *oem = o;
+    return 1;
+}
+/* Q16.16 fraction of 100 % to whole percent, rounded (0x4ccd -> 30, 0x10000 -> 100). */
+static inline uint32_t nvrm_gc_q16_pct(uint32_t q)
+{
+    return (uint32_t)(((uint64_t)q * 100u + 32768u) >> 16);
+}
+
+/* ---- the fan interface: structural checks and fingerprint (kext and NVMetrics compute the same) ------------------
+ * Both take the two 980-byte replies of the firmware's unpublished fan block: the normal request (header word 4 = 0)
+ * and the "default" request (word 4 = 1). This header names that read only as provenance; it gives no command id. What
+ * the read does inside the firmware is not known. On 2026-11-17 four such reads on the owner's card left the block and
+ * both tachometers unchanged (caps1-findings.md:59-62).
+ *
+ * The FINGERPRINT is FNV-1a (32 bit) over these 32-bit words, each fed as four bytes, least significant first:
+ *     980;
+ *     for the normal reply, then the default reply:
+ *         header word 0, header word 1, header word 3 (the record mask);
+ *         for each record i = 0..15 whose bit is set in that mask, in order:
+ *             i, record word +0, record word +8, record word +12           (record i starts at byte 20 + 60 * i)
+ * These are the words NVMetrics has validated on the owner's card in automatic and in manual sessions. Left out:
+ * header words 2 and 4, record words +16 and +20 (they change with the mode), and +24, +28, +40, +44 (seen only in
+ * automatic mode so far; nobody knows whether they move). A result of 0 is returned as 1; 0 means "no fingerprint".
+ * NVMetrics computes the fingerprint of its own live read at begin() and compares it with FAN_INTERFACE v1
+ * (nvrm_gc_fan_path() takes it). */
+static inline uint32_t nvrm_gc_fnv_word_(uint32_t h, uint32_t w)
+{
+    for (uint32_t k = 0; k < 32; k += 8) { h ^= (w >> k) & 0xFFu; h *= 16777619u; }
+    return h;
+}
+static inline uint32_t nvrm_gc_fan_fingerprint(const uint8_t *normal, const uint8_t *dflt, uint32_t len)
+{
+    if (!normal || !dflt || len != NVRM_GC_FAN980_BYTES) return 0;
+    uint32_t h = nvrm_gc_fnv_word_(2166136261u, NVRM_GC_FAN980_BYTES);
+    for (uint32_t v = 0; v < 2; v++) {
+        const uint8_t *b = v ? dflt : normal;
+        const uint32_t mask = nvrm_gc_rd32(b, 12);
+        h = nvrm_gc_fnv_word_(h, nvrm_gc_rd32(b, 0));
+        h = nvrm_gc_fnv_word_(h, nvrm_gc_rd32(b, 4));
+        h = nvrm_gc_fnv_word_(h, mask);
+        for (uint32_t i = 0; i < NVRM_GC_MAX_COOLERS; i++) {
+            if (!(mask >> i & 1u)) continue;
+            const uint32_t r = NVRM_GC_FAN980_HDR_BYTES + NVRM_GC_FAN980_REC_BYTES * i;
+            h = nvrm_gc_fnv_word_(h, i);
+            h = nvrm_gc_fnv_word_(h, nvrm_gc_rd32(b, r + 0));
+            h = nvrm_gc_fnv_word_(h, nvrm_gc_rd32(b, r + 8));
+            h = nvrm_gc_fnv_word_(h, nvrm_gc_rd32(b, r + 12));
+        }
+    }
+    return h ? h : 1u;
+}
+static inline int nvrm_gc_fan_records_ok_(const uint8_t *b)
+{
+    const uint32_t mask = nvrm_gc_rd32(b, 12);
+    if (mask == 0 || (mask >> NVRM_GC_MAX_COOLERS) != 0) return 0;
+    for (uint32_t i = 0; i < NVRM_GC_MAX_COOLERS; i++) {
+        if (!(mask >> i & 1u)) continue;
+        const uint32_t r = NVRM_GC_FAN980_HDR_BYTES + NVRM_GC_FAN980_REC_BYTES * i;
+        const uint32_t lo = nvrm_gc_rd32(b, r + 8), hi = nvrm_gc_rd32(b, r + 12);
+        if (nvrm_gc_rd32(b, r) == 0 || lo == 0 || hi == 0 || lo > hi) return 0;
+    }
+    return 1;
+}
+/* NVRM_GC_FANIF_CHK_* bits the two replies pass; mask_sent is the record mask the request carried. */
+static inline uint32_t nvrm_gc_fan_checks(const uint8_t *normal, uint32_t nlen, const uint8_t *dflt, uint32_t dlen,
+                                          uint32_t mask_sent)
+{
+    if (!normal || !dflt || nlen != NVRM_GC_FAN980_BYTES || dlen != NVRM_GC_FAN980_BYTES) return 0;
+    uint32_t c = NVRM_GC_FANIF_CHK_SIZE;
+    if (nvrm_gc_rd32(normal, 12) == mask_sent && nvrm_gc_rd32(normal, 16) == 0 &&
+        nvrm_gc_rd32(dflt, 12) == mask_sent && nvrm_gc_rd32(dflt, 16) == 1)
+        c |= NVRM_GC_FANIF_CHK_ECHO;
+    if (nvrm_gc_fan_records_ok_(normal)) c |= NVRM_GC_FANIF_CHK_RECORDS;
+    if (nvrm_gc_fan_records_ok_(dflt)) c |= NVRM_GC_FANIF_CHK_DEFAULT;
+    return c;
+}
+
+/* ---- reading ------------------------------------------------------------------------------------------------------ */
+enum { NVRM_GC_OK = 0, NVRM_GC_E_SHORT = 1, NVRM_GC_E_MAGIC = 2, NVRM_GC_E_MAJOR = 3, NVRM_GC_E_BOUNDS = 4 };
+/* Checks a reply of `len` bytes (what the call reported) before anything in it is read. NVRM_GC_OK: the header, the
+ * records and the strings lie inside the reply and do not overlap. E_MAJOR: the first 8 bytes are a header of another
+ * major. Anything else: read every capability as UNKNOWN. */
+static inline int nvrm_gc_check(const uint8_t *b, uint32_t len)
+{
+    if (!b || len < 8) return NVRM_GC_E_SHORT;
+    if (nvrm_gc_rd32(b, NVRM_GC_HO_MAGIC) != NVRM_GC_MAGIC) return NVRM_GC_E_MAGIC;
+    if (nvrm_gc_rd16(b, NVRM_GC_HO_MAJOR) != NVRM_GC_ABI_MAJOR) return NVRM_GC_E_MAJOR;
+    if (len < NVRM_GC_HEADER_BYTES_1_0) return NVRM_GC_E_SHORT;
+    const uint32_t hs = nvrm_gc_rd16(b, NVRM_GC_HO_HEADER_SIZE), rs = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_SIZE);
+    const uint32_t total = nvrm_gc_rd32(b, NVRM_GC_HO_TOTAL);
+    const uint32_t ro = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_OFFSET), rc = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_COUNT);
+    const uint32_t so = nvrm_gc_rd16(b, NVRM_GC_HO_STRING_OFFSET), ss = nvrm_gc_rd16(b, NVRM_GC_HO_STRING_SIZE);
+    if (hs < NVRM_GC_HEADER_BYTES_1_0 || rs < NVRM_GC_RECORD_BYTES_1_0) return NVRM_GC_E_BOUNDS;
+    if (total > len || total > NVRM_GC_BUF_BYTES || total < hs) return NVRM_GC_E_BOUNDS;
+    /* every term is at most 0xFFFF, so ro + rc * rs stays below 2^32 */
+    if (rc && (ro < hs || ro + rc * rs > total)) return NVRM_GC_E_BOUNDS;
+    if (ss && (so < hs || so + ss > total)) return NVRM_GC_E_BOUNDS;
+    if (rc && ss && so < ro + rc * rs && ro < so + ss) return NVRM_GC_E_BOUNDS;
+    return NVRM_GC_OK;
+}
+/* One fact as a reader sees it. Every field is zero for an absent record. `state` is the recomputed state; v[] holds
+ * the value only when it is usable. source, answer, level, row and rm_status are the record's own (diagnostics). */
+struct nvrm_gc_fact {
+    uint32_t present, state, source, answer, level, row, rm_status, vtype;
+    uint32_t v[4];
+};
+static inline void nvrm_gc_fact_clear_(struct nvrm_gc_fact *f)
+{
+    f->present = f->state = f->source = f->answer = f->level = f->row = f->rm_status = f->vtype = 0;
+    f->v[0] = f->v[1] = f->v[2] = f->v[3] = 0;
+}
+/* Reads fact (cap, index) without the NEEDS_IFACE rule. */
+static inline void nvrm_gc_fact_raw_(const uint8_t *b, uint32_t len, uint32_t cap, uint32_t index,
+                                     struct nvrm_gc_fact *f)
+{
+    struct nvrm_gc_cap_info ci;
+    nvrm_gc_fact_clear_(f);
+    if (nvrm_gc_check(b, len) != NVRM_GC_OK || !nvrm_gc_cap_lookup(cap, &ci)) return;
+    const uint32_t flags = nvrm_gc_rd32(b, NVRM_GC_HO_FLAGS);
+    if (flags & (NVRM_GC_F_PENDING | NVRM_GC_F_OFF)) return;
+    const uint32_t rs = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_SIZE), ro = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_OFFSET);
+    const uint32_t rc = nvrm_gc_rd16(b, NVRM_GC_HO_RECORD_COUNT), policy = nvrm_gc_rd8(b, NVRM_GC_HO_POLICY);
+    const uint8_t *r = 0;
+    for (uint32_t i = 0; i < rc; i++) {
+        const uint8_t *x = b + ro + i * rs;
+        if (nvrm_gc_rd16(x, NVRM_GC_RO_CAP) != cap || nvrm_gc_rd8(x, NVRM_GC_RO_INDEX) != index) continue;
+        if (r) { f->state = NVRM_GC_ST_UNKNOWN; return; }    /* two records for one fact: trust neither */
+        r = x;
+    }
+    if (!r) return;
+    f->present = 1;
+    f->source = nvrm_gc_rd8(r, NVRM_GC_RO_SOURCE); f->answer = nvrm_gc_rd8(r, NVRM_GC_RO_ANSWER);
+    f->level = nvrm_gc_rd8(r, NVRM_GC_RO_LEVEL); f->row = nvrm_gc_rd16(r, NVRM_GC_RO_ROW);
+    f->rm_status = nvrm_gc_rd32(r, NVRM_GC_RO_RM_STATUS); f->vtype = nvrm_gc_rd8(r, NVRM_GC_RO_VTYPE);
+    const uint32_t st = nvrm_gc_rd8(r, NVRM_GC_RO_STATE);
+    uint32_t any = 0;
+    for (uint32_t k = 0; k < 4; k++) any |= nvrm_gc_rd32(r, NVRM_GC_RO_V + 4 * k);
+    if (st > NVRM_GC_ST_VERIFIED || index >= nvrm_gc_index_limit(ci.ix) || f->vtype != ci.vt) return;
+    if (f->source != NVRM_GC_SRC_NONE && (f->source >= NVRM_GC_SRC_COUNT || !(ci.sources >> f->source & 1u))) return;
+    if ((f->row == 0) != (f->level == NVRM_GC_LV_NONE)) return;           /* a level needs its row, and back */
+    if (f->row != 0 && f->answer != NVRM_GC_ANS_VALID) return;           /* a row applies only to a valid answer */
+    if (nvrm_gc_state(f->answer, f->source, f->level, policy) != st) return;
+    if (!nvrm_gc_usable(st) && any) return;                               /* a value where none may be */
+    if ((ci.flags & NVRM_GC_CF_PHYSICAL_ONLY) && nvrm_gc_usable(st) && f->level != NVRM_GC_LV_PHYSICAL) return;
+    if ((flags & (NVRM_GC_F_STALE | NVRM_GC_F_GPU_LOST)) && !(ci.flags & NVRM_GC_CF_STATIC)) return;
+    f->state = st;
+    if (nvrm_gc_usable(st))
+        for (uint32_t k = 0; k < 4; k++) f->v[k] = nvrm_gc_rd32(r, NVRM_GC_RO_V + 4 * k);
+}
+/* The one way a fact leaves a reply. `b` may be any buffer of `len` bytes (it is checked here). The state is derived
+ * again from the record's answer, source and level and the header's policy; it reads UNKNOWN when the record is absent
+ * or duplicated, its stored state disagrees, its source is not one the capability may take, it carries a value while
+ * not usable, the block is pending or off, the fact is not static and the block is stale or the GPU lost, or the fact
+ * needs this run's fan interface and FAN_INTERFACE is not usable. */
+static inline uint32_t nvrm_gc_fact(const uint8_t *b, uint32_t len, uint32_t cap, uint32_t index,
+                                    struct nvrm_gc_fact *f)
+{
+    struct nvrm_gc_cap_info ci;
+    nvrm_gc_fact_raw_(b, len, cap, index, f);
+    if (nvrm_gc_usable(f->state) && nvrm_gc_cap_lookup(cap, &ci) && (ci.flags & NVRM_GC_CF_NEEDS_IFACE)) {
+        struct nvrm_gc_fact iface;
+        nvrm_gc_fact_raw_(b, len, NVRM_GC_CAP_FAN_INTERFACE, 0, &iface);
+        if (!nvrm_gc_usable(iface.state)) { f->state = NVRM_GC_ST_UNKNOWN; f->v[0] = f->v[1] = f->v[2] = f->v[3] = 0; }
+    }
+    return f->state;
+}
+/* The state of (cap, index); v[0..3] get the value when usable, zeros otherwise. */
+static inline uint32_t nvrm_gc_get(const uint8_t *b, uint32_t len, uint32_t cap, uint32_t index, uint32_t v[4])
+{
+    struct nvrm_gc_fact f;
+    const uint32_t st = nvrm_gc_fact(b, len, cap, index, &f);
+    for (uint32_t k = 0; k < 4; k++) v[k] = f.v[k];
+    return st;
+}
+/* A STRING fact: copies it, NUL-terminated, into out[outcap] (outcap >= 1) when usable; "" otherwise. A string that
+ * leaves the string area, is not NUL-terminated, does not pass nvrm_gc_text_ok() or does not fit reads UNKNOWN. */
+static inline uint32_t nvrm_gc_get_string(const uint8_t *b, uint32_t len, uint32_t cap, uint32_t index, char *out,
+                                          uint32_t outcap)
+{
+    struct nvrm_gc_fact f;
+    if (!out || outcap == 0) return NVRM_GC_ST_UNKNOWN;
+    out[0] = 0;
+    const uint32_t st = nvrm_gc_fact(b, len, cap, index, &f);
+    if (!nvrm_gc_usable(st)) return st;
+    if (f.vtype != NVRM_GC_VT_STRING) return NVRM_GC_ST_UNKNOWN;
+    const uint32_t so = nvrm_gc_rd16(b, NVRM_GC_HO_STRING_OFFSET), ss = nvrm_gc_rd16(b, NVRM_GC_HO_STRING_SIZE);
+    const uint32_t off = f.v[0], n = f.v[1];
+    /* off + n + 1 <= ss, written so that it cannot wrap */
+    if (n == 0 || n >= NVRM_GC_STRING_MAX || off >= ss || n >= ss - off || n + 1 > outcap) return NVRM_GC_ST_UNKNOWN;
+    if (b[so + off + n] != 0) return NVRM_GC_ST_UNKNOWN;
+    char tmp[NVRM_GC_STRING_MAX];
+    for (uint32_t k = 0; k <= n; k++) {
+        tmp[k] = (char)b[so + off + k];
+        if (k < n && tmp[k] == 0) return NVRM_GC_ST_UNKNOWN;         /* a NUL before the stated length */
+    }
+    if (!nvrm_gc_text_ok(tmp)) return NVRM_GC_ST_UNKNOWN;
+    for (uint32_t k = 0; k <= n; k++) out[k] = tmp[k];
+    return st;
+}
+
+/* ---- what the caller does: one verdict for any outcome of the call ----------------------------------------------- */
+/* How the call ended, as the caller maps its IOReturn. */
+enum { NVRM_GC_CALL_OK = 0,            /* kIOReturnSuccess */
+       NVRM_GC_CALL_BAD_ARGUMENT = 1,  /* kIOReturnBadArgument */
+       NVRM_GC_CALL_NO_SPACE = 2,      /* kIOReturnNoSpace: the buffer was short or out of line */
+       NVRM_GC_CALL_OTHER = 3 };       /* any other IOReturn */
+/* The verdict. 0 is BAD_REPLY, so an uninitialised verdict never reads as usable. */
+enum {
+    NVRM_GC_V_BAD_REPLY   = 0,  /* a reply that does not pass nvrm_gc_check: everything UNKNOWN, stop asking */
+    NVRM_GC_V_OLD_KEXT    = 1,  /* no selector 14: everything UNKNOWN, read-only, stop asking; no model fallback */
+    NVRM_GC_V_BAD_CALL    = 2,  /* the kext has selector 14 and refused how it was called: fix the call */
+    NVRM_GC_V_OTHER_MAJOR = 3,  /* a reply of another major (its abi_major says which): everything UNKNOWN */
+    NVRM_GC_V_PENDING     = 4,  /* not produced yet: everything UNKNOWN for now, ask again in a few seconds */
+    NVRM_GC_V_OFF         = 5,  /* nvgpucaps=0: everything UNKNOWN for this boot */
+    NVRM_GC_V_LOST        = 6,  /* the GPU is lost: static facts readable, everything else UNKNOWN until reboot */
+    NVRM_GC_V_STALE       = 7,  /* slept since made (or asleep now): static facts readable, the rest UNKNOWN;
+                                   ask again after the wake */
+    NVRM_GC_V_USABLE      = 8   /* read the facts; each one's state says how far to trust it */
+};
+/* call: NVRM_GC_CALL_*. sel7_read: the caller read selector 7 on this connection; sel7_bits: its answer. b, got: the
+ * reply and the size the call reported. */
+static inline uint32_t nvrm_gc_verdict(uint32_t call, int sel7_read, uint64_t sel7_bits, const uint8_t *b, uint32_t got)
+{
+    if (call == NVRM_GC_CALL_BAD_ARGUMENT)
+        return (sel7_read && (sel7_bits & NVRM_GC_SEL7_HAS_GPU_CAPS)) ? NVRM_GC_V_BAD_CALL : NVRM_GC_V_OLD_KEXT;
+    if (call == NVRM_GC_CALL_NO_SPACE) return NVRM_GC_V_BAD_CALL;
+    if (call != NVRM_GC_CALL_OK) return NVRM_GC_V_BAD_REPLY;
+    const int c = nvrm_gc_check(b, got);
+    if (c == NVRM_GC_E_MAJOR) return NVRM_GC_V_OTHER_MAJOR;
+    if (c != NVRM_GC_OK) return NVRM_GC_V_BAD_REPLY;
+    const uint32_t flags = nvrm_gc_rd32(b, NVRM_GC_HO_FLAGS);
+    if (flags & NVRM_GC_F_OFF) return NVRM_GC_V_OFF;
+    if ((flags & NVRM_GC_F_PENDING) || nvrm_gc_rd32(b, NVRM_GC_HO_GENERATION) == 0) return NVRM_GC_V_PENDING;
+    if (flags & NVRM_GC_F_GPU_LOST) return NVRM_GC_V_LOST;
+    if (flags & (NVRM_GC_F_STALE | NVRM_GC_F_ASLEEP)) return NVRM_GC_V_STALE;
+    return NVRM_GC_V_USABLE;
+}
+
+/* ---- "may a consumer treat this card's fan interface as the one that was observed?" ------------------------------
+ * The question NVMetrics 0.15.0 asks before any fan write (qualified_gpu() and inspect_auto(qualified=True) at
+ * install, Physical.begin() in a session). Usable only when all of these hold in this reply:
+ *   - FAN_INTERFACE is usable, of family GSS_980, passed every structural check, and its fingerprint equals
+ *     `live_fingerprint`, the fingerprint of the caller's own live read (0 = no live read: UNKNOWN);
+ *   - FAN_MANUAL_FW is usable (the firmware takes a manual level), which requires an evidence row keyed on the exact
+ *     identity and on this fingerprint;
+ *   - FAN_RESTORE_AUTO_FW is usable (the firmware takes its control back), under the same rule.
+ * It returns their combined state (nvrm_gc_all) and writes in *weakest the lowest evidence level among the three, so a
+ * consumer can say "reported, not logged" (NVRM_GC_LV_REPORTED). It never returns UNSUPPORTED. Whether the app acts on
+ * EXPERIMENTAL is the app's policy, not this function's. */
+static inline uint32_t nvrm_gc_fan_path(const uint8_t *b, uint32_t len, uint32_t live_fingerprint, uint32_t *weakest)
+{
+    struct nvrm_gc_fact i, m, r;
+    if (weakest) *weakest = NVRM_GC_LV_NONE;
+    if (live_fingerprint == 0) return NVRM_GC_ST_UNKNOWN;
+    nvrm_gc_fact(b, len, NVRM_GC_CAP_FAN_INTERFACE, 0, &i);
+    nvrm_gc_fact(b, len, NVRM_GC_CAP_FAN_MANUAL_FW, 0, &m);
+    nvrm_gc_fact(b, len, NVRM_GC_CAP_FAN_RESTORE_AUTO_FW, 0, &r);
+    if (!nvrm_gc_usable(i.state) || !nvrm_gc_usable(m.state) || !nvrm_gc_usable(r.state)) return NVRM_GC_ST_UNKNOWN;
+    if (i.v[0] != NVRM_GC_FANIF_GSS_980 || i.v[1] != live_fingerprint ||
+        (i.v[2] & NVRM_GC_FANIF_CHK_ALL) != NVRM_GC_FANIF_CHK_ALL)
+        return NVRM_GC_ST_UNKNOWN;
+    uint32_t w = i.level;
+    if (m.level < w) w = m.level;
+    if (r.level < w) w = r.level;
+    if (weakest) *weakest = w;
+    return nvrm_gc_all(nvrm_gc_all(i.state, m.state), r.state);
+}
+
+/* ---- producing (pure; the kext builds every block with these and nothing else; the host test does too) ----------- */
+/* Starts a block in out[NVRM_GC_BUF_BYTES]: zero-fills it and writes a 1.0 header with no records. `flags` may carry
+ * PENDING, PRODUCED, PARTIAL, OFF; the selector's own bits are dropped. `policy` is NVRM_GC_POL_*. */
+static inline void nvrm_gc_begin(uint8_t *out, uint32_t generation, uint32_t flags, uint32_t pm_cycles,
+                                 uint32_t policy, uint32_t evidence_table, uint32_t evidence_rows)
+{
+    for (uint32_t i = 0; i < NVRM_GC_BUF_BYTES; i++) out[i] = 0;
+    nvrm_gc_wr32(out, NVRM_GC_HO_MAGIC, NVRM_GC_MAGIC);
+    nvrm_gc_wr16(out, NVRM_GC_HO_MAJOR, NVRM_GC_ABI_MAJOR);
+    nvrm_gc_wr16(out, NVRM_GC_HO_MINOR, NVRM_GC_ABI_MINOR);
+    nvrm_gc_wr16(out, NVRM_GC_HO_HEADER_SIZE, NVRM_GC_HEADER_BYTES_1_0);
+    nvrm_gc_wr16(out, NVRM_GC_HO_RECORD_SIZE, NVRM_GC_RECORD_BYTES_1_0);
+    nvrm_gc_wr32(out, NVRM_GC_HO_TOTAL, NVRM_GC_HEADER_BYTES_1_0);
+    nvrm_gc_wr32(out, NVRM_GC_HO_GENERATION, generation);
+    nvrm_gc_wr32(out, NVRM_GC_HO_FLAGS, flags & ~NVRM_GC_F_SELECTOR_);
+    nvrm_gc_wr32(out, NVRM_GC_HO_PM_CYCLES, pm_cycles);
+    nvrm_gc_wr16(out, NVRM_GC_HO_RECORD_OFFSET, NVRM_GC_HEADER_BYTES_1_0);
+    nvrm_gc_wr16(out, NVRM_GC_HO_STRING_OFFSET,
+                 NVRM_GC_HEADER_BYTES_1_0 + NVRM_GC_MAX_RECORDS_1_0 * NVRM_GC_RECORD_BYTES_1_0);
+    nvrm_gc_wr8(out, NVRM_GC_HO_POLICY, policy);
+    nvrm_gc_wr16(out, NVRM_GC_HO_EVIDENCE_ROWS, evidence_rows);
+    nvrm_gc_wr32(out, NVRM_GC_HO_EVIDENCE_TABLE, evidence_table);
+}
+static inline void nvrm_gc_fix_total_(uint8_t *out)
+{
+    const uint32_t rend = nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_OFFSET) +
+                          nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_COUNT) * NVRM_GC_RECORD_BYTES_1_0;
+    const uint32_t ss = nvrm_gc_rd16(out, NVRM_GC_HO_STRING_SIZE);
+    const uint32_t send = ss ? nvrm_gc_rd16(out, NVRM_GC_HO_STRING_OFFSET) + ss : 0;
+    nvrm_gc_wr32(out, NVRM_GC_HO_TOTAL, send > rend ? send : rend);
+}
+enum { NVRM_GC_PUT_OK = 0, NVRM_GC_PUT_FULL = 1, NVRM_GC_PUT_DUPLICATE = 2, NVRM_GC_PUT_BAD = 3 };
+/* Appends fact (cap, index) to a block made by nvrm_gc_begin(). The state is derived here from (answer, source,
+ * level, the header's policy). A level other than NONE needs its row id; on any answer but VALID the row and level are
+ * dropped. A value is stored only when the fact is usable. Refused (NVRM_GC_PUT_BAD, nothing written): an id this
+ * header does not list, an index outside the id's kind, a source the id may not take, a STRING id (use
+ * nvrm_gc_put_string), a level without a row, a usable NEEDS_IFACE fact while FAN_INTERFACE is not usable in the
+ * block, a usable PHYSICAL_ONLY fact without a PHYSICAL row. A second record for one fact is DUPLICATE. When the
+ * records are full it sets NVRM_GC_F_TRUNCATED and answers FULL: what is left out reads UNKNOWN. */
+static inline int nvrm_gc_put_(uint8_t *out, uint32_t cap, uint32_t index, uint32_t source, uint32_t answer,
+                               uint32_t level, uint32_t row, uint32_t rm_status, const uint32_t v[4], int is_string)
+{
+    struct nvrm_gc_cap_info ci;
+    if (!nvrm_gc_cap_lookup(cap, &ci) || index >= nvrm_gc_index_limit(ci.ix)) return NVRM_GC_PUT_BAD;
+    if ((ci.vt == NVRM_GC_VT_STRING) != (is_string != 0)) return NVRM_GC_PUT_BAD;
+    if (source >= NVRM_GC_SRC_COUNT || (source != NVRM_GC_SRC_NONE && !(ci.sources >> source & 1u)))
+        return NVRM_GC_PUT_BAD;
+    if (answer >= NVRM_GC_ANS_COUNT || level >= NVRM_GC_LV_COUNT || row > 0xFFFFu) return NVRM_GC_PUT_BAD;
+    if (answer != NVRM_GC_ANS_VALID) { level = NVRM_GC_LV_NONE; row = 0; }
+    if ((level == NVRM_GC_LV_NONE) != (row == 0)) return NVRM_GC_PUT_BAD;
+    const uint32_t policy = nvrm_gc_rd8(out, NVRM_GC_HO_POLICY);
+    const uint32_t st = nvrm_gc_state(answer, source, level, policy);
+    if (nvrm_gc_usable(st) && (ci.flags & NVRM_GC_CF_PHYSICAL_ONLY) && level != NVRM_GC_LV_PHYSICAL)
+        return NVRM_GC_PUT_BAD;
+    if (nvrm_gc_usable(st) && (ci.flags & NVRM_GC_CF_NEEDS_IFACE)) {
+        struct nvrm_gc_fact iface;
+        nvrm_gc_fact_raw_(out, NVRM_GC_BUF_BYTES, NVRM_GC_CAP_FAN_INTERFACE, 0, &iface);
+        if (!nvrm_gc_usable(iface.state)) return NVRM_GC_PUT_BAD;
+    }
+    const uint32_t ro = nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_OFFSET), rc = nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_COUNT);
+    for (uint32_t i = 0; i < rc; i++) {
+        const uint8_t *r = out + ro + i * NVRM_GC_RECORD_BYTES_1_0;
+        if (nvrm_gc_rd16(r, NVRM_GC_RO_CAP) == cap && nvrm_gc_rd8(r, NVRM_GC_RO_INDEX) == index)
+            return NVRM_GC_PUT_DUPLICATE;
+    }
+    if (rc >= NVRM_GC_MAX_RECORDS_1_0) {
+        nvrm_gc_wr32(out, NVRM_GC_HO_FLAGS, nvrm_gc_rd32(out, NVRM_GC_HO_FLAGS) | NVRM_GC_F_TRUNCATED);
+        return NVRM_GC_PUT_FULL;
+    }
+    uint8_t *r = out + ro + rc * NVRM_GC_RECORD_BYTES_1_0;
+    nvrm_gc_wr16(r, NVRM_GC_RO_CAP, cap); nvrm_gc_wr8(r, NVRM_GC_RO_INDEX, index); nvrm_gc_wr8(r, NVRM_GC_RO_STATE, st);
+    nvrm_gc_wr8(r, NVRM_GC_RO_SOURCE, source); nvrm_gc_wr8(r, NVRM_GC_RO_ANSWER, answer);
+    nvrm_gc_wr8(r, NVRM_GC_RO_LEVEL, level); nvrm_gc_wr8(r, NVRM_GC_RO_VTYPE, ci.vt);
+    nvrm_gc_wr16(r, NVRM_GC_RO_ROW, row); nvrm_gc_wr16(r, NVRM_GC_RO_RESERVED, 0);
+    nvrm_gc_wr32(r, NVRM_GC_RO_RM_STATUS, rm_status);
+    const uint32_t words = nvrm_gc_vt_words(ci.vt);
+    for (uint32_t k = 0; k < 4; k++)
+        nvrm_gc_wr32(r, NVRM_GC_RO_V + 4 * k, (nvrm_gc_usable(st) && k < words) ? v[k] : 0);
+    nvrm_gc_wr16(out, NVRM_GC_HO_RECORD_COUNT, rc + 1);
+    nvrm_gc_fix_total_(out);
+    return NVRM_GC_PUT_OK;
+}
+static inline int nvrm_gc_put(uint8_t *out, uint32_t cap, uint32_t index, uint32_t source, uint32_t answer,
+                              uint32_t level, uint32_t row, uint32_t rm_status,
+                              uint32_t v0, uint32_t v1, uint32_t v2, uint32_t v3)
+{
+    const uint32_t v[4] = { v0, v1, v2, v3 };
+    return nvrm_gc_put_(out, cap, index, source, answer, level, row, rm_status, v, 0);
+}
+/* Appends a STRING fact. A VALID answer whose text fails nvrm_gc_text_ok() (or nvrm_gc_dotted_ok() for a DOTTED id),
+ * or that does not fit in the string area, is recorded as INVALID, so it reads UNKNOWN. */
+static inline int nvrm_gc_put_string(uint8_t *out, uint32_t cap, uint32_t index, uint32_t source, uint32_t answer,
+                                     uint32_t level, uint32_t row, uint32_t rm_status, const char *s)
+{
+    struct nvrm_gc_cap_info ci;
+    uint32_t zero[4];                       /* set one by one: an initialiser may become a memset call at -O0 */
+    uint32_t n = 0;
+    const uint32_t so = nvrm_gc_rd16(out, NVRM_GC_HO_STRING_OFFSET), ss = nvrm_gc_rd16(out, NVRM_GC_HO_STRING_SIZE);
+    zero[0] = zero[1] = zero[2] = zero[3] = 0;
+    if (!nvrm_gc_cap_lookup(cap, &ci)) return NVRM_GC_PUT_BAD;
+    if (answer == NVRM_GC_ANS_VALID) {
+        if (!nvrm_gc_text_ok(s) || ((ci.flags & NVRM_GC_CF_DOTTED) && !nvrm_gc_dotted_ok(s))) {
+            answer = NVRM_GC_ANS_INVALID;
+        } else {
+            while (s[n]) n++;
+            if (ss + n + 1 > NVRM_GC_STRINGS_BYTES_1_0) {
+                answer = NVRM_GC_ANS_INVALID;
+                nvrm_gc_wr32(out, NVRM_GC_HO_FLAGS, nvrm_gc_rd32(out, NVRM_GC_HO_FLAGS) | NVRM_GC_F_TRUNCATED);
+            }
+        }
+    }
+    const int r = nvrm_gc_put_(out, cap, index, source, answer, level, row, rm_status, zero, 1);
+    if (r != NVRM_GC_PUT_OK) return r;
+    const uint32_t rc = nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_COUNT);
+    uint8_t *rec = out + nvrm_gc_rd16(out, NVRM_GC_HO_RECORD_OFFSET) + (rc - 1u) * NVRM_GC_RECORD_BYTES_1_0;
+    if (!nvrm_gc_usable(nvrm_gc_rd8(rec, NVRM_GC_RO_STATE))) return r;
+    for (uint32_t k = 0; k < n; k++) out[so + ss + k] = (uint8_t)s[k];
+    out[so + ss + n] = 0;
+    nvrm_gc_wr32(rec, NVRM_GC_RO_V + 0, ss);
+    nvrm_gc_wr32(rec, NVRM_GC_RO_V + 4, n);
+    nvrm_gc_wr16(out, NVRM_GC_HO_STRING_SIZE, ss + n + 1);
+    nvrm_gc_fix_total_(out);
+    return NVRM_GC_PUT_OK;
+}
+/* The selector's own bits, on its copy `copy` of the cached block, at call time. pm_state: NVRM_GC_PM_* now (fGpuPm);
+ * pm_cycles_now: fPmCycles now. A block whose pm_cycles differs from pm_cycles_now predates a sleep: STALE. */
+static inline void nvrm_gc_mark_copy(uint8_t *copy, uint32_t pm_state, uint32_t pm_cycles_now)
+{
+    uint32_t f = nvrm_gc_rd32(copy, NVRM_GC_HO_FLAGS) & ~NVRM_GC_F_SELECTOR_;
+    if (!(f & (NVRM_GC_F_PENDING | NVRM_GC_F_OFF))) {
+        if (nvrm_gc_rd32(copy, NVRM_GC_HO_PM_CYCLES) != pm_cycles_now) f |= NVRM_GC_F_STALE;
+        if (pm_state == NVRM_GC_PM_SUSPENDED) f |= NVRM_GC_F_ASLEEP | NVRM_GC_F_STALE;
+        if (pm_state == NVRM_GC_PM_LOST) f |= NVRM_GC_F_GPU_LOST;
+    }
+    nvrm_gc_wr32(copy, NVRM_GC_HO_FLAGS, f);
+}
+/* The reply to a caller that asked for another major: this header alone, no records, no strings. Returns its size. */
+static inline uint32_t nvrm_gc_header_only(uint8_t *copy)
+{
+    const uint32_t hs = nvrm_gc_rd16(copy, NVRM_GC_HO_HEADER_SIZE);
+    nvrm_gc_wr16(copy, NVRM_GC_HO_RECORD_COUNT, 0);
+    nvrm_gc_wr16(copy, NVRM_GC_HO_STRING_SIZE, 0);
+    nvrm_gc_wr32(copy, NVRM_GC_HO_TOTAL, hs);
+    return hs;
+}
+
+/* ---- the evidence table (tools/gpu_caps_evidence.tsv -> generated kexts/NVRM/nvrm_gpu_caps_evidence.h) ----------
+ * Kext side and host test; not part of the wire. Each row names one capability (and index, or every index) and the
+ * level of its evidence, cites the document that holds it, and is keyed on:
+ *   EXACT   PCI vendor, device, revision, subsystem vendor and device, VBIOS revision and OEM revision, RM version.
+ *           Every row but an interface permit needs it; a row is never keyed on a model name.
+ *   FAMILY  chip architecture and implementation, with RM: only for the FAN_INTERFACE permit (D10: the producer sends
+ *           the unpublished fan read only where such a row names that interface for the chip family). Needs OBSERVED.
+ *   FPRINT  the fan-interface fingerprint of this run. Required on every row for a NEEDS_IFACE capability, so an
+ *           observation never travels to another fan layout (a 10de:2d83 board whose block says 1200/3800 matches
+ *           none of the owner's rows).
+ * PHYSICAL rows also need `record`, the path of the physical-verification record. The generator refuses any row that
+ * this matcher would never apply, and any row without a citation. */
+#define NVRM_GC_KEY_EXACT   0x1u
+#define NVRM_GC_KEY_FAMILY  0x2u
+#define NVRM_GC_KEY_RM      0x4u
+#define NVRM_GC_KEY_FPRINT  0x8u
+#define NVRM_GC_ANY_INDEX   0xFFu
+struct nvrm_gc_evidence_row {
+    uint16_t id;                     /* stable, never reused, never 0; what a record's evidence_row names */
+    uint16_t cap;                    /* NVRM_GC_CAP_* */
+    uint8_t  index;                  /* or NVRM_GC_ANY_INDEX (not in PHYSICAL rows) */
+    uint8_t  level;                  /* NVRM_GC_LV_REPORTED, _OBSERVED or _PHYSICAL */
+    uint16_t keys;                   /* NVRM_GC_KEY_* */
+    uint16_t vendor, device, subsys_vendor, subsys_device;
+    uint32_t revision, vbios_rev, vbios_oem;
+    uint32_t arch, impl, fingerprint;
+    const char *rm;                  /* exact RM version string */
+    uint32_t v[4];                   /* the value an EVIDENCE fact takes; 0 otherwise */
+    const char *record;              /* PHYSICAL: the physical-verification record; "" otherwise */
+    const char *cite;                /* where the evidence is; never empty */
+};
+struct nvrm_gc_platform {            /* what this run read; known = NVRM_GC_KEY_* bits whose values are valid */
+    uint16_t known;
+    uint16_t vendor, device, subsys_vendor, subsys_device;
+    uint32_t revision, vbios_rev, vbios_oem;
+    uint32_t arch, impl, fingerprint;
+    const char *rm;
+};
+static inline int nvrm_gc_streq_(const char *x, const char *y)
+{
+    if (!x || !y) return 0;
+    for (; *x && *x == *y; x++, y++) {}
+    return *x == *y;
+}
+/* The level row `r` gives (cap, index) on platform `p`, ignoring the keys in `ignore` (the producer ignores FPRINT to
+ * decide whether it may ask at all); NVRM_GC_LV_NONE when it does not apply. */
+static inline uint32_t nvrm_gc_row_level(const struct nvrm_gc_evidence_row *r, const struct nvrm_gc_platform *p,
+                                         uint32_t cap, uint32_t index, uint32_t ignore)
+{
+    struct nvrm_gc_cap_info ci;
+    if (!r || !p || r->id == 0 || r->cap != cap || !r->cite || !r->cite[0] || !nvrm_gc_cap_lookup(cap, &ci))
+        return NVRM_GC_LV_NONE;
+    if (r->level != NVRM_GC_LV_REPORTED && r->level != NVRM_GC_LV_OBSERVED && r->level != NVRM_GC_LV_PHYSICAL)
+        return NVRM_GC_LV_NONE;
+    if (r->index != index && !(r->index == NVRM_GC_ANY_INDEX && r->level != NVRM_GC_LV_PHYSICAL))
+        return NVRM_GC_LV_NONE;
+    if (r->level == NVRM_GC_LV_PHYSICAL) {
+        if (!(r->keys & NVRM_GC_KEY_EXACT) || !r->record || !r->record[0]) return NVRM_GC_LV_NONE;
+    } else if (cap == NVRM_GC_CAP_FAN_INTERFACE && !(r->keys & NVRM_GC_KEY_EXACT)) {
+        if ((r->keys & (NVRM_GC_KEY_FAMILY | NVRM_GC_KEY_RM)) != (NVRM_GC_KEY_FAMILY | NVRM_GC_KEY_RM) ||
+            r->level != NVRM_GC_LV_OBSERVED)
+            return NVRM_GC_LV_NONE;
+    } else if (!(r->keys & NVRM_GC_KEY_EXACT)) {
+        return NVRM_GC_LV_NONE;
+    }
+    if ((ci.flags & NVRM_GC_CF_NEEDS_IFACE) && !(r->keys & NVRM_GC_KEY_FPRINT)) return NVRM_GC_LV_NONE;
+    const uint32_t need = r->keys & ~ignore;
+    if ((p->known & need) != need) return NVRM_GC_LV_NONE;
+    if ((need & NVRM_GC_KEY_EXACT) &&
+        (r->vendor != p->vendor || r->device != p->device || r->revision != p->revision ||
+         r->subsys_vendor != p->subsys_vendor || r->subsys_device != p->subsys_device ||
+         r->vbios_rev != p->vbios_rev || r->vbios_oem != p->vbios_oem || !nvrm_gc_streq_(r->rm, p->rm)))
+        return NVRM_GC_LV_NONE;
+    if ((need & NVRM_GC_KEY_FAMILY) && (r->arch != p->arch || r->impl != p->impl)) return NVRM_GC_LV_NONE;
+    if ((need & NVRM_GC_KEY_RM) && !nvrm_gc_streq_(r->rm, p->rm)) return NVRM_GC_LV_NONE;
+    if ((need & NVRM_GC_KEY_FPRINT) && (r->fingerprint == 0 || r->fingerprint != p->fingerprint))
+        return NVRM_GC_LV_NONE;
+    return r->level;
+}
+/* The best level over the table for (cap, index), with the id and the values of the row that gave it (the first row
+ * wins a tie). */
+static inline uint32_t nvrm_gc_evidence(const struct nvrm_gc_evidence_row *rows, uint32_t n,
+                                        const struct nvrm_gc_platform *p, uint32_t cap, uint32_t index,
+                                        uint32_t ignore, uint32_t *row_id, uint32_t v[4])
+{
+    uint32_t best = NVRM_GC_LV_NONE, id = 0, at = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t l = nvrm_gc_row_level(&rows[i], p, cap, index, ignore);
+        if (l > best) { best = l; id = rows[i].id; at = i; }
+    }
+    if (row_id) *row_id = id;
+    if (v) for (uint32_t k = 0; k < 4; k++) v[k] = best ? rows[at].v[k] : 0;
+    return best;
+}
+
+#ifdef KERNEL
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* The kext side, kexts/NVRM/nvrm_gpu_caps.cpp (a new CXX_SOURCES entry). `struct NVRMGcCache` is a member of the NVRM
+ * object (one per GPU): the published block, the producer's block under construction (both heap memory of the NVRM
+ * object, never the kernel stack), one leaf IOLock, the producer's thread_call, a running counter and a stopping flag.
+ * A run builds into its own block with the helpers above, then publishes it with one memcpy of total_bytes under the
+ * leaf lock; nothing else is done under that lock, and the selector takes that lock and nothing else. Its source test
+ * is its own (tools/test_gpu_caps_selector.py), allowing exactly one IOLockLock/IOLockUnlock pair on that lock,
+ * because tools/test_nvk_boost_policy.py:84 forbids any IOLock in the selector it checks. The sGpuCaps body goes after
+ * externalMethod, outside the slice tools/test_security_hardening.py:278,318 cuts. */
+struct NVRMGcCache;
+/* NVRM::start(), before registerService(): allocates, writes a PENDING header (generation 0, no records), or an OFF
+ * header when nvgpucaps=0. From here on selector 14 always answers a valid header. */
+int  nvrm_gpu_caps_init(struct NVRMGcCache *c, int producer_off, uint32_t policy);
+/* go() pass 2, after publishGpuProfile() and before nvrm_power_start(), on the auto-go thread: the fast phase (PCI
+ * configuration space, kernel state, the build's facts, published controls the CPU-side RM answers) publishes with
+ * NVRM_GC_F_PARTIAL, then arms the slow phase's thread_call (RUSD polling for one interval, forwarded controls, and the
+ * unpublished fan read only where nvrm_gc_evidence() gives the FAN_INTERFACE permit), admitted with
+ * nv_xnu_pm_try_enter(). Nothing with producer_off. */
+void nvrm_gpu_caps_start(struct NVRMGcCache *c);
+/* gpuSuspend(), before the power gate closes: cancel the pending run, wait for a running one on the running counter,
+ * then mark that a run is owed. STALE itself is computed by the selector from fPmCycles. */
+void nvrm_gpu_caps_suspend(struct NVRMGcCache *c);
+/* gpuResume(), after nv_xnu_pm_open(): lost != 0 arms nothing (the selector reports GPU_LOST from fGpuPm); otherwise
+ * re-arms both phases. */
+void nvrm_gpu_caps_resume(struct NVRMGcCache *c, int lost);
+/* Selector 14's body: copies the published block into out[cap] under the leaf lock, applies nvrm_gc_mark_copy() with
+ * fGpuPm and fPmCycles, and nvrm_gc_header_only() when asked_major is not NVRM_GC_ABI_MAJOR. Returns the bytes written,
+ * or 0 when cap is too small (the selector then answers kIOReturnNoSpace). No RM call, no gate. */
+uint32_t nvrm_gpu_caps_copy(struct NVRMGcCache *c, uint8_t *out, uint32_t cap, uint32_t asked_major,
+                            uint32_t pm_state, uint32_t pm_cycles_now);
+/* NVRM::stop(): set stopping, thread_call_cancel, wait until the running counter is 0 (the run never re-arms once
+ * stopping is set), thread_call_free, then free both blocks - the order of nvrm_power_stop(), because
+ * thread_call_cancel_wait is not exported to kexts (nvrm_power.cpp:118-122). Afterwards nothing may call copy(). */
+void nvrm_gpu_caps_stop(struct NVRMGcCache *c);
+#ifdef __cplusplus
+}
+#endif
+#endif
