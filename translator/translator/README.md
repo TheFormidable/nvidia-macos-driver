@@ -1,6 +1,6 @@
 # metal2vulkan
 
-[![License: LGPL-3.0-or-later](https://img.shields.io/badge/License-LGPL%203.0%20or%20later-blue.svg)](LICENSE)
+[![License: LGPL-3.0-or-later](https://img.shields.io/badge/License-LGPL%203.0%20or%20later-blue.svg)](../LICENSE)
 
 > **Alpha.** The public API, CLI, reflection schema, and emitted SPIR-V may change during the `0.x`
 > series. The project is suitable for experimentation and integration pilots, but consumers should
@@ -127,10 +127,10 @@ cargo run --features serde --example translate_reflected -- \
 | [How to translate and integrate a shader](docs/HOWTO.md) | You want an end-to-end CLI or Rust integration recipe |
 | [Shader reflection](docs/REFLECTION.md) | You need the complete reflection schema and binding contract |
 | [Architecture](docs/ARCHITECTURE.md) | You are changing the emitter, retained module, passes, or retries |
-| [Validation playbook](docs/VALIDATION.md) | You are checking byte stability or authored semantic behavior |
-| [Contributing](CONTRIBUTING.md) | You need the repository layout and required development gates |
-| [Validation crate](validation/README.md) | You are operating the unpublished corpus tooling |
-| [Changelog](CHANGELOG.md) | You need unreleased API and behavior changes |
+| [Driver translator validation](../../docs/TRANSLATOR-VALIDATION.md) | You are checking byte stability or authored semantic behavior in this fork |
+| [Contributing](../../CONTRIBUTING.md) | You need this fork's contribution and evidence policy |
+| Private validation workspace (not included) | You are operating the unpublished corpus tooling |
+| [Driver changelog](../../CHANGELOG.md) | You need integrated driver and translator changes |
 
 The generated Rust API documentation is available from `cargo doc --all-features --open`.
 
@@ -139,14 +139,15 @@ The generated Rust API documentation is available from `cargo doc --all-features
 Grammar and lowering behavior is locked with owned synthetic Rust tests. This repository does not
 ship third-party captured shaders. Optional private system-metallib harvest, authored manifests,
 and dependency-exact evidence stay in the validation workspace and are described in the
-[validation playbook](docs/VALIDATION.md).
+[driver translator validation guide](../../docs/TRANSLATOR-VALIDATION.md). The original private validation
+workspace and playbook are not included in this tree.
 
 Passing `spirv-val` proves structural validity, not agreement with Metal or correct pixels. Use the
 authored validation ladder for semantic claims.
 
 ## License
 
-Licensed under the [GNU Lesser General Public License v3.0 or later](LICENSE)
+Licensed under the [GNU Lesser General Public License v3.0 or later](../LICENSE)
 (`LGPL-3.0-or-later`).
 
 Metal is a trademark of Apple Inc. metal2vulkan is an independent project and is not affiliated

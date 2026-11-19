@@ -1,12 +1,12 @@
-# Testing release 3.0 on a card
+# Testing the 3.0.x development driver on a card
 
-This page is the check list for the first run of release 3.0 on a card. No result of it has been reported: a package
-built from this branch at commit aa27c73 has been installed over 2.9 and started on one machine with an RTX 5050, and
-nothing more is known from there, so each "pass" below is what the code is written to show, not a result anyone has
-reported. What else has run is the build: at commit 3933ff6, `./build.sh` built every component and staged a package on
-one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
-Xcode 26.3 with the 26.2 SDK), and at commit aa27c73 on that Mac again, where the host tests ran too (305 passed,
-0 failed, of 317). [BUILDING.md](BUILDING.md) says what ran where.
+This checklist is for new builds, including the integrated 3.0.3 development tree. Earlier RTX 5050 builds have
+booted, card checks have run, and GPU Caps has scoped native evidence. See [STATUS.md](STATUS.md) for what actually
+ran and [BUILDING.md](BUILDING.md) for historical build results. Each "pass" below is an acceptance criterion,
+not a claim that the current integrated tree has passed it. Keep results by exact package revision.
+
+For GPU Caps, run the read-only validation in [GPU-CAPS.md](GPU-CAPS.md) after a successful boot. Do not
+test fan writes as part of general driver validation; see [NVMETRICS.md](NVMETRICS.md).
 
 En español: [TESTING-ON-HARDWARE.es.md](TESTING-ON-HARDWARE.es.md).
 

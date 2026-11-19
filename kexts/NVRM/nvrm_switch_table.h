@@ -74,6 +74,7 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvfbvramfast", NVRM_SW_ESCAPE },
     { "nvfbvrr", NVRM_SW_SETTING },
     { "nvfetchcopy", NVRM_SW_DEV },
+    { "nvgpucaps", NVRM_SW_ESCAPE },
     { "nvhud", NVRM_SW_DIAG },
     { "nvhwvbl", NVRM_SW_RECOVERY },
     { "nvlayout", NVRM_SW_ESCAPE },
@@ -104,5 +105,5 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvselector", NVRM_SW_HARDWARE },
     { "nvzink", NVRM_SW_ESCAPE },
 };
-#define NVRM_SWITCH_COUNT 98u
+#define NVRM_SWITCH_COUNT 99u
 #endif

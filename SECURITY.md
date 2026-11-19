@@ -2,16 +2,20 @@
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub: [open a security advisory](https://github.com/nullmoth/nvidia-macos-driver/security/advisories/new).
+For fork-specific vulnerabilities, report privately through GitHub: [open a security advisory](https://github.com/TheFormidable/nvidia-macos-driver/security/advisories/new).
 Please do not open a public issue for a vulnerability. Include the driver version, the macOS version, and the steps that
-show the problem. We answer in the advisory thread.
+show the problem, including the exact commit. For an upstream vulnerability, use [NullMoth's advisory channel](https://github.com/nullmoth/nvidia-macos-driver/security/advisories/new).
 
 ## Where the driver comes from
 
-The only official sources are this repository's [releases](https://github.com/nullmoth/nvidia-macos-driver/releases),
-the 1401 app (which downloads from those releases), and [nullmothsystems.com](https://nullmothsystems.com). Copies on
-other sites or in other repositories are not ours. The 1401 apps check every driver package and app update against a
-detached Ed25519 signature made with the NullMoth release key before they install it, and refuse anything unsigned.
+This repository is an independent fork. [Fork releases](https://github.com/TheFormidable/nvidia-macos-driver/releases)
+and source builds are distinct from the [official NullMoth releases](https://github.com/nullmoth/nvidia-macos-driver/releases),
+1401, and [nullmothsystems.com](https://nullmothsystems.com). Upstream 1401 verifies the NullMoth release signature;
+do not assume that it trusts or distributes this fork's builds. A source package's checksum verifies its contents
+against its manifest, not the identity of its publisher. Verify provenance and keep a known-good recovery package.
+
+GPU Caps is read-only. It does not authorize fan, voltage, clock or power writes. NVMetrics is a separate project:
+its experimental manual cooling relies on qualified hardware, live telemetry, watchdog and verified AUTO recovery.
 
 ## What the driver changes on your Mac
 

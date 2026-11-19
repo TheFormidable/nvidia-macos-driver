@@ -4,8 +4,10 @@ Every entry below, except those under "The new paths of release 3.0", comes from
 your machine stops, read why, and do the fix. If yours is not here, press **Send logs** (Mac app) or **Scan for logs
 and send them** (1401 for Windows) and post the report ID.
 
-Before anything else: **use the newest 1401 and driver.** Most problems below are already fixed in a later version, and a
-stick made by an old 1401 keeps the old problem until you make it again.
+Before anything else: identify whether you are using the upstream 1401 release or a fork source build, and record
+the exact driver revision. Do not install a different development build just to troubleshoot without a known-good
+rollback. See [STATUS.md](STATUS.md) for current fork evidence and [NVMETRICS.md](NVMETRICS.md) for telemetry
+and guarded fan-control issues. Historical cases below refer to their named releases.
 
 The changes of release 3.0 and the way back from each are in [CHANGELOG.md](../CHANGELOG.md); what to check on a
 card that runs it for the first time is in [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). Problems building the
