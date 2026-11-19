@@ -27,6 +27,7 @@ SHARED = [
     ("nvrm_chan_note_abi.h", "nvk-channel-recover", "NVK's rebuild of a channel after a GPU fault"),
     ("nvrm_fence_abi.h", "nvk-fence", "NVK's use of the kernel surface fence"),
     ("nvrm_boost_policy_abi.h", "nvk-boost-policy", "NVK's use of the kext's boost policy (idle mode while apps run)"),
+    ("nvrm_gpu_capabilities_abi.h", "nvk-gpu-caps", "NVRM read-only GPU capabilities"),
 ]
 fails = []
 
