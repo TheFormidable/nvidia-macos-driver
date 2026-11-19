@@ -502,7 +502,7 @@ __attribute__((unused)) static const char *zk_owner(const void *address, char *o
    return out;
 }
 
-/* nvk_cgl_last_error() of zink/nvk_cgl.c:156: the calling thread's last adapter failure, or "none". */
+/* nvk_cgl_last_error() of zink/nvk_cgl.c:157: the calling thread's last adapter failure, or "none". */
 static const char *zk_last_error(void)
 {
    static const char *(*fn)(void);
@@ -546,7 +546,7 @@ static bool zk_is_software(const char *renderer)
 }
 
 /* Never returns: a hardware context that is not Zink's. Only the layout guard's refusal makes the check inactive
- * (zink/nvk_cgl.c:672-679, printed once per process, for the first context it refuses): the guard keeps Apple's
+ * (zink/nvk_cgl.c:712-719, printed once per process, for the first context it refuses): the guard keeps Apple's
  * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
  * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
  * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
@@ -561,9 +561,14 @@ static _Noreturn void zk_not_zink(const char *renderer)
    if (zk_tee_find("NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (", line,
                    sizeof(line)))
       zk_inactive("%s", line + strlen("NVK Zink: "));
-   if (!renderer)
-      /* On the Zink path every call returns 0 when the capability table cannot be built (nvk_cgl.c:376-383). */
-      zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s", zk_last_error());
+   if (!renderer || !strcmp(renderer, "(null)")) {
+      /* glGetString gave 0, which zk_string hands on as "(null)". On the Zink path every call returns 0 when the
+       * capability table cannot be built (nvk_cgl.c:391-398) and when the adapter drops the call (:265-278); the
+       * driver's line, where it wrote one, says which. */
+      int said = zk_tee_driver_line(line, sizeof(line));
+      zk_fail("zink", "GL_RENDERER is NULL; nvk_cgl_last_error: %s%s%s", zk_last_error(),
+              said ? "; the driver wrote: " : "", said ? line : "");
+   }
    else if (zk_tee_driver_line(line, sizeof(line)))
       zk_fail("zink", "the context is Apple's (GL_RENDERER %s): %s", shown, line);
    else if (!zk_image(ZK_BUNDLE, NULL, 0))
