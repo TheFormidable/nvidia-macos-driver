@@ -112,7 +112,7 @@ int main(void) {
 for key, value in [('INTERFACE', interface), ('IMPLEMENTATION', implementation), ('SELECTION', selection)]:
     harness = harness.replace('@@' + key + '@@', value)
 for label, flags in [('release', []), ('sanitized', ['-fsanitize=address,undefined'])]:
-    with tempfile.TemporaryDirectory(prefix='nvmtl-readonly-', dir='/private/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='nvmtl-readonly-') as directory:
         src, exe = Path(directory) / 'probe.m', Path(directory) / 'probe'
         src.write_text(harness)
         subprocess.run(['xcrun', 'clang', '-fobjc-arc', '-O1', '-g', *flags,

@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
 """Check production per-draw address tables across page boundaries and ICB replay."""
-import pathlib,re,subprocess,tempfile,os
+import pathlib,re,subprocess,sys,tempfile,os
 root=pathlib.Path(__file__).resolve().parents[1]
+def vulkan_include():
+    """-> the folder that holds vulkan/vulkan.h, found as tools/test_bc_small_mips.py finds it: NM_VULKAN_INCLUDE
+    first (when it is set it must be right), then ~/Vulkan-Headers/include; neither: SKIP (exit 2)."""
+    env = os.environ.get('NM_VULKAN_INCLUDE', '')
+    if env:
+        if not (pathlib.Path(env) / 'vulkan/vulkan.h').is_file():
+            print(f'FAIL: NM_VULKAN_INCLUDE={env} holds no vulkan/vulkan.h')
+            sys.exit(1)
+        return pathlib.Path(env)
+    home = pathlib.Path.home() / 'Vulkan-Headers/include'
+    if (home / 'vulkan/vulkan.h').is_file():
+        return home
+    print('SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h '
+          '(./build.sh test does, after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers')
+    sys.exit(2)
+VULKAN_INCLUDE=vulkan_include()
 source=(root/'plugin/nvmtl_vk.c').read_text()
 start=source.index('static int nvmtl_address_snapshot(');end=source.index('{',start)+1;depth=1
 while depth:
@@ -61,8 +77,8 @@ int main(void){
 # Keep fixture dimensions aligned with the production ABI.
 for name in ('NVMTL_NBUF','NVMTL_NTEX','NVMTL_TABLES_PER_PAGE'):
  assert re.search(r'#define\s+'+name+r'\s+(\d+)',source).group(1)==re.search(r'#define '+name+r' (\d+)',fixture).group(1)
-with tempfile.TemporaryDirectory(prefix='nvmtl-address-test-',dir='/private/tmp') as tmp:
+with tempfile.TemporaryDirectory(prefix='nvmtl-address-test-') as tmp:
  path=pathlib.Path(tmp);(path/'test.c').write_text(fixture.replace('/*PRODUCTION*/',production))
- env=os.environ.copy();env['TMPDIR']='/private/tmp'
- subprocess.run(['xcrun','clang','-O1','-g','-fsanitize=address,undefined','-I'+str(root.parent/'Vulkan-Headers-1.4.335/include'),str(path/'test.c'),'-o',str(path/'test')],check=True,env=env)
+ env=os.environ.copy()
+ subprocess.run(['xcrun','clang','-O1','-g','-fsanitize=address,undefined','-I'+str(VULKAN_INCLUDE),str(path/'test.c'),'-o',str(path/'test')],check=True,env=env)
  subprocess.run([str(path/'test')],check=True,env=env)
