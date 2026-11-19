@@ -9,6 +9,7 @@
 
 Fixes #
 
-- [ ] I wrote this change and this description myself (not an AI tool), and I can explain every line.
+- [ ] I reviewed this change and can explain its behavior, including AI-assisted work if applicable.
+- [ ] I distinguished host tests from native build and physical GPU results, and documented any remaining risks.
 
-<!-- Please read CONTRIBUTING.md. AI-written pull requests are closed without review. -->
+<!-- See CONTRIBUTING.md for this fork's policy; upstream has its own rules. -->

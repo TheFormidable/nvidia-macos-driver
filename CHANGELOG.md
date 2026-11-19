@@ -3,8 +3,10 @@
 ## 3.0.3
 
 **Not released.** This section describes the branch being prepared as 3.0.3, a patch on top of `fable` at ae84aec7
-(3.0.2). Nothing committed after ae84aec7 has been built on a Mac or run on a card: it was compiled and its host
-tests were run on Linux only (below, "What ran where").
+(3.0.2), now merged with GPU Caps Phase 1/2B on `fable` (PRs #6 and #7). The Zink correction itself was
+compiled and host-tested on Linux only (below, "What ran where"); GPU Caps has separate physical evidence
+from an RTX 5050. No native build or card result for the combined 3.0.3 tree is recorded yet.
+See [current status](docs/STATUS.md).
 
 ### Fixes and changes
 
@@ -102,7 +104,7 @@ None new. Boot argument `nvzink=0` keeps Apple's OpenGL for every application, a
 
 ### What ran where
 
-On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac or run on a card.
+Zink correction: on Linux only (x86_64, gcc and clang); no native build or physical result for this correction yet.
 
 - `tools/test_cgl_gld_guard.py` compiles `zink/nvk_cgl_guard.h` for the host with `-Wall -Wextra -Werror` under gcc 13
   and clang 18 and feeds it synthetic heap blocks and VM regions: 266 cases (placements of the CGL context, `rend` and
@@ -154,11 +156,12 @@ On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac 
   The glbench row's shell fragment was run under sh and bash with a first line that names Zink, "(null)", another
   renderer and none. Not compiled with Xcode, not linked, not run.
 
-## GPU Caps experimental branch (2026-11-17)
+## GPU Caps experimental integration (2026-11-17 to 2026-11-19)
 
 - Phase 1: versioned read-only selector 14 and per-GPU capability cache.
 - Phase 2B: additional RM observations, refreshed on lifecycle changes; validated on one RTX 5050. The reported verified count increased from 9 to 15; manual authorization remained false. No fan-write policy was changed.
-- See [GPU Caps integration and evidence](docs/GPU-CAPS.md). This is not a general 3.0.2 release certification.
+- Both phases are merged into `fable`. See [GPU Caps integration and evidence](docs/GPU-CAPS.md).
+  This is not a certification of the combined 3.0.3 source tree.
 
 ## 3.0.2
 

@@ -1,32 +1,31 @@
-# NullMoth NVIDIA Driver for macOS
+# NVIDIA driver for macOS — TheFormidable fork
 
-> **GPU Caps development branch:** the experimental read-only capability ABI (phases 1 and 2B) was built and booted on one RTX 5050 with macOS 26.7.3; 15 capabilities were verified and the remainder were unknown. See [GPU Caps integration and validation](docs/GPU-CAPS.md). This scoped result does not certify other GPUs or the other changes described in the historical notice below.
+Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork develops NVIDIA acceleration for
+Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
+[NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Not yet tested on a card.** `fable` is a branch of a fork that changes a large part of the driver.
-> At commits 3933ff6 and ee7f332, `./build.sh` built every component of it, with build tools it had built from pinned
-> sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel
-> runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK). At 3933ff6 the host tests passed on
-> that Mac and, in GitHub's workflow `ci`, on that runner; at ee7f332 they passed in the workflow `ci` on GitHub's Intel
-> and Apple-silicon runners, and the workflow `full-build` succeeded in every step, its own run of the host tests
-> included; at aa27c73 that Mac built and staged it again and the host tests passed there
-> ([docs/BUILDING.md](docs/BUILDING.md) says what ran where). A package built from aa27c73 has been installed
-> over 2.9 and started on one machine with an RTX 5050, but no test of it on a card has been reported, and the commits
-> after aa27c73 have been compiled and their host tests run on Linux only (those that need a Mac have not run): whoever
-> installs it is testing it. Read [docs/TESTING-ON-HARDWARE.md](docs/TESTING-ON-HARDWARE.md) first and keep the way back
-> to 2.9 at hand: the first step of that page is a way back you have tried, and [CHANGELOG.md](CHANGELOG.md), "The ways
-> back", gives the way back from each change on its own.
+> **Development status — November 19, 2026.** `fable` contains the 3.0.3 Zink guard correction and
+> GPU Caps phases 1/2B ([PR #6](https://github.com/TheFormidable/nvidia-macos-driver/pull/6),
+> [PR #7](https://github.com/TheFormidable/nvidia-macos-driver/pull/7)). 3.0.3 is an unreleased source
+> version, not a certified binary. Earlier builds and the capability API have physical RTX 5050 evidence;
+> the fully integrated 3.0.3 tree still needs a native build, boot and regression run.
 
-**What this branch is.** Release 2.9 of the driver with the changes being prepared as 3.0: the kernel knows which
-process is still drawing into a surface, so a reader waits for that work instead of polling a mark; applications sleep
-through long GPU waits instead of polling; a GPU fault on one channel costs the frames in flight instead of the
-application's Metal device; RTX 50 cards decode H.264 video in Safari, QuickTime and FaceTime once a short self-test
-has passed on the card; and more ([CHANGELOG.md](CHANGELOG.md)). Every change is on as installed; each risky change that
-changes how the driver runs has one way back to the 2.9 behaviour, and the rest (listed in [CHANGELOG.md](CHANGELOG.md))
-are undone only by reinstalling 2.9. No test of it on an NVIDIA card has been reported yet.
+| Area | Current implementation | Evidence / limits |
+|---|---|---|
+| Metal / desktop | AIR → SPIR-V → NVK/NAK; surface fences, event waits, channel recovery and faster captured-frame allocations | Earlier RTX 5050 builds booted and card checks ran; individual fixes need targeted regression tests. |
+| OpenGL | Zink on NVK, with Apple's GL-on-Metal fallback | Round 11 found 39 inactive Zink rows; 3.0.3 guard fix is host-tested only. `nvzink=0` is the escape hatch. |
+| GPU capabilities | Read-only selector 14, ABI 1.0, lifecycle-refreshed per-GPU cache | 15 verified / 150 unknown on one RTX 5050, manual authorization false. |
+| GPU monitoring | `nvmtl-smi` and separate NVMetrics app; RUSD telemetry, live boost policy, experimental guarded fan control | Do not treat observed RPM or successful GET as general write support. |
+| Media / games | VideoToolbox, opt-in Vulkan runtime, DLSS/MetalFX paths, translator fixes | Feature- and generation-dependent: no claim of full Windows, CUDA, DRM or Metal parity. |
 
-Four parts of it come from the HighDelay/nvidia-macos-driver-nvk fork and have been built and checked on Linux only:
+See the [current status and evidence](docs/STATUS.md), [documentation index](docs/README.md),
+[changelog](CHANGELOG.md), and [hardware test checklist](docs/TESTING-ON-HARDWARE.md).
+Keep a tested rollback package before installing. Release 2.9 remains the inherited baseline for many fallback switches.
 
-- **OpenGL through Zink.** On macOS 15.5 or later OpenGL applications run on NVK through Mesa's Zink instead of
+Four areas incorporate work from the HighDelay/nvidia-macos-driver-nvk fork. Their individual validation status
+is documented in the linked pages; source integration is not evidence of end-to-end hardware success:
+
+- **OpenGL through Zink.** On macOS 15.5 or later the driver attempts to route OpenGL through Mesa's Zink on NVK instead of
   Apple's OpenGL over Metal. The boot argument `nvzink=0` turns it off and gives every application Apple's OpenGL
   back. See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
 - **A Vulkan runtime for Minecraft and other Vulkan applications.** The driver installs a native Vulkan runtime at
@@ -53,8 +52,8 @@ Supported cards are Turing and newer: GTX 16, RTX 20, 30, 40 and 50, TITAN RTX, 
 testing of release 2.9 was done on an RTX 5060, so other cards may have problems that haven't been found yet. See
 [card support](docs/CARD-SUPPORT.md) for what has been reported working.
 
-- Changes: [CHANGELOG.md](CHANGELOG.md), downloads on the [releases page](https://github.com/nullmoth/nvidia-macos-driver/releases)
-- Problems: [troubleshooting](docs/TROUBLESHOOTING.md), then Send logs from the 1401 app
+- Changes: [CHANGELOG.md](CHANGELOG.md); [fork releases](https://github.com/TheFormidable/nvidia-macos-driver/releases) and [upstream releases](https://github.com/nullmoth/nvidia-macos-driver/releases) (different builds)
+- Problems: [troubleshooting](docs/TROUBLESHOOTING.md), then report the exact fork revision to the [fork's issue tracker](https://github.com/TheFormidable/nvidia-macos-driver/issues)
 - Installing macOS from Windows: [1401](https://github.com/nullmoth/1401)
 - How it works: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)
 - Every switch and what it does: [docs/SWITCHES.md](docs/SWITCHES.md)
@@ -68,9 +67,9 @@ Support the work: https://buymeacoffee.com/nullmoth
 | | |
 |---|---|
 | macOS | 15.5 Sequoia or later (2.9 was tested on 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
-| GPUs | NVIDIA Turing and later; developed on an RTX 5060 |
+| GPUs | NVIDIA Turing and later; upstream development RTX 5060, scoped fork validation RTX 5050 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
-| Also | OpenGL (on NVK through Zink on macOS 15.5 or later, Apple's GL-on-Metal before 15.5 or with `nvzink=0`), Vulkan for applications that select it, OpenCL, Core Image, Core ML |
+| Also | OpenGL (experimental Zink route on macOS 15.5 or later; Apple's GL-on-Metal with `nvzink=0`), Vulkan for applications that select it, OpenCL, Core Image, Core ML |
 
 ## How it works
 
@@ -93,7 +92,8 @@ NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-po
 
 ## Install — by hand
 
-Use the 1401 Mac app below unless you manage your OpenCore config yourself. `install.sh` installs the driver files but
+For this fork, build the package using the instructions below; the upstream 1401 app is not a distribution channel
+for an unsigned development build of this fork. `install.sh` installs the driver files but
 does not change OpenCore, and the driver does not start until OpenCore has these settings:
 
 - `boot-args` include `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80
@@ -117,7 +117,7 @@ Terminal on macOS does not treat `#` as a comment, so a pasted comment becomes p
 
 macOS asks you to **allow the extensions** in System Settings → Privacy & Security the first time. Allow, then reboot again.
 
-## 1401 Mac app (recommended)
+## Upstream 1401 Mac app
 
 Download the latest `1401-Mac-<version>.dmg` from **Releases**, open it, and run **1401** (the driver package is inside the disk
 image, so nothing else to download). Follow its steps. A supported setup must use a verified or explicitly selected OpenCore partition. The app finds the OpenCore that started your Mac (in `EFI/OC` or `EFI/BOOT`, on an
@@ -220,11 +220,10 @@ sudo ./uninstall.sh && sudo shutdown -r now
 
 On a Mac with macOS 15.6 or later and Xcode 26 or later (the full Xcode, not only the command line tools; the whole
 driver has been built with Xcode 26.3 (SDK 26.2), the newest Xcode that runs on macOS 15, and with Xcode 26.5, not yet
-with Xcode 26.0 to 26.2), from a git clone of the repository and branch that carry `build.sh`, with its owner and
-branch name in place of `<owner>` and `<branch>` (the original project's repository does not have `build.sh`):
+with Xcode 26.0 to 26.2), clone this fork's development branch:
 
 ```bash
-git clone -b <branch> https://github.com/<owner>/nvidia-macos-driver.git
+git clone -b fable https://github.com/TheFormidable/nvidia-macos-driver.git
 cd nvidia-macos-driver
 ./build.sh doctor
 ./build.sh
@@ -317,3 +316,5 @@ Free of charge, source code included. Nobody may sell it or use it to make money
 - GSP firmware: NVIDIA's redistributable firmware licence.
 
 See `NOTICE` for third-party credits.
+
+This fork preserves the original component licenses and upstream credits; it is not an official NullMoth release.

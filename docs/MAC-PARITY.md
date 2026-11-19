@@ -1,10 +1,13 @@
 # What a real Mac has, and what a NullMoth Mac has
 
-This is the 2.9 audit for PCs that run macOS 15 Sequoia or macOS 26 Tahoe through 1401 and the NullMoth driver (NVIDIA
+This is the 2.9 baseline audit with selected 3.0.3 fork updates for PCs that run macOS 15 Sequoia or macOS 26 Tahoe through 1401 and the NullMoth driver (NVIDIA
 GTX 16 and RTX 20 to 50; AMD and Intel graphics through the NMXGPU test driver; hybrid laptops). Each row names a
 feature of a real Apple-silicon Mac or a real Intel Mac, what a NullMoth Mac has today, and the gap. NVIDIA's own
 Windows features are in [WINDOWS-PARITY.md](WINDOWS-PARITY.md) and [WINDOWS-PARITY-MEDIA.md](WINDOWS-PARITY-MEDIA.md);
 this page is about the Mac side.
+
+The fork's actual validation record is in [STATUS.md](STATUS.md). "Have" in this inherited comparison
+describes implementation, not a new certification of Apple hardware or every OS build.
 
 How to read the status column:
 
@@ -52,7 +55,7 @@ The two limits that shape most rows:
 | Display brightness (laptop panel) | yes | NVRMFB backlight path with persistence (`docs/NVRMFB-BACKLIGHT-POWER.md`); on a hybrid laptop the integrated GPU owns the panel | Have where the NVIDIA GPU drives the panel; hybrid: see Power |
 | GPU switching (dual-GPU laptops) | automatic graphics switching | opt-in render offload with the integrated GPU keeping the panel (`docs/HYBRID-LAPTOPS.md`, `nmhybrid`) | Built, off. Needs a hybrid laptop |
 | External GPU over Thunderbolt | Intel Macs | BAR bridge-window code for a card behind a downstream port (`docs/WINDOWS-PARITY.md`, Hardware coverage) | Partial |
-| OpenGL, OpenCL, Core Image | yes | OpenGL over Metal (`plugin/NVMTLGL.m`); OpenCL in the compute area; Core Image on Metal | Have for OpenGL and Core Image |
+| OpenGL, OpenCL, Core Image | yes | Apple's OpenGL over Metal or the new Zink GLD path; OpenCL in the compute area; Core Image on Metal | Zink 3.0.3 correction is host-tested only; see [ZINK-OPENGL.md](ZINK-OPENGL.md) |
 
 ## Media
 

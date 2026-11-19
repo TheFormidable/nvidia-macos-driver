@@ -1,10 +1,12 @@
 # Native OpenGL through Zink on NVK
 
 On macOS 15.5 or later the accelerator names `NVKZinkGLDriver.bundle` as its OpenGL driver. OpenGL applications then
-run on NVK through Mesa's Zink instead of on Apple's OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's
+are routed to NVK through Mesa's Zink when the guard accepts the context, instead of on Apple's OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's
 renderer for every application, as in 2.9.
 
-This was built and checked on Linux only (the cross-build and the checks below). It has not yet run on a Mac.
+Earlier fork hardware testing (round 11, RTX 5050, macOS 26.7.3) found 39 inactive Zink rows, including 38 renderer-word
+guard refusals. The 3.0.3 correction below was built/checked on Linux only; there is no recorded native result
+for that correction. See [STATUS.md](STATUS.md). A selected bundle is not proof that Zink serves a context.
 
 ## The parts
 

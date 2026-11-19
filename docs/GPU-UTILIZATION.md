@@ -7,6 +7,10 @@ value is RM's GR engine utilization. Memory is bandwidth utilization, not VRAM
 allocation. Values are whole percentages rounded from RM's percent-times-100
 units. No helper daemon, writable sysctl, or additional sensor kext is needed.
 
+These counters are distinct from the RUSD shared sensor data and the versioned
+GPU Caps snapshot. [NVMetrics integration](NVMETRICS.md) explains the userspace
+telemetry and freshness boundaries; [GPU-CAPS.md](GPU-CAPS.md) documents selector 14.
+
 The accelerator asks the NVRM service on its own PCI device for a sample once
 per second, on a separate work loop. NVRM uses a private kernel RM client and
 the read-only `PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2` command. Its roughly

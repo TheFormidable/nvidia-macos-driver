@@ -1,13 +1,12 @@
-# Probar la versión 3.0 en una tarjeta
+# Probar el driver de desarrollo 3.0.x en una tarjeta
 
-Esta página es la lista de comprobaciones para la primera prueba de la versión 3.0 en una tarjeta. No se ha informado de
-ningún resultado suyo: un paquete compilado a partir de esta rama en el commit aa27c73 se ha instalado sobre la 2.9 y ha
-arrancado en una máquina con una RTX 5050, y no se sabe nada más de allí, así que cada "bien" de abajo es lo que el
-código está escrito para mostrar, no un resultado del que alguien haya informado. Lo demás que se ha ejecutado es la
-compilación: en el commit 3933ff6, `./build.sh` compiló todos los componentes y preparó un paquete en un Mac Intel
-(12 hilos, macOS 26.7, Xcode 26.5) y en la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15,
-Xcode 26.3 con el SDK 26.2), y en el commit aa27c73 otra vez en ese Mac, donde también se ejecutaron las pruebas (de
-317 pasaron 305 y no falló ninguna). [BUILDING.es.md](BUILDING.es.md) dice qué se ejecutó y dónde.
+Esta lista sirve para paquetes nuevos, incluido el árbol combinado 3.0.3. Versiones anteriores arrancaron en
+una RTX 5050, se ejecutaron pruebas de tarjeta y GPU Caps tiene evidencia física de alcance limitado.
+Consulta [STATUS.md](STATUS.md) y [BUILDING.es.md](BUILDING.es.md). Cada "bien" de abajo es un criterio de
+aceptación, no un resultado confirmado del árbol actual. Guarda cada resultado con la revisión exacta del paquete.
+
+Después de arrancar, valida GPU Caps únicamente mediante lecturas según [GPU-CAPS.md](GPU-CAPS.md).
+El control manual de ventiladores pertenece a NVMetrics; consulta [NVMETRICS.md](NVMETRICS.md).
 
 In English: [TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md). La versión en inglés es la de referencia.
 
