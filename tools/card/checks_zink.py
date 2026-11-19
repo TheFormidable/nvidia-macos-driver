@@ -132,6 +132,8 @@ for _i, (_s, _t) in enumerate((("a", "released on one thread, destroyed on anoth
                       env=_SCRIBBLE))
 
 # glbench as it is: a smoke row and a number. A context that is not Zink's makes the row inactive; zink.path says why.
+# A GL_RENDERER of (null) is not that case: glGetString gave 0, as the adapter's calls do when it drops them in a
+# context it took, so the row keeps glbench's own exit status and fails.
 # glbench has no crash handlers of its own; zink_crash_guard.h, included by the build, turns a crash into exit 70
 # and a CRASH line on standard error, so that macOS writes no crash report for it.
 CHECKS.append({
@@ -144,6 +146,7 @@ CHECKS.append({
              'out=$("$1" 4000 20); rc=$?\n'
              'case "$out" in\n'
              '"GL_RENDERER zink Vulkan "*) printf "%s\\n" "$out"; exit "$rc" ;;\n'
+             '"GL_RENDERER (null)"*) printf "%s\\n" "$out"; exit "$rc" ;;\n'
              '"GL_RENDERER "*) r=$(printf "%s\\n" "$out" | sed -n "1s/^GL_RENDERER //p")\n'
              '   printf "INACTIVE: the context is not Zink\'s (GL_RENDERER %s); zink.path says why\\n" "$r"\n'
              '   printf "%s\\n" "$out"; exit 4 ;;\n'
