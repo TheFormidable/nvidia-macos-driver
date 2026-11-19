@@ -79,8 +79,8 @@ Before it reads past any recorded pointer or writes through one, `nvk_cgl_prepar
 shaped as the record says, using only facts the process already has and the sizes the public SDK headers give
 (`zink/nvk_cgl_guard.h`). It runs before the process's Zink screen (a Vulkan instance and an NVK device) is made. On
 any mismatch it leaves the engine it was handed unadapted, having written nothing and opened no device. For the first
-GLI engine of a CGL context, this keeps Apple's renderer for that context; a later engine of a context it has already
-decided on is described below. Below, the GLI engine is GLEngine's per-context object, the pointer `gldCreateContext`
+GLI engine of a CGL context, this leaves that context on Apple's renderer; what happens to a later engine of the same
+context is described below. Below, the GLI engine is GLEngine's per-context object, the pointer `gldCreateContext`
 hands over (the sections above call it GLEngine's context; Apple's headers type it `GLIContext`). The checks are:
 
 - the GLI engine is a heap block that spans every recorded read (the process's allocator reports a block's start and
@@ -114,19 +114,26 @@ hands over (the sections above call it GLEngine's context; Apple's headers type 
   CGL context before a `GLIFunctionDispatch` ends, an address in an image, a stack, read-only or unmapped memory, or a
   value that is no aligned user address.
 
-`nvk_cgl_prepare_gld` decides once for a CGL context, with the first of its GLI engines whose check reaches the
-context: it adopts that engine, refuses it with the first line below, or leaves it unadopted because the Zink screen
-could not be made or memory ran out. A later engine of a context it adopted or left unadopted (another renderer of its
-pixel format) is a further engine. It is left unadapted and prints no line, whatever its own check says: the line
-would say that OpenGL stays Apple's for a layout that differs, and that is not what decided the context. In a context
-Zink serves, `nvk_cgl_last_error` then says "The CGL context already has a GLI engine served by Zink", and leaving the
+An engine that passes the checks is adopted, or left unadopted where the Zink screen could not be made or memory ran
+out. `nvk_cgl_prepare_gld` remembers both outcomes for the CGL context: the first by the context's bridge, the second
+in one slot, which holds the last such context. A later engine of such a context (another renderer of its pixel
+format) is a further engine. It is left unadapted and prints no line, whatever its own check says: the line would say
+that OpenGL stays Apple's for a layout that differs, and that is not what decided the context. In a context Zink
+serves, `nvk_cgl_last_error` then says "The CGL context already has a GLI engine served by Zink", and leaving the
 engine unadapted does not hand its calls to Apple's renderer: a call that reaches the context's adapters with it is
-dropped, with the third line below. In a context left unadopted prepare sets no last error. Two limits. A later engine
-whose check stops before the context's (its own block, its profile byte, its dispatch pointers) names no context, so
-prepare cannot tell that it is a further engine and refuses it like a first engine, with the line. And the adapter
-remembers only the last context it left unadopted, until that engine's GLD context is destroyed: after an engine of
-another context is left unadopted in between, a later engine of the earlier context whose check refuses prints the
-line too.
+dropped, with the third line below. In a context left unadopted prepare sets no last error. Three limits:
+
+- A later engine whose check stops before the context's (its own block, its profile byte, its dispatch pointers) names
+  no context, so prepare cannot tell that it is a further engine and refuses it like a first engine, with the line.
+- A refusal is not remembered. A later engine of a context whose earlier engine was refused is checked like a first
+  engine: it is refused again when its check refuses, and adopted when its own check passes (the saved table is a
+  word of each engine, so one engine's can be refused and another's accepted). Zink then serves, through that engine,
+  a context the line said stays Apple's.
+- The slot holds one context, until the GLD context of the engine left unadopted is destroyed. After an engine of
+  another context is left unadopted in between, a later engine of the earlier context is checked like a first engine
+  too: it is refused, with the line, when its check refuses, and adopted when its check passes and its bridge can be
+  allocated. That can happen only where the earlier engine was left for want of memory, since a Zink screen that
+  could not be made is not tried again in the process.
 
 The adapter prints three kinds of line on standard error, each once per process, the first time it happens:
 
@@ -136,7 +143,8 @@ The adapter prints three kinds of line on standard error, each once per process,
   a named block at an offset, or the value itself with the VM tag, protection and remaining bytes of the region that
   holds it. Past the context check, it gives the sizes of the GLI engine's and the CGL context's blocks too. A later
   context refused for another reason prints nothing. The line means what it says for the context it names, with the
-  one exception above: a later engine of a context Zink serves whose check stops before the context's.
+  two exceptions above: it can come from a later engine of a context Zink serves, whose check stopped before the
+  context's, and a later engine of the context it names can pass its own check and be adopted.
 - "NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private layout does not match the
   record (...)". When Zink first serves a context (at its first GL call), in every process and whether or not the
   application ever calls CGLTexImageIOSurface2D, `install_integer_dispatch` places a hook in the GLI integer callback
@@ -235,13 +243,14 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   reaching the start of the GLI engine or of the CGL context (refused); a span of memory at no block start under
   each VM tag from 0 to 31 and each protection (a saved table only under the tags malloc gives, readable and
   writable); each refusal's text, with the sizes it prints; the text of the dropped-call line; which engines count
-  as further engines of a context already decided on; and `nvk_cgl_room`, the question `integer_dispatch_slot` asks
-  of the CGL private object and its engine list. Its other checks read `zink/nvk_cgl.c`, which the host cannot
-  compile: that prepare reads through no recorded offset before the check, returns from every refusal before the
-  screen and any write, and that the three lines are printed where this document says and are quoted here, in
-  TESTING-ON-HARDWARE and in the CHANGELOG as the code builds them. It loads no Apple framework and touches no GPU;
-  `malloc_size` has no Linux name, so a shim behind the header's macros uses `malloc_usable_size`, and a table of
-  synthetic regions stands in for the VM map. It has run on Linux only.
+  as further engines of a context adopted or left unadopted; and `nvk_cgl_room`, the question
+  `integer_dispatch_slot` asks of the CGL private object and its engine list. Its other checks read
+  `zink/nvk_cgl.c`, which the host cannot compile: that prepare reads through no recorded offset before the check,
+  returns from every refusal before the screen and any write, and holds no other return and no other write to the
+  refusal's reason before it allocates the bridge, and that the three lines are printed where this document says and
+  are quoted here, in TESTING-ON-HARDWARE and in the CHANGELOG as the code builds them. It loads no Apple framework
+  and touches no GPU; `malloc_size` has no Linux name, so a shim behind the header's macros uses
+  `malloc_usable_size`, and a table of synthetic regions stands in for the VM map. It has run on Linux only.
 - `nvk_cgl.c` and `appkit.m` with clang 18 `-fsyntax-only` on Linux against the public macOS 11.3 SDK's own headers
   (`-isysroot`, target `x86_64-apple-macos15.0`, the flags of `build/build_zink.sh`): no diagnostic. This covers
   `nvk_cgl_vm_region`'s call of `mach_vm_region_recurse` and the VM tag names; the 11.3 SDK names tag 13

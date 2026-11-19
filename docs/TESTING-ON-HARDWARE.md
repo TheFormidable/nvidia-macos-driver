@@ -357,9 +357,13 @@ cast, an old frame, frames that flicker between two, one of those counters above
    `NVK Zink:`. A line `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record (...)`
    means the adapter found this build's layout different and left an OpenGL context of the application on Apple's
    OpenGL, as it is meant to. The line is printed for the first context refused in a process only, and other contexts
-   of the application may still be Zink's: send that line and the output of `sw_vers`, and say whether the application
-   draws as it should. A line `NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private
-   layout does not match the record (...)` means Zink is drawing and only that one call was left to Apple's handler;
+   of the application may still be Zink's. In two cases the context the line was printed for is Zink's as well: the
+   line came from a second GLI engine (GLEngine's object for one renderer of the context) of a context Zink already
+   serves, and calls made with that engine are dropped, with the last line below; or a later GLI engine of the refused
+   context passed its own check and Zink took the context with it ([ZINK-OPENGL.md](ZINK-OPENGL.md), "The layout
+   guard"). Send that line and the output of `sw_vers`, and say whether the application draws as it should. A line
+   `NVK Zink: CGLTexImageIOSurface2D in a Zink context stays Apple's; GLEngine's private layout does not match the
+   record (...)` means Zink is drawing and only that one call was left to Apple's handler;
    where it appears, every OpenGL application Zink serves prints it, whether or not it uses that call: send it the
    same way and say whether anything in the application draws wrong. A line
    `NVK Zink: a call through a Zink context was dropped; it did not come with the GLI engine Zink adopted for the
