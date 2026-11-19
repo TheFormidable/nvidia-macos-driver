@@ -101,6 +101,7 @@ env	NVENCVT_ANY_GPU	dev	unset	2.9	-	Developer only (the video library's own over
 env	NVENCVT_BFRAMES	dev	unset	2.9	-	unreviewed
 env	NVENCVT_BT	dev	unset	2.9	-	unreviewed
 env	NVENCVT_CONF	dev	unset	2.9	-	unreviewed
+env	NVENCVT_DEC_HOLD	escape	on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4)	3.0.5	3.2	In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project.
 env	NVENCVT_DEPTH	dev	unset	2.9	-	unreviewed
 env	NVENCVT_DPB_EXTRA	dev	unset	2.9	-	unreviewed
 env	NVENCVT_ENGINE	dev	unset	2.9	-	unreviewed
@@ -434,6 +435,7 @@ env	NVMTL_SPVCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVMTL_SPVCACHE_REARM_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFACE_VRAM_PIPE	escape	on (NVMTL_SURFACE_VRAM_PIPE=0 in the settings file: the family VRAM import opens /dev/null with a plain open(), so a process whose sandbox refuses it, as Firefox's do, draws its surfaces through private images and copies, as in 3.0.4)	3.0.5	3.2	A process whose sandbox refuses /dev/null (Firefox's) imports a surface's family VRAM with the read end of an empty pipe as its descriptor, as NVK's own opens there already do, instead of failing the import without a word; a process that may open /dev/null is not changed. From pull request 487 of the original project.
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ZERO	escape	on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0)	3.0.1	3.2	WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0.
@@ -1045,6 +1047,7 @@ procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user 
 procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	plugin-container	internal	-	3.0.5	-	a branch on the process name, Firefox's child processes, where the video library's decoders keep their last emitted pictures (NVENCVT_DEC_HOLD); not a user switch
 build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS <names> (NVK_EXTRA_PATCHES)"
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver
 build	NVK_PATH	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver

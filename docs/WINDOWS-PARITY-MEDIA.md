@@ -20,3 +20,34 @@ See [STATUS.md](STATUS.md) for the scope of actual fork hardware results, and
 | Fan curve, clock and voltage offsets (NVAPI) | no general driver write API; separate NVMetrics guarded manual fan experiment | verified only on the tested RTX 5050 RM record layout; not a universal fan curve, clock or voltage interface |
 | Telemetry (power, clocks, temperature, utilisation, throttle reasons, fan) | `tools/nvmtl-smi` and separate NVMetrics dashboard; GPU Caps read-only ABI | RUSD data requires coherent fresh reads; GPU Caps evidence is partial |
 | Video engine utilisation counters | `tools/nvmtl-smi` prints what RUSD reports for the video engines | the same studio check |
+
+## Firefox
+
+Firefox decodes video in one of its child processes (`plugin-container`) and draws it in another, its GPU process.
+On RTX 40 the vendored NVEncVT registers by default in every app that loads the Metal plugin and offers its H.264,
+HEVC, VP9 and AV1 decoders; on RTX 30 its VP9 and AV1 decoders. `about:support`, under "Codec Support Information",
+shows whether Firefox takes them. The author of pull request 487 of the original project reported hardware decoding
+of VP9, AV1 and HEVC there on an RTX 4060 Ti (macOS 26.7.2, Firefox 159); it has not been tried in this tree.
+
+From that pull request:
+
+- Firefox's sandboxes refuse `/dev/null`. NVEncVT's connections to the kernel (`vendor/nvenc/src/rm.c`) and the
+  plugin's import of a surface's video memory then use the read end of an empty pipe as their descriptor, as NVK's own
+  connections already did; without any descriptor the connection fails at once and the plugin logs the import it
+  could not make. The import is the one change here that acts on RTX 50 by default: in a Firefox process whose sandbox
+  refuses `/dev/null` and that draws with Metal, IOSurface textures now live in the surface's own video memory, as in
+  every other process, instead of in private images and their copies. `NVMTL_SURFACE_VRAM_PIPE=0` in the settings
+  file puts the import back on a plain `open()`, which fails in such a sandbox, as in 3.0.4 (whether that sandbox
+  lets the plugin read the settings file has not been checked).
+- In `plugin-container` each decoded picture stays referenced until eight later ones have been handed out, so the
+  pool does not write the next picture into one Firefox's GPU process has not taken yet. Other processes release
+  each picture at once. `NVENCVT_DEC_HOLD=0` (in the environment, or as a line of the root-owned
+  `/usr/local/etc/nvencvt.conf`) turns this off.
+- `NVENCVT_LOG=2` logs every VP9 and AV1 frame with NVDEC's status.
+
+On RTX 50 none of this brings VP9 or AV1: NVEncVT does not register those decoders on Blackwell (first table), so
+Firefox decodes VP9 and AV1 in software as before. Firefox's H.264 there goes to the driver's own H.264 decoder
+(`docs/PROVENANCE.md`, section 2a); NVEncVT decodes H.264 by default only in the decode service, after its
+self-test, so the hold above applies on RTX 50 only where `NVMTL_NVENCVT` is `1` or names `plugin-container` and
+the self-test has passed in that process. The pull request's launcher, which preloads the library into Firefox with
+`DYLD_INSERT_LIBRARIES`, is not included.
