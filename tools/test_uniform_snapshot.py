@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
 """Exercise the production descriptor snapshot cache across uniform and pipeline changes."""
 import os
+import pathlib
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+def vulkan_include():
+    """-> the folder that holds vulkan/vulkan.h, found as tools/test_bc_small_mips.py finds it: NM_VULKAN_INCLUDE
+    first (when it is set it must be right), then ~/Vulkan-Headers/include; neither: SKIP (exit 2)."""
+    env = os.environ.get('NM_VULKAN_INCLUDE', '')
+    if env:
+        if not (pathlib.Path(env) / 'vulkan/vulkan.h').is_file():
+            print(f'FAIL: NM_VULKAN_INCLUDE={env} holds no vulkan/vulkan.h')
+            sys.exit(1)
+        return pathlib.Path(env)
+    home = pathlib.Path.home() / 'Vulkan-Headers/include'
+    if (home / 'vulkan/vulkan.h').is_file():
+        return home
+    print('SKIP: no Vulkan headers: set NM_VULKAN_INCLUDE to a folder holding vulkan/vulkan.h '
+          '(./build.sh test does, after ./build.sh fetch), or put Vulkan-Headers in ~/Vulkan-Headers')
+    sys.exit(2)
+
+
+VULKAN_INCLUDE = vulkan_include()
 text = (root / 'plugin/nvmtl_vk.c').read_text()
 start = text.index('static VkDescriptorSet nvmtl_snapshot_set_c(')
 end = text.index('{', start) + 1
@@ -99,5 +119,5 @@ with tempfile.TemporaryDirectory() as directory:
     path = Path(directory)
     (path / 'probe.c').write_text(source)
     for flags in ([], ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']):
-        subprocess.run(['xcrun', '--sdk', 'macosx', 'clang', '-std=c11', '-O1', *flags, str(path / 'probe.c'), '-o', str(path / 'probe')], check=True)
+        subprocess.run(['xcrun', '--sdk', 'macosx', 'clang', '-std=c11', '-O1', *flags, '-I', str(VULKAN_INCLUDE), str(path / 'probe.c'), '-o', str(path / 'probe')], check=True)
         subprocess.run([str(path / 'probe')], check=True, env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'})
