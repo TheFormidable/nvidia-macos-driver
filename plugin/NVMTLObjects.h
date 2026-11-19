@@ -280,6 +280,8 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   int _resRefs, _rstate, _lruReg, _wantOn; uint64_t _lastUse;
   uint64_t _useEp;
   BOOL _texSeen;
+  BOOL _gpuWritten;     /* a buffer with a caller copy (_hostPtr) that a sealed part may have written; never cleared */
+  void *_callerPages;   /* the caller's pages of a no-copy buffer copied once (nvmtl_nocopy_once.h): contents only */
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
@@ -293,8 +295,11 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
-- (NVMTLResSet *)nvmtlTakeAll;
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s, *_readOnly; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+- (void)addReadOnlyObject:(id)o;
+- (BOOL)isWrittenObject:(id)o;
+// Sealing transfers an owned set; it must not linger in the caller's autorelease pool.
+- (NVMTLResSet *)nvmtlTakeAll NS_RETURNS_RETAINED;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
 // machine code compiled ahead of time for this function (NVMTLSass.m), nil otherwise

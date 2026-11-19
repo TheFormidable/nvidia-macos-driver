@@ -39,6 +39,7 @@
 #include "nvmtl_y422_convert.h"
 #include "nvmtl_icb_record.h"
 #include "nvmtl_copy_compat.h"
+#include "nvmtl_buffer_texture.h"
 #include "nvmtl_sampler_state.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -308,7 +309,8 @@ void nvmtl_heaps_dump(FILE *f, void (*emit)(void *, const char *));   /* NVMTLOb
 // Buffer grace: a destroyed buffer keeps its VkBuffer (and so its GPU address) until the queue has completed every
 // submit that was in flight when the app freed it. vkDestroyBuffer releases the address at once, and NVK does not
 // wait for the GPU, so a per-frame buffer freed while a submit still stored through it was a page-table fault
-// attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off.
+// attributed to whatever ran next. Same shape as the image grace and the page lifetime. NVMTL_BUFFER_GRACE=0 turns it off;
+// the caller's deallocator of an imported newBufferWithBytesNoCopy buffer then runs at once, inside -dealloc.
 typedef struct nvmtl_bgrace { nvk_buffer b; nvmtl_pl_node life; } nvmtl_bgrace;
 static nvmtl_pl_state g_bg; static pthread_mutex_t g_bg_lock = PTHREAD_MUTEX_INITIALIZER;
 static int nvmtl_buffer_grace_on(void)
@@ -3109,6 +3111,22 @@ int nvmtl_vk_accel_surface_wait(void)
     IOObjectRelease(s);
     return on == 1;
 }
+/* Whether the descriptor of the family VRAM import below is opened the way NVK's own opens are (nvmtl_fd_token.h), so a
+   process whose sandbox refuses /dev/null, as Firefox's do, still imports (from pull request 487 of the original
+   project). It is read once. NVMTL_SURFACE_VRAM_PIPE=0, in the environment or the settings file, opens /dev/null with a
+   plain open() again: in such a sandbox the import then fails and its surfaces go through private images and their
+   copies, as in 3.0.4. Processes that may open /dev/null are the same either way. */
+static int nvmtl_vk_surface_vram_pipe_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_SURFACE_VRAM_PIPE");
+        on = !(e && e[0] == '0');
+        if (!on) nvlog("item 7: the family VRAM import opens /dev/null with a plain open() (NVMTL_SURFACE_VRAM_PIPE=0): "
+                       "a sandbox that refuses it leaves its surfaces on private images and copies");
+    }
+    return on;
+}
 /* The family's VRAM for one plane of a surface, granted by the kernel through NVK's import, as a buffer of `need` bytes.
    planeWord and sizeWord are the grant's words as the kernel reads them: the plane alone and the bytes needed, or a
    ranged grant's (nvmtl_plane_alias.h). */
@@ -3121,9 +3139,21 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) return -1;
     nvmtl_vram_rec r = { 3, surfaceID, planeWord, 0, sizeWord };
+    /* The descriptor carries nothing (the staged record names the surface), and NVK takes it over. It is opened the way
+       NVK's own opens are (nvmtl_fd_token.h): a sandbox that refuses /dev/null, as Firefox's does, gets the read end
+       of an empty pipe. With a plain open() the import failed there without a word and every such surface went through
+       a private image and its copies (from pull request 487 of the original project). NVMTL_SURFACE_VRAM_PIPE=0 goes
+       back to the plain open(). */
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-                                    open("/dev/null", O_RDONLY | O_CLOEXEC) };
-    if (imp.fd < 0) return -1;
+                                    nvmtl_vk_surface_vram_pipe_on() ? nvmtl_icd_open("/dev/null", O_RDONLY | O_CLOEXEC)
+                                                                    : open("/dev/null", O_RDONLY | O_CLOEXEC) };
+    if (imp.fd < 0) {
+        const int e = errno;
+        static unsigned nfd; if (nfd++ < 8 || nfd % 1000 == 0)
+            nvlog("item 7: surface %u plane %u%s: no descriptor for the family VRAM import (errno %d) - private image + copies (%u so far)",
+                  surfaceID, plane, plane != planeWord ? " (its byte range)" : "", e, nfd);
+        return -1;
+    }
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, need, (uint32_t)mt };
     VkDeviceMemory m = VK_NULL_HANDLE;
     pnvk_stage_import(&r);
@@ -4637,11 +4667,15 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
         page->next = c->address_pages; c->address_pages = page;
         pthread_mutex_lock(&g_pl_lock); nvmtl_pl_made(&g_pl); pthread_mutex_unlock(&g_pl_lock);
     }
-    uint64_t *addresses = (uint64_t *)((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES);
+    // Assemble in ordinary CPU memory, then write the mapped page once. The dummy
+    // address is identical for every empty slot; querying it per slot costs a
+    // Vulkan call for each of the many unbound buffers in small WebGL draws.
+    uint64_t addresses[2 * NVMTL_NBUF + NVMTL_NTEX];
+    const uint64_t dummy = nvmtl_vk_buffer_address(&g_dummyBuf);
     nvmtl_bindtable *t = c->table;
     for (unsigned i = 0; i < NVMTL_NBUF; ++i) {
         nvmtl_slot *s = t ? &t->s[which][i] : NULL;
-        addresses[i] = s && s->kind == NVMTL_SLOT_BUF ? s->address + s->off : nvmtl_vk_buffer_address(&g_dummyBuf);
+        addresses[i] = s && s->kind == NVMTL_SLOT_BUF ? s->address + s->off : dummy;
     }
     uint64_t self = nvmtl_vk_buffer_address(&page->buffer);
     if (!self) nvlog("address table: page has no device address - array_ref<void> arguments will read 0");
@@ -4651,6 +4685,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
         const nvmtl_slot *s = t ? &t->s[which][NVMTL_NBUF + i] : NULL;
         addresses[2 * NVMTL_NBUF + i] = (s && s->kind == NVMTL_SLOT_TEX && s->h) ? (uint64_t)s->size : 0;
     }
+    memcpy((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES, addresses, sizeof addresses);
     *out = (VkDescriptorBufferInfo){ page->buffer.buf, slot * NVMTL_TABLE_BYTES, NVMTL_TABLE_BYTES };
     c->address_count++;
     return 0;
@@ -4919,8 +4954,9 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     // ~60k sets a second).
     static const uint64_t notb[4] = { 0, 0, 0, 0 };
     const uint64_t *tb = p->tbany ? p->tbm[which] : notb;
+    const uint32_t glkey = p->gl_uniform_layout ? p->gl_uniform_slot[which] + 1u : 0;
     const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb)
-        && t->lastgl[which] == p->gl_uniform_layout
+        && t->lastgl[which] == glkey
         && (!uniform || (t->lastubuf[which] == uniform->buffer && t->lasturange[which] == uniform->range));
     int live = sametb && t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
                && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
@@ -4945,9 +4981,15 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         const nvmtl_address_page *page = (const nvmtl_address_page *)c->address_pages;
         const int samePage = !table || (t->lasttab[which] && page && (c->address_count % NVMTL_TABLES_PER_PAGE) != 0
                                         && (void *)page->buffer.buf == t->lasttab[which]);
+        // The promoted slot is read directly from the dynamic uniform
+        // descriptor, never from the address table. If only that slot changed,
+        // retain the previous immutable table and update just its UBO offset.
+        // glkey also guards a pipeline switch to a different promoted slot.
+        const int uniformOnly = p->gl_uniform_layout && p->gl_uniform_slot[which]
+            && t->chg[which][0] == (1ull << (p->gl_uniform_slot[which] - 1u));
         VkDescriptorBufferInfo ai;
-        if (covered && samePage && !c->icb_slot && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
-            if (table) t->lastdyn[which] = (uint32_t)ai.offset;
+        if (covered && !c->icb_slot && (uniformOnly || (samePage && (!table || !nvmtl_address_snapshot(c, which, &ai))))) {
+            if (table && !uniformOnly) t->lastdyn[which] = (uint32_t)ai.offset;
             t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
             c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
             nvmtl_enc78_count(E78C_SETREUSE, 1);
@@ -4971,7 +5013,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     if (!s) return s;
     t->last[which] = s; t->last_idx[which] = c->nsets - 1; t->last_hi[which] = hi; t->dirty[which] = 0;
     memcpy(t->lasttb[which], tb, sizeof notb);
-    t->lastgl[which] = p->gl_uniform_layout;
+    t->lastgl[which] = glkey;
     t->lastubuf[which] = uniform ? uniform->buffer : VK_NULL_HANDLE;
     t->lasturange[which] = uniform ? uniform->range : 0;
     t->lastdyn[which] = c->dyn_out[which]; t->lasttab[which] = c->tab_out[which];
@@ -9277,7 +9319,8 @@ static void nvmtl_free_offmain_run(void *p)
 {
     nvmtl_bgrace *g = p;
     const uint64_t sz = g->b.size;
-    t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0;
+    const int was = t_grace_reaping;
+    t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = was;
     free(g);
     atomic_fetch_sub(&g_free_pending_b, sz);
 }
@@ -9328,8 +9371,17 @@ void nvmtl_vk_buffer_destroy(nvk_buffer *b)
             const int now = nvmtl_pl_release(&g_bg, &g->life, __atomic_load_n(&g_cmd_finished_seq, __ATOMIC_ACQUIRE), 0);
             pthread_mutex_unlock(&g_bg_lock);
             if (now && nvmtl_ws_free_offmain(g)) { nvmtl_perf_note(NVP_BUFDEL, t0, n); return; }
-            if (now) { t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b); t_grace_reaping = 0; free(g); }
+            // The flag is put back, not cleared: this can run inside a reap, from a caller's deallocator.
+            if (now) { const int was = t_grace_reaping; t_grace_reaping = 1; nvmtl_vk_buffer_destroy_body(&g->b);
+                       t_grace_reaping = was; free(g); }
             nvmtl_perf_note(NVP_BUFDEL, t0, n);
+            return;
+        }
+        if (b->host_release) {
+            // No grace record for an import of the caller's pages: keep the buffer and the pages (both leak) rather than
+            // give the pages back while a submit in flight may still read them (pull request 576 of the original project).
+            nvlog("buffer grace: allocation failed; an import of the caller's pages and those pages are kept");
+            memset(b, 0, sizeof *b);
             return;
         }
     }
@@ -9376,7 +9428,13 @@ static void nvmtl_vk_buffer_destroy_body(nvk_buffer *b)
         pvkFreeMemory(g_dev, (VkDeviceMemory)b->mem, NULL);
         if (b->alloc) { g_alloc_bytes -= b->alloc; if (was_charged) nvmtl_vk_budget_discharge(b->alloc); }
     }
+    // The caller's deallocator of an imported buffer runs after vkFreeMemory, outside every lock (it can call back in).
+    // It runs as code outside the reap: a buffer it frees is noted dead by its own path, and the reap's flag is put back
+    // for the buffers after this one.
+    void (*const release)(void *) = b->host_release;
+    void *const context = b->host_context;
     memset(b, 0, sizeof *b);
+    if (release) { const int was = t_grace_reaping; t_grace_reaping = 0; release(context); t_grace_reaping = was; }
 }
 
 void nvmtl_vk_buffer_retire(nvk_buffer *b)
@@ -11910,7 +11968,7 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
         nvlog("buffer texture: bytesPerRow %zu cannot hold %u texels of %u B", row_pitch, w, bpp); return -1; }
     if (g_linmod && row_pitch % 32) {
         nvlog("buffer texture: bytesPerRow %zu is not a multiple of 32 B (the texture header's linear pitch unit)", row_pitch); return -1; }
-    if (offset > b->size || (size_t)row_pitch * (h - 1) + (size_t)w * bpp > b->size - offset) {
+    if (!nvmtl_buffer_texture_fits(b->size, offset, w, h, bpp, row_pitch) || offset > SIZE_MAX - b->moff) {
         nvlog("buffer texture: %ux%u at offset %zu pitch %zu overruns the %zu-byte buffer", w, h, offset, row_pitch, b->size); return -1; }
     PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
     VkFormatFeatureFlags lf = nvmtl_vk_buffer_tiling_features(gfp, (VkFormat)vkfmt, plain_linear);

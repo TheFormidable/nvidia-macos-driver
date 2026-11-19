@@ -52,7 +52,11 @@ check('sealing a part hands the scratch list over', r[0])
 check('sealing a part clears the setBytes cache in the same step', r[1])
 seal = method(eventsync, '- (void)nvmtlSealPartWithSignal:')
 HOLD = 'if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];'
-check('a seal that goes on recording keeps holding what the binding tables still name', HOLD in seal)
+# 3.0.4 (pull request 578 of the original project): every member is still added, a read-only blit source as read only
+HOLD_RO = ('if (restart) { NVMTLResSet *previous = (NVMTLResSet *)part->resources, *next = (NVMTLResSet *)_resources; '
+           'for (id o in previous) { if ([previous isWrittenObject:o]) [next addObject:o]; else [next addReadOnlyObject:o]; } }')
+flat = ' '.join(seal.split()) if seal else ''
+check('a seal that goes on recording keeps holding what the binding tables still name', HOLD in seal or HOLD_RO in flat)
 fin = method(eventsync, '- (void)nvmtlFinishExecution:')
 check('a finished command buffer clears the setBytes cache', fin is not None and 'memset(_g79BRing, 0, sizeof _g79BRing)' in fin)
 

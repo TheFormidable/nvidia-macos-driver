@@ -165,6 +165,57 @@ plugin       The Photo Booth preview adapter (plugin/NVMTLPhotoBooth.m), the A8 
              come from the HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project
              (LICENSE), written into this tree's plugin.
 
+plugin, translator/wrapper  The GL and ANGLE uniform promotion (573, 579), the reuse and building of address tables
+             (577, 580), the bounds check of textures over buffers (nvmtl_buffer_texture.h, 575), the read-only blit
+             sources that are not copied back (578) and the deallocator of imported caller pages (half of 576) come
+             from pull requests 573 and 575 to 580 by luckiest-luk to the original project
+             (https://github.com/nullmoth/nvidia-macos-driver), closed there without being merged. Their commits keep
+             their author; plugin/ is under PolyForm Noncommercial 1.0.0 like this project (LICENSE), and
+             translator/wrapper under the translator's GNU Lesser General Public License v3.0 or later
+             (translator/LICENSE, translator/COPYING).
+
+kexts/NVRMFB, tools  The retry of a head that does not light at power-on (NVRMFB's setPowerState(1) queues the GPU
+             wake call, which tries again) and the kernel log lines for the branch a power-on takes and for the length
+             of a system wake's DidWake(false) replay come from pull request 597 by Geek to the original project
+             (https://github.com/nullmoth/nvidia-macos-driver), adapted here: each retry is queued 500 ms later, at
+             most three attempts in one wake, instead of waited for under the display gate, and the reordering of the
+             system wake's notifications is not taken. tools/test_display_power_retry.py carries that pull request's
+             addition to the test, changed for the delay. kexts/NVRMFB and tools/ are under PolyForm Noncommercial
+             1.0.0 like this project (LICENSE).
+
+plugin, vendor/nvenc  The descriptor of the plugin's family-VRAM import where a sandbox refuses /dev/null and the import
+             cache's limit for 8 GB cards (plugin/nvmtl_vk.c, plugin/NVMTLDevice.m), and in the video library the
+             descriptor of its kernel connections in such a sandbox, the pictures kept after they are emitted, and the
+             VP9 and AV1 decoders' count of blocks in error with their log lines (vendor/nvenc/src/rm.c, vp9dec.c,
+             av1dec.c, vt/nvencvt_dec.c), come from pull request 487 by dreamelite96 to the original project
+             (https://github.com/nullmoth/nvidia-macos-driver), not merged there, adapted to this tree (the pictures
+             are kept in Firefox's processes only). plugin/ is under PolyForm Noncommercial 1.0.0 like this project
+             (LICENSE); vendor/nvenc keeps its MIT licence (vendor/nvenc/LICENSE, Copyright (c) 2026 mickys,
+             licenses/mickys-nvenc-LICENSE.txt), and vendor/nvenc/SOURCE lists the changes.
+
+translator, plugin  The whole-object views of the shader translator (native/ir/alloca.rs: whole_object_aliases and the
+             rule that only a whole-object alias retypes a local; native/ir/pointer_pointees.rs: the byte image of a
+             parameter's mixed views), their 21 unit tests (native/ir/whole_view_tests.rs) and the ten iOS Simulator
+             fixtures of translator/wrapper/tests/fixtures/simulator come from pull request 524 by emretascii to the
+             original project (https://github.com/nullmoth/nvidia-macos-driver; that pull request's commits 47222fbc and
+             8bd65e09, its parts T3 and T4, signed "Antigravity (local port)"), not merged there. The emitter half of
+             its part T4 is not taken. The switch NVMTL_WHOLE_VIEWS with its tests, the mark it adds to the plugin's
+             shader cache tag (plugin/nvmtl_spvcache_name.h) and the in-process validation of
+             translator/wrapper/tests/simulator_owned.rs were written for this tree. translator/ is under the GNU Lesser
+             General Public License v3.0 or later (translator/LICENSE, translator/COPYING); plugin/ is under PolyForm
+             Noncommercial 1.0.0 like this project (LICENSE).
+
+plugin       The publication of protected IOSurfaces on the GPU side, the one-time copy of WindowServer's read-only
+             no-copy buffers (nvmtl_nocopy_once.h), the submit-ahead of parts that only read caller copies, the worker's
+             "scheduled" report after the queue has accepted a part, the iOS Simulator's schedule mode and the early
+             "scheduled" report of a held command buffer come from pull request 524 by emretascii to the original
+             project (https://github.com/nullmoth/nvidia-macos-driver; its commits def650d8, ad3bca03 and d3c27e79,
+             signed "Antigravity (local port)"), not merged there, adapted to this tree. The limit of the one-time copy
+             to pages mapped read only and privately, with its region query, the same "scheduled" order in the
+             submit-ahead pass and after the synchronous submit, the Simulator's mode by process name in place of that
+             pull request's token, and the switches with their tests were written for this tree. plugin/ is under
+             PolyForm Noncommercial 1.0.0 like this project (LICENSE).
+
 tools/nvk-bridge  The native Vulkan presentation runtime installed at /Library/GPUBundles/nvmtl/minecraft (bridge.mm,
              its host and smoke tests, ModFreeProbe.java and its documents) comes from nvk/native-macos of the
              HighDelay/nvidia-macos-driver-nvk fork, PolyForm Noncommercial 1.0.0 like this project (LICENSE), adapted

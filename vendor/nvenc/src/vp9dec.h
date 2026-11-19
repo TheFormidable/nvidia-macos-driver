@@ -32,7 +32,7 @@ typedef struct {
     Vp9Frame f;
     int cur_surf, cur_w, cur_h;     // the picture to show (valid when vp9dec_frame returned 1)
     int dec_surf;                   // the surface the last coded frame went to (also hidden ones; -1 for show_existing_frame)
-    unsigned err_status, ok_blocks;
+    unsigned err_status, ok_blocks, err_blocks;   // NVDEC's status of the last frame (err_blocks: from pull request 487 of the original project)
     double engine_ms;
 } Vp9Dec;
 
