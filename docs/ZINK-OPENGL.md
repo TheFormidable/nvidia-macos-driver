@@ -114,14 +114,16 @@ hands over (the sections above call it GLEngine's context; Apple's headers type 
   CGL context before a `GLIFunctionDispatch` ends, an address in an image, a stack, read-only or unmapped memory, or a
   value that is no aligned user address.
 
-An engine that passes the checks is adopted, or left unadopted where the Zink screen could not be made or memory ran
-out. `nvk_cgl_prepare_gld` remembers both outcomes for the CGL context: the first by the context's bridge, the second
-in one slot, which holds the last such context. A later engine of such a context (another renderer of its pixel
-format) is a further engine. It is left unadapted and prints no line, whatever its own check says: the line would say
-that OpenGL stays Apple's for a layout that differs, and that is not what decided the context. In a context Zink
-serves, `nvk_cgl_last_error` then says "The CGL context already has a GLI engine served by Zink", and leaving the
-engine unadapted does not hand its calls to Apple's renderer: a call that reaches the context's adapters with it is
-dropped, with the third line below. In a context left unadopted prepare sets no last error. Three limits:
+An engine that passes the checks is adopted, or left unadopted where the Zink screen is not ready (it could not be
+made, or it was marked uncertain after GPU work whose completion could not be confirmed, which `nvk_zink.c` reports
+with "NVK Zink: completion uncertain; share group quarantined") or memory ran out. `nvk_cgl_prepare_gld` remembers
+both outcomes for the CGL context: the first by the context's bridge, the second in one slot, which holds the last
+such context. A later engine of such a context (another renderer of its pixel format) is a further engine. It is left
+unadapted and prints no line, whatever its own check says: the line would say that OpenGL stays Apple's for a layout
+that differs, and that is not what decided the context. In a context Zink serves, `nvk_cgl_last_error` then says "The
+CGL context already has a GLI engine served by Zink", and leaving the engine unadapted does not hand its calls to
+Apple's renderer: a call that reaches the context's adapters with it is dropped, with the third line below. In a
+context left unadopted prepare sets no last error. Three limits:
 
 - A later engine whose check stops before the context's (its own block, its profile byte, its dispatch pointers) names
   no context, so prepare cannot tell that it is a further engine and refuses it like a first engine, with the line.
@@ -132,8 +134,8 @@ dropped, with the third line below. In a context left unadopted prepare sets no 
 - The slot holds one context, until the GLD context of the engine left unadopted is destroyed. After an engine of
   another context is left unadopted in between, a later engine of the earlier context is checked like a first engine
   too: it is refused, with the line, when its check refuses, and adopted when its check passes and its bridge can be
-  allocated. That can happen only where the earlier engine was left for want of memory, since a Zink screen that
-  could not be made is not tried again in the process.
+  allocated. That can happen only where the earlier engine was left for want of memory, since a Zink screen that is
+  not ready does not become ready later in the process.
 
 The adapter prints three kinds of line on standard error, each once per process, the first time it happens:
 
