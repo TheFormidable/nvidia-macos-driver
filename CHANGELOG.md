@@ -46,18 +46,21 @@ tests were run on Linux only (below, "What ran where").
   context's block one context of a process can stay Apple's while another goes to Zink. A saved-table word that starts
   a foreign heap block of at least 0x1e78 bytes, or points into a foreign heap object in writable heap memory, is
   written over, as it was in 3.0.2 for a block. `docs/ZINK-OPENGL.md`, "What the checks do not prove".
-- **One GLI engine per CGL context.** `nvk_cgl_prepare_gld` decides once for a CGL context, with the first of its GLI
-  engines whose check reaches the context: it adopts it, refuses it with the refusal line, or leaves it unadopted
-  because the Zink screen could not be made or memory ran out. A later engine of a context it adopted or left
-  unadopted (another renderer of its pixel format) is left unadapted and prints no line, whatever its own check says:
-  the line would say that OpenGL stays Apple's for a layout that differs, which is not what decided that context. In a
-  context Zink serves, `nvk_cgl_last_error` gives "The CGL context already has a GLI engine served by Zink", and a
-  call that reaches the context's adapters with the unadapted engine is not handed to Apple's renderer; it is dropped,
-  with the dropped-call line. Two limits: a later engine whose check stops before the context's names no context and
-  is refused with the line; and the adapter remembers only the last context it left unadopted, so after another
-  context is left unadopted in between, a later engine of the earlier one whose check refuses prints the line too. The
-  source fork adopts each engine, and the destroy of one then writes its own engine pointer back into a context the
-  other still uses.
+- **One GLI engine per CGL context.** An engine that passes the checks is adopted, or left unadopted where the Zink
+  screen could not be made or memory ran out, and `nvk_cgl_prepare_gld` remembers both outcomes for the CGL context
+  (the second for one context, the last). A later engine of such a context (another renderer of its pixel format) is
+  left unadapted and prints no line, whatever its own check says: the line would say that OpenGL stays Apple's for a
+  layout that differs, which is not what decided that context. In a context Zink serves, `nvk_cgl_last_error` gives
+  "The CGL context already has a GLI engine served by Zink", and a call that reaches the context's adapters with the
+  unadapted engine is not handed to Apple's renderer; it is dropped, with the dropped-call line. Three limits. A later
+  engine whose check stops before the context's names no context and is refused with the line. A refusal is not
+  remembered: a later engine of a context whose earlier engine was refused is checked like a first engine and adopted
+  when its own check passes, and Zink then serves a context the line said stays Apple's. And after another context is
+  left unadopted in between, a later engine of the earlier one is checked like a first engine too: refused with the
+  line when its check refuses, adopted when its check passes and its bridge can be allocated (only where the earlier
+  engine was left for want of memory; a Zink screen that could not be made is not tried again). The source fork
+  adopts each engine, and the destroy of one then writes its own engine pointer back into a context the other still
+  uses.
 - **CGLTexImageIOSurface2D's hook reads the CGL private object where the allocator vouches for it, and says when it is
   not placed.** `install_integer_dispatch` runs when Zink first serves a context, in every process, and
   `integer_dispatch_slot`, which finds the callback vector for it, had two checks that had never run on a Mac either.
@@ -104,22 +107,24 @@ On Linux only (x86_64, gcc and clang); nothing of 3.0.3 has been built on a Mac 
   and clang 18 and feeds it synthetic heap blocks and VM regions: 266 cases (placements of the CGL context, `rend` and
   the saved table that the guard accepts and that it refuses, at their boundaries; a span of memory under each VM tag
   from 0 to 31 and each protection; the outputs on acceptance and refusal; each refusal's text, with the sizes it
-  prints; the text of the dropped-call line; which engines are later engines of a context already decided on; and
-  `nvk_cgl_room`), all ok, and its 23 other checks, all ok. Fourteen of those read `zink/nvk_cgl.c`, which the host
+  prints; the text of the dropped-call line; which engines are later engines of a context adopted or left unadopted;
+  and `nvk_cgl_room`), all ok, and its 24 other checks, all ok. Fifteen of those read `zink/nvk_cgl.c`, which the host
   cannot compile: prepare reads through no recorded offset before the check and returns from every refusal before the
-  Zink screen and any write; a later engine of a context already decided on returns before the refusal line; an engine
-  that passed the check and was not adopted is remembered with its context and forgotten when its GLD context is
-  destroyed; the three lines are printed in one place, each once per process, and the first starts with the text the
-  card checks read as inactive; `bridge_current` drops a call that comes with another engine; the VM question goes to
-  `mach_vm_region_recurse`; `integer_dispatch_slot` asks `nvk_cgl_room` before each read, writes each reason whole
-  into the caller's buffer and prints nothing; `install_integer_dispatch` writes a reason and prints its line for
-  every way the hook is left out. Four say that this file, `docs/ZINK-OPENGL.md` and both TESTING-ON-HARDWARE files
-  quote the three lines as the code builds them, with "..." for the reason. To see that the test notices, 188 single
-  changes were made to copies of the guard header (125) and of `nvk_cgl.c` (63), one at a time: a condition dropped, a
-  bound moved by one, two values swapped, a return removed. The test failed for 184. The other four cannot change what
-  the guard does: one differs only for a heap block of exactly 0xc6a6 bytes, a size malloc does not report; one drops
-  a test the VM answer already implies; two test the alignment of an offset into a heap block in place of the
-  pointer's, and a block starts at an aligned address.
+  Zink screen and any write; from its first statement to the allocation of the bridge it holds the statements the test
+  lists and no other, so no other return and no other write to the refusal's reason; a later engine of a context
+  adopted or left unadopted returns before the refusal line; an engine that passed the check and was not adopted is
+  remembered with its context and forgotten when its GLD context is destroyed; the three lines are printed in one
+  place, each once per process, and the first starts with the text the card checks read as inactive; `bridge_current`
+  drops a call that comes with another engine; the VM question goes to `mach_vm_region_recurse`;
+  `integer_dispatch_slot` asks `nvk_cgl_room` before each read, writes each reason whole into the caller's buffer and
+  prints nothing; `install_integer_dispatch` writes a reason and prints its line for every way the hook is left out
+  except a failed allocation of the clone. Four say that this file, `docs/ZINK-OPENGL.md` and both TESTING-ON-HARDWARE
+  files quote the three lines as the code builds them, with "..." for the reason. To see that the test notices, 199
+  single changes were made to copies of the guard header (125) and of `nvk_cgl.c` (74), one at a time: a condition
+  dropped, a bound moved by one, two values swapped, a return removed or added, a reason blanked after it is written.
+  The test failed for 195. The other four cannot change what the guard does: one differs only for a heap block of
+  exactly 0xc6a6 bytes, a size malloc does not report; one drops a test the VM answer already implies; two test the
+  alignment of an offset into a heap block in place of the pointer's, and a block starts at an aligned address.
 - `zink/nvk_cgl.c` and `zink/appkit.m` checked with clang 18 `-fsyntax-only` against the public macOS 11.3 SDK's own
   headers (`-isysroot`, target `x86_64-apple-macos15.0`, with the flags of `build/build_zink.sh`: `-O2 -Wall -Wextra
   -Werror -Werror=unguarded-availability-new -Wno-deprecated-declarations`, and `cgl_api.inc` and `cgl_dispatch.inc`
