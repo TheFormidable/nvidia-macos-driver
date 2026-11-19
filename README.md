@@ -1,5 +1,7 @@
 # NullMoth NVIDIA Driver for macOS
 
+> **GPU Caps development branch:** the experimental read-only capability ABI (phases 1 and 2B) was built and booted on one RTX 5050 with macOS 26.7.3; 15 capabilities were verified and the remainder were unknown. See [GPU Caps integration and validation](docs/GPU-CAPS.md). This scoped result does not certify other GPUs or the other changes described in the historical notice below.
+
 > **Not yet tested on a card.** `fable` is a branch of a fork that changes a large part of the driver.
 > At commits 3933ff6 and ee7f332, `./build.sh` built every component of it, with build tools it had built from pinned
 > sources, and staged a package on two Intel Macs: one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and GitHub's Intel

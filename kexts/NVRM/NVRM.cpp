@@ -51,6 +51,8 @@ static bool nvrm_kernel_supported(void) { return version_major == 24 || version_
 #include "nvrm_vram_abi.h"
 #include "nvrm_chan_note_abi.h"
 #include "nvrm_boost_policy_abi.h"
+#include "nvrm_gpu_caps_static.h"
+#include "nvUnixVersion.h"
 #include "nvrm_evwait.h"
 #include "nvrm_fence.h"
 extern "C" int nvrm_surfshare_rm(struct NVRMSurfShareRm *);
@@ -61,6 +63,7 @@ extern "C" int nvrm_gpuva_alloc(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_map(struct NVRMGpuVaRequest *);
 extern "C" int nvrm_gpuva_free(struct NVRMGpuVaRequest *);
 extern "C" bool nvrm_query_vram_kb(NvU32 gpuId, NvU32 *pRamKb, NvU32 *pTotalKb, NvU32 *pStatus);
+extern "C" void nvrm_query_gpu_caps(NvU32 gpuId, uint8_t *out);
 extern "C" bool nvrm_query_vidmem_cleared(NvU32 gpuId, NvU32 *pCleared, NvU32 *pStatus);
 extern "C" bool nvrm_query_gpu_profile(NvU32 gpuId, NvU32 *pArch, NvU32 *pImpl, NvU32 *pCls3d, NvU32 *pClsCompute,
                                        NvU32 *pClsCopy, NvU32 *pClsEnc, NvU32 *pClsDec, NvU32 *pStatus);
@@ -221,6 +224,13 @@ private:
     volatile UInt32 fFenceAsleep = 0;
     bool         fPmJoined = false;
     unsigned     fPmCycles = 0;
+    // Phase-1 capability cache. Retained until free(), including after stop(),
+    // so a surviving user client cannot race a freed lock or buffer.
+    IOLock *fGpuCapsLock = nullptr;
+    uint8_t *fGpuCapsBlock = nullptr;
+    NvrmGcIdentity fGpuCapsIdentity = {};
+    bool fGpuCapsStopped = false;
+    void gpuCapsPublish(bool refresh);
     struct PciSave {
         bool valid; UInt32 rbOff[6], rbCtl[6]; unsigned rbCount;
         UInt32 bar[6]; UInt16 cmd;
@@ -634,6 +644,7 @@ private:
     static IOReturn sEvtNote(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sFence(OSObject *target, void *reference, IOExternalMethodArguments *args);
     static IOReturn sBoostPolicy(OSObject *target, void *reference, IOExternalMethodArguments *args);
+    static IOReturn sGpuCaps(OSObject *target, void *reference, IOExternalMethodArguments *args);
     // This connection's owner id in the surface fence: zero when the client is made, assigned by the fence itself on
     // the first request that needs one, and handed back to it when the client closes (nvrm_fence_owner_gone).
     volatile UInt64 fFenceOwner = 0;
@@ -1079,6 +1090,9 @@ bool NVRM::startGPU(IOService *provider)
     nv->pci_info.device_id = fPCI->configRead16(0x02);
     nv->subsystem_vendor   = fPCI->configRead16(0x2C);
     nv->subsystem_id       = fPCI->configRead16(0x2E);
+    fGpuCapsIdentity = { (uint32_t)nv->pci_info.vendor_id, (uint32_t)nv->pci_info.device_id,
+                        (uint32_t)nv->subsystem_vendor, (uint32_t)nv->subsystem_id, fPCI->configRead32(0x08),
+                        (uint32_t)nv->pci_info.domain, bus, dev, 0xffffffffu };
     nv->handle = os_pci_init_handle(0, bus, dev, fn, NULL, NULL);
     nv->regs = &nv->bars[NV_GPU_BAR_INDEX_REGS];
     nv->fb   = &nv->bars[NV_GPU_BAR_INDEX_FB];
@@ -1150,6 +1164,15 @@ bool NVRM::startGPU(IOService *provider)
                 releaseBootHold("no auto-go thread");
             }
         }
+    }
+    // Publish a valid pending/off cache before joining power management or exposing the service.
+    fGpuCapsLock = IOLockAlloc();
+    if (fGpuCapsLock) fGpuCapsBlock = (uint8_t *)kern_os_malloc(NVRM_GC_BUF_BYTES);
+    if (fGpuCapsBlock) {
+        uint32_t enabled = 1;
+        PE_parse_boot_argn("nvgpucaps", &enabled, sizeof enabled);
+        nvrm_gc_begin(fGpuCapsBlock, 0, enabled ? NVRM_GC_F_PENDING : NVRM_GC_F_OFF,
+                      0, NVRM_GC_POL_PUBLISHED_COUNTS, 0, 0);
     }
     {
         // Join the power tree under the GPU's IOPCIDevice: on system sleep NVRM puts the GPU in standby
@@ -2468,6 +2491,7 @@ IOReturn NVRM::go(uint32_t pass)
             }
         }
         publishGpuProfile();
+        gpuCapsPublish(false);
         if (nvkms_xnu_load()) nvrm_display_publish(this, fNv.gpu_id);
         nvrm_power_start(&fNv);   // boot-arg nvrmtgp=1: the notebook power budget while on mains power (nvrm_power.cpp)
         // The surface fence (nvrm_fence.cpp), once per GPU and only after a start that worked: from here user space may
@@ -2690,6 +2714,11 @@ void NVRM::stop(IOService *provider)
     if (OSCompareAndSwap(1, 0, &fFenceStarted)) {
         if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(NVRM_FENCE_PM_RESUMED);
         nvrm_fence_stop();
+    }
+    if (fGpuCapsLock) {
+        IOLockLock(fGpuCapsLock);
+        fGpuCapsStopped = true;
+        IOLockUnlock(fGpuCapsLock);
     }
     // Still before anything is torn down: the idle power-down monitor (nvrtd3=1) loses this GPU. Its polls call
     // gpuSuspend() and gpuResume(), and neither may run against what follows. Nothing happens here for a GPU the
@@ -2921,6 +2950,8 @@ void NVRM::publishBarFacts()
 
 void NVRM::free()
 {
+    if (fGpuCapsBlock) { kern_os_free(fGpuCapsBlock); fGpuCapsBlock = nullptr; }
+    if (fGpuCapsLock) { IOLockFree(fGpuCapsLock); fGpuCapsLock = nullptr; }
     if (fUtilizationLock) { IOLockFree(fUtilizationLock); fUtilizationLock = nullptr; }
     super::free();
 }
@@ -2953,7 +2984,7 @@ extern "C" uint64_t nv_xnu_tmpfile_written(void);   // os-xnu2.cpp: bytes writte
 void NVRM::gpuSuspend()
 {
     uint64_t t0 = mach_absolute_time();
-    fPmCycles++;
+    __atomic_add_fetch(&fPmCycles, 1u, __ATOMIC_ACQ_REL);
     nvrm_power_suspend();
     // Before the user channels stop: every surface hold ends now and new ones are refused until the wake, so nobody
     // waits on a channel that is about to stand still, and work committed across the transition uses the older marks.
@@ -2961,13 +2992,13 @@ void NVRM::gpuSuspend()
     nv_xnu_rc_suspend(&fNv);
     OSCompareAndSwap(kGpuPmRunning, kGpuPmSuspended, &fGpuPm);
     setProperty("nvrm-pm", "suspended");
-    LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", fPmCycles);
+    LOG("sleep #%u: suspending the GPU (NVKMS, then RM standby)", __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE));
     notifyFramebuffers(0);
     // NVKMS first: once it is suspended no thread is inside it, so none can hold gKmsLock while it waits at the RM
     // gate (closing the gate first deadlocked against an NVKMS ioctl calling into RM).
     nvkms_xnu_suspend(fNv.gpu_id);
     const int busy = nv_xnu_pm_close(10000);
-    if (busy) LOG("sleep #%u: %d RM call(s) still running after 10 s - suspending anyway", fPmCycles, busy);
+    if (busy) LOG("sleep #%u: %d RM call(s) still running after 10 s - suspending anyway", __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE), busy);
     // nv_preempt_user_channels(): with every VRAM allocation preserved, user channels must be idle and stopped
     // while their memory is copied out, and restarted once it is back.
     NV_STATUS cst = rm_stop_user_channels(NULL, &fNv);
@@ -2984,7 +3015,7 @@ void NVRM::gpuSuspend()
     irqSettle(2000);
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     LOG("sleep #%u: user channels stopped -> 0x%x; rm_power_management(STANDBY) -> 0x%x in %llu ms, %llu MB of VRAM (%llu bytes) "
-        "written to the save file%s", fPmCycles, (unsigned)cst, (unsigned)st, ns / 1000000ULL, saved >> 20, saved,
+        "written to the save file%s", __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE), (unsigned)cst, (unsigned)st, ns / 1000000ULL, saved >> 20, saved,
         st == NV_OK ? "" : " - resume will still be tried, as on Linux");
 }
 
@@ -2994,7 +3025,7 @@ void NVRM::gpuSuspend()
 void NVRM::gpuResume()
 {
     uint64_t t0 = mach_absolute_time();
-    LOG("wake #%u: resuming the GPU", fPmCycles);
+    LOG("wake #%u: resuming the GPU", __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE));
     nv_xnu_pm_take();
     bool ok = pciRestoreAfterWake() && gpuAnswers();
     if (ok) enableAspmL1();   // the link comes back with whatever IOPCIFamily restored
@@ -3006,13 +3037,14 @@ void NVRM::gpuResume()
     OSCompareAndSwap(kGpuPmSuspended, ok ? kGpuPmRunning : kGpuPmLost, &fGpuPm);
     nvkms_xnu_resume(fNv.gpu_id, ok);
     nv_xnu_pm_open();   // also when lost: RM then answers the waiting calls with errors instead of leaving them blocked
+    if (ok) gpuCapsPublish(true);
     if (ok) nvrm_power_resume();
     if (ok) nv_xnu_rc_resume(&fNv);
     // A failed resume leaves the fence off for good (LOST): user space keeps the older marks on a GPU that is gone.
     if (OSCompareAndSwap(1, 0, &fFenceAsleep)) nvrm_fence_pm(ok ? NVRM_FENCE_PM_RESUMED : NVRM_FENCE_PM_LOST);
     setProperty("nvrm-pm", ok ? "running" : "lost (resume failed)");
     uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-    LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", fPmCycles,
+    LOG("wake #%u: rm_power_management(RESUME) -> 0x%x, user channels restarted -> 0x%x, %llu ms - %s", __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE),
         (unsigned)st, (unsigned)cst, ns / 1000000ULL,
         ok ? "GPU running, telling the framebuffers" : "GPU LOST: NVKMS refuses all display work until a restart");
     notifyFramebuffers(ok ? 1 : 2);
@@ -3429,7 +3461,7 @@ IOReturn NVRM::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, voi
         // there, the RM brings back what was allocated, and nothing in its sources clears what was free. The
         // framebuffer counts the power messages itself, but one that starts, or is loaded again, after a standby
         // has seen none of them.
-        q->cleared = (answer == 1 && fPmCycles == 0) ? 1u : 0u;
+        q->cleared = (answer == 1 && __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE) == 0) ? 1u : 0u;
         return answer ? kIOReturnSuccess : kIOReturnNotReady;
     }
     if (fn && fn->isEqualTo(NVRM_DISPLAY_PTRS_FN)) {
@@ -3750,8 +3782,12 @@ IOReturn NVRMUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
 // says why it returned, and selector 9 exists (nvrm_evwait.h). User space of 2.9 tests bit 0 only.
 IOReturn NVRMUserClient::sCaps(OSObject *target, void *reference, IOExternalMethodArguments *args)
 {
-    if (!OSDynamicCast(NVRMUserClient, target)) return kIOReturnNotAttached;
-    args->scalarOutput[0] = NVRM_EVW_CAP_WAIT | NVRM_EVW_CAP_REASON;
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me) return kIOReturnNotAttached;
+    uint64_t features = NVRM_EVW_CAP_WAIT | NVRM_EVW_CAP_REASON;
+    if (me->fOwner && me->fOwner->fGpuCapsLock && me->fOwner->fGpuCapsBlock)
+        features |= NVRM_GC_SEL7_HAS_GPU_CAPS;
+    args->scalarOutput[0] = features;
     return kIOReturnSuccess;
 }
 // Selector 8: forget a token after its mapping is unmapped; drops the descriptor. An unknown token is not an error.
@@ -3788,6 +3824,7 @@ IOReturn NVRMUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
         { sRetired, 0, 0, 0, 0 },
         { sFence, 0, sizeof(struct NVRMFenceReq), 0, sizeof(struct NVRMFenceReq) },   // 12: NVRM_FENCE_SELECTOR, no fGate
         { sBoostPolicy, 2, 0, 1, 0 },                 // 13: NVRM_BOOST_POLICY_SELECTOR, no fGate, no RM call
+        { sGpuCaps, 1, 0, 0, kIOUCVariableStructureSize }, // 14: cached read-only GPU capabilities
     };
     if (selector >= sizeof tbl / sizeof tbl[0]) return kIOReturnBadArgument;
     IOExternalMethodDispatch d = tbl[selector];
@@ -3799,6 +3836,56 @@ extern "C" void *nv_xnu_gpu_os_device(void) { return gNVRMTab.primary(); }
 extern "C" nv_state_t *nv_xnu_gpu_state_at(unsigned index) { NVRM *s = gNVRMTab.at(index); return s ? &s->fNv : NULL; }
 extern "C" void *nv_xnu_gpu_os_device_at(unsigned index) { return gNVRMTab.at(index); }
 extern "C" unsigned nv_xnu_gpu_count(void) { return gNVRMTab.count(); }
+
+void NVRM::gpuCapsPublish(bool refresh)
+{
+    if (!fGpuCapsLock || !fGpuCapsBlock) return;
+    uint8_t *next = (uint8_t *)kern_os_malloc(NVRM_GC_BUF_BYTES);
+    if (!next) return;
+    uint32_t generation = 0, cycle = 0;
+    IOLockLock(fGpuCapsLock);
+    const uint32_t flags = nvrm_gc_rd32(fGpuCapsBlock, NVRM_GC_HO_FLAGS);
+    if (!fGpuCapsStopped && !(flags & NVRM_GC_F_OFF) && (!refresh || (flags & NVRM_GC_F_PRODUCED))) {
+        if (!refresh) fGpuCapsIdentity.gpu_id = fNv.gpu_id;
+        generation = nvrm_gc_rd32(fGpuCapsBlock, NVRM_GC_HO_GENERATION) + 1u;
+        if (!generation) generation = 1;
+        cycle = __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE);
+        nvrm_gc_static_publish(next, &fGpuCapsIdentity, generation, cycle, NV_VERSION_STRING);
+    }
+    IOLockUnlock(fGpuCapsLock);
+    if (generation) {
+        // RM must never run under the selector's leaf lock.
+        nvrm_query_gpu_caps(fNv.gpu_id, next);
+        IOLockLock(fGpuCapsLock);
+        if (!fGpuCapsStopped && cycle == __atomic_load_n(&fPmCycles, __ATOMIC_ACQUIRE) &&
+            nvrm_gc_check(next, nvrm_gc_rd32(next, NVRM_GC_HO_TOTAL)) == NVRM_GC_OK) {
+            for (uint32_t i = 0; i < NVRM_GC_BUF_BYTES; ++i) fGpuCapsBlock[i] = next[i];
+        }
+        IOLockUnlock(fGpuCapsLock);
+    }
+    kern_os_free(next);
+}
+
+IOReturn NVRMUserClient::sGpuCaps(OSObject *target, void *, IOExternalMethodArguments *args)
+{
+    NVRMUserClient *me = OSDynamicCast(NVRMUserClient, target);
+    if (!me || !me->fOwner) return kIOReturnNotAttached;
+    if (args->structureOutputDescriptor || !args->structureOutput ||
+        args->structureOutputSize > NVRM_GC_BUF_BYTES) return kIOReturnNoSpace;
+    NVRM *owner = me->fOwner;
+    if (!owner->fGpuCapsLock || !owner->fGpuCapsBlock) return kIOReturnNoMemory;
+    IOLockLock(owner->fGpuCapsLock);
+    const bool stopped = owner->fGpuCapsStopped;
+    uint32_t bytes = 0;
+    if (!stopped) bytes = nvrm_gc_static_copy(owner->fGpuCapsBlock,
+        (uint8_t *)args->structureOutput, args->structureOutputSize, args->scalarInput[0],
+        (uint32_t)OSAddAtomic(0, &owner->fGpuPm), __atomic_load_n(&owner->fPmCycles, __ATOMIC_ACQUIRE));
+    IOLockUnlock(owner->fGpuCapsLock);
+    if (stopped) return kIOReturnNotAttached;
+    if (!bytes) return kIOReturnNoSpace;
+    args->structureOutputSize = bytes;
+    return kIOReturnSuccess;
+}
 
 // Selectors 4 and 5 handed a caller's buffer to NVKMS as a kernel-space client, which trusts the pointers inside it
 // (flip heads, LUT ramps, clip lists) as kernel addresses: root could make the kernel read and write where it chose.
