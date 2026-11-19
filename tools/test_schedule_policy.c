@@ -1,5 +1,6 @@
 /* test_schedule_policy.c - which surface writes a command buffer publishes before it reports "scheduled", by mode and per
-   surface (two-plane surfaces in their planes' own VRAM included).
+   surface (two-plane surfaces in their planes' own VRAM included), and which processes default to which mode (the
+   Chromium family and, from 3.0.5, the iOS Simulator's GPU processes: on 3.0.4 that arm fails).
    Build and run anywhere:  cc -I plugin tools/test_schedule_policy.c -o /tmp/test_schedule_policy && /tmp/test_schedule_policy */
 #include "nvmtl_schedule_policy.h"
 #include <stdio.h>
@@ -32,6 +33,16 @@ int main(void)
     ARM("Chrome, its helpers, Chromium and Edge publish every surface write first",
         nvmtl_schedule_after_mode(NULL, "Google Chrome") == 1 && nvmtl_schedule_after_mode(NULL, "Google Chrome Helper (GPU)") == 1 &&
         nvmtl_schedule_after_mode(NULL, "Chromium Helper (Renderer)") == 1 && nvmtl_schedule_after_mode(NULL, "Microsoft Edge Helper (GPU)") == 1);
+    ARM("the iOS Simulator's GPU processes (SimMetalHost, SimRenderServer) publish every surface write first",
+        nvmtl_schedule_after_mode(NULL, "SimMetalHost") == 1 && nvmtl_schedule_after_mode(NULL, "SimRenderServer") == 1 &&
+        nvmtl_schedule_after_mode("3", "SimMetalHost") == 3 && nvmtl_schedule_after_mode("3", "SimRenderServer") == 3);
+    ARM("NVMTL_SCHEDULE_SIMULATOR=0 keeps the Simulator's processes on mode 3, as in 3.0.4, and changes no other process",
+        nvmtl_schedule_after_mode_sim(NULL, "SimMetalHost", "0") == 3 && nvmtl_schedule_after_mode_sim(NULL, "SimRenderServer", "0") == 3 &&
+        nvmtl_schedule_after_mode_sim(NULL, "Google Chrome", "0") == 1 && nvmtl_schedule_after_mode_sim(NULL, "WindowServer", "0") == 3 &&
+        nvmtl_schedule_after_mode_sim("1", "SimMetalHost", "0") == 1 && nvmtl_schedule_after_mode_sim(NULL, "SimMetalHost", "1") == 1);
+    ARM("... and only those: a simulated app's own process name or a near miss keeps mode 3",
+        nvmtl_schedule_after_mode(NULL, "Simulator") == 3 && nvmtl_schedule_after_mode(NULL, "SimMetalHostX") == 3 &&
+        nvmtl_schedule_after_mode(NULL, "launchd_sim") == 3 && nvmtl_schedule_after_mode("simulator", "Safari") == 3);
     ARM("WindowServer, Safari, Electron apps and unnamed processes keep mode 3",
         nvmtl_schedule_after_mode(NULL, "WindowServer") == 3 && nvmtl_schedule_after_mode(NULL, "Safari") == 3 &&
         nvmtl_schedule_after_mode(NULL, "Electron") == 3 && nvmtl_schedule_after_mode(NULL, NULL) == 3 && nvmtl_schedule_after_mode("", "") == 3);

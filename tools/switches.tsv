@@ -239,6 +239,7 @@ env	NVMTL_GDQ_RESCAP	dev	unset	2.9	-	unreviewed
 env	NVMTL_GDQ_STATS	diag	unset	2.9	-	unreviewed
 env	NVMTL_GPU_ICB	dev	unset	2.9	-	unreviewed
 env	NVMTL_GSUB_HOSTPTR_LIFT	dev	unset	2.9	-	unreviewed
+env	NVMTL_GSUB_HOST_READS	escape	on (NVMTL_GSUB_HOST_READS=0: a part with any caller copy waits for the worker instead of being submitted ahead, as in 3.0.4)	3.0.5	3.2	A part whose caller copies (newBufferWithBytesNoCopy pages the driver copies) are all buffers it only reads, and that no sealed part may have written, can be submitted ahead of the worker; one that a part may write still holds every later reader. From pull request 524 of the original project.
 env	NVMTL_GSUB_INFLIGHT	setting	unset	2.9	-	Low-latency mode (GPU work queued ahead): How many parts of GPU work may be queued ahead, 1 to 32 (default 16). A low number cuts input lag and can cost frame rate. 
 env	NVMTL_HAZARD	dev	unset	2.9	-	unreviewed
 env	NVMTL_HAZARD_DISPATCH	dev	unset	2.9	-	unreviewed
@@ -419,7 +420,10 @@ env	NVMTL_SASS_TABLELOG	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_TEST_CODE	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_TEST_RECORD	dev	unset	2.9	-	unreviewed
 env	NVMTL_SASS_UPLOADLOG	dev	unset	2.9	-	unreviewed
+env	NVMTL_SCHEDULED_AFTER_SUBMIT	escape	on (NVMTL_SCHEDULED_AFTER_SUBMIT=0: scheduled is reported before the part is handed to the queue, as in 3.0.4)	3.0.5	3.2	A command buffer reports scheduled once the queue has accepted its part and the part's kernel fence is armed, not before the submission, so a scheduled handler that hands a surface to another process runs after something holds it. A command buffer whose first part is empty (one that begins with an event wait) still reports when that part is retired, as in 3.0.4. The worker's report after vkQueueSubmit is from pull request 524 of the original project; the same order in the submit-ahead pass and after the synchronous submit is this tree's.
 env	NVMTL_SCHEDULE_AFTER_SURFACE_WRITES	dev	unset	2.9	-	unreviewed
+env	NVMTL_SCHEDULE_EARLY	escape	on (NVMTL_SCHEDULE_EARLY=0: a command buffer held until its surface writes are published reports scheduled only when it has finished, as in 3.0.4)	3.0.5	3.2	A command buffer held until its surface writes are published reports scheduled as soon as they are, when a later part of it waits for an event (the iOS Simulator waits for one its scheduled handler leads to, and hung). From pull request 524 of the original project.
+env	NVMTL_SCHEDULE_SIMULATOR	escape	on (NVMTL_SCHEDULE_SIMULATOR=0 in the settings file: SimMetalHost and SimRenderServer keep schedule mode 3, as in 3.0.4; no other process changes)	3.0.5	3.2	The iOS Simulator's GPU processes, SimMetalHost and SimRenderServer, publish every surface write before they report scheduled (schedule mode 1, as the Chromium family does), so the simulated screen is not composed from a surface the GPU has not finished. An explicit NVMTL_SCHEDULE_AFTER_SURFACE_WRITES digit still wins. From pull request 524 of the original project (its part P5, which took a token of that setting instead).
 env	NVMTL_SHARED_POOL_VRAM	dev	unset	2.9	-	unreviewed
 env	NVMTL_SHARED_VRAM	dev	unset	2.9	-	unreviewed
 env	NVMTL_SHARED_VRAM_BUDGET_MB	dev	unset	2.9	-	unreviewed
@@ -469,6 +473,7 @@ env	NVMTL_WIT_WAIT_MS	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FILL_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_FREE_OFFMAIN	escape	on in WindowServer (NVMTL_WS_FREE_OFFMAIN=0: a released texture's import of video memory is freed by the thread that releases it, as in 3.0)	3.0.1	3.2	WindowServer frees the video-memory import of a texture it released on a thread of its own, so its compositor does not wait for the resource manager.
 env	NVMTL_WS_FULL	dev	unset	2.9	-	unreviewed
+env	NVMTL_WS_NOCOPY_ONCE	escape	on (NVMTL_WS_NOCOPY_ONCE=0: in WindowServer, a newBufferWithBytesNoCopy range mapped read only and private is copied before each submission and written back after it, as in 3.0.4)	3.0.5	3.2	WindowServer's newBufferWithBytesNoCopy ranges that the GPU cannot import and that are mapped read only, privately and with no file or device behind them are copied once when the buffer is made; the copy back into such pages faulted. From pull request 524 of the original project.
 env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_WAIT_COMPLETION	dev	unset	2.9	-	unreviewed
@@ -1043,6 +1048,8 @@ procname	Discord	internal	-	2.9	-	a branch on the process name; not a user switc
 procname	Electron	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	Google Chrome	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	Microsoft Edge	internal	-	2.9	-	a branch on the process name; not a user switch
+procname	SimMetalHost	internal	-	3.0.5	-	a branch on the process name; not a user switch
+procname	SimRenderServer	internal	-	3.0.5	-	a branch on the process name; not a user switch
 procname	VTDecoderXPCService	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	WindowServer	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user switch

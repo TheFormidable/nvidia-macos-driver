@@ -1257,7 +1257,7 @@ static void nvmtl_host_buffer_release(void *retained)
     return a;
 }
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)s {
-    if (_heap || _subHeap || _hostPtr) return MTLPurgeableStateNonVolatile;
+    if (_heap || _subHeap || _hostPtr || _callerPages) return MTLPurgeableStateNonVolatile;
     MTLPurgeableState prev = nvmtl_purge(&_purge, s);
     nvmtl_purge_track(self, s);
     return prev;
@@ -1298,7 +1298,8 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
                     [h nvmtlReleaseSubAllocation:c]; }
     if (hostDealloc) hostDealloc(hostPtr, hostLen); }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; if (_callerPages) return _callerPages;
+    return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
@@ -1719,6 +1720,12 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (_i.bpp && rowBytes <= surfaceBytes
         && IOSurfaceGetHeightOfPlane(_surf, (uint32_t)_plane) >= _i.h
         && bpr >= rowBytes && inAlloc) return YES;
+    if (!b0) {
+        // a protected surface (DRM video): the system gives this process no CPU mapping of it at all
+        static int saidMap; if (saidMap++ < 4) nvlog("G13 surface %p plane %lu NOT synced: the surface has no CPU mapping (a protected surface)",
+            (void *)_surf, (unsigned long)_plane);
+        return NO;
+    }
     if (_i.bpp && !inAlloc) {
         static int saidAlloc; if (saidAlloc++ < 4) nvlog("G13 surface %p plane %lu NOT synced: %u rows of %zu B from plane offset %zu pass the surface's %zu-byte allocation",
             (void *)_surf, (unsigned long)_plane, _i.h, bpr, (size_t)(bp - b0), alloc);
@@ -1951,6 +1958,24 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
         }
     });
 }
+// A protected surface (DRM video) has no CPU mapping, so it can never be copied out, and its publication used to fail
+// the whole command buffer ("Could not publish event segment writes"). Where its pixels live in the surface's own VRAM
+// (_vramOn) nothing needs the CPU: the VRAM is marked newest in the kernel as for any other surface, after the GPU copy
+// of a tiled image into it. From pull request 524 of the original project (P3). That pull request also returned YES
+// for a protected surface drawn through a private image, which would leave the surface's old pixels in place with no
+// message: such a surface still fails here, logged as a protected one, and so does one whose VRAM mark was refused.
+// Each outcome is logged the first four times and every 5000th: a protected video publishes every frame.
+enum { NVMTL_PROT_GPU, NVMTL_PROT_PRIVATE, NVMTL_PROT_REFUSED };
+static void nvmtl_surface_protected_note(NVMTLTexture *r, int outcome) {
+    static const char *const what[] = {
+        "published on the GPU side, its VRAM marked newest",
+        "drawn through a private image, which only the CPU can publish - NOT published, the command buffer fails",
+        "the kernel refused to mark its VRAM newest and there is no CPU copy to fall back to - NOT published, the command buffer fails" };
+    static _Atomic unsigned n[3]; const unsigned k = atomic_fetch_add(&n[outcome], 1);
+    if (k < 4 || (k + 1) % 5000 == 0)
+        nvlog("surface-out: surface %u %ux%u has no CPU mapping (a protected surface): %s (#%u)", (unsigned)IOSurfaceGetID(r->_surf),
+              r->_i.w, r->_i.h, what[outcome], k + 1);
+}
 // dirtied: the commit already marked this surface's shared VRAM newest in the kernel (WindowServer, with an accelerator
 // whose page-off waits for the GPU). It is marked again in case a CPU lock paged it off since, but only if the accelerator
 // lock is free: a page-off waiting for another surface's pending GPU write holds that lock until the write is released,
@@ -1960,7 +1985,9 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
-    if (![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
+    const BOOL noCpu = !IOSurfaceGetBaseAddress(r->_surf);
+    if (noCpu && !r->_vramOn) { nvmtl_surface_protected_note(r, NVMTL_PROT_PRIVATE); return NO; }
+    if (!noCpu && ![r nvmtlSurfaceCopyable]) { nvtrace("SURFOUT surf %u %ux%u NOT copyable", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h); return NO; }
     nvtrace("SURFOUT surf %u %ux%u vramOn %d t=%llu", (unsigned)IOSurfaceGetID(r->_surf), r->_i.w, r->_i.h, (int)r->_vramOn,
             (unsigned long long)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000));
     // a tiled image is published into the VRAM on the GPU first; the VRAM is marked newest only once it holds the pixels
@@ -1976,8 +2003,10 @@ static void nvmtl_surface_remark_later(NVMTLTexture *r, uint32_t seed) {
         nvmtl_vram_tags_follow(r->_surf, r->_plane, marked, before, seed);
         if (dirtied && marked > 0) nvmtl_surface_remark_later(r, seed);
         static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
+        if (noCpu) nvmtl_surface_protected_note(r, NVMTL_PROT_GPU);
         return YES;
     }
+    if (noCpu) { nvmtl_surface_protected_note(r, NVMTL_PROT_REFUSED); return NO; }
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
     uint32_t lockSeed = 0;

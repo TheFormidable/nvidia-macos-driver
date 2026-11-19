@@ -35,7 +35,7 @@ typedef struct { void *map; size_t size; } Buffer;
 - (BOOL)isWrittenObject:(id)object { return YES; }
 @end
 @interface NVMTLBuffer : NSObject { @public
-    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc; BOOL _texSeen;
+    void *_hostPtr; size_t _hostLen; Buffer _b, _shadow; unsigned _syncOut, _zshadow; void *_swc; BOOL _texSeen, _gpuWritten;
 } @end
 @implementation NVMTLBuffer @end
 @interface NVMTLTexture : NSObject { @public
@@ -144,8 +144,14 @@ static void nvmtl_vk_fence_close(uint64_t cookie, uint32_t sid) { if (cookie && 
     BOOL waitFolded, aheadEmpty, claimed; int aheadFailed; unsigned encoders;
     nvmtl_inflight *inflight;
     NSArray<NVMTLBuffer *> *copyInputs; BOOL copyInputsPrepared, hasHostCopies;
+    NSArray<NVMTLBuffer *> *hostReads;
 } @end
 @implementation NVMTLSubmissionPart @end
+// the three switches of the submission code (NVMTLEventSync.m), at their defaults; these fixtures' resources are plain
+// sets, so a caller copy always holds (tools/test_host_reads_ahead.py drives the read-only case and the order of the
+// scheduled report)
+static BOOL nvmtl_gsub_host_reads_on(void) { return YES; }
+static BOOL nvmtl_scheduled_after_submit_on(void) { return YES; }
 @interface NVMTLTexture (Publication)
 - (BOOL)nvmtlSurfaceOut;
 - (BOOL)nvmtlSurfaceOutDirtied:(BOOL)dirtied;
@@ -164,6 +170,7 @@ static void nvmtl_vk_fence_close(uint64_t cookie, uint32_t sid) { if (cookie && 
 - (BOOL)nvmtlSubmitAhead;
 - (BOOL)nvmtlAdvancePart;
 - (void)nvmtlMarkScheduled;
+- (void)nvmtlScheduledAfterPublished;
 - (void)nvmtlCollectDeviceTiming:(Commands *)commands;
 - (void)nvmtlFinishExecution:(NSError *)error;
 @end
@@ -211,6 +218,7 @@ static int nvmtl_surface_out_planes(NSArray *roots) { (void)roots; abort(); }
 /*WS*/
 @implementation NVMTLCommandBuffer
 - (void)nvmtlMarkScheduled { scheduled++; }
+- (void)nvmtlScheduledAfterPublished {}
 - (void)nvmtlCollectDeviceTiming:(Commands *)commands {}
 - (void)nvmtlFinishExecution:(NSError *)error { _cbError=error; _executionDone=YES; nvmtl_ws_mark_ready(self); }
 """
