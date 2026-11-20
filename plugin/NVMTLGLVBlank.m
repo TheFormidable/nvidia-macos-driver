@@ -21,6 +21,7 @@
 #include <objc/runtime.h>
 #include <os/lock.h>
 #include <stdatomic.h>
+#include "nvmtl_gl_diag.h"
 
 // QuartzCore's image queue calls synchronize makes, and a VBL info entry as CAImageQueueGetVBLInfo copies it out: the
 // vblank's host time, the same time in seconds, and a rate (1)
@@ -53,6 +54,24 @@ static uint64_t nvglvbl_mach_from_seconds(double s)
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return (uint64_t)(s * 1e9 * tb.denom / tb.numer);
+}
+
+static uint64_t nvglvbl_us_from_mach(uint64_t t)
+{
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    return (uint64_t)((double)t * tb.numer / tb.denom / 1e3);
+}
+
+// The first decision of a process, once: which way it waits, and the periods it went by. Nothing at install, which
+// every process that loads AppKit does.
+static void nvglvbl_say(nvglvbl_decision d, uint32_t n, uint64_t period, uint64_t t0, uint64_t t1)
+{
+    static atomic_bool said;
+    if (atomic_load_explicit(&said, memory_order_relaxed) || atomic_exchange(&said, true)) return;
+    char t[400];
+    nvglvbl_text(t, sizeof t, d, n, nvglvbl_us_from_mach(period), t1 > t0 ? nvglvbl_us_from_mach(t1 - t0) : 0, getprogname());
+    nvlog_notice("%s", t);
 }
 
 // the refresh period (mach time) of the display window is on, 0 when unknown
@@ -114,8 +133,10 @@ static void nvglvbl_synchronize(id self, SEL cmd)
     const uint64_t period = nvglvbl_window_period(*(uint32_t *)(surface + gGLVBL.window_ivar));
     // the entries are the window server's vblank plus 1..n times the spacing CoreAnimation took for the period: with a
     // longer spacing than the display's period, the next vblank is that vblank plus a whole number of periods
-    if (n >= 2 && n <= NVGLVBL_ENTRIES && period && info[1].host_time > info[0].host_time &&
-        period < info[1].host_time - info[0].host_time) {
+    const uint64_t t0 = n >= 2 ? info[0].host_time : 0, t1 = n >= 2 ? info[1].host_time : 0;
+    const nvglvbl_decision decision = nvglvbl_decide(n, NVGLVBL_ENTRIES, period, t0, t1);
+    nvglvbl_say(decision, n, period, t0, t1);
+    if (decision == NVGLVBL_CORRECTED) {
         const uint64_t vblank = info[0].host_time - (info[1].host_time - info[0].host_time);
         const uint64_t now = mach_absolute_time();
         mach_wait_until(vblank + (now > vblank ? (now - vblank) / period + 1 : 1) * period);
