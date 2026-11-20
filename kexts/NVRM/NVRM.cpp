@@ -454,6 +454,34 @@ SYSCTL_STRING(_debug, OID_AUTO, nvrm_switches, CTLFLAG_RD, gNvSwitches.names, si
 SYSCTL_INT(_debug, OID_AUTO, nvrm_switches_set, CTLFLAG_RD, &gNvSwitches.set, 0, "driver boot arguments set beside the install line");
 SYSCTL_INT(_debug, OID_AUTO, nvrm_switches_nondefault, CTLFLAG_RD, &gNvSwitches.nondefault, 0,
            "of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install)");
+// Whether write-combined mappings are write-combined on this machine (nvrm_pat.h): a kernel patch common on AMD machines
+// rewrites the CPU's page attribute table so that they are uncached (uncached-minus: unless the firmware's MTRRs mark
+// the range write-combining), and every CPU write through BAR1 is then one bus transaction per store. Read once at start on the CPU that runs startGPU, with rdmsr_carefully (a missing MSR returns
+// non-zero instead of faulting), before the three sysctls are registered; never written again, and nothing in the
+// driver reads it back. Every CPU runs the same table code at start and wake, so one CPU's value stands for all.
+#include "nvrm_pat.h"
+extern "C" int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);   // i386/proc_reg.h; com.apple.kpi.unsupported
+static uint64_t gNvPat;
+static int gNvPatWc = NVRM_PAT_WC_UNKNOWN;
+static char gNvPatWhy[192] = "not read yet";
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pat, CTLFLAG_RD | CTLFLAG_LOCKED, (int64_t *)&gNvPat, "IA32_PAT of the CPU that started NVRM (0 if not read)");
+SYSCTL_INT(_debug, OID_AUTO, nvrm_pat_wc, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvPatWc, 0,
+           "1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known");
+SYSCTL_STRING(_debug, OID_AUTO, nvrm_pat_why, CTLFLAG_RD | CTLFLAG_LOCKED, gNvPatWhy, sizeof gNvPatWhy,
+              "the page attribute table verdict in words");
+static void nvrmPatRead(void)
+{
+    uint32_t lo = 0, hi = 0;
+    const int ok = rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) == 0;
+    struct nvrm_pat_verdict v;
+    gNvPat = ok ? ((uint64_t)hi << 32 | lo) : 0;
+    nvrm_pat_decode(gNvPat, ok, &v);
+    gNvPatWc = v.wc;
+    // The table in hex leads the string: sysctl prints debug.nvrm_pat (a quad) in decimal.
+    snprintf(gNvPatWhy, sizeof gNvPatWhy, "0x%016llx, %s: %s", (unsigned long long)gNvPat, v.table, v.words);
+    LOG("page attribute table 0x%016llx (entry 6 %s, entry 2 %s; %s): %s", (unsigned long long)gNvPat,
+        ok ? nvrm_pat_type_name(v.pa6) : "-", ok ? nvrm_pat_type_name(v.pa2) : "-", v.table, v.words);
+}
 extern "C" int nv_xnu_pm_enter(void)
 {
     if (!gNvPmGate || current_thread() == gNvPmOwner) return 0;
@@ -1062,6 +1090,9 @@ bool NVRM::startGPU(IOService *provider)
             nvrm_switch_report_build(&gNvSwitches, nvrm_switch_names, NVRM_SWITCH_COUNT, nvrmSwitchPresent);
             sysctl_register_oid(&sysctl__debug_nvrm_switches); sysctl_register_oid(&sysctl__debug_nvrm_switches_set);
             sysctl_register_oid(&sysctl__debug_nvrm_switches_nondefault);
+            nvrmPatRead();
+            sysctl_register_oid(&sysctl__debug_nvrm_pat); sysctl_register_oid(&sysctl__debug_nvrm_pat_wc);
+            sysctl_register_oid(&sysctl__debug_nvrm_pat_why);
             if (gNvSwitches.set)
                 LOG("boot arguments beside the install line: %d (%s%s), %d not needed by an ordinary install",
                     gNvSwitches.set, gNvSwitches.names, gNvSwitches.truncated ? " ..." : "", gNvSwitches.nondefault);
