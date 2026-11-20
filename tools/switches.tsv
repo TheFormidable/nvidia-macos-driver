@@ -921,9 +921,9 @@ sysctl	debug.nvrm_pageoff_coalesced	diag	read-only	2.9	-	page-offs copied per ru
 sysctl	debug.nvrm_pageoff_pages	diag	read-only	2.9	-	pages in the last page-off
 sysctl	debug.nvrm_pageoff_perpage	diag	read-only	2.9	-	page-offs copied per 4 KB page
 sysctl	debug.nvrm_pageoff_runs	diag	read-only	2.9	-	runs in the last page-off
-sysctl	debug.nvrm_pat	diag	read-only	3.0.5	-	IA32_PAT of the CPU that started NVRM (0 if not read)
-sysctl	debug.nvrm_pat_wc	diag	read-only	3.0.5	-	1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known
-sysctl	debug.nvrm_pat_why	diag	read-only	3.0.5	-	the page attribute table verdict in words
+sysctl	debug.nvrm_pat	diag	read-only	3.0.6	-	IA32_PAT of the CPU that started NVRM (0 if not read)
+sysctl	debug.nvrm_pat_wc	diag	read-only	3.0.6	-	1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known
+sysctl	debug.nvrm_pat_why	diag	read-only	3.0.6	-	the page attribute table verdict in words
 sysctl	debug.nvrm_physmap	diag	read-only	2.9	-	batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused
 sysctl	debug.nvrm_pm_waited	diag	read-only	2.9	-	RM calls that waited for a GPU resume
 sysctl	debug.nvrm_pvchain	diag	read-only	2.9	-	batch 59b: do live RM buffers have a second pv mapper chained on qlink (read-only)

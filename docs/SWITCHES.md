@@ -1021,9 +1021,9 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_pageoff_pages` | diag | read-only | 2.9 | - | pages in the last page-off | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_perpage` | diag | read-only | 2.9 | - | page-offs copied per 4 KB page | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_runs` | diag | read-only | 2.9 | - | runs in the last page-off | kexts/NVRM/nvrm_surfshare.cpp |
-| `debug.nvrm_pat` | diag | read-only | 3.0.5 | - | IA32_PAT of the CPU that started NVRM (0 if not read) | kexts/NVRM/NVRM.cpp |
-| `debug.nvrm_pat_wc` | diag | read-only | 3.0.5 | - | 1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known | kexts/NVRM/NVRM.cpp |
-| `debug.nvrm_pat_why` | diag | read-only | 3.0.5 | - | the page attribute table verdict in words | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat` | diag | read-only | 3.0.6 | - | IA32_PAT of the CPU that started NVRM (0 if not read) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat_wc` | diag | read-only | 3.0.6 | - | 1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat_why` | diag | read-only | 3.0.6 | - | the page attribute table verdict in words | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_physmap` | diag | read-only | 2.9 | - | batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused | kexts/NVRM/os-xnu2.cpp |
 | `debug.nvrm_pm_waited` | diag | read-only | 2.9 | - | RM calls that waited for a GPU resume | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_pvchain` | diag | read-only | 2.9 | - | batch 59b: do live RM buffers have a second pv mapper chained on qlink (read-only) | kexts/NVRM/os-xnu2.cpp |
