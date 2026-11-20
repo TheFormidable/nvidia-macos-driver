@@ -65,6 +65,7 @@ static nvmtl_translate_fn xlate;
 #include "nvmtl_pretranslate.h"
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_cache_file.h"
+#include "nvmtl_fc_refusal.h"
 int nvmtl_vk_lost(void);
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
@@ -1752,16 +1753,22 @@ static NSData *nvmtl_fc_via_spec(NSString *ll, NSString *stage, const uint32_t *
     if (xlate_free) xlate_free(out, out_len);
     return d;
 }
+// Set by nvmtl_translate_with_fc only where the translator itself refused the request, the one outcome that the same
+// request always gets again (nvmtl_fc_refusal.h); cleared on entry, so every other result of the call leaves it 0.
+static __thread int g_fc_refused;
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
+    g_fc_refused = 0;
     if (!nvmtl_xlate_ready()) { if (err) *err = @"the AIR->SPIR-V translator is not loaded"; return nil; }
     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
     nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
+    BOOL viaSpecTried = NO;
     if (n > 0 && nvmtl_fc_spec_on() && xlate_spec && xlate_spec_apply) {
+        viaSpecTried = YES;
         NSString *why = nil;
         NSData *viaSpec = nvmtl_fc_via_spec(ll, stage, idx, sizes, payloads, n, &why);
         if (viaSpec) return viaSpec;
@@ -1775,11 +1782,22 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
         // replayed offline against the translator; nothing is written unless the variable is set.
         nvmtl_fc_dump(getenv("NVMTL_FC_FAIL_DUMP"), ll, stage, idx, sizes, payloads, n, e);
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
+        g_fc_refused = !viaSpecTried;
         return nil;
     }
     NSData *d = [NSData dataWithBytes:out length:out_len];
     if (xlate_free) xlate_free(out, out_len);
     return d;
+}
+// Variant refusals, kept beside the entry refusals in gTranslateFailures under the variant's own cache key (an fc1 name,
+// never an entry's), at most NVMTL_FC_REFUSALS_MAX of them.
+static _Atomic unsigned long gFcRefusalsKept, gFcRefusedAgain;
+static void nvmtl_fc_refusal_note(NSString *key, NSString *why) {
+    @synchronized([NSProcessInfo processInfo]) {
+        if (!nvmtl_fc_refusal_keep(1, 1, key != nil, gFcRefusalsKept) || gTranslateFailures[key]) return;
+        if (!gTranslateFailures) gTranslateFailures = [NSMutableDictionary new];
+        gTranslateFailures[key] = why; gFcRefusalsKept++;
+    }
 }
 
 /* Function-constant warm-up.
@@ -2040,8 +2058,25 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
             return hit;
         }
     }
+    // Refused before: the translator gives the same request the same refusal (nvmtl_fc_refusal.h), so it is not asked
+    // again. Looked up only after the memory, the disk and the warm-up have missed, so a file another process stored for
+    // this key is still read first.
+    NSString *refusedBefore = fcCacheOn ? nvmtl_translate_failure_for(memoKey) : nil;
+    if (nvmtl_fc_refusal_use(fcCacheOn, refusedBefore != nil)) {
+        if (err) *err = refusedBefore;
+        const unsigned long k = atomic_fetch_add(&gFcRefusedAgain, 1) + 1;
+        if (!(k & (k - 1))) nvlog("fc cache: %s was refused before with these constants - the same refusal, not translated again [%lu so far]: %s",
+                                  name.UTF8String, k, refusedBefore.UTF8String);
+        nvmtl_fc_note_lookup();
+        return nil;
+    }
     gFcMiss++;
-    NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, err);
+    NSString *why = nil;
+    NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, &why);
+    const int refused = !result && g_fc_refused;
+    if (!result && err) *err = why;
+    if (!result && nvmtl_fc_refusal_keep(refused, fcCacheOn, memoKey != nil, gFcRefusalsKept))
+        nvmtl_fc_refusal_note(memoKey, why ?: @"specialization failed");
     if (result && fcCacheOn && path && nvmtl_fcwarm_on() &&
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 >= (uint64_t)NVMTL_FCWARM_RECORD_MS * 1000000ull)
         nvmtl_fcwarm_record(airDigest, json);

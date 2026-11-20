@@ -6669,6 +6669,18 @@ static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t
     else *(nvk_pipeline *)out = pending;
     return result;
 }
+#include "nvmtl_cvar_seed.h"
+// NVMTL_CVAR_SEED=0: a kernel's creation-time pipeline is compiled unspecialized and its variant table starts empty, as in
+// 3.0.5, so the first dispatch of any threadgroup size compiles the kernel again. Otherwise it is compiled for the
+// translator's default size and kept as that size's variant (nvmtl_cvar_seed.h).
+static int nvmtl_cvar_seed_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_CVAR_SEED"); on = !(e && e[0] == '0');
+        nvlog("compute: a kernel's creation-time pipeline %s (NVMTL_CVAR_SEED=%s)",
+              on ? "is compiled for its default threadgroup size and kept as that size's variant" : "is compiled unspecialized and never dispatched",
+              e ? e : "unset"); }
+    return on;
+}
 static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out)
 {
     if (nvmtl_heap_binding_refused(cs, n, "compute")) return -1;
@@ -6706,11 +6718,25 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES };
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2c, 1, &pcr };
     VKCK(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout(compute)");
+    // The specialization below is the one nvmtl_compute_variant gives a dispatch of size d, and d is the module's own
+    // default, so this compiles the same kernel the unspecialized create did and is also that size's variant.
+    uint32_t d[3], sd[4];
+    const uint32_t *wl = g_lim.maxComputeWorkGroupSize;
+    const int seed = nvmtl_cvar_seed_on() && nvmtl_cvar_seed_size(cs, n / 4, d)
+                  && nvmtl_cvar_size_fits(d, wl, g_lim.maxComputeWorkGroupInvocations);
+    if (seed) nvmtl_cvar_spec_data(d, out->lin, wl, sd);
+    VkSpecializationMapEntry me[4] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } };
+    VkSpecializationInfo si = { 4, me, 16, sd };
     VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", seed ? &si : NULL },
         out->layout, VK_NULL_HANDLE, -1 };
     VKCK(nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &out->pipe), "vkCreateComputePipelines");
     out->mod = mod;
+    // Last, after every step that can fail: nvmtl_failed_pipeline does not free the table. The pipeline is not published
+    // yet, so no lock is needed; nvmtl_vk_pipeline_destroy destroys var[0] and p->pipe once (nvmtl_destroy_pipe_once).
+    if (seed && (out->var = calloc(NVMTL_NVAR, sizeof *out->var))) {
+        out->capvar = NVMTL_NVAR; memcpy(out->var[0].l, d, sizeof out->var[0].l); out->var[0].pipe = out->pipe; out->nvar = 1;
+    }
     return 0;
 }
 
@@ -6738,7 +6764,19 @@ int nvmtl_vk_tg_reject(const uint32_t l[3], const uint32_t *t, const char *kerne
     }
     return 0;
 }
+// g_var_lock guards every kernel's table of threadgroup-size variants (nvk_pipeline var/nvar/capvar), nothing else.
 static pthread_mutex_t g_var_lock = PTHREAD_MUTEX_INITIALIZER;
+#include "nvmtl_cvar.h"
+// NVMTL_CVAR_PARALLEL=0: a threadgroup-size variant is compiled while g_var_lock is held, as in 3.0.5, so a dispatch of
+// any kernel on another thread waits for that compile. Otherwise it is compiled outside the lock (nvmtl_cvar.h).
+static _Atomic unsigned long long g_cvar_twice;
+static int nvmtl_cvar_parallel_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_CVAR_PARALLEL"); on = !(e && e[0] == '0');
+        nvlog("compute: threadgroup-size variants compile %s (NVMTL_CVAR_PARALLEL=%s)",
+              on ? "outside the variant table's lock" : "under the variant table's lock", e ? e : "unset"); }
+    return on;
+}
 static pthread_mutex_t g_ag_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
 {
@@ -6770,10 +6808,14 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
 {
     if (nvmtl_vk_tg_reject(l, NULL, "(variant)", p->lin)) return VK_NULL_HANDLE;
     if (!p->mod) return (VkPipeline)p->pipe;
-    VkPipeline found = VK_NULL_HANDLE;
+    // p->mod, p->layout and p->lin are written once when the pipeline is created, so only the table needs the lock.
+    const int parallel = nvmtl_cvar_parallel_on();
+    VkPipeline found = VK_NULL_HANDLE; void *winner = NULL;
+    int put = -1; uint32_t had = 0, grown = 0;
     pthread_mutex_lock(&g_var_lock);
-    for (uint32_t i = 0; i < p->nvar; i++) if (!memcmp(p->var[i].l, l, sizeof p->var[i].l)) { found = (VkPipeline)p->var[i].pipe; break; }
+    found = (VkPipeline)nvmtl_cvar_find(p->var, p->nvar, l);
     if (!found) {
+        if (parallel) pthread_mutex_unlock(&g_var_lock);
         const uint32_t *wl = g_lim.maxComputeWorkGroupSize;
         uint32_t sd[4] = { l[0], l[1], l[2], (p->lin && (l[0] > wl[0] || l[1] > wl[1] || l[2] > wl[2])) ? 1u : 0u };
         VkSpecializationMapEntry me[4] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } };
@@ -6782,22 +6824,29 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
             { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
             (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
         VkResult r = nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &cpi, NULL, &found);
+        if (parallel) pthread_mutex_lock(&g_var_lock);
         if (r != VK_SUCCESS) {
             if (found) pvkDestroyPipeline(g_dev, found, NULL);
-            nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r); found = VK_NULL_HANDLE;
+            // Compiled outside the lock, another thread may have kept this size meanwhile; under the lock nobody could.
+            found = parallel ? (VkPipeline)nvmtl_cvar_find(p->var, p->nvar, l) : VK_NULL_HANDLE;
+            if (!found) nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r);
         }
         else {
-            if (p->nvar == p->capvar && p->capvar < NVMTL_NVAR_MAX) {
-                uint32_t cap = p->capvar ? p->capvar * 2 : NVMTL_NVAR;
-                struct nvmtl_cvar *g = realloc(p->var, cap * sizeof *g);
-                if (g) { p->var = g; p->capvar = cap;
-                    if (cap > NVMTL_NVAR) nvlog("vk: cvar1 one kernel now has %u threadgroup-size variants (table grown to %u)", p->nvar, cap); }
-            }
-            if (p->nvar < p->capvar) { memcpy(p->var[p->nvar].l, l, sizeof p->var[p->nvar].l); p->var[p->nvar].pipe = found; p->nvar++; }
-            else { static int said; if (!said++) nvlog("vk: one kernel was dispatched with more than %u threadgroup sizes — variants now leak", p->capvar); }
+            // Compiled outside the lock, the same size may have been put in by another thread meanwhile: its pipeline
+            // stays, and this one, which no command buffer has seen, is destroyed below.
+            had = p->nvar;
+            put = nvmtl_cvar_insert(&p->var, &p->nvar, &p->capvar, l, (void *)found, parallel, NVMTL_NVAR, NVMTL_NVAR_MAX,
+                                    &winner, &grown);
+            if (put == NVMTL_CVAR_FULL) { static int said; if (!said++) nvlog("vk: one kernel was dispatched with more than %u threadgroup sizes — variants now leak", p->capvar); }
         }
     }
     pthread_mutex_unlock(&g_var_lock);
+    if (put == NVMTL_CVAR_GREW) nvlog("vk: cvar1 one kernel now has %u threadgroup-size variants (table grown to %u)", had, grown);
+    if (put == NVMTL_CVAR_TAKEN) {
+        pvkDestroyPipeline(g_dev, found, NULL); found = (VkPipeline)winner;
+        const unsigned long long k = atomic_fetch_add(&g_cvar_twice, 1) + 1;
+        if (!(k & (k - 1))) nvlog("vk: compute variant %ux%ux%u was compiled by two threads at once; one copy kept [%llu so far]", l[0], l[1], l[2], k);
+    }
     return found;
 }
 
