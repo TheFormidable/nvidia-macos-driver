@@ -8109,6 +8109,9 @@ static void nvmtl_late_present(void) {
     static int ws = -1;
     if (ws < 0) ws = (getprogname() && !strcmp(getprogname(), "WindowServer")) ? 1 : 0;
     [self commit];
+    // Outside WindowServer the caller is about to sleep until this command buffer is scheduled: it submits it ahead
+    // itself when it can instead of waiting for nvmtl.ahead to do it (nvmtl_fast_flush.h). The wait below is unchanged.
+    nvmtl_fast_flush_submit(self, ws);
     // nvmtl_ws_kernel_waits: the swap waits for this composite in NVAccel instead (nvmtl_ws_mark_pending at commit)
     if (ws && !nvmtl_ws_kernel_waits()) [self waitUntilCompleted]; else [self waitUntilScheduled];
     return self.status != MTLCommandBufferStatusError;
