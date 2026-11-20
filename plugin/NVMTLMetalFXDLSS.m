@@ -27,6 +27,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
+#include "nvmtl_dlss_views.h"
 
 // The command buffer DLSS records into. A Metal 3 encode passes this driver's NVMTLCommandBuffer; a Metal 4 encode passes
 // an MTL4 command buffer, which hands out the recording it is filling through -nvmtl_recordingCommandBuffer (between
@@ -342,6 +343,7 @@ static id nvmtl_mfx_dlss_rr_make(id descriptor, id device) {
     NSUInteger _inW, _inH, _outW, _outH;
     MTLPixelFormat _fmtColor, _fmtDepth, _fmtMotion, _fmtOutput, _fmtUI;
     id<MTLTexture> _lastColor;      // colorTexture of the previous encode, to tell whether prevColorTexture is the core's history
+    nvmtl_dlss_src _lastSeen;       // the image of that colour texture as the core was handed it
     BOOL _haveHistory, _notedUnmapped, _havePrevVP, _notedScalerMotion;
     simd_float4x4 _prevVP;
     uint32_t _frame;
@@ -400,6 +402,12 @@ static BOOL nvmtl_fg_sizes(MTLFXFrameInterpolatorDescriptor *d, NSUInteger s[4])
 - (NSUInteger)inputHeight { return _inH; }
 - (NSUInteger)outputWidth { return _outW; }
 - (NSUInteger)outputHeight { return _outH; }
+
+// The image DLSS builds its resource from for this texture (a texture view resolves to its parent's image).
+static nvmtl_dlss_src nvmtl_fg_src(NVMTLTexture *t) {
+    nvk_image *i = t ? [t nvi] : NULL;
+    return i ? (nvmtl_dlss_src){ i->img, i->fmt, i->w, i->h, i->samples } : (nvmtl_dlss_src){ 0 };
+}
 
 static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) out[c * 4 + r] = m.columns[c][r]; }
 
@@ -473,15 +481,17 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     nvmtl_fg_copy(a.view_to_clip, haveMat ? p : id4);
 
     int rc = 0;
-    // Prime the core's history with the previous real frame when it has not already seen it as the last encode's colour.
+    // Prime the core's history with the previous real frame when it has not already seen it as the last encode's colour:
+    // neither as the same texture object nor as the same image behind another object (a view of it).
     BOOL reset = _shouldResetHistory;   // a scene cut: the current frame alone starts the history
-    if (!reset && prev && (!_haveHistory || (id)_prevColorTexture != (id)_lastColor)) {
+    if (nvmtl_dlss_fg_prime(reset, prev != nil, _haveHistory, (id)_prevColorTexture == (id)_lastColor,
+                            nvmtl_fg_src(prev), _lastSeen, nvmtl_fg_src(nvmtl_dlss_tex(_lastColor)))) {
         rc = [self evaluate:cb args:a color:prev reset:!_haveHistory];
         if (!rc) nvmtl_retain_resource(cb, prev);
     } else if (!reset && !_haveHistory) reset = YES;   // no previous frame at all: the first frame starts the history
     if (!rc) rc = [self evaluate:cb args:a color:color reset:reset];
-    if (rc) { nvlog("dlss: FG: interpolation was not recorded (output left as it was)"); _haveHistory = NO; return; }
-    _haveHistory = YES; _lastColor = _colorTexture; if (haveMat) { _prevVP = vp; _havePrevVP = YES; }
+    if (rc) { nvlog("dlss: FG: interpolation was not recorded (output left as it was)"); _haveHistory = NO; _lastSeen = (nvmtl_dlss_src){ 0 }; return; }
+    _haveHistory = YES; _lastColor = _colorTexture; _lastSeen = nvmtl_fg_src(color); if (haveMat) { _prevVP = vp; _havePrevVP = YES; }
     nvmtl_retain_resource(cb, color); nvmtl_retain_resource(cb, depth); nvmtl_retain_resource(cb, motion); nvmtl_retain_resource(cb, out);
     if (ui) nvmtl_retain_resource(cb, ui);
     NVMTLTexture *rs = out->_parent ? out->_parent : out;
