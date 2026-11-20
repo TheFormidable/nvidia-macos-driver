@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 38 | 1 | 55 | 405 | 12 |  | 517 |
+| env |  | 6 |  |  | 40 | 1 | 55 | 405 | 12 |  | 519 |
 | bootarg | 4 | 13 | 30 | 21 | 15 |  | 8 | 6 | 2 |  | 99 |
 | sysctl |  | 5 | 4 | 12 |  |  | 376 |  |  |  | 397 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -46,8 +46,10 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_CB_LEAN` | on (NVMTL_CB_LEAN=0: every command buffer makes its two handler dispatch groups up front and every -commandBuffer takes the queue class lock to find the capacity semaphore, as in 3.0.5) | 3.2 | A command buffer makes its scheduled-handler and completed-handler dispatch groups when the first handler of each kind is dispatched, and a queue's capacity semaphore is made with the queue and read without the class lock; Apple's OpenGL renderer makes on the order of a hundred command buffers a frame. |
 | env | `NVMTL_CVAR_PARALLEL` | on (NVMTL_CVAR_PARALLEL=0: a compute kernel's threadgroup-size variant is compiled while the variant table's lock is held, as in 3.0.5) | 3.2 | A compute kernel's threadgroup-size variant is compiled outside the process-wide variant lock and the table is looked at again before the result goes in, so a dispatch of another kernel on another thread does not wait for the compile; two threads that miss the same size at once both compile it and one copy is destroyed. |
 | env | `NVMTL_CVAR_SEED` | on (NVMTL_CVAR_SEED=0: the pipeline newComputePipelineState compiles is unspecialized and the variant table starts empty, as in 3.0.5) | 3.2 | The pipeline newComputePipelineState compiles, so that a kernel NVK cannot build is refused there, is specialized for the kernel's default threadgroup size and kept as that size's variant, so the first dispatch at that size does not compile the kernel a second time; a module whose size is not given by plain SpecId defaults stays unspecialized. |
+| env | `NVMTL_DLSS_FG_SAME_IMAGE` | on (NVMTL_DLSS_FG_SAME_IMAGE=0: Frame Generation records its priming evaluation whenever prevColorTexture is not the very texture object it last saw, as in 3.0.5) | 3.2 | Frame Generation does not record the priming evaluation again when prevColorTexture is another texture (a view) for the image it handed the core at the last encode; only a different image, a reset or a missing history primes. |
 | env | `NVMTL_DROP_REPORT` | on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9) | 3.2 | A command buffer that was dropped while its channel was rebuilt is reported to the application as an error. |
 | env | `NVMTL_DS_SKIP` | on except in WindowServer (NVMTL_DS_SKIP=0: setDepthStencilState applies the state again even when it is the one the encoder last applied, as in 3.0.5) | 3.2 | A render encoder does not apply again a depth-stencil state that is the one it last applied; never in WindowServer. |
+| env | `NVMTL_FC_REFUSAL_MEMO` | on (NVMTL_FC_REFUSAL_MEMO=0: every request for a function-constant variant goes to the translator, so the re-translate FAILED line and the NVMTL_FC_FAIL_DUMP and NVMTL_FC_DUMP_ALL files come back on every repeat, as in 3.0.5) | 3.2 | A function-constant variant the translator refused is remembered for the process and answered with the same refusal without being translated again; the rest of the variant cache does not depend on it (NVMTL_FCCACHE_OFF turns the whole cache off, this memory included). |
 | env | `NVMTL_GL_FAST_FLUSH` | on except in WindowServer (NVMTL_GL_FAST_FLUSH=0: commitAndWaitUntilSubmitted only waits for the submit-ahead thread or the worker, as in 3.0.5) | 3.2 | commitAndWaitUntilSubmitted, which Apple's OpenGL renderer calls at every context flush, runs the submit-ahead step for its own queue on the committing thread, in order up to its own command buffer and with the same decisions, before it waits as before, instead of sleeping until another thread has taken the lock and submitted; never in WindowServer. |
 | env | `NVMTL_GL_WAIT_EVENT` | on (NVMTL_GL_WAIT_EVENT=0: waitUntilComplete of a buffer or texture sleeps 50 us and looks again, as in 3.0.5) | 3.2 | The OpenGL renderer's wait until no command buffer names a buffer or texture any more (waitUntilComplete, from GLDBufferRec::restoreData) sleeps on a condition that the release bringing the count to zero wakes, instead of polling every 50 us; the 10 s limit is the same. |
 | env | `NVMTL_GSUB_HOST_READS` | on (NVMTL_GSUB_HOST_READS=0: a part with any caller copy waits for the worker instead of being submitted ahead, as in 3.0.4) | 3.2 | A part whose caller copies (newBufferWithBytesNoCopy pages the driver copies) are all buffers it only reads, and that no sealed part may have written, can be submitted ahead of the worker; one that a part may write still holds every later reader. From pull request 524 of the original project. |
@@ -285,6 +287,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_DLSS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DLSS_FG` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DLSS_FG_FEATURE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
+| `NVMTL_DLSS_FG_SAME_IMAGE` | escape | on (NVMTL_DLSS_FG_SAME_IMAGE=0: Frame Generation records its priming evaluation whenever prevColorTexture is not the very texture object it last saw, as in 3.0.5) | 3.0.6 | 3.2 | Frame Generation does not record the priming evaluation again when prevColorTexture is another texture (a view) for the image it handed the core at the last encode; only a different image, a reset or a missing history primes. | plugin/NVMTLMetalFXDLSS.m |
 | `NVMTL_DLSS_PRESET` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DLSS_RR` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
 | `NVMTL_DLSS_RR_FEATURE` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_dlss.c |
@@ -311,6 +314,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_FCWARM_OFF` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_FC_DUMP_ALL` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_FC_FAIL_DUMP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
+| `NVMTL_FC_REFUSAL_MEMO` | escape | on (NVMTL_FC_REFUSAL_MEMO=0: every request for a function-constant variant goes to the translator, so the re-translate FAILED line and the NVMTL_FC_FAIL_DUMP and NVMTL_FC_DUMP_ALL files come back on every repeat, as in 3.0.5) | 3.0.6 | 3.2 | A function-constant variant the translator refused is remembered for the process and answered with the same refusal without being translated again; the rest of the variant cache does not depend on it (NVMTL_FCCACHE_OFF turns the whole cache off, this memory included). | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_FC_SPEC` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_FETCH_COPY` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_FETCH_SPLIT_MAX` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
@@ -1175,7 +1179,7 @@ Each of these does nothing unless it is set.
 | `SimMetalHost` | internal | - | 3.0.5 | - | a branch on the process name; not a user switch | plugin/nvmtl_schedule_policy.h |
 | `SimRenderServer` | internal | - | 3.0.5 | - | a branch on the process name; not a user switch | plugin/nvmtl_schedule_policy.h |
 | `VTDecoderXPCService` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
-| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-evwait.patch, nvk/nvk-macos.patch and 7 more |
+| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-evwait.patch, nvk/nvk-macos.patch and 6 more |
 | `mtlprobe` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtlrender` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtltest` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |

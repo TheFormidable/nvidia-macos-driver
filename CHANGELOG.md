@@ -96,12 +96,16 @@ boot argument `nvzink=0` brings that renderer back.
   Vulkan creation takes both and makes its own view. Its content is undefined, as Metal allows, and its layout
   tracking starts at UNDEFINED. At most 32 images and 128 MB are held, 32 MB per image at most. An image not reused
   within about a second is freed at the next completed submit or park. Held memory stays counted as allocated VRAM,
-  and it is the first thing given back when the VRAM gate, an image allocation the kernel refuses, or the residency
-  pager needs room. Placed, pooled, sparse, system-memory, IOSurface, depth, multisample, re-backed and migrated
-  images are never held, and WindowServer never holds any. Way out: NVMTL_TEX_RECYCLE=0 frees every dead texture as
-  before. Checked here with a host model of the cache (tools/test_texrc.c, every mutation of its rules fails it), text
-  checks of the wiring (tools/test_texrc.py), the existing grace and channel-recovery checks, and objccheck. It has
-  not run on a GPU, and no gain has been measured.
+  and it is the first thing given back when room is needed: at the VRAM gate; when the kernel refuses an allocation
+  for an image, a private buffer, a stable-address buffer or a placement heap, each of which is then tried once more;
+  and by the residency pager, before it moves any live texture to system memory. A texture whose grace was released by
+  force, because a command buffer from before its death stayed open too long, is freed and never held. A fault report
+  says when a dead texture's image and memory are held for reuse, and a slot that still names such a texture's
+  destroyed view stays reported as dead after the image is reused. Placed, pooled, sparse, system-memory, IOSurface,
+  depth, multisample, re-backed and migrated images are never held, and WindowServer never holds any. Way out:
+  NVMTL_TEX_RECYCLE=0 frees every dead texture as before. Checked here with a host model of the cache
+  (tools/test_texrc.c, every mutation of its rules fails it), text checks of the wiring (tools/test_texrc.py), the
+  existing grace and channel-recovery checks, and objccheck. It has not run on a GPU, and no gain has been measured.
 - **Finished asynchronous texture uploads are given back at the next upload.** An asynchronous replaceRegion or
   IOSurface upload kept three things until its texture was used again (uploaded again, read back, mapped or
   destroyed): its record, its staging buffer and one of the process's 256 places. A texture uploaded once and then
@@ -110,9 +114,11 @@ boot argument `nvzink=0` brings that renderer back.
   which earlier uploads the GPU has finished. It gives back their places, staging buffers and records, and leaves only
   a small header on each texture. A copy that a GPU fault recovery dropped is still made again at the texture's next
   use. The wait for the previous upload of the same texture is unchanged, and so are the copy's barriers, so animated
-  textures still wait as before. WindowServer does not use this. Way out: NVMTL_ASYNCUP_REAP=0  restores the old
-  lifetime. Checked with host tests (tools/test_up_reap.c, including a three-thread race; tools/test_up_reap.py; the
-  updated tools/test_plugin_defaults_wiring.py) and with the Objective-C check. Not run on a GPU; no gain measured.
+  textures still wait as before. WindowServer gives nothing back early. Way out: NVMTL_ASYNCUP_REAP=0 restores the old
+  lifetime. With the switch at 0, and in WindowServer, an upload's record is still reached through the small header;
+  what is kept and what is waited for is as in 3.0.5. Checked with host tests (tools/test_up_reap.c, including a
+  three-thread race; tools/test_up_reap.py; the updated tools/test_plugin_defaults_wiring.py) and with the Objective-C
+  check. Not run on a GPU; no gain measured.
 - **A draw records less on the CPU: NVK no longer walks 642 empty bindings for every descriptor set, and the plugin
   skips binds the command buffer already holds.** In capture A, 4.2 % of the render thread is in
   nvk_AllocateDescriptorSets, most of it the function's own time. nvk_descriptor_set_create looked for immutable
@@ -150,10 +156,12 @@ boot argument `nvzink=0` brings that renderer back.
   that the translator itself refused was translated again on every request. That refusal is now remembered for the
   process under the variant's cache key, and the same message is returned. A module stored on disk is still read
   first, nothing is remembered with NVMTL_FCCACHE_OFF, at most 4096 refusals are kept, and other failures are not
-  remembered. There is no switch for this last change, because the answer to a request cannot change. Run: new host
-  tests test_cvar.c/.py, test_cvar_seed.c/.py and test_fc_refusal.c/.py, plus the existing tests that read the files
-  touched; objccheck reports 0 new errors and 0 new warnings. Not run: anything on a card or on macOS. No speed gain
-  is measured: in the two captures of the slow game no variant compile and no function-constant translation shows up.
+  remembered. NVMTL_FC_REFUSAL_MEMO=0 sends every request to the translator again, as in 3.0.5: the answer is the
+  same, but the re-translate FAILED line and the NVMTL_FC_FAIL_DUMP and NVMTL_FC_DUMP_ALL files come back on each
+  repeat, and the rest of the variant cache stays on. Run: new host tests test_cvar.c/.py, test_cvar_seed.c/.py and
+  test_fc_refusal.c/.py, plus the existing tests that read the files touched; objccheck reports 0 new errors and 0 new
+  warnings. Not run: anything on a card or on macOS. No speed gain is measured: in the two captures of the slow game
+  no variant compile and no function-constant translation shows up.
 - **Three shader translations that failed on the card are fixed: a sampler picked through call-site attributes, the
   elements of an argument-buffer array of handles, and a loop that switches between two buffers.** These are the rows
   `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk` of the card checks, which failed on an RTX
@@ -211,10 +219,12 @@ boot argument `nvzink=0` brings that renderer back.
   like the texture's main view. Frame Generation also skips its priming evaluation when the previous colour texture is
   a different Metal object (such as a texture view) for the very image it was given at the last encode, since the core
   would be handed the same view again. A stale comment saying Frame Generation is not driven is corrected. Way out:
-  none, since these changes only stop leaks, drop dead entries and leave out an evaluation that would repeat the
-  previous one with the same view. Run: a host test of the cache and the priming decision (tools/test_dlss_views.c),
-  text checks of the wiring (tools/test_dlss_views.py, tools/check_view_grace.py) and the Objective-C check. Not run:
-  DLSS on a card. No performance gain is claimed: DLSS is not part of the measured profile.
+  NVMTL_DLSS_FG_SAME_IMAGE=0 brings back 3.0.5's priming decision, in which only the same texture object counted as
+  already seen, so the core is fed the same sequence of evaluations as before. The table's growth and the dropped
+  views have no switch, since they only stop leaks and drop dead entries. Run: a host test of the cache and the
+  priming decision (tools/test_dlss_views.c), text checks of the wiring (tools/test_dlss_views.py,
+  tools/check_view_grace.py) and the Objective-C check. Not run: DLSS on a card. No performance gain is claimed: DLSS
+  is not part of the measured profile.
 - **The memory table is looked up through an index.** The plugin records every device memory so a fault report can
   name what an address held. Every vkFreeMemory and every image commit looked a memory up by scanning that table
   backwards under g_mm_lock: one step per memory allocated since the one sought, and the whole table for an old heap
@@ -248,16 +258,17 @@ boot argument `nvzink=0` brings that renderer back.
   patch that lets Apple's OpenGL renderer use the last vertex as provoking vertex. It accepts only the renderer table
   of macOS 15.8.1, and on any other build it quietly left the renderer rewriting the index buffer of every indexed
   draw. The second is the GL vblank wait correction, which logged neither which branch a frame took nor the periods it
-  used. A process that loads Apple's renderer now writes one line naming the outcome: patched, set by Apple, profile
-  differs (with its 20 bytes and the macOS build), no profile symbol, page not writable, or not patched because the
-  Vulkan device has no last-vertex provoking. The first vblank wait of a process writes one line naming its branch,
-  its entry count, the display's period and CoreAnimation's spacing. Find them with `log show --last 1d --style
-  compact --predicate 'eventMessage CONTAINS "GL provoking vertex"'` and `log show --last 1d --style compact
-  --predicate 'eventMessage CONTAINS "GL vblank wait"'`. Nothing else changes: the patch accepts the same table and
-  writes in the same cases, and WindowServer registers what it did before. The vblank branch comes from the same rule
-  as before, which a host test checks over an edge grid. There is no switch, because this is logging only. Run:
-  tools/test_gl_diag.c and tools/test_gl_diag.py (new), the existing tests that read these files, and objccheck (0
-  new). Not run: anything on a Mac or a card. No gain is claimed; these lines provide the data a later decision needs.
+  used. A process that loads Apple's renderer on a device with last-vertex provoking now writes one line naming the
+  outcome: patched, set by Apple, profile differs (with its 20 bytes and the macOS build), no profile symbol, or page
+  not writable. On a device without last-vertex provoking nothing is registered and no line is written, as in 3.0.5.
+  The first vblank wait of a process writes one line naming its branch, its entry count, the display's period and
+  CoreAnimation's spacing. Find them with `log show --last 1d --style compact --predicate 'eventMessage CONTAINS "GL
+  provoking vertex"'` and `log show --last 1d --style compact --predicate 'eventMessage CONTAINS "GL vblank wait"'`.
+  Nothing else changes: the patch accepts the same table and writes in the same cases, and the dyld callback is
+  registered exactly when 3.0.5 registered it. The vblank branch comes from the same rule as before, which a host test
+  checks over an edge grid. There is no switch, because this is logging only. Run: tools/test_gl_diag.c and
+  tools/test_gl_diag.py (new), the existing tests that read these files, and objccheck (0 new). Not run: anything on a
+  Mac or a card. No gain is claimed; these lines provide the data a later decision needs.
 
 ### The ways back
 
@@ -279,8 +290,12 @@ the code path is the one of 3.0.5.
 - `NVMTL_DS_SKIP=0`: a repeated `setDepthStencilState` is applied again.
 - `NVMTL_CVAR_PARALLEL=0`: a compute variant is compiled under the variant table's lock.
 - `NVMTL_CVAR_SEED=0`: the creation-time compute pipeline is unspecialized and thrown away.
+- `NVMTL_FC_REFUSAL_MEMO=0`: a refused function-constant variant is not remembered; every request goes to the
+  translator, and its FAILED line and dump files are written on each repeat.
 - `NVMTL_RES2_NOWAIT=0`: a thread refused video memory waits for the pager (30 ms and 16 ms, and the 250 ms pause),
   and the three Private buffers without a fallback are refused.
+- `NVMTL_DLSS_FG_SAME_IMAGE=0`: Frame Generation records its priming evaluation whenever the previous colour texture
+  is not the very object it last saw.
 - `NVMTL_ARGBUF_ARRAYS=0`: an argument-buffer array of handles gets one field, its first element.
 - `NVMTL_XLATE_ADDR_RETRY=0`: a module refused for a select between two buffer roots stays refused. The plugin then
   adds `-ar0` to its shader cache tag, so the two modes never share a cached module.
@@ -292,10 +307,11 @@ whatever they say.
 No switch: the NVK patch `nvk/nvk-desc-alloc.patch` (a new descriptor set comes out exactly as before; leaving the
 patch out of the chain in `build/build_nvk.sh` restores the walk), the single resource set per command buffer, the
 ShaderWrite census flag, the pipeline state's function ivars and the embedded-sampler short-circuit, the memory
-table's index, the remembered function-constant refusals (`NVMTL_FCCACHE_OFF=1`, not new, still turns that cache
-off), the DLSS view table and the views dropped with their image, the sampler found through call-site attributes in
-the translator (only modules that were refused change), and the three diagnostics (`debug.nvrm_pat`,
-`debug.nvrm_pat_wc` and `debug.nvrm_pat_why`, read-only, and the two OpenGL log lines), which decide nothing.
+table's index, the growth of the DLSS view table and the views dropped with their image, what the texture recycle
+cache gives back and when (it acts only on that cache, which `NVMTL_TEX_RECYCLE=0` leaves empty), the sampler found
+through call-site attributes in the translator (only modules that were refused change), and the three diagnostics
+(`debug.nvrm_pat`, `debug.nvrm_pat_wc` and `debug.nvrm_pat_why`, read-only, and the two OpenGL log lines), which
+decide nothing.
 
 ### What ran where
 

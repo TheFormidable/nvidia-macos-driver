@@ -197,6 +197,7 @@ env	NVMTL_DISPATCH_WITNESS	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS_FG	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS_FG_FEATURE	dev	unset	2.9	-	unreviewed
+env	NVMTL_DLSS_FG_SAME_IMAGE	escape	on (NVMTL_DLSS_FG_SAME_IMAGE=0: Frame Generation records its priming evaluation whenever prevColorTexture is not the very texture object it last saw, as in 3.0.5)	3.0.6	3.2	Frame Generation does not record the priming evaluation again when prevColorTexture is another texture (a view) for the image it handed the core at the last encode; only a different image, a reset or a missing history primes.
 env	NVMTL_DLSS_PRESET	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS_RR	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS_RR_FEATURE	dev	unset	2.9	-	unreviewed
@@ -223,6 +224,7 @@ env	NVMTL_FCCACHE_OFF	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVMTL_FCWARM_OFF	dev	unset (the path is on)	2.9	-	unreviewed
 env	NVMTL_FC_DUMP_ALL	diag	unset	2.9	-	unreviewed
 env	NVMTL_FC_FAIL_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_FC_REFUSAL_MEMO	escape	on (NVMTL_FC_REFUSAL_MEMO=0: every request for a function-constant variant goes to the translator, so the re-translate FAILED line and the NVMTL_FC_FAIL_DUMP and NVMTL_FC_DUMP_ALL files come back on every repeat, as in 3.0.5)	3.0.6	3.2	A function-constant variant the translator refused is remembered for the process and answered with the same refusal without being translated again; the rest of the variant cache does not depend on it (NVMTL_FCCACHE_OFF turns the whole cache off, this memory included).
 env	NVMTL_FC_SPEC	dev	unset	2.9	-	unreviewed
 env	NVMTL_FETCH_COPY	dev	unset	2.9	-	unreviewed
 env	NVMTL_FETCH_SPLIT_MAX	dev	unset	2.9	-	unreviewed
