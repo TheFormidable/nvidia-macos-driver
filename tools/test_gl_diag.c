@@ -32,8 +32,7 @@ int main(void)
     int quiet = 1, found = 1, prog_named = 1;
     for (int p = 0; p < 4; p++) {
         for (int o = 0; o < NVMTL_GL_CAPS_OUTCOMES; o++) {
-            nvmtl_gl_caps_text(t[o], sizeof t[o], (nvmtl_gl_caps_outcome)o, o == NVMTL_GL_CAPS_NO_SYMBOL ||
-                               o == NVMTL_GL_CAPS_NO_FEATURE ? NULL : k1581, 1, progs[p], "25G342");
+            nvmtl_gl_caps_text(t[o], sizeof t[o], (nvmtl_gl_caps_outcome)o, o == NVMTL_GL_CAPS_NO_SYMBOL ? NULL : k1581, 1, progs[p], "25G342");
             quiet &= notice_only(t[o]);
             found &= strstr(t[o], "GL provoking vertex: ") == t[o];
             prog_named &= strstr(t[o], progs[p] ? progs[p] : " in ? ") != NULL;
@@ -46,7 +45,7 @@ int main(void)
     int distinct = 1;
     for (int a = 0; a < NVMTL_GL_CAPS_OUTCOMES; a++)
         for (int b = a + 1; b < NVMTL_GL_CAPS_OUTCOMES; b++) distinct &= strcmp(nvmtl_gl_caps_what(a), nvmtl_gl_caps_what(b)) != 0;
-    arm("the six outcomes read differently", distinct && NVMTL_GL_CAPS_OUTCOMES == 6);
+    arm("the five outcomes read differently", distinct && NVMTL_GL_CAPS_OUTCOMES == 5);
 
     char line[400];
     nvmtl_gl_caps_text(line, sizeof line, NVMTL_GL_CAPS_DIFFERS, k1581, 0, "java", "25G342");
@@ -61,8 +60,6 @@ int main(void)
     arm("kr is shown only where vm_protect refused the page", strstr(line, "kr") == NULL);
     nvmtl_gl_caps_text(line, sizeof line, NVMTL_GL_CAPS_NO_SYMBOL, NULL, 0, "java", "25G342");
     arm("without a table there are no bytes to show", strstr(line, "(NVIDIA profile none)") != NULL);
-    nvmtl_gl_caps_text(line, sizeof line, NVMTL_GL_CAPS_NO_FEATURE, NULL, 0, "java", "25G342");
-    arm("a device without last-vertex provoking is named as such", strstr(line, "no last-vertex provoking") != NULL);
     char small[16]; memset(small, 'x', sizeof small);
     nvmtl_gl_caps_text(small, sizeof small, NVMTL_GL_CAPS_DIFFERS, k1581, 0, "java", "25G342");
     arm("a short buffer is cut and still ends", memchr(small, 0, sizeof small) != NULL);

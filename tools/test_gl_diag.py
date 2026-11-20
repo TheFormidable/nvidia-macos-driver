@@ -5,8 +5,9 @@ vblank rule are checked by tools/test_gl_diag.c).
 - nvmtl_gl_caps_patch (plugin/NVMTLGL.m): every return after the renderer's path matched goes through
   nvmtl_gl_caps_say, and so does the end of the function, so a process that loaded Apple's renderer always says which
   outcome it had; the path check itself says nothing (no line in processes without the renderer). Every outcome is
-  reported somewhere, the device's feature is tested after the path, and no write comes before the tables are compared.
-- nvmtl_gl_caps_enable registers the callback for a device without last-vertex provoking too, except in WindowServer.
+  reported somewhere, the device's feature is not tested there, and no write comes before the tables are compared.
+- nvmtl_gl_caps_enable returns at once on a device without last-vertex provoking, as in 3.0.5: no callback is
+  registered there, in any process.
 - nvglvbl_synchronize (plugin/NVMTLGLVBlank.m): one decision through nvglvbl_decide, reported before either branch,
   and the corrected wait is taken on that decision alone; nothing is reported at install.
 - nvlog_notice (plugin/NVMTLDevice.m): a release build sends a line to the system log as a notice only when the failure
@@ -44,7 +45,7 @@ def body(src, head):
     return ""
 
 
-OUTCOMES = ["PATCHED", "SET_BY_APPLE", "DIFFERS", "NO_SYMBOL", "NOT_WRITABLE", "NO_FEATURE"]
+OUTCOMES = ["PATCHED", "SET_BY_APPLE", "DIFFERS", "NO_SYMBOL", "NOT_WRITABLE"]
 
 
 def chk_caps_patch(src):
@@ -67,9 +68,8 @@ def chk_caps_patch(src):
     said = re.findall(r"nvmtl_gl_caps_say\(NVMTL_GL_CAPS_(\w+)", b)
     if sorted(said) != sorted(OUTCOMES):
         return False   # each outcome exactly once
-    feat = b.find("nvmtl_vk_have_provoking_last()")
     write = b.find("caps[0] |=")
-    return (b.find("kGLRendererSuffix") < feat < b.find("nvmtl_gl_local_symbol(")
+    return ("nvmtl_vk_have_provoking_last()" not in b and "NO_FEATURE" not in b
             and b.find("memcmp(caps, kGLNvidiaCaps1581") < b.find("vm_protect(") < write
             and "nvlog(" not in b)
 
@@ -83,9 +83,10 @@ def chk_caps_say(src):
 
 def chk_caps_enable(src):
     b = body(src, "void nvmtl_gl_caps_enable(void) {")
-    gate = 'if (!nvmtl_vk_have_provoking_last() && !strcmp(getprogname(), "WindowServer")) return;'
-    return bool(b) and gate in b and b.index(gate) < b.index("_dyld_register_func_for_add_image(nvmtl_gl_image_added)") \
-        and b.count("return") == 1
+    gate = 'if (!nvmtl_vk_have_provoking_last()) return;'
+    code = re.sub(r"//[^\n]*", "", b)
+    return bool(b) and gate in code and code.index(gate) < code.index("_dyld_register_func_for_add_image(nvmtl_gl_image_added)") \
+        and code.count("return") == 1 and "getprogname" not in code
 
 
 def chk_vbl(src):
@@ -122,7 +123,7 @@ def chk_notice(src):
 checks = [
     ("every return of nvmtl_gl_caps_patch after the renderer matched reports its outcome, each outcome once", chk_caps_patch, "GL"),
     ("the provoking-vertex report is said once per process", chk_caps_say, "GL"),
-    ("the callback is registered without the feature too, but not in WindowServer", chk_caps_enable, "GL"),
+    ("no callback is registered on a device without last-vertex provoking, in any process (as in 3.0.5)", chk_caps_enable, "GL"),
     ("the vblank wait decides once, reports before either branch, and branches on that decision", chk_vbl, "VBL"),
     ("the vblank report is said once per process, and not at install", chk_vbl_say, "VBL"),
     ("nvlog_notice sends a release line to the system log once, as a notice", chk_notice, "DEV"),
@@ -137,11 +138,11 @@ broken = [
         "if (!caps) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_SYMBOL, NULL, 0); return; }", "if (!caps) return;")),
     ("a patched outcome that says nothing is caught", chk_caps_patch, GL.replace(
         "    nvmtl_gl_caps_say(NVMTL_GL_CAPS_PATCHED, kGLNvidiaCaps1581, 0);", "")),
-    ("the feature test before the path check is caught", chk_caps_patch, GL.replace(
-        "    if (!nvmtl_vk_have_provoking_last()) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_FEATURE, NULL, 0); return; }\n", "").replace(
-        "    Dl_info info;", "    if (!nvmtl_vk_have_provoking_last()) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_FEATURE, NULL, 0); return; }\n    Dl_info info;")),
-    ("the old early return in nvmtl_gl_caps_enable is caught", chk_caps_enable, GL.replace(
-        ' && !strcmp(getprogname(), "WindowServer")', "")),
+    ("a feature test that says nothing inside the patch is caught", chk_caps_patch, GL.replace(
+        "    uint8_t *caps = nvmtl_gl_local_symbol(", "    if (!nvmtl_vk_have_provoking_last()) return;\n    uint8_t *caps = nvmtl_gl_local_symbol(")),
+    ("a callback registered without the feature outside WindowServer is caught", chk_caps_enable, GL.replace(
+        "    if (!nvmtl_vk_have_provoking_last()) return;\n    static dispatch_once_t once;",
+        '    if (!nvmtl_vk_have_provoking_last() && !strcmp(getprogname(), "WindowServer")) return;\n    static dispatch_once_t once;')),
     ("the old inline vblank rule is caught", chk_vbl, VBL.replace(
         "if (decision == NVGLVBL_CORRECTED) {", "if (n >= 2 && info[1].host_time > info[0].host_time) {")),
     ("a notice sent even when the failure rule sends it is caught", chk_notice, DEV.replace(

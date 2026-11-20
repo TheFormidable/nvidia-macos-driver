@@ -77,20 +77,34 @@ int main(void)
     /* Frame Generation priming */
     const nvmtl_dlss_src A = { IMG(1), 97, 1920, 1080, 1 }, B = { IMG(2), 97, 1920, 1080, 1 }, Z = { 0 };
     nvmtl_dlss_src A2 = A; A2.fmt = 98; nvmtl_dlss_src Ah = A; Ah.h = 540;
-    arm("a reset never primes", !nvmtl_dlss_fg_prime(1, 1, 1, 0, B, A, A));
-    arm("no previous colour texture never primes", !nvmtl_dlss_fg_prime(0, 0, 1, 0, Z, A, A));
-    arm("no history yet always primes", nvmtl_dlss_fg_prime(0, 1, 0, 1, A, A, A) && nvmtl_dlss_fg_prime(0, 1, 0, 0, A, A, A));
-    arm("the same object as the last colour is not primed (as before)", !nvmtl_dlss_fg_prime(0, 1, 1, 1, A, A, A));
-    arm("the same object is not primed even after a re-back moved it (as before)", !nvmtl_dlss_fg_prime(0, 1, 1, 1, B, A, B));
-    arm("another object for the same image the core was handed is not primed again", !nvmtl_dlss_fg_prime(0, 1, 1, 0, A, A, A));
-    arm("a different image (a copy into a previous texture) is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, B, A, A));
-    arm("the same image in another format is primed (the core gets another view)", nvmtl_dlss_fg_prime(0, 1, 1, 0, A2, A, A));
-    arm("the same image at another size is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, Ah, A, A));
+    arm("a reset never primes", !nvmtl_dlss_fg_prime(1, 1, 1, 0, 1, B, A, A));
+    arm("no previous colour texture never primes", !nvmtl_dlss_fg_prime(0, 0, 1, 0, 1, Z, A, A));
+    arm("no history yet always primes", nvmtl_dlss_fg_prime(0, 1, 0, 1, 1, A, A, A) && nvmtl_dlss_fg_prime(0, 1, 0, 0, 1, A, A, A));
+    arm("the same object as the last colour is not primed (as before)", !nvmtl_dlss_fg_prime(0, 1, 1, 1, 1, A, A, A));
+    arm("the same object is not primed even after a re-back moved it (as before)", !nvmtl_dlss_fg_prime(0, 1, 1, 1, 1, B, A, B));
+    arm("another object for the same image the core was handed is not primed again", !nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A, A, A));
+    arm("a different image (a copy into a previous texture) is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, B, A, A));
+    arm("the same image in another format is primed (the core gets another view)", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A2, A, A));
+    arm("the same image at another size is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, Ah, A, A));
     { nvmtl_dlss_src As = A; As.samples = 4;
-      arm("the same image with another sample count is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, As, A, A)); }
-    arm("the last colour given a new backing since: a texture now carrying the old handle value is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, A, A, B));
-    arm("the last colour gone (nil) primes", nvmtl_dlss_fg_prime(0, 1, 1, 0, A, A, Z));
-    arm("nothing remembered (a failed encode) primes", nvmtl_dlss_fg_prime(0, 1, 1, 0, Z, Z, Z) && nvmtl_dlss_fg_prime(0, 1, 1, 0, A, Z, A));
+      arm("the same image with another sample count is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, As, A, A)); }
+    arm("the last colour given a new backing since: a texture now carrying the old handle value is primed", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A, A, B));
+    arm("the last colour gone (nil) primes", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A, A, Z));
+    arm("nothing remembered (a failed encode) primes", nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, Z, Z, Z) && nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A, Z, A));
+
+
+    /* NVMTL_DLSS_FG_SAME_IMAGE=0: the decision is the 3.0.5 expression for every input */
+    { const nvmtl_dlss_src srcs[3] = { A, B, Z }; int same = 1;
+      for (int rs = 0; rs < 2; rs++) for (int hp = 0; hp < 2; hp++) for (int hh = 0; hh < 2; hh++) for (int so = 0; so < 2; so++)
+      for (int x = 0; x < 3; x++) for (int y = 0; y < 3; y++) for (int z = 0; z < 3; z++) {
+          const int v305 = !rs && hp && (!hh || !so);
+          if (nvmtl_dlss_fg_prime(rs, hp, hh, so, 0, srcs[x], srcs[y], srcs[z]) != v305) same = 0;
+      }
+      arm("with the way out at 0 every input decides as 3.0.5 did (reset, previous texture, history, object)", same); }
+    arm("a view of the image the core was handed is primed again with the way out at 0, and not with it on",
+        nvmtl_dlss_fg_prime(0, 1, 1, 0, 0, A, A, A) && !nvmtl_dlss_fg_prime(0, 1, 1, 0, 1, A, A, A));
+    arm("the way out is on unless its value starts with 0", nvmtl_dlss_fg_same_image_env_on(NULL) && nvmtl_dlss_fg_same_image_env_on("1")
+        && nvmtl_dlss_fg_same_image_env_on("") && !nvmtl_dlss_fg_same_image_env_on("0") && !nvmtl_dlss_fg_same_image_env_on("00"));
 
     printf(fails ? "FAILED %d\n" : "ok\n", fails);
     return fails != 0;

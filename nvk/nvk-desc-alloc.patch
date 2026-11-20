@@ -7,6 +7,8 @@ bindings up to 641 (its storage textures from 480, its address table at 640, the
 walked 642 binding records of 32 bytes to find none. The layout now keeps the immutable sampler count it already
 computes, and a layout whose count is zero skips the walk. The walk writes only bindings that have immutable samplers,
 and a binding has them only when it contributed to that count, so what a set holds after allocation is unchanged.
+The new field moves the layout's binding array from byte 152 to byte 160 (the Metal plugin's device-loss report reads
+it at an offset measured per build, plugin/nvmtl_nvk_layout.h).
 
 diff --git a/src/nouveau/vulkan/nvk_descriptor_set.c b/src/nouveau/vulkan/nvk_descriptor_set.c
 --- a/src/nouveau/vulkan/nvk_descriptor_set.c

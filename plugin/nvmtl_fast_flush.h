@@ -33,7 +33,9 @@ static inline int nvmtl_fast_flush_inline(int on, int windowServer, int submitAh
 
 /* The walk over the queue's reservations, in order: a command buffer that could not submit all its parts stops it,
    since nothing later in the queue may go before it, and so does the committing thread's own command buffer, since
-   what comes after it is not what this caller waits for (nvmtl.ahead's pass still submits it). */
+   what comes after it is not what this caller waits for (nvmtl.ahead's pass still submits it). The walk's strong load
+   of an earlier command buffer can be its last reference, so that buffer's -dealloc may run on the committing thread
+   under the class lock, as it already could on nvmtl.ahead's own pass. */
 static inline int nvmtl_fast_flush_walk_stops(int submittedAll, int isOwn)
 {
     return !submittedAll || isOwn;

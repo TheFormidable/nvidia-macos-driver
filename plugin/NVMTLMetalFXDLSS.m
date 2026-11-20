@@ -409,6 +409,15 @@ static nvmtl_dlss_src nvmtl_fg_src(NVMTLTexture *t) {
     return i ? (nvmtl_dlss_src){ i->img, i->fmt, i->w, i->h, i->samples } : (nvmtl_dlss_src){ 0 };
 }
 
+// Whether a view of the last colour handed in as prevColorTexture counts as the frame the core already saw. Read once.
+static int nvmtl_fg_same_image_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_DLSS_FG_SAME_IMAGE"); on = nvmtl_dlss_fg_same_image_env_on(e);
+        nvlog("dlss: FG: another texture for the last colour's image as prevColorTexture %s (NVMTL_DLSS_FG_SAME_IMAGE=%s)",
+              on ? "is not primed again" : "is primed again, as in 3.0.5", e ? e : "unset"); }
+    return on;
+}
+
 static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 4; c++) for (int r = 0; r < 4; r++) out[c * 4 + r] = m.columns[c][r]; }
 
 // One call into the Vulkan layer for `color` with the shared arguments in `base`; the matrices and pose are set by the caller.
@@ -484,7 +493,7 @@ static void nvmtl_fg_copy(float out[16], simd_float4x4 m) { for (int c = 0; c < 
     // Prime the core's history with the previous real frame when it has not already seen it as the last encode's colour:
     // neither as the same texture object nor as the same image behind another object (a view of it).
     BOOL reset = _shouldResetHistory;   // a scene cut: the current frame alone starts the history
-    if (nvmtl_dlss_fg_prime(reset, prev != nil, _haveHistory, (id)_prevColorTexture == (id)_lastColor,
+    if (nvmtl_dlss_fg_prime(reset, prev != nil, _haveHistory, (id)_prevColorTexture == (id)_lastColor, nvmtl_fg_same_image_on(),
                             nvmtl_fg_src(prev), _lastSeen, nvmtl_fg_src(nvmtl_dlss_tex(_lastColor)))) {
         rc = [self evaluate:cb args:a color:prev reset:!_haveHistory];
         if (!rc) nvmtl_retain_resource(cb, prev);

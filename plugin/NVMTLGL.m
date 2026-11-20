@@ -225,7 +225,8 @@ static BOOL nvmtl_sel1_idle(int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE
 // Once the Vulkan device can make the last vertex provoke, the bit is set in that table, in this process only. The
 // renderer copies the table after it has created its Metal device (this plugin's device init); a renderer loaded
 // later is caught by the dyld callback. A table that does not hold the bytes it held on macOS 15.8.1 is left alone.
-// A process that loads the renderer says once which of these it was (nvmtl_gl_diag.h), with the table's bytes.
+// A process that loads the renderer on a device with last-vertex provoking says once which of these it was
+// (nvmtl_gl_diag.h), with the table's bytes.
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -270,7 +271,6 @@ static void nvmtl_gl_caps_patch(const struct mach_header *mh) {
     Dl_info info; const char *path = dladdr(mh, &info) ? info.dli_fname : NULL;
     size_t n = path ? strlen(path) : 0, k = sizeof kGLRendererSuffix - 1;
     if (n < k || strcmp(path + n - k, kGLRendererSuffix) || mh->magic != MH_MAGIC_64) return;
-    if (!nvmtl_vk_have_provoking_last()) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_FEATURE, NULL, 0); return; }
     uint8_t *caps = nvmtl_gl_local_symbol((const struct mach_header_64 *)mh, kGLNvidiaCaps);
     if (!caps) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_SYMBOL, NULL, 0); return; }
     if (caps[0] & NVMTL_GL_CAP_PROVOKING_VERTEX) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_SET_BY_APPLE, caps, 0); return; }
@@ -283,11 +283,10 @@ static void nvmtl_gl_caps_patch(const struct mach_header *mh) {
     nvmtl_gl_caps_say(NVMTL_GL_CAPS_PATCHED, kGLNvidiaCaps1581, 0);   // the bytes as the renderer had them
 }
 static void nvmtl_gl_image_added(const struct mach_header *mh, intptr_t slide) { (void)slide; nvmtl_gl_caps_patch(mh); }
-// A device without last-vertex provoking patches nothing (nvmtl_gl_caps_patch says so and returns before any write);
-// the callback is registered anyway so that a process that loads the renderer says why the rewrite stays. Not in
-// WindowServer, which registers nothing on such a device, as before.
+// A device without last-vertex provoking has nothing to patch, so no callback is registered and nothing is said: a
+// line for that case would need the callback in every Metal process, to learn whether the renderer is ever loaded.
 void nvmtl_gl_caps_enable(void) {
-    if (!nvmtl_vk_have_provoking_last() && !strcmp(getprogname(), "WindowServer")) return;
+    if (!nvmtl_vk_have_provoking_last()) return;
     static dispatch_once_t once;   // the callback also runs at once for every image already loaded
     dispatch_once(&once, ^{ _dyld_register_func_for_add_image(nvmtl_gl_image_added); });
 }
