@@ -7884,7 +7884,8 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         // their own set, and the set that lost was freed with the resources only it held (and under the other
         // thread's addObject:).
         _resources = [NVMTLResSet new];
-        _callbackGroup = dispatch_group_create(); _scheduledGroup = dispatch_group_create();
+        // Otherwise made when the first handler of their kind is dispatched (nvmtlDispatchHandlers, nvmtl_cb_lean.h).
+        if (nvmtl_cb_groups_at_init(nvmtl_cb_lean_on())) { _callbackGroup = dispatch_group_create(); _scheduledGroup = dispatch_group_create(); }
     }
     return self;
 }
@@ -8195,15 +8196,19 @@ static void nvmtl_late_present(void) {
     const uint64_t cbt0 = nvmtl_cbt_on() ? nvmtl_cbt_now() : 0;
     _nWait++; [_completionCondition lock];
     while (!_completionReady) [_completionCondition wait];
+    // read under the lock nvmtlDispatchHandlers makes it under; once made it never changes. None: none dispatched.
+    const BOOL handlersGroup = _callbackGroup != nil;
     [_completionCondition unlock];
-    dispatch_group_wait(_callbackGroup, DISPATCH_TIME_FOREVER);
+    if (nvmtl_cb_group_wait_due(handlersGroup)) dispatch_group_wait(_callbackGroup, DISPATCH_TIME_FOREVER);
     if (cbt0) nvmtl_cbt_line("W %llu %llu %llu\n", (unsigned long long)_cbtSeq, (unsigned long long)cbt0, (unsigned long long)nvmtl_cbt_now());
 }
 - (void)waitUntilScheduled {
     _nWait++; [_completionCondition lock];
     while (!_wasScheduled && !_executionDone) [_completionCondition wait];
+    // read under the lock nvmtlDispatchHandlers makes it under; once made it never changes. None: none dispatched.
+    const BOOL handlersGroup = _scheduledGroup != nil;
     [_completionCondition unlock];
-    dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
+    if (nvmtl_cb_group_wait_due(handlersGroup)) dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
 }
 - (MTLCommandBufferStatus)status { [_completionCondition lock]; MTLCommandBufferStatus s = _cbstatus; [_completionCondition unlock]; return s; }
 - (NSError *)error { return _cbError; }
@@ -8213,6 +8218,14 @@ static void nvmtl_late_present(void) {
 - (NSString *)label { return _label; }
 @end
 
+// The queue's capacity semaphore, made by -newCommandQueueWithMaxCommandBufferCount: before the queue is returned, with
+// the count -commandBuffer used to make it with at its first call. Nothing else writes _capacity once it is set, so
+// -commandBuffer reads it without the command-queue class lock (nvmtl_cb_lean.h). NVMTL_CB_LEAN=0: left to the first
+// -commandBuffer, under that lock, as in 3.0.5.
+static void nvmtl_queue_make_capacity(NVMTLCommandQueue *q) {
+    if (nvmtl_cb_capacity_with_queue(nvmtl_cb_lean_on(), nvmtl_async_commit_on()))
+        q->_capacity = dispatch_semaphore_create(q->_capacityCount ? q->_capacityCount : 64);
+}
 @implementation NVMTLCommandQueue
 - (NSUInteger)getGPUPriority { return 1; }
 - (NSUInteger)getBackgroundGPUPriority { return 2; }
@@ -8248,20 +8261,23 @@ static void nvmtl_late_present(void) {
 - (id<MTLCommandBuffer>)commandBuffer {
     dispatch_semaphore_t cap = nil;
     if (nvmtl_async_commit_on()) {
-        @synchronized ([NVMTLCommandQueue class]) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
+        // made with the queue before it was handed out (nvmtl_queue_make_capacity), so it is read without the lock
+        if (nvmtl_cb_capacity_read_unlocked(nvmtl_cb_lean_on())) cap = _capacity;
+        if (!cap) @synchronized ([NVMTLCommandQueue class]) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
         dispatch_semaphore_wait(cap, DISPATCH_TIME_FOREVER);
     }
     NVMTLCommandBuffer *cb = [NVMTLCommandBuffer new];
     if (!cb) { if (cap) dispatch_semaphore_signal(cap); return nil; }
     cb->_queue = self; cb->_capacityHeld = cap != nil;
     if (nvmtl_cbt_on()) { static _Atomic uint64_t seq; cb->_cbtSeq = ++seq; cb->_cbtCreate = nvmtl_cbt_now(); }
-    // The resource set exists from the start. Every encoder used to create it on first use
+    // The resource set exists from the start: -init makes it. Every encoder used to create it on first use
     // (`if (!cb->_resources) cb->_resources = [NVMTLResSet new]`), and encoders of one command buffer run on several
     // threads (parallel render encoders, CoreAnimation's async render queue): two threads both saw nil, the second
     // store released the set the first was adding to, and the app died in -[NVMTLResSet addObject:] (__rehash on a freed
     // member) or in its -dealloc - about 14 Macs from 1.15 to 2.0.1 (NotificationCenter, Music, mediaanalysisd, games).
     // The set itself takes a lock for every operation; only its creation was unguarded. The first-use checks now never fire.
-    cb->_resources = [NVMTLResSet new];
+    // It was also made a second time here, replacing -init's empty set with another empty one before anything could see
+    // either: one set made and freed per command buffer for nothing.
     if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) {
         // WindowServer asserts on this nil ("Failed to get a MTLCommandBuffer"); the cause is the "vk: command buffer
         // refused" line just above, and for a disabled backend the "disabling backend" line before it.

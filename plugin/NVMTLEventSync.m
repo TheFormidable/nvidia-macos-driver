@@ -6,6 +6,7 @@
 
 #include "nvmtl_schedule_policy.h"
 #include "nvmtl_fast_flush.h"
+#include "nvmtl_cb_lean.h"
 
 @interface NVMTLQueueReservation : NSObject { @public __weak NVMTLCommandBuffer *buffer; } @end
 @implementation NVMTLQueueReservation @end
@@ -422,6 +423,17 @@ static BOOL nvmtl_async_commit_on(void) {
         nvlog("commit: %s (NVMTL_ASYNC_COMMIT=%s)", on ? "ASYNC (default) - execution worker, submit ahead, queue capacity enforced" : "synchronous (NVMTL_ASYNC_COMMIT=0)", e ? e : "unset"); }
     return on;
 }
+// NVMTL_CB_LEAN=0: every command buffer makes its two handler dispatch groups up front, and every -commandBuffer takes
+// the command-queue class lock to find the queue's capacity semaphore, as in 3.0.5. Otherwise a group is made when the
+// first handler of its kind is dispatched and the semaphore is made with the queue (nvmtl_cb_lean.h). Read once.
+static BOOL nvmtl_cb_lean_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_CB_LEAN"); on = nvmtl_cb_lean_env_on(e);
+        nvlog("commit: command buffer %s (NVMTL_CB_LEAN=%s)",
+              on ? "handler groups made on first use, queue capacity made with the queue" : "handler groups and queue capacity made as in 3.0.5",
+              e ? e : "unset"); }
+    return on;
+}
 static _Atomic unsigned long long gSkipEmpty;
 static int nvmtl_skip_empty_on(void) {
     static int on = -1;
@@ -592,6 +604,9 @@ static void nvmtl_note_host_writes(NVMTLResSet *members) {
         order = _queue->_callbackOrderQueue;
         target = _queue->_completionQueue ?: dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
     }
+    // Both callers hold _completionCondition, which is also where the waiters read the groups (nvmtl_cb_lean.h).
+    if (nvmtl_cb_group_make_now(_callbackGroup != nil, handlers.count)) _callbackGroup = dispatch_group_create();
+    if (scheduled && nvmtl_cb_group_make_now(_scheduledGroup != nil, handlers.count)) _scheduledGroup = dispatch_group_create();
     for (NSUInteger i = 0; i < handlers.count; ++i) {
         dispatch_group_enter(_callbackGroup);
         if (scheduled) dispatch_group_enter(_scheduledGroup);
