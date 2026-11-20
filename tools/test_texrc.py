@@ -51,7 +51,7 @@ arm('only an image with its own VRAM is marked recyclable',
 arm('the view is made the same way for a taken image', b.find('nvmtl_opaque_CreateImageView(g_dev, &vci, NULL, &out->view)') > b.find('out->rc_mem = out->mem'))
 
 reap = body(vk, 'static void nvmtl_image_grace_reap(void)\n{')
-arm('the grace reap lets its destroy park', 'else { t_texrc_may_park = 1; nvmtl_vk_image_destroy_now(&e->img); }' in reap)
+arm('the grace reap lets its destroy park', 't_texrc_may_park = !nvmtl_cl_forced(&e->mark); nvmtl_vk_image_destroy_now(&e->img);' in reap)
 arm('the grace reap ages the cache out', 'nvmtl_texrc_tick();' in reap)
 d = body(vk, 'void nvmtl_vk_image_destroy(nvk_image *i)\n{')
 arm('a death nothing can read may park, and only after the grace said so (not when its entry could not be made)',
@@ -89,6 +89,45 @@ arm('the residency pager\'s room check gives the cache back before it answers no
 am = body(vk, 'static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDeviceMemory *mem, uint32_t *sysmem, const char *what)\n{')
 arm('an allocation RM refuses retries once with the cache given back, before res2 evicts',
     0 <= am.find('nvmtl_texrc_give_back_all()') < am.find('nvmtl_res2_evict_hook'))
+
+arm('the grace reap does not let an image released by force park (a command buffer from before its death may still read it)',
+    'else { t_texrc_may_park = !nvmtl_cl_forced(&e->mark); nvmtl_vk_image_destroy_now(&e->img); }' in reap)
+
+# An RM refusal behind an open soft gate gives the parked images back and retries once, before the fallback to system
+# memory, for the other VRAM allocations too.
+bb = body(vk, 'static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer *out)\n{')
+ga, al, fb = bb.find('nvmtl_texrc_give_back_all()'), bb.find('nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem)'), bb.find('REFUSED VRAM')
+arm('a Private buffer RM refuses retries with the cache given back before it goes to system memory', 0 <= al < ga < fb
+    and 'if (!bgate && br == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all())' in bb)
+sp = body(vk, 'static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)\n{')
+ga, al, fb = sp.find('nvmtl_texrc_give_back_all()'), sp.find('ar = pvkAllocateMemory(g_dev, &mai, NULL, &m);'), sp.find('nvmtl_vk_sysmem_type')
+arm('a stable-address buffer RM refuses retries with the cache given back before it goes to system memory', 0 <= al < ga < fb
+    and 'if (ar == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all())' in sp)
+hb = body(vk, 'static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *out)\n{')
+ga, al, fb = hb.find('nvmtl_texrc_give_back_all()'), hb.find('pvkAllocateMemory(g_dev, &mai, NULL, &mem)'), hb.find('!(g_memp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)')
+arm('a private placement heap RM refuses retries with the cache given back before it goes to system memory', 0 <= al < ga < fb
+    and 'if (!hgate && !host_visible && r_ == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all())' in hb
+    and ga < hb.find('nvmtl_vk_budget_charge(size)'))
+
+# The residency pager's pressure pass gives the parked images back before it measures what it has to page out.
+objs = (root / 'plugin' / 'NVMTLObjects.m').read_text()
+rp = body(objs.replace('static void nvmtl_res2_pass(void) {', 'static void nvmtl_res2_pass(void)\n{'), 'static void nvmtl_res2_pass(void)\n{')
+pw = rp[rp.find('if (want) {'):] if 'if (want) {' in rp else ''
+arm('the pressure pass gives the cache back before it computes its target and what is free',
+    0 <= pw.find('nvmtl_vk_texrc_give_back()') < pw.find('const uint64_t target') and pw.find('nvmtl_vk_texrc_give_back()') < pw.find('const uint64_t f0'))
+arm('nvmtl_vk.h declares the give-back for the pager', 'uint32_t nvmtl_vk_texrc_give_back(void);' in hdr)
+gb = body(vk, 'uint32_t nvmtl_vk_texrc_give_back(void)\n{')
+arm('the pager\'s give-back marks the budget stale only when it freed something',
+    'const uint32_t n = nvmtl_texrc_give_back_all();' in gb and 'if (n) g_budget_stale = 1;' in gb)
+
+# The fault report's mark for a kept image is set before the entry can be freed by another thread, and cleared when the
+# cache frees the image, before the handle can be handed out again.
+pk = body(vk, 'static int nvmtl_texrc_park(nvk_image *i)\n{')
+arm('a park marks the dead record kept before the entry is in the cache',
+    0 <= pk.find('nvmtl_im_parked_dead(&g_im, i->img, g_cmd_submitted)') < pk.find('nvmtl_texrc_put(') and pk.find('nvmtl_im_parked_dead') < pk.find('memset(i, 0'))
+fr = body(vk, 'static void nvmtl_texrc_free(const nvmtl_texrc_entry *e)\n{')
+arm('a freed parked image is a plain death again in the fault report, cleared before its handle is destroyed',
+    0 <= fr.find('nvmtl_im_kept_freed(&g_im, e->img)') < fr.find('pvkDestroyImage'))
 
 on = body(vk, 'static int nvmtl_texrc_on(void)\n{')
 arm('the switch is NVMTL_TEX_RECYCLE, read once, and WindowServer is told apart',

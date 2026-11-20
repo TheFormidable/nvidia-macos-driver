@@ -97,6 +97,53 @@ int main(void)
         FILE *f2 = tmpfile(); nvmtl_im_dump(&im2, f2); rewind(f2); char l2[256] = ""; fgets(l2, sizeof l2, f2); fclose(f2);
         ARM("a destroyed image is a death: zero alive, and the dump says when (an instrument that counts 0 deaths after a destroy is broken)", im2.live == 0 && strstr(l2, "seq 700 died 701"));
         free(im2.e); }
+    /* the texture recycle cache: a dead texture keeps its image X and memory M, the next texture of that shape takes them
+       and makes a new view. A slot still naming the dead texture's destroyed view must stay DEAD after the reuse. */
+    {   nvmtl_sl_state sl3; nvmtl_im_state im3; nvmtl_vw_state vw3; nvmtl_mm_state mm3;
+        memset(&sl3, 0, sizeof sl3); memset(&im3, 0, sizeof im3); memset(&vw3, 0, sizeof vw3); memset(&mm3, 0, sizeof mm3);
+        const void *X = (void *)0x70, *M = (void *)0x71, *V1 = (void *)0x72, *V2 = (void *)0x73;
+        nvmtl_mm_add(&mm3, M, 0x500000000ull, 8 << 20, 0, "nvmtl_vk_alloc_image_mem", 4);
+        nvmtl_sl_init(&sl3, 16);
+        nvmtl_im_add(&im3, X, M, 0, 8 << 20, V1, 1920, 1080, 37, 0, 0, 0, 5); nvmtl_vw_add(&vw3, V1, X);
+        nvmtl_sl_alloc(&sl3, 3, 6); nvmtl_sl_write(&sl3, 3, 0, V1, 6);
+        nvmtl_im_died(&im3, X, 20); nvmtl_vw_died(&vw3, V1, 20);
+        nvmtl_im_parked_dead(&im3, X, 21);
+        nout = 0; unsigned f3 = nvmtl_sl_report(&sl3, &im3, &vw3, 3, &d, "", &mm3, emit, NULL);
+        ARM("a parked dead image reads as dead, and says its image and memory are parked (its memory is still alive)",
+            (f3 & NVMTL_SL_DEAD) && has("DIED at seq 20, its image and memory parked for reuse since seq 21") && has("created seq 4, ALIVE"));
+        nvmtl_im_add(&im3, X, M, 0, 8 << 20, V2, 1920, 1080, 37, 0, 0, 0, 30); nvmtl_vw_add(&vw3, V2, X);
+        const nvmtl_im_entry *e1 = nvmtl_im_by_view(&im3, &vw3, V1), *e2 = nvmtl_im_by_view(&im3, &vw3, V2);
+        ARM("after the image is taken again, the destroyed view still resolves to the dead texture's record", e1 && e1->died == 20 && e1->seq == 5);
+        ARM("  and the new view to the new, live record, which is not parked", e2 && !e2->died && e2->seq == 30 && !e2->parked);
+        nout = 0; f3 = nvmtl_sl_report(&sl3, &im3, &vw3, 3, &d, "", &mm3, emit, NULL);
+        ARM("  so the slot naming the destroyed view is still DEAD", (f3 & NVMTL_SL_DEAD) && has("DIED at seq 20") && !has("created seq 30"));
+        nvmtl_sl_alloc(&sl3, 4, 31); nvmtl_sl_write(&sl3, 4, 0, V2, 31);
+        ARM("  and a slot naming the new view is not (negative control)", !(nvmtl_sl_flags(&sl3, &im3, &vw3, 4, &d) & NVMTL_SL_DEAD));
+        const void *V3 = (void *)0x74; nvmtl_vw_add(&vw3, V3, X);
+        const nvmtl_im_entry *e3 = nvmtl_im_by_view(&im3, &vw3, V3);
+        ARM("a view the image record does not name resolves to the image's newest record, as before", e3 && e3->seq == 30);
+        free(sl3.s); free(im3.e); free(vw3.e); free(mm3.e); }
+    /* the recycle cache's mark is its own: an image a heap or buffer park held and later destroyed is a plain death, and
+       so is a kept image the cache frees instead of handing on */
+    {   nvmtl_sl_state sl4; nvmtl_im_state im4; nvmtl_vw_state vw4;
+        memset(&sl4, 0, sizeof sl4); memset(&im4, 0, sizeof im4); memset(&vw4, 0, sizeof vw4);
+        const void *P = (void *)0x80, *PV = (void *)0x81, *K = (void *)0x82, *KV = (void *)0x83;
+        nvmtl_sl_init(&sl4, 16);
+        nvmtl_im_add(&im4, P, NULL, 0, 4096, PV, 8, 8, 37, 0, 0, 0, 40); nvmtl_vw_add(&vw4, PV, P);
+        nvmtl_im_add(&im4, K, NULL, 0, 4096, KV, 8, 8, 37, 0, 0, 0, 41); nvmtl_vw_add(&vw4, KV, K);
+        nvmtl_sl_alloc(&sl4, 1, 42); nvmtl_sl_write(&sl4, 1, 0, PV, 42);
+        nvmtl_sl_alloc(&sl4, 2, 42); nvmtl_sl_write(&sl4, 2, 0, KV, 42);
+        nvmtl_im_parked(&im4, P, 43); nvmtl_im_died(&im4, P, 44); nvmtl_vw_died(&vw4, PV, 44);
+        nout = 0; nvmtl_sl_report(&sl4, &im4, &vw4, 1, &d, "", NULL, emit, NULL);
+        ARM("an image a heap or buffer park held, then destroyed, reads as a plain death, not as kept by the recycle cache",
+            has("DIED at seq 44") && !has("parked for reuse"));
+        nvmtl_im_died(&im4, K, 45); nvmtl_vw_died(&vw4, KV, 45); nvmtl_im_parked_dead(&im4, K, 46);
+        nout = 0; nvmtl_sl_report(&sl4, &im4, &vw4, 2, &d, "", NULL, emit, NULL);
+        ARM("  an image the recycle cache keeps says so", has("DIED at seq 45, its image and memory parked for reuse since seq 46"));
+        nvmtl_im_kept_freed(&im4, K);
+        nout = 0; nvmtl_sl_report(&sl4, &im4, &vw4, 2, &d, "", NULL, emit, NULL);
+        ARM("  and once the cache frees it, it is a plain death again", has("DIED at seq 45") && !has("parked for reuse"));
+        free(sl4.s); free(im4.e); free(vw4.e); }
     /* the texture header decode against hand-built words: address 0x4c3200000 (bits 31:9 in w0, 56:32 in w1), 2048x2048x1, 2D array, 11 mips, gob height 4 */
     {   uint32_t w[8] = {0}; const uint64_t addr = 0x4c3200000ull;
         w[0] = (uint32_t)(addr & 0xFFFFFE00u) | 0x1A3; w[1] = (uint32_t)(addr >> 32) | (0x5u << 25); w[2] = (2u << 3) | (1u << 6) | (10u << 28); w[3] = (0x7u << 16) | (1u << 28);

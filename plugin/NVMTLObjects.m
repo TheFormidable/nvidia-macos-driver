@@ -764,6 +764,8 @@ static void nvmtl_res2_pass(void) {
         if (r2_move(t, 0) == 0) { on++; onB += tb; onM += a; __atomic_store_n(r2_want(t), 0, __ATOMIC_RELEASE); }
     }
     if (want) {
+        // dead parked images go before any live texture is paged out: what they free is seen by f0 and the loop below
+        (void)nvmtl_vk_texrc_give_back();
         const uint64_t target = nvmtl_vk_vram_headroom() + gRes2Margin + want;
         if (nvmtl_vk_mig_batch_begin() == 0) gRes2Batching = 1;
         { static unsigned said; if (said++ < 16 || said % 1024 == 0)

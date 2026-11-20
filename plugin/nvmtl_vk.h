@@ -337,6 +337,9 @@ void nvmtl_vk_res1_stats(uint64_t out[6]);
 int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out);
 void nvmtl_vk_image_free_backing(nvk_image *old);
 int nvmtl_vk_vram_room(uint64_t want);
+/* the residency pager's pressure pass: every parked image of the texture recycle cache is freed before it measures what
+   it has to page out (0 when the cache is empty, as with NVMTL_TEX_RECYCLE=0 and in WindowServer) */
+uint32_t nvmtl_vk_texrc_give_back(void);
 uint64_t nvmtl_vk_vram_free_now(void);
 uint64_t nvmtl_vk_vram_headroom(void);
 int nvmtl_vk_vram_measured(void);

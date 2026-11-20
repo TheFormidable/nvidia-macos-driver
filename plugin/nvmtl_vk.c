@@ -356,6 +356,7 @@ static nvmtl_cl_state g_cl;   // the open command buffers by cohort and the queu
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
 static int nvmtl_texrc_park(nvk_image *i);   // the texture recycle cache (nvmtl_texrc.h), next to nvmtl_vk_image_destroy
 static void nvmtl_texrc_tick(void);
+static uint32_t nvmtl_texrc_give_back_all(void);   // every parked image freed: the first memory given back when VRAM runs short
 // Set just before the grace's own release of an image: the destroy may park it instead (read and cleared on entry).
 static __thread int t_texrc_may_park;
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
@@ -439,7 +440,8 @@ static void nvmtl_image_grace_reap(void)
               (unsigned long long)forced, NVMTL_CL_PATIENCE, (unsigned long long)open, getprogname());
     while (due) { nvmtl_grace_img *e = due; due = e->next;
                   if (e->bufview || e->alias) nvmtl_vk_texel_view_destroy_now(e->alias, e->bufview);
-                  else { t_texrc_may_park = 1; nvmtl_vk_image_destroy_now(&e->img); }
+                  // an image released by force may still be read by the command buffer that held it: destroyed, never parked
+                  else { t_texrc_may_park = !nvmtl_cl_forced(&e->mark); nvmtl_vk_image_destroy_now(&e->img); }
                   free(e); }
     nvmtl_texrc_tick();   // parked images not taken within their age go here, on the thread that releases the others
     if (n && (reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)reaped, (unsigned long long)held);
@@ -1995,7 +1997,8 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, mr.size, 0 };
     VkDeviceMemory m = VK_NULL_HANDLE; VkResult ar = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     if (!sys) { int mt = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-                if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
+                if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m);
+                               if (ar == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }   // RM refused: parked images first
     if (ar != VK_SUCCESS) { int mt = nvmtl_vk_sysmem_type(mr.memoryTypeBits); sys = 1;
                             if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
     if (ar != VK_SUCCESS || nvmtl_vk_sparse_bind(b, 0, m, mr.size)) {
@@ -2077,6 +2080,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         int bgate = nvmtl_vk_vram_wall(mr.size, &bfree, &bbud, &bused, &bmeas);
         VkResult br = bgate ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                             : nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem);
+        if (!bgate && br == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) br = nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem);   // RM refused: parked images first
         if (br != VK_SUCCESS) {
             g_buf_vram_refused++;
             bpark_drain_private();
@@ -2427,7 +2431,6 @@ static int nvmtl_res2_evict_off(void) {
     return off;
 }
 static __thread int t_in_reclaim;
-static uint32_t nvmtl_texrc_give_back_all(void);
 static uint64_t g_res1_calls, g_res1_credit, g_res1_seen_free, g_res1_admit;
 static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out)
 {
@@ -9599,6 +9602,8 @@ static void nvmtl_texrc_census(const char *what)
 // What nvmtl_vk_image_destroy_now does for an image's own VRAM, once the cache lets the image go.
 static void nvmtl_texrc_free(const nvmtl_texrc_entry *e)
 {
+    // before the handle can be handed out again: the dead texture's record no longer says its image and memory are kept
+    pthread_mutex_lock(&g_sl_lock); nvmtl_im_kept_freed(&g_im, e->img); pthread_mutex_unlock(&g_sl_lock);
     pvkDestroyImage(g_dev, (VkImage)e->img, NULL);
     pvkFreeMemory(g_dev, (VkDeviceMemory)e->mem, NULL);
     g_alloc_bytes -= e->bytes; g_vram_bytes -= e->bytes; g_img_align -= (e->bytes + 65535ull) & ~65535ull;
@@ -9615,6 +9620,9 @@ static int nvmtl_texrc_park(nvk_image *i)
                               i->placed, i->pool != NULL, i->sparse != NULL, (int)i->sysmem, (uint64_t)i->alloc)) return 0;
     const nvmtl_texrc_entry e = { i->rck, i->img, i->mem, (uint64_t)i->alloc, 0 };
     nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    // the fault report must not read the dead image over its still-alive memory as a plain use after free. Marked before
+    // the put, so that a free of the entry by another thread (which clears the mark) cannot come before it.
+    pthread_mutex_lock(&g_sl_lock); nvmtl_im_parked_dead(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
     pthread_mutex_lock(&g_texrc_lock);
     const uint32_t n = nvmtl_texrc_put(&g_texrc, &e, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), out);
     pthread_mutex_unlock(&g_texrc_lock);
@@ -9657,6 +9665,12 @@ static uint32_t nvmtl_texrc_give_back_all(void)
     nvmtl_texrc_free_all(out, n);
     if (n) { static unsigned said; if (said++ < 8 || said % 1024 == 0)
         nvlog("vk: texture recycle: gave %u parked images (%llu MB) back to the VRAM gate", n, (unsigned long long)(bytes >> 20)); }
+    return n;
+}
+uint32_t nvmtl_vk_texrc_give_back(void)
+{
+    const uint32_t n = nvmtl_texrc_give_back_all();
+    if (n) g_budget_stale = 1;
     return n;
 }
 void nvmtl_vk_image_destroy(nvk_image *i)
@@ -12133,6 +12147,7 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
     { uint64_t hbud = 0, hused = 0, hfree = 0; int hmeas = 0;
       int hgate = host_visible ? 0 : nvmtl_vk_vram_wall(size, &hfree, &hbud, &hused, &hmeas);
       VkResult r_ = hgate ? VK_ERROR_OUT_OF_DEVICE_MEMORY : pvkAllocateMemory(g_dev, &mai, NULL, &mem);
+      if (!hgate && !host_visible && r_ == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) r_ = pvkAllocateMemory(g_dev, &mai, NULL, &mem);   // RM refused: parked images first
       if (r_ == VK_SUCCESS && !host_visible) nvmtl_vk_budget_charge(size);
       if (r_ == VK_ERROR_OUT_OF_DEVICE_MEMORY && !host_visible) {
           int mt2 = -1; for (uint32_t i = 0; i < g_memp.memoryTypeCount; i++) if ((bits & (1u << i)) && !(g_memp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt2 = (int)i; break; }
