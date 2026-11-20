@@ -352,6 +352,10 @@ static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, 
 static nvmtl_grace_img *g_grace_unsettled;   // the oldest held entry whose mark is not settled; every one before it is
 static nvmtl_cl_state g_cl;   // the open command buffers by cohort and the queue sequence (nvmtl_cmd_life.h); under g_grace_lock
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static int nvmtl_texrc_park(nvk_image *i);   // the texture recycle cache (nvmtl_texrc.h), next to nvmtl_vk_image_destroy
+static void nvmtl_texrc_tick(void);
+// Set just before the grace's own release of an image: the destroy may park it instead (read and cleared on entry).
+static __thread int t_texrc_may_park;
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
 /* A command buffer's life is counted in three places and nowhere else: nvmtl_vk_cmd_begin counts the begin, the queue
    submit counts the end of the command buffer and of those that ride in the same vkQueueSubmit (the pre-submit prologue,
@@ -432,8 +436,9 @@ static void nvmtl_image_grace_reap(void)
               (unsigned long long)forced, NVMTL_CL_PATIENCE, (unsigned long long)open, getprogname());
     while (due) { nvmtl_grace_img *e = due; due = e->next;
                   if (e->bufview || e->alias) nvmtl_vk_texel_view_destroy_now(e->alias, e->bufview);
-                  else nvmtl_vk_image_destroy_now(&e->img);
+                  else { t_texrc_may_park = 1; nvmtl_vk_image_destroy_now(&e->img); }
                   free(e); }
+    nvmtl_texrc_tick();   // parked images not taken within their age go here, on the thread that releases the others
     if (n && (reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)reaped, (unsigned long long)held);
 }
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
@@ -2419,11 +2424,14 @@ static int nvmtl_res2_evict_off(void) {
     return off;
 }
 static __thread int t_in_reclaim;
+static uint32_t nvmtl_texrc_give_back_all(void);
 static uint64_t g_res1_calls, g_res1_credit, g_res1_seen_free, g_res1_admit;
 static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_out, uint64_t *used_out, int *measured_out)
 {
     uint64_t fv = 0, bd = 0, us = 0; int ms = 0;
     int gate = nvmtl_vk_vram_wall0(want, &fv, &bd, &us, &ms);
+    // the recycle cache's parked images are the first memory given back, before anything that is still in use
+    if (gate && nvmtl_texrc_give_back_all()) { g_budget_stale = 1; gate = nvmtl_vk_vram_wall0(want, &fv, &bd, &us, &ms); }
     if (fv > g_res1_seen_free) { uint64_t up = fv - g_res1_seen_free; g_res1_credit = g_res1_credit > up ? g_res1_credit - up : 0; }
     g_res1_seen_free = fv;
     if (gate && nvmtl_reclaim_hook && !t_in_reclaim) {
@@ -2595,7 +2603,8 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
     int gate = nvmtl_vk_vram_wall(mr->size, &freev, &bud, &used, &measured);
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     if (!gate) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);
-    else nvlog("vk: soft VRAM gate: %llu MB free on the card, this %s image wants %llu MB + %llu MB headroom -> SYSTEM MEMORY (heapUsage %llu of budget %llu MB, %s)",
+    if (!gate && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);   // RM refused: parked images first
+    if (gate) nvlog("vk: soft VRAM gate: %llu MB free on the card, this %s image wants %llu MB + %llu MB headroom -> SYSTEM MEMORY (heapUsage %llu of budget %llu MB, %s)",
                (unsigned long long)(freev >> 20), what, (unsigned long long)(mr->size >> 20),
                (unsigned long long)(nvmtl_vk_headroom_eff(bud, measured) >> 20), (unsigned long long)(used >> 20),
                (unsigned long long)(bud >> 20), measured ? "measured" : "estimated");
@@ -2825,6 +2834,15 @@ int nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uin
     return r;
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
+static __thread int t_texrc_create;   // set around the one creation in nvmtl_vk_image_create_typed_recyclable
+static int nvmtl_texrc_reuse(const nvmtl_texrc_key *key, nvk_image *out);
+int nvmtl_vk_image_create_typed_recyclable(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
+{
+    t_texrc_create = 1;
+    const int r = nvmtl_vk_image_create_typed(w, h, vkfmt, bpp, a8, mips, storage, mtl_type, layers, out);
+    t_texrc_create = 0;
+    return r;
+}
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
 {
     nvk_image pending = {0};
@@ -2844,6 +2862,8 @@ static VkComponentMapping nvmtl_a8_mapping(int a8)
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
 {
+    const int recyclable = t_texrc_create;
+    t_texrc_create = 0;   // only this creation: none the device's first use may make on the way
     if (!layers || (mtl_type < 2 && h != 1) || mtl_type == 4 || mtl_type > 7
         || ((mtl_type == 0 || mtl_type == 2) && layers != 1) || (mtl_type == 5 && layers != 6) || (mtl_type == 6 && layers % 6)) {
         nvlog("image_create: textureType %u with %u layer(s) is not carried", mtl_type, layers); return -1; }
@@ -2864,16 +2884,23 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     if (viewStorage) ici.flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
     nvmtl_vk_image_mutable(&ici, out);
-    VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
-    if (viewStorage && nvmtl_storage_view_add((VkImage)out->img, ici.usage | (nvmtl_fbfetch_on() ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0))) {
-        pvkDestroyImage(g_dev, (VkImage)out->img, NULL); out->img = NULL; return -1;
+    // Everything the image is made from is in ici now; an image parked from an earlier texture of the same creation is
+    // already that image, bound to its own VRAM (and, for a storage twin, registered with the same usage).
+    const nvmtl_texrc_key rck = nvmtl_texrc_key_of((uint32_t)ici.flags, (uint32_t)ici.imageType, (uint32_t)ici.format, ici.extent.width, ici.extent.height,
+                                                   ici.extent.depth, ici.mipLevels, ici.arrayLayers, (uint32_t)ici.usage);
+    if (!recyclable || !nvmtl_texrc_reuse(&rck, out)) {
+        VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
+        if (viewStorage && nvmtl_storage_view_add((VkImage)out->img, ici.usage | (nvmtl_fbfetch_on() ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0))) {
+            pvkDestroyImage(g_dev, (VkImage)out->img, NULL); out->img = NULL; return -1;
+        }
+        VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
+        if (image_pool_bind(out)) {
+            VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
+            out->alloc = mr.size;
+            VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
+        }
     }
-    VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
-    if (image_pool_bind(out)) {
-        VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
-        out->alloc = mr.size;
-        VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
-    }
+    if (recyclable && !out->pool && !out->placed && !out->sysmem && out->mem) { out->rck = rck; out->rc_img = out->img; out->rc_mem = out->mem; }
     out->alias_a8 = (uint8_t)a8;   // the mapping of its own view: an attachment takes an identity view instead
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
@@ -9470,6 +9497,93 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
 }
 
+/* The texture recycle cache (nvmtl_texrc.h). Parked images stay counted as allocated VRAM (g_alloc_bytes, g_vram_bytes,
+   g_img_align) and stay charged to the budget until they are really freed; a take hands the counts to
+   nvmtl_commit_image, which adds them again for the new texture. */
+static nvmtl_texrc_state g_texrc; static pthread_mutex_t g_texrc_lock = PTHREAD_MUTEX_INITIALIZER;
+static int nvmtl_texrc_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_TEX_RECYCLE"); on = nvmtl_texrc_enabled(e, getprogname());
+        nvlog("vk: texture recycle: %s (NVMTL_TEX_RECYCLE=%s)", on ? "a dead texture's image and memory are kept for the next texture of the same creation"
+              : "off - every dead texture's image and memory are freed", e ? e : "unset"); }
+    return on;
+}
+static void nvmtl_texrc_census(const char *what)
+{
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint64_t parked = g_texrc.parked, reused = g_texrc.reused, aged = g_texrc.aged, evicted = g_texrc.evicted, given = g_texrc.given, bytes = g_texrc.bytes;
+    const uint32_t n = g_texrc.n;
+    pthread_mutex_unlock(&g_texrc_lock);
+    const uint64_t k = parked + reused;
+    if (k & (k - 1)) return;
+    nvlog("vk: texture recycle (%s): %llu parked, %llu reused, %llu aged out, %llu evicted, %llu given back to the VRAM gate; %u held, %llu MB",
+          what, (unsigned long long)parked, (unsigned long long)reused, (unsigned long long)aged, (unsigned long long)evicted,
+          (unsigned long long)given, n, (unsigned long long)(bytes >> 20));
+}
+// What nvmtl_vk_image_destroy_now does for an image's own VRAM, once the cache lets the image go.
+static void nvmtl_texrc_free(const nvmtl_texrc_entry *e)
+{
+    pvkDestroyImage(g_dev, (VkImage)e->img, NULL);
+    pvkFreeMemory(g_dev, (VkDeviceMemory)e->mem, NULL);
+    g_alloc_bytes -= e->bytes; g_vram_bytes -= e->bytes; g_img_align -= (e->bytes + 65535ull) & ~65535ull;
+    nvmtl_vk_budget_discharge(e->bytes);
+}
+static void nvmtl_texrc_free_all(const nvmtl_texrc_entry *out, uint32_t n) { for (uint32_t k = 0; k < n; k++) nvmtl_texrc_free(&out[k]); }
+/* A dead image the grace has released, its upload drained and its views gone (nvmtl_vk_image_destroy_now): its image and
+   memory are parked instead of destroyed when nvmtl_texrc_eligible says they may be (1), else 0 and the caller destroys
+   them. The next texture of the same creation makes its own view. */
+static int nvmtl_texrc_park(nvk_image *i)
+{
+    if (!i->img || !i->rc_img) return 0;
+    if (!nvmtl_texrc_eligible(nvmtl_texrc_on(), nvmtl_image_grace_on(), i->img, i->mem, i->rc_img, i->rc_mem,
+                              i->placed, i->pool != NULL, i->sparse != NULL, (int)i->sysmem, (uint64_t)i->alloc)) return 0;
+    const nvmtl_texrc_entry e = { i->rck, i->img, i->mem, (uint64_t)i->alloc, 0 };
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint32_t n = nvmtl_texrc_put(&g_texrc, &e, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    memset(i, 0, sizeof *i);
+    nvmtl_texrc_free_all(out, n);
+    nvmtl_texrc_census("park");
+    return 1;
+}
+static int nvmtl_texrc_reuse(const nvmtl_texrc_key *key, nvk_image *out)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED) || !nvmtl_texrc_on()) return 0;
+    nvmtl_texrc_entry e;
+    pthread_mutex_lock(&g_texrc_lock);
+    const int hit = nvmtl_texrc_take(&g_texrc, key, &e);
+    pthread_mutex_unlock(&g_texrc_lock);
+    if (!hit) return 0;
+    // nvmtl_commit_image counts the memory again for the new texture
+    g_alloc_bytes -= e.bytes; g_vram_bytes -= e.bytes; g_img_align -= (e.bytes + 65535ull) & ~65535ull;
+    out->img = e.img; out->mem = e.mem; out->alloc = (size_t)e.bytes; out->sysmem = 0;
+    nvmtl_texrc_census("reuse");
+    return 1;
+}
+static void nvmtl_texrc_tick(void)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED)) return;
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint32_t n = nvmtl_texrc_age(&g_texrc, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    nvmtl_texrc_free_all(out, n);
+}
+static uint32_t nvmtl_texrc_give_back_all(void)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED)) return 0;
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint64_t bytes = g_texrc.bytes;
+    const uint32_t n = nvmtl_texrc_give_back(&g_texrc, out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    nvmtl_texrc_free_all(out, n);
+    if (n) { static unsigned said; if (said++ < 8 || said % 1024 == 0)
+        nvlog("vk: texture recycle: gave %u parked images (%llu MB) back to the VRAM gate", n, (unsigned long long)(bytes >> 20)); }
+    return n;
+}
 void nvmtl_vk_image_destroy(nvk_image *i)
 {
     if (g_state != 1 || !i || !i->img) return;
@@ -9485,6 +9599,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
             e->img = *i;
             if (nvmtl_grace_hold(e)) { memset(i, 0, sizeof *i); return; }
             free(e);   // nothing can read it any more: released at once below
+            t_texrc_may_park = 1;
         }
     }
     nvmtl_vk_image_destroy_now(i);
@@ -9492,11 +9607,15 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 static void nvmtl_vk_image_upload_drain(nvk_image *img);
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
+    const int may_park = t_texrc_may_park;
+    t_texrc_may_park = 0;   // this image only: none an upload drain below may release on the way
+    const int was_sparse = i->sparse != NULL;   // the park must see it, and it is freed here
     if (i->sparse) { free(i->sparse); i->sparse = NULL; }
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_drain(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
     nvmtl_dlss_views_drop((VkImage)i->img);   // DLSS's own views of this image go with it
+    if (may_park && !was_sparse && nvmtl_texrc_park(i)) return;   // the image and its memory wait for the next texture of their creation
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
@@ -9547,6 +9666,9 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res1_off++; g_res1_off_b += i->alloc; }
     else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
     i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // A re-backed image was not made by the recyclable creation: NVK may hand out the freed handles again, so comparing
+    // them with the old ones at death is not enough to tell.
+    i->rc_img = i->rc_mem = NULL;
     pthread_mutex_lock(&g_sl_lock);
     nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img); nvmtl_vw_tic_note(view);
     pthread_mutex_unlock(&g_sl_lock);
@@ -9555,7 +9677,15 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
 
 static uint64_t g_res2_off, g_res2_on, g_res2_off_b, g_res2_on_b, g_res2_fail;
 void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2_on; out[2] = g_res2_off_b >> 20; out[3] = g_res2_on_b >> 20; out[4] = g_res2_fail; }
-int nvmtl_vk_vram_room(uint64_t want) { g_budget_stale = 1; return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL); }
+int nvmtl_vk_vram_room(uint64_t want)
+{
+    g_budget_stale = 1;
+    if (!nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL)) return 1;
+    // the residency pager asks before it moves a texture back to VRAM: parked images go before it pages anything out
+    if (!nvmtl_texrc_give_back_all()) return 0;
+    g_budget_stale = 1;
+    return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL);
+}
 uint64_t nvmtl_vk_vram_free_now(void) { uint64_t f = 0; g_budget_stale = 1; (void)nvmtl_vk_vram_wall0(0, &f, NULL, NULL, NULL); return f; }
 // Whether the budget behind every figure above is RM's own (VK_EXT_memory_budget) or our estimate. The
 // estimated model counts IMAGES only, so a caller that sizes work from it should size it smaller.
@@ -9661,6 +9791,7 @@ int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_o
       if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res2_off++; g_res2_off_b += i->alloc; }
       else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res2_on++; g_res2_on_b += mr.size; } }
     i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = (uint32_t)was;
+    i->rc_img = i->rc_mem = NULL;   // migrated: never parked (the handles of the freed backing may be handed out again)
     return 0;
 fail:
     if (view) pvkDestroyImageView(g_dev, view, NULL);
