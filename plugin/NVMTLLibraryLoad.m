@@ -66,6 +66,7 @@ static nvmtl_translate_fn xlate;
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_cache_file.h"
 #include "nvmtl_fc_refusal.h"
+#include "nvmtl_argbuf_elems.h"
 int nvmtl_vk_lost(void);
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
@@ -162,6 +163,12 @@ static int nvmtl_xlate_ready(void) {
         // NVMTL_WHOLE_VIEWS=0: without its mark, a module cached with the views on would still be served after they
         // were turned off in the settings file.
         if (h && strcmp(gXlateTag, "untagged") && !nvmtl_spvcache_escape_tag(gXlateTag, sizeof gXlateTag, getenv("NVMTL_WHOLE_VIEWS"))) {
+            strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
+            nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
+        }
+        // And the translator's way back from its device-address construction, NVMTL_XLATE_ADDR_RETRY=0: a module that
+        // only that construction translates must not be served from the cache once the retry is turned off.
+        if (h && strcmp(gXlateTag, "untagged") && !nvmtl_spvcache_addr_retry_tag(gXlateTag, sizeof gXlateTag, getenv("NVMTL_XLATE_ADDR_RETRY"))) {
             strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
             nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
         }
@@ -2539,6 +2546,15 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
     return r;
 }
 
+// NVMTL_ARGBUF_ARRAYS=0: an array of handles in an argument buffer is one field again, its first element, as in 3.0.5.
+// Otherwise each element has its own [[id]] (nvmtl_air_argbuf_walk).
+static BOOL nvmtl_argbuf_arrays_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_ARGBUF_ARRAYS"); on = !(e && e[0] == '0');
+        nvlog("argument encoder: an array of handles %s (NVMTL_ARGBUF_ARRAYS=%s)",
+              on ? "takes one [[id]] per element" : "keeps only its first element", e ? e : "unset"); }
+    return on;
+}
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
 // !"air.indirect_argument", leaf`. A leaf is either a node with the member's `air.location_index` (its [[id]] inside the
 // struct), or, for a nested struct - whose member starts with `!"air.struct_type_info", !child` - `i32 id`, the
@@ -2558,6 +2574,7 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
             i++; continue;
         }
         const NSUInteger off = (NSUInteger)[[tok[j] substringFromIndex:4] integerValue], size = (NSUInteger)[[tok[j + 1] substringFromIndex:4] integerValue];
+        const NSInteger count = [[tok[j + 2] substringFromIndex:4] integerValue];
         NSString *ref = tok[j + 6], *name = [tok[j + 4] substringWithRange:NSMakeRange(2, tok[j + 4].length - 3)];
         if (child) {
             if ([ref hasPrefix:@"i32 "]) nvmtl_air_argbuf_walk(nodes, child, baseId + (NSUInteger)[[ref substringFromIndex:4] integerValue],
@@ -2583,6 +2600,19 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
                     }
                 }
                 [out addObject:fld];
+                // An array of handles takes one [[id]] per element, its handle word at 8 bytes per element
+                // (nvmtl_argbuf_elems.h, both spellings of the array). WAS one field for the whole array, so
+                // setTexture:atIndex: 1-7 of an array<texture2d<float>, 8> was REFUSED and those elements read zeros
+                // (card row xlate.paths-abarray). Element 0 stays the field above.
+                const BOOL handle = [kind isEqualToString:@"texture"] || [kind isEqualToString:@"sampler"]
+                                 || [leaf rangeOfString:@"!\"air.buffer\""].location != NSNotFound;
+                long lid = 0, lcount = 1; unsigned stride = 0;
+                const unsigned n = handle && nvmtl_argbuf_arrays_on() && nvmtl_air_location_pair(leaf.UTF8String, &lid, &lcount)
+                                 ? nvmtl_argbuf_handle_elements((long)count, (long)size, lcount, &stride) : 1;
+                for (unsigned k = 1; k < n; k++)
+                    [out addObject:@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel + k),
+                                      @"field_offset": @(baseOff + off + (NSUInteger)k * stride), @"size": @(stride), @"kind": kind,
+                                      @"name": name }];
             }
         }
         i = j + 7;

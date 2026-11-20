@@ -30,6 +30,9 @@ mod spirv_variable_ptr;
 pub mod tools;
 pub(crate) mod types;
 
+pub use construction::{
+    device_address_last_resort_active, device_address_last_resort_applies, with_device_address_last_resort,
+};
 pub use fc_air_specialize::specialize_air_function_constants;
 pub use fc_specialize::{
     apply_function_constant_values, fc_spec_id, specialize_function_constant_bytes, specialize_function_constants,
@@ -929,6 +932,11 @@ pub fn translate_native_no_retry_constructed_with_options(
                 format!("{emit_err}; raw construction failed: {construction_error}")
             })?
         }
+        Err(emit_err) if construction::cross_root_select_refusal(&emit_err) => {
+            rc.construct_device_addresses().map_err(|construction_error| {
+                format!("{emit_err}; device-address construction failed: {construction_error}")
+            })?
+        }
         Err(emit_err) => return Err(emit_err),
     };
     Ok(constructed.bytes)
@@ -1426,6 +1434,11 @@ fn translate_sanitized_with_meta_prevalidated_carrier(
                 format!("{emit_err}; raw construction failed: {construction_error}")
             })?;
             Ok(constructed)
+        }
+        Err(emit_err) if construction::cross_root_select_refusal(&emit_err) => {
+            rc.construct_device_addresses().map_err(|construction_error| {
+                format!("{emit_err}; device-address construction failed: {construction_error}")
+            })
         }
         Err(emit_err) => Err(emit_err),
     }
