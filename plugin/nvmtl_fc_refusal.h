@@ -10,11 +10,21 @@
    Only that refusal is remembered: not the translator being absent, not a variant whose one-module route (NVMTL_FC_SPEC=1)
    declined first (that route reads a cache entry that can change), not with NVMTL_FCCACHE_OFF, which keeps nothing.
    At most NVMTL_FC_REFUSALS_MAX are kept; past that a refusal is translated again each time, as before.
+   What a repeat no longer produces is the translator's "re-translate FAILED" line and the NVMTL_FC_FAIL_DUMP and
+   NVMTL_FC_DUMP_ALL files; NVMTL_FC_REFUSAL_MEMO=0 keeps and looks up nothing, so every request reaches the translator
+   as in 3.0.5, with the rest of the cache still on.
    Pure so tools/test_fc_refusal.c proves the rule without Metal. */
 #ifndef NVMTL_FC_REFUSAL_H
 #define NVMTL_FC_REFUSAL_H
 
 #define NVMTL_FC_REFUSALS_MAX 4096u
+
+/* The way out: on unless NVMTL_FC_REFUSAL_MEMO starts with 0. The caller passes the cache switch ANDed with it as
+   cache_on below, so 0 here means nothing is remembered and nothing is answered from memory. */
+static inline int nvmtl_fc_refusal_memo_env_on(const char *value)
+{
+    return !(value && value[0] == '0');
+}
 
 /* 1 when a failed variant translation is to be remembered under its cache key. refused: the translator itself refused
    the request (the deterministic branch); cache_on: NVMTL_FCCACHE_OFF is not set; have_key: the request has a key;

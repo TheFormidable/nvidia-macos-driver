@@ -20,14 +20,14 @@
 
 #define NVMTL_GL_CAPS_BYTES 20   /* the size of the renderer's NVIDIA profile table the patch compares */
 
-/* what nvmtl_gl_caps_patch did in a process that loaded Apple's renderer */
+/* what nvmtl_gl_caps_patch did in a process that loaded Apple's renderer. A device without last-vertex provoking
+   registers no callback (nvmtl_gl_caps_enable returns at once, as before), so it has no outcome and no line. */
 typedef enum {
     NVMTL_GL_CAPS_PATCHED = 0,      /* the bit is set: the renderer sends setProvokingVertexMode: */
     NVMTL_GL_CAPS_SET_BY_APPLE,     /* the renderer's own table already has the bit */
     NVMTL_GL_CAPS_DIFFERS,          /* the table is not the one this plugin knows: left alone */
     NVMTL_GL_CAPS_NO_SYMBOL,        /* the table's symbol is not in the renderer's symbol table */
     NVMTL_GL_CAPS_NOT_WRITABLE,     /* vm_protect would not make the table's page writable */
-    NVMTL_GL_CAPS_NO_FEATURE,       /* the Vulkan device cannot make the last vertex provoke: nothing to tell */
     NVMTL_GL_CAPS_OUTCOMES
 } nvmtl_gl_caps_outcome;
 
@@ -39,7 +39,6 @@ static inline const char *nvmtl_gl_caps_what(nvmtl_gl_caps_outcome o)
     case NVMTL_GL_CAPS_DIFFERS:      return "left to the renderer's index rewrite (its NVIDIA profile is not the macOS 15.8.1 one)";
     case NVMTL_GL_CAPS_NO_SYMBOL:    return "left to the renderer's index rewrite (no NVIDIA profile symbol in it)";
     case NVMTL_GL_CAPS_NOT_WRITABLE: return "left to the renderer's index rewrite (its profile page is not writable)";
-    case NVMTL_GL_CAPS_NO_FEATURE:   return "not patched, its NVIDIA profile is not read (the Vulkan device has no last-vertex provoking)";
     default:                         return "?";
     }
 }

@@ -18,6 +18,13 @@ int main(void)
     arm("a remembered refusal answers the request", nvmtl_fc_refusal_use(1, 1));
     arm("a request with nothing remembered is translated", !nvmtl_fc_refusal_use(1, 0));
     arm("with NVMTL_FCCACHE_OFF every request is translated, remembered or not", !nvmtl_fc_refusal_use(0, 1));
+    {   /* NVMTL_FC_REFUSAL_MEMO: the caller passes cache_on && memo as the gate of both calls */
+        const int memo_off = nvmtl_fc_refusal_memo_env_on("0"), cache_on = 1;
+        arm("the way out is on unless its value starts with 0", nvmtl_fc_refusal_memo_env_on(NULL) && nvmtl_fc_refusal_memo_env_on("1")
+            && nvmtl_fc_refusal_memo_env_on("") && !memo_off && !nvmtl_fc_refusal_memo_env_on("0x"));
+        arm("with NVMTL_FC_REFUSAL_MEMO=0 a refusal is not remembered and a remembered one is not used, so every request is translated",
+            !nvmtl_fc_refusal_keep(1, cache_on && memo_off, 1, 0) && !nvmtl_fc_refusal_use(cache_on && memo_off, 1));
+    }
     printf(fails ? "FAILED %d\n" : "ok\n", fails);
     return fails != 0;
 }

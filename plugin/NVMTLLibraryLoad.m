@@ -1799,6 +1799,14 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
 // Variant refusals, kept beside the entry refusals in gTranslateFailures under the variant's own cache key (an fc1 name,
 // never an entry's), at most NVMTL_FC_REFUSALS_MAX of them.
 static _Atomic unsigned long gFcRefusalsKept, gFcRefusedAgain;
+// Whether variant refusals are remembered at all (NVMTL_FC_REFUSAL_MEMO=0: every request is translated, as in 3.0.5).
+static int nvmtl_fc_refusal_memo_on(void) {
+    static int on = -1;
+    // Said only when it is turned off, so a default run (WindowServer among them) writes no line it did not write before.
+    if (on < 0) { const char *e = getenv("NVMTL_FC_REFUSAL_MEMO"); on = nvmtl_fc_refusal_memo_env_on(e);
+        if (!on) nvlog("fc cache: a variant the translator refused is translated again on every request, as in 3.0.5 (NVMTL_FC_REFUSAL_MEMO=%s)", e); }
+    return on;
+}
 static void nvmtl_fc_refusal_note(NSString *key, NSString *why) {
     @synchronized([NSProcessInfo processInfo]) {
         if (!nvmtl_fc_refusal_keep(1, 1, key != nil, gFcRefusalsKept) || gTranslateFailures[key]) return;
@@ -2068,8 +2076,9 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     // Refused before: the translator gives the same request the same refusal (nvmtl_fc_refusal.h), so it is not asked
     // again. Looked up only after the memory, the disk and the warm-up have missed, so a file another process stored for
     // this key is still read first.
-    NSString *refusedBefore = fcCacheOn ? nvmtl_translate_failure_for(memoKey) : nil;
-    if (nvmtl_fc_refusal_use(fcCacheOn, refusedBefore != nil)) {
+    const BOOL memoOn = fcCacheOn && nvmtl_fc_refusal_memo_on();
+    NSString *refusedBefore = memoOn ? nvmtl_translate_failure_for(memoKey) : nil;
+    if (nvmtl_fc_refusal_use(memoOn, refusedBefore != nil)) {
         if (err) *err = refusedBefore;
         const unsigned long k = atomic_fetch_add(&gFcRefusedAgain, 1) + 1;
         if (!(k & (k - 1))) nvlog("fc cache: %s was refused before with these constants - the same refusal, not translated again [%lu so far]: %s",
@@ -2082,7 +2091,7 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
     NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, &why);
     const int refused = !result && g_fc_refused;
     if (!result && err) *err = why;
-    if (!result && nvmtl_fc_refusal_keep(refused, fcCacheOn, memoKey != nil, gFcRefusalsKept))
+    if (!result && nvmtl_fc_refusal_keep(refused, memoOn, memoKey != nil, gFcRefusalsKept))
         nvmtl_fc_refusal_note(memoKey, why ?: @"specialization failed");
     if (result && fcCacheOn && path && nvmtl_fcwarm_on() &&
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 >= (uint64_t)NVMTL_FCWARM_RECORD_MS * 1000000ull)

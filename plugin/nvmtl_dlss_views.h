@@ -8,7 +8,9 @@
    Frame Generation primes the core's history with prevColorTexture unless the core already saw that frame as the last
    encode's colorTexture. The previous encode's colour texture and prevColorTexture can be two Metal objects for one
    image (a texture view of it): the core is then handed the very same view, so the priming evaluation repeats the
-   last one. The decision is pure so tools/test_dlss_views.c proves it without a GPU. */
+   last one. NVMTL_DLSS_FG_SAME_IMAGE=0: only the same object counts as already seen, so such a view is primed again as
+   in 3.0.5 (the view table's growth and the dropped views stay). The decision is pure so tools/test_dlss_views.c
+   proves it without a GPU. */
 #ifndef NVMTL_DLSS_VIEWS_H
 #define NVMTL_DLSS_VIEWS_H
 #include <stdint.h>
@@ -76,14 +78,21 @@ static inline int nvmtl_dlss_src_eq(nvmtl_dlss_src a, nvmtl_dlss_src b)
    colour texture still owns that image now (last_now): while that texture keeps that image no other image can carry the
    same handle, and an image given a new backing since does not match, so it is primed as before. (Two new backings
    between encodes can bring the old handle value back; the texture then still holds that image, and the decision is
-   the one the same-object case makes.) */
-static inline int nvmtl_dlss_fg_prime(int reset, int have_prev, int have_history, int same_object,
+   the one the same-object case makes.) same_image: that image comparison is used at all; with 0 the decision is the
+   3.0.5 one, reset, previous texture, history and object identity alone. */
+static inline int nvmtl_dlss_fg_prime(int reset, int have_prev, int have_history, int same_object, int same_image,
                                       nvmtl_dlss_src prev, nvmtl_dlss_src last_seen, nvmtl_dlss_src last_now)
 {
     if (reset || !have_prev) return 0;
     if (!have_history) return 1;
     if (same_object) return 0;
-    return !(nvmtl_dlss_src_eq(prev, last_seen) && nvmtl_dlss_src_eq(last_now, last_seen));
+    return !(same_image && nvmtl_dlss_src_eq(prev, last_seen) && nvmtl_dlss_src_eq(last_now, last_seen));
+}
+
+/* The way out of the image comparison: on unless NVMTL_DLSS_FG_SAME_IMAGE starts with 0. */
+static inline int nvmtl_dlss_fg_same_image_env_on(const char *value)
+{
+    return !(value && value[0] == '0');
 }
 
 #endif

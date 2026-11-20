@@ -48,7 +48,12 @@ arm("no fixed-size DLSS view table is left", "DLSS_VIEW_CACHE" not in vk and "st
 arm("nvmtl_vk.c includes the header", '#include "nvmtl_dlss_views.h"' in vk)
 e = body(fx, "nvmtl_fg_src")
 arm("Frame Generation reads the image DLSS uses for a texture (its nvi)", "[t nvi]" in e)
-arm("Frame Generation decides the priming through nvmtl_dlss_fg_prime", "nvmtl_dlss_fg_prime(reset, prev != nil, _haveHistory, (id)_prevColorTexture == (id)_lastColor" in fx)
+arm("Frame Generation decides the priming through nvmtl_dlss_fg_prime, with the image comparison behind its way out",
+    "nvmtl_dlss_fg_prime(reset, prev != nil, _haveHistory, (id)_prevColorTexture == (id)_lastColor, nvmtl_fg_same_image_on()," in fx)
+w = body(fx, "nvmtl_fg_same_image_on")
+arm("NVMTL_DLSS_FG_SAME_IMAGE is read once into a static, through the header's rule, and nowhere else",
+    "static int on = -1;" in w and 'getenv("NVMTL_DLSS_FG_SAME_IMAGE")' in w and "nvmtl_dlss_fg_same_image_env_on(e)" in w
+    and fx.count('getenv("NVMTL_DLSS_FG_SAME_IMAGE")') == 1)
 arm("Frame Generation remembers the image it handed the core with the last colour",
     "_lastColor = _colorTexture; _lastSeen = nvmtl_fg_src(color);" in fx)
 arm("a failed encode forgets the remembered image", "_haveHistory = NO; _lastSeen = (nvmtl_dlss_src){ 0 }; return;" in fx)
