@@ -155,6 +155,16 @@ void nvlog_every(const char *fmt, ...) {
     char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);
     nvlog_line(t);
 }
+// A line that says which way the plugin decided, once per process (the caller keeps the once): a field report needs
+// it from a release build too, where nvlog_line sends only failures to the system log. A line that does name a
+// failure is sent there by nvlog_line already, so it is not sent twice.
+void nvlog_notice(const char *fmt, ...) {
+    char t[640]; va_list a; va_start(a, fmt); vsnprintf(t, sizeof t, fmt, a); va_end(a);
+#if NVMTL_RELEASE
+    if (!nvmtl_log_failure(t)) syslog(LOG_NOTICE, "NullMoth: %s", t);
+#endif
+    nvlog_line(t);
+}
 static void nvlog_line(const char *t) {
 #if NVMTL_RELEASE
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
