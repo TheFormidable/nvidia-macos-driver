@@ -25,6 +25,7 @@
 #include "nvmtl_plane_seed.h"
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
+#include "nvmtl_up_reap.h"
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_ws_capture.h"
 #include "nvmtl_fetch_copy.h"
@@ -10371,17 +10372,53 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
+// The image's handle names the small header `rec` (nvmtl_up_reap.h), which names this record while the upload holds
+// anything. The record embeds two command-buffer structures and is several kilobytes, so the reaper frees it and only
+// the header stays behind on a texture that is never uploaded again.
 typedef struct {
     nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic;
     uint64_t bytes;   // the staging bytes it holds, counted out of g_asyncup_held_bytes when it is finished
+    nvmtl_up_rec *rec;
 } nvmtl_asyncup;
 static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
+// The stored records in store order, for the reaper (nvmtl_asyncup_sweep); under g_asyncup_mutex.
+static nvmtl_up_fifo g_asyncup_fifo;
+// NVMTL_ASYNCUP_REAP=0: a finished asynchronous upload keeps its record, staging buffer and place until its image is
+// taken from again, as in 3.0.5. Otherwise the next upload gives back those whose copy has finished, without waiting.
+static int nvmtl_asyncup_reap_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_ASYNCUP_REAP");
+        on = nvmtl_up_reap_default(e, getprogname());
+        nvlog("vk: tex upload async: finished uploads are given back %s (NVMTL_ASYNCUP_REAP=%s)",
+              on ? "at the next upload" : "when their image is next used", e ? e : "unset");
+    }
+    return on;
+}
+static nvmtl_up_rec *nvmtl_asyncup_rec_new(nvmtl_asyncup *au)
+{
+    nvmtl_up_rec *r = (nvmtl_up_rec *)malloc(sizeof *r);
+    if (r) nvmtl_up_rec_init(r, au);
+    return r;
+}
+// What a take or a replaced handle leaves to its caller, after nvmtl_up_claim under the lock: the record to finish as
+// before (a LIVE one), or 0. A RELEASED header is freed here; a BUSY one is freed by the sweep that is releasing it.
+static uint64_t nvmtl_asyncup_claimed(uint64_t handle, nvmtl_up_claim_kind kind)
+{
+    nvmtl_up_rec *r = (nvmtl_up_rec *)(uintptr_t)handle;
+    if (!r) return 0;
+    if (kind == NVMTL_UP_CLAIM_FREE) { free(r); return 0; }
+    if (kind == NVMTL_UP_CLAIM_LEFT) return 0;
+    return (uint64_t)(uintptr_t)r->body;
+}
 // What the stored handles of the process hold: how many there are and their staging bytes (nvmtl_up_room). An upload is
 // counted in when its handle is stored and out when it is finished, so a failed submit that frees its own record is
 // never counted. Plain atomics: the room check reads them without the lock, so two threads can both pass it and go one
 // upload past a limit each, which is a bound on how far it is overshot, not a leak.
 static _Atomic uint64_t g_asyncup_held, g_asyncup_held_bytes;
-// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
+// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision), and return the
+// record the caller must finish, or 0 when there is none or the reaper has already released it (nvmtl_asyncup_claimed).
 static uint64_t nvmtl_asyncup_take(nvk_image *img)
 {
     if (!img) return 0;
@@ -10389,23 +10426,28 @@ static uint64_t nvmtl_asyncup_take(nvk_image *img)
     nvmtl_up_state s = { img->up_token };
     const uint64_t token = nvmtl_up_before_consume(&s);
     img->up_token = 0;
+    const nvmtl_up_claim_kind kind = token ? nvmtl_up_claim(&g_asyncup_fifo, (nvmtl_up_rec *)(uintptr_t)token) : NVMTL_UP_CLAIM_FINISH;
     pthread_mutex_unlock(&g_asyncup_mutex);
-    return token;
+    return nvmtl_asyncup_claimed(token, kind);
 }
-// Store a new handle and return the one it replaces (0 for none). Another thread uploading to the same image can have
-// stored its handle after this one read the image's handle without the lock; the caller finishes the returned handle
-// outside the lock, so that upload is neither leaked nor left running when the image is freed.
+// Store a new handle and return the record of the one it replaces, when that one still holds its copy (0 otherwise).
+// Another thread uploading to the same image can have stored its handle after this one read the image's handle without
+// the lock; the caller finishes the returned record outside the lock, so that upload is neither leaked nor left running
+// when the image is freed. The image keeps the record's header, which goes on the reaper's list when the reaper is on.
 static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)
 {
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    const int reap = nvmtl_asyncup_reap_on();
     atomic_fetch_add(&g_asyncup_held, 1);
     atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);
     pthread_mutex_lock(&g_asyncup_mutex);
     nvmtl_up_state s = { img->up_token };
-    const uint64_t old = nvmtl_up_set(&s, token);
+    const uint64_t old = nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec);
     img->up_token = s.infl;
+    if (reap) nvmtl_up_fifo_push(&g_asyncup_fifo, au->rec);
+    const nvmtl_up_claim_kind kind = old ? nvmtl_up_claim(&g_asyncup_fifo, (nvmtl_up_rec *)(uintptr_t)old) : NVMTL_UP_CLAIM_FINISH;
     pthread_mutex_unlock(&g_asyncup_mutex);
-    return old;
+    return nvmtl_asyncup_claimed(old, kind);
 }
 // The copy of an async upload was dropped by a channel rebuild after a GPU fault (nvmtl_vk_submit_finish answered -1).
 // The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
@@ -10443,11 +10485,47 @@ static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
 {
     if (!token) return;
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    free(au->rec);   // no image names it any more (taken or replaced), and it is off the reaper's list (nvmtl_up_claim)
+    au->rec = NULL;
     if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);
     atomic_fetch_sub(&g_asyncup_held, 1);   // every handle finished here was counted in by nvmtl_asyncup_store
     atomic_fetch_sub(&g_asyncup_held_bytes, au->bytes);
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
+}
+// The fence poll of the reaper's sweep, under g_asyncup_mutex: a zero timeout, so it never blocks. A copy that a channel
+// rebuild dropped is told apart, so that it is left to the image's next take, which makes it again.
+static int nvmtl_asyncup_probe(void *ctx, void *body)
+{
+    (void)ctx;
+    const VkFence fence = ((nvmtl_asyncup *)body)->infl.fence;
+    if (g_state != 1 || pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, 0) != VK_SUCCESS) return NVMTL_UP_PROBE_PENDING;
+    return pnvk_fence_dropped && nvmtl_drop_seen(pnvk_fence_dropped(g_dev, fence)) ? NVMTL_UP_PROBE_DROPPED : NVMTL_UP_PROBE_RAN;
+}
+// Give back the records whose copy has finished (nvmtl_up_reap.h): claimed under the lock, released outside it, as a
+// take would (the submission finished without a wait, since its fence has signalled; the staging destroyed; the counts
+// lowered). Called by an upload before it judges the room, so a texture uploaded once no longer keeps a place and its
+// staging for its whole life. The release can run the image grace's reaps, which can destroy an image whose handle is
+// one of the records claimed here: that take finds it BUSY and leaves it to this loop, so nothing waits on itself.
+static void nvmtl_asyncup_sweep(void)
+{
+    if (!nvmtl_asyncup_reap_on() || !atomic_load(&g_asyncup_held)) return;
+    nvmtl_up_rec *got[NVMTL_UP_SWEEP_MAX];
+    pthread_mutex_lock(&g_asyncup_mutex);
+    const unsigned n = nvmtl_up_sweep_collect(&g_asyncup_fifo, NVMTL_UP_SWEEP_MAX, nvmtl_asyncup_probe, NULL, got);
+    pthread_mutex_unlock(&g_asyncup_mutex);
+    for (unsigned i = 0; i < n; i++) {
+        nvmtl_asyncup *const b = (nvmtl_asyncup *)got[i]->body;
+        (void)nvmtl_vk_submit_finish(&b->infl);   // not dropped (the poll said so): there is no copy to make again
+        atomic_fetch_sub(&g_asyncup_held, 1);
+        atomic_fetch_sub(&g_asyncup_held_bytes, b->bytes);
+        nvmtl_vk_buffer_destroy(&b->stage);
+        free(b);
+        pthread_mutex_lock(&g_asyncup_mutex);
+        const int orphan = nvmtl_up_release_done(got[i]);
+        pthread_mutex_unlock(&g_asyncup_mutex);
+        if (orphan) free(got[i]);
+    }
 }
 // Public guard for the consumers (readback, surface-out, migration): finish a pending upload first.
 void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img)); }
@@ -10481,11 +10559,16 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
         // a prior async upload to THIS image must land before we overwrite the texture or its staging
         if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));
         // The room is judged after that finish, so a texture uploaded again every frame gives back its place first and
-        // keeps it. Without room the upload takes the synchronous path below, which holds nothing once it returns.
+        // keeps it, and after the sweep, which gives back the places of uploads to other textures whose copy has
+        // finished. Without room the upload takes the synchronous path below, which holds nothing once it returns.
+        nvmtl_asyncup_sweep();
         const uint64_t held = atomic_load(&g_asyncup_held), held_bytes = atomic_load(&g_asyncup_held_bytes);
         if (nvmtl_up_room(held, held_bytes, bytes)) {
             au = (nvmtl_asyncup *)calloc(1, sizeof *au);
-            if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
+            if (!au || !(au->rec = nvmtl_asyncup_rec_new(au)) || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) {
+                if (au) free(au->rec);
+                free(au); au = NULL;   // fall back to sync
+            }
             else au->bytes = bytes;
         } else {
             static _Atomic int said;
@@ -10503,7 +10586,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     }
     uint8_t *dst = (uint8_t *)stageb->map;
     for (uint32_t r = 0; r < rows; r++) memcpy(dst + (size_t)r * cols * bpp, (const uint8_t *)src + (size_t)r * row_bytes, (size_t)cols * bpp);
-    if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au); } return -1; }
+    if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au->rec); free(au); } return -1; }
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 }, { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
@@ -10514,7 +10597,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
         // submit without waiting; queue order + the SHADER_READ barrier above order the copy before any later
         // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
         au->bic = bic;   // kept so that a copy a channel rebuild drops can be made again (nvmtl_asyncup_redo)
-        if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
+        if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au->rec); free(au); return -1; }
         // A second thread's upload to this image may have been stored since the image's handle was read above: it is
         // handed back here and finished, outside the lock, rather than overwritten and lost.
         nvmtl_asyncup_finish(img, nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au));
