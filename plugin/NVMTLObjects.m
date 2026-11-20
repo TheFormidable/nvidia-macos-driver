@@ -551,10 +551,25 @@ static os_unfair_lock gRes2PassLock = OS_UNFAIR_LOCK_INIT;
 static __thread int gRes2InPass;
 static uint64_t gRes2EvictCalls, gRes2EvictBytes;
 static _Atomic int gRes2Force;
+#include "nvmtl_res2_nowait.h"
+// NVMTL_RES2_NOWAIT=0: a thread that asks the pager for VRAM sleeps while the worker holds the pass and again while the
+// evicted backings drain, as in 3.0.5. Otherwise it never sleeps there and its allocation takes the caller's own
+// fallback (system memory) when nothing came back at once (nvmtl_res2_nowait.h). WindowServer keeps the waits.
+static int nvmtl_res2_nowait_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_RES2_NOWAIT");
+        on = nvmtl_res2_nowait_default(e, getprogname());
+        nvlog("residency (res2): the allocating thread %s (NVMTL_RES2_NOWAIT=%s)",
+              on ? "never sleeps for the pager" : "waits up to 30 ms for the pager and 16 ms for evicted VRAM to drain", e ? e : "unset"); }
+    return on;
+}
 static void nvmtl_res2_pass_guarded(int from_worker) {
     if (gRes2InPass) return;
     if (!os_unfair_lock_trylock(&gRes2PassLock)) {
-        if (from_worker) { nvmtl_res2_kick(1); return; }
+        // The pass that holds the lock, or the one this kick queues, sees gRes2Want, which nvmtl_res2_evict raised
+        // before calling here; the kick also covers a running pass that already took gRes2Want, because the worker
+        // clears gRes2Pending before it starts.
+        if (nvmtl_res2_busy_action(from_worker, nvmtl_res2_nowait_on()) == NVMTL_RES2_BUSY_KICK) { nvmtl_res2_kick(1); return; }
         const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); int got = 0;
         while (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 < 30000000ull) { usleep(200); if (os_unfair_lock_trylock(&gRes2PassLock)) { got = 1; break; } }
         if (!got) { static unsigned said; if (said++ < 4) nvlog("residency (res2): allocating thread waited 30 ms for the pager and gave up - this allocation spills"); return; }
@@ -575,7 +590,20 @@ static uint64_t nvmtl_res2_evict(uint64_t want) {
     @autoreleasepool { nvmtl_res2_pass_guarded(0); }
     uint64_t after = nvmtl_vk_vram_free_now();
     static _Atomic uint64_t blindUntil;
-    if (after <= before && gGraveVram && clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= atomic_load(&blindUntil)) {
+    const nvmtl_res2_drain drain = nvmtl_res2_drain_action(nvmtl_res2_nowait_on(), after <= before, gGraveVram,
+                                                           clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), atomic_load(&blindUntil));
+    if (drain == NVMTL_RES2_DRAIN_REAP) {
+        // Whatever drained during the pass is freed now; the rest is freed by the worker, which this kick (and the
+        // completion of the command buffers that hold it, nvmtl_res2_cb_done) schedules. When nothing came back the
+        // caller takes the path it took whenever the old wait timed out: textures, heaps and stable-address buffers
+        // go to system memory, newBufferWithLength places a refused Private buffer there, and the few Private
+        // buffers with no such fallback (visibility scratch, acceleration-structure side tables) are refused.
+        nvmtl_res2_reap(); after = nvmtl_vk_vram_free_now();
+        if (after <= before) { nvmtl_res2_kick(0);
+            static unsigned said; if (said++ < 4 || said % 256 == 0)
+                nvlog("residency (res2): %llu MB of evicted VRAM has not drained yet - this allocation spills, the pager frees it later (%u)",
+                      (unsigned long long)(gGraveVram >> 20), said); }
+    } else if (drain == NVMTL_RES2_DRAIN_SLEEP) {
         const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         while (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 < 16000000ull) {
             usleep(1000); nvmtl_res2_reap(); after = nvmtl_vk_vram_free_now();
@@ -5181,7 +5209,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NVMTLBuffer *scratch = nil;
     if (needScratch) {
         scratch = [NVMTLBuffer new];
-        if (nvmtl_vk_buffer_create(_visRecords.count * 8, 0, &scratch->_b)) {
+        // A VRAM refusal falls back to system memory, as the acceleration-structure scratch does: the pager no longer
+        // waits for evicted VRAM to drain, so a refusal that wait used to turn into an admission now comes here
+        // (nvmtl_res2_nowait.h; NVMTL_RES2_NOWAIT=0 restores the wait and the plain refusal).
+        if (nvmtl_vk_buffer_create(_visRecords.count * 8, 0, &scratch->_b) &&
+            (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(_visRecords.count * 8, 1, &scratch->_b))) {
             [self nvmtlVisibilityError:[NSString stringWithFormat:@"visibility: accumulation scratch allocation failed"]]; scratch = nil;
         } else {
             if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
@@ -9185,7 +9217,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         if (dst->_uid.size < uidBytes) {
             if (dst->_uid.buf) { NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = dst->_uid; if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new]; [_cb->_scratch addObject:old]; }
             memset(&dst->_uid, 0, sizeof dst->_uid);
-            if (nvmtl_vk_buffer_create(uidBytes, 0, &dst->_uid)) { nvlog("build acceleration structure: userID side table (%zu B) FAILED - user_instance_id reads 0", uidBytes); memset(&dst->_uid, 0, sizeof dst->_uid); }
+            // a VRAM refusal falls back to system memory while the pager does not wait (see the visibility scratch)
+            if (nvmtl_vk_buffer_create(uidBytes, 0, &dst->_uid) && (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(uidBytes, 1, &dst->_uid))) { nvlog("build acceleration structure: userID side table (%zu B) FAILED - user_instance_id reads 0", uidBytes); memset(&dst->_uid, 0, sizeof dst->_uid); }
         }
         if (dst->_uid.buf && nvmtl_vk_cmd_copy_buffer(&_cb->_c, &vk->_b, uidOff, &dst->_uid, 0, uidBytes))
             nvlog("build acceleration structure: userID side table copy FAILED");
@@ -9302,7 +9335,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         if (d->_uid.size < s->_uid.size) {
             if (d->_uid.buf) { NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = d->_uid; if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new]; [_cb->_scratch addObject:old]; }
             memset(&d->_uid, 0, sizeof d->_uid);
-            if (nvmtl_vk_buffer_create(s->_uid.size, 0, &d->_uid)) { nvlog("copy acceleration structure: side table FAILED"); memset(&d->_uid, 0, sizeof d->_uid); }
+            if (nvmtl_vk_buffer_create(s->_uid.size, 0, &d->_uid) && (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(s->_uid.size, 1, &d->_uid))) { nvlog("copy acceleration structure: side table FAILED"); memset(&d->_uid, 0, sizeof d->_uid); }
         }
         if (d->_uid.buf && nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_uid, 0, &d->_uid, 0, s->_uid.size)) nvlog("copy acceleration structure: side table copy FAILED");
     }
