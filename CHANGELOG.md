@@ -11,10 +11,12 @@ memory to spare, and the game's render thread was the limit. Capture A is a mome
 one at 19. Between 15 % (A) and 35 % (B) of the render thread was spent in waits that belong to the plugin, and that
 is what the first group below goes after. The rest are defects and costs the audit found by reading the code, each
 judged by a second reviewer before it was written and by a third after: compute shaders, three shader translations
-that were refused, a DLSS leak, the video-memory pager's waits, and three diagnostics. Every change of what runs by
-default has one way back, a new row of tier escape in `tools/switches.tsv`; a change with none either gives exactly
-what 3.0.5 gave or only writes a log line. **Nothing of 3.0.6 has been built on a Mac or run on a card, and no gain
-has been measured**: it was compiled and its host tests were run on Linux only (below, "What ran where"). The shares
+that were refused, a DLSS leak, the video-memory pager's waits, and three diagnostics. The last group holds what the
+host suite found when it first ran on a Mac: one defect of the plugin, and three tests that failed for other reasons.
+Every change of what runs by default has one way back, a new row of tier escape in `tools/switches.tsv`; a change with
+none either gives exactly what 3.0.5 gave or only writes a log line. **No driver of 3.0.6 has been built on a Mac or
+run on a card, and no gain has been measured**: it was compiled on Linux only, and its host tests were run on Linux
+and on that Mac, where they build small programs of their own and load nothing (below, "What ran where"). The shares
 quoted from the captures say where the time went in 3.0.2, not what this branch gives back. On that route the waits
 measured put the ceiling of all of this between 1.2 and 1.9 times the frame rate. The larger step for an OpenGL game
 is OpenGL through Zink on NVK (one translation instead of two), which 3.0.3 is expected to let engage on that macOS
@@ -270,6 +272,38 @@ boot argument `nvzink=0` brings that renderer back.
   tools/test_gl_diag.py (new), the existing tests that read these files, and objccheck (0 new). Not run: anything on a
   Mac or a card. No gain is claimed; these lines provide the data a later decision needs.
 
+#### Found when the host suite first ran on a Mac
+
+- **WindowServer's zero-surface flush drains its own autoreleases before it hands its textures to another thread.**
+  Since 3.0.1, a WindowServer surface that is all zero is cleared on the GPU instead of uploaded. When those fills go
+  out as their own submit, the textures are handed to another thread to be released: the flush can run inside a
+  submit, under the submit mutex, and a texture's last release frees its surface. That holds only if the array handed
+  over is this thread's last reference. The flush kept its snapshot of the owed textures out of the caller's
+  autorelease pool, but not the next call, which empties the weak table they were in, nor anything else it calls. On a
+  Mac a reference to each texture does end up in the caller's pool (the test below shows it; emptying the weak table
+  is the likely source, being the one call on the textures that ran outside a pool), and that pool is popped on the
+  submitting thread as soon as the flush returns. If the other thread had released first, the pop was the texture's
+  last release, inside the submit. The flush's whole body now runs in a pool of its own, and the hand-off happens
+  after that pool has drained, while the array still holds every texture. The same calls run in the same order under
+  the same lock, so there is no switch. `tools/test_surfin_zero.py`, the test of this rule, failed on a Mac at 3.0.5
+  and passes on Linux, where the weak table of gnustep-base removes without loading. The test now calls the flush in a
+  pool, as the plugin does, and prints what it counted. On the Mac, at the commit that changes only the test, it
+  failed with "the watched root was freed 1 time(s), 1 of them on the submitting thread"; with the flush changed it
+  passes. On Linux a model of a table that autoreleases what it removes gives the same failure against the old flush
+  and passes against the new one, and a release in place of the hand-off fails the test, as it must. Not run in
+  WindowServer or on a card.
+- **Two host tests that had failed since 3.0.3 pass again.** `tools/test_evwait_wiring_kernel.py` looked for the exact
+  text of selector 7's answer, which the GPU capability producer rewrote: the selector still answers both event-wait
+  bits, and now ORs a third bit into them. The check accepts that shape and nothing looser, with three new controls (a
+  later feature assigned over the bits, the bits masked off, a second value returned).
+  `tools/test_package_licenses.py` asks `NOTICE` and `docs/PROVENANCE.md` to name every file the NVK patches add under
+  the driver's own licence. `nvk/nvk-gpu-caps.patch` added a fifth, `nvrm_gpu_capabilities_abi.h`, and both documents
+  now name it. No code changes.
+- **The bind cache's switch is defined ahead of the pipeline bind.** `tools/test_graphics_bindings.py` compiles the
+  text of `plugin/nvmtl_vk.c` between two functions on its own, and this branch had written `nvmtl_bind_cache_on`
+  between them, so the test no longer compiled. It needs Vulkan headers and is skipped on Linux; the Mac showed it.
+  The function moved, unchanged.
+
 ### The ways back
 
 Each is new, of tier escape, with a row in `tools/switches.tsv`, read once per process, and is a line of
@@ -309,7 +343,8 @@ patch out of the chain in `build/build_nvk.sh` restores the walk), the single re
 ShaderWrite census flag, the pipeline state's function ivars and the embedded-sampler short-circuit, the memory
 table's index, the growth of the DLSS view table and the views dropped with their image, what the texture recycle
 cache gives back and when (it acts only on that cache, which `NVMTL_TEX_RECYCLE=0` leaves empty), the sampler found
-through call-site attributes in the translator (only modules that were refused change), and the three diagnostics
+through call-site attributes in the translator (only modules that were refused change), the pool around WindowServer's
+zero-surface flush (the same calls in the same order under the same lock), and the three diagnostics
 (`debug.nvrm_pat`, `debug.nvrm_pat_wc` and `debug.nvrm_pat_why`, read-only, and the two OpenGL log lines), which
 decide nothing.
 
@@ -321,10 +356,13 @@ decide nothing.
   the exports of macOS 15 and 26 gives the one line it gives for 3.0.5 (`_ceutilsMemset_IMPL`). The plugin's
   Objective-C check, at two SDK levels against a stand-in SDK, reports 0 new errors and 0 new warnings. None of these
   links or runs the driver.
-- **Linux, the host suite** (`python3 tools/run_all_tests.py`). 348 passed, 43 failed, 11 skipped and 10 not run, of
-  412. The 43 are the tests that fail on Linux at 3.0.5 too (311 passed and 43 failed of 376 there), by name, because
-  they need a Mac: Apple's clang, Mach-O tools, frameworks. With wrappers that let the Objective-C tests compile and
-  run on Linux, 373 passed and 19 failed, the same 19 as at 3.0.5 (337 and 19).
+- **Linux, the host suite** (`python3 tools/run_all_tests.py`), on the final tree. 350 passed, 41 failed, 11 skipped
+  and 10 not run, of 412. The 41 fail on Linux at 3.0.5 too (311 passed and 43 failed of 376 there), by name, because
+  they need a Mac: Apple's clang, Mach-O tools, frameworks; the other two of those 43 are the two tests fixed above.
+  With wrappers that let the Objective-C tests compile and run on Linux, 375 passed and 17 failed: the 19 that fail at
+  3.0.5 (337 and 19) less the same two. Six tests need Vulkan headers and are skipped in both runs. Given the headers
+  and a stand-in for the Mach headers they include, five of them pass on Linux; the sixth,
+  `tools/test_opengl_perf.py`, needs Apple's Objective-C runtime.
 - **Linux, the translator's unit tests** (`cargo test`). 2520 passed and 25 failed in the translator, 61 passed and 2
   failed in the wrapper; the failures are the ones 3.0.5 has, and only the tests added here changed.
 - **Review.** Each change was written by one engineer and read by a second whose task was to break it. Four more then
@@ -332,11 +370,24 @@ decide nothing.
   hang. They found five of other kinds, all fixed in the entries above: two places where the textures kept for reuse
   were not given back before memory still in use was touched, fault reports that mislabelled such textures, and two
   changes with no way back. One change was withdrawn, as its entry says.
+- **A Mac, the host suite.** The same command ran on the Mac the captures came from (macOS 26.7.3, with 3.0.2
+  installed), from a separate checkout, with the Vulkan headers an earlier build of NVK had fetched there. Nothing was
+  installed or loaded for it, and no driver was built. At e0624e87, this branch before the four commits of "Found when
+  the host suite first ran on a Mac": 394 passed, 4 failed, 4 skipped and 10 not run, of 412. The four are the tests
+  those commits are about. Three of them fail on that Mac at 3.0.5 too, and the fourth is the one this branch had
+  broken. At 3994f024, the last commit that changes code or tests, the 76 tests that name a file changed since ran
+  again, those four among them: 74 passed, none failed, 1 was skipped and 1 not run. The other 336 were not run again
+  there. The skipped tests need NVIDIA's video headers or ffmpeg, and one runs `cargo`, which was given an empty cache
+  on purpose so that it would leave the tester's own alone; the tests not run need a built translator. After both runs
+  the checkout was clean, nothing under the system's folders was newer than the run, and WindowServer was the same
+  process. The suite does leave crash reports in the tester's own log folder, 48 over the two runs: they come from
+  control programs the tests build and end by a signal on purpose.
 - **Before the suite went to a Mac**, every test and script changed since the last such reading (133 files, everything
   after c5e90f2e) was read for what it starts and writes on a Mac, and the whole suite was run on Linux with every
   program start recorded. One test was changed for it: `tools/test_translator_whole_views.py` runs the tester's own
   `cargo`, and when the runner stopped it at its limit, the translator's `Cargo.lock` stayed rewritten. It now stops
-  cargo itself before that limit and puts the file back.
+  cargo itself before that limit and puts the file back. The two test files changed after that run were read the same
+  way before they went back to the Mac.
 - **Not run anywhere:** a build of the driver, the driver on a card, any game. The three rows
   `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk` of the card checks still have to pass on the
   card, and every gain is still to be measured.
