@@ -315,7 +315,31 @@ decide nothing.
 
 ### What ran where
 
-RANHERE
+**No driver was built on a Mac and nothing ran on a card.** What did run, and where:
+
+- **Linux, compile checks of the final tree.** The kext compile check of all 25 units passes. The import check against
+  the exports of macOS 15 and 26 gives the one line it gives for 3.0.5 (`_ceutilsMemset_IMPL`). The plugin's
+  Objective-C check, at two SDK levels against a stand-in SDK, reports 0 new errors and 0 new warnings. None of these
+  links or runs the driver.
+- **Linux, the host suite** (`python3 tools/run_all_tests.py`). 348 passed, 43 failed, 11 skipped and 10 not run, of
+  412. The 43 are the tests that fail on Linux at 3.0.5 too (311 passed and 43 failed of 376 there), by name, because
+  they need a Mac: Apple's clang, Mach-O tools, frameworks. With wrappers that let the Objective-C tests compile and
+  run on Linux, 373 passed and 19 failed, the same 19 as at 3.0.5 (337 and 19).
+- **Linux, the translator's unit tests** (`cargo test`). 2520 passed and 25 failed in the translator, 61 passed and 2
+  failed in the wrapper; the failures are the ones 3.0.5 has, and only the tests added here changed.
+- **Review.** Each change was written by one engineer and read by a second whose task was to break it. Four more then
+  read the whole branch by area, each finding checked by another reader. They found no defect of rendering, crash or
+  hang. They found five of other kinds, all fixed in the entries above: two places where the textures kept for reuse
+  were not given back before memory still in use was touched, fault reports that mislabelled such textures, and two
+  changes with no way back. One change was withdrawn, as its entry says.
+- **Before the suite went to a Mac**, every test and script changed since the last such reading (133 files, everything
+  after c5e90f2e) was read for what it starts and writes on a Mac, and the whole suite was run on Linux with every
+  program start recorded. One test was changed for it: `tools/test_translator_whole_views.py` runs the tester's own
+  `cargo`, and when the runner stopped it at its limit, the translator's `Cargo.lock` stayed rewritten. It now stops
+  cargo itself before that limit and puts the file back.
+- **Not run anywhere:** a build of the driver, the driver on a card, any game. The three rows
+  `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk` of the card checks still have to pass on the
+  card, and every gain is still to be measured.
 
 ## 3.0.5
 
