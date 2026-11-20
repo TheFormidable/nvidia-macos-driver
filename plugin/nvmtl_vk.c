@@ -8749,18 +8749,10 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
 }
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
-void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
-    p = nvmtl_uniform_cbuf_pick(c, p);
-    if (p->pipe && c->graphics_pipeline == p->pipe) return;
-    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
-    c->graphics_pipeline = p->pipe;
-    if (p->db_dyn) {
-        pvkCmdSetDepthBoundsTestEnable(c->cb, c->db_on ? VK_TRUE : VK_FALSE);
-        pvkCmdSetDepthBounds(c->cb, c->db_on ? c->db_lo : 0.0f, c->db_on ? c->db_hi : 1.0f);
-    }
-}
 // NVMTL_BIND_CACHE=0: every draw records its index buffer, vertex buffers, topology and restart again, as in 3.0.5.
 // WindowServer always does: the saving is for applications that draw many times per command buffer.
+// (Defined ahead of nvmtl_vk_cmd_bind_pipeline: tools/test_graphics_bindings.py compiles the text from that function
+// to nvmtl_vk_cmd_set_topology on its own, so nothing else may sit between the two.)
 _Static_assert(NVMTL_DC_NVIN == NVMTL_NVIN, "the draw cache keeps one entry per vertex buffer binding");
 static int nvmtl_bind_cache_on(void)
 {
@@ -8773,6 +8765,16 @@ static int nvmtl_bind_cache_on(void)
               e ? e : "unset", ws ? ", WindowServer" : "");
     }
     return on;
+}
+void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
+    p = nvmtl_uniform_cbuf_pick(c, p);
+    if (p->pipe && c->graphics_pipeline == p->pipe) return;
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipeline)p->pipe);
+    c->graphics_pipeline = p->pipe;
+    if (p->db_dyn) {
+        pvkCmdSetDepthBoundsTestEnable(c->cb, c->db_on ? VK_TRUE : VK_FALSE);
+        pvkCmdSetDepthBounds(c->cb, c->db_on ? c->db_lo : 0.0f, c->db_on ? c->db_hi : 1.0f);
+    }
 }
 int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     static const VkPrimitiveTopology map[5] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
