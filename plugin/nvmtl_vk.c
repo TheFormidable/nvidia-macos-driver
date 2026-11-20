@@ -7988,6 +7988,7 @@ typedef struct nvmtl_render_shadow {
 static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
 {
+    c->gfx_epoch++;
     int mixed = ps->dsview != NULL;
     uint32_t linear = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
@@ -8704,6 +8705,21 @@ void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
         pvkCmdSetDepthBounds(c->cb, c->db_on ? c->db_lo : 0.0f, c->db_on ? c->db_hi : 1.0f);
     }
 }
+// NVMTL_BIND_CACHE=0: every draw records its index buffer, vertex buffers, topology and restart again, as in 3.0.5.
+// WindowServer always does: the saving is for applications that draw many times per command buffer.
+_Static_assert(NVMTL_DC_NVIN == NVMTL_NVIN, "the draw cache keeps one entry per vertex buffer binding");
+static int nvmtl_bind_cache_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_BIND_CACHE"); const char *me = getprogname();
+        const int ws = me && !strcmp(me, "WindowServer");
+        on = !(e && e[0] == '0') && !ws;
+        nvlog("draw: repeated index and vertex buffer binds are %s (NVMTL_BIND_CACHE=%s%s)", on ? "skipped" : "recorded again",
+              e ? e : "unset", ws ? ", WindowServer" : "");
+    }
+    return on;
+}
 int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     static const VkPrimitiveTopology map[5] = { VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP };
@@ -8712,8 +8728,11 @@ int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     if (mtlType < 3 && !g_topo_any) { static int said2; if (said2++ < 4) nvlog("G14 draw: point/line primitives need "
         "dynamicPrimitiveTopologyUnrestricted, which this device does not report — NOT drawn (was: rasterised as triangles)"); return -1; }
     c->topo = mtlType;
-    pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
-    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE);
+    const VkBool32 restart = (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE;
+    int emitRestart;
+    if (nvmtl_dc_topo(&c->dc, nvmtl_bind_cache_on(), (uint32_t)map[mtlType], (uint32_t)restart, &emitRestart))
+        pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
+    if (emitRestart) pvkCmdSetPrimitiveRestartEnable(c->cb, restart);
     if (mtlType != 3) { static int told[5]; if (!told[mtlType]++) nvlog("G14 first draw of MTLPrimitiveType %u in this process", mtlType); }
     return 0;
 }
@@ -8721,12 +8740,13 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
 {
     if (c->nobind || !p || !p->vin_mask) return 0;
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
+    const int cache = nvmtl_bind_cache_on();
     for (uint32_t i = 0; i < NVMTL_NVIN; i++) if (p->vin_mask & (1u << i)) {
         nvmtl_slot *sl = t ? &t->s[0][i] : NULL;
         if (!sl || sl->kind != NVMTL_SLOT_BUF || !sl->h) { static int said; if (said++ < 8) nvlog("G16 draw: the pipeline fetches vertex "
             "attributes from buffer index %u and nothing is bound there — NOT drawn", i); return -1; }
         VkBuffer b = (VkBuffer)sl->h; VkDeviceSize off = sl->off;
-        if (!p->vin_dyn) { pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off); continue; }
+        if (!p->vin_dyn) { if (nvmtl_dc_vb(&c->dc, cache, i, (uint64_t)(uintptr_t)b, off, 0)) pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off); continue; }
         VkDeviceSize st = p->vin_stride[i];
         if (p->vin_dyn & (1u << i)) {
             if (!vstride || !(vset & (1u << i))) { static int said; if (said++ < 8) nvlog("apps-dyn draw: buffer index %u has a dynamic stride "
@@ -8735,6 +8755,7 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
             if (st > g_lim.maxVertexInputBindingStride) { static int said; if (said++ < 8) nvlog("apps-dyn draw: attributeStride %llu at "
                 "buffer index %u is past maxVertexInputBindingStride %u — NOT drawn", (unsigned long long)st, i, g_lim.maxVertexInputBindingStride); return -1; }
         }
+        (void)nvmtl_dc_vb(&c->dc, cache, i, (uint64_t)(uintptr_t)b, off, 1);   // always recorded: it sets the stride
         pvkCmdBindVertexBuffers2(c->cb, i, 1, &b, &off, NULL, &st);
     }
     return 0;
@@ -8759,7 +8780,9 @@ void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, ui
                                uint32_t instances, int32_t baseVertex, uint32_t baseInstance)
 {
     if (!nvmtl_index_range_ok(idx, offset)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    const VkIndexType type = is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (nvmtl_dc_ib(&c->dc, nvmtl_bind_cache_on(), (uint64_t)(uintptr_t)idx->buf, offset, (uint32_t)type))
+        pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, type);
     if (c->nobind) return;
     const uint32_t n = instances ? instances : 1;
     if (nvmtl_fetch_split(c, count, n)) {
@@ -10689,6 +10712,7 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, sizeof pc, &pc);
     pvkCmdSetPrimitiveTopology(c->cb, VK_PRIMITIVE_TOPOLOGY_PATCH_LIST);
     pvkCmdSetPrimitiveRestartEnable(c->cb, VK_FALSE);
+    nvmtl_dc_topo_unknown(&c->dc);   // set behind the draw cache: the next ordinary draw sets its own again
     if (ind) pvkCmdDrawIndirect(c->cb, (VkBuffer)ind->buf, indoff, 1, 0);
     else pvkCmdDraw(c->cb, count, instances ? instances : 1, start, baseInstance);
     { static int told; if (!told++) nvlog("tess: first patch draw in this process (%s)", ind ? "indirect" : "direct"); }
@@ -10697,7 +10721,9 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off)
 {
     if (!nvmtl_index_range_ok(idx, idxOff)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    const VkIndexType type = is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (nvmtl_dc_ib(&c->dc, nvmtl_bind_cache_on(), (uint64_t)(uintptr_t)idx->buf, idxOff, (uint32_t)type))
+        pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, type);
     if (c->nobind) return;
     NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0));
 }
@@ -12910,13 +12936,14 @@ int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         // The feature's setup (weights and tables the core uploads) is recorded into this same command buffer: its
         // writes must land before the first evaluation reads them. The standalone check submitted and waited between.
         nvmtl_vk_cmd_barrier(c);
     }
     c->direct_sass = 1;   // the core launches compiled machine code from this buffer: never reuse its pool
     const int rc = nvmtl_dlss_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
@@ -12968,11 +12995,12 @@ int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_rr_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_rr_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
     }
     c->direct_sass = 1;
     const int rc = nvmtl_dlss_rr_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
@@ -13019,11 +13047,12 @@ int nvmtl_vk_cmd_dlss_fg(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_fg_a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_fg_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_fg_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
     }
     c->direct_sass = 1;
     const int rc = nvmtl_dlss_fg_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }

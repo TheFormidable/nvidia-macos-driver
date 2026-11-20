@@ -30,6 +30,27 @@ int main(void)
     arm("with no choice recorded yet it misses", !nvmtl_sv_memo_hit(1, NULL, &a, NULL, &k1, 0));
     arm("a missing key never hits", !nvmtl_sv_memo_hit(1, &a, &a, NULL, NULL, 1));
 
+    /* setDepthStencilState: s is the state, d another; the record says s was applied in epoch 5 of command buffer 9,
+       with a pipeline that had stencil */
+    int s = 0, d = 0;
+    arm("the state this encoder last applied, again in the same pass, is skipped",
+        nvmtl_ds_skip(1, 1, &s, &s, &s, 1, 1, 1, 5, 5, 9, 9));
+    arm("NVMTL_DS_SKIP=0 applies it again", !nvmtl_ds_skip(0, 1, &s, &s, &s, 1, 1, 1, 5, 5, 9, 9));
+    arm("another state is applied", !nvmtl_ds_skip(1, 1, &d, &s, &s, 1, 1, 1, 5, 5, 9, 9));
+    arm("a state set while it was not applied (no record of it) is applied", !nvmtl_ds_skip(1, 1, &s, &s, NULL, 1, 1, 1, 5, 5, 9, 9));
+    arm("a record of another state does not cover this one", !nvmtl_ds_skip(1, 1, &s, &s, &d, 1, 1, 1, 5, 5, 9, 9));
+    arm("a record of this state does not cover it once the encoder holds another one",
+        !nvmtl_ds_skip(1, 1, &s, &d, &s, 1, 1, 1, 5, 5, 9, 9));
+    arm("a nil state is always applied (it turns the depth test off)", !nvmtl_ds_skip(1, 1, NULL, NULL, NULL, 1, 1, 1, 5, 5, 9, 9));
+    arm("after a new render pass began it is applied again", !nvmtl_ds_skip(1, 1, &s, &s, &s, 1, 1, 1, 5, 6, 9, 9));
+    arm("in another VkCommandBuffer (a restart between encoders, epochs start over) it is applied again",
+        !nvmtl_ds_skip(1, 1, &s, &s, &s, 1, 1, 1, 0, 0, 9, 10));
+    arm("outside a begun pass it is applied (and the apply itself does nothing then)", !nvmtl_ds_skip(1, 0, &s, &s, &s, 1, 1, 1, 5, 5, 9, 9));
+    arm("a pipeline without depth is never skipped", !nvmtl_ds_skip(1, 1, &s, &s, &s, 0, 0, 0, 5, 5, 9, 9));
+    arm("a pipeline with stencil after a record made without it applies the stencil state",
+        !nvmtl_ds_skip(1, 1, &s, &s, &s, 1, 1, 0, 5, 5, 9, 9));
+    arm("a depth-only pipeline after a depth-only record is skipped", nvmtl_ds_skip(1, 1, &s, &s, &s, 1, 0, 0, 5, 5, 9, 9));
+
     printf(fails ? "FAILED %d\n" : "ok\n", fails);
     return fails != 0;
 }
