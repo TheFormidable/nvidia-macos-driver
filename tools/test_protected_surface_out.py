@@ -119,6 +119,10 @@ static int nvmtl_vk_image_read(void *q, Image *i, void *base, size_t row) { if (
 @end
 @class NVMTLTexture;
 static int nvmtl_surfin_zero_try(NVMTLTexture *r, const void *b, size_t row) { return 0; }
+// a bind passing a copy-out (NVMTL_SURFIN_SKIP_OWN_OUT, nvmtl_surf_private.h) is tools/test_surf_private's: off here, so
+// every copy-out holds its monitor as these arms expect
+static BOOL nvmtl_surface_out_pass_begin(NVMTLTexture *r) { (void)r; return NO; }
+static void nvmtl_surface_out_pass_end(NVMTLTexture *r, BOOL passable) { (void)r; (void)passable; }
 @implementation NVMTLTexture
 - (void)nvmtlY422SurfaceIn { assert(!"a non-4:2:2 texture took the 4:2:2 path"); }
 '''

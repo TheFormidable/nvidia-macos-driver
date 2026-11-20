@@ -580,6 +580,8 @@ int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
 
 int nvmtl_vk_surface_share_on(void);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);
+/* why the last nvmtl_vk_surface_vram on this thread failed: 0 not said, 1 no descriptor, 2 import failed, 3 buffer refused */
+int nvmtl_vk_surface_vram_why(void);
 /* Two-plane surfaces whose planes live in their own VRAM (nvmtl_plane_alias.h). vram_ranged: one plane's VRAM granted with
    its byte range. plane_vram_gate: NULL when the accelerator offers ranged grants and its page-off waits unlocked, else
    why not. plane_vram_state: 1 the process's self-test passed; 0 not now; -1 the caller must start the self-test (one

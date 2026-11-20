@@ -3130,9 +3130,14 @@ static int nvmtl_vk_surface_vram_pipe_on(void)
 /* The family's VRAM for one plane of a surface, granted by the kernel through NVK's import, as a buffer of `need` bytes.
    planeWord and sizeWord are the grant's words as the kernel reads them: the plane alone and the bytes needed, or a
    ranged grant's (nvmtl_plane_alias.h). */
+/* What the last import on this thread ran into, for the private-surface note (nvmtl_surf_private.h): 0 nothing (or not
+   tried), 1 no descriptor, 2 NVK's import failed, 3 the buffer over the import was refused. */
+static __thread int t_sv_why;
+int nvmtl_vk_surface_vram_why(void) { return t_sv_why; }
 static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, uint64_t sizeWord, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
+    t_sv_why = 0;
     if (!nvmtl_vk_surface_share_on() || !need) return -1;
     const uint32_t plane = planeWord & ~NVMTL_PA_PLANE_RANGED;
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
@@ -3149,6 +3154,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
                                                                     : open("/dev/null", O_RDONLY | O_CLOEXEC) };
     if (imp.fd < 0) {
         const int e = errno;
+        t_sv_why = 1;
         static unsigned nfd; if (nfd++ < 8 || nfd % 1000 == 0)
             nvlog("item 7: surface %u plane %u%s: no descriptor for the family VRAM import (errno %d) - private image + copies (%u so far)",
                   surfaceID, plane, plane != planeWord ? " (its byte range)" : "", e, nfd);
@@ -3161,6 +3167,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     pnvk_stage_import(NULL);
     if (vr != VK_SUCCESS) {
         close(imp.fd);
+        t_sv_why = 2;
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
             nvlog("item 7: surface %u plane %u%s: family VRAM import refused (%d) - private image + copies (%u so far)", surfaceID, plane,
                   plane != planeWord ? " (its byte range)" : "", (int)vr, n);
@@ -3172,6 +3179,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     if (pvkCreateBuffer(g_dev, &bci, NULL, &b) != VK_SUCCESS || pvkBindBufferMemory(g_dev, b, m, 0) != VK_SUCCESS) {
         if (b) pvkDestroyBuffer(g_dev, b, NULL);
         pvkFreeMemory(g_dev, m, NULL);
+        t_sv_why = 3;
         nvlog("item 7: surface %u: a buffer over the imported VRAM was refused - private", surfaceID);
         return -1;
     }
