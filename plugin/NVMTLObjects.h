@@ -241,6 +241,9 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
   NVMTLRenderPipelineState *_ps;
   NSMutableArray *_scratch;
   NVMTLDepthStencilState *_ds;
+  // what nvmtlApplyDepthStencil last recorded: the state (compared by address only), the pass epoch and command buffer
+  // it was recorded in, and whether the pipeline had stencil (setDepthStencilState skips a repeat, nvmtl_ds_skip)
+  __unsafe_unretained NVMTLDepthStencilState *_dsDone; uint32_t _dsEpoch, _dsCbId; BOOL _dsStencil;
   NVMTLBuffer *_tfb; NSUInteger _tfbOff, _tfbStride; float _tfScale; BOOL _tfScaleSet;
   NVMTLBuffer *_visBuf;
   uint32_t _visSlot; NSUInteger _visOffset;
@@ -292,6 +295,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
   uint64_t _lastUse;
   int _lruReg, _wantOn;
   uint64_t _useEp;
+  uint8_t _swNoted;   /* setFragmentTexture has looked at this texture for the ShaderWrite census (atomic, relaxed) */
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
@@ -304,6 +308,9 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLFunction () { @public NSString *_label; } @end
 // machine code compiled ahead of time for this function (NVMTLSass.m), nil otherwise
 @interface NVMTLFunction () { @public id _sassKernel; } @end
+// what nvmtl_bind_embedded found to bind for this function: 0 not known yet, 1 nothing (no constexpr sampler and no
+// embedded argument), 2 something. Both lists are computed once and kept, so the answer never changes (atomic, relaxed).
+@interface NVMTLFunction () { @public uint8_t _embState; } @end
 @interface NVMTLLibrary () { @public NSString *_label; } @end
 @interface NVMTLCommandQueue () { @public NSString *_label; } @end
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
@@ -316,6 +323,9 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 // _sassKernel: machine code that runs before the Vulkan pipeline; _sassOnly: there is no Vulkan pipeline
 @interface NVMTLComputePipelineState () { @public id _sassKernel; BOOL _sassOnly; } @end
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
+// _descriptor's vertex and fragment functions, read once when the pipeline is made: the descriptor is a copy nothing
+// changes afterwards, and a draw read them through two getters
+@interface NVMTLRenderPipelineState () { @public id<MTLFunction> _vfn, _ffn; } @end
 // macOS 26 required threadgroup sizes, as the pipeline descriptor gave them (0x0x0 = not set). Apps read them back from
 // the pipeline; without the getters the read is an unrecognized selector and the app stops.
 @interface NVMTLRenderPipelineState () { @public MTLSize _reqObj, _reqMesh; } @end

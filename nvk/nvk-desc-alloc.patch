@@ -1,0 +1,59 @@
+nvk-desc-alloc: a descriptor set layout without immutable samplers does not walk its bindings for every new set.
+NullMoth's own change (not an upstream Mesa commit).
+
+nvk_descriptor_set_create pre-writes the immutable samplers of a new set. It looked for them by visiting every binding
+of the layout, and binding_count is the highest binding number plus one: the Metal plugin's layout numbers its
+bindings up to 641 (its storage textures from 480, its address table at 640, the GL uniform buffer at 641), so each set
+walked 642 binding records of 32 bytes to find none. The layout now keeps the immutable sampler count it already
+computes, and a layout whose count is zero skips the walk. The walk writes only bindings that have immutable samplers,
+and a binding has them only when it contributed to that count, so what a set holds after allocation is unchanged.
+
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set.c b/src/nouveau/vulkan/nvk_descriptor_set.c
+--- a/src/nouveau/vulkan/nvk_descriptor_set.c
++++ b/src/nouveau/vulkan/nvk_descriptor_set.c
+@@ -865,9 +865,16 @@
+    vk_descriptor_set_layout_ref(&layout->vk);
+    set->layout = layout;
+ 
++   /* Only bindings with immutable samplers are written here. A layout with
++    * none skips the walk: it visited every binding number up to the highest
++    * one for each set, which for a large sparse layout was most of the cost
++    * of allocating a set.
++    */
+    struct nvk_descriptor_writer w;
+    nvk_descriptor_writer_init_set(pdev, &w, set);
+-   for (uint32_t b = 0; b < layout->binding_count; b++) {
++   const uint32_t prewrite_count =
++      layout->immutable_sampler_count ? layout->binding_count : 0;
++   for (uint32_t b = 0; b < prewrite_count; b++) {
+       if (layout->binding[b].type != VK_DESCRIPTOR_TYPE_SAMPLER &&
+           layout->binding[b].type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+          continue;
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set_layout.c b/src/nouveau/vulkan/nvk_descriptor_set_layout.c
+--- a/src/nouveau/vulkan/nvk_descriptor_set_layout.c
++++ b/src/nouveau/vulkan/nvk_descriptor_set_layout.c
+@@ -203,6 +203,7 @@
+    layout->vk.destroy = nvk_descriptor_set_layout_destroy;
+    layout->flags = pCreateInfo->flags;
+    layout->binding_count = num_bindings;
++   layout->immutable_sampler_count = immutable_sampler_count;
+ 
+    for (uint32_t j = 0; j < pCreateInfo->bindingCount; j++) {
+       const VkDescriptorSetLayoutBinding *binding = &pCreateInfo->pBindings[j];
+diff --git a/src/nouveau/vulkan/nvk_descriptor_set_layout.h b/src/nouveau/vulkan/nvk_descriptor_set_layout.h
+--- a/src/nouveau/vulkan/nvk_descriptor_set_layout.h
++++ b/src/nouveau/vulkan/nvk_descriptor_set_layout.h
+@@ -60,6 +60,13 @@
+    /* Number of bindings in this descriptor set */
+    uint32_t binding_count;
+ 
++   /* Number of immutable samplers over all bindings. Zero means no binding
++    * has any, so a new set has nothing to pre-write and need not walk its
++    * bindings (binding_count is the highest binding number plus one, so a
++    * sparse layout walks every unused number as well).
++    */
++   uint32_t immutable_sampler_count;
++
+    /* Address to the embedded sampler descriptor buffer.
+     *
+     * This is allocated from nvk_device::heap and has the size

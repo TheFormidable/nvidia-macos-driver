@@ -26,6 +26,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_slots.h"
 #include "nvmtl_fence.h"
 #include "nvmtl_plane_alias.h"
+#include "nvmtl_draw_cache.h"
 #include "nvmtl_nvk_layout.h"
 #include "nvmtl_texrc.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
@@ -145,6 +146,9 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
                     dynamic state is bound, since binding a pipeline without them leaves that state undefined */
                  uint8_t db_on; float db_lo, db_hi;
+                 /* the index buffer, vertex buffers, topology and restart this VkCommandBuffer holds (nvmtl_draw_cache.h) */
+                 nvmtl_draw_cache dc;
+                 uint32_t gfx_epoch; /* advanced by every render pass begin: an encoder's record of depth-stencil state it applied holds within one */
                  int dead; /* made after the device was lost: records nothing, submits as "device removed" (nvmtl_vk_cmd_begin) */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);

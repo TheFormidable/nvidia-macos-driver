@@ -283,8 +283,13 @@ static void nvmtl_clear_embedded_slot(NVMTLCommandBuffer *cb, uint32_t set, uint
 void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn, NVMTLBuffer *__strong const *bufAt, const NSUInteger *offAt)
 {
     if (!cb || !fn) return;
+    // A function with nothing to bind (most of them, every one of Apple's GL shaders) does here what the full path below
+    // does for two empty lists: it gives back the sampler slots parked by an earlier shader. The two lists are looked up
+    // through associated objects, four lookups a draw, so their emptiness is kept on the function.
+    if (__atomic_load_n(&fn->_embState, __ATOMIC_RELAXED) == 1) { nvmtl_vk_parked_samplers_keep(&cb->_c, set, 0); return; }
     NSArray<NSArray *> *statics = nvmtl_static_samplers_on() ? nvmtl_static_samplers(fn) : nil;
     NSArray<NVMTLEmbeddedPlan *> *embedded = nvmtl_embedded_plan(fn);
+    __atomic_store_n(&fn->_embState, (uint8_t)(statics.count || embedded.count ? 2 : 1), __ATOMIC_RELAXED);
     // give the app back any sampler slot an earlier shader parked its own sampler in and this one leaves alone
     uint32_t keep = 0;
     for (NSArray *pair in statics) { uint32_t i = [pair[0] unsignedIntValue]; if (i < 32) keep |= 1u << i; }

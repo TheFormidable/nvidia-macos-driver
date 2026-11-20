@@ -4584,8 +4584,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt, _vbufOff);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt, _fbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_vfn, _vbufAt, _vbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_ffn, _fbufAt, _fbufOff);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     return YES;
 }
@@ -4739,17 +4739,30 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     _pass.load = keep;
     return rc == 0;
 }
+// NVMTL_DS_SKIP=0: setDepthStencilState applies the state again even when it is the one this encoder last applied, as
+// in 3.0.5. WindowServer always applies it again.
+static int nvmtl_ds_skip_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_DS_SKIP"); const char *me = getprogname(); const int ws = me && !strcmp(me, "WindowServer");
+        on = !(e && e[0] == '0') && !ws;
+        nvlog("encoder: a repeated setDepthStencilState is %s (NVMTL_DS_SKIP=%s%s)", on ? "skipped" : "applied again", e ? e : "unset", ws ? ", WindowServer" : ""); }
+    return on;
+}
 - (void)nvmtlApplyDepthStencil {
+    _dsDone = nil;
     if (!_begun || !_ps || !_ps->_p.has_depth) return;
     nvmtl_vk_cmd_set_depth(&_cb->_c, _ds ? 1 : 0, _ds ? _ds->_write : 0, _ds ? _ds->_compare : 7);
     // Every encoder starts with the depth bounds test off, as on Apple; the pipeline holds it as dynamic state, which
     // must be set before the first draw, so it is written here at pass begin even when the app never asks for it.
     if (nvmtl_vk_cmd_set_depth_bounds(&_cb->_c, _dbOn, _dbLo, _dbHi) && _dbOn) {
         static int said; if (!said++) nvlog("setDepthTestMinBound:maxBound: REFUSED - this device has no depthBounds feature, the test is not applied"); }
-    if (!_ps->_p.has_stencil) return;
-    static const uint32_t off[6] = { 7, 0, 0, 0, 0xff, 0xff };
-    nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
-    if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
+    if (_ps->_p.has_stencil) {
+        static const uint32_t off[6] = { 7, 0, 0, 0, 0xff, 0xff };
+        nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
+        if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
+    }
+    // Recorded only once all of it was applied; a repeat of the same state can then be skipped (nvmtl_ds_skip).
+    _dsDone = _ds; _dsEpoch = _cb->_c.gfx_epoch; _dsCbId = _cb->_c.begin_id; _dsStencil = _ps->_p.has_stencil ? YES : NO;
 }
 // Metal draws through the ATTACHMENT's format, not the pipeline's: a pipeline declared BGRA8 that renders into an RGBA8
 // texture (or the reverse) writes the colour the shader returned into the texture's own channel order and reports no error
@@ -4998,6 +5011,10 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     else {
     if (nvmtl_hz_bind_texture(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, [nt nvsampleview])) nvlog("setFragmentTexture: bind FAILED");
     nvmtl_hz_bind_storage(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
+    // A texture's storage view, usage, format and type are fixed when it is made, so after its first bind the census
+    // below can only answer "already said" for it: each texture is looked at once. Two encoders binding it at the same
+    // time may both look, as before.
+    if (!__atomic_load_n(&nt->_swNoted, __ATOMIC_RELAXED)) {
     if (!nt->_stex && (nt.usage & MTLTextureUsageShaderWrite)) {
         // a fragment shader writing a texture that has no storage view writes the dummy: say which texture, once per shape
         // OpenGL rebinds every texture before each draw, and its textures carry ShaderWrite: this runs thousands of times
@@ -5011,6 +5028,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         os_unfair_lock_unlock(&sl);
         if (fresh) nvlog("setFragmentTexture: texture %lu is ShaderWrite but has no storage view (pixelFormat %lu, usage 0x%lx, type %lu, image storage %u) - a fragment write to it goes to the dummy",
                          (unsigned long)i, (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType, [nt nvi]->storage);
+    }
+    __atomic_store_n(&nt->_swNoted, 1, __ATOMIC_RELAXED);
     }
     }
 }
@@ -5405,6 +5424,10 @@ static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
               (unsigned long)mode);
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)s {
+    // Apple's GL sets the same state before every draw; the calls it would make again are the ones already recorded.
+    if (nvmtl_ds_skip(nvmtl_ds_skip_on(), _begun, (__bridge const void *)s, (__bridge const void *)_ds, (__bridge const void *)_dsDone,
+                      _ps && _ps->_p.has_depth, _ps && _ps->_p.has_stencil, _dsStencil, _dsEpoch, _cb->_c.gfx_epoch, _dsCbId, _cb->_c.begin_id))
+        return;
     _ds = (NVMTLDepthStencilState *)s;
     [self nvmtlApplyDepthStencil];
 }
