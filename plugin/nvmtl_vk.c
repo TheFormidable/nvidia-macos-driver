@@ -26,6 +26,7 @@
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
 #include "nvmtl_up_reap.h"
+#include "nvmtl_dlss_views.h"
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_ws_capture.h"
 #include "nvmtl_fetch_copy.h"
@@ -358,6 +359,7 @@ static void nvmtl_texrc_tick(void);
 // Set just before the grace's own release of an image: the destroy may park it instead (read and cleared on entry).
 static __thread int t_texrc_may_park;
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
+static void nvmtl_dlss_views_retire(VkImage img);
 /* A command buffer's life is counted in three places and nowhere else: nvmtl_vk_cmd_begin counts the begin, the queue
    submit counts the end of the command buffer and of those that ride in the same vkQueueSubmit (the pre-submit prologue,
    the counter reset), and nvmtl_cmd_retire - which every other way out goes through: abandon, a submit that fails
@@ -9732,6 +9734,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     if (pvkCreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); pvkDestroyImage(g_dev, img, NULL); return -1; }
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);   // re-backed: the old image dies, the new one is recorded below
     if (i->view) nvmtl_vk_image_view_destroy(i->view);   // through the grace: a submit in flight may still hold this view's descriptor index
+    nvmtl_dlss_views_retire((VkImage)i->img);   // DLSS's own views of the old image, through the grace as well
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
     uint64_t aligned = (mr.size + 65535ull) & ~65535ull;
@@ -9783,6 +9786,7 @@ void nvmtl_vk_image_free_backing(nvk_image *o)
     if (g_state != 1 || !o || !o->img) return;
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, o->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
     if (o->view) { nvmtl_vw_note_died(o->view); pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL); }
+    nvmtl_dlss_views_drop((VkImage)o->img);   // DLSS's own views of this backing go with it (the texture now has another image)
     pvkDestroyImage(g_dev, (VkImage)o->img, NULL);
     if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(o->alloc); }    }
     memset(o, 0, sizeof *o);
@@ -12887,30 +12891,42 @@ int nvmtl_vk_dlss_available(void)
  * format. The Metal texture's view can carry depth AND stencil (a combined depth-stencil texture), several levels or
  * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle).
  * The view is made ONCE per image and kept until the image itself is destroyed (nvmtl_dlss_views_drop, called from
- * nvmtl_vk_image_destroy_now after the GPU is done with it). The core keeps the handle it took for a view across
- * frames; a view destroyed and re-created every frame can come back with the same handle value naming another
- * image's descriptor. */
-#define DLSS_VIEW_CACHE 48
-typedef struct { VkImage img; uint32_t fmt; VkImageAspectFlags aspect; int rw; VkImageView v; } dlss_view_ent;
-static dlss_view_ent g_dlss_vc[DLSS_VIEW_CACHE];
+ * nvmtl_vk_image_destroy_now after the GPU is done with it, and from nvmtl_vk_image_free_backing for a backing the
+ * residency pager retired) or given a new backing (nvmtl_vk_image_reback, through the grace). The core keeps the handle
+ * it took for a view across frames; a view destroyed and re-created every frame can come back with the same handle
+ * value naming another image's descriptor. The table grows (nvmtl_dlss_views.h): a fixed one, once full, made a view
+ * for every evaluation that was never destroyed and filled the device's descriptor table. */
+static nvmtl_dvc g_dlss_vc;
 static pthread_mutex_t g_dlss_vc_mu = PTHREAD_MUTEX_INITIALIZER;
 static void nvmtl_dlss_views_drop(VkImage img)
 {
     if (!img) return;
+    void *v[8]; uint32_t n;
     pthread_mutex_lock(&g_dlss_vc_mu);
-    for (int k = 0; k < DLSS_VIEW_CACHE; k++)
-        if (g_dlss_vc[k].img == img) { pvkDestroyImageView(g_dev, g_dlss_vc[k].v, NULL); memset(&g_dlss_vc[k], 0, sizeof g_dlss_vc[k]); }
+    while ((n = nvmtl_dvc_take(&g_dlss_vc, (const void *)img, v, 8)))
+        for (uint32_t k = 0; k < n; k++) pvkDestroyImageView(g_dev, (VkImageView)v[k], NULL);
     pthread_mutex_unlock(&g_dlss_vc_mu);
+}
+/* An image given a new backing keeps its Metal texture, and the old VkImage goes at once: its DLSS views leave the
+ * table now (so a later image with the same handle value gets views of its own) and are destroyed through the grace
+ * like the image's main view, since a submit in flight may still hold their descriptor indices. */
+static void nvmtl_dlss_views_retire(VkImage img)
+{
+    if (!img) return;
+    void *v[8]; uint32_t n;
+    for (;;) {
+        pthread_mutex_lock(&g_dlss_vc_mu);
+        n = nvmtl_dvc_take(&g_dlss_vc, (const void *)img, v, 8);
+        pthread_mutex_unlock(&g_dlss_vc_mu);
+        if (!n) break;
+        for (uint32_t k = 0; k < n; k++) nvmtl_vk_image_view_destroy(v[k]);
+    }
 }
 static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
 {
     pthread_mutex_lock(&g_dlss_vc_mu);
-    int freek = -1;
-    for (int k = 0; k < DLSS_VIEW_CACHE; k++) {
-        const dlss_view_ent *e = &g_dlss_vc[k];
-        if (e->img == (VkImage)i->img && e->fmt == i->fmt && e->aspect == aspect && e->rw == rw) { VkImageView v = e->v; pthread_mutex_unlock(&g_dlss_vc_mu); return v; }
-        if (!e->img && freek < 0) freek = k;
-    }
+    void *hit = nvmtl_dvc_find(&g_dlss_vc, i->img, i->fmt, (uint32_t)aspect, rw);
+    if (hit) { pthread_mutex_unlock(&g_dlss_vc_mu); return (VkImageView)hit; }
     // The view keeps every usage of its image (no VkImageViewUsageCreateInfo): the core asks for a sampled handle of
     // the output as well as a storage one, and NVK makes a view's sampled or storage descriptor only for a usage the
     // view has - a storage-only output view returned sampled handle 0, a null descriptor the GPU faulted on (VA 0x0).
@@ -12919,9 +12935,10 @@ static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
     VkImageView v = VK_NULL_HANDLE;
     const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
     if (r != VK_SUCCESS) { pthread_mutex_unlock(&g_dlss_vc_mu); nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
-    if (freek < 0) {   // full: a game that keeps more scaler textures alive than this; the new view is not cached and is
-        nvlog("dlss: view cache full (%d) - a view is made for this evaluation only and kept", DLSS_VIEW_CACHE);   // leaked, never reused
-    } else g_dlss_vc[freek] = (dlss_view_ent){ (VkImage)i->img, i->fmt, aspect, rw, v };
+    const nvmtl_dvc_ent ent = { i->img, i->fmt, (uint32_t)aspect, rw, (void *)v };
+    if (nvmtl_dvc_add(&g_dlss_vc, &ent)) {   // out of memory: the new view is not cached; it serves this evaluation and is kept
+        nvlog("dlss: view cache cannot grow past %u - a view is made for this evaluation only and kept", g_dlss_vc.cap);   // leaked, never reused
+    }
     nvlog("dlss: own view %p of image %p (VkFormat %u %ux%u usage 0x%x, %s)", (void *)v, i->img, i->fmt, i->w, i->h, i->usage, rw ? "output" : "input");
     pthread_mutex_unlock(&g_dlss_vc_mu);
     return v;
