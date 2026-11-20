@@ -27,6 +27,7 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_fence.h"
 #include "nvmtl_plane_alias.h"
 #include "nvmtl_nvk_layout.h"
+#include "nvmtl_texrc.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
@@ -35,6 +36,9 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  uint8_t linear;  /* a linear alias of a buffer: 1 = offset and pitch 128-byte aligned, 2 = not (NVK renders it
                                      through its own tiled shadow even when no other attachment is tiled) */
                  uint8_t alias_a8; /* the a8 component mapping of the image's own view (nvmtl_a8_mapping); 0 = identity */
+                 /* a texture the recycle cache may park at its death (nvmtl_texrc.h): the creation it came from and the
+                    image and memory that creation made; rc_img NULL for every other image */
+                 nvmtl_texrc_key rck; void *rc_img, *rc_mem;
                } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -526,6 +530,9 @@ size_t nvmtl_vk_allocated_bytes(void);
 uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
 
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
+/* the same, for -[MTLDevice newTextureWithDescriptor:]: the texture may take a parked image of its exact creation and be
+   parked at its death (nvmtl_texrc.h) */
+int nvmtl_vk_image_create_typed_recyclable(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; } nvk_heap;
 int  nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out);
 void nvmtl_vk_image_parked(nvk_image *i);     /* the image went to a park for reuse (alive, recyclable) */
