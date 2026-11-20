@@ -1751,12 +1751,35 @@ static int nvmtl_managed_surface_tiled_on(void)
     if (on < 0) { const char *e = getenv("NVMTL_MANAGED_SURFACE_TILED"); on = !(e && e[0] == '0'); nvlog("shader-writable Managed surfaces: %s (NVMTL_MANAGED_SURFACE_TILED=%s)", on ? "a tiled image of their own, published through the VRAM import" : "drawn straight into the VRAM import", e ?: "unset"); }
     return on;
 }
+#include "nvmtl_surf_private.h"
+// WindowServer keeps its log as it was: the private-surface note and the binds that pass a copy-out are for applications.
+static int nvmtl_spv_window_server(void)
+{
+    static int ws = -1;
+    if (ws < 0) { const char *me = getprogname(); ws = me && !strcmp(me, "WindowServer"); }
+    return ws;
+}
+// The reasons this process has already put in the system log (nvmtl_spv_first): one line for each, never one per frame.
+static uint32_t g_spv_seen;
+// One line per process and reason for a single-plane surface drawn through a private image, or copied out from its VRAM
+// because its mark was refused. It names the first surface that met the reason; a release plugin sends it to the system
+// log because it says "refused" (nvmtl_log_failure.h). nvlog_every, because nvlog's limit per call site is shared by
+// every reason and the once-per-reason bit already limits this one.
+static void nvmtl_spv_note(int reason, IOSurfaceRef surf, uint32_t w, uint32_t h, uint32_t vkf)
+{
+    // An AMD or Intel GPU copies every surface by design (nvmtl_gpu_headless): nothing was refused there.
+    if (!surf || nvmtl_spv_window_server() || (reason == NVMTL_SPV_SHARE_OFF && nvmtl_vk_vendor() != 0x10de)) return;
+    if (!nvmtl_spv_first(&g_spv_seen, reason)) return;
+    nvlog_every(NVMTL_SPV_FORMAT, (unsigned)IOSurfaceGetID(surf), w, h, IOSurfaceGetWidth(surf), IOSurfaceGetHeight(surf), IOSurfaceGetBytesPerRow(surf), vkf,
+                nvmtl_spv_text(reason));
+}
 // rt: the wrapper may be drawn into (its usage has RenderTarget, or is Unknown), so its backing must be a colour attachment.
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex, int rt)
 {
     const char *vwhy = NULL;   // why a single-plane surface that fits the family's VRAM still takes a private image
     const char *pwhy = NULL;   // the same for a plane of a two-plane surface
+    int vstage = NVMTL_SPV_STAGE_NONE;   // how far a single-plane surface got towards the family's VRAM (nvmtl_spv_reason)
     if (surf && plane == 0 && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
@@ -1770,6 +1793,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                     // black) and a pass never draws into an image that is not a colour attachment.
                     if ((stex && !t->_i.storage) || (rt && !(t->_i.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))) {
                         vwhy = stex && !t->_i.storage ? "the linear import has no storage view" : "the linear import is not a colour attachment";
+                        vstage = stex && !t->_i.storage ? NVMTL_SPV_STAGE_NO_STORAGE : NVMTL_SPV_STAGE_NOT_RT;
                         nvmtl_vk_image_destroy(&t->_i);
                         if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
                         goto private_image;
@@ -1779,6 +1803,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                         nvk_image tiled; memset(&tiled, 0, sizeof tiled);
                         if (nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &tiled)) {
                             vwhy = "no tiled image for a shader-writable Managed wrapper";
+                            vstage = NVMTL_SPV_STAGE_NO_TILED;
                             nvmtl_vk_image_destroy(&t->_i);
                             if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
                             goto private_image;
@@ -1796,8 +1821,9 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                               g_surf_vram, g_surf_private);
                     return 0;
                 }
+                vstage = NVMTL_SPV_STAGE_ALIAS;
                 if (!nvmtl_ic_put(&vb)) nvmtl_vk_buffer_destroy(&vb);
-            }
+            } else vstage = NVMTL_SPV_STAGE_IMPORT;
         }
     }
     if (surf && IOSurfaceGetPlaneCount(surf) == 2 && nvmtl_vk_surface_share_on()) {
@@ -1832,6 +1858,9 @@ private_image:
               (unsigned)IOSurfaceGetID(surf), w, h, (unsigned long)plane,
               (plane != 0 || pplanes > 1) ? (pwhy ? pwhy : "more than one plane") : ((size_t)w * (bpp ? bpp : 4) > prow || h > IOSurfaceGetHeight(surf)) ? "image larger than the surface"
               : (prow % 32) ? "the row is not a multiple of 32 bytes" : vwhy ? vwhy : "the family VRAM could not be used", prow, pplanes);
+        if (plane == 0 && pplanes <= 1)
+            nvmtl_spv_note(nvmtl_spv_reason(nvmtl_vk_surface_share_on(), w, h, bpp, prow, IOSurfaceGetHeight(surf), vstage,
+                                            vstage == NVMTL_SPV_STAGE_IMPORT ? nvmtl_vk_surface_vram_why() : 0), surf, w, h, vkf);
     }
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }

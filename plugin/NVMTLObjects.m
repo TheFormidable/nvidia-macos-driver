@@ -1496,10 +1496,65 @@ static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTextur
     [cb->_surfOverwrites addObject:r];
 }
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t);
+// NVMTL_SURFIN_SKIP_OWN_OUT (on by default, =0 off): a command encoder's bind of a private surface image whose copy-out
+// to the surface's pages is waiting for the GPU returns without waiting for it (nvmtl_spv_bind_skips,
+// nvmtl_surf_private.h). WAS: the bind waited on the surface's monitor for the whole GPU round trip of the copy-out,
+// and then nvmtlSurfaceIn found the image and the pages in step and returned without an upload. An OpenGL game's render
+// thread spent 5.4 % of its time there, in the bind of its own window surface at every swap (AppKit's flushRect), while
+// the completion thread copied the previous frame out. The copy only reads the image, and the device has one queue: a
+// command the bind records runs after the copy, or, submitted before it, writes pixels the copy then reads and the
+// publication of that command buffer copies out again; the copy's first barrier waits for all earlier work, and the
+// copy straight into the pages (nvmtl_vk_image_read_host) ends with a barrier from its transfer stage, which NVK makes
+// a wait for idle (nvk_barrier_flushes_waits). The layouts the two threads track for the image can disagree then, as
+// they already could for a bind recorded while the command buffer that wrote the image was still on the GPU
+// (nvmtl_surface_pending_write lets it through without the monitor); NVK's barriers do not read the layout of a colour
+// image (nvk_cmd_image_layout_transition looks only at zcull, which colour images do not have). A copy-out that fails
+// leaves the image as the GPU drew it and the pages behind it; the next bind after it uploads those pages, as a waiting
+// bind did at once. Not WindowServer, which keeps waiting.
+static BOOL nvmtl_surfin_skip_own_out_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURFIN_SKIP_OWN_OUT"); on = !(e && e[0] == '0');
+        nvlog("surface-in: a bind %s this process's own copy-out of a private surface image (NVMTL_SURFIN_SKIP_OWN_OUT=%s)",
+              on ? "does not wait for" : "waits for", e ?: "unset"); }
+    return on;
+}
+static unsigned long long g_surfin_out_passed;
+static BOOL nvmtl_surface_bind_passes_out(NVMTLTexture *r) {
+    if (!r->_surf || !__atomic_load_n(&r->_surfOutBusy, __ATOMIC_ACQUIRE)) return NO;
+    const uint32_t at = __atomic_load_n(&r->_surfOutGen, __ATOMIC_RELAXED);
+    const int lost = __atomic_load_n(&r->_zeroLost, __ATOMIC_ACQUIRE) != 0;
+    if (!nvmtl_spv_bind_skips(1, lost, nvmtl_vram_gen(r->_surf, r->_plane), at)) return NO;
+    // still in flight once the generation was read: had the copy-out ended first, the bind takes the monitor as before
+    if (!__atomic_load_n(&r->_surfOutBusy, __ATOMIC_ACQUIRE)) return NO;
+    const unsigned long long n = __atomic_add_fetch(&g_surfin_out_passed, 1, __ATOMIC_RELAXED);
+    if (n <= 6 || n % 5000 == 0) nvlog("surface-in: a bind of surface %u passed this process's own copy-out in flight (%llu so far)",
+                                       (unsigned)IOSurfaceGetID(r->_surf), n);
+    return YES;
+}
+// The copy-out of root r (under its monitor) is about to lock the surface and read the image back. A surface in the
+// family's VRAM gets here only when its mark was refused (a refused try returns before): that is noted once. Returns
+// YES when binds may pass this copy-out; the caller then calls nvmtl_surface_out_pass_end on every way out.
+static BOOL nvmtl_surface_out_pass_begin(NVMTLTexture *r) {
+    if (r->_vramOn) nvmtl_spv_note(NVMTL_SPV_MARK_REFUSED, r->_surf, r->_i.w, r->_i.h, r->_i.fmt);
+    // WindowServer does not read the switch, so its log stays as it was
+    const int ws = nvmtl_spv_window_server();
+    if (!nvmtl_spv_out_passable(ws ? 0 : nvmtl_surfin_skip_own_out_on(), ws, r->_vramOn, r->_clientWritten, r->_surfSynced)) return NO;
+    __atomic_store_n(&r->_surfOutGen, r->_surfGen, __ATOMIC_RELAXED);
+    __atomic_store_n(&r->_surfOutBusy, 1u, __ATOMIC_RELEASE);
+    return YES;
+}
+static void nvmtl_surface_out_pass_end(NVMTLTexture *r, BOOL passable) {
+    if (passable) __atomic_store_n(&r->_surfOutBusy, 0u, __ATOMIC_RELEASE);
+}
 static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
+    // No surface behind the texture: nothing to bring in. nvmtlSurfaceIn would return at once too (it looks for a 4:2:2
+    // surface on t itself, then for the root's surface).
+    if (!r->_surf && !t->_y422Surf) return;
     if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
+    if (!t->_y422Surf && nvmtl_surface_bind_passes_out(r)) return;
     // A prior committed buffer defines this GPU backing's contents.
     // Importing the old CPU surface here would run ahead of this buffer and
     // overwrite that earlier GPU write. Queue order or the application's event supplies the dependency.
@@ -1524,10 +1579,12 @@ static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
 }
 static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h);
 static void nvmtl_surface_cpu_dump(NVMTLTexture *rt) {
+    // a texture without a surface never dumps: it returns before the clock read, which every bind paid
+    if (!rt || !rt->_surf) return;
     static uint64_t next; static int on;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (now >= next) { next = now + 250000000ull; on = access("/tmp/nvmtl-dump-request", F_OK) == 0; }
-    if (!on || !rt || !rt->_surf || IOSurfaceGetBytesPerElement(rt->_surf) != 4 || IOSurfaceGetPlaneCount(rt->_surf) > 1) return;
+    if (!on || IOSurfaceGetBytesPerElement(rt->_surf) != 4 || IOSurfaceGetPlaneCount(rt->_surf) > 1) return;
     if (IOSurfaceLock(rt->_surf, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) { static int said; if (!said++) nvlog("G16 cpu dump: IOSurfaceLock failed"); return; }
     char tag[24]; snprintf(tag, sizeof tag, "cpu%u-", (unsigned)IOSurfaceGetID(rt->_surf));
     nvmtl_frame_dump(tag, IOSurfaceGetBaseAddress(rt->_surf), IOSurfaceGetBytesPerRow(rt->_surf), (uint32_t)IOSurfaceGetWidth(rt->_surf), (uint32_t)IOSurfaceGetHeight(rt->_surf));
@@ -2010,7 +2067,12 @@ static void nvmtl_surface_protected_note(NVMTLTexture *r, int outcome) {
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
     uint32_t lockSeed = 0;
-    if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    // Binds may pass this copy-out while it waits for the GPU; every way out below lets them wait again first, before
+    // the monitor is let go (nvmtl_surface_out_pass_begin / _end).
+    const BOOL passable = nvmtl_surface_out_pass_begin(r);
+    if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) {
+        nvmtl_surface_out_pass_end(r, passable);
+        nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = -1;
@@ -2029,9 +2091,12 @@ static void nvmtl_surface_protected_note(NVMTLTexture *r, int outcome) {
         nvmtl_ps_record(&g_ps, (uint32_t)IOSurfaceGetID(r->_surf), cookie, (uint32_t)r->_plane, lockSeed, seed, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
         os_unfair_lock_unlock(&g_ps_lock);
     }
-    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
+    if (rc || unlocked != kIOReturnSuccess) {
+        nvmtl_surface_out_pass_end(r, passable);
+        nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
+    nvmtl_surface_out_pass_end(r, passable);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);

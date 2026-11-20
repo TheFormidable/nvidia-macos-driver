@@ -130,6 +130,10 @@ static const char *nvmtl_pa_reason(int why) { (void)why; return "stub"; }
 static int nvmtl_plane_vram_ready(void) { return 0; }
 static int nvmtl_vk_plane_image_create(uint32_t id, const nvmtl_pa_surface *s, uint32_t p, uint32_t w, uint32_t h, uint32_t f, uint32_t bpp,
                                        int a8, int st, nvk_buffer *b, nvk_image *o) { (void)id; (void)s; (void)p; (void)w; (void)h; (void)f; (void)bpp; (void)a8; (void)st; (void)b; (void)o; return -1; }
+/* the private-surface note (nvmtl_surf_private.h, proved by test_surf_private.c) only logs; here it says nothing */
+@@SPV@@
+static void nvmtl_spv_note(int r, IOSurfaceRef s, uint32_t w, uint32_t h, uint32_t f) { (void)r; (void)s; (void)w; (void)h; (void)f; }
+static int nvmtl_vk_surface_vram_why(void) { return 0; }
 @@IMAGE@@
 /* the request lines of nvmtlNewSurfaceTexture, with the descriptor and the wrapper reduced to what they read */
 static void requests(NSUInteger usage, BOOL fbo, IOSurfaceRef surf, size_t planes, int a8, uint32_t vkf, int *stex, int *rt) {
@@ -256,7 +260,8 @@ def compiler():
 def build_and_run(directory, image, name):
     src = pathlib.Path(directory) / (name + '.c')
     exe = pathlib.Path(directory) / name
-    src.write_text(FIXTURE.replace('@@POLICY@@', POLICY).replace('@@IMAGE@@', image).replace('@@REQUEST@@', REQUEST))
+    spv = (ROOT / 'plugin/nvmtl_surf_private.h').read_text() if (ROOT / 'plugin/nvmtl_surf_private.h').exists() else ''
+    src.write_text(FIXTURE.replace('@@POLICY@@', POLICY).replace('@@SPV@@', spv).replace('@@IMAGE@@', image).replace('@@REQUEST@@', REQUEST))
     r = subprocess.run(compiler() + ['-std=c11', '-O1', '-g', '-Wall', '-Wextra', '-Wno-unused-function', '-Wno-unused-label',
                                       '-fsanitize=address,undefined', '-fno-sanitize-recover=all', str(src), '-o', str(exe)],
                        capture_output=True, text=True)
