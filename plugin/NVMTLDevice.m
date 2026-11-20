@@ -1067,10 +1067,12 @@ static void nvmtl_plane_selftest_early(void);
     return [NSString stringWithFormat:@"%@ (NVMTL over %@)", marketing, full];
 }
 - (id<MTLCommandQueue>)newCommandQueue { return [self newCommandQueueWithMaxCommandBufferCount:64]; }
+static void nvmtl_queue_make_capacity(NVMTLCommandQueue *q);   // NVMTLObjects.m
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)n {
     if (nvmtl_vk_init()) { nvlog("newCommandQueue: Vulkan/NVK is down — no queue"); return nil; }
     NVMTLCommandQueue *q = [NVMTLCommandQueue new];
     q->_capacityCount = n ? n : 64;
+    nvmtl_queue_make_capacity(q);   // before the queue is handed out, so -commandBuffer reads it without a lock
     q->_dev = self;
     if (nvmtl_vk_queue_create(&q->_q)) { nvlog("newCommandQueue: command pool FAILED"); return nil; }
     nvlog("newCommandQueue -> %p (NVK command pool)", (__bridge void *)q); return q; }
