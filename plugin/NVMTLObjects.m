@@ -1044,14 +1044,18 @@ static int nvmtl_surfin_zero_try(NVMTLTexture *r, const void *base, size_t row) 
 static void nvmtl_surf_zero_flush(void) {
     if (!atomic_load(&gSurfZeroAny) || gSurfZeroInFlush) return;
     gSurfZeroInFlush = 1;
-    // todo is the only reference this function takes (not autoreleased into the caller's pool), so that the fallback
-    // below can hand it to another thread whole
+    // todo is the only reference this function takes, so that the fallback below can hand it to another thread whole.
+    // Everything else this thread does with the roots drains in this function's own pool, while todo still holds each
+    // one, before that hand-off: a weak table may load (retain and autorelease) its entries to remove them, and such a
+    // reference left in the caller's pool (nvmtl_presubmit's, popped inside the submit) could be a root's last release
+    void *keep = NULL;
+    unsigned n = 0, lost = 0;
+    @autoreleasepool {
     NSArray *todo;
     os_unfair_lock_lock(&gSurfZeroLock);
-    @autoreleasepool { todo = [[NSArray alloc] initWithArray:gSurfZeroOwed.allObjects]; }
+    todo = [[NSArray alloc] initWithArray:gSurfZeroOwed.allObjects];
     [gSurfZeroOwed removeAllObjects]; atomic_store(&gSurfZeroAny, 0);
     os_unfair_lock_unlock(&gSurfZeroLock);
-    unsigned n = 0, lost = 0;
     if (todo.count && nvmtl_vk_pre_open()) {
         for (NVMTLTexture *r in todo) {
             if (nvmtl_vk_pre_fill(&r->_vramBuf, 0, IOSurfaceGetBytesPerRow(r->_surf) * r->_i.h, 0) == 0) n++;
@@ -1076,10 +1080,11 @@ static void nvmtl_surf_zero_flush(void) {
             nvlog("surface-in zero: GPU clear of %lu surfaces FAILED - each decides again at its next surface-in",
                   (unsigned long)todo.count);
         }
-        void *const keep = (__bridge_retained void *)todo;
+        keep = (__bridge_retained void *)todo;
         todo = nil;
-        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), keep, nvmtl_pre_release);
     }
+    }
+    if (keep) dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), keep, nvmtl_pre_release);
     if (n) atomic_fetch_add(&gSurfZeroFills, n);
     if (lost) atomic_fetch_add(&gSurfZeroLost, lost);
     gSurfZeroInFlush = 0;
