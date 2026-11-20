@@ -136,10 +136,33 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d) {
 @implementation NVMTLCommandBuffer (NVMTLGL)
 - (void)commitAndHold { [self commit]; }
 @end
+// Apple's GL renderer waits here until no command buffer names the resource (GLDBufferRec::restoreData, under
+// glDrawElements). The release that brings the count to zero wakes the waiter (nvmtl_idle_wait.h). WAS: a 50 us sleep
+// between looks, still there with NVMTL_GL_WAIT_EVENT=0. The 10 s limit and its log line are the same either way.
+// The census counts the waits that had to sleep and their time, logged at doubling counts and every 65536th.
+static void nvmtl_gl_wait_census(uint64_t t0) {
+    static _Atomic unsigned long long waits, ns;
+    const unsigned long long took = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0;
+    const unsigned long long k = atomic_fetch_add(&waits, 1) + 1, total = atomic_fetch_add(&ns, took) + took;
+    if (!(k & (k - 1)) || !(k & 0xFFFF))
+        nvlog("GL: waitUntilComplete slept %llu times so far, %llu us in all (this one %llu us), until the command buffers naming the resource let go",
+              k, total / 1000, took / 1000);
+}
+static BOOL nvmtl_gl_wait_idle(int *refs, BOOL textureRule, uint64_t t0) {
+    int slept = 0;
+    const int late = nvmtl_idle_wait_for(&gNVMTLIdleQ, refs, textureRule, nvmtl_idle_now_ns(), 10000000000ull, &slept);
+    if (slept) nvmtl_gl_wait_census(t0);
+    return !late;
+}
 @implementation NVMTLTexture (NVMTLGL)
 - (void)waitUntilComplete {
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     NVMTLTexture *own = _parent ? _parent : self;
+    if (nvmtl_gl_wait_event_on()) {
+        if (!nvmtl_gl_wait_idle(&own->_resRefs, YES, t0))
+            nvlog("GL: waitUntilComplete gave up after 10 s - %d command buffer(s) still name this texture", __atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE));
+        return;
+    }
     while (__atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE) > 0) {
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 > 10000000000ull) {
             nvlog("GL: waitUntilComplete gave up after 10 s - %d command buffer(s) still name this texture", __atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE));
@@ -160,6 +183,11 @@ static BOOL nvmtl_sel1_idle(int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE
 - (BOOL)isWriteComplete { return nvmtl_sel1_idle(&_resRefs); }
 - (void)waitUntilComplete {
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (nvmtl_gl_wait_event_on()) {
+        if (!nvmtl_gl_wait_idle(&_resRefs, NO, t0))
+            nvlog("waitUntilComplete (buffer) gave up after 10 s - %d command buffer(s) still name it", __atomic_load_n(&_resRefs, __ATOMIC_ACQUIRE));
+        return;
+    }
     while (!nvmtl_sel1_idle(&_resRefs)) {
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 > 10000000000ull) {
             nvlog("waitUntilComplete (buffer) gave up after 10 s - %d command buffer(s) still name it", __atomic_load_n(&_resRefs, __ATOMIC_ACQUIRE));

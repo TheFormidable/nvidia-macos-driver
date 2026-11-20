@@ -113,6 +113,7 @@ extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include <IOKit/IOKitLib.h>
 #include "nvmtl_fps_limit.h"
 #include "nvmtl_shared_wc.h"
+#include "nvmtl_idle_wait.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
 // replaces them. The shipped lines above that block are defaults, which a profile does replace.
 static char g_conf_mine[64][48];
@@ -291,19 +292,32 @@ static inline void nvmtl_res3_wait_move(int *rs) { while (__atomic_load_n(rs, __
 static void nvmtl_res2_kick(int scan);
 static _Atomic int gRes2Scan;
 static Class gNVMTLTexClass;
+// The threads in -waitUntilComplete (NVMTLGL.m) sleep here until a release brings a count to zero (nvmtl_idle_wait.h).
+static nvmtl_idle_waitq gNVMTLIdleQ = NVMTL_IDLE_WAITQ_INIT;
+// NVMTL_GL_WAIT_EVENT=0: those waits poll every 50 us, as before. Read once.
+static BOOL nvmtl_gl_wait_event_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_GL_WAIT_EVENT"); on = nvmtl_idle_wait_on(e);
+        nvlog("GL: resource waits (waitUntilComplete) %s (NVMTL_GL_WAIT_EVENT=%s)",
+              on ? "wake when the last command buffer lets go" : "poll every 50 us", e ? e : "unset"); }
+    return on;
+}
 static inline void nvmtl_resref(id o, int d) {
     if (!gNVMTLTexClass) gNVMTLTexClass = [NVMTLTexture class];
     if (![o isKindOfClass:gNVMTLTexClass]) {
         static Class BC; if (!BC) BC = [NVMTLBuffer class];
         if (object_getClass(o) != BC) return;
         NVMTLBuffer *b = o;
-        const int v = __atomic_add_fetch(&b->_resRefs, d, __ATOMIC_ACQ_REL);
+        const int v = nvmtl_idle_add(&b->_resRefs, d);
+        // any arrival at zero, also an add that ends an (unexpected) negative count, which a buffer's wait waits out
+        if (v == 0) nvmtl_idle_settled(&gNVMTLIdleQ, &b->_resRefs);
         if (d > 0) { __atomic_store_n(&b->_useEp, nvmtl_ep_now(), __ATOMIC_RELEASE); nvmtl_res3_wait_move(&b->_rstate); nvmtl_res3_note_use(b); }
         else if (v == 0 && __atomic_load_n(&b->_wantOn, __ATOMIC_ACQUIRE)) nvmtl_res2_kick(1);
         return;
     }
     NVMTLTexture *t = o; if (t->_parent) t = t->_parent;
-    const int v = __atomic_add_fetch(&t->_resRefs, d, __ATOMIC_ACQ_REL);
+    const int v = nvmtl_idle_add(&t->_resRefs, d);
+    if (v == 0) nvmtl_idle_settled(&gNVMTLIdleQ, &t->_resRefs);
     if (d > 0) { __atomic_store_n(&t->_useEp, nvmtl_ep_now(), __ATOMIC_RELEASE); nvmtl_res3_wait_move(&t->_rstate);
                  nvmtl_res2_note_use(t); }
     else if (v == 0 && __atomic_load_n(&t->_wantOn, __ATOMIC_ACQUIRE)) nvmtl_res2_kick(1);
