@@ -1,5 +1,306 @@
 # Changelog
 
+## 3.0.6
+
+**Not released.** This section describes the branch being prepared as 3.0.6, on top of 3.0.5 (below, not released
+either). It is the code half of a performance audit of games. The audit started from a measurement: two `sample`
+captures and the driver's counters, taken on one Mac (AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz,
+macOS 26.7.3) running 3.0.2 and a heavily modded Minecraft pack that does not pass 23 frames a second. That game draws
+with OpenGL through Apple's OpenGL renderer over this driver's Metal plugin; the GPU was 37 to 60 % busy with video
+memory to spare, and the game's render thread was the limit. Capture A is a moment at 74 frames a second, capture B
+one at 19. Between 15 % (A) and 35 % (B) of the render thread was spent in waits that belong to the plugin, and that
+is what the first group below goes after. The rest are defects and costs the audit found by reading the code, each
+judged by a second reviewer before it was written and by a third after: compute shaders, three shader translations
+that were refused, a DLSS leak, the video-memory pager's waits, and three diagnostics. Every change of what runs by
+default has one way back, a new row of tier escape in `tools/switches.tsv`; a change with none either gives exactly
+what 3.0.5 gave or only writes a log line. **Nothing of 3.0.6 has been built on a Mac or run on a card, and no gain
+has been measured**: it was compiled and its host tests were run on Linux only (below, "What ran where"). The shares
+quoted from the captures say where the time went in 3.0.2, not what this branch gives back. On that route the waits
+measured put the ceiling of all of this between 1.2 and 1.9 times the frame rate. The larger step for an OpenGL game
+is OpenGL through Zink on NVK (one translation instead of two), which 3.0.3 is expected to let engage on that macOS
+build and which has not run on that card either. With Zink engaged these changes to Apple's renderer do not act; the
+boot argument `nvzink=0` brings that renderer back.
+
+### Fixes and changes
+
+#### Apple's OpenGL renderer over the plugin (the measured route)
+
+- **Apple's OpenGL renderer no longer sleeps on a thread hop at every context flush.** The renderer calls
+  -commitAndWaitUntilSubmitted on the order of a hundred times a frame, because each glBufferSubData on a buffer the
+  pending command buffer uses flushes the context. Each call committed the command buffer and asked the nvmtl.ahead
+  queue for a submit-ahead pass. It then slept until that thread had taken the command-buffer class lock, submitted
+  the part and woken it. That sleep was 7.8 % and 20.1 % of the render thread in the two captures, and nvmtl.ahead
+  spent 35-39 % of its time waiting for that lock. Outside WindowServer the committing thread now runs that same
+  submit-ahead step itself: the same nvmtlSubmitAhead decisions, under the same lock, over its own queue in order up
+  to its own command buffer. It then waits exactly as before, so it still returns only once the command buffer is
+  scheduled. The status, the result, the scheduled handlers and command buffers held until a surface publication are
+  unchanged. A command buffer the step cannot submit waits as before: the in-flight cap, a caller copy, an event wait,
+  or an earlier command buffer not yet committed or being submitted by the worker. WindowServer keeps its path. A log
+  line at powers of two says how many of the flushes that ran the step were scheduled when it returned. Way out:
+  NVMTL_GL_FAST_FLUSH=0 brings back the plain wait. Checked with the host tests test_fast_flush.c and
+  test_fast_flush.py and the plugin's Objective-C check (0 new errors or warnings). Not run on a GPU or a Mac, so no
+  gain is measured.
+- **A command buffer costs less to make.** Apple's OpenGL renderer makes on the order of a hundred command buffers a
+  frame, and each one paid for things it did not need. -[NVMTLCommandQueue commandBuffer] made the command buffer's
+  resource set a second time and freed the empty one that -init had just made. It took the command-queue class lock on
+  every call just to find the queue's capacity semaphore. Every command buffer made two dispatch groups, whether or
+  not a handler was ever dispatched. Now the set from -init is kept. The semaphore is made with the queue, with the
+  same count, and read without the lock. Each handler group is made when the first handler of its kind is dispatched,
+  under the lock its waiters check it under, so every wait still waits for the same handlers. In capture A these costs
+  came to about 0.7-1 % of the render thread's time. That share is read from the sample; no gain has been measured.
+  Way out: NVMTL_CB_LEAN=0 makes both groups with every command buffer and looks the semaphore up under the lock, as
+  in 3.0.5. The second resource set is gone either way, because it changed nothing. Checked with tools/test_cb_lean.c
+  (a model of every order of dispatches and waits, with the groups made up front and on first use),
+  tools/test_cb_lean.py (the wiring) and the Objective-C check. Nothing was run on a card.
+- **A window surface drawn through a private image now says why in the system log, and the game's render thread no
+  longer waits for the previous frame's copy-out when it binds that surface.** An OpenGL game's window surface that
+  cannot live in the accelerator family's VRAM is drawn through an image of the game's own process. That image is
+  copied to the surface's pages after every GPU write. Which condition caused this was written only to the plugin's
+  own log, which a release plugin keeps only for a process started with NVMTL_PROCESS_ENV=1. Each reason is now
+  written to the system log once per process, tagged "private-surface:". The reasons are: the import had no
+  descriptor, NVK's import of the family VRAM failed, the buffer or the linear image over it was refused, the texture
+  is larger than the surface, the row is not a multiple of 32 bytes, surface sharing is off, or the surface is in VRAM
+  but its mark as newest was refused. Find it with `log show --last 1d --style compact --predicate 'eventMessage
+  CONTAINS "private-surface:" OR eventMessage CONTAINS "surfvram: surface" OR eventMessage CONTAINS "dirty refused"'`.
+  Nothing is written in WindowServer, or on AMD and Intel GPUs, which copy by design. The copy-out also held the
+  surface's monitor for its whole GPU round trip. In capture A the game's render thread spent 5.4 % of its time
+  blocked on that monitor while binding its window surface at swap time, only to find the image and the pages already
+  in step afterwards. A command encoder's bind now passes this process's own copy-out of a private image while it is
+  in flight, unless a zero fill was lost or another writer published into the surface's VRAM meanwhile. CPU reads and
+  writes of the texture still wait, and WindowServer is unchanged. Way out: NVMTL_SURFIN_SKIP_OWN_OUT=0 waits as
+  before. Two smaller equivalent changes: a bind of a texture with no surface behind it returns at once, and the CPU
+  frame-dump check no longer reads the clock for such textures. Not run on a card, so no gain is measured. Host tests:
+  tools/test_surf_private.c (which fails on each of seven changes to its rules) and tools/test_surf_private.py pass,
+  and objccheck reports 0 new errors and 0 new warnings. test_surface_publication.py and test_protected_surface_out.py
+  got stubs for the new calls in their fixtures but cannot run in this environment.
+- **Apple's OpenGL renderer's resource waits wake when the last command buffer lets go, instead of polling every 50
+  us.** GLDBufferRec::restoreData, reached from glDrawElements, calls -[NVMTLBuffer waitUntilComplete] after
+  -[NVMTLCommandBuffer waitUntilCompleted]. That call, and its texture twin, slept 50 us between looks at the
+  resource's command-buffer count. In capture B it took 4.7 % of the game's render thread, nearly all of it in usleep,
+  on top of 6.9 % in waitUntilCompleted. The waiter now sleeps on a condition shared by the whole process, with the
+  address of the count it waits for listed beside it. Any change that brings that count to zero wakes it. While nobody
+  waits, a count reaching zero costs one extra load and nothing more, so WindowServer and every other process behave
+  as before. The 10 s limit and its log lines are kept, and the limit no longer depends on the wall clock. A new
+  census line logs, at doubling counts, how often the waits slept and for how long. From the code: by the time
+  waitUntilCompleted returns, that command buffer's references are already dropped, so the remaining wait is for other
+  command buffers that still name the resource. No gain is measured yet. NVMTL_GL_WAIT_EVENT=0 restores the polling.
+  Run: tools/test_idle_wait.c (racing threads with no lost wake-up, a control, and a waiter on a negative count),
+  tools/test_idle_wait.py (wiring), the objccheck (0 new errors and warnings), and the tests that touch these files.
+  Not run on a GPU or on macOS.
+- **Textures that Apple's OpenGL renderer makes and drops for every glBlitFramebuffer no longer cost four kernel round
+  trips each.** In capture B, the render thread spent 8.2 % of its samples in -[NVMTLDevice
+  newTextureWithDescriptor:]: vkAllocateMemory, plus the image's GPU virtual range being allocated and mapped in
+  vkBindImageMemory. The completion worker spent 8.3 % freeing them again (nvk_DestroyImage, nvk_FreeMemory). An
+  ordinary colour texture from newTextureWithDescriptor now keeps its image and its own VRAM once the image grace has
+  released it, which means nothing open or in flight can read it any more. The next texture made with exactly the same
+  Vulkan creation takes both and makes its own view. Its content is undefined, as Metal allows, and its layout
+  tracking starts at UNDEFINED. At most 32 images and 128 MB are held, 32 MB per image at most. An image not reused
+  within about a second is freed at the next completed submit or park. Held memory stays counted as allocated VRAM,
+  and it is the first thing given back when the VRAM gate, an image allocation the kernel refuses, or the residency
+  pager needs room. Placed, pooled, sparse, system-memory, IOSurface, depth, multisample, re-backed and migrated
+  images are never held, and WindowServer never holds any. Way out: NVMTL_TEX_RECYCLE=0 frees every dead texture as
+  before. Checked here with a host model of the cache (tools/test_texrc.c, every mutation of its rules fails it), text
+  checks of the wiring (tools/test_texrc.py), the existing grace and channel-recovery checks, and objccheck. It has
+  not run on a GPU, and no gain has been measured.
+- **Finished asynchronous texture uploads are given back at the next upload.** An asynchronous replaceRegion or
+  IOSurface upload kept three things until its texture was used again (uploaded again, read back, mapped or
+  destroyed): its record, its staging buffer and one of the process's 256 places. A texture uploaded once and then
+  only sampled held all of that for its whole life. Once 256 such textures existed, every later upload to any other
+  texture went back to submitting and waiting for the whole GPU queue. Now each upload first checks, without waiting,
+  which earlier uploads the GPU has finished. It gives back their places, staging buffers and records, and leaves only
+  a small header on each texture. A copy that a GPU fault recovery dropped is still made again at the texture's next
+  use. The wait for the previous upload of the same texture is unchanged, and so are the copy's barriers, so animated
+  textures still wait as before. WindowServer does not use this. Way out: NVMTL_ASYNCUP_REAP=0  restores the old
+  lifetime. Checked with host tests (tools/test_up_reap.c, including a three-thread race; tools/test_up_reap.py; the
+  updated tools/test_plugin_defaults_wiring.py) and with the Objective-C check. Not run on a GPU; no gain measured.
+- **A draw records less on the CPU: NVK no longer walks 642 empty bindings for every descriptor set, and the plugin
+  skips binds the command buffer already holds.** In capture A, 4.2 % of the render thread is in
+  nvk_AllocateDescriptorSets, most of it the function's own time. nvk_descriptor_set_create looked for immutable
+  samplers by visiting every binding number up to the layout's highest, and the plugin's layout goes up to 641. The
+  new NVK patch nvk/nvk-desc-alloc.patch, last in the 3.0 chain, skips that walk for a layout with no immutable
+  samplers. A new set comes out exactly as before. In the plugin, a command buffer remembers its index buffer, vertex
+  buffers, topology and primitive restart, and does not record them again when a draw repeats them. NVK records every
+  buffer bind as a pushbuffer write and a macro run on the GPU. WindowServer still records every bind.
+  `NVMTL_BIND_CACHE=0` turns this off. A setDepthStencilState that repeats the state the encoder last applied, in the
+  same pass and command buffer, records nothing. Mesa already dropped those equal values, so this saves only CPU
+  calls. WindowServer still applies every set. `NVMTL_DS_SKIP=0` turns this off. Without a switch, because nothing
+  they produce changes: the ShaderWrite census of setFragmentTexture looks at each texture only once, and a draw reads
+  its pipeline's functions from ivars. A shader with nothing embedded skips four associated-object lookups. What was
+  run: on Linux only. The new host tests ran (tools/test_nvk_desc_alloc.py, test_draw_cache.c and .py,
+  test_ds_skip.py, the new arms of test_repeat_bind.c, test_sw_census.py, test_embedded_fast.py), with mutations of
+  each header and of the wiring to check that the tests fail when the logic is wrong. The existing tests that read the
+  changed code also ran, and objccheck reported 0 new errors and 0 new warnings. Nothing was built on a Mac or run on
+  a card, and no gain has been measured.
+
+#### Compute shaders and shader translation
+
+- **A compute kernel's threadgroup-size variants no longer stall other threads, the creation-time compile is reused,
+  and a refused function-constant variant is not translated again.** nvmtl_compute_variant compiled each new
+  threadgroup-size variant (spirv_to_nir and the GPU compiler) while holding one process-wide lock, so a dispatch of
+  any kernel on any other thread waited for that compile. The variant is now compiled outside the lock, and the table
+  is checked again before the result goes in. If another thread put in the same size first, its pipeline is used and
+  the unused copy is destroyed before any command buffer sees it. A thread whose own compile failed also takes a
+  pipeline another thread kept for that size. NVMTL_CVAR_PARALLEL=0 compiles under the lock again, as in 3.0.5. The
+  pipeline that newComputePipelineState compiles, so that a kernel NVK cannot build is refused, was compiled
+  unspecialized, while every dispatch uses a specialized variant. It was never bound, and the first dispatch compiled
+  the kernel a second time. It is now compiled with the specialization a dispatch at the kernel's default size uses.
+  Those are the module's own default values, so it builds and refuses exactly what it did before. It is kept as that
+  size's variant. A module whose threadgroup size is not given by single SpecId defaults stays unspecialized.
+  NVMTL_CVAR_SEED=0 brings back the unspecialized compile with an empty variant table. A function-constant variant
+  that the translator itself refused was translated again on every request. That refusal is now remembered for the
+  process under the variant's cache key, and the same message is returned. A module stored on disk is still read
+  first, nothing is remembered with NVMTL_FCCACHE_OFF, at most 4096 refusals are kept, and other failures are not
+  remembered. There is no switch for this last change, because the answer to a request cannot change. Run: new host
+  tests test_cvar.c/.py, test_cvar_seed.c/.py and test_fc_refusal.c/.py, plus the existing tests that read the files
+  touched; objccheck reports 0 new errors and 0 new warnings. Not run: anything on a card or on macOS. No speed gain
+  is measured: in the two captures of the slow game no variant compile and no function-constant translation shows up.
+- **Three shader translations that failed on the card are fixed: a sampler picked through call-site attributes, the
+  elements of an argument-buffer array of handles, and a loop that switches between two buffers.** These are the rows
+  `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk` of the card checks, which failed on an RTX
+  5050. (1) A sample through a sampler that a switch picks among several [[sampler(n)]] arguments was refused
+  ("sampler operand is a pointer whose exact sampler state was not recovered") whenever Apple's compiler wrote
+  parameter attributes on the call (`ptr addrspace(2) readonly captures(none) %sel`). The inline retry now finds the
+  operand through those attributes and keeps them on each cloned call (`translator/translator/src/native/inline.rs`).
+  Modules that translated before are unchanged, so there is no switch. A sampler picked by a chain of selects already
+  sampled once per candidate; a test now pins that. (2) An argument encoder built from a function's AIR gave an array
+  of textures one field. So `setTexture:atIndex:` past element 0 of `array<texture2d<float>, 8>` or `texture2d<float>
+  t[8]` was refused, and those textures read as black. Each element of a texture, sampler or buffer-pointer array now
+  has its own [[id]], 8 bytes apart, read from the member's count, size and location pair
+  (`plugin/nvmtl_argbuf_elems.h`, `nvmtl_air_argbuf_walk` in `plugin/NVMTLLibraryLoad.m`). Way out:
+  `NVMTL_ARGBUF_ARRAYS=0`. (3) A kernel whose loop picks its next buffer with a select between two buffer arguments
+  was refused ("cannot reinterpret pointer for owned OpSelect type mismatch"). It is now built with every buffer read
+  through its device address, but only as a last resort for the whole translation. The wrapper tries several option
+  sets for one module (formatless storage images, then the default options; argument-buffer samplers, then ordinary
+  ones), and a first attempt built with addresses could have taken the place of a later attempt that translated the
+  module in 3.0.5. So the translator builds with addresses only inside a scope that the wrapper enters once, after
+  every attempt made in 3.0.5 has failed with one of the two cross-root refusals (`with_device_address_last_resort` in
+  `translator/translator/src/construction.rs`, `with_address_last_resort` in `translator/wrapper/src/lib.rs`). If that
+  last try fails too, the error is the same text as before. The specialization-constant entry never takes the last
+  resort, and neither does a function the plugin may still link at pipeline creation. The translator cannot tell which
+  process it is in, so this is not kept out of WindowServer; only modules that were refused change. A function-
+  constant set that both the chain and the last resort refuse runs the chain twice each time it is asked for. Way out:
+  `NVMTL_XLATE_ADDR_RETRY=0`; the plugin then adds `-ar0` to its shader cache tag, so a module translated with the
+  retry on is never served from the cache with it off. How Apple's compiler of macOS 26 shapes these kernels on the
+  card is not known: the fixtures are the shapes the failing rows reported. Not run on the card: the three rows still
+  have to pass there. No performance change is claimed.
+
+#### Video memory and DLSS
+
+- **The VRAM pager no longer puts the allocating thread to sleep.** When a texture, Private buffer or heap was refused
+  VRAM, the thread creating it asked the res2 pager for room. While the pager's worker held the pass, that thread
+  polled for up to 30 ms. Then it slept up to 16 ms more, waiting for the VRAM of the evicted textures to be freed.
+  That VRAM is freed only after the command buffers using it complete, which at 20 fps can take longer than the wait.
+  When either wait ran out, the allocation went to system memory anyway. Now the thread hands the work to the worker
+  and goes on. After the pass it frees whatever has already drained, without waiting, and the worker frees the rest
+  later. The resource takes the same system-memory fallback it took when the old wait timed out. The call made after
+  vkAllocateMemory itself failed always has that fallback, because NVK offers a system-memory type that every image
+  accepts. Three Private buffers had no fallback: the visibility accumulation scratch and the acceleration-structure
+  user-ID tables. A failed visibility scratch set an error on the app's command buffer. These three now retry in
+  system memory, as the acceleration-structure scratch already did. This matters only for titles that fill the card;
+  the measured profile shows no VRAM pressure. WindowServer keeps the old waits. Way out: NVMTL_RES2_NOWAIT=0 restores
+  both waits, the 250 ms pause after a timed-out wait and the plain refusal of those three buffers, exactly as in
+  3.0.5. Run: tools/test_res2_nowait.c and tools/test_res2_nowait.py, the host tests that mention NVMTLObjects.m or
+  res2, and the plugin Objective-C check (0 new errors, 0 new warnings). Not run on a GPU or on macOS.
+- **DLSS no longer leaks image views, and a view can no longer outlive its image.** DLSS keeps its own views of the
+  scaler's images in a table that held 48 entries. Once it was full, every evaluation made a new VkImageView that was
+  neither cached nor destroyed, so a long session could slowly fill NVK's descriptor table. Two paths also destroyed
+  an image without taking its DLSS views out of the table: the residency pager's re-back of a purgeable texture, and
+  the release of a migrated texture's old backing. Those entries leaked, and a later image that reused the same handle
+  value could be handed the dead view. The table now grows and behaves the same up to 48 entries. The backing release
+  drops the image's DLSS views the way the image destroy does, and the re-back retires them through the image grace
+  like the texture's main view. Frame Generation also skips its priming evaluation when the previous colour texture is
+  a different Metal object (such as a texture view) for the very image it was given at the last encode, since the core
+  would be handed the same view again. A stale comment saying Frame Generation is not driven is corrected. Way out:
+  none, since these changes only stop leaks, drop dead entries and leave out an evaluation that would repeat the
+  previous one with the same view. Run: a host test of the cache and the priming decision (tools/test_dlss_views.c),
+  text checks of the wiring (tools/test_dlss_views.py, tools/check_view_grace.py) and the Objective-C check. Not run:
+  DLSS on a card. No performance gain is claimed: DLSS is not part of the measured profile.
+- **The memory table is looked up through an index.** The plugin records every device memory so a fault report can
+  name what an address held. Every vkFreeMemory and every image commit looked a memory up by scanning that table
+  backwards under g_mm_lock: one step per memory allocated since the one sought, and the whole table for an old heap
+  or pool memory. The table now has a hash index like the image history's. It returns the same record the scan
+  returned in no more steps, and its walk always ends even when a fault report reads it without the lock. No way out
+  is needed: the answers are identical, and the table still keeps every record. The histories still grow by about 300
+  bytes per texture, as in 3.0.5. A compaction was tried and withdrawn: on a host model it held the commit and dealloc
+  locks for 30 to 150 ms each time it ran. Run: tools/test_mem_index.c (the index checked against the scan with
+  reissued handles), tools/test_mem_index.py (three broken indexes must fail it), tools/test_slots.c, the Objective-C
+  check. Not run on a card; no gain was measured.
+
+#### Diagnostics
+
+- **NVRM says whether write-combined mappings are really write-combined on this machine.** On AMD hackintoshes,
+  AMD_Vanilla enables a fix-PAT kernel patch by default (Algrey / Zormeister). It replaces the write in which XNU sets
+  entry 6 of the CPU's page attribute table to write-combining with a fixed table, 0x0007010600070106. In that table
+  entry 6 is uncached-minus. Every kIOMapWriteCombineCache mapping, BAR1 included, is then uncached unless the
+  firmware's MTRRs mark the range write-combining, and each CPU store goes out as its own bus transaction. No log or
+  report said which table a machine runs. NVRM now reads IA32_PAT once at start with rdmsr_carefully and publishes it
+  read-only: `sysctl debug.nvrm_pat_wc debug.nvrm_pat_why` (debug.nvrm_pat holds the raw value, which sysctl prints in
+  decimal), plus one log line "page attribute table 0x... (entry 6 .., entry 2 ..; <table>): <verdict>".
+  debug.nvrm_pat_wc is 1 when write-combined mappings are write-combined. It is 0 when they are not: uncached, write-
+  through or write-protect, and for uncached-minus unless an MTRR says WC. It is 2 when the entry is write-back, so
+  the firmware's MTRRs decide (the Shaneee table), and -1 when the table could not be read or decoded. The diagnostic
+  decides nothing: no MSR is written, no mapping changes and no code path reads the verdict, so there is no switch.
+  Checked on Linux: the kext compile check of all units, the import check (rdmsr_carefully is exported by
+  com.apple.kpi.unsupported on macOS 15 and 26), and the host tests tools/test_nvrm_pat.c and tools/test_nvrm_pat.py.
+  It was not run on a Mac or on the card, and the value on the measured machine is not known yet.
+- **The OpenGL path now says in the system log how two of its silent decisions went, once per process.** In a release
+  build the system log only got lines that name a failure, so two decisions logged nothing there. The first is the
+  patch that lets Apple's OpenGL renderer use the last vertex as provoking vertex. It accepts only the renderer table
+  of macOS 15.8.1, and on any other build it quietly left the renderer rewriting the index buffer of every indexed
+  draw. The second is the GL vblank wait correction, which logged neither which branch a frame took nor the periods it
+  used. A process that loads Apple's renderer now writes one line naming the outcome: patched, set by Apple, profile
+  differs (with its 20 bytes and the macOS build), no profile symbol, page not writable, or not patched because the
+  Vulkan device has no last-vertex provoking. The first vblank wait of a process writes one line naming its branch,
+  its entry count, the display's period and CoreAnimation's spacing. Find them with `log show --last 1d --style
+  compact --predicate 'eventMessage CONTAINS "GL provoking vertex"'` and `log show --last 1d --style compact
+  --predicate 'eventMessage CONTAINS "GL vblank wait"'`. Nothing else changes: the patch accepts the same table and
+  writes in the same cases, and WindowServer registers what it did before. The vblank branch comes from the same rule
+  as before, which a host test checks over an edge grid. There is no switch, because this is logging only. Run:
+  tools/test_gl_diag.c and tools/test_gl_diag.py (new), the existing tests that read these files, and objccheck (0
+  new). Not run: anything on a Mac or a card. No gain is claimed; these lines provide the data a later decision needs.
+
+### The ways back
+
+Each is new, of tier escape, with a row in `tools/switches.tsv`, read once per process, and is a line of
+`/Library/GPUBundles/nvmtl/nvrm610.conf` (or the process's own environment with `NVMTL_PROCESS_ENV=1`). With it at 0
+the code path is the one of 3.0.5.
+
+- `NVMTL_GL_FAST_FLUSH=0`: `commitAndWaitUntilSubmitted` only waits for the submit-ahead thread or the worker.
+- `NVMTL_CB_LEAN=0`: every command buffer makes its two handler groups up front, and every `-commandBuffer` takes the
+  queue class lock to find the capacity semaphore.
+- `NVMTL_SURFIN_SKIP_OWN_OUT=0`: a bind of a surface texture waits on the surface's monitor for the copy-out in
+  flight.
+- `NVMTL_GL_WAIT_EVENT=0`: `waitUntilComplete` of a buffer or texture polls every 50 us.
+- `NVMTL_TEX_RECYCLE=0`: every dead texture is destroyed and every new one created and allocated.
+- `NVMTL_ASYNCUP_REAP=0`: a finished asynchronous upload keeps its staging buffer and its place until its texture is
+  next written, read back or freed.
+- `NVMTL_BIND_CACHE=0`: the index buffer, the vertex buffers, the topology and primitive restart are recorded before
+  every draw.
+- `NVMTL_DS_SKIP=0`: a repeated `setDepthStencilState` is applied again.
+- `NVMTL_CVAR_PARALLEL=0`: a compute variant is compiled under the variant table's lock.
+- `NVMTL_CVAR_SEED=0`: the creation-time compute pipeline is unspecialized and thrown away.
+- `NVMTL_RES2_NOWAIT=0`: a thread refused video memory waits for the pager (30 ms and 16 ms, and the 250 ms pause),
+  and the three Private buffers without a fallback are refused.
+- `NVMTL_ARGBUF_ARRAYS=0`: an argument-buffer array of handles gets one field, its first element.
+- `NVMTL_XLATE_ADDR_RETRY=0`: a module refused for a select between two buffer roots stays refused. The plugin then
+  adds `-ar0` to its shader cache tag, so the two modes never share a cached module.
+
+`NVMTL_TEX_RECYCLE`, `NVMTL_ASYNCUP_REAP`, `NVMTL_BIND_CACHE`, `NVMTL_DS_SKIP`, `NVMTL_GL_FAST_FLUSH`,
+`NVMTL_SURFIN_SKIP_OWN_OUT` and `NVMTL_RES2_NOWAIT` change nothing in WindowServer, which keeps the path of 3.0.5
+whatever they say.
+
+No switch: the NVK patch `nvk/nvk-desc-alloc.patch` (a new descriptor set comes out exactly as before; leaving the
+patch out of the chain in `build/build_nvk.sh` restores the walk), the single resource set per command buffer, the
+ShaderWrite census flag, the pipeline state's function ivars and the embedded-sampler short-circuit, the memory
+table's index, the remembered function-constant refusals (`NVMTL_FCCACHE_OFF=1`, not new, still turns that cache
+off), the DLSS view table and the views dropped with their image, the sampler found through call-site attributes in
+the translator (only modules that were refused change), and the three diagnostics (`debug.nvrm_pat`,
+`debug.nvrm_pat_wc` and `debug.nvrm_pat_why`, read-only, and the two OpenGL log lines), which decide nothing.
+
+### What ran where
+
+RANHERE
+
 ## 3.0.5
 
 **Not released.** This section describes the branch being prepared as 3.0.5, on top of 3.0.4 (below, in the same pull

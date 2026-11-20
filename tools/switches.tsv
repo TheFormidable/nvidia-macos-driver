@@ -161,13 +161,16 @@ env	NVMTL_ANGLE_METAL	dev	unset	2.9	-	unreviewed
 env	NVMTL_APPLE_FAMILY	dev	unset	2.9	-	unreviewed
 env	NVMTL_APPLE_PIPELINE	dev	unset	2.9	-	unreviewed
 env	NVMTL_APP_PROFILE	setting	unset	2.9	-	Built-in per-application profiles: On by default; off turns every shipped per-application profile off.
+env	NVMTL_ARGBUF_ARRAYS	escape	on (NVMTL_ARGBUF_ARRAYS=0: an argument-buffer member that is an array of textures, samplers or buffers gets one field, its first element, as in 3.0.5)	3.0.6	3.2	An argument-buffer struct member that is an array of resource handles gets one [[id]] per element when a shader library is loaded, so a shader that indexes the array past its first element is translated instead of refused or reading the wrong handle.
 env	NVMTL_ARGBUF_SAMPLERS	dev	unset	2.9	-	unreviewed
+env	NVMTL_ASYNCUP_REAP	escape	on except in WindowServer (NVMTL_ASYNCUP_REAP=0: a finished asynchronous texture upload keeps its staging buffer and its place until its image is next written, read back or freed, as in 3.0.5)	3.0.6	3.2	The staging buffer, the submission and the place of an asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD) are given back at the next upload once the GPU has finished the copy, at most 16 per upload and without waiting, so textures that are uploaded once and then only sampled do not fill the 256 places and push later uploads onto the path that waits; never in WindowServer.
 env	NVMTL_ASYNC_COMMIT	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_SURFACE_UPLOAD	dev	unset	2.9	-	unreviewed
 env	NVMTL_ASYNC_TEX_UPLOAD	escape	on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0)	2.9	3.2	A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too.
 env	NVMTL_B78_DEBUG	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_FILE	diag	unset	2.9	-	unreviewed
 env	NVMTL_BDA_PROBE_HASH	diag	unset	2.9	-	unreviewed
+env	NVMTL_BIND_CACHE	escape	on except in WindowServer (NVMTL_BIND_CACHE=0: the index buffer, every vertex buffer, the topology and primitive restart are recorded before every draw, as in 3.0.5)	3.0.6	3.2	A draw does not record again the index buffer, the vertex buffer bindings, the primitive topology or primitive restart that its Vulkan command buffer already holds; a fresh command buffer records everything, and whoever records behind the cache (a patch draw, DLSS) clears it; never in WindowServer.
 env	NVMTL_BLIT_READONLY	escape	on (NVMTL_BLIT_READONLY=0: a buffer with a caller copy that a command buffer used only as a blit copy's source is copied back to the caller's memory at completion, as in 3.0.3)	3.0.4	3.2	A buffer with a caller copy (newBufferWithBytesNoCopy pages the driver copies) that a command buffer used only as the source of copyFromBuffer:toBuffer: or copyFromBuffer:toTexture: is not copied back at completion; any other use in the command buffer still copies it back. From pull request 578 of the original project.
 env	NVMTL_BUFFER_GRACE	dev	unset	2.9	-	unreviewed
 env	NVMTL_BUF_GUARD	dev	unset	2.9	-	unreviewed
@@ -175,12 +178,15 @@ env	NVMTL_BUSY_DONE_EARLY	escape	on (NVMTL_BUSY_DONE_EARLY=0 in the settings fil
 env	NVMTL_CACHE_SYNC_IO	dev	unset	2.9	-	unreviewed
 env	NVMTL_CANONICAL_POINTERS	dev	unset	2.9	-	unreviewed
 env	NVMTL_CARD	setting	unset	2.9	-	Card for an application: With more than one card: 0 is the primary, 1 the second and so on (up to 7), for every application (1) or per application (Game=1,*=0).
+env	NVMTL_CB_LEAN	escape	on (NVMTL_CB_LEAN=0: every command buffer makes its two handler dispatch groups up front and every -commandBuffer takes the queue class lock to find the capacity semaphore, as in 3.0.5)	3.0.6	3.2	A command buffer makes its scheduled-handler and completed-handler dispatch groups when the first handler of each kind is dispatched, and a queue's capacity semaphore is made with the queue and read without the class lock; Apple's OpenGL renderer makes on the order of a hundred command buffers a frame.
 env	NVMTL_CB_TIME	dev	unset	2.9	-	unreviewed
 env	NVMTL_CL_REFL_TRACE	diag	unset	2.9	-	unreviewed
 env	NVMTL_COMMIT_AHEAD	dev	unset	2.9	-	unreviewed
 env	NVMTL_COMPUTE_ROBUST	dev	unset	2.9	-	unreviewed
 env	NVMTL_CONF_SET	dev	unset	2.9	-	unreviewed
 env	NVMTL_COPY_EXACT_FORMAT	dev	unset	2.9	-	unreviewed
+env	NVMTL_CVAR_PARALLEL	escape	on (NVMTL_CVAR_PARALLEL=0: a compute kernel's threadgroup-size variant is compiled while the variant table's lock is held, as in 3.0.5)	3.0.6	3.2	A compute kernel's threadgroup-size variant is compiled outside the process-wide variant lock and the table is looked at again before the result goes in, so a dispatch of another kernel on another thread does not wait for the compile; two threads that miss the same size at once both compile it and one copy is destroyed.
+env	NVMTL_CVAR_SEED	escape	on (NVMTL_CVAR_SEED=0: the pipeline newComputePipelineState compiles is unspecialized and the variant table starts empty, as in 3.0.5)	3.0.6	3.2	The pipeline newComputePipelineState compiles, so that a kernel NVK cannot build is refused there, is specialized for the kernel's default threadgroup size and kept as that size's variant, so the first dispatch at that size does not compile the kernel a second time; a module whose size is not given by plain SpecId defaults stays unspecialized.
 env	NVMTL_DEBUG_WAIT_EACH	diag	unset	2.9	-	unreviewed
 env	NVMTL_DESC_BATCH	dev	unset	2.9	-	unreviewed
 env	NVMTL_DESC_MASK	dev	unset	2.9	-	unreviewed
@@ -200,6 +206,7 @@ env	NVMTL_DLSS_SKIP	dev	unset	2.9	-	unreviewed
 env	NVMTL_DLSS_TRACE	diag	unset	2.9	-	unreviewed
 env	NVMTL_DONTCARE_CLEARS	dev	unset	2.9	-	unreviewed
 env	NVMTL_DROP_REPORT	escape	on (NVMTL_DROP_REPORT=0 in the settings file: it is reported as completed, as in 2.9)	3.0	3.2	A command buffer that was dropped while its channel was rebuilt is reported to the application as an error.
+env	NVMTL_DS_SKIP	escape	on except in WindowServer (NVMTL_DS_SKIP=0: setDepthStencilState applies the state again even when it is the one the encoder last applied, as in 3.0.5)	3.0.6	3.2	A render encoder does not apply again a depth-stencil state that is the one it last applied; never in WindowServer.
 env	NVMTL_DUMP_FAILED_DIR	diag	unset	2.9	-	unreviewed
 env	NVMTL_DUMP_GROUP	diag	unset	2.9	-	unreviewed
 env	NVMTL_DUMP_PSO	diag	unset	2.9	-	unreviewed
@@ -237,6 +244,8 @@ env	NVMTL_GDQ_PCAS	dev	unset	2.9	-	unreviewed
 env	NVMTL_GDQ_RES	dev	unset	2.9	-	unreviewed
 env	NVMTL_GDQ_RESCAP	dev	unset	2.9	-	unreviewed
 env	NVMTL_GDQ_STATS	diag	unset	2.9	-	unreviewed
+env	NVMTL_GL_FAST_FLUSH	escape	on except in WindowServer (NVMTL_GL_FAST_FLUSH=0: commitAndWaitUntilSubmitted only waits for the submit-ahead thread or the worker, as in 3.0.5)	3.0.6	3.2	commitAndWaitUntilSubmitted, which Apple's OpenGL renderer calls at every context flush, runs the submit-ahead step for its own queue on the committing thread, in order up to its own command buffer and with the same decisions, before it waits as before, instead of sleeping until another thread has taken the lock and submitted; never in WindowServer.
+env	NVMTL_GL_WAIT_EVENT	escape	on (NVMTL_GL_WAIT_EVENT=0: waitUntilComplete of a buffer or texture sleeps 50 us and looks again, as in 3.0.5)	3.0.6	3.2	The OpenGL renderer's wait until no command buffer names a buffer or texture any more (waitUntilComplete, from GLDBufferRec::restoreData) sleeps on a condition that the release bringing the count to zero wakes, instead of polling every 50 us; the 10 s limit is the same.
 env	NVMTL_GPU_ICB	dev	unset	2.9	-	unreviewed
 env	NVMTL_GSUB_HOSTPTR_LIFT	dev	unset	2.9	-	unreviewed
 env	NVMTL_GSUB_HOST_READS	escape	on (NVMTL_GSUB_HOST_READS=0: a part with any caller copy waits for the worker instead of being submitted ahead, as in 3.0.4)	3.0.5	3.2	A part whose caller copies (newBufferWithBytesNoCopy pages the driver copies) are all buffers it only reads, and that no sealed part may have written, can be submitted ahead of the worker; one that a part may write still holds every later reader. From pull request 524 of the original project.
@@ -413,6 +422,7 @@ env	NVMTL_REFLECT	dev	unset	2.9	-	unreviewed
 env	NVMTL_RES2_COLD	dev	unset	2.9	-	unreviewed
 env	NVMTL_RES2_HOT	dev	unset	2.9	-	unreviewed
 env	NVMTL_RES2_MARGIN_MB	dev	unset	2.9	-	unreviewed
+env	NVMTL_RES2_NOWAIT	escape	on except in WindowServer (NVMTL_RES2_NOWAIT=0: a thread refused video memory polls up to 30 ms for the pager's pass and sleeps up to 16 ms for evicted memory to drain, with a 250 ms pause after a wait that ran out, and three Private buffers without a fallback are refused, as in 3.0.5)	3.0.6	3.2	A thread that is refused video memory hands the residency pass to the pager's worker when the worker holds it, frees what has already drained without waiting and goes on to the system-memory fallback it took when the old waits ran out; the visibility accumulation scratch and the acceleration-structure user-ID tables, which had no fallback, retry in system memory; never in WindowServer.
 env	NVMTL_RES2_WS	dev	unset	2.9	-	unreviewed
 env	NVMTL_RT_ADDR_TRACE	diag	unset	2.9	-	unreviewed
 env	NVMTL_SASS_CACHE	dev	unset	2.9	-	unreviewed
@@ -441,6 +451,7 @@ env	NVMTL_SPVCACHE_TARGET_PCT	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_BUSY	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFACE_VRAM_PIPE	escape	on (NVMTL_SURFACE_VRAM_PIPE=0 in the settings file: the family VRAM import opens /dev/null with a plain open(), so a process whose sandbox refuses it, as Firefox's do, draws its surfaces through private images and copies, as in 3.0.4)	3.0.5	3.2	A process whose sandbox refuses /dev/null (Firefox's) imports a surface's family VRAM with the read end of an empty pipe as its descriptor, as NVK's own opens there already do, instead of failing the import without a word; a process that may open /dev/null is not changed. From pull request 487 of the original project.
 env	NVMTL_SURFIN_ORDERED	dev	unset	2.9	-	unreviewed
+env	NVMTL_SURFIN_SKIP_OWN_OUT	escape	on except in WindowServer (NVMTL_SURFIN_SKIP_OWN_OUT=0: a bind of a surface texture waits on the surface's monitor for the copy-out in flight, as in 3.0.5)	3.0.6	3.2	A command encoder's bind of a surface drawn through a private image does not wait for this process's own copy-out of that image to the surface's pages while it is in flight, unless a zero fill was lost or another writer has published into the surface's video memory meanwhile; CPU reads and writes of the texture still wait; never in WindowServer.
 env	NVMTL_SURFIN_UPLOAD	dev	unset	2.9	-	unreviewed
 env	NVMTL_SURFIN_ZERO	escape	on in WindowServer (NVMTL_SURFIN_ZERO=0: WindowServer uploads a surface whose pages are all zero and waits for the copy, as in 3.0)	3.0.1	3.2	WindowServer does not upload a surface whose memory pages are all zero, such as the new surface of each captured frame of a shared screen: it clears the surface's video memory on the GPU ahead of its next command buffer instead of copying and waiting. Off with NVMTL_PRESUBMIT_PROLOGUE=0.
 env	NVMTL_SURFOUT_PLANES	escape	on (NVMTL_SURFOUT_PLANES=0 in the settings file: each plane is copied out on its own, as in 2.9)	3.0	3.2	The planes of a two-plane surface drawn through private images (the frames WindowServer draws for a screen share) are copied back to the surface together, under one lock and with one wait for the GPU, so the other plane is not uploaded again at its next use.
@@ -452,6 +463,7 @@ env	NVMTL_TABLE_SHADOW	dev	unset	2.9	-	unreviewed
 env	NVMTL_TABLE_SSBO	dev	unset	2.9	-	unreviewed
 env	NVMTL_TESS_ORDER_FLIP	dev	unset	2.9	-	unreviewed
 env	NVMTL_TEW	dev	unset	2.9	-	unreviewed
+env	NVMTL_TEX_RECYCLE	escape	on except in WindowServer (NVMTL_TEX_RECYCLE=0: every dead texture is destroyed and every new one created and allocated, as in 3.0.5)	3.0.6	3.2	A dead ordinary colour texture of up to 32 MB keeps its Vulkan image and memory for at most a second, up to 32 images and 128 MB, and the next texture of the same format, size, mips, layers and usage takes them instead of four round trips to the kernel; they are given back first when video memory runs short; never in WindowServer, and never an image that was re-backed, migrated or sparse.
 env	NVMTL_TG_RESHAPE	dev	unset	2.9	-	unreviewed
 env	NVMTL_TILE_SHADING	dev	unset	2.9	-	unreviewed
 env	NVMTL_TSPOOL_KEEP	dev	unset	2.9	-	unreviewed
@@ -477,6 +489,7 @@ env	NVMTL_WS_NOCOPY_ONCE	escape	on (NVMTL_WS_NOCOPY_ONCE=0: in WindowServer, a n
 env	NVMTL_WS_RESERVE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_RT_GATE_MB	dev	unset	2.9	-	unreviewed
 env	NVMTL_WS_WAIT_COMPLETION	dev	unset	2.9	-	unreviewed
+env	NVMTL_XLATE_ADDR_RETRY	escape	on (NVMTL_XLATE_ADDR_RETRY=0: a shader the translator refuses for a select between two buffer roots is refused, as in 3.0.5; the plugin then adds -ar0 to its shader cache tag)	3.0.6	3.2	A shader module the translator refused because a pointer is picked between two different buffers (a select or phi across buffer roots) is constructed again with device addresses for those buffers, as a last resort after every other attempt, instead of being refused.
 env	NVMTL_XLATE_TRIG_FLUSH	dev	unset	2.9	-	unreviewed
 env	NVMTL_YUV422	escape	on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9)	2.9	3.2	Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused.
 env	NVMTL_ZERO_FILL	dev	unset	2.9	-	unreviewed
@@ -906,6 +919,9 @@ sysctl	debug.nvrm_pageoff_coalesced	diag	read-only	2.9	-	page-offs copied per ru
 sysctl	debug.nvrm_pageoff_pages	diag	read-only	2.9	-	pages in the last page-off
 sysctl	debug.nvrm_pageoff_perpage	diag	read-only	2.9	-	page-offs copied per 4 KB page
 sysctl	debug.nvrm_pageoff_runs	diag	read-only	2.9	-	runs in the last page-off
+sysctl	debug.nvrm_pat	diag	read-only	3.0.5	-	IA32_PAT of the CPU that started NVRM (0 if not read)
+sysctl	debug.nvrm_pat_wc	diag	read-only	3.0.5	-	1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known
+sysctl	debug.nvrm_pat_why	diag	read-only	3.0.5	-	the page attribute table verdict in words
 sysctl	debug.nvrm_physmap	diag	read-only	2.9	-	batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused
 sysctl	debug.nvrm_pm_waited	diag	read-only	2.9	-	RM calls that waited for a GPU resume
 sysctl	debug.nvrm_pvchain	diag	read-only	2.9	-	batch 59b: do live RM buffers have a second pv mapper chained on qlink (read-only)
