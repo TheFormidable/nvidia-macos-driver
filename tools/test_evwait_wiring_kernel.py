@@ -108,8 +108,15 @@ def arms(src):
         and re.search(r"NVRMUserClient::sRetired\s*\([^)]*\)\s*\{\s*return\s+kIOReturnUnsupported\s*;\s*\}", code) is not None)
 
     caps = body(code, "NVRMUserClient::sCaps")
+    # Both bits, always. Since the GPU capability producer (3.0.3) the answer is built in a local that starts as the two
+    # bits: a later feature may only be OR-ed into it, and that local is what the selector returns.
+    both = r"NVRM_EVW_CAP_WAIT\s*\|\s*NVRM_EVW_CAP_REASON\s*;"
+    built = re.search(r"uint64_t\s+features\s*=\s*" + both, caps)
     arm("selector 7 answers both bits (2.9's bit 0, and bit 1: reasons and selector 9)",
-        re.search(r"scalarOutput\s*\[\s*0\s*\]\s*=\s*NVRM_EVW_CAP_WAIT\s*\|\s*NVRM_EVW_CAP_REASON\s*;", caps) is not None)
+        re.search(r"scalarOutput\s*\[\s*0\s*\]\s*=\s*" + both, caps) is not None
+        or (built is not None and len(re.findall(r"scalarOutput\s*\[\s*0\s*\]\s*=", caps)) == 1
+            and re.search(r"scalarOutput\s*\[\s*0\s*\]\s*=\s*features\s*;", caps) is not None
+            and re.search(r"\bfeatures\s*(?:=(?!=)|[&^+\-*/%]=|<<=|>>=)", caps[built.end():]) is None))
 
     w = body(code, "NVRMUserClient::sWaitEvent")
     arm("selector 6 keeps the 100 ms clamp", re.search(r"if\s*\(\s*us\s*>\s*100000\s*\)\s*us\s*=\s*100000\s*;", w) is not None)
@@ -189,6 +196,12 @@ CONTROLS = [
     ("row 10 runs the note", "rows 10 and 11 are retired", lambda s: broken(s, "{ sEvtNote, 1, 0, 0, 0 },", "{ sEvtNote, 1, 0, 0, 0 },\n        { sEvtNote, 1, 0, 0, 0 },")),
     ("a 2.9 row moved", "rows 0..8", lambda s: broken(s, "{ sCaps, 0, 0, 1, 0 },\n        { sForgetToken, 1, 0, 0, 0 },", "{ sForgetToken, 1, 0, 0, 0 },\n        { sCaps, 0, 0, 1, 0 },")),
     ("caps back to 1", "selector 7 answers both bits", lambda s: broken(s, "NVRM_EVW_CAP_WAIT | NVRM_EVW_CAP_REASON;", "1;")),
+    ("a later feature replaces both bits", "selector 7 answers both bits",
+     lambda s: broken(s, "features |= NVRM_GC_SEL7_HAS_GPU_CAPS;", "features = NVRM_GC_SEL7_HAS_GPU_CAPS;")),
+    ("the bits are masked off again", "selector 7 answers both bits",
+     lambda s: broken(s, "args->scalarOutput[0] = features;", "features &= NVRM_GC_SEL7_HAS_GPU_CAPS;\n    args->scalarOutput[0] = features;")),
+    ("something else is returned", "selector 7 answers both bits",
+     lambda s: broken(s, "args->scalarOutput[0] = features;", "args->scalarOutput[0] = features;\n    args->scalarOutput[0] = 0;")),
     ("count re-read dropped", "parks as 2.9 did", lambda s: broken(s, "if (me->fEvtSeq != seen) thread_wakeup((event_t)&me->fEvtSeq);", "")),
     ("sleepers not uncounted after the block", "parks as 2.9 did",
      lambda s: re.sub(r"(const wait_result_t r = thread_block\(THREAD_CONTINUE_NULL\);)\s*OSDecrementAtomic\(&gNvEvtSleepers\);", r"\1", s)),
