@@ -325,6 +325,10 @@ int main(void)
         memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_death(&s, &m);
         check(!nvmtl_cl_due(&s, &m, NVMTL_CL_PATIENCE - 1) && nvmtl_cl_due(&s, &m, NVMTL_CL_PATIENCE) && s.forced == 1,
               "a record never ended: the dead image is released after NVMTL_CL_PATIENCE completed submits, counted as forced");
+        check(nvmtl_cl_forced(&m), "  and its mark says it was released by force (the recycle cache must not keep such an image)");
+        memset(&s, 0, sizeof s); nvmtl_cl_begin(&s, &a); nvmtl_cl_death(&s, &m); const uint64_t q3 = nvmtl_cl_submit(&s, &a);
+        check(nvmtl_cl_due(&s, &m, q3) && !nvmtl_cl_forced(&m) && s.forced == 0,
+              "a dead image released because its command buffers ended is not marked forced (negative control)");
     }
     printf("%s: %d passed, %d failed\n", g_fail ? "FAIL" : "OK", g_pass, g_fail);
     return g_fail ? 1 : 0;

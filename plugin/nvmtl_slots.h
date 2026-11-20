@@ -22,8 +22,9 @@ typedef struct { const void *view; uint64_t seq; } nvmtl_sl_bind;               
 typedef struct { nvmtl_sl_bind b[NVMTL_SL_NB]; uint32_t allocs, state; uint64_t alloc_seq, drop_seq; } nvmtl_sl_slot;   /* state: 0 never allocated, 1 live, 2 dropped */
 typedef struct { nvmtl_sl_slot *s; uint32_t n; uint64_t writes, allocs, drops; } nvmtl_sl_state;
 
-typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples, chain; } nvmtl_im_entry;
-/* parked: in a heap/buffer park since this seq, 0 when in use; size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
+typedef struct { const void *img, *mem, *view; uint64_t off, size, seq, died, parked, kept, avail; uint32_t w, h, fmt, storage, placed, pooled, layers, mips, flags, usage, samples, chain; } nvmtl_im_entry;
+/* parked: in a heap/buffer park since this seq, 0 when in use; kept: dead, and its image and memory held by the texture
+   recycle cache since this seq (0 otherwise; a heap/buffer park can leave parked set on a record that later died); size: the memory the image needs (its requirement); avail: the memory it was given from its bind offset (0 = unknown) */
 /* heads/chain: a hash index over the append-only history - heads[bucket] is 1 + the newest entry of that bucket, each
    entry's chain is 1 + the next older one. Without it every image death, park and reuse scanned the WHOLE history under
    g_sl_lock: Cyberpunk creates and frees textures every frame, the history only grows, and on 11-07 ~28% of the game's
@@ -93,7 +94,7 @@ static inline uint32_t nvmtl_im_add(nvmtl_im_state *s, const void *img, const vo
     if (!img) return 0;
     if (s->n == s->cap) { const uint32_t cap = s->cap ? s->cap * 2 : 4096; nvmtl_im_entry *e = (nvmtl_im_entry *)realloc(s->e, (size_t)cap * sizeof *e); if (!e) return 0; s->e = e; s->cap = cap; }
     nvmtl_im_entry *e = &s->e[s->n++];
-    e->img = img; e->mem = mem; e->off = off; e->size = size; e->view = view; e->w = w; e->h = h; e->fmt = fmt; e->storage = storage; e->placed = placed; e->pooled = pooled; e->seq = seq; e->died = 0; e->parked = 0;
+    e->img = img; e->mem = mem; e->off = off; e->size = size; e->view = view; e->w = w; e->h = h; e->fmt = fmt; e->storage = storage; e->placed = placed; e->pooled = pooled; e->seq = seq; e->died = 0; e->parked = 0; e->kept = 0;
     { const uint32_t b = nvmtl_im_bucket(img); e->chain = s->heads[b]; s->heads[b] = s->n; }   /* s->n is already 1 + this entry */
     s->live++;
     return s->n;
@@ -113,6 +114,11 @@ static inline void nvmtl_im_died(nvmtl_im_state *s, const void *img, uint64_t se
 /* a texture object died but its image went to a park for reuse (alive, mapped, recyclable); and the reuse */
 static inline void nvmtl_im_parked(nvmtl_im_state *s, const void *img, uint64_t seq) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e && !e->died) e->parked = seq ? seq : 1; }
 static inline void nvmtl_im_recycled(nvmtl_im_state *s, const void *img) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e) e->parked = 0; }
+/* a dead texture whose image and memory the texture recycle cache kept: the record stays dead (nothing may read it), and
+   says why its memory is still alive. The next texture that takes them adds a record of its own; when the cache frees
+   them instead, the record goes back to a plain death. */
+static inline void nvmtl_im_parked_dead(nvmtl_im_state *s, const void *img, uint64_t seq) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e && e->died) e->kept = seq ? seq : 1; }
+static inline void nvmtl_im_kept_freed(nvmtl_im_state *s, const void *img) { nvmtl_im_entry *e = nvmtl_im_by_img(s, img); if (e && e->died) e->kept = 0; }
 static inline void nvmtl_vw_add_ex(nvmtl_vw_state *s, const void *view, const void *img, uint32_t type1, uint32_t base_layer, uint32_t layers, uint32_t base_mip, uint32_t mips)
 {
     if (!view || !img) return;
@@ -194,11 +200,19 @@ static inline void nvmtl_im_set_params(nvmtl_im_state *s, uint32_t id, uint32_t 
     nvmtl_im_entry *e = &s->e[id - 1]; e->layers = layers; e->mips = mips; e->flags = flags; e->usage = usage; e->samples = samples; e->avail = avail;
 }
 static inline int nvmtl_im_undersized(const nvmtl_im_entry *e) { return e->avail && e->size > e->avail; }
-/* the image a heap-bound view belongs to (newest pairing, so a reused handle resolves to its latest image), or NULL */
+/* the image a heap-bound view belongs to (newest pairing), or NULL. An image handle can have several lives (a reissued
+   handle, or the texture recycle cache handing a dead texture's image to the next one): the life whose record names this
+   very view is the one, so a destroyed view of an earlier life does not resolve to the live record of a later one. A
+   view no record names (a storage twin, a derived view) resolves to the handle's newest life. */
 static inline const nvmtl_im_entry *nvmtl_im_by_view(const nvmtl_im_state *im, const nvmtl_vw_state *vw, const void *view)
 {
     if (!view) return NULL;
-    for (uint32_t i = vw->n; i-- > 0;) if (vw->e[i].view == view) return nvmtl_im_by_img(im, vw->e[i].img);
+    for (uint32_t i = vw->n; i-- > 0;) if (vw->e[i].view == view) {
+        const void *img = vw->e[i].img;
+        for (uint32_t k = im->heads[nvmtl_im_bucket(img)]; k && k <= im->n; k = im->e[k - 1].chain)
+            if (im->e[k - 1].img == img && im->e[k - 1].view == view) return &im->e[k - 1];
+        return nvmtl_im_by_img(im, img);
+    }
     return NULL;
 }
 static inline uint32_t nvmtl_im_dump(const nvmtl_im_state *s, FILE *f)
@@ -255,7 +269,8 @@ static inline unsigned nvmtl_sl_report(const nvmtl_sl_state *sl, const nvmtl_im_
         if (nvmtl_sl_is_dummy(d, b, v)) { snprintf(line, sizeof line, "fault context:   binding %u: the dummy (%s seq %llu)", b, x->b[b].seq ? "written at" : "prefilled at creation,", (unsigned long long)x->b[b].seq); emit(ctx, line); continue; }
         const nvmtl_im_entry *e = nvmtl_im_by_view(im, vw, v);
         if (!e) snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu - of no image this table knows", b, v, (unsigned long long)x->b[b].seq);
-        else { char lv[64]; if (e->died) snprintf(lv, sizeof lv, "DIED at seq %llu", (unsigned long long)e->died); else if (e->parked) snprintf(lv, sizeof lv, "ALIVE but PARKED for reuse since seq %llu", (unsigned long long)e->parked); else snprintf(lv, sizeof lv, "ALIVE");
+        else { char lv[128]; if (e->died && e->kept) snprintf(lv, sizeof lv, "DIED at seq %llu, its image and memory parked for reuse since seq %llu", (unsigned long long)e->died, (unsigned long long)e->kept);
+               else if (e->died) snprintf(lv, sizeof lv, "DIED at seq %llu", (unsigned long long)e->died); else if (e->parked) snprintf(lv, sizeof lv, "ALIVE but PARKED for reuse since seq %llu", (unsigned long long)e->parked); else snprintf(lv, sizeof lv, "ALIVE");
                snprintf(line, sizeof line, "fault context:   binding %u: view %p written at seq %llu -> image %p %ux%u fmt %u%s%s%s mem %p+%llu %llu bytes, created seq %llu, %s",
                       b, v, (unsigned long long)x->b[b].seq, e->img, e->w, e->h, e->fmt, e->storage ? " storage" : "", e->placed ? " placed" : "", e->pooled ? " pooled" : "",
                       e->mem, (unsigned long long)e->off, (unsigned long long)e->size, (unsigned long long)e->seq, lv); }
