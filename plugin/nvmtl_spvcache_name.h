@@ -32,6 +32,21 @@ static inline int nvmtl_spvcache_escape_tag(char *tag, size_t cap, const char *w
     if (k < 0 || (size_t)k >= cap - n) { tag[n] = 0; return 0; }
     return 1;
 }
+/* Appends to `tag` the mark of the translator's way back from its device-address construction of a module refused for a
+   pointer select between two buffer roots: "-ar0" for NVMTL_XLATE_ADDR_RETRY=0 (`addr_retry` is the variable's value
+   after the settings file was read, NULL when unset). The translator reads it once (translator/translator/src/
+   construction.rs, cross_root_select_refusal) and, as here, a value that starts with 0 turns the retry off. Without the
+   mark a module translated with the retry on would still be served from the cache after it was turned off. Returns 1,
+   or 0 when the tag with its mark does not fit in `cap`; on 0 the tag is left as it was and the caller must not cache. */
+static inline int nvmtl_spvcache_addr_retry_tag(char *tag, size_t cap, const char *addr_retry)
+{
+    if (!tag || !cap) return 0;
+    const size_t n = strnlen(tag, cap);
+    if (n == cap) return 0;
+    const int k = snprintf(tag + n, cap - n, "%s", addr_retry && addr_retry[0] == '0' ? "-ar0" : "");
+    if (k < 0 || (size_t)k >= cap - n) { tag[n] = 0; return 0; }
+    return 1;
+}
 /* 1 when `name` is an entry of translator build `build` (any mode); 0 for another build's entry or a foreign file. */
 static inline int nvmtl_spvcache_same_build(const char *name, const char *build)
 {
