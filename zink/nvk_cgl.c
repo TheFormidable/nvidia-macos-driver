@@ -2,6 +2,8 @@
 #include "nvk_cgl.h"
 #include "nvk_zink.h"
 #include "native_drawable.h"
+#include "nvk_opacity.h"
+#include "nvk_zink_cfg.h"
 #define GL_DO_NOT_WARN_IF_MULTI_GL_VERSION_HEADERS_INCLUDED 1
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl.h>
@@ -123,6 +125,8 @@ struct nvk_cgl_bridge {
    char api_version_string[128], api_glsl_string[64];
    GLint api_version, api_extension_count;
    bool api_ready;
+   struct nvk_opacity opacity;   /* whether the drawable is opaque, kept between swaps (zink/nvk_opacity.h) */
+   bool no_view;                 /* the last swap's native acquire found no view */
    struct nvk_cgl_bridge *next;
 };
 struct dispatch_entry { const char *name; size_t offset; void *adapter; };
@@ -322,6 +326,7 @@ static struct nvk_cgl_bridge *bridge_current(void *engine)
       pthread_mutex_lock(&bridges_lock);
       thread_bridge->width = width; thread_bridge->height = height;
       pthread_mutex_unlock(&bridges_lock);
+      nvk_opacity_changed(&thread_bridge->opacity);
       /* Resizing attachments must not overwrite the application viewport. */
    }
    return thread_bridge;
@@ -569,6 +574,9 @@ static int iosurface_integer(void *engine, unsigned parameter, const int *values
    struct nvk_cgl_bridge *b=bridges;
    while (b && b->engine!=engine) b=b->next;
    int (*original)(void *,unsigned,const int *)=b && b->integer_original ? b->integer_original[9] : NULL;
+   /* Whether CGLSetParameter(kCGLCPSurfaceOpacity) passes through here is not known. When it does, the next swap asks
+    * for the opacity at once instead of up to 100 ms later; the call itself goes on to Apple's callback unchanged. */
+   if (b && parameter==(unsigned)kCGLCPSurfaceOpacity) nvk_opacity_changed(&b->opacity);
    pthread_mutex_unlock(&bridges_lock);
    if (!b || !original) return kCGLBadContext;
    if (parameter!=910) return original(engine,parameter,values);
@@ -871,6 +879,7 @@ EXPORT int nvk_cgl_resize(CGLContextObj context, unsigned width, unsigned height
    pthread_mutex_lock(&bridges_lock);
    b->width = width; b->height = height;
    pthread_mutex_unlock(&bridges_lock);
+   nvk_opacity_changed(&b->opacity);
    return 1;
 }
 
@@ -1055,14 +1064,39 @@ failure:
    return 0;
 }
 
-static bool opaque_drawable(CGLContextObj context)
+static int read_opacity(void *context, int *opaque)
 {
    GLint opacity = 1;
-   CGLGetParameter(context, kCGLCPSurfaceOpacity, &opacity);
-   return opacity != 0;
+   const CGLError error = CGLGetParameter(context, kCGLCPSurfaceOpacity, &opacity);
+   *opaque = opacity != 0;
+   return error == kCGLNoError;
 }
 
-static int gpu_present(struct nvk_cgl_bridge *b)
+/* NVK_ZINK_OPACITY_KEEP=0 (zink/nvk_zink_cfg.h), read once per process: every swap asks WindowServer again. */
+static pthread_once_t opacity_once = PTHREAD_ONCE_INIT;
+static int opacity_keep;
+static void read_opacity_switch(void) { opacity_keep = nvk_zink_cfg_on("NVK_ZINK_OPACITY_KEEP"); }
+
+/* Whether the drawable is opaque, for one swap: asked at most once per swap, the answer kept for 100 ms
+ * (zink/nvk_opacity.h). */
+static int opaque_drawable(struct nvk_cgl_bridge *b)
+{
+   pthread_once(&opacity_once, read_opacity_switch);
+   return nvk_opacity_get(&b->opacity, opacity_keep, nvk_opacity_now_ns(), read_opacity, b->context);
+}
+
+/* The context's output changed where the adapter does not set the size itself: in AppKit's view binding
+ * (zink/native_drawable.m) and when the native target is removed. The next swap asks for the opacity at once. */
+void nvk_cgl_output_changed(CGLContextObj context)
+{
+   pthread_mutex_lock(&bridges_lock);
+   struct nvk_cgl_bridge *b = find_bridge(context);
+   if (b) nvk_opacity_changed(&b->opacity);
+   pthread_mutex_unlock(&bridges_lock);
+}
+
+/* opaque: what the swap's native acquire was given, or -1 when the swap has not asked yet. */
+static int gpu_present(struct nvk_cgl_bridge *b, int opaque)
 {
    unsigned slot = b->gpu_slot;
    use_original(b);
@@ -1077,7 +1111,7 @@ static int gpu_present(struct nvk_cgl_bridge *b)
    use_zink(b);
    IOSurfaceRef surface = b->gpu_present[slot].surface;
    if (IOSurfaceLock(surface, 0, NULL) != kIOReturnSuccess) return fail("Cannot lock GPU presentation surface");
-   int ok = nvk_zink_present_begin(b->zink, slot, 1, opaque_drawable(b->context));
+   int ok = nvk_zink_present_begin(b->zink, slot, 1, opaque >= 0 ? opaque : opaque_drawable(b));
    if (!nvk_zink_present_wait(b->zink, slot)) {
       nvk_zink_present_release(b->zink);
       ok = 0;
@@ -1139,6 +1173,8 @@ static int present_drawable(CGLContextObj context)
       b->native_present = true;
       b->present_configured = true;
    }
+   /* The drawable's opacity is asked for at most once per swap, and the layer and the copy are given the same answer. */
+   int opaque = -1;
    if (b->native_present) {
       uint32_t vendor = 0, device = 0;
       if (!nvk_zink_device_info(b->zink, &vendor, &device)) return fail("Native presentation requires an NVK device");
@@ -1147,8 +1183,13 @@ static int present_drawable(CGLContextObj context)
        * its drawables back, and no present of it runs beside nextDrawable. */
       if (!nvk_zink_present_drain(b->zink)) return fail("Native NVK completion uncertain; drawable quarantined");
       void *frame = NULL; IOSurfaceRef surface = NULL;
-      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque_drawable(context), &frame, &surface);
+      opaque = opaque_drawable(b);
+      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque, &frame, &surface);
       if (acquired != 1) nvk_zink_present_idle(b->zink); /* No drawable: nothing to keep imported for. */
+      /* Nor an answer to keep: the layer is being set up, is gone or is given up, or the view just went away. A swap
+       * that again finds no view, on the IOSurface path, presents to what the swap before it did. */
+      if (acquired != 1 && (acquired != NVK_NATIVE_NO_VIEW || !b->no_view)) nvk_opacity_changed(&b->opacity);
+      b->no_view = acquired == NVK_NATIVE_NO_VIEW;
       if (acquired == 2) return 2; /* Main-thread setup/resize or minimized window. */
       if (acquired != 1) {
          if (acquired == NVK_NATIVE_NO_VIEW) {
@@ -1166,7 +1207,7 @@ static int present_drawable(CGLContextObj context)
          /* Early Cocoa swaps may precede setView/update. Keep the context
           * eligible for native presentation once that view is attached. */
       } else {
-      int copied = nvk_zink_present_frame(b->zink, surface, opaque_drawable(context), native_frame_done, frame);
+      int copied = nvk_zink_present_frame(b->zink, surface, opaque, native_frame_done, frame);
       if (copied < 0) {
          /* The retained frame pins the drawable while uncertain GPU work can
           * still reference its pages. The Zink share group is quarantined. */
@@ -1182,7 +1223,7 @@ static int present_drawable(CGLContextObj context)
       }
    }
    if (!prepare_gpu_present(b)) return fail("GPU presentation needs NVK host import and Apple IOSurface textures");
-   return gpu_present(b);
+   return gpu_present(b, opaque);
 }
 
 EXPORT int nvk_cgl_present(CGLContextObj context)
