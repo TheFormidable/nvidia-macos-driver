@@ -37,6 +37,16 @@
 /* NVRM_SS_PLANE_RANGED: the range leaves the surface's memory, the planes share one resource, or the resource's
  * validity word is not understood */
 #define NVRM_SS_BAD_RANGE     0x80000009u
+/* NVRM_ESC_SURF_DIRTY with a block named in `pad`: the surface no longer has that block (the family released it and
+ * allocated another, or it has none), so the caller's pixels are not in the surface. Nothing was marked. */
+#define NVRM_SS_MOVED         0x8000000Au
+/* `pad` names the block of VRAM a caller keeps imported for longer than one frame (3.0.7):
+ *   NVRM_ESC_SURF_VRAM   [out] the block that was shared; 0 for a grant that was refused, and for the one block in
+ *                              2^32 whose name would be 0: the caller then keeps nothing
+ *   NVRM_ESC_SURF_DIRTY  [in]  0: mark whatever block the surface has now, as every caller before 3.0.7 does;
+ *                              else: mark only if the surface still has that block, and answer NVRM_SS_MOVED if not
+ * A kernel before 3.0.7 copies the word back as it came, so a caller that sent 0 with its grant reads 0 and knows it
+ * may not keep the import. The completion mark (NVRM_SS_PLANE_GPU_MARK) does not read it. */
 struct NVRMSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;
