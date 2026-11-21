@@ -22,7 +22,8 @@ MESA_COMMIT = '0a6fa60abb737d26ac8a316a4aad7c9ddf64f9e4'
 ARCHIVE_SHA256 = 'cf65daa7cb857010df1b56169426350cc11d8481def906ca3653fa2ccd2cd0d4'
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ('nvk_zink.c', 'nvk_zink.h', 'nvk_zink_private.h', 'nvk_iosurface.c',
-            'nvk_present.c', 'nvk_present.h', 'meson.build', 'zink_sync_probe.c')
+            'nvk_present.c', 'nvk_present.h', 'nvk_present_queue.c', 'nvk_present_queue.h',
+            'nvk_zink_cfg.h', 'meson.build', 'zink_sync_probe.c')
 
 
 def digest(data):

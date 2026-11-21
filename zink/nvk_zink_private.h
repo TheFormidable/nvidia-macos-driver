@@ -2,6 +2,7 @@
 #ifndef NVK_ZINK_PRIVATE_H
 #define NVK_ZINK_PRIVATE_H
 #include "nvk_zink.h"
+#include "nvk_present_queue.h"
 #include "state_tracker/st_context.h"
 #include "pipe/p_screen.h"
 
@@ -25,6 +26,13 @@ struct nvk_zink_context {
    bool double_buffer;
    bool front_flush_pending, front_flush_active;
    struct pipe_resource *native_image;
+   /* One frame ahead (nvk_present.h). The queue says who may touch `ahead` and the frame in flight.
+    * present_refusals counts frames in a row that NVK would not import that way; at three, present_old_only sends
+    * every later frame through nvk_zink_copy_vram until the context's presentation state is released. */
+   struct nvk_pq present_queue;
+   struct nvk_present_ahead *ahead;
+   unsigned present_refusals, present_late;
+   bool present_old_only;
    struct {
       IOSurfaceRef surface;
       struct pipe_resource *buffer, *image;

@@ -15,11 +15,15 @@
  *
  * Frames are checked twice and never by screen capture. Before each flush the program reads the back buffer (the
  * front buffer when single-buffered) with glReadPixels. And through the adapter's own present observer
- * (nvk_zink_set_present_observer, zink/nvk_zink.h:66-76, exported by libnvk_zink.dylib, zink/nvk_present.c:39-43) it
+ * (nvk_zink_set_present_observer, zink/nvk_zink.h:66-78, exported by libnvk_zink.dylib, zink/nvk_present.c:41-45) it
  * copies every presented frame from the event's VkBuffer into host memory on the GPU, with Zink's queue lock held by
- * the caller (zink/nvk_present.c:228-232), and compares every pixel. The observer is called after the copy into the
- * drawable has completed, so a frame it sees is the frame CAMetalLayer gets; whether the window server composites it
- * is not checked (that would need screen recording).
+ * the caller (zink/nvk_present.c:230-234; since 3.0.7 a window's frame is observed on the adapter's presentation
+ * thread, :471-473, and a swap with an observer set waits for it), and compares every pixel. The observer is called
+ * after the copy into the drawable has completed, so a frame it sees is the frame CAMetalLayer gets; whether the
+ * window server composites it is not checked (that would need screen recording). One case is observed twice: a
+ * frame whose mark the kernel refuses (the drawable has another block of video memory by then) is sent again through
+ * the first of those two places, so its first event may name a buffer the drawable no longer has and its second
+ * names the one that is shown. Both hold the same frame.
  *
  * Windows: 400x300 or smaller, borderless, floating, not restorable, ignoring the mouse, ordered front without
  * activating the application (activation policy Accessory, orderFrontRegardless), closed at the end. The program first
@@ -67,7 +71,7 @@ static struct {
 static void (*zw_set_observer)(nvk_zink_present_observer);
 
 /* Every pixel of the frame against the expectation. The CAMetalLayer path does not flip: row 0 of the buffer is the
- * top row of the image (zink/nvk_zink.c:512-514). Colour within 1, alpha within alpha_tol. */
+ * top row of the image (zink/nvk_zink.c:518-520). Colour within 1, alpha within alpha_tol. */
 static bool zw_pixels(const unsigned char *data, const struct nvk_zink_present_event *e, const zw_expect *x, char *why,
                       size_t size)
 {
@@ -146,7 +150,8 @@ static int zw_compare(const struct nvk_zink_present_event *e, const zw_expect *x
          break;
       }
       GetBufferMemoryRequirements(device, target, &req);
-      /* host_coherent_types: the memory types that are host visible and coherent (zink/nvk_present.c:221-225). */
+      /* host_coherent_types: the memory types that are host visible and coherent (zink/nvk_present.c:223-227,
+       * :463-467). */
       uint32_t types = req.memoryTypeBits & e->host_coherent_types, type = 0;
       if (!types) {
          snprintf(why, size, "no host-coherent memory type for the copy (types 0x%x, host 0x%x)", req.memoryTypeBits,
@@ -192,7 +197,8 @@ static int zw_compare(const struct nvk_zink_present_event *e, const zw_expect *x
          break;
       }
       VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &command};
-      /* The caller holds Zink's queue lock (zink/nvk_present.c:228-232), which is what vkQueueSubmit needs. */
+      /* The caller holds Zink's queue lock (zink/nvk_present.c:230-234, :471-473), which is what vkQueueSubmit
+       * needs. */
       if (QueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
          snprintf(why, size, "vkQueueSubmit of the copy failed");
          break;
@@ -216,7 +222,7 @@ static int zw_compare(const struct nvk_zink_present_event *e, const zw_expect *x
    return verdict;
 }
 
-/* The adapter's contract (zink/nvk_zink.h:66-68): 1 verified, 0 a safe failure (the present then fails), -1 uncertain
+/* The adapter's contract (zink/nvk_zink.h:66-70): 1 verified, 0 a safe failure (the present then fails), -1 uncertain
  * GPU work (the share group is quarantined). The check records what it saw and returns 1, so that only the driver's
  * own failures end a present; -1 only when its own copy did not complete. */
 static int zw_observer(const struct nvk_zink_present_event *e)
@@ -572,7 +578,7 @@ static void zw_present(ZKWin *z, int how, zw_tally *t)
    if (dx) ++t->bad;
    if (!zk_software) {
       /* nvk_cgl_last_error() is per thread; a present that only defers (returns 2) clears it
-       * (zink/nvk_cgl.c:1117-1147). */
+       * (zink/nvk_cgl.c:1127-1162). */
       const char *last = zk_last_error();
       if (strcmp(last, "none")) {
          if (!t->last_error_bad)
@@ -636,7 +642,7 @@ static void sub_basic(void)
       zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &t);
       zw_pump(0.004);
    }
-   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1137). */
+   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1152). */
    zw_report("frames", &t, 57);
    zw_check_layer("layer", z);
    zw_close(z);
@@ -708,7 +714,7 @@ static void sub_ctl(void)
    else if (layer) zk_fail("interval-1", "swap interval 1: displaySyncEnabled got=NO expected=YES");
    zw_report("interval-1", &i1, 2);
    /* (b) layer.opaque = kCGLCPSurfaceOpacity (zink/native_drawable.m:115, zink/nvk_cgl.c:1058-1063); an opaque surface
-    * gets alpha 1 in the copy (zink/nvk_zink.c:435-440). 0.5 is 127.5 in 8 bits, hence alpha within 1. */
+    * gets alpha 1 in the copy (zink/nvk_zink.c:441-446). 0.5 is 127.5 in 8 bits, hence alpha within 1. */
    CGLSetParameter(cgl, kCGLCPSurfaceOpacity, &zero);
    const zw_alpha half = {128, 128, 128, 1}, forced = {128, 128, 255, 0};
    for (int i = 0; i < 3; ++i) zw_frame(z, 30 + i, half, ZW_FLUSH_BUFFER, &o0);

@@ -65,7 +65,9 @@ int nvk_zink_flush_iosurfaces(struct nvk_zink_context *);
 int nvk_zink_refresh_iosurfaces(struct nvk_zink_context *, unsigned target, int framebuffer);
 /* Optional diagnostic observer. The queue is externally locked during the
  * callback. 1 = verified, 0 = safe diagnostic failure, -1 = uncertain GPU work.
- * Gameplay leaves this unset; diagnostic readback is separate pixel traffic. */
+ * Gameplay leaves this unset; diagnostic readback is separate pixel traffic.
+ * It is called on the presentation thread, during the swap it observes: a
+ * swap with an observer set waits for its frame, so that swap fails on 0. */
 struct nvk_zink_present_event {
    void *get_device_proc_addr, *device, *queue;
    uint64_t buffer;
@@ -78,6 +80,23 @@ void nvk_zink_set_present_observer(nvk_zink_present_observer);
  * the drawable, stop using this share group, and do not publish its contents. */
 int nvk_zink_device_info(struct nvk_zink_context *, uint32_t *vendor, uint32_t *device);
 int nvk_zink_present_native(struct nvk_zink_context *, IOSurfaceRef, int opaque);
+/* The same presentation, one frame ahead (zink/nvk_present.h): the copy is
+ * submitted and the swap returns; the presentation thread waits for the GPU,
+ * publishes the surface and calls done(arg, publish), which presents the
+ * drawable when publish is 1 and releases it either way.
+ *   2  the frame was handed over: the caller no longer touches arg
+ *   3  handed over, waited for, and not published (a front-buffer flush, or a
+ *      diagnostic observer is set): the swap failed; arg was released by done
+ *   1, 0, -1  as nvk_zink_present_native, and done was not and will not be called
+ * NVK_ZINK_PRESENT_AHEAD=0 makes every call the third case. */
+int nvk_zink_present_frame(struct nvk_zink_context *, IOSurfaceRef, int opaque,
+                           int (*done)(void *arg, int publish), void *arg);
+/* Wait until the frame that is one ahead has been published and its drawable
+ * presented. 0 = completion uncertain. Call before taking the next drawable. */
+int nvk_zink_present_drain(struct nvk_zink_context *);
+/* The context has no drawable to present into now: let the surfaces it kept
+ * imported go. */
+void nvk_zink_present_idle(struct nvk_zink_context *);
 /* Two reusable GPU presentation slots. Import maps IOSurface pages through
  * VK_EXT_external_memory_host; begin blits/copies on the GPU and submits a
  * fence. Wait must complete before another API reads the surface. The caller
