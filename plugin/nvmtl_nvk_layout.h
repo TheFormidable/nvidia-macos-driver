@@ -6,7 +6,10 @@
    whose LC_UUID is below), and the reader refuses to run against any other ICD. Pure decode of the texture header
    bit fields (Maxwell+ TEXHEAD_V2_BL: address 31:9 and 56:32, gob heights 64-72, max mip 95:92, components 118:112,
    version 127:124, width 144:128, type 153:150, height 176:160, depth 191:177) is in nvmtl_tic_decode, which
-   tools/test_slots.c proves against hand-built words. */
+   tools/test_slots.c proves against hand-built words.
+   nvk/nvk-desc-alloc.patch adds a 4-byte field after binding_count in struct nvk_descriptor_set_layout, so in a build
+   that carries it embedded_samplers_addr is aligned to 152 and binding[] starts at 160, not at the 152 measured here:
+   NVK_L_LAYOUT_BINDING must be measured again with the rest when the UUID is moved to such a build. */
 #ifndef NVMTL_NVK_LAYOUT_H
 #define NVMTL_NVK_LAYOUT_H
 #include <stdint.h>

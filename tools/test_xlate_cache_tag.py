@@ -114,10 +114,12 @@ with tempfile.TemporaryDirectory(prefix='xlate_cache_tag-') as d:
     clean = {k: v for k, v in os.environ.items() if not k.startswith('NVMTL_') and not k.startswith('TEST_')}
     build = 'sha256-' + '5a' * 32
 
-    def tag(opened=True, whole_views=None, typed_dummies=False, build=build):
+    def tag(opened=True, whole_views=None, typed_dummies=False, build=build, addr_retry=None):
         env = dict(clean, TEST_BUILD=build)
         if whole_views is not None:
             env['NVMTL_WHOLE_VIEWS'] = whole_views
+        if addr_retry is not None:
+            env['NVMTL_XLATE_ADDR_RETRY'] = addr_retry
         if typed_dummies:
             env['TEST_TYPED_DUMMIES'] = '1'
         out = subprocess.run([str(exe)] + (['opened'] if opened else []), env=env, capture_output=True, check=True)
@@ -149,6 +151,28 @@ with tempfile.TemporaryDirectory(prefix='xlate_cache_tag-') as d:
     got, log = tag(build=longest, whole_views='0')
     arm('when the tag with -wv0 does not fit, the cache is off in that process (untagged) and the log says so',
         got == 'untagged' and 'the shader cache is OFF' in log, got)
+
+    # The translator's device-address retry (NVMTL_XLATE_ADDR_RETRY, read in translator/translator/src/construction.rs)
+    # has its own mark, after -wv0: a module only that construction translates is never served with the retry off.
+    arm('with NVMTL_XLATE_ADDR_RETRY unset the tag has no -ar0', '-ar0' not in on, on)
+    got, _ = tag(addr_retry='0')
+    arm('NVMTL_XLATE_ADDR_RETRY=0 adds -ar0 to that tag', got == on + '-ar0', got)
+    for value in ('1', '', 'off', ' 0'):
+        got, _ = tag(addr_retry=value)
+        arm(f'NVMTL_XLATE_ADDR_RETRY={value!r} leaves the tag as with the retry on', got == on, got)
+    got, _ = tag(addr_retry='00')
+    arm("NVMTL_XLATE_ADDR_RETRY='00' starts with 0, as the translator reads it", got == on + '-ar0', got)
+    got, _ = tag(addr_retry='0', whole_views='0')
+    arm('with both ways back the tag ends in -wv0-ar0', got == on + '-wv0-ar0', got)
+    got, _ = tag(opened=False, addr_retry='0')
+    arm('without a translator the tag stays untagged (-ar0)', got == 'untagged', got)
+    roomy = 'sha256-' + 'b' * (cap - 3 - marks - len('sha256-'))
+    got, log = tag(build=roomy, addr_retry='0')
+    arm('when the tag with -ar0 does not fit, the cache is off in that process (untagged) and the log says so',
+        got == 'untagged' and 'the shader cache is OFF' in log, got)
+    rust = source('translator/translator/src/construction.rs')
+    arm('the translator turns the retry off on the same first byte',
+        'var_os("NVMTL_XLATE_ADDR_RETRY").is_some_and(|v| v.as_encoded_bytes().first() == Some(&b\'0\'))' in rust, 'construction.rs')
 
 print(f'{fails} failed' if fails else 'ok')
 sys.exit(1 if fails else 0)

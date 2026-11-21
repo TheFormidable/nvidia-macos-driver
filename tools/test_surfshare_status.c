@@ -17,7 +17,8 @@ static int fails;
 #define ARM(name, cond) do { const int ok = !!(cond); printf("%s  %s\n", ok ? "ok  " : "FAIL", name); if (!ok) fails++; } while (0)
 
 /* the numbers other code relies on: a change here is a change of the interface, not of the test */
-_Static_assert(NVRM_SS_BUSY == 0x80000007u && NVRM_SS_NO_DMA == 0x80000008u && NVRM_SS_BAD_RANGE == 0x80000009u, "status values");
+_Static_assert(NVRM_SS_BUSY == 0x80000007u && NVRM_SS_NO_DMA == 0x80000008u && NVRM_SS_BAD_RANGE == 0x80000009u
+               && NVRM_SS_MOVED == 0x8000000Au, "status values");
 _Static_assert(NVRM_SS_PLANE_GPU_MARK == 0x80000000u && NVRM_SS_PLANE_TRYLOCK == 0x40000000u && NVRM_SS_PLANE_RANGED == 0x20000000u,
                "plane flags");
 _Static_assert((NVRM_SS_PLANE_GPU_MARK & NVRM_SS_PLANE_TRYLOCK) == 0 && (NVRM_SS_PLANE_GPU_MARK & NVRM_SS_PLANE_RANGED) == 0
@@ -38,6 +39,7 @@ static const char *known(unsigned v)
     case NVRM_SS_BUSY:        return "NVRM_SS_BUSY";
     case NVRM_SS_NO_DMA:      return "NVRM_SS_NO_DMA";
     case NVRM_SS_BAD_RANGE:   return "NVRM_SS_BAD_RANGE";
+    case NVRM_SS_MOVED:       return "NVRM_SS_MOVED";
     default:                  return NULL;
     }
 }
@@ -102,7 +104,7 @@ int main(int argc, char **argv)
     if (!text) return 1;
 
     const unsigned n = collect(text, d, 64);
-    ARM("the text holds the nine statuses and the completion-mark flag, at least", n >= 10 && n < 64);
+    ARM("the text holds the ten statuses and the completion-mark flag, at least", n >= 11 && n < 64);
     ARM("no two NVRM_SS_* values of the form 0x800000NN share a number", duplicates(d, n, 1) == 0);
 
     /* the text and the compiled header agree: the reader above sees what the compiler sees */
@@ -112,7 +114,7 @@ int main(int argc, char **argv)
         if (k && !strcmp(k, d[i].name)) agree++;
         if (strncmp(d[i].name, "NVRM_SS_PLANE_", 14) != 0) statuses++;
     }
-    ARM("every status the compiler knows is found in the text with the same value", agree == 9);
+    ARM("every status the compiler knows is found in the text with the same value", agree == 10);
     ARM("the flag at 0x80000000 is the only value in that range that is not a status", statuses == n - 1 && find(d, n, "NVRM_SS_PLANE_GPU_MARK"));
     ARM("the DMA refusal and the bad plane range are two different answers",
         find(d, n, "NVRM_SS_NO_DMA") && find(d, n, "NVRM_SS_BAD_RANGE")

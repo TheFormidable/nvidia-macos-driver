@@ -16,10 +16,12 @@ nvmtl_tex_upload.h and tools/test_pretranslate.c the pool. This test holds the c
                  the asynchronous record
   the counts     the store counts an upload in before it publishes the handle, and every finish counts it out
                  unconditionally
-  one way out    every stored record is finished by nvmtl_asyncup_finish (barrier, drain, finish-first, hand-back),
-                 and the failure paths before the store free their record without finishing (it was never counted)
-  the hand-back  nvmtl_asyncup_store returns the handle nvmtl_up_set replaced, under the lock, and the upload
-                 finishes it outside it: nothing is finished or waited for while g_asyncup_mutex is held
+  one way out    every stored record is finished by nvmtl_asyncup_finish (barrier, drain, finish-first, hand-back)
+                 or released by the reaper's sweep (nvmtl_asyncup_sweep, held by tools/test_up_reap.py), and the
+                 failure paths before the store free their record without finishing (it was never counted)
+  the hand-back  nvmtl_asyncup_store claims the handle nvmtl_up_set replaced, under the lock, and the upload
+                 finishes what the claim hands back outside it: nothing is finished or waited for while
+                 g_asyncup_mutex is held
 
 Each check also runs on damaged copies of the text, which must fail it (the controls).
 Run: python3 tools/test_plugin_defaults_wiring.py [root]"""
@@ -174,8 +176,10 @@ def one_way_out(s):
                "nvmtl_asyncup_finish(NULL,nvmtl_asyncup_take(img));}")
     # the upload itself finishes only what it took (finish-first) or what the store handed back; its failure paths
     # before the store free their own record and must not finish it (it was never counted in)
+    sw = compact(body(s["vk"], "static void nvmtl_asyncup_sweep(void)"))
     return (all(c in vk for c in callers) and vk.count("nvmtl_asyncup_finish(") == 5
             and wr.count("nvmtl_asyncup_finish(") == 2 and vk.count("nvmtl_vk_submit_finish(&au->infl)") == 1
+            and vk.count("nvmtl_vk_submit_finish(&b->infl)") == 1 and sw.count("nvmtl_vk_submit_finish(&b->infl)") == 1
             and wr.count("free(au);") == 3)
 
 
@@ -186,17 +190,18 @@ def no_wait_under_lock(s):
         b = compact(body(s["vk"], head))
         lk, un = b.find("pthread_mutex_lock(&g_asyncup_mutex);"), b.find("pthread_mutex_unlock(&g_asyncup_mutex);")
         inside = b[lk:un] if 0 <= lk < un else ""
-        ok = ok and bool(inside) and not re.search(r"finish|wait|redo|free\(", inside)
+        ok = ok and bool(inside) and not re.search(r"finish|wait|redo|free\(|claimed\(", inside)
     return ok
 
 
 def hand_back(s):
     st = compact(body(s["vk"], STORE))
     lk = st.find("pthread_mutex_lock(&g_asyncup_mutex);")
-    st_set = st.find("constuint64_told=nvmtl_up_set(&s,token);")
+    st_set = st.find("constuint64_told=nvmtl_up_set(&s,(uint64_t)(uintptr_t)au->rec);")
+    claim = st.find("nvmtl_up_claim(&g_asyncup_fifo,(nvmtl_up_rec*)(uintptr_t)old)")
     un = st.find("pthread_mutex_unlock(&g_asyncup_mutex);")
     wr = compact(body(s["vk"], WRITE))
-    return (0 <= lk < st_set < un and "returnold;}" in st
+    return (0 <= lk < st_set < claim < un and "returnnvmtl_asyncup_claimed(old,kind);}" in st
             and "nvmtl_asyncup_finish(img,nvmtl_asyncup_store(img,(uint64_t)(uintptr_t)au));" in wr
             and wr.count("nvmtl_asyncup_store(") == 1)
 
@@ -244,7 +249,7 @@ CHECKS = [
         ("vk", "        if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));\n", ""),
     ]),
     ("an upload is counted in by the store and out by the finish", counting, [
-        ("vk", "    atomic_fetch_sub(&g_asyncup_held, 1);", ""),
+        ("vk", "    atomic_fetch_sub(&g_asyncup_held, 1);   // every handle finished here was counted in by nvmtl_asyncup_store", ""),
         ("vk", "    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);\n", ""),
         ("vk", "            else au->bytes = bytes;", ""),
         ("vk", "    atomic_fetch_sub(&g_asyncup_held, 1);   //",
@@ -255,8 +260,9 @@ CHECKS = [
          "    atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);"),
     ]),
     ("every stored upload leaves through nvmtl_asyncup_finish, and a record never stored does not", one_way_out, [
-        ("vk", "{ nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }",
+        ("vk", "{ nvmtl_vk_buffer_destroy(&au->stage); free(au->rec); free(au); return -1; }",
          "{ nvmtl_asyncup_finish(img, (uint64_t)(uintptr_t)au); return -1; }"),
+        ("vk", "        (void)nvmtl_vk_submit_finish(&b->infl);", "        (void)b;"),
         ("vk", "{ nvmtl_asyncup_finish(NULL, nvmtl_asyncup_take(img)); }",
          "{ uint64_t t = nvmtl_asyncup_take(img); if (t) { nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)t; "
          "nvmtl_vk_submit_finish(&au->infl); nvmtl_vk_buffer_destroy(&au->stage); free(au); } }"),
@@ -265,18 +271,21 @@ CHECKS = [
          "        nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));\n"),
     ]),
     ("the store and the take neither finish nor wait while they hold g_asyncup_mutex", no_wait_under_lock, [
-        ("vk", "    const uint64_t old = nvmtl_up_set(&s, token);",
-         "    const uint64_t old = nvmtl_up_set(&s, token);\n"
+        ("vk", "    const uint64_t old = nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec);",
+         "    const uint64_t old = nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec);\n"
          "    if (old) nvmtl_vk_submit_finish(&((nvmtl_asyncup *)(uintptr_t)old)->infl);"),
-        ("vk", "    img->up_token = 0;\n    pthread_mutex_unlock(&g_asyncup_mutex);",
-         "    img->up_token = 0;\n    nvmtl_asyncup_finish(img, token);\n    pthread_mutex_unlock(&g_asyncup_mutex);"),
+        ("vk", "    img->up_token = 0;\n    const nvmtl_up_claim_kind kind",
+         "    img->up_token = 0;\n    nvmtl_asyncup_finish(img, token);\n    const nvmtl_up_claim_kind kind"),
+        ("vk", "    pthread_mutex_unlock(&g_asyncup_mutex);\n    return nvmtl_asyncup_claimed(old, kind);",
+         "    const uint64_t back = nvmtl_asyncup_claimed(old, kind);\n    pthread_mutex_unlock(&g_asyncup_mutex);\n    return back;"),
     ]),
     ("the store hands back the replaced handle under the lock and the upload finishes it", hand_back, [
-        ("vk", "    const uint64_t old = nvmtl_up_set(&s, token);",
-         "    nvmtl_up_set(&s, token); const uint64_t old = 0;"),
+        ("vk", "    const uint64_t old = nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec);",
+         "    nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec); const uint64_t old = 0;"),
         ("vk", "nvmtl_asyncup_finish(img, nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au));",
          "(void)nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au);"),
-        ("vk", "    return old;\n}", "    return 0;\n}"),
+        ("vk", "    return nvmtl_asyncup_claimed(old, kind);\n}", "    return 0;\n}"),
+        ("vk", "    const nvmtl_up_claim_kind kind = old ? nvmtl_up_claim(&g_asyncup_fifo, (nvmtl_up_rec *)(uintptr_t)old) : NVMTL_UP_CLAIM_FINISH;\n", "    const nvmtl_up_claim_kind kind = NVMTL_UP_CLAIM_FINISH;\n"),
     ]),
 ]
 

@@ -361,7 +361,8 @@ static int init_locked(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, PFN_v
     ngxp *caps = NULL; int avail = -1; caps_fn(&caps);
     if (caps) P_GETI(caps, "SuperSampling.Available", &avail);
     if (avail != 1) return fail("NGX reports Super Resolution not available");
-    /* The core names Ray Reconstruction "SuperSamplingDenoising". Frame Generation is only reported: it is not driven. */
+    /* The core names Ray Reconstruction "SuperSamplingDenoising". Both answers gate the features below (nvmtl_dlss_rr_ready,
+     * nvmtl_dlss_fg_ready): Frame Generation is driven too, behind the MetalFX frame interpolator. */
     if (caps) { P_GETI(caps, "SuperSamplingDenoising.Available", &g_rr_avail); P_GETI(caps, "FrameGeneration.Available", &g_fg_avail); }
     nvlog("dlss: core reports Ray Reconstruction %s, Frame Generation %s", g_rr_avail == 1 ? "available" : "not available",
           g_fg_avail == 1 ? "available" : "not available");

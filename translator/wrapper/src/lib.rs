@@ -123,7 +123,50 @@ fn formatless_options(ll: &str, st: Stage, caps: u32) -> Option<metal2vulkan::pa
 }
 fn translate_one(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
     // one parse per distinct text for the whole translation, its retries included
-    metal2vulkan::with_parse_cache(|| translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st)))
+    metal2vulkan::with_parse_cache(|| with_address_last_resort(ll, || translate_attempts(ll, st)))
+}
+
+// Every attempt the translation of a module makes, in their order, without the device-address last resort.
+fn translate_attempts(ll: &str, st: Stage) -> Result<Vec<u8>, String> {
+    translate_with_pointer_retry(ll, |ll| translate_one_as_written(ll, st))
+}
+
+// A module refused for a select between two buffer roots (xlate.paths-walk) can be constructed with device addresses,
+// but only once every attempt `attempts` makes has failed: a first attempt refused that way (formatless images,
+// argument-buffer samplers) must never pre-empt a later one that translates the module as it always has. So the
+// attempts run as they always did; only when their final error holds one of the two cross-root refusals do they run
+// again inside the last-resort scope, where the translator may build the module with addresses. When that fails too,
+// the caller gets the first error unchanged, the text the plugin reads (nvmtl_needs_visible_link, its failure memo).
+// `ll` is the module as the caller handed it in (before its function constants or visible references were closed): one
+// that names visible functions or a function table never gets the last resort, since the plugin may still link it at
+// pipeline creation and translate the linked module instead. It is only read once the attempts failed.
+fn with_address_last_resort(
+    ll: &str, attempts: impl Fn() -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    match attempts() {
+        Err(e) if metal2vulkan::device_address_last_resort_applies(&e) && !may_link_visible_functions(ll) => {
+            metal2vulkan::with_device_address_last_resort(&attempts).map_err(|last| {
+                eprintln!("nvmtl_translate: the device-address last resort failed too: {last}");
+                e
+            })
+        }
+        other => other,
+    }
+}
+
+// The plugin's own test for a function it defers to its pipeline's link (nvmtl_needs_visible_link: the translator's
+// list of visible-function references, or a read of a visible or intersection function table), and the markers that
+// stay in a module whose references were closed against an empty linkage. A query that cannot answer reads as yes.
+fn may_link_visible_functions(ll: &str) -> bool {
+    const FORMS: [&str; 10] = [
+        ".MTL_VISIBLE_FN_REF", ".MTL_UNRESOLVED_VISIBLE_FN", "air.visible_function_references",
+        "@air.get_function_pointer_visible_function_table", "@air.get_size_visible_function_table",
+        "@air.is_null_visible_function_table", "@air.get_null_intersection_function_table",
+        "@air.set_buffer_intersection_function_table", "@air.set_intersection_function_table",
+        "_function_table\"",
+    ];
+    FORMS.iter().any(|f| ll.contains(f))
+        || metal2vulkan::linked_functions::visible_function_reference_symbols(ll).map_or(true, |s| !s.is_empty())
 }
 
 // Keep the same translation options on both attempts. In particular, the
@@ -541,7 +584,12 @@ pub extern "C" fn nvmtl_translate_fc(
         Ok(v) => v,
         Err(e) => { set_err(&format!("visible function reference: {e}")); return -1; }
     };
-    match translate_one(specialized.as_str(), st) {
+    // the function's own text decides the last resort: a reference the closure folded away still sends a refused
+    // function to the plugin's link at pipeline creation, as it always has
+    let translated = metal2vulkan::with_parse_cache(|| {
+        with_address_last_resort(ll, || translate_attempts(specialized.as_str(), st))
+    });
+    match translated {
         Ok(spv) => {
             let mut b = spv.into_boxed_slice();
             unsafe { *out = b.as_mut_ptr(); *out_len = b.len(); }
@@ -624,7 +672,11 @@ pub extern "C" fn nvmtl_translate_spec(
         Ok(v) => v,
         Err(e) => { set_err(&format!("visible function reference: {e}")); return -1; }
     };
-    let spv = match translate_one(closed.as_str(), st) { Ok(v) => v, Err(e) => { set_err(&e); return -1; } };
+    // No device-address last resort here: the plugin translates each constant set with nvmtl_translate_fc when this
+    // module is refused (nvmtl_translate_with_fc), and that translation is the one that may end in the last resort.
+    let spv = match metal2vulkan::with_parse_cache(|| translate_attempts(closed.as_str(), st)) {
+        Ok(v) => v, Err(e) => { set_err(&e); return -1; }
+    };
     let (spv, entries) = match metal2vulkan::specialize_function_constants_as_spec_ids(&spv) {
         Ok(v) => v,
         Err(e) => { set_err(&e); return -1; }
@@ -776,6 +828,175 @@ mod gl_translation_tests {
     }
 }
 
+// A kernel whose loop picks its next buffer with a select between two buffer arguments (xlate.paths-walk) has no
+// descriptor form and is constructed with device addresses. The plugin hands that module to the same address lowering
+// as every other one (nvmtl_lower_buffer_addresses_ex: lowering, the table at 640 as a Uniform block, the alignment
+// guard in both modes), so each step must accept it and leave valid SPIR-V.
+#[cfg(test)]
+mod device_address_retry_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    fn valid(what: &str, bytes: &[u8]) {
+        let words: Vec<u32> = bytes.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        let mut options = spirv_tools::val::ValidatorOptions::default();
+        options.scalar_block_layout = true;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+            .validate(&words, Some(options)).unwrap_or_else(|e| panic!("{what}: {e}"));
+    }
+
+    #[test]
+    fn a_loop_carried_buffer_select_survives_the_plugins_address_lowering() {
+        let ll = include_str!("../../translator/tests/fixtures/app_shapes/walk.ll");
+        let spv = translate_one(ll, Stage::Kernel).expect("the walk kernel translates");
+        valid("translated", &spv);
+        let lowered = buffer_addresses::lower(&spv).expect("buffer-address lowering accepts it");
+        valid("lowered", &lowered);
+        let uniform = table_ubo::convert(&lowered).expect("the address table moves to a Uniform block");
+        valid("uniform table", &uniform);
+        for safe in [false, true] {
+            let (guarded, _) = align_guard::guard(&uniform, safe).expect("the alignment guard accepts it");
+            valid(if safe { "guarded, safe" } else { "guarded" }, &guarded);
+            let (guarded, _) = align_guard::guard(&lowered, safe).expect("the alignment guard accepts the storage table");
+            valid(if safe { "storage table, guarded, safe" } else { "storage table, guarded" }, &guarded);
+        }
+    }
+}
+
+// The device-address construction is the last resort of a whole translation, never of one attempt: a module whose first
+// attempt (formatless images, argument-buffer samplers, the inlined text) is refused for a cross-root select and whose
+// later attempt translates comes out of that later attempt, as it always has. Attempts here are stand-ins that answer
+// as the translator does inside and outside the scope; the walk kernel's own text is the module, so the visible
+// function check sees a real module.
+#[cfg(test)]
+mod address_last_resort_order_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const WALK: &str = include_str!("../../translator/tests/fixtures/app_shapes/walk.ll");
+    const CROSS: &str = "native emitter: cannot reinterpret pointer for owned OpSelect type mismatch";
+
+    // first: refused for a cross-root select outside the scope, constructed with addresses inside it
+    fn first(log: &RefCell<Vec<(&'static str, bool)>>) -> Result<Vec<u8>, String> {
+        let scoped = metal2vulkan::device_address_last_resort_active();
+        log.borrow_mut().push(("first", scoped));
+        if scoped { Ok(b"first, through addresses".to_vec()) } else { Err(CROSS.into()) }
+    }
+
+    #[test]
+    fn a_later_attempt_that_translates_wins_over_the_address_retry_of_an_earlier_one() {
+        let log = RefCell::new(Vec::new());
+        let got = with_address_last_resort(WALK, || first(&log).or_else(|_| {
+            log.borrow_mut().push(("later", metal2vulkan::device_address_last_resort_active()));
+            Ok(b"later".to_vec())
+        }));
+        assert_eq!(got.unwrap(), b"later");
+        assert_eq!(*log.borrow(), vec![("first", false), ("later", false)], "every attempt ran outside the scope, once");
+    }
+
+    #[test]
+    fn only_after_every_attempt_failed_do_the_attempts_run_again_with_addresses() {
+        let log = RefCell::new(Vec::new());
+        let got = with_address_last_resort(WALK, || first(&log).or_else(|e| {
+            log.borrow_mut().push(("later", metal2vulkan::device_address_last_resort_active()));
+            Err::<Vec<u8>, String>(format!("{e}; retry with argument-buffer samplers from the sampler heap: {CROSS}"))
+        }));
+        assert_eq!(got.unwrap(), b"first, through addresses");
+        assert_eq!(*log.borrow(), vec![("first", false), ("later", false), ("first", true)]);
+        assert!(!metal2vulkan::device_address_last_resort_active(), "the scope ends with the last resort");
+    }
+
+    #[test]
+    fn another_refusal_runs_the_attempts_once_and_keeps_its_error() {
+        let runs = RefCell::new(0);
+        let got = with_address_last_resort(WALK, || { *runs.borrow_mut() += 1; Err::<Vec<u8>, String>("pointer placeholder".into()) });
+        assert_eq!(got.unwrap_err(), "pointer placeholder");
+        assert_eq!(*runs.borrow(), 1);
+    }
+
+    #[test]
+    fn a_last_resort_that_fails_hands_back_the_error_of_the_attempts() {
+        let got = with_address_last_resort(WALK, || if metal2vulkan::device_address_last_resort_active() {
+            Err::<Vec<u8>, String>("device-address construction failed: no".into())
+        } else {
+            Err(CROSS.into())
+        });
+        assert_eq!(got.unwrap_err(), CROSS, "the text the plugin reads is the one it always got");
+    }
+
+    #[test]
+    fn a_module_the_plugin_may_still_link_gets_no_last_resort() {
+        let linked = format!("{WALK}\n@f.MTL_VISIBLE_FN_REF = external global i8\n");
+        let log = RefCell::new(Vec::new());
+        assert_eq!(with_address_last_resort(&linked, || first(&log)).unwrap_err(), CROSS);
+        assert_eq!(*log.borrow(), vec![("first", false)]);
+        let table = format!("{WALK}\n!99 = !{{!\"air.visible_function_table\"}}\n");
+        assert!(may_link_visible_functions(&table));
+        assert!(!may_link_visible_functions(WALK));
+    }
+
+    // The real kernel through every entry the plugin calls: nvmtl_translate takes the last resort, the
+    // specialization-constant module (whose refusal the plugin follows with nvmtl_translate_fc) does not.
+    #[test]
+    fn the_walk_kernel_through_the_plugins_entries() {
+        let ll = std::ffi::CString::new(WALK).unwrap();
+        let stage = std::ffi::CString::new("kernel").unwrap();
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut err = [0 as c_char; 1024];
+        let rc = nvmtl_translate(ll.as_ptr(), stage.as_ptr(), &mut out, &mut len, err.as_mut_ptr(), err.len());
+        assert_eq!(rc, 0, "{}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
+        let bytes = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+        nvmtl_translate_free(out, len);
+        let asm = metal2vulkan::disassemble(&bytes).expect("disassemble");
+        assert!(asm.contains("OpMemoryModel PhysicalStorageBuffer64"), "{asm}");
+        let direct = metal2vulkan::translate_native_no_retry_constructed_with_options(WALK, Stage::Kernel, apply_tg(Default::default()));
+        assert!(metal2vulkan::device_address_last_resort_applies(&direct.unwrap_err()), "refused outside the scope");
+        let (mut t, mut tlen) = (std::ptr::null_mut(), 0usize);
+        let rc = nvmtl_translate_spec(ll.as_ptr(), stage.as_ptr(), &mut out, &mut len, &mut t, &mut tlen, err.as_mut_ptr(), err.len());
+        assert_ne!(rc, 0, "the specialization-constant module takes no last resort");
+        let e = unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
+        assert!(metal2vulkan::device_address_last_resort_applies(&e), "{e}");
+    }
+
+    // A function constant picks the buffer: the set that folds the select away translates as it always did, the set
+    // that keeps it is refused by every attempt outside the scope and only then constructed with addresses.
+    #[test]
+    fn a_constant_set_takes_the_last_resort_only_when_its_attempts_failed() {
+        use spirv_tools::val::Validator;
+        let text = include_str!("../../translator/tests/fixtures/app_shapes/pick_fc.ll");
+        let ll = std::ffi::CString::new(text).unwrap();
+        let stage = std::ffi::CString::new("kernel").unwrap();
+        for v in [0u8, 1u8] {
+            let (idx, sz, value) = ([0u32], [1u32], [v]);
+            let pay = [value.as_ptr()];
+            let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+            let mut err = [0 as c_char; 1024];
+            let rc = nvmtl_translate_fc(ll.as_ptr(), stage.as_ptr(), idx.as_ptr(), sz.as_ptr(), pay.as_ptr(), 1,
+                &mut out, &mut len, err.as_mut_ptr(), err.len());
+            assert_eq!(rc, 0, "pick_b = {v}: {}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy());
+            let bytes = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+            nvmtl_translate_free(out, len);
+            let specialized = metal2vulkan::specialize_air_function_constants(text, &[(0, vec![v])]).unwrap();
+            let attempts = metal2vulkan::with_parse_cache(|| translate_attempts(specialized.as_ref(), Stage::Kernel));
+            if v == 0 {
+                assert_eq!(bytes, attempts.expect("pick_b = 0 translates as written"), "the attempts' own bytes");
+            } else {
+                let e = attempts.expect_err("pick_b = 1 keeps the select between the two buffers");
+                assert!(metal2vulkan::device_address_last_resort_applies(&e), "{e}");
+                let last = metal2vulkan::with_parse_cache(|| {
+                    metal2vulkan::with_device_address_last_resort(|| translate_attempts(specialized.as_ref(), Stage::Kernel))
+                });
+                assert_eq!(bytes, last.expect("constructed with addresses"));
+                let words: Vec<u32> = bytes.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+                let mut options = spirv_tools::val::ValidatorOptions::default();
+                options.scalar_block_layout = true;
+                spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+                    .validate(&words, Some(options)).unwrap_or_else(|e| panic!("pick_b = 1: {e}"));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod storage_caps_tests {
     use super::*;
@@ -909,9 +1130,9 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
         }
         if used==0 && a8==0 && amp<=1{return translate_one(ll,st)}
         let opts=apply_tg(opts);
-        translate_with_pointer_retry(ll, |ll| {
+        with_address_last_resort(ll, || translate_with_pointer_retry(ll, |ll| {
             metal2vulkan::translate_native_no_retry_constructed_with_options(ll,st,opts)
-        })
+        }))
     })());
     match result {
         Ok(bytes)=>{let mut b=bytes.into_boxed_slice();*out=b.as_mut_ptr();*out_len=b.len();std::mem::forget(b);0}

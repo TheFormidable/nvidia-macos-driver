@@ -113,6 +113,7 @@ extern uint64_t (*nvmtl_res2_evict_hook)(uint64_t want);
 #include <IOKit/IOKitLib.h>
 #include "nvmtl_fps_limit.h"
 #include "nvmtl_shared_wc.h"
+#include "nvmtl_idle_wait.h"
 // The keys the user's own block of nvrm610.conf set ("my settings, kept on update"): an application profile never
 // replaces them. The shipped lines above that block are defaults, which a profile does replace.
 static char g_conf_mine[64][48];
@@ -291,19 +292,32 @@ static inline void nvmtl_res3_wait_move(int *rs) { while (__atomic_load_n(rs, __
 static void nvmtl_res2_kick(int scan);
 static _Atomic int gRes2Scan;
 static Class gNVMTLTexClass;
+// The threads in -waitUntilComplete (NVMTLGL.m) sleep here until a release brings a count to zero (nvmtl_idle_wait.h).
+static nvmtl_idle_waitq gNVMTLIdleQ = NVMTL_IDLE_WAITQ_INIT;
+// NVMTL_GL_WAIT_EVENT=0: those waits poll every 50 us, as before. Read once.
+static BOOL nvmtl_gl_wait_event_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_GL_WAIT_EVENT"); on = nvmtl_idle_wait_on(e);
+        nvlog("GL: resource waits (waitUntilComplete) %s (NVMTL_GL_WAIT_EVENT=%s)",
+              on ? "wake when the last command buffer lets go" : "poll every 50 us", e ? e : "unset"); }
+    return on;
+}
 static inline void nvmtl_resref(id o, int d) {
     if (!gNVMTLTexClass) gNVMTLTexClass = [NVMTLTexture class];
     if (![o isKindOfClass:gNVMTLTexClass]) {
         static Class BC; if (!BC) BC = [NVMTLBuffer class];
         if (object_getClass(o) != BC) return;
         NVMTLBuffer *b = o;
-        const int v = __atomic_add_fetch(&b->_resRefs, d, __ATOMIC_ACQ_REL);
+        const int v = nvmtl_idle_add(&b->_resRefs, d);
+        // any arrival at zero, also an add that ends an (unexpected) negative count, which a buffer's wait waits out
+        if (v == 0) nvmtl_idle_settled(&gNVMTLIdleQ, &b->_resRefs);
         if (d > 0) { __atomic_store_n(&b->_useEp, nvmtl_ep_now(), __ATOMIC_RELEASE); nvmtl_res3_wait_move(&b->_rstate); nvmtl_res3_note_use(b); }
         else if (v == 0 && __atomic_load_n(&b->_wantOn, __ATOMIC_ACQUIRE)) nvmtl_res2_kick(1);
         return;
     }
     NVMTLTexture *t = o; if (t->_parent) t = t->_parent;
-    const int v = __atomic_add_fetch(&t->_resRefs, d, __ATOMIC_ACQ_REL);
+    const int v = nvmtl_idle_add(&t->_resRefs, d);
+    if (v == 0) nvmtl_idle_settled(&gNVMTLIdleQ, &t->_resRefs);
     if (d > 0) { __atomic_store_n(&t->_useEp, nvmtl_ep_now(), __ATOMIC_RELEASE); nvmtl_res3_wait_move(&t->_rstate);
                  nvmtl_res2_note_use(t); }
     else if (v == 0 && __atomic_load_n(&t->_wantOn, __ATOMIC_ACQUIRE)) nvmtl_res2_kick(1);
@@ -537,10 +551,25 @@ static os_unfair_lock gRes2PassLock = OS_UNFAIR_LOCK_INIT;
 static __thread int gRes2InPass;
 static uint64_t gRes2EvictCalls, gRes2EvictBytes;
 static _Atomic int gRes2Force;
+#include "nvmtl_res2_nowait.h"
+// NVMTL_RES2_NOWAIT=0: a thread that asks the pager for VRAM sleeps while the worker holds the pass and again while the
+// evicted backings drain, as in 3.0.5. Otherwise it never sleeps there and its allocation takes the caller's own
+// fallback (system memory) when nothing came back at once (nvmtl_res2_nowait.h). WindowServer keeps the waits.
+static int nvmtl_res2_nowait_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_RES2_NOWAIT");
+        on = nvmtl_res2_nowait_default(e, getprogname());
+        nvlog("residency (res2): the allocating thread %s (NVMTL_RES2_NOWAIT=%s)",
+              on ? "never sleeps for the pager" : "waits up to 30 ms for the pager and 16 ms for evicted VRAM to drain", e ? e : "unset"); }
+    return on;
+}
 static void nvmtl_res2_pass_guarded(int from_worker) {
     if (gRes2InPass) return;
     if (!os_unfair_lock_trylock(&gRes2PassLock)) {
-        if (from_worker) { nvmtl_res2_kick(1); return; }
+        // The pass that holds the lock, or the one this kick queues, sees gRes2Want, which nvmtl_res2_evict raised
+        // before calling here; the kick also covers a running pass that already took gRes2Want, because the worker
+        // clears gRes2Pending before it starts.
+        if (nvmtl_res2_busy_action(from_worker, nvmtl_res2_nowait_on()) == NVMTL_RES2_BUSY_KICK) { nvmtl_res2_kick(1); return; }
         const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); int got = 0;
         while (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 < 30000000ull) { usleep(200); if (os_unfair_lock_trylock(&gRes2PassLock)) { got = 1; break; } }
         if (!got) { static unsigned said; if (said++ < 4) nvlog("residency (res2): allocating thread waited 30 ms for the pager and gave up - this allocation spills"); return; }
@@ -561,7 +590,20 @@ static uint64_t nvmtl_res2_evict(uint64_t want) {
     @autoreleasepool { nvmtl_res2_pass_guarded(0); }
     uint64_t after = nvmtl_vk_vram_free_now();
     static _Atomic uint64_t blindUntil;
-    if (after <= before && gGraveVram && clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) >= atomic_load(&blindUntil)) {
+    const nvmtl_res2_drain drain = nvmtl_res2_drain_action(nvmtl_res2_nowait_on(), after <= before, gGraveVram,
+                                                           clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), atomic_load(&blindUntil));
+    if (drain == NVMTL_RES2_DRAIN_REAP) {
+        // Whatever drained during the pass is freed now; the rest is freed by the worker, which this kick (and the
+        // completion of the command buffers that hold it, nvmtl_res2_cb_done) schedules. When nothing came back the
+        // caller takes the path it took whenever the old wait timed out: textures, heaps and stable-address buffers
+        // go to system memory, newBufferWithLength places a refused Private buffer there, and the few Private
+        // buffers with no such fallback (visibility scratch, acceleration-structure side tables) are refused.
+        nvmtl_res2_reap(); after = nvmtl_vk_vram_free_now();
+        if (after <= before) { nvmtl_res2_kick(0);
+            static unsigned said; if (said++ < 4 || said % 256 == 0)
+                nvlog("residency (res2): %llu MB of evicted VRAM has not drained yet - this allocation spills, the pager frees it later (%u)",
+                      (unsigned long long)(gGraveVram >> 20), said); }
+    } else if (drain == NVMTL_RES2_DRAIN_SLEEP) {
         const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         while (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 < 16000000ull) {
             usleep(1000); nvmtl_res2_reap(); after = nvmtl_vk_vram_free_now();
@@ -722,6 +764,8 @@ static void nvmtl_res2_pass(void) {
         if (r2_move(t, 0) == 0) { on++; onB += tb; onM += a; __atomic_store_n(r2_want(t), 0, __ATOMIC_RELEASE); }
     }
     if (want) {
+        // dead parked images go before any live texture is paged out: what they free is seen by f0 and the loop below
+        (void)nvmtl_vk_texrc_give_back();
         const uint64_t target = nvmtl_vk_vram_headroom() + gRes2Margin + want;
         if (nvmtl_vk_mig_batch_begin() == 0) gRes2Batching = 1;
         { static unsigned said; if (said++ < 16 || said % 1024 == 0)
@@ -1000,14 +1044,18 @@ static int nvmtl_surfin_zero_try(NVMTLTexture *r, const void *base, size_t row) 
 static void nvmtl_surf_zero_flush(void) {
     if (!atomic_load(&gSurfZeroAny) || gSurfZeroInFlush) return;
     gSurfZeroInFlush = 1;
-    // todo is the only reference this function takes (not autoreleased into the caller's pool), so that the fallback
-    // below can hand it to another thread whole
+    // todo is the only reference this function takes, so that the fallback below can hand it to another thread whole.
+    // Everything else this thread does with the roots drains in this function's own pool, while todo still holds each
+    // one, before that hand-off: a weak table may load (retain and autorelease) its entries to remove them, and such a
+    // reference left in the caller's pool (nvmtl_presubmit's, popped inside the submit) could be a root's last release
+    void *keep = NULL;
+    unsigned n = 0, lost = 0;
+    @autoreleasepool {
     NSArray *todo;
     os_unfair_lock_lock(&gSurfZeroLock);
-    @autoreleasepool { todo = [[NSArray alloc] initWithArray:gSurfZeroOwed.allObjects]; }
+    todo = [[NSArray alloc] initWithArray:gSurfZeroOwed.allObjects];
     [gSurfZeroOwed removeAllObjects]; atomic_store(&gSurfZeroAny, 0);
     os_unfair_lock_unlock(&gSurfZeroLock);
-    unsigned n = 0, lost = 0;
     if (todo.count && nvmtl_vk_pre_open()) {
         for (NVMTLTexture *r in todo) {
             if (nvmtl_vk_pre_fill(&r->_vramBuf, 0, IOSurfaceGetBytesPerRow(r->_surf) * r->_i.h, 0) == 0) n++;
@@ -1032,10 +1080,11 @@ static void nvmtl_surf_zero_flush(void) {
             nvlog("surface-in zero: GPU clear of %lu surfaces FAILED - each decides again at its next surface-in",
                   (unsigned long)todo.count);
         }
-        void *const keep = (__bridge_retained void *)todo;
+        keep = (__bridge_retained void *)todo;
         todo = nil;
-        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), keep, nvmtl_pre_release);
     }
+    }
+    if (keep) dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), keep, nvmtl_pre_release);
     if (n) atomic_fetch_add(&gSurfZeroFills, n);
     if (lost) atomic_fetch_add(&gSurfZeroLost, lost);
     gSurfZeroInFlush = 0;
@@ -1496,10 +1545,65 @@ static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTextur
     [cb->_surfOverwrites addObject:r];
 }
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t);
+// NVMTL_SURFIN_SKIP_OWN_OUT (on by default, =0 off): a command encoder's bind of a private surface image whose copy-out
+// to the surface's pages is waiting for the GPU returns without waiting for it (nvmtl_spv_bind_skips,
+// nvmtl_surf_private.h). WAS: the bind waited on the surface's monitor for the whole GPU round trip of the copy-out,
+// and then nvmtlSurfaceIn found the image and the pages in step and returned without an upload. An OpenGL game's render
+// thread spent 5.4 % of its time there, in the bind of its own window surface at every swap (AppKit's flushRect), while
+// the completion thread copied the previous frame out. The copy only reads the image, and the device has one queue: a
+// command the bind records runs after the copy, or, submitted before it, writes pixels the copy then reads and the
+// publication of that command buffer copies out again; the copy's first barrier waits for all earlier work, and the
+// copy straight into the pages (nvmtl_vk_image_read_host) ends with a barrier from its transfer stage, which NVK makes
+// a wait for idle (nvk_barrier_flushes_waits). The layouts the two threads track for the image can disagree then, as
+// they already could for a bind recorded while the command buffer that wrote the image was still on the GPU
+// (nvmtl_surface_pending_write lets it through without the monitor); NVK's barriers do not read the layout of a colour
+// image (nvk_cmd_image_layout_transition looks only at zcull, which colour images do not have). A copy-out that fails
+// leaves the image as the GPU drew it and the pages behind it; the next bind after it uploads those pages, as a waiting
+// bind did at once. Not WindowServer, which keeps waiting.
+static BOOL nvmtl_surfin_skip_own_out_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_SURFIN_SKIP_OWN_OUT"); on = !(e && e[0] == '0');
+        nvlog("surface-in: a bind %s this process's own copy-out of a private surface image (NVMTL_SURFIN_SKIP_OWN_OUT=%s)",
+              on ? "does not wait for" : "waits for", e ?: "unset"); }
+    return on;
+}
+static unsigned long long g_surfin_out_passed;
+static BOOL nvmtl_surface_bind_passes_out(NVMTLTexture *r) {
+    if (!r->_surf || !__atomic_load_n(&r->_surfOutBusy, __ATOMIC_ACQUIRE)) return NO;
+    const uint32_t at = __atomic_load_n(&r->_surfOutGen, __ATOMIC_RELAXED);
+    const int lost = __atomic_load_n(&r->_zeroLost, __ATOMIC_ACQUIRE) != 0;
+    if (!nvmtl_spv_bind_skips(1, lost, nvmtl_vram_gen(r->_surf, r->_plane), at)) return NO;
+    // still in flight once the generation was read: had the copy-out ended first, the bind takes the monitor as before
+    if (!__atomic_load_n(&r->_surfOutBusy, __ATOMIC_ACQUIRE)) return NO;
+    const unsigned long long n = __atomic_add_fetch(&g_surfin_out_passed, 1, __ATOMIC_RELAXED);
+    if (n <= 6 || n % 5000 == 0) nvlog("surface-in: a bind of surface %u passed this process's own copy-out in flight (%llu so far)",
+                                       (unsigned)IOSurfaceGetID(r->_surf), n);
+    return YES;
+}
+// The copy-out of root r (under its monitor) is about to lock the surface and read the image back. A surface in the
+// family's VRAM gets here only when its mark was refused (a refused try returns before): that is noted once. Returns
+// YES when binds may pass this copy-out; the caller then calls nvmtl_surface_out_pass_end on every way out.
+static BOOL nvmtl_surface_out_pass_begin(NVMTLTexture *r) {
+    if (r->_vramOn) nvmtl_spv_note(NVMTL_SPV_MARK_REFUSED, r->_surf, r->_i.w, r->_i.h, r->_i.fmt);
+    // WindowServer does not read the switch, so its log stays as it was
+    const int ws = nvmtl_spv_window_server();
+    if (!nvmtl_spv_out_passable(ws ? 0 : nvmtl_surfin_skip_own_out_on(), ws, r->_vramOn, r->_clientWritten, r->_surfSynced)) return NO;
+    __atomic_store_n(&r->_surfOutGen, r->_surfGen, __ATOMIC_RELAXED);
+    __atomic_store_n(&r->_surfOutBusy, 1u, __ATOMIC_RELEASE);
+    return YES;
+}
+static void nvmtl_surface_out_pass_end(NVMTLTexture *r, BOOL passable) {
+    if (passable) __atomic_store_n(&r->_surfOutBusy, 0u, __ATOMIC_RELEASE);
+}
 static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
+    // No surface behind the texture: nothing to bring in. nvmtlSurfaceIn would return at once too (it looks for a 4:2:2
+    // surface on t itself, then for the root's surface).
+    if (!r->_surf && !t->_y422Surf) return;
     if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
+    if (!t->_y422Surf && nvmtl_surface_bind_passes_out(r)) return;
     // A prior committed buffer defines this GPU backing's contents.
     // Importing the old CPU surface here would run ahead of this buffer and
     // overwrite that earlier GPU write. Queue order or the application's event supplies the dependency.
@@ -1524,10 +1628,12 @@ static void nvmtl_census(const char *what, uint32_t w, uint32_t h, int surf) {
 }
 static void nvmtl_frame_dump(const char *tag, const void *base, size_t row, uint32_t w, uint32_t h);
 static void nvmtl_surface_cpu_dump(NVMTLTexture *rt) {
+    // a texture without a surface never dumps: it returns before the clock read, which every bind paid
+    if (!rt || !rt->_surf) return;
     static uint64_t next; static int on;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if (now >= next) { next = now + 250000000ull; on = access("/tmp/nvmtl-dump-request", F_OK) == 0; }
-    if (!on || !rt || !rt->_surf || IOSurfaceGetBytesPerElement(rt->_surf) != 4 || IOSurfaceGetPlaneCount(rt->_surf) > 1) return;
+    if (!on || IOSurfaceGetBytesPerElement(rt->_surf) != 4 || IOSurfaceGetPlaneCount(rt->_surf) > 1) return;
     if (IOSurfaceLock(rt->_surf, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) { static int said; if (!said++) nvlog("G16 cpu dump: IOSurfaceLock failed"); return; }
     char tag[24]; snprintf(tag, sizeof tag, "cpu%u-", (unsigned)IOSurfaceGetID(rt->_surf));
     nvmtl_frame_dump(tag, IOSurfaceGetBaseAddress(rt->_surf), IOSurfaceGetBytesPerRow(rt->_surf), (uint32_t)IOSurfaceGetWidth(rt->_surf), (uint32_t)IOSurfaceGetHeight(rt->_surf));
@@ -2010,7 +2116,12 @@ static void nvmtl_surface_protected_note(NVMTLTexture *r, int outcome) {
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
     uint32_t lockSeed = 0;
-    if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    // Binds may pass this copy-out while it waits for the GPU; every way out below lets them wait again first, before
+    // the monitor is let go (nvmtl_surface_out_pass_begin / _end).
+    const BOOL passable = nvmtl_surface_out_pass_begin(r);
+    if (IOSurfaceLock(r->_surf, lockopt, &lockSeed) != kIOReturnSuccess) {
+        nvmtl_surface_out_pass_end(r, passable);
+        nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = -1;
@@ -2029,9 +2140,12 @@ static void nvmtl_surface_protected_note(NVMTLTexture *r, int outcome) {
         nvmtl_ps_record(&g_ps, (uint32_t)IOSurfaceGetID(r->_surf), cookie, (uint32_t)r->_plane, lockSeed, seed, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
         os_unfair_lock_unlock(&g_ps_lock);
     }
-    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
+    if (rc || unlocked != kIOReturnSuccess) {
+        nvmtl_surface_out_pass_end(r, passable);
+        nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
+    nvmtl_surface_out_pass_end(r, passable);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
@@ -4505,8 +4619,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt, _vbufOff);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt, _fbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_vfn, _vbufAt, _vbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_ffn, _fbufAt, _fbufOff);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     return YES;
 }
@@ -4660,17 +4774,30 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     _pass.load = keep;
     return rc == 0;
 }
+// NVMTL_DS_SKIP=0: setDepthStencilState applies the state again even when it is the one this encoder last applied, as
+// in 3.0.5. WindowServer always applies it again.
+static int nvmtl_ds_skip_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_DS_SKIP"); const char *me = getprogname(); const int ws = me && !strcmp(me, "WindowServer");
+        on = !(e && e[0] == '0') && !ws;
+        nvlog("encoder: a repeated setDepthStencilState is %s (NVMTL_DS_SKIP=%s%s)", on ? "skipped" : "applied again", e ? e : "unset", ws ? ", WindowServer" : ""); }
+    return on;
+}
 - (void)nvmtlApplyDepthStencil {
+    _dsDone = nil;
     if (!_begun || !_ps || !_ps->_p.has_depth) return;
     nvmtl_vk_cmd_set_depth(&_cb->_c, _ds ? 1 : 0, _ds ? _ds->_write : 0, _ds ? _ds->_compare : 7);
     // Every encoder starts with the depth bounds test off, as on Apple; the pipeline holds it as dynamic state, which
     // must be set before the first draw, so it is written here at pass begin even when the app never asks for it.
     if (nvmtl_vk_cmd_set_depth_bounds(&_cb->_c, _dbOn, _dbLo, _dbHi) && _dbOn) {
         static int said; if (!said++) nvlog("setDepthTestMinBound:maxBound: REFUSED - this device has no depthBounds feature, the test is not applied"); }
-    if (!_ps->_p.has_stencil) return;
-    static const uint32_t off[6] = { 7, 0, 0, 0, 0xff, 0xff };
-    nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
-    if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
+    if (_ps->_p.has_stencil) {
+        static const uint32_t off[6] = { 7, 0, 0, 0, 0xff, 0xff };
+        nvmtl_vk_cmd_set_stencil(&_cb->_c, _ds && _ds->_stencil, _ds ? _ds->_sf : off, _ds ? _ds->_sb : off);
+        if (!_hasRef) { nvmtl_vk_cmd_set_stencil_ref(&_cb->_c, 0, 0); _hasRef = YES; }
+    }
+    // Recorded only once all of it was applied; a repeat of the same state can then be skipped (nvmtl_ds_skip).
+    _dsDone = _ds; _dsEpoch = _cb->_c.gfx_epoch; _dsCbId = _cb->_c.begin_id; _dsStencil = _ps->_p.has_stencil ? YES : NO;
 }
 // Metal draws through the ATTACHMENT's format, not the pipeline's: a pipeline declared BGRA8 that renders into an RGBA8
 // texture (or the reverse) writes the colour the shader returned into the texture's own channel order and reports no error
@@ -4919,6 +5046,10 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     else {
     if (nvmtl_hz_bind_texture(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, [nt nvsampleview])) nvlog("setFragmentTexture: bind FAILED");
     nvmtl_hz_bind_storage(&_cb->_c, [nt nvi], nvmtl_hz_untracked_tex(nt), NVMTL_SET_FRAGMENT, (uint32_t)i, nt->_stex ? [nt nvview] : NULL);
+    // A texture's storage view, usage, format and type are fixed when it is made, so after its first bind the census
+    // below can only answer "already said" for it: each texture is looked at once. Two encoders binding it at the same
+    // time may both look, as before.
+    if (!__atomic_load_n(&nt->_swNoted, __ATOMIC_RELAXED)) {
     if (!nt->_stex && (nt.usage & MTLTextureUsageShaderWrite)) {
         // a fragment shader writing a texture that has no storage view writes the dummy: say which texture, once per shape
         // OpenGL rebinds every texture before each draw, and its textures carry ShaderWrite: this runs thousands of times
@@ -4932,6 +5063,8 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
         os_unfair_lock_unlock(&sl);
         if (fresh) nvlog("setFragmentTexture: texture %lu is ShaderWrite but has no storage view (pixelFormat %lu, usage 0x%lx, type %lu, image storage %u) - a fragment write to it goes to the dummy",
                          (unsigned long)i, (unsigned long)nt.pixelFormat, (unsigned long)nt.usage, (unsigned long)nt.textureType, [nt nvi]->storage);
+    }
+    __atomic_store_n(&nt->_swNoted, 1, __ATOMIC_RELAXED);
     }
     }
 }
@@ -5083,7 +5216,11 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     NVMTLBuffer *scratch = nil;
     if (needScratch) {
         scratch = [NVMTLBuffer new];
-        if (nvmtl_vk_buffer_create(_visRecords.count * 8, 0, &scratch->_b)) {
+        // A VRAM refusal falls back to system memory, as the acceleration-structure scratch does: the pager no longer
+        // waits for evicted VRAM to drain, so a refusal that wait used to turn into an admission now comes here
+        // (nvmtl_res2_nowait.h; NVMTL_RES2_NOWAIT=0 restores the wait and the plain refusal).
+        if (nvmtl_vk_buffer_create(_visRecords.count * 8, 0, &scratch->_b) &&
+            (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(_visRecords.count * 8, 1, &scratch->_b))) {
             [self nvmtlVisibilityError:[NSString stringWithFormat:@"visibility: accumulation scratch allocation failed"]]; scratch = nil;
         } else {
             if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new];
@@ -5326,6 +5463,10 @@ static NVMTLBuffer *nvmtl_icb_scratch(uint32_t slots) {
               (unsigned long)mode);
 }
 - (void)setDepthStencilState:(id<MTLDepthStencilState>)s {
+    // Apple's GL sets the same state before every draw; the calls it would make again are the ones already recorded.
+    if (nvmtl_ds_skip(nvmtl_ds_skip_on(), _begun, (__bridge const void *)s, (__bridge const void *)_ds, (__bridge const void *)_dsDone,
+                      _ps && _ps->_p.has_depth, _ps && _ps->_p.has_stencil, _dsStencil, _dsEpoch, _cb->_c.gfx_epoch, _dsCbId, _cb->_c.begin_id))
+        return;
     _ds = (NVMTLDepthStencilState *)s;
     [self nvmtlApplyDepthStencil];
 }
@@ -7884,7 +8025,8 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         // their own set, and the set that lost was freed with the resources only it held (and under the other
         // thread's addObject:).
         _resources = [NVMTLResSet new];
-        _callbackGroup = dispatch_group_create(); _scheduledGroup = dispatch_group_create();
+        // Otherwise made when the first handler of their kind is dispatched (nvmtlDispatchHandlers, nvmtl_cb_lean.h).
+        if (nvmtl_cb_groups_at_init(nvmtl_cb_lean_on())) { _callbackGroup = dispatch_group_create(); _scheduledGroup = dispatch_group_create(); }
     }
     return self;
 }
@@ -8109,6 +8251,9 @@ static void nvmtl_late_present(void) {
     static int ws = -1;
     if (ws < 0) ws = (getprogname() && !strcmp(getprogname(), "WindowServer")) ? 1 : 0;
     [self commit];
+    // Outside WindowServer the caller is about to sleep until this command buffer is scheduled: it submits it ahead
+    // itself when it can instead of waiting for nvmtl.ahead to do it (nvmtl_fast_flush.h). The wait below is unchanged.
+    nvmtl_fast_flush_submit(self, ws);
     // nvmtl_ws_kernel_waits: the swap waits for this composite in NVAccel instead (nvmtl_ws_mark_pending at commit)
     if (ws && !nvmtl_ws_kernel_waits()) [self waitUntilCompleted]; else [self waitUntilScheduled];
     return self.status != MTLCommandBufferStatusError;
@@ -8192,15 +8337,19 @@ static void nvmtl_late_present(void) {
     const uint64_t cbt0 = nvmtl_cbt_on() ? nvmtl_cbt_now() : 0;
     _nWait++; [_completionCondition lock];
     while (!_completionReady) [_completionCondition wait];
+    // read under the lock nvmtlDispatchHandlers makes it under; once made it never changes. None: none dispatched.
+    const BOOL handlersGroup = _callbackGroup != nil;
     [_completionCondition unlock];
-    dispatch_group_wait(_callbackGroup, DISPATCH_TIME_FOREVER);
+    if (nvmtl_cb_group_wait_due(handlersGroup)) dispatch_group_wait(_callbackGroup, DISPATCH_TIME_FOREVER);
     if (cbt0) nvmtl_cbt_line("W %llu %llu %llu\n", (unsigned long long)_cbtSeq, (unsigned long long)cbt0, (unsigned long long)nvmtl_cbt_now());
 }
 - (void)waitUntilScheduled {
     _nWait++; [_completionCondition lock];
     while (!_wasScheduled && !_executionDone) [_completionCondition wait];
+    // read under the lock nvmtlDispatchHandlers makes it under; once made it never changes. None: none dispatched.
+    const BOOL handlersGroup = _scheduledGroup != nil;
     [_completionCondition unlock];
-    dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
+    if (nvmtl_cb_group_wait_due(handlersGroup)) dispatch_group_wait(_scheduledGroup, DISPATCH_TIME_FOREVER);
 }
 - (MTLCommandBufferStatus)status { [_completionCondition lock]; MTLCommandBufferStatus s = _cbstatus; [_completionCondition unlock]; return s; }
 - (NSError *)error { return _cbError; }
@@ -8210,6 +8359,14 @@ static void nvmtl_late_present(void) {
 - (NSString *)label { return _label; }
 @end
 
+// The queue's capacity semaphore, made by -newCommandQueueWithMaxCommandBufferCount: before the queue is returned, with
+// the count -commandBuffer used to make it with at its first call. Nothing else writes _capacity once it is set, so
+// -commandBuffer reads it without the command-queue class lock (nvmtl_cb_lean.h). NVMTL_CB_LEAN=0: left to the first
+// -commandBuffer, under that lock, as in 3.0.5.
+static void nvmtl_queue_make_capacity(NVMTLCommandQueue *q) {
+    if (nvmtl_cb_capacity_with_queue(nvmtl_cb_lean_on(), nvmtl_async_commit_on()))
+        q->_capacity = dispatch_semaphore_create(q->_capacityCount ? q->_capacityCount : 64);
+}
 @implementation NVMTLCommandQueue
 - (NSUInteger)getGPUPriority { return 1; }
 - (NSUInteger)getBackgroundGPUPriority { return 2; }
@@ -8245,20 +8402,23 @@ static void nvmtl_late_present(void) {
 - (id<MTLCommandBuffer>)commandBuffer {
     dispatch_semaphore_t cap = nil;
     if (nvmtl_async_commit_on()) {
-        @synchronized ([NVMTLCommandQueue class]) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
+        // made with the queue before it was handed out (nvmtl_queue_make_capacity), so it is read without the lock
+        if (nvmtl_cb_capacity_read_unlocked(nvmtl_cb_lean_on())) cap = _capacity;
+        if (!cap) @synchronized ([NVMTLCommandQueue class]) { if (!_capacity) _capacity = dispatch_semaphore_create(_capacityCount ? _capacityCount : 64); cap = _capacity; }
         dispatch_semaphore_wait(cap, DISPATCH_TIME_FOREVER);
     }
     NVMTLCommandBuffer *cb = [NVMTLCommandBuffer new];
     if (!cb) { if (cap) dispatch_semaphore_signal(cap); return nil; }
     cb->_queue = self; cb->_capacityHeld = cap != nil;
     if (nvmtl_cbt_on()) { static _Atomic uint64_t seq; cb->_cbtSeq = ++seq; cb->_cbtCreate = nvmtl_cbt_now(); }
-    // The resource set exists from the start. Every encoder used to create it on first use
+    // The resource set exists from the start: -init makes it. Every encoder used to create it on first use
     // (`if (!cb->_resources) cb->_resources = [NVMTLResSet new]`), and encoders of one command buffer run on several
     // threads (parallel render encoders, CoreAnimation's async render queue): two threads both saw nil, the second
     // store released the set the first was adding to, and the app died in -[NVMTLResSet addObject:] (__rehash on a freed
     // member) or in its -dealloc - about 14 Macs from 1.15 to 2.0.1 (NotificationCenter, Music, mediaanalysisd, games).
     // The set itself takes a lock for every operation; only its creation was unguarded. The first-use checks now never fire.
-    cb->_resources = [NVMTLResSet new];
+    // It was also made a second time here, replacing -init's empty set with another empty one before anything could see
+    // either: one set made and freed per command buffer for nothing.
     if (nvmtl_vk_cmd_begin(&_q, &cb->_c)) {
         // WindowServer asserts on this nil ("Failed to get a MTLCommandBuffer"); the cause is the "vk: command buffer
         // refused" line just above, and for a disabled backend the "disabling backend" line before it.
@@ -9064,7 +9224,8 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         if (dst->_uid.size < uidBytes) {
             if (dst->_uid.buf) { NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = dst->_uid; if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new]; [_cb->_scratch addObject:old]; }
             memset(&dst->_uid, 0, sizeof dst->_uid);
-            if (nvmtl_vk_buffer_create(uidBytes, 0, &dst->_uid)) { nvlog("build acceleration structure: userID side table (%zu B) FAILED - user_instance_id reads 0", uidBytes); memset(&dst->_uid, 0, sizeof dst->_uid); }
+            // a VRAM refusal falls back to system memory while the pager does not wait (see the visibility scratch)
+            if (nvmtl_vk_buffer_create(uidBytes, 0, &dst->_uid) && (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(uidBytes, 1, &dst->_uid))) { nvlog("build acceleration structure: userID side table (%zu B) FAILED - user_instance_id reads 0", uidBytes); memset(&dst->_uid, 0, sizeof dst->_uid); }
         }
         if (dst->_uid.buf && nvmtl_vk_cmd_copy_buffer(&_cb->_c, &vk->_b, uidOff, &dst->_uid, 0, uidBytes))
             nvlog("build acceleration structure: userID side table copy FAILED");
@@ -9181,7 +9342,7 @@ uint32_t nvmtl_geoms_from_descriptor(id desc, nvmtl_geom *out, uint32_t max, int
         if (d->_uid.size < s->_uid.size) {
             if (d->_uid.buf) { NVMTLBuffer *old = [NVMTLBuffer new]; old->_b = d->_uid; if (!_cb->_scratch) _cb->_scratch = [NSMutableArray new]; [_cb->_scratch addObject:old]; }
             memset(&d->_uid, 0, sizeof d->_uid);
-            if (nvmtl_vk_buffer_create(s->_uid.size, 0, &d->_uid)) { nvlog("copy acceleration structure: side table FAILED"); memset(&d->_uid, 0, sizeof d->_uid); }
+            if (nvmtl_vk_buffer_create(s->_uid.size, 0, &d->_uid) && (!nvmtl_res2_nowait_on() || nvmtl_vk_buffer_create(s->_uid.size, 1, &d->_uid))) { nvlog("copy acceleration structure: side table FAILED"); memset(&d->_uid, 0, sizeof d->_uid); }
         }
         if (d->_uid.buf && nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_uid, 0, &d->_uid, 0, s->_uid.size)) nvlog("copy acceleration structure: side table copy FAILED");
     }

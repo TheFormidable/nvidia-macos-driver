@@ -837,7 +837,7 @@ static void sub_offscreen(void)
    glDeleteTextures(1, &tex);
 
    /* No view and no drawable: present_drawable returns 2 without a failure, so the adapter's last error is NULL,
-    * which nvk_cgl_last_error() reports as "none" (zink/nvk_cgl.c:157, :1117-1147). */
+    * which nvk_cgl_last_error() reports as "none" (zink/nvk_cgl.c:157, :1127-1162). */
    CGLError flushed[3];
    for (int i = 0; i < 3; ++i) flushed[i] = CGLFlushDrawable(ctx);
    GLenum flush_error = zk_gl_error();

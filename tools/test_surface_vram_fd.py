@@ -94,6 +94,7 @@ typedef struct { uint32_t memoryTypeCount; } memory_properties;
 /*BUFFER_TYPE*/
 /*RECORD_TYPE*/
 #define NVMTL_PA_PLANE_RANGED 0x20000000u
+static __thread int t_sv_why;   /* what the import reports to the private-surface note; not checked here */
 static memory_properties g_memp = { 4 };
 static VkDevice g_dev = (VkDevice)0x1;
 static uint64_t g_buf_made;

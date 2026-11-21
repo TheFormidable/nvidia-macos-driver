@@ -4,7 +4,7 @@
 # (docs/ZINK-OPENGL.md). ./build.sh runs it as the zink component; <Mesa commit> is its pin (build/pins.sh, ZINKMESA),
 # which must be the commit build/prepare_zink.py checks the tree against.
 #   <out>/zink/libnvk_zink.dylib       Mesa 26.3.0's Zink with zink/mesa-zink-nvk.patch and the nvk-zink frontend
-#                                      (zink/nvk_zink.c, nvk_present.c, nvk_iosurface.c); install name @rpath/..., rpath
+#                                      (zink/nvk_zink.c, nvk_present.c, nvk_present_queue.c, nvk_iosurface.c); install name @rpath/..., rpath
 #                                      @loader_path, where the package puts the private Vulkan runtime beside it
 #   <out>/zink/libnvk_cgl.dylib        the CGL adapter (zink/nvk_cgl.c, appkit.m, native_drawable.m)
 #   <out>/zink/cgl-dispatch-map.json   what build/generate_cgl_dispatch.py made of this SDK's OpenGL headers

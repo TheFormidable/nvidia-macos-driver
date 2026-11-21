@@ -2483,7 +2483,6 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
             }
         }
         let name = name.to_string();
-        let operand = format!("ptr addrspace(2) {name}");
         let uses: Vec<usize> = (0..f.body.len()).filter(|&j| j != i && mentions(&f.body[j], &name)).collect();
         // Duplicate only texture sampling reads, never arbitrary AIR intrinsics.
         // Every use must be in this block, with this sampler exactly once.
@@ -2500,13 +2499,10 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
             let Some(ty) = call.strip_prefix("call ").and_then(|c| c.split_once(" @air.")).map(|(ty, _)| ty) else {
                 return false;
             };
-            let once = l.matches(&operand).count() == 1 && l.matches(name.as_str()).count() == 1;
-            let after = l.find(&operand).map(|p| &l[p + operand.len()..]);
             j > i
                 && f.body[i + 1..=j].iter().all(|b| block_label_id(b).is_none())
                 && (ty.starts_with('{') || ty.starts_with('<') || !ty.contains(' '))
-                && once
-                && after.is_some_and(|a| a.starts_with(',') || a.starts_with(')'))
+                && sampler_operand_value_at(l, &name).is_some()
         };
         // A stage binds at most 16 Metal samplers, so a pick among them has at most that many
         // incoming samplers: Complementary's GetReflection takes a sampler2D argument that
@@ -2544,8 +2540,11 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
             let ty = call.strip_prefix("tail ").unwrap_or(call).strip_prefix("call ").and_then(|c| c.split_once(" @air."));
             let ty = ty.map(|(ty, _)| ty).unwrap_or_default();
             let mut lines = Vec::new();
+            // use_ok found the one spelling of the name in this line, the sampler operand's value; only the value is
+            // replaced, so the operand's parameter attributes stay with it
+            let Some(q) = sampler_operand_value_at(call, &name) else { unreachable!("use_ok checked {name}") };
             for (k, s) in samplers.iter().enumerate() {
-                lines.push(format!("{use_indent}%{tag}.u{j}.s{k} = {}", call.replacen(&operand, &format!("ptr addrspace(2) {s}"), 1)));
+                lines.push(format!("{use_indent}%{tag}.u{j}.s{k} = {}{s}{}", &call[..q], &call[q + name.len()..]));
             }
             let mut acc = format!("%{tag}.u{j}.s0");
             for k in 1..samplers.len() {
@@ -2561,6 +2560,40 @@ fn split_sampler_phi_samples_in(f: &mut FuncBlock) -> bool {
         i += 1;
     }
     changed
+}
+
+/// Where `name`, a sampler phi, is the value of a `ptr addrspace(2)` operand in the call `line`: the byte offset of the
+/// name when it is spelled exactly once in the line, ends its operand (a `,` or `)` follows) and its operand opens with
+/// the type `ptr addrspace(2)`. Parameter attributes may stand between the type and the value: Apple's compiler writes
+/// `ptr addrspace(2) readonly captures(none) %s` (and older ones `nocapture readonly`), and an attribute can hold a comma
+/// in parentheses (`captures(address, provenance)`).
+fn sampler_operand_value_at(line: &str, name: &str) -> Option<usize> {
+    if line.matches(name).count() != 1 {
+        return None;
+    }
+    let p = line.find(name)?;
+    let after = &line[p + name.len()..];
+    if !(after.starts_with(',') || after.starts_with(')')) {
+        return None;
+    }
+    // back to the `,` or `(` that opens this operand, skipping what attributes hold in parentheses
+    let mut depth = 0usize;
+    let mut start = None;
+    for (at, c) in line[..p].char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            ',' if depth > 0 => {}
+            '(' | ',' => {
+                start = Some(at + 1);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let operand = line[start?..p].trim_start();
+    let rest = operand.strip_prefix("ptr addrspace(2)")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(p)
 }
 
 /// A field of a local object written through one spelling of its address and read through another is still one field.

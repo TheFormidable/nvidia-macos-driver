@@ -25,6 +25,8 @@
 #include "nvmtl_plane_seed.h"
 #include "nvmtl_dlss.h"
 #include "nvmtl_tex_upload.h"
+#include "nvmtl_up_reap.h"
+#include "nvmtl_dlss_views.h"
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_ws_capture.h"
 #include "nvmtl_fetch_copy.h"
@@ -352,7 +354,13 @@ static nvmtl_grace_img *g_grace_head, *g_grace_tail; static uint64_t g_grace_n, 
 static nvmtl_grace_img *g_grace_unsettled;   // the oldest held entry whose mark is not settled; every one before it is
 static nvmtl_cl_state g_cl;   // the open command buffers by cohort and the queue sequence (nvmtl_cmd_life.h); under g_grace_lock
 static void nvmtl_vk_image_destroy_now(nvk_image *i);
+static int nvmtl_texrc_park(nvk_image *i);   // the texture recycle cache (nvmtl_texrc.h), next to nvmtl_vk_image_destroy
+static void nvmtl_texrc_tick(void);
+static uint32_t nvmtl_texrc_give_back_all(void);   // every parked image freed: the first memory given back when VRAM runs short
+// Set just before the grace's own release of an image: the destroy may park it instead (read and cleared on entry).
+static __thread int t_texrc_may_park;
 static void nvmtl_dlss_views_drop(VkImage img);   // DLSS Super Resolution section, near the end
+static void nvmtl_dlss_views_retire(VkImage img);
 /* A command buffer's life is counted in three places and nowhere else: nvmtl_vk_cmd_begin counts the begin, the queue
    submit counts the end of the command buffer and of those that ride in the same vkQueueSubmit (the pre-submit prologue,
    the counter reset), and nvmtl_cmd_retire - which every other way out goes through: abandon, a submit that fails
@@ -432,8 +440,10 @@ static void nvmtl_image_grace_reap(void)
               (unsigned long long)forced, NVMTL_CL_PATIENCE, (unsigned long long)open, getprogname());
     while (due) { nvmtl_grace_img *e = due; due = e->next;
                   if (e->bufview || e->alias) nvmtl_vk_texel_view_destroy_now(e->alias, e->bufview);
-                  else nvmtl_vk_image_destroy_now(&e->img);
+                  // an image released by force may still be read by the command buffer that held it: destroyed, never parked
+                  else { t_texrc_may_park = !nvmtl_cl_forced(&e->mark); nvmtl_vk_image_destroy_now(&e->img); }
                   free(e); }
+    nvmtl_texrc_tick();   // parked images not taken within their age go here, on the thread that releases the others
     if (n && (reaped & 0xFFF) < n) nvlog("vk: image grace: %llu dead images released so far, %llu still held", (unsigned long long)reaped, (unsigned long long)held);
 }
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned)
@@ -1987,7 +1997,8 @@ static int nvmtl_vk_buffer_create_sparse(size_t size, nvk_buffer *out)
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &mafi, mr.size, 0 };
     VkDeviceMemory m = VK_NULL_HANDLE; VkResult ar = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     if (!sys) { int mt = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-                if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
+                if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m);
+                               if (ar == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }   // RM refused: parked images first
     if (ar != VK_SUCCESS) { int mt = nvmtl_vk_sysmem_type(mr.memoryTypeBits); sys = 1;
                             if (mt >= 0) { mai.memoryTypeIndex = (uint32_t)mt; ar = pvkAllocateMemory(g_dev, &mai, NULL, &m); } }
     if (ar != VK_SUCCESS || nvmtl_vk_sparse_bind(b, 0, m, mr.size)) {
@@ -2069,6 +2080,7 @@ static int nvmtl_vk_buffer_create_body(size_t size, int host_visible, nvk_buffer
         int bgate = nvmtl_vk_vram_wall(mr.size, &bfree, &bbud, &bused, &bmeas);
         VkResult br = bgate ? VK_ERROR_OUT_OF_DEVICE_MEMORY
                             : nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem);
+        if (!bgate && br == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) br = nvmtl_opaque_AllocateMemory(g_dev, &mai, NULL, &out->mem);   // RM refused: parked images first
         if (br != VK_SUCCESS) {
             g_buf_vram_refused++;
             bpark_drain_private();
@@ -2424,6 +2436,8 @@ static int nvmtl_vk_vram_wall(uint64_t want, uint64_t *freev_out, uint64_t *bud_
 {
     uint64_t fv = 0, bd = 0, us = 0; int ms = 0;
     int gate = nvmtl_vk_vram_wall0(want, &fv, &bd, &us, &ms);
+    // the recycle cache's parked images are the first memory given back, before anything that is still in use
+    if (gate && nvmtl_texrc_give_back_all()) { g_budget_stale = 1; gate = nvmtl_vk_vram_wall0(want, &fv, &bd, &us, &ms); }
     if (fv > g_res1_seen_free) { uint64_t up = fv - g_res1_seen_free; g_res1_credit = g_res1_credit > up ? g_res1_credit - up : 0; }
     g_res1_seen_free = fv;
     if (gate && nvmtl_reclaim_hook && !t_in_reclaim) {
@@ -2595,7 +2609,8 @@ static VkResult nvmtl_vk_alloc_image_mem(const VkMemoryRequirements *mr, VkDevic
     int gate = nvmtl_vk_vram_wall(mr->size, &freev, &bud, &used, &measured);
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     if (!gate) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);
-    else nvlog("vk: soft VRAM gate: %llu MB free on the card, this %s image wants %llu MB + %llu MB headroom -> SYSTEM MEMORY (heapUsage %llu of budget %llu MB, %s)",
+    if (!gate && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) r = pvkAllocateMemory(g_dev, &mai, NULL, mem);   // RM refused: parked images first
+    if (gate) nvlog("vk: soft VRAM gate: %llu MB free on the card, this %s image wants %llu MB + %llu MB headroom -> SYSTEM MEMORY (heapUsage %llu of budget %llu MB, %s)",
                (unsigned long long)(freev >> 20), what, (unsigned long long)(mr->size >> 20),
                (unsigned long long)(nvmtl_vk_headroom_eff(bud, measured) >> 20), (unsigned long long)(used >> 20),
                (unsigned long long)(bud >> 20), measured ? "measured" : "estimated");
@@ -2825,6 +2840,15 @@ int nvmtl_vk_image_create_ms_storage(uint32_t w, uint32_t h, uint32_t vkfmt, uin
     return r;
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
+static __thread int t_texrc_create;   // set around the one creation in nvmtl_vk_image_create_typed_recyclable
+static int nvmtl_texrc_reuse(const nvmtl_texrc_key *key, nvk_image *out);
+int nvmtl_vk_image_create_typed_recyclable(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
+{
+    t_texrc_create = 1;
+    const int r = nvmtl_vk_image_create_typed(w, h, vkfmt, bpp, a8, mips, storage, mtl_type, layers, out);
+    t_texrc_create = 0;
+    return r;
+}
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
 {
     nvk_image pending = {0};
@@ -2844,6 +2868,8 @@ static VkComponentMapping nvmtl_a8_mapping(int a8)
 }
 static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out)
 {
+    const int recyclable = t_texrc_create;
+    t_texrc_create = 0;   // only this creation: none the device's first use may make on the way
     if (!layers || (mtl_type < 2 && h != 1) || mtl_type == 4 || mtl_type > 7
         || ((mtl_type == 0 || mtl_type == 2) && layers != 1) || (mtl_type == 5 && layers != 6) || (mtl_type == 6 && layers % 6)) {
         nvlog("image_create: textureType %u with %u layer(s) is not carried", mtl_type, layers); return -1; }
@@ -2864,16 +2890,23 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
         VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
     if (viewStorage) ici.flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
     nvmtl_vk_image_mutable(&ici, out);
-    VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
-    if (viewStorage && nvmtl_storage_view_add((VkImage)out->img, ici.usage | (nvmtl_fbfetch_on() ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0))) {
-        pvkDestroyImage(g_dev, (VkImage)out->img, NULL); out->img = NULL; return -1;
+    // Everything the image is made from is in ici now; an image parked from an earlier texture of the same creation is
+    // already that image, bound to its own VRAM (and, for a storage twin, registered with the same usage).
+    const nvmtl_texrc_key rck = nvmtl_texrc_key_of((uint32_t)ici.flags, (uint32_t)ici.imageType, (uint32_t)ici.format, ici.extent.width, ici.extent.height,
+                                                   ici.extent.depth, ici.mipLevels, ici.arrayLayers, (uint32_t)ici.usage);
+    if (!recyclable || !nvmtl_texrc_reuse(&rck, out)) {
+        VKCK(nvmtl_opaque_CreateImage(g_dev, &ici, NULL, &out->img), "vkCreateImage");
+        if (viewStorage && nvmtl_storage_view_add((VkImage)out->img, ici.usage | (nvmtl_fbfetch_on() ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0))) {
+            pvkDestroyImage(g_dev, (VkImage)out->img, NULL); out->img = NULL; return -1;
+        }
+        VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
+        if (image_pool_bind(out)) {
+            VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
+            out->alloc = mr.size;
+            VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
+        }
     }
-    VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, out->img, &mr);
-    if (image_pool_bind(out)) {
-        VKCK(nvmtl_alloc_opaque_image_mem(&mr, &out->mem, &out->sysmem, "colour"), "vkAllocateMemory(image)");
-        out->alloc = mr.size;
-        VKCK(pvkBindImageMemory(g_dev, out->img, out->mem, 0), "vkBindImageMemory");
-    }
+    if (recyclable && !out->pool && !out->placed && !out->sysmem && out->mem) { out->rck = rck; out->rc_img = out->img; out->rc_mem = out->mem; }
     out->alias_a8 = (uint8_t)a8;   // the mapping of its own view: an attachment takes an identity view instead
     VkComponentMapping swz = nvmtl_a8_mapping(a8);
     VkImageViewType viewType = mtl_type == 0 ? VK_IMAGE_VIEW_TYPE_1D : mtl_type == 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : mtl_type == 3 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
@@ -3130,9 +3163,14 @@ static int nvmtl_vk_surface_vram_pipe_on(void)
 /* The family's VRAM for one plane of a surface, granted by the kernel through NVK's import, as a buffer of `need` bytes.
    planeWord and sizeWord are the grant's words as the kernel reads them: the plane alone and the bytes needed, or a
    ranged grant's (nvmtl_plane_alias.h). */
+/* What the last import on this thread ran into, for the private-surface note (nvmtl_surf_private.h): 0 nothing (or not
+   tried), 1 no descriptor, 2 NVK's import failed, 3 the buffer over the import was refused. */
+static __thread int t_sv_why;
+int nvmtl_vk_surface_vram_why(void) { return t_sv_why; }
 static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, uint64_t sizeWord, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
+    t_sv_why = 0;
     if (!nvmtl_vk_surface_share_on() || !need) return -1;
     const uint32_t plane = planeWord & ~NVMTL_PA_PLANE_RANGED;
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
@@ -3149,6 +3187,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
                                                                     : open("/dev/null", O_RDONLY | O_CLOEXEC) };
     if (imp.fd < 0) {
         const int e = errno;
+        t_sv_why = 1;
         static unsigned nfd; if (nfd++ < 8 || nfd % 1000 == 0)
             nvlog("item 7: surface %u plane %u%s: no descriptor for the family VRAM import (errno %d) - private image + copies (%u so far)",
                   surfaceID, plane, plane != planeWord ? " (its byte range)" : "", e, nfd);
@@ -3161,6 +3200,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     pnvk_stage_import(NULL);
     if (vr != VK_SUCCESS) {
         close(imp.fd);
+        t_sv_why = 2;
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
             nvlog("item 7: surface %u plane %u%s: family VRAM import refused (%d) - private image + copies (%u so far)", surfaceID, plane,
                   plane != planeWord ? " (its byte range)" : "", (int)vr, n);
@@ -3172,6 +3212,7 @@ static int nvmtl_vk_surface_vram_words(uint32_t surfaceID, uint32_t planeWord, u
     if (pvkCreateBuffer(g_dev, &bci, NULL, &b) != VK_SUCCESS || pvkBindBufferMemory(g_dev, b, m, 0) != VK_SUCCESS) {
         if (b) pvkDestroyBuffer(g_dev, b, NULL);
         pvkFreeMemory(g_dev, m, NULL);
+        t_sv_why = 3;
         nvlog("item 7: surface %u: a buffer over the imported VRAM was refused - private", surfaceID);
         return -1;
     }
@@ -6633,6 +6674,18 @@ static int nvmtl_vk_compute_pipeline_create_g(const void *cs, size_t n, uint32_t
     else *(nvk_pipeline *)out = pending;
     return result;
 }
+#include "nvmtl_cvar_seed.h"
+// NVMTL_CVAR_SEED=0: a kernel's creation-time pipeline is compiled unspecialized and its variant table starts empty, as in
+// 3.0.5, so the first dispatch of any threadgroup size compiles the kernel again. Otherwise it is compiled for the
+// translator's default size and kept as that size's variant (nvmtl_cvar_seed.h).
+static int nvmtl_cvar_seed_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_CVAR_SEED"); on = !(e && e[0] == '0');
+        nvlog("compute: a kernel's creation-time pipeline %s (NVMTL_CVAR_SEED=%s)",
+              on ? "is compiled for its default threadgroup size and kept as that size's variant" : "is compiled unspecialized and never dispatched",
+              e ? e : "unset"); }
+    return on;
+}
 static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size_t n, uint32_t flags, nvk_pipeline *out)
 {
     if (nvmtl_heap_binding_refused(cs, n, "compute")) return -1;
@@ -6670,11 +6723,25 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES };
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2c, 1, &pcr };
     VKCK(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout(compute)");
+    // The specialization below is the one nvmtl_compute_variant gives a dispatch of size d, and d is the module's own
+    // default, so this compiles the same kernel the unspecialized create did and is also that size's variant.
+    uint32_t d[3], sd[4];
+    const uint32_t *wl = g_lim.maxComputeWorkGroupSize;
+    const int seed = nvmtl_cvar_seed_on() && nvmtl_cvar_seed_size(cs, n / 4, d)
+                  && nvmtl_cvar_size_fits(d, wl, g_lim.maxComputeWorkGroupInvocations);
+    if (seed) nvmtl_cvar_spec_data(d, out->lin, wl, sd);
+    VkSpecializationMapEntry me[4] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } };
+    VkSpecializationInfo si = { 4, me, 16, sd };
     VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", seed ? &si : NULL },
         out->layout, VK_NULL_HANDLE, -1 };
     VKCK(nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &out->pipe), "vkCreateComputePipelines");
     out->mod = mod;
+    // Last, after every step that can fail: nvmtl_failed_pipeline does not free the table. The pipeline is not published
+    // yet, so no lock is needed; nvmtl_vk_pipeline_destroy destroys var[0] and p->pipe once (nvmtl_destroy_pipe_once).
+    if (seed && (out->var = calloc(NVMTL_NVAR, sizeof *out->var))) {
+        out->capvar = NVMTL_NVAR; memcpy(out->var[0].l, d, sizeof out->var[0].l); out->var[0].pipe = out->pipe; out->nvar = 1;
+    }
     return 0;
 }
 
@@ -6702,7 +6769,19 @@ int nvmtl_vk_tg_reject(const uint32_t l[3], const uint32_t *t, const char *kerne
     }
     return 0;
 }
+// g_var_lock guards every kernel's table of threadgroup-size variants (nvk_pipeline var/nvar/capvar), nothing else.
 static pthread_mutex_t g_var_lock = PTHREAD_MUTEX_INITIALIZER;
+#include "nvmtl_cvar.h"
+// NVMTL_CVAR_PARALLEL=0: a threadgroup-size variant is compiled while g_var_lock is held, as in 3.0.5, so a dispatch of
+// any kernel on another thread waits for that compile. Otherwise it is compiled outside the lock (nvmtl_cvar.h).
+static _Atomic unsigned long long g_cvar_twice;
+static int nvmtl_cvar_parallel_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_CVAR_PARALLEL"); on = !(e && e[0] == '0');
+        nvlog("compute: threadgroup-size variants compile %s (NVMTL_CVAR_PARALLEL=%s)",
+              on ? "outside the variant table's lock" : "under the variant table's lock", e ? e : "unset"); }
+    return on;
+}
 static pthread_mutex_t g_ag_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
 {
@@ -6734,10 +6813,14 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
 {
     if (nvmtl_vk_tg_reject(l, NULL, "(variant)", p->lin)) return VK_NULL_HANDLE;
     if (!p->mod) return (VkPipeline)p->pipe;
-    VkPipeline found = VK_NULL_HANDLE;
+    // p->mod, p->layout and p->lin are written once when the pipeline is created, so only the table needs the lock.
+    const int parallel = nvmtl_cvar_parallel_on();
+    VkPipeline found = VK_NULL_HANDLE; void *winner = NULL;
+    int put = -1; uint32_t had = 0, grown = 0;
     pthread_mutex_lock(&g_var_lock);
-    for (uint32_t i = 0; i < p->nvar; i++) if (!memcmp(p->var[i].l, l, sizeof p->var[i].l)) { found = (VkPipeline)p->var[i].pipe; break; }
+    found = (VkPipeline)nvmtl_cvar_find(p->var, p->nvar, l);
     if (!found) {
+        if (parallel) pthread_mutex_unlock(&g_var_lock);
         const uint32_t *wl = g_lim.maxComputeWorkGroupSize;
         uint32_t sd[4] = { l[0], l[1], l[2], (p->lin && (l[0] > wl[0] || l[1] > wl[1] || l[2] > wl[2])) ? 1u : 0u };
         VkSpecializationMapEntry me[4] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } };
@@ -6746,22 +6829,29 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
             { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
             (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
         VkResult r = nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &cpi, NULL, &found);
+        if (parallel) pthread_mutex_lock(&g_var_lock);
         if (r != VK_SUCCESS) {
             if (found) pvkDestroyPipeline(g_dev, found, NULL);
-            nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r); found = VK_NULL_HANDLE;
+            // Compiled outside the lock, another thread may have kept this size meanwhile; under the lock nobody could.
+            found = parallel ? (VkPipeline)nvmtl_cvar_find(p->var, p->nvar, l) : VK_NULL_HANDLE;
+            if (!found) nvlog("vk: compute variant %ux%ux%u -> %d — this dispatch is SKIPPED", l[0], l[1], l[2], r);
         }
         else {
-            if (p->nvar == p->capvar && p->capvar < NVMTL_NVAR_MAX) {
-                uint32_t cap = p->capvar ? p->capvar * 2 : NVMTL_NVAR;
-                struct nvmtl_cvar *g = realloc(p->var, cap * sizeof *g);
-                if (g) { p->var = g; p->capvar = cap;
-                    if (cap > NVMTL_NVAR) nvlog("vk: cvar1 one kernel now has %u threadgroup-size variants (table grown to %u)", p->nvar, cap); }
-            }
-            if (p->nvar < p->capvar) { memcpy(p->var[p->nvar].l, l, sizeof p->var[p->nvar].l); p->var[p->nvar].pipe = found; p->nvar++; }
-            else { static int said; if (!said++) nvlog("vk: one kernel was dispatched with more than %u threadgroup sizes — variants now leak", p->capvar); }
+            // Compiled outside the lock, the same size may have been put in by another thread meanwhile: its pipeline
+            // stays, and this one, which no command buffer has seen, is destroyed below.
+            had = p->nvar;
+            put = nvmtl_cvar_insert(&p->var, &p->nvar, &p->capvar, l, (void *)found, parallel, NVMTL_NVAR, NVMTL_NVAR_MAX,
+                                    &winner, &grown);
+            if (put == NVMTL_CVAR_FULL) { static int said; if (!said++) nvlog("vk: one kernel was dispatched with more than %u threadgroup sizes — variants now leak", p->capvar); }
         }
     }
     pthread_mutex_unlock(&g_var_lock);
+    if (put == NVMTL_CVAR_GREW) nvlog("vk: cvar1 one kernel now has %u threadgroup-size variants (table grown to %u)", had, grown);
+    if (put == NVMTL_CVAR_TAKEN) {
+        pvkDestroyPipeline(g_dev, found, NULL); found = (VkPipeline)winner;
+        const unsigned long long k = atomic_fetch_add(&g_cvar_twice, 1) + 1;
+        if (!(k & (k - 1))) nvlog("vk: compute variant %ux%ux%u was compiled by two threads at once; one copy kept [%llu so far]", l[0], l[1], l[2], k);
+    }
     return found;
 }
 
@@ -7952,6 +8042,7 @@ typedef struct nvmtl_render_shadow {
 static int nvmtl_vk_cmd_begin_pass_body(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
 {
+    c->gfx_epoch++;
     int mixed = ps->dsview != NULL;
     uint32_t linear = 0;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) {
@@ -8658,6 +8749,23 @@ void nvmtl_vk_cmd_draw(nvk_cmdbuf *c, uint32_t first, uint32_t count, uint32_t i
 }
 void nvmtl_vk_cmd_set_scissor(nvk_cmdbuf *c, int32_t x, int32_t y, uint32_t w, uint32_t h)
 { VkRect2D r = { { x, y }, { w, h } }; pvkCmdSetScissor(c->cb, 0, 1, &r); }
+// NVMTL_BIND_CACHE=0: every draw records its index buffer, vertex buffers, topology and restart again, as in 3.0.5.
+// WindowServer always does: the saving is for applications that draw many times per command buffer.
+// (Defined ahead of nvmtl_vk_cmd_bind_pipeline: tools/test_graphics_bindings.py compiles the text from that function
+// to nvmtl_vk_cmd_set_topology on its own, so nothing else may sit between the two.)
+_Static_assert(NVMTL_DC_NVIN == NVMTL_NVIN, "the draw cache keeps one entry per vertex buffer binding");
+static int nvmtl_bind_cache_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_BIND_CACHE"); const char *me = getprogname();
+        const int ws = me && !strcmp(me, "WindowServer");
+        on = !(e && e[0] == '0') && !ws;
+        nvlog("draw: repeated index and vertex buffer binds are %s (NVMTL_BIND_CACHE=%s%s)", on ? "skipped" : "recorded again",
+              e ? e : "unset", ws ? ", WindowServer" : "");
+    }
+    return on;
+}
 void nvmtl_vk_cmd_bind_pipeline(nvk_cmdbuf *c, nvk_pipeline *p) {
     p = nvmtl_uniform_cbuf_pick(c, p);
     if (p->pipe && c->graphics_pipeline == p->pipe) return;
@@ -8676,8 +8784,11 @@ int nvmtl_vk_cmd_set_topology(nvk_cmdbuf *c, unsigned mtlType) {
     if (mtlType < 3 && !g_topo_any) { static int said2; if (said2++ < 4) nvlog("G14 draw: point/line primitives need "
         "dynamicPrimitiveTopologyUnrestricted, which this device does not report — NOT drawn (was: rasterised as triangles)"); return -1; }
     c->topo = mtlType;
-    pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
-    pvkCmdSetPrimitiveRestartEnable(c->cb, (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE);
+    const VkBool32 restart = (mtlType == 2 || mtlType == 4) && !c->restart_off ? VK_TRUE : VK_FALSE;
+    int emitRestart;
+    if (nvmtl_dc_topo(&c->dc, nvmtl_bind_cache_on(), (uint32_t)map[mtlType], (uint32_t)restart, &emitRestart))
+        pvkCmdSetPrimitiveTopology(c->cb, map[mtlType]);
+    if (emitRestart) pvkCmdSetPrimitiveRestartEnable(c->cb, restart);
     if (mtlType != 3) { static int told[5]; if (!told[mtlType]++) nvlog("G14 first draw of MTLPrimitiveType %u in this process", mtlType); }
     return 0;
 }
@@ -8685,12 +8796,13 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
 {
     if (c->nobind || !p || !p->vin_mask) return 0;
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
+    const int cache = nvmtl_bind_cache_on();
     for (uint32_t i = 0; i < NVMTL_NVIN; i++) if (p->vin_mask & (1u << i)) {
         nvmtl_slot *sl = t ? &t->s[0][i] : NULL;
         if (!sl || sl->kind != NVMTL_SLOT_BUF || !sl->h) { static int said; if (said++ < 8) nvlog("G16 draw: the pipeline fetches vertex "
             "attributes from buffer index %u and nothing is bound there — NOT drawn", i); return -1; }
         VkBuffer b = (VkBuffer)sl->h; VkDeviceSize off = sl->off;
-        if (!p->vin_dyn) { pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off); continue; }
+        if (!p->vin_dyn) { if (nvmtl_dc_vb(&c->dc, cache, i, (uint64_t)(uintptr_t)b, off, 0)) pvkCmdBindVertexBuffers(c->cb, i, 1, &b, &off); continue; }
         VkDeviceSize st = p->vin_stride[i];
         if (p->vin_dyn & (1u << i)) {
             if (!vstride || !(vset & (1u << i))) { static int said; if (said++ < 8) nvlog("apps-dyn draw: buffer index %u has a dynamic stride "
@@ -8699,6 +8811,7 @@ int nvmtl_vk_cmd_vertex_inputs(nvk_cmdbuf *c, const nvk_pipeline *p, const uint3
             if (st > g_lim.maxVertexInputBindingStride) { static int said; if (said++ < 8) nvlog("apps-dyn draw: attributeStride %llu at "
                 "buffer index %u is past maxVertexInputBindingStride %u — NOT drawn", (unsigned long long)st, i, g_lim.maxVertexInputBindingStride); return -1; }
         }
+        (void)nvmtl_dc_vb(&c->dc, cache, i, (uint64_t)(uintptr_t)b, off, 1);   // always recorded: it sets the stride
         pvkCmdBindVertexBuffers2(c->cb, i, 1, &b, &off, NULL, &st);
     }
     return 0;
@@ -8723,7 +8836,9 @@ void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, ui
                                uint32_t instances, int32_t baseVertex, uint32_t baseInstance)
 {
     if (!nvmtl_index_range_ok(idx, offset)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    const VkIndexType type = is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (nvmtl_dc_ib(&c->dc, nvmtl_bind_cache_on(), (uint64_t)(uintptr_t)idx->buf, offset, (uint32_t)type))
+        pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, type);
     if (c->nobind) return;
     const uint32_t n = instances ? instances : 1;
     if (nvmtl_fetch_split(c, count, n)) {
@@ -9462,6 +9577,104 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b)
     nvmtl_perf_note(NVP_BUFDEL, t0, n);
 }
 
+/* The texture recycle cache (nvmtl_texrc.h). Parked images stay counted as allocated VRAM (g_alloc_bytes, g_vram_bytes,
+   g_img_align) and stay charged to the budget until they are really freed; a take hands the counts to
+   nvmtl_commit_image, which adds them again for the new texture. */
+static nvmtl_texrc_state g_texrc; static pthread_mutex_t g_texrc_lock = PTHREAD_MUTEX_INITIALIZER;
+static int nvmtl_texrc_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_TEX_RECYCLE"); on = nvmtl_texrc_enabled(e, getprogname());
+        nvlog("vk: texture recycle: %s (NVMTL_TEX_RECYCLE=%s)", on ? "a dead texture's image and memory are kept for the next texture of the same creation"
+              : "off - every dead texture's image and memory are freed", e ? e : "unset"); }
+    return on;
+}
+static void nvmtl_texrc_census(const char *what)
+{
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint64_t parked = g_texrc.parked, reused = g_texrc.reused, aged = g_texrc.aged, evicted = g_texrc.evicted, given = g_texrc.given, bytes = g_texrc.bytes;
+    const uint32_t n = g_texrc.n;
+    pthread_mutex_unlock(&g_texrc_lock);
+    const uint64_t k = parked + reused;
+    if (k & (k - 1)) return;
+    nvlog("vk: texture recycle (%s): %llu parked, %llu reused, %llu aged out, %llu evicted, %llu given back to the VRAM gate; %u held, %llu MB",
+          what, (unsigned long long)parked, (unsigned long long)reused, (unsigned long long)aged, (unsigned long long)evicted,
+          (unsigned long long)given, n, (unsigned long long)(bytes >> 20));
+}
+// What nvmtl_vk_image_destroy_now does for an image's own VRAM, once the cache lets the image go.
+static void nvmtl_texrc_free(const nvmtl_texrc_entry *e)
+{
+    // before the handle can be handed out again: the dead texture's record no longer says its image and memory are kept
+    pthread_mutex_lock(&g_sl_lock); nvmtl_im_kept_freed(&g_im, e->img); pthread_mutex_unlock(&g_sl_lock);
+    pvkDestroyImage(g_dev, (VkImage)e->img, NULL);
+    pvkFreeMemory(g_dev, (VkDeviceMemory)e->mem, NULL);
+    g_alloc_bytes -= e->bytes; g_vram_bytes -= e->bytes; g_img_align -= (e->bytes + 65535ull) & ~65535ull;
+    nvmtl_vk_budget_discharge(e->bytes);
+}
+static void nvmtl_texrc_free_all(const nvmtl_texrc_entry *out, uint32_t n) { for (uint32_t k = 0; k < n; k++) nvmtl_texrc_free(&out[k]); }
+/* A dead image the grace has released, its upload drained and its views gone (nvmtl_vk_image_destroy_now): its image and
+   memory are parked instead of destroyed when nvmtl_texrc_eligible says they may be (1), else 0 and the caller destroys
+   them. The next texture of the same creation makes its own view. */
+static int nvmtl_texrc_park(nvk_image *i)
+{
+    if (!i->img || !i->rc_img) return 0;
+    if (!nvmtl_texrc_eligible(nvmtl_texrc_on(), nvmtl_image_grace_on(), i->img, i->mem, i->rc_img, i->rc_mem,
+                              i->placed, i->pool != NULL, i->sparse != NULL, (int)i->sysmem, (uint64_t)i->alloc)) return 0;
+    const nvmtl_texrc_entry e = { i->rck, i->img, i->mem, (uint64_t)i->alloc, 0 };
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    // the fault report must not read the dead image over its still-alive memory as a plain use after free. Marked before
+    // the put, so that a free of the entry by another thread (which clears the mark) cannot come before it.
+    pthread_mutex_lock(&g_sl_lock); nvmtl_im_parked_dead(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint32_t n = nvmtl_texrc_put(&g_texrc, &e, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    memset(i, 0, sizeof *i);
+    nvmtl_texrc_free_all(out, n);
+    nvmtl_texrc_census("park");
+    return 1;
+}
+static int nvmtl_texrc_reuse(const nvmtl_texrc_key *key, nvk_image *out)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED) || !nvmtl_texrc_on()) return 0;
+    nvmtl_texrc_entry e;
+    pthread_mutex_lock(&g_texrc_lock);
+    const int hit = nvmtl_texrc_take(&g_texrc, key, &e);
+    pthread_mutex_unlock(&g_texrc_lock);
+    if (!hit) return 0;
+    // nvmtl_commit_image counts the memory again for the new texture
+    g_alloc_bytes -= e.bytes; g_vram_bytes -= e.bytes; g_img_align -= (e.bytes + 65535ull) & ~65535ull;
+    out->img = e.img; out->mem = e.mem; out->alloc = (size_t)e.bytes; out->sysmem = 0;
+    nvmtl_texrc_census("reuse");
+    return 1;
+}
+static void nvmtl_texrc_tick(void)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED)) return;
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint32_t n = nvmtl_texrc_age(&g_texrc, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    nvmtl_texrc_free_all(out, n);
+}
+static uint32_t nvmtl_texrc_give_back_all(void)
+{
+    if (!__atomic_load_n(&g_texrc.n, __ATOMIC_RELAXED)) return 0;
+    nvmtl_texrc_entry out[NVMTL_TEXRC_N];
+    pthread_mutex_lock(&g_texrc_lock);
+    const uint64_t bytes = g_texrc.bytes;
+    const uint32_t n = nvmtl_texrc_give_back(&g_texrc, out);
+    pthread_mutex_unlock(&g_texrc_lock);
+    nvmtl_texrc_free_all(out, n);
+    if (n) { static unsigned said; if (said++ < 8 || said % 1024 == 0)
+        nvlog("vk: texture recycle: gave %u parked images (%llu MB) back to the VRAM gate", n, (unsigned long long)(bytes >> 20)); }
+    return n;
+}
+uint32_t nvmtl_vk_texrc_give_back(void)
+{
+    const uint32_t n = nvmtl_texrc_give_back_all();
+    if (n) g_budget_stale = 1;
+    return n;
+}
 void nvmtl_vk_image_destroy(nvk_image *i)
 {
     if (g_state != 1 || !i || !i->img) return;
@@ -9477,6 +9690,7 @@ void nvmtl_vk_image_destroy(nvk_image *i)
             e->img = *i;
             if (nvmtl_grace_hold(e)) { memset(i, 0, sizeof *i); return; }
             free(e);   // nothing can read it any more: released at once below
+            t_texrc_may_park = 1;
         }
     }
     nvmtl_vk_image_destroy_now(i);
@@ -9484,11 +9698,15 @@ void nvmtl_vk_image_destroy(nvk_image *i)
 static void nvmtl_vk_image_upload_drain(nvk_image *img);
 static void nvmtl_vk_image_destroy_now(nvk_image *i)
 {
+    const int may_park = t_texrc_may_park;
+    t_texrc_may_park = 0;   // this image only: none an upload drain below may release on the way
+    const int was_sparse = i->sparse != NULL;   // the park must see it, and it is freed here
     if (i->sparse) { free(i->sparse); i->sparse = NULL; }
     if (!i->img) { if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); i->view = NULL; } return; }   // a view held by the grace (texel entries: nvmtl_image_grace_reap)
     nvmtl_vk_image_upload_drain(i);   // an async upload must finish before we free this image's memory (#96)
     if (i->view) { nvmtl_vw_note_died(i->view); pvkDestroyImageView(g_dev, (VkImageView)i->view, NULL); }
     nvmtl_dlss_views_drop((VkImage)i->img);   // DLSS's own views of this image go with it
+    if (may_park && !was_sparse && nvmtl_texrc_park(i)) return;   // the image and its memory wait for the next texture of their creation
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->pool) { if (i->sysmem) g_sys_bytes -= i->alloc; else g_vram_bytes -= i->alloc; image_pool_release(i); }
     if (!i->placed && i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(i->alloc); }    }
@@ -9532,6 +9750,7 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     if (pvkCreateImageView(g_dev, &vci, NULL, &view) != VK_SUCCESS) { pvkFreeMemory(g_dev, mem, NULL); pvkDestroyImage(g_dev, img, NULL); return -1; }
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, i->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);   // re-backed: the old image dies, the new one is recorded below
     if (i->view) nvmtl_vk_image_view_destroy(i->view);   // through the grace: a submit in flight may still hold this view's descriptor index
+    nvmtl_dlss_views_retire((VkImage)i->img);   // DLSS's own views of the old image, through the grace as well
     pvkDestroyImage(g_dev, (VkImage)i->img, NULL);
     if (i->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)i->mem, NULL); g_alloc_bytes -= i->alloc; if (i->sysmem) { g_sys_bytes -= i->alloc; g_sys_align -= (i->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= i->alloc; g_img_align -= (i->alloc + 65535ull) & ~65535ull; }    }
     uint64_t aligned = (mr.size + 65535ull) & ~65535ull;
@@ -9539,6 +9758,9 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
     if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res1_off++; g_res1_off_b += i->alloc; }
     else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res1_on++; g_res1_on_b += mr.size; }
     i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // A re-backed image was not made by the recyclable creation: NVK may hand out the freed handles again, so comparing
+    // them with the old ones at death is not enough to tell.
+    i->rc_img = i->rc_mem = NULL;
     pthread_mutex_lock(&g_sl_lock);
     nvmtl_im_add(&g_im, img, mem, 0, mr.size, view, i->w, i->h, i->fmt, i->storage, 0, 0, g_cmd_submitted); nvmtl_vw_add(&g_vw, view, img); nvmtl_vw_tic_note(view);
     pthread_mutex_unlock(&g_sl_lock);
@@ -9547,7 +9769,15 @@ int nvmtl_vk_image_reback(nvk_image *i, int to_sysmem, int a8)
 
 static uint64_t g_res2_off, g_res2_on, g_res2_off_b, g_res2_on_b, g_res2_fail;
 void nvmtl_vk_res2_stats(uint64_t out[5]) { out[0] = g_res2_off; out[1] = g_res2_on; out[2] = g_res2_off_b >> 20; out[3] = g_res2_on_b >> 20; out[4] = g_res2_fail; }
-int nvmtl_vk_vram_room(uint64_t want) { g_budget_stale = 1; return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL); }
+int nvmtl_vk_vram_room(uint64_t want)
+{
+    g_budget_stale = 1;
+    if (!nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL)) return 1;
+    // the residency pager asks before it moves a texture back to VRAM: parked images go before it pages anything out
+    if (!nvmtl_texrc_give_back_all()) return 0;
+    g_budget_stale = 1;
+    return !nvmtl_vk_vram_wall0(want, NULL, NULL, NULL, NULL);
+}
 uint64_t nvmtl_vk_vram_free_now(void) { uint64_t f = 0; g_budget_stale = 1; (void)nvmtl_vk_vram_wall0(0, &f, NULL, NULL, NULL); return f; }
 // Whether the budget behind every figure above is RM's own (VK_EXT_memory_budget) or our estimate. The
 // estimated model counts IMAGES only, so a caller that sizes work from it should size it smaller.
@@ -9572,6 +9802,7 @@ void nvmtl_vk_image_free_backing(nvk_image *o)
     if (g_state != 1 || !o || !o->img) return;
     pthread_mutex_lock(&g_sl_lock); nvmtl_im_died(&g_im, o->img, g_cmd_submitted); pthread_mutex_unlock(&g_sl_lock);
     if (o->view) { nvmtl_vw_note_died(o->view); pvkDestroyImageView(g_dev, (VkImageView)o->view, NULL); }
+    nvmtl_dlss_views_drop((VkImage)o->img);   // DLSS's own views of this backing go with it (the texture now has another image)
     pvkDestroyImage(g_dev, (VkImage)o->img, NULL);
     if (o->mem) { pvkFreeMemory(g_dev, (VkDeviceMemory)o->mem, NULL); g_alloc_bytes -= o->alloc; if (o->sysmem) { g_sys_bytes -= o->alloc; g_sys_align -= (o->alloc + 65535ull) & ~65535ull; } else { g_vram_bytes -= o->alloc; g_img_align -= (o->alloc + 65535ull) & ~65535ull; nvmtl_vk_budget_discharge(o->alloc); }    }
     memset(o, 0, sizeof *o);
@@ -9653,6 +9884,7 @@ int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_o
       if (to_sysmem) { g_sys_bytes += mr.size; g_sys_align += aligned; g_res2_off++; g_res2_off_b += i->alloc; }
       else { g_vram_bytes += mr.size; g_img_align += aligned; nvmtl_vk_budget_charge(mr.size); g_res2_on++; g_res2_on_b += mr.size; } }
     i->alias_a8 = (uint8_t)a8; i->img = img; i->mem = mem; i->view = view; i->alloc = mr.size; i->sysmem = to_sysmem ? 1 : 0; i->layout = (uint32_t)was;
+    i->rc_img = i->rc_mem = NULL;   // migrated: never parked (the handles of the freed backing may be handed out again)
     return 0;
 fail:
     if (view) pvkDestroyImageView(g_dev, view, NULL);
@@ -10232,17 +10464,53 @@ static int nvmtl_async_tex_upload(void)
     }
     return on;
 }
+// The image's handle names the small header `rec` (nvmtl_up_reap.h), which names this record while the upload holds
+// anything. The record embeds two command-buffer structures and is several kilobytes, so the reaper frees it and only
+// the header stays behind on a texture that is never uploaded again.
 typedef struct {
     nvmtl_inflight infl; nvk_buffer stage; nvk_cmdbuf cb; VkBufferImageCopy bic;
     uint64_t bytes;   // the staging bytes it holds, counted out of g_asyncup_held_bytes when it is finished
+    nvmtl_up_rec *rec;
 } nvmtl_asyncup;
 static pthread_mutex_t g_asyncup_mutex = PTHREAD_MUTEX_INITIALIZER;
+// The stored records in store order, for the reaper (nvmtl_asyncup_sweep); under g_asyncup_mutex.
+static nvmtl_up_fifo g_asyncup_fifo;
+// NVMTL_ASYNCUP_REAP=0: a finished asynchronous upload keeps its record, staging buffer and place until its image is
+// taken from again, as in 3.0.5. Otherwise the next upload gives back those whose copy has finished, without waiting.
+static int nvmtl_asyncup_reap_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NVMTL_ASYNCUP_REAP");
+        on = nvmtl_up_reap_default(e, getprogname());
+        nvlog("vk: tex upload async: finished uploads are given back %s (NVMTL_ASYNCUP_REAP=%s)",
+              on ? "at the next upload" : "when their image is next used", e ? e : "unset");
+    }
+    return on;
+}
+static nvmtl_up_rec *nvmtl_asyncup_rec_new(nvmtl_asyncup *au)
+{
+    nvmtl_up_rec *r = (nvmtl_up_rec *)malloc(sizeof *r);
+    if (r) nvmtl_up_rec_init(r, au);
+    return r;
+}
+// What a take or a replaced handle leaves to its caller, after nvmtl_up_claim under the lock: the record to finish as
+// before (a LIVE one), or 0. A RELEASED header is freed here; a BUSY one is freed by the sweep that is releasing it.
+static uint64_t nvmtl_asyncup_claimed(uint64_t handle, nvmtl_up_claim_kind kind)
+{
+    nvmtl_up_rec *r = (nvmtl_up_rec *)(uintptr_t)handle;
+    if (!r) return 0;
+    if (kind == NVMTL_UP_CLAIM_FREE) { free(r); return 0; }
+    if (kind == NVMTL_UP_CLAIM_LEFT) return 0;
+    return (uint64_t)(uintptr_t)r->body;
+}
 // What the stored handles of the process hold: how many there are and their staging bytes (nvmtl_up_room). An upload is
 // counted in when its handle is stored and out when it is finished, so a failed submit that frees its own record is
 // never counted. Plain atomics: the room check reads them without the lock, so two threads can both pass it and go one
 // upload past a limit each, which is a bound on how far it is overshot, not a leak.
 static _Atomic uint64_t g_asyncup_held, g_asyncup_held_bytes;
-// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision).
+// Atomically read and clear an image's pending async-upload handle (the consume/finish-first decision), and return the
+// record the caller must finish, or 0 when there is none or the reaper has already released it (nvmtl_asyncup_claimed).
 static uint64_t nvmtl_asyncup_take(nvk_image *img)
 {
     if (!img) return 0;
@@ -10250,23 +10518,28 @@ static uint64_t nvmtl_asyncup_take(nvk_image *img)
     nvmtl_up_state s = { img->up_token };
     const uint64_t token = nvmtl_up_before_consume(&s);
     img->up_token = 0;
+    const nvmtl_up_claim_kind kind = token ? nvmtl_up_claim(&g_asyncup_fifo, (nvmtl_up_rec *)(uintptr_t)token) : NVMTL_UP_CLAIM_FINISH;
     pthread_mutex_unlock(&g_asyncup_mutex);
-    return token;
+    return nvmtl_asyncup_claimed(token, kind);
 }
-// Store a new handle and return the one it replaces (0 for none). Another thread uploading to the same image can have
-// stored its handle after this one read the image's handle without the lock; the caller finishes the returned handle
-// outside the lock, so that upload is neither leaked nor left running when the image is freed.
+// Store a new handle and return the record of the one it replaces, when that one still holds its copy (0 otherwise).
+// Another thread uploading to the same image can have stored its handle after this one read the image's handle without
+// the lock; the caller finishes the returned record outside the lock, so that upload is neither leaked nor left running
+// when the image is freed. The image keeps the record's header, which goes on the reaper's list when the reaper is on.
 static uint64_t nvmtl_asyncup_store(nvk_image *img, uint64_t token)
 {
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    const int reap = nvmtl_asyncup_reap_on();
     atomic_fetch_add(&g_asyncup_held, 1);
     atomic_fetch_add(&g_asyncup_held_bytes, au->bytes);
     pthread_mutex_lock(&g_asyncup_mutex);
     nvmtl_up_state s = { img->up_token };
-    const uint64_t old = nvmtl_up_set(&s, token);
+    const uint64_t old = nvmtl_up_set(&s, (uint64_t)(uintptr_t)au->rec);
     img->up_token = s.infl;
+    if (reap) nvmtl_up_fifo_push(&g_asyncup_fifo, au->rec);
+    const nvmtl_up_claim_kind kind = old ? nvmtl_up_claim(&g_asyncup_fifo, (nvmtl_up_rec *)(uintptr_t)old) : NVMTL_UP_CLAIM_FINISH;
     pthread_mutex_unlock(&g_asyncup_mutex);
-    return old;
+    return nvmtl_asyncup_claimed(old, kind);
 }
 // The copy of an async upload was dropped by a channel rebuild after a GPU fault (nvmtl_vk_submit_finish answered -1).
 // The image was taken as written when the copy was queued, and its surface as synchronised, so write it again now from
@@ -10304,11 +10577,47 @@ static void nvmtl_asyncup_finish(nvk_image *img, uint64_t token)
 {
     if (!token) return;
     nvmtl_asyncup *au = (nvmtl_asyncup *)(uintptr_t)token;
+    free(au->rec);   // no image names it any more (taken or replaced), and it is off the reaper's list (nvmtl_up_claim)
+    au->rec = NULL;
     if (nvmtl_vk_submit_finish(&au->infl) == -1 && img) nvmtl_asyncup_redo(img, au);
     atomic_fetch_sub(&g_asyncup_held, 1);   // every handle finished here was counted in by nvmtl_asyncup_store
     atomic_fetch_sub(&g_asyncup_held_bytes, au->bytes);
     nvmtl_vk_buffer_destroy(&au->stage);
     free(au);
+}
+// The fence poll of the reaper's sweep, under g_asyncup_mutex: a zero timeout, so it never blocks. A copy that a channel
+// rebuild dropped is told apart, so that it is left to the image's next take, which makes it again.
+static int nvmtl_asyncup_probe(void *ctx, void *body)
+{
+    (void)ctx;
+    const VkFence fence = ((nvmtl_asyncup *)body)->infl.fence;
+    if (g_state != 1 || pvkWaitForFences(g_dev, 1, &fence, VK_TRUE, 0) != VK_SUCCESS) return NVMTL_UP_PROBE_PENDING;
+    return pnvk_fence_dropped && nvmtl_drop_seen(pnvk_fence_dropped(g_dev, fence)) ? NVMTL_UP_PROBE_DROPPED : NVMTL_UP_PROBE_RAN;
+}
+// Give back the records whose copy has finished (nvmtl_up_reap.h): claimed under the lock, released outside it, as a
+// take would (the submission finished without a wait, since its fence has signalled; the staging destroyed; the counts
+// lowered). Called by an upload before it judges the room, so a texture uploaded once no longer keeps a place and its
+// staging for its whole life. The release can run the image grace's reaps, which can destroy an image whose handle is
+// one of the records claimed here: that take finds it BUSY and leaves it to this loop, so nothing waits on itself.
+static void nvmtl_asyncup_sweep(void)
+{
+    if (!nvmtl_asyncup_reap_on() || !atomic_load(&g_asyncup_held)) return;
+    nvmtl_up_rec *got[NVMTL_UP_SWEEP_MAX];
+    pthread_mutex_lock(&g_asyncup_mutex);
+    const unsigned n = nvmtl_up_sweep_collect(&g_asyncup_fifo, NVMTL_UP_SWEEP_MAX, nvmtl_asyncup_probe, NULL, got);
+    pthread_mutex_unlock(&g_asyncup_mutex);
+    for (unsigned i = 0; i < n; i++) {
+        nvmtl_asyncup *const b = (nvmtl_asyncup *)got[i]->body;
+        (void)nvmtl_vk_submit_finish(&b->infl);   // not dropped (the poll said so): there is no copy to make again
+        atomic_fetch_sub(&g_asyncup_held, 1);
+        atomic_fetch_sub(&g_asyncup_held_bytes, b->bytes);
+        nvmtl_vk_buffer_destroy(&b->stage);
+        free(b);
+        pthread_mutex_lock(&g_asyncup_mutex);
+        const int orphan = nvmtl_up_release_done(got[i]);
+        pthread_mutex_unlock(&g_asyncup_mutex);
+        if (orphan) free(got[i]);
+    }
 }
 // Public guard for the consumers (readback, surface-out, migration): finish a pending upload first.
 void nvmtl_vk_image_upload_barrier(nvk_image *img) { nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img)); }
@@ -10342,11 +10651,16 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
         // a prior async upload to THIS image must land before we overwrite the texture or its staging
         if (finish_first) nvmtl_asyncup_finish(img, nvmtl_asyncup_take(img));
         // The room is judged after that finish, so a texture uploaded again every frame gives back its place first and
-        // keeps it. Without room the upload takes the synchronous path below, which holds nothing once it returns.
+        // keeps it, and after the sweep, which gives back the places of uploads to other textures whose copy has
+        // finished. Without room the upload takes the synchronous path below, which holds nothing once it returns.
+        nvmtl_asyncup_sweep();
         const uint64_t held = atomic_load(&g_asyncup_held), held_bytes = atomic_load(&g_asyncup_held_bytes);
         if (nvmtl_up_room(held, held_bytes, bytes)) {
             au = (nvmtl_asyncup *)calloc(1, sizeof *au);
-            if (!au || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) { free(au); au = NULL; }   // fall back to sync
+            if (!au || !(au->rec = nvmtl_asyncup_rec_new(au)) || nvmtl_vk_buffer_create(bytes, 1, &au->stage)) {
+                if (au) free(au->rec);
+                free(au); au = NULL;   // fall back to sync
+            }
             else au->bytes = bytes;
         } else {
             static _Atomic int said;
@@ -10364,7 +10678,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
     }
     uint8_t *dst = (uint8_t *)stageb->map;
     for (uint32_t r = 0; r < rows; r++) memcpy(dst + (size_t)r * cols * bpp, (const uint8_t *)src + (size_t)r * row_bytes, (size_t)cols * bpp);
-    if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au); } return -1; }
+    if (nvmtl_vk_cmd_begin(q, c)) { if (au) { nvmtl_vk_buffer_destroy(&au->stage); free(au->rec); free(au); } return -1; }
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 }, { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
@@ -10375,7 +10689,7 @@ int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const 
         // submit without waiting; queue order + the SHADER_READ barrier above order the copy before any later
         // draw that samples this image, and the handle is finished before a readback, destroy or re-upload.
         au->bic = bic;   // kept so that a copy a channel rebuild drops can be made again (nvmtl_asyncup_redo)
-        if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au); return -1; }
+        if (nvmtl_vk_submit_begin_at(c, &au->infl, "tex upload async")) { nvmtl_vk_buffer_destroy(&au->stage); free(au->rec); free(au); return -1; }
         // A second thread's upload to this image may have been stored since the image's handle was read above: it is
         // handed back here and finished, outside the lock, rather than overwritten and lost.
         nvmtl_asyncup_finish(img, nvmtl_asyncup_store(img, (uint64_t)(uintptr_t)au));
@@ -10467,6 +10781,7 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
     pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, sizeof pc, &pc);
     pvkCmdSetPrimitiveTopology(c->cb, VK_PRIMITIVE_TOPOLOGY_PATCH_LIST);
     pvkCmdSetPrimitiveRestartEnable(c->cb, VK_FALSE);
+    nvmtl_dc_topo_unknown(&c->dc);   // set behind the draw cache: the next ordinary draw sets its own again
     if (ind) pvkCmdDrawIndirect(c->cb, (VkBuffer)ind->buf, indoff, 1, 0);
     else pvkCmdDraw(c->cb, count, instances ? instances : 1, start, baseInstance);
     { static int told; if (!told++) nvlog("tess: first patch draw in this process (%s)", ind ? "indirect" : "direct"); }
@@ -10475,7 +10790,9 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off)
 {
     if (!nvmtl_index_range_ok(idx, idxOff)) return;
-    pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    const VkIndexType type = is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+    if (nvmtl_dc_ib(&c->dc, nvmtl_bind_cache_on(), (uint64_t)(uintptr_t)idx->buf, idxOff, (uint32_t)type))
+        pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, type);
     if (c->nobind) return;
     NVMTL_SEMU_DRAW(c, pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0));
 }
@@ -11832,6 +12149,7 @@ static int nvmtl_vk_heap_create_body(size_t size, int host_visible, nvk_heap *ou
     { uint64_t hbud = 0, hused = 0, hfree = 0; int hmeas = 0;
       int hgate = host_visible ? 0 : nvmtl_vk_vram_wall(size, &hfree, &hbud, &hused, &hmeas);
       VkResult r_ = hgate ? VK_ERROR_OUT_OF_DEVICE_MEMORY : pvkAllocateMemory(g_dev, &mai, NULL, &mem);
+      if (!hgate && !host_visible && r_ == VK_ERROR_OUT_OF_DEVICE_MEMORY && nvmtl_texrc_give_back_all()) r_ = pvkAllocateMemory(g_dev, &mai, NULL, &mem);   // RM refused: parked images first
       if (r_ == VK_SUCCESS && !host_visible) nvmtl_vk_budget_charge(size);
       if (r_ == VK_ERROR_OUT_OF_DEVICE_MEMORY && !host_visible) {
           int mt2 = -1; for (uint32_t i = 0; i < g_memp.memoryTypeCount; i++) if ((bits & (1u << i)) && !(g_memp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt2 = (int)i; break; }
@@ -12590,30 +12908,42 @@ int nvmtl_vk_dlss_available(void)
  * format. The Metal texture's view can carry depth AND stencil (a combined depth-stencil texture), several levels or
  * layers, or a swizzle; the core turns each view into a descriptor handle (VK_NVX_image_view_handle).
  * The view is made ONCE per image and kept until the image itself is destroyed (nvmtl_dlss_views_drop, called from
- * nvmtl_vk_image_destroy_now after the GPU is done with it). The core keeps the handle it took for a view across
- * frames; a view destroyed and re-created every frame can come back with the same handle value naming another
- * image's descriptor. */
-#define DLSS_VIEW_CACHE 48
-typedef struct { VkImage img; uint32_t fmt; VkImageAspectFlags aspect; int rw; VkImageView v; } dlss_view_ent;
-static dlss_view_ent g_dlss_vc[DLSS_VIEW_CACHE];
+ * nvmtl_vk_image_destroy_now after the GPU is done with it, and from nvmtl_vk_image_free_backing for a backing the
+ * residency pager retired) or given a new backing (nvmtl_vk_image_reback, through the grace). The core keeps the handle
+ * it took for a view across frames; a view destroyed and re-created every frame can come back with the same handle
+ * value naming another image's descriptor. The table grows (nvmtl_dlss_views.h): a fixed one, once full, made a view
+ * for every evaluation that was never destroyed and filled the device's descriptor table. */
+static nvmtl_dvc g_dlss_vc;
 static pthread_mutex_t g_dlss_vc_mu = PTHREAD_MUTEX_INITIALIZER;
 static void nvmtl_dlss_views_drop(VkImage img)
 {
     if (!img) return;
+    void *v[8]; uint32_t n;
     pthread_mutex_lock(&g_dlss_vc_mu);
-    for (int k = 0; k < DLSS_VIEW_CACHE; k++)
-        if (g_dlss_vc[k].img == img) { pvkDestroyImageView(g_dev, g_dlss_vc[k].v, NULL); memset(&g_dlss_vc[k], 0, sizeof g_dlss_vc[k]); }
+    while ((n = nvmtl_dvc_take(&g_dlss_vc, (const void *)img, v, 8)))
+        for (uint32_t k = 0; k < n; k++) pvkDestroyImageView(g_dev, (VkImageView)v[k], NULL);
     pthread_mutex_unlock(&g_dlss_vc_mu);
+}
+/* An image given a new backing keeps its Metal texture, and the old VkImage goes at once: its DLSS views leave the
+ * table now (so a later image with the same handle value gets views of its own) and are destroyed through the grace
+ * like the image's main view, since a submit in flight may still hold their descriptor indices. */
+static void nvmtl_dlss_views_retire(VkImage img)
+{
+    if (!img) return;
+    void *v[8]; uint32_t n;
+    for (;;) {
+        pthread_mutex_lock(&g_dlss_vc_mu);
+        n = nvmtl_dvc_take(&g_dlss_vc, (const void *)img, v, 8);
+        pthread_mutex_unlock(&g_dlss_vc_mu);
+        if (!n) break;
+        for (uint32_t k = 0; k < n; k++) nvmtl_vk_image_view_destroy(v[k]);
+    }
 }
 static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
 {
     pthread_mutex_lock(&g_dlss_vc_mu);
-    int freek = -1;
-    for (int k = 0; k < DLSS_VIEW_CACHE; k++) {
-        const dlss_view_ent *e = &g_dlss_vc[k];
-        if (e->img == (VkImage)i->img && e->fmt == i->fmt && e->aspect == aspect && e->rw == rw) { VkImageView v = e->v; pthread_mutex_unlock(&g_dlss_vc_mu); return v; }
-        if (!e->img && freek < 0) freek = k;
-    }
+    void *hit = nvmtl_dvc_find(&g_dlss_vc, i->img, i->fmt, (uint32_t)aspect, rw);
+    if (hit) { pthread_mutex_unlock(&g_dlss_vc_mu); return (VkImageView)hit; }
     // The view keeps every usage of its image (no VkImageViewUsageCreateInfo): the core asks for a sampled handle of
     // the output as well as a storage one, and NVK makes a view's sampled or storage descriptor only for a usage the
     // view has - a storage-only output view returned sampled handle 0, a null descriptor the GPU faulted on (VA 0x0).
@@ -12622,9 +12952,10 @@ static VkImageView dlss_view(nvk_image *i, VkImageAspectFlags aspect, int rw)
     VkImageView v = VK_NULL_HANDLE;
     const VkResult r = pvkCreateImageView(g_dev, &vci, NULL, &v);
     if (r != VK_SUCCESS) { pthread_mutex_unlock(&g_dlss_vc_mu); nvlog("dlss: own %s view of VkFormat %u -> %d", rw ? "storage" : "sampled", i->fmt, r); return VK_NULL_HANDLE; }
-    if (freek < 0) {   // full: a game that keeps more scaler textures alive than this; the new view is not cached and is
-        nvlog("dlss: view cache full (%d) - a view is made for this evaluation only and kept", DLSS_VIEW_CACHE);   // leaked, never reused
-    } else g_dlss_vc[freek] = (dlss_view_ent){ (VkImage)i->img, i->fmt, aspect, rw, v };
+    const nvmtl_dvc_ent ent = { i->img, i->fmt, (uint32_t)aspect, rw, (void *)v };
+    if (nvmtl_dvc_add(&g_dlss_vc, &ent)) {   // out of memory: the new view is not cached; it serves this evaluation and is kept
+        nvlog("dlss: view cache cannot grow past %u - a view is made for this evaluation only and kept", g_dlss_vc.cap);   // leaked, never reused
+    }
     nvlog("dlss: own view %p of image %p (VkFormat %u %ux%u usage 0x%x, %s)", (void *)v, i->img, i->fmt, i->w, i->h, i->usage, rw ? "output" : "input");
     pthread_mutex_unlock(&g_dlss_vc_mu);
     return v;
@@ -12688,13 +13019,14 @@ int nvmtl_vk_cmd_dlss(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_args *a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         // The feature's setup (weights and tables the core uploads) is recorded into this same command buffer: its
         // writes must land before the first evaluation reads them. The standalone check submitted and waited between.
         nvmtl_vk_cmd_barrier(c);
     }
     c->direct_sass = 1;   // the core launches compiled machine code from this buffer: never reuse its pool
     const int rc = nvmtl_dlss_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
@@ -12746,11 +13078,12 @@ int nvmtl_vk_cmd_dlss_rr(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_rr_a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_rr_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_rr_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
     }
     c->direct_sass = 1;
     const int rc = nvmtl_dlss_rr_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }
@@ -12797,11 +13130,12 @@ int nvmtl_vk_cmd_dlss_fg(nvk_cmdbuf *c, void **feature, const nvmtl_vk_dlss_fg_a
         f = NULL;
     }
     if (!f) {
-        f = nvmtl_dlss_fg_feature_create(c->cb, &want); if (!f) return -1; *feature = f;
+        f = nvmtl_dlss_fg_feature_create(c->cb, &want); nvmtl_dc_invalidate(&c->dc); if (!f) return -1; *feature = f;
         nvmtl_vk_cmd_barrier(c);   // the feature's setup is recorded into this buffer: it must land before the first evaluation
     }
     c->direct_sass = 1;
     const int rc = nvmtl_dlss_fg_evaluate(c->cb, f, &e);
+    nvmtl_dc_invalidate(&c->dc);   // NGX recorded its feature setup and evaluation into this command buffer
     nvmtl_vk_cmd_barrier(c);
     return rc;
 }

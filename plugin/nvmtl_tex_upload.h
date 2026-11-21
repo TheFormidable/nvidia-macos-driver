@@ -30,7 +30,8 @@
 #include <stdint.h>
 
 // Per-image async-upload bookkeeping. `infl` is an opaque handle to the in-flight submission (the plugin
-// stores an nvmtl_inflight pointer, cast to uint64_t); 0 means no async upload is in flight for this image.
+// stores a pointer to the upload's small header, nvmtl_up_rec in nvmtl_up_reap.h, cast to uint64_t); 0 means no
+// async upload is pending for this image.
 typedef struct { uint64_t infl; } nvmtl_up_state;
 
 typedef enum {
@@ -70,8 +71,9 @@ static inline uint64_t nvmtl_up_set(nvmtl_up_state *s, uint64_t infl)
 static inline void nvmtl_up_clear(nvmtl_up_state *s) { if (s) s->infl = 0; }
 
 // How much the pending asynchronous uploads of the whole process may hold. A pending upload is kept until its image
-// is uploaded again, read back, migrated or destroyed, and a texture that is uploaded once and only sampled afterwards
-// keeps it for its whole life. Each one holds its own host-visible staging buffer, the size of the upload, and also a
+// is uploaded again, read back, migrated or destroyed, or until a later upload finds its copy finished and gives it back
+// (nvmtl_up_reap.h); without that reaper (NVMTL_ASYNCUP_REAP=0) a texture that is uploaded once and only sampled
+// afterwards keeps it for its whole life. Each one holds its own host-visible staging buffer, the size of the upload, and also a
 // command pool, a timestamp query pool and a fence. The byte limit bounds the memory; the count limit bounds the
 // driver objects, which many small uploads would pile up long before they reach the byte limit. Without room the
 // upload takes the synchronous path (the shared per-thread staging buffer and a wait), which holds nothing afterwards.

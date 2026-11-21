@@ -39,6 +39,11 @@
 #        and the image and sampler tables above all, stays in video memory behind BAR1 by default in every process but
 #        WindowServer, for memory that is not shared; what the CPU reads back, descriptor pools above all, keeps system
 #        RAM; NVK_LOCAL_MAP_SYSMEM=1 in nvrm610.conf keeps all of it in system RAM as in 3.0).
+#        then nvk-gpu-caps (3.0.3) and nvk-desc-alloc (3.0.6), each described in its own header,
+#        then nvk-surface-keep (3.0.7: two exports for a caller that keeps its import of a surface's video memory
+#        across frames, the Zink frontend's presentation: nvmtl_nvk_import_cookie, the kernel's name for the block the
+#        last import on the thread received, and nvmtl_nvk_surface_dirty_at, a mark the kernel takes only while the
+#        surface still has that block; nothing that existed changes, and a caller that does not ask is not told).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
@@ -83,7 +88,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps nvk-desc-alloc nvk-surface-keep" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
