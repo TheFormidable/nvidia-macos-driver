@@ -202,7 +202,7 @@ presents through an IOSurface that NVK imports. No frame goes through a CPU copy
 
 Through 3.0.6 the thread that swapped did all of it for every frame: it imported the surface's video memory, sent the
 copy, slept until the GPU had finished the frame, marked and tagged the surface and presented the drawable. Measured
-in a Minecraft modpack at 55 to 64 frames per second on an RTX 5050, that thread spent 30 to 40 % of its time asleep
+in a Minecraft modpack at 55 to 64 frames per second on an RTX 5050, that thread spent 30 to 44 % of its time asleep
 in the swap and 6 to 8 % importing, for a layer that hands out the same three surfaces in turn.
 
 Since 3.0.7 a swap is one frame ahead (`zink/nvk_present_queue.h`, the second half of `zink/nvk_present.c`):
