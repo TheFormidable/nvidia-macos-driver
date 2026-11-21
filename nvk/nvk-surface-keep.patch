@@ -1,0 +1,121 @@
+nvk-surface-keep: a caller may keep its import of a surface's video memory for longer than one frame (3.0.7).
+NullMoth's own change (not an upstream Mesa commit).
+
+The Zink frontend presents by copying its frame into the video memory of the drawable's IOSurface. Through 3.0.6 it
+imported that memory again for every frame (a grant from the accelerator, a duplicate of the RM object, a GPU address
+range bound and unbound): 6 to 8 % of the thread that swaps in a Minecraft modpack, for a CAMetalLayer that hands out
+the same three surfaces in turn. To keep an import, the caller has to learn when the surface no longer has the block
+it imported, because a mark (nvmtl_nvk_surface_dirty) names only the surface and would then be taken for memory the
+caller never wrote.
+
+The kernel's grant now answers with a name for the block it shared, in the `pad` word of the escape (NVRM.kext 3.0.7,
+kexts/NVRM/nvrm_surfshare_abi.h; an older kernel copies the word back as it was sent, 0). Two exports give that to a
+caller, which finds them by name and keeps no import when either is missing:
+
+  nvmtl_nvk_import_cookie()            the name the last import on this thread received. It is cleared when an import
+                                       starts and set only when the import has succeeded, so a caller that reads it
+                                       right after vkAllocateMemory returned VK_SUCCESS reads the name of the memory
+                                       it holds, and 0 when the kernel did not tell.
+  nvmtl_nvk_surface_dirty_at(…cookie)  the mark of nvmtl_nvk_surface_dirty with that name in `pad`: the kernel takes
+                                       it only if the surface still has that block and answers 0x8000000A
+                                       (NVRM_SS_MOVED) otherwise, with nothing marked.
+
+Nothing that exists changes: nvmtl_nvk_stage_import, nvmtl_nvk_surface_dirty and the import itself send and do what
+they did, and a caller that does not ask for the name is not told. What the import relies on is unchanged too: the
+duplicate of the RM object keeps the memory alive in this client for as long as the VkDeviceMemory lives, whatever
+the surface does with its own handle meanwhile (the Metal plugin's imports have always relied on that).
+
+diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
+--- a/src/nouveau/vulkan/nvk_device_memory.c
++++ b/src/nouveau/vulkan/nvk_device_memory.c
+@@ -138,6 +138,17 @@
+    return nvkmd_nvrm_surface_dirty(dev->nvkmd, surfaceID, plane);
+ }
+ 
++/* nvmtl_nvk_surface_dirty for an import that is kept: see nvkmd_nvrm_surface_dirty_at. A caller looks this up by name
++ * together with nvmtl_nvk_import_cookie, and keeps no import when either is missing. */
++__attribute__((visibility("default"))) uint32_t   /* exported: the Zink frontend's dlsym */
++nvmtl_nvk_surface_dirty_at(VkDevice device, uint32_t surfaceID, uint32_t plane, uint32_t cookie)
++{
++   VK_FROM_HANDLE(nvk_device, dev, device);
++   if (dev == NULL || dev->nvkmd == NULL)
++      return 0x80000002u;   /* NVRM_SS_OFF */
++   return nvkmd_nvrm_surface_dirty_at(dev->nvkmd, surfaceID, plane, cookie);
++}
++
+ /* The surface fence: see nvkmd_nvrm_fence. The plugin finds this by name and calls it through its own prototype, so the
+  * signature never changes; a new one gets a new name. */
+ __attribute__((visibility("default"))) uint32_t   /* exported: plugin dlsym */
+diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
+--- a/src/nouveau/vulkan/nvkmd/nvkmd.h
++++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
+@@ -532,6 +532,14 @@
+  * a CPU lock then pages the VRAM off on the copy engine). 0 = the kernel took it (the plugin may skip its copy-out). */
+ uint32_t nvkmd_nvrm_surface_dirty(struct nvkmd_dev *dev, uint32_t surfaceID, uint32_t plane);
+ uint32_t nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID, uint32_t plane);   /* exported: plugin dlsym */
++/* An import kept for longer than one frame (the Zink frontend's presentation queue). nvmtl_nvk_import_cookie: the
++ * kernel's name for the block the last vkAllocateMemory import on this thread received, read right after that call
++ * returns VK_SUCCESS; 0 = not told (a kernel before 3.0.7, or the import failed): import again for every frame.
++ * nvmtl_nvk_surface_dirty_at: the mark of nvmtl_nvk_surface_dirty, taken only if the surface still has that block;
++ * 0x8000000A (NVRM_SS_MOVED) = it has another one or none, nothing was marked, and the import has to be dropped. */
++uint32_t nvmtl_nvk_import_cookie(void);   /* exported: the Zink frontend's dlsym */
++uint32_t nvkmd_nvrm_surface_dirty_at(struct nvkmd_dev *dev, uint32_t surfaceID, uint32_t plane, uint32_t cookie);
++uint32_t nvmtl_nvk_surface_dirty_at(VkDevice device, uint32_t surfaceID, uint32_t plane, uint32_t cookie);   /* exported: the Zink frontend's dlsym */
+ /* The surface fence (NVRM.kext selector 12, nvkmd/nvrm/nvrm_fence_abi.h): one request of the plugin. op is QUERY, OPEN,
+  * ARM, CLOSE or WAIT; ARM names the work by sync (the VkFence's payload), WAIT the surface by ids[0] and planes[0].
+  * Returns NVRM_FENCE_ST_*, NVRM_FENCE_ST_OFF when this process has no fence. out: QUERY { active, accel, capGpuMs,
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_mem.c
+@@ -154,6 +154,27 @@
+    return nvRmApiSurfShare(&rm, NVRM_ESC_SURF_DIRTY, &e);
+ }
+ 
++/* A caller that keeps an import for longer than one frame names the block it imported (nvkmd.h). The kernel's answer
++ * to the last import that succeeded on this thread; 0 after one that failed, and from a kernel that does not tell. */
++static __thread uint32_t nvrm_import_cookie;
++__attribute__((visibility("default"))) uint32_t   /* exported: the Zink frontend's dlsym */
++nvmtl_nvk_import_cookie(void)
++{
++   return nvrm_import_cookie;
++}
++
++/* nvkmd_nvrm_surface_dirty for a kept import: the mark is taken only if the surface still has the block `cookie` names. */
++uint32_t
++nvkmd_nvrm_surface_dirty_at(struct nvkmd_dev *_dev, uint32_t surfaceID, uint32_t plane, uint32_t cookie)
++{
++   struct nvkmd_nvrm_dev *dev = nvkmd_nvrm_dev(_dev);
++   struct nvkmd_nvrm_pdev *pdev = nvkmd_nvrm_pdev(dev->base.pdev);
++   struct NvRmApi rm;
++   nvkmd_nvrm_dev_api_ctl(pdev, &rm);
++   struct NVRMSurfShareEsc e = { .surfaceID = surfaceID, .plane = plane, .hClient = pdev->hClient, .pad = cookie };
++   return nvRmApiSurfShare(&rm, NVRM_ESC_SURF_DIRTY, &e);
++}
++
+ static VkResult
+ create_mem_or_close_bo(struct nvkmd_nvrm_dev *dev,
+                        struct vk_object_base *log_obj,
+@@ -409,6 +430,7 @@
+ {
+    /* item 7 share: the fd carries nothing on XNU (no dma-buf); the record staged on THIS thread names the surface.
+     * one import per stage — a record left staged must never be imported by an unrelated allocation. */
++   nvrm_import_cookie = 0;   /* an import that fails names no block */
+    if (!nvrm_import_is_staged)
+       return vk_errorf(log_obj, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                        "nvkmd_nvrm_import_dma_buf: fd %d has no staged surface record (nvmtl_nvk_stage_import)", fd);
+@@ -437,8 +459,13 @@
+                        "import: RM_DUP_OBJECT(client %#x, mem %#x) -> NV_STATUS %#x", e.hSrcClient, e.hSrcMemory, st);
+ 
+    /* VRAM, generic pte kind: the plugin places a LINEAR image at the surface's bytesPerRow in it */
+-   return create_mem_or_close_bo(dev, log_obj, NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM | NVKMD_MEM_SHARED, h, e.size, NVKMD_VA_GART, 0,
+-                                 _dev->pdev->bind_align_B, mem_out);
++   const VkResult result = create_mem_or_close_bo(dev, log_obj, NVKMD_MEM_LOCAL | NVKMD_MEM_VRAM | NVKMD_MEM_SHARED, h, e.size,
++                                                  NVKMD_VA_GART, 0, _dev->pdev->bind_align_B, mem_out);
++   /* The block that was shared: the kernel's name for it (3.0.7), 0 from a kernel that copies the word back as sent.
++    * Set only here, once the import exists, so a caller never reads the name of an import it did not get. */
++   if (result == VK_SUCCESS)
++      nvrm_import_cookie = e.pad;
++   return result;
+ }
+ 
+ /* b72 host-pointer import — the GPU reads and writes the CALLER'S pages (Metal newBufferWithBytesNoCopy). The kext
