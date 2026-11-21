@@ -452,8 +452,8 @@ static CAMetalLayer *zw_layer(NSView *view, int *count)
    return found;
 }
 
-/* The adapter's sublayer (zink/native_drawable.m:117-154): one CAMetalLayer, BGRA8, sized as the drawable, on the
- * card's Metal device (matched by the NVAccel registry entry, :56-78). */
+/* The adapter's sublayer (zink/native_drawable.m:97-131): one CAMetalLayer, BGRA8, sized as the drawable, on the
+ * card's Metal device (matched by the NVAccel registry entry, :36-58). */
 static void zw_check_layer(const char *name, ZKWin *z)
 {
    int count = 0;
@@ -578,7 +578,7 @@ static void zw_present(ZKWin *z, int how, zw_tally *t)
    if (dx) ++t->bad;
    if (!zk_software) {
       /* nvk_cgl_last_error() is per thread; a present that only defers (returns 2) clears it
-       * (zink/nvk_cgl.c:1161-1203). */
+       * (zink/nvk_cgl.c:1161-1204). */
       const char *last = zk_last_error();
       if (strcmp(last, "none")) {
          if (!t->last_error_bad)
@@ -642,7 +642,7 @@ static void sub_basic(void)
       zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &t);
       zw_pump(0.004);
    }
-   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1193). */
+   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1194). */
    zw_report("frames", &t, 57);
    zw_check_layer("layer", z);
    zw_close(z);
@@ -781,7 +781,7 @@ static void sub_noncurrent(void)
    zw_report("warm-up", &warm, 3);
 
    /* No context current: swap_drawable finds the bridge by engine and presents by a borrowed bind (zink/nvk_cgl.c:
-    * 501-513, :1229-1259). */
+    * 501-513, :1230-1260). */
    zw_draw(z, 10, zw_opaque, &none);
    CGLSetCurrentContext(NULL);
    zw_present(z, ZW_CGL_FLUSH, &none);
@@ -887,7 +887,7 @@ static void *zw_render_main(void *unused)
       if (!zw_wait_go()) return NULL;
       double start = zk_now();
       /* The first present from this thread dispatches the layer's setup to main and is deferred
-       * (zink/native_drawable.m:175-184); main keeps its run loop going meanwhile. */
+       * (zink/native_drawable.m:162-168); main keeps its run loop going meanwhile. */
       for (int i = 0; i < 120; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &zw_thread_tally);
       zw_thread_seconds = zk_now() - start;
       [NSOpenGLContext clearCurrentContext];
@@ -981,7 +981,7 @@ static void sub_clear(void)
       zw_tally before = {0}, cleared = {0}, again = {0};
       for (int i = 0; i < 10; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &before);
       zw_report("before", &before, 8);
-      /* The adapter's clearDrawable hook removes the layer (zink/appkit.m:117-127, zink/native_drawable.m:83-99). */
+      /* The adapter's clearDrawable hook removes the layer (zink/appkit.m:117-127, zink/native_drawable.m:81-95). */
       [z.context clearDrawable];
       zw_pump(0.2);
       zw_layer(z.view, &count);

@@ -17,8 +17,9 @@
  *
  * This file knows no Apple type, so tools/test_zink_opacity.py runs it as it is (tools/zink_opacity_fixture.c), with
  * a clock and a reader of its own, on any machine. A struct nvk_opacity that is all zero bytes asks at its first swap,
- * so a bridge made with calloc needs nothing more. Only the thread that swaps calls nvk_opacity_get; CGL lets one
- * thread at a time use a context. Any thread may call nvk_opacity_changed. */
+ * so a bridge made with calloc needs nothing more. Only the thread that swaps calls nvk_opacity_get: its plain fields
+ * are per-swap state of the bridge like the bridge's others, and CGL leaves it to the application that two threads do
+ * not swap one context at once. Any thread may call nvk_opacity_changed. */
 #define NVK_OPACITY_KEEP_NS 100000000ull   /* 100 ms */
 
 struct nvk_opacity {

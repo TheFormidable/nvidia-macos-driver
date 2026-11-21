@@ -21,18 +21,19 @@ gives in frames is for a capture on the card to say.
 - **A swap asks for the drawable's opacity once, and the answer is kept for a tenth of a second.** Through 3.0.7 a
   swap asked twice: once for the layer (`nvk_native_acquire`, which sets the CAMetalLayer's `opaque`) and once for the
   copy (`nvk_zink_present_frame`, whose blit writes alpha 1 into an opaque drawable); a swap that went on to the
-  IOSurface path asked a third time. Now a swap asks at most once and gives the layer, the copy and the IOSurface path
-  the same answer, so they cannot disagree within a swap. A context keeps that answer (`zink/nvk_opacity.h`) and asks
-  again on the first swap at least 100 ms after it last asked, on a clock that does not move while the machine sleeps.
-  It asks at once on its first swap, after an ask that failed (which answers opaque, as 3.0.7 did, and is not kept),
-  and after the adapter has seen the context's output change: a new size of the drawable, a view bound or unbound, the
-  native target removed, and a native acquire that gave no drawable (the layer is being set up, the window is
-  minimized, the native path fell back, or the view went away). **What it changes for an application:** after an
-  application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps of up to the next 100 ms are
-  still composed with the old value, both the layer's `opaque` and the alpha the copy writes, where 3.0.7 used the new
-  value from the next swap. Where `CGLSetParameter` of that parameter reaches the GLI integer callback the adapter
-  already replaces for `CGLTexImageIOSurface2D`, the next swap asks at once; whether it does is not known, and nothing
-  depends on it. Way back: `NVK_ZINK_OPACITY_KEEP=0`. Checked with `tools/test_zink_opacity.py`.
+  IOSurface path asked there instead of for the copy. Now a swap asks at most once and gives the layer, the copy and the
+  IOSurface path the same answer, so they cannot disagree within a swap. A context keeps that answer
+  (`zink/nvk_opacity.h`) and asks again on the first swap at least 100 ms after it last asked, on a clock that does not
+  move while the machine sleeps. It asks at once on its first swap, after an ask that failed (which answers opaque, as
+  3.0.7 did, and is not kept), and after the adapter has seen the context's output change: a new size of the drawable, a
+  view bound or unbound, the native target removed, and a native acquire that gave no drawable (the layer is being set
+  up, the window is minimized, the native path fell back, or the view went away), except a swap that again finds no
+  view. **What it changes for an application:** after an application changes `kCGLCPSurfaceOpacity` of a context that
+  has swapped, the swaps of up to the next 100 ms are still composed with the old value, both the layer's `opaque` and
+  the alpha the copy writes, where 3.0.7 used the new value from the next swap. Where `CGLSetParameter` of that
+  parameter reaches the GLI integer callback the adapter already replaces for `CGLTexImageIOSurface2D`, the next swap
+  asks at once; whether it does is not known, and nothing depends on it. Way back: `NVK_ZINK_OPACITY_KEEP=0`. Checked
+  with `tools/test_zink_opacity.py`.
 
 The card check `zink.win-ctl` changes opacity on a window that has already swapped and judges the three frames after
 each change. It now lets 150 ms pass after each change before those frames, so that it judges the same thing on 3.0.7
@@ -59,7 +60,8 @@ changed), and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` pass the syntax ch
 it had before. `tools/test_zink_opacity.py` runs `nvk_opacity.h` as it is with a clock and a reader of its own (25
 arms, plain and under AddressSanitizer and UndefinedBehaviorSanitizer, with gcc 13 and clang 18), against 13 copies
 with one rule broken each, every one of which fails as it has to, and reads the adapter for one ask per swap, the
-switch, and each place that makes the next swap ask. `tools/test_zink_present_queue.py` passes with the end of
+switch, and each place that makes the next swap ask, against 3 copies of the adapter with one such place broken
+each, every one of which fails that reading. `tools/test_zink_present_queue.py` passes with the end of
 `present_drawable` as it is now. Not checked: the clock's cost on a Mac (the frontend's queue already uses it),
 whether `CGLSetParameter` reaches the integer callback, and anything that needs WindowServer.
 
@@ -77,9 +79,9 @@ either). It is one change in three parts, in the kernel, in NVK and in the Zink 
 gets its frame to the screen. It starts from a measurement. 3.0.6 was built and installed on the Mac the audit's
 captures came from (AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3), the first time
 anything after 3.0.2 ran on a card. The modded Minecraft pack of the audit draws through Zink on NVK there now, as
-3.0.3 meant it to, and three `sample` captures with the kernel's counters put it at 55 to 64 frames a second in the
-same pack, which gave 19 and 74 in the two captures of 3.0.2 through Apple's renderer (the scenes were not matched),
-with the GPU 41 to 53 % busy. In those captures the game's thread spent 30 to 44 % of its time asleep in the swap,
+3.0.3 meant it to, and three `sample` captures with the kernel's counters put it at 55 to 64 frames a second with the
+GPU 41 to 53 % busy, in the same pack, which gave 19 and 74 in the two captures of 3.0.2 through Apple's renderer (the
+scenes were not matched). In those captures the game's thread spent 30 to 44 % of its time asleep in the swap,
 until the GPU had finished the frame it had just sent (4.6 to 7.9 ms a frame), and 6 to 8 % importing the drawable's
 video memory into NVK again, for a layer that hands out the same three surfaces in turn. Up to 13 % more went to
 copying the game's buffer uploads into video memory that this machine maps uncached instead of write-combined
@@ -221,8 +223,8 @@ been measured on its own.** What ran, and where:
   fault signals, the word of a refused grant, the settings' blanks, and the tests that were missing (a fence that
   keeps its state, a kernel that remembers each surface's block, the age to the frame, the drawable's ownership run
   instead of read). Three are answered by saying so here and not by code: no card row runs a swap one frame ahead,
-  `nvk_zink_present_frame` is read and not run, and a context that stops swapping keeps its imports until it is
-  destroyed.
+  `nvk_zink_present_frame` is read and not run (as this was written; it has since run on the card in one capture,
+  below), and a context that stops swapping keeps its imports until it is destroyed.
 - **A Mac, the driver built.** At 9682b3a2, whose tree is the one of 7159e8dc, on the Mac of the captures: the outputs
   of earlier builds were removed (`./build.sh clean outputs`) and all 19 components were built from nothing in 512 s
   with 0 warnings, reusing the build tools and the pinned sources already there; then `package`, which installs and
@@ -232,17 +234,17 @@ been measured on its own.** What ran, and where:
   `debug.nvaccel_surf_mark_moved` exists and reads 0. The Mac was started from a test copy of its boot loader
   configuration, not the one on its disk, in which the page attribute table has a write-combining entry:
   `debug.nvrm_pat_wc` reads 1.
-- **The card checks** (`tools/card_selftest.py` at 9682b3a2). Of 134 rows 133 ran: 130 passed, 3 failed, and 1 was
+- **The card checks** (`tools/card_selftest.py` at 9682b3a2). Of 134 rows 133 ran, 130 passed and 3 failed; 1 was
   skipped (`vulkan.smoke-sdl`, which needs SDL3). The OpenGL rows ran through Zink, the card reported no fault (Xid 0)
   and WindowServer stayed the same process. The three rows 3.0.6 had left to pass on the card,
   `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk`, pass. A second round measured the three that
   failed; the fixes of the three checks are not in this release:
   - `zink.win-thread`: the 120 frames of its secondary thread did not finish in their time, and every frame of every
-    Zink window row took about 250 ms. That time is the check's own and not the swap's: 97.2 % of the presentation
-    thread's samples are self time in the check's pixel reader (`zw_pixels`, `tools/card/zink_win_check.m`), which
-    reads its copy of each frame byte by byte from video memory behind BAR1. With `NVK_BAR_VRAM=0` for that process
-    alone the row took 1.5 s instead of 15.4 s and the secondary thread's 120 frames took 1.2 s;
-    `NVK_ZINK_PRESENT_AHEAD=0` changed nothing.
+    Zink window row took about 250 ms. That time is the check's own and not the swap's: in a profile of
+    `zink.win-basic`, 97.2 % of the presentation thread's samples are self time in the check's pixel reader
+    (`zw_pixels`, `tools/card/zink_win_check.m`), which reads its copy of each frame byte by byte from video memory
+    behind BAR1. With `NVK_BAR_VRAM=0` for that process alone `zink.win-basic` took 1.5 s instead of 15.4 s, and the
+    secondary-thread case passed (120 frames in 1.2 s, the run 2.1 s); `NVK_ZINK_PRESENT_AHEAD=0` changed nothing.
   - `v301.async-upload`, case "limit": the driver printed no line of 256 pending uploads. The row's expectation
     predates the reaper of 3.0.6, which gives finished uploads back; with `NVMTL_ASYNCUP_REAP=0` its 9 cases pass.
   - `zink.migrate`, the probe of a context that a second thread takes over after its first thread released it through
