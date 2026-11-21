@@ -155,6 +155,8 @@ env	NVK_QUEUE_COUNT	dev	unset	2.9	-	unreviewed
 env	NVK_STRONG_GLOBAL_LOADS	dev	unset	2.9	-	unreviewed
 env	NVK_SYSMEM_GPU_UNCACHED	dev	unset	2.9	-	unreviewed
 env	NVK_UNBOUND_STAGE_STRICT	dev	unset	2.9	-	unreviewed
+env	NVK_ZINK_PRESENT_AHEAD	escape	on (NVK_ZINK_PRESENT_AHEAD=0 in the settings file: a swap waits for the GPU and publishes its frame itself, as in 3.0.6)	3.0.7	3.2	An OpenGL swap on Zink hands its frame to a presentation thread of the process, which waits for the GPU, marks and tags the surface and presents the drawable; the swap returns at once, and the next swap waits for that frame first, so a context never has more than one frame on its way.
+env	NVK_ZINK_SURFACE_KEEP	escape	on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6)	3.0.7	3.2	The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7.
 env	NVMTL_AIRCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_AIR_DUMP	diag	unset	2.9	-	unreviewed
 env	NVMTL_ANGLE_METAL	dev	unset	2.9	-	unreviewed
@@ -725,6 +727,7 @@ sysctl	debug.nvaccel_res_new	diag	read-only	2.9	-	NVResource objects created
 sysctl	debug.nvaccel_surf_mark_lock_wait_max_us	diag	read-only	3.0	-	longest wait of a surface VRAM mark or grant for the accelerator lock, us
 sysctl	debug.nvaccel_surf_mark_lock_wait_us	diag	read-only	3.0	-	time those marks and grants waited for the accelerator lock, in total, us
 sysctl	debug.nvaccel_surf_mark_lock_waits	diag	read-only	3.0	-	surface VRAM marks and grants that found the accelerator lock taken and waited for it
+sysctl	debug.nvaccel_surf_mark_moved	diag	read-only	3.0.7	-	surface VRAM marks refused because the surface no longer has the block the caller keeps imported
 sysctl	debug.nvaccel_surf_plane_validbits	diag	read-only	3.0	-	OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane)
 sysctl	debug.nvaccel_surf_planes	diag	read-only	3.0	-	1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0)
 sysctl	debug.nvaccel_surface_fence	diag	read-only	3.0	-	1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only)
