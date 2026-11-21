@@ -13,12 +13,16 @@ thread spent 30 to 40 % of its time asleep in the swap, until the GPU had finish
 7.3 ms a frame), and 6 to 8 % importing the drawable's video memory into NVK again, for a layer that hands out the
 same three surfaces in turn. Up to 13 % more went to copying the game's buffer uploads into video memory that this
 machine maps uncached instead of write-combined (`debug.nvrm_pat_wc` reads 0 there); that is decided by the boot
-loader's kernel patches, and nothing here changes it. **Nothing of 3.0.7 has been built on a Mac or run on a card, and
-no gain has been measured.** The kernel part and the frontend were compiled on Linux, NVK was not compiled with its
-new patch at all, and the tests are host tests on Linux (below, "What ran where"). By arithmetic alone a swap that
-neither sleeps nor imports would let that scene run 1.6 to 1.9 times as fast, if the GPU keeps up, and the GPU had
-about that much room; what it gives is for a capture on the card to say. Each of the two changes of what runs by
-default has one way back.
+loader's kernel patches, and nothing here changes it. It was measured afterwards, on the same Mac and the same 3.0.6:
+started from a boot loader that sets entry 6 of the page attribute table to write-combined (`debug.nvrm_pat_wc` reads
+1), the uploads fall from 11 to 14 % of that thread to 1.4 %, the import falls from 7 to 8 % to 1.2 % (the kernel call
+that binds its address range is twenty times as fast), and the scene gives 61 frames a second where the two comparable
+captures gave 55. The sleep in the swap is then 38 % of the thread, 6.3 ms a frame, and what is left of the import is
+small. **Nothing of 3.0.7 has been built on a Mac or run on a card, and no gain has been measured.** The kernel part
+and the frontend were compiled on Linux, of NVK only the syntax of the units its new patch changes was checked, and
+the tests are host tests on Linux (below, "What ran where"). By arithmetic alone a swap that neither sleeps nor
+imports would let that scene run 1.6 to 1.9 times as fast, if the GPU keeps up, and the GPU had about that much room;
+what it gives is for a capture on the card to say. Each of the two changes of what runs by default has one way back.
 
 ### Fixes and changes
 
@@ -106,8 +110,10 @@ OpenGL back to Apple's renderer whole.
   (`_ceutilsMemset_IMPL`). The plugin's Objective-C check reports 0 new errors and 0 new warnings; the plugin is not
   changed. The four files of the Zink frontend compile for macOS in the cross-build with 0 warnings, and `nvk_cgl.c`,
   `appkit.m` and `native_drawable.m` pass a syntax check against the 11.3 SDK. None of these links or runs the driver.
-- **NVK.** `nvk/nvk-surface-keep.patch` applies without fuzz to a tree with the rest of the chain applied. NVK was not
-  compiled with it anywhere.
+- **NVK.** `nvk/nvk-surface-keep.patch` applies without fuzz to a tree with the rest of the chain applied. The two C
+  units it changes and 29 of NVK's other 52 pass clang 18's syntax check for macOS, against the public 11.3 SDK and
+  the 610 kernel-module headers, with the same diagnostics as without the patch; the remaining 23 need generated
+  headers that were not made here, with or without it. NVK was not built or linked with the patch anywhere.
 - **Linux, the tests of this change.** `tools/test_zink_present_queue.py` builds three programs out of the sources as
   they are. The queue's has 24 arms and the frame's 69 (in seven sets: with and without kept imports, switched off, an
   older NVK, an older kernel, how the settings' lines may be written, a fork); both run plain and again under
@@ -153,14 +159,16 @@ judged by a second reviewer before it was written and by a third after: compute 
 that were refused, a DLSS leak, the video-memory pager's waits, and three diagnostics. The last group holds what the
 host suite found when it first ran on a Mac: one defect of the plugin, and three tests that failed for other reasons.
 Every change of what runs by default has one way back, a new row of tier escape in `tools/switches.tsv`; a change with
-none either gives exactly what 3.0.5 gave or only writes a log line. **No driver of 3.0.6 has been built on a Mac or
-run on a card, and no gain has been measured**: it was compiled on Linux only, and its host tests were run on Linux
-and on that Mac, where they build small programs of their own and load nothing (below, "What ran where"). The shares
-quoted from the captures say where the time went in 3.0.2, not what this branch gives back. On that route the waits
-measured put the ceiling of all of this between 1.2 and 1.9 times the frame rate. The larger step for an OpenGL game
-is OpenGL through Zink on NVK (one translation instead of two), which 3.0.3 is expected to let engage on that macOS
-build and which has not run on that card either. With Zink engaged these changes to Apple's renderer do not act; the
-boot argument `nvzink=0` brings that renderer back.
+none either gives exactly what 3.0.5 gave or only writes a log line. **3.0.6 was built on that Mac, installed there by
+its owner and runs on that card, and none of the gains of its own changes has been measured** (below, "What ran
+where"). What was measured there is the route. With 3.0.6 installed, the first driver after 3.0.2 to run on a card,
+that game draws through Zink on NVK (one translation instead of two), which 3.0.3 let engage on that macOS build, and
+three captures put it at 55 to 64 frames a second in the scene that gave 19. With Zink engaged the changes of the
+first group below, to Apple's renderer, do not act, and no capture was taken with the boot argument `nvzink=0`, which
+brings that renderer back; on that route the waits measured in 3.0.2 put the ceiling of those changes between 1.2 and
+1.9 times the frame rate. The shares quoted from the captures say where the time went in 3.0.2, not what this branch
+gives back. The entries below say "not run on a card" as they were written, before that install; none of them has been
+measured on its own since.
 
 ### Fixes and changes
 
@@ -489,7 +497,8 @@ decide nothing.
 
 ### What ran where
 
-**No driver was built on a Mac and nothing ran on a card.** What did run, and where:
+**The driver was built on a Mac and runs on one card; no change of this section has been measured on its own.** What
+ran, and where:
 
 - **Linux, compile checks of the final tree.** The kext compile check of all 25 units passes. The import check against
   the exports of macOS 15 and 26 gives the one line it gives for 3.0.5 (`_ceutilsMemset_IMPL`). The plugin's
@@ -527,9 +536,23 @@ decide nothing.
   `cargo`, and when the runner stopped it at its limit, the translator's `Cargo.lock` stayed rewritten. It now stops
   cargo itself before that limit and puts the file back. The two test files changed after that run were read the same
   way before they went back to the Mac.
-- **Not run anywhere:** a build of the driver, the driver on a card, any game. The three rows
-  `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk` of the card checks still have to pass on the
-  card, and every gain is still to be measured.
+- **A Mac, the driver built.** At 52a77475, on the same Mac, in the working directory that had built 3.0.2
+  (`./build.sh build`, then `package`; the build installs and loads nothing): the eleven components whose sources
+  changed were built again in 420 s, and the three that count their warnings (NVRMFB, the plugin, libnvencvt) report
+  0. The package is 3.0.6, every file matches `SHA256SUMS`, the plugin bundle's seal verifies, and the installer is
+  byte for byte the one of 3.0.2. The commit after it, 3cdddbc5, only corrects the release named in three rows of the
+  switch registry.
+- **The card.** The Mac's owner installed that package on 2026-11-20 over 3.0.2, so 3.0.3, 3.0.4 and 3.0.5 ran on a
+  card for the first time with it. The installer's check passed and kept 3.0.2 as the fallback, the Mac started
+  normally, and no fault was reported in the hours of use that followed, the modded pack among them.
+  `debug.nvrm_pat_wc` reads 0 there, with the table 0x0007010600070106 that the fix-PAT kernel patch of AMD_Vanilla
+  leaves: write-combined mappings are not write-combined on that machine, which is what the diagnostic was written to
+  tell. The modded pack draws through Zink on NVK: three `sample` captures with the kernel's counters give 55 to 64
+  frames a second, the GPU 41 to 53 % busy, in the scene that gave 19 on 3.0.2 through Apple's renderer. Those
+  captures are where 3.0.7 starts (above).
+- **Not run anywhere:** the card checks on 3.0.6, so the three rows `xlate.paths-samplerphi`, `xlate.paths-abarray`
+  and `xlate.paths-walk` still have to pass on the card; and a measurement of any one change on its own. The gain of
+  the changes to Apple's renderer is unmeasured: the game they were measured for no longer uses that renderer.
 
 ## 3.0.5
 
