@@ -1113,6 +1113,16 @@ static int gpu_present(struct nvk_cgl_bridge *b)
    return nvk_zink_swap(b->zink);
 }
 
+/* A frame the Zink frontend took one frame ahead (nvk_zink_present_frame):
+ * the drawable is presented when its pixels are in the surface, and released
+ * either way, on the presentation thread. */
+static int native_frame_done(void *frame, int publish)
+{
+   int presented = publish && nvk_native_publish(frame);
+   nvk_native_release(frame);
+   return presented;
+}
+
 /* 2 is a deferred native acquire, rather than a completed publication. */
 static int present_drawable(CGLContextObj context)
 {
@@ -1132,8 +1142,13 @@ static int present_drawable(CGLContextObj context)
    if (b->native_present) {
       uint32_t vendor = 0, device = 0;
       if (!nvk_zink_device_info(b->zink, &vendor, &device)) return fail("Native presentation requires an NVK device");
+      /* The frame before this one may still be on its way to the layer. It is
+       * waited for here, before the next drawable is asked for: the layer has
+       * its drawables back, and no present of it runs beside nextDrawable. */
+      if (!nvk_zink_present_drain(b->zink)) return fail("Native NVK completion uncertain; drawable quarantined");
       void *frame = NULL; IOSurfaceRef surface = NULL;
       int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque_drawable(context), &frame, &surface);
+      if (acquired != 1) nvk_zink_present_idle(b->zink); /* No drawable: nothing to keep imported for. */
       if (acquired == 2) return 2; /* Main-thread setup/resize or minimized window. */
       if (acquired != 1) {
          if (acquired == NVK_NATIVE_NO_VIEW) {
@@ -1151,12 +1166,15 @@ static int present_drawable(CGLContextObj context)
          /* Early Cocoa swaps may precede setView/update. Keep the context
           * eligible for native presentation once that view is attached. */
       } else {
-      int copied = nvk_zink_present_native(b->zink, surface, opaque_drawable(context));
+      int copied = nvk_zink_present_frame(b->zink, surface, opaque_drawable(context), native_frame_done, frame);
       if (copied < 0) {
          /* The retained frame pins the drawable while uncertain GPU work can
           * still reference its pages. The Zink share group is quarantined. */
          return fail("Native NVK completion uncertain; drawable quarantined");
       }
+      /* Handed over: the frame is native_frame_done's, here no longer. */
+      if (copied == 3) return fail("Native NVK drawable handoff failed");
+      if (copied == 2) return nvk_zink_swap(b->zink);
       int ok = copied && nvk_native_publish(frame);
       nvk_native_release(frame);
       if (!ok) return fail("Native NVK drawable handoff failed");

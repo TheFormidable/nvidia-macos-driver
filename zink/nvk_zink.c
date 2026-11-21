@@ -334,6 +334,12 @@ NVK_EXPORT int nvk_zink_present_wait(struct nvk_zink_context *ctx, unsigned slot
 NVK_EXPORT void nvk_zink_present_release(struct nvk_zink_context *ctx)
 {
    if (!ctx) return;
+   /* The frame that is one ahead first: its copy reads the scratch image
+    * dropped below, and its imports are freed with it. This waits for the
+    * presentation thread, and for a thread that is inside a present. */
+   if (!nvk_present_ahead_destroy(&ctx->present_queue, &ctx->ahead, &ctx->screen->uncertain)) return;
+   ctx->present_old_only = false;
+   ctx->present_refusals = 0;
    /* Drain even when this Mesa context is not current (GLD teardown). The
     * imports retain the surface while NVK can still access its pinned pages. */
    if (!finish(ctx)) return;
@@ -514,6 +520,86 @@ NVK_EXPORT int nvk_zink_present_native(struct nvk_zink_context *ctx, IOSurfaceRe
    if (blit_default(ctx, image, 0, opaque) && finish(ctx))
       result = nvk_zink_copy_vram(ctx->screen->fscreen.screen, image, surface);
    if (result < 0) p_atomic_set(&ctx->screen->uncertain, 1);
+   return p_atomic_read(&ctx->screen->uncertain) ? -1 : result;
+}
+
+NVK_EXPORT int nvk_zink_present_drain(struct nvk_zink_context *ctx)
+{
+   /* A context that never presented one frame ahead has nothing in flight. */
+   if (!ctx || !ctx->ahead) return 1;
+   const int drained = nvk_present_ahead_drain(&ctx->present_queue, &ctx->screen->uncertain);
+   /* A frame that went out and was not published is one frame the window did
+    * not get; the swap that sent it had already returned. Said once, then at
+    * every doubling of the count. */
+   if (drained == 2) {
+      const unsigned late = ++ctx->present_late;
+      if (!(late & (late - 1)))
+         fprintf(stderr, "NVK Zink: a frame was not published (%u so far in this context)\n", late);
+   }
+   return drained != 0;
+}
+
+NVK_EXPORT void nvk_zink_present_idle(struct nvk_zink_context *ctx)
+{
+   if (ctx && ctx->ahead) nvk_present_ahead_trim(&ctx->present_queue, &ctx->ahead, &ctx->screen->uncertain);
+}
+
+NVK_EXPORT int nvk_zink_present_frame(struct nvk_zink_context *ctx, IOSurfaceRef surface, int opaque,
+                                      int (*done)(void *arg, int publish), void *arg)
+{
+   if (!ctx || !done || ctx->present_old_only || !nvk_present_ahead_enabled())
+      return nvk_zink_present_native(ctx, surface, opaque);
+   if (!surface || st_api_get_current() != ctx->st || p_atomic_read(&ctx->screen->uncertain) ||
+       IOSurfaceGetWidth(surface) != ctx->width || IOSurfaceGetHeight(surface) != ctx->height) return 0;
+   struct pipe_screen *screen = ctx->screen->fscreen.screen;
+   const int began = nvk_present_ahead_begin(&ctx->present_queue, &ctx->ahead, screen, &ctx->screen->uncertain);
+   if (began == -2) {
+      /* Not this screen, or no presentation thread in this process. */
+      ctx->present_old_only = true;
+      return nvk_zink_present_native(ctx, surface, opaque);
+   }
+   if (began <= 0) return began;
+   /* Inside the queue: the frame before this one has been published, so the
+    * scratch image is nobody's and can be drawn into again. */
+   struct pipe_resource templ = {.target = PIPE_TEXTURE_2D, .format = PIPE_FORMAT_B8G8R8A8_UNORM,
+      .width0 = ctx->width, .height0 = ctx->height, .depth0 = 1, .array_size = 1,
+      .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW};
+   if (!ctx->native_image)
+      ctx->native_image = screen->resource_create(screen, &templ);
+   struct pipe_resource *image = ctx->native_image;
+   if (!image || !blit_default(ctx, image, 0, opaque)) {
+      nvk_present_ahead_cancel(&ctx->present_queue);
+      return 0;
+   }
+   /* The flush returns once the batch that holds the blit has been submitted;
+    * nobody waits for the GPU here. */
+   struct pipe_fence_handle *fence = NULL;
+   st_context_flush(ctx->st, 0, &fence, NULL, NULL);
+   if (!fence) {
+      p_atomic_set(&ctx->screen->uncertain, 1);
+      fprintf(stderr, "NVK Zink: completion uncertain; share group quarantined\n");
+      nvk_present_ahead_cancel(&ctx->present_queue);
+      return -1;
+   }
+   int result = nvk_present_ahead_submit(&ctx->present_queue, ctx->ahead, image, surface, fence,
+                                         ctx->front_flush_active, done, arg);
+   if (result == -2) {
+      /* NVK did not import this surface's video memory, or the copy could not
+       * be recorded. Nothing was submitted for it: this frame is finished the
+       * way 3.0.6 presents, which also knows the other ways into a surface.
+       * Three such frames in a row and the context stays with that way. */
+      screen->fence_reference(screen, &fence, NULL);
+      if (++ctx->present_refusals >= 3 && !ctx->present_old_only) {
+         ctx->present_old_only = true;
+         fprintf(stderr, "NVK Zink: this context's surfaces are not imported ahead; presenting as in 3.0.6\n");
+         /* Nothing is in flight (the refusal left the queue): what was kept imported is of no use from here on. */
+         nvk_present_ahead_trim(&ctx->present_queue, &ctx->ahead, &ctx->screen->uncertain);
+      }
+      result = finish(ctx) ? nvk_zink_copy_vram(screen, image, surface) : 0;
+      if (result < 0) p_atomic_set(&ctx->screen->uncertain, 1);
+   } else if (result > 0) {
+      ctx->present_refusals = 0;
+   }
    return p_atomic_read(&ctx->screen->uncertain) ? -1 : result;
 }
 
