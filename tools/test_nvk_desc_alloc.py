@@ -148,6 +148,10 @@ arm("the patch touches only the three descriptor files",
      "src/nouveau/vulkan/nvk_descriptor_set_layout.h"])
 chain = next((l for l in bld.splitlines() if l.strip().startswith('CHAIN="nvk-macos') and "nvk-card-select" in l
               and "nvk-mesa-26.3.0" in l), "")
-arm("the patch ends the 3.0 chain, after every patch that changes these files", chain.rstrip().endswith('nvk-gpu-caps nvk-desc-alloc" ;;'), chain[-80:])
+# 3.0.7 put nvk-surface-keep behind it, which touches none of the three descriptor files (its own test holds that)
+arm("the patch comes in the 3.0 chain after every patch that changes these files",
+    " nvk-gpu-caps nvk-desc-alloc" in chain and chain.rstrip().endswith('" ;;')
+    and all(not (R / "nvk" / f"{name}.patch").read_text().count("nvk_descriptor_set")
+            for name in chain.split("nvk-desc-alloc", 1)[1].replace('" ;;', "").split()), chain[-100:])
 arm("the 2.9 and 2.8 chains do not have it", sum("nvk-desc-alloc" in l for l in bld.splitlines() if 'CHAIN="' in l) == 1)
 print("FAILED" if fails else "PASS"); sys.exit(1 if fails else 0)
