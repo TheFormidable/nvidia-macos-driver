@@ -1,5 +1,68 @@
 # Changelog
 
+## 3.0.8
+
+**Not released.** This section describes the branch being prepared as 3.0.8, on top of 3.0.7 (below, not released
+either). It is one change, in the Zink frontend's CGL adapter: how often a swap asks WindowServer whether the window's
+drawable is opaque. It starts from a measurement. 3.0.7 was built on one Mac from an empty folder and installed there
+(AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3, started from a test copy of its boot
+loader configuration in which `debug.nvrm_pat_wc` reads 1). A `sample` capture of the modded Minecraft pack of the
+audit put it at 90 frames a second with the GPU 83 % busy, where the comparable capture on 3.0.6 had 61 and 51 % (not
+the identical scene). Of the game's render thread, 63.3 % was the game's own code and 12.0 % the swap; of the swap,
+288 of the thread's 5036 samples (5.7 %) were `present_drawable` asking CGL for `kCGLCPSurfaceOpacity`, which CGL
+answers with a message to WindowServer and its reply, twice per swap. **Nothing of 3.0.8 has been built on a Mac or
+run on a card, and no gain has been measured.** The most the render thread can get back is those 5.7 %; what that
+gives in frames is for a capture on the card to say.
+
+### Fixes and changes
+
+#### OpenGL through Zink: the swap
+
+- **A swap asks for the drawable's opacity once, and the answer is kept for a tenth of a second.** Through 3.0.7 a
+  swap asked twice: once for the layer (`nvk_native_acquire`, which sets the CAMetalLayer's `opaque`) and once for the
+  copy (`nvk_zink_present_frame`, whose blit writes alpha 1 into an opaque drawable); a swap that went on to the
+  IOSurface path asked a third time. Now a swap asks at most once and gives the layer, the copy and the IOSurface path
+  the same answer, so they cannot disagree within a swap. A context keeps that answer (`zink/nvk_opacity.h`) and asks
+  again on the first swap at least 100 ms after it last asked, on a clock that does not move while the machine sleeps.
+  It asks at once on its first swap, after an ask that failed (which answers opaque, as 3.0.7 did, and is not kept),
+  and after the adapter has seen the context's output change: a new size of the drawable, a view bound or unbound, the
+  native target removed, and a native acquire that gave no drawable (the layer is being set up, the window is
+  minimized, the native path fell back, or the view went away). **What it changes for an application:** after an
+  application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps of up to the next 100 ms are
+  still composed with the old value, both the layer's `opaque` and the alpha the copy writes, where 3.0.7 used the new
+  value from the next swap. Where `CGLSetParameter` of that parameter reaches the GLI integer callback the adapter
+  already replaces for `CGLTexImageIOSurface2D`, the next swap asks at once; whether it does is not known, and nothing
+  depends on it. Way back: `NVK_ZINK_OPACITY_KEEP=0`. Checked with `tools/test_zink_opacity.py`.
+
+The card check `zink.win-ctl` changes opacity on a window that has already swapped and judges the three frames after
+each change. It now lets 150 ms pass after each change before those frames, so that it judges the same thing on 3.0.7
+and on 3.0.8; its case of a new context whose opacity is set before its first swap is unchanged, since a context's
+first swap always asks. The line citations of the card checks follow the code that moved, and one that named the wrong
+lines before (the borrowed bind of `nvk_cgl_present`, in `zink_win_check.m`) names the right ones; nothing else in
+them changed.
+
+### The way back
+
+New, of tier escape, with a row in `tools/switches.tsv`: `NVK_ZINK_OPACITY_KEEP=0`, a line of
+`/Library/GPUBundles/nvmtl/nvrm610.conf` (or the process's own environment with `NVMTL_PROCESS_ENV=1`), read once per
+process by `libnvk_cgl.dylib` when its first context presents, spelled as the two switches of 3.0.7 may be. Every swap
+then asks WindowServer again, once, and sees an application's change at the next swap as 3.0.7 did. A swap still asks
+only once and gives the layer and the copy the same answer; that has no switch.
+
+### What ran where
+
+**Nothing of 3.0.8 was built on a Mac or ran on a card.** On Linux: the four files of the Zink frontend compile for
+macOS in the cross-build with 0 warnings and 0 errors (of what they include only a comment of `nvk_zink_cfg.h`
+changed), and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` pass the syntax check against the 11.3 SDK with `-Wall
+-Wextra -Werror`, `native_drawable.m` with the SDK's older name standing in for `kIOMainPortDefault`.
+`tools/card/zink_win_check.m` passes the same syntax check with its row's flags, with the three deprecation warnings
+it had before. `tools/test_zink_opacity.py` runs `nvk_opacity.h` as it is with a clock and a reader of its own (25
+arms, plain and under AddressSanitizer and UndefinedBehaviorSanitizer, with gcc 13 and clang 18), against 13 copies
+with one rule broken each, every one of which fails as it has to, and reads the adapter for one ask per swap, the
+switch, and each place that makes the next swap ask. `tools/test_zink_present_queue.py` passes with the end of
+`present_drawable` as it is now. Not checked: the clock's cost on a Mac (the frontend's queue already uses it),
+whether `CGLSetParameter` reaches the integer callback, and anything that needs WindowServer.
+
 ## 3.0.7
 
 **Not released.** This section describes the branch being prepared as 3.0.7, on top of 3.0.6 (below, not released
