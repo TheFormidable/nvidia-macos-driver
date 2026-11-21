@@ -1,5 +1,144 @@
 # Changelog
 
+## 3.0.7
+
+**Not released.** This section describes the branch being prepared as 3.0.7, on top of 3.0.6 (below, not released
+either). It is one change in three parts, in the kernel, in NVK and in the Zink frontend: how an OpenGL window on Zink
+gets its frame to the screen. It starts from a measurement. 3.0.6 was built and installed on the Mac the audit's
+captures came from (AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3), the first time
+anything after 3.0.2 ran on a card. The modded Minecraft pack of the audit draws through Zink on NVK there now, as
+3.0.3 meant it to, and three `sample` captures with the kernel's counters put it at 55 to 64 frames a second in the
+scene that gave 19 on 3.0.2 through Apple's renderer, with the GPU 41 to 53 % busy. In those captures the game's
+thread spent 30 to 40 % of its time asleep in the swap, until the GPU had finished the frame it had just sent (4.7 to
+7.3 ms a frame), and 6 to 8 % importing the drawable's video memory into NVK again, for a layer that hands out the
+same three surfaces in turn. Up to 13 % more went to copying the game's buffer uploads into video memory that this
+machine maps uncached instead of write-combined (`debug.nvrm_pat_wc` reads 0 there); that is decided by the boot
+loader's kernel patches, and nothing here changes it. **Nothing of 3.0.7 has been built on a Mac or run on a card, and
+no gain has been measured.** The kernel part and the frontend were compiled on Linux, NVK was not compiled with its
+new patch at all, and the tests are host tests on Linux (below, "What ran where"). By arithmetic alone a swap that
+neither sleeps nor imports would let that scene run 1.6 to 1.9 times as fast, if the GPU keeps up, and the GPU had
+about that much room; what it gives is for a capture on the card to say. Each of the two changes of what runs by
+default has one way back.
+
+### Fixes and changes
+
+#### OpenGL through Zink: the swap
+
+- **A swap no longer sleeps until the GPU has finished its frame.** Through 3.0.6 the thread that swapped did all of
+  it for every frame: it imported the drawable's video memory, sent the copy into it, slept until the GPU had
+  finished, marked and tagged the surface and presented the drawable. Now the swap draws the frame into the scratch
+  image, flushes, sends the copy to the same queue right behind it and returns. One thread of the process, the
+  presentation thread, waits for the copy's fence and then does what the swap did, in the same order: the mark, the
+  tag, the drawable. The context's next swap waits for that to have happened before it asks the layer for a drawable
+  and before it draws into the scratch image again. So a context never has more than one frame on its way, the layer
+  has its drawable back before the next is asked for, what is on screen is at most one frame behind what was swapped,
+  and the time the GPU takes for a frame runs beside the game's work on the next one instead of in front of it. A
+  front-buffer flush, and a swap while a diagnostic observer is set, wait for their own frame as before. A frame the
+  presentation thread could not publish (the mark of an import made for that frame was refused, the channel was
+  rebuilt under the copy) is released unpresented, and the next swap of that context says so on standard error, once
+  and then at every doubling of the count; the swap that sent it had already answered 1. A GPU that does not finish a
+  copy in 5 s, or a presentation thread that stays at one frame for 12 s (5 s for the copy and 5 s more for a frame it
+  had to send again), quarantines the share group as 3.0.6 does for a copy that does not finish: nothing is freed and
+  nothing more is presented. The 12 s are that thread's and not the waiting swap's, because it works the frames of
+  every window of the process in turn: a frame that stands behind another window's slow one is not given up while that
+  one is within its time, and a frame whose work is already past it is given up at once. That thread takes none of the
+  application's signals, except the ones a fault of its own raises (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS),
+  so a crash in it is reported as a crash. Whatever this path does not take (NVK refuses the import, the surface is
+  not one the copy can fill) goes through 3.0.6's path for that frame, which stays in the file unchanged; after three
+  such frames in a row a context stays with it and lets its kept imports go. The command pool, the fence and the
+  renderer's entry points, which 3.0.6 made and looked up for every frame, are the context's now. Way out:
+  `NVK_ZINK_PRESENT_AHEAD=0`. Checked with `tools/test_zink_present_queue.py`: the queue with real threads, and this
+  half of `zink/nvk_present.c`, cut out of the file as it is, against a scripted GPU.
+- **A drawable's video memory is imported once instead of for every frame.** 3.0.6 imported the surface it was handed
+  into NVK for every frame, a new address range and a new binding each time, and freed the import after the frame. A
+  context now keeps its imports, of up to four surfaces, and lets one go when it has presented 64 frames without it,
+  when a swap finds no drawable, when it goes back to 3.0.6's path, and when it is destroyed. A context that stops
+  swapping keeps what it has, at most four, until then. A kept import must not outlive what it imported: the surface's
+  family can release the block of video memory and allocate another, and a frame copied into the old block would be
+  marked as if it were in the surface. So the kernel names the block. The grant of a surface's video memory
+  (`NVRM_ESC_SURF_VRAM`) answers with the block it shared, in a word of the reply that was padding (the low half of
+  the allocation's cookie; 0 whenever the grant is refused, and a caller that reads 0 keeps nothing), and a mark
+  (`NVRM_ESC_SURF_DIRTY`) that names a block is taken only while the surface still has it; otherwise the kernel marks
+  nothing, answers `NVRM_SS_MOVED` and counts it in the read-only `debug.nvaccel_surf_mark_moved`. A mark that names
+  no block is taken as before, which is every mark of the Metal plugin and of a frontend before 3.0.7. NVK gets two
+  exports for it, in `nvk/nvk-surface-keep.patch` at the end of the 3.0 chain: the block the calling thread's last
+  import was granted, and a mark that names a block. When the mark for a kept import is refused, for that reason or
+  any other, the frame is still whole in the scratch image: the presentation thread lets the import go and sends the
+  frame again at once the way 3.0.6 sent every frame, before it answers, so whether a frame reaches the screen does
+  not depend on the application swapping again. It is not sent again once the share group is quarantined: nothing is
+  sent then, as in 3.0.6. After four refused marks in a context's life the context lets its kept imports go, imports
+  for every frame from then on and says so once on standard error. With an NVK or a kernel from before 3.0.7 no block
+  is named and nothing is kept. Way out: `NVK_ZINK_SURFACE_KEEP=0`. Checked with `tools/test_surf_keep.py` (the
+  kernel's two rules and the lines of the escape that apply them) and with `tools/test_zink_present_queue.py`.
+
+What the two rest on and could not be run here: a duplicate of the RM object keeps a surface's video memory alive in
+this process after the surface gave it up, which the Metal plugin's imports rely on too; a drawable may be presented
+and released by a thread other than the one that asked for it, which the card check `zink.win-thread` does with the
+swap itself; and the waits of an application that reads back or queries its own frame move into the next frame. The
+card checks of Zink set the observer, so they run the swap that waits; no row runs a swap one frame ahead yet, and
+that row is still to be written. Their line citations follow the code that moved, and the head comment of
+`zink_win_check.m` now says that a frame which is sent again is observed twice; nothing else in them changed.
+
+### The ways back
+
+Both are new, of tier escape, with a row in `tools/switches.tsv`. A process reads them once, when its first context
+presents, from `/Library/GPUBundles/nvmtl/nvrm610.conf` (or from its own environment with `NVMTL_PROCESS_ENV=1`). A
+line may have blanks before the name, around the `=` and before the value, so every spelling that turns a switch of
+the Metal plugin off in that file turns one of these off (the plugin itself keeps a blank after the `=` as part of the
+value), and the last line that names a switch decides.
+
+- `NVK_ZINK_PRESENT_AHEAD=0`: every swap waits for the GPU and publishes its own frame, through the code of 3.0.6,
+  which also imports for every frame.
+- `NVK_ZINK_SURFACE_KEEP=0`: swaps stay one frame ahead, and the drawable's video memory is imported for every frame.
+
+No switch: the word of the grant that names the block (a caller that sends 0 in its marks gets what 3.0.6 gives), the
+two exports of NVK (only this frontend calls them), and the counter, which decides nothing. A frontend of 3.0.7 over
+an older NVK or kernel, and an older frontend over these, import for every frame as 3.0.6 does. Neither switch reaches
+WindowServer or a Metal application, which do not load this frontend, and the boot argument `nvzink=0` still takes
+OpenGL back to Apple's renderer whole.
+
+### What ran where
+
+**No driver of 3.0.7 was built on a Mac and nothing of it ran on a card.** What did run, and where:
+
+- **Linux, compile checks of the final tree.** The kext compile check of all 25 units passes with 0 warnings. The
+  import check against the exports of macOS 15 and 26 gives the one line it gives for 3.0.5 and 3.0.6
+  (`_ceutilsMemset_IMPL`). The plugin's Objective-C check reports 0 new errors and 0 new warnings; the plugin is not
+  changed. The four files of the Zink frontend compile for macOS in the cross-build with 0 warnings, and `nvk_cgl.c`,
+  `appkit.m` and `native_drawable.m` pass a syntax check against the 11.3 SDK. None of these links or runs the driver.
+- **NVK.** `nvk/nvk-surface-keep.patch` applies without fuzz to a tree with the rest of the chain applied. NVK was not
+  compiled with it anywhere.
+- **Linux, the tests of this change.** `tools/test_zink_present_queue.py` builds three programs out of the sources as
+  they are. The queue's has 24 arms and the frame's 69 (in seven sets: with and without kept imports, switched off, an
+  older NVK, an older kernel, how the settings' lines may be written, a fork); both run plain and again under
+  ThreadSanitizer and AddressSanitizer (there the queue without its two fork arms, and the frame's first four sets).
+  The third runs the end of `present_drawable` and `native_frame_done`, cut out of `nvk_cgl.c`, for who releases the
+  drawable in each answer of the frontend: 11 arms. With them go 31 copies of the sources with one rule broken each
+  (10 of the queue, 16 of the frame, 5 of the drawable's), every one of which fails as it has to, and the text of
+  3.0.6's path, which every way back leads to, held to what it was. `nvk_zink_present_frame` itself is not run, only
+  read for the order of its steps, and the 12 s are read too: the programs run with a limit of 0.4 s.
+  `tools/test_surf_keep.py`: 14 arms and 6 such controls. Both with gcc 13 and with clang 18.
+- **Linux, the host suite** (`python3 tools/run_all_tests.py`), on the final tree. 353 passed, 40 failed, 11 skipped
+  and 10 not run, of 414. The two tests of this change are new and pass. The 40 are 40 of the 41 that fail on Linux at
+  3.0.6, by name, because they need a Mac; the 41st, `test_build_sh.py`, passes here now and passes on the 3.0.6 tree
+  too when it is run again, so that one was this machine and not either tree. With wrappers that let the Objective-C
+  tests compile and run on Linux, 378 passed and 16 failed: 16 of the 17 that fail that way at 3.0.6, the same test
+  apart.
+- **A second reading.** The code was read again by area (the kernel and NVK, the queue, the frame, the frontend and
+  CGL, the tests and texts), and each thing found was then checked by a reader told to refute it. 21 stood. The
+  corrections were then read once more by three readers, each with a refuter, and five more things stood, all small: a
+  frame was sent again even in a share group that had been quarantined meanwhile, the 12 s were counted from when a
+  swap began to wait and so charged a frame with the time of the frames ahead of it, and three texts said more than
+  the code did. Of the 26, none was a wrong or a foreign frame on screen, a crash, a hang or memory used after it was
+  freed; the weightiest was that a frame whose mark was refused waited for the application's next swap, which an
+  application that draws only when something changes may never make. What is described above is the code after all of
+  them: the frame sent again from the presentation thread, kept imports let go as soon as a context stops keeping, the
+  fault signals, the word of a refused grant, the settings' blanks, and the tests that were missing (a fence that
+  keeps its state, a kernel that remembers each surface's block, the age to the frame, the drawable's ownership run
+  instead of read). Three are answered by saying so here and not by code: no card row runs a swap one frame ahead,
+  `nvk_zink_present_frame` is read and not run, and a context that stops swapping keeps its imports until it is
+  destroyed.
+
 ## 3.0.6
 
 **Not released.** This section describes the branch being prepared as 3.0.6, on top of 3.0.5 (below, not released

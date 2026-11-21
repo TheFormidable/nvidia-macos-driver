@@ -21,9 +21,9 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 40 | 1 | 55 | 405 | 12 |  | 519 |
+| env |  | 6 |  |  | 42 | 1 | 55 | 405 | 12 |  | 521 |
 | bootarg | 4 | 13 | 30 | 21 | 15 |  | 8 | 6 | 2 |  | 99 |
-| sysctl |  | 5 | 4 | 12 |  |  | 376 |  |  |  | 397 |
+| sysctl |  | 5 | 4 | 12 |  |  | 377 |  |  |  | 398 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 15 |  | 15 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -37,6 +37,8 @@ Each of these turns one change that is on by default back off. None is needed on
 |---|---|---|---|---|
 | env | `NVENCVT_DEC_HOLD` | on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4) | 3.2 | In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project. |
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
+| env | `NVK_ZINK_PRESENT_AHEAD` | on (NVK_ZINK_PRESENT_AHEAD=0 in the settings file: a swap waits for the GPU and publishes its frame itself, as in 3.0.6) | 3.2 | An OpenGL swap on Zink hands its frame to a presentation thread of the process, which waits for the GPU, marks and tags the surface and presents the drawable; the swap returns at once, and the next swap waits for that frame first, so a context never has more than one frame on its way. |
+| env | `NVK_ZINK_SURFACE_KEEP` | on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6) | 3.2 | The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7. |
 | env | `NVMTL_ARGBUF_ARRAYS` | on (NVMTL_ARGBUF_ARRAYS=0: an argument-buffer member that is an array of textures, samplers or buffers gets one field, its first element, as in 3.0.5) | 3.2 | An argument-buffer struct member that is an array of resource handles gets one [[id]] per element when a shader library is loaded, so a shader that indexes the array past its first element is translated instead of refused or reading the wrong handle. |
 | env | `NVMTL_ASYNCUP_REAP` | on except in WindowServer (NVMTL_ASYNCUP_REAP=0: a finished asynchronous texture upload keeps its staging buffer and its place until its image is next written, read back or freed, as in 3.0.5) | 3.2 | The staging buffer, the submission and the place of an asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD) are given back at the next upload once the GPU has finished the copy, at most 16 per upload and without waiting, so textures that are uploaded once and then only sampled do not fill the 256 places and push later uploads onto the path that waits; never in WindowServer. |
 | env | `NVMTL_ASYNC_TEX_UPLOAD` | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. |
@@ -245,6 +247,8 @@ Each of these does nothing unless it is set.
 | `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
 | `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-unbound-stage.patch |
+| `NVK_ZINK_PRESENT_AHEAD` | escape | on (NVK_ZINK_PRESENT_AHEAD=0 in the settings file: a swap waits for the GPU and publishes its frame itself, as in 3.0.6) | 3.0.7 | 3.2 | An OpenGL swap on Zink hands its frame to a presentation thread of the process, which waits for the GPU, marks and tags the surface and presents the drawable; the swap returns at once, and the next swap waits for that frame first, so a context never has more than one frame on its way. | zink/nvk_present.c |
+| `NVK_ZINK_SURFACE_KEEP` | escape | on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6) | 3.0.7 | 3.2 | The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7. | zink/nvk_present.c |
 | `NVMTL_AIRCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/NVMTLObjects.m |
 | `NVMTL_AIR_DUMP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_ANGLE_METAL` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
@@ -501,7 +505,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_PRIVATE_CAPTURE_DIR` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PRIVATE_CAPTURE_REQUEST` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_PRIVATE_POOL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
-| `NVMTL_PROCESS_ENV` | diag | unset | 2.9 | - | NVMTL_PROCESS_ENV=1 in a process's own environment (exactly 1; not honoured in a process run as root or setuid/setgid): the release plugin keeps that process's driver variables (NVMTL_, NVK_, NVRM_ and the other driver prefixes), which then win over the settings file, and writes its log, /tmp/nvmtl.log, for that process, which it does for no other process | plugin/nvmtl_env_knobs.h |
+| `NVMTL_PROCESS_ENV` | diag | unset | 2.9 | - | NVMTL_PROCESS_ENV=1 in a process's own environment (exactly 1; not honoured in a process run as root or setuid/setgid): the release plugin keeps that process's driver variables (NVMTL_, NVK_, NVRM_ and the other driver prefixes), which then win over the settings file, and writes its log, /tmp/nvmtl.log, for that process, which it does for no other process | plugin/nvmtl_env_knobs.h, zink/nvk_zink_cfg.h |
 | `NVMTL_PSTAT` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_RAW_MATCH_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_RAW_MAX_GPRS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
@@ -825,6 +829,7 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_surf_mark_lock_wait_max_us` | diag | read-only | 3.0 | - | longest wait of a surface VRAM mark or grant for the accelerator lock, us | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_mark_lock_wait_us` | diag | read-only | 3.0 | - | time those marks and grants waited for the accelerator lock, in total, us | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_mark_lock_waits` | diag | read-only | 3.0 | - | surface VRAM marks and grants that found the accelerator lock taken and waited for it | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_surf_mark_moved` | diag | read-only | 3.0.7 | - | surface VRAM marks refused because the surface no longer has the block the caller keeps imported | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_plane_validbits` | diag | read-only | 3.0 | - | OR of the validity bits recorded for planes above 0 (1: the family uses bit 0 for every resource; 2: a bit per plane) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surf_planes` | diag | read-only | 3.0 | - | 1 = plane-ranged VRAM grants for two-plane surfaces are offered (0: boot-arg nvaccel_surf_planes=0) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_surface_fence` | diag | read-only | 3.0 | - | 1 = waits for WindowServer's GPU work go through NVRM's surface fence (0: they use the 2.9 marks only) | kexts/NVRM/accel/nvrm-accel.cpp |
@@ -1138,7 +1143,7 @@ Each of these does nothing unless it is set.
 | `/Library/GPUBundles/nvmtl-gpu-policy.txt` | setting | absent | 2.9 | - | per-application choice between the NVIDIA GPU and the integrated GPU on a hybrid laptop | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl-gpupass-probe` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl/no-failed-air` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLLibraryLoad.m |
-| `/Library/GPUBundles/nvmtl/nvrm610.conf` | install | absent | 2.9 | - | the settings file the installer writes; the user block is kept on update | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m |
+| `/Library/GPUBundles/nvmtl/nvrm610.conf` | install | absent | 2.9 | - | the settings file the installer writes; the user block is kept on update | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m, zink/nvk_zink_cfg.h |
 | `/Library/NullMoth/gamemode-active` | internal | absent | 2.9 | - | written by the game-priority helper while a game runs | plugin/NVMTLDevice.m |
 | `/Library/NullMoth/nvfb-small` | recovery | absent | 2.9 | - | the same as boot-arg nvfbsmall=1 without a restart into recovery | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `/private/tmp/nvmtl-off.log` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |
