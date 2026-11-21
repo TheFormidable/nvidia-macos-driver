@@ -22,7 +22,12 @@ reason the files of the baseline get the current time when they are unpacked: gi
 their commit, which is older than a binary of another revision already in the baseline's folder.
 
 Needs cargo and the translator's crates already in cargo's cache (it runs with --offline); without them it is skipped
-(exit 2 and SKIP, as tools/run_all_tests.py counts it). A first build of the translator's tests takes some minutes."""
+(exit 2 and SKIP, as tools/run_all_tests.py counts it). A first build of the translator's tests takes some minutes;
+cargo is stopped after 540 s, before the runner's own limit, so that Cargo.lock is always put back as it was.
+
+The cargo is the tester's own, found on PATH: it uses the tester's cargo home (its crate cache and lock file there) and
+builds into translator/translator/target of this tree. A tester who wants neither sets CARGO_HOME to an empty folder,
+and the test is skipped."""
 import argparse
 import io
 import os
@@ -55,10 +60,22 @@ env = {k: v for k, v in os.environ.items() if k != 'NVMTL_WHOLE_VIEWS'}
 env.update(CARGO_TARGET_DIR=str(target))
 
 
+# tools/run_all_tests.py stops a test with everything it started after 600 s, and a test stopped that way never reaches
+# the lines below that put Cargo.lock back. So cargo is stopped here first, and that is a failure. Its compilers end
+# with it or are stopped by the runner when this test ends: they are in this test's session.
+CARGO_LIMIT = 540
+
+
 def run(tree, filters):
     cmd = ['cargo', 'test', '--offline', '--lib', '--manifest-path', str(tree / 'translator/translator/Cargo.toml'),
            '--'] + filters
-    return subprocess.run(cmd, env=env, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=CARGO_LIMIT)
+    except subprocess.TimeoutExpired as e:
+        def text(x):
+            return x.decode(errors='replace') if isinstance(x, bytes) else (x or '')
+        return subprocess.CompletedProcess(cmd, 124, text(e.stdout),
+                                           text(e.stderr) + f'\nno result from cargo after {CARGO_LIMIT} s: stopped')
 
 
 with tempfile.TemporaryDirectory(prefix='whole_views-') as tmp:

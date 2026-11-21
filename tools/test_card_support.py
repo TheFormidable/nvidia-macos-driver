@@ -106,6 +106,14 @@ static BOOL nvmtl_ws_kernel_waits(void) { return NO; }
 - (void)waitUntilScheduled;
 - (BOOL)commitAndWaitUntilSubmitted;
 @end
+// the submit-ahead step of a flush (nvmtl_fast_flush.h): it runs once, after the commit and before the wait, and is
+// told whether this is WindowServer (where it does nothing)
+static int fast_calls, fast_bad;
+static void nvmtl_fast_flush_submit(Command *cb, int ws) {
+    fast_calls++;
+    if (cb.commits != 1 + (fast_calls > 1) || ws != (program && !strcmp(program, "WindowServer"))) fast_bad = 1;
+    if (fast_calls == 1 && (cb.completed || cb.scheduled)) fast_bad = 1;
+}
 @implementation Command
 - (void)commit { self.commits++; }
 - (void)waitUntilCompleted { self.completed++; }
@@ -120,6 +128,7 @@ int main(int argc,char **argv) { @autoreleasepool {
      cb.completed!=(ws?1:0) || cb.scheduled!=(ws?0:1)) return 42;
  cb.status=MTLCommandBufferStatusError;
  if ([cb commitAndWaitUntilSubmitted]) return 43;
+ if (fast_calls != 2 || fast_bad) return 44;
  puts("PASS display completion ordering and error return");
  return 0;
 }}

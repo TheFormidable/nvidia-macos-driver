@@ -210,8 +210,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     // thread, never here inside a submit (attack S1b-7); a failed submit marks every root to decide again
     { preOpen = 0; const unsigned c0 = cmdFills; Surface *g = surface(17); watch = g;
       @autoreleasepool { NVMTLTexture *u = root(g); [u nvmtlSurfaceIn]; assert(owed() == 1); keepUntilFlush = u; }
-      nvmtl_surf_zero_flush(); assert(cmdFills == c0 + 1 && !keepUntilFlush);
-      for (int i = 0; i < 500 && !atomic_load(&deallocs); i++) [NSThread sleepForTimeInterval:0.002];
+      // in a pool, as nvmtl_presubmit calls it, popped only after the worker has released (or 1 s): a reference the
+      // flush left in the caller's pool is then the root's last release, here (deallocsOnMain), not a silent leak
+      @autoreleasepool { nvmtl_surf_zero_flush(); assert(cmdFills == c0 + 1 && !keepUntilFlush);
+        for (int i = 0; i < 500 && !atomic_load(&deallocs); i++) [NSThread sleepForTimeInterval:0.002]; }
+      fprintf(stderr, "S1b-7: the watched root was freed %d time(s), %d of them on the submitting thread (wanted 1 and 0)\n",
+              atomic_load(&deallocs), atomic_load(&deallocsOnMain));
       assert(atomic_load(&deallocs) == 1 && atomic_load(&deallocsOnMain) == 0);
       Surface *h = surface(18); NVMTLTexture *u = root(h); [u nvmtlSurfaceIn];
       waitAnswer = -1; nvmtl_surf_zero_flush(); assert(u->_zeroLost == 1);

@@ -136,10 +136,33 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d) {
 @implementation NVMTLCommandBuffer (NVMTLGL)
 - (void)commitAndHold { [self commit]; }
 @end
+// Apple's GL renderer waits here until no command buffer names the resource (GLDBufferRec::restoreData, under
+// glDrawElements). The release that brings the count to zero wakes the waiter (nvmtl_idle_wait.h). WAS: a 50 us sleep
+// between looks, still there with NVMTL_GL_WAIT_EVENT=0. The 10 s limit and its log line are the same either way.
+// The census counts the waits that had to sleep and their time, logged at doubling counts and every 65536th.
+static void nvmtl_gl_wait_census(uint64_t t0) {
+    static _Atomic unsigned long long waits, ns;
+    const unsigned long long took = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0;
+    const unsigned long long k = atomic_fetch_add(&waits, 1) + 1, total = atomic_fetch_add(&ns, took) + took;
+    if (!(k & (k - 1)) || !(k & 0xFFFF))
+        nvlog("GL: waitUntilComplete slept %llu times so far, %llu us in all (this one %llu us), until the command buffers naming the resource let go",
+              k, total / 1000, took / 1000);
+}
+static BOOL nvmtl_gl_wait_idle(int *refs, BOOL textureRule, uint64_t t0) {
+    int slept = 0;
+    const int late = nvmtl_idle_wait_for(&gNVMTLIdleQ, refs, textureRule, nvmtl_idle_now_ns(), 10000000000ull, &slept);
+    if (slept) nvmtl_gl_wait_census(t0);
+    return !late;
+}
 @implementation NVMTLTexture (NVMTLGL)
 - (void)waitUntilComplete {
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     NVMTLTexture *own = _parent ? _parent : self;
+    if (nvmtl_gl_wait_event_on()) {
+        if (!nvmtl_gl_wait_idle(&own->_resRefs, YES, t0))
+            nvlog("GL: waitUntilComplete gave up after 10 s - %d command buffer(s) still name this texture", __atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE));
+        return;
+    }
     while (__atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE) > 0) {
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 > 10000000000ull) {
             nvlog("GL: waitUntilComplete gave up after 10 s - %d command buffer(s) still name this texture", __atomic_load_n(&own->_resRefs, __ATOMIC_ACQUIRE));
@@ -160,6 +183,11 @@ static BOOL nvmtl_sel1_idle(int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE
 - (BOOL)isWriteComplete { return nvmtl_sel1_idle(&_resRefs); }
 - (void)waitUntilComplete {
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (nvmtl_gl_wait_event_on()) {
+        if (!nvmtl_gl_wait_idle(&_resRefs, NO, t0))
+            nvlog("waitUntilComplete (buffer) gave up after 10 s - %d command buffer(s) still name it", __atomic_load_n(&_resRefs, __ATOMIC_ACQUIRE));
+        return;
+    }
     while (!nvmtl_sel1_idle(&_resRefs)) {
         if (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 > 10000000000ull) {
             nvlog("waitUntilComplete (buffer) gave up after 10 s - %d command buffer(s) still name it", __atomic_load_n(&_resRefs, __ATOMIC_ACQUIRE));
@@ -197,11 +225,14 @@ static BOOL nvmtl_sel1_idle(int *r) { return __atomic_load_n(r, __ATOMIC_ACQUIRE
 // Once the Vulkan device can make the last vertex provoke, the bit is set in that table, in this process only. The
 // renderer copies the table after it has created its Metal device (this plugin's device init); a renderer loaded
 // later is caught by the dyld callback. A table that does not hold the bytes it held on macOS 15.8.1 is left alone.
+// A process that loads the renderer on a device with last-vertex provoking says once which of these it was
+// (nvmtl_gl_diag.h), with the table's bytes.
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach/mach.h>
+#include "nvmtl_gl_diag.h"
 static const char kGLRendererSuffix[] = "/AppleMetalOpenGLRenderer.bundle/Contents/MacOS/AppleMetalOpenGLRenderer";
 static const char kGLNvidiaCaps[] = "__ZZN12GLDDeviceRec19initWithDisplayMaskEjE6nvidia";
 static const uint8_t kGLNvidiaCaps1581[20] = { 0x40, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x42, 0, 0, 0x80, 0x41, 0, 0, 0, 0 };
@@ -227,23 +258,33 @@ static uint8_t *nvmtl_gl_local_symbol(const struct mach_header_64 *mh, const cha
             return (uint8_t *)(sym[i].n_value + slide);
     return NULL;
 }
+// Once per process, and only once the image is the renderer, so that no other process logs anything.
+static void nvmtl_gl_caps_say(nvmtl_gl_caps_outcome o, const uint8_t *caps, int kr) {
+    static _Atomic int said;
+    if (atomic_exchange_explicit(&said, 1, memory_order_relaxed)) return;
+    char build[32] = ""; size_t len = sizeof build;
+    if (sysctlbyname("kern.osversion", build, &len, NULL, 0)) build[0] = 0;
+    char t[400]; nvmtl_gl_caps_text(t, sizeof t, o, caps, kr, getprogname(), build);
+    nvlog_notice("%s", t);
+}
 static void nvmtl_gl_caps_patch(const struct mach_header *mh) {
     Dl_info info; const char *path = dladdr(mh, &info) ? info.dli_fname : NULL;
     size_t n = path ? strlen(path) : 0, k = sizeof kGLRendererSuffix - 1;
     if (n < k || strcmp(path + n - k, kGLRendererSuffix) || mh->magic != MH_MAGIC_64) return;
     uint8_t *caps = nvmtl_gl_local_symbol((const struct mach_header_64 *)mh, kGLNvidiaCaps);
-    if (!caps) { nvlog("GL: renderer has no %s - provoking vertex left to its index rewrite", kGLNvidiaCaps); return; }
-    if (caps[0] & NVMTL_GL_CAP_PROVOKING_VERTEX) return;
-    if (memcmp(caps, kGLNvidiaCaps1581, sizeof kGLNvidiaCaps1581)) {
-        nvlog("GL: the renderer's NVIDIA profile is not the macOS 15.8.1 one - provoking vertex left to its index rewrite"); return;
-    }
+    if (!caps) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NO_SYMBOL, NULL, 0); return; }
+    if (caps[0] & NVMTL_GL_CAP_PROVOKING_VERTEX) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_SET_BY_APPLE, caps, 0); return; }
+    if (memcmp(caps, kGLNvidiaCaps1581, sizeof kGLNvidiaCaps1581)) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_DIFFERS, caps, 0); return; }
     const vm_address_t page = (vm_address_t)caps & ~(vm_address_t)(vm_page_size - 1);
     kern_return_t kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) { nvlog("GL: profile page not writable (%d) - provoking vertex left to its index rewrite", kr); return; }
+    if (kr != KERN_SUCCESS) { nvmtl_gl_caps_say(NVMTL_GL_CAPS_NOT_WRITABLE, caps, kr); return; }
     caps[0] |= NVMTL_GL_CAP_PROVOKING_VERTEX;
     vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);   // data only on this page (__TEXT,__const)
+    nvmtl_gl_caps_say(NVMTL_GL_CAPS_PATCHED, kGLNvidiaCaps1581, 0);   // the bytes as the renderer had them
 }
 static void nvmtl_gl_image_added(const struct mach_header *mh, intptr_t slide) { (void)slide; nvmtl_gl_caps_patch(mh); }
+// A device without last-vertex provoking has nothing to patch, so no callback is registered and nothing is said: a
+// line for that case would need the callback in every Metal process, to learn whether the renderer is ever loaded.
 void nvmtl_gl_caps_enable(void) {
     if (!nvmtl_vk_have_provoking_last()) return;
     static dispatch_once_t once;   // the callback also runs at once for every image already loaded

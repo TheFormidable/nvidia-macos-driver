@@ -2033,6 +2033,8 @@ static SInt64 gCntSvLockWaits, gCntSvLockWaitUs;
 static int gSvLockWaitMaxUs;
 NVACCEL_CNT(nvaccel_surf_mark_lock_waits,    gCntSvLockWaits,  "surface VRAM marks and grants that found the accelerator lock taken and waited for it");
 NVACCEL_CNT(nvaccel_surf_mark_lock_wait_us,  gCntSvLockWaitUs, "time those marks and grants waited for the accelerator lock, in total, us");
+static SInt64 gCntSvMarkMoved;
+NVACCEL_CNT(nvaccel_surf_mark_moved,         gCntSvMarkMoved,  "surface VRAM marks refused because the surface no longer has the block the caller keeps imported");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surf_mark_lock_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gSvLockWaitMaxUs, 0, "longest wait of a surface VRAM mark or grant for the accelerator lock, us");
 static void nvCntUs(uint64_t t0, SInt64 *count, SInt64 *total, int *max)
 {
@@ -2184,6 +2186,7 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
     sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_waits); sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_max_us);
+    sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_moved);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_mode);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_staged);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_maps);       sysctl_register_oid(&sysctl__debug_nvaccel_dma_map_fail);
     sysctl_register_oid(&sysctl__debug_nvaccel_dma_unmaps);     sysctl_register_oid(&sysctl__debug_nvaccel_dma_abandoned);
@@ -2305,6 +2308,7 @@ static IOReturn nvAccelGpuVaCall(NVAccel *owner, const char *fn, struct NVRMGpuV
 #define NVRM_SS_KERNEL_ABI 1
 #include "../nvrm_surfshare_abi.h"
 #include "nvaccel_plane_range.h"
+#include "nvaccel_surf_keep.h"
 static unsigned nvAccelDmaMode(NVAccel *owner);
 static bool nvAccelPlanesOn(NVAccel *a);
 extern "C" {
@@ -2522,6 +2526,7 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
         return kIOReturnSuccess;
     }
     p->hSrcClient = p->hSrcMemory = 0;
+    if (cmd != NVRM_ESC_SURF_DIRTY) p->pad = 0;   // a grant names its block only when it succeeds: every refusal below answers 0
     if (p->version != NVRM_SURFSHARE_VERSION) { p->status = NVRM_SS_BAD_VERSION; return kIOReturnSuccess; }
     // The plugin re-marks a surface after its last GPU write on the thread that releases the pending marks. A page-off
     // waiting for one of those marks holds the accelerator lock, so that re-mark must not wait for the lock: it is
@@ -2550,8 +2555,14 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
     NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
     if (cmd == NVRM_ESC_SURF_DIRTY) {
         const bool sameBacking = nvAccelRestoreParkedForDirty(res, vm, p->plane);
-        p->status = (sameBacking && cache && res && vm && vm->fRmHandle)
-            ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
+        // A caller that keeps its import names the block it wrote (pad, from its grant). The surface is looked up and a
+        // parked block put back first, as for any mark; then a block that is not the one named refuses the mark before
+        // anything is recorded (no pending entry, no seed, no validity bit): the pixels are somewhere else.
+        if (!sameBacking || !cache || !res || !vm) p->status = NVRM_SS_NO_CACHE;
+        else if (nvaccel_keep_moved(p->pad, vm->fRmHandle != nullptr, vm->fAllocationCookie)) {
+            p->status = NVRM_SS_MOVED; OSAddAtomic64(1, &gCntSvMarkMoved);
+        }
+        else p->status = vm->fRmHandle ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
         if (p->status == 0) gNVSVDirty++; else gNVSVDirtyRefused++;
         if (nvSVDiag()) ALOG("SVDIAG dirty surface %u plane %u -> %#x (cache %d res %d vm %d)", p->surfaceID, p->plane, p->status,
                              cache ? 1 : 0, res ? 1 : 0, (vm && vm->fRmHandle) ? 1 : 0);
@@ -2577,6 +2588,7 @@ static IOReturn nvAccelSurfVram(NVAccel *owner, struct NVRMSurfShareEsc *p, task
         if (nvrm && sym && nvrm->callPlatformFunction(sym, false, &g, nullptr, nullptr, nullptr) == kIOReturnSuccess) {}
         if (sym) sym->release();
         p->status = g.status; p->hSrcClient = g.hClient; p->hSrcMemory = g.hObject; p->size = vm->fBytes;
+        p->pad = nvaccel_keep_cookie(g.status, vm->fAllocationCookie);   // the block's name, for a caller that keeps the import
     }
     if (p->status == 0) gNVSVOk++; else gNVSVRefused++;
     if (gNVSVOk + gNVSVRefused <= 8 || ((gNVSVOk + gNVSVRefused) & 1023) == 0)

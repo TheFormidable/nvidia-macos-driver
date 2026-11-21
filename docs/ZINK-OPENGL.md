@@ -200,11 +200,65 @@ drawable, through the same IOSurface import, completion fence and dirty notifica
 (`nvmtl_nvk_stage_import`, `nvmtl_nvk_surface_dirty`). A context without a view, or one whose layer cannot be used,
 presents through an IOSurface that NVK imports. No frame goes through a CPU copy.
 
+Through 3.0.6 the thread that swapped did all of it for every frame: it imported the surface's video memory, sent the
+copy, slept until the GPU had finished the frame, marked and tagged the surface and presented the drawable. Measured
+in a Minecraft modpack at 55 to 64 frames per second on an RTX 5050, that thread spent 30 to 40 % of its time asleep
+in the swap and 6 to 8 % importing, for a layer that hands out the same three surfaces in turn.
+
+Since 3.0.7 a swap is one frame ahead (`zink/nvk_present_queue.h`, the second half of `zink/nvk_present.c`):
+
+- The swap draws the frame into the scratch image, flushes, sends the copy to the same queue right behind it and
+  returns. One thread of the process, the presentation thread, waits for the copy's fence and then does what the
+  swap did, in the same order: the mark, the tag, the drawable.
+- Before a context starts its next frame, and before it asks the layer for the next drawable, it waits for that to
+  have happened. A context never has more than one frame on its way, so the scratch image is drawn into again only
+  when nothing reads it, and what is on screen is at most one frame behind what was swapped.
+- A front-buffer flush, and a swap while a diagnostic observer is set, wait for their own frame as before.
+- A frame the presentation thread could not publish (the mark of an import made for that frame was refused, the
+  channel was rebuilt under the copy) is released unpresented, and the next swap of that context says so on standard
+  error, once and then at every doubling of the count. The swap that sent it had already returned 1.
+- The import of a surface's video memory is kept, for up to four surfaces per context, and let go when the context has
+  presented 64 frames without it, when a swap finds no drawable, when the context goes back to 3.0.6's path, and with
+  the context; a context that stops swapping keeps what it has until then. The kernel names the block it shared with
+  each import, and a mark for a kept import names that block: when the surface has another one by then (or none), the
+  kernel refuses the mark with `NVRM_SS_MOVED` and counts it in `debug.nvaccel_surf_mark_moved`. The frame is still
+  whole in the scratch image, so the presentation thread lets that import go and sends the frame again at once, the
+  way 3.0.6 sent every frame (a new import, the copy, the wait, a mark that names no block, the tag), before it
+  answers; it does the same for any other refusal of such a mark. Whether a frame reaches the screen does not depend
+  on the application swapping again. It is not sent again once the share group is quarantined: nothing is sent then,
+  as in 3.0.6. After four refused marks in a context's life the context lets its kept imports go and imports for every
+  frame from then on, and says so once on standard error.
+- Anything this path does not take (NVK refuses the import, the surface is not one the copy can fill) goes through
+  3.0.6's path for that frame, unchanged; after three such frames in a row the context stays with it and lets its kept
+  imports go.
+- A GPU that does not finish a copy in 5 s, or a presentation thread that stays at one frame for 12 s (5 s for the
+  copy, 5 s more for a frame it had to send again), quarantines the share group as before: nothing is freed, nothing
+  more is presented. The 12 s are that thread's and not the waiting swap's, because it works the frames of every
+  window of the process in turn: a frame behind another window's slow one is not given up while that one is within its
+  time, and a frame whose work is already past it is given up at once.
+- The presentation thread takes none of the application's signals, except the ones a fault of its own raises (SIGSEGV,
+  SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS), which stay open so that a crash there is reported as one.
+
+What this rests on and could not be run here: a duplicate of the RM object keeps a surface's video memory alive in
+this process after the surface gave it up (the Metal plugin's imports rely on the same); a drawable may be presented
+and released from a thread that is not the one that asked for it (the card check `zink.win-thread` does that with
+the swap itself); and the waits of an application that reads back or queries its own frame move into the next
+frame. None of it has run on a card.
+
 ## The way out
 
 Native OpenGL has one way out, boot argument `nvzink=0` (a row in tools/switches.tsv, docs/SWITCHES.md): the
 accelerator names AppleMetalOpenGLRenderer again, read once when it starts, so every application keeps Apple's
-OpenGL. Nothing else switches native OpenGL off or changes how it presents.
+OpenGL. Nothing else switches native OpenGL off.
+
+How it presents has two switches of its own since 3.0.7, each a line of the settings file
+(`/Library/GPUBundles/nvmtl/nvrm610.conf`) that a process reads once, when its first context presents:
+`NVK_ZINK_PRESENT_AHEAD=0` makes every swap wait for the GPU and publish its own frame, through the code of 3.0.6;
+`NVK_ZINK_SURFACE_KEEP=0` leaves swaps one frame ahead and imports the drawable's video memory for every frame.
+A line may have blanks before the name, around the `=` and before the value, so every spelling that turns a switch
+of the Metal plugin off in that file turns one of these off (the plugin itself keeps a blank after the `=` as part
+of the value); the last line that names a switch decides. As for those settings, a variable of that name in a process's own
+environment counts only when that process also sets `NVMTL_PROCESS_ENV=1`.
 
 In OBS, OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the
 first frame on this driver.
@@ -264,7 +318,27 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   rows and Mesa's Vulkan headers: no error, and no warning but three that say `NSOpenGLContext`'s `view` is
   deprecated, in lines this change does not touch. The shell fragment of the glbench row under sh and bash, with a
   first line that names Zink, "(null)", another renderer and none.
-- Not checked: `native_drawable.m` (it names `kIOMainPortDefault`, which the 11.3 SDK does not have), a compile with
+- `tools/test_zink_present_queue.py` (3.0.7): the presentation queue, as it is, with real threads (who may be inside,
+  who waits for whom, how the limit is the presentation thread's time at one frame and not a swap's wait, teardown,
+  two threads presenting one context, a fork, which signals the presentation thread takes), and the half of
+  `nvk_present.c` that presents one frame ahead, cut out of the file as it is, against a scripted GPU and a scripted
+  kernel that remembers which block each surface has: the order fence, mark, tag, drawable; a fence that is reset
+  before it is used again; kept imports, their eviction and their age to the frame; a block that moved under a kept
+  import and the frame sent again from the presentation thread without another swap; a context that stops keeping; a
+  GPU that does not finish, and a frame that is not sent again once the share group is quarantined; every refusal;
+  both switches and how their lines may be written; an NVK and a kernel from before 3.0.7. A third program runs the
+  end of `present_drawable` and `native_frame_done`, cut out of `nvk_cgl.c` as they are, for who releases the drawable
+  in each answer of the frontend. The queue without its two fork arms and the frame's first four sets run again under
+  ThreadSanitizer and AddressSanitizer, and all of it runs against 31 copies of the sources with one rule broken each,
+  every one of which has to fail. It also holds the text of 3.0.6's path, which every way back leads to, unchanged.
+  `nvk_zink_present_frame` itself is not run, only read for the order of its steps, and the limit of 12 s is read too
+  (the programs run with 0.4 s). It has run on Linux only, with gcc 13 and clang 18. `tools/test_surf_keep.py` runs
+  the kernel's side of a kept import the same way: the two rules and the lines of the escape that apply them.
+- The frontend with the queue (`nvk_zink.c`, `nvk_present.c`, `nvk_present_queue.c`, `nvk_iosurface.c`) in the
+  darwin cross-build on Linux, 0 warnings, and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` with `-fsyntax-only`
+  (the last with the 11.3 SDK's older name standing in for `kIOMainPortDefault`).
+  The NVK patch `nvk-surface-keep` applies at the end of the chain without fuzz; NVK itself was not compiled here.
+- Not checked: `native_drawable.m` as it is (it names `kIOMainPortDefault`, which the 11.3 SDK does not have), a compile with
   Xcode against a current SDK, the real link, running anything; where the recorded builds keep the CGL private object
   and its engine list (`integer_dispatch_slot` has not run on a Mac); when CGL stores `rend` relative to
   gldCreateContext, what `rend` holds afterwards and how CGL allocates the context, on any build (25G342 refused at

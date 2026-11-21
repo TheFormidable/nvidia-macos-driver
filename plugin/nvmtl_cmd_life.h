@@ -61,7 +61,8 @@ typedef struct nvmtl_cl_state {
     uint32_t open[NVMTL_CL_COHORTS];   /* command buffers begun and not ended, per kept cohort (index id % NVMTL_CL_COHORTS) */
 } nvmtl_cl_state;
 
-/* what a dead image remembers: its cohort, then (once resolved) the last sequence it has to see finished */
+/* what a dead image remembers: its cohort, then (once resolved) the last sequence it has to see finished. resolved is 1
+   when every command buffer of its cohort and older ended, 2 when the patience ran out with one still open (forced). */
 typedef struct nvmtl_cl_mark { uint64_t cohort, seq; uint32_t resolved, pad; } nvmtl_cl_mark;
 
 static inline uint64_t nvmtl_cl_current(nvmtl_cl_state *s)
@@ -136,9 +137,12 @@ static inline int nvmtl_cl_settle(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t 
         m->resolved = 1;
         if (s->submitted > m->seq) m->seq = s->submitted;
     }
-    if (!m->resolved && finished >= m->seq + NVMTL_CL_PATIENCE) { m->resolved = 1; s->forced++; }   /* seq stays the death's */
+    if (!m->resolved && finished >= m->seq + NVMTL_CL_PATIENCE) { m->resolved = 2; s->forced++; }   /* seq stays the death's */
     return (int)m->resolved;
 }
+/* Was the thing marked m released by force? A command buffer open at its death may still be submitted and read it, so
+   it is released as without the grace and must not be kept for reuse. */
+static inline int nvmtl_cl_forced(const nvmtl_cl_mark *m) { return m->resolved == 2; }
 /* May the thing marked m be released, with finished the highest sequence the queue has completed? */
 static inline int nvmtl_cl_due(nvmtl_cl_state *s, nvmtl_cl_mark *m, uint64_t finished)
 {

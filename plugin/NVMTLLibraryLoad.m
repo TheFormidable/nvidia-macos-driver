@@ -65,6 +65,8 @@ static nvmtl_translate_fn xlate;
 #include "nvmtl_pretranslate.h"
 #include "nvmtl_switch_defaults.h"
 #include "nvmtl_cache_file.h"
+#include "nvmtl_fc_refusal.h"
+#include "nvmtl_argbuf_elems.h"
 int nvmtl_vk_lost(void);
 // The cache tag: the translator build (sha256-<64 hex>, 71 characters) plus every mode suffix. This buffer was 80 bytes,
 // so a tag with -u2 and -p5 had room for only "-a" of "-as1", and any suffix after it was silently dropped: entries
@@ -161,6 +163,12 @@ static int nvmtl_xlate_ready(void) {
         // NVMTL_WHOLE_VIEWS=0: without its mark, a module cached with the views on would still be served after they
         // were turned off in the settings file.
         if (h && strcmp(gXlateTag, "untagged") && !nvmtl_spvcache_escape_tag(gXlateTag, sizeof gXlateTag, getenv("NVMTL_WHOLE_VIEWS"))) {
+            strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
+            nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
+        }
+        // And the translator's way back from its device-address construction, NVMTL_XLATE_ADDR_RETRY=0: a module that
+        // only that construction translates must not be served from the cache once the retry is turned off.
+        if (h && strcmp(gXlateTag, "untagged") && !nvmtl_spvcache_addr_retry_tag(gXlateTag, sizeof gXlateTag, getenv("NVMTL_XLATE_ADDR_RETRY"))) {
             strlcpy(gXlateTag, "untagged", sizeof gXlateTag);
             nvlog("translate: cache tag does not fit - the shader cache is OFF in this process");
         }
@@ -1752,16 +1760,22 @@ static NSData *nvmtl_fc_via_spec(NSString *ll, NSString *stage, const uint32_t *
     if (xlate_free) xlate_free(out, out_len);
     return d;
 }
+// Set by nvmtl_translate_with_fc only where the translator itself refused the request, the one outcome that the same
+// request always gets again (nvmtl_fc_refusal.h); cleared on entry, so every other result of the call leaves it 0.
+static __thread int g_fc_refused;
 NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *idx, const uint32_t *sizes,
                                 const uint8_t *const *payloads, size_t n, NSString **err)
 {
+    g_fc_refused = 0;
     if (!nvmtl_xlate_ready()) { if (err) *err = @"the AIR->SPIR-V translator is not loaded"; return nil; }
     if (!xlate_fc) { if (err) *err = @"this translator has no nvmtl_translate_fc — rebuild nvmtl_translate"; return nil; }
     if (!ll || !stage.length) { if (err) *err = @"no AIR kept for this function"; return nil; }
     uint8_t *out = NULL; size_t out_len = 0; char e[512] = {0};
     // NVMTL_FC_DUMP_ALL=<dir>: keep every module before it is translated, including one whose translation never returns.
     nvmtl_fc_dump(getenv("NVMTL_FC_DUMP_ALL"), ll, stage, idx, sizes, payloads, n, NULL);
+    BOOL viaSpecTried = NO;
     if (n > 0 && nvmtl_fc_spec_on() && xlate_spec && xlate_spec_apply) {
+        viaSpecTried = YES;
         NSString *why = nil;
         NSData *viaSpec = nvmtl_fc_via_spec(ll, stage, idx, sizes, payloads, n, &why);
         if (viaSpec) return viaSpec;
@@ -1775,11 +1789,30 @@ NSData *nvmtl_translate_with_fc(NSString *ll, NSString *stage, const uint32_t *i
         // replayed offline against the translator; nothing is written unless the variable is set.
         nvmtl_fc_dump(getenv("NVMTL_FC_FAIL_DUMP"), ll, stage, idx, sizes, payloads, n, e);
         if (err) *err = [NSString stringWithUTF8String:e[0] ? e : "specialization failed"];
+        g_fc_refused = !viaSpecTried;
         return nil;
     }
     NSData *d = [NSData dataWithBytes:out length:out_len];
     if (xlate_free) xlate_free(out, out_len);
     return d;
+}
+// Variant refusals, kept beside the entry refusals in gTranslateFailures under the variant's own cache key (an fc1 name,
+// never an entry's), at most NVMTL_FC_REFUSALS_MAX of them.
+static _Atomic unsigned long gFcRefusalsKept, gFcRefusedAgain;
+// Whether variant refusals are remembered at all (NVMTL_FC_REFUSAL_MEMO=0: every request is translated, as in 3.0.5).
+static int nvmtl_fc_refusal_memo_on(void) {
+    static int on = -1;
+    // Said only when it is turned off, so a default run (WindowServer among them) writes no line it did not write before.
+    if (on < 0) { const char *e = getenv("NVMTL_FC_REFUSAL_MEMO"); on = nvmtl_fc_refusal_memo_env_on(e);
+        if (!on) nvlog("fc cache: a variant the translator refused is translated again on every request, as in 3.0.5 (NVMTL_FC_REFUSAL_MEMO=%s)", e); }
+    return on;
+}
+static void nvmtl_fc_refusal_note(NSString *key, NSString *why) {
+    @synchronized([NSProcessInfo processInfo]) {
+        if (!nvmtl_fc_refusal_keep(1, 1, key != nil, gFcRefusalsKept) || gTranslateFailures[key]) return;
+        if (!gTranslateFailures) gTranslateFailures = [NSMutableDictionary new];
+        gTranslateFailures[key] = why; gFcRefusalsKept++;
+    }
 }
 
 /* Function-constant warm-up.
@@ -2040,8 +2073,26 @@ NSData *nvmtl_translate_with_fc_cached(NSString *ll, NSString *stage, NSString *
             return hit;
         }
     }
+    // Refused before: the translator gives the same request the same refusal (nvmtl_fc_refusal.h), so it is not asked
+    // again. Looked up only after the memory, the disk and the warm-up have missed, so a file another process stored for
+    // this key is still read first.
+    const BOOL memoOn = fcCacheOn && nvmtl_fc_refusal_memo_on();
+    NSString *refusedBefore = memoOn ? nvmtl_translate_failure_for(memoKey) : nil;
+    if (nvmtl_fc_refusal_use(memoOn, refusedBefore != nil)) {
+        if (err) *err = refusedBefore;
+        const unsigned long k = atomic_fetch_add(&gFcRefusedAgain, 1) + 1;
+        if (!(k & (k - 1))) nvlog("fc cache: %s was refused before with these constants - the same refusal, not translated again [%lu so far]: %s",
+                                  name.UTF8String, k, refusedBefore.UTF8String);
+        nvmtl_fc_note_lookup();
+        return nil;
+    }
     gFcMiss++;
-    NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, err);
+    NSString *why = nil;
+    NSData *result = nvmtl_translate_with_fc(ll, stage, idx, sizes, payloads, n, &why);
+    const int refused = !result && g_fc_refused;
+    if (!result && err) *err = why;
+    if (!result && nvmtl_fc_refusal_keep(refused, memoOn, memoKey != nil, gFcRefusalsKept))
+        nvmtl_fc_refusal_note(memoKey, why ?: @"specialization failed");
     if (result && fcCacheOn && path && nvmtl_fcwarm_on() &&
         clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0 >= (uint64_t)NVMTL_FCWARM_RECORD_MS * 1000000ull)
         nvmtl_fcwarm_record(airDigest, json);
@@ -2504,6 +2555,15 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn)
     return r;
 }
 
+// NVMTL_ARGBUF_ARRAYS=0: an array of handles in an argument buffer is one field again, its first element, as in 3.0.5.
+// Otherwise each element has its own [[id]] (nvmtl_air_argbuf_walk).
+static BOOL nvmtl_argbuf_arrays_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_ARGBUF_ARRAYS"); on = !(e && e[0] == '0');
+        nvlog("argument encoder: an array of handles %s (NVMTL_ARGBUF_ARRAYS=%s)",
+              on ? "takes one [[id]] per element" : "keeps only its first element", e ? e : "unset"); }
+    return on;
+}
 // One `air.struct_type_info` tuple: members of `i32 offset, i32 size, i32 count, !"type", !"name",
 // !"air.indirect_argument", leaf`. A leaf is either a node with the member's `air.location_index` (its [[id]] inside the
 // struct), or, for a nested struct - whose member starts with `!"air.struct_type_info", !child` - `i32 id`, the
@@ -2523,6 +2583,7 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
             i++; continue;
         }
         const NSUInteger off = (NSUInteger)[[tok[j] substringFromIndex:4] integerValue], size = (NSUInteger)[[tok[j + 1] substringFromIndex:4] integerValue];
+        const NSInteger count = [[tok[j + 2] substringFromIndex:4] integerValue];
         NSString *ref = tok[j + 6], *name = [tok[j + 4] substringWithRange:NSMakeRange(2, tok[j + 4].length - 3)];
         if (child) {
             if ([ref hasPrefix:@"i32 "]) nvmtl_air_argbuf_walk(nodes, child, baseId + (NSUInteger)[[ref substringFromIndex:4] integerValue],
@@ -2548,6 +2609,19 @@ static void nvmtl_air_argbuf_walk(NSDictionary *nodes, NSString *node, NSUIntege
                     }
                 }
                 [out addObject:fld];
+                // An array of handles takes one [[id]] per element, its handle word at 8 bytes per element
+                // (nvmtl_argbuf_elems.h, both spellings of the array). WAS one field for the whole array, so
+                // setTexture:atIndex: 1-7 of an array<texture2d<float>, 8> was REFUSED and those elements read zeros
+                // (card row xlate.paths-abarray). Element 0 stays the field above.
+                const BOOL handle = [kind isEqualToString:@"texture"] || [kind isEqualToString:@"sampler"]
+                                 || [leaf rangeOfString:@"!\"air.buffer\""].location != NSNotFound;
+                long lid = 0, lcount = 1; unsigned stride = 0;
+                const unsigned n = handle && nvmtl_argbuf_arrays_on() && nvmtl_air_location_pair(leaf.UTF8String, &lid, &lcount)
+                                 ? nvmtl_argbuf_handle_elements((long)count, (long)size, lcount, &stride) : 1;
+                for (unsigned k = 1; k < n; k++)
+                    [out addObject:@{ @"buffer_index": @(bufferIndex), @"argument_index": @(baseId + (NSUInteger)rel + k),
+                                      @"field_offset": @(baseOff + off + (NSUInteger)k * stride), @"size": @(stride), @"kind": kind,
+                                      @"name": name }];
             }
         }
         i = j + 7;

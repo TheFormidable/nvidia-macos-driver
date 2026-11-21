@@ -26,7 +26,9 @@ typedef struct { void *buf; void *mem; void *map; size_t size; size_t alloc; int
 #include "nvmtl_slots.h"
 #include "nvmtl_fence.h"
 #include "nvmtl_plane_alias.h"
+#include "nvmtl_draw_cache.h"
 #include "nvmtl_nvk_layout.h"
+#include "nvmtl_texrc.h"
 typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; uint32_t layout; uint32_t mips; uint32_t fmt, bpp; uint32_t storage, mtl_type, layers; int placed; uint32_t bw, bh; uint32_t samples; uint32_t sysmem; uint32_t vkflags, usage;  uint32_t vfl;  uint64_t up_token;
                  void *pool; size_t poff, poollen; /* NVMTL_IMAGE_POOL: the pool block this image lives in and its reserved range */
                  size_t hz_off, hz_len;   /* placed: the image's byte range of mem, for the hazard model (0 = all of mem) */
@@ -35,6 +37,9 @@ typedef struct { void *img; void *mem; void *view; uint32_t w, h; size_t alloc; 
                  uint8_t linear;  /* a linear alias of a buffer: 1 = offset and pitch 128-byte aligned, 2 = not (NVK renders it
                                      through its own tiled shadow even when no other attachment is tiled) */
                  uint8_t alias_a8; /* the a8 component mapping of the image's own view (nvmtl_a8_mapping); 0 = identity */
+                 /* a texture the recycle cache may park at its death (nvmtl_texrc.h): the creation it came from and the
+                    image and memory that creation made; rc_img NULL for every other image */
+                 nvmtl_texrc_key rck; void *rc_img, *rc_mem;
                } nvk_image;
 #define NVMTL_NVAR 16
 #define NVMTL_NVAR_MAX 4096
@@ -141,6 +146,9 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  /* the encoder's depth bounds (setDepthTestMinBound:maxBound:), re-emitted when a pipeline that has them as
                     dynamic state is bound, since binding a pipeline without them leaves that state undefined */
                  uint8_t db_on; float db_lo, db_hi;
+                 /* the index buffer, vertex buffers, topology and restart this VkCommandBuffer holds (nvmtl_draw_cache.h) */
+                 nvmtl_draw_cache dc;
+                 uint32_t gfx_epoch; /* advanced by every render pass begin: an encoder's record of depth-stencil state it applied holds within one */
                  int dead; /* made after the device was lost: records nothing, submits as "device removed" (nvmtl_vk_cmd_begin) */
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);
@@ -329,6 +337,9 @@ void nvmtl_vk_res1_stats(uint64_t out[6]);
 int nvmtl_vk_image_migrate(nvk_image *i, int to_sysmem, int a8, nvk_image *old_out);
 void nvmtl_vk_image_free_backing(nvk_image *old);
 int nvmtl_vk_vram_room(uint64_t want);
+/* the residency pager's pressure pass: every parked image of the texture recycle cache is freed before it measures what
+   it has to page out (0 when the cache is empty, as with NVMTL_TEX_RECYCLE=0 and in WindowServer) */
+uint32_t nvmtl_vk_texrc_give_back(void);
 uint64_t nvmtl_vk_vram_free_now(void);
 uint64_t nvmtl_vk_vram_headroom(void);
 int nvmtl_vk_vram_measured(void);
@@ -526,6 +537,9 @@ size_t nvmtl_vk_allocated_bytes(void);
 uint64_t nvmtl_vk_buffer_address(nvk_buffer *b);
 
 int nvmtl_vk_image_create_typed(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
+/* the same, for -[MTLDevice newTextureWithDescriptor:]: the texture may take a parked image of its exact creation and be
+   parked at its death (nvmtl_texrc.h) */
+int nvmtl_vk_image_create_typed_recyclable(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, uint32_t mips, int storage, uint32_t mtl_type, uint32_t layers, nvk_image *out);
 typedef struct { void *mem; void *map; size_t size; uint32_t memtype; int host_visible; } nvk_heap;
 int  nvmtl_vk_heap_create(size_t size, int host_visible, nvk_heap *out);
 void nvmtl_vk_image_parked(nvk_image *i);     /* the image went to a park for reuse (alive, recyclable) */
@@ -580,6 +594,8 @@ int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
 
 int nvmtl_vk_surface_share_on(void);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);
+/* why the last nvmtl_vk_surface_vram on this thread failed: 0 not said, 1 no descriptor, 2 import failed, 3 buffer refused */
+int nvmtl_vk_surface_vram_why(void);
 /* Two-plane surfaces whose planes live in their own VRAM (nvmtl_plane_alias.h). vram_ranged: one plane's VRAM granted with
    its byte range. plane_vram_gate: NULL when the accelerator offers ranged grants and its page-off waits unlocked, else
    why not. plane_vram_state: 1 the process's self-test passed; 0 not now; -1 the caller must start the self-test (one

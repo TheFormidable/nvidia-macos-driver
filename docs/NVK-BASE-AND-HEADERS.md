@@ -41,9 +41,12 @@ compiler file and no file of the three patches above. It is not one of the upstr
 NAK changes on main since (the `imad64` and `fmnmx`/`fclamp` series, the zcull depth hints) are not taken: they change
 the code of shaders and cannot be checked on a card here.
 
-The current chain also ends with `nvk-gpu-caps`, which carries the byte-identical
+The current chain goes on with `nvk-gpu-caps`, which carries the byte-identical
 NVRM GPU Caps ABI header. It does not rebase Mesa or implement GPU writes.
 See [GPU-CAPS.md](GPU-CAPS.md); `tools/test_shared_headers.py` checks the two copies.
+After it come two changes of our own, each described in its header: `nvk-desc-alloc` (3.0.6: a descriptor set layout
+without immutable samplers is not walked for every new set) and `nvk-surface-keep` (3.0.7: two exports for a caller
+that keeps its import of a surface's video memory across frames; see [ZINK-OPENGL.md](ZINK-OPENGL.md)).
 
 `NVK_SKIP_PATCHES="<name> ..."` for `build/build_nvk.sh` leaves any of the three out of a build; no other name is
 accepted. It is there to find the cause of a rendering fault: build without `nvk-nak-sched-main` first (it is the only
