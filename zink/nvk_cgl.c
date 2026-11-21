@@ -1173,7 +1173,8 @@ static int present_drawable(CGLContextObj context)
       b->native_present = true;
       b->present_configured = true;
    }
-   /* The drawable's opacity is asked for at most once per swap, and the layer and the copy are given the same answer. */
+   /* The drawable's opacity is asked for at most once per swap, and the layer and the copy are given the same
+    * answer. */
    int opaque = -1;
    if (b->native_present) {
       uint32_t vendor = 0, device = 0;

@@ -243,23 +243,24 @@ What this rests on and could not be run here: a duplicate of the RM object keeps
 this process after the surface gave it up (the Metal plugin's imports rely on the same); a drawable may be presented
 and released from a thread that is not the one that asked for it (the card check `zink.win-thread` does that with
 the swap itself); and the waits of an application that reads back or queries its own frame move into the next
-frame. None of it has run on a card.
+frame. Of it only this ran on a card, on 3.0.7 (CHANGELOG.md, 3.0.7, What ran where): `zink.win-thread`, which failed
+there for the time of its own pixel reader, and the swap one frame ahead in one capture of the modded pack. No card
+row runs a swap one frame ahead.
 
 Whether the drawable is opaque decides the layer's `opaque` and whether the copy writes alpha 1. It is the context's
 `kCGLCPSurfaceOpacity`, and CGL answers it with a message to WindowServer and its reply. Through 3.0.7
-`present_drawable` asked twice per swap, once for the layer and once for the copy (a third time on the IOSurface
-path); in a capture of the Minecraft pack on 3.0.7 that was 5.7 % of the game's render thread. Since 3.0.8 a swap asks
-at most once and gives the layer, the copy and the IOSurface path that one answer, and a context keeps it
+`present_drawable` asked twice per swap, once for the layer and once for the copy (on the IOSurface path, there instead
+of for the copy); in a capture of the Minecraft pack on 3.0.7 that was 5.7 % of the game's render thread. Since 3.0.8 a
+swap asks at most once and gives the layer, the copy and the IOSurface path that one answer, and a context keeps it
 (`zink/nvk_opacity.h`): it asks again on the first swap at least 100 ms after it last asked, and at once on its first
 swap, after an ask that failed (which answers opaque and is not kept), and after the adapter has seen the context's
-output change: a size it applies (`bridge_current`, `nvk_cgl_resize`), a view bound or unbound
-(`nvk_native_bind_view`, which AppKit's `setView:` and `update` reach), the native target removed
-(`nvk_native_remove`, which `clearDrawable` reaches), and a native acquire that gave no drawable, except a swap that
-again finds no view. So after an application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps
-of up to the next 100 ms are composed with the old value, where 3.0.7 used the new one from the next swap. Where
-`CGLSetParameter` of that parameter (236) passes the GLI integer callback the adapter replaces for
-`CGLTexImageIOSurface2D`, the next swap asks at once; whether it does has not been seen, and nothing depends on it.
-The gain has not been measured.
+output change: a size it applies (`bridge_current`, `nvk_cgl_resize`), a view bound or unbound (`nvk_native_bind_view`,
+which AppKit's `setView:` and `update` reach on the main thread), the native target removed (`nvk_native_remove`, which
+`clearDrawable` reaches), and a native acquire that gave no drawable, except a swap that again finds no view. So after
+an application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps of up to the next 100 ms are
+composed with the old value, where 3.0.7 used the new one from the next swap. Where `CGLSetParameter` of that parameter
+(236) passes the GLI integer callback the adapter replaces for `CGLTexImageIOSurface2D`, the next swap asks at once;
+whether it does has not been seen, and nothing depends on it. The gain has not been measured.
 
 ## The way out
 
@@ -357,7 +358,8 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   switch off every swap asks once, a failed ask answers opaque and is not kept, a clock that goes back or wraps keeps
   no answer for good; plain and under AddressSanitizer and UndefinedBehaviorSanitizer, and against 13 copies with one
   rule broken each, every one of which has to fail. It reads `nvk_cgl.c` and `native_drawable.m` for one ask per swap,
-  the switch, and each place that makes the next swap ask. It has run on Linux only, with gcc 13 and clang 18.
+  the switch, and each place that makes the next swap ask, and against 3 copies of them with one such place broken
+  each, every one of which has to fail that reading. It has run on Linux only, with gcc 13 and clang 18.
 - The frontend with the queue (`nvk_zink.c`, `nvk_present.c`, `nvk_present_queue.c`, `nvk_iosurface.c`) in the
   darwin cross-build on Linux, 0 warnings, and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` with `-fsyntax-only`
   (the last with the 11.3 SDK's older name standing in for `kIOMainPortDefault`).
