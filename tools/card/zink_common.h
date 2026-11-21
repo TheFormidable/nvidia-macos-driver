@@ -13,7 +13,7 @@
 #define ZINK_COMMON_H
 
 #define GL_SILENCE_DEPRECATION 1
-/* The core and the legacy prototypes together, as zink/nvk_cgl.c:5-7 includes them. */
+/* The core and the legacy prototypes together, as zink/nvk_cgl.c:7-9 includes them. */
 #define GL_DO_NOT_WARN_IF_MULTI_GL_VERSION_HEADERS_INCLUDED 1
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -502,7 +502,7 @@ __attribute__((unused)) static const char *zk_owner(const void *address, char *o
    return out;
 }
 
-/* nvk_cgl_last_error() of zink/nvk_cgl.c:157: the calling thread's last adapter failure, or "none". */
+/* nvk_cgl_last_error() of zink/nvk_cgl.c:161: the calling thread's last adapter failure, or "none". */
 static const char *zk_last_error(void)
 {
    static const char *(*fn)(void);
@@ -552,7 +552,7 @@ static bool zk_is_software(const char *renderer)
 
 /* Never returns: a hardware context that is not Zink's, or one whose GL_RENDERER is null (that one fails, below).
  * Of the others, only the layout guard's refusal makes the check inactive
- * (zink/nvk_cgl.c:719-726, printed once per process, for the first context it refuses): the guard keeps Apple's
+ * (zink/nvk_cgl.c:727-734, printed once per process, for the first context it refuses): the guard keeps Apple's
  * OpenGL on purpose when GLEngine's private layout is not the recorded one. Every other way a hardware context stays
  * Apple's, while IOGLBundleName names the bundle (the row's need "zink"), is a failure of the installed driver: a
  * screen that could not start (zink/nvk_zink.c:127), a bundle without Apple's renderer or the adapter
@@ -567,7 +567,7 @@ static _Noreturn void zk_not_zink(const char *renderer)
    if (!renderer || !strcmp(renderer, "(null)")) {
       /* glGetString gave 0, which zk_string hands on as "(null)". With a context current Apple's renderer gives a
        * string, so the context is Zink's: on the Zink path every call returns 0 when the capability table cannot be
-       * built (nvk_cgl.c:392-399) and when the adapter drops the call (:266-279). The row fails whatever else the
+       * built (nvk_cgl.c:397-404) and when the adapter drops the call (:270-283). The row fails whatever else the
        * process printed, the refusal line of another context included; the driver's first line, where it wrote
        * one, is added. */
       int said = zk_tee_driver_line(line, sizeof(line));

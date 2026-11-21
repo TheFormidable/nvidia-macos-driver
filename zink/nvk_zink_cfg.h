@@ -37,7 +37,9 @@ static inline int nvk_zink_cfg_on_in(const char *text, const char *name, int pro
    return !(value && value[0] == '0');
 }
 
-/* Not for two threads at once: its one caller reads the switches once, under pthread_once. */
+/* Not for two threads at once. Each library that includes this has its own copy of the text, and its one caller there
+ * reads that library's switches once, under pthread_once: nvk_present.c in libnvk_zink.dylib, nvk_cgl.c (the
+ * opacity's switch) in libnvk_cgl.dylib. */
 static inline int nvk_zink_cfg_on(const char *name)
 {
    static char text[8192];

@@ -62,6 +62,7 @@ void nvk_native_bind_view(CGLContextObj context, void *pointer)
    if (!context || ![NSThread isMainThread]) return;
    NSView *view = (__bridge NSView *)pointer;
    NSMutableDictionary *table = bindings();
+   BOOL changed = NO;
    @synchronized(table) {
       NSValue *key = [NSValue valueWithPointer:context];
       NVKZinkTarget *target = table[key];
@@ -70,9 +71,11 @@ void nvk_native_bind_view(CGLContextObj context, void *pointer)
          if (target.view != view) {
             [target.layer removeFromSuperlayer]; target.layer = nil;
             target.view = view; target.width = target.height = 0;
+            changed = YES;
          }
       }
    }
+   if (changed) nvk_cgl_output_changed(context);
 }
 
 void nvk_native_remove(CGLContextObj context)
@@ -84,6 +87,7 @@ void nvk_native_remove(CGLContextObj context)
       target = table[key]; [table removeObjectForKey:key];
    }
    if (!target) return;
+   nvk_cgl_output_changed(context);
    void (^remove)(void) = ^{
       @synchronized(target) { [target.layer removeFromSuperlayer]; target.layer = nil; target.view = nil; }
    };
