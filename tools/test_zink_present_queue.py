@@ -51,14 +51,14 @@ static int fail(const char *error) { (void)error; failed++; return 0; }
 static int nvk_native_publish(void *frame) { (void)frame; published++; return publish_answer; }
 static void nvk_native_release(void *frame) { (void)frame; released++; }
 static int nvk_zink_swap(struct nvk_zink_context *z) { (void)z; swapped++; return 1; }
-static int opaque_drawable(CGLContextObj c) { (void)c; return 0; }
 static int script_result, script_done, done_answer;   /* script_done: -1 `done` is not called, else done(arg, it) */
 static int nvk_zink_present_frame(struct nvk_zink_context *z, IOSurfaceRef s, int opaque, int (*done)(void *, int), void *arg)
 { (void)z; (void)s; (void)opaque; if (script_done >= 0) done_answer = done(arg, script_done); return script_result; }
 
 @DONE@
-static int tail(struct nvk_cgl_bridge *b, CGLContextObj context, IOSurfaceRef surface, void *frame)
+static int tail(struct nvk_cgl_bridge *b, CGLContextObj context, IOSurfaceRef surface, void *frame, int opaque)
 {
+    (void)context;
 @TAIL@}
 
 static int fails;
@@ -68,7 +68,7 @@ static int go(int result, int done, int publish)
     static struct nvk_zink_context z; static struct nvk_cgl_bridge b = { &z }; static int frame;
     published = released = failed = swapped = 0; done_answer = -1;
     script_result = result; script_done = done; publish_answer = publish;
-    return tail(&b, NULL, NULL, &frame);
+    return tail(&b, NULL, NULL, &frame, 0);
 }
 int main(void)
 {
