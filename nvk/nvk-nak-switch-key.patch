@@ -1,4 +1,4 @@
-nvk-nak-switch-key: the shader compiler's switches are part of NVK's shader cache key (3.0.9).
+nvk-nak-switch-key: the shader compiler's switches are part of NVK's shader cache key (3.0.10).
 NullMoth's own change (not an upstream Mesa commit).
 
 nvk_physical_device_compiler_flags feeds pipelineCacheUUID, shaderBinaryUUID and the disk cache's driver flags. Of the

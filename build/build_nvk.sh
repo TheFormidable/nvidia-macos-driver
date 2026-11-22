@@ -44,11 +44,11 @@
 #        across frames, the Zink frontend's presentation: nvmtl_nvk_import_cookie, the kernel's name for the block the
 #        last import on the thread received, and nvmtl_nvk_surface_dirty_at, a mark the kernel takes only while the
 #        surface still has that block; nothing that existed changes, and a caller that does not ask is not told),
-#        then nvk-nak-switch-key (3.0.9: the environment switches the shader compiler reads, two of Mesa's SPIR-V
+#        then nvk-nak-switch-key (3.0.10: the environment switches the shader compiler reads, two of Mesa's SPIR-V
 #        reader among them, are part of NVK's shader cache key, as a digest in bits 16..47 that is 0 when none is set,
 #        so the key with no switch set is computed as before; a switch turned on or off no longer gets binaries
 #        compiled under the other setting from a cache)
-#        and nvk-tex-uhandle-safe (3.0.9: with NAK_TEX_UHANDLE=1, off by default, a texture whose handle left its
+#        and nvk-tex-uhandle-safe (3.0.10: with NAK_TEX_UHANDLE=1, off by default, a texture whose handle left its
 #        uniform register goes back to the handle-in-a-GPR form instead of failing the compile; with the switch unset
 #        the compiler's output is what it was).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,

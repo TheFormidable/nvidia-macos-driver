@@ -128,6 +128,7 @@ env	NVENCVT_SYNC	dev	unset	2.9	-	unreviewed
 env	NVENCVT_TWOPASS	dev	unset	2.9	-	unreviewed
 env	NVK_ACCEL_ID	dev	unset	2.9	-	unreviewed
 env	NVK_BAR_VRAM	dev	unset	2.9	-	unreviewed
+env	NVK_BRIDGE_PRESENT_NEWEST	escape	on (NVK_BRIDGE_PRESENT_NEWEST=0 in the settings file: every swapchain of the native Vulkan frontend presents synchronously, on the application's thread, as in 3.0.8)	3.0.9	3.2	An IMMEDIATE swapchain of the native Vulkan frontend hands each presented frame to a thread of the swapchain, which copies the newest one into a drawable when the layer has one, so vkQueuePresentKHR does not wait for the layer and a frame that was overtaken is not shown; the frontend reads the settings file alone, once, when the process makes its first IMMEDIATE swapchain.
 env	NVK_CHANNEL_RECOVER	escape	on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9)	3.0	3.2	After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device.
 env	NVK_CMDMEM_CENSUS	dev	unset	2.9	-	unreviewed
 env	NVK_CMDMEM_LIVE_MAX	dev	unset	2.9	-	unreviewed
