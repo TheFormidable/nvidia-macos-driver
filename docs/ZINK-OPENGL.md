@@ -202,7 +202,7 @@ presents through an IOSurface that NVK imports. No frame goes through a CPU copy
 
 Through 3.0.6 the thread that swapped did all of it for every frame: it imported the surface's video memory, sent the
 copy, slept until the GPU had finished the frame, marked and tagged the surface and presented the drawable. Measured
-in a Minecraft modpack at 55 to 64 frames per second on an RTX 5050, that thread spent 30 to 40 % of its time asleep
+in a Minecraft modpack at 55 to 64 frames per second on an RTX 5050, that thread spent 30 to 44 % of its time asleep
 in the swap and 6 to 8 % importing, for a layer that hands out the same three surfaces in turn.
 
 Since 3.0.7 a swap is one frame ahead (`zink/nvk_present_queue.h`, the second half of `zink/nvk_present.c`):
@@ -243,7 +243,24 @@ What this rests on and could not be run here: a duplicate of the RM object keeps
 this process after the surface gave it up (the Metal plugin's imports rely on the same); a drawable may be presented
 and released from a thread that is not the one that asked for it (the card check `zink.win-thread` does that with
 the swap itself); and the waits of an application that reads back or queries its own frame move into the next
-frame. None of it has run on a card.
+frame. Of it only this ran on a card, on 3.0.7 (CHANGELOG.md, 3.0.7, What ran where): `zink.win-thread`, which failed
+there for the time of its own pixel reader, and the swap one frame ahead in one capture of the modded pack. No card
+row runs a swap one frame ahead.
+
+Whether the drawable is opaque decides the layer's `opaque` and whether the copy writes alpha 1. It is the context's
+`kCGLCPSurfaceOpacity`, and CGL answers it with a message to WindowServer and its reply. Through 3.0.7
+`present_drawable` asked twice per swap, once for the layer and once for the copy (on the IOSurface path, there instead
+of for the copy); in a capture of the Minecraft pack on 3.0.7 that was 5.7 % of the game's render thread. Since 3.0.8 a
+swap asks at most once and gives the layer, the copy and the IOSurface path that one answer, and a context keeps it
+(`zink/nvk_opacity.h`): it asks again on the first swap at least 100 ms after it last asked, and at once on its first
+swap, after an ask that failed (which answers opaque and is not kept), and after the adapter has seen the context's
+output change: a size it applies (`bridge_current`, `nvk_cgl_resize`), a view bound or unbound (`nvk_native_bind_view`,
+which AppKit's `setView:` and `update` reach on the main thread), the native target removed (`nvk_native_remove`, which
+`clearDrawable` reaches), and a native acquire that gave no drawable, except a swap that again finds no view. So after
+an application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps of up to the next 100 ms are
+composed with the old value, where 3.0.7 used the new one from the next swap. Where `CGLSetParameter` of that parameter
+(236) passes the GLI integer callback the adapter replaces for `CGLTexImageIOSurface2D`, the next swap asks at once;
+whether it does has not been seen, and nothing depends on it. The gain has not been measured.
 
 ## The way out
 
@@ -255,6 +272,8 @@ How it presents has two switches of its own since 3.0.7, each a line of the sett
 (`/Library/GPUBundles/nvmtl/nvrm610.conf`) that a process reads once, when its first context presents:
 `NVK_ZINK_PRESENT_AHEAD=0` makes every swap wait for the GPU and publish its own frame, through the code of 3.0.6;
 `NVK_ZINK_SURFACE_KEEP=0` leaves swaps one frame ahead and imports the drawable's video memory for every frame.
+Since 3.0.8 `NVK_ZINK_OPACITY_KEEP=0`, read the same way by the CGL adapter (`libnvk_cgl.dylib`), makes every swap ask
+WindowServer for the drawable's opacity again, once.
 A line may have blanks before the name, around the `=` and before the value, so every spelling that turns a switch
 of the Metal plugin off in that file turns one of these off (the plugin itself keeps a blank after the `=` as part
 of the value); the last line that names a switch decides. As for those settings, a variable of that name in a process's own
@@ -334,6 +353,13 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   `nvk_zink_present_frame` itself is not run, only read for the order of its steps, and the limit of 12 s is read too
   (the programs run with 0.4 s). It has run on Linux only, with gcc 13 and clang 18. `tools/test_surf_keep.py` runs
   the kernel's side of a kept import the same way: the two rules and the lines of the escape that apply them.
+- `tools/test_zink_opacity.py` (3.0.8): `zink/nvk_opacity.h`, as it is, with a clock and a reader of its own: the
+  first swap asks, nothing is asked within 100 ms, one ask at 100 ms, a change of the output asks at once, with the
+  switch off every swap asks once, a failed ask answers opaque and is not kept, a clock that goes back or wraps keeps
+  no answer for good; plain and under AddressSanitizer and UndefinedBehaviorSanitizer, and against 13 copies with one
+  rule broken each, every one of which has to fail. It reads `nvk_cgl.c` and `native_drawable.m` for one ask per swap,
+  the switch, and each place that makes the next swap ask, and against 3 copies of them with one such place broken
+  each, every one of which has to fail that reading. It has run on Linux only, with gcc 13 and clang 18.
 - The frontend with the queue (`nvk_zink.c`, `nvk_present.c`, `nvk_present_queue.c`, `nvk_iosurface.c`) in the
   darwin cross-build on Linux, 0 warnings, and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` with `-fsyntax-only`
   (the last with the 11.3 SDK's older name standing in for `kIOMainPortDefault`).

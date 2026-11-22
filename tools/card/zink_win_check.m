@@ -452,8 +452,8 @@ static CAMetalLayer *zw_layer(NSView *view, int *count)
    return found;
 }
 
-/* The adapter's sublayer (zink/native_drawable.m:113-150): one CAMetalLayer, BGRA8, sized as the drawable, on the
- * card's Metal device (matched by the NVAccel registry entry, :56-78). */
+/* The adapter's sublayer (zink/native_drawable.m:97-131): one CAMetalLayer, BGRA8, sized as the drawable, on the
+ * card's Metal device (matched by the NVAccel registry entry, :36-58). */
 static void zw_check_layer(const char *name, ZKWin *z)
 {
    int count = 0;
@@ -578,7 +578,7 @@ static void zw_present(ZKWin *z, int how, zw_tally *t)
    if (dx) ++t->bad;
    if (!zk_software) {
       /* nvk_cgl_last_error() is per thread; a present that only defers (returns 2) clears it
-       * (zink/nvk_cgl.c:1127-1162). */
+       * (zink/nvk_cgl.c:1161-1204). */
       const char *last = zk_last_error();
       if (strcmp(last, "none")) {
          if (!t->last_error_bad)
@@ -642,7 +642,7 @@ static void sub_basic(void)
       zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &t);
       zw_pump(0.004);
    }
-   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1152). */
+   /* The first frame after the layer's setup may be deferred (returns 2, zink/nvk_cgl.c:1194). */
    zw_report("frames", &t, 57);
    zw_check_layer("layer", z);
    zw_close(z);
@@ -665,8 +665,8 @@ static void sub_resize(void)
    zw_tally t0 = {0}, t1 = {0}, t2 = {0};
    for (int i = 0; i < 20; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &t0);
    zw_report("320x240", &t0, 17);
-   /* The drawable follows at the next GL call (zink/nvk_cgl.c:195-207, :299-326); at most 3 frames per size may
-    * miss the observer while the layer is reconfigured (zink/native_drawable.m:155-170). */
+   /* The drawable follows at the next GL call (zink/nvk_cgl.c:199-211, :303-331); at most 3 frames per size may
+    * miss the observer while the layer is reconfigured (zink/native_drawable.m:159-174). */
    zw_resize(z, 400, 300);
    for (int i = 0; i < 20; ++i) zw_frame(z, 20 + i, zw_opaque, ZW_FLUSH_BUFFER, &t1);
    zw_report("400x300", &t1, 17);
@@ -698,7 +698,7 @@ static void sub_ctl(void)
    const GLint zero = 0, one = 1;
    zw_tally warm = {0}, i0 = {0}, i1 = {0}, o0 = {0}, o1 = {0};
    for (int i = 0; i < 3; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &warm);
-   /* (a) displaySyncEnabled = (kCGLCPSwapInterval != 0) (zink/native_drawable.m:136, :120). */
+   /* (a) displaySyncEnabled = (kCGLCPSwapInterval != 0) (zink/native_drawable.m:140, :124). */
    CGLSetParameter(cgl, kCGLCPSwapInterval, &zero);
    for (int i = 0; i < 3; ++i) zw_frame(z, 10 + i, zw_opaque, ZW_FLUSH_BUFFER, &i0);
    zw_pump(0.05);
@@ -713,9 +713,12 @@ static void sub_ctl(void)
    if (layer && layer.displaySyncEnabled) zk_pass("interval-1", "swap interval 1: displaySyncEnabled YES");
    else if (layer) zk_fail("interval-1", "swap interval 1: displaySyncEnabled got=NO expected=YES");
    zw_report("interval-1", &i1, 2);
-   /* (b) layer.opaque = kCGLCPSurfaceOpacity (zink/native_drawable.m:115, zink/nvk_cgl.c:1058-1063); an opaque surface
-    * gets alpha 1 in the copy (zink/nvk_zink.c:441-446). 0.5 is 127.5 in 8 bits, hence alpha within 1. */
+   /* (b) layer.opaque = kCGLCPSurfaceOpacity (zink/native_drawable.m:119, zink/nvk_cgl.c:1067-1086); an opaque surface
+    * gets alpha 1 in the copy (zink/nvk_zink.c:441-446). 0.5 is 127.5 in 8 bits, hence alpha within 1. Since 3.0.8 a
+    * context that has swapped keeps its last answer for 100 ms (zink/nvk_opacity.h, NVK_OPACITY_KEEP_NS), so the frames
+    * that are judged come 150 ms after each change; 3.0.7 asked at every swap, and the wait changes nothing there. */
    CGLSetParameter(cgl, kCGLCPSurfaceOpacity, &zero);
+   zw_pump(0.15);
    const zw_alpha half = {128, 128, 128, 1}, forced = {128, 128, 255, 0};
    for (int i = 0; i < 3; ++i) zw_frame(z, 30 + i, half, ZW_FLUSH_BUFFER, &o0);
    zw_pump(0.05);
@@ -724,6 +727,7 @@ static void sub_ctl(void)
    else if (layer) zk_fail("opacity-0", "surface opacity 0: layer.opaque got=YES expected=NO");
    zw_report("opacity-0", &o0, 2);
    CGLSetParameter(cgl, kCGLCPSurfaceOpacity, &one);
+   zw_pump(0.15);
    for (int i = 0; i < 3; ++i) zw_frame(z, 40 + i, forced, ZW_FLUSH_BUFFER, &o1);
    zw_pump(0.05);
    layer = zw_only_layer("opacity-1", z);
@@ -734,7 +738,7 @@ static void sub_ctl(void)
 
    /* (c) a format without alpha gives an RGBX drawable, whose copy shows alpha 1 even when not opaque. Judged only
     * when the pixel format really has no alpha (the adapter mirrors the described alpha size,
-    * zink/nvk_cgl.c:755-758). */
+    * zink/nvk_cgl.c:763-766). */
    zw_format noalpha = zw_default;
    noalpha.alpha = false;
    ZKWin *y = zw_open(320, 240, noalpha, false, true);
@@ -777,7 +781,7 @@ static void sub_noncurrent(void)
    zw_report("warm-up", &warm, 3);
 
    /* No context current: swap_drawable finds the bridge by engine and presents by a borrowed bind (zink/nvk_cgl.c:
-    * 496-508, :1170-1200). */
+    * 501-513, :1230-1260). */
    zw_draw(z, 10, zw_opaque, &none);
    CGLSetCurrentContext(NULL);
    zw_present(z, ZW_CGL_FLUSH, &none);
@@ -836,7 +840,7 @@ static void sub_front(void)
    single.db = false;
    ZKWin *z = zw_open_or_fail(320, 240, single, false, true);
    zw_gate_main(z);
-   /* In a single-buffered context the adapter's glFlush presents the front buffer (zink/nvk_cgl.c:358-363,
+   /* In a single-buffered context the adapter's glFlush presents the front buffer (zink/nvk_cgl.c:363-368,
     * zink/nvk_zink.c:53-83). */
    zw_tally t = {0};
    for (int i = 0; i < 20; ++i) {
@@ -883,7 +887,7 @@ static void *zw_render_main(void *unused)
       if (!zw_wait_go()) return NULL;
       double start = zk_now();
       /* The first present from this thread dispatches the layer's setup to main and is deferred
-       * (zink/native_drawable.m:171-180); main keeps its run loop going meanwhile. */
+       * (zink/native_drawable.m:162-168); main keeps its run loop going meanwhile. */
       for (int i = 0; i < 120; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &zw_thread_tally);
       zw_thread_seconds = zk_now() - start;
       [NSOpenGLContext clearCurrentContext];
@@ -977,7 +981,7 @@ static void sub_clear(void)
       zw_tally before = {0}, cleared = {0}, again = {0};
       for (int i = 0; i < 10; ++i) zw_frame(z, i, zw_opaque, ZW_FLUSH_BUFFER, &before);
       zw_report("before", &before, 8);
-      /* The adapter's clearDrawable hook removes the layer (zink/appkit.m:117-127, zink/native_drawable.m:80-95). */
+      /* The adapter's clearDrawable hook removes the layer (zink/appkit.m:117-127, zink/native_drawable.m:81-95). */
       [z.context clearDrawable];
       zw_pump(0.2);
       zw_layer(z.view, &count);
@@ -993,7 +997,7 @@ static void sub_clear(void)
       for (int i = 0; i < 10; ++i) zw_frame(z, 30 + i, zw_opaque, ZW_FLUSH_BUFFER, &again);
       zw_report("again", &again, 8);
       /* Destroying the context removes the layer too (gldDestroyContext reaches nvk_cgl_destroy_gld, zink/gld_bridge.c:
-       * 94-98, which removes the native target, zink/nvk_cgl.c:789). */
+       * 94-98, which removes the native target, zink/nvk_cgl.c:797). */
       [NSOpenGLContext clearCurrentContext];
       weak = z.context;
       z.context = nil;

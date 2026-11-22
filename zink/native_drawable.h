@@ -8,6 +8,9 @@
  * it never synchronously dispatches to main or changes a view's layer tree. */
 void nvk_native_bind_view(CGLContextObj, void *view);
 void nvk_native_remove(CGLContextObj);
+/* zink/nvk_cgl.c: the context's output changed, so its next swap asks for the drawable's opacity at once. Any thread;
+ * not with the CGL adapter's lock held. */
+void nvk_cgl_output_changed(CGLContextObj);
 /* A missing view can become usable after AppKit attaches it. Auto mode may
  * use its GPU fallback meanwhile, then retry native presentation. */
 enum { NVK_NATIVE_NO_VIEW = 3 };

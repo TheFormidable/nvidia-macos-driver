@@ -1,5 +1,77 @@
 # Changelog
 
+## 3.0.8
+
+**Not released.** This section describes the branch being prepared as 3.0.8, on top of 3.0.7 (below, not released
+either). It is one change, in the Zink frontend's CGL adapter: how often a swap asks WindowServer whether the window's
+drawable is opaque. It starts from a measurement. 3.0.7 was built on one Mac from an empty folder and installed there
+(AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3, started from a test copy of its boot
+loader configuration in which `debug.nvrm_pat_wc` reads 1). A `sample` capture of the modded Minecraft pack of the
+audit put it at 90 frames a second with the GPU 83 % busy, where the comparable capture on 3.0.6 had 61 and 51 % (not
+the identical scene). Of the game's render thread, 63.3 % was the game's own code and 12.0 % the swap; of the swap,
+288 of the thread's 5036 samples (5.7 %) were `present_drawable` asking CGL for `kCGLCPSurfaceOpacity`, which CGL
+answers with a message to WindowServer and its reply, twice per swap. **Nothing of 3.0.8 has been built on a Mac or
+run on a card, and no gain has been measured.** The most the render thread can get back is those 5.7 %; what that
+gives in frames is for a capture on the card to say.
+
+### Fixes and changes
+
+#### OpenGL through Zink: the swap
+
+- **A swap asks for the drawable's opacity once, and the answer is kept for a tenth of a second.** Through 3.0.7 a
+  swap asked twice: once for the layer (`nvk_native_acquire`, which sets the CAMetalLayer's `opaque`) and once for the
+  copy (`nvk_zink_present_frame`, whose blit writes alpha 1 into an opaque drawable); a swap that went on to the
+  IOSurface path asked there instead of for the copy. Now a swap asks at most once and gives the layer, the copy and the
+  IOSurface path the same answer, so they cannot disagree within a swap. A context keeps that answer
+  (`zink/nvk_opacity.h`) and asks again on the first swap at least 100 ms after it last asked, on a clock that does not
+  move while the machine sleeps. It asks at once on its first swap, after an ask that failed (which answers opaque, as
+  3.0.7 did, and is not kept), and after the adapter has seen the context's output change: a new size of the drawable, a
+  view bound or unbound, the native target removed, and a native acquire that gave no drawable (the layer is being set
+  up, the window is minimized, the native path fell back, or the view went away), except a swap that again finds no
+  view. **What it changes for an application:** after an application changes `kCGLCPSurfaceOpacity` of a context that
+  has swapped, the swaps of up to the next 100 ms are still composed with the old value, both the layer's `opaque` and
+  the alpha the copy writes, where 3.0.7 used the new value from the next swap. Where `CGLSetParameter` of that
+  parameter reaches the GLI integer callback the adapter already replaces for `CGLTexImageIOSurface2D`, the next swap
+  asks at once; whether it does is not known, and nothing depends on it. Way back: `NVK_ZINK_OPACITY_KEEP=0`. Checked
+  with `tools/test_zink_opacity.py`.
+
+The card check `zink.win-ctl` changes opacity on a window that has already swapped and judges the three frames after
+each change. It now lets 150 ms pass after each change before those frames, so that it judges the same thing on 3.0.7
+and on 3.0.8; its case of a new context whose opacity is set before its first swap is unchanged, since a context's
+first swap always asks. The line citations of the card checks follow the code that moved, and one that named the wrong
+lines before (the borrowed bind of `nvk_cgl_present`, in `zink_win_check.m`) names the right ones; nothing else in
+them changed.
+
+### The way back
+
+New, of tier escape, with a row in `tools/switches.tsv`: `NVK_ZINK_OPACITY_KEEP=0`, a line of
+`/Library/GPUBundles/nvmtl/nvrm610.conf` (or the process's own environment with `NVMTL_PROCESS_ENV=1`), read once per
+process by `libnvk_cgl.dylib` when its first context presents, spelled as the two switches of 3.0.7 may be. Every swap
+then asks WindowServer again, once, and sees an application's change at the next swap as 3.0.7 did. A swap still asks
+only once and gives the layer and the copy the same answer; that has no switch.
+
+### What ran where
+
+**Nothing of 3.0.8 was built on a Mac or ran on a card.** On Linux: the four files of the Zink frontend compile for
+macOS in the cross-build with 0 warnings and 0 errors (of what they include only a comment of `nvk_zink_cfg.h`
+changed), and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` pass the syntax check against the 11.3 SDK with `-Wall
+-Wextra -Werror`, `native_drawable.m` with the SDK's older name standing in for `kIOMainPortDefault`.
+`tools/card/zink_win_check.m` passes the same syntax check with its row's flags, with the three deprecation warnings
+it had before. `tools/test_zink_opacity.py` runs `nvk_opacity.h` as it is with a clock and a reader of its own (25
+arms, plain and under AddressSanitizer and UndefinedBehaviorSanitizer, with gcc 13 and clang 18), against 13 copies
+with one rule broken each, every one of which fails as it has to, and reads the adapter for one ask per swap, the
+switch, and each place that makes the next swap ask, against 3 copies of the adapter with one such place broken
+each, every one of which fails that reading. `tools/test_zink_present_queue.py` passes with the end of
+`present_drawable` as it is now. Not checked: the clock's cost on a Mac (the frontend's queue already uses it),
+whether `CGLSetParameter` reaches the integer callback, and anything that needs WindowServer.
+
+Three figures in the sections of 3.0.7 and 3.0.6 are corrected in place, because the captures they came from, read
+again, do not bear them out: the 61 frames a second with the changed page attribute table had been set against two
+captures at 55 that were not like for like, so what the table change adds in frames is not known; the sleep in the
+swap of 3.0.6 was 30 to 44 % of the game's thread and 4.6 to 7.9 ms a frame, not 30 to 40 % and 4.7 to 7.3 ms; and the
+captures of 3.0.6 are of the same pack as the 19 frames a second of 3.0.2, not of a scene matched to it. The 3.0.7
+section also says now what 3.0.7 did on a Mac and on its card.
+
 ## 3.0.7
 
 **Not released.** This section describes the branch being prepared as 3.0.7, on top of 3.0.6 (below, not released
@@ -7,22 +79,30 @@ either). It is one change in three parts, in the kernel, in NVK and in the Zink 
 gets its frame to the screen. It starts from a measurement. 3.0.6 was built and installed on the Mac the audit's
 captures came from (AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3), the first time
 anything after 3.0.2 ran on a card. The modded Minecraft pack of the audit draws through Zink on NVK there now, as
-3.0.3 meant it to, and three `sample` captures with the kernel's counters put it at 55 to 64 frames a second in the
-scene that gave 19 on 3.0.2 through Apple's renderer, with the GPU 41 to 53 % busy. In those captures the game's
-thread spent 30 to 40 % of its time asleep in the swap, until the GPU had finished the frame it had just sent (4.7 to
-7.3 ms a frame), and 6 to 8 % importing the drawable's video memory into NVK again, for a layer that hands out the
-same three surfaces in turn. Up to 13 % more went to copying the game's buffer uploads into video memory that this
-machine maps uncached instead of write-combined (`debug.nvrm_pat_wc` reads 0 there); that is decided by the boot
-loader's kernel patches, and nothing here changes it. It was measured afterwards, on the same Mac and the same 3.0.6:
-started from a boot loader that sets entry 6 of the page attribute table to write-combined (`debug.nvrm_pat_wc` reads
-1), the uploads fall from 11 to 14 % of that thread to 1.4 %, the import falls from 7 to 8 % to 1.2 % (the kernel call
-that binds its address range is twenty times as fast), and the scene gives 61 frames a second where the two comparable
-captures gave 55. The sleep in the swap is then 38 % of the thread, 6.3 ms a frame, and what is left of the import is
-small. **Nothing of 3.0.7 has been built on a Mac or run on a card, and no gain has been measured.** The kernel part
-and the frontend were compiled on Linux, of NVK only the syntax of the units its new patch changes was checked, and
-the tests are host tests on Linux (below, "What ran where"). By arithmetic alone a swap that neither sleeps nor
-imports would let that scene run 1.6 to 1.9 times as fast, if the GPU keeps up, and the GPU had about that much room;
-what it gives is for a capture on the card to say. Each of the two changes of what runs by default has one way back.
+3.0.3 meant it to, and three `sample` captures with the kernel's counters put it at 55 to 64 frames a second with the
+GPU 41 to 53 % busy, in the same pack, which gave 19 and 74 in the two captures of 3.0.2 through Apple's renderer (the
+scenes were not matched). In those captures the game's thread spent 30 to 44 % of its time asleep in the swap,
+until the GPU had finished the frame it had just sent (4.6 to 7.9 ms a frame), and 6 to 8 % importing the drawable's
+video memory into NVK again, for a layer that hands out the same three surfaces in turn. Up to 13 % more went to
+copying the game's buffer uploads into video memory that this machine maps uncached instead of write-combined
+(`debug.nvrm_pat_wc` reads 0 there); that is decided by the boot loader's kernel patches, and nothing here changes it.
+It was measured afterwards, on the same Mac and the same 3.0.6: started from a boot loader that sets entry 6 of the
+page attribute table to write-combined (`debug.nvrm_pat_wc` reads 1), the uploads fall from 11 to 14 % of that thread
+to 1.4 %, the import falls from 7 to 8 % to 1.2 % (the kernel call that binds its address range is twenty times as
+fast), and that capture gives 61 frames a second. What that is worth in frames is not known: the two captures at 55
+that it was set against were not taken like for like (one ran with `NVK_LOCAL_MAP_SYSMEM=1`, the other also with
+`NVK_BAR_VRAM=0`), and the only other capture without settings, of a lighter scene and without the table change, gave
+64. What is measured is the split of the thread; how many frames a second the table change adds is not. The sleep in
+the swap is then 38 % of the thread, 6.3 ms a frame, and what is left of the import is small. **3.0.7 was built on
+that Mac from an empty folder, installed there and started normally, and its card checks ran there; no gain of either
+change on its own has been measured** (below, "What ran where"). Before that, the kernel part and the frontend were
+compiled on Linux, of NVK only the syntax of the units its new patch changes was checked, and the tests were host
+tests on Linux. By arithmetic alone a swap that neither sleeps nor imports would let that scene run 1.6 to 1.9 times
+as fast, if the GPU keeps up, and the GPU had about that much room. A capture of the pack on 3.0.7, with the same test
+boot configuration, gives 90 frames a second where the comparable capture on 3.0.6 gave 61 (the scenes are not
+identical), the GPU 83 % busy where it was 51 %, and the swap 12.0 % of the game's thread where that thread was asleep
+in the swap 38.4 % of the time; the presentation thread waits for the GPU 68.7 % of its time. No card row runs a swap
+one frame ahead yet. Each of the two changes of what runs by default has one way back.
 
 ### Fixes and changes
 
@@ -103,7 +183,8 @@ OpenGL back to Apple's renderer whole.
 
 ### What ran where
 
-**No driver of 3.0.7 was built on a Mac and nothing of it ran on a card.** What did run, and where:
+**3.0.7 was built on a Mac from an empty folder, installed there and ran on its card; no change of this section has
+been measured on its own.** What ran, and where:
 
 - **Linux, compile checks of the final tree.** The kext compile check of all 25 units passes with 0 warnings. The
   import check against the exports of macOS 15 and 26 gives the one line it gives for 3.0.5 and 3.0.6
@@ -142,8 +223,46 @@ OpenGL back to Apple's renderer whole.
   fault signals, the word of a refused grant, the settings' blanks, and the tests that were missing (a fence that
   keeps its state, a kernel that remembers each surface's block, the age to the frame, the drawable's ownership run
   instead of read). Three are answered by saying so here and not by code: no card row runs a swap one frame ahead,
-  `nvk_zink_present_frame` is read and not run, and a context that stops swapping keeps its imports until it is
-  destroyed.
+  `nvk_zink_present_frame` is read and not run (as this was written; it has since run on the card in one capture,
+  below), and a context that stops swapping keeps its imports until it is destroyed.
+- **A Mac, the driver built.** At 9682b3a2, whose tree is the one of 7159e8dc, on the Mac of the captures: the outputs
+  of earlier builds were removed (`./build.sh clean outputs`) and all 19 components were built from nothing in 512 s
+  with 0 warnings, reusing the build tools and the pinned sources already there; then `package`, which installs and
+  loads nothing. Every file of the package matches `SHA256SUMS` and the plugin bundle's seal verifies.
+- **The card.** That package was installed over 3.0.6, which the installer kept as the fallback, and the Mac started
+  normally; the boot guard counted the start as good. The 48 files under `/Library/GPUBundles` equal the package, and
+  `debug.nvaccel_surf_mark_moved` exists and reads 0. The Mac was started from a test copy of its boot loader
+  configuration, not the one on its disk, in which the page attribute table has a write-combining entry:
+  `debug.nvrm_pat_wc` reads 1.
+- **The card checks** (`tools/card_selftest.py` at 9682b3a2). Of 134 rows 133 ran, 130 passed and 3 failed; 1 was
+  skipped (`vulkan.smoke-sdl`, which needs SDL3). The OpenGL rows ran through Zink, the card reported no fault (Xid 0)
+  and WindowServer stayed the same process. The three rows 3.0.6 had left to pass on the card,
+  `xlate.paths-samplerphi`, `xlate.paths-abarray` and `xlate.paths-walk`, pass. A second round measured the three that
+  failed; the fixes of the three checks are not in this release:
+  - `zink.win-thread`: the 120 frames of its secondary thread did not finish in their time, and every frame of every
+    Zink window row took about 250 ms. That time is the check's own and not the swap's: in a profile of
+    `zink.win-basic`, 97.2 % of the presentation thread's samples are self time in the check's pixel reader
+    (`zw_pixels`, `tools/card/zink_win_check.m`), which reads its copy of each frame byte by byte from video memory
+    behind BAR1. With `NVK_BAR_VRAM=0` for that process alone `zink.win-basic` took 1.5 s instead of 15.4 s, and the
+    secondary-thread case passed (120 frames in 1.2 s, the run 2.1 s); `NVK_ZINK_PRESENT_AHEAD=0` changed nothing.
+  - `v301.async-upload`, case "limit": the driver printed no line of 256 pending uploads. The row's expectation
+    predates the reaper of 3.0.6, which gives finished uploads back; with `NVMTL_ASYNCUP_REAP=0` its 9 cases pass.
+  - `zink.migrate`, the probe of a context that a second thread takes over after its first thread released it through
+    CGL alone, so that Mesa still holds it current there while that thread binds another: it ends through its own
+    crash handler, exit 70 and only "CRASH " on standard output, in all five runs, with no signal name, no backtrace,
+    no crash report and the kernel's counters unchanged. Where it faults is not known. The code that case runs is
+    older than 3.0.7 and reaches none of 3.0.7's changes, so it is taken for a defect of the frontend that predates
+    3.0.7; that is read in the code, not shown by a backtrace or a run of an older release.
+- **A capture of the modded pack** with `sample` and the kernel's counters, with the test boot configuration: 90
+  frames a second, the GPU 83 % busy. Of the 5036 samples of the game's render thread 63.3 % are the game's own code
+  and 12.0 % the swap; within the swap 5.7 % of the thread asks WindowServer for the drawable's opacity, twice per
+  swap (3.0.8, above), 3.7 % flushes the frame and 2.1 % waits for the presentation thread to have presented the
+  previous one. The presentation thread waits for the GPU 68.7 % of its time and is idle 30.5 %. The comparable
+  capture on 3.0.6, on the same Mac with the same test boot configuration but not of the identical scene, gave 61
+  frames a second with the GPU 51 % busy and the thread asleep in the swap 38.4 % of the time.
+- **Not run anywhere:** a card row that runs a swap one frame ahead (the rows set the observer, which makes the swap
+  wait); a measurement of either change on its own; and 3.0.7 with the boot loader configuration on the Mac's disk,
+  where `debug.nvrm_pat_wc` reads 0.
 
 ## 3.0.6
 
@@ -163,12 +282,12 @@ none either gives exactly what 3.0.5 gave or only writes a log line. **3.0.6 was
 its owner and runs on that card, and none of the gains of its own changes has been measured** (below, "What ran
 where"). What was measured there is the route. With 3.0.6 installed, the first driver after 3.0.2 to run on a card,
 that game draws through Zink on NVK (one translation instead of two), which 3.0.3 let engage on that macOS build, and
-three captures put it at 55 to 64 frames a second in the scene that gave 19. With Zink engaged the changes of the
-first group below, to Apple's renderer, do not act, and no capture was taken with the boot argument `nvzink=0`, which
-brings that renderer back; on that route the waits measured in 3.0.2 put the ceiling of those changes between 1.2 and
-1.9 times the frame rate. The shares quoted from the captures say where the time went in 3.0.2, not what this branch
-gives back. The entries below say "not run on a card" as they were written, before that install; none of them has been
-measured on its own since.
+three captures put it at 55 to 64 frames a second in the same pack, which gave 74 and 19 in captures A and B (the
+scenes were not matched). With Zink engaged the changes of the first group below, to Apple's renderer, do not act, and
+no capture was taken with the boot argument `nvzink=0`, which brings that renderer back; on that route the waits
+measured in 3.0.2 put the ceiling of those changes between 1.2 and 1.9 times the frame rate. The shares quoted from
+the captures say where the time went in 3.0.2, not what this branch gives back. The entries below say "not run on a
+card" as they were written, before that install; none of them has been measured on its own since.
 
 ### Fixes and changes
 
@@ -548,8 +667,8 @@ ran, and where:
   `debug.nvrm_pat_wc` reads 0 there, with the table 0x0007010600070106 that the fix-PAT kernel patch of AMD_Vanilla
   leaves: write-combined mappings are not write-combined on that machine, which is what the diagnostic was written to
   tell. The modded pack draws through Zink on NVK: three `sample` captures with the kernel's counters give 55 to 64
-  frames a second, the GPU 41 to 53 % busy, in the scene that gave 19 on 3.0.2 through Apple's renderer. Those
-  captures are where 3.0.7 starts (above).
+  frames a second, the GPU 41 to 53 % busy, in the same pack that gave 74 and 19 on 3.0.2 through Apple's renderer
+  (the scenes were not matched). Those captures are where 3.0.7 starts (above).
 - **Not run anywhere:** the card checks on 3.0.6, so the three rows `xlate.paths-samplerphi`, `xlate.paths-abarray`
   and `xlate.paths-walk` still have to pass on the card; and a measurement of any one change on its own. The gain of
   the changes to Apple's renderer is unmeasured: the game they were measured for no longer uses that renderer.
