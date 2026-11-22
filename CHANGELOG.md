@@ -30,20 +30,25 @@ or run on a card.** No frame rate changes with it, and none was expected to.
   `MESA_SPIRV_READ_PATH`, which swaps a module for a file after the module's hash was taken. With 3.0.8's code a
   process that did not set the second was then served the replacement's binary (21 instructions where its own shader
   compiles to 11), and one that set the first was served the default's (62 instructions for 68). For
-  `MESA_SPIRV_READ_PATH` it is the folder's name that is in the key, not its files: after editing one, clear the
-  cache. Three of NullMoth's are left out with their reasons in the test: two change only the QMD, which is filled at
-  each dispatch, and `NVK_DUMP_SHADER_DIR` acts when a shader is uploaded, which a cached one is too (as upstream's
-  `NV50_PROG_DEBUG` does). **What it changes:** with no switch set the digest is 0 and the key is computed exactly as
-  in 3.0.8. With one set, the process compiles its shaders once under a key of its own and finds them again at its
-  next start; the entries of the default key are untouched and are found again when the switch is unset. A switch that
-  reaches a process from the settings file or from an application's profile counts like one set by hand. The value is
-  hashed whole, so a value that means the same as unset (`=0` for most), or the same as another value, still has a key
-  of its own: one more compile, never a wrong binary. Not covered: a switch that enters the process's environment
-  after NVK has made its device. The Metal plugin settles the environment when it loads (it sets what the settings
-  file and the application's profile name and, in a release build, forgets what was inherited unless
-  `NVMTL_PROCESS_ENV=1`); in a Metal process that happens before NVK makes its device, and whether it does in a
-  process that reaches NVK through Zink was not determined. No switch. Checked with
-  `tools/test_nvk_nak_switch_key.py`.
+  `MESA_SPIRV_READ_PATH` it is the value as written that is in the key, not the folder's files: after a file there is
+  added, changed or removed, or when the value is a relative path used from another folder, clear the cache. Three of
+  NullMoth's are left out with their reasons in the test: two change only the QMD, which is filled at each dispatch, and
+  `NVK_DUMP_SHADER_DIR` acts when a shader is uploaded, which a cached one is too (as upstream's `NV50_PROG_DEBUG`
+  does). **What it changes:** with no switch set the digest is 0 and the key is computed exactly as in 3.0.8. With one
+  set, the process compiles its shaders once under a key of its own and finds them again at its next start, and a
+  process without the switch finds the default key's entries as they were. The value is hashed whole, so a value that
+  means the same as unset (`=0` for most), or the same as another value, still has a key of its own: one more compile,
+  never a wrong binary. **Not covered:** the key is taken when NVK makes its device, from the environment as it is then,
+  and the compiler reads its switches later: some at every compile, many once for as long as the library stays loaded. A
+  switch that enters or leaves the process's environment in between is compiled under a key that does not say so, the
+  default key included, as on 3.0.8. The Metal plugin does change the environment when it loads: it sets what the
+  settings file and the application's profile name and, in a release build, forgets what was inherited unless
+  `NVMTL_PROCESS_ENV=1`. In a Metal process that happens before NVK makes its device, so a switch from the settings file
+  or from a profile counts there like one set by hand. In a process that reaches NVK through Zink, or in a Vulkan
+  application on the frontend library, which of the two comes first on a Mac was not determined: the frontends
+  themselves ask Metal for its devices only after NVK has made one (`zink/native_drawable.m`,
+  `tools/nvk-bridge/bridge.mm`), and Apple's own renderer, which runs before Zink is brought in, may have loaded the
+  plugin by then. No switch. Checked with `tools/test_nvk_nak_switch_key.py`.
 
 #### NAK: the uniform texture handle experiment
 
@@ -96,17 +101,17 @@ for the review of this change (many textures, both arms of a branch, loops, the 
 gradient, fetch and gather forms, sampler arrays with a dynamic index), each compiled with and without NAK's forced
 spilling: with the switch set 84 of the 250 compiles failed on 3.0.8's code and none fails with the patch, and with
 the switch unset the 250 outputs are the same before and after it. `tools/test_nvk_nak_switch_key.py` replays the
-reads of the 35 patches of the chain and builds the patch's own digest code with a stand-in environment (24 arms),
-against 17 copies of the tree with one rule broken each, 16 of which have to fail the arm that names their rule and no
-other and one of which has to pass. `tools/test_nak_tex_uhandle_safe.py` builds the patch's own Rust against stand-ins
-for the NAK types it uses and runs it over 13,066 cases (every shape of a texture's sources with a Zero, a uniform and
-a warp handle), against 11 copies with one rule broken each, every one of which fails as it has to, and reads the
-patch for where its two calls are. The repository's whole host suite was run on Linux with the change: 349 of its 417
-tests pass, and the 46 that fail are the same 46 that fail there without it. Not checked: a build with Apple's clang
-and the Mac's Rust, the patches under the BSD `patch` of macOS (their headers pass the check `tools/test_nvk_chain.py`
-has for the upstream ones, which both tests now make for these two), any shader of a real application, any stage other
-than vertex and fragment, and anything that needs the card: no image was compared, and the uniform-handle form itself
-was not run.
+reads of the 35 patches of the chain and builds the patch's own digest code with a stand-in environment (25 arms),
+against 26 copies of the tree with one rule broken each, 24 of which have to fail the arm that names their rule and no
+other and two of which have to pass. `tools/test_nak_tex_uhandle_safe.py` builds the patch's own Rust against
+stand-ins for the NAK types it uses and runs it over 13,068 cases (every shape of a texture's sources with a Zero, a
+uniform and a warp handle, then two such textures in one block and in two), against 13 copies with one rule broken
+each, every one of which fails as it has to, and reads the patch for where its two calls are. The repository's whole
+host suite was run on Linux with the change: 349 of its 417 tests pass, and the 46 that fail are the same 46 that fail
+there without it. Not checked: a build with Apple's clang and the Mac's Rust, the patches under the BSD `patch` of
+macOS (their headers pass the check `tools/test_nvk_chain.py` has for the upstream ones, which both tests now make for
+these two), any shader of a real application, any stage other than vertex and fragment, and anything that needs the
+card: no image was compared, and the uniform-handle form itself was not run.
 
 ## 3.0.8
 
