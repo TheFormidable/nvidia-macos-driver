@@ -15,9 +15,10 @@ void nvk_cgl_output_changed(CGLContextObj);
  * use its GPU fallback meanwhile, then retry native presentation. */
 enum { NVK_NATIVE_NO_VIEW = 3 };
 /* 1 = drawable, 2 = resize/hidden/setup pending, 3 = no view yet,
- * 0 = unsupported/failed. */
+ * 0 = unsupported/failed. interval is the context's swap interval, which the caller reads (zink/nvk_cgl.c): since
+ * 3.0.11 a thread the context is not current on may ask, and it calls nothing of CGL's. */
 int nvk_native_acquire(CGLContextObj, uint32_t vendor, uint32_t device,
-                       unsigned width, unsigned height, int opaque, void **frame, IOSurfaceRef *surface);
+                       unsigned width, unsigned height, int opaque, int interval, void **frame, IOSurfaceRef *surface);
 int nvk_native_publish(void *frame);
 void nvk_native_release(void *frame);
 #endif

@@ -131,12 +131,10 @@ static void configure(NVKZinkTarget *target, uint32_t vendor, uint32_t deviceID,
 }
 
 int nvk_native_acquire(CGLContextObj context, uint32_t vendor, uint32_t deviceID,
-                       unsigned width, unsigned height, int opaque, void **frame, IOSurfaceRef *surface)
+                       unsigned width, unsigned height, int opaque, int interval, void **frame, IOSurfaceRef *surface)
 {
    if (!context || !frame || !surface || !width || !height) return 0;
    *frame = NULL; *surface = NULL;
-   GLint interval = 1;
-   CGLGetParameter(context, kCGLCPSwapInterval, &interval);
    BOOL displaySync = interval != 0;
    @autoreleasepool {
       @try {
