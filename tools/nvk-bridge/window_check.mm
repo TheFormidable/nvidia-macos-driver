@@ -1752,10 +1752,12 @@ void check_surface()
    std::vector<VkPresentModeKHR> modes(n);
    if (r == VK_SUCCESS) r = vk.GetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, modes.data());
    modes.resize(r == VK_SUCCESS ? n : 0);
-   check(r == VK_SUCCESS && modes.size() == 2 && modes[0] == VK_PRESENT_MODE_FIFO_KHR &&
+   // MAILBOX is on the list since 3.0.11, unless NVK_BRIDGE_PRESENT_NEWEST=0 is in the settings file.
+   const bool mailbox = modes.size() == 3 && modes[2] == VK_PRESENT_MODE_MAILBOX_KHR;
+   check(r == VK_SUCCESS && (modes.size() == 2 || mailbox) && modes[0] == VK_PRESENT_MODE_FIFO_KHR &&
             modes[1] == VK_PRESENT_MODE_IMMEDIATE_KHR,
-         "modes", "exactly FIFO and IMMEDIATE",
-         format("-> %d, %zu modes, first %d expected=FIFO (2), IMMEDIATE (0)", (int)r, modes.size(),
+         "modes", "FIFO and IMMEDIATE, and MAILBOX after them or not at all",
+         format("-> %d, %zu modes, first %d expected=FIFO (2), IMMEDIATE (0)[, MAILBOX (1)]", (int)r, modes.size(),
                 modes.empty() ? -1 : (int)modes[0]));
 
    n = 0;
@@ -1803,8 +1805,8 @@ void check_swapchain_refusals()
        [](VkSwapchainCreateInfoKHR &s) { s.imageFormat = VK_FORMAT_R8G8B8A8_UNORM; }},
       {"1 image", VK_ERROR_INITIALIZATION_FAILED, [](VkSwapchainCreateInfoKHR &s) { s.minImageCount = 1; }},
       {"9 images", VK_ERROR_INITIALIZATION_FAILED, [](VkSwapchainCreateInfoKHR &s) { s.minImageCount = 9; }},
-      {"MAILBOX", VK_ERROR_INITIALIZATION_FAILED,
-       [](VkSwapchainCreateInfoKHR &s) { s.presentMode = VK_PRESENT_MODE_MAILBOX_KHR; }},
+      {"FIFO_RELAXED", VK_ERROR_INITIALIZATION_FAILED,
+       [](VkSwapchainCreateInfoKHR &s) { s.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR; }},
       {"extent 0", VK_ERROR_INITIALIZATION_FAILED,
        [](VkSwapchainCreateInfoKHR &s) { s.imageExtent = VkExtent2D{0, 0}; }},
       {"STORAGE usage", VK_ERROR_FEATURE_NOT_PRESENT,
@@ -1823,7 +1825,7 @@ void check_swapchain_refusals()
    }
    if (layer.device) bad.push_back("the refusals touched the layer: its device is set");
    check(bad.empty(), "swapchain-refusals",
-         "R8G8B8A8 (FORMAT_NOT_SUPPORTED), 1 and 9 images, MAILBOX, extent 0 (INITIALIZATION_FAILED), STORAGE usage "
+         "R8G8B8A8 (FORMAT_NOT_SUPPORTED), 1 and 9 images, FIFO_RELAXED, extent 0 (INITIALIZATION_FAILED), STORAGE usage "
          "and POST_MULTIPLIED alpha (FEATURE_NOT_PRESENT) are refused before the layer is touched",
          joined(bad));
 }

@@ -1,14 +1,14 @@
 # Changelog
 
-## 3.0.10
+## 3.0.12
 
-**Not released.** This section describes the branch being prepared as 3.0.10, on top of 3.0.9 (below, not released
+**Not released.** This section describes the branch being prepared as 3.0.12, on top of 3.0.11 (below, not released
 either). It is two fixes in NVK, each a patch of its own at the end of the 3.0 chain, and neither changes what the
 driver does while no switch is set. Both were found by reading the shader compiler (NAK) and NVK's shader caches, and
 both were then reproduced on Linux, where this NVK and NAK were built on Mesa's nouveau drm-shim as a GB207 (shader
 model 120): pipelines compile there without a card, and nothing is drawn. The measurements below were made on 3.0.8's
-code; 3.0.9 changed nothing in NVK, so they hold for 3.0.9's. **Nothing of 3.0.10 has been built on a Mac or run on a
-card.** No frame rate changes with it, and none was expected to.
+code; 3.0.9 and 3.0.11 changed nothing in NVK, so they hold for 3.0.11's. **Nothing of 3.0.12 has been built on a Mac
+or run on a card.** No frame rate changes with it, and none was expected to.
 
 ### Fixes and changes
 
@@ -80,14 +80,14 @@ patches may not touch that file (`tools/test_nvk_chain.py`): "bits 15..47 are fr
 
 ### The ways back
 
-None new. With no switch set, the cache key and the compiler's output are what 3.0.9 computes, so there is nothing to
+None new. With no switch set, the cache key and the compiler's output are what 3.0.11 computes, so there is nothing to
 turn off; leaving `nvk-nak-switch-key` or `nvk-tex-uhandle-safe` out of the chain in `build/build_nvk.sh` restores
-3.0.9's code. As with every new build of NVK, the library's build id changes, so the shader caches of 3.0.9 are not
+3.0.11's code. As with every new build of NVK, the library's build id changes, so the shader caches of 3.0.11 are not
 reused and shaders are compiled again once.
 
 ### What ran where
 
-**Nothing of 3.0.10 was built on a Mac or ran on a card.** On Linux: both patches apply to the tree with the rest of
+**Nothing of 3.0.12 was built on a Mac or ran on a card.** On Linux: both patches apply to the tree with the rest of
 the chain applied, without fuzz or offset, also with any of the three upstream-fix patches left out, and
 `nvk/dlss/patch_dlss_cache.py` still applies after them. The whole library (C, C++ and Rust, 942 units) cross-builds
 for macOS with LLVM 18 and rustc 1.97 with 0 errors and 0 warnings, and leaves the same 13 symbols unresolved as
@@ -113,6 +113,96 @@ there without it. Not checked: a build with Apple's clang and the Mac's Rust, th
 macOS (their headers pass the check `tools/test_nvk_chain.py` has for the upstream ones, which both tests now make for
 these two), any shader of a real application, any stage other than vertex and fragment, and anything that needs the
 card: no image was compared, and the uniform-handle form itself was not run.
+
+## 3.0.11
+
+**Not released.** This section describes the branch being prepared as 3.0.11, on top of 3.0.9 (below; 3.0.10 was
+another branch's number, which became 3.0.12). It carries what 3.0.9 did for the native Vulkan frontend's IMMEDIATE
+swapchains to the two places next to it: OpenGL on Zink with the swap interval at 0, and the Vulkan frontend's MAILBOX
+mode. **Nothing of it has run on a card**; what was checked and what was not is at the end.
+
+### Fixes and changes
+
+#### OpenGL on Zink: a swap with the interval at 0 no longer waits for the display
+
+Through 3.0.9 a swap of an OpenGL context on Zink (`present_drawable`, `zink/nvk_cgl.c`) waited for the frame before it
+to be published and then asked the window's layer for its next drawable itself, on the application's thread. The layer
+hands a drawable out only when the compositor has given one back, so with vertical sync off an application still drew
+no faster than about two frames for each composition of the display: the same tie that held Minecraft's Vulkan
+renderer at 200 frames a second on a 100 Hz display before 3.0.9. That figure was measured on the Vulkan frontend; for
+Zink the tie is read from the code and was not measured.
+
+Since 3.0.11 such a swap leaves its frame parked and returns (`zink/nvk_newest.h`):
+
+- The swap copies the frame into the context's scratch image and flushes, as before, then waits for the GPU to have
+  finished the frame parked before this one, and returns. It waits for nothing of the display. An application stays
+  one frame ahead of the GPU, as it was (`nvk_zink_present_park`, `zink/nvk_zink.c`).
+- A sender thread does the rest of what the swap did: it waits for the frame in flight to be published, asks the
+  layer for a drawable, and hands over whatever frame is parked when the layer answers, the newest
+  (`nvk_zink_present_send`). The copy, the wait for the GPU, the mark, the tag and the drawable's present are the code
+  of 3.0.7, on the presentation thread. A frame that a newer one replaced before the layer had room is never copied.
+- The last frame an application draws is always shown: the sender runs until nothing is parked. An application that
+  draws only when something changes loses nothing.
+- A front-buffer flush (an application that draws without a back buffer and shows its drawing with `glFlush`) parks
+  the front buffer the same way. Through 3.0.9 each such flush waited for its own frame to be on the layer.
+- Only the plain case goes this way: a context with a view, with the interval at 0, after a frame that was presented
+  by its own swap or flush one frame ahead. The first frame of a context, a resize, a view that goes away, a
+  diagnostic observer, a surface NVK does not import ahead, an uncertain completion and the child of a fork are
+  presented by the swap, as in 3.0.9, after the sender has been stopped. A context without a view (it presents
+    through Apple's own swap, on the application's context and thread) is not changed and cannot be this way. A sender
+  that cannot
+  send gives up and the next swap presents by itself; after eight in a row with no frame sent in between the context
+  stops parking.
+- With the interval not 0 nothing changes. The interval is now read by the swap and passed to the layer's acquire
+  (`nvk_native_acquire`), which no longer calls CGL, so a thread the context is not current on may ask.
+
+One switch, on by default: a line `NVK_ZINK_PRESENT_NEWEST=0` in the settings file
+(`/Library/GPUBundles/nvmtl/nvrm610.conf`) makes every swap present by itself, as in 3.0.9. It is read once per
+process with the two it depends on; with `NVK_ZINK_PRESENT_AHEAD=0` no frame is parked either. When a context that
+parked frames is destroyed it writes one line to stderr, `NVK Zink: newest_frames_drawn=N newest_frames_sent=M`.
+
+Known limits. A frame the sender could not send is not sent again by itself: the next swap, or the next flush that
+has new drawing, presents its own. With the window minimized or hidden the layer hands out no drawable; through 3.0.9
+each swap then
+waited up to a second, and now the application draws at its own rate while the sender waits. A change of the swap
+interval, a resize and a context's destruction wait for a frame the sender is sending, which is as long as the layer
+takes to answer (it gives up after a second) and the GPU to finish. The waits for the GPU are 5 s, as everywhere in
+the Zink frontend, on a clock that a sleep of the machine can run out. Nothing paces the sender: it copies a frame
+for every drawable the layer hands out, which can be two for each refresh.
+
+#### The native Vulkan frontend offers MAILBOX
+
+The frontend offered FIFO and IMMEDIATE and refused a MAILBOX swapchain, so an application that asks for MAILBOX to
+run without a limit, and falls back to FIFO without it, was held to the display. MAILBOX is what 3.0.9's thread does:
+the newest frame, one at a time. Since 3.0.11 it is on the list of present modes, after the other two, and a MAILBOX
+swapchain gets the presentation thread of an IMMEDIATE one with the layer's display synchronization left on: the
+application is not held to the display and the thread copies one frame for each refresh. On a device without a copy
+queue of the frontend's own, and in the child of a fork, a MAILBOX swapchain presents as FIFO does.
+`NVK_BRIDGE_PRESENT_NEWEST=0` takes MAILBOX off the list and refuses it again, as before 3.0.11. An application that
+prefers MAILBOX to IMMEDIATE when both are offered will now choose it.
+
+### What was checked, and what was not
+
+- `tools/test_zink_newest.py` (new): the agreement between the swap and the sender, `zink/nvk_newest.h` as it is, with
+  real threads: a frame parked while another is being sent is sent by the same sender; a stop waits for the frame
+  being sent and leaves a parked one parked; a sender that gave up is reported to the next swap; 20000 frames at an
+  uneven pace against a slow layer end with the last one sent, never two senders, nothing out of order. Plain and
+  under the thread sanitizer, six copies of the header with one rule broken each (every one fails), and a reading of
+  the adapter and the frontend for the order of their steps and for every path that has to stop the sender.
+- `tools/test_zink_present_queue.py`: the half of `nvk_present.c` that presents one frame ahead, with the two new
+  arguments of `nvk_present_ahead_submit`, passes as before; `nvk_zink_copy_vram` and `nvk_zink_present_native` are
+  3.0.6's text, unchanged.
+- `tools/test_nvk_bridge.py` and `tools/test_nvk_bridge_newest.py` pass with MAILBOX.
+- The four files of the Zink frontend were compiled for macOS against the public 11.3 SDK and the pinned Mesa
+  (objects only), and `nvk_cgl.c`, `native_drawable.m`, `bridge.mm` and `window_check.mm` pass a syntax check with
+  `-Wall -Wextra -Werror` there. Nothing was linked or run on a Mac.
+- **Not checked:** a frame on a card through either new path; the frame rate of any application; tearing or pacing
+  on screen; a resize, a minimize, a fullscreen switch and a second display under the sender; a MAILBOX swapchain in
+  any application. The card suite does not run them: `zink_win_check` sets the present observer, which makes every
+  swap present by itself, and `window_check` (which now accepts MAILBOX on the list and no longer expects it to be
+  refused) presents with FIFO and IMMEDIATE. The whole host suite was not run again; the tests above are the ones
+  that read or run the files this branch touches, with `tools/test_switch_registry.py`.
+
 
 ## 3.0.9
 

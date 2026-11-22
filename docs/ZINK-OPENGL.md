@@ -214,6 +214,15 @@ Since 3.0.7 a swap is one frame ahead (`zink/nvk_present_queue.h`, the second ha
   have happened. A context never has more than one frame on its way, so the scratch image is drawn into again only
   when nothing reads it, and what is on screen is at most one frame behind what was swapped.
 - A front-buffer flush, and a swap while a diagnostic observer is set, wait for their own frame as before.
+
+Since 3.0.11 a swap with the swap interval at 0 does not ask the layer either (`zink/nvk_newest.h`). It copies the
+frame into the scratch image, flushes, waits for the GPU to have finished the frame parked before it, and returns; the
+frame stays parked in the scratch image. A sender thread waits for the frame in flight, asks the layer for a drawable,
+and hands the frame that is parked by then to the presentation thread. The application is one frame ahead of the GPU
+as before and is not held to the display; a frame replaced before the layer had room is never copied, and the last
+frame drawn always is. A front-buffer flush parks the front buffer the same way. Only a frame after one that was presented
+by its own swap or flush goes this way: the first frame, a resize, a missing view, an observer and every failure are
+presented by the swap, after the sender has been stopped. `tools/test_zink_newest.py` runs the agreement between the two threads.
 - A frame the presentation thread could not publish (the mark of an import made for that frame was refused, the
   channel was rebuilt under the copy) is released unpresented, and the next swap of that context says so on standard
   error, once and then at every doubling of the count. The swap that sent it had already returned 1.
@@ -272,6 +281,7 @@ How it presents has two switches of its own since 3.0.7, each a line of the sett
 (`/Library/GPUBundles/nvmtl/nvrm610.conf`) that a process reads once, when its first context presents:
 `NVK_ZINK_PRESENT_AHEAD=0` makes every swap wait for the GPU and publish its own frame, through the code of 3.0.6;
 `NVK_ZINK_SURFACE_KEEP=0` leaves swaps one frame ahead and imports the drawable's video memory for every frame.
+Since 3.0.11 `NVK_ZINK_PRESENT_NEWEST=0` makes a swap with the interval at 0 ask the layer itself again, as in 3.0.9.
 Since 3.0.8 `NVK_ZINK_OPACITY_KEEP=0`, read the same way by the CGL adapter (`libnvk_cgl.dylib`), makes every swap ask
 WindowServer for the drawable's opacity again, once.
 A line may have blanks before the name, around the `=` and before the value, so every spelling that turns a switch
