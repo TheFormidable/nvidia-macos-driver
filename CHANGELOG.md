@@ -1,13 +1,14 @@
 # Changelog
 
-## 3.0.9
+## 3.0.10
 
-**Not released.** This section describes the branch being prepared as 3.0.9, on top of 3.0.8 (below, not released
+**Not released.** This section describes the branch being prepared as 3.0.10, on top of 3.0.9 (below, not released
 either). It is two fixes in NVK, each a patch of its own at the end of the 3.0 chain, and neither changes what the
 driver does while no switch is set. Both were found by reading the shader compiler (NAK) and NVK's shader caches, and
 both were then reproduced on Linux, where this NVK and NAK were built on Mesa's nouveau drm-shim as a GB207 (shader
-model 120): pipelines compile there without a card, and nothing is drawn. **Nothing of 3.0.9 has been built on a Mac
-or run on a card.** No frame rate changes with it, and none was expected to.
+model 120): pipelines compile there without a card, and nothing is drawn. The measurements below were made on 3.0.8's
+code; 3.0.9 changed nothing in NVK, so they hold for 3.0.9's. **Nothing of 3.0.10 has been built on a Mac or run on a
+card.** No frame rate changes with it, and none was expected to.
 
 ### Fixes and changes
 
@@ -79,14 +80,14 @@ patches may not touch that file (`tools/test_nvk_chain.py`): "bits 15..47 are fr
 
 ### The ways back
 
-None new. With no switch set, the cache key and the compiler's output are what 3.0.8 computes, so there is nothing to
+None new. With no switch set, the cache key and the compiler's output are what 3.0.9 computes, so there is nothing to
 turn off; leaving `nvk-nak-switch-key` or `nvk-tex-uhandle-safe` out of the chain in `build/build_nvk.sh` restores
-3.0.8's code. As with every new build of NVK, the library's build id changes, so the shader caches of 3.0.8 are not
+3.0.9's code. As with every new build of NVK, the library's build id changes, so the shader caches of 3.0.9 are not
 reused and shaders are compiled again once.
 
 ### What ran where
 
-**Nothing of 3.0.9 was built on a Mac or ran on a card.** On Linux: both patches apply to the tree with the rest of
+**Nothing of 3.0.10 was built on a Mac or ran on a card.** On Linux: both patches apply to the tree with the rest of
 the chain applied, without fuzz or offset, also with any of the three upstream-fix patches left out, and
 `nvk/dlss/patch_dlss_cache.py` still applies after them. The whole library (C, C++ and Rust, 942 units) cross-builds
 for macOS with LLVM 18 and rustc 1.97 with 0 errors and 0 warnings, and leaves the same 13 symbols unresolved as
@@ -112,6 +113,177 @@ there without it. Not checked: a build with Apple's clang and the Mac's Rust, th
 macOS (their headers pass the check `tools/test_nvk_chain.py` has for the upstream ones, which both tests now make for
 these two), any shader of a real application, any stage other than vertex and fragment, and anything that needs the
 card: no image was compared, and the uniform-handle form itself was not run.
+
+## 3.0.9
+
+**Not released.** This section describes the branch being prepared as 3.0.9, on top of 3.0.8 (below, not released
+either). It is one change, in the native Vulkan frontend (`tools/nvk-bridge`, installed as `libnvk_minecraft.dylib`):
+how a swapchain of present mode IMMEDIATE gets its frames to the window. It starts from a measurement, on the Mac the
+captures below came from (AMD Ryzen 5 5500, RTX 5050, one 1920x1080 display at 100 Hz, macOS 26.7.3). Minecraft 26.3
+without mods, on its Vulkan renderer through this frontend, with vertical sync off and no frame limit, stood at 200
+frames a second: twice the display's rate. A `sample` capture of 21 s has the GPU 35 % busy and the game's render
+thread 69.0 % inside the frontend's `vkQueuePresentKHR`: 47.2 % of the thread waiting in `-[CAMetalLayer
+nextDrawable]`, 11.0 % waiting for the copy's fence, 5.9 % importing the drawable's video memory and 2.2 % freeing it;
+the game's own work was 31 %. The display took 98 frames a second and the frontend presented about 196: the layer,
+which has three drawables at most, handed out two for each composition of the screen, and every present waited for one
+on the game's thread. So the frame rate was a multiple of the display's rate whatever the game and the GPU could do,
+in the mode whose meaning is that the application does not wait for the display. The frontend's source had not changed
+since 3.0 added it. **Nothing of 3.0.9 has been built on a Mac or run on a card, and no gain has been measured.** What
+the game reaches without that wait is for a capture on the card to say; the display goes on showing 100 frames a
+second.
+
+### Fixes and changes
+
+#### The native Vulkan frontend: presentation
+
+- **An IMMEDIATE swapchain shows the newest frame, and its `vkQueuePresentKHR` does not wait for the layer.** Through
+  3.0.8 every present, of either mode, took the layer's next drawable on the application's thread, copied the image
+  into it on the GPU, waited for the copy and presented, with the device's submission lock held for the whole call. A
+  FIFO swapchain still does exactly that, through the same code. An IMMEDIATE swapchain now has a thread of its own
+  (`tools/nvk-bridge/present_newest.h`, which `bridge.mm` includes). `vkQueuePresentKHR` submits a fence on the
+  application's queue, behind the semaphores the application passed, hands the image to that thread and returns. The
+  thread waits for a presented frame, then for a drawable of the layer, with nothing held; when it has one it takes the
+  newest frame the application has presented by then, waits for that frame's fence, copies the image into the
+  drawable, marks and tags the drawable as before and presents it. A frame that a newer one overtook before a
+  drawable came is never copied: its image goes back to the application once the GPU has finished rendering it.
+  `vkAcquireNextImageKHR` on such a swapchain waits for the GPU to finish an overtaken frame, or for the thread when
+  the thread has every image the application does not hold. For an application that acquires one image at a time
+  (with more than two images: one that leaves at least two with the swapchain) that is the thread's copy, never a
+  drawable; one that asks for the last image it does not hold can wait there for the layer, up to the layer's timeout
+  of one second. The thread takes the device's submission lock for the copy's `vkQueueSubmit` alone, so the
+  application's own submissions do not wait behind the import of the drawable's video memory, the wait for the copy or
+  the mark. The layer is configured as before (three drawables at most, display sync off for IMMEDIATE); nothing
+  paces the thread, and MAILBOX is still not offered.
+- **When a swapchain or a present stays synchronous.** A swapchain gets a thread only when its mode is IMMEDIATE, the
+  device has a copy queue of the frontend's own (the thread submits to it; where the frontend shares a queue with the
+  application it does not), the process is not a child of `fork` made after the frontend started a thread, the switch
+  below is on and the thread could be started; `NVK Bridge: swapchain presentation=newest frame` or `=synchronous` in
+  the application's standard error says which, for each swapchain. On a swapchain with a thread, a present is still
+  made on the application's thread, as in 3.0.8, when it presents several swapchains at once, when a present observer
+  is set (the test hook `nvkbridgeSetPresentObserver`, which is called on the presenting thread), when the thread has
+  ended, and after the thread could not show a frame. Such a present first gives up the frame the thread has not
+  taken and waits for the copy the thread is in, so no older frame reaches the layer after it.
+- **Errors are reported one present late.** A present that hands its frame over answers `VK_SUCCESS` before the frame
+  is on the layer. When the layer gives the thread no drawable within its timeout of one second (a hidden or
+  minimized window), or the thread's copy is refused (a drawable of another size after a resize) or fails, that frame
+  is not shown, and the next present of that surface is synchronous and answers for itself what 3.0.8 answered
+  (`VK_ERROR_OUT_OF_DATE_KHR` for a layer that gives no drawable). Presents of that surface stay synchronous, also on
+  the swapchain that replaces this one, until one of them reaches the layer. A window whose layer gives no drawable
+  therefore holds the application to one present a second once the thread's first wait has run out, about a second
+  after the last frame that was shown, where 3.0.8 held it from the first present; in that second the application's
+  presents are handed over and return at once. The thread also asks the renderer whether a fence signalled because
+  the channel was rebuilt after a fault (`nvmtl_nvk_fence_dropped_v1`): of the frame's own fence before it copies, and
+  of its copy's fence before it publishes. A frame whose fence was dropped is not copied, a copy that never ran is not
+  published, and each counts as a frame that could not be shown. The first question covers the fence's own
+  submission: rendering that a rebuild dropped while the fence submitted after it survived is copied as the image
+  holds it, as on the synchronous path.
+- **How long the GPU has, and a machine that sleeps.** The time a presentation thread gives the GPU, for a frame
+  handed to it and for its own copy, is a backstop behind the renderer's own verdicts, which arrive through the same
+  wait. On a channel that stands still the renderer rebuilds the channel (the fence then signals) or loses the device
+  (the wait fails): after 5 s awake with its channel recovery on, which is its default, and after
+  `NVRM_FLUSH_TIMEOUT_MS` (5 s) with it off. It goes on waiting only for a GPU that the kext calls suspended for a
+  system sleep or wake, for at most 360 s of awake time, and then runs the same sequence. The frontend's own limit is
+  therefore 400 s, longer than those together (`tools/test_nvk_bridge_newest.py` compares it with the renderer's
+  constants), and each wait is one call for the whole of it, never slices: the renderer's clock for a channel that
+  stands still starts again with every call. When the limit does run out, the device's completion is uncertain, as
+  after a copy that did not complete within 5 s before, and on the synchronous path still: the frontend then answers
+  `VK_ERROR_DEVICE_LOST` and releases nothing of the device. The renderer ends a wait at a time on a clock that goes on
+  during a sleep, so a wait that ran out is believed only when the machine did not sleep through it, and is made again
+  when it did: the frontend compares `CLOCK_UPTIME_RAW`, which stands still during a sleep, with
+  `CLOCK_MONOTONIC_RAW`, and takes a second or more between them as a sleep. `vkAcquireNextImageKHR` with a timeout
+  shorter than the limit waits for that timeout and answers `VK_TIMEOUT`, without a verdict on the device.
+- **Replacing and destroying.** `vkCreateSwapchainKHR` with an old swapchain, `vkDestroySwapchainKHR` and
+  `vkDestroyDevice` first tell the old swapchain's thread to present nothing more and wait for the copy it is in,
+  before they take the submission lock (the thread needs that lock to finish a copy). When the device's completion
+  is already uncertain they wait for nothing: every call on the device then answers that it is lost, and nothing of
+  it is released. `vkDestroySwapchainKHR` then waits for the rendering of the frames that were presented and never
+  copied before the images go, with the same limit. The thread itself ends when it next looks, at the latest after the
+  layer's timeout if it was waiting for a drawable; until then it keeps the swapchain's record and the layer alive,
+  and touches neither images nor the device. It can so still be inside the layer's `nextDrawable` while
+  `vkCreateSwapchainKHR` configures the layer for the swapchain that replaces its own; the drawable it then gets
+  goes back to the layer unpresented. A new swapchain's thread is started last, after the swapchain is in the
+  frontend's registry, so a creation that fails leaves no thread behind. `vkQueueWaitIdle` and `vkDeviceWaitIdle` are
+  unchanged: they do not wait for a frame the thread has not shown yet.
+- **The thread.** One per IMMEDIATE swapchain, detached, named `NVK Bridge presentation`, of user-interactive
+  quality of service, started with every signal blocked except those of a fault, with an autorelease pool for each
+  round, as the Zink frontend's presentation thread (`zink/nvk_present_queue.c`). Nothing leaves it: on an exception
+  it stops and the swapchain presents synchronously from then on. The library is pinned in the process when the first
+  thread starts (`RTLD_NODELETE`, opened again by its own path with `RTLD_LOCAL`); where that fails no thread is
+  started and the swapchains present synchronously.
+- **What the frontend says.** The device's line reads `presentation completion=by swapchain` where it read
+  `=synchronous`. The line written when a swapchain is destroyed gains `newest_frames_presented`,
+  `newest_frames_shown` and `newest_frames_dropped`, counted for the process: frames handed to a thread, frames a
+  thread showed, and frames overtaken or given up. A new export, `nvkbridgeGetPresentStats(uint64_t *out, uint32_t
+  count)`, gives those three, the frames a thread could not show and the nanoseconds the threads waited for the
+  layer. `nvkbridgeGetStats` is unchanged, and its copy counter counts the threads' copies too.
+
+Nothing changes for OpenGL through Zink. `libnvk_zink_vulkan.dylib` is a copy of this frontend, but Zink creates no
+swapchain in it: it presents through its own adapter, so the copy starts no thread and does not open the settings file
+for this. Zink's own presentation has the same tie to the layer with vertical sync off (`present_drawable` in
+`zink/nvk_cgl.c` waits for the frame before and takes the next drawable on the application's thread); that is not
+part of 3.0.9.
+
+`tools/switch_registry.py` now reads the frontend's own sources (`bridge.mm` and the header it includes, not the test
+programs beside them) for the switches they name, and `tools/card_selftest.py` counts the header among the driver's
+sources.
+
+### The way back
+
+New, of tier escape, with a row in `tools/switches.tsv`: `NVK_BRIDGE_PRESENT_NEWEST=0`, a line of
+`/Library/GPUBundles/nvmtl/nvrm610.conf`, spelled as the switches of 3.0.7 and 3.0.8 may be (blanks around the name and
+the `=`; off when the value begins with 0; the last line that names it wins). The frontend reads it from the file
+alone, since it reads no environment variable (`NVMTL_PROCESS_ENV` does not apply to it), once per process when the
+process makes its first IMMEDIATE swapchain, from the file's first 8191 bytes. Every swapchain then presents
+synchronously, as in 3.0.8, and the frontend says so in one line. Without the file, an application's own vertical
+sync setting (a FIFO swapchain) has the same effect for that application.
+
+### What ran where
+
+**Nothing of 3.0.9 was built on a Mac or ran on a card.** On Linux: `bridge.mm`, and `host_test.mm`, which includes
+it, pass the syntax check against the 11.3 SDK as Objective-C++17 with ARC and `-Wall -Wextra -Werror`, with the SDK's
+older name standing in for `kIOMainPortDefault`; nothing of the frontend was compiled to an object or linked here.
+`tools/test_nvk_bridge_newest.py` runs `present_newest.h` as it is, with a GPU, a layer, a machine that can sleep and
+an application of its own (`tools/nvk_bridge_newest_fixture.cpp`, 38 checks: an application nothing limits, with 2, 3
+and 8 images; synchronous presents mixed in; a swapchain replaced with frames in flight; a copy that fails; an
+exception; a hidden window; a GPU slower than the application; a GPU that stops; a wait that fails; a machine that
+sleeps through a wait of the thread and of `vkAcquireNextImageKHR`; the two clocks). The test was run with gcc 13 and
+again with clang 18, each plain, under ThreadSanitizer and under AddressSanitizer with UndefinedBehaviorSanitizer;
+against 21 copies of the header with one rule broken each, every one of which fails in the check that looks at its
+rule (the test names it); and against an application's side that takes the submission lock before it waits for the
+thread, in a present and in an acquire, each of which stands still as it has to. The same test reads `bridge.mm` for
+how it uses the header (what is done before the submission lock, when a present is handed over, the fence behind the
+rendering, the whole waits and the two clocks, the thread's setup, its pin and that it starts last, the dropped-fence
+questions against NVK's own declaration, the limit against NVK's constants), with 18 copies of `bridge.mm` broken in
+one place each, one copy of NVK's patch whose declaration takes other arguments and one copy of the header with a
+limit of 30 s. `tools/test_nvk_bridge.py` now reads the frontend and its header together for the files they open
+(two, both to read) and the environment (none).
+The fixture's machine sleeps when its script says so; that `CLOCK_UPTIME_RAW` and `CLOCK_MONOTONIC_RAW` move apart by
+the length of a sleep on the Mac, and that NVK's wait behaves across one as read from its source, was not run.
+
+Not checked, because it needs the layer, WindowServer and the card: that the frames the thread shows are the right
+ones, whole and in order on the screen; what the game's frame rate becomes; what a resize, a minimize and a second
+display do to it; the thread's cost on the GPU when the application presents far more frames than the layer takes
+(the thread copies for every drawable the layer hands out, about two for each composition in the capture above).
+**No check of the card suite runs the new path:** `smoke.mm` uses FIFO, and `window_check.mm` sets the present
+observer for its whole run, so the swapchain of its IMMEDIATE phase, when it has a thread (the program now prints the
+frontend's `swapchain presentation=` line for it, as information), never hands that thread a frame and its presents
+are synchronous. The suite therefore goes on checking the synchronous path, which it has to pass as before, and on a
+swapchain with a thread the new bookkeeping of images under it. `host_test.mm` was not run and has no case for a
+swapchain with a thread.
+
+Known limits. With `NVRM_ASYNC=0`, or on a channel that has no slot for asynchronous submission, the fence a present
+submits still waits for the GPU on the application's thread. A presentation thread is not joined when the process
+exits. A child of `fork` that goes on using a swapchain its parent made is not supported (it was not before). The
+synchronous path's wait for its copy is 3.0.8's, 5 s on the renderer's clock: a synchronous present that is in flight
+when the machine goes to sleep can still find its wait run out when it wakes, as before. A sleep shorter than a second
+is not seen as one. With the renderer's channel recovery off (`NVK_CHANNEL_RECOVER=0`, or `NVRM_ASYNC=0`) the
+renderer's own clock for a channel that stands still counts a sleep, so a wait in flight across one fails in the
+renderer, as it did before 3.0.9. The 400 s of a presentation thread are a constant of the frontend, which reads no
+environment: `NVRM_FLUSH_TIMEOUT_MS` raised beyond them is not followed. They are also how long an application can
+stand in `vkAcquireNextImageKHR`, or in a present, a resize or a destroy that waits for the thread, on a device that
+finishes nothing for a reason the renderer does not see, before it is answered `VK_ERROR_DEVICE_LOST`; on the
+synchronous path that is 5 s. The renderer does not tell the frontend that the GPU is suspended; the frontend infers
+a sleep from the clocks, after the wait.
 
 ## 3.0.8
 
