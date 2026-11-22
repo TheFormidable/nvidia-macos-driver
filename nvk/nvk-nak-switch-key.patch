@@ -1,0 +1,143 @@
+nvk-nak-switch-key: the shader compiler's switches are part of NVK's shader cache key (3.0.12).
+NullMoth's own change (not an upstream Mesa commit).
+
+nvk_physical_device_compiler_flags feeds pipelineCacheUUID, shaderBinaryUUID and the disk cache's driver flags. Of the
+switches NullMoth's patches read between SPIR-V and the cached nvk_shader, only NVMTL_NAK_ARR_SCRATCH (bit 15) was in
+it, beside what upstream keys there (NVK_DEBUG's no_cbuf and edb_bview, drirc's ssbo_align_4b, and NAK_DEBUG in the
+bits from 48 up), so a process that turned any other one on or off was handed binaries compiled under the other
+setting: from the disk cache, and from the VkPipelineCache data Zink keeps in a cache of its own. A 32-bit digest of
+the name and value of every such switch that is set now goes into bits 16..47 of the key that
+nvk_physical_device_init_pipeline_cache hashes and hands to the disk cache. It is 0 when none is set, so the key with
+no switch set is computed exactly as before. Two switches of upstream's SPIR-V reader that upstream keys nowhere are
+in the digest too (MESA_SPIRV_FORCE_UNSTRUCTURED and MESA_SPIRV_READ_PATH).
+
+The code is in nvk_physical_device.c because nvk-nak-sched-main changes nvk_shader.c, and a later patch may not touch
+a file of the three upstream-fix patches (tools/test_nvk_chain.py). Two comments in nvk_shader.c therefore stay as
+they were and are out of date: "bits 15..47 are free" of the key, and NVMTL_NVK_NO_LCONST16 "not in the shader cache
+key". tools/test_nvk_nak_switch_key.py keeps the list of switches complete.
+
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -1490,6 +1490,98 @@
+             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+ }
+ 
++/* nvk-nak-switch-key: the switches read between SPIR-V and the cached nvk_shader change the code, the info or the
++ * refusal that NAK and NVK give a shader. Of the ones NullMoth's patches read, only NVMTL_NAK_ARR_SCRATCH (bit 15) was
++ * in nvk_physical_device_compiler_flags, beside what upstream keys there (NVK_DEBUG's no_cbuf and edb_bview, drirc's
++ * ssbo_align_4b, and NAK_DEBUG in bits 48..63): a binary from the disk cache or from VkPipelineCache data (Zink keeps
++ * it in a cache of its own) came back whatever the others were set to. Each name below that is set is hashed with its
++ * value (FNV-1a, 32 bits) into bits 16..47 of the key; with none set the digest is 0 and the key is the one of 3.0.8.
++ * The value is hashed whole: one that means the same as unset ("0" for most), or the same as another, still gives a
++ * key of its own, which costs one more compile and never gives a wrong binary. Each name is read as the compiler
++ * reads it, getenv, and nvmtl_cfg_getenv for NVMTL_NVK_NO_LCONST16 alone, so a settings-file line the compiler does
++ * not see does not change the key. The key is taken here, when the device is made, and the compiler reads later, some
++ * switches at every compile and many once for as long as the library is loaded: a switch that enters or leaves the
++ * environment in between is compiled under a key that does not say so. The switches that only log are in, so that
++ * asking for a log compiles. The two MESA_SPIRV_ names are upstream's, which keys neither: the first changes the
++ * control flow spirv_to_nir builds, and the second swaps a module for a file after the module's hash was taken, so
++ * without it here the default key's entries would get the replacement's binary (the value as written is what is
++ * hashed, not the folder's files: clear the cache when a file there is added, changed or removed, or when a relative
++ * path is used from another folder). Not in it: NAK_SMEM_TARGET_CAP_KB and NAK_QMD_NO_PREFETCH change only the QMD,
++ * filled at each dispatch; NVK_DUMP_SHADER_DIR and NV50_PROG_DEBUG act in nvk_shader_upload, which a cached shader
++ * goes through too.
++ * The code is here and not in nvk_shader.c, which nvk-nak-sched-main changes (NVK_SKIP_PATCHES); that file's two
++ * comments on the key ("bits 15..47 are free", and NVMTL_NVK_NO_LCONST16 "not in the shader cache key") are older
++ * than this. tools/test_nvk_nak_switch_key.py fails when a patch reads a switch on the compile path that is in no
++ * list. */
++static const char *const nvk_nak_key_switches[] = {
++   "MESA_SPIRV_FORCE_UNSTRUCTURED",
++   "MESA_SPIRV_READ_PATH",
++   "NAK_B83_ARRAYS",
++   "NAK_NO_LICM",
++   "NAK_NO_PIN_ADDR",
++   "NAK_TEX_UHANDLE",
++   "NAK_TEX_UHANDLE_WHY",
++   "NVK_CURVES",
++   "NVK_HWRT_QUERY",
++   "NVK_STRONG_GLOBAL_LOADS",
++   "NVK_UNBOUND_STAGE_STRICT",
++   "NVMTL_NAK_LOOPCONT",
++   "NVMTL_NAK_NOIMMCSE",
++   "NVMTL_NAK_NOIMMHOIST",
++   "NVMTL_NAK_NO_LDSINK",
++   "NVMTL_NAK_NO_PEEP",
++   "NVMTL_NAK_NO_PIN_WHOLE",
++   "NVMTL_NAK_NO_PREDLOAD",
++   "NVMTL_NAK_NO_PREPASS",
++   "NVMTL_NAK_NO_PUNROLL",
++   "NVMTL_NAK_NO_PUNROLL2",
++   "NVMTL_NAK_NO_SINKINC",
++   "NVMTL_NAK_NO_U2FMAGIC",
++   "NVMTL_NAK_PIN_WHOLE_MIN",
++   "NVMTL_NAK_PREDLOAD_MAX",
++   "NVMTL_NAK_PREPASS_PICK",
++   "NVMTL_NO_RAW_TUNING",
++   "NVMTL_NO_SMALL_ARRAYS",
++   "NVMTL_RAW_MATCH_LOG",
++   "NVMTL_RAW_MAX_GPRS",
++   "NVMTL_RAW_PRESSURE",
++   "NVMTL_RAW_SHADER_MATCH",
++   "NVMTL_RAW_SOURCE_BLAKE3",
++   "NVMTL_RAW_SOURCE_BLAKE3_LIST",
++};
++
++static uint32_t
++nvk_nak_switch_mix(uint32_t h, const char *name, const char *value)
++{
++   for (const char *s = name; *s; s++)
++      h = (h ^ (uint8_t)*s) * 16777619u;
++   h = (h ^ '=') * 16777619u;
++   for (const char *s = value; *s; s++)
++      h = (h ^ (uint8_t)*s) * 16777619u;
++   return h * 16777619u;   /* the NUL that ends the value */
++}
++
++/* 0 when no switch is set, never 0 when one is */
++static uint32_t
++nvk_nak_switch_digest(void)
++{
++   uint32_t h = 2166136261u;
++   bool any = false;
++   for (unsigned i = 0; i < ARRAY_SIZE(nvk_nak_key_switches); i++) {
++      const char *v = getenv(nvk_nak_key_switches[i]);
++      if (v != NULL) {
++         h = nvk_nak_switch_mix(h, nvk_nak_key_switches[i], v);
++         any = true;
++      }
++   }
++   const char *lc = nvmtl_cfg_getenv("NVMTL_NVK_NO_LCONST16");
++   if (lc != NULL) {
++      h = nvk_nak_switch_mix(h, "NVMTL_NVK_NO_LCONST16", lc);
++      any = true;
++   }
++   return !any ? 0 : h != 0 ? h : 1;
++}
++
+ static void
+ nvk_physical_device_init_pipeline_cache(struct nvk_physical_device *pdev)
+ {
+@@ -1513,7 +1605,12 @@
+    _mesa_blake3_update(&blake3_ctx, &pdev->info.chipset,
+                      sizeof(pdev->info.chipset));
+ 
+-   const uint64_t compiler_flags = nvk_physical_device_compiler_flags(pdev);
++   /* nvk-nak-switch-key: the digest takes bits 16..47, free in nvk_physical_device_compiler_flags (bit 15 is
++    * arrscratch's). Exclusive or, so that with no switch set the key is that function's value to the bit, and a bit
++    * a later Mesa put in that range would still tell two keys apart instead of being swallowed. */
++   assert((nvk_physical_device_compiler_flags(pdev) & 0x0000ffffffff0000ull) == 0);
++   const uint64_t compiler_flags = nvk_physical_device_compiler_flags(pdev)
++      ^ ((uint64_t)nvk_nak_switch_digest() << 16);
+    _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
+ 
+    unsigned char blake3[BLAKE3_KEY_LEN];
+@@ -1532,7 +1629,7 @@
+    char timestamp[BLAKE3_HEX_LEN];
+    _mesa_blake3_format(timestamp, instance->driver_build_sha);
+ 
+-   const uint64_t driver_flags = nvk_physical_device_compiler_flags(pdev);
++   const uint64_t driver_flags = compiler_flags;   /* nvk-nak-switch-key: the same key, switches included */
+    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+    if (pdev->vk.disk_cache != NULL) {
+       pdev->vk.properties.pipelineBinaryInternalCache = true;
