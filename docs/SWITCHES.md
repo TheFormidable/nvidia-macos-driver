@@ -173,9 +173,9 @@ Each of these does nothing unless it is set.
 | `METAL2VULKAN_WHY` | dev | unset | 2.9 | - | unreviewed | translator/translator/src/env_vars.rs |
 | `MPEG2_NO_EOS` | dev | unset (the path is on) | 2.9 | - | unreviewed | vendor/nvenc/src/mpeg2dec.c |
 | `MPEG4_TRY_H263` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/src/mpeg4dec.c |
-| `NAK_B83_ARRAYS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NAK_NO_LICM` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NAK_NO_PIN_ADDR` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NAK_B83_ARRAYS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NAK_NO_LICM` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NAK_NO_PIN_ADDR` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NAK_QMD_NO_PREFETCH` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NAK_SMEM_TARGET_CAP_KB` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NAK_TEX_UHANDLE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
@@ -245,9 +245,9 @@ Each of these does nothing unless it is set.
 | `NVK_NO_NONCONTIG` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_PREEMPT_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_QUEUE_COUNT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
-| `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVK_STRONG_GLOBAL_LOADS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVK_SYSMEM_GPU_UNCACHED` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
-| `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-unbound-stage.patch |
+| `NVK_UNBOUND_STAGE_STRICT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-nak-switch-key.patch, nvk/nvk-unbound-stage.patch |
 | `NVK_ZINK_OPACITY_KEEP` | escape | on (NVK_ZINK_OPACITY_KEEP=0 in the settings file: every OpenGL swap on Zink asks WindowServer for the drawable's opacity again, once, and sees an application's change at the next swap, as 3.0.7 did) | 3.0.8 | 3.2 | A context of the Zink frontend keeps the answer to whether its drawable is opaque (kCGLCPSurfaceOpacity, a message to WindowServer and its reply) for 100 ms and asks again at once when the adapter sees its output change, so an application's own change of the opacity reaches the window up to 100 ms late; a swap asks at most once either way. | zink/nvk_cgl.c |
 | `NVK_ZINK_PRESENT_AHEAD` | escape | on (NVK_ZINK_PRESENT_AHEAD=0 in the settings file: a swap waits for the GPU and publishes its frame itself, as in 3.0.6) | 3.0.7 | 3.2 | An OpenGL swap on Zink hands its frame to a presentation thread of the process, which waits for the GPU, marks and tags the surface and presents the drawable; the swap returns at once, and the next swap waits for that frame first, so a context never has more than one frame on its way. | zink/nvk_present.c |
 | `NVK_ZINK_SURFACE_KEEP` | escape | on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6) | 3.0.7 | 3.2 | The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7. | zink/nvk_present.c |
@@ -400,21 +400,21 @@ Each of these does nothing unless it is set.
 | `NVMTL_MISALIGNED_BUFFER_COPY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_MULTIGPU` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_NAK_ARR_SCRATCH` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_LOOPCONT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NOIMMCSE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NOIMMHOIST` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_LDSINK` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PEEP` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PIN_WHOLE` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PREDLOAD` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PREPASS` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PUNROLL` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_PUNROLL2` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_SINKINC` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_NO_U2FMAGIC` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_PIN_WHOLE_MIN` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_PREDLOAD_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_NAK_PREPASS_PICK` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_NAK_LOOPCONT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NOIMMCSE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NOIMMHOIST` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_LDSINK` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PEEP` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PIN_WHOLE` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PREDLOAD` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PREPASS` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PUNROLL` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_PUNROLL2` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_SINKINC` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_NO_U2FMAGIC` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_PIN_WHOLE_MIN` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_PREDLOAD_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
+| `NVMTL_NAK_PREPASS_PICK` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVMTL_NO_AIR_ALIGN` | dev | unset (the path is on) | 2.9 | - | unreviewed | translator/translator/src/b78_tcg.rs, translator/wrapper/src/buffer_addresses.rs |
 | `NVMTL_NO_AIR_UNROLL` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_NO_ALIGN_GUARD` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
@@ -464,7 +464,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_NO_SAMPLER_RESTORE` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_SAMPVAR` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_NO_SIZEQUERY_CACHE` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_NO_SMALL_ARRAYS` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_NO_SMALL_ARRAYS` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVMTL_NO_SPARSE_BUF` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_STATIC_SAMPLERS` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLEmbedded.m |
 | `NVMTL_NO_SURFACE_PAGEOFF` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
@@ -489,7 +489,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_NVENC_MAX_PIXEL_RATE` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVMTL_NVK_DYLIB` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NVK_MESSAGES` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_NVK_NO_LCONST16` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_NVK_NO_LCONST16` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVMTL_OSVER_TEST_REAL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_osver.m |
 | `NVMTL_OS_VERSION` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m |
 | `NVMTL_PAR_SIGCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -510,11 +510,11 @@ Each of these does nothing unless it is set.
 | `NVMTL_PROCESS_ENV` | diag | unset | 2.9 | - | NVMTL_PROCESS_ENV=1 in a process's own environment (exactly 1; not honoured in a process run as root or setuid/setgid): the release plugin keeps that process's driver variables (NVMTL_, NVK_, NVRM_ and the other driver prefixes), which then win over the settings file, and writes its log, /tmp/nvmtl.log, for that process, which it does for no other process | plugin/nvmtl_env_knobs.h, zink/nvk_zink_cfg.h |
 | `NVMTL_PSTAT` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_RAW_MATCH_LOG` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_RAW_MAX_GPRS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_RAW_MAX_GPRS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVMTL_RAW_PRESSURE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_RAW_SHADER_MATCH` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVMTL_RAW_SOURCE_BLAKE3` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVMTL_RAW_SOURCE_BLAKE3_LIST` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NVMTL_RAW_SOURCE_BLAKE3_LIST` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NVMTL_REFLCACHE_OFF` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_REFLECT` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
 | `NVMTL_RES2_COLD` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
