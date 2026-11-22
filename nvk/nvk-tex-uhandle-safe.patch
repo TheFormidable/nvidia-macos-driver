@@ -1,4 +1,4 @@
-nvk-tex-uhandle-safe: with NAK_TEX_UHANDLE=1 a texture whose handle left its uniform register compiles (3.0.10).
+nvk-tex-uhandle-safe: with NAK_TEX_UHANDLE=1 a texture whose handle left its uniform register compiles (3.0.12).
 NullMoth's own change (not an upstream Mesa commit).
 
 NAK_TEX_UHANDLE=1 (off by default, SM100 and later) keeps the handle of a TEX in a uniform register, and the encoder

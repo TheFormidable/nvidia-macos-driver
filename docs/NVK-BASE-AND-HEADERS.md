@@ -47,8 +47,8 @@ See [GPU-CAPS.md](GPU-CAPS.md); `tools/test_shared_headers.py` checks the two co
 After it come four changes of our own, each described in its header: `nvk-desc-alloc` (3.0.6: a descriptor set layout
 without immutable samplers is not walked for every new set), `nvk-surface-keep` (3.0.7: two exports for a caller
 that keeps its import of a surface's video memory across frames; see [ZINK-OPENGL.md](ZINK-OPENGL.md)),
-`nvk-nak-switch-key` (3.0.10: the environment switches the shader compiler reads, two of Mesa's SPIR-V reader among
-them, are part of the shader cache key, as a digest that is 0 when none is set) and `nvk-tex-uhandle-safe` (3.0.10:
+`nvk-nak-switch-key` (3.0.12: the environment switches the shader compiler reads, two of Mesa's SPIR-V reader among
+them, are part of the shader cache key, as a digest that is 0 when none is set) and `nvk-tex-uhandle-safe` (3.0.12:
 with `NAK_TEX_UHANDLE=1`, which is off by default, a texture whose handle left its uniform register no longer fails
 the compile). The last one is a change to
 the compiler, in `assign_regs.rs` and `sm70_encode.rs`; with the switch unset its code leaves every texture and every
@@ -83,7 +83,7 @@ and LLVM 22, and had the same bytes in three builds (one with tools built by han
 runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) built it at that commit too.
 `nvk-stream-uncached`, added after commit aa27c73, and `nvk-boost-policy`, `nvk-mesa-main-2`, `nvk-nvrm-fixes` and
 `nvk-local-map-vram`, added in 3.0.1, have been compiled on Linux only. So have `nvk-nak-switch-key` and
-`nvk-tex-uhandle-safe` of 3.0.10: in the cross-build for macOS, and in a Linux build of this NVK and NAK on Mesa's
+`nvk-tex-uhandle-safe` of 3.0.12: in the cross-build for macOS, and in a Linux build of this NVK and NAK on Mesa's
 nouveau drm-shim as a GB207 (shader model 120), where pipelines compile without a card and nothing is drawn. No check
 of the image on a card has been reported. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa
 release. The library's build id changes, so shader caches written by a 2.9 build are not reused and shaders are

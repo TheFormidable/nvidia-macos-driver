@@ -234,9 +234,9 @@ def wiring_problems(bridge):
        copy.index("fence_dropped(d->raw") > copy.index("surface_dirty(d->raw"):
         p.append("a presentation thread publishes a copy that a channel rebuild dropped")
     create = body(bridge, "VkResult VKAPI_CALL create_swapchain(")
-    if "if (info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR && d->private_copy_queue && !forked && newest_wanted()) {" not in create or \
+    if "if ((info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR || info->presentMode==VK_PRESENT_MODE_MAILBOX_KHR) && d->private_copy_queue && !forked && newest_wanted()) {" not in create or \
        bridge.count("std::make_unique<nvkbridge::Newest<NewestBackend>>") != 1:
-        p.append("a swapchain other than IMMEDIATE with a private copy queue and the switch on can get a presentation thread")
+        p.append("a swapchain other than IMMEDIATE or MAILBOX with a private copy queue and the switch on can get a presentation thread")
     if "signalled.flags=VK_FENCE_CREATE_SIGNALED_BIT;" not in create:
         p.append("the images' done fences are not created signalled")
     thread = body(bridge, "void *newest_main(")
@@ -315,7 +315,7 @@ def main():
         ("an observer called on the presentation thread", "   if (!threaded) if (auto observer=present_observer.load())",
          "   if (auto observer=present_observer.load())"),
         ("a FIFO swapchain with a presentation thread",
-         "if (info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR && d->private_copy_queue && !forked && newest_wanted()) {",
+         "if ((info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR || info->presentMode==VK_PRESENT_MODE_MAILBOX_KHR) && d->private_copy_queue && !forked && newest_wanted()) {",
          "if (d->private_copy_queue && !forked && newest_wanted()) {"),
         ("a presentation thread that takes the application's signals", "   sigfillset(&all);\n", "   sigemptyset(&all);\n"),
         ("a frame handed over without its done fence",

@@ -311,23 +311,39 @@ struct nvk_present_ahead {
    IOSurfaceRef surface;               /* retained */
    struct pipe_resource *image;
    struct pipe_fence_handle *zink_fence;
+   pthread_mutex_t *image_lock;        /* NULL, or what guards the image against the thread that draws (3.0.11) */
    nvk_zink_frame_done done;
    void *arg;
    uint32_t row, width, height;
 };
 
 static pthread_once_t ahead_once = PTHREAD_ONCE_INIT;
-static int ahead_on, keep_on;
+static int ahead_on, keep_on, newest_on;
 static void ahead_read_switches(void)
 {
    ahead_on = nvk_zink_cfg_on("NVK_ZINK_PRESENT_AHEAD");
    keep_on = nvk_zink_cfg_on("NVK_ZINK_SURFACE_KEEP");
+   newest_on = nvk_zink_cfg_on("NVK_ZINK_PRESENT_NEWEST");
 }
 
 int nvk_present_ahead_enabled(void)
 {
    pthread_once(&ahead_once, ahead_read_switches);
    return ahead_on;
+}
+
+int nvk_present_newest_enabled(void)
+{
+   pthread_once(&ahead_once, ahead_read_switches);
+   /* The sender sees nothing of what a diagnostic observer is promised (it is called during the swap it was armed
+    * for), so a process that has one presents every frame from its swap. */
+   return ahead_on && newest_on && !atomic_load(&present_observer);
+}
+
+unsigned nvk_present_image_layout(struct pipe_resource *image)
+{
+   struct zink_resource *resource = image ? zink_resource(image) : NULL;
+   return resource && resource->obj && !resource->obj->is_buffer ? (unsigned)resource->layout : 0;
 }
 
 static void ahead_import_free(struct nvk_present_ahead *a, struct ahead_import *import)
@@ -500,7 +516,12 @@ static int ahead_work(void *frame)
             for (unsigned i = 0; i < AHEAD_KEPT; ++i) ahead_import_free(a, &a->kept[i]);
             fprintf(stderr, "NVK Zink: marks for kept surfaces keep being refused; importing for every frame from now on\n");
          }
+         /* A context that parks its frames (3.0.11) may be drawing the next one into the scratch image now: its
+          * lock keeps that, and Zink's record of the image's layout, still for the copy. What goes out is then
+          * the frame the image holds, this one or a newer one. */
+         if (a->image_lock) pthread_mutex_lock(a->image_lock);
          const int again = nvk_zink_copy_vram(&screen->base, a->image, a->surface);
+         if (a->image_lock) pthread_mutex_unlock(a->image_lock);
          if (again < 0) {
             p_atomic_set(a->uncertain, 1);
             fprintf(stderr, "NVK Zink: presentation completion uncertain; share group quarantined\n");
@@ -607,8 +628,8 @@ int nvk_present_ahead_destroy(struct nvk_pq *queue, struct nvk_present_ahead **s
 }
 
 int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, struct pipe_resource *image,
-                             IOSurfaceRef surface, struct pipe_fence_handle *zink_fence, int synchronous,
-                             nvk_zink_frame_done done, void *arg)
+                             unsigned layout, pthread_mutex_t *image_lock, IOSurfaceRef surface,
+                             struct pipe_fence_handle *zink_fence, int synchronous, nvk_zink_frame_done done, void *arg)
 {
    struct zink_screen *screen = a->screen;
    /* What nvk_zink_copy_vram refuses is refused here; it then refuses it itself, and its caller hears that. */
@@ -621,7 +642,8 @@ int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, 
        image->height0 > SIZE_MAX / row || row * image->height0 > size)
       goto refused;
    struct zink_resource *resource = zink_resource(image);
-   const VkImageLayout prior = resource->layout;
+   /* The thread that draws reads Zink's record; a sender is told what the record said when the frame was parked. */
+   const VkImageLayout prior = layout ? (VkImageLayout)layout : resource->layout;
    if (prior == VK_IMAGE_LAYOUT_UNDEFINED || !resource->obj || resource->obj->is_buffer) goto refused;
    struct ahead_import *import = ahead_import_for(a, surface, row * image->height0, size);
    if (!import) goto refused;
@@ -655,6 +677,7 @@ int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, 
    a->surface = (IOSurfaceRef)CFRetain(surface);
    pipe_resource_reference(&a->image, image);
    a->zink_fence = zink_fence;
+   a->image_lock = image_lock;
    a->done = done; a->arg = arg;
    a->row = (uint32_t)row; a->width = image->width0; a->height = image->height0;
    VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -664,6 +687,9 @@ int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, 
    simple_mtx_lock(screen->queue_lock);
    VkResult result = screen->vk.QueueSubmit(screen->queue, 1, &submit, a->fence);
    simple_mtx_unlock(screen->queue_lock);
+   /* The copy has its place on the queue: the thread that draws may flush its next frame behind it. Nothing below
+    * waits with the image's lock held (the presentation thread asks for it when it sends a frame again). */
+   if (image_lock) pthread_mutex_unlock(image_lock);
    if (result != VK_SUCCESS) {
       /* As above: after a submission that may or may not have been taken nothing is destroyed or published. */
       p_atomic_set(a->uncertain, 1);
@@ -682,7 +708,7 @@ int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, 
    /* A caller that has to know now what became of the frame waits for it here, with the queue lock long dropped:
     * a diagnostic observer (it is called during the swap it was armed for) and a front-buffer flush (one that was
     * not published is tried again at the next flush). */
-   if (synchronous || atomic_load(&present_observer)) {
+   if (synchronous > 0 || (!synchronous && atomic_load(&present_observer))) {
       int settled;
       const int inside = ahead_enter(queue, a->uncertain, 0, &settled);
       if (inside < 0) return -1;
@@ -693,6 +719,7 @@ int nvk_present_ahead_submit(struct nvk_pq *queue, struct nvk_present_ahead *a, 
 unused:
    if (import == &a->own) ahead_import_free(a, &a->own);
 refused:
+   if (image_lock) pthread_mutex_unlock(image_lock);
    nvk_pq_release(queue);
    return -2;
 }
