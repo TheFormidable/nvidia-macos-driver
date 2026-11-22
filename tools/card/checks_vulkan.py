@@ -34,10 +34,10 @@ _INSTALLED_LOADER = "{GB}/nvmtl/libvulkan.1.dylib"
 _BUILT_LOADER = "{B}/out/vulkan-loader/libvulkan.1.dylib"
 _SDL = "/usr/local/lib/libSDL3.dylib"   # an x86_64 SDL3 where Homebrew on an Intel Mac links it
 # The runtime's folder as the frontend and the loader may spell it: the loader joins the manifest's folder and its
-# "./lib/libnvk_minecraft.dylib", and the frontend names its renderer from its own path (bridge.mm:121-134).
+# "./lib/libnvk_minecraft.dylib", and the frontend names its renderer from its own path (bridge.mm:173-188).
 _LIB = r"/Library/GPUBundles/nvmtl/minecraft(?:/+\.)*/+lib/"
-# the frontend's lines for a failed renderer load, a missing Metal device and an uncertain copy (bridge.mm:129, :355,
-# :431, :775)
+# the frontend's lines for a failed renderer load, a missing Metal device and an uncertain completion (bridge.mm:181,
+# :409, :492, :986, :1028)
 _FORBID = (r"^NVK Bridge: renderer load failed", r"^NVK Bridge: a matching NVIDIA Metal device",
            r"^NVK Bridge: presentation completion uncertain", r"^NVK Bridge: uncertain GPU completion")
 _MERGED = 'exec "$0" "$@" 2>&1'   # sh -c: stderr into stdout, then the program in sh's place

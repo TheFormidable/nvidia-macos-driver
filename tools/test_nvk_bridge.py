@@ -7,7 +7,8 @@ package and the installer carry it.
   SHA-256 in the properties file, the compile flags, and no folder of the build machine in what it writes.
 - bridge.mm against the driver: the import record is NVK's struct nvmtl_nvk_share at its version, the entry points it
   looks up are exported by the NVK patch chain with the signatures it calls, the generation tag is the plugin's, the
-  service it matches is the accelerator's class; it reads no environment variable; and the renderer's own
+  service it matches is the accelerator's class; it reads no environment variable and opens two files, both
+  read-only (/dev/null for the import, and the settings file for its one switch); and the renderer's own
   window-system extensions (nvk-metal-wsi.patch) are filtered.
 - build.sh builds it after nvk as part of all; package_local.sh puts its four files under
   Library/GPUBundles/nvmtl/minecraft and its two guides at the package's top; install.sh and uninstall.sh back up,
@@ -185,20 +186,46 @@ control("a surface_dirty with another signature", interface_problems(
     BRIDGE, PATCH.replace("nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID, uint32_t plane)",
                           "nvmtl_nvk_surface_dirty(VkDevice device, uint32_t surfaceID)", 1), plugin, plist))
 
-def reads_problems(bridge):
-    code = re.sub(r"//[^\n]*|/\*.*?\*/", "", bridge, flags=re.S)
-    reads = re.findall(r"\b(getenv|secure_getenv|environ|NSProcessInfo|fopen|O_CREAT|O_WRONLY|O_RDWR)\b", code)
-    if len(re.findall(r"(?<!\w)open\(", code)) != 1 or 'open("/dev/null",O_RDONLY|O_CLOEXEC)' not in code:
-        reads.append("an open( other than the one of /dev/null, read-only")
+# The frontend's own sources: bridge.mm and the headers beside it that it includes (the test programs of the folder
+# read the environment, and are not the frontend).
+NEWEST = (NB / "present_newest.h").read_text()
+SETTINGS_OPEN = 'open("/Library/GPUBundles/nvmtl/nvrm610.conf",O_RDONLY|O_CLOEXEC)'
+
+
+def reads_problems(bridge, headers):
+    reads = []
+    included = sorted(re.findall(r'^#include "([^"]+)"', bridge, re.M))
+    if included != sorted(headers):
+        reads.append(f"bridge.mm includes {included}, and this check reads {sorted(headers)}")
+    code = re.sub(r"//[^\n]*|/\*.*?\*/", "", bridge + "".join(headers.values()), flags=re.S)
+    reads += re.findall(r"\b(getenv|secure_getenv|environ|NSProcessInfo|fopen|O_CREAT|O_WRONLY|O_RDWR)\b", code)
+    if len(re.findall(r"(?<!\w)open\(", code)) != 2 or 'open("/dev/null",O_RDONLY|O_CLOEXEC)' not in code or SETTINGS_OPEN not in code:
+        reads.append("an open( other than the two it has: /dev/null and the settings file, both read-only")
+    if '"NVK_BRIDGE_PRESENT_NEWEST"' not in code or "nvkbridge::settings_switch_on(text,\"NVK_BRIDGE_PRESENT_NEWEST\")" not in code:
+        reads.append("the settings file is not read for the one switch NVK_BRIDGE_PRESENT_NEWEST, by the settings file's rule")
     return reads
 
 
-p = reads_problems(BRIDGE)
-check("bridge.mm reads no environment variable and opens no file to write (it opens only /dev/null, read-only)", not p, p)
+HEADERS = {"present_newest.h": NEWEST}
+sys.path.insert(0, str(ROOT / "tools"))
+import switch_registry
+check("the switch registry scans bridge.mm and the headers it includes, and none of the folder's test programs",
+      sorted(switch_registry.NVK_BRIDGE_SOURCES) == sorted(["bridge.mm", *HEADERS]), str(switch_registry.NVK_BRIDGE_SOURCES))
+p = reads_problems(BRIDGE, HEADERS)
+check("bridge.mm and the header it includes read no environment variable and open no file to write (they open "
+      "/dev/null and the settings file, read-only, the second for the one switch NVK_BRIDGE_PRESENT_NEWEST)", not p, p)
 control("a bridge.mm that reads an environment variable",
-        reads_problems(BRIDGE.replace("Share share{3,", 'getenv("X");Share share{3,', 1)))
+        reads_problems(BRIDGE.replace("Share share{3,", 'getenv("X");Share share{3,', 1), HEADERS))
+control("a header of the frontend that reads an environment variable",
+        reads_problems(BRIDGE, {"present_newest.h": NEWEST.replace("const char *value=nullptr;", 'const char *value=getenv(name);', 1)}))
+control("a bridge.mm that includes a header this check does not read",
+        reads_problems(BRIDGE.replace('#include "present_newest.h"', '#include "present_newest.h"\n#include "../../zink/nvk_zink_cfg.h"', 1), HEADERS))
 control("a bridge.mm that opens a file to write", reads_problems(
-    BRIDGE.replace('open("/dev/null",O_RDONLY|O_CLOEXEC)', 'open("/tmp/x",O_WRONLY|O_CLOEXEC)', 1)))
+    BRIDGE.replace('open("/dev/null",O_RDONLY|O_CLOEXEC)', 'open("/tmp/x",O_WRONLY|O_CLOEXEC)', 1), HEADERS))
+control("a bridge.mm that opens the settings file to write", reads_problems(
+    BRIDGE.replace(SETTINGS_OPEN, 'open("/Library/GPUBundles/nvmtl/nvrm610.conf",O_RDWR|O_CLOEXEC)', 1), HEADERS))
+control("a bridge.mm that opens a third file", reads_problems(
+    BRIDGE.replace("text[have]=0;", 'text[have]=0;close(open("/etc/hosts",O_RDONLY|O_CLOEXEC));', 1), HEADERS))
 
 
 def wsi_problems(bridge):
