@@ -33,6 +33,7 @@ PRELUDE = r"""
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #define NVK_EXPORT
 #define ST_ATTACHMENT_COUNT 4
 #define p_atomic_read(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
@@ -52,6 +53,7 @@ struct nvk_zink_context {
    struct st_context *st;
    struct pipe_resource *attachments[ST_ATTACHMENT_COUNT];
    struct pipe_resource *iosurface_staging;
+   struct { pthread_mutex_t lock; unsigned long long drawn, sent; pid_t pid; } parked;   /* 3.0.11: what destroy_now reads of it */
    int freed;
 };
 /* zink/nvk_zink.h declares these in the real build */

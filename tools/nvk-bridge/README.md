@@ -135,8 +135,11 @@ and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal 
 and imports its target and is waited for on the CPU. That import and the mark after the copy are two kernel calls
 per frame that take the accelerator's lock. On the synchronous path the frontend holds its device's submit lock during
 both, so the application's own queue submissions wait as well; a presentation thread holds that lock for the copy's
-submission alone. Nothing paces a presentation thread: it copies a frame for every drawable the layer hands out, which
-can be more than the display shows, and MAILBOX is not offered. During a screen share a captured frame is paged off
+submission alone. Nothing paces the presentation thread of an IMMEDIATE swapchain: it copies a frame for every drawable the layer hands
+out, which can be more than the display shows. A MAILBOX swapchain (offered since 3.0.11, while
+`NVK_BRIDGE_PRESENT_NEWEST` is not 0) has the same thread with the layer's display synchronization left on, so its
+thread copies one frame for each refresh and the application is still not held to the display; on a device without a
+copy queue of the frontend's own it presents as FIFO does. During a screen share a captured frame is paged off
 under the accelerator's lock,
 and a page-off can hold it while it waits for the GPU (the accelerator's `debug.nvaccel_surf_mark_lock_wait_*` counters
 measure such waits). The cost of these calls has not been measured on a card. The Metal plugin imports each surface's

@@ -403,7 +403,7 @@ static int swap(IOSurfaceRef surface, int synchronous, struct drawable **out)
    if (began != 1) return began == 0 ? -100 : began;
    struct pipe_fence_handle *fence = &zfences[zfence_next++];
    atomic_store(&fence->refs, 1);
-   return nvk_present_ahead_submit(&queue, ahead, &image.base, surface, fence, synchronous, frame_done, d);
+   return nvk_present_ahead_submit(&queue, ahead, &image.base, 0, NULL, surface, fence, synchronous, frame_done, d);
 }
 static int drain(void) { return nvk_present_ahead_drain(&queue, &uncertain); }
 static int surface_refs_idle(void) { for (int i = 0; i < 6; i++) if (atomic_load(&surfaces[i].refs) != 1) return 0; return 1; }

@@ -14,8 +14,11 @@
 // swapchain shows the newest frame (3.0.9, present_newest.h): queue_present
 // hands the frame to a thread of the swapchain and returns, and that thread
 // copies the newest frame into a drawable when the layer has one; a frame that
-// was overtaken first is not copied. NVK_BRIDGE_PRESENT_NEWEST=0 in the
-// settings file makes IMMEDIATE synchronous again. The renderer's own
+// was overtaken first is not copied. A MAILBOX swapchain (3.0.11) is the same
+// with the layer's display synchronization left on: the application is not
+// held to the display, and the thread copies one frame for each refresh.
+// NVK_BRIDGE_PRESENT_NEWEST=0 in the settings file makes IMMEDIATE synchronous
+// again and takes MAILBOX off the list of modes. The renderer's own
 // window-system extensions and entry points are hidden
 // (unsupported_device_extension).
 #define VK_NO_PROTOTYPES
@@ -556,9 +559,14 @@ VkResult VKAPI_CALL surface_formats2(VkPhysicalDevice physical,const VkPhysicalD
    for (uint32_t j=0;j<written;j++) out[j].surfaceFormat=formats[j]; *count=written;
    return written<n?VK_INCOMPLETE:VK_SUCCESS;
 }
+bool newest_wanted();
 VkResult VKAPI_CALL present_modes(VkPhysicalDevice physical,VkSurfaceKHR surface,uint32_t *count,VkPresentModeKHR *out) {
    if (!find(physicals,physical) || !find(surfaces,surface)) return VK_ERROR_SURFACE_LOST_KHR;
-   return enumerate(std::vector<VkPresentModeKHR>{VK_PRESENT_MODE_FIFO_KHR,VK_PRESENT_MODE_IMMEDIATE_KHR},count,out);
+   // MAILBOX is "the newest frame, without tearing": it is offered while the swapchains that show the newest frame
+   // are (3.0.11), and it is what an application asks for that wants no limit and has no use for IMMEDIATE.
+   std::vector<VkPresentModeKHR> modes{VK_PRESENT_MODE_FIFO_KHR,VK_PRESENT_MODE_IMMEDIATE_KHR};
+   if (newest_wanted()) modes.push_back(VK_PRESENT_MODE_MAILBOX_KHR);
+   return enumerate(modes,count,out);
 }
 
 int memory_type(const Device &d,uint32_t bits,VkMemoryPropertyFlags flags) {
@@ -586,9 +594,9 @@ void release_images(const std::shared_ptr<Chain> &c) {
    }
 }
 // The way back of the swapchains that show the newest frame: a line NVK_BRIDGE_PRESENT_NEWEST=0 of the settings file
-// (the file alone: this frontend reads no environment variable). Read once, when the first IMMEDIATE swapchain is
-// made, so that a process that never makes one (every OpenGL application on Zink, which loads a copy of this
-// library as its Vulkan driver) does not open the file for it.
+// (the file alone: this frontend reads no environment variable). Read once, when a surface's present modes are first
+// asked for or the first IMMEDIATE swapchain is made, so that a process that does neither (every OpenGL application
+// on Zink, which loads a copy of this library as its Vulkan driver) does not open the file for it.
 bool newest_wanted() {
    static std::once_flag once;
    static bool on=true;
@@ -673,7 +681,8 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
        !info->imageExtent.width || !info->imageExtent.height ||
        info->imageExtent.width>d->properties.limits.maxImageDimension2D || info->imageExtent.height>d->properties.limits.maxImageDimension2D ||
        info->preTransform!=VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ||
-       (info->presentMode!=VK_PRESENT_MODE_FIFO_KHR && info->presentMode!=VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_ERROR_INITIALIZATION_FAILED;
+       (info->presentMode!=VK_PRESENT_MODE_FIFO_KHR && info->presentMode!=VK_PRESENT_MODE_IMMEDIATE_KHR &&
+        !(info->presentMode==VK_PRESENT_MODE_MAILBOX_KHR && newest_wanted()))) return VK_ERROR_INITIALIZATION_FAILED;
    VkSurfaceCapabilitiesKHR caps{}; surface_caps(d->physical,info->surface,&caps);
    if ((info->imageUsage&~caps.supportedUsageFlags) || !(info->compositeAlpha&caps.supportedCompositeAlpha)) return VK_ERROR_FEATURE_NOT_PRESENT;
    // The swapchain this one replaces presents nothing more, before the layer changes under it: a frame of the old
@@ -718,9 +727,10 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
       if (r==VK_SUCCESS) r=DP(d,BindImageMemory)(device,im.raw,im.memory,0);
       if (r!=VK_SUCCESS) { release_images(c);return r; }
    }
-   // IMMEDIATE shows the newest frame, on a thread of the swapchain. Only with a copy queue of this frontend's own:
-   // that thread submits to it, and an application's queue is the application's to synchronize.
-   if (info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR && d->private_copy_queue && !forked && newest_wanted()) {
+   // IMMEDIATE and MAILBOX show the newest frame, on a thread of the swapchain. Only with a copy queue of this
+   // frontend's own: that thread submits to it, and an application's queue is the application's to synchronize.
+   // Without one, a MAILBOX swapchain presents as FIFO does: its layer keeps the display synchronization on.
+   if ((info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR || info->presentMode==VK_PRESENT_MODE_MAILBOX_KHR) && d->private_copy_queue && !forked && newest_wanted()) {
       VkFenceCreateInfo signalled{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};signalled.flags=VK_FENCE_CREATE_SIGNALED_BIT;
       for (auto &im:c->images) {
          VkResult r=DP(d,CreateFence)(device,&signalled,c->alloc(),&im.done); if (r!=VK_SUCCESS) { release_images(c);return r; }
