@@ -91,6 +91,28 @@ int nvk_zink_present_native(struct nvk_zink_context *, IOSurfaceRef, int opaque)
  * NVK_ZINK_PRESENT_AHEAD=0 makes every call the third case. */
 int nvk_zink_present_frame(struct nvk_zink_context *, IOSurfaceRef, int opaque,
                            int (*done)(void *arg, int publish), void *arg);
+/* The newest frame, shown by a sender (3.0.11; the agreement between the two threads is zink/nvk_newest.h).
+ *
+ * nvk_zink_present_park is for the thread that swaps or flushes the front buffer, with the context current: it copies
+ * the frame into the scratch image, flushes, and leaves it parked in place of the frame that was parked before. It
+ * then waits for the GPU to finish the frame parked before this one, which is all it waits for. 1 = parked; 0 = not
+ * this way (the frame before was not handed over by nvk_zink_present_frame, or nvk_zink_present_idle or
+ * nvk_zink_present_release was called since; NVK_ZINK_PRESENT_NEWEST=0 or NVK_ZINK_PRESENT_AHEAD=0; an observer; the
+ * child of a fork): present with nvk_zink_present_frame; -1 = uncertain. */
+int nvk_zink_present_park(struct nvk_zink_context *, int opaque);
+/* Any thread. The sequence number of the frame that is parked (they count from 1) with its size and the opacity it
+ * was copied with, or 0 when none is. */
+unsigned nvk_zink_present_parked(struct nvk_zink_context *, unsigned *width, unsigned *height, int *opaque);
+/* A sender, which has waited with nvk_zink_present_drain and holds a drawable of the parked frame's size: hand the
+ * parked frame over as nvk_zink_present_frame does, without touching the Mesa context.
+ *   2, 3, -1  as nvk_zink_present_frame
+ *   1         NVK did not take the surface one frame ahead; the frame was copied and waited for here the way 3.0.6
+ *             does, and the caller presents the drawable. The swaps after it should go back to presenting themselves.
+ *   0         not sent, and no longer parked
+ *   4         nothing of the surface's size is parked: the drawable is the caller's to release, and it asks again */
+int nvk_zink_present_send(struct nvk_zink_context *, IOSurfaceRef, int (*done)(void *arg, int publish), void *arg);
+/* Any thread. Drop the parked frame: the one numbered seq, or with seq 0 whichever is parked. */
+void nvk_zink_present_unpark(struct nvk_zink_context *, unsigned seq);
 /* Wait until the frame that is one ahead has been published and its drawable
  * presented. 0 = completion uncertain. Call before taking the next drawable. */
 int nvk_zink_present_drain(struct nvk_zink_context *);

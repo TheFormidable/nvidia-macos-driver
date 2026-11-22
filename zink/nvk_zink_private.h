@@ -5,6 +5,9 @@
 #include "nvk_present_queue.h"
 #include "state_tracker/st_context.h"
 #include "pipe/p_screen.h"
+#include <pthread.h>
+#include <stdint.h>
+#include <unistd.h>
 
 struct nvk_iosurface_group;
 struct nvk_zink_screen {
@@ -33,6 +36,23 @@ struct nvk_zink_context {
    struct nvk_present_ahead *ahead;
    unsigned present_refusals, present_late;
    bool present_old_only;
+   /* The newest frame, parked for a sender (zink/nvk_newest.h, 3.0.11). `lock` guards image, layout, seq and opaque,
+    * and it guards the scratch image against every thread but the one that draws: that thread blits and flushes
+    * into the image with the lock held, and a sender holds it from taking the frame until its copy is on the
+    * queue. throttle and drawn are the drawing thread's own. pid is the process the lock was made in: the child of
+    * a fork leaves it alone (parked_lock, zink/nvk_zink.c). */
+   struct {
+      pthread_mutex_t lock;
+      struct pipe_resource *image;   /* the scratch image that holds the frame, referenced; NULL = nothing parked */
+      unsigned layout, seq;
+      int opaque;
+      /* The frame before this one went out one frame ahead, from a swap that presented by itself, and nothing has
+       * said since that the context has no drawable: the next swap may park. Read and written with p_atomic. */
+      int armed;
+      struct pipe_fence_handle *throttle;   /* the flush of the frame parked before the newest */
+      uint64_t drawn, sent;                 /* sent is written with p_atomic_inc */
+      pid_t pid;
+   } parked;
    struct {
       IOSurfaceRef surface;
       struct pipe_resource *buffer, *image;
