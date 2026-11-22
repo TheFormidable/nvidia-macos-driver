@@ -1,11 +1,125 @@
 # Changelog
 
+## 3.0.12
+
+**Not released.** This section describes the branch being prepared as 3.0.12, on top of 3.0.11 (below, not released
+either). It is two fixes in NVK, each a patch of its own at the end of the 3.0 chain, and neither changes what the
+driver does while no switch is set. Both were found by reading the shader compiler (NAK) and NVK's shader caches, and
+both were then reproduced on Linux, where this NVK and NAK were built on Mesa's nouveau drm-shim as a GB207 (shader
+model 120): pipelines compile there without a card, and nothing is drawn. The measurements below were made on 3.0.8's
+code; 3.0.9 and 3.0.11 changed nothing in NVK, so they hold for 3.0.11's. **Nothing of 3.0.12 has been built on a Mac
+or run on a card.** No frame rate changes with it, and none was expected to.
+
+### Fixes and changes
+
+#### NVK: the shader caches and the compiler's switches
+
+- **A compiler switch that is turned on or off no longer gets binaries compiled under the other setting.** NVK's
+  shader cache key (`nvk_physical_device_compiler_flags`) feeds `pipelineCacheUUID`, `shaderBinaryUUID` and the disk
+  cache's driver flags. Of the switches NullMoth's patches read between SPIR-V and the cached shader, only
+  `NVMTL_NAK_ARR_SCRATCH` was in it, beside what upstream Mesa keys there (`NAK_DEBUG`, two flags of `NVK_DEBUG` and
+  one drirc option). A process that set any other one was served what an earlier process had compiled without it, from
+  the disk cache and from the pipeline cache data that Zink keeps in a cache of its own, and the other way round. On
+  the Linux build, with 3.0.8's code and one disk cache, a process with `NVMTL_NAK_NO_PREPASS=1` got a cache hit and a
+  fragment shader of 11 instructions and 94 static cycles, where a compile under that switch gives 13 and 129; a
+  process with `NAK_TEX_UHANDLE=1` got a hit too, which hid the failure of the next item. The new NVK patch
+  `nvk/nvk-nak-switch-key.patch` puts a 32-bit digest (FNV-1a) of the name and value of every such switch that is set
+  into bits 16..47 of the key, for the two identifiers and for the disk cache alike. It covers 35 switches: 34 read
+  with `getenv`, listed in the patch, and `NVMTL_NVK_NO_LCONST16`, read as the compiler reads it, from the settings
+  file too. The switches that only log are in, so that asking for a log compiles. Two of the 34 are upstream Mesa's
+  own, for its SPIR-V reader, and upstream keys them nowhere: `MESA_SPIRV_FORCE_UNSTRUCTURED`, and
+  `MESA_SPIRV_READ_PATH`, which swaps a module for a file after the module's hash was taken. With 3.0.8's code a
+  process that did not set the second was then served the replacement's binary (21 instructions where its own shader
+  compiles to 11), and one that set the first was served the default's (62 instructions for 68). For
+  `MESA_SPIRV_READ_PATH` it is the value as written that is in the key, not the folder's files: after a file there is
+  added, changed or removed, or when the value is a relative path used from another folder, clear the cache. Three of
+  NullMoth's are left out with their reasons in the test: two change only the QMD, which is filled at each dispatch, and
+  `NVK_DUMP_SHADER_DIR` acts when a shader is uploaded, which a cached one is too (as upstream's `NV50_PROG_DEBUG`
+  does). **What it changes:** with no switch set the digest is 0 and the key is computed exactly as in 3.0.8. With one
+  set, the process compiles its shaders once under a key of its own and finds them again at its next start, and a
+  process without the switch finds the default key's entries as they were. The value is hashed whole, so a value that
+  means the same as unset (`=0` for most), or the same as another value, still has a key of its own: one more compile,
+  never a wrong binary. **Not covered:** the key is taken when NVK makes its device, from the environment as it is then,
+  and the compiler reads its switches later: some at every compile, many once for as long as the library stays loaded. A
+  switch that enters or leaves the process's environment in between is compiled under a key that does not say so, the
+  default key included, as on 3.0.8. The Metal plugin does change the environment when it loads: it sets what the
+  settings file and the application's profile name and, in a release build, forgets what was inherited unless
+  `NVMTL_PROCESS_ENV=1`. In a Metal process that happens before NVK makes its device, so a switch from the settings file
+  or from a profile counts there like one set by hand. In a process that reaches NVK through Zink, or in a Vulkan
+  application on the frontend library, which of the two comes first on a Mac was not determined: the frontends
+  themselves ask Metal for its devices only after NVK has made one (`zink/native_drawable.m`,
+  `tools/nvk-bridge/bridge.mm`), and Apple's own renderer, which runs before Zink is brought in, may have loaded the
+  plugin by then. No switch. Checked with `tools/test_nvk_nak_switch_key.py`.
+
+#### NAK: the uniform texture handle experiment
+
+- **With `NAK_TEX_UHANDLE=1`, a texture whose handle left its uniform register compiles.** The experiment (off by
+  default, shader model 100 and later) keeps the handle of a TEX in a uniform register, and the encoder asserts that
+  it is one. Two passes could give that source a warp register instead: `opt_uniform_instrs`, when it lowers the
+  instruction that loads the handle to a warp one (reproduced with the two loads that cannot be uniform: an array of
+  samplers indexed by a uniform value, and a descriptor past the part of its set that is mapped as a constant buffer),
+  and `spill_values`, when more uniform values are live than there are uniform registers and the texture is in a
+  non-uniform block. The compile then panicked: NVK answered `VK_ERROR_UNKNOWN` for the pipeline, and the process
+  aborted only under `NAK_DEBUG=panic`. The new NVK patch `nvk/nvk-tex-uhandle-safe.patch` puts such a texture back
+  into the layout `from_nir` already builds for a handle that is not uniform (the handle first in the second source,
+  the split of the coordinates undone): in the texture's legalize for the first case, and in `assign_regs` after the
+  uniform registers were spilled for the second, where a value that ends up twice among the texture's vector sources
+  gets a copy. The encoder and its assertion are unchanged. On the Linux build, of 25 test pipelines 17 failed with
+  the switch set on 3.0.8's code, and all 25 compile with the patch; 4 of the 17 then compile to exactly the code the
+  compiler gives with the switch unset, and the other 13 to code of their own. **With the switch unset nothing
+  changes:** the handle is then always Zero, the new function returns before it writes anything and the loop in
+  `assign_regs` skips every block; the assembly and statistics NAK prints for the 25 pipelines are the same before and
+  after the patch. This does not make the experiment ready to turn on: its encoding rests on one reference instruction
+  and has not run on a card, and it is not a gain everywhere: with the switch set the static cycle count goes up on 10
+  of the 25 test pipelines (by up to 84, 495 to 579), down on 7 and stays on 8. No switch. Checked with
+  `tools/test_nak_tex_uhandle_safe.py`.
+
+Two comments in `nvk_shader.c` are now out of date and stay as they are, because a patch after the three upstream-fix
+patches may not touch that file (`tools/test_nvk_chain.py`): "bits 15..47 are free" of the key, and
+`NVMTL_NVK_NO_LCONST16` "not in the shader cache key". The patch header and `docs/NVK-BASE-AND-HEADERS.md` say so.
+
+### The ways back
+
+None new. With no switch set, the cache key and the compiler's output are what 3.0.11 computes, so there is nothing to
+turn off; leaving `nvk-nak-switch-key` or `nvk-tex-uhandle-safe` out of the chain in `build/build_nvk.sh` restores
+3.0.11's code. As with every new build of NVK, the library's build id changes, so the shader caches of 3.0.11 are not
+reused and shaders are compiled again once.
+
+### What ran where
+
+**Nothing of 3.0.12 was built on a Mac or ran on a card.** On Linux: both patches apply to the tree with the rest of
+the chain applied, without fuzz or offset, also with any of the three upstream-fix patches left out, and
+`nvk/dlss/patch_dlss_cache.py` still applies after them. The whole library (C, C++ and Rust, 942 units) cross-builds
+for macOS with LLVM 18 and rustc 1.97 with 0 errors and 0 warnings, and leaves the same 13 symbols unresolved as
+before (the Objective-C file of the Metal WSI, which that build does not compile). The Linux build is the same chain
+with upstream's nouveau back end added beside the NVRM one, so that the drm-shim can stand in for the kernel; NAK's
+sources in it are byte for byte the chain's. On it: the disk cache with a switch turned on and off between processes,
+with the results above (before the patch a hit with the other setting's binary, after it a miss, a compile, and a hit
+at the next start, and the default entries found again), the same for the two switches of Mesa's SPIR-V reader;
+`NVMTL_NAK_ARR_SCRATCH` keeps a key of its own as before, and `NAK_SMEM_TARGET_CAP_KB`, which is left out, still hits
+the default entries; the 25 pipelines of the second item with the switch set and unset; and 125 more shaders written
+for the review of this change (many textures, both arms of a branch, loops, the shadow, cube, array, 3D, offset,
+gradient, fetch and gather forms, sampler arrays with a dynamic index), each compiled with and without NAK's forced
+spilling: with the switch set 84 of the 250 compiles failed on 3.0.8's code and none fails with the patch, and with
+the switch unset the 250 outputs are the same before and after it. `tools/test_nvk_nak_switch_key.py` replays the
+reads of the 35 patches of the chain and builds the patch's own digest code with a stand-in environment (25 arms),
+against 26 copies of the tree with one rule broken each, 24 of which have to fail the arm that names their rule and no
+other and two of which have to pass. `tools/test_nak_tex_uhandle_safe.py` builds the patch's own Rust against
+stand-ins for the NAK types it uses and runs it over 13,068 cases (every shape of a texture's sources with a Zero, a
+uniform and a warp handle, then two such textures in one block and in two), against 13 copies with one rule broken
+each, every one of which fails as it has to, and reads the patch for where its two calls are. The repository's whole
+host suite was run on Linux with the change: 349 of its 417 tests pass, and the 46 that fail are the same 46 that fail
+there without it. Not checked: a build with Apple's clang and the Mac's Rust, the patches under the BSD `patch` of
+macOS (their headers pass the check `tools/test_nvk_chain.py` has for the upstream ones, which both tests now make for
+these two), any shader of a real application, any stage other than vertex and fragment, and anything that needs the
+card: no image was compared, and the uniform-handle form itself was not run.
+
 ## 3.0.11
 
-**Not released.** This section describes the branch being prepared as 3.0.11, on top of 3.0.9 (below; 3.0.10 is
-another branch's number). It carries what 3.0.9 did for the native Vulkan frontend's IMMEDIATE swapchains to the two
-places next to it: OpenGL on Zink with the swap interval at 0, and the Vulkan frontend's MAILBOX mode. **Nothing of it
-has run on a card**; what was checked and what was not is at the end.
+**Not released.** This section describes the branch being prepared as 3.0.11, on top of 3.0.9 (below; 3.0.10 was
+another branch's number, which became 3.0.12). It carries what 3.0.9 did for the native Vulkan frontend's IMMEDIATE
+swapchains to the two places next to it: OpenGL on Zink with the swap interval at 0, and the Vulkan frontend's MAILBOX
+mode. **Nothing of it has run on a card**; what was checked and what was not is at the end.
 
 ### Fixes and changes
 
@@ -88,6 +202,7 @@ prefers MAILBOX to IMMEDIATE when both are offered will now choose it.
   swap present by itself, and `window_check` (which now accepts MAILBOX on the list and no longer expects it to be
   refused) presents with FIFO and IMMEDIATE. The whole host suite was not run again; the tests above are the ones
   that read or run the files this branch touches, with `tools/test_switch_registry.py`.
+
 
 ## 3.0.9
 

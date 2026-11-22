@@ -44,9 +44,19 @@ the code of shaders and cannot be checked on a card here.
 The current chain goes on with `nvk-gpu-caps`, which carries the byte-identical
 NVRM GPU Caps ABI header. It does not rebase Mesa or implement GPU writes.
 See [GPU-CAPS.md](GPU-CAPS.md); `tools/test_shared_headers.py` checks the two copies.
-After it come two changes of our own, each described in its header: `nvk-desc-alloc` (3.0.6: a descriptor set layout
-without immutable samplers is not walked for every new set) and `nvk-surface-keep` (3.0.7: two exports for a caller
-that keeps its import of a surface's video memory across frames; see [ZINK-OPENGL.md](ZINK-OPENGL.md)).
+After it come four changes of our own, each described in its header: `nvk-desc-alloc` (3.0.6: a descriptor set layout
+without immutable samplers is not walked for every new set), `nvk-surface-keep` (3.0.7: two exports for a caller
+that keeps its import of a surface's video memory across frames; see [ZINK-OPENGL.md](ZINK-OPENGL.md)),
+`nvk-nak-switch-key` (3.0.12: the environment switches the shader compiler reads, two of Mesa's SPIR-V reader among
+them, are part of the shader cache key, as a digest that is 0 when none is set) and `nvk-tex-uhandle-safe` (3.0.12:
+with `NAK_TEX_UHANDLE=1`, which is off by default, a texture whose handle left its uniform register no longer fails
+the compile). The last one is a change to
+the compiler, in `assign_regs.rs` and `sm70_encode.rs`; with the switch unset its code leaves every texture and every
+block as it finds them (`tools/test_nak_tex_uhandle_safe.py`). Neither touches a file of the three upstream-fix
+patches, so a build with `NVK_SKIP_PATCHES` applies both: that is why the key's code is in `nvk_physical_device.c`,
+where the key is hashed, and not in `nvk_shader.c`, where `nvk_physical_device_compiler_flags` is and which
+`nvk-nak-sched-main` changes. Two comments in `nvk_shader.c` are therefore out of date: "bits 15..47 are free" of that
+function's value (the digest has 16..47), and `NVMTL_NVK_NO_LCONST16` "not in the shader cache key" (it is).
 
 `NVK_SKIP_PATCHES="<name> ..."` for `build/build_nvk.sh` leaves any of the three out of a build; no other name is
 accepted. It is there to find the cause of a rendering fault: build without `nvk-nak-sched-main` first (it is the only
@@ -72,9 +82,12 @@ and LLVM 22, and had the same bytes in three builds (one with tools built by han
 650db45 and 3933ff6, which do not differ in NVK's sources or patches), at 3933ff6 with no warning; GitHub's Intel
 runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) built it at that commit too.
 `nvk-stream-uncached`, added after commit aa27c73, and `nvk-boost-policy`, `nvk-mesa-main-2`, `nvk-nvrm-fixes` and
-`nvk-local-map-vram`, added in 3.0.1, have been compiled on Linux only. No check of the image on a card has
-been reported. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa release. The library's build id
-changes, so shader caches written by a 2.9 build are not reused and shaders are compiled again once.
+`nvk-local-map-vram`, added in 3.0.1, have been compiled on Linux only. So have `nvk-nak-switch-key` and
+`nvk-tex-uhandle-safe` of 3.0.12: in the cross-build for macOS, and in a Linux build of this NVK and NAK on Mesa's
+nouveau drm-shim as a GB207 (shader model 120), where pipelines compile without a card and nothing is drawn. No check
+of the image on a card has been reported. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa
+release. The library's build id changes, so shader caches written by a 2.9 build are not reused and shaders are
+compiled again once.
 
 ## NVRM headers
 
