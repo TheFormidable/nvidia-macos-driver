@@ -1,0 +1,117 @@
+nvk-tex-uhandle-safe: with NAK_TEX_UHANDLE=1 a texture whose handle left its uniform register compiles (3.0.9).
+NullMoth's own change (not an upstream Mesa commit).
+
+NAK_TEX_UHANDLE=1 (off by default, SM100 and later) keeps the handle of a TEX in a uniform register, and the encoder
+asserts that it is one. Two passes could hand that source a warp register instead, and the compile then panicked: NVK
+answered VK_ERROR_UNKNOWN for the pipeline, and the process aborted under NAK_DEBUG=panic.
+The first is opt_uniform_instrs: it lowers a uniform instruction that cannot be encoded as one, or that reads two
+values that are not uniform, and gives its uses the warp value. A handle loaded by an LDC with a register offset (an
+array of samplers indexed by a uniform value) or by a global LD (a descriptor past the part of its set mapped as a
+constant buffer) is such a use; those two are the loads that were reproduced. The second is spill_values: when more
+uniform values are live than there are uniform registers, it gives every use in a non-uniform block the GPR copy of a
+spilled one.
+A texture in either state now goes back to the layout from_nir already builds for a handle that is not uniform (the
+handle first in the second source, the split of the coordinates undone): in OpTex's legalize for the first case, and
+in assign_regs after the uniform registers were spilled for the second, where a value that ends up twice among the
+texture's vector sources gets a copy, as legalize gives one. The encoder and its assertion are unchanged.
+
+With NAK_TEX_UHANDLE unset the handle is always Zero: demote_handle returns before it writes anything, and the loop in
+assign_regs skips every block. tools/test_nak_tex_uhandle_safe.py reads this patch for those properties.
+
+diff --git a/src/nouveau/compiler/nak/assign_regs.rs b/src/nouveau/compiler/nak/assign_regs.rs
+--- a/src/nouveau/compiler/nak/assign_regs.rs
++++ b/src/nouveau/compiler/nak/assign_regs.rs
+@@ -1444,6 +1444,49 @@
+             }
+         }
+ 
++        // nvk-tex-uhandle-safe: in a non-uniform block spill_values hands every use of a spilled UGPR its GPR copy
++        // ("non-uniform instructions can always accept a wave register"), which the uniform handle of TEX cannot
++        // take. Such a texture goes back to the GPR-handle layout. Undoing its .SCR split can leave one value twice
++        // in a vector (vec2(c, c)), which legalize copies apart and RA cannot place, so a value that is twice among
++        // the vector sources gets a copy, as in legalize (sources of one component are left alone). A block with no
++        // uniform handle, which is every block unless NAK_TEX_UHANDLE=1, is not touched.
++        let mut demoted = false;
++        for b in f.blocks.iter_mut() {
++            if !b.instrs.iter().any(|i| matches!(&i.op, Op::Tex(tex) if !tex.handle.is_zero())) {
++                continue;
++            }
++            let mut instrs = Vec::with_capacity(b.instrs.len() + 1);
++            for mut instr in b.instrs.drain(..) {
++                if let Op::Tex(tex) = &mut instr.op {
++                    if tex.demote_handle() {
++                        demoted = true;
++                        let mut seen: FxHashSet<SSAValue> = Default::default();
++                        for src in tex.srcs.iter_mut() {
++                            if let SrcRef::SSA(vec) = &mut src.src_ref {
++                                if vec.comps() == 1 {
++                                    continue;
++                                }
++                                for c in &mut vec[..] {
++                                    if !seen.insert(*c) {
++                                        let copy = f.ssa_alloc.alloc(c.file());
++                                        instrs.push(Instr::new(OpCopy { dst: copy.into(), src: (*c).into() }));
++                                        *c = copy;
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++                instrs.push(instr);
++            }
++            b.instrs = instrs;
++        }
++        if demoted {
++            // the copies are new values and the handle moved between sources
++            live = SimpleLiveness::for_function(f);
++            max_live = live.calc_max_live(f);
++        }
++
+         // An instruction can have at most 4 vector sources/destinations.  In
+         // order to ensure we always succeed at allocation, regardless of
+         // arbitrary choices, we need at least 16 GPRs.
+diff --git a/src/nouveau/compiler/nak/sm70_encode.rs b/src/nouveau/compiler/nak/sm70_encode.rs
+--- a/src/nouveau/compiler/nak/sm70_encode.rs
++++ b/src/nouveau/compiler/nak/sm70_encode.rs
+@@ -2881,8 +2881,40 @@
+     }
+ }
+ 
++impl OpTex {
++    /// nvk-tex-uhandle-safe: TEX takes its uniform handle from a UGPR only (set_ureg asserts the file). When a pass
++    /// has turned the handle into a warp value, the texture goes back to the layout from_nir builds for a handle
++    /// that is not uniform: the handle first in srcs[1], and the .SCR split of the coordinates undone. Before
++    /// register allocation only. Returns false, having changed nothing, for a Zero handle (every texture unless
++    /// NAK_TEX_UHANDLE=1) and for a handle still in a UGPR.
++    pub fn demote_handle(&mut self) -> bool {
++        let h = match &self.handle.src_ref {
++            SrcRef::SSA(h) if h.file() != RegFile::UGPR => h.clone(),
++            _ => return false,
++        };
++        let mut c0: Vec<SSAValue> = Vec::new();
++        let mut c1: Vec<SSAValue> = Vec::new();
++        if let SrcRef::SSA(v) = &self.srcs[0].src_ref { c0.extend(v.iter().copied()); }
++        if let SrcRef::SSA(v) = &self.srcs[1].src_ref { c1.extend(v.iter().copied()); }
++        if self.scalar {
++            c0.extend(c1.drain(..));
++            self.scalar = false;
++        }
++        let mut n1: Vec<SSAValue> = h.iter().copied().collect();
++        n1.extend(c1);
++        self.srcs[0] = SSARef::try_from(&c0[..]).unwrap().into();
++        self.srcs[1] = SSARef::try_from(&n1[..]).unwrap().into();
++        self.handle = SrcRef::Zero.into();
++        true
++    }
++}
++
+ impl SM70Op for OpTex {
+     fn legalize(&mut self, b: &mut LegalizeBuilder) {
++        // nvk-tex-uhandle-safe: opt_uniform_instrs hands a use the warp value of a uniform instruction it lowered
++        // (a handle loaded by an LDC with a register offset, or by a global LD); such a handle returns to srcs here,
++        // before legalize_tex_instr and the pass after it that keeps a vector's components distinct
++        self.demote_handle();
+         legalize_tex_instr(self, b);
+     }
+ 
