@@ -3,11 +3,13 @@
 #include "nvk_zink.h"
 #include "native_drawable.h"
 #include "nvk_opacity.h"
+#include "nvk_newest.h"
 #include "nvk_zink_cfg.h"
 #define GL_DO_NOT_WARN_IF_MULTI_GL_VERSION_HEADERS_INCLUDED 1
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/CGLContext.h>
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <mach/mach.h>
@@ -21,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define EXPORT __attribute__((visibility("default")))
 /* The structural checks that guard the recorded private offsets below ask
@@ -127,6 +130,13 @@ struct nvk_cgl_bridge {
    bool api_ready;
    struct nvk_opacity opacity;   /* whether the drawable is opaque, kept between swaps (zink/nvk_opacity.h) */
    bool no_view;                 /* the last swap's native acquire found no view */
+   /* The newest frame, shown by a sender (zink/nvk_newest.h, 3.0.11). newest_used: a frame was parked since the last
+    * newest_stop, in the process newest_pid. Both belong to the thread that swaps. newest_failures counts senders
+    * that gave up with none that sent a frame in between. */
+   struct nvk_newest newest;
+   bool newest_used;
+   pid_t newest_pid;
+   atomic_uint newest_failures;
    struct nvk_cgl_bridge *next;
 };
 struct dispatch_entry { const char *name; size_t offset; void *adapter; };
@@ -147,6 +157,7 @@ static _Thread_local void *thread_engine;
 static _Thread_local const char *last_error;
 static int materialize(struct nvk_cgl_bridge *b);
 static void release_gpu_present(struct nvk_cgl_bridge *b);
+static void newest_stop(struct nvk_cgl_bridge *b);
 static void drain_native_cleanups(struct nvk_cgl_bridge *b);
 static int present_drawable(CGLContextObj context);
 static void install_integer_dispatch(struct nvk_cgl_bridge *b);
@@ -794,6 +805,7 @@ EXPORT void nvk_cgl_destroy_gld(void *driver)
    if (b) { *link = b->next; atomic_fetch_add(&generation, 1); }
    pthread_mutex_unlock(&bridges_lock);
    if (!b) return;
+   newest_stop(b);
    nvk_native_remove(b->context);
    use_original(b);
    *(void ***)((char *)b->engine + GLI_SAVED_DISPATCH) = b->engine_back;
@@ -813,6 +825,7 @@ EXPORT void nvk_cgl_destroy_gld(void *driver)
    release_integer_dispatch(b);
    free(b->api_extensions);free(b->api_extension_string);
    free(b->cleanup_reserve);
+   if (b->newest_pid == getpid()) nvk_newest_destroy(&b->newest);
    free(b);
 }
 
@@ -875,6 +888,7 @@ EXPORT int nvk_cgl_resize(CGLContextObj context, unsigned width, unsigned height
 {
    if (!context || context != CGLGetCurrentContext()) return fail("Resize requires the context current");
    struct nvk_cgl_bridge *b = bridge_current(*(void **)context);
+   if (b) newest_stop(b);
    if (!b || !nvk_zink_resize(b->zink, width, height)) return fail("Cannot resize Zink drawable");
    pthread_mutex_lock(&bridges_lock);
    b->width = width; b->height = height;
@@ -984,6 +998,7 @@ static void drain_native_cleanups(struct nvk_cgl_bridge *b)
 
 static void release_gpu_present(struct nvk_cgl_bridge *b)
 {
+   newest_stop(b);
    if (b->apple_uncertain) return;
    bool current = b->context == CGLGetCurrentContext();
    if (current) {
@@ -1157,6 +1172,76 @@ static int native_frame_done(void *frame, int publish)
    return presented;
 }
 
+/* ---- The newest frame (3.0.11; zink/nvk_newest.h says why) ----------------------------------------------------
+ *
+ * A swap with the swap interval at 0 parks its frame (nvk_zink_present_park) and returns; the sender below does the
+ * rest of what present_drawable does for a frame, on a thread that has no context current: it waits for the frame in
+ * flight, asks the layer for a drawable and hands the frame parked by then to the presentation thread. It calls
+ * nothing of CGL's and nothing of Mesa's context. Everything that is not the plain case goes back to the swap: the
+ * sender gives up, and the next swap, after newest_stop, presents by itself as it did through 3.0.9. */
+#define NEWEST_FAILURES 8   /* senders that may give up in a row before the context stops parking for good */
+
+static unsigned newest_parked(void *arg)
+{
+   struct nvk_cgl_bridge *b = arg;
+   return nvk_zink_present_parked(b->zink, NULL, NULL, NULL);
+}
+
+/* 0 = go on; 1 = the sender gives up. */
+static int newest_send(void *arg, unsigned seen)
+{
+   struct nvk_cgl_bridge *b = arg;
+   uint32_t vendor = 0, device = 0;
+   unsigned width = 0, height = 0;
+   int opaque = 1;
+   /* The frame in flight first, as a swap does: no present of the layer runs beside nextDrawable. */
+   if (!nvk_zink_device_info(b->zink, &vendor, &device) || !nvk_zink_present_drain(b->zink)) return 1;
+   seen = nvk_zink_present_parked(b->zink, &width, &height, &opaque);
+   if (!seen) return 0;
+   void *frame = NULL; IOSurfaceRef surface = NULL;
+   /* The swap interval is 0, or nothing would be parked. This is where the display is waited for. */
+   const int acquired = nvk_native_acquire(b->context, vendor, device, width, height, opaque, 0, &frame, &surface);
+   if (acquired == 2) {
+      /* The layer is being set up or resized, or the window is not on screen: the frame is not shown, as the frame
+       * of a swap that found the same was not. One parked meanwhile is asked for again. */
+      nvk_zink_present_idle(b->zink);
+      nvk_opacity_changed(&b->opacity);
+      nvk_zink_present_unpark(b->zink, seen);
+      return 0;
+   }
+   if (acquired != 1) return 1; /* No view, or a layer that cannot be used: the next swap does what it always did. */
+   const int sent = nvk_zink_present_send(b->zink, surface, native_frame_done, frame);
+   if (sent == 2) { atomic_store(&b->newest_failures, 0); return 0; }
+   /* 3 and -1: the frame is native_frame_done's, or it pins the drawable while uncertain work may reference it. */
+   if (sent == 1) nvk_native_publish(frame);
+   if (sent == 0 || sent == 1 || sent == 4) nvk_native_release(frame);
+   return sent != 4;
+}
+
+static void newest_start(void *arg);
+static const struct nvk_newest_ops newest_ops = { newest_parked, newest_send, newest_start };
+static void newest_thread(void *arg)
+{
+   struct nvk_cgl_bridge *b = arg;
+   nvk_newest_run(&b->newest, &newest_ops, b);
+}
+static void newest_start(void *arg)
+{
+   dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), arg, newest_thread);
+}
+
+/* Before a thread presents, resizes or destroys the context by itself: after this no sender is at work and nothing
+ * is parked. It waits for a frame the sender is sending, which is as long as the layer takes to give a drawable (it
+ * gives up after a second) and the GPU to finish. The child of a fork has no sender to wait for. */
+static void newest_stop(struct nvk_cgl_bridge *b)
+{
+   if (!b->newest_used) return;
+   b->newest_used = false;
+   if (b->newest_pid != getpid()) { memset(&b->newest, 0, sizeof(b->newest)); return; }
+   if (nvk_newest_stop(&b->newest)) atomic_fetch_add(&b->newest_failures, 1);
+   if (b->zink) nvk_zink_present_unpark(b->zink, 0);
+}
+
 /* 2 is a deferred native acquire, rather than a completed publication. */
 static int present_drawable(CGLContextObj context)
 {
@@ -1176,6 +1261,22 @@ static int present_drawable(CGLContextObj context)
    /* The drawable's opacity is asked for at most once per swap, and the layer and the copy are given the same
     * answer. */
    int opaque = -1;
+   /* CGLSetParameter keeps the interval in Apple's context; the layer and the choice below are given what it says
+    * now. */
+   GLint interval = 1;
+   if (b->native_present) {
+      CGLGetParameter(context, kCGLCPSwapInterval, &interval);
+      opaque = opaque_drawable(b);
+   }
+   /* 3.0.11: with the interval at 0 the frame is parked for the sender and the swap returns, waiting for the GPU
+    * and never for the display. The frontend parks only after a swap that presented by itself, one frame ahead. */
+   if (b->native_present && !interval && atomic_load(&b->newest_failures) < NEWEST_FAILURES) {
+      const int parked = nvk_zink_present_park(b->zink, opaque);
+      if (parked < 0) return fail("Native NVK completion uncertain; drawable quarantined");
+      if (parked) { b->newest_used = true; b->newest_pid = getpid(); }
+      if (parked && nvk_newest_kick(&b->newest, &newest_ops, b)) return nvk_zink_swap(b->zink);
+   }
+   newest_stop(b);
    if (b->native_present) {
       uint32_t vendor = 0, device = 0;
       if (!nvk_zink_device_info(b->zink, &vendor, &device)) return fail("Native presentation requires an NVK device");
@@ -1184,8 +1285,7 @@ static int present_drawable(CGLContextObj context)
        * its drawables back, and no present of it runs beside nextDrawable. */
       if (!nvk_zink_present_drain(b->zink)) return fail("Native NVK completion uncertain; drawable quarantined");
       void *frame = NULL; IOSurfaceRef surface = NULL;
-      opaque = opaque_drawable(b);
-      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque, &frame, &surface);
+      int acquired = nvk_native_acquire(context, vendor, device, b->width, b->height, opaque, interval, &frame, &surface);
       if (acquired != 1) nvk_zink_present_idle(b->zink); /* No drawable: nothing to keep imported for. */
       /* Nor an answer to keep: the layer is being set up, is gone or is given up, or the view just went away. A swap
        * that again finds no view, on the IOSurface path, presents to what the swap before it did. */
@@ -1270,6 +1370,7 @@ EXPORT int nvk_cgl_detach(CGLContextObj context)
    if (b) { *link = b->next; atomic_fetch_add(&generation, 1); }
    pthread_mutex_unlock(&bridges_lock);
    if (!b) { CGLUnlockContext(context); return fail("Context is not attached"); }
+   newest_stop(b);
    nvk_native_remove(b->context);
    release_gpu_present(b);
    use_original(b);
@@ -1289,6 +1390,7 @@ EXPORT int nvk_cgl_detach(CGLContextObj context)
    release_integer_dispatch(b);
    free(b->api_extensions);free(b->api_extension_string);
    free(b->cleanup_reserve);
+   if (b->newest_pid == getpid()) nvk_newest_destroy(&b->newest);
    free(b);
    CGLUnlockContext(context);
    if (!automatic) CGLReleaseContext(context);
