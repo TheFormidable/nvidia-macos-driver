@@ -19,7 +19,7 @@ key". tools/test_nvk_nak_switch_key.py keeps the list of switches complete.
 diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
 --- a/src/nouveau/vulkan/nvk_physical_device.c
 +++ b/src/nouveau/vulkan/nvk_physical_device.c
-@@ -1490,6 +1490,94 @@
+@@ -1490,6 +1490,98 @@
              "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
  }
  
@@ -32,12 +32,16 @@ diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_p
 + * The value is hashed whole: one that means the same as unset ("0" for most), or the same as another, still gives a
 + * key of its own, which costs one more compile and never gives a wrong binary. Each name is read as the compiler
 + * reads it, getenv, and nvmtl_cfg_getenv for NVMTL_NVK_NO_LCONST16 alone, so a settings-file line the compiler does
-+ * not see does not change the key. The switches that only log are in, so that asking for a log compiles. The two
-+ * MESA_SPIRV_ names are upstream's, which keys neither: the first changes the control flow spirv_to_nir builds, and
-+ * the second swaps a module for a file after the module's hash was taken, so without it here the default key's
-+ * entries would get the replacement's binary (the folder's name is what is hashed, not its files: clear the cache
-+ * after editing one). Not in it: NAK_SMEM_TARGET_CAP_KB and NAK_QMD_NO_PREFETCH change only the QMD, filled at each
-+ * dispatch; NVK_DUMP_SHADER_DIR and NV50_PROG_DEBUG act in nvk_shader_upload, which a cached shader goes through too.
++ * not see does not change the key. The key is taken here, when the device is made, and the compiler reads later, some
++ * switches at every compile and many once for as long as the library is loaded: a switch that enters or leaves the
++ * environment in between is compiled under a key that does not say so. The switches that only log are in, so that
++ * asking for a log compiles. The two MESA_SPIRV_ names are upstream's, which keys neither: the first changes the
++ * control flow spirv_to_nir builds, and the second swaps a module for a file after the module's hash was taken, so
++ * without it here the default key's entries would get the replacement's binary (the value as written is what is
++ * hashed, not the folder's files: clear the cache when a file there is added, changed or removed, or when a relative
++ * path is used from another folder). Not in it: NAK_SMEM_TARGET_CAP_KB and NAK_QMD_NO_PREFETCH change only the QMD,
++ * filled at each dispatch; NVK_DUMP_SHADER_DIR and NV50_PROG_DEBUG act in nvk_shader_upload, which a cached shader
++ * goes through too.
 + * The code is here and not in nvk_shader.c, which nvk-nak-sched-main changes (NVK_SKIP_PATCHES); that file's two
 + * comments on the key ("bits 15..47 are free", and NVMTL_NVK_NO_LCONST16 "not in the shader cache key") are older
 + * than this. tools/test_nvk_nak_switch_key.py fails when a patch reads a switch on the compile path that is in no
@@ -114,7 +118,7 @@ diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_p
  static void
  nvk_physical_device_init_pipeline_cache(struct nvk_physical_device *pdev)
  {
-@@ -1513,7 +1601,12 @@
+@@ -1513,7 +1605,12 @@
     _mesa_blake3_update(&blake3_ctx, &pdev->info.chipset,
                       sizeof(pdev->info.chipset));
  
@@ -128,7 +132,7 @@ diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_p
     _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
  
     unsigned char blake3[BLAKE3_KEY_LEN];
-@@ -1532,7 +1625,7 @@
+@@ -1532,7 +1629,7 @@
     char timestamp[BLAKE3_HEX_LEN];
     _mesa_blake3_format(timestamp, instance->driver_build_sha);
  

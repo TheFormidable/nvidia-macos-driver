@@ -17,12 +17,16 @@ spilled. No Mesa tree is needed here:
                gives from_nir's fallback layout: the handle first in the second source, the .SCR split undone, no
                vector longer than four, no value twice among the sources of more than one component, each copy placed
                just before its TEX, and the liveness and the most values live at once computed again from the
-               function as it then is.
-  controls     the same code with one rule broken each (the copy left out, the split kept, the handle put last, a UGPR
-               handle demoted, liveness not computed again, the most values live at once left as it was, a block
-               rebuilt although it has no uniform handle). Every one of them has to fail the run.
-  the text     the patch only adds lines, to assign_regs.rs and sm70_encode.rs alone; OpTex's legalize has
-               demote_handle as its first statement and legalize_tex_instr as its second; the loop in assign_regs
+               function as it then is. Then two textures with a GPR handle in one block, and two such blocks with
+               one without between them: every one of the textures goes back, and liveness runs once more, not twice.
+  controls     the same code with one rule broken each: a repeated value left without its copy, a source of one
+               component given copies, the split kept, the coordinates not joined again, the handle put last, the
+               handle left in its place as well, a UGPR handle demoted, liveness not computed again, liveness computed
+               again every time, the most values live at once left as it was, a block rebuilt although it has no
+               uniform handle, only the first such texture put back, only the first such block rebuilt. Every one of
+               them has to fail the run.
+  the text     the patch only adds lines, to assign_regs.rs and sm70_encode.rs alone; OpTex's legalize is
+               demote_handle, then legalize_tex_instr, and nothing after it; the loop in assign_regs
                follows the spill of the uniform files and comes before the GPR limit is taken from the liveness; the
                layout is built with the statements of from_nir's fallback (nvk/nvk-macos.patch); and the patch sits
                in the 3.0 chain once, after every other patch that changes those two files, and not in the chains of
@@ -41,6 +45,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.dont_write_bytecode = True
 import switch_registry as sr  # noqa: E402  (the chain as build/build_nvk.sh applies it)
 
 NAME = "nvk-tex-uhandle-safe"
@@ -241,6 +246,37 @@ fn main() {
     if i.len() != 3 || !matches!(&i[0].op, Op::Copy(_)) || i[2].op != Op::Tex(Box::new(b)) || f.liveness_runs.get() != 2 || max_live_from != 2 {
         bad += 1; println!("bad: two textures in one block");
     }
+    // two textures in one block, each with its handle in a GPR and an instruction between them: both go back
+    let done = |s0: Src, s1: Src| Instr { op: Op::Tex(Box::new(OpTex { srcs: [s0, s1], handle: SrcRef::Zero.into(), scalar: false })) };
+    let (h0, h1) = (val(900), val(901));
+    let a = OpTex { srcs: [src(&[1]), src(&[1])], handle: h0.into(), scalar: true };
+    let b = OpTex { srcs: [src(&[2, 3]), src(&[4])], handle: h1.into(), scalar: false };
+    let mut f = Function { blocks: vec![Block { instrs: vec![Instr { op: Op::Tex(Box::new(a)) }, Instr { op: Op::Other(5) }, Instr { op: Op::Tex(Box::new(b)) }] }],
+                           ssa_alloc: Alloc { next: FRESH }, liveness_runs: Cell::new(0) };
+    let max_live_from = hook(&mut f);
+    cases += 1;
+    let fresh = SSAValue { idx: FRESH, file: RegFile::GPR };
+    let want = vec![Instr::new(OpCopy { dst: fresh.into(), src: val(1).into() }),
+                    done(SSARef(vec![val(1), fresh]).into(), h0.into()),
+                    Instr { op: Op::Other(5) },
+                    done(src(&[2, 3]), SSARef(vec![h1, val(4)]).into())];
+    if f.blocks[0].instrs != want || f.liveness_runs.get() != 2 || max_live_from != 2 {
+        bad += 1; println!("bad: two textures with a GPR handle in one block: {:?}", f.blocks[0].instrs);
+    }
+    // two blocks with such a texture and one without between them: each is rebuilt, and liveness runs once more, not twice
+    let tex = |c: u32, h: u32| Instr { op: Op::Tex(Box::new(OpTex { srcs: [src(&[c, c + 1]), src(&[])], handle: val(h).into(), scalar: false })) };
+    let quiet = vec![Instr { op: Op::Other(3) }];
+    let mut f = Function { blocks: vec![Block { instrs: vec![tex(1, 900)] }, Block { instrs: quiet.clone() },
+                                        Block { instrs: vec![Instr { op: Op::Other(4) }, tex(5, 901)] }],
+                           ssa_alloc: Alloc { next: FRESH }, liveness_runs: Cell::new(0) };
+    let quiet_at = f.blocks[1].instrs.as_ptr();
+    let max_live_from = hook(&mut f);
+    cases += 1;
+    if f.blocks[0].instrs != vec![done(src(&[1, 2]), val(900).into())] || f.blocks[1].instrs != quiet || f.blocks[1].instrs.as_ptr() != quiet_at
+        || f.blocks[2].instrs != vec![Instr { op: Op::Other(4) }, done(src(&[5, 6]), val(901).into())]
+        || f.liveness_runs.get() != 2 || max_live_from != 2 {
+        bad += 1; println!("bad: two blocks with a GPR handle: {:?} / {:?}", f.blocks[0].instrs, f.blocks[2].instrs);
+    }
     println!("cases {} bad {}", cases, bad);
 }
 '''
@@ -307,6 +343,10 @@ if demote and hook and RUSTC:
             ("the most values live at once is left as it was before the change", D, H, "            max_live = live.calc_max_live(f);\n", ""),
             ("a block with no uniform handle is rebuilt", D, H, "if !tex.handle.is_zero())) {\n                continue;",
              "if !tex.handle.is_zero())) {\n                let _ = 0;"),
+            ("only the first texture with such a handle is put back", D, H, "                    if tex.demote_handle() {\n",
+             "                    if !demoted && tex.demote_handle() {\n"),
+            ("only the first block with such a texture is rebuilt", D, H, "            b.instrs = instrs;\n",
+             "            b.instrs = instrs;\n            if demoted {\n                break;\n            }\n"),
         ]
         for i, (what, dm, hk, old, new) in enumerate(controls):
             if (dm + hk).count(old) != 1:
@@ -327,13 +367,13 @@ risky = [l for l in patch.partition("\ndiff --git ")[0].splitlines()
          if re.match(r"[ \tX]*(--- |\+\+\+ |@@|\*\*\* |Index:|Prereq:|diff |[<>] |\.$|\d)", l)]
 arm("no line of the patch's header can be taken for part of a patch", not risky, risky)
 enc = section(NAK + "sm70_encode.rs", " +")
-A_LEGALIZE = "OpTex's legalize has demote_handle as its first statement and legalize_tex_instr as its second"
+A_LEGALIZE = "OpTex's legalize is demote_handle, then legalize_tex_instr, and nothing else"
 if "impl SM70Op for OpTex {" in enc:
     i = enc.index("impl SM70Op for OpTex {")
     stmts = [l.strip() for l in enc[i + 2:] if l.strip() and not l.strip().startswith("//")]
     arm(A_LEGALIZE, enc[i + 1].strip() == "fn legalize(&mut self, b: &mut LegalizeBuilder) {"
-        and stmts[:2] == ["self.demote_handle();", "legalize_tex_instr(self, b);"],
-        f"its first statements in the patch are {stmts[:3]}")
+        and stmts[:3] == ["self.demote_handle();", "legalize_tex_instr(self, b);", "}"],
+        f"its statements in the patch are {stmts[:4]}")
 else:
     arm(A_LEGALIZE, False, "no hunk of the patch shows `impl SM70Op for OpTex {`")
 body = demote.group(0) if demote else ""
