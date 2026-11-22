@@ -6,16 +6,19 @@
 //                                          manifest, and the loader must route to <frontend>
 //   nvmtltest renderer <renderer>          the control, with no window and no device: which of the window-system
 //                                          extensions that the frontend hides its renderer offers
-// The windowed modes check what the frontend offers and hides (instance and device extensions, entry points, the
-// loader interface), the Metal surface with its capabilities, formats, modes and rectangle, and the swapchain's
-// refusals. Then they present into a window of their own: FIFO with 3 images (and the acquire limits), a resize, a
-// minimize and a restore, IMMEDIATE sRGB with 2 images, and 8 images with premultiplied alpha. Every presented copy is
-// read back through the frontend's present observer (nvkbridgeSetPresentObserver, the hook smoke.mm's
-// NVKBRIDGE_VERIFY_PIXELS uses) and every pixel compared. The layer is a CAMetalLayer subclass that watches its
-// drawables: one nextDrawable per present, their size, format and device, the NVMTLVramAt:p0 generation tag and the
-// presented handlers. Every tenth frame is also read by the CPU through a read-only IOSurface lock, a Metal blit runs
-// in the same process while the Vulkan device lives, and the frontend's counters (nvkbridgeGetStats) must count every
-// copy, with no refused VRAM import, on a device whose BAR covers its VRAM.
+// The windowed modes check what the frontend offers and hides (instance and device extensions, entry points, the loader
+// interface), the Metal surface with its capabilities, formats, modes and rectangle, and the swapchain's refusals. Then
+// they present into a window of their own: FIFO with 3 images (and the acquire limits), a resize, a minimize and a
+// restore, IMMEDIATE sRGB with 2 images, and 8 images with premultiplied alpha. Every presented copy is read back
+// through the frontend's present observer (nvkbridgeSetPresentObserver, the hook smoke.mm's NVKBRIDGE_VERIFY_PIXELS
+// uses) and every pixel compared. A present made while an observer is set is synchronous, so since 3.0.9 the IMMEDIATE
+// swapchain here, when it has a presentation thread (the program prints the frontend's own line about it), never hands
+// that thread a frame: this program checks the synchronous path of both modes, and on such a swapchain the images'
+// bookkeeping under it. The layer is a CAMetalLayer subclass that watches its drawables: one nextDrawable per present,
+// their size, format and device, the NVMTLVramAt:p0 generation tag and the presented handlers. Every tenth frame is
+// also read by the CPU through a read-only IOSurface lock, a Metal blit runs in the same process while the Vulkan
+// device lives, and the frontend's counters (nvkbridgeGetStats) must count every copy, with no refused VRAM import, on
+// a device whose BAR covers its VRAM.
 // Conventions of tools/card: exit 0 pass, 1 a check failed, 2 setup error (the program's own window, layer or pipe,
 // and a window that does not minimize or restore within 5 s),
 // 3 skip (first line "SKIP: <why>"); one line per case and a last line RESULT; its own alarm; crash handlers that print
@@ -463,7 +466,7 @@ using Negotiate = VkResult (*)(uint32_t *);
 
 const char *const kOwnedInstance[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_METAL_SURFACE_EXTENSION_NAME,
                                       VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME};
-// The window-system extensions the frontend takes out of what the renderer offers and refuses (bridge.mm:160-172).
+// The window-system extensions the frontend takes out of what the renderer offers and refuses (bridge.mm:214-226).
 const char *const kHiddenInstance[] = {"VK_EXT_headless_surface", "VK_KHR_surface_maintenance1",
                                        "VK_EXT_surface_maintenance1"};
 const char *const kHiddenDevice[] = {"VK_KHR_present_id", "VK_KHR_present_id2", "VK_KHR_present_wait",
@@ -472,7 +475,7 @@ const char *const kHiddenDevice[] = {"VK_KHR_present_id", "VK_KHR_present_id2", 
                                      "VK_KHR_incremental_present", "VK_EXT_present_timing", "VK_GOOGLE_display_timing",
                                      "VK_EXT_hdr_metadata", "VK_EXT_full_screen_exclusive", "VK_KHR_display_swapchain",
                                      "VK_EXT_display_control"};
-// Entry points of those extensions, which a device with VK_KHR_swapchain answers with NULL (bridge.mm:173-179, :899).
+// Entry points of those extensions, which a device with VK_KHR_swapchain answers with NULL (bridge.mm:227-233, :1205).
 const char *const kHiddenEntries[] = {"vkWaitForPresentKHR", "vkSetHdrMetadataEXT", "vkGetSwapchainStatusKHR",
                                       "vkReleaseSwapchainImagesKHR", "vkGetPastPresentationTimingGOOGLE",
                                       "vkGetRefreshCycleDurationGOOGLE"};
@@ -515,7 +518,7 @@ std::string joined(const std::vector<std::string> &names)
    return s.empty() ? std::string("none") : s;
 }
 
-// bridge.mm:288-307, limited_bar_memory, the same rule: true when no DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as
+// bridge.mm:342-361, limited_bar_memory, the same rule: true when no DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as
 // large as the largest DEVICE_LOCAL heap, and some system-memory type is HOST_VISIBLE|HOST_COHERENT.
 bool limited_bar(const VkPhysicalDeviceMemoryProperties &m)
 {
@@ -707,7 +710,8 @@ std::string read_back(PFN_vkGetDeviceProcAddr gdpa, VkDevice dev, VkQueue q, VkB
    return why;
 }
 
-// Called by the frontend after each completed copy, on the thread that presents (bridge.mm:778).
+// Called by the frontend after each completed copy, on the thread that presents (bridge.mm:991). While an observer
+// is set every present is synchronous (bridge.mm:1080), so that thread is the one that called vkQueuePresentKHR.
 void observer(PFN_vkGetDeviceProcAddr gdpa, VkDevice dev, VkQueue q, VkBuffer source, uint32_t row, uint32_t width,
               uint32_t height, uint32_t family)
 {
@@ -897,7 +901,7 @@ void close_window()
    pump(0.05);
 }
 
-// what the frontend computes as the surface's current extent (bridge.mm:469-471)
+// what the frontend computes as the surface's current extent (bridge.mm:530-532)
 VkExtent2D layer_extent()
 {
    const CGSize size = layer.bounds.size;
@@ -1220,7 +1224,7 @@ Presented present_frame(Chain &c, const Colour &col, Phase phase, Tally &t, bool
       const MTLPixelFormat want = c.format == VK_FORMAT_B8G8R8A8_SRGB ? MTLPixelFormatBGRA8Unorm_sRGB
                                                                       : MTLPixelFormatBGRA8Unorm;
       Tag tag{};
-      const uint32_t generation = v.prior ? v.prior_generation + 1 : 0;   // bridge.mm:674-684
+      const uint32_t generation = v.prior ? v.prior_generation + 1 : 0;   // bridge.mm:878-888
       if (!v.drawable) t.problem(frame, "the present succeeded but nextDrawable gave nil");
       else if (v.width != c.extent.width || v.height != c.extent.height)
          t.problem(frame, format("drawable texture got=%ux%u expected=%ux%u", v.width, v.height, c.extent.width,
@@ -1576,9 +1580,9 @@ void check_memory_and_images()
    const bool limited = limited_bar(m);
    check(full && !limited, "full-bar",
          format("a DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as large as the largest DEVICE_LOCAL heap (%llu MiB), "
-                "so the frontend's limited-BAR rule (bridge.mm:288-307) is false: it imports the drawable's VRAM and "
+                "so the frontend's limited-BAR rule (bridge.mm:342-361) is false: it imports the drawable's VRAM and "
                 "never takes the host-page path", (unsigned long long)(vram >> 20)),
-         limited ? std::string("the frontend's limited-BAR rule (bridge.mm:288-307) holds for this device: it would "
+         limited ? std::string("the frontend's limited-BAR rule (bridge.mm:342-361) holds for this device: it would "
                                "copy into host pages")
                  : format("no DEVICE_LOCAL|HOST_VISIBLE type lies on a heap as large as the largest DEVICE_LOCAL heap "
                           "(%llu MiB): the BAR does not cover the VRAM", (unsigned long long)(vram >> 20)));
@@ -2034,6 +2038,11 @@ void metal_blit()
    // Phase D: IMMEDIATE, B8G8R8A8_SRGB, 2 images.
    const Spec immediate{VK_PRESENT_MODE_IMMEDIATE_KHR, VK_FORMAT_B8G8R8A8_SRGB, 2, VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR};
    replace_chain(chain, immediate, "IMMEDIATE sRGB");
+   // How this swapchain presents by itself, in the frontend's own words (newest frame: it has a presentation thread;
+   // synchronous: it has none). Information, not a check: with the observer set its presents are synchronous either way.
+   tee_sync();
+   const auto how = bridge_with("NVK Bridge: swapchain presentation=");
+   if (!how.empty()) info("the IMMEDIATE swapchain's own %s", how.back().substr(12).c_str());
    check_layer("layer-immediate", chain, MTLPixelFormatBGRA8Unorm_sRGB, 2, NO, YES, 2);
    Tally td("frames-immediate");
    frames(chain, 60, kImmediate, td, true);

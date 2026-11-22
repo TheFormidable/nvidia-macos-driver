@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 43 | 1 | 55 | 405 | 12 |  | 522 |
+| env |  | 6 |  |  | 44 | 1 | 55 | 405 | 12 |  | 523 |
 | bootarg | 4 | 13 | 30 | 21 | 15 |  | 8 | 6 | 2 |  | 99 |
 | sysctl |  | 5 | 4 | 12 |  |  | 377 |  |  |  | 398 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -36,6 +36,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
 | env | `NVENCVT_DEC_HOLD` | on in Firefox's processes, plugin-container (NVENCVT_DEC_HOLD=0 in the environment or in /usr/local/etc/nvencvt.conf: every decoded picture is released when it is emitted, as in 3.0.4) | 3.2 | In Firefox's processes (plugin-container) the video library's decoders keep each picture they emitted until eight later ones have been emitted, so that its pixel buffer is not handed out again and overwritten before Firefox's GPU process has taken the surface; other processes release it at once. From pull request 487 of the original project. |
+| env | `NVK_BRIDGE_PRESENT_NEWEST` | on (NVK_BRIDGE_PRESENT_NEWEST=0 in the settings file: every swapchain of the native Vulkan frontend presents synchronously, on the application's thread, as in 3.0.8) | 3.2 | An IMMEDIATE swapchain of the native Vulkan frontend hands each presented frame to a thread of the swapchain, which copies the newest one into a drawable when the layer has one, so vkQueuePresentKHR does not wait for the layer and a frame that was overtaken is not shown; the frontend reads the settings file alone, once, when the process makes its first IMMEDIATE swapchain. |
 | env | `NVK_CHANNEL_RECOVER` | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. |
 | env | `NVK_ZINK_OPACITY_KEEP` | on (NVK_ZINK_OPACITY_KEEP=0 in the settings file: every OpenGL swap on Zink asks WindowServer for the drawable's opacity again, once, and sees an application's change at the next swap, as 3.0.7 did) | 3.2 | A context of the Zink frontend keeps the answer to whether its drawable is opaque (kCGLCPSurfaceOpacity, a message to WindowServer and its reply) for 100 ms and asks again at once when the adapter sees its output change, so an application's own change of the opacity reaches the window up to 100 ms late; a swap asks at most once either way. |
 | env | `NVK_ZINK_PRESENT_AHEAD` | on (NVK_ZINK_PRESENT_AHEAD=0 in the settings file: a swap waits for the GPU and publishes its frame itself, as in 3.0.6) | 3.2 | An OpenGL swap on Zink hands its frame to a presentation thread of the process, which waits for the GPU, marks and tags the surface and presents the drawable; the swap returns at once, and the next swap waits for that frame first, so a context never has more than one frame on its way. |
@@ -221,6 +222,7 @@ Each of these does nothing unless it is set.
 | `NVENCVT_TWOPASS` | dev | unset | 2.9 | - | unreviewed | vendor/nvenc/vt/nvencvt.c |
 | `NVK_ACCEL_ID` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-card-select.patch, plugin/NVMTLDevice.m |
 | `NVK_BAR_VRAM` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nvrm-fixes.patch |
+| `NVK_BRIDGE_PRESENT_NEWEST` | escape | on (NVK_BRIDGE_PRESENT_NEWEST=0 in the settings file: every swapchain of the native Vulkan frontend presents synchronously, on the application's thread, as in 3.0.8) | 3.0.9 | 3.2 | An IMMEDIATE swapchain of the native Vulkan frontend hands each presented frame to a thread of the swapchain, which copies the newest one into a drawable when the layer has one, so vkQueuePresentKHR does not wait for the layer and a frame that was overtaken is not shown; the frontend reads the settings file alone, once, when the process makes its first IMMEDIATE swapchain. | tools/nvk-bridge/bridge.mm |
 | `NVK_CHANNEL_RECOVER` | escape | on (NVK_CHANNEL_RECOVER=0 in the settings file: a channel fault ends the device, as in 2.9) | 3.0 | 3.2 | After a GPU fault on one channel NVK rebuilds that channel and the application carries on, instead of losing its device. | nvk/nvk-channel-recover.patch |
 | `NVK_CMDMEM_CENSUS` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
 | `NVK_CMDMEM_LIVE_MAX` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-recycle.patch |
@@ -1145,7 +1147,7 @@ Each of these does nothing unless it is set.
 | `/Library/GPUBundles/nvmtl-gpu-policy.txt` | setting | absent | 2.9 | - | per-application choice between the NVIDIA GPU and the integrated GPU on a hybrid laptop | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl-gpupass-probe` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |
 | `/Library/GPUBundles/nvmtl/no-failed-air` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLLibraryLoad.m |
-| `/Library/GPUBundles/nvmtl/nvrm610.conf` | install | absent | 2.9 | - | the settings file the installer writes; the user block is kept on update | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m, zink/nvk_zink_cfg.h |
+| `/Library/GPUBundles/nvmtl/nvrm610.conf` | install | absent | 2.9 | - | the settings file the installer writes; the user block is kept on update | plugin/NVMTLObjects.m, plugin/nvmtl_osver.m, tools/nvk-bridge/bridge.mm and 1 more |
 | `/Library/NullMoth/gamemode-active` | internal | absent | 2.9 | - | written by the game-priority helper while a game runs | plugin/NVMTLDevice.m |
 | `/Library/NullMoth/nvfb-small` | recovery | absent | 2.9 | - | the same as boot-arg nvfbsmall=1 without a restart into recovery | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `/private/tmp/nvmtl-off.log` | diag | absent | 2.9 | - | unreviewed: a flag or log file; the release plugin refuses /tmp paths | plugin/NVMTLDevice.m |

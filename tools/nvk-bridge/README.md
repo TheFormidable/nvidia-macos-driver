@@ -48,17 +48,35 @@ rebuilds the runtime, because the component depends on `nvk`.
   that asks for one gets `VK_ERROR_EXTENSION_NOT_PRESENT`, and their entry points are absent.
 - Swapchain images are ordinary NVK images in VRAM. Two to eight images are supported, independent of the two or three
   drawables of the `CAMetalLayer`.
-- On present, the frontend waits for the application's semaphores, imports the drawable's IOSurface as Vulkan memory,
-  copies the image into it on a private queue, and waits for the copy to complete. It then marks the VRAM newest
-  (`nvmtl_nvk_surface_dirty`), writes the plugin's generation tag (`NVMTLVramAt:p0`) and presents the drawable.
-  Presentation is synchronous.
+- On present, the frontend waits for the application's semaphores, takes the layer's next drawable, imports its
+  IOSurface as Vulkan memory, copies the image into it on a private queue, and waits for the copy to complete. It then
+  marks the VRAM newest (`nvmtl_nvk_surface_dirty`), writes the plugin's generation tag (`NVMTLVramAt:p0`) and presents
+  the drawable. On a FIFO swapchain all of that is synchronous: `vkQueuePresentKHR` does it on the application's
+  thread and returns when the drawable was presented.
+- An IMMEDIATE swapchain shows the newest frame (since 3.0.9, `present_newest.h`). `vkQueuePresentKHR` submits a fence
+  behind the frame's rendering, hands the image to a thread of the swapchain and returns. That thread takes a drawable
+  when the layer has one and does the copy, the mark, the tag and the present for the newest frame presented by then.
+  A frame that a newer one overtook first is not copied, and its image goes back to the application when the GPU has
+  finished rendering it, so `vkQueuePresentKHR` no longer waits for the layer. A present of such a swapchain
+  is synchronous as well when it names several swapchains, while a present observer is set, after the thread has
+  ended, and after the thread could not show a frame (a layer that gives no drawable within a second, a resize) until
+  a present reaches the layer again; that present reports the error. A device without a copy queue of the frontend's
+  own gets no such thread.
 - When the GPU's BAR is smaller than its VRAM and the driver refuses the VRAM import, the copy goes to the drawable's
   host pages instead (`VK_EXT_external_memory_host`). With a full BAR this path is never taken.
-- When a copy does not complete within five seconds, the device is marked uncertain: its resources are kept, not freed,
-  and every later call on that device returns `VK_ERROR_DEVICE_LOST`.
+- When a synchronous present's copy does not complete within five seconds, or a frame handed to a presentation thread
+  is not rendered, or that thread's copy does not complete, within 400 seconds, the device is marked uncertain: its
+  resources are kept, not freed, and every later call on that device returns `VK_ERROR_DEVICE_LOST`. The 400 seconds
+  are a backstop: NVK reaches its own verdict on a stalled channel inside one wait, after five seconds awake, and
+  goes on waiting only for a GPU suspended for a system sleep or wake, for at most 360 seconds awake. So a
+  presentation thread's wait is one call for the whole time, and it is made again when the machine slept through it:
+  the frontend compares `CLOCK_UPTIME_RAW` with `CLOCK_MONOTONIC_RAW`. The synchronous path's five seconds are on
+  NVK's own clock (`os_time_get_nano`), which counts a sleep.
 - The frontend reads no environment variable. The plugin's developer switches `NVMTL_NO_SURFACE_PAGEOFF` and
-  `NVMTL_NO_SURFACE_SHARE` do not reach it: it always imports the drawable's VRAM and always marks it newest. The way
-  out of the runtime is per application: remove the JVM argument or `VK_DRIVER_FILES`.
+  `NVMTL_NO_SURFACE_SHARE` do not reach it: it always imports the drawable's VRAM and always marks it newest. It reads
+  one switch from the settings file `/Library/GPUBundles/nvmtl/nvrm610.conf`, once, when a process makes its first
+  IMMEDIATE swapchain: `NVK_BRIDGE_PRESENT_NEWEST=0` makes every swapchain present synchronously, as before 3.0.9. The
+  way out of the runtime is per application: remove the JVM argument or `VK_DRIVER_FILES`.
 
 ## Interfaces with the driver
 
@@ -88,6 +106,12 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
 - `window_check.mm` needs no SDL3: it presents through the installed runtime into an AppKit window of its own, reads
   every copy back, and covers a resize, an old swapchain, a minimize and a restore. `tools/card_selftest.py` builds
   and runs it and `smoke.mm`, directly and through the installed and the built loader (`tools/card/checks_vulkan.py`).
+  It reads the copies through the present observer, and a present made while an observer is set is synchronous: these
+  two programs check the synchronous path, and no check on a card hands a frame to a presentation thread.
+- `tools/test_nvk_bridge_newest.py` runs `present_newest.h` on any system, with a GPU, a layer and an application of
+  its own (`tools/nvk_bridge_newest_fixture.cpp`), plain, under ThreadSanitizer and under AddressSanitizer with
+  UndefinedBehaviorSanitizer, against copies of the header with one rule broken each, and reads `bridge.mm` for how it
+  uses the header.
 - `ModFreeProbe.java` calls Minecraft 26.3's own `NativeLibrariesBootstrap.tryLoadingVulkan` with
   `-Dorg.lwjgl.vulkan.libname` set and checks that the game, LWJGL and SDL all use the frontend. It needs Java 25 and the
   game's and LWJGL 3.4.3's jars; it does not start the game.
@@ -100,13 +124,20 @@ The source fork reports Minecraft 26.3 (Fabric and NeoForge) rendering through t
 macOS 26.7.1, with its own NVK build and a full 8 GiB BAR. This tree's version was built and checked on Linux only:
 `bridge.mm`, `host_test.mm` and `smoke.mm` pass a syntax-only compile for x86_64 macOS 15.0 against a stand-in SDK, with
 two declarations the stand-in lacks (`CGSizeMake`, `CALayer.opaque`) added for the check, and its build and package
-wiring passes this repository's tests. It has not run on a Mac with this tree's NVK.
+wiring passes this repository's tests. Since then it has run on one Mac with this tree's NVK (AMD Ryzen 5 5500, RTX
+5050, macOS 26.7.3, one display at 100 Hz): Minecraft 26.3 without mods renders through it. There, with vertical sync
+off, the game stood at 200 frames a second through 3.0.8, its render thread 69 % inside `vkQueuePresentKHR` and most of
+that waiting for the layer's next drawable; 3.0.9's presentation thread comes from that capture (CHANGELOG.md) and has
+not been built on a Mac or run on a card.
 
 Limits: one window per swapchain, formats `B8G8R8A8_SRGB` and `B8G8R8A8_UNORM` only, FIFO and immediate present modes,
-and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each present allocates
-and imports its copy target and waits for it on the CPU. That import and the mark after the copy are two kernel calls
-per frame that take the accelerator's lock, and the frontend holds its device's submit lock during both, so the
-application's own queue submissions wait as well. During a screen share a captured frame is paged off under that lock,
+and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each copy allocates
+and imports its target and is waited for on the CPU. That import and the mark after the copy are two kernel calls
+per frame that take the accelerator's lock. On the synchronous path the frontend holds its device's submit lock during
+both, so the application's own queue submissions wait as well; a presentation thread holds that lock for the copy's
+submission alone. Nothing paces a presentation thread: it copies a frame for every drawable the layer hands out, which
+can be more than the display shows, and MAILBOX is not offered. During a screen share a captured frame is paged off
+under the accelerator's lock,
 and a page-off can hold it while it waits for the GPU (the accelerator's `debug.nvaccel_surf_mark_lock_wait_*` counters
 measure such waits). The cost of these calls has not been measured on a card. The Metal plugin imports each surface's
 VRAM once and keeps it. With a BAR smaller than VRAM, NVK's own memory types are those of this tree's NVK: the source

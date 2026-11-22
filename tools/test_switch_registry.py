@@ -57,8 +57,10 @@ arm("no row added after 2.9 is a development switch, a hardware switch or a writ
 
 def tree(t):
     """A tree with one switch of each kind and nothing wrong with it."""
-    for d in ("plugin", "kexts/X", "build", "nvk", "translator/src", "tools"):
+    for d in ("plugin", "kexts/X", "build", "nvk", "translator/src", "tools/nvk-bridge"):
         (t / d).mkdir(parents=True)
+    (t / "tools/nvk-bridge/bridge.mm").write_text('static bool on(const char *text) { return nvkbridge::settings_switch_on(text,"NVK_BRIDGE_ONE"); }\n')
+    (t / "tools/nvk-bridge/smoke.mm").write_text('static const char *hook(void) { return getenv("NVKBRIDGE_TEST_ONLY"); }\n')
     (t / "build/build_nvk.sh").write_text('REL=${4:-9.9}\ncase $REL in\n  9.9) FIXES=$NVK/fixes.patch\n       CHAIN="one @FIXES" ;;\n'
                                            '  9.8) FIXES=$NVK/old.patch\n       CHAIN="old" ;;\nesac\nCHAIN="$CHAIN ${NVK_EXTRA_PATCHES:-two}"\n'
                                            'for s in ${NVK_SKIP_PATCHES:-}; do CHAIN="$(printf "%s " $CHAIN | grep -v -- "$s")"; done\n'
@@ -108,6 +110,9 @@ with tempfile.TemporaryDirectory(prefix="nmsw-") as tmp:
     arm("a name in a comment and a name a patch only removes are not switches",
         not ({"NVMTL_COMMENT", "NVK_NOT", "NVK_GONE"} & set(env)), str(sorted(env)))
     arm("a variable the driver only sets is marked so (it is not a user switch)", env["NVMTL_SETONLY"]["set_only"] and not env["NVMTL_PLAIN"]["set_only"])
+    arm("the native Vulkan frontend's switch, a name it looks up in the settings file, is found in bridge.mm; what the test programs "
+        "of its folder read is not a switch of the driver", "NVK_BRIDGE_ONE" in env and not env["NVK_BRIDGE_ONE"]["set_only"]
+        and env["NVK_BRIDGE_ONE"]["owner"] == {"nvkbridge"} and "NVKBRIDGE_TEST_ONLY" not in env, str(sorted(env)))
     arm("read-write and write-only sysctls are both writable, a counter is not",
         sysc["debug.nvx_knob"]["writable"] and sysc["debug.nvx_blob"]["writable"] and not sysc["debug.nvx_count"]["writable"])
     arm("a sysctl declared through a macro is found with its name, its flags and its description",
@@ -126,6 +131,9 @@ with tempfile.TemporaryDirectory(prefix="nmsw-") as tmp:
     for name, rel, text, want in (
         ("a new getenv in the plugin", "plugin/a.m", 'static int n(void) { return getenv("NVMTL_ZZ_NEW") != 0; }\n', ("env NVMTL_ZZ_NEW is read at plugin/a.m:5", "tier escape", "opt-in")),
         ("a new name read through a wrapper nobody told the scanner about", "plugin/a.m", 'static int n(void) { return my_reader(@"NVMTL_ZZ_VIA"); }\n', ("env NVMTL_ZZ_VIA", "ships ON")),
+        ("a new name the native Vulkan frontend looks up in the settings file", "tools/nvk-bridge/bridge.mm",
+         'static bool n(const char *text) { return nvkbridge::settings_switch_on(text,"NVK_ZZ_BRIDGE"); }\n',
+         ("env NVK_ZZ_BRIDGE is read at tools/nvk-bridge/bridge.mm:2", "tier escape")),
         ("a new name in an NVK patch of the chain", "nvk/one.patch", '+   if (nvmtl_cfg_getenv("NVK_ZZ_NEW")) return;\n', ("env NVK_ZZ_NEW is read at nvk/one.patch", "tier escape")),
         ("a name put together at run time", "plugin/a.m", 'static int n(const char *s) { char b[64]; snprintf(b, sizeof b, "NVMTL_%s", s); return getenv(b) != 0; }\n',
          ("put together at run time", "one string literal")),

@@ -94,6 +94,10 @@ NEW_TIERS = ("escape", "test", "diag", "setting", "internal", "retired")
 WRITABLE_TIERS = ("setting", "hardware", "recovery", "diag", "dev")
 NONDEFAULT = ("escape", "test", "dev", "retired")   # what debug.nvrm_switches_nondefault and `doctor` count
 C_EXT = (".c", ".cpp", ".h", ".hpp", ".m", ".mm", ".inc")
+# The native Vulkan frontend's own sources in tools/nvk-bridge: bridge.mm and the headers it includes. The test
+# programs beside them (smoke.mm, window_check.mm, host_test.mm) read the environment for themselves and are not
+# installed. tools/test_nvk_bridge.py holds this list to bridge.mm's #include lines.
+NVK_BRIDGE_SOURCES = ("bridge.mm", "present_newest.h")
 # a preference key read by name: CFPreferencesGetAppBooleanValue(CFSTR("Key"), ...) and its siblings
 PREF_READ = re.compile(r"\bCFPreferences(?:GetAppBooleanValue|GetAppIntegerValue|CopyAppValue|CopyValue)\s*\(\s*CFSTR\s*\(\s*\"([A-Za-z0-9_.]+)\"")
 # not kext sources: patches kept as documentation
@@ -441,9 +445,12 @@ def scan(root):
                     elif not re.search(r"\b(?:char|NSString)\b", arg):     # not its own declaration or definition
                         env_by_variable(r, t, owner, m.start(), arg, w + "()")
 
-    # --- environment and preferences: C and Objective-C (plugin, DLSS host, vendor libraries, native OpenGL)
-    for sub, owner in (("plugin", "plugin"), ("dlss", "dlss"), ("vendor", "nvencvt"), ("zink", "zink")):
+    # --- environment and preferences: C and Objective-C (plugin, DLSS host, vendor libraries, native OpenGL, and the
+    #     native Vulkan frontend, whose one switch is a name it looks up in the settings file)
+    for sub, owner in (("plugin", "plugin"), ("dlss", "dlss"), ("vendor", "nvencvt"), ("zink", "zink"), ("tools/nvk-bridge", "nvkbridge")):
         for p in tracked(root, sub, C_EXT):
+            if owner == "nvkbridge" and p.name not in NVK_BRIDGE_SOURCES:
+                continue
             r = str(p.relative_to(root)); t = strip_comments(p.read_text(errors="replace"))
             c_texts[r] = (t, owner)
             env_in(t, r, owner)

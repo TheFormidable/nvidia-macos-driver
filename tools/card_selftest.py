@@ -141,7 +141,7 @@ FORBIDDEN = re.compile(r"(?<![\w.-])(sudo|nvram|csrutil|bless|kmutil|kextload|ke
 CHECK_PROGRAMS = ("/usr/bin/xcrun", "/usr/bin/python3", "/bin/sh")
 # build/build_nvk.sh names the chain of NVK patches the package was built with (its CHAIN line)
 DRIVER_PATHS = ("plugin", "zink", "translator", "nvk", "kexts", "dlss", "vendor", "tools/nvk-bridge/bridge.mm",
-                "build/build_nvk.sh")
+                "tools/nvk-bridge/present_newest.h", "build/build_nvk.sh")
 # Read around every GPU check; a name the loaded kexts lack reads as None and its rule does nothing. The channel
 # counters are NVRM.kext's (kexts/NVRM/nvrm_chan_note.cpp: kicks, recovered and dropped are NVK's notes of a stalled or
 # rebuilt channel); the nvrmfb_vram ones are NVRMFB's (kexts/NVRMFB/fb/nvrm-fb.cpp): power_events counts the GPU's

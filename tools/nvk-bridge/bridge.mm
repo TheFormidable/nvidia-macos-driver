@@ -9,9 +9,15 @@
 // on the GPU into the CAMetalLayer drawable's IOSurface VRAM (imported through
 // the driver's nvmtl_nvk_stage_import), marked newest (nvmtl_nvk_surface_dirty)
 // and tagged (the plugin's NVMTLVramAt:p0 generation tag) before it is
-// presented. Presentation is synchronous: queue_present returns after the copy
-// completed and the drawable was presented. The renderer's own window-system
-// extensions and entry points are hidden (unsupported_device_extension).
+// presented. A FIFO swapchain presents synchronously: queue_present returns
+// after the copy completed and the drawable was presented. An IMMEDIATE
+// swapchain shows the newest frame (3.0.9, present_newest.h): queue_present
+// hands the frame to a thread of the swapchain and returns, and that thread
+// copies the newest frame into a drawable when the layer has one; a frame that
+// was overtaken first is not copied. NVK_BRIDGE_PRESENT_NEWEST=0 in the
+// settings file makes IMMEDIATE synchronous again. The renderer's own
+// window-system extensions and entry points are hidden
+// (unsupported_device_extension).
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_METAL_EXT
 #include <vulkan/vulkan.h>
@@ -22,6 +28,9 @@
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
@@ -32,10 +41,12 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include "present_newest.h"
 
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char *);
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char *);
@@ -47,15 +58,34 @@ struct Share { uint32_t version, surface, plane, pad; uint64_t bytes; };
 static_assert(sizeof(Share) == 24);
 using StageImport = void (*)(const Share *);
 using SurfaceDirty = uint32_t (*)(VkDevice, uint32_t, uint32_t);
+using FenceDropped = int (*)(VkDevice, VkFence);
 PFN_vkGetInstanceProcAddr backend_gipa;
 PFN_vkGetDeviceProcAddr backend_gdpa;
 StageImport stage_import;
 SurfaceDirty surface_dirty;
+FenceDropped fence_dropped;
 void *backend;
 std::once_flag backend_once;
 std::once_flag device_procs_once;
 std::atomic<uint64_t> next_handle{0x4e564b0000000000ull};
 std::atomic<uint64_t> copies{}, copy_bytes{}, drawable_ns{}, producer_ns{}, import_failures{};
+// The swapchains that show the newest frame: frames handed to a presentation thread, frames it showed, frames that
+// were overtaken or given up, frames it could not show, and the time it waited for the layer.
+std::atomic<uint64_t> newest_presented{}, newest_shown{}, newest_dropped{}, newest_failed{}, newest_drawable_ns{};
+// A child of fork has none of the parent's threads: a swapchain made there presents synchronously. (A swapchain the
+// parent made is the parent's, with its layer and its device; a child that goes on using it was never supported.)
+std::atomic<bool> forked{};
+// Whether the machine has slept, for the waits whose running out makes a device's completion uncertain
+// (present_newest.h, wait_whole): CLOCK_UPTIME_RAW stands still during a sleep and CLOCK_MONOTONIC_RAW goes on. The
+// clock that goes on is read first: a thread held up between the two readings then sees the clocks closer than they
+// are, never farther apart, and a reading that is too close counts for nothing (WakeWatch). Never destroyed: a
+// presentation thread may ask while the process exits.
+uint64_t machine_woke() {
+   static auto &watch=*new nvkbridge::WakeWatch;
+   const uint64_t all=clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+   const uint64_t awake=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+   return watch.look(awake,all);
+}
 using PresentObserver=void (*)(PFN_vkGetDeviceProcAddr,VkDevice,VkQueue,VkBuffer,uint32_t,uint32_t,uint32_t,uint32_t);
 std::atomic<PresentObserver> present_observer{};
 std::mutex registry;
@@ -64,11 +94,30 @@ struct Instance { VkInstance raw{}; };
 struct Device;
 struct Surface {
    CAMetalLayer *__strong layer;
+   // A presentation thread could not show a frame on this layer (no drawable within the layer's timeout: a hidden
+   // window; or a drawable of another size: a resize): presents are synchronous, and so report what is wrong, until
+   // one of them reaches the layer. The swapchain made after a resize starts under it too.
+   std::atomic<bool> held{};
 };
 struct Queue { VkQueue raw{}; uint32_t family{}; std::weak_ptr<Device> dev; };
-struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{}; };
+// done: on a swapchain that shows the newest frame, the fence vkQueuePresentKHR submits behind the frame's rendering.
+struct Image { VkImage raw{}; VkDeviceMemory memory{}; bool acquired{}; VkFence done{}; };
 struct Frame;
-struct Chain {
+struct Chain;
+// The GPU and the layer of one swapchain, as present_newest.h asks for them. The swapchain owns its Newest, so the
+// pointer holds for as long as the Newest does.
+struct NewestBackend {
+   Chain *chain;
+   bool uncertain() const;
+   void set_uncertain();
+   void hold();
+   void dropped() { newest_dropped++; }
+   nvkbridge::Wait wait_done(uint32_t k,uint64_t ns);
+   uint64_t woke() { return machine_woke(); }
+   id<CAMetalDrawable> next_drawable();
+   nvkbridge::Copy copy(uint32_t k,id<CAMetalDrawable> drawable);
+};
+struct Chain : std::enable_shared_from_this<Chain> {
    std::shared_ptr<Device> dev;
    std::shared_ptr<Surface> surface;
    VkSwapchainKHR handle{};
@@ -80,6 +129,9 @@ struct Chain {
    std::condition_variable available;
    uint32_t cursor{};
    bool retired{};
+   // Set for a swapchain that shows the newest frame: it then owns the images' states, and mutex, available, cursor
+   // and Image::acquired above are not used.
+   std::unique_ptr<nvkbridge::Newest<NewestBackend>> newest;
    VkAllocationCallbacks allocator{};
    bool custom_allocator{};
    const VkAllocationCallbacks *alloc() const { return custom_allocator ? &allocator : nullptr; }
@@ -130,6 +182,8 @@ bool initialize() {
       backend_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(backend, "vk_icdGetInstanceProcAddr"));
       stage_import = reinterpret_cast<StageImport>(dlsym(backend, "nvmtl_nvk_stage_import"));
       surface_dirty = reinterpret_cast<SurfaceDirty>(dlsym(backend, "nvmtl_nvk_surface_dirty"));
+      // Since 3.0.1; a renderer without it answers every fence as before.
+      fence_dropped = reinterpret_cast<FenceDropped>(dlsym(backend, "nvmtl_nvk_fence_dropped_v1"));
       if (!backend_gipa || !stage_import || !surface_dirty) backend_gipa = nullptr;
       fprintf(stderr, "NVK Bridge: renderer=%s; presentation=gpu-copy; game-frame CPU pixel traffic=0\n", path.c_str());
    });
@@ -387,7 +441,7 @@ VkResult VKAPI_CALL create_device(VkPhysicalDevice physical, const VkDeviceCreat
    { std::lock_guard<std::mutex> lock(registry); devices[*result]=state; }
    fprintf(stderr,"NVK Bridge: native device=%s; copy family=%u; Metal registry=%llu\n",
       state->properties.deviceName,state->copy_family,(unsigned long long)state->metal.registryID);
-   fprintf(stderr,"NVK Bridge: presentation completion=synchronous; private copy queue=%s\n",state->private_copy_queue?"yes":"no");
+   fprintf(stderr,"NVK Bridge: presentation completion=by swapchain; private copy queue=%s\n",state->private_copy_queue?"yes":"no");
    return VK_SUCCESS;
 }
 void VKAPI_CALL get_queue(VkDevice device,uint32_t family,uint32_t index,VkQueue *out) {
@@ -427,6 +481,13 @@ VkResult VKAPI_CALL device_idle(VkDevice device) {
 }
 void VKAPI_CALL destroy_device(VkDevice device,const VkAllocationCallbacks *alloc) {
    auto d=find(devices,device); if (!d) return;
+   // A swapchain the application did not destroy first: its presentation thread starts no copy from here on. Before
+   // the submission lock is taken, because that thread needs the lock to finish the copy it is in.
+   std::vector<std::shared_ptr<Chain>> left;
+   { std::lock_guard<std::mutex> guard(registry);
+     for (auto &entry:chains) if (entry.second->dev==d && entry.second->newest) left.push_back(entry.second);
+   }
+   for (auto &c:left) c->newest->retire();
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    if (d->uncertain) { fprintf(stderr,"NVK Bridge: uncertain GPU completion; retaining native device until process exit\n"); return; }
    DP(d,DeviceWaitIdle)(device);
@@ -504,13 +565,104 @@ int memory_type(const Device &d,uint32_t bits,VkMemoryPropertyFlags flags) {
    for (uint32_t i=0;i<d.memory.memoryTypeCount;i++) if ((bits&(1u<<i)) && (d.memory.memoryTypes[i].propertyFlags&flags)==flags) return (int)i;
    return -1;
 }
+// A wait for a fence on a presentation thread, or for one of its frames: the whole budget in one call, made again
+// when the machine slept through it (present_newest.h, wait_whole). VK_TIMEOUT: the GPU did not get there while the
+// machine was awake.
+VkResult wait_fence_whole(Device *d,VkFence fence) {
+   VkResult r=VK_TIMEOUT;
+   nvkbridge::wait_whole([&] {
+      r=DP(d,WaitForFences)(d->raw,1,&fence,VK_TRUE,nvkbridge::NewestLimits{}.done_ns);
+      return r==VK_SUCCESS?nvkbridge::Wait::Signalled:r==VK_TIMEOUT?nvkbridge::Wait::Pending:nvkbridge::Wait::Failed;
+   },machine_woke);
+   return r;
+}
 void release_images(const std::shared_ptr<Chain> &c) {
    if (c->dev->uncertain) return;
    for (auto &im:c->images) {
       if (im.raw) DP(c->dev,DestroyImage)(c->dev->raw,im.raw,c->alloc());
       if (im.memory) DP(c->dev,FreeMemory)(c->dev->raw,im.memory,c->alloc());
+      if (im.done) DP(c->dev,DestroyFence)(c->dev->raw,im.done,c->alloc());
       im={};
    }
+}
+// The way back of the swapchains that show the newest frame: a line NVK_BRIDGE_PRESENT_NEWEST=0 of the settings file
+// (the file alone: this frontend reads no environment variable). Read once, when the first IMMEDIATE swapchain is
+// made, so that a process that never makes one (every OpenGL application on Zink, which loads a copy of this
+// library as its Vulkan driver) does not open the file for it.
+bool newest_wanted() {
+   static std::once_flag once;
+   static bool on=true;
+   std::call_once(once,[] {
+      char text[8192];
+      size_t have=0;
+      int fd=open("/Library/GPUBundles/nvmtl/nvrm610.conf",O_RDONLY|O_CLOEXEC);
+      if (fd>=0) {
+         for (ssize_t n;have<sizeof text-1 && (n=read(fd,text+have,sizeof text-1-have))>0;) have+=static_cast<size_t>(n);
+         close(fd);
+      }
+      text[have]=0;
+      on=nvkbridge::settings_switch_on(text,"NVK_BRIDGE_PRESENT_NEWEST");
+      if (!on) fprintf(stderr,"NVK Bridge: NVK_BRIDGE_PRESENT_NEWEST=0: IMMEDIATE swapchains present synchronously\n");
+   });
+   return on;
+}
+// A swapchain's presentation thread. It holds the swapchain, and with it the device and the layer, until it ends:
+// when the swapchain is retired, at the latest after the layer's own timeout (1 s) if it was waiting for a drawable.
+// It may so still be inside the layer's nextDrawable while vkCreateSwapchainKHR sets the layer up for the swapchain
+// that replaces this one; the drawable it then gets is given back unpresented. Each round has its own autorelease
+// pool: a drawable the layer handed out goes back to it when the pool is drained, and the layer has two or three
+// (maximumDrawableCount).
+void *newest_main(void *arg) {
+   std::shared_ptr<Chain> c;
+   { std::unique_ptr<std::shared_ptr<Chain>> given(static_cast<std::shared_ptr<Chain> *>(arg));c=*given; }
+   pthread_setname_np("NVK Bridge presentation");
+   for (bool more=true;more;) {
+      @autoreleasepool {
+         // Nothing may leave this thread: nobody would catch it. catch (...) takes an Objective-C exception too.
+         try { more=c->newest->step(); }
+         catch (...) {
+            fprintf(stderr,"NVK Bridge: the presentation thread ended on an exception; this swapchain presents synchronously\n");
+            c->newest->abandon();more=false;
+         }
+      }
+   }
+   return nullptr;
+}
+bool start_presentation(const std::shared_ptr<Chain> &c) {
+   static std::once_flag once;
+   static bool pinned;
+   std::call_once(once,[] {
+      pthread_atfork(nullptr,nullptr,[] { forked=true; });
+      // The thread runs this library's code whatever the application does with the library afterwards. A library
+      // that cannot be pinned gets no thread (as zink/appkit.m does with its observers).
+      Dl_info self{};
+      pinned=dladdr(reinterpret_cast<void *>(&vkGetInstanceProcAddr),&self) && self.dli_fname &&
+             dlopen(self.dli_fname,RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
+   });
+   if (!pinned) return false;
+   pthread_attr_t attr;
+   if (pthread_attr_init(&attr)) return false;
+   pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+   // The frame is on its way to the screen: this thread's work is what the user is looking at.
+   pthread_attr_set_qos_class_np(&attr,QOS_CLASS_USER_INTERACTIVE,0);
+   // The thread belongs to no runtime of the application (a JVM's signal handlers are not written for it), so it
+   // starts with every signal blocked that is sent to a process, and the calling thread's mask is put back. The
+   // signals of a fault stay open: blocked, a fault on this thread would fault again for ever instead of ending the
+   // process. As the Zink frontend's presentation thread (zink/nvk_present_queue.c).
+   sigset_t all,saved;
+   sigfillset(&all);
+   sigdelset(&all,SIGSEGV);sigdelset(&all,SIGBUS);sigdelset(&all,SIGILL);
+   sigdelset(&all,SIGFPE);sigdelset(&all,SIGTRAP);sigdelset(&all,SIGSYS);
+   bool started=false;
+   auto *given=new (std::nothrow) std::shared_ptr<Chain>(c);
+   if (given && pthread_sigmask(SIG_SETMASK,&all,&saved)==0) {
+      pthread_t thread;
+      started=pthread_create(&thread,&attr,newest_main,given)==0;
+      pthread_sigmask(SIG_SETMASK,&saved,nullptr);
+   }
+   if (!started) delete given;
+   pthread_attr_destroy(&attr);
+   return started;
 }
 VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfoKHR *info,const VkAllocationCallbacks *alloc,VkSwapchainKHR *out) {
    auto d=find(devices,device); auto s=find(surfaces,info->surface);
@@ -524,6 +676,11 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
        (info->presentMode!=VK_PRESENT_MODE_FIFO_KHR && info->presentMode!=VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_ERROR_INITIALIZATION_FAILED;
    VkSurfaceCapabilitiesKHR caps{}; surface_caps(d->physical,info->surface,&caps);
    if ((info->imageUsage&~caps.supportedUsageFlags) || !(info->compositeAlpha&caps.supportedCompositeAlpha)) return VK_ERROR_FEATURE_NOT_PRESENT;
+   // The swapchain this one replaces presents nothing more, before the layer changes under it: a frame of the old
+   // size must not reach the layer after one of the new. Before the submission lock is taken, because its
+   // presentation thread needs the lock to finish the copy it is in.
+   auto old=find(chains,info->oldSwapchain);
+   if (old && old->newest) old->newest->retire();
    std::lock_guard<std::recursive_mutex> submit(d->submit);
    if(d->uncertain)return VK_ERROR_DEVICE_LOST;
    if (s->layer.device && s->layer.device.registryID!=d->metal.registryID) return VK_ERROR_SURFACE_LOST_KHR;
@@ -561,21 +718,51 @@ VkResult VKAPI_CALL create_swapchain(VkDevice device,const VkSwapchainCreateInfo
       if (r==VK_SUCCESS) r=DP(d,BindImageMemory)(device,im.raw,im.memory,0);
       if (r!=VK_SUCCESS) { release_images(c);return r; }
    }
+   // IMMEDIATE shows the newest frame, on a thread of the swapchain. Only with a copy queue of this frontend's own:
+   // that thread submits to it, and an application's queue is the application's to synchronize.
+   if (info->presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR && d->private_copy_queue && !forked && newest_wanted()) {
+      VkFenceCreateInfo signalled{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};signalled.flags=VK_FENCE_CREATE_SIGNALED_BIT;
+      for (auto &im:c->images) {
+         VkResult r=DP(d,CreateFence)(device,&signalled,c->alloc(),&im.done); if (r!=VK_SUCCESS) { release_images(c);return r; }
+      }
+      c->newest=std::make_unique<nvkbridge::Newest<NewestBackend>>(NewestBackend{c.get()},(uint32_t)c->images.size());
+   }
    c->handle=(VkSwapchainKHR)(uintptr_t)next_handle.fetch_add(1);*out=c->handle;
    { std::lock_guard<std::mutex> lock(registry);chains[c->handle]=c; }
-   if (auto old=find(chains,info->oldSwapchain)) { std::lock_guard<std::mutex> lock(old->mutex);old->retired=true;old->available.notify_all(); }
+   // The thread starts last, when nothing after it can fail: a thread holds its swapchain, and a swapchain the
+   // application was never given could not be retired.
+   if (c->newest && !start_presentation(c)) {
+      c->newest.reset();
+      for (auto &im:c->images) { DP(d,DestroyFence)(device,im.done,c->alloc());im.done=VK_NULL_HANDLE; }
+      fprintf(stderr,"NVK Bridge: no presentation thread; this swapchain presents synchronously\n");
+   }
+   if (old) { std::lock_guard<std::mutex> lock(old->mutex);old->retired=true;old->available.notify_all(); }
    fprintf(stderr,"NVK Bridge: swapchain %ux%u, %u Vulkan images, %lu Metal slots\n",c->extent.width,c->extent.height,info->minImageCount,(unsigned long)s->layer.maximumDrawableCount);
+   fprintf(stderr,"NVK Bridge: swapchain presentation=%s\n",c->newest?"newest frame":"synchronous");
    return VK_SUCCESS;
 }
 void VKAPI_CALL destroy_swapchain(VkDevice device,VkSwapchainKHR swapchain,const VkAllocationCallbacks *) {
    auto c=find(chains,swapchain);if (!c || c->dev->raw!=device) return;
    { std::lock_guard<std::mutex> lock(c->mutex);c->retired=true;c->available.notify_all(); }
+   if (c->newest) {
+      // Before the submission lock is taken: the presentation thread needs it to finish the copy it is in.
+      c->newest->retire();
+      // Frames that were presented and never copied: the application's rendering of them ends before their images go.
+      auto d=c->dev;
+      for (uint32_t k:c->newest->pending()) {
+         if (d->uncertain) break;
+         VkResult r=wait_fence_whole(d.get(),c->images[k].done);
+         if (r!=VK_SUCCESS) NewestBackend{c.get()}.set_uncertain();
+      }
+   }
    std::lock_guard<std::recursive_mutex> submit(c->dev->submit);
    if (c->dev->uncertain) return;
    release_images(c);
    { std::lock_guard<std::mutex> lock(registry);chains.erase(swapchain); }
-   fprintf(stderr,"NVK Bridge: gpu_copy_count=%llu gpu_copy_bytes=%llu cpu_pixel_readback_bytes=0 metal_cpu_upload_bytes=0\n",
-      (unsigned long long)copies.load(),(unsigned long long)copy_bytes.load());
+   fprintf(stderr,"NVK Bridge: gpu_copy_count=%llu gpu_copy_bytes=%llu cpu_pixel_readback_bytes=0 metal_cpu_upload_bytes=0 "
+      "newest_frames_presented=%llu newest_frames_shown=%llu newest_frames_dropped=%llu\n",
+      (unsigned long long)copies.load(),(unsigned long long)copy_bytes.load(),(unsigned long long)newest_presented.load(),
+      (unsigned long long)newest_shown.load(),(unsigned long long)newest_dropped.load());
 }
 VkResult VKAPI_CALL swapchain_images(VkDevice device,VkSwapchainKHR swapchain,uint32_t *count,VkImage *out) {
    auto c=find(chains,swapchain);if (!c || c->dev->raw!=device) return VK_ERROR_OUT_OF_DATE_KHR;
@@ -585,24 +772,40 @@ VkResult VKAPI_CALL acquire_image(VkDevice device,VkSwapchainKHR swapchain,uint6
    auto c=find(chains,swapchain);if (!c || c->dev->raw!=device) return VK_ERROR_OUT_OF_DATE_KHR;
    if (!semaphore && !fence) return VK_ERROR_INITIALIZATION_FAILED;
    auto d=c->dev;if (d->uncertain) return VK_ERROR_DEVICE_LOST;
-   std::unique_lock<std::mutex> lock(c->mutex);
-   auto ready=[&] { return c->retired || d->uncertain || std::any_of(c->images.begin(),c->images.end(),[](auto &im){return !im.acquired;}); };
-   if (!ready()) {
-      if (!timeout) return VK_NOT_READY;
-      if (timeout==UINT64_MAX) c->available.wait(lock,ready);
-      else if (!c->available.wait_for(lock,std::chrono::nanoseconds(std::min(timeout,(uint64_t)INT64_MAX)),ready)) return VK_TIMEOUT;
+   if (c->newest) {
+      // It waits for the GPU to finish a frame that was overtaken, or for the presentation thread when that has
+      // every image the application does not hold; with one image acquired at a time, never for a drawable. Before
+      // the submission lock is taken below: the thread needs it to finish a copy. The image it hands out is free of
+      // the GPU and of the thread, so the semaphore and fence below are true at once.
+      switch (c->newest->acquire(timeout,index)) {
+         case nvkbridge::Acquire::Got: break;
+         case nvkbridge::Acquire::NotReady: return VK_NOT_READY;
+         case nvkbridge::Acquire::Timeout: return VK_TIMEOUT;
+         case nvkbridge::Acquire::Retired: return VK_ERROR_OUT_OF_DATE_KHR;
+         case nvkbridge::Acquire::Lost: return VK_ERROR_DEVICE_LOST;
+      }
+   } else {
+      std::unique_lock<std::mutex> lock(c->mutex);
+      auto ready=[&] { return c->retired || d->uncertain || std::any_of(c->images.begin(),c->images.end(),[](auto &im){return !im.acquired;}); };
+      if (!ready()) {
+         if (!timeout) return VK_NOT_READY;
+         if (timeout==UINT64_MAX) c->available.wait(lock,ready);
+         else if (!c->available.wait_for(lock,std::chrono::nanoseconds(std::min(timeout,(uint64_t)INT64_MAX)),ready)) return VK_TIMEOUT;
+      }
+      if (c->retired) return VK_ERROR_OUT_OF_DATE_KHR;
+      if (d->uncertain) return VK_ERROR_DEVICE_LOST;
+      for (uint32_t j=0;j<c->images.size();j++) {
+         uint32_t k=(c->cursor+j)%(uint32_t)c->images.size();
+         if (!c->images[k].acquired) { c->images[k].acquired=true;*index=k;c->cursor=(k+1)%(uint32_t)c->images.size();break; }
+      }
    }
-   if (c->retired) return VK_ERROR_OUT_OF_DATE_KHR;
-   if (d->uncertain) return VK_ERROR_DEVICE_LOST;
-   for (uint32_t j=0;j<c->images.size();j++) {
-      uint32_t k=(c->cursor+j)%(uint32_t)c->images.size();
-      if (!c->images[k].acquired) { c->images[k].acquired=true;*index=k;c->cursor=(k+1)%(uint32_t)c->images.size();break; }
-   }
-   lock.unlock();
    VkSubmitInfo signal{VK_STRUCTURE_TYPE_SUBMIT_INFO};signal.signalSemaphoreCount=semaphore?1:0;signal.pSignalSemaphores=&semaphore;
    VkResult r;
    { std::lock_guard<std::recursive_mutex> submit(d->submit);r=d->uncertain?VK_ERROR_DEVICE_LOST:DP(d,QueueSubmit)(d->copy_queue,1,&signal,fence); }
-   if (r!=VK_SUCCESS) { std::lock_guard<std::mutex> rollback(c->mutex);c->images[*index].acquired=false;c->available.notify_all(); }
+   if (r!=VK_SUCCESS) {
+      if (c->newest) c->newest->unacquire(*index);
+      else { std::lock_guard<std::mutex> rollback(c->mutex);c->images[*index].acquired=false;c->available.notify_all(); }
+   }
    return r;
 }
 VkResult VKAPI_CALL acquire_image2(VkDevice device,const VkAcquireNextImageInfoKHR *info,uint32_t *index) {
@@ -637,7 +840,8 @@ struct Frame {
       if (surface) CFRelease(surface);
    }
 };
-std::vector<std::shared_ptr<Frame>> quarantine;
+// Never destroyed: a presentation thread may add to it while the process exits.
+auto &quarantine=*new std::vector<std::shared_ptr<Frame>>;
 
 VkResult import_host_frame(const std::shared_ptr<Frame> &frame,VkBufferCreateInfo buffer) {
    auto d=frame->dev;
@@ -682,12 +886,15 @@ void publish_tag(IOSurfaceRef surface) {
    CFDataRef data=CFDataCreate(nullptr,(const UInt8 *)&tag,sizeof tag);
    if (data) { IOSurfaceSetValue(surface,CFSTR("NVMTLVramAt:p0"),data);CFRelease(data); }
 }
-VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore handoff,bool &consumed) {
+// The copy of one presented image into a drawable of the layer, its publication and its present.
+// threaded false: the synchronous path, on the application's thread inside vkQueuePresentKHR, which holds the
+// device's submission lock for the whole call; the lock is taken here again from the first native object on, as
+// before 3.0.9.
+// threaded true: a swapchain's presentation thread. It takes the lock for the copy's submission alone: the import of
+// the drawable's video memory and the mark are calls into the kernel, and the application's own vkQueueSubmit does
+// not wait behind them. The frame's rendering has finished (its `done` fence), so there is no handoff to wait for.
+VkResult copy_drawable(const std::shared_ptr<Chain> &c,uint32_t index,id<CAMetalDrawable> drawable,VkSemaphore handoff,bool &consumed,bool threaded) {
    auto d=c->dev;
-   auto start=std::chrono::steady_clock::now();
-   id<CAMetalDrawable> drawable=[c->surface->layer nextDrawable];
-   drawable_ns+=elapsed(start);
-   if (!drawable) return VK_ERROR_OUT_OF_DATE_KHR;
    id<MTLTexture> texture=drawable.texture;
    if (texture.device.registryID!=d->metal.registryID || texture.iosurfacePlane!=0 || !texture.iosurface)
       return VK_ERROR_SURFACE_LOST_KHR;
@@ -701,7 +908,8 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    size_t row=IOSurfaceGetBytesPerRow(surface),size=IOSurfaceGetAllocSize(surface);
    if (IOSurfaceGetPlaneCount(surface)>1 || row%4 || row<(uint64_t)c->extent.width*4 ||
        c->extent.height>SIZE_MAX/row || (uint64_t)row*c->extent.height>size) return VK_ERROR_FORMAT_NOT_SUPPORTED;
-   std::unique_lock<std::recursive_mutex> backend_lock(d->submit);
+   std::unique_lock<std::recursive_mutex> backend_lock(d->submit,std::defer_lock);
+   if(!threaded)backend_lock.lock();
    if(d->uncertain)return VK_ERROR_DEVICE_LOST;
    // Every frame imports the drawable's IOSurface on its own; the frame and
    // its native objects are released when this function returns, unless the
@@ -759,14 +967,17 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    VkPipelineStageFlags transfer=VK_PIPELINE_STAGE_TRANSFER_BIT;
    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.waitSemaphoreCount=handoff?1:0;submit.pWaitSemaphores=&handoff;submit.pWaitDstStageMask=&transfer;
    submit.commandBufferCount=1;submit.pCommandBuffers=&frame->commands;
+   if(threaded) { backend_lock.lock();if(d->uncertain)return VK_ERROR_DEVICE_LOST; }
    r=DP(d,QueueSubmit)(d->copy_queue,1,&submit,frame->fence);
    if (r!=VK_SUCCESS) return r;
    if (handoff) consumed=true;
-   // queue_present holds the outer recursive lock for the whole call, so this
-   // unlock keeps the device's submissions ordered behind the presentation.
+   // On the synchronous path queue_present holds the outer recursive lock for
+   // the whole call, so this unlock keeps the device's submissions ordered
+   // behind the presentation. A presentation thread lets the lock go here.
    backend_lock.unlock();
-   start=std::chrono::steady_clock::now();r=DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
-   backend_lock.lock();
+   auto start=std::chrono::steady_clock::now();
+   r=threaded?wait_fence_whole(d.get(),frame->fence):DP(d,WaitForFences)(d->raw,1,&frame->fence,VK_TRUE,5000000000ull);
+   if(!threaded)backend_lock.lock();
    producer_ns+=elapsed(start);
    if (r!=VK_SUCCESS) {
       d->uncertain=true;
@@ -775,7 +986,13 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
       fprintf(stderr,"NVK Bridge: presentation completion uncertain (%d); resources quarantined\n",r);
       return VK_ERROR_DEVICE_LOST;
    }
-   if (auto observer=present_observer.load()) observer(backend_gdpa,d->raw,d->copy_queue,frame->buffer,(uint32_t)row,c->extent.width,c->extent.height,d->copy_family);
+   // The observer is called on the thread that presents, with the submission lock held: a present made while one is
+   // set is synchronous (queue_present).
+   if (!threaded) if (auto observer=present_observer.load()) observer(backend_gdpa,d->raw,d->copy_queue,frame->buffer,(uint32_t)row,c->extent.width,c->extent.height,d->copy_family);
+   // A fence also signals when its channel was rebuilt after a fault and the copy never ran: the drawable then holds
+   // what it held before, and is not published. Asked on the presentation thread only; the synchronous path is
+   // 3.0.8's.
+   if (threaded && fence_dropped && fence_dropped(d->raw,frame->fence)==1) return VK_ERROR_UNKNOWN;
    // Publication. The GPU copy has completed (the fence above), so the VRAM is
    // marked newest for plane 0 (a blocking mark, as the plugin's own
    // nvmtl_vk_surface_dirty), and the generation tag is written after the mark
@@ -793,11 +1010,96 @@ VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore h
    copies++;copy_bytes+=frame->bytes;
    return VK_SUCCESS;
 }
+// The synchronous path: the layer's next drawable on the application's thread, which waits for it.
+VkResult copy_frame(const std::shared_ptr<Chain> &c,uint32_t index,VkSemaphore handoff,bool &consumed) {
+   auto start=std::chrono::steady_clock::now();
+   id<CAMetalDrawable> drawable=[c->surface->layer nextDrawable];
+   drawable_ns+=elapsed(start);
+   if (!drawable) return VK_ERROR_OUT_OF_DATE_KHR;
+   VkResult r=copy_drawable(c,index,drawable,handoff,consumed,false);
+   // A frame reached the layer: a swapchain that shows the newest frame hands its next one to its thread again.
+   if (r==VK_SUCCESS) c->surface->held=false;
+   return r;
+}
+
+bool NewestBackend::uncertain() const { return chain->dev->uncertain.load(); }
+void NewestBackend::set_uncertain() {
+   if (!chain->dev->uncertain.exchange(true))
+      fprintf(stderr,"NVK Bridge: presentation completion uncertain (a presented frame did not finish rendering); resources retained\n");
+}
+void NewestBackend::hold() { chain->surface->held=true; }
+nvkbridge::Wait NewestBackend::wait_done(uint32_t k,uint64_t ns) {
+   Device *d=chain->dev.get();
+   VkFence done=chain->images[k].done;
+   VkResult r=ns?DP(d,WaitForFences)(d->raw,1,&done,VK_TRUE,ns):DP(d,GetFenceStatus)(d->raw,done);
+   if (r==VK_SUCCESS) return nvkbridge::Wait::Signalled;
+   return r==VK_TIMEOUT || r==VK_NOT_READY?nvkbridge::Wait::Pending:nvkbridge::Wait::Failed;
+}
+id<CAMetalDrawable> NewestBackend::next_drawable() {
+   auto start=std::chrono::steady_clock::now();
+   id<CAMetalDrawable> drawable=[chain->surface->layer nextDrawable];
+   newest_drawable_ns+=elapsed(start);
+   return drawable;
+}
+nvkbridge::Copy NewestBackend::copy(uint32_t k,id<CAMetalDrawable> drawable) {
+   // The presentation thread holds the swapchain while it runs (newest_main).
+   auto c=chain->shared_from_this();
+   // The frame's fence also signals when a channel rebuild dropped the submission behind it. The image may then
+   // hold an older or a partly drawn frame, so it is not shown. Nothing goes on drawing into it: a rebuild drops or
+   // replays what its channel had, and the channel of a waiter is rebuilt only when the one it waits on is idle
+   // (nvk/nvk-channel-recover.patch), so the image is the application's to acquire again.
+   if (fence_dropped && fence_dropped(c->dev->raw,c->images[k].done)==1) {
+      newest_failed++;
+      fprintf(stderr,"NVK Bridge: a channel rebuild dropped a presented frame; the next present is synchronous\n");
+      return nvkbridge::Copy::Failed;
+   }
+   bool consumed=false;
+   VkResult r=copy_drawable(c,k,drawable,VK_NULL_HANDLE,consumed,true);
+   if (c->dev->uncertain) return nvkbridge::Copy::Uncertain;
+   if (r==VK_SUCCESS) { newest_shown++;return nvkbridge::Copy::Shown; }
+   // The copy did not start, or it completed and its publication was refused: the image has no reader left. The
+   // next present is synchronous and answers what is wrong (a layer of another size: VK_ERROR_OUT_OF_DATE_KHR).
+   newest_failed++;
+   fprintf(stderr,"NVK Bridge: the presentation thread could not show a frame (%d); the next present is synchronous\n",r);
+   return nvkbridge::Copy::Failed;
+}
 
 VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
    auto q=find(queues,queue);auto d=q?q->dev.lock():nullptr;if (!d || !d->swapchain || d->uncertain) return VK_ERROR_DEVICE_LOST;
+   // The swapchains that show the newest frame, before the submission lock is taken: a presentation thread needs
+   // that lock to finish a copy, so nobody waits for one while holding it. A present of one such swapchain alone is
+   // handed to its thread. Any other present of one is synchronous, below, and first gives up the frame its thread
+   // has not taken and waits for the copy it is in, so that no older frame reaches the layer after this one: a
+   // present observer is set (it is called on the presenting thread), several swapchains are presented at once, the
+   // layer gave that thread nothing or something it could not use (Surface::held), the thread is gone, the
+   // swapchain is retired, or the image is not the application's.
+   std::shared_ptr<Chain> handed;
+   for (uint32_t j=0;j<info->swapchainCount;j++) {
+      auto c=find(chains,info->pSwapchains[j]);
+      if (!c || c->dev!=d || !c->newest) continue;
+      if (info->swapchainCount==1 && !present_observer.load() && !c->surface->held &&
+          c->newest->accepts(info->pImageIndices[j])) handed=c;
+      else c->newest->quiesce();
+   }
    std::lock_guard<std::recursive_mutex> lock(d->submit);
    if(d->uncertain)return VK_ERROR_DEVICE_LOST;
+   if (handed) {
+      // The frame's rendering dependencies are consumed here, on the application's queue, as on the synchronous
+      // path; what they signal is the image's `done` fence, which the presentation thread waits for before it
+      // copies, and vkAcquireNextImageKHR before it hands out the image of a frame that was overtaken.
+      const uint32_t k=info->pImageIndices[0];
+      VkFence done=handed->images[k].done;
+      VkResult r=DP(d,ResetFences)(d->raw,1,&done);if (r!=VK_SUCCESS) return r;
+      std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+      VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.waitSemaphoreCount=info->waitSemaphoreCount;submit.pWaitSemaphores=info->pWaitSemaphores;
+      submit.pWaitDstStageMask=stages.data();
+      // A failure leaves the image with the application, as on the synchronous path. Its fence is then reset with
+      // nothing submitted: nobody waits for the fence of an image the application holds.
+      r=DP(d,QueueSubmit)(queue,1,&submit,done);if (r!=VK_SUCCESS) return r;
+      handed->newest->put(k);newest_presented++;
+      if (info->pResults) info->pResults[0]=VK_SUCCESS;
+      return VK_SUCCESS;
+   }
    VkSemaphore handoff{};VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
    VkResult r=DP(d,CreateSemaphore)(d->raw,&sci,nullptr,&handoff);if (r!=VK_SUCCESS) return r;
    std::vector<VkPipelineStageFlags> stages(info->waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -809,11 +1111,15 @@ VkResult VKAPI_CALL queue_present(VkQueue queue,const VkPresentInfoKHR *info) {
       auto c=find(chains,info->pSwapchains[j]);VkResult result=VK_ERROR_OUT_OF_DATE_KHR;uint32_t k=info->pImageIndices[j];
       if (c && c->dev==d && k<c->images.size()) {
          bool valid;
-         { std::lock_guard<std::mutex> guard(c->mutex);valid=c->images[k].acquired && !c->retired; }
+         if (c->newest) valid=c->newest->app_owns(k);
+         else { std::lock_guard<std::mutex> guard(c->mutex);valid=c->images[k].acquired && !c->retired; }
          if (valid) {
             @autoreleasepool { result=copy_frame(c,k,consumed?VK_NULL_HANDLE:handoff,consumed); }
          }
-         if (!d->uncertain) { std::lock_guard<std::mutex> guard(c->mutex);c->images[k].acquired=false;c->available.notify_all(); }
+         if (!d->uncertain) {
+            if (c->newest) c->newest->release(k);
+            else { std::lock_guard<std::mutex> guard(c->mutex);c->images[k].acquired=false;c->available.notify_all(); }
+         }
       }
       if (info->pResults) info->pResults[j]=result;
       if (result!=VK_SUCCESS) overall=result;
@@ -909,6 +1215,13 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateMetalSurfaceEXT(
 }
 extern "C" void nvkbridgeGetStats(uint64_t out[7]) {
    out[0]=copies;out[1]=copy_bytes;out[2]=drawable_ns;out[3]=producer_ns;out[4]=import_failures;out[5]=0;out[6]=0;
+}
+// The swapchains that show the newest frame, for the process: frames handed to a presentation thread, frames it
+// showed, frames overtaken or given up, frames it could not show, nanoseconds it waited for the layer. count: how
+// many of them out[] has room for.
+extern "C" void nvkbridgeGetPresentStats(uint64_t *out,uint32_t count) {
+   const uint64_t all[5]={newest_presented,newest_shown,newest_dropped,newest_failed,newest_drawable_ns};
+   for (uint32_t j=0;out && j<count && j<5;j++) out[j]=all[j];
 }
 extern "C" void nvkbridgeSetPresentObserver(PresentObserver observer) { present_observer=observer; }
 // Loader/ICD interface. The frontend already owns portable surfaces and
