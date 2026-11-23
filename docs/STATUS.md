@@ -1,7 +1,7 @@
 # Fork status and evidence — 2026-11-23
 
 This is the current snapshot of TheFormidable's `fable` branch with [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)
-merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.15: the development package version, not
+and [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.15: the development package version, not
 a published or qualified release. 3.0.1 to 3.0.15 are merged; there is no 3.0.10. 3.0.14 adds statistics of the shader
 compiler, a development tool tested on Linux only. 3.0.15 compiles a heavy graphics shader again with fewer registers
 when that runs more warps per SM, on by default with `NAK_OCC_TARGET=0` as the way back, host-tested only. The upstream baseline
@@ -38,7 +38,7 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.13 at a79482f3 | Linux only: `test_nvrm_pat.c` and `test_nvrm_pat.py` pass, the switch registry check passes, the new kernel code compiled for macOS in a stub unit with its instructions in the intended order | Not built on a Mac, not installed: the first start and the first wake with NVRM writing the table itself, and the installer's DLSS step run by default |
 | Onboard sound on macOS 26 (PR #17) | On the RTX 5050 machine with `alcid=66` in boot-args only the NVIDIA display outputs appeared; removing it brought the onboard outputs back | Other boards and codecs |
 | 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18) | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script): the fork's NVK built on Mesa's nouveau drm-shim as shader model 120, all 300 corpus stages compile, `test_nak_stats.py` passes |
-| 3.0.15 (more warps per SM for heavy shaders) | Linux only, host-tested only: the corpus does not change; of ATM10's 409 stages, 27 fragment stages gain warps (28 % more over them) for 2.6 % more instructions, with 4510 new spill and fill instructions to local memory; `NAK_OCC_TARGET=0` gives 3.0.14's output; `test_nak_occ_target.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
+| 3.0.15, [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) | Linux only, host-tested only: the corpus does not change; of ATM10's 409 stages, 27 fragment stages gain warps (28 % more over them) for 2.6 % more instructions, with 4510 new spill and fill instructions to local memory; `NAK_OCC_TARGET=0` gives 3.0.14's output; `test_nak_occ_target.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
 [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md).
