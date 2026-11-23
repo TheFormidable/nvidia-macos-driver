@@ -8,12 +8,12 @@ and 3D-controller PCI classes, then asks NVIDIA's own supported-device gates to 
 A card being in the table doesn't mean a given laptop works: its display wiring, firmware and BAR
 setup still have to cooperate.
 
-| Family | Examples covered by the device table | Recorded physical evidence (not a 3.0.3 certification) |
+| Family | Examples covered by the device table | Recorded physical evidence (not a certification of any 3.0.x build) |
 | --- | --- | --- |
 | Turing | GTX 1650/1660, RTX 20, TITAN RTX, Quadro T1000/T2000/RTX, NVIDIA T400/T600/T1000, T500/T550/T600/T1200 laptop | Pending |
 | Ampere | RTX 30, RTX A workstation and laptop cards | Pending |
 | Ada | RTX 40, supported RTX workstation and laptop cards | Pending |
-| Blackwell | RTX 50 and supported RTX PRO cards | Upstream RTX 5060 automated; RTX 5070/5080 reported working. Fork RTX 5050: desktop, card checks and scoped GPU Caps 1/2B validation. |
+| Blackwell | RTX 50 and supported RTX PRO cards | Upstream RTX 5060 automated; RTX 5070/5080 reported working. Fork RTX 5050 (macOS 26.7.3): desktop, card checks (3.0.1, 3.0.7), games on OpenGL through Zink and on the Vulkan runtime with the builds through 3.0.12, and scoped GPU Caps 1/2B validation. |
 
 For the fork's exact build and test boundaries, see [STATUS.md](STATUS.md). Device ID coverage does
 not imply feature parity, nor does a successful boot prove every graphics or control path.

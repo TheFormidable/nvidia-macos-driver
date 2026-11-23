@@ -127,11 +127,13 @@ two declarations the stand-in lacks (`CGSizeMake`, `CALayer.opaque`) added for t
 wiring passes this repository's tests. Since then it has run on one Mac with this tree's NVK (AMD Ryzen 5 5500, RTX
 5050, macOS 26.7.3, one display at 100 Hz): Minecraft 26.3 without mods renders through it. There, with vertical sync
 off, the game stood at 200 frames a second through 3.0.8, its render thread 69 % inside `vkQueuePresentKHR` and most of
-that waiting for the layer's next drawable; 3.0.9's presentation thread comes from that capture (CHANGELOG.md) and has
-not been built on a Mac or run on a card.
+that waiting for the layer's next drawable; 3.0.9's presentation thread comes from that capture (CHANGELOG.md). 3.0.9
+and 3.0.11 were then built on that Mac without a warning and installed there (2026-11-22); the Mac restarted without a
+fault, and with 3.0.9 its owner read up to 1000 frames a second on the game's own counter. No capture was taken, and
+no card check presents through the thread (`window_check` sets the present observer, `smoke` uses FIFO).
 
-Limits: one window per swapchain, formats `B8G8R8A8_SRGB` and `B8G8R8A8_UNORM` only, FIFO and immediate present modes,
-and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each copy allocates
+Limits: one window per swapchain, formats `B8G8R8A8_SRGB` and `B8G8R8A8_UNORM` only, the FIFO, IMMEDIATE and (since
+3.0.11) MAILBOX present modes, and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each copy allocates
 and imports its target and is waited for on the CPU. That import and the mark after the copy are two kernel calls
 per frame that take the accelerator's lock. On the synchronous path the frontend holds its device's submit lock during
 both, so the application's own queue submissions wait as well; a presentation thread holds that lock for the copy's
