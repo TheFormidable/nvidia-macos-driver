@@ -2,8 +2,8 @@
 """NAK_STATS=1 writes one JSON line per compiled shader stage, and the corpus and the diff tool read them
 (nvk/nvk-nak-stats.patch, tools/nak-corpus/, tools/nak_stats_diff.py). No Mesa tree is needed here:
 
-  the chain    the patch is the last of the 3.0 chain and in no other, changes src/nouveau/compiler/nak/api.rs alone,
-               and only adds lines
+  the chain    the patch follows nvk-tex-uhandle-safe in the 3.0 chain (only nvk-nak-occ-target after it), is in no
+               other, changes src/nouveau/compiler/nak/api.rs alone, and only adds lines
   the switch   the added code reads NAK_STATS once, through a OnceLock, and is on only for the value 1; its one
                eprintln! and its one call of nak_stats_line are inside `if nak_stats_on()`; NAK_STATS has a row in
                tools/switches.tsv and is among the switches the cache-key test exempts
@@ -195,7 +195,10 @@ def corpus_problems(baseline_text):
 arm("nvk/nvk-nak-stats.patch exists", PATCH.is_file())
 text = PATCH.read_text() if PATCH.is_file() else ""
 ch = chains()
-arm("the patch is the last of the 3.0 chain", ch.get("3.0", [])[-1:] == ["nvk-nak-stats"], ch.get("3.0", [])[-3:])
+c30 = ch.get("3.0", [])
+arm("the patch is in the 3.0 chain right after nvk-tex-uhandle-safe, and only nvk-nak-occ-target follows it",
+    "nvk-nak-stats" in c30 and c30[c30.index("nvk-nak-stats") - 1:] in (["nvk-tex-uhandle-safe", "nvk-nak-stats"],
+    ["nvk-tex-uhandle-safe", "nvk-nak-stats", "nvk-nak-occ-target"]), c30[-3:])
 arm("the patch is in no other chain", all("nvk-nak-stats" not in v for k, v in ch.items() if k != "3.0"))
 files = re.findall(r"^\+\+\+ b/(\S+)", text, re.M)
 arm("the patch changes api.rs alone", files == ["src/nouveau/compiler/nak/api.rs"], files)

@@ -1,0 +1,171 @@
+nvk-nak-occ-target: a heavy graphics shader is built again under a lower register cap when it gains warps (3.0.15).
+NullMoth's own change (not an upstream Mesa commit).
+
+Phase 1 of the compiler work. The register file of an SM holds 65536 registers, so a shader's register count sets how
+many warps an SM can keep in flight (max_warps_per_sm: GPRs in steps of 8, warps in steps of 4); a fragment shader
+at 104 registers runs 16 warps per SM, at 80 it runs 24. A shader that waits on textures or global memory hides that
+wait with other warps, so fewer registers can be worth a few more instructions.
+
+For a vertex, tessellation, geometry or fragment shader that ends below 32 warps per SM, samples a texture or reads
+global memory, and has no register budget of its own (NVMTL's RAW budget on SM 120), nak_compile_shader_internal builds
+it again with assign_regs capped at the largest register count that gains warps (the cap goes through the existing
+NVMTL_RA_BUDGET hook, never below the hardware-reserved registers plus 32), and keeps the new build only when it really
+fits under the cap, really gains warps, and has no more than 5 % more instructions than the first build. It tries at
+most twice, a step lower each time, and a build that panics is dropped. Compute shaders and shaders at 32 warps or more
+are never rebuilt.
+
+On by default. NAK_OCC_TARGET=0 (read once per process) keeps the first build always, which is the compiler of 3.0.14
+to the instruction; the switch is in the shader cache key table of nvk-nak-switch-key, so binaries built under one
+setting are not served under the other.
+diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
+--- a/src/nouveau/compiler/nak/api.rs
++++ b/src/nouveau/compiler/nak/api.rs
+@@ -3,7 +3,7 @@
+ 
+ use crate::from_nir::*;
+ use crate::ir::{
+-    max_warps_per_sm, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
++    max_warps_per_sm, Op, Shader, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
+     ShaderStageInfo,
+ };
+ use crate::sph;
+@@ -535,6 +535,75 @@
+     fn drop(&mut self) { NVMTL_RA_BUDGET.with(|v| v.set(self.old)); }
+ }
+ 
++/// nvk-nak-occ-target (3.0.15): a graphics stage below this many warps per SM (of 48 on SM120) is tried again under
++/// tighter register ceilings. The heavy fragment shaders of a shader pack sit at 16 to 28.
++const NAK_OCC_TRY_BELOW: u32 = 32;
++/// nvk-nak-occ-target: a build with more warps is kept only if it has at most this many percent more instructions
++/// (spill and fill instructions included) than the build without a ceiling.
++const NAK_OCC_MAX_GROWTH_PCT: u64 = 5;
++
++/// nvk-nak-occ-target: on unless NAK_OCC_TARGET=0 (read once per process).
++fn nak_occ_target_on() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| env::var("NAK_OCC_TARGET").map_or(true, |v| v != "0"))
++}
++
++/// nvk-nak-occ-target: the stages it applies to. Compute, kernels, task and mesh shaders keep their own rules
++/// (the prepass pick above, the RAW cap).
++fn nak_occ_stage(stage: mesa_shader_stage) -> bool {
++    stage == MESA_SHADER_VERTEX
++        || stage == MESA_SHADER_TESS_CTRL
++        || stage == MESA_SHADER_TESS_EVAL
++        || stage == MESA_SHADER_GEOMETRY
++        || stage == MESA_SHADER_FRAGMENT
++}
++
++/// nvk-nak-occ-target: more warps only help a shader that waits on memory: one with a texture or global access.
++fn nak_occ_hides_latency(s: &Shader) -> bool {
++    if s.info.uses_global_mem {
++        return true;
++    }
++    let mut tex = false;
++    s.for_each_instr(&mut |instr| {
++        tex |= matches!(
++            &instr.op,
++            Op::Tex(_) | Op::Tld(_) | Op::Tld4(_) | Op::Txd(_) | Op::Tmml(_)
++        );
++    });
++    tex
++}
++
++/// nvk-nak-occ-target: the largest physical register count (a multiple of 8, hardware-reserved registers included)
++/// that gives more than `warps` warps per SM, or None when no such count leaves room for NAK's allocator (it needs
++/// 18 above the reserved ones; 32 is asked here) or the SM is already at its most warps.
++fn nak_occ_ceiling(sm: &ShaderModelInfo, warps: u32) -> Option<u32> {
++    let floor = sm.hw_reserved_gprs() + 32;
++    let mut g = 256u32;
++    while g >= floor {
++        if max_warps_per_sm(sm, g) > warps {
++            return Some(g);
++        }
++        g -= 8;
++    }
++    None
++}
++
++// nvk-nak-occ-target: the register ceiling of the build being tried (0 = none), read in the build closure.
++thread_local! {
++    static NAK_OCC_CEILING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
++}
++struct NakOccCeilingGuard(u32);
++impl NakOccCeilingGuard {
++    fn new(ceiling: u32) -> Self {
++        Self(NAK_OCC_CEILING.with(|c| c.replace(ceiling)))
++    }
++}
++impl Drop for NakOccCeilingGuard {
++    fn drop(&mut self) {
++        NAK_OCC_CEILING.with(|c| c.set(self.0));
++    }
++}
++
+ /// nvk-nak-stats: NAK_STATS=1 (read once per process) turns on the per-shader JSON line.
+ fn nak_stats_on() -> bool {
+     static ON: OnceLock<bool> = OnceLock::new();
+@@ -615,10 +684,14 @@
+             pass!(s, opt_instr_sched_prepass);
+         }
+         {
+-            let cap = if nak.sm == 120 { unsafe { nvmtl_raw_budget(nir) } } else { 0 };
++            let raw = if nak.sm == 120 { unsafe { nvmtl_raw_budget(nir) } } else { 0 };
++            // nvk-nak-occ-target: with no RAW cap, the register ceiling of an occupancy try (0 = none) is the cap.
++            let cap = if raw != 0 { raw } else { NAK_OCC_CEILING.with(|c| c.get()) };
+             let guard = NvmtlRaBudgetGuard::new(cap);
+             pass!(s, assign_regs);
+-            guard.verify(u32::from(s.info.num_gprs) + sm.hw_reserved_gprs());
++            if raw != 0 {
++                guard.verify(u32::from(s.info.num_gprs) + sm.hw_reserved_gprs());
++            }
+         }
+         pass!(s, lower_par_copies);
+         pass!(s, lower_copy_swap);
+@@ -658,6 +731,46 @@
+         }
+     };
+ 
++    // nvk-nak-occ-target (3.0.15): a graphics stage that keeps fewer than NAK_OCC_TRY_BELOW warps per SM is built
++    // again under the register ceiling of the next occupancy step, then of the one after, and the build with the most
++    // warps is kept if it has at most NAK_OCC_MAX_GROWTH_PCT % more instructions than the first. NAK_OCC_TARGET=0
++    // keeps the first build, as 3.0.14 does.
++    let s = if nak_occ_target_on()
++        && nak_occ_stage(nir.info.stage())
++        && !(nak.sm == 120 && unsafe { nvmtl_raw_budget(nir) } != 0)
++    {
++        let first_instrs = s.info.num_instrs;
++        let mut best = s;
++        let mut warps = best.info.max_warps_per_sm;
++        if warps < NAK_OCC_TRY_BELOW && nak_occ_hides_latency(&best) {
++            for _ in 0..2 {
++                let Some(ceiling) = nak_occ_ceiling(&sm, warps) else {
++                    break;
++                };
++                let tried = {
++                    let _c = NakOccCeilingGuard::new(ceiling);
++                    panic::catch_unwind(panic::AssertUnwindSafe(|| build(!never))).ok()
++                };
++                let Some(c) = tried else {
++                    break;
++                };
++                let physical = u32::from(c.info.num_gprs) + sm.hw_reserved_gprs();
++                if physical > ceiling
++                    || c.info.max_warps_per_sm <= warps
++                    || u64::from(c.info.num_instrs) * 100
++                        > u64::from(first_instrs) * (100 + NAK_OCC_MAX_GROWTH_PCT)
++                {
++                    break;
++                }
++                warps = c.info.max_warps_per_sm;
++                best = c;
++            }
++        }
++        best
++    } else {
++        s
++    };
++
+     // nvk-nak-stats (3.0.14): NAK_STATS=1 prints one JSON line per compiled shader on stderr, for the corpus runs of
+     // tools/nak-corpus and tools/nak_stats_diff.py. It reads the finished shader and changes nothing in it.
+     if nak_stats_on() {
