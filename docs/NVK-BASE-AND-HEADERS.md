@@ -86,7 +86,8 @@ runner (macos-15-intel: 4 processors, macOS 15, Xcode 26.3 with the 26.2 SDK) bu
 `nvk-tex-uhandle-safe` of 3.0.12: in the cross-build for macOS, and in a Linux build of this NVK and NAK on Mesa's
 nouveau drm-shim as a GB207 (shader model 120), where pipelines compile without a card and nothing is drawn. No check
 of the image on a card has been reported. `nvk-nak-stats` of 3.0.14 (`NAK_STATS=1`, a line of compiler statistics per shader)
-has been compiled in that Linux build only, not cross-built for macOS. Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa
+has been compiled in that Linux build only, not cross-built for macOS, and so has `nvk-nak-occ-target` of 3.0.15
+(a heavy graphics shader built again with fewer registers for more warps per SM, `NAK_OCC_TARGET=0` to go back). Mesa's CI has no RTX 50, and the scheduling patch has not been in a Mesa
 release. The library's build id changes, so shader caches written by a 2.9 build are not reused and shaders are
 compiled again once.
 

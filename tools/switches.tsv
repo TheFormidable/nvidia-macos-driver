@@ -83,6 +83,7 @@ env	MPEG4_TRY_H263	dev	unset	2.9	-	unreviewed
 env	NAK_B83_ARRAYS	dev	unset	2.9	-	unreviewed
 env	NAK_NO_LICM	dev	unset (the path is on)	2.9	-	unreviewed
 env	NAK_NO_PIN_ADDR	dev	unset (the path is on)	2.9	-	unreviewed
+env	NAK_OCC_TARGET	escape	on (NAK_OCC_TARGET=0 in the environment of the application: every shader keeps the build without a register cap, as in 3.0.14)	3.0.15	3.2	A vertex, tessellation, geometry or fragment shader that ends below 32 warps per SM and samples a texture or reads global memory is built again by NAK under a lower register cap, up to twice, and the build with more warps per SM is kept when it has at most 5 % more instructions; compute shaders and shaders at 32 warps or more are never rebuilt. In the shader cache key (nvk-nak-switch-key). The environment only: NAK reads it with std::env, not from the settings file.
 env	NAK_QMD_NO_PREFETCH	dev	unset (the path is on)	2.9	-	unreviewed
 env	NAK_SMEM_TARGET_CAP_KB	dev	unset	2.9	-	unreviewed
 env	NAK_STATS	diag	unset	3.0.14	3.2	writes one JSON line of shader-compiler statistics per compiled shader stage on stderr (tools/nak-corpus, tools/nak_stats_diff.py); changes no code
