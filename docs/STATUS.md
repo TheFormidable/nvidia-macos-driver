@@ -38,7 +38,7 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.13 at a79482f3 | Linux only: `test_nvrm_pat.c` and `test_nvrm_pat.py` pass, the switch registry check passes, the new kernel code compiled for macOS in a stub unit with its instructions in the intended order | Not built on a Mac, not installed: the first start and the first wake with NVRM writing the table itself, and the installer's DLSS step run by default |
 | Onboard sound on macOS 26 (PR #17) | On the RTX 5050 machine with `alcid=66` in boot-args only the NVIDIA display outputs appeared; removing it brought the onboard outputs back | Other boards and codecs |
 | 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18) | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script): the fork's NVK built on Mesa's nouveau drm-shim as shader model 120, all 300 corpus stages compile, `test_nak_stats.py` passes |
-| 3.0.15, [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) | Linux only, host-tested only: the corpus does not change; of ATM10's 409 stages, 27 fragment stages gain warps (28 % more over them) for 2.6 % more instructions, with 4510 new spill and fill instructions to local memory; `NAK_OCC_TARGET=0` gives 3.0.14's output; `test_nak_occ_target.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
+| 3.0.15, [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) | Built on the RTX 5050 machine from fdbc830d without a warning (before the WindowServer rule), not yet run on the card. On Linux: the corpus does not change; of ATM10's 409 stages, 27 fragment stages gain warps (28 % more over them) for 2.6 % more instructions, with 4510 new spill and fill instructions to local memory; `NAK_OCC_TARGET=0` gives 3.0.14's output; `test_nak_occ_target.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
 [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md).
@@ -72,8 +72,8 @@ Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](G
 - **Shader-compiler statistics (3.0.14):** `NAK_STATS=1` writes one JSON line per compiled shader stage;
   `tools/nak-corpus/` and `tools/nak_stats_diff.py` measure a compiler change over a fixed set of 300 stages.
   Host-tested only: built and run on Linux on Mesa's nouveau drm-shim as shader model 120, never on a Mac or a card.
-- **More warps per SM for heavy graphics shaders (3.0.15):** on by default, `NAK_OCC_TARGET=0` goes back. Host-tested
-  only: the figures are the compiler's own on Linux; no frame rate or GPU utilisation has been measured on a card.
+- **More warps per SM for heavy graphics shaders (3.0.15):** on by default, `NAK_OCC_TARGET=0` goes back, never
+  in WindowServer. Host-tested only: the figures are the compiler's own on Linux; no frame rate or GPU utilisation has been measured on a card.
 - **Other gaps:** full multi-GPU acceleration, hybrid laptop offload, hardware ray-tracing opt-ins and Windows/Apple
   feature parity require dedicated evidence. CUDA and proprietary firmware capabilities are not implemented by this
   fork. No card other than the RTX 5050 has run a 3.0.x build of this fork.

@@ -12,7 +12,8 @@ it again with assign_regs capped at the largest register count that gains warps 
 NVMTL_RA_BUDGET hook, never below the hardware-reserved registers plus 32), and keeps the new build only when it really
 fits under the cap, really gains warps, and has no more than 5 % more instructions than the first build. It tries at
 most twice, a step lower each time, and a build that panics is dropped. Compute shaders and shaders at 32 warps or more
-are never rebuilt.
+are never rebuilt, and nothing is rebuilt in WindowServer: it has no shell environment and NAK does not read
+nvrm610.conf, so the way back below could not reach it, and there the compiler stays as it was in 3.0.14.
 
 On by default. NAK_OCC_TARGET=0 (read once per process) keeps the first build always, which is the compiler of 3.0.14
 to the instruction; the switch is in the shader cache key table of nvk-nak-switch-key, so binaries built under one
@@ -29,7 +30,7 @@ diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
      ShaderStageInfo,
  };
  use crate::sph;
-@@ -535,6 +535,75 @@
+@@ -535,6 +535,84 @@
      fn drop(&mut self) { NVMTL_RA_BUDGET.with(|v| v.set(self.old)); }
  }
  
@@ -44,6 +45,15 @@ diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
 +fn nak_occ_target_on() -> bool {
 +    static ON: OnceLock<bool> = OnceLock::new();
 +    *ON.get_or_init(|| env::var("NAK_OCC_TARGET").map_or(true, |v| v != "0"))
++}
++
++/// nvk-nak-occ-target: never in WindowServer. It has no shell environment and NAK does not read nvrm610.conf, so
++/// NAK_OCC_TARGET=0 could not reach it: there the compiler stays as it was in 3.0.14 (read once per process).
++fn nak_occ_in_windowserver() -> bool {
++    static WS: OnceLock<bool> = OnceLock::new();
++    *WS.get_or_init(|| {
++        env::current_exe().map_or(false, |p| p.file_name().map_or(false, |n| n == "WindowServer"))
++    })
 +}
 +
 +/// nvk-nak-occ-target: the stages it applies to. Compute, kernels, task and mesh shaders keep their own rules
@@ -105,7 +115,7 @@ diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
  /// nvk-nak-stats: NAK_STATS=1 (read once per process) turns on the per-shader JSON line.
  fn nak_stats_on() -> bool {
      static ON: OnceLock<bool> = OnceLock::new();
-@@ -615,10 +684,14 @@
+@@ -615,10 +693,14 @@
              pass!(s, opt_instr_sched_prepass);
          }
          {
@@ -122,7 +132,7 @@ diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
          }
          pass!(s, lower_par_copies);
          pass!(s, lower_copy_swap);
-@@ -658,6 +731,46 @@
+@@ -658,6 +740,47 @@
          }
      };
  
@@ -131,6 +141,7 @@ diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
 +    // warps is kept if it has at most NAK_OCC_MAX_GROWTH_PCT % more instructions than the first. NAK_OCC_TARGET=0
 +    // keeps the first build, as 3.0.14 does.
 +    let s = if nak_occ_target_on()
++        && !nak_occ_in_windowserver()
 +        && nak_occ_stage(nir.info.stage())
 +        && !(nak.sm == 120 && unsafe { nvmtl_raw_budget(nir) } != 0)
 +    {

@@ -55,7 +55,8 @@
 #        tools/nak-corpus/run.sh collects and tools/nak_stats_diff.py compares; unset, nothing is read or written),
 #        then nvk-nak-occ-target (3.0.15: a vertex, tessellation, geometry or fragment shader below 32 warps per SM that
 #        samples a texture or reads global memory is built again under a lower register cap, and the build with more
-#        warps is kept when it has at most 5 % more instructions; on by default, NAK_OCC_TARGET=0 keeps the first build).
+#        warps is kept when it has at most 5 % more instructions; on by default, never in WindowServer, NAK_OCC_TARGET=0
+#        keeps the first build).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
