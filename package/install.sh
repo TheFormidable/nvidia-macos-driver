@@ -894,6 +894,15 @@ amfi_note() {
   esac
 }
 amfi_note "$ba"
+# On macOS 26 there is no AppleHDA, so AppleALC (alcid=, alcverbs) has nothing to drive; NMXAudio leaves an onboard
+# controller alone while either is set ("another codec stack is switched on"), and the Mac has no speakers, headphone
+# jack or microphone, only the display outputs. A user who restored AppleHDA (SimpleHDA, a root patch) wants exactly that.
+alc_note() {
+  case " $1 " in *" alcid="*|*" alcverbs"*|*" -alcverbs"*)
+    echo "   NOTE: boot-args carry AppleALC's 'alcid' or 'alcverbs'. macOS 26 has no AppleHDA for AppleALC to use, and the audio driver (NMXAudio) leaves your onboard sound to AppleALC while either is set, so the speakers, headphone jack and microphone do not appear. Remove them from boot-args in your OpenCore config.plist (README: Wiring into an existing OpenCore setup), unless you restored AppleHDA yourself";;
+  esac
+}
+case " $KEXTS " in *" NMXAudio "*) alc_note "$ba";; esac
 # WhateverGreen's boot screen copy (on unless gfxrst=4) reads a console mapping macOS may already have freed when this
 # driver's display first opens, and the Mac panics in IOFramebuffer::postOpen.
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
