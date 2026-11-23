@@ -13,8 +13,14 @@
  * machine runs, and a slow BAR1 looks the same as a slow link from user space.
  *
  * The kext reads the table once at start on the CPU that starts it and publishes the value and this verdict as
- * read-only sysctls (debug.nvrm_pat, debug.nvrm_pat_wc, debug.nvrm_pat_why) and one log line. It decides nothing: no
- * code path reads the verdict, nothing is written to any MSR, and no mapping changes. */
+ * read-only sysctls (debug.nvrm_pat, debug.nvrm_pat_wc, debug.nvrm_pat_why) and one log line.
+ *
+ * Since 3.0.13 it also puts entry 6 back (nvrm_pat_with_wc6): when the table it finds has anything but WC there, it
+ * makes on every CPU the one change stock XNU's pat_init makes (entry 6 to WC, every other entry left as it was), at
+ * start and again after every wake, because the patched kernel writes its own table back on each CPU at wake. On the
+ * default AMD_Vanilla table that gives 0x0001010600070106, the table a test boot from a USB stick ran with on a
+ * Ryzen 5 5500 and an RTX 5050 under macOS 26.7.3 (2026-11-21, OpenCore's Replace changed by one byte). The boot
+ * argument nvpatwc=0 leaves the table as the kernel wrote it, as in 3.0.12. */
 #ifndef NVRM_PAT_H
 #define NVRM_PAT_H
 
@@ -36,6 +42,8 @@ enum { NVRM_PAT_UC = 0, NVRM_PAT_WC = 1, NVRM_PAT_WT = 4, NVRM_PAT_WP = 5, NVRM_
 #define NVRM_PAT_MACOS     0x0001040600070406ull   /* the reset value after stock XNU's pat_init: entry 6 is WC */
 #define NVRM_PAT_ALGREY    0x0007010600070106ull   /* AMD_Vanilla "Algrey / Zormeister | Fix PAT" (enabled by default) */
 #define NVRM_PAT_SHANEEE   0x0606060606060606ull   /* AMD_Vanilla "Shaneee / Zormeister | Fix PAT" */
+#define NVRM_PAT_ALGREY_WC6  0x0001010600070106ull /* the Algrey table with entry 6 put back to WC (nvrm_pat_with_wc6) */
+#define NVRM_PAT_SHANEEE_WC6 0x0601060606060606ull /* the Shaneee table with entry 6 put back to WC */
 
 /* The five high bits of every entry are reserved and must be zero. */
 #define NVRM_PAT_RESERVED_MASK 0xF8F8F8F8F8F8F8F8ull
@@ -103,6 +111,8 @@ static inline void nvrm_pat_decode(uint64_t pat, int read_ok, struct nvrm_pat_ve
              : pat == NVRM_PAT_ALGREY   ? "AMD_Vanilla Algrey fix-PAT"
              : pat == NVRM_PAT_SHANEEE  ? "AMD_Vanilla Shaneee fix-PAT"
              : pat == NVRM_PAT_POWER_ON ? "the power-on table, entry 6 never set"
+             : pat == NVRM_PAT_ALGREY_WC6  ? "AMD_Vanilla Algrey fix-PAT with entry 6 put back to WC"
+             : pat == NVRM_PAT_SHANEEE_WC6 ? "AMD_Vanilla Shaneee fix-PAT with entry 6 put back to WC"
              : "unrecognised";
     switch (v->pa6) {
     case NVRM_PAT_WC:
@@ -128,6 +138,18 @@ static inline void nvrm_pat_decode(uint64_t pat, int read_ok, struct nvrm_pat_ve
         v->words = "write-combined mappings are write-through or write-protect: CPU writes through BAR1 are not combined";
         break;
     }
+}
+
+/* The table with entry 6 set to write-combining and the other seven as they were: what stock XNU's pat_init writes
+ * (mtrr.c, mtrr_update_action: pat &= ~(0xFF << 48); pat |= 1 << 48), so the five reserved bits of the entry are
+ * cleared too. */
+static inline uint64_t nvrm_pat_with_wc6(uint64_t pat) { return (pat & ~(0xFFull << 48)) | (0x01ull << 48); }
+
+/* Whether the driver changes a table it read: it was read, it holds no reserved encoding (such a table was not
+ * written by any code this file knows, so it is left alone), and entry 6 is not WC already (pat_init's own test). */
+static inline int nvrm_pat_fix_wanted(uint64_t pat, int read_ok)
+{
+    return read_ok && !nvrm_pat_has_reserved(pat) && nvrm_pat_entry(pat, NVRM_PAT_ENTRY_WCOMB) != NVRM_PAT_WC;
 }
 
 #endif

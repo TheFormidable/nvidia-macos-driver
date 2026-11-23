@@ -81,6 +81,7 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvmaxbpc", NVRM_SW_HARDWARE },
     { "nvmultigpu", NVRM_SW_SETTING },
     { "nvoffbar", NVRM_SW_RECOVERY },
+    { "nvpatwc", NVRM_SW_ESCAPE },
     { "nvregdwords", NVRM_SW_HARDWARE },
     { "nvrmacpibl", NVRM_SW_HARDWARE },
     { "nvrmaspm", NVRM_SW_HARDWARE },
@@ -105,5 +106,5 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvselector", NVRM_SW_HARDWARE },
     { "nvzink", NVRM_SW_ESCAPE },
 };
-#define NVRM_SWITCH_COUNT 99u
+#define NVRM_SWITCH_COUNT 100u
 #endif

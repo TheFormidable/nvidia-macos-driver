@@ -54,8 +54,39 @@ int main(void)
           "the power-on table (0x0007040600070406, pat_init's write replaced by nothing): not write-combined, named");
 
     v = dec(0x0001010600070106ull, 1);
-    CHECK(v.wc == NVRM_PAT_WC_YES && !strcmp(v.table, "unrecognised"),
-          "a hand-fixed Algrey table with entry 6 set to WC: write-combined, and not passed off as a known table");
+    CHECK(v.wc == NVRM_PAT_WC_YES && strstr(v.table, "Algrey") && strstr(v.table, "put back to WC"),
+          "the Algrey table with entry 6 put back to WC (what NVRM leaves since 3.0.13, and the USB test boot's table): write-combined, named");
+    v = dec(NVRM_PAT_SHANEEE_WC6, 1);
+    CHECK(v.wc == NVRM_PAT_WC_YES && strstr(v.table, "Shaneee") && strstr(v.table, "put back to WC"),
+          "the Shaneee table with entry 6 put back to WC: write-combined, named");
+
+    /* 3.0.13: the change NVRM makes, the one stock XNU's pat_init makes */
+    CHECK(nvrm_pat_with_wc6(NVRM_PAT_ALGREY) == 0x0001010600070106ull, "Algrey's table with entry 6 to WC is 0x0001010600070106 (the USB test's)");
+    CHECK(nvrm_pat_with_wc6(NVRM_PAT_SHANEEE) == NVRM_PAT_SHANEEE_WC6 && NVRM_PAT_SHANEEE_WC6 == 0x0601060606060606ull,
+          "Shaneee's table with entry 6 to WC: only entry 6 changes");
+    CHECK(nvrm_pat_with_wc6(NVRM_PAT_POWER_ON) == NVRM_PAT_MACOS, "the power-on table with entry 6 to WC is macOS's own");
+    CHECK(nvrm_pat_with_wc6(NVRM_PAT_MACOS) == NVRM_PAT_MACOS, "macOS's own table is left as it is");
+    {
+        const uint64_t t = 0x0007010600070106ull | (0x08ull << 48);   /* a reserved bit inside entry 6 */
+        CHECK(nvrm_pat_with_wc6(t) == 0x0001010600070106ull, "the whole byte of entry 6 is rewritten, reserved bits cleared (as pat_init)");
+    }
+    {
+        int i, others_kept = 1;
+        static const uint64_t tabs[] = { NVRM_PAT_ALGREY, NVRM_PAT_SHANEEE, NVRM_PAT_POWER_ON, 0x0004040600070406ull, 0x0000040600070406ull };
+        size_t k;
+        for (k = 0; k < sizeof tabs / sizeof tabs[0]; k++)
+            for (i = 0; i < 8; i++)
+                if (i != 6 && nvrm_pat_entry(nvrm_pat_with_wc6(tabs[k]), (unsigned)i) != nvrm_pat_entry(tabs[k], (unsigned)i)) others_kept = 0;
+        CHECK(others_kept, "the other seven entries are never changed");
+    }
+    CHECK(nvrm_pat_fix_wanted(NVRM_PAT_ALGREY, 1) && nvrm_pat_fix_wanted(NVRM_PAT_SHANEEE, 1) && nvrm_pat_fix_wanted(NVRM_PAT_POWER_ON, 1)
+          && nvrm_pat_fix_wanted(0x0004040600070406ull, 1) && nvrm_pat_fix_wanted(0x0000040600070406ull, 1),
+          "a table with UC-, WB, UC or WT in entry 6 is changed");
+    CHECK(!nvrm_pat_fix_wanted(NVRM_PAT_MACOS, 1) && !nvrm_pat_fix_wanted(NVRM_PAT_ALGREY_WC6, 1),
+          "a table with WC in entry 6 is left alone (so a stock Mac and a second pass write nothing)");
+    CHECK(!nvrm_pat_fix_wanted(NVRM_PAT_ALGREY, 0), "a table that could not be read is left alone");
+    CHECK(!nvrm_pat_fix_wanted(NVRM_PAT_MACOS | (1ull << 51), 1) && !nvrm_pat_fix_wanted(0x0002040600070406ull, 1),
+          "a table with reserved bits or a reserved encoding is left alone");
 
     v = dec(0x0004040600070406ull, 1);
     CHECK(v.wc == NVRM_PAT_WC_NO && v.pa6 == NVRM_PAT_WT && strstr(v.words, "not combined") != NULL,
