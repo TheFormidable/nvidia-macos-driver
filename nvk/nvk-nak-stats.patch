@@ -1,0 +1,108 @@
+nvk-nak-stats: NAK_STATS=1 prints one JSON line per compiled shader stage on stderr (3.0.14).
+NullMoth's own change (not an upstream Mesa commit).
+
+Phase 0 of the compiler work: an instrument that changes nothing. Every later change to NAK is judged by the same
+figures over the same shaders (tools/nak-corpus, compared with tools/nak_stats_diff.py), so the compiler has to say
+them in a form a script reads. NAK already counts most of them (NAK_DEBUG=print writes them as text, and Vulkan's
+pipeline executable statistics show them); what it did not count is how many instructions run on the uniform data
+path, and nothing wrote them one shader per line.
+
+With NAK_STATS=1 (read once per process) nak_compile_shader_internal writes, after the shader is finished and before
+it is encoded, {"nak_stats":1,"stage":..,"sm":..,"blake3":..} followed by instrs, instrs_warp, instrs_uniform, gprs,
+warps_per_sm, static_cycles, spills_to_mem, fills_from_mem, spills_to_reg, fills_from_reg and slm. instrs_uniform
+counts the instructions whose destinations are uniform registers (Instr::is_uniform, the test opt_uniform_instrs uses);
+instrs_warp is the rest. gprs is the count Vulkan's statistics show (hardware-reserved registers included, at least 4).
+blake3 is the hash of the shader's SPIR-V. A compute shader that NAK builds twice reports the build it keeps.
+
+Unset, or set to anything but 1, nothing is read from the shader and nothing is written. The switch changes no code,
+so it is not part of the shader cache key: a shader that comes from a cache is not compiled and prints nothing, which
+is why tools/nak-corpus/run.sh turns the caches off.
+diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
+--- a/src/nouveau/compiler/nak/api.rs
++++ b/src/nouveau/compiler/nak/api.rs
+@@ -535,6 +535,38 @@
+     fn drop(&mut self) { NVMTL_RA_BUDGET.with(|v| v.set(self.old)); }
+ }
+ 
++/// nvk-nak-stats: NAK_STATS=1 (read once per process) turns on the per-shader JSON line.
++fn nak_stats_on() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| env::var("NAK_STATS").map_or(false, |v| v == "1"))
++}
++
++/// nvk-nak-stats: one JSON object on one line, {"nak_stats":1,"stage":"..","sm":N,"blake3":"<hex>",then each field}.
++/// The stage keeps only letters, digits and '_', and the field names are fixed by the caller, so nothing needs
++/// escaping. blake3 is the hash of the shader's SPIR-V (all zero for a shader that did not come from SPIR-V).
++fn nak_stats_line(
++    stage: &str,
++    sm: u8,
++    blake3: &[u8],
++    fields: &[(&str, u64)],
++) -> String {
++    let mut out = String::with_capacity(360);
++    out.push_str("{\"nak_stats\":1,\"stage\":\"");
++    out.extend(stage.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_'));
++    out.push_str("\",\"sm\":");
++    out.push_str(&sm.to_string());
++    out.push_str(",\"blake3\":\"");
++    for b in blake3 {
++        out.push_str(&format!("{:02x}", b));
++    }
++    out.push('"');
++    for (name, value) in fields {
++        out.push_str(&format!(",\"{}\":{}", name, value));
++    }
++    out.push('}');
++    out
++}
++
+ fn nak_compile_shader_internal(
+     nir: *mut nir_shader,
+     dump_asm: bool,
+@@ -626,6 +658,46 @@
+         }
+     };
+ 
++    // nvk-nak-stats (3.0.14): NAK_STATS=1 prints one JSON line per compiled shader on stderr, for the corpus runs of
++    // tools/nak-corpus and tools/nak_stats_diff.py. It reads the finished shader and changes nothing in it.
++    if nak_stats_on() {
++        let mut uniform: u64 = 0;
++        s.for_each_instr(&mut |instr| {
++            if instr.is_uniform() {
++                uniform += 1;
++            }
++        });
++        let stage = unsafe {
++            CStr::from_ptr(_mesa_shader_stage_to_string(nir.info.stage() as u32))
++                .to_str()
++                .unwrap_or("unknown")
++        };
++        let i = &s.info;
++        let instrs = u64::from(i.num_instrs);
++        let gprs = max(4, u32::from(i.num_gprs) + sm.hw_reserved_gprs());
++        eprintln!(
++            "{}",
++            nak_stats_line(
++                stage,
++                nak.sm,
++                &nir.info.source_blake3[..],
++                &[
++                    ("instrs", instrs),
++                    ("instrs_warp", instrs.saturating_sub(uniform)),
++                    ("instrs_uniform", uniform),
++                    ("gprs", u64::from(gprs)),
++                    ("warps_per_sm", u64::from(i.max_warps_per_sm)),
++                    ("static_cycles", i.num_static_cycles),
++                    ("spills_to_mem", u64::from(i.num_spills_to_mem)),
++                    ("fills_from_mem", u64::from(i.num_fills_from_mem)),
++                    ("spills_to_reg", u64::from(i.num_spills_to_reg)),
++                    ("fills_from_reg", u64::from(i.num_fills_from_reg)),
++                    ("slm", u64::from(i.slm_size)),
++                ],
++            )
++        );
++    }
++
+     let mut asm = String::new();
+     if dump_asm {
+         write!(asm, "{}", s).expect("Failed to dump assembly");

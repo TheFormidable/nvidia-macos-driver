@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 45 | 1 | 55 | 405 | 12 |  | 524 |
+| env |  | 6 |  |  | 45 | 1 | 56 | 405 | 12 |  | 525 |
 | bootarg | 4 | 13 | 30 | 21 | 16 |  | 8 | 6 | 2 |  | 100 |
 | sysctl |  | 5 | 4 | 12 |  |  | 380 |  |  |  | 401 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -181,6 +181,7 @@ Each of these does nothing unless it is set.
 | `NAK_NO_PIN_ADDR` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch, nvk/nvk-nak-switch-key.patch |
 | `NAK_QMD_NO_PREFETCH` | dev | unset (the path is on) | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NAK_SMEM_TARGET_CAP_KB` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
+| `NAK_STATS` | diag | unset | 3.0.14 | 3.2 | writes one JSON line of shader-compiler statistics per compiled shader stage on stderr (tools/nak-corpus, tools/nak_stats_diff.py); changes no code | nvk/nvk-nak-stats.patch |
 | `NAK_TEX_UHANDLE` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NAK_TEX_UHANDLE_WHY` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NMXVT` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
