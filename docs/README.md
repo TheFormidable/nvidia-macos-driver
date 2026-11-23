@@ -1,6 +1,7 @@
 # Documentation index
 
-Start with [current status](STATUS.md) and the [main README](../README.md).
+Start with [current status](STATUS.md) and the [main README](../README.md), which lists
+[what is on by default and its ways back](../README.md#what-is-on-by-default-and-the-ways-back).
 The documents below cover the current source tree and its historical design
 records. A historical test applies to its named revision, not all later code.
 

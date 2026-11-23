@@ -81,8 +81,11 @@ Through 3.0.8 the game stood at a multiple of the display's rate with vertical s
 display of 100 Hz there), because every present waited for the window on the game's thread. Since 3.0.9 a present made
 with vertical sync off does not wait for the window: whenever the window can take a frame the runtime shows the newest
 one the game has presented, once it has finished rendering, and a frame that a newer one overtook first is not shown.
-That is meant to let the game's frame rate leave the display's; 3.0.9's change has not been built on a Mac or run on a
-card yet, so what the frame rate becomes is not measured. The game's log says which way a swapchain presents (`NVK
+That lets the game's frame rate leave the display's. 3.0.9 was built and installed on that Mac on 2026-11-22: it
+restarted without a fault, and with vertical sync off its owner read up to 1000 frames a second on the game's own
+counter, where a capture on 3.0.8 had 200. No capture was taken on 3.0.9, so that figure is a reading, not a
+measurement. Since 3.0.11 the runtime also offers the MAILBOX present mode (the newest frame, one for each refresh of
+the display), which an application that prefers it to IMMEDIATE will choose. The game's log says which way a swapchain presents (`NVK
 Bridge: swapchain presentation=newest frame` or `=synchronous`), and when the game closes or resizes its window, how
 many frames it handed over, how many were shown and how many were overtaken (`newest_frames_presented`,
 `newest_frames_shown`, `newest_frames_dropped`).

@@ -71,7 +71,9 @@ Which driver takes which GPU (`kexts/NMGopFB/nm_gopfb.h`, tested on the host):
 3. In OpenCore, turn the `Fix PAT` kernel patch off (the AMD Vanilla `_mtrr_update_action | Fix PAT` entry). With it on,
    macOS maps write-combined memory as uncached and every row of the copy takes about twenty times longer. (PrimeBridge,
    the community project this follows, measured 39.7 microseconds per 7680-byte row with the patch on against 2.0 with it
-   off.) Test from a USB stick first.
+   off.) Test from a USB stick first. Since 3.0.13 NVRM, where it is loaded, puts write-combining back into that
+   table by itself (`sysctl debug.nvrm_pat_wc` reads 1; boot argument `nvpatwc=0` leaves the table alone), which is
+   meant to make this step unnecessary; that has not been run on a hybrid laptop, so keep the step until it has.
 4. Switch it on: `sudo tools/hybrid_switch.sh copy` (boot-arg `nmhybrid=1`). Level 2 behaves as level 1 here.
 5. Restart. To see the log: `log show --last boot --predicate 'eventMessage CONTAINS "NMGopFB"'`. A healthy start prints
    `selected (hybrid level 1)`, `firmware framebuffer WxH pitch P at 0x... (BARn +0x...)`, `provider NMGopFB ...` and

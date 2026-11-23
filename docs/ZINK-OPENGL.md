@@ -1,12 +1,19 @@
 # Native OpenGL through Zink on NVK
 
-On macOS 15.5 or later the accelerator names `NVKZinkGLDriver.bundle` as its OpenGL driver. OpenGL applications then
-are routed to NVK through Mesa's Zink when the guard accepts the context, instead of on Apple's OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's
-renderer for every application, as in 2.9.
+On macOS 15.5 or later the accelerator names `NVKZinkGLDriver.bundle` as its OpenGL driver, with no setting. OpenGL
+applications then are routed to NVK through Mesa's Zink when the guard accepts the context, instead of on Apple's
+OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's renderer for every application, as in 2.9.
 
 Earlier fork hardware testing (round 11, RTX 5050, macOS 26.7.3) found 39 inactive Zink rows, including 38 renderer-word
-guard refusals. The 3.0.3 correction below was built/checked on Linux only; there is no recorded native result
-for that correction. See [STATUS.md](STATUS.md). A selected bundle is not proof that Zink serves a context.
+guard refusals. The 3.0.3 correction below was built and checked on Linux only when it was written. It has since run
+on that card inside 3.0.6 and later: the accelerator reports `IOGLBundleName` `NVKZinkGLDriver`, the OpenGL rows of
+the 3.0.7 card run went through Zink (none inactive), and the games measured there draw through it. That is one card
+on one macOS build: on another, a selected bundle is not proof that Zink serves a context. See [STATUS.md](STATUS.md).
+
+What a swap does today, each on by default and each with one way back (below, "Presentation" and
+"The way out"): it runs one frame ahead of the GPU and keeps its import of the window's video memory (3.0.7), asks
+WindowServer for the window's opacity once and keeps the answer 100 ms (3.0.8), and with the swap interval at 0
+leaves its frame to a sender thread and does not wait for the display (3.0.11).
 
 ## The parts
 
