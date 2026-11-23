@@ -6,7 +6,8 @@ NAK_OCC_TARGET=0 as the way back (nvk/nvk-nak-occ-target.patch, 3.0.15). No Mesa
                src/nouveau/compiler/nak/api.rs alone
   the switch   NAK_OCC_TARGET is read once, through a OnceLock, and only the value 0 turns the pick off; it is an escape
                row of tools/switches.tsv, on by default, and in the shader cache key table of nvk-nak-switch-key
-  the pick     it runs only behind nak_occ_target_on(), for the vertex, tessellation, geometry and fragment stages, not
+  the pick     it runs only behind nak_occ_target_on(), never in WindowServer (whose executable's name is tested once,
+               because NAK_OCC_TARGET=0 cannot reach it), for the vertex, tessellation, geometry and fragment stages, not
                when the shader has a RAW budget of its own, only below NAK_OCC_TRY_BELOW (32) warps and for a shader
                that samples a texture or reads global memory; it tries at most twice, drops a build that panics, and
                keeps a build only if it fits under the cap, gains warps, and has at most NAK_OCC_MAX_GROWTH_PCT (5)
@@ -18,7 +19,8 @@ NAK_OCC_TARGET=0 as the way back (nvk/nvk-nak-occ-target.patch, 3.0.15). No Mesa
                registers plus 32, and None when no count gains warps
   the docs     CHANGELOG.md has a 3.0.15 section that names NAK_OCC_TARGET=0, and docs/STATUS.md says host-tested only
   controls     the same arms over broken copies: the default turned off, compute added to the stages, the 5 % gate
-               raised, the warp check dropped, the key table without the switch, a ceiling that is one step too low.
+               raised, the warp check dropped, the key table without the switch, a ceiling that is one step too low,
+               the pick run in WindowServer too, WindowServer's name misspelt.
                Each has to fail.
 
 What this does not show: that more warps make a frame faster on a card (that is the card round's question: the same
@@ -80,11 +82,15 @@ def pick_problems(add):
         probs.append("NAK_OCC_TRY_BELOW is not 32")
     if not re.search(r"const NAK_OCC_MAX_GROWTH_PCT: u64 = 5;", add):
         probs.append("NAK_OCC_MAX_GROWTH_PCT is not 5")
-    m = re.search(r"let s = if nak_occ_target_on\(\) && nak_occ_stage\(nir\.info\.stage\(\)\) "
+    if not re.search(r'fn nak_occ_in_windowserver\(\) -> bool \{ static WS: OnceLock<bool> = OnceLock::new\(\); '
+                     r'\*WS\.get_or_init\(\|\| \{ env::current_exe\(\)\.map_or\(false, \|p\| p\.file_name\(\)'
+                     r'\.map_or\(false, \|n\| n == "WindowServer"\)\) \}\) \}', add):
+        probs.append("nak_occ_in_windowserver does not test the executable's name once")
+    m = re.search(r"let s = if nak_occ_target_on\(\) && !nak_occ_in_windowserver\(\) && nak_occ_stage\(nir\.info\.stage\(\)\) "
                   r"&& !\(nak\.sm == 120 && unsafe \{ nvmtl_raw_budget\(nir\) \} != 0\) \{(.*?)\} else \{ s \};",
                   add)
     if not m:
-        return probs + ["no pick behind nak_occ_target_on(), the stage filter and the RAW budget"]
+        return probs + ["no pick behind nak_occ_target_on(), the WindowServer test, the stage filter and the RAW budget"]
     p = m.group(1)
     for what, rx in (("the warp and latency test", r"if warps < NAK_OCC_TRY_BELOW && nak_occ_hides_latency\(&best\)"),
                      ("at most two tries", r"for _ in 0\.\.2 \{"),
@@ -212,6 +218,8 @@ CONTROLS = (
     ("the warp check dropped", "|| c.info.max_warps_per_sm <= warps", "", False),
     ("the key table without the switch", '+   "NAK_OCC_TARGET",\n', "", True),
     ("a ceiling one step too low", "return Some(g);", "return Some(g - 8);", False),
+    ("the pick run in WindowServer too", "+        && !nak_occ_in_windowserver()\n", "", False),
+    ("WindowServer's name misspelt", '|n| n == "WindowServer"', '|n| n == "Windowserver"', False),
 )
 for name, old, new, in_key in CONTROLS:
     src = keytext if in_key else text

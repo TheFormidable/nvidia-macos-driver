@@ -5,8 +5,9 @@
 **Not released.** This section describes the branch being prepared as 3.0.15, on top of 3.0.14 (below, not released
 either). It is phase 1 of the shader-compiler work: a heavy graphics shader is compiled a second time with fewer
 registers when that lets more warps share an SM, which helps a shader that spends its time waiting on textures. It is
-on by default and has one way back, `NAK_OCC_TARGET=0`. **Nothing of 3.0.15 has been built on a Mac or run on a card**;
-it is host-tested only, and whether it makes a game faster is the card's question (below, "What ran where").
+on by default and has one way back, `NAK_OCC_TARGET=0`, and is never used in WindowServer. **Nothing of 3.0.15 has
+run on a card yet**; it is host-tested only, and whether it makes a game faster is the card's question (below, "What ran
+where").
 
 ### Fixes and changes
 
@@ -22,6 +23,9 @@ it is host-tested only, and whether it makes a game faster is the card's questio
   new build is kept only when it fits under the cap, gains warps, and has **at most 5 % more instructions** than the
   first build (spill and fill instructions included); then one more step down is tried the same way. A build that
   fails is dropped and the first build is kept. Compute shaders and shaders at 32 warps or more are never rebuilt.
+- **Never in WindowServer.** WindowServer has no shell environment and NAK reads its switches with Rust's
+  `std::env`, not from `nvrm610.conf`, so `NAK_OCC_TARGET=0` could not reach it. NAK tests the name of the process's
+  executable once and, in WindowServer, keeps the compiler of 3.0.14 for every shader.
 - **`NAK_OCC_TARGET` is in the shader cache key** (`nvk/nvk-nak-switch-key.patch`), so a binary built with the pick
   is not served to a process that set `NAK_OCC_TARGET=0`, nor the other way round. With nothing set the key is
   computed as before; the new driver build changes the cache anyway, so the first start of a game compiles its shaders
@@ -49,13 +53,19 @@ it.
 
 ### What ran where
 
-On Linux only. The fork's NVK and NAK (Mesa 26.3.0-rc3 with the whole 3.0 chain, this patch included) were built for
+On the RTX 5050 machine (macOS 26.7.3), the package was built from fdbc830d without a warning: the two new NVK patches
+under macOS's `patch`, Apple's clang and the Mac's Rust, and 3.0.13's NVRM with Apple's clang for the first time;
+`test_nvk_nak_switch_key.py` and `test_nvk_chain.py` pass there. Against the installed 3.0.12 only NVK's three
+libraries, NVRM's binary, `nvrm610.conf` and the macOS 15 NVAccel differ, so the phase can be tried by copying NVK's
+three libraries without a restart. The WindowServer rule came after that build.
+
+On Linux, the fork's NVK and NAK (Mesa 26.3.0-rc3 with the whole 3.0 chain, this patch included) were built for
 x86_64 on Mesa's nouveau drm-shim as a GB207; the corpus and the ATM10 census compiled with and without
 `NAK_OCC_TARGET=0` (one ATM10 program, 342, fails at its draw with GL error 0x502 in both runs, as it did in the
 census of 3.0.12). The new host test
 `tools/test_nak_occ_target.py` passes and fails on 3.0.14; `test_nak_stats.py`, `test_nvk_nak_switch_key.py`,
 `test_nvk_chain.py`, `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_package_licenses.py`,
-`test_tree_layout.py` and `tools/switch_registry.py check` pass. Nothing was built on a Mac and nothing ran on a card.
+`test_tree_layout.py` and `tools/switch_registry.py check` pass. Nothing ran on a card yet.
 The card round that decides it: the same place in ATM10 with the shader pack, frames per second and GPU utilisation,
 once as installed and once with `NAK_OCC_TARGET=0`.
 
