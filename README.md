@@ -11,8 +11,8 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 > installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only
 > inside 3.0.6, and there is no 3.0.10. 3.0.13 has not been built on a Mac or run on a card. 3.0.14 adds statistics
 > of the shader compiler, a development tool ([PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)),
-> tested on Linux only. 3.0.15 compiles a heavy shader again with fewer registers when that runs more warps at once,
-> tested on Linux only.
+> tested on Linux only. 3.0.15 compiles a heavy shader again with fewer registers when that runs more warps at once
+> ([PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20)), tested on Linux only.
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`
