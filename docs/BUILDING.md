@@ -10,7 +10,9 @@ En español: [BUILDING.es.md](BUILDING.es.md).
 > installed over release 2.9 and started on one machine with an RTX 5050: the machine started with it twice, and the
 > installer's fallback job did not put 2.9 back. This is the historical build record through aa27c73.
 > Later RTX 5050 card checks and GPU Caps builds are recorded in [STATUS.md](STATUS.md).
-> The combined 3.0.3 source tree has no recorded native build yet. What ran in the earlier build campaign:
+> Since then 3.0.6 to 3.0.12 were built on the machine with the RTX 5050 itself and installed there; 3.0.7 from an
+> empty folder of build outputs (all 19 components in 512 s with no warning, with the build tools and pinned sources
+> already there). 3.0.13 has no native build yet. What ran in the earlier build campaign:
 >
 > - On one Intel Mac (12 threads, macOS 26.7, Xcode 26.5). At commit 650db45, `./build.sh deps` started from an empty
 >   working directory and built every tool NVK and the translator need into it in 46.5 minutes, without Homebrew. At
@@ -262,7 +264,7 @@ run, and an unknown name stops `build.sh`. A yes/no setting takes `1`, `0`, `yes
 | Variable | Default | Meaning |
 |---|---|---|
 | `NM_BASE_PACKAGE_SHA256` | none | The base package's SHA-256 from the release page (for release 2.9 it is also `NM_PIN_CI_BASEPKG_SHA256` in build/pins.sh); checked before it is used |
-| `NM_PACKAGE_VERSION` | the version of CHANGELOG.md's first heading (`3.0.3`) | Written to the package's `VERSION`. install.sh keeps only digits and dots and records it in `/Library/NullMoth/driver-version` (so `package` stops on a value with anything else: `3.0rc1` would be recorded as `3.01`), the installed version the app's update check and Send logs read. The base package's own `VERSION` is not kept, so an installed tester build is not recorded as that release (2.9). `package` stops when the heading is not a version and this is not set |
+| `NM_PACKAGE_VERSION` | the version of CHANGELOG.md's first heading (`3.0.14`) | Written to the package's `VERSION`. install.sh keeps only digits and dots and records it in `/Library/NullMoth/driver-version` (so `package` stops on a value with anything else: `3.0rc1` would be recorded as `3.01`), the installed version the app's update check and Send logs read. The base package's own `VERSION` is not kept, so an installed tester build is not recorded as that release (2.9). `package` stops when the heading is not a version and this is not set |
 | `NM_OGKM_URL` | the URL in build/pins.sh | A mirror of NVIDIA's open-gpu-kernel-modules (both trees) |
 | `NM_MESA_URL` | the URL in build/pins.sh | A mirror of Mesa; any clone that has the pinned commit works |
 | `NM_KHRONOS_URL` | the URL in build/pins.sh | A URL prefix that holds `Vulkan-Headers` and `Vulkan-Loader`. Set by you, it is also what the loader build clones from; unset, the loader is built from the verified copies in `<workdir>/src/khronos` |
@@ -513,7 +515,7 @@ base names your browser), so it can be passed on. The ryzenadj built here has an
 one the 1401 app pins, so the app will not install it; the driver is not affected.
 
 Earlier local packages started on an RTX 5050; later builds and card checks have scoped results in [STATUS.md](STATUS.md).
-The merged 3.0.3 tree still needs native acceptance. The kexts compare the running macOS's IOKit class layouts with
+3.0.13 still needs a native build and a start on a card. The kexts compare the running macOS's IOKit class layouts with
 their own when they start (the layout check); a successful build does not prove those checks will accept a new OS.
 
 Install it yourself, as for a release (read [README.md](../README.md), "Install — by hand", first: OpenCore must be

@@ -124,6 +124,13 @@ model 120): pipelines compile there without a card, and nothing is drawn. The me
 code; 3.0.9 and 3.0.11 changed nothing in NVK, so they hold for 3.0.11's. **Nothing of 3.0.12 has been built on a Mac
 or run on a card.** No frame rate changes with it, and none was expected to.
 
+**Since this section was written:** 3.0.12 was built on the Mac of the 3.0.7 captures on 2026-11-22 (NVK and the
+components built from it were rebuilt, with no warning: the first time the two patches went through the `patch` of macOS, Apple's clang and the
+Mac's Rust), `tools/test_nvk_nak_switch_key.py` and `tools/test_nvk_chain.py` pass there, and the package was installed
+there with the installer and a restart: `/Library/NullMoth/driver-version` reads 3.0.12 and the installed NVK equals
+the package's. `tools/test_nak_tex_uhandle_safe.py` was not run there. Nothing else below changes: the sentences that
+say nothing of it was built on a Mac are of before that.
+
 ### Fixes and changes
 
 #### NVK: the shader caches and the compiler's switches
@@ -235,6 +242,12 @@ another branch's number, which became 3.0.12). It carries what 3.0.9 did for the
 swapchains to the two places next to it: OpenGL on Zink with the swap interval at 0, and the Vulkan frontend's MAILBOX
 mode. **Nothing of it has run on a card**; what was checked and what was not is at the end.
 
+**Since this section was written:** 3.0.11 was built on the Mac of the 3.0.9 measurement on 2026-11-22 (the Vulkan
+frontend and Zink were rebuilt, with no warning; the tests of this change that were run there pass) and installed
+there, and the Mac restarted without a fault. In Minecraft without mods on OpenGL through Zink its owner then read 490
+frames a second on the game's own counter. That is a reading, not a measurement: no capture was taken, and there is
+no figure from before on Zink to set it against. What "Not checked" lists below still stands.
+
 ### Fixes and changes
 
 #### OpenGL on Zink: a swap with the interval at 0 no longer waits for the display
@@ -335,6 +348,13 @@ in the mode whose meaning is that the application does not wait for the display.
 since 3.0 added it. **Nothing of 3.0.9 has been built on a Mac or run on a card, and no gain has been measured.** What
 the game reaches without that wait is for a capture on the card to say; the display goes on showing 100 frames a
 second.
+
+**Since this section was written:** 3.0.9 was built on that Mac on 2026-11-22 (only the frontend was rebuilt, with no
+warning; `tools/test_nvk_bridge.py` and `tools/test_nvk_bridge_newest.py` pass there) and installed there, and the Mac
+restarted without a fault. With vertical sync off its owner then read up to 1000 frames a second on the game's own
+counter, where the capture above has 200. That is a reading, not a measurement: no capture was taken on 3.0.9, and no
+card check presents through the new thread. The sentences below that say nothing of it was built on a Mac are of
+before that.
 
 ### Fixes and changes
 
@@ -502,6 +522,10 @@ the identical scene). Of the game's render thread, 63.3 % was the game's own cod
 answers with a message to WindowServer and its reply, twice per swap. **Nothing of 3.0.8 has been built on a Mac or
 run on a card, and no gain has been measured.** The most the render thread can get back is those 5.7 %; what that
 gives in frames is for a capture on the card to say.
+
+**Since this section was written:** 3.0.8 was built on that Mac (only the Zink frontend changed) and put in place
+there on 2026-11-22 without a restart, by copying the libraries that changed. No capture was taken with it, so what
+the change gives back is still not measured.
 
 ### Fixes and changes
 

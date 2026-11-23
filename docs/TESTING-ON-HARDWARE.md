@@ -1,7 +1,8 @@
 # Testing the 3.0.x development driver on a card
 
-This checklist is for new builds, including the integrated 3.0.3 development tree. Earlier RTX 5050 builds have
-booted, card checks have run, and GPU Caps has scoped native evidence. See [STATUS.md](STATUS.md) for what actually
+This checklist is for new builds, including 3.0.13, which has not run on a card. On one RTX 5050 the builds through
+3.0.12 have been installed and started, the card checks ran on 3.0.1 and on 3.0.7 (133 rows, 130 passed), and GPU
+Caps has scoped native evidence. See [STATUS.md](STATUS.md) for what actually
 ran and [BUILDING.md](BUILDING.md) for historical build results. Each "pass" below is an acceptance criterion,
 not a claim that the current integrated tree has passed it. Keep results by exact package revision.
 

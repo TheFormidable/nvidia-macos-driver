@@ -10,7 +10,9 @@ comandos y opciones y la solución de problemas.
 > abajo se ha instalado sobre la versión 2.9 y ha arrancado en una máquina con una RTX 5050: la máquina arrancó con él
 > dos veces, y la tarea del instalador que devuelve la versión anterior no devolvió la 2.9. Este es el registro
 > histórico hasta aa27c73; las pruebas posteriores con RTX 5050 y GPU Caps están en [STATUS.md](STATUS.md).
-> No hay todavía una compilación nativa registrada del árbol combinado 3.0.3. Lo que se ejecutó entonces:
+> Después, las versiones 3.0.6 a 3.0.12 se compilaron en la propia máquina de la RTX 5050 y se instalaron allí; la
+> 3.0.7 desde una carpeta de resultados vacía (los 19 componentes en 512 s y sin avisos, con las herramientas y las
+> fuentes fijadas ya presentes). La 3.0.13 no tiene todavía compilación nativa. Lo que se ejecutó entonces:
 >
 > - En un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5). En el commit 650db45, `./build.sh deps` empezó con un
 >   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
@@ -210,7 +212,7 @@ lo fijado detiene la compilación y no se usa nada de ella. `./build.sh doctor` 
 usan las mismas fuentes.
 
 Paquetes locales anteriores arrancaron en una RTX 5050; compilaciones y pruebas posteriores tienen resultados
-de alcance limitado en [STATUS.md](STATUS.md). El árbol combinado 3.0.3 aún necesita validación nativa.
+de alcance limitado en [STATUS.md](STATUS.md). La 3.0.13 aún necesita una compilación nativa y un arranque en una tarjeta.
 Los kexts comparan las clases IOKit del macOS en ejecución con las suyas al arrancar; compilar correctamente
 no demuestra que esas comprobaciones acepten otra versión del sistema.
 
