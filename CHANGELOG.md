@@ -1,5 +1,65 @@
 # Changelog
 
+## 3.0.16
+
+**Not released.** This section describes the branch being prepared as 3.0.16, on top of 3.0.14 (below; 3.0.15 was
+tried and not kept, and its number is not used again). In OpenGL on Zink, a buffer upload that would make the game's
+thread wait for the GPU goes through a staging buffer instead. It is on by default and has one way back,
+`NVK_ZINK_SUBDATA_STAGE=0`. **Nothing of 3.0.16 has run on a card yet**; it is host-tested only (below, "What ran
+where").
+
+### Fixes and changes
+
+#### Zink: glBufferSubData no longer waits for the GPU
+
+- **What the card showed.** In ATM10 with a shader pack on the RTX 5050 (the captures of 3.0.15 under 3.0.14 below),
+  the game's render thread spent 19 to 25 % of its time asleep in `glBufferSubData` (or a `glBufferData` of the same
+  size, which Mesa turns into the same call): `tc_buffer_subdata` → `tc_buffer_map` → `zink_buffer_map` →
+  `zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is about 1.9 ms a frame at 75 to 79 frames a second. Before 3.0.7
+  the same writes found the buffer idle, because the swap itself waited for the GPU. Since the swap stopped waiting,
+  the GPU is still reading the buffer from the frame before when the game writes it again.
+- **Why it waited.** Mesa's threaded context (`u_threaded_context.c`) normally writes a busy buffer through a staging
+  buffer and a copy queued on the GPU. It maps the buffer itself, and waits, in two cases. The first is a write of more
+  than 320 bytes into a buffer the application has mapped (`PIPE_MAP_DIRECTLY`, which keeps the threaded context from
+  discarding the range). The second is a write it infers to be unsynchronized (a range never written, or an idle
+  buffer) that overlaps the range of a staging upload not executed yet. `tc_buffer_map` then takes the unsynchronized
+  flag away, and the mapping waits for the buffer's whole batch. Mesa's record of that range is never reset, so the
+  overlap is often only with an upload that is long done. Which of the two the game hits was not measured.
+- **What changes.** `zink/mesa-zink-nvk.patch` adds `tc_subdata_stage_instead` to `u_threaded_context.h` and an option
+  of the threaded context, `subdata_never_wait`. Zink sets the option on NVK on macOS. With it, `tc_buffer_subdata`
+  writes those two cases through the threaded context's own staging path. A subdata call writes every byte of its
+  range, and the copy is queued after every earlier call, so the buffer ends up as the mapping would have left it.
+  The range becomes valid when it is copied. Excluded, as before:
+  - a buffer of user memory, with CPU storage, in a client pointer heap, sparse or unmappable;
+  - a persistent mapping;
+  - a write the threaded context already stages;
+  - a write of 320 bytes or fewer that is not unsynchronized, which is queued as it is.
+- **What the application could see.** With a buffer the application keeps mapped, the bytes `glBufferSubData` writes
+  reach the mapping when the GPU executes the copy, not when the call returns. The GL specification asks an
+  application to wait on a fence before it reads what the GL wrote into a mapped buffer. A program that reads its
+  mapping right after `glBufferSubData` without one would see the old bytes. `NVK_ZINK_SUBDATA_STAGE=0` is for that
+  case.
+
+### The ways back
+
+`NVK_ZINK_SUBDATA_STAGE=0` in the settings file (`/Library/GPUBundles/nvmtl/nvrm610.conf`), or in the application's
+own environment with `NVMTL_PROCESS_ENV=1`, as for the other switches of the Zink frontend. A process reads it once,
+at its first GL context. With it the option is left off and `tc_buffer_subdata` runs as in 3.0.14.
+
+### What ran where
+
+On Linux only:
+- `build/prepare_zink.py` applies the patch to the pinned Mesa 26.3.0.
+- `u_threaded_context.c`, `zink_context.c` and `zink_resource.c` compile with GCC without a warning. Zink's lines that
+  set the option, and the frontend's reader in `zink/nvk_present.c`, are macOS-only and were not compiled.
+- The new host test `tools/test_zink_subdata_stage.py` passes and fails on 3.0.14. It checks the decision function
+  over every case named above, the code around it, the switch, and eight broken copies, each of which has to fail.
+- `tools/switch_registry.py check` passes.
+
+Nothing was built on a Mac or ran on a card. The card round that decides it is the same place in ATM10 with
+`fps_capture.sh`. The measure is the render thread's share in `zink_buffer_map`'s wait and the frames per second,
+once as installed and once with `NVK_ZINK_SUBDATA_STAGE=0`.
+
 ## 3.0.14
 
 **Not released.** This section describes the branch being prepared as 3.0.14, on top of 3.0.13 (below, not released
