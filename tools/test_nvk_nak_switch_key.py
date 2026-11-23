@@ -97,6 +97,7 @@ EXEMPT = {
     "NAK_SMEM_TARGET_CAP_KB": "qmd.rs: changes only the QMD, which nak_fill_qmd fills at every dispatch (nvk_cmd_dispatch.c)",
     "NAK_QMD_NO_PREFETCH": "qmd.rs: changes only the QMD, which nak_fill_qmd fills at every dispatch (nvk_cmd_dispatch.c)",
     "NVK_DUMP_SHADER_DIR": "nvk_shader_upload writes the dump, and a shader from a cache is uploaded too",
+    "NAK_STATS": "api.rs: writes a line of statistics on stderr and changes nothing in the shader (nvk-nak-stats)",
 }
 # Upstream's own reads on that path are on no + line, so the replay does not see them. These two change what a release
 # build compiles and upstream keys neither, so the key's table has to have them; both are read from the environment.

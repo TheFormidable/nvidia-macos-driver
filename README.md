@@ -5,13 +5,13 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
 > **Development status — November 23, 2026.** `fable` is at 3.0.13, the first heading of
-> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.13 are merged. None is a published release or a certified binary: each
+> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.14 are merged. None is a published release or a certified binary: each
 > is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
 > 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
 > installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only
-> inside 3.0.6, and there is no 3.0.10. 3.0.13 has not been built on a Mac or run on a card. 3.0.14 (statistics of
-> the shader compiler, a development tool; [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)) is
-> open and not merged.
+> inside 3.0.6, and there is no 3.0.10. 3.0.13 has not been built on a Mac or run on a card. 3.0.14 adds statistics
+> of the shader compiler, a development tool ([PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)),
+> tested on Linux only.
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`

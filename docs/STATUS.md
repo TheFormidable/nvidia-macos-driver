@@ -1,9 +1,9 @@
 # Fork status and evidence — 2026-11-23
 
-This is the current snapshot of TheFormidable's `fable` branch at 3a44f126. The first numeric heading in
-[CHANGELOG.md](../CHANGELOG.md) is 3.0.13: the development package version, not a published or qualified release.
-3.0.1 to 3.0.13 are merged; there is no 3.0.10. 3.0.14 (statistics of the shader compiler, a development tool,
-[PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)) is open and not merged. The upstream baseline
+This is the current snapshot of TheFormidable's `fable` branch with [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)
+merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.14: the development package version, not
+a published or qualified release. 3.0.1 to 3.0.14 are merged; there is no 3.0.10. 3.0.14 adds statistics of the shader
+compiler, a development tool tested on Linux only. The upstream baseline
 is NullMoth 2.9. Keep inherited upstream evidence separate from this fork's experiments and from the NVMetrics
 application.
 
@@ -36,7 +36,7 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.12 at f561d334 | Built on that machine (NVK, no warning: the two new patches under macOS's `patch`, Apple's clang and the Mac's Rust), `test_nvk_nak_switch_key.py` and `test_nvk_chain.py` pass there; installed 2026-11-22 with the installer and a restart. `driver-version` reads 3.0.12, the installed NVK equals the package's, `IOGLBundleName` is `NVKZinkGLDriver`. The modded Minecraft pack on it, read by its owner: 123 to 290 frames a second, and 75 to 190 with a shader pack on | 3.0.12 changes nothing while no compiler switch is set; the uniform-handle experiment has not run on a card |
 | 3.0.13 at a79482f3 | Linux only: `test_nvrm_pat.c` and `test_nvrm_pat.py` pass, the switch registry check passes, the new kernel code compiled for macOS in a stub unit with its instructions in the intended order | Not built on a Mac, not installed: the first start and the first wake with NVRM writing the table itself, and the installer's DLSS step run by default |
 | Onboard sound on macOS 26 (PR #17) | On the RTX 5050 machine with `alcid=66` in boot-args only the NVIDIA display outputs appeared; removing it brought the onboard outputs back | Other boards and codecs |
-| 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18), open | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script) | Not merged; nothing of it on a Mac or a card |
+| 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18) | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script): the fork's NVK built on Mesa's nouveau drm-shim as shader model 120, all 300 corpus stages compile, `test_nak_stats.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
 [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md).
@@ -67,6 +67,9 @@ Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](G
 - **Media:** H.264 Blackwell decode path is gated by a self-test; do not advertise Blackwell AV1/VP9 hardware decode
   from that gate. DRM streaming and end-to-end WebRTC/4K capture remain issues to qualify on specific OS/browser/codec
   paths.
+- **Shader-compiler statistics (3.0.14):** `NAK_STATS=1` writes one JSON line per compiled shader stage;
+  `tools/nak-corpus/` and `tools/nak_stats_diff.py` measure a compiler change over a fixed set of 300 stages.
+  Host-tested only: built and run on Linux on Mesa's nouveau drm-shim as shader model 120, never on a Mac or a card.
 - **Other gaps:** full multi-GPU acceleration, hybrid laptop offload, hardware ray-tracing opt-ins and Windows/Apple
   feature parity require dedicated evidence. CUDA and proprietary firmware capabilities are not implemented by this
   fork. No card other than the RTX 5050 has run a 3.0.x build of this fork.
