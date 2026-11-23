@@ -900,18 +900,21 @@ if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>
   case " $ba " in *" gfxrst=4 "*) ;; *) echo "   NOTE: WhateverGreen is loaded and boot-args lack 'gfxrst=4' — add it in your OpenCore config.plist, or the Mac can panic when the NVIDIA display first opens";; esac
 fi
 
-# Optional DLSS 4 / 4.5 files: downloaded from NVIDIA on this Mac and checked against pinned hashes. A failure here
-# never undoes the driver install.
+# DLSS 4 / 4.5 files (super resolution, ray reconstruction and frame generation, which Metal games reach through MetalFX):
+# downloaded from NVIDIA on this Mac and checked against pinned hashes. On by default since 3.0.13 (3.0.12 asked for
+# NULLMOTH_DLSS=1); NULLMOTH_DLSS=0 skips the step. An install with the same versions already in place downloads
+# nothing. A failure here never undoes the driver install.
 # dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
 if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
       && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
   echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
-  if [ "${NULLMOTH_DLSS:-0}" = 1 ]; then
+  if [ "${NULLMOTH_DLSS:-1}" != 0 ]; then
     step "DLSS 4 / 4.5 files"
-    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo env NULLMOTH_DLSS=1 ./install.sh"
+    echo "   NVIDIA's own files, about 750 MB the first time, under NVIDIA's licences (skip with: sudo env NULLMOTH_DLSS=0 ./install.sh)"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run the installer again later to retry."
   else
-    echo "   DLSS 4 / 4.5 is optional: install with sudo env NULLMOTH_DLSS=1 ./install.sh (dlss_fetch.sh runs only from the installer's checked root-owned copy)."
+    echo "   DLSS 4 / 4.5 skipped (NULLMOTH_DLSS=0); files already under /Library/NullMoth/dlss stay in use."
   fi
 fi
 

@@ -1,5 +1,59 @@
 # Changelog
 
+## 3.0.13
+
+**Not released.** This section describes the branch being prepared as 3.0.13, on top of 3.0.12 (below, not released
+either). Two things that were left to the user are now done by default: the kernel driver puts write-combining back
+into the CPU's page attribute table where an AMD kernel patch took it out, and the installer fetches the DLSS files.
+**Nothing of 3.0.13 has been built on a Mac or run on a card.**
+
+### Fixes and changes
+
+- **Write-combined mappings are write-combined again on machines with a fix-PAT kernel patch.** Since 3.0.6
+  `debug.nvrm_pat_wc` has said that on an AMD machine with AMD_Vanilla's default "Fix PAT" patch (Algrey / Zormeister)
+  entry 6 of the page attribute table is uncached-minus, so every CPU write through BAR1 (NVK's mapped video memory,
+  the kernel's CPU fill of the framebuffer) leaves the CPU one store at a time. The fix was the user's: a byte in
+  OpenCore's Replace. NVRM now makes it itself. When the table it reads at start has anything but WC in entry 6, and
+  holds no reserved encoding, it writes on every CPU at once, inside a rendezvous with interrupts off
+  (`mp_rendezvous_no_intrs`), the one change stock XNU's `pat_init` makes: entry 6 to WC, the other seven entries as
+  they were. Each CPU follows the order of XNU's own `mtrr_update_action`: no-fill cache mode, write back and
+  invalidate the caches, flush the TLB, write the table, flush both again, restore CR0 and CR4. The patched kernel
+  writes its table back on every CPU at wake, so NVRM does the pass again at the start of `setPowerState` for a
+  power-on, before the GPU resumes, where the start pass changed something. On the default AMD_Vanilla table the
+  result is 0x0001010600070106, the table a test boot from a USB stick with that byte changed ran with on a Ryzen 5
+  5500 and an RTX 5050 under macOS 26.7.3 on 2026-11-21: it booted normally, and in ATM10 by Zink the main thread's
+  share in `glBufferSubData` uploads fell from 11-14 % to 1.4 % and in importing the window's surface from 7-8 % to
+  1.2 % (frames per second were not compared like for like). A Mac with macOS's own table, or a machine where entry
+  6 is already WC, sees no write and no rendezvous at start. The verdict sysctls now describe the table in force after
+  the change, `debug.nvrm_pat_found` the one the kernel wrote, `debug.nvrm_pat_passes` how many passes changed a CPU
+  (start, then one per wake) and `debug.nvrm_pat_cpus` how many CPUs had WC in entry 6 after the last one (compare with
+  `hw.ncpu`). A CPU that restarted on its own outside a system wake would come back with the kernel's table; macOS
+  does not do that on x86, and the counter would show it. Checked with `tools/test_nvrm_pat.c` (the change on every
+  named table, reserved bits, the other entries kept) and `tools/test_nvrm_pat.py` (the one MSR write under `kexts/`,
+  its order, its callers and the boot argument).
+- **The DLSS files are installed by default.** `install.sh` ran `dlss_fetch.sh` only with `NULLMOTH_DLSS=1`; it now
+  runs it unless `NULLMOTH_DLSS=0` is set. The step downloads NVIDIA's own files (about 750 MB the first time; an
+  install with the same versions in place downloads nothing), checks their pinned hashes and builds the DLSS kernels
+  for the card, as before. With the files present the Metal plugin already served the MetalFX temporal upscaler with
+  DLSS Super Resolution and the MetalFX frame interpolator with DLSS Frame Generation without any switch, so a Metal
+  game that uses MetalFX gets them with no setting. A failure in the step still leaves the driver installed.
+
+### The ways back
+
+| Change | Way back |
+|---|---|
+| Entry 6 of the page attribute table put back to WC | boot argument `nvpatwc=0`: the table is left as the kernel wrote it, as in 3.0.12 |
+| DLSS files installed by default | `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step; `uninstall.sh` removes `/Library/NullMoth/dlss` |
+
+### What ran where
+
+On Linux: `tools/test_nvrm_pat.c` and `tools/test_nvrm_pat.py` pass; the switch registry check passes with the new
+boot argument and the three new read-only sysctls. The 68 host tests that read `NVRM.cpp`, `install.sh` or the switch
+registry give the same result as on 3.0.12 (the 11 that fail there fail on 3.0.12 too, in this shallow clone or as
+root). The new kernel code was compiled for x86_64 macOS with `-fapple-kext -mkernel` in a stub translation unit,
+and its disassembly has the instructions in the order above; NVRM.kext itself was not compiled. `dlss_fetch.sh` is
+unchanged.
+
 ## 3.0.12
 
 **Not released.** This section describes the branch being prepared as 3.0.12, on top of 3.0.11 (below, not released

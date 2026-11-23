@@ -614,6 +614,7 @@ bootarg	nvlayout	escape	on (nvlayout=0: the layout is still checked and any diff
 bootarg	nvmaxbpc	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvmultigpu	setting	unset	2.9	-	More than one NVIDIA card (experimental): Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below.
 bootarg	nvoffbar	recovery	unset	2.9	-	turns one part of the driver off or back to its safest form, for a machine that does not start
+bootarg	nvpatwc	escape	on (nvpatwc=0: the page attribute table is left as the kernel wrote it, so on a machine with a fix-PAT kernel patch write-combined mappings stay uncached, as in 3.0.12)	3.0.13	3.2	Where the kernel's page attribute table has anything but write-combining in entry 6 (the AMD_Vanilla fix-PAT patches), NVRM puts that entry back to write-combining on every CPU at start and after each wake, the one change stock XNU's pat_init makes, so CPU writes through BAR1 are combined.
 bootarg	nvregdwords	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvrmacpibl	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nvrmaspm	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
@@ -927,7 +928,10 @@ sysctl	debug.nvrm_pageoff_coalesced	diag	read-only	2.9	-	page-offs copied per ru
 sysctl	debug.nvrm_pageoff_pages	diag	read-only	2.9	-	pages in the last page-off
 sysctl	debug.nvrm_pageoff_perpage	diag	read-only	2.9	-	page-offs copied per 4 KB page
 sysctl	debug.nvrm_pageoff_runs	diag	read-only	2.9	-	runs in the last page-off
-sysctl	debug.nvrm_pat	diag	read-only	3.0.6	-	IA32_PAT of the CPU that started NVRM (0 if not read)
+sysctl	debug.nvrm_pat	diag	read-only	3.0.6	-	IA32_PAT in force on the CPU that started NVRM, after NVRM's own change (0 if not read)
+sysctl	debug.nvrm_pat_cpus	diag	read-only	3.0.13	-	CPUs whose entry 6 was write-combining after NVRM's last pass (compare with hw.ncpu)
+sysctl	debug.nvrm_pat_found	diag	read-only	3.0.13	-	IA32_PAT as the kernel wrote it, read at NVRM start before NVRM changed anything (0 if not read)
+sysctl	debug.nvrm_pat_passes	diag	read-only	3.0.13	-	times NVRM put entry 6 of the page attribute table back to write-combining on every CPU (start, then each wake)
 sysctl	debug.nvrm_pat_wc	diag	read-only	3.0.6	-	1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known
 sysctl	debug.nvrm_pat_why	diag	read-only	3.0.6	-	the page attribute table verdict in words
 sysctl	debug.nvrm_physmap	diag	read-only	2.9	-	batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused

@@ -456,31 +456,107 @@ SYSCTL_INT(_debug, OID_AUTO, nvrm_switches_nondefault, CTLFLAG_RD, &gNvSwitches.
            "of those: opt-outs, test hooks, development switches and retired names (0 on an ordinary install)");
 // Whether write-combined mappings are write-combined on this machine (nvrm_pat.h): a kernel patch common on AMD machines
 // rewrites the CPU's page attribute table so that they are uncached (uncached-minus: unless the firmware's MTRRs mark
-// the range write-combining), and every CPU write through BAR1 is then one bus transaction per store. Read once at start on the CPU that runs startGPU, with rdmsr_carefully (a missing MSR returns
-// non-zero instead of faulting), before the three sysctls are registered; never written again, and nothing in the
-// driver reads it back. Every CPU runs the same table code at start and wake, so one CPU's value stands for all.
+// the range write-combining), and every CPU write through BAR1 is then one bus transaction per store. Read at start on
+// the CPU that runs startGPU, with rdmsr_carefully (a missing MSR returns non-zero instead of faulting), before the
+// sysctls are registered. Every CPU runs the same table code at start and wake, so one CPU's value stands for all.
+//
+// Since 3.0.13 the driver puts entry 6 back to write-combining when it finds anything else there (nvrm_pat_fix_wanted):
+// on every CPU at once (mp_rendezvous_no_intrs, the call XNU's own MTRR update uses), at start and again after each
+// wake, where the patched kernel has written its table back on every CPU before any driver wakes. nvpatwc=0, read once,
+// leaves the table alone, as in 3.0.12. The sysctls then say what is in force after the change, and debug.nvrm_pat_found
+// what the kernel had written.
 #include "nvrm_pat.h"
 extern "C" int rdmsr_carefully(uint32_t msr, uint32_t *lo, uint32_t *hi);   // i386/proc_reg.h; com.apple.kpi.unsupported
-static uint64_t gNvPat;
+extern "C" void mp_rendezvous_no_intrs(void (*action)(void *), void *arg);   // i386/mp.h; com.apple.kpi.unsupported (x86_64)
+static uint64_t gNvPat, gNvPatFound;
 static int gNvPatWc = NVRM_PAT_WC_UNKNOWN;
 static char gNvPatWhy[192] = "not read yet";
-SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pat, CTLFLAG_RD | CTLFLAG_LOCKED, (int64_t *)&gNvPat, "IA32_PAT of the CPU that started NVRM (0 if not read)");
+static int gNvPatPasses, gNvPatCpus;
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pat, CTLFLAG_RD | CTLFLAG_LOCKED, (int64_t *)&gNvPat, "IA32_PAT in force on the CPU that started NVRM, after NVRM's own change (0 if not read)");
 SYSCTL_INT(_debug, OID_AUTO, nvrm_pat_wc, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvPatWc, 0,
            "1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known");
 SYSCTL_STRING(_debug, OID_AUTO, nvrm_pat_why, CTLFLAG_RD | CTLFLAG_LOCKED, gNvPatWhy, sizeof gNvPatWhy,
               "the page attribute table verdict in words");
+SYSCTL_QUAD(_debug, OID_AUTO, nvrm_pat_found, CTLFLAG_RD | CTLFLAG_LOCKED, (int64_t *)&gNvPatFound,
+            "IA32_PAT as the kernel wrote it, read at NVRM start before NVRM changed anything (0 if not read)");
+SYSCTL_INT(_debug, OID_AUTO, nvrm_pat_passes, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvPatPasses, 0,
+           "times NVRM put entry 6 of the page attribute table back to write-combining on every CPU (start, then each wake)");
+SYSCTL_INT(_debug, OID_AUTO, nvrm_pat_cpus, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvPatCpus, 0,
+           "CPUs whose entry 6 was write-combining after NVRM's last pass (compare with hw.ncpu)");
+
+// One CPU's part of a pass, with interrupts off and every other CPU inside the same rendezvous. The order is the one of
+// XNU's mtrr_update_action, the code pat_init runs on each CPU at boot and wake (Intel SDM vol. 3A, "Programming the
+// PAT" and "MTRR Considerations in MP Systems"): no-fill cache mode, write back and invalidate the caches, flush the
+// TLB, write the table, write back and invalidate again, flush the TLB again, restore.
+static volatile SInt32 gPatChanged, gPatWc;
+static void nvrmPatFixCpu(void *)
+{
+    uint32_t lo = 0, hi = 0;
+    if (rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) != 0) return;
+    const uint64_t pat = (uint64_t)hi << 32 | lo;
+    if (nvrm_pat_fix_wanted(pat, 1)) {
+        const uint64_t want = nvrm_pat_with_wc6(pat);
+        uintptr_t cr0, cr3, cr4;
+        __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+        const uintptr_t cd = (uintptr_t)1 << 30, nw = (uintptr_t)1 << 29, pge = (uintptr_t)1 << 7;   // CR0.CD, CR0.NW, CR4.PGE
+        __asm__ volatile("mov %0, %%cr0" : : "r"((cr0 | cd) & ~nw) : "memory");
+        __asm__ volatile("wbinvd" : : : "memory");
+        if (cr4 & pge) __asm__ volatile("mov %0, %%cr4" : : "r"(cr4 & ~pge) : "memory");
+        else { __asm__ volatile("mov %%cr3, %0" : "=r"(cr3)); __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory"); }
+        __asm__ volatile("wrmsr" : : "c"(NVRM_PAT_MSR), "a"((uint32_t)want), "d"((uint32_t)(want >> 32)) : "memory");
+        __asm__ volatile("wbinvd" : : : "memory");
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3)); __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+        __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+        if (cr4 & pge) __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+        OSIncrementAtomic(&gPatChanged);
+    }
+    if (rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) == 0 && nvrm_pat_entry((uint64_t)hi << 32 | lo, NVRM_PAT_ENTRY_WCOMB) == NVRM_PAT_WC)
+        OSIncrementAtomic(&gPatWc);
+}
+// A pass over every CPU. Two NVRM instances (nvmultigpu=1) can wake at the same time: the second one finds the pass
+// running and leaves it to the first.
+static int nvrmPatFixOn(void)
+{
+    static int on = -1;
+    if (on < 0) { uint32_t v = 1; on = !(PE_parse_boot_argn("nvpatwc", &v, sizeof v) && v == 0u); }
+    return on;
+}
+static volatile SInt32 gPatBusy;
+static void nvrmPatFix(const char *when)
+{
+    if (!OSCompareAndSwap(0, 1, &gPatBusy)) return;
+    gPatChanged = 0; gPatWc = 0;
+    mp_rendezvous_no_intrs(nvrmPatFixCpu, NULL);
+    gNvPatCpus = gPatWc;
+    if (gPatChanged) OSIncrementAtomic(&gNvPatPasses);
+    LOG("page attribute table (%s): entry 6 set to write-combining on %d CPU(s); %d CPU(s) have it now (nvpatwc=0 leaves the table alone)",
+        when, (int)gPatChanged, (int)gPatWc);
+    OSCompareAndSwap(1, 0, &gPatBusy);
+}
 static void nvrmPatRead(void)
 {
     uint32_t lo = 0, hi = 0;
-    const int ok = rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) == 0;
+    int ok = rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) == 0;
+    gNvPatFound = ok ? ((uint64_t)hi << 32 | lo) : 0;
+    if (nvrm_pat_fix_wanted(gNvPatFound, ok)) {
+        if (nvrmPatFixOn()) { nvrmPatFix("start"); ok = rdmsr_carefully(NVRM_PAT_MSR, &lo, &hi) == 0; }
+        else LOG("page attribute table: nvpatwc=0, left as the kernel wrote it");
+    }
     struct nvrm_pat_verdict v;
     gNvPat = ok ? ((uint64_t)hi << 32 | lo) : 0;
     nvrm_pat_decode(gNvPat, ok, &v);
     gNvPatWc = v.wc;
     // The table in hex leads the string: sysctl prints debug.nvrm_pat (a quad) in decimal.
     snprintf(gNvPatWhy, sizeof gNvPatWhy, "0x%016llx, %s: %s", (unsigned long long)gNvPat, v.table, v.words);
-    LOG("page attribute table 0x%016llx (entry 6 %s, entry 2 %s; %s): %s", (unsigned long long)gNvPat,
-        ok ? nvrm_pat_type_name(v.pa6) : "-", ok ? nvrm_pat_type_name(v.pa2) : "-", v.table, v.words);
+    LOG("page attribute table 0x%016llx (found 0x%016llx; entry 6 %s, entry 2 %s; %s): %s", (unsigned long long)gNvPat,
+        (unsigned long long)gNvPatFound, ok ? nvrm_pat_type_name(v.pa6) : "-", ok ? nvrm_pat_type_name(v.pa2) : "-", v.table, v.words);
+}
+// After a wake: the patched kernel's pat_init has written its own table on every CPU again. Only where the start pass
+// ran (the table was found without WC in entry 6 and nvpatwc=0 is not set); the published verdict stays the start's.
+static void nvrmPatAfterWake(void)
+{
+    if (gNvPatPasses > 0) nvrmPatFix("wake");
 }
 extern "C" int nv_xnu_pm_enter(void)
 {
@@ -1092,7 +1168,8 @@ bool NVRM::startGPU(IOService *provider)
             sysctl_register_oid(&sysctl__debug_nvrm_switches_nondefault);
             nvrmPatRead();
             sysctl_register_oid(&sysctl__debug_nvrm_pat); sysctl_register_oid(&sysctl__debug_nvrm_pat_wc);
-            sysctl_register_oid(&sysctl__debug_nvrm_pat_why);
+            sysctl_register_oid(&sysctl__debug_nvrm_pat_why); sysctl_register_oid(&sysctl__debug_nvrm_pat_found);
+            sysctl_register_oid(&sysctl__debug_nvrm_pat_passes); sysctl_register_oid(&sysctl__debug_nvrm_pat_cpus);
             if (gNvSwitches.set)
                 LOG("boot arguments beside the install line: %d (%s%s), %d not needed by an ordinary install",
                     gNvSwitches.set, gNvSwitches.names, gNvSwitches.truncated ? " ..." : "", gNvSwitches.nondefault);
@@ -2992,6 +3069,7 @@ extern "C" { void nvkms_xnu_suspend(NvU32 gpuId); void nvkms_xnu_resume(NvU32 gp
 IOReturn NVRM::setPowerState(unsigned long ordinal, IOService *device)
 {
     nv_xnu_power_refresh();        // a wake can be a change of power source; this runs before the firmware asks
+    if (ordinal != 0) nvrmPatAfterWake();   // before the GPU's own resume, which writes through BAR1 too
     // From here until the wake the idle power-down monitor (nvrtd3=1) leaves this GPU alone, and a call of it that is
     // already inside ends first: the state read on the next line is then the one the monitor left.
     if (ordinal == 0) rtd3Hold(30000);
