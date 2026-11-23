@@ -22,8 +22,8 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 45 | 1 | 55 | 405 | 12 |  | 524 |
-| bootarg | 4 | 13 | 30 | 21 | 15 |  | 8 | 6 | 2 |  | 99 |
-| sysctl |  | 5 | 4 | 12 |  |  | 377 |  |  |  | 398 |
+| bootarg | 4 | 13 | 30 | 21 | 16 |  | 8 | 6 | 2 |  | 100 |
+| sysctl |  | 5 | 4 | 12 |  |  | 380 |  |  |  | 401 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 15 |  | 15 |
 | build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
@@ -87,6 +87,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | bootarg | `nvfbvramfast` | on (nvfbvramfast=0: every granted block of video memory is cleared again, by the copy engine or with nvfbceclear=0 from the processor as in 2.9, and made on the thread that asks) | 3.2 | A block of video memory granted to a surface is not filled with zeros a second time while the RM's own clearing is believed (it said so, the GPU has not been through a standby, which a system sleep is, and every new block read as zero where it is probed), and blocks of a size that is asked for and handed back again and again (one per captured frame of a screen share) are made ahead of time by a worker, so that the thread that asks waits neither for the fill nor for the display gate. |
 | bootarg | `nvgpucaps` | on (nvgpucaps=0: the cache reports OFF and RM capability discovery is skipped) | 3.2 | Enable the read-only per-GPU capability cache and lifecycle refresh; read once during NVRM start. This does not authorize GPU control writes. |
 | bootarg | `nvlayout` | on (nvlayout=0: the layout is still checked and any difference logged, but it no longer stops the start; 2.9 did not check at all) | 3.2 | Before it starts, each kext checks that the Apple classes it builds on are laid out as it was compiled to expect, and declines to start when they are not, instead of running on a wrong layout after a macOS update. |
+| bootarg | `nvpatwc` | on (nvpatwc=0: the page attribute table is left as the kernel wrote it, so on a machine with a fix-PAT kernel patch write-combined mappings stay uncached, as in 3.0.12) | 3.2 | Where the kernel's page attribute table has anything but write-combining in entry 6 (the AMD_Vanilla fix-PAT patches), NVRM puts that entry back to write-combining on every CPU at start and after each wake, the one change stock XNU's pat_init makes, so CPU writes through BAR1 are combined. |
 | bootarg | `nvrmatomic` | on (nvrmatomic=0: the RM is told every context may sleep, as in 2.9) | 3.2 | The RM gets a true answer to whether the calling context may sleep, and memory it asks for where it may not comes from a reserved pool. |
 | bootarg | `nvrmbhthread` | on (nvrmbhthread=0: the bottom half runs on the interrupt's work loop, as in 2.9) | 3.2 | The RM's interrupt bottom half runs on its own thread, so a long one no longer holds back the next GPU interrupt. |
 | bootarg | `nvrmdma` | on (nvrmdma=0: no IOMMU mapper -> the 2.9 path; mapper present -> the GPU is not started) | 3.2 | With an IOMMU (VT-d) translating for the GPU, the GPU is given the mapper's bus addresses instead of physical ones; without a mapper nothing changes. On a machine with a mapper nvrmdma=0 is not a way back to 2.9, whose untranslated addresses are wrong there: the GPU is left unstarted and the log says why. |
@@ -714,6 +715,7 @@ Each of these does nothing unless it is set.
 | `nvmaxbpc` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-nvkms-xnu.cpp |
 | `nvmultigpu` | setting | unset | 2.9 | - | More than one NVIDIA card (experimental): Accelerate every NVIDIA card, one start-up at a time. A process drives one card: the primary, or the one assigned below. | kexts/NVRM/NVRM.cpp, kexts/NVRM/accel/nvrm-accel.cpp, plugin/NVMTLDevice.m |
 | `nvoffbar` | recovery | unset | 2.9 | - | turns one part of the driver off or back to its safest form, for a machine that does not start | kexts/NVRM/NVRM.cpp, kexts/NVRMFB/fb/nvrm-fb.cpp |
+| `nvpatwc` | escape | on (nvpatwc=0: the page attribute table is left as the kernel wrote it, so on a machine with a fix-PAT kernel patch write-combined mappings stay uncached, as in 3.0.12) | 3.0.13 | 3.2 | Where the kernel's page attribute table has anything but write-combining in entry 6 (the AMD_Vanilla fix-PAT patches), NVRM puts that entry back to write-combining on every CPU at start and after each wake, the one change stock XNU's pat_init makes, so CPU writes through BAR1 are combined. | kexts/NVRM/NVRM.cpp |
 | `nvregdwords` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/NVRM.cpp |
 | `nvrmacpibl` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/os-xnu2.cpp |
 | `nvrmaspm` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRM/NVRM.cpp |
@@ -1032,7 +1034,10 @@ Each of these does nothing unless it is set.
 | `debug.nvrm_pageoff_pages` | diag | read-only | 2.9 | - | pages in the last page-off | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_perpage` | diag | read-only | 2.9 | - | page-offs copied per 4 KB page | kexts/NVRM/nvrm_surfshare.cpp |
 | `debug.nvrm_pageoff_runs` | diag | read-only | 2.9 | - | runs in the last page-off | kexts/NVRM/nvrm_surfshare.cpp |
-| `debug.nvrm_pat` | diag | read-only | 3.0.6 | - | IA32_PAT of the CPU that started NVRM (0 if not read) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat` | diag | read-only | 3.0.6 | - | IA32_PAT in force on the CPU that started NVRM, after NVRM's own change (0 if not read) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat_cpus` | diag | read-only | 3.0.13 | - | CPUs whose entry 6 was write-combining after NVRM's last pass (compare with hw.ncpu) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat_found` | diag | read-only | 3.0.13 | - | IA32_PAT as the kernel wrote it, read at NVRM start before NVRM changed anything (0 if not read) | kexts/NVRM/NVRM.cpp |
+| `debug.nvrm_pat_passes` | diag | read-only | 3.0.13 | - | times NVRM put entry 6 of the page attribute table back to write-combining on every CPU (start, then each wake) | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_pat_wc` | diag | read-only | 3.0.6 | - | 1 write-combined mappings are write-combined, 0 they are not (for UC-: unless an MTRR says WC), 2 the firmware's MTRRs decide, -1 not known | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_pat_why` | diag | read-only | 3.0.6 | - | the page attribute table verdict in words | kexts/NVRM/NVRM.cpp |
 | `debug.nvrm_physmap` | diag | read-only | 2.9 | - | batch 47: RAM mapped by physical address — aliased, deferred, pinned, foreign, refused | kexts/NVRM/os-xnu2.cpp |
