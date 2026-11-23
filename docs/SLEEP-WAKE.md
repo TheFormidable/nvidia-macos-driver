@@ -131,6 +131,8 @@ the same before and after a sleep with nothing else running. Not yet reported fr
 | `debug.nvrm_isr_skipped` | sysctl | GPU interrupts that arrived while the interrupt path was closed (sleep, shutdown, stop) and were not given to the RM. |
 | `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet before standby that ran out. Should stay 0. |
 | `debug.nvrm_fence_end_pm`, `debug.nvrm_fence_state` | sysctl | Surface holds ended by a sleep; the fence's state (1 on, 3 off after a failed resume). |
+| `debug.nvrm_pat_passes`, `debug.nvrm_pat_cpus` | sysctl | Since 3.0.13, on a machine where NVRM put write-combining back into the CPU's page attribute table at start (an AMD kernel with a fix-PAT patch), it does so again at each wake before the GPU resumes, because the patched kernel writes its own table back on every CPU at wake. The first counts the passes that changed a CPU (start, then one per wake); the second says how many CPUs had the entry after the last one (compare with `hw.ncpu`). Not run on a card yet. |
+| `nvpatwc=0` | boot-arg | The page attribute table is left as the kernel wrote it, at start and at wake, as in 3.0.12. |
 
 Kernel log lines to look for (`/usr/bin/log show --predicate 'process == "kernel"'`): `NVRM-xnu: sleep #`,
 `NVRM-xnu: wake #`, `VRAM save file closed: N MB held`, `NVRM-fb: system wake:`.

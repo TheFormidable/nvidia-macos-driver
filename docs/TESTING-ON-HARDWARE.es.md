@@ -1,7 +1,8 @@
 # Probar el driver de desarrollo 3.0.x en una tarjeta
 
-Esta lista sirve para paquetes nuevos, incluido el árbol combinado 3.0.3. Versiones anteriores arrancaron en
-una RTX 5050, se ejecutaron pruebas de tarjeta y GPU Caps tiene evidencia física de alcance limitado.
+Esta lista sirve para paquetes nuevos, incluida la 3.0.13, que no ha corrido en una tarjeta. En una RTX 5050 las
+versiones hasta la 3.0.12 se instalaron y arrancaron, las pruebas de tarjeta corrieron en la 3.0.1 y en la 3.0.7 (133
+filas, 130 pasan) y GPU Caps tiene evidencia física de alcance limitado.
 Consulta [STATUS.md](STATUS.md) y [BUILDING.es.md](BUILDING.es.md). Cada "bien" de abajo es un criterio de
 aceptación, no un resultado confirmado del árbol actual. Guarda cada resultado con la revisión exacta del paquete.
 

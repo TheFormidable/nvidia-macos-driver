@@ -4,19 +4,32 @@ Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork 
 Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Development status — November 19, 2026.** `fable` contains the 3.0.3 Zink guard correction and
-> GPU Caps phases 1/2B ([PR #6](https://github.com/TheFormidable/nvidia-macos-driver/pull/6),
-> [PR #7](https://github.com/TheFormidable/nvidia-macos-driver/pull/7)). 3.0.3 is an unreleased source
-> version, not a certified binary. Earlier builds and the capability API have physical RTX 5050 evidence;
-> the fully integrated 3.0.3 tree still needs a native build, boot and regression run.
+> **Development status — November 23, 2026.** `fable` is at 3.0.13, the first heading of
+> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.14 are merged. None is a published release or a certified binary: each
+> is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
+> 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
+> installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only
+> inside 3.0.6, and there is no 3.0.10. 3.0.13 has not been built on a Mac or run on a card. 3.0.14 adds statistics
+> of the shader compiler, a development tool ([PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)),
+> tested on Linux only.
 
-| Area | Current implementation | Evidence / limits |
+**Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
+on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`
+(a boot argument or a line of the settings file); they are listed under
+[What is on by default, and the ways back](#what-is-on-by-default-and-the-ways-back).
+
+| Area | What the driver does today | Evidence / limits |
 |---|---|---|
-| Metal / desktop | AIR → SPIR-V → NVK/NAK; surface fences, event waits, channel recovery and faster captured-frame allocations | Earlier RTX 5050 builds booted and card checks ran; individual fixes need targeted regression tests. |
-| OpenGL | Zink on NVK, with Apple's GL-on-Metal fallback | Round 11 found 39 inactive Zink rows; 3.0.3 guard fix is host-tested only. `nvzink=0` is the escape hatch. |
-| GPU capabilities | Read-only selector 14, ABI 1.0, lifecycle-refreshed per-GPU cache | 15 verified / 150 unknown on one RTX 5050, manual authorization false. |
-| GPU monitoring | `nvmtl-smi` and separate NVMetrics app; RUSD telemetry, live boost policy, experimental guarded fan control | Do not treat observed RPM or successful GET as general write support. |
-| Media / games | VideoToolbox, opt-in Vulkan runtime, DLSS/MetalFX paths, translator fixes | Feature- and generation-dependent: no claim of full Windows, CUDA, DRM or Metal parity. |
+| Metal / desktop | AIR → SPIR-V → NVK/NAK. Surface fences, sleeping event waits, channel recovery, video memory for a screen share's captured frames granted without a fill from the processor, asynchronous texture uploads, a game's shaders translated ahead (3.0.1), and the plugin and translator changes of 3.0.4 to 3.0.6 | The RTX 5050 machine's desktop runs on it. The card checks of 3.0.7 ran 133 rows: 130 passed and 3 failed ([CHANGELOG.md](CHANGELOG.md), 3.0.7, "What ran where"). No change of 3.0.4 to 3.0.6 has been measured on its own. |
+| OpenGL | Mesa's Zink on NVK is the OpenGL driver on macOS 15.5 or later; a context its guard refuses stays on Apple's OpenGL over Metal. A swap runs one frame ahead of the GPU (3.0.7), asks WindowServer for the window's opacity once and keeps the answer 100 ms (3.0.8), and with the swap interval at 0 leaves its frame to a sender thread instead of waiting for the display (3.0.11) | On the RTX 5050 with macOS 26.7.3 the OpenGL rows of the 3.0.7 card run went through Zink. One modded Minecraft pack, in captures whose scenes were not matched: 19 and 74 frames a second on 3.0.2 (Apple's renderer), 55 to 64 on 3.0.6 (Zink); started from a test boot loader with the write-combining table, 61 on 3.0.6 and 90 on 3.0.7. With 3.0.11 installed its owner read 490 on the game's own counter in Minecraft without mods on Zink; no capture was taken. |
+| Vulkan for applications | A native Vulkan runtime for applications that select it when they are launched: NVK renders and each frame is copied on the GPU into the window, with no MoltenVK. It offers FIFO, IMMEDIATE and MAILBOX; an IMMEDIATE or MAILBOX swapchain shows the newest frame and does not hold the application to the display (3.0.9, 3.0.11) | Minecraft 26.3 without mods on the RTX 5050 with vertical sync off: 200 frames a second on the 100 Hz display through 3.0.8, in a capture that has its render thread waiting for the window. With 3.0.9 installed its owner read up to 1000 on the game's own counter; no capture was taken. |
+| Write-combining on AMD machines | Where a kernel patch (AMD_Vanilla's "Fix PAT") leaves the CPU's page attribute table without a write-combining entry, NVRM puts the entry back at start and after each wake, so what the CPU writes into video memory is combined again (3.0.13). A machine whose table has the entry sees no write | 3.0.13 is not built on a Mac yet. The same table, set from a test boot loader on the RTX 5050 machine with 3.0.6: the share of a game's main thread in buffer uploads fell from 11-14 % to 1.4 %, and in importing the window's surface from 7-8 % to 1.2 %. Frames per second were not compared like for like. |
+| DLSS / MetalFX | `install.sh` fetches NVIDIA's own DLSS files and builds their kernels for the card (3.0.13). With the files in place a Metal game's MetalFX temporal upscaler is served by DLSS Super Resolution and its MetalFX frame interpolator by DLSS Frame Generation, with no setting | RTX cards only; about 750 MB the first time. The architecture choice is measured on an RTX 5060 only: the Turing, Ampere and Ada rows have run on no card. |
+| GPU capabilities | Read-only selector 14, ABI 1.0, a per-GPU cache refreshed on lifecycle changes | 15 verified / 150 unknown on one RTX 5050, manual authorization false. |
+| GPU monitoring and power | `nvmtl-smi` and the separate NVMetrics app; RUSD telemetry; a machine-wide boost policy that a root process changes while applications run, so idle mode goes on and off without closing anything (3.0.1); experimental guarded fan control in NVMetrics | Do not treat observed RPM or a successful GET as general write support. |
+| Sleep and wake | System sleep with video memory preserved; a display head that does not light at power-on is tried again (3.0.5) | [docs/SLEEP-WAKE.md](docs/SLEEP-WAKE.md). The retry was taken from an open pull request of the original project and has no card result of its own here. |
+| Media | VideoToolbox decode and encode; in Firefox the video library and the plugin's surface imports work inside its sandbox (3.0.5) | Feature- and generation-dependent: no claim of full Windows, CUDA, DRM or Metal parity. No VP9 or AV1 hardware decode on RTX 50. |
+| Shader caches | A shader-compiler switch that is set gets a cache key of its own, so it is never served a binary compiled under another setting (3.0.12) | Reproduced and checked on Linux; with no switch set the key is unchanged. 3.0.12 is installed on the RTX 5050 machine. |
 
 See the [current status and evidence](docs/STATUS.md), [documentation index](docs/README.md),
 [changelog](CHANGELOG.md), and [hardware test checklist](docs/TESTING-ON-HARDWARE.md).
@@ -25,16 +38,19 @@ Keep a tested rollback package before installing. Release 2.9 remains the inheri
 Four areas incorporate work from the HighDelay/nvidia-macos-driver-nvk fork. Their individual validation status
 is documented in the linked pages; source integration is not evidence of end-to-end hardware success:
 
-- **OpenGL through Zink.** On macOS 15.5 or later the driver attempts to route OpenGL through Mesa's Zink on NVK instead of
-  Apple's OpenGL over Metal. The boot argument `nvzink=0` turns it off and gives every application Apple's OpenGL
-  back. See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
+- **OpenGL through Zink.** On macOS 15.5 or later the driver routes OpenGL through Mesa's Zink on NVK instead of
+  Apple's OpenGL over Metal, with no setting. The boot argument `nvzink=0` turns it off and gives every application
+  Apple's OpenGL back. See [docs/ZINK-OPENGL.md](docs/ZINK-OPENGL.md).
 - **A Vulkan runtime for Minecraft and other Vulkan applications.** The driver installs a native Vulkan runtime at
   `/Library/GPUBundles/nvmtl/minecraft`: rendering goes to NVK and each frame is copied on the GPU into the window,
-  with no MoltenVK. Nothing uses it unless an application selects it when it is launched: Minecraft 26.3 with the JVM
-  argument `-Dorg.lwjgl.vulkan.libname=/Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib`, MPV and other
+  with no MoltenVK. It is installed and ready on every install; which Vulkan library an application loads is the
+  application's own launch setting, so it is named there: Minecraft 26.3 with the JVM argument
+  `-Dorg.lwjgl.vulkan.libname=/Library/GPUBundles/nvmtl/minecraft/lib/libnvk_minecraft.dylib`, MPV and other
   applications that use the Vulkan loader with
-  `VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json`. See
-  [tools/nvk-bridge/INSTALL.md](tools/nvk-bridge/INSTALL.md) and
+  `VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json`. With vertical sync off (an IMMEDIATE or
+  MAILBOX swapchain) the runtime shows the newest finished frame and the application is not held to a multiple of the
+  display's rate; `NVK_BRIDGE_PRESENT_NEWEST=0` in the settings file goes back to presenting every frame on the
+  application's thread. See [tools/nvk-bridge/INSTALL.md](tools/nvk-bridge/INSTALL.md) and
   [tools/nvk-bridge/APPLICATIONS.md](tools/nvk-bridge/APPLICATIONS.md).
 - **Shader translator repairs.** Argument-buffer textures, sampler arrays, buffer-address lowering, helper inlining and
   Safari's WebGPU textures.
@@ -69,7 +85,7 @@ Support the work: https://buymeacoffee.com/nullmoth
 | macOS | 15.5 Sequoia or later (2.9 was tested on 15.7.x and 15.8.1), or 26 Tahoe, x86_64 |
 | GPUs | NVIDIA Turing and later; upstream development RTX 5060, scoped fork validation RTX 5050 |
 | Metal | Metal 3: argument buffers tier 2, ray tracing, mesh shaders, MPS, MetalFX path |
-| Also | OpenGL (experimental Zink route on macOS 15.5 or later; Apple's GL-on-Metal with `nvzink=0`), Vulkan for applications that select it, OpenCL, Core Image, Core ML |
+| Also | OpenGL (Zink on NVK on macOS 15.5 or later; Apple's GL-on-Metal with `nvzink=0`), Vulkan for applications that select it, MetalFX served by DLSS on RTX cards, OpenCL, Core Image, Core ML |
 
 ## How it works
 
@@ -89,6 +105,43 @@ Metal app ─► NVMTLDriver.bundle ─► translator (Apple AIR → SPIR-V) ─
 
 The kernel side runs NVIDIA's own open GPU kernel modules (620.70.06) under macOS. NVRMFB is the display framebuffer,
 NVAccel the accelerator WindowServer composites through, NVRMAGDC the display-policy shim.
+
+## What is on by default, and the ways back
+
+Nothing in this driver has to be turned on. A change that replaced an older path keeps one way back to that path, so
+that a problem can be pinned on it: set the way back, see whether the problem goes, and report both results. None of
+them is needed on a Mac that works.
+
+- A **boot argument** goes into OpenCore's `boot-args` and needs a restart.
+- A **settings line** goes into your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf` (between
+  `# --- my settings, kept on update ---` and `# --- end my settings ---`), from the first column. It acts on the
+  processes started after it: restart the application, or log out and in for WindowServer.
+
+| On by default | Since | Way back | Kind |
+|---|---|---|---|
+| OpenGL through Zink on NVK (macOS 15.5 or later) | 3.0 | `nvzink=0`: Apple's OpenGL over Metal for every application | boot argument |
+| Zink: a swap runs one frame ahead of the GPU; the window's video memory is imported once and kept | 3.0.7 | `NVK_ZINK_PRESENT_AHEAD=0`; `NVK_ZINK_SURFACE_KEEP=0` | settings line |
+| Zink: the window's opacity is asked once per swap and the answer kept 100 ms | 3.0.8 | `NVK_ZINK_OPACITY_KEEP=0` | settings line |
+| Zink: with the swap interval at 0 the newest frame is shown and the swap does not wait for the display | 3.0.11 | `NVK_ZINK_PRESENT_NEWEST=0` | settings line |
+| Vulkan runtime: an IMMEDIATE swapchain shows the newest frame (3.0.9); MAILBOX is offered (3.0.11) | 3.0.9 | `NVK_BRIDGE_PRESENT_NEWEST=0` | settings line |
+| Write-combining put back into the page attribute table where a kernel patch took it out | 3.0.13 | `nvpatwc=0` | boot argument |
+| The installer fetches the DLSS files | 3.0.13 | `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step | installer |
+| Read-only GPU capability cache | 3.0.3 | `nvgpucaps=0` | boot argument |
+| Video memory for captured frames (screen sharing) granted without a second fill | 3.0 | `nvfbvramfast=0` | boot argument |
+| New blocks of video memory cleared by the GPU's copy engine | 3.0.1 | `nvfbceclear=0` | boot argument |
+| Asynchronous texture uploads outside WindowServer | 3.0.1 | `NVMTL_ASYNC_TEX_UPLOAD=0` | settings line |
+| A game's shaders translated ahead | 3.0.1 | `NVMTL_PRETRANSLATE=0` | settings line |
+| NVK's own write-only mapped memory in video memory, outside WindowServer | 3.0.1 | `NVK_LOCAL_MAP_SYSMEM=1` | settings line |
+| Surface fences between processes | 3.0 | `nvrmfence=0` | boot argument |
+| Waits for the GPU sleep on its event instead of polling | 3.0 | `NVRM_EVENT_WAIT=0` | settings line |
+| A GPU fault on one channel rebuilds that channel | 3.0 | `NVK_CHANNEL_RECOVER=0` | settings line |
+| The Metal plugin's changes of the performance audit (fifteen, one switch each) | 3.0.6 | [CHANGELOG.md](CHANGELOG.md), 3.0.6, "The ways back" | settings lines |
+| Changes taken from pull requests to the original project (uniforms through a constant buffer, Firefox, whole-object views in the translator, the order of "scheduled") | 3.0.4, 3.0.5 | [CHANGELOG.md](CHANGELOG.md), 3.0.4 and 3.0.5, "The ways back" | settings lines |
+
+The table holds the ways back most likely to be wanted. Every release's section of [CHANGELOG.md](CHANGELOG.md) has
+its own list under "The ways back", and [docs/SWITCHES.md](docs/SWITCHES.md) lists every name the driver reads with
+what is in effect when it is not set. To turn the whole driver off for one start, the boot argument `-nvoff` makes
+NVRM leave the card alone ([docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), "Getting back in").
 
 ## Install — by hand
 
@@ -112,7 +165,10 @@ sudo shutdown -r now
 ```
 
 Every file must say OK in the check. `install.sh` copies the files and rebuilds the Auxiliary Kernel Collection; the
-restart is required, because logging out does not load the driver. (Paste the lines without anything after them: the
+restart is required, because logging out does not load the driver. It also downloads what the package may not carry,
+from NVIDIA's own sites and checked against pinned hashes: the GPU firmware, and since 3.0.13 the DLSS files (about
+750 MB the first time, nothing when the same versions are in place; a failure there leaves the driver installed, and
+`sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step). (Paste the lines without anything after them: the
 Terminal on macOS does not treat `#` as a comment, so a pasted comment becomes part of the command.)
 
 macOS asks you to **allow the extensions** in System Settings → Privacy & Security the first time. Allow, then reboot again.
@@ -269,7 +325,8 @@ repository, so a package is the release's with every part this checkout builds r
 ```
 
 Such a package has been staged on both Intel Macs above, and one made at commit aa27c73 on the first of them has been
-installed and started on one machine with an RTX 5050.
+installed and started on one machine with an RTX 5050. The packages of 3.0.6 to 3.0.12 were since built on that
+machine itself and installed there ([docs/STATUS.md](docs/STATUS.md)).
 
 `./build.sh help` lists the commands, components and options; `./build.sh env` prints every variable the build
 scripts read, to run one of them by hand. [docs/BUILDING.md](docs/BUILDING.md) explains everything, including what
