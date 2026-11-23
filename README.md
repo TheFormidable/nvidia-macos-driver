@@ -4,8 +4,8 @@ Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork 
 Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Development status — November 23, 2026.** `fable` is at 3.0.14, the first heading of
-> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.14 are merged. None is a published release or a certified binary: each
+> **Development status — November 23, 2026.** `fable` is at 3.0.16, the first heading of
+> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.16 are merged. None is a published release or a certified binary: each
 > is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
 > 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
 > installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only
@@ -13,7 +13,8 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 > of the shader compiler, a development tool ([PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)),
 > tested on Linux only. 3.0.15, more warps per SM for heavy shaders
 > ([PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20)), was measured on the card, gave nothing
-> and was not kept ([CHANGELOG.md](CHANGELOG.md#3015-tried-on-top-of-3014-and-not-kept)).
+> and was not kept ([CHANGELOG.md](CHANGELOG.md#3015-tried-on-top-of-3014-and-not-kept)). 3.0.16 writes OpenGL
+> buffer uploads that would wait for the GPU through a staging buffer, tested on Linux only.
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`
@@ -126,6 +127,7 @@ them is needed on a Mac that works.
 | Zink: the window's opacity is asked once per swap and the answer kept 100 ms | 3.0.8 | `NVK_ZINK_OPACITY_KEEP=0` | settings line |
 | Zink: with the swap interval at 0 the newest frame is shown and the swap does not wait for the display | 3.0.11 | `NVK_ZINK_PRESENT_NEWEST=0` | settings line |
 | Vulkan runtime: an IMMEDIATE swapchain shows the newest frame (3.0.9); MAILBOX is offered (3.0.11) | 3.0.9 | `NVK_BRIDGE_PRESENT_NEWEST=0` | settings line |
+| Zink: a glBufferSubData that would wait for the GPU goes through a staging buffer | 3.0.16 | `NVK_ZINK_SUBDATA_STAGE=0` | settings line |
 | Write-combining put back into the page attribute table where a kernel patch took it out | 3.0.13 | `nvpatwc=0` | boot argument |
 | The installer fetches the DLSS files | 3.0.13 | `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step | installer |
 | Read-only GPU capability cache | 3.0.3 | `nvgpucaps=0` | boot argument |

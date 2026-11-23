@@ -318,12 +318,22 @@ struct nvk_present_ahead {
 };
 
 static pthread_once_t ahead_once = PTHREAD_ONCE_INIT;
-static int ahead_on, keep_on, newest_on;
+static int ahead_on, keep_on, newest_on, subdata_on;
 static void ahead_read_switches(void)
 {
    ahead_on = nvk_zink_cfg_on("NVK_ZINK_PRESENT_AHEAD");
    keep_on = nvk_zink_cfg_on("NVK_ZINK_SURFACE_KEEP");
    newest_on = nvk_zink_cfg_on("NVK_ZINK_PRESENT_NEWEST");
+   subdata_on = nvk_zink_cfg_on("NVK_ZINK_SUBDATA_STAGE");
+}
+
+/* 3.0.16: whether glBufferSubData and a glBufferData of the same size write through a staging buffer where the
+ * threaded context would map the buffer and wait for the GPU (tc_subdata_stage_instead in Mesa's
+ * u_threaded_context.h, zink/mesa-zink-nvk.patch). Zink's context creation asks it once per context. */
+int nvk_zink_subdata_stage_enabled(void)
+{
+   pthread_once(&ahead_once, ahead_read_switches);
+   return subdata_on;
 }
 
 int nvk_present_ahead_enabled(void)

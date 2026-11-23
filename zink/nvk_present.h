@@ -23,6 +23,8 @@ int nvk_present_ahead_enabled(void);
 /* That, NVK_ZINK_PRESENT_NEWEST is not 0 and the process has no diagnostic observer: a swap may park its frame for a
  * sender (zink/nvk_newest.h). */
 int nvk_present_newest_enabled(void);
+/* 3.0.16: NVK_ZINK_SUBDATA_STAGE, read once with the switches above. zink_context.c declares it again for itself. */
+int nvk_zink_subdata_stage_enabled(void);
 /* Zink's record of the layout of an image, for the thread that draws into it. 0 = it has none. */
 unsigned nvk_present_image_layout(struct pipe_resource *image);
 /* Enter the queue for a new frame, after the one in flight has been published. 1 = inside (leave with cancel or
