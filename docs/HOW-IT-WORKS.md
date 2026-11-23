@@ -3,9 +3,10 @@
 This page follows a frame from a Metal app down to the GPU, then covers how the driver is installed, removed, and
 recovered. Paths are the ones on an installed Mac; the source folder for each piece is in brackets.
 
-> Release 2.9 has upstream RTX 5060 evidence; earlier 3.0.x fork builds ran on an RTX 5050 and GPU Caps
-> has scoped native evidence. The combined 3.0.3 development tree still needs validation
-> ([STATUS.md](STATUS.md)). The driver may not work on every card, board or
+> Release 2.9 has upstream RTX 5060 evidence; the fork's 3.0.x builds through 3.0.12 ran on one RTX 5050 and GPU Caps
+> has scoped native evidence. 3.0.13 has not been built on a Mac or run on a card
+> ([STATUS.md](STATUS.md)). Every path described here is on by default; the ways back are in the
+> [README](../README.md#what-is-on-by-default-and-the-ways-back). The driver may not work on every card, board or
 > OpenCore setup. If your Mac does not boot macOS with OpenCore yet, set that up first with the
 > [OpenCore Install Guide](https://dortania.github.io/OpenCore-Install-Guide/), then install the driver.
 
@@ -52,6 +53,13 @@ Linux's. At start it:
 
 The boot argument `-nvoff` makes NVRM leave the card alone. The recovery path below uses it.
 
+Since 3.0.13 NVRM also reads the CPU's page attribute table at start. On an AMD machine with AMD_Vanilla's "Fix PAT"
+kernel patch, entry 6 of that table, the one macOS uses for write-combined mappings, is uncached-minus, so every CPU write
+through BAR1 leaves the CPU one store at a time. NVRM then writes the entry back to write-combining on every CPU at
+once, the one change stock XNU makes itself, and repeats it at each wake, where the patched kernel has put its own
+table back. A machine whose table already has the entry sees no write. `sysctl debug.nvrm_pat_wc debug.nvrm_pat_why`
+say what is in force; the boot argument `nvpatwc=0` leaves the table as the kernel wrote it.
+
 NVRM also exposes versioned read-only GPU Caps through selector 14 and live boost policy through selector 13.
 The capability snapshot is not a write-permission API. [GPU-CAPS.md](GPU-CAPS.md) and
 [NVMETRICS.md](NVMETRICS.md) describe their userspace consumers and limits.
@@ -89,6 +97,27 @@ to, into SPIR-V that NVK can compile. It is based on metal2vulkan (LGPL-3.0).
 
 **NVK** (`/Library/GPUBundles/nvmtl/`) is Mesa's Vulkan driver for NVIDIA plus the NAK shader compiler, patched to run
 on macOS against NVRM instead of the Linux DRM interface (`nvk/nvk-macos.patch` and the rest of the chain on Mesa `90a959eb`, 26.3.0-rc3).
+
+**OpenGL** (`/Library/GPUBundles/NVKZinkGLDriver.bundle`, `/Library/GPUBundles/nvmtl/zink`; `zink/`). On macOS 15.5
+or later the accelerator names this bundle as its OpenGL driver, so an OpenGL application runs on NVK through Mesa's
+Zink: one translation, where Apple's OpenGL goes through Metal and then through the plugin. The frontend copies each
+frame on the GPU into the window's surface. A swap runs one frame ahead of the GPU and keeps its import of the
+window's video memory (3.0.7), and with the swap interval at 0 it leaves its frame to a sender thread that shows the
+newest one, so the application is not held to the display (3.0.11). A context the guard refuses, and every
+application with the boot argument `nvzink=0`, stays on Apple's OpenGL over Metal.
+[ZINK-OPENGL.md](ZINK-OPENGL.md) has the details.
+
+**Vulkan for applications** (`/Library/GPUBundles/nvmtl/minecraft`; `tools/nvk-bridge/`). A frontend library gives a
+Vulkan application NVK with windows: the application renders with NVK and the frontend copies each frame on the GPU
+into a `CAMetalLayer`, with no MoltenVK. It offers the FIFO, IMMEDIATE and MAILBOX present modes; for the last two a
+presentation thread shows the newest finished frame whenever the window can take one (3.0.9, 3.0.11). An application
+selects the runtime when it is launched ([INSTALL.md](../tools/nvk-bridge/INSTALL.md),
+[APPLICATIONS.md](../tools/nvk-bridge/APPLICATIONS.md)).
+
+**DLSS** (`/Library/NullMoth/dlss`; `dlss/`, `plugin/nvmtl_dlss.c`). The package carries no NVIDIA DLSS code. Since
+3.0.13 `install.sh` downloads NVIDIA's own files, checks their pinned hashes and builds the DLSS kernels for the card,
+unless `NULLMOTH_DLSS=0` is set. With the files in place the plugin serves the MetalFX temporal upscaler with DLSS
+Super Resolution and the MetalFX frame interpolator with DLSS Frame Generation; WindowServer never loads them.
 
 **NVIDIAShared.bundle** is no longer in the package. Packages up to 2.8.1 carried it with two of NVIDIA's closed
 compiler libraries; the plugin used it only when a developer switch (`NVMTL_VENDOR_COMPILER`) was set. The installer
@@ -168,7 +197,9 @@ Nothing is sent; you can upload the file on the site yourself.
 ## 6. The package
 
 `package/install.sh` and `uninstall.sh` work without the app (README, *Install — by hand*). The tarball holds
-`pkgroot/` with every file at its install path plus `SHA256SUMS`.
+`pkgroot/` with every file at its install path plus `SHA256SUMS`. What the package does not carry, `install.sh`
+fetches from NVIDIA's own sites and checks against pinned hashes: the GSP firmware (`package/fw_fetch.sh`) and, since
+3.0.13, the DLSS files (`package/dlss_fetch.sh`; `NULLMOTH_DLSS=0` skips them).
 
 ## 7. Building
 
