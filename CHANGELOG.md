@@ -1,5 +1,59 @@
 # Changelog
 
+## 3.0.14
+
+**Not released.** This section describes the branch being prepared as 3.0.14, on top of 3.0.13 (below, not released
+either). It is phase 0 of the shader-compiler work: an instrument that changes nothing the driver does. Every later
+change to NAK is to be judged by the same figures over the same shaders, and accepted or reverted on them, so the
+compiler now writes those figures one shader per line, a fixed set of shaders lives in the repository, and a script
+compares two runs. **Nothing of 3.0.14 has been built on a Mac or run on a card**; it is host-tested only.
+
+### Fixes and changes
+
+#### NVK: per-shader statistics for compiler work
+
+- **`NAK_STATS=1` writes one JSON line per compiled shader stage on stderr.** The new patch `nvk/nvk-nak-stats.patch`,
+  last in the 3.0 chain, changes `src/nouveau/compiler/nak/api.rs` only. After the shader is finished and before it is
+  encoded, the compiler writes `{"nak_stats":1,"stage":..,"sm":..,"blake3":..}` and then `instrs`, `instrs_warp`,
+  `instrs_uniform`, `gprs`, `warps_per_sm`, `static_cycles`, the four spill and fill counts and `slm`. NAK already
+  counted most of these (`NAK_DEBUG=print` and Vulkan's pipeline executable statistics show them); new are the split
+  between the uniform data path and the main one (`instrs_uniform` counts the instructions whose destinations are
+  uniform registers) and the one-line form. `blake3` is the hash of the shader's SPIR-V. A compute shader that NAK
+  builds twice reports the build it keeps. Unset, or set to anything but 1, nothing is read from the shader and
+  nothing is written. The switch changes no code, so it is not in the shader cache key (`tools/test_nvk_nak_switch_key.py`
+  lists it with the other switches that rightly are not): a shader served from a cache prints nothing.
+- **A corpus of shaders and a runner, `tools/nak-corpus/`.** 150 graphics pipelines (300 shader stages): the 30
+  written by hand for the 3.0.12 fixes and 120 that `gen.py` writes (many textures, branches, loops, shadow, cube,
+  array, 3D, offset, gradient, fetch and gather forms, most of them under register pressure). `run.sh <out.jsonl>
+  [NAME=value ...]` builds `pipetest.c`, compiles every case once with the caches off and `NAK_STATS=1`, and writes
+  one line per stage with the case's name added; it needs glslangValidator and a Vulkan loader pointed at the NVK to
+  measure. `baseline-sm120-host.jsonl` is the run of this release's NAK on Linux (Mesa's nouveau drm-shim as a GB207,
+  shader model 120). Not in the corpus, because they cannot be put in the repository: the shaders of a game's shader
+  pack (the census of ATM10 with Complementary Unbound was kept outside it) and Apple's Core Animation kernels.
+- **`tools/nak_stats_diff.py BASE NEW`** prints, for instructions (all, main pipe, uniform), registers, warps per SM,
+  spills and static cycles, the total over the shaders both runs have, the change, how many shaders went up and down,
+  and the shaders that changed most. `--gate-instrs PCT` fails when instructions rise by more than PCT percent and
+  `--gate-spills` when any shader spills more than before. Pairs of instructions issued together are not counted:
+  the GPUs this driver supports have no dual issue (NAK models it only for Kepler).
+
+What it showed on the corpus, as a check of the instrument: two runs of the same build give the same file byte for
+byte. With `NAK_TEX_UHANDLE=1` (off by default), instructions go down 0.48 % (main pipe down 1.68 %, uniform up 0.63 %)
+and static cycles 0.43 %, but 71 stages spill more registers (spills to registers, none to memory), so
+`--gate-spills` refuses it.
+
+### The ways back
+
+Nothing is on by default. Leaving `NAK_STATS` unset is the old behaviour.
+
+### What ran where
+
+On Linux only. The fork's NVK and NAK (Mesa 26.3.0-rc3 with the whole 3.0 chain, this patch included) were built for
+x86_64 on Mesa's nouveau drm-shim as a GB207; every corpus case compiled, with and without `NAK_TEX_UHANDLE=1`. The
+new host test `tools/test_nak_stats.py` passes and fails on 3.0.13; `tools/test_nvk_nak_switch_key.py`,
+`test_nvk_chain.py`, `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_package_licenses.py`,
+`test_tree_layout.py` and `tools/switch_registry.py check` pass. The patch was not cross-built for macOS, nothing was
+built on a Mac and nothing ran on a card.
+
 ## 3.0.13
 
 **Not released.** This section describes the branch being prepared as 3.0.13, on top of 3.0.12 (below, not released

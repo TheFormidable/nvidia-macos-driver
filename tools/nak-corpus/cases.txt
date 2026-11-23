@@ -1,0 +1,30 @@
+a_tex1|-s 1|quad
+b_texarr_ubo|-a 4 -u|quad
+c_fetch_lod|-s 2|quad
+t0_const|-s 1|quad
+t1_dynidx_pc|-a 4 -p 4|quad
+t2_global_const|-s 1 -a 16400|quad
+t3_global_dyn|-s 1 -a 16400 -p 4|quad
+t4_spill|-s 1 -u|quad
+t4_spill_24|-s 1 -u|quad
+t4_spill_40|-s 1 -u|quad
+t4_spill_64|-s 1 -u|quad
+t5_spill_24|-s 1 -u|quad
+t5_spill_28|-s 1 -u|quad
+v6_dup_24|-s 1 -u|quad
+v6_dup_28|-s 1 -u|quad
+v7_p1_dup|-a 4 -p 4|quad
+m1_dup_cross_24|-s 1 -u|quad
+m2_shadow_off_24|-s 1 -u|quad
+m3_array_dup_24|-s 1 -u|quad
+m4_cube_bias_24|-s 1 -u|quad
+m5_two_24|-s 1 -u|quad
+m6_3d_lz_28|-s 1 -u|quad
+m7_p1_spill_24|-a 4 -u -p 4|quad
+m8_loop_24|-s 1 -u|quad
+m9_vs|-s 1 -u|m9_vs
+x_loopdiv|-a 4 -u -p 4|quad
+x_phihandle|-a 4 -u -p 4|quad
+x_dupcoordlod|-a 4 -u -p 4|quad
+x_both|-a 4 -u -p 4|quad
+x_cubearr4|-a 4 -u -p 4|quad
