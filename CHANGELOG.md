@@ -37,6 +37,12 @@ into the CPU's page attribute table where an AMD kernel patch took it out, and t
   for the card, as before. With the files present the Metal plugin already served the MetalFX temporal upscaler with
   DLSS Super Resolution and the MetalFX frame interpolator with DLSS Frame Generation without any switch, so a Metal
   game that uses MetalFX gets them with no setting. A failure in the step still leaves the driver installed.
+- **No onboard sound on macOS 26 with `alcid` in boot-args: the installer says so, and the README explains it.** macOS
+  26 has no AppleHDA, so AppleALC does nothing there, and the audio driver (NMXAudio) leaves the onboard controller
+  alone while `alcid` or `alcverbs` is set: only the NVIDIA display outputs appeared, with no speakers, headphone jack
+  or microphone (an RTX 5050 on 26.7.3 with `alcid=66`; removing it brought them back). This was not written down
+  anywhere. `install.sh` now prints a note when it installs NMXAudio and boot-args carry either argument, and the
+  README's OpenCore section says what to remove (`tools/test_install_alc_note.py`).
 
 ### The ways back
 
