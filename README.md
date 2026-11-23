@@ -194,6 +194,14 @@ Also required:
 - **With WhateverGreen installed** (for an Intel or AMD GPU), add `gfxrst=4` to boot-args. Without it, WhateverGreen's
   boot screen copy can read freed memory when the NVIDIA display opens, and the Mac panics.
 - **No `DeviceProperties`** are needed for the NVIDIA card.
+- **Sound on macOS 26: remove `alcid=…` and `alcverbs` from boot-args.** macOS 26 has no AppleHDA, so AppleALC loads
+  and does nothing, and while either argument is set the installer's audio driver (`com.nullmoth.NMXAudio`) leaves the
+  onboard sound to AppleALC: the Mac shows only the NVIDIA HDMI/DisplayPort outputs, with no speakers, headphone jack
+  or microphone. Its boot log says so: `log show --last boot --style compact --predicate 'senderImagePath CONTAINS[c]
+  "NMXAudio"'` prints `leaving <vendor:device> alone: another codec stack is switched on (alcid/alcverbs)`. Edit the
+  `boot-args` in `config.plist` (OpenCore rewrites them each boot, so `sudo nvram` is not enough) and restart. AppleALC
+  can stay; keep `alcid` only if you restored AppleHDA yourself (SimpleHDA, a root patch). The installer prints a note
+  when it finds either argument.
 
 Verify after the reboot:
 
