@@ -1,74 +1,5 @@
 # Changelog
 
-## 3.0.15
-
-**Not released.** This section describes the branch being prepared as 3.0.15, on top of 3.0.14 (below, not released
-either). It is phase 1 of the shader-compiler work: a heavy graphics shader is compiled a second time with fewer
-registers when that lets more warps share an SM, which helps a shader that spends its time waiting on textures. It is
-on by default and has one way back, `NAK_OCC_TARGET=0`, and is never used in WindowServer. **Nothing of 3.0.15 has
-run on a card yet**; it is host-tested only, and whether it makes a game faster is the card's question (below, "What ran
-where").
-
-### Fixes and changes
-
-#### NVK: more warps per SM for heavy graphics shaders
-
-- **A shader below 32 warps per SM is built again under a lower register cap.** The new patch
-  `nvk/nvk-nak-occ-target.patch`, last in the 3.0 chain, changes `src/nouveau/compiler/nak/api.rs` only. An SM's
-  register file holds 65536 registers, so the registers a shader takes set how many warps run at once (on the RTX 5050,
-  104 to 128 registers give 16 warps of 48, 96 give 20, 80 give 24, 72 give 28, 64 give 32). For a vertex,
-  tessellation, geometry or fragment shader that ends below 32 warps, samples a texture or reads global memory, and has
-  no register budget of its own (the Metal plugin's RAW budget on shader model 120), the compiler builds it again with
-  the register allocator capped at the largest count that gains warps, through the cap hook the fork already had. The
-  new build is kept only when it fits under the cap, gains warps, and has **at most 5 % more instructions** than the
-  first build (spill and fill instructions included); then one more step down is tried the same way. A build that
-  fails is dropped and the first build is kept. Compute shaders and shaders at 32 warps or more are never rebuilt.
-- **Never in WindowServer.** WindowServer has no shell environment and NAK reads its switches with Rust's
-  `std::env`, not from `nvrm610.conf`, so `NAK_OCC_TARGET=0` could not reach it. NAK tests the name of the process's
-  executable once and, in WindowServer, keeps the compiler of 3.0.14 for every shader.
-- **`NAK_OCC_TARGET` is in the shader cache key** (`nvk/nvk-nak-switch-key.patch`), so a binary built with the pick
-  is not served to a process that set `NAK_OCC_TARGET=0`, nor the other way round. With nothing set the key is
-  computed as before; the new driver build changes the cache anyway, so the first start of a game compiles its shaders
-  again.
-
-What it gave on Linux (`NAK_STATS=1`, compared with `tools/nak_stats_diff.py`):
-
-- **The corpus** (`tools/nak-corpus/`, 300 stages): no change. One stage is below 32 warps (80 registers, 24 warps); its
-  try at 72 registers reached 28 warps with 13 % more instructions, so the gate refused it.
-- **The ATM10 shaders with Complementary Unbound** (the census kept outside the repository, 409 stages through Zink):
-  30 fragment stages are below 32 warps, and 27 of them gain warps: 16 to 20 or 24, 20 to 28, 24 to 28 or 32, 28 to 32
-  or 36, 28 % more warps over those 27 in all. Their instructions rise 2.6 % (at most 4.8 % for one), all stages
-  together 1.6 %, and NAK's static cycle estimate per warp 3.1 %. **The price is spilling to memory**: those 27 had no
-  spill to local memory before and now have 3479 spills and 1031 fills to it, which the instruction count includes but
-  which go through the L1 cache at run time. `--gate-spills` refuses the change for that reason; the plan's gate is the
-  5 % of instructions, which it meets. Whether 28 % more warps outweigh those memory accesses is what the card has to
-  show. Compiling the 352 programs from an empty cache took 26.5 s instead of 21.7 s (the second builds).
-
-### The ways back
-
-`NAK_OCC_TARGET=0` in the environment of the application (for a game, in its launcher's environment variables)
-keeps the first build of every shader, which is the compiler of 3.0.14 to the instruction: the corpus run with it is
-byte for byte the 3.0.14 baseline. NAK reads it with Rust's `std::env`, so a line of `nvrm610.conf` does not reach
-it.
-
-### What ran where
-
-On the RTX 5050 machine (macOS 26.7.3), the package was built from fdbc830d without a warning: the two new NVK patches
-under macOS's `patch`, Apple's clang and the Mac's Rust, and 3.0.13's NVRM with Apple's clang for the first time;
-`test_nvk_nak_switch_key.py` and `test_nvk_chain.py` pass there. Against the installed 3.0.12 only NVK's three
-libraries, NVRM's binary, `nvrm610.conf` and the macOS 15 NVAccel differ, so the phase can be tried by copying NVK's
-three libraries without a restart. The WindowServer rule came after that build.
-
-On Linux, the fork's NVK and NAK (Mesa 26.3.0-rc3 with the whole 3.0 chain, this patch included) were built for
-x86_64 on Mesa's nouveau drm-shim as a GB207; the corpus and the ATM10 census compiled with and without
-`NAK_OCC_TARGET=0` (one ATM10 program, 342, fails at its draw with GL error 0x502 in both runs, as it did in the
-census of 3.0.12). The new host test
-`tools/test_nak_occ_target.py` passes and fails on 3.0.14; `test_nak_stats.py`, `test_nvk_nak_switch_key.py`,
-`test_nvk_chain.py`, `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_package_licenses.py`,
-`test_tree_layout.py` and `tools/switch_registry.py check` pass. Nothing ran on a card yet.
-The card round that decides it: the same place in ATM10 with the shader pack, frames per second and GPU utilisation,
-once as installed and once with `NAK_OCC_TARGET=0`.
-
 ## 3.0.14
 
 **Not released.** This section describes the branch being prepared as 3.0.14, on top of 3.0.13 (below, not released
@@ -122,6 +53,39 @@ new host test `tools/test_nak_stats.py` passes and fails on 3.0.13; `tools/test_
 `test_nvk_chain.py`, `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_package_licenses.py`,
 `test_tree_layout.py` and `tools/switch_registry.py check` pass. The patch was not cross-built for macOS, nothing was
 built on a Mac and nothing ran on a card.
+
+### 3.0.15, tried on top of 3.0.14 and not kept
+
+[PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) was phase 1 of the shader-compiler plan:
+a heavy graphics shader below 32 warps per SM was built a second time with fewer registers, and that build was kept
+when it gained warps for at most 5 % more instructions. The switch was `NAK_OCC_TARGET=0`, and the pick never ran
+in WindowServer. On Linux it met the instruction gate. Of ATM10's 409 stages with Complementary Unbound, 27 fragment
+stages gained warps (28 % more over them) for 2.6 % more instructions, but they went from no spill to local memory to
+4510 spill and fill instructions.
+
+On the card it did not meet the plan's criterion (the same frames for less GPU or fewer watts), so it was closed
+without merging and its patch is not in the tree. The test, on 2026-11-23 on the RTX 5050: NVK 3.0.15 was copied by
+hand over an installed 3.0.12. The place in ATM10 with the shader pack and the view were fixed. `fps_capture.sh` ran
+20 s per capture, in the order on, off (`NAK_OCC_TARGET=0` through `launchctl setenv`), on:
+
+| capture | phase 1 | game frames/s | watts | GPU % | joules per frame |
+|---|---|---|---|---|---|
+| 175040 | on | 75.4 | 96.9 | 63.2 | 1.285 |
+| 175746 | off | 77.0 | 98.8 | 66.7 | 1.283 |
+| 180425 | on | 78.8 | 100.6 | 67.8 | 1.277 |
+
+Game frames are the frames that went through Zink's surface fences (`debug.nvaccel_surface_fence_waits`). The GPU
+clock was 2912 to 2925 MHz throughout, with no Xid. The two "on" captures differ from each other by as much as either
+differs from "off". A first capture, taken with phase 1 off, is left out: only 34 frames went through the surface
+fences in 20 s while the display flipped 102 times a second and the GPU ran at 96 % and 121 W, so the screen showed
+something else.
+
+What limited that scene was the game's render thread, not its shaders. In the three captures it spends 19 to 25 % of
+its time asleep in `glBufferSubData`, in `tc_buffer_subdata` → `tc_buffer_map` → `zink_buffer_map` →
+`zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is Zink waiting for the GPU to finish with a buffer before the game
+may write it again.
+
+The version number 3.0.15 is not used again. On the card the compiler's own figures counted for less than this wait.
 
 ## 3.0.13
 
