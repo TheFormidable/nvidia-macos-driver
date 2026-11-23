@@ -85,6 +85,7 @@ env	NAK_NO_LICM	dev	unset (the path is on)	2.9	-	unreviewed
 env	NAK_NO_PIN_ADDR	dev	unset (the path is on)	2.9	-	unreviewed
 env	NAK_QMD_NO_PREFETCH	dev	unset (the path is on)	2.9	-	unreviewed
 env	NAK_SMEM_TARGET_CAP_KB	dev	unset	2.9	-	unreviewed
+env	NAK_STATS	diag	unset	3.0.14	3.2	writes one JSON line of shader-compiler statistics per compiled shader stage on stderr (tools/nak-corpus, tools/nak_stats_diff.py); changes no code
 env	NAK_TEX_UHANDLE	dev	unset	2.9	-	unreviewed
 env	NAK_TEX_UHANDLE_WHY	dev	unset	2.9	-	unreviewed
 env	NMXVT	dev	unset	2.9	-	unreviewed

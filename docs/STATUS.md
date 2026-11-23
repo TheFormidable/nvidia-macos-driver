@@ -41,6 +41,10 @@ the exact meaning of the records are in [GPU-CAPS.md](GPU-CAPS.md) and
 - **Media:** H.264 Blackwell decode path is gated by a self-test; do not advertise
   Blackwell AV1/VP9 hardware decode from that gate. DRM streaming and end-to-end
   WebRTC/4K capture remain issues to qualify on specific OS/browser/codec paths.
+- **Shader-compiler statistics (3.0.14):** `NAK_STATS=1` writes one JSON line per
+  compiled shader stage; `tools/nak-corpus/` and `tools/nak_stats_diff.py` measure a
+  compiler change over a fixed set of 300 stages. Host-tested only: built and run on
+  Linux on Mesa's nouveau drm-shim as shader model 120, never on a Mac or a card.
 - **Other gaps:** full multi-GPU acceleration, hybrid laptop offload, hardware
   ray-tracing opt-ins and Windows/Apple feature parity require dedicated evidence.
   CUDA and proprietary firmware capabilities are not implemented by this fork.
