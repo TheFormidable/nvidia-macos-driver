@@ -87,6 +87,29 @@ the driver components, see [selecting one GPU](MULTI-GPU.md). The workaround was
 on four RTX 4090s with 1.14.7 and macOS 15.8.1; it restricts NVRM/NVAccel to the display card
 and rebuilds the final collection from permanent installation paths.
 
+### What 3.0.1 to 3.0.13 added
+
+Everything these versions added is on by default; nothing has to be turned on. `cat /Library/NullMoth/driver-version`
+says which version is installed. Each entry's fix is the way back of that one change (the whole list is in
+[README.md](../README.md#what-is-on-by-default-and-the-ways-back)): a boot argument goes into OpenCore's `boot-args`
+and needs a restart; a settings line goes into your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf` (between
+`# --- my settings, kept on update ---` and `# --- end my settings ---`), from the first column, and acts on the
+applications started after it. Apart from the sound entry, these entries come from one machine (an RTX 5050 on macOS
+26.7.3) and from reading the code, not from logs people sent.
+
+| What you see | Why | Fix |
+|---|---|---|
+| macOS 26: no speakers, headphone jack or microphone; only the NVIDIA HDMI/DisplayPort outputs appear | macOS 26 has no AppleHDA, so AppleALC does nothing there, and the installer's audio driver (NMXAudio) leaves the onboard sound alone while boot-args carry `alcid=…` or `alcverbs`. | Remove both from `boot-args` in `config.plist` and restart ([README.md](../README.md), "Wiring into an existing OpenCore setup"). The installer prints a note when it finds either. |
+| An OpenGL application draws wrong, shows an empty window or does not start | On macOS 15.5 or later OpenGL runs on NVK through Zink instead of Apple's OpenGL over Metal. | Restart once with the boot argument `nvzink=0`, which gives every application Apple's OpenGL. If the problem goes, report the application and its `NVK Zink:` lines ([ZINK-OPENGL.md](ZINK-OPENGL.md), "The way out"). `ioreg -l -w0 \| grep IOGLBundleName` says which driver the accelerator names (`NVKZinkGLDriver` for Zink). |
+| An OpenGL game is correct but stutters, or shows frames unevenly with vertical sync off | How a swap on Zink reaches the window changed in 3.0.7 (one frame ahead of the GPU), 3.0.8 (the opacity answer is kept) and 3.0.11 (with the swap interval at 0 a sender thread shows the newest frame). | In the settings file, one at a time, restarting the game after each: `NVK_ZINK_PRESENT_NEWEST=0`, then `NVK_ZINK_OPACITY_KEEP=0`, then `NVK_ZINK_PRESENT_AHEAD=0`. Report which one changed it. Vertical sync on in the game also takes the 3.0.11 path out. |
+| A game on the Vulkan runtime (Minecraft's Vulkan renderer) stutters or shows frames unevenly with vertical sync off | Since 3.0.9 an IMMEDIATE swapchain, and since 3.0.11 a MAILBOX one, hands its frames to a presentation thread that shows the newest. | `NVK_BRIDGE_PRESENT_NEWEST=0` in the settings file and restart the game: every present waits on the game's thread, as in 3.0.8. The game's log then has `NVK Bridge: swapchain presentation=synchronous` ([INSTALL.md](../tools/nvk-bridge/INSTALL.md), "Going back"). |
+| With vertical sync off a game stands at exactly twice the display's refresh rate (200 frames a second on a 100 Hz display), or another multiple of it | Through 3.0.8 the Vulkan runtime, and through 3.0.9 OpenGL on Zink, waited in every present for the window's next drawable. | Install 3.0.9 or later for the Vulkan runtime and 3.0.11 or later for OpenGL. The two changes are in those two frontends only: an application that presents through Metal itself (a Metal game, MoltenVK, Apple's OpenGL with `nvzink=0`) is not changed by them. |
+| AMD machine: `sysctl debug.nvrm_pat_wc` reads 0, and uploads of buffers and textures are slow | AMD_Vanilla's "Fix PAT" kernel patch leaves the CPU's page attribute table without a write-combining entry, so what the CPU writes into video memory leaves it one store at a time. | 3.0.13 puts the entry back by itself at start and after each wake: `sysctl debug.nvrm_pat_found debug.nvrm_pat_wc debug.nvrm_pat_why debug.nvrm_pat_passes debug.nvrm_pat_cpus hw.ncpu` then shows `nvrm_pat_wc` 1, at least one pass and as many CPUs as `hw.ncpu`. Through 3.0.12 the only fix was the patch's own byte in OpenCore. |
+| An AMD machine does not start, or misbehaves after a wake, after an update to 3.0.13 | NVRM now writes the page attribute table on every CPU (the row above). 3.0.13 has not run on a card yet. | Boot argument `nvpatwc=0`: the table is left as the kernel wrote it, as in 3.0.12. After two failed starts the boot guard turns the driver off by itself (section 4). Report the sysctls of the row above. |
+| `install.sh` spends minutes at "DLSS 4 / 4.5 files", or prints that the DLSS files were not installed | Since 3.0.13 the installer downloads NVIDIA's DLSS files by default (about 750 MB the first time) and builds their kernels for the card. | A failure there leaves the driver installed; run the installer again later to retry. `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step, and files already under `/Library/NullMoth/dlss` stay in use. |
+| The first start of a game after a driver update loads more slowly than before | A new build of NVK has a new build id, so the shader caches of the version before are not reused and every shader is compiled once more. | Nothing to do: the next start finds the new caches. |
+| The desktop and a game lose most of their frame rate while the screen is shared (Google Meet, Discord) | Before 3.0 every captured frame cost WindowServer a fill of new video memory from the processor and a wait for the display. | Fixed in 3.0. `sysctl debug \| grep nvrmfb_vram_` has its counters; the boot argument `nvfbvramfast=0` goes back to the old path for a comparison. |
+
 ### The new paths of release 3.0
 
 Every change of 3.0 is on by default. Each risky change has one way back to the 2.9 behaviour (the table "The ways

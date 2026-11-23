@@ -1,6 +1,6 @@
 # What NVIDIA's Windows driver offers, and what this driver offers on macOS
 
-This is the 2.9 baseline audit with 3.0.3 fork updates for GTX 16 / RTX 20 to RTX 50 cards on macOS 15 and 26. Each row names the Windows feature, the
+This is the 2.9 baseline audit with fork updates through 3.0.13 for GTX 16 / RTX 20 to RTX 50 cards on macOS 15 and 26. Each row names the Windows feature, the
 state in this tree (file, switch or document), and what is missing. "Blocked" always carries the reason. Media rows are
 detailed in [WINDOWS-PARITY-MEDIA.md](WINDOWS-PARITY-MEDIA.md); card coverage in [CARD-SUPPORT.md](CARD-SUPPORT.md).
 See [STATUS.md](STATUS.md) for test scope; inherited features and new experimental implementations are not a
@@ -50,13 +50,14 @@ asked about, and writes conf settings only into the block the installer keeps ac
 | OpenCL | owned by the compute/OpenCL area (`rel/driver-opencl`) | see that area's report |
 | DirectML-equivalent | Metal Performance Shaders and Core ML run on the Metal path | none |
 | Vulkan for applications | **built:** `package/vulkan-for-apps.sh --install` writes a loader manifest for the driver's NVK library, off by default (`tools/test_vulkan_for_apps.sh`, 12 arms). `nvk/nvk-metal-wsi.patch` adds `VK_EXT_metal_surface` windows (copy-based present into a `CAMetalLayer`). | Window presentation is proven to build only (see the report); the copy path is slower than a native one. The Khronos loader (Apache-2.0) is in the package as `Library/NullMoth/vulkan/libvulkan.1.dylib` and is installed with `--with-loader`. |
-| OpenGL | Zink on NVK via GLD on macOS 15.5+, with Apple's OpenGL-on-Metal fallback | 3.0.3 guard fix host-tested only; validate GL_RENDERER after installation. See [ZINK-OPENGL.md](ZINK-OPENGL.md). |
+| Vulkan runtime for games (`tools/nvk-bridge`) | **built and installed with the driver:** `/Library/GPUBundles/nvmtl/minecraft`, NVK with each frame copied on the GPU into the window; FIFO, IMMEDIATE and MAILBOX, the last two showing the newest frame without holding the application to the display (3.0.9, 3.0.11; `NVK_BRIDGE_PRESENT_NEWEST=0` goes back). An application selects it when it is launched ([INSTALL.md](../tools/nvk-bridge/INSTALL.md)) | Seen with Minecraft 26.3 on one RTX 5050; no capture after 3.0.9. |
+| OpenGL | Zink on NVK via GLD on macOS 15.5+, on by default, with Apple's OpenGL-on-Metal fallback (`nvzink=0`). A swap runs one frame ahead (3.0.7) and with the swap interval at 0 shows the newest frame without waiting for the display (3.0.11) | Runs on one RTX 5050 with macOS 26.7.3 since 3.0.6; on another card or macOS build validate GL_RENDERER after installation. See [ZINK-OPENGL.md](ZINK-OPENGL.md). |
 
 ## Gaming
 
 | Windows feature | State in 2.9 | Gap |
 |---|---|---|
-| DLSS Super Resolution, Frame Generation, Ray Reconstruction | `plugin/nvmtl_dlss.c`, `plugin/NVMTLMetalFXDLSS.m`, `dlss/` (Blackwell default; Turing, Ampere, Ada opt-in) | verification needs studio |
+| DLSS Super Resolution, Frame Generation, Ray Reconstruction | `plugin/nvmtl_dlss.c`, `plugin/NVMTLMetalFXDLSS.m`, `dlss/` (Blackwell default; Turing, Ampere, Ada opt-in). Since 3.0.13 the installer fetches the DLSS files by default (`NULLMOTH_DLSS=0` skips) | verification needs studio |
 | Max frame rate limiter | **built:** `NVMTL_FPS_LIMIT` (`plugin/nvmtl_fps_limit.h`, `tools/test_fps_limit.c`, 17 arms). One number or `Game=60,*=0`, 10 to 1000, never WindowServer. Kept across updates. | applied on the application's present call; proven offline only, behaviour on a real game is a studio check |
 | Low-latency mode | `NVMTL_GSUB_INFLIGHT` (1 to 32, queue depth) | NVIDIA Reflex needs the game's own SDK calls and NVIDIA's closed runtime: blocked |
 | Per-application profiles | built-in profiles by executable and bundle id (`plugin/nvmtl_app_profile.h`); a user's own settings block in `nvrm610.conf`; per-application GPU on hybrid laptops (`nvmtl-gpu-policy.txt`); per-application frame limits | a user-defined per-application profile for arbitrary knobs is not built; the frame limit is the one per-application user setting |
