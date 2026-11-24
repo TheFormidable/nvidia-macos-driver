@@ -202,6 +202,7 @@ typedef const void *CFTypeRef, *CFStringRef;
 typedef struct { CFIndex location, length; } CFRange;
 static CFRange CFRangeMake(CFIndex l, CFIndex n) { CFRange r = { l, n }; return r; }
 enum { KERN_SUCCESS = 0, kIOMainPortDefault = 0 };
+#define NV_IO_MAIN_PORT kIOMainPortDefault   /* vendor/nvenc/src/nv_floor.h, macOS 12 and later */
 #define CFSTR(s) (s)
 typedef struct { unsigned vendor, device, cls; } Fn;
 static const Fn *reg;

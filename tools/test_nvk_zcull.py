@@ -45,7 +45,10 @@ rem = "\n".join(l[1:] for l in body.splitlines() if l.startswith("-") and not l.
 
 # --- the chain ---------------------------------------------------------------------------------------------------------
 ch = chains()
-arm("the patch is the last of the 3.0 chain", ch.get("3.0", [])[-1:] == ["nvk-zcull"], ch.get("3.0", [])[-3:])
+# A patch added later goes at the end of the chain, behind this one: the order is what is held, not the last place.
+c30 = ch.get("3.0", [])
+arm("the patch follows nvk-nak-stats in the 3.0 chain", "nvk-zcull" in c30 and "nvk-nak-stats" in c30
+    and c30.index("nvk-zcull") > c30.index("nvk-nak-stats"), c30[-4:])
 arm("the patch is in no other chain", all("nvk-zcull" not in v for k, v in ch.items() if k != "3.0"))
 files = re.findall(r"^\+\+\+ b/(\S+)", text, re.M)
 arm("the patch changes nvkmd_nvrm_pdev.c alone", files == ["src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c"], files)

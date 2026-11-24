@@ -80,6 +80,8 @@ typedef int64_t SInt64; typedef int32_t SInt32; typedef uint32_t UInt32;
 #define ALOG(...) ((void)0)
 #include "nvaccel_lock_owner.h"
 #include "nvaccel_pageoff_recheck.h"
+#include "nvres_fields.h"                             // the resource's field offsets (one layout from 10.14 on)
+#define NV_FAM_PAGEOFF(ev, a1, out, a3) IOAccelResource2::pageoff(ev, a1, out, a3)   // the kext's, for 10.12 and later
 #include "nvrm_fence_abi.h"
 #include "nvrm_surfshare_abi.h"
 // ---- threads and the accelerator lock ---------------------------------------------------------------------------------

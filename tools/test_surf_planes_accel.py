@@ -66,6 +66,15 @@ def git_show(rev, path):
     return r.stdout if r.returncode == 0 else None
 
 
+
+def macos15_names(text):
+    """The source with the names the older-macOS kits use (kexts/NVRM/accel/nvres_fields.h for the resource's fields,
+    NV_FAM_PAGEOFF for the family's page-off) written as what they are on macOS 15 and 26, the text these checks read."""
+    for name, off in (("kNvResFlags", "0xc"), ("kNvResType", "0x14"), ("kNvResValid", "0x30"), ("kNvResVidMem", "0x88"),
+                      ("kNvResCache", "0xe0"), ("kNvResBaseLevel", "0xae"), ("kNvResWidth", "0xb0"), ("kNvResHeight", "0xb2")):
+        text = re.sub(r"\b%s\b" % name, off, text)
+    return re.sub(r"(?<!#define )\bNV_FAM_PAGEOFF\(", "IOAccelResource2::pageoff(", text)
+
 def func(src, start, end_marker="\n}\n"):
     a = src.find(start)
     if a < 0:
@@ -634,7 +643,7 @@ def sysctl_problems(src):
 
 
 def main():
-    src = SRC.read_text()
+    src = macos15_names(SRC.read_text())
     st, gr, rg = staging(src), grant(src), ranged(src)
     arm("the staging code, the plane grant and the plane page-off are found in the source", bool(st and gr and rg))
 

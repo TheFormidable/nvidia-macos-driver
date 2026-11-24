@@ -40,6 +40,15 @@ def git_show(rev, path):
     return r.stdout if r.returncode == 0 else None
 
 
+
+def macos15_names(text):
+    """The source with the names the older-macOS kits use (kexts/NVRM/accel/nvres_fields.h for the resource's fields,
+    NV_FAM_PAGEOFF for the family's page-off) written as what they are on macOS 15 and 26, the text these checks read."""
+    for name, off in (("kNvResFlags", "0xc"), ("kNvResType", "0x14"), ("kNvResValid", "0x30"), ("kNvResVidMem", "0x88"),
+                      ("kNvResCache", "0xe0"), ("kNvResBaseLevel", "0xae"), ("kNvResWidth", "0xb0"), ("kNvResHeight", "0xb2")):
+        text = re.sub(r"\b%s\b" % name, off, text)
+    return re.sub(r"(?<!#define )\bNV_FAM_PAGEOFF\(", "IOAccelResource2::pageoff(", text)
+
 def func(src, head):
     """The text of a function from its head up to the first line that is a lone closing brace."""
     if head not in src:
@@ -174,7 +183,7 @@ def default_on(src):
             and "gPoUnlocked = 0;" in opt and 0 <= o < f)
 
 
-src = (R / SRC).read_text()
+src = macos15_names((R / SRC).read_text())
 hdr = (R / HDR).read_text()
 stubs = (R / STUBS).read_text()
 rule = (R / RULE).read_text() if (R / RULE).exists() else ""

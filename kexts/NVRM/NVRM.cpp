@@ -77,10 +77,6 @@ __private_extern__ int _kext_apple_cc = __APPLE_CC__;
 
 #define LOG(fmt, ...) do { kprintf("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); IOLog("NVRM-xnu: " fmt "\n", ##__VA_ARGS__); } while (0)
 
-// Longest a utilization firmware read may take before it counts as hung (chosen by us: two orders above a control
-// round trip, an order below the firmware's own timeout); the read's real duration is logged when it trips.
-static const uint64_t kUtilHangNs = 500ull * 1000 * 1000;
-
 extern "C" { NvBool nvkms_xnu_load(void); }
 class NVRM;
 #include "nvrm_devtab.h"
