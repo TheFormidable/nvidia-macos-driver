@@ -19,7 +19,55 @@
  
     if (!(usage & TC_TRANSFER_MAP_THREADED_UNSYNC))
        tc_clear_driver_thread(tc);
-@@ -3746,8 +3754,12 @@ tc_texture_subdata(struct pipe_context *_pipe,
+@@ -3627,13 +3635,33 @@ tc_buffer_subdata(struct pipe_context *_pipe,
+ 
+    usage = tc_improve_map_buffer_flags(tc, tres, usage, offset, size);
+ 
++   /* Write through a staging buffer where the mapping would wait. tc_buffer_map
++    * takes the flags as they are now: tc_improve_map_buffer_flags added
++    * TC_TRANSFER_MAP_NO_INVALIDATE, which stops it from running again.
++    */
++   bool staged = false;
++   if (tc->options.subdata_never_wait &&
++       tc_subdata_stage_instead(usage, size,
++                                tres->is_user_ptr || tres->allow_cpu_storage ||
++                                tres->cpu_storage || tres->b.clientptr_heap ||
++                                (tres->b.flags & (PIPE_RESOURCE_FLAG_SPARSE |
++                                                  PIPE_RESOURCE_FLAG_UNMAPPABLE)),
++                                p_atomic_read(&tres->pending_staging_uploads) &&
++                                util_ranges_intersect(&tres->pending_staging_uploads_range,
++                                                      offset, offset + size))) {
++      usage &= ~(PIPE_MAP_UNSYNCHRONIZED | TC_TRANSFER_MAP_THREADED_UNSYNC |
++                 PIPE_MAP_THREAD_SAFE | PIPE_MAP_SHORT_LIVED);
++      usage |= PIPE_MAP_DISCARD_RANGE;
++      staged = true;
++   }
++
+    /* Unsychronized and big transfers should use transfer_map. Also handle
+     * full invalidations, because drivers aren't allowed to do them.
+     */
+    if (usage & (PIPE_MAP_UNSYNCHRONIZED |
+                 PIPE_MAP_DISCARD_WHOLE_RESOURCE) ||
+        size > TC_MAX_SUBDATA_BYTES ||
+-       tres->cpu_storage) {
++       tres->cpu_storage || staged) {
+       struct pipe_transfer *transfer;
+       struct pipe_box box;
+       uint8_t *map = NULL;
+@@ -3641,9 +3669,10 @@ tc_buffer_subdata(struct pipe_context *_pipe,
+       u_box_1d(offset, size, &box);
+ 
+       /* CPU storage is only useful for partial updates. It can add overhead
+-       * on glBufferData calls so avoid using it.
++       * on glBufferData calls so avoid using it. A staged write keeps the flag
++       * off, so that its range becomes valid when it is copied.
+        */
+-      if (!tres->cpu_storage && offset == 0 && size == resource->width0)
++      if (!tres->cpu_storage && offset == 0 && size == resource->width0 && !staged)
+          usage |= TC_TRANSFER_MAP_UPLOAD_CPU_STORAGE;
+ 
+       map = tc_buffer_map(_pipe, resource, 0, usage, &box, &transfer);
+@@ -3746,8 +3775,12 @@ tc_texture_subdata(struct pipe_context *_pipe,
     if (tc->options.parse_renderpass_info && tc->in_renderpass)
        ended = tc_check_fb_access(tc, NULL, resource);
  
@@ -35,13 +83,51 @@
  
 --- a/src/gallium/auxiliary/util/u_threaded_context.h
 +++ b/src/gallium/auxiliary/util/u_threaded_context.h
-@@ -619,6 +619,9 @@ struct threaded_context_options {
+@@ -294,6 +294,34 @@ struct tc_unflushed_batch_token;
+  */
+ #define TC_MAX_SUBDATA_BYTES        320
+ 
++/* Whether tc_buffer_subdata writes through a staging buffer of the threaded
++ * context when the mapping it would otherwise get makes the application's
++ * thread wait for the GPU. A subdata call writes every byte of its range, so a
++ * copy from a staging buffer, enqueued after every earlier call, leaves the
++ * buffer as the mapping would.
++ *
++ * usage is what tc_improve_map_buffer_flags returned. excluded: the buffer is
++ * one the threaded context never stages (user memory, CPU storage, a client
++ * pointer heap, sparse or unmappable). pending_overlap: a staging upload into
++ * the range is enqueued and not executed yet, which makes tc_buffer_map take
++ * PIPE_MAP_UNSYNCHRONIZED away. Writes of TC_MAX_SUBDATA_BYTES or fewer that
++ * are not unsynchronized are enqueued as they are and never wait here.
++ */
++static inline bool
++tc_subdata_stage_instead(unsigned usage, unsigned size, bool excluded,
++                         bool pending_overlap)
++{
++   if (excluded ||
++       usage & (PIPE_MAP_PERSISTENT | PIPE_MAP_DISCARD_RANGE |
++                TC_TRANSFER_MAP_UPLOAD_CPU_STORAGE))
++      return false;
++
++   if (usage & PIPE_MAP_UNSYNCHRONIZED)
++      return pending_overlap;
++
++   return size > TC_MAX_SUBDATA_BYTES;
++}
++
+ enum tc_binding_type {
+    TC_BINDING_VERTEX_BUFFER,
+    TC_BINDING_STREAMOUT_BUFFER,
+@@ -619,6 +647,12 @@ struct threaded_context_options {
     bool unsynchronized_create_fence_fd;
     /* if true, texture_subdata calls may occur unsynchronized with PIPE_MAP_UNSYNCHRONIZED */
     bool unsynchronized_texture_subdata;
 +   /* Zero keeps the default threshold. Larger inline texture uploads can
 +    * avoid executing driver copy commands on the application thread. */
 +   unsigned max_texture_subdata_bytes;
++   /* if true, buffer_subdata never makes the application's thread wait for
++    * the GPU: see tc_subdata_stage_instead */
++   bool subdata_never_wait;
     /* if true, parse and track renderpass info during execution */
     bool parse_renderpass_info;
     /* callbacks for drivers to read their DSA/FS state and update renderpass info accordingly
@@ -111,12 +197,26 @@
              return NULL;
 --- a/src/gallium/drivers/zink/zink_context.c
 +++ b/src/gallium/drivers/zink/zink_context.c
-@@ -6335,6 +6335,9 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+@@ -65,6 +65,11 @@
+ #define XXH_INLINE_ALL
+ #include "util/xxhash.h"
+ 
++#if defined(__APPLE__) && defined(NVK_ZINK_NVK)
++/* The native frontend's switch NVK_ZINK_SUBDATA_STAGE (src/gallium/targets/nvk-zink/nvk_present.c). */
++int nvk_zink_subdata_stage_enabled(void);
++#endif
++
+ static void
+ update_tc_info(struct zink_context *ctx)
+ {
+@@ -6335,6 +6340,11 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
                                                          .driver_flush_interval = get_tc_flush_interval(screen),
                                                          .unsynchronized_get_device_reset_status = true,
                                                          .unsynchronized_texture_subdata = true,
 +#if defined(__APPLE__) && defined(NVK_ZINK_NVK)
 +                                                        .max_texture_subdata_bytes = screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_NVK ? 4096 : 0,
++                                                        .subdata_never_wait = screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_NVK &&
++                                                                              nvk_zink_subdata_stage_enabled(),
 +#endif
                                                          .parse_renderpass_info = screen->driver_workarounds.track_renderpasses,
                                                          .dsa_parse = zink_tc_parse_dsa,

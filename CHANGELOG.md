@@ -2,8 +2,8 @@
 
 ## 3.0.17
 
-**Not released.** This section describes the branch being prepared as 3.0.17, on top of 3.0.14 (below, not released
-either; 3.0.15 was closed without merging and 3.0.16 is a pull request of its own). It turns on the GPU's hierarchical
+**Not released.** This section describes the branch being prepared as 3.0.17, on top of 3.0.16 (below, not released
+either; 3.0.15 was closed without merging). It turns on the GPU's hierarchical
 Z, which NVK already drives on Linux. **Nothing of 3.0.17 has been built on a Mac or run on a card**; the decision it
 adds is host-tested and the changed code was compiled on Linux against the real RM headers only.
 
@@ -54,6 +54,71 @@ code was compiled on its own with clang and gcc against the RM 610.57.04 headers
 check now reads "after nvk-tex-uhandle-safe"), `test_nvk_chain.py`, `test_nvk_nak_switch_key.py`,
 `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_tree_layout.py` and `tools/switch_registry.py check`
 pass. The whole NVK library was not cross-built for macOS, nothing was built on a Mac and nothing ran on a card.
+
+## 3.0.16
+
+**Not released.** This section describes the branch being prepared as 3.0.16, on top of 3.0.14 (below; 3.0.15 was
+tried and not kept, and its number is not used again). In OpenGL on Zink, a buffer upload that would make the game's
+thread wait for the GPU goes through a staging buffer instead. It is on by default and has one way back,
+`NVK_ZINK_SUBDATA_STAGE=0`. It was built on the RTX 5050 machine and its Zink library copied by hand, but **the card
+has not yet shown the wait it removes while 3.0.16 was in place** (below, "What ran where").
+
+### Fixes and changes
+
+#### Zink: glBufferSubData no longer waits for the GPU
+
+- **What the card showed.** In ATM10 with a shader pack on the RTX 5050 (the captures of 3.0.15 under 3.0.14 below),
+  the game's render thread spent 19 to 25 % of its time asleep in `glBufferSubData` (or a `glBufferData` of the same
+  size, which Mesa turns into the same call): `tc_buffer_subdata` → `tc_buffer_map` → `zink_buffer_map` →
+  `zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is about 1.9 ms a frame at 75 to 79 frames a second. The wait
+  does not come every time: a capture with the same versions installed (3.0.12, NVK of 3.0.15), taken in the same
+  place minutes before, had none, with the GPU at 96 % instead of 63 to 68 %. What the game draws when it starts was
+  not found; the captures of 3.0.6 and 3.0.7 do not show it.
+- **Why it waited.** Mesa's threaded context (`u_threaded_context.c`) normally writes a busy buffer through a staging
+  buffer and a copy queued on the GPU. It maps the buffer itself, and waits, in two cases. The first is a write of more
+  than 320 bytes into a buffer the application has mapped (`PIPE_MAP_DIRECTLY`, which keeps the threaded context from
+  discarding the range). The second is a write it infers to be unsynchronized (a range never written, or an idle
+  buffer) that overlaps the range of a staging upload not executed yet. `tc_buffer_map` then takes the unsynchronized
+  flag away, and the mapping waits for the buffer's whole batch. Mesa's record of that range is never reset, so the
+  overlap is often only with an upload that is long done. Which of the two the game hits was not measured.
+- **What changes.** `zink/mesa-zink-nvk.patch` adds `tc_subdata_stage_instead` to `u_threaded_context.h` and an option
+  of the threaded context, `subdata_never_wait`. Zink sets the option on NVK on macOS. With it, `tc_buffer_subdata`
+  writes those two cases through the threaded context's own staging path. A subdata call writes every byte of its
+  range, and the copy is queued after every earlier call, so the buffer ends up as the mapping would have left it.
+  The range becomes valid when it is copied. Excluded, as before:
+  - a buffer of user memory, with CPU storage, in a client pointer heap, sparse or unmappable;
+  - a persistent mapping;
+  - a write the threaded context already stages;
+  - a write of 320 bytes or fewer that is not unsynchronized, which is queued as it is.
+- **What the application could see.** With a buffer the application keeps mapped, the bytes `glBufferSubData` writes
+  reach the mapping when the GPU executes the copy, not when the call returns. The GL specification asks an
+  application to wait on a fence before it reads what the GL wrote into a mapped buffer. A program that reads its
+  mapping right after `glBufferSubData` without one would see the old bytes. `NVK_ZINK_SUBDATA_STAGE=0` is for that
+  case.
+
+### The ways back
+
+`NVK_ZINK_SUBDATA_STAGE=0` in the settings file (`/Library/GPUBundles/nvmtl/nvrm610.conf`), or in the application's
+own environment with `NVMTL_PROCESS_ENV=1`, as for the other switches of the Zink frontend. A process reads it once,
+at its first GL context. With it the option is left off and `tc_buffer_subdata` runs as in 3.0.14.
+
+### What ran where
+
+On Linux only:
+- `build/prepare_zink.py` applies the patch to the pinned Mesa 26.3.0.
+- `u_threaded_context.c`, `zink_context.c` and `zink_resource.c` compile with GCC without a warning. Zink's lines that
+  set the option, and the frontend's reader in `zink/nvk_present.c`, are macOS-only and were not compiled.
+- The new host test `tools/test_zink_subdata_stage.py` passes and fails on 3.0.14. It checks the decision function
+  over every case named above, the code around it, the switch, and eight broken copies, each of which has to fail.
+- `tools/switch_registry.py check` passes.
+
+On the card (2026-11-24): the package of 394be13a was built on the RTX 5050 machine without a warning, and
+`zink/libnvk_zink.dylib` copied by hand over 3.0.12 with NVK of 3.0.14. Two captures at the place in ATM10 above, with
+the shader pack, as installed and with `NVK_ZINK_SUBDATA_STAGE=0`: in both the render thread did not wait in
+`zink_buffer_map` (no sample), the GPU ran at 98 and 96 % (120 and 117 W) and the display flipped 102 and 97 times a
+second, at its 100 Hz. The state that waits did not come in either, so these captures neither prove nor refute the
+change; they show it changes nothing where there is no wait. The capture that decides it is one taken while the wait
+is there (the GPU below about 80 % at that place).
 
 ## 3.0.14
 
@@ -108,6 +173,39 @@ new host test `tools/test_nak_stats.py` passes and fails on 3.0.13; `tools/test_
 `test_nvk_chain.py`, `test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_package_licenses.py`,
 `test_tree_layout.py` and `tools/switch_registry.py check` pass. The patch was not cross-built for macOS, nothing was
 built on a Mac and nothing ran on a card.
+
+### 3.0.15, tried on top of 3.0.14 and not kept
+
+[PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20) was phase 1 of the shader-compiler plan:
+a heavy graphics shader below 32 warps per SM was built a second time with fewer registers, and that build was kept
+when it gained warps for at most 5 % more instructions. The switch was `NAK_OCC_TARGET=0`, and the pick never ran
+in WindowServer. On Linux it met the instruction gate. Of ATM10's 409 stages with Complementary Unbound, 27 fragment
+stages gained warps (28 % more over them) for 2.6 % more instructions, but they went from no spill to local memory to
+4510 spill and fill instructions.
+
+On the card it did not meet the plan's criterion (the same frames for less GPU or fewer watts), so it was closed
+without merging and its patch is not in the tree. The test, on 2026-11-23 on the RTX 5050: NVK 3.0.15 was copied by
+hand over an installed 3.0.12. The place in ATM10 with the shader pack and the view were fixed. `fps_capture.sh` ran
+20 s per capture, in the order on, off (`NAK_OCC_TARGET=0` through `launchctl setenv`), on:
+
+| capture | phase 1 | game frames/s | watts | GPU % | joules per frame |
+|---|---|---|---|---|---|
+| 175040 | on | 75.4 | 96.9 | 63.2 | 1.285 |
+| 175746 | off | 77.0 | 98.8 | 66.7 | 1.283 |
+| 180425 | on | 78.8 | 100.6 | 67.8 | 1.277 |
+
+Game frames are the frames that went through Zink's surface fences (`debug.nvaccel_surface_fence_waits`). The GPU
+clock was 2912 to 2925 MHz throughout, with no Xid. The two "on" captures differ from each other by as much as either
+differs from "off". A first capture, taken with phase 1 off, is left out: only 34 frames went through the surface
+fences in 20 s while the display flipped 102 times a second and the GPU ran at 96 % and 121 W, so the screen showed
+something else.
+
+What limited that scene was the game's render thread, not its shaders. In the three captures it spends 19 to 25 % of
+its time asleep in `glBufferSubData`, in `tc_buffer_subdata` → `tc_buffer_map` → `zink_buffer_map` →
+`zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is Zink waiting for the GPU to finish with a buffer before the game
+may write it again.
+
+The version number 3.0.15 is not used again. On the card the compiler's own figures counted for less than this wait.
 
 ## 3.0.13
 
