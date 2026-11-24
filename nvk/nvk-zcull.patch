@@ -1,0 +1,125 @@
+nvk-zcull: hierarchical Z (ZCULL) over NVRM.
+NullMoth's own change (not an upstream Mesa commit).
+
+NVK 26.3 already drives the GPU's ZCULL unit, which throws away fragments hidden behind depth already drawn before
+they are shaded: an image with only depth-attachment and read-only usages gets a ZCULL plane (nvk_image.c), and a
+render pass whose depth attachment has such a plane, or is cleared at load, programs the unit (nvk_cmd_draw.c). It
+does so only when the device reports the unit's geometry (nv_device_info.has_zcull_info, filled on Linux by
+DRM_NOUVEAU_GET_ZCULL_INFO). The NVRM backend set it to false, so ZCULL never ran on macOS. It now asks RM for the same
+figures, NV2080_CTRL_CMD_GR_GET_ZCULL_INFO and the ZCULL engine's context properties, as Linux's GSP code
+(r570_gr_get_ctxbufs_and_zcull_info) does. Every graphics channel already binds a ZCULL context-switch buffer
+SEPARATE_BUFFER (NVRM_610_ZCULL, nvkmd_nvrm_ctx.c), so the unit's state survives a switch to another process.
+
+Off, as in 3.0.16, with NVK_ZCULL=0 (settings file or environment), in WindowServer, with NVRM_610_ZCULL=0, when either
+RM call fails, or when a figure is one NIL would divide by or index past. NVK_DIAG=1 or NVK_ZCULL_LOG=1 writes one
+line with the decision and the figures. tools/test_nvk_zcull.py.
+
+diff --git a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+--- a/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
++++ b/src/nouveau/vulkan/nvkmd/nvrm/nvkmd_nvrm_pdev.c
+@@ -104,6 +104,7 @@
+ #include "ctrl/ctrl2080/ctrl2080mc.h" // NV2080_CTRL_CMD_MC_GET_ARCH_INFO
+ #include "ctrl/ctrl2080/ctrl2080gpu.h" // NV2080_CTRL_CMD_GPU_GET_NAME_STRING
+ #include "ctrl/ctrl2080/ctrl2080perf.h" // b81: NV2080_CTRL_CMD_PERF_BOOST
++#include "ctrl/ctrl0080/ctrl0080fifo.h" // 3.0.17: NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES (ZCULL)
+ #include "../../nvmtl_cfg.h"
+ #include "nvrm_boost_policy_abi.h"   // the kext's boost policy (idle mode, hot)
+ 
+@@ -147,6 +148,83 @@
+ 
+ // (RTX 5060 / GB206): the RM reports NV2080_CTRL_GR_INFO_SM_VERSION 0xa04 and the old formula
+ // ((v >> 8) * 10 + (v & 0xf)) turned it into NAK sm 104 = Blackwell A (GB100 datacenter ISA + its latency table).
++/* 3.0.17: hierarchical Z (ZCULL). NVK 26.3 lets the GPU's ZCULL unit throw away hidden fragments before they are
++ * shaded when the device reports the unit's geometry (nv_zcull_device_info; on Linux DRM_NOUVEAU_GET_ZCULL_INFO). Over
++ * NVRM the same figures come from NV2080_CTRL_CMD_GR_GET_ZCULL_INFO, and the size and alignment of the unit's context
++ * switch buffer from the ZCULL engine's context properties, as Linux's GSP code fills them
++ * (r570_gr_get_ctxbufs_and_zcull_info). Every graphics channel binds that buffer SEPARATE_BUFFER (NVRM_610_ZCULL in
++ * nvkmd_nvrm_ctx.c), so the unit's state survives a switch to another process; without the bind it stays off.
++ *
++ * nvrm_zcull_decide is the whole rule, pure so that tools/test_nvk_zcull.py can compile it on its own: ZCULL is on
++ * unless NVK_ZCULL=0 (settings file or environment), the process is WindowServer (it draws no depth worth culling,
++ * and a fault there takes the desktop), NVRM_610_ZCULL=0 took the channels' buffer away, either RM call failed, or a
++ * figure is one NIL would divide by or index past (nil/zcull.rs: the two subregion alignments, the pixels per aliquot,
++ * at most 16 subregions; an assert there aborts the process). The reason is a word for the log. */
++#define NVRM_ZCULL_MAX_SUBREGIONS 16u   /* nil/zcull.rs MAX_SUBREGIONS */
++static bool
++nvrm_zcull_decide(const char *env, bool window_server, bool ctxsw_bind_on, bool info_ok, bool props_ok,
++                  uint32_t ctxsw_size, const struct nv_zcull_device_info *z, const char **why)
++{
++   const char *w = "on";
++   if (env != NULL && env[0] == '0') w = "NVK_ZCULL=0";
++   else if (window_server) w = "WindowServer";
++   else if (!ctxsw_bind_on) w = "NVRM_610_ZCULL=0";
++   else if (!info_ok) w = "GR_GET_ZCULL_INFO failed";
++   else if (!props_ok || ctxsw_size == 0) w = "no ZCULL context buffer";
++   else if (z->width_align_pixels == 0 || z->height_align_pixels == 0 || z->pixel_squares_by_aliquots == 0 ||
++            z->aliquot_total == 0 || z->zcull_region_byte_multiplier == 0 || z->subregion_count == 0 ||
++            z->subregion_count > NVRM_ZCULL_MAX_SUBREGIONS || z->subregion_width_align_pixels == 0 ||
++            z->subregion_height_align_pixels == 0)
++      w = "figures out of range";
++   if (why) *why = w;
++   return w[0] == 'o' && w[1] == 'n' && w[2] == 0;
++}
++
++static void
++nvkmd_nvrm_pdev_zcull(struct nvkmd_nvrm_pdev *pdev, struct NvRmApi *rm)
++{
++   struct nv_zcull_device_info z = {0};
++   NV2080_CTRL_GR_GET_ZCULL_INFO_PARAMS zi = {0};
++   NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_PARAMS zp = {
++      .engineId = NV0080_CTRL_FIFO_GET_ENGINE_CONTEXT_PROPERTIES_ENGINE_ID_GRAPHICS_ZCULL };
++   const char *env = nvmtl_cfg_getenv("NVK_ZCULL");
++   const char *pn = getprogname();
++   const bool ws = pn != NULL && strcmp(pn, "WindowServer") == 0;
++   const bool bind_on = nvrm610_on("ZCULL");
++   bool info_ok = false, props_ok = false;
++   NV_STATUS si = NV_ERR_NOT_SUPPORTED, sp = NV_ERR_NOT_SUPPORTED;
++   if (!(env != NULL && env[0] == '0') && !ws && bind_on) {
++      si = nvRmApiControl(rm, pdev->hSubdevice, NV2080_CTRL_CMD_GR_GET_ZCULL_INFO, &zi, sizeof zi);
++      sp = nvRmApiControl(rm, pdev->hDevice, NV0080_CTRL_CMD_FIFO_GET_ENGINE_CONTEXT_PROPERTIES, &zp, sizeof zp);
++      info_ok = si == NV_OK;
++      props_ok = sp == NV_OK;
++   }
++   z.width_align_pixels = zi.widthAlignPixels;
++   z.height_align_pixels = zi.heightAlignPixels;
++   z.pixel_squares_by_aliquots = zi.pixelSquaresByAliquots;
++   z.aliquot_total = zi.aliquotTotal;
++   z.zcull_region_byte_multiplier = zi.zcullRegionByteMultiplier;
++   z.zcull_region_header_size = zi.zcullRegionHeaderSize;
++   z.zcull_subregion_header_size = zi.zcullSubregionHeaderSize;
++   z.subregion_count = zi.subregionCount;
++   z.subregion_width_align_pixels = zi.subregionWidthAlignPixels;
++   z.subregion_height_align_pixels = zi.subregionHeightAlignPixels;
++   z.ctxsw_size = zp.size;
++   z.ctxsw_align = zp.alignment;
++   const char *why = NULL;
++   const bool on = nvrm_zcull_decide(env, ws, bind_on, info_ok, props_ok, zp.size, &z, &why);
++   pdev->base.dev_info.has_zcull_info = on;
++   if (on)
++      pdev->base.dev_info.zcull_info = z;
++   if (nvkmd_nvrm_diag_on() || nvmtl_cfg_getenv("NVK_ZCULL_LOG"))
++      fprintf(stderr, "nvrm: zcull %s%s (rc 0x%x 0x%x; align %ux%u, %u px/aliquot, %u aliquots, %u subregions "
++              "%ux%u, %u B/aliquot, headers %u+%u, ctxsw %u B align %u)\n", on ? "" : "off: ", why,
++              (unsigned)si, (unsigned)sp, z.width_align_pixels, z.height_align_pixels, z.pixel_squares_by_aliquots,
++              z.aliquot_total, z.subregion_count, z.subregion_width_align_pixels, z.subregion_height_align_pixels,
++              z.zcull_region_byte_multiplier, z.zcull_region_header_size, z.zcull_subregion_header_size,
++              z.ctxsw_size, z.ctxsw_align);
++}
++
+ // The chip is Blackwell B, sm 120. An empty compute shader launched fine; the first one with a global store
+ // died with an SM exception (Xid 13). Mirror nouveau (winsys/nouveau_device.c sm_for_chipset), which keys on
+ // the chipset id, and keep the RM formula only for chips that table does not know.
+@@ -621,11 +699,11 @@
+    /* Not yet over NVRM (each one a logged gap, off = the live driver's behaviour):
+     * - video: NVK's NVDEC decode (needs an NVDEC channel class from RM; our VideoToolbox path is separate)
+     * - transfer queue: a copy-engine-only queue family (ctx->ceOnly exists; needs its own gate)
+-    * - zcull: RM has NV2080_CTRL_CMD_GR_GET_ZCULL_INFO + a ctxsw zcull bind; NVIDIA's driver uses it */
++    * ZCULL was the third gap until 3.0.17: nvkmd_nvrm_pdev_zcull fills it from RM. */
+    pdev->base.dev_info.cls_vdec = 0;
+    pdev->base.dev_info.has_video = false;
+    pdev->base.dev_info.has_transfer_queue = false;
+-   pdev->base.dev_info.has_zcull_info = false;
++   nvkmd_nvrm_pdev_zcull(pdev, &rm);
+ 
+    /* The resource manager's names are 64-byte fields with no guaranteed terminator, and chipset_name holds 16:
+     * copy at most what fits and what the source holds, always terminated. */
