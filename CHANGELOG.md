@@ -1,12 +1,67 @@
 # Changelog
 
+## 3.0.17
+
+**Not released.** This section describes the branch being prepared as 3.0.17, on top of 3.0.16 (below, not released
+either; 3.0.15 was closed without merging). It turns on the GPU's hierarchical
+Z, which NVK already drives on Linux. **Nothing of 3.0.17 has been built on a Mac or run on a card**; the decision it
+adds is host-tested and the changed code was compiled on Linux against the real RM headers only.
+
+### Fixes and changes
+
+#### NVK: hierarchical Z (ZCULL) over NVRM
+
+- **NVK now uses the GPU's ZCULL unit on macOS.** ZCULL keeps a coarse copy of the depth buffer on the chip and throws
+  away whole blocks of fragments that are behind depth already drawn, before they are shaded. NVK 26.3 has the code
+  (`nvk_image.c` gives a depth image a ZCULL plane, `nvk_cmd_draw.c` programs the unit at the start of a render pass),
+  but it runs only when the device reports the unit's geometry, which on Linux the kernel does
+  (`DRM_NOUVEAU_GET_ZCULL_INFO`). The NVRM backend reported none, so ZCULL never ran here. The new patch
+  `nvk/nvk-zcull.patch`, last in the 3.0 chain, changes `nvkmd_nvrm_pdev.c` only: at device creation it asks RM for the
+  same figures, `NV2080_CTRL_CMD_GR_GET_ZCULL_INFO` and the ZCULL engine's context properties, and fills
+  `nv_device_info.zcull_info` field by field as Linux's GSP code does (`r570_gr_get_ctxbufs_and_zcull_info`). Every
+  graphics channel has bound a ZCULL context-switch buffer `SEPARATE_BUFFER` since 2.9 (`NVRM_610_ZCULL`), so the
+  unit's contents survive a switch to WindowServer or another application.
+- **Where it acts.** NVK keeps a ZCULL plane only for a depth image whose usages are depth attachment and read
+  (sampled, input attachment, copy source); a render pass with such an image keeps ZCULL across passes, and any render
+  pass whose depth is cleared at load uses ZCULL for that pass. A depth image that can also be a copy destination gets
+  no plane, because NVK cannot keep the coarse copy right after a copy into it (upstream's rule, unchanged). Zink
+  (OpenGL) and the Metal plugin create their depth images as copy destinations, so for OpenGL games and Metal
+  applications ZCULL acts in the passes that clear depth at load, which is how a frame usually starts; a native Vulkan
+  application that creates its depth image with the usual usages gets it in every pass.
+- **Kept off** in WindowServer (it draws no depth worth culling, and a fault there takes the desktop), with
+  `NVRM_610_ZCULL=0` (no context buffer), when either RM call fails or returns a size of 0, and when a figure is one
+  that NIL would divide by or that passes its 16 subregions (an assert there would end the process).
+  `NVK_ZCULL_LOG=1` (or `NVK_DIAG=1`) writes one line per device on stderr with the decision, the reason when it is
+  off, and RM's figures.
+
+What it gives is not measured. It costs nothing where nothing is hidden and gains most where much is drawn behind
+other things (dense scenes, foliage, shader packs that draw the scene more than once). If a frame shows things through
+walls or flickering depth, `NVK_ZCULL=0` is the first thing to try.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVK_ZCULL=0` | settings line (or environment) | NVK reports no ZCULL unit and draws without hierarchical Z, as in 3.0.16 |
+
+### What ran where
+
+On Linux only. `tools/test_nvk_zcull.py` (new) checks the patch's place in the chain and the one file it changes,
+that each of RM's figures lands in the field of the same meaning, that the decision is the one the device setup
+stores, and compiles the decision out of the patch with `-Wall -Wextra -Werror` and runs it over 20 cases. The changed
+code was compiled on its own with clang and gcc against the RM 610.57.04 headers and Mesa 26.3.0-rc3's
+`nv_device_info.h`; the patch applies at the end of the 3.0 chain on Mesa 26.3.0-rc3. `test_nak_stats.py` (its chain
+check now reads "after nvk-tex-uhandle-safe"), `test_nvk_chain.py`, `test_nvk_nak_switch_key.py`,
+`test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_tree_layout.py` and `tools/switch_registry.py check`
+pass. The whole NVK library was not cross-built for macOS, nothing was built on a Mac and nothing ran on a card.
+
 ## 3.0.16
 
 **Not released.** This section describes the branch being prepared as 3.0.16, on top of 3.0.14 (below; 3.0.15 was
 tried and not kept, and its number is not used again). In OpenGL on Zink, a buffer upload that would make the game's
 thread wait for the GPU goes through a staging buffer instead. It is on by default and has one way back,
-`NVK_ZINK_SUBDATA_STAGE=0`. **Nothing of 3.0.16 has run on a card yet**; it is host-tested only (below, "What ran
-where").
+`NVK_ZINK_SUBDATA_STAGE=0`. It was built on the RTX 5050 machine and its Zink library copied by hand, but **the card
+has not yet shown the wait it removes while 3.0.16 was in place** (below, "What ran where").
 
 ### Fixes and changes
 
@@ -15,9 +70,10 @@ where").
 - **What the card showed.** In ATM10 with a shader pack on the RTX 5050 (the captures of 3.0.15 under 3.0.14 below),
   the game's render thread spent 19 to 25 % of its time asleep in `glBufferSubData` (or a `glBufferData` of the same
   size, which Mesa turns into the same call): `tc_buffer_subdata` → `tc_buffer_map` → `zink_buffer_map` →
-  `zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is about 1.9 ms a frame at 75 to 79 frames a second. Before 3.0.7
-  the same writes found the buffer idle, because the swap itself waited for the GPU. Since the swap stopped waiting,
-  the GPU is still reading the buffer from the frame before when the game writes it again.
+  `zink_wait_on_batch` → `nvrm_evw_nvk_wait`. That is about 1.9 ms a frame at 75 to 79 frames a second. The wait
+  does not come every time: a capture with the same versions installed (3.0.12, NVK of 3.0.15), taken in the same
+  place minutes before, had none, with the GPU at 96 % instead of 63 to 68 %. What the game draws when it starts was
+  not found; the captures of 3.0.6 and 3.0.7 do not show it.
 - **Why it waited.** Mesa's threaded context (`u_threaded_context.c`) normally writes a busy buffer through a staging
   buffer and a copy queued on the GPU. It maps the buffer itself, and waits, in two cases. The first is a write of more
   than 320 bytes into a buffer the application has mapped (`PIPE_MAP_DIRECTLY`, which keeps the threaded context from
@@ -56,9 +112,13 @@ On Linux only:
   over every case named above, the code around it, the switch, and eight broken copies, each of which has to fail.
 - `tools/switch_registry.py check` passes.
 
-Nothing was built on a Mac or ran on a card. The card round that decides it is the same place in ATM10 with
-`fps_capture.sh`. The measure is the render thread's share in `zink_buffer_map`'s wait and the frames per second,
-once as installed and once with `NVK_ZINK_SUBDATA_STAGE=0`.
+On the card (2026-11-24): the package of 394be13a was built on the RTX 5050 machine without a warning, and
+`zink/libnvk_zink.dylib` copied by hand over 3.0.12 with NVK of 3.0.14. Two captures at the place in ATM10 above, with
+the shader pack, as installed and with `NVK_ZINK_SUBDATA_STAGE=0`: in both the render thread did not wait in
+`zink_buffer_map` (no sample), the GPU ran at 98 and 96 % (120 and 117 W) and the display flipped 102 and 97 times a
+second, at its 100 Hz. The state that waits did not come in either, so these captures neither prove nor refute the
+change; they show it changes nothing where there is no wait. The capture that decides it is one taken while the wait
+is there (the GPU below about 80 % at that place).
 
 ## 3.0.14
 

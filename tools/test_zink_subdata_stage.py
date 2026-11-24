@@ -169,12 +169,13 @@ def problems(patch_text, present_text, docs=True):
         if not row or row[0][2] != "escape" or row[0][4] != "3.0.16" or "NVK_ZINK_SUBDATA_STAGE=0" not in row[0][3]:
             out.append("tools/switches.tsv has no escape row for NVK_ZINK_SUBDATA_STAGE since 3.0.16")
         log = (ROOT / "CHANGELOG.md").read_text()
-        top = re.search(r"^## (\S+)\n(.*?)(?=^## )", log, re.M | re.S)
-        if not top or top.group(1) != "3.0.16" or "NVK_ZINK_SUBDATA_STAGE=0" not in top.group(2):
-            out.append("CHANGELOG.md's first section is not 3.0.16 with its way back")
+        top = re.search(r"^## 3\.0\.16\n(.*?)(?=^## )", log, re.M | re.S)
+        if not top or "NVK_ZINK_SUBDATA_STAGE=0" not in top.group(1):
+            out.append("CHANGELOG.md has no 3.0.16 section with its way back")
         status = (ROOT / "docs/STATUS.md").read_text()
-        if not re.search(r"OpenGL buffer uploads without a wait \(3\.0\.16\).*?\n\s+Host-tested only", status, re.S):
-            out.append("docs/STATUS.md does not say 3.0.16 is host-tested only")
+        if not re.search(r"OpenGL buffer uploads without a wait \(3\.0\.16\).*?\n\s+On the card only where the game did not wait",
+                         status, re.S):
+            out.append("docs/STATUS.md does not say 3.0.16 is not yet shown on a card removing the wait")
         if "| `NVK_ZINK_SUBDATA_STAGE=0` | settings line |" not in (ROOT / "README.md").read_text():
             out.append("README.md's table of ways back has no NVK_ZINK_SUBDATA_STAGE row")
     return out

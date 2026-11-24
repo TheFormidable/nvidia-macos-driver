@@ -195,7 +195,8 @@ def corpus_problems(baseline_text):
 arm("nvk/nvk-nak-stats.patch exists", PATCH.is_file())
 text = PATCH.read_text() if PATCH.is_file() else ""
 ch = chains()
-arm("the patch is the last of the 3.0 chain", ch.get("3.0", [])[-1:] == ["nvk-nak-stats"], ch.get("3.0", [])[-3:])
+arm("the patch is in the 3.0 chain after nvk-tex-uhandle-safe", "nvk-nak-stats" in ch.get("3.0", []) and
+    ch["3.0"].index("nvk-nak-stats") > ch["3.0"].index("nvk-tex-uhandle-safe"), ch.get("3.0", [])[-3:])
 arm("the patch is in no other chain", all("nvk-nak-stats" not in v for k, v in ch.items() if k != "3.0"))
 files = re.findall(r"^\+\+\+ b/(\S+)", text, re.M)
 arm("the patch changes api.rs alone", files == ["src/nouveau/compiler/nak/api.rs"], files)
