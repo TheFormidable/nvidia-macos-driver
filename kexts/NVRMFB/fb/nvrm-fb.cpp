@@ -328,6 +328,7 @@ class NVRMBacklightHandler : public IODisplayParameterHandler {
     bool fEdp = false; unsigned fEdpGpu = 0, fEdpDisplay = 0; EdpBacklightCaps fEdpCaps = {};   // DPCD brightness fallback, see publishBacklight
     bool fHaveSaved = false;            // NVRAM held a saved level when this handler was made
     volatile bool fUserSeen = false;    // a user request other than a start-up default has arrived
+    volatile bool fUserMoved = false;   // a user request below the maximum has arrived (ends external restores)
     OSDictionary *fParameters = nullptr;
     static void applyFire(thread_call_param_t me, thread_call_param_t);
     static void persistFire(thread_call_param_t me, thread_call_param_t);
@@ -341,8 +342,54 @@ public:
     bool doDataSet(const OSSymbol *, OSData *) override { return false; }
     bool doUpdate() override { return true; }
     void free() override;
+    int restoreExternal(SInt32 level);
 };
 OSDefineMetaClassAndStructors(NVRMBacklightHandler, IODisplayParameterHandler)
+// The internal panel's handler, for debug.nvrmfb_backlight_restore. Set by publishBacklight once the handler is
+// registered, cleared by stop() before the handler is released; read and retained under gBacklightLock.
+static IOLock *gBacklightLock = nullptr;
+static NVRMBacklightHandler *gBacklightHandler = nullptr;
+static void nvrmBacklightPublishGlobal(NVRMBacklightHandler *h)
+{
+    if (!gBacklightLock) { IOLock *l = IOLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void * volatile *)&gBacklightLock)) IOLockFree(l); }
+    if (!gBacklightLock) return;
+    IOLockLock(gBacklightLock);
+    if (h) h->retain();
+    NVRMBacklightHandler *old = gBacklightHandler;
+    gBacklightHandler = h;
+    IOLockUnlock(gBacklightLock);
+    if (old) old->release();
+}
+static void nvrmBacklightClearGlobal(NVRMBacklightHandler *h)
+{
+    if (!gBacklightLock || !h) return;
+    IOLockLock(gBacklightLock);
+    const bool mine = gBacklightHandler == h;
+    if (mine) gBacklightHandler = nullptr;
+    IOLockUnlock(gBacklightLock);
+    if (mine) h->release();
+}
+// Write-only: a logical level 0..65535 to restore while the user has not moved the brightness this boot. Firmware that
+// drops NVRAM writes (OpenCore with DisableVariableWrite and no emulated NVRAM) brings /options back with an old level at
+// every restart; the installed backlight job keeps its own copy of the last level and writes it here when /options
+// disagrees with it. Reading returns -1.
+static int nvrmfbBacklightRestoreSysctl SYSCTL_HANDLER_ARGS
+{
+    int v = -1;
+    int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    if (!gBacklightLock) return ENODEV;
+    IOLockLock(gBacklightLock);
+    NVRMBacklightHandler *h = gBacklightHandler;
+    if (h) h->retain();
+    IOLockUnlock(gBacklightLock);
+    if (!h) return ENODEV;
+    err = h->restoreExternal((SInt32)v);
+    h->release();
+    return err;
+}
+SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_backlight_restore, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
+            nvrmfbBacklightRestoreSysctl, "I", "restore a saved panel brightness (0..65535) before the user has moved it this boot");
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 
@@ -418,8 +465,12 @@ bool NVRMBacklightHandler::setDisplay(IODisplay *display)
     IODisplay::addParameter(params, sLinearBrightnessProbe, 0, kNVRMBacklightMax);
     IODisplay::setParameter(params, sLinearBrightnessProbe, initial);
     display->setProperty(gIODisplayParametersKey, params);
-    OSSafeReleaseNULL(fParameters);
+    // The restore sysctl reads fParameters from its own thread: swap under the lock it snapshots under, release after.
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    OSDictionary *replaced = fParameters;
     fParameters = params;
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    OSSafeReleaseNULL(replaced);
     if (fRestoreLevel >= 0) {
         fPending = fRestoreLevel;
         fRestoreLevel = -1;
@@ -442,10 +493,18 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
             paramName == sBrightnessProbe ? sLinearBrightnessProbe : sBrightnessProbe, level);
     }
     bool userRequest = params && params->getObject(gIODisplayValueKey);
-    if (nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel))) {
+    // The three flags are also written by the restore sysctl; decide and record under the lock it uses.
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    const bool startupDefault = nvrm_backlight_startup_default(userRequest, (UInt32)level, fHaveSaved, fUserSeen, OSAddAtomic(0, &fUserLevel));
+    if (!startupDefault && userRequest) {
+        fUserSeen = true;
+        if (level < (SInt32)kNVRMBacklightMax) fUserMoved = true;
+    }
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    if (startupDefault) {
         BLLOG("backlight: first user request is the maximum with a saved level -- start-up default, not saved");
         userRequest = false;
-    } else if (userRequest) fUserSeen = true;
+    }
     if (userRequest) {
         uint64_t deadline;
         clock_interval_to_deadline(kNVRMBacklightSaveDelaySeconds, kSecondScale, &deadline);
@@ -463,6 +522,46 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     fPending = level;
     thread_call_enter(fApply);
     return true;
+}
+
+// debug.nvrmfb_backlight_restore: the same restore setDisplay makes from /options, for a level kept outside NVRAM.
+int NVRMBacklightHandler::restoreExternal(SInt32 level)
+{
+    if (level < 0 || level > (SInt32)kNVRMBacklightMax) return EINVAL;
+    // This runs on the caller's thread while the display's own thread may be in setDisplay or doIntegerSet: the check,
+    // the flags and a retained snapshot of the parameter dictionary are taken under one lock.
+    OSDictionary *shown = nullptr;
+    if (gBacklightLock) IOLockLock(gBacklightLock);
+    const bool allowed = nvrm_backlight_external_restore_ok(fUserMoved, level);
+    if (allowed) {
+        __atomic_store_n(&fUserLevel, level, __ATOMIC_SEQ_CST);
+        fHaveSaved = true;
+        fUserSeen = false;
+        shown = fParameters;
+        if (shown) shown->retain();
+    }
+    if (gBacklightLock) IOLockUnlock(gBacklightLock);
+    if (!allowed) {
+        BLLOG("backlight: external restore of logical %d refused -- the user already moved the brightness this boot", (int)level);
+        return EBUSY;
+    }
+    // Treated like a level read from /options at start: the display stack's start-up request for the maximum is then
+    // clamped to it instead of replacing it. Requests seen so far were all for the maximum (fUserMoved is clear), so
+    // they were start-up defaults too, and the next one is treated the same way.
+    if (shown) {
+        IODisplay::setParameter(shown, gIODisplayBrightnessKey, level);
+        IODisplay::setParameter(shown, gIODisplayLinearBrightnessKey, level);
+        shown->release();
+    }
+    // Keep /options in step for this boot, so the variable shows what the panel shows; a firmware that keeps writes
+    // stores it as usual.
+    IORegistryEntry *options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (options) (void)nvrm_backlight_write(options, (UInt32)level);
+    OSSafeReleaseNULL(options);
+    BLLOG("backlight: external restore logical=%d/65535 (a level kept outside NVRAM)", (int)level);
+    fPending = level;
+    thread_call_enter(fApply);
+    return 0;
 }
 
 void NVRMBacklightHandler::applyFire(thread_call_param_t p, thread_call_param_t)
@@ -884,7 +983,9 @@ public:
     bool isConsoleDevice(void) override { return fBootConsole; }
     // WAS: both returned success and did nothing, so Night Shift, True Tone and calibration changed nothing on screen.
     IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d) override { return nvrmSetGamma(ch, n, w, d); }
+#if !defined(NM_ERA) || defined(NM_ERA_HAS_GAMMA_SYNC)   // the five-argument form exists from 10.13
     IOReturn setGammaTable(UInt32 ch, UInt32 n, UInt32 w, void *d, bool) override { return nvrmSetGamma(ch, n, w, d); }
+#endif
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
     IOReturn setStartupDisplayMode(IODisplayModeID, IOIndex) override { return kIOReturnSuccess; }
@@ -994,6 +1095,24 @@ public:
     }
 };
 OSDefineMetaClassAndStructors(NVRMFBClaim, IOService)
+
+// CoreDisplay of macOS 10.13 and 10.14 decides whether to use IOPresentment (and with it the Metal compositor) by
+// looking for a service of class AppleIntelFramebuffer, NVDA or AMDFramebuffer. This marker carries that class name
+// beside our framebuffer; it does nothing else. Built only where the install-time option asks for it, because the
+// name collides with Apple's own NVIDIA kext if an older NVIDIA card makes that kext load.
+#ifdef NVRMFB_PUBLISH_CLASS_NVDA
+class NVDA : public IOService
+{
+    OSDeclareDefaultStructors(NVDA)
+public:
+    bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
+        if (!IOService::start(provider)) return false;
+        registerService();
+        return true;
+    }
+};
+OSDefineMetaClassAndStructors(NVDA, IOService)
+#endif
 
 // With the driver off ("Start once without NVIDIA driver", "Remove NVIDIA driver") the claim above steps aside, but the
 // install excludes IONDRVSupport in OpenCore so Apple's firmware framebuffer never takes this display: nothing lit the
@@ -3416,7 +3535,7 @@ void NVRMNVDAFramebuffer::stop(IOService *provider)
     if (fHwVblCb && fKms && fDev) {
         fKms->unregisterVblankIntrCallback(fDev, fHead, fHwVblCb); fHwVblCb = nullptr;
     }
-    if (fBacklight) { fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
+    if (fBacklight) { nvrmBacklightClearGlobal(fBacklight); fBacklight->detach(this); OSSafeReleaseNULL(fBacklight); }
     if (fGamma) { IOFree(fGamma, sizeof *fGamma); fGamma = nullptr; fGammaOn = false; }
     if (fWakeGate) { if (IOWorkLoop *wl = getWorkLoop()) wl->removeEventSource(fWakeGate); OSSafeReleaseNULL(fWakeGate); }
     if (fSleepTap) { fSleepTap->remove(); fSleepTap = nullptr; }
@@ -3470,6 +3589,8 @@ void NVRMNVDAFramebuffer::publishBacklight()
     fBacklight->setName("backlight");
     if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); FBLOG("fb%u: backlight handler attach failed", fIndex); return; }
     fBacklight->registerService(kIOServiceSynchronous);
+    nvrmBacklightPublishGlobal(fBacklight);
+    { static volatile SInt32 once; if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_backlight_restore); }
     FBLOG("fb%u: panel backlight at %u%% -- brightness keys and slider through AppleBacklightDisplay", fIndex, (unsigned)level);
 }
 
