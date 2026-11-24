@@ -37,6 +37,7 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.13 at a79482f3 | Linux only: `test_nvrm_pat.c` and `test_nvrm_pat.py` pass, the switch registry check passes, the new kernel code compiled for macOS in a stub unit with its instructions in the intended order | Not built on a Mac, not installed: the first start and the first wake with NVRM writing the table itself, and the installer's DLSS step run by default |
 | Onboard sound on macOS 26 (PR #17) | On the RTX 5050 machine with `alcid=66` in boot-args only the NVIDIA display outputs appeared; removing it brought the onboard outputs back | Other boards and codecs |
 | 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18) | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script): the fork's NVK built on Mesa's nouveau drm-shim as shader model 120, all 300 corpus stages compile, `test_nak_stats.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
+| 3.0.17 (hierarchical Z) | Linux only: `test_nvk_zcull.py` passes; the new device-setup code compiled on its own against the RM 610.57.04 headers; the patch applies last in the 3.0 chain | Not cross-built for macOS, not built on a Mac, not on a card: whether RM answers the ZCULL query on the RTX 5050, and any gain or artefact in a game |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
 [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md).

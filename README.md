@@ -124,6 +124,7 @@ them is needed on a Mac that works.
 | Zink: the window's opacity is asked once per swap and the answer kept 100 ms | 3.0.8 | `NVK_ZINK_OPACITY_KEEP=0` | settings line |
 | Zink: with the swap interval at 0 the newest frame is shown and the swap does not wait for the display | 3.0.11 | `NVK_ZINK_PRESENT_NEWEST=0` | settings line |
 | Vulkan runtime: an IMMEDIATE swapchain shows the newest frame (3.0.9); MAILBOX is offered (3.0.11) | 3.0.9 | `NVK_BRIDGE_PRESENT_NEWEST=0` | settings line |
+| Hierarchical Z (ZCULL): hidden fragments culled before they are shaded, outside WindowServer | 3.0.17 | `NVK_ZCULL=0` | settings line |
 | Write-combining put back into the page attribute table where a kernel patch took it out | 3.0.13 | `nvpatwc=0` | boot argument |
 | The installer fetches the DLSS files | 3.0.13 | `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step | installer |
 | Read-only GPU capability cache | 3.0.3 | `nvgpucaps=0` | boot argument |
