@@ -28,6 +28,8 @@ AI-generated contributions there contrary to its policy.
 - Commit messages: `component: short summary` under 72 characters (`NVRMFB: fix 165 Hz mode missing`), then a
   plain explanation if one is needed.
 - Comments in code explain why the code does what it does. They are not a log of when you found something.
+- Sign off every commit (`git commit -s`). It certifies you wrote the change or may submit it under this
+  repository's licence (Developer Certificate of Origin, <https://developercertificate.org>).
 
 Kernel changes (`kexts/`) require real hardware validation before being declared release-ready, because a bad kext
 can stop the machine from starting. Experimental changes may be integrated into `fable` with explicit evidence
@@ -47,3 +49,4 @@ If you own a card we haven't tested, a working report (the "It works" form) is a
 ## Building
 
 See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the layout of the source and how each part is built.
+Setting up, the tests and the rules for changes are in [DEVELOPING.md](DEVELOPING.md).

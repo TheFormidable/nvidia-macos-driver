@@ -16,6 +16,7 @@ class NVAccel;
 #include "IOAccelCLContext2.h"
 #include "IOAccelVideoContext2.h"
 #include "nvaccel_pageoff_recheck.h"
+#include "nvres_fields.h"
 class NVResource : public IOAccelResource2 {
     OSDeclareDefaultStructors(NVResource)
     NM_TAHOE_FWD(NVResource)
@@ -26,25 +27,31 @@ public:
     uint64_t getLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
         if (a2) {
-            unsigned long long pitch = *(const volatile unsigned long long *)(r + 0xb8);
-            unsigned base = r[0xae];
+            unsigned long long pitch = nvResPitch(r);
+            unsigned base = r[kNvResBaseLevel];
             *a2 = (int)(pitch >> ((a1 >= base) ? (unsigned)(a1 - base) : 0u));
         }
-        return (unsigned long long)a0 * *(const volatile unsigned long long *)(r + 0xd0);
+        return (unsigned long long)a0 * nvResFaceSize(r);
     }
     uint64_t getBackingLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
         if (a2) {
-            unsigned long long pitch = *(const volatile unsigned long long *)(r + 0xc0);
-            unsigned base = r[0xae];
+            unsigned long long pitch = nvResBackingPitch(r);
+            unsigned base = r[kNvResBaseLevel];
             *a2 = (int)(pitch >> ((a1 >= base) ? (unsigned)(a1 - base) : 0u));
         }
-        return (unsigned long long)a0 * *(const volatile unsigned long long *)(r + 0xd0);
+        return (unsigned long long)a0 * nvResFaceSize(r);
     }
     uint64_t calculateIOSurfaceDeviceCacheVRAMBytes(unsigned long long* a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
-        unsigned long long size = *(const volatile unsigned long long *)(r + 0xd0);
+        unsigned long long size = nvResFaceSize(r);
+#if defined(NM_ERA) && NM_ERA < 1014
+        // Before 10.14 the second result is a 32-bit count (Apple's own driver declares it so); writing 8 bytes would
+        // run past the caller's variable.
+        if (a1) *(unsigned int *)a1 = 1;
+#else
         if (a1) *a1 = 1;
+#endif
         if (a0) *a0 = size;
         return size;
     }
@@ -52,7 +59,14 @@ public:
     void removeFromAperture() APPLE_KEXT_OVERRIDE;
     void *getApertureMemoryDescriptor(unsigned long long *a0) APPLE_KEXT_OVERRIDE;
     void free() APPLE_KEXT_OVERRIDE;
+#if defined(NM_ERA) && NM_ERA < 1012
+    // Before 10.12 the family declares only the two short forms, both pure; the driver supplies them.
+    void pageon(IOAccelEvent *, bool) APPLE_KEXT_OVERRIDE { }
+    void pageoff(IOAccelEvent *ev, bool a1, bool *out) APPLE_KEXT_OVERRIDE { pageoff(ev, a1, out, 0ull); }
+    void pageoff(IOAccelEvent *, bool, bool *, unsigned long long);
+#else
     void pageoff(IOAccelEvent *, bool, bool *, unsigned long long) APPLE_KEXT_OVERRIDE;
+#endif
     unsigned int fApLogged = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
     // Set by the plugin's surface-dirty escape: the allocation cookie of the VRAM the GPU wrote for this resource. The
@@ -116,8 +130,19 @@ class NVSurface : public IOAccelLegacySurface {
     OSDeclareDefaultStructors(NVSurface)
     NM_TAHOE_FWD(NVSurface)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    // macOS 10.13 and 10.14: one surface class, with these two where the newer family has the sync command and a pad.
+    // canTmpAlloc answers 1, as Apple's own NVIDIA surface does on these releases.
+    void submitSwapFlush(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2, IOAccelSwapFlushRec const* a3, unsigned int a4, unsigned int a5, unsigned int a6, IOAccelBounds const* a7) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitSwapFlush"); }
+    bool canTmpAlloc(unsigned int a0) APPLE_KEXT_OVERRIDE { return true; }
+    // The family keeps these two to itself on these releases (not exported), so a vendor surface supplies its own,
+    // as every Apple vendor driver of the time does.
+    void submitCopyForward(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccelResource2* a3, IOAccelBounds const* a4, unsigned int a5) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitCopyForward"); }
+    void submitUpdate(unsigned int a0, IOAccelBounds* a1, unsigned int a2) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::submitUpdate"); }
+#else
     void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE { ALOG("NVSurface::setSyncCommand"); }
     void _pure335() APPLE_KEXT_OVERRIDE { ALOG("NVSurface::_pure335"); }
+#endif
     bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyFromBuffer"); return false; }
     bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyToBuffer"); return false; }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
@@ -176,18 +201,32 @@ class NVGLContext : public IOAccelGLContext2 {
     OSDeclareDefaultStructors(NVGLContext)
     NM_TAHOE_FWD(NVGLContext)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    // the same four pure slots, under the names the 10.14 vendor drivers give them
+    void addDrawableToChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::addDrawableToChannel"); }
+    void removeDrawableFromChannel(IOAccelDrawable2* a0) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::removeDrawableFromChannel"); }
+    // Out-parameters are always written: the family reads them after the call.
+    void setCompatibleSurfaceMode(unsigned long long* a0, unsigned long long a1, int a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::setCompatibleSurfaceMode"); if (a0) *a0 = 0; }
+    void get_temp_allocation_info(IOAccelDrawable2* a0, unsigned int* a1, unsigned int* a2) APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::get_temp_allocation_info"); if (a1) *a1 = 0; if (a2) *a2 = 0; }
+#else
     void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure362"); }
     void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure363"); }
     void _pure364() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure364"); }
     void _pure367() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure367"); }
+#endif
 };
 OSDefineMetaClassAndStructors(NVGLContext, IOAccelGLContext2)
 class NV2DContext : public IOAccel2DContext2 {
     OSDeclareDefaultStructors(NV2DContext)
     NM_TAHOE_FWD(NV2DContext)
 public:
+#if defined(NM_ERA) && NM_ERA < 1015
+    void blitCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2, IOAccel2DBlitRectStruc* a3, unsigned int a4) APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::blitCopy"); }
+    void blitFill(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccel2DBlitRectStruc* a3, unsigned int a4) APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::blitFill"); }
+#else
     void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure362"); }
     void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure363"); }
+#endif
 };
 OSDefineMetaClassAndStructors(NV2DContext, IOAccel2DContext2)
 class NVCLContext : public IOAccelCLContext2 {
