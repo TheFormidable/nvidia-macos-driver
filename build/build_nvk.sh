@@ -52,7 +52,9 @@
 #        uniform register goes back to the handle-in-a-GPR form instead of failing the compile; with the switch unset
 #        the compiler's output is what it was),
 #        then nvk-nak-stats (3.0.14: NAK_STATS=1 writes one JSON line per compiled shader stage on stderr, the figures
-#        tools/nak-corpus/run.sh collects and tools/nak_stats_diff.py compares; unset, nothing is read or written).
+#        tools/nak-corpus/run.sh collects and tools/nak_stats_diff.py compares; unset, nothing is read or written),
+#        then nvk-zcull (3.0.17: the NVRM backend reports the ZCULL unit's geometry from RM, so NVK's hierarchical Z,
+#        already in 26.3, culls hidden fragments; off with NVK_ZCULL=0, in WindowServer and with NVRM_610_ZCULL=0).
 #   2.9  nvk-macos, nvk-fixes-after-def16, nvk-620-kernel, nvk-recycle, nvk-slab, nvk-slabdef, nvk-hubfix,
 #        nvk-perf-boost-burst, nvk-rated-tdp, nvk-gps-maxpower, nvk-metal-wsi (VK_EXT_metal_surface: windows), nvk-card-select (NVK_ACCEL_ID),
 #        hwrt/ttu-nak + hwrt/ttu-rq (ray queries on the RT cores, compiled in, off unless NVK_HWRT_QUERY=1; docs/HWRT.md),
@@ -97,7 +99,7 @@ UPSTREAM_FIXES="nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main"   # the c
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps nvk-desc-alloc nvk-surface-keep nvk-nak-switch-key nvk-tex-uhandle-safe nvk-nak-stats" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps nvk-desc-alloc nvk-surface-keep nvk-nak-switch-key nvk-tex-uhandle-safe nvk-nak-stats nvk-zcull" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;

@@ -1,5 +1,60 @@
 # Changelog
 
+## 3.0.17
+
+**Not released.** This section describes the branch being prepared as 3.0.17, on top of 3.0.14 (below, not released
+either; 3.0.15 was closed without merging and 3.0.16 is a pull request of its own). It turns on the GPU's hierarchical
+Z, which NVK already drives on Linux. **Nothing of 3.0.17 has been built on a Mac or run on a card**; the decision it
+adds is host-tested and the changed code was compiled on Linux against the real RM headers only.
+
+### Fixes and changes
+
+#### NVK: hierarchical Z (ZCULL) over NVRM
+
+- **NVK now uses the GPU's ZCULL unit on macOS.** ZCULL keeps a coarse copy of the depth buffer on the chip and throws
+  away whole blocks of fragments that are behind depth already drawn, before they are shaded. NVK 26.3 has the code
+  (`nvk_image.c` gives a depth image a ZCULL plane, `nvk_cmd_draw.c` programs the unit at the start of a render pass),
+  but it runs only when the device reports the unit's geometry, which on Linux the kernel does
+  (`DRM_NOUVEAU_GET_ZCULL_INFO`). The NVRM backend reported none, so ZCULL never ran here. The new patch
+  `nvk/nvk-zcull.patch`, last in the 3.0 chain, changes `nvkmd_nvrm_pdev.c` only: at device creation it asks RM for the
+  same figures, `NV2080_CTRL_CMD_GR_GET_ZCULL_INFO` and the ZCULL engine's context properties, and fills
+  `nv_device_info.zcull_info` field by field as Linux's GSP code does (`r570_gr_get_ctxbufs_and_zcull_info`). Every
+  graphics channel has bound a ZCULL context-switch buffer `SEPARATE_BUFFER` since 2.9 (`NVRM_610_ZCULL`), so the
+  unit's contents survive a switch to WindowServer or another application.
+- **Where it acts.** NVK keeps a ZCULL plane only for a depth image whose usages are depth attachment and read
+  (sampled, input attachment, copy source); a render pass with such an image keeps ZCULL across passes, and any render
+  pass whose depth is cleared at load uses ZCULL for that pass. A depth image that can also be a copy destination gets
+  no plane, because NVK cannot keep the coarse copy right after a copy into it (upstream's rule, unchanged). Zink
+  (OpenGL) and the Metal plugin create their depth images as copy destinations, so for OpenGL games and Metal
+  applications ZCULL acts in the passes that clear depth at load, which is how a frame usually starts; a native Vulkan
+  application that creates its depth image with the usual usages gets it in every pass.
+- **Kept off** in WindowServer (it draws no depth worth culling, and a fault there takes the desktop), with
+  `NVRM_610_ZCULL=0` (no context buffer), when either RM call fails or returns a size of 0, and when a figure is one
+  that NIL would divide by or that passes its 16 subregions (an assert there would end the process).
+  `NVK_ZCULL_LOG=1` (or `NVK_DIAG=1`) writes one line per device on stderr with the decision, the reason when it is
+  off, and RM's figures.
+
+What it gives is not measured. It costs nothing where nothing is hidden and gains most where much is drawn behind
+other things (dense scenes, foliage, shader packs that draw the scene more than once). If a frame shows things through
+walls or flickering depth, `NVK_ZCULL=0` is the first thing to try.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVK_ZCULL=0` | settings line (or environment) | NVK reports no ZCULL unit and draws without hierarchical Z, as in 3.0.16 |
+
+### What ran where
+
+On Linux only. `tools/test_nvk_zcull.py` (new) checks the patch's place in the chain and the one file it changes,
+that each of RM's figures lands in the field of the same meaning, that the decision is the one the device setup
+stores, and compiles the decision out of the patch with `-Wall -Wextra -Werror` and runs it over 20 cases. The changed
+code was compiled on its own with clang and gcc against the RM 610.57.04 headers and Mesa 26.3.0-rc3's
+`nv_device_info.h`; the patch applies at the end of the 3.0 chain on Mesa 26.3.0-rc3. `test_nak_stats.py` (its chain
+check now reads "after nvk-tex-uhandle-safe"), `test_nvk_chain.py`, `test_nvk_nak_switch_key.py`,
+`test_switch_registry.py`, `test_build_nvk_fingerprint.py`, `test_tree_layout.py` and `tools/switch_registry.py check`
+pass. The whole NVK library was not cross-built for macOS, nothing was built on a Mac and nothing ran on a card.
+
 ## 3.0.14
 
 **Not released.** This section describes the branch being prepared as 3.0.14, on top of 3.0.13 (below, not released
