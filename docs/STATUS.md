@@ -1,9 +1,11 @@
-# Fork status and evidence — 2026-11-23
+# Fork status and evidence — 2026-11-24
 
 This is the current snapshot of TheFormidable's `fable` branch with [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)
-merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.14: the development package version, not
-a published or qualified release. 3.0.1 to 3.0.14 are merged; there is no 3.0.10. 3.0.14 adds statistics of the shader
-compiler, a development tool tested on Linux only. The upstream baseline
+merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.17: the development package version, not
+a published or qualified release. 3.0.1 to 3.0.17 are merged; there is no 3.0.10, and 3.0.15 was tried and not kept.
+3.0.14 adds statistics of the shader compiler, a development tool tested on Linux only. 3.0.16 writes OpenGL buffer
+uploads that would wait for the GPU through a staging buffer; on the card it has not yet met the wait it removes.
+3.0.17 turns on the GPU's hierarchical Z (ZCULL) in NVK, host-tested only. The upstream baseline
 is NullMoth 2.9. Keep inherited upstream evidence separate from this fork's experiments and from the NVMetrics
 application.
 
@@ -37,6 +39,8 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.13 at a79482f3 | Linux only: `test_nvrm_pat.c` and `test_nvrm_pat.py` pass, the switch registry check passes, the new kernel code compiled for macOS in a stub unit with its instructions in the intended order | Not built on a Mac, not installed: the first start and the first wake with NVRM writing the table itself, and the installer's DLSS step run by default |
 | Onboard sound on macOS 26 (PR #17) | On the RTX 5050 machine with `alcid=66` in boot-args only the NVIDIA display outputs appeared; removing it brought the onboard outputs back | Other boards and codecs |
 | 3.0.14, [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18) | Linux only (a development tool: `NAK_STATS=1`, a shader corpus and a comparison script): the fork's NVK built on Mesa's nouveau drm-shim as shader model 120, all 300 corpus stages compile, `test_nak_stats.py` passes | Not cross-built for macOS; nothing of it on a Mac or a card |
+| 3.0.15, [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20), not kept | Built on the RTX 5050 machine and its NVK copied by hand over 3.0.12. Three captures at a fixed place in ATM10 with the shader pack, phase 1 on, off, on: 1.285, 1.283 and 1.277 J per frame, 75 to 79 game frames a second with the GPU at 63 to 68 %. No gain, so it was closed without merging; the render thread waited 19 to 25 % of its time in `glBufferSubData` | Its patch is not in the tree ([CHANGELOG.md](../CHANGELOG.md#3015-tried-on-top-of-3014-and-not-kept)) |
+| 3.0.16 | Linux: the patch applies to Mesa 26.3.0 with `prepare_zink.py`; the threaded context and Zink compile with GCC without a warning; `test_zink_subdata_stage.py` passes. RTX 5050 machine: built without a warning, Zink copied by hand over 3.0.12; two ATM10 captures, as installed and with `NVK_ZINK_SUBDATA_STAGE=0`, both without the wait (GPU 96 to 98 %) | Whether the render thread of ATM10 stops waiting in `glBufferSubData`: the state that waits did not come while 3.0.16 was in place |
 | 3.0.17 (hierarchical Z) | Linux only: `test_nvk_zcull.py` passes; the new device-setup code compiled on its own against the RM 610.57.04 headers; the patch applies last in the 3.0 chain | Not cross-built for macOS, not built on a Mac, not on a card: whether RM answers the ZCULL query on the RTX 5050, and any gain or artefact in a game |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
@@ -71,6 +75,12 @@ Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](G
 - **Shader-compiler statistics (3.0.14):** `NAK_STATS=1` writes one JSON line per compiled shader stage;
   `tools/nak-corpus/` and `tools/nak_stats_diff.py` measure a compiler change over a fixed set of 300 stages.
   Host-tested only: built and run on Linux on Mesa's nouveau drm-shim as shader model 120, never on a Mac or a card.
+- **Tried and not kept (3.0.15):** building heavy graphics shaders again with fewer registers for more warps per SM
+  met the compiler gate on Linux but gave the same joules per frame on the card; ATM10 there is held up by Zink
+  waiting in `glBufferSubData`, not by its shaders.
+- **OpenGL buffer uploads without a wait (3.0.16):** on by default, `NVK_ZINK_SUBDATA_STAGE=0` goes back.
+  On the card only where the game did not wait: two ATM10 captures, with it and without it, the same; not yet shown
+  removing the wait.
 - **Other gaps:** full multi-GPU acceleration, hybrid laptop offload, hardware ray-tracing opt-ins and Windows/Apple
   feature parity require dedicated evidence. CUDA and proprietary firmware capabilities are not implemented by this
   fork. No card other than the RTX 5050 has run a 3.0.x build of this fork.
