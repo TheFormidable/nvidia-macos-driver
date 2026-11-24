@@ -68,6 +68,7 @@ fixture = r'''
 typedef uint32_t NvU32; typedef unsigned io_connect_t, io_service_t, mach_port_t; typedef int kern_return_t;
 enum { KERN_SUCCESS = 0, KERN_FAILURE = 5 };
 #define kIOMainPortDefault 0
+#define NV_IO_MAIN_PORT kIOMainPortDefault   /* vendor/nvenc/src/nv_floor.h, macOS 12 and later */
 typedef struct { io_connect_t conn; int fd; } RmConn;
 static int opened, closed, binds; static int64_t bound = -99; static int bound_fifo, bound_chr, bound_cloexec;
 static mach_port_t mach_task_self(void) { return 1; }

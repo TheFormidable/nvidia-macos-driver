@@ -1,0 +1,21 @@
+Ray queries read a geometry entry as two 4-byte loads. From the original project's 3.1 (its commit 89e94f8d, "VFX
+shaders, local pointer fields, late access split"), where it is an edit of hwrt/ttu-rq.patch. Here it is a patch of
+its own at the end of the 3.0 chain, so that hwrt/ttu-rq.patch stays the file release 2.9 was built from.
+The entry is 4-byte aligned; one 8-byte load of it is wider than its alignment, which NAK refuses ("Internal compiler
+error in NAK"). nvk-nak-late-split.patch splits such loads in the compiler as well; this one does not make one.
+
+--- a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
++++ b/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c
+@@ -911,9 +911,9 @@
+                                    nir_u2u64(b, nir_iadd(b, hw_load_u32(b, blas_app,
+                                                                          offsetof(struct nvk_hwrt_appendix, geometry_table_offset)),
+                                                          nir_imul_imm(b, geom, sizeof(struct nvk_hwrt_geometry)))));
+-         nir_def *gentry = nir_build_load_global(b, 2, 32, table, .align_mul = 4);
+-         nir_def *geometry_id_and_flags = nir_channel(b, gentry, 0);
+-         nir_def *first_leaf = nir_channel(b, gentry, 1);
++         /* two 4-byte loads: an entry is 4-byte aligned, and NAK refuses a load wider than its alignment */
++         nir_def *geometry_id_and_flags = hw_load_u32(b, table, 0);
++         nir_def *first_leaf = hw_load_u32(b, table, 4);
+          nir_def *tri_leaves = hw_load_u32(b, blas, offsetof(struct nvk_bvh_header, leaf_nodes_offset));
+          nir_def *prim_off = nir_iadd(b, tri_leaves, nir_imul_imm(b, nir_iadd(b, first_leaf, prim), sizeof(struct nvk_bvh_triangle_node)));
+          nir_def *prim_addr = nir_iadd(b, blas, nir_u2u64(b, prim_off));

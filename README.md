@@ -4,8 +4,8 @@ Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork 
 Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Development status — November 24, 2026.** `fable` is at 3.0.17, the first heading of
-> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.17 are merged. None is a published release or a certified binary: each
+> **Development status — November 24, 2026.** `fable` is at 3.0.18, the first heading of
+> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.18 are merged. None is a published release or a certified binary: each
 > is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
 > 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
 > installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only
@@ -16,7 +16,8 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 > and was not kept ([CHANGELOG.md](CHANGELOG.md#3015-tried-on-top-of-3014-and-not-kept)). 3.0.16 writes OpenGL
 > buffer uploads that would wait for the GPU through a staging buffer; its Zink library was built on that machine and
 > copied by hand, and the card has not yet shown the wait it removes while it was in place. 3.0.17 turns on the GPU's
-> hierarchical Z (ZCULL) in NVK, tested on Linux only.
+> hierarchical Z (ZCULL) in NVK, tested on Linux only. 3.0.18 merges everything the original project has published up
+> to its 3.1, including its experimental driver kits for macOS 14 down to 10.7, tested on Linux only.
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`

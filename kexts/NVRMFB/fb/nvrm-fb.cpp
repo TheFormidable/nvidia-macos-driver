@@ -375,6 +375,12 @@ static void nvrmBacklightClearGlobal(NVRMBacklightHandler *h)
 // disagrees with it. Reading returns -1.
 static int nvrmfbBacklightRestoreSysctl SYSCTL_HANDLER_ARGS
 {
+    // Registered with the framebuffer's other sysctls (nvrmfbInstallSysctl: the kext stays loaded once they are). Until
+    // an internal panel's handler is published it answers ENODEV, read or written, so the backlight job, which waits
+    // for the name to answer, still finds nothing on a machine without a panel and ends after its two minutes.
+    bool havePanel = false;
+    if (gBacklightLock) { IOLockLock(gBacklightLock); havePanel = gBacklightHandler != nullptr; IOLockUnlock(gBacklightLock); }
+    if (!havePanel) return ENODEV;
     int v = -1;
     int err = sysctl_handle_int(oidp, &v, 0, req);
     if (err || !req->newptr) return err;
@@ -3590,7 +3596,6 @@ void NVRMNVDAFramebuffer::publishBacklight()
     if (!fBacklight->attach(this)) { OSSafeReleaseNULL(fBacklight); FBLOG("fb%u: backlight handler attach failed", fIndex); return; }
     fBacklight->registerService(kIOServiceSynchronous);
     nvrmBacklightPublishGlobal(fBacklight);
-    { static volatile SInt32 once; if (OSCompareAndSwap(0, 1, &once)) sysctl_register_oid(&sysctl__debug_nvrmfb_backlight_restore); }
     FBLOG("fb%u: panel backlight at %u%% -- brightness keys and slider through AppleBacklightDisplay", fIndex, (unsigned)level);
 }
 
@@ -4915,6 +4920,7 @@ static void nvrmfbInstallSysctl(void)
 {
     if (gFbSysctl) return; gFbSysctl = true;
     nvrmfbStayLoaded();         // held already (the framebuffer's start); never unregistered, so the kext must stay
+    sysctl_register_oid(&sysctl__debug_nvrmfb_backlight_restore);   // answers ENODEV until publishBacklight has a panel
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grants);   sysctl_register_oid(&sysctl__debug_nvrmfb_vram_grant_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_releases); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_release_bytes);
     sysctl_register_oid(&sysctl__debug_nvrmfb_vram_mapped_bytes); sysctl_register_oid(&sysctl__debug_nvrmfb_vram_budget_bytes);

@@ -103,7 +103,7 @@ FLOOR=${NVK_FLOOR:-15.0}
 
 case $REL in
   3.0) FIXES=$NVK/nvk-fixes-after-def16.patch
-       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps nvk-desc-alloc nvk-surface-keep nvk-nak-switch-key nvk-tex-uhandle-safe nvk-nak-stats nvk-zcull nvk-nak-late-split" ;;
+       CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow nvk-mesa-26.3.0 nvk-nak-fixes-main nvk-nak-sched-main nvk-evwait nvk-fence nvk-channel-recover nvk-stream-uncached nvk-boost-policy nvk-mesa-main-2 nvk-nvrm-fixes nvk-local-map-vram nvk-gpu-caps nvk-desc-alloc nvk-surface-keep nvk-nak-switch-key nvk-tex-uhandle-safe nvk-nak-stats nvk-zcull nvk-nak-late-split hwrt/ttu-rq-split" ;;
   2.9) FIXES=$NVK/nvk-fixes-after-def16.patch
        BASE=90a959eb   # the 2.9 package was built on this Mesa (mesa-26.3.0-rc3), whatever nvk/MESA_BASE names later
        CHAIN="nvk-macos @FIXES nvk-620-kernel nvk-recycle nvk-slab nvk-slabdef nvk-hubfix nvk-perf-boost-burst nvk-rated-tdp nvk-gps-maxpower nvk-metal-wsi nvk-card-select hwrt/ttu-nak hwrt/ttu-rq curves/curves hwrt/wide nvk-warnings nvk-unbound-stage nvk-diag-nofollow" ;;
@@ -130,7 +130,8 @@ for p in ${NVK_EXTRA_PATCHES:-}; do
   CHAIN="$CHAIN $p"; ADDED="$ADDED $p"
 done
 # NVK_SKIP_PATCHES leaves upstream-fix patches out of the 3.0 chain. Only those can be named: they change compiler files
-# that no later patch of the chain touches, and none of the three needs another, so the rest of the chain applies
+# that no later patch of the chain touches (nvk-nak-late-split adds a pass to nak_nir.c away from their hunks, and was
+# applied with each of them left out), and none of the three needs another, so the rest of the chain applies
 # whichever are left out. Any other name stops the build: a misspelt name that was silently ignored would give a build
 # that still has the patch its owner believes is out. So does a name that is not in the chain asked for (2.9 and 2.8
 # have none of the three): the library would be that release's whole chain, not one with a patch left out.
