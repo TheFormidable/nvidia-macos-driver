@@ -167,6 +167,39 @@ drop_lines "$ZB"; rm -rf "${R:?}/$ZB"; mkdir -p "$(dirname "$R/$ZB")"; cp -pR "$
 codesign --force --sign - "$R/$ZB" >/dev/null 2>&1 || stop "could not sign $ZB"
 refresh_tree "$ZB"; echo "replaced $ZB (signed ad hoc)"
 # --- end of native OpenGL ---
+# --- one package for every release: the kits for macOS 10.7 to 14 (build/legacy, package/pick_kit.sh) ---
+# NM_LEGACY_KITS = the folder build/legacy/package_kits.sh wrote (legacy_kits.json and the 13 archives). Each archive is
+# checked against the json's SHA-256 and against its own SHA256SUMS, and unpacked to legacy/<release>/; install.sh runs
+# the matching one on 10.7 to 14. All 13 or none: a package that silently lacks one release's kit is not made.
+put_file "$P/pick_kit.sh" pick_kit.sh 755
+if [ -n "${NM_LEGACY_KITS:-}" ]; then
+  LK=$(cd "$NM_LEGACY_KITS" && pwd) || stop "NM_LEGACY_KITS=$NM_LEGACY_KITS is not a folder"
+  [ -f "$LK/legacy_kits.json" ] || stop "$LK has no legacy_kits.json (build/legacy/package_kits.sh writes it)"
+  drop_lines legacy; rm -rf "${R:?}/legacy"; mkdir -p "$R/legacy"
+  LT=$PKG/legacy-unpack; rm -rf "$LT"
+  for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
+    pin=$(python3 -c 'import json,sys; k=json.load(open(sys.argv[1]))["kits"].get(sys.argv[2]) or {}; print(k.get("name",""), k.get("sha256",""))' "$LK/legacy_kits.json" "$rel") \
+      || stop "cannot read $LK/legacy_kits.json"
+    name=${pin%% *}; want=${pin##* }
+    [ -n "$name" ] && [ -n "$want" ] && [ "$name" != "$want" ] || stop "legacy_kits.json has no kit for macOS $rel"
+    case "$name" in */*|.*) stop "legacy_kits.json names $name for macOS $rel: not a plain file name";; esac
+    [ -f "$LK/$name" ] || stop "the kit for macOS $rel ($LK/$name) is missing"
+    got=$(shasum -a 256 "$LK/$name" | cut -d' ' -f1)
+    [ "$got" = "$want" ] || stop "$name has SHA-256 $got, not the $want legacy_kits.json pins"
+    mkdir -p "$LT/$rel"; tar -xzf "$LK/$name" -C "$LT/$rel" || stop "could not unpack $name"
+    top=$(cd "$LT/$rel" && ls); [ "$top" = "${name%.tar.gz}" ] && [ -d "$LT/$rel/$top" ] || stop "$name does not hold the one folder ${name%.tar.gz}"
+    K=$LT/$rel/$top
+    [ -z "$(find "$K" -type l | sed -n 1p)" ] || stop "the kit for macOS $rel holds a link"
+    [ -z "$(find "$K" ! -type f ! -type d | sed -n 1p)" ] || stop "the kit for macOS $rel holds something that is neither a file nor a folder"
+    [ "$(tr -cd '0-9.' < "$K/RELEASE" 2>/dev/null)" = "$rel" ] || stop "$name is not the kit for macOS $rel (its RELEASE says otherwise)"
+    [ -f "$K/install-legacy.sh" ] && [ -f "$K/kexts/NVRM.kext/Contents/MacOS/NVRM" ] || stop "$name lacks install-legacy.sh or the NVRM kext"
+    ( cd "$K" && shasum -a 256 --strict -c SHA256SUMS --quiet ) || stop "$name does not match its own SHA256SUMS"
+    mv "$K" "$R/legacy/$rel"; echo "legacy kit for macOS $rel: $name"
+  done
+  rm -rf "$LT"
+  refresh_tree legacy
+fi
+# --- end of one package for every release ---
 if [ -d "$R/licenses" ]; then
   for f in "$HERE"/licenses/*; do if [ -f "$f" ]; then put_file "$f" "licenses/$(basename "$f")"; fi; done
   # This checkout's notice and licence too: install.sh copies licenses/ to /Library/NullMoth/licenses, and the base
