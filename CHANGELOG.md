@@ -45,6 +45,14 @@ older release has been installed on;** the kits are the original's older-release
   - 10.11 is not covered: its family lacks the GPU page-table methods NVAccel overrides. That kit keeps OpenGL.
 - `build/legacy/assemble_kits.sh`: a kext the release's own kext linker refused goes to `held-back/`, not `kexts/`.
   `install-legacy.sh` test-links every kext in `kexts/` and stops the whole install on one refusal.
+- The kits' programs are all signed (ad hoc), as `package/check_package.sh` asks of the package. There were 23
+  unsigned Mach-O files:
+  - `build/legacy/userland/stage_legacy.sh` signed `NVMTLDriver` first. Signing a bundle's main program seals the
+    bundle, and codesign refused because its neighbours were not signed yet; the error was hidden. It now signs them
+    first, the plugin last, and a failure stops the stage.
+  - `gl/package/stage.sh` signed nothing. It now signs the Vulkan driver, then the engine, before it writes
+    `MANIFEST.json`.
+  - `build/legacy/package_kits.sh` stops on an unsigned program in a kit and names it.
 
 ### What ran where
 

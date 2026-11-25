@@ -38,6 +38,11 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   find "$D" -name .DS_Store -delete
   # no build machine's folder names in what ships (3.0's kits carried them in four binaries and the link log)
   python3 "$(dirname "$0")/scrub_kit.py" "$D" || die "scrub $rel"
+  # the package check's rule, here where it is cheap to act on: every Mach-O outside a kext's Contents/MacOS is signed
+  bad=$(find "$D" -type f ! -path '*.kext/Contents/MacOS/*' -print0 | while IFS= read -r -d '' f; do
+    m=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$m" in cffaedfe|cefaedfe|cafebabe|feedfacf) codesign -v "$f" >/dev/null 2>&1 || echo "${f#"$D/"}";; esac; done)
+  [ -z "$bad" ] || { echo "$bad" | sed 's/^/  unsigned: /'; die "unsigned programs in the kit for $rel (signed by the stagers: userland/stage_legacy.sh, gl/package/stage.sh)"; }
   ( cd "$D" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS ) || die "sums $rel"
   ( cd "$D" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "sums do not verify $rel"
   # a plain ustar archive without extended attributes or resource forks: 10.7's tar must read it
