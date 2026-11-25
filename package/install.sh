@@ -135,9 +135,9 @@ trap 'die "installer interrupted (signal INT)"' INT
 trap 'die "installer interrupted (signal TERM)"' TERM
 
 # --- one package for every release (package/pick_kit.sh) ---
-# On macOS 10.7 to 14 this package installs the kit built for that release (build/legacy, package/legacy): the kit is
+# On macOS 10.14 to 14 this package installs the kit built for that release (build/legacy, package/legacy): the kit is
 # checked against this package's SHA256SUMS and run from a root-owned private copy, as step 2 does for the whole package
-# on 15 and 26. Plain shasum: the one of 10.7 has no --strict. CHECK=1 becomes the kit installer's --check.
+# on 15 and 26. Plain shasum, one file at a time: an older shasum may have no --strict. CHECK=1 becomes the kit installer's --check.
 legacy_install() {
   local v=$1 pick rel kit
   [ -f "$HERE/pick_kit.sh" ] || die "This driver is built for macOS 15 and 26 (this is $v); no changes made"

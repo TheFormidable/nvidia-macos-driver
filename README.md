@@ -17,7 +17,9 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 > buffer uploads that would wait for the GPU through a staging buffer; its Zink library was built on that machine and
 > copied by hand, and the card has not yet shown the wait it removes while it was in place. 3.0.17 turns on the GPU's
 > hierarchical Z (ZCULL) in NVK, tested on Linux only. 3.0.18 merges everything the original project has published up
-> to its 3.1, including its experimental driver kits for macOS 14 down to 10.7, tested on Linux only.
+> to its 3.1, including its experimental driver kits for macOS 14 down to 10.7, tested on Linux only. 3.0.19 puts the
+> kits for macOS 10.14 to 14 inside the one package, and `install.sh` installs the kit of the macOS it runs on; macOS
+> 10.13 and older are not supported. No kit has run on a card.
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`

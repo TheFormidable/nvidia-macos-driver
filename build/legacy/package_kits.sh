@@ -2,21 +2,21 @@
 # package_kits.sh <version> : one installable archive per older release from the kits assemble_kits.sh gathered.
 #   $B/kit/<release>  ->  $B/pkg/nullmoth-nvidia-legacy-<release>-<version>.tar.gz   (+ $B/pkg/legacy_kits.json for the builder)
 # Each archive holds the kit, the installer (package/legacy), the firmware fetcher, and a Zstandard decoder built for
-# 10.7 so the same file runs on every release. Reference data files a test package left in the kit are replaced or
+# 10.14 so the same file runs on every release. Releases 10.13 and older are not packaged: the driver supports 10.14 on. Reference data files a test package left in the kit are replaced or
 # dropped here. Nothing is installed or run. $SRC = the driver source tree (default: the folder this script is in).
 set -u
 B=${B:?audit folder}; V=${1:?version}
 SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 P=$B/pkg; rm -rf "$P"; mkdir -p "$P/tools"
 die() { echo "STOP $*"; exit 1; }
-# one decoder for all releases: 10.7 is the oldest release a kit is packaged for
-xcrun clang -O2 -arch x86_64 -mmacosx-version-min=10.7 -DZSTD_DISABLE_ASM -o "$P/tools/nm_unzstd" "$SRC/dlss/nm_unzstd.c" \
+# one decoder for all releases: 10.14 is the oldest release a kit is packaged for
+xcrun clang -O2 -arch x86_64 -mmacosx-version-min=10.14 -DZSTD_DISABLE_ASM -o "$P/tools/nm_unzstd" "$SRC/dlss/nm_unzstd.c" \
   "$SRC"/dlss/zstd/common/*.c "$SRC"/dlss/zstd/decompress/*.c 2>"$P/tools/unzstd.log" || { cat "$P/tools/unzstd.log"; die "decoder build"; }
 strip -S "$P/tools/nm_unzstd"
-xcrun otool -l "$P/tools/nm_unzstd" | grep -q "version 10.7" || die "the decoder is not built for 10.7"
+xcrun otool -l "$P/tools/nm_unzstd" | grep -Eq "(version|minos) 10\.14( |$)" || die "the decoder is not built for 10.14"
 printf '{\n  "version": "%s",\n  "base": "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v%s/",\n  "kits": {' "$V" "$V" > "$P/legacy_kits.json"
 first=1
-for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
+for rel in 10.14 10.15 11 12 13 14; do
   K=$B/kit/$rel; [ -d "$K/kexts/NVRM.kext" ] || die "no kit for $rel"
   N=nullmoth-nvidia-legacy-$rel-$V; D=$P/$N; mkdir -p "$D/dlss"
   cp -R "$K/kexts" "$D/" || die "copy kexts $rel"
@@ -40,7 +40,7 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   python3 "$(dirname "$0")/scrub_kit.py" "$D" || die "scrub $rel"
   ( cd "$D" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS ) || die "sums $rel"
   ( cd "$D" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "sums do not verify $rel"
-  # a plain ustar archive without extended attributes or resource forks: 10.7's tar must read it
+  # a plain ustar archive without extended attributes or resource forks: 10.14's tar must read it
   ( cd "$P" && COPYFILE_DISABLE=1 tar --format ustar --no-xattrs --no-mac-metadata -czf "$N.tar.gz" "$N" ) || die "archive $rel"
   s=$(shasum -a 256 "$P/$N.tar.gz" | cut -d' ' -f1)
   [ $first = 1 ] || printf ',' >> "$P/legacy_kits.json"; first=0
@@ -49,6 +49,6 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   rm -rf "$D"
 done
 printf '\n  }\n}\n' >> "$P/legacy_kits.json"
-python3 -c "import json,sys; j=json.load(open(sys.argv[1])); assert len(j['kits'])==13" "$P/legacy_kits.json" || die "the pin file is not valid"
+python3 -c "import json,sys; j=json.load(open(sys.argv[1])); assert len(j['kits'])==6" "$P/legacy_kits.json" || die "the pin file is not valid"
 ( cd "$P" && shasum -a 256 *.tar.gz > SHA256SUMS )
 echo "pins: $P/legacy_kits.json"

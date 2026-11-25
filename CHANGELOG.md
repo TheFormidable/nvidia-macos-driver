@@ -3,28 +3,29 @@
 ## 3.0.19
 
 **Not released.** This section describes the branch being prepared as 3.0.19, on top of 3.0.18 (below, not released
-either). **One package for every release:** the package carries the kits for macOS 10.7 to 14, built by this fork from
+either). **One package for every release:** the package carries the kits for macOS 10.14 to 14, built by this fork from
 its own tree with Apple's SDK and Kernel Debug Kit of each release, and the installer picks the kit of the macOS it runs
-on. Nothing to choose: the same `sudo ./install.sh` on 10.7 to 14, 15 and 26. **No kit has been run on a card, and no
+on. Nothing to choose: the same `sudo ./install.sh` on 10.14 to 14, 15 and 26. **macOS 10.13 and older are not
+supported** (the owner's call): `install.sh` stops there and changes nothing. The original's lane still builds them. **No kit has been run on a card, and no
 older release has been installed on;** the kits are the original's older-release lane (3.0.18) built here.
 
 ### What changed
 
 - `package/pick_kit.sh` (new) names the part of the package for a macOS version: `modern` on 15 and 26, `legacy
-  <release>` on 10.7 to 14, `none <reason>` otherwise (10.6 and older, an unknown release, or a package without the
-  kit). Plain bash 3.2, as on 10.7.
+  <release>` on 10.14 to 14, `none <reason>` otherwise (10.13 and older, an unknown release, or a package without the
+  kit). Plain bash 3.2.
 - `package/install.sh`: right after the root check, on any release but 15 and 26, it runs `pick_kit.sh`, copies that
   kit to a root-owned folder in /var/tmp, checks every file of the copy against the package's `SHA256SUMS` (one file at
-  a time with plain `shasum`, since 10.7's has no `--strict`; a malformed line or an unlisted file stops it), and runs
+  a time with plain `shasum`, since an older one may have no `--strict`; a malformed line or an unlisted file stops it), and runs
   the kit's own `install-legacy.sh` from the copy (`CHECK=1` becomes its `--check`). It does not change boot
   arguments; the kit's installer says what to add. On 15 and 26 nothing changed.
-- `package/uninstall.sh`: on 10.7 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
+- `package/uninstall.sh`: on 10.14 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
 - `build/package_local.sh` and `./build.sh package`: `NM_LEGACY_KITS=<folder of build/legacy/package_kits.sh>` puts the
-  13 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
-  13 or the package is not made. Without it the package has no kits and `install.sh` says so on an older release.
+  6 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
+  6 or the package is not made. `build/legacy/package_kits.sh` packages 10.14 to 14 only, with its decoder built for 10.14. Without it the package has no kits and `install.sh` says so on an older release.
 - `tools/test_pick_kit.py` (new): every release and the versions around them; the installer's dispatch lifted out and
   run with stand-ins, with a changed kit file, an unlisted file, a malformed line and a list without the kit as controls.
-- NVRM builds for 10.7 to 14 again. Three things this fork added since 2.9 need a newer kernel than the oldest kits:
+- NVRM builds for 10.7 to 14 again (the kits packaged are 10.14 on; the lane builds all of them). Three things this fork added since 2.9 need a newer kernel than the oldest kits:
   - Thread names (10.15) do nothing before 10.15 (`kexts/compat/nm_era.h`).
   - The DMA read-back (`IOMapper::mapToPhysicalAddress`, 10.11) counts nothing as verified before 10.11. A GPU behind
     a DMA mapper is then refused at the self-test, as with `nvrmdma=0`; without a mapper nothing changes
