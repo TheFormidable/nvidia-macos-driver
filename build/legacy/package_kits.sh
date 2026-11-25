@@ -48,6 +48,12 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   find "$D" -name .DS_Store -delete
   # no build machine's folder names in what ships (3.0's kits carried them in four binaries and the link log)
   python3 "$(dirname "$0")/scrub_kit.py" "$D" || die "scrub $rel"
+  # The bundle version set above and scrub_kit.py's rewrites change files inside signed bundles, which breaks their
+  # seals (NVMTLDriver: "invalid Info.plist"). Sign again what no longer verifies; a second pass takes a bundle's own
+  # program when codesign refused it the first time because a neighbour in its folder came later in the list.
+  for pass in 1 2; do
+    unsigned_in "$D" | while IFS= read -r f; do codesign -f -s - "$D/$f" >/dev/null 2>&1; done
+  done
   # the package check's rule, here where it is cheap to act on: every Mach-O outside a kext's Contents/MacOS is signed
   bad=$(unsigned_in "$D")
   [ -z "$bad" ] || { echo "$bad" | sed 's/^/  unsigned: /'; die "unsigned programs in the kit for $rel (signed by the stagers: userland/stage_legacy.sh, gl/package/stage.sh)"; }
