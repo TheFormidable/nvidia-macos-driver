@@ -18,6 +18,11 @@ for rel in 10.06 10.07 10.08 10.09 10.10 10.11 10.12 10.13; do
   case $rel in 10.06) fl=10.6;; 10.07|10.08|10.09|10.10) fl=10.7;; *) fl=10.11;; esac
   [ -f "$IN/nvk-out/$fl/libvulkan_nouveau.dylib" ] && cp "$IN/nvk-out/$fl/libvulkan_nouveau.dylib" "$d/$E/GLEngine.bundle/" || { echo "$rel: no Vulkan driver for floor $fl"; fail=1; }
   k=$IN/kext-out/$short/NMLegacyAccel.kext; [ -d "$k" ] && /bin/cp -R "$k" "$d/System/Library/Extensions/" || { echo "$rel: no kext"; fail=1; }
+  # every program outside the kext is signed (ad hoc), as the package check asks; the Vulkan driver before the engine,
+  # whose signature seals the bundle the driver sits in. Before the manifest, so its hashes are of the signed files.
+  for x in "$d/$E/GLEngine.bundle/libvulkan_nouveau.dylib" "$d/$E/GLEngine.bundle/GLEngine"; do
+    [ -f "$x" ] || continue
+    codesign -f -s - "$x" > /dev/null 2>&1 || { echo "$rel: cannot sign ${x#"$d/"}"; fail=1; }; done
   python3 - "$d" "$rel" "$tier" > "$d/MANIFEST.json" <<'PY'
 import hashlib, json, os, subprocess, sys
 d, rel, tier = sys.argv[1:4]; files = []

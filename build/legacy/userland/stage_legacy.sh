@@ -37,8 +37,11 @@ for R in ${@:-14 13 12 11 10.15 10.14 10.13 10.12 10.11}; do
   cp "$REF/Library/GPUBundles/nvmtl-allow.txt" "$P/Library/GPUBundles/"
   cp "$T/package/vulkan-for-apps.sh" "$V/vulkan/"; cp "$T/licenses/Vulkan-Loader-LICENSE.txt" "$V/vulkan/LICENSE.txt" 2>/dev/null
   cp "$H/com.nullmoth.nvmtl-boost.plist" "$V/boost/" 2>/dev/null
-  for x in "$B/MacOS/NVMTLDriver" "$B/MacOS/libnvmtl_translate.dylib" "$B/MacOS/libnvencvt.dylib" "$B/MacOS/nvmtl-air-dis" "$N/libvulkan_nouveau.dylib" "$N/libnvmtl_osver.dylib" "$V/vulkan/libvulkan.1.dylib" "$V/boost/nvmtl-boost"; do
-    [ -f "$x" ] && codesign -f -s - "$x" > /dev/null 2>&1; done
+  # The plugin's own program last: signing a bundle's main program seals the bundle, and codesign refuses while the
+  # other programs in its Contents/MacOS are still unsigned (that left NVMTLDriver unsigned in every 3.0.19 kit).
+  for x in "$B/MacOS/libnvmtl_translate.dylib" "$B/MacOS/libnvencvt.dylib" "$B/MacOS/nvmtl-air-dis" "$N/libvulkan_nouveau.dylib" "$N/libnvmtl_osver.dylib" "$V/vulkan/libvulkan.1.dylib" "$V/boost/nvmtl-boost" "$B/MacOS/NVMTLDriver"; do
+    [ -f "$x" ] || continue
+    codesign -f -s - "$x" > "$L/sign.err" 2>&1 || st="cannot sign ${x#"$P/"}: $(head -1 "$L/sign.err")"; done
   # 9. imports against this release's real libraries, with a control in each direction
   MO=$(find "$P" -type f \( -name '*.dylib' -o -name NVMTLDriver -o -name nvmtl-air-dis -o -name nvmtl-boost \))
   { echo "positive control (a macOS 15 build on OS X 10.11 must report missing):"; python3 "$A/tools/importcheck.py" "$A/sys/10.11" "$A/floors-fix/NVMTLDriver-15.0" | head -1
