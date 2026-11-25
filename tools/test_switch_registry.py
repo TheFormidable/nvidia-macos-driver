@@ -52,7 +52,8 @@ reg = sr.load(ROOT)
 arm("the four boot arguments of the README install line are tier install, and nothing else is",
     {n for (k, n), r in reg.rows.items() if r["tier"] == "install" and k == "bootarg"} == {"nvfb", "nvaccel", "nvfbheads", "-nvkmsnosmooth"})
 arm("no row added after 2.9 is a development switch, a hardware switch or a writable sysctl",
-    not [k for k, r in reg.rows.items() if sr.is_new(r) and (r["tier"] not in sr.NEW_TIERS or r["default"].startswith("writable"))])
+    not [k for k, r in reg.rows.items() if sr.is_new(r) and (r["tier"] not in sr.NEW_TIERS or r["default"].startswith("writable"))
+         and not (k == ("sysctl", sr.CHANNELS[0]) and r["tier"] == "internal")])
 
 
 def tree(t):

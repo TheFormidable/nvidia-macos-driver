@@ -239,7 +239,14 @@ for p in later:
     hit = sorted(mine & set(re.findall(r"(?m)^(?:diff --git a/\S+ b/|\+\+\+ b/)(\S+)", (NVK / (p + ".patch")).read_text())))
     if hit:
         clash[p] = hit
-arm("no patch after the three touches a file they change (it would not apply with one of them left out)", not clash, clash)
+# nvk-nak-late-split (the original project's 3.1) adds a pass to nak_nir.c, a file nvk-nak-fixes-main changes, away from
+# its hunks: on 2026-11-24 the whole 3.0 chain was applied to mesa-26.3.0-rc3 with each of the three left out in turn and
+# every patch applied without fuzz. A later patch that shares a file is named here only after such a rehearsal; a skip
+# that breaks it still stops the build at that patch ("does not apply"), it never builds something else.
+REHEARSED = {"nvk-nak-late-split": ["src/nouveau/compiler/nak_nir.c"]}
+clash = {p: hit for p, hit in clash.items() if REHEARSED.get(p) != hit}
+arm("no patch after the three touches a file they change (it would not apply with one of them left out), except one "
+    "rehearsed with each of them left out", not clash, clash)
 
 # --- the switches, on the real script -------------------------------------------------------------------------------
 rc, out, chain, wrote = run()

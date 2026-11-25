@@ -65,7 +65,8 @@ Rules `check` enforces (each has a control in --selftest or in tools/test_switch
      ceilings in the registry header; a ceiling never rises (the test compares with the previous commit), except the
      count of rows dated 2.9 when the scanner learns a spelling it missed and the 2.9 release's own tree shows that
      every such row is a switch it read;
-  5. no sysctl is writable unless it was at 2.9 and is a setting, hardware, recovery, diag or dev row; none is
+  5. no sysctl is writable unless it was at 2.9 and is a setting, hardware, recovery, diag or dev row, or is one of the
+     CHANNELS below (a write-only path an installed job writes, tier internal); none is
      CTLFLAG_ANYBODY; a declaration whose access flags are not spelled out is refused, because it cannot be judged;
   6. a boot argument is read with a literal name: PE_parse_boot_argn(variable, ...) is followed to the function that
      passes its own parameter on, and every call of that function must pass a literal;
@@ -92,6 +93,11 @@ NEXT = "3.0"       # the release a row written on top of BASE belongs to, until 
 UNREVIEWED = "unreviewed"
 NEW_TIERS = ("escape", "test", "diag", "setting", "internal", "retired")
 WRITABLE_TIERS = ("setting", "hardware", "recovery", "diag", "dev")
+# Write-only data paths that a job this driver installs writes, not switches: no user sets them and no default path
+# depends on them. Each is tier internal, its row's default says "writable", and it is the only kind of writable
+# sysctl a row after 2.9 may have. debug.nvrmfb_backlight_restore came with the original project's backlight keeper
+# (its #582): package/install.sh's job writes the level it saved when the firmware drops NVRAM writes.
+CHANNELS = ("debug.nvrmfb_backlight_restore",)
 NONDEFAULT = ("escape", "test", "dev", "retired")   # what debug.nvrm_switches_nondefault and `doctor` count
 C_EXT = (".c", ".cpp", ".h", ".hpp", ".m", ".mm", ".inc")
 # The native Vulkan frontend's own sources in tools/nvk-bridge: bridge.mm and the headers it includes. The test
@@ -743,7 +749,8 @@ def rules(reg, found, version, catalog_keys=None):
                 out.append(f"{REG}:{row['line']}: {kind} {name} is marked retired and {site} still reads it: give the row the tier the switch has, or take the read out")
             if kind == "sysctl":
                 says_writable = row["default"].startswith("writable")
-                if e.get("writable") and (is_new(row) or row["tier"] not in WRITABLE_TIERS):
+                channel = name in CHANNELS and row["tier"] == "internal"
+                if e.get("writable") and not channel and (is_new(row) or row["tier"] not in WRITABLE_TIERS):
                     out.append(f"sysctl {name} ({site}) is writable and its row is tier {row['tier']}, since {row['since']}: a default path has no writable "
                                f"switch, and no writable sysctl is added after {BASE}. {HOW_SYSCTL}")
                 elif e.get("writable") and not says_writable:
@@ -777,7 +784,7 @@ def rules(reg, found, version, catalog_keys=None):
                     "recovery": "a way out without a review date", "install": "a new required boot argument"}[tier]
             out.append(f"{at} is new (since {row['since']}) and tier {tier}, {what}: refused. {HOW_NEW} "
                        f"A path that depends on the machine checks for it at run time and falls back to the {BASE} behaviour when the check fails")
-        if new and kind == "sysctl" and tier not in ("diag", "retired"):
+        if new and kind == "sysctl" and tier not in ("diag", "retired") and not (name in CHANNELS and tier == "internal"):
             out.append(f"{at}: a sysctl added after {BASE} is a read-only counter (tier diag). {HOW_SYSCTL}")
         if new and tier == "internal":
             if kind == "env" and e is not None and not e["set_only"] and not STD_ENV.match(name):

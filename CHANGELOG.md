@@ -1,5 +1,84 @@
 # Changelog
 
+## 3.0.18
+
+**Not released.** This section describes the branch being prepared as 3.0.18, on top of 3.0.17 (below, not released
+either). It brings in everything the original project ([NullMoth](https://github.com/nullmoth/nvidia-macos-driver))
+has published up to its 3.1 (commit 900470d4, 2026-11-23), as a merge: until now its changes were picked one by one
+(3.0, 3.0.4, 3.0.5) and its support for older macOS releases was left out. **Nothing of 3.0.18 has been built on a Mac
+or run on a card.** Where the original and this fork had made the same fix, this fork's version is kept.
+
+### From the original's 3.1
+
+- **The lock screen and login window crashing in a loop** (SecurityAgent or loginwindow, "Floating point exception" in
+  VFX, its #624 #569). The shader translator follows a value a shader keeps in a local structure and reads back in a
+  helper (VFX keeps its acceleration structure that way), inlines helpers that return a texture or a pointer, and keeps
+  ray-tracing kernels' structure through local objects. The original reports every VFX compute kernel building (312 of
+  312). `NVMTL_INLINE_RETRY_DUMP=<file>` writes the module the inline retry produced (a diagnostic).
+- **"Internal compiler error in NAK" on some large kernels**: a memory read wider than its alignment reached the last
+  compiler stage. `nvk/nvk-nak-late-split.patch` splits it into reads the hardware accepts, and ray queries read a
+  geometry entry as two 4-byte loads (`nvk/hwrt/ttu-rq-split.patch`; in the original this is an edit of
+  `hwrt/ttu-rq.patch`, here a patch of its own so that 2.9's chain still rebuilds as shipped). Both are at the end of
+  the 3.0 chain.
+- **The accelerator and the display driver refusing to start, without a word, on the second start after a failed
+  one** (its #633): every driver gets the same answer from the boot guard for the whole start.
+- **Installing with no internet**: the installer finds NVIDIA's driver package (the GPU firmware's source) in
+  Downloads, on the Desktop, in /Users/Shared or on a USB stick, continues a download that stopped, and prints the
+  download's progress (its #644 #639 #598).
+- **The Ryzen laptop power profile** (`tools/ryzenadj-macos`) is linked with the LC_UUID macOS 26 requires (its #590
+  #631).
+
+### From the original's 3.0, not taken before
+
+- **Older macOS releases (experimental, as in the original).** The sources of its driver kits for macOS 14 Sonoma down
+  to Mac OS X 10.7 Lion: `build/legacy/` (the kit builds, which need each release's own SDK and Kernel Debug Kit from
+  Apple), `package/legacy/` (`install-legacy.sh`, `uninstall-legacy.sh`), `gl/` (OpenGL for those releases),
+  `kexts/compat/nm_era.h`, `kexts/NVRM/accel/nvres_fields.h`, `plugin/nvmtl_avail.h`, `vendor/nvenc/src/nv_floor.h`,
+  `nvk/nvk-legacy-floor.patch` and `NVK_FLOOR` in `build/build_nvk.sh`. A build for macOS 15 and 26 defines no
+  `NM_ERA` and compiles what it compiled before. None of the kits has been built here or run on a card; this fork's own
+  code since 2.9 has not been checked against the older layouts.
+- **The panel brightness kept on disk** when the firmware drops NVRAM writes (OpenCore with `DisableVariableWrite` and
+  no emulated NVRAM, its #582). The installer adds a job (`/Library/NullMoth/backlight.sh`,
+  `com.nullmoth.backlight`) that saves the level and, at the next start, restores it through
+  `debug.nvrmfb_backlight_restore` unless the user already moved the brightness. On a machine without an internal
+  panel the name answers nothing and the job ends after two minutes.
+- **`gfxrst=4` with WhateverGreen**: when WhateverGreen is loaded and the boot-args set no `gfxrst`, the installer adds
+  `gfxrst=4` to the NVRAM boot-args (WhateverGreen's boot screen copy can panic the Mac when the NVIDIA display first
+  opens) and records it, and `uninstall.sh` takes out only that. An OpenCore config that writes its own boot-args at
+  every start replaces the NVRAM value; the installer still says to add it there.
+- `DEVELOPING.md` and the original's test workflow (`.github/workflows/tests.yml`). Its `CODEOWNERS` is not taken.
+
+### What changed here to take it
+
+- The page-off path and this fork's own reads of the accelerator's resource object use the original's field names
+  (`kNvResType`, `kNvResValid`, `kNvResWidth`, ...) and `NV_FAM_PAGEOFF`; on macOS 15 and 26 they are the same offsets
+  and the same call.
+- `debug.nvrmfb_backlight_restore` is registered with the display driver's other sysctls, after the reference that
+  keeps the kext loaded (the original registered it when the panel's handler was published), and answers `ENODEV`
+  until a panel's handler exists.
+- `tools/switch_registry.py`: the one writable sysctl a row after 2.9 may have is a write-only channel that a job this
+  driver installs writes, tier internal (`CHANNELS`: only `debug.nvrmfb_backlight_restore`); every other rule is
+  unchanged. New rows: that sysctl, `NVMTL_INLINE_RETRY_DUMP` (diag) and `NVK_FLOOR` (build host setting).
+- A duplicate of the utilization sampler's hang limit (`kUtilHangNs`, already in `nvrm_utilization_pace.h`) that the
+  merge brought into `NVRM.cpp` was removed.
+
+### The ways back
+
+None new: nothing of 3.0.18 adds a path that needs one. The backlight job is removed with
+`launchctl bootout system/com.nullmoth.backlight` and its two files; `uninstall.sh` removes it and the `gfxrst=4` it
+added.
+
+### What ran where
+
+On Linux only. `build/kext_check.sh` compiled every kext source (NVRM, NVAccel for 15 and 26, NVRMFB, NVRMAGDC and the
+panel drivers) with no error or warning, and every import resolves on xnu-11215.1.10 and xnu-12377.1.9. The 3.0 NVK
+chain applies to Mesa 26.3.0-rc3 without fuzz, also with each of `nvk-mesa-26.3.0`, `nvk-nak-fixes-main` and
+`nvk-nak-sched-main` left out, and gives the same tree as the original's edit of `hwrt/ttu-rq.patch`. The host suite
+(`tools/run_all_tests.py`): the tests the merge broke were fixed (field names in the lifted page-off code, the
+encoder's main-port name, the chain's order); `test_backlight_keeper.py` (from the original) fails 3 of its arms on
+Linux on the original's own tree as well. The translator was built and its library tests run. The plugin, the
+translator's macOS build and NVK were not built for macOS, and nothing ran on a card.
+
 ## 3.0.17
 
 **Not released.** This section describes the branch being prepared as 3.0.17, on top of 3.0.16 (below, not released

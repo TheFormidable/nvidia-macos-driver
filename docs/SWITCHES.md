@@ -21,12 +21,12 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 47 | 1 | 57 | 405 | 12 |  | 528 |
+| env |  | 6 |  |  | 47 | 1 | 58 | 405 | 12 |  | 529 |
 | bootarg | 4 | 13 | 30 | 21 | 16 |  | 8 | 6 | 2 |  | 100 |
-| sysctl |  | 5 | 4 | 12 |  |  | 380 |  |  |  | 401 |
+| sysctl |  | 5 | 4 | 12 |  |  | 380 |  | 1 |  | 402 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 15 |  | 15 |
-| build |  |  |  |  | 1 |  |  | 1 | 5 |  | 7 |
+| build |  |  |  |  | 1 |  |  | 1 | 6 |  | 8 |
 | pref |  |  |  |  |  |  |  |  |  |  | 0 |
 
 ## The ways back
@@ -380,6 +380,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_IMAGE_LAYOUT_GENERAL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_IMAGE_POOL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_app_profile.h, plugin/nvmtl_vk.c |
 | `NVMTL_INDIRECT_WITNESS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_INLINE_RETRY_DUMP` | diag | unset | 3.0.18 | 3.2 | A file path: the translator writes there the module its inline retry produced (the original project's 3.1 VFX fix), for reading a shader that still fails. | translator/translator/src/native/mod.rs |
 | `NVMTL_KEEP_POOLS` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_KEEP_WITNESS_CONTROL` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_LIBMEMO_NOCTIME_TEST` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m |
@@ -1101,6 +1102,7 @@ Each of these does nothing unless it is set.
 | `debug.nvrmfb_agdc_maxfb` | diag | read-only | 2.9 | - | maxFramebuffers in our last 0x980 reply (0 = never asked) | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_refused` | diag | read-only | 2.9 | - | AGDC vendor calls answered Unsupported | kexts/NVRMAGDC/nvrm-agdc.cpp |
 | `debug.nvrmfb_agdc_rescans` | diag | read-only | 2.9 | - | slot-table rescans done while answering 0x980 (a framebuffer that started after boot) | kexts/NVRMAGDC/nvrm-agdc.cpp |
+| `debug.nvrmfb_backlight_restore` | internal | writable by root (write-only; reading gives -1) | 3.0.18 | - | The backlight keeper's channel, not a switch: when the firmware drops NVRAM writes (OpenCore with DisableVariableWrite and no emulated NVRAM), the job package/install.sh installs writes the panel level it saved at the last shutdown, and the framebuffer restores it unless the user already moved the brightness this boot (from the original project, its #582). | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_bpc` | setting | writable by root | 2.9 | - | output bits per channel: 0 automatic, 6, 8, 10, 12 | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_format` | setting | writable by root | 2.9 | - | output colour format: 0 RGB, 1 YCbCr 4:2:2, 2 YCbCr 4:4:4, 3 automatic | kexts/NVRMFB/fb/nvrm-fb.cpp |
 | `debug.nvrmfb_color_range` | setting | writable by root | 2.9 | - | output range: 0 automatic, 1 full, 2 limited | kexts/NVRMFB/fb/nvrm-fb.cpp |
@@ -1212,6 +1214,7 @@ Each of these does nothing unless it is set.
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
 | `NVK_EXTRA_PATCHES` | dev | unset | 2.9 | - | extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS \<names> (NVK_EXTRA_PATCHES)" | build/build_nvk.sh |
+| `NVK_FLOOR` | internal | unset (15.0: the release) | 3.0.18 | - | a build host setting: the macOS deployment floor NVK is built for; the original project's older-macOS test builds set it, nothing of it changes the shipped driver | build/build_nvk.sh |
 | `NVK_JOBS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVK_PATH` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh, build/build_release_inputs.sh |
 | `NVK_REF_EXPORTS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |
