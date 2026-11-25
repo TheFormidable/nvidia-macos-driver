@@ -59,8 +59,28 @@ older release has been installed on;** the kits are the original's older-release
 ### What ran where
 
 Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh, the package and build.sh's
-settings pass as before. The kits are being built on the owner's Mac (macOS 26.7.3) in a separate work folder; the
-package with the kits has not been built yet.
+settings pass as before.
+
+On the owner's Mac (macOS 26.7.3, 2026-11-25), from 2e4b9cc4, in a separate work folder, with Apple's SDK and Kernel
+Debug Kit of each release: the 13 kits were built and packed, and so was the full package with them inside
+(`nullmoth-nvidia-local-2e4b9cc4.tar.gz`, 415,814,046 bytes; `check_package.sh` passes over its 591 files). Each kit's
+kexts went through that release's kernel extension linker (kxld), which exists up to 10.15; from 11 to 14 they are only
+linked at build time.
+
+| macOS | kexts | link test | Metal | OpenGL |
+|---|---|---|---|---|
+| 10.7 | NVRM, NVRMFB | linked | not on that release | yes |
+| 10.8 | NVRM, NVRMFB (NVRMAGDC held back) | linked | not on that release | yes |
+| 10.9, 10.10 | NVRM, NVRMFB, NVRMAGDC | linked | not on that release | yes |
+| 10.11 | NVRM, NVRMFB, NVRMAGDC | linked | userland only, no accelerator | yes |
+| 10.12, 10.13 | all four | linked | yes | yes |
+| 10.14, 10.15 | all four | linked | yes | no (by design) |
+| 11 to 14 | all four | build time only | yes | no (by design) |
+
+`pick_kit.sh` was run against the built package without installing: it picks the 10.7, 10.13, 10.14, 12 and 14 kits
+for 10.7.5, 10.13.6, 10.14.6, 12.7.6 and 14.8.3, and the usual driver for 26.7.3. The accelerator headers of 10.10 to
+10.14 made on that run are kept in `build/legacy/era-headers` (see its README). Nothing was installed, and no older
+release has run on a card.
 
 ## 3.0.18
 
