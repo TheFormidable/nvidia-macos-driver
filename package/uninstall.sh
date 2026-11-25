@@ -61,7 +61,7 @@ lists_driver() {
 }
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 # --- one package for every release (package/pick_kit.sh) ---
-# On macOS 10.14 to 14 the driver was put in by that release's kit: its own remover does the removal. install-legacy.sh
+# On macOS 10.7 to 14 the driver was put in by that release's kit: its own remover does the removal. install-legacy.sh
 # keeps a copy of it in /Library/NullMoth/legacy/<release>/ (root's folder; a package folder's copy is not run as root).
 OSV=$(sw_vers -productVersion)
 case "${OSV%%.*}" in 15|26) ;; *)
