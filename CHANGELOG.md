@@ -1,5 +1,36 @@
 # Changelog
 
+## 3.0.19
+
+**Not released.** This section describes the branch being prepared as 3.0.19, on top of 3.0.18 (below, not released
+either). **One package for every release:** the package carries the kits for macOS 10.7 to 14, built by this fork from
+its own tree with Apple's SDK and Kernel Debug Kit of each release, and the installer picks the kit of the macOS it runs
+on. Nothing to choose: the same `sudo ./install.sh` on 10.7 to 14, 15 and 26. **No kit has been run on a card, and no
+older release has been installed on;** the kits are the original's older-release lane (3.0.18) built here.
+
+### What changed
+
+- `package/pick_kit.sh` (new) names the part of the package for a macOS version: `modern` on 15 and 26, `legacy
+  <release>` on 10.7 to 14, `none <reason>` otherwise (10.6 and older, an unknown release, or a package without the
+  kit). Plain bash 3.2, as on 10.7.
+- `package/install.sh`: right after the root check, on any release but 15 and 26, it runs `pick_kit.sh`, copies that
+  kit to a root-owned folder in /var/tmp, checks every file of the copy against the package's `SHA256SUMS` (one file at
+  a time with plain `shasum`, since 10.7's has no `--strict`; a malformed line or an unlisted file stops it), and runs
+  the kit's own `install-legacy.sh` from the copy (`CHECK=1` becomes its `--check`). It does not change boot
+  arguments; the kit's installer says what to add. On 15 and 26 nothing changed.
+- `package/uninstall.sh`: on 10.7 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
+- `build/package_local.sh` and `./build.sh package`: `NM_LEGACY_KITS=<folder of build/legacy/package_kits.sh>` puts the
+  13 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
+  13 or the package is not made. Without it the package has no kits and `install.sh` says so on an older release.
+- `tools/test_pick_kit.py` (new): every release and the versions around them; the installer's dispatch lifted out and
+  run with stand-ins, with a changed kit file, an unlisted file, a malformed line and a list without the kit as controls.
+
+### What ran where
+
+Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh, the package and build.sh's
+settings pass as before. The kits are being built on the owner's Mac (macOS 26.7.3) in a separate work folder; the
+package with the kits has not been built yet.
+
 ## 3.0.18
 
 **Not released.** This section describes the branch being prepared as 3.0.18, on top of 3.0.17 (below, not released
