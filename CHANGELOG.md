@@ -40,7 +40,8 @@ older release has been installed on;** the kits are the original's older-release
     alias (`kexts/NVRM/accel/nvaccel_layout.h`). Without it, 10.14's kext linker refused NVAccel.
   - Before 10.14, `NVResource::calculateIOSurfaceDeviceCacheVRAMBytes` takes `unsigned int *` for its second result,
     as the regenerated 10.12 and 10.13 headers declare (`kexts/NVRM/accel/nvaccel_stubs.h`). It wrote 4 bytes there
-    already; now the override matches.
+    already; now the override matches. `build/legacy/gen_era_headers.py` gives it `uint64_t`: with no matching newer
+    declaration it fell back to `void`, and a value a caller ignores is harmless where a missing one is not.
   - 10.11 is not covered: its family lacks the GPU page-table methods NVAccel overrides. That kit keeps OpenGL.
 - `build/legacy/assemble_kits.sh`: a kext the release's own kext linker refused goes to `held-back/`, not `kexts/`.
   `install-legacy.sh` test-links every kext in `kexts/` and stops the whole install on one refusal.
