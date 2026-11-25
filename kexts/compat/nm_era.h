@@ -72,6 +72,17 @@ static inline void *nm_era_malloc_zero(vm_size_t size)
 #define gIODisplayLinearBrightnessKey gIODisplayBrightnessKey
 #endif
 
+// Kernel thread names arrived in 10.15. Before it a thread has no name: the call does nothing.
+#if NM_ERA < 1015
+#define thread_set_thread_name(th, name) ((void)(th), (void)(name))
+#endif
+
+// The host-contiguous allocation option arrived in 10.8. It is asked for only while a GPU's DMA is remapped, which the
+// driver never does before 10.11 (nvrm_dma.cpp, dmaVerify), so on 10.7 it is no option at all.
+#if NM_ERA < 1008
+#define kIOMemoryHostPhysicallyContiguous 0
+#endif
+
 // IOFramebuffer::setGammaTable with the sync flag (five arguments) exists from 10.13.
 #if NM_ERA >= 1013
 #define NM_ERA_HAS_GAMMA_SYNC 1
