@@ -219,8 +219,11 @@ extern "C" int sysctlbyname(const char *, void *, size_t *, void *, size_t);
  * Name only vtables the kext imports already (the base of one of its own classes): a new name is a new import, and a
  * mistyped one stops the kext from loading. */
 #define NVL_VTABLE(Cls, sym) extern const void *const nvLayoutVt_##Cls[] __asm(sym)
-/* An entry of the vtable table, after NVL_TAIL(Cls) and NVL_VTABLE(Cls, ...) */
-#define NVL_VT(Cls)          { #Cls, nvLayoutVt_##Cls + 2, NVL_BUILT(Cls) }
+/* An entry of the vtable table, after NVL_TAIL(Cls) and NVL_VTABLE(Cls, ...). NVL_BUILT is written out here, not
+ * called: an argument handed on to another macro is expanded first, and an era build that defines a class name as
+ * another (gen_era_headers.py: IOAccelLegacyDisplayPipe -> IOAccelDisplayPipe2) would then name a struct NVL_TAIL never
+ * declared. */
+#define NVL_VT(Cls)          { #Cls, nvLayoutVt_##Cls + 2, nvLayoutTailSlot(&NvLayoutTail_##Cls::nvLayoutTailFn) }
 
 template <class T> static inline int nvLayoutTailSlot(void (T::*pmf)())
 {

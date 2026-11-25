@@ -31,6 +31,11 @@ older release has been installed on;** the kits are the original's older-release
     (`kexts/NVRM/nvrm_dma.cpp`).
   - The host-contiguous allocation option (10.8) is no option on 10.7. It is used only while DMA is remapped, which
     never happens there.
+- NVAccel builds for 10.11 to 10.14 with the headers regenerated from each release's own accelerator family and Apple's
+  vendor drivers (from the full installers). `NVL_VT` in `kexts/NVRM/nvrm_layout.h` (and its copy in NVRMAGDC) writes
+  out `NVL_BUILT` instead of calling it: an argument handed on to another macro is expanded first, and the
+  regenerated headers define `IOAccelLegacyDisplayPipe` as `IOAccelDisplayPipe2`, so the call named a struct that
+  `NVL_TAIL` never declared. Builds without that alias expand the same as before.
 
 ### What ran where
 
