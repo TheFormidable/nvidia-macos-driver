@@ -202,7 +202,13 @@ NVL_VTABLE(IOGraphicsAccelerator2, "__ZTV22IOGraphicsAccelerator2");
 NVL_VTABLE(IOAccelResource2, "__ZTV16IOAccelResource2");
 NVL_VTABLE(IOAccelVidMemory, "__ZTV16IOAccelVidMemory");
 NVL_VTABLE(IOAccelMemoryMap, "__ZTV16IOAccelMemoryMap");
+#ifdef IOAccelLegacyDisplayPipe
+// An era build on regenerated headers (gen_era_headers.py) names the class by the release's own name: the kernel
+// exports that vtable, not the newer one. The symbol is written out, so it follows the alias by hand.
+NVL_VTABLE(IOAccelLegacyDisplayPipe, "__ZTV19IOAccelDisplayPipe2");
+#else
 NVL_VTABLE(IOAccelLegacyDisplayPipe, "__ZTV24IOAccelLegacyDisplayPipe");
+#endif
 #ifdef NM_TAHOE
 NVL_TAIL(IOAccelSysMemory);
 NVL_TAIL(IOAccel2DContext2);

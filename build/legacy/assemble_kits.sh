@@ -30,6 +30,16 @@ echo "$LIST" | while read rel kd md gd; do
   # 10.8 has no graphics-control class at all: the kext cannot link there. It is kept out of kexts/ so nobody loads
   # it by copying the folder. (On 10.9 and 10.10 it links since the reserved slots are no longer named there.)
   case $rel in 10.8) [ -d "$D/kexts/NVRMAGDC.kext" ] && { mkdir -p "$D/held-back"; mv "$D/kexts/NVRMAGDC.kext" "$D/held-back/"; have_k=${have_k/ NVRMAGDC/}; } ;; esac
+  # A kext this release's own kext linker refused stays out of kexts/ as well: install-legacy.sh test-links every kext
+  # there and stops the whole install on one refusal. It goes to held-back/; kexts/link-test.txt keeps the linker's words.
+  # (NVRM refused leaves no kexts/NVRM.kext, and package_kits.sh then stops: a kit without it is no kit.)
+  held=""
+  if [ -f "$B/kxld/results/$rel.txt" ]; then
+    for x in NVRM NVRMFB NVRMAGDC NVAccel; do
+      grep -qE "^  com\.nullmoth\.$x: REFUSED" "$B/kxld/results/$rel.txt" && [ -d "$D/kexts/$x.kext" ] && {
+        mkdir -p "$D/held-back"; mv "$D/kexts/$x.kext" "$D/held-back/"; have_k=${have_k/ $x/}; held="$held $x"; }
+    done
+  fi
   for x in NVRM NVRMFB NVRMAGDC NVAccel; do [ -f "$B/out/$kd/$x.missing.txt" ] && cp "$B/out/$kd/$x.missing.txt" "$D/kexts/$x.not-exported.txt"; done
   have_m=no; [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/payload" ] && { mkdir -p "$D/userland"; cp -R "$B/metal/stage/$md/payload" "$B/metal/stage/$md/MANIFEST.txt" "$B/metal/stage/$md/IMPORTS.txt" "$D/userland/"; have_m=yes; }
   [ "$md" != "-" ] && [ -d "$B/metal/stage/$md/options" ] && cp -R "$B/metal/stage/$md/options" "$D/options"
@@ -47,6 +57,7 @@ echo "$LIST" | while read rel kd md gd; do
     echo "kexts/     :$have_k"
     case " $have_k " in *" NVAccel "*) echo "             NVAccel is the Metal-side accelerator (subclasses Apple's accelerator family of this release).";;
       *) echo "             No NVAccel: this release has no Metal; acceleration is the OpenGL accelerator under opengl/.";; esac
+    [ -n "$held" ] && echo "held-back/ :$held (this release's kext linker refused them; kexts/link-test.txt says why)"
     [ -n "$slots" ] && echo "             accelerator table check: $slots"
     # link test with this release's own kext linker, built from the release's published kernel source (10.6 to 10.15)
     if [ -f "$B/kxld/results/$rel.txt" ]; then
