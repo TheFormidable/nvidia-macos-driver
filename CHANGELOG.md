@@ -52,7 +52,9 @@ older release has been installed on;** the kits are the original's older-release
     first, the plugin last, and a failure stops the stage.
   - `gl/package/stage.sh` signed nothing. It now signs the Vulkan driver, then the engine, before it writes
     `MANIFEST.json`.
-  - `build/legacy/package_kits.sh` stops on an unsigned program in a kit and names it.
+  - `build/legacy/package_kits.sh` signs again what its own changes unsealed (the bundle version it writes into
+    `NVMTLDriver.bundle`'s Info.plist, the rewrites of `scrub_kit.py`), then stops on any program still unsigned and
+    names it.
 
 ### What ran where
 
