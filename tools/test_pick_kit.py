@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One package for every release: package/pick_kit.sh names the part of the package that installs on a macOS version,
-and install.sh's legacy_install runs the matching kit for 10.7 to 14 from a private copy checked against SHA256SUMS.
+and install.sh's legacy_install runs the matching kit for 10.14 to 14 from a private copy checked against SHA256SUMS.
 
 pick_kit.sh is run with every release the driver knows and with the versions around them. legacy_install is lifted out
 of install.sh and run in a scratch folder: mktemp's /var/tmp is moved into that folder, ditto and chown are stand-ins,
@@ -16,7 +16,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PICK = ROOT / "package" / "pick_kit.sh"
 INSTALL = ROOT / "package" / "install.sh"
-RELEASES = ["10.7", "10.8", "10.9", "10.10", "10.11", "10.12", "10.13", "10.14", "10.15", "11", "12", "13", "14"]
+RELEASES = ["10.14", "10.15", "11", "12", "13", "14"]
 fails = 0
 
 
@@ -59,19 +59,19 @@ with tempfile.TemporaryDirectory() as td:
     for v, want in [("15.7.2", "modern"), ("26.7.3", "modern"), ("26", "modern"), ("15.0", "modern")]:
         rc, out = pick(v, full)
         arm(f"pick {v} -> {want}", rc == 0 and out == want, out)
-    for v, rel in [("10.7.5", "10.7"), ("10.8", "10.8"), ("10.9.5", "10.9"), ("10.10.5", "10.10"), ("10.11.6", "10.11"),
-                   ("10.12.6", "10.12"), ("10.13.6", "10.13"), ("10.14.6", "10.14"), ("10.15.7", "10.15"),
+    for v, rel in [("10.14.6", "10.14"), ("10.14", "10.14"), ("10.15.7", "10.15"),
                    ("11.7.10", "11"), ("12.7.6", "12"), ("13.7.8", "13"), ("14.8.3", "14")]:
         rc, out = pick(v, full)
         arm(f"pick {v} -> legacy {rel}", rc == 0 and out == f"legacy {rel}", out)
         rc, out = pick(v, empty)
         arm(f"pick {v} without kits -> none", rc == 0 and out.startswith("none ") and "no kit for macOS " + rel in out, out)
-    for v, word in [("10.6.8", "older"), ("10.5", "older"), ("9.2", "older"), ("16.0", "newer"), ("27.1", "newer"),
+    for v, word in [("10.13.6", "older"), ("10.12.6", "older"), ("10.7.5", "older"), ("10.6.8", "older"), ("10.5", "older"),
+                    ("9.2", "older"), ("16.0", "newer"), ("27.1", "newer"),
                     ("", "cannot read"), ("10", "cannot read"), ("x.y", "cannot read"), ("10.13;rm", "cannot read")]:
         rc, out = pick(v, full)
         arm(f"pick '{v}' -> none ({word})", rc == 0 and out.startswith("none ") and word in out, out)
-    wrong = T / "wrong"; make_kit(wrong, "10.13"); (wrong / "legacy" / "10.13" / "RELEASE").write_text("10.12\n")
-    rc, out = pick("10.13.6", wrong)
+    wrong = T / "wrong"; make_kit(wrong, "10.14"); (wrong / "legacy" / "10.14" / "RELEASE").write_text("10.13\n")
+    rc, out = pick("10.14.6", wrong)
     arm("pick refuses a kit whose RELEASE names another release", out.startswith("none ") and "not the one" in out, out)
 
     # 2. install.sh's order
@@ -111,17 +111,18 @@ with tempfile.TemporaryDirectory() as td:
         make_kit(pkg, r)
     (pkg / "pick_kit.sh").write_text(PICK.read_text())
     sums(pkg)
-    rc, out, log = run(pkg, "10.13.6")
-    arm("10.13.6: the 10.13 kit runs, from the private copy, with no arguments",
-        rc == 7 and log.startswith("KIT 10.13 ARGS:: DIR:" + str(vt) + "/nullmoth-legacy."), out + log)
+    rc, out, log = run(pkg, "10.14.6")
+    arm("10.14.6: the 10.14 kit runs, from the private copy, with no arguments",
+        rc == 7 and log.startswith("KIT 10.14 ARGS:: DIR:" + str(vt) + "/nullmoth-legacy."), out + log)
     rc, out, log = run(pkg, "14.8.3", check="1")
     arm("14.8.3 with CHECK=1: the 14 kit runs with --check", rc == 7 and log.startswith("KIT 14 ARGS:--check: DIR:" + str(vt)), out + log)
-    rc, out, log = run(pkg, "10.6.8")
-    arm("10.6.8: stopped, no kit runs", rc == 1 and "DIE" in out and "older" in out and log == "", out + log)
+    for v in ("10.13.6", "10.7.5"):
+        rc, out, log = run(pkg, v)
+        arm(f"{v}: stopped as unsupported, no kit runs", rc == 1 and "DIE" in out and "older" in out and "10.14" in out and log == "", out + log)
 
     # controls
-    (pkg / "legacy" / "10.13" / "kexts" / "NVRM.kext" / "Contents" / "MacOS" / "NVRM").write_text("changed")
-    rc, out, log = run(pkg, "10.13.6")
+    (pkg / "legacy" / "10.14" / "kexts" / "NVRM.kext" / "Contents" / "MacOS" / "NVRM").write_text("changed")
+    rc, out, log = run(pkg, "10.14.6")
     arm("control: a kit file changed after packaging stops it before the kit runs", rc == 1 and "does not match SHA256SUMS" in out
         and log == "", out + log)
     sums(pkg)

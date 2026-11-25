@@ -167,17 +167,17 @@ drop_lines "$ZB"; rm -rf "${R:?}/$ZB"; mkdir -p "$(dirname "$R/$ZB")"; cp -pR "$
 codesign --force --sign - "$R/$ZB" >/dev/null 2>&1 || stop "could not sign $ZB"
 refresh_tree "$ZB"; echo "replaced $ZB (signed ad hoc)"
 # --- end of native OpenGL ---
-# --- one package for every release: the kits for macOS 10.7 to 14 (build/legacy, package/pick_kit.sh) ---
-# NM_LEGACY_KITS = the folder build/legacy/package_kits.sh wrote (legacy_kits.json and the 13 archives). Each archive is
+# --- one package for every release: the kits for macOS 10.14 to 14 (build/legacy, package/pick_kit.sh) ---
+# NM_LEGACY_KITS = the folder build/legacy/package_kits.sh wrote (legacy_kits.json and the 6 archives). Each archive is
 # checked against the json's SHA-256 and against its own SHA256SUMS, and unpacked to legacy/<release>/; install.sh runs
-# the matching one on 10.7 to 14. All 13 or none: a package that silently lacks one release's kit is not made.
+# the matching one on 10.14 to 14. All 6 or none: a package that silently lacks one release's kit is not made.
 put_file "$P/pick_kit.sh" pick_kit.sh 755
 if [ -n "${NM_LEGACY_KITS:-}" ]; then
   LK=$(cd "$NM_LEGACY_KITS" && pwd) || stop "NM_LEGACY_KITS=$NM_LEGACY_KITS is not a folder"
   [ -f "$LK/legacy_kits.json" ] || stop "$LK has no legacy_kits.json (build/legacy/package_kits.sh writes it)"
   drop_lines legacy; rm -rf "${R:?}/legacy"; mkdir -p "$R/legacy"
   LT=$PKG/legacy-unpack; rm -rf "$LT"
-  for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
+  for rel in 10.14 10.15 11 12 13 14; do
     pin=$(python3 -c 'import json,sys; k=json.load(open(sys.argv[1]))["kits"].get(sys.argv[2]) or {}; print(k.get("name",""), k.get("sha256",""))' "$LK/legacy_kits.json" "$rel") \
       || stop "cannot read $LK/legacy_kits.json"
     name=${pin%% *}; want=${pin##* }
