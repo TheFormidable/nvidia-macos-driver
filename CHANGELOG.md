@@ -24,6 +24,13 @@ older release has been installed on;** the kits are the original's older-release
   13 or the package is not made. Without it the package has no kits and `install.sh` says so on an older release.
 - `tools/test_pick_kit.py` (new): every release and the versions around them; the installer's dispatch lifted out and
   run with stand-ins, with a changed kit file, an unlisted file, a malformed line and a list without the kit as controls.
+- NVRM builds for 10.7 to 14 again. Three things this fork added since 2.9 need a newer kernel than the oldest kits:
+  - Thread names (10.15) do nothing before 10.15 (`kexts/compat/nm_era.h`).
+  - The DMA read-back (`IOMapper::mapToPhysicalAddress`, 10.11) counts nothing as verified before 10.11. A GPU behind
+    a DMA mapper is then refused at the self-test, as with `nvrmdma=0`; without a mapper nothing changes
+    (`kexts/NVRM/nvrm_dma.cpp`).
+  - The host-contiguous allocation option (10.8) is no option on 10.7. It is used only while DMA is remapped, which
+    never happens there.
 
 ### What ran where
 
