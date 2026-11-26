@@ -55,6 +55,10 @@ older release has been installed on;** the kits are the original's older-release
   - `build/legacy/package_kits.sh` signs again what its own changes unsealed (the bundle version it writes into
     `NVMTLDriver.bundle`'s Info.plist, the rewrites of `scrub_kit.py`), then stops on any program still unsigned and
     names it.
+- The 10.13 and 10.14 kits no longer carry a copy of Apple's SkyLight `Configuration.plist` (the file as shipped and
+  one with the key added) in `options/compositor-route-A-configuration-key/`: `build/legacy/userland/stage_options.sh`
+  now writes only the README, whose steps add the key to the Mac's own copy and save it first. `package_kits.sh` stops
+  if such a file is in a kit, because the kits are published.
 
 ### What ran where
 
