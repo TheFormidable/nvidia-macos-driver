@@ -190,7 +190,10 @@ from NVIDIA's own sites and checked against pinned hashes: the GPU firmware, and
 `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step). (Paste the lines without anything after them: the
 Terminal on macOS does not treat `#` as a comment, so a pasted comment becomes part of the command.)
 
-macOS asks you to **allow the extensions** in System Settings → Privacy & Security the first time. Allow, then reboot again.
+The installer records the kernel extensions' approval for you, so a first install needs just the one restart above —
+no manual **Allow** in System Settings → Privacy & Security (3.0.19). macOS loads a third-party kext only once its
+bundle is allowed, and the installer now writes that same approval for its own kexts. If your SIP leaves that approval
+database read-only, macOS asks the first time instead: allow the extensions there, then reboot again.
 
 ## Upstream 1401 Mac app
 

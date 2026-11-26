@@ -18,6 +18,16 @@ older release has been installed on;** the kits are the original's older-release
   a time with plain `shasum`, since 10.7's has no `--strict`; a malformed line or an unlisted file stops it), and runs
   the kit's own `install-legacy.sh` from the copy (`CHECK=1` becomes its `--check`). It does not change boot
   arguments; the kit's installer says what to add. On 15 and 26 nothing changed.
+- **A first install no longer needs the user to click Allow in System Settings > Privacy & Security.** macOS loads a
+  third-party kext only once its bundle is allowed (`allowed=1` in `kext_policy`). Until now `package/install.sh` only
+  refreshed that record for kexts already allowed (an update needed one restart), and a fresh install was blocked until
+  the user allowed each kext by hand and restarted a second time. It now writes the same `allowed=1` row the Allow
+  button writes, scoped to the driver's own kexts (the four in `KEXTS`, plus the primary-GPU selector when built) with
+  the id already constrained to `[A-Za-z0-9.]`, so one restart is enough. The approval database is SIP-protected; the
+  driver's SIP setting (0x0A43) lets root write it, and where it is read-only the install still works and macOS asks as
+  before (the closing message says which happened). `tools/test_kext_preapprove.py` (new) runs the same SQL against a
+  stand-in `KextPolicy` database and checks the driver's kexts end up allowed once each while an already-allowed kext
+  and an unrelated third-party row are left untouched. Not yet exercised on a Mac.
 - `package/uninstall.sh`: on 10.7 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
 - `build/package_local.sh` and `./build.sh package`: `NM_LEGACY_KITS=<folder of build/legacy/package_kits.sh>` puts the
   13 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
