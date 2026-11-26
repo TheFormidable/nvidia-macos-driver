@@ -124,7 +124,7 @@ echo "== building the codeless anchor kext with AMFIAnchor's own tool"
 python3 "$MKINJ" --certificate "$KEYDIR/root.cert.pem" \
   --bundle "$ANCHOR_KEXT" --bundle-id "$BUNDLE_ID" --anchor-id "$ANCHOR_ID" >/dev/null
 
-LEAF_FP=$(openssl x509 -in leaf.cert.pem -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
+LEAF_FP=$(openssl x509 -in leaf.cert.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
 
 cat <<EOF
 
@@ -134,7 +134,7 @@ Done. Private keys and the chain live in:
 Public material to use:
   root certificate (public): $KEYDIR/root.cert.pem
   anchor kext for OpenCore:  $ANCHOR_KEXT
-  leaf fingerprint (sha256): $LEAF_FP
+  leaf fingerprint (sha1):   $LEAF_FP
 
 Next:
   1) OpenCore: load Lilu.kext, AMFIAnchor.kext (from b00t0x/AMFIAnchor releases) and the anchor kext above,
