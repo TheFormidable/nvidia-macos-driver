@@ -131,6 +131,7 @@ them is needed on a Mac that works.
 | Zink: with the swap interval at 0 the newest frame is shown and the swap does not wait for the display | 3.0.11 | `NVK_ZINK_PRESENT_NEWEST=0` | settings line |
 | Vulkan runtime: an IMMEDIATE swapchain shows the newest frame (3.0.9); MAILBOX is offered (3.0.11) | 3.0.9 | `NVK_BRIDGE_PRESENT_NEWEST=0` | settings line |
 | Zink: a glBufferSubData that would wait for the GPU goes through a staging buffer | 3.0.16 | `NVK_ZINK_SUBDATA_STAGE=0` | settings line |
+| Firefox and other Gecko browsers keep Apple's OpenGL over Metal, so the IOSurfaces they draw into are not copied | 3.0.20 | `NVK_ZINK_GECKO_APPLE=0` | settings line |
 | Hierarchical Z (ZCULL): hidden fragments culled before they are shaded, outside WindowServer | 3.0.17 | `NVK_ZCULL=0` | settings line |
 | Write-combining put back into the page attribute table where a kernel patch took it out | 3.0.13 | `nvpatwc=0` | boot argument |
 | The installer fetches the DLSS files | 3.0.13 | `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step | installer |
