@@ -7,8 +7,8 @@ for R in 14 13 12 11 10.15 10.14 10.13 10.12 10.11; do
   S=$A/stage/$R; [ -d "$S" ] || continue; O=$S/options; rm -rf "$O"; mkdir -p "$O"
   case $R in 10.13|10.14)
     X=$O/compositor-route-A-configuration-key; mkdir -p "$X"
-    C=$A/sys/$R/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/Configuration.plist
-    cp "$C" "$X/Configuration.plist.original"; plutil -insert BootToMetalCompositor -bool true -o "$X/Configuration.plist.with-key" "$C"
+    # No copy of Apple's Configuration.plist goes into the kit (it is Apple's file, and the kits are published): the
+    # README says how to add the key to the Mac's own copy.
     cat > "$X/README.txt" <<EOT
 Metal desktop on macOS $R, route A: the window server's own configuration key.
 
@@ -16,8 +16,7 @@ What changes: one file,
   /System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/Configuration.plist
 gains the boolean key BootToMetalCompositor = true. Nothing else. With the key true and a Metal device that is not
 headless, the window server starts its Metal compositor (activate_compositor_default, read from the $R binary).
-Configuration.plist.original is the file as Apple ships it on the recovery image of $R (INFERRED equal on a full
-install; compare before replacing). Configuration.plist.with-key is that file plus the key.
+This kit carries no copy of that file: the steps below add the key to the Mac's own copy and save it first.
 
 To apply (system integrity protection off, system volume mounted writable, as root):
   cp -p <that path> /Library/NullMoth/Configuration.plist.before-route-A
