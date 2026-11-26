@@ -49,7 +49,7 @@ cross-build).
    OpenGL on this driver, also in one whose contexts all stay with Apple's renderer; only `nvzink=0` leaves the bundle
    unloaded.
 4. The adapter leaves a context with Apple's renderer when Zink cannot start in this process (no NVK device, for
-   example), when the application asked for a profile Zink does not serve, in OBS and in Gecko browsers (below), and when the GLEngine
+   example), when the application asked for a profile Zink does not serve, in OBS (below), and when the GLEngine
    private layout the adapter reads and writes does not match the record (next section). Otherwise it saves
    GLEngine's dispatch table and puts its own entries in the context's table. From then on nothing gives the context
    back to Apple's renderer: a call the adapter cannot serve is dropped (next section, "What the checks do not
@@ -298,16 +298,6 @@ environment counts only when that process also sets `NVMTL_PROCESS_ENV=1`.
 
 In OBS, OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the
 first frame on this driver.
-
-Since 3.0.20, in Firefox and in the other browsers built on Gecko (any process that has Gecko's library, `XUL`, loaded:
-LibreWolf, Zen, Floorp, Waterfox, Tor Browser, Thunderbird), OpenGL stays Apple's too (`zink/nvk_gecko.h`). Gecko
-draws everything it shows into IOSurfaces it binds with `CGLTexImageIOSurface2D`: WebRender's CoreAnimation tiles and
-video surfaces, WebGL's canvases. In a Zink context each of those is a private image copied in from the surface's pages
-and copied back out, with a wait for the GPU after each copy, at every `glFlush`, `glFinish` and `glFenceSync`
-(`zink/nvk_iosurface.c`). A page that changes every frame then crawls: the preview of one's own screen share in a
-Google Meet tab did, while the shared tab and what the other side received kept their rate. Apple's OpenGL over the
-Metal plugin draws into the surface's own video memory instead and copies nothing. `NVK_ZINK_GECKO_APPLE=0` in the
-settings file gives these browsers Zink again, as in 3.0.19; restart the browser after changing it.
 
 ## Install and removal
 

@@ -1,44 +1,5 @@
 # Changelog
 
-## 3.0.20
-
-**Not released.** On top of 3.0.19. One change, in the OpenGL adapter of Zink: the preview of one's own screen share
-in a video call ran slowly in Firefox.
-
-### What changed
-
-- **Firefox and the other browsers built on Gecko keep Apple's OpenGL over the Metal plugin** (`zink/nvk_gecko.h`,
-  `zink/nvk_cgl.c`). Reported on the RTX 5050 machine with 3.0.19: sharing a tab from a Google Meet call, the preview
-  of the share in the Meet tab moved slowly, while the shared tab itself and what the other side of the call received
-  kept their rate. Since 3.0.6 Firefox's OpenGL went to Zink. Gecko draws everything it shows into IOSurfaces it binds
-  with `CGLTexImageIOSurface2D` (WebRender's CoreAnimation tiles and video surfaces, WebGL's canvases), and in a Zink
-  context each of those is a private image, copied in from the surface's pages and copied back out, each copy followed
-  by a wait for the GPU, at every `glFlush`, `glFinish` and `glFenceSync` (`zink/nvk_iosurface.c`). A decoded video,
-  as on the shared YouTube tab, reaches the screen as a layer of its own and pays none of this; the call's preview is
-  drawn by WebRender every frame and pays it for each surface it touches. On Apple's OpenGL the Metal plugin draws
-  into the surface's own video memory and copies nothing, as it did for Firefox up to 3.0.5.
-  - A process counts as Gecko's when an image whose file is named exactly `XUL` is loaded in it (Gecko's library:
-    Firefox, LibreWolf, Zen, Floorp, Waterfox, Tor Browser, Thunderbird, each with its helper processes). It is
-    looked at once, when the process makes its first OpenGL context, right after the check for OBS and before anything
-    of GLEngine is read or an NVK device is opened.
-  - The adapter's two switches are read together, once (`read_cgl_switches`): the settings reader is not for two
-    threads at once.
-- `tools/test_zink_gecko.py` (new): the header built and run on any machine with every case and four controls that
-  must fail, the place of the check in `nvk_cgl_prepare_gld`, the switch, the registry row and the texts.
-  `tools/test_cgl_gld_guard.py` and `tools/test_zink_opacity.py` read the new statement and the renamed reader.
-
-### What ran where
-
-Linux only: `test_zink_gecko.py`, `test_cgl_gld_guard.py`, `test_zink_opacity.py`, `test_zink_context_refs.py` and
-the registry's `check`. Nothing of it has been compiled against Apple's SDK or run in Firefox on a card; whether
-Firefox's preview runs at the share's rate with it is for the card to say.
-
-### The ways back
-
-| Way back | Kind | What it does |
-|---|---|---|
-| `NVK_ZINK_GECKO_APPLE=0` | settings line | Firefox and the other Gecko browsers draw through Zink like any other OpenGL application, as in 3.0.19; restart the browser after changing it |
-
 ## 3.0.19
 
 **Not released.** This section describes the branch being prepared as 3.0.19, on top of 3.0.18 (below, not released
