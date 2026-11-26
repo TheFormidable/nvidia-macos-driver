@@ -16,6 +16,11 @@ import re
 # a real place the installers use, and scripts are left alone (they name /Volumes/* on purpose); only binaries and the
 # link log carry build paths.
 PREFIX = re.compile(rb"/(?:Volumes|Users)/(?!Shared\b)[A-Za-z0-9._-]+")
+# The same prefix with its slashes turned into underscores: kxld_run.py names its thinned copies after the source path
+# that way, and the link log prints those names. Also the build machine's per-user temporary folder
+# (/var/folders/<2>/<id>/T), which the link log prints too and which is tied to that machine's account.
+ESCAPED = re.compile(rb"_(?:Volumes|Users)_(?!Shared_)[A-Za-z0-9.-]+")
+TMPDIR = re.compile(rb"/(?:private/)?var/folders/[A-Za-z0-9_+-]+/[A-Za-z0-9_+-]+")
 
 
 def neutral(m):
@@ -23,8 +28,16 @@ def neutral(m):
     return (b"/private/tmp/" + b"x" * n)[:n] if n >= 13 else b"/" + b"x" * (n - 1)
 
 
+def neutral_escaped(m):
+    return b"_" + b"x" * (len(m.group(0)) - 1)
+
+
 def scrub_bytes(data):
-    return PREFIX.sub(neutral, data)
+    return TMPDIR.sub(neutral, ESCAPED.sub(neutral_escaped, PREFIX.sub(neutral, data)))
+
+
+def has_build_path(data):
+    return bool(PREFIX.search(data) or ESCAPED.search(data) or TMPDIR.search(data))
 
 
 def is_macho(data):
@@ -65,7 +78,7 @@ def main(root):
                 continue
             with open(path, "rb") as fh:
                 data = fh.read()
-            if (is_macho(data) or name == "link-test.txt") and PREFIX.search(data):
+            if (is_macho(data) or name == "link-test.txt") and has_build_path(data):
                 left.append(os.path.relpath(path, root))
     for c in changed:
         print(f"scrubbed {c}")

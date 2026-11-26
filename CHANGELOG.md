@@ -59,6 +59,13 @@ older release has been installed on;** the kits are the original's older-release
   one with the key added) in `options/compositor-route-A-configuration-key/`: `build/legacy/userland/stage_options.sh`
   now writes only the README, whose steps add the key to the Mac's own copy and save it first. `package_kits.sh` stops
   if such a file is in a kit, because the kits are published.
+- `build/legacy/scrub_kit.py` also takes out the build machine's folder where the link log (`kexts/link-test.txt`)
+  writes it with underscores for slashes (`_Users_<name>_...`, the names `kxld_run.py` gives its thinned copies), and
+  the machine's per-user temporary folder (`/var/folders/<id>/<id>`). The 10.11 and 10.12 kits named the build
+  account that way.
+- `./build.sh package` builds the package again when the kits in `NM_LEGACY_KITS` were packed again: its recipe now
+  carries the SHA-256 of that folder's `legacy_kits.json`, which names every kit by its own SHA-256. Before, it held
+  only the folder's path, so new kits at the same path left the package "up to date" with the old ones.
 
 ### What ran where
 

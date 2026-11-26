@@ -2105,6 +2105,11 @@ recipe() {   # <component>: everything its output depends on, as text
   # NVKZinkGLDriver.bundle exports the build Mac's AppleMetalOpenGLRenderer names (build/generate_gld_forward.py), which
   # a macOS update can change without any change to Xcode: the system's build is part of zink's recipe
   if [ "$n" = zink ] && is_mac; then say "macos $(sw_vers -buildVersion 2>/dev/null || true)"; fi
+  # NM_LEGACY_KITS is a folder: its kits can be packed again (new bytes, same path), so the package's recipe carries the
+  # pin file that names every kit by its SHA-256, not only the path
+  if [ "$n" = package ] && [ -n "${NM_LEGACY_KITS:-}" ]; then
+    say "legacy_kits $(sha256_file "$NM_LEGACY_KITS/legacy_kits.json" 2>/dev/null || echo none)"
+  fi
   for v in $C_VARS; do eval "say \"var $v=\${$v:-}\""; done
   say "src $(tree_hash $C_SRC)"
   for d in $C_DEPS; do say "dep $d $(sha256_file "$STAMPS/$d" 2>/dev/null || echo none) $(dep_outputs_id "$d")"; done
