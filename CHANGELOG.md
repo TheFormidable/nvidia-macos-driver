@@ -66,6 +66,12 @@ older release has been installed on;** the kits are the original's older-release
 - `./build.sh package` builds the package again when the kits in `NM_LEGACY_KITS` were packed again: its recipe now
   carries the SHA-256 of that folder's `legacy_kits.json`, which names every kit by its own SHA-256. Before, it held
   only the folder's path, so new kits at the same path left the package "up to date" with the old ones.
+- **DLSS is downloaded again on install, as it should have been since 3.0.13.** `package/install.sh` runs the DLSS step
+  only when `SHA256SUMS` lists `dlss_fetch.sh` and its tools, and it looked for the lines `<hash>  dlss_fetch.sh`.
+  This fork's packages write `<hash>  ./dlss_fetch.sh` (`build/package_local.sh` through `sums_refresh.sh`), so every
+  install printed "this package's SHA256SUMS does not cover the DLSS step; skipping it" and downloaded nothing. The
+  same checks of the optional Safari copy (`NULLMOTH_SAFARI_GPU_COPY=1`) and GPU boost daemon (`NULLMOTH_GPU_BOOST=1`)
+  had the same fault. All seven now accept both spellings. Found by installing 3.0.19 on the test machine.
 
 ### What ran where
 
