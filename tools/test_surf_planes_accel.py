@@ -28,7 +28,7 @@ What this checks:
   - on the source text: the flag is taken off the plane only for a VRAM grant; the switch is checked before any device
     cache is looked up; the plane checks come after the existing cache and VRAM checks and before the size check; a
     dirty mark uses the plane's bit and refuses a plane above 0 without a range; the page-off sends a plane to its own
-    copy right after the mode is read, before the mode-3 family line; neither family fallback of the page-off's head
+    copy right after the mode is read, before the mode-3 family line; no family fallback of the page-off's head
     takes a plane; boot-arg and property; read-only counters registered once;
   - the page-off of a resource without a range is the one of the step before (2714281) byte for byte, once the lines
     that only a plane takes are taken out.
@@ -543,8 +543,14 @@ BIT_GUARD_SAME = [
 ]
 
 
+# 3.0.20's copy without the lock (nvPoCopyUnlocked, its own test: tools/test_pageoff_copy_unlocked.py) comes before the
+# unlocked wait: taken out, the head is the step before's again
+COPY_UNLOCKED = re.compile(r"        // The copy without the lock \(nvPoCopyUnlocked\).*?\n        \} else if \(pending && a->mayRelease\(\)\) \{\n", re.S)
+
+
 def unranged(po):
     """the page-off as a resource without a range runs it: the plane-only lines out, the validity bit as it is then (1)"""
+    po = COPY_UNLOCKED.sub("        if (pending && a->mayRelease()) {\n", po, count=1)
     for l in PLANE_LINES:
         po = po.replace(l, "")
     po = po.replace("(v0[0] & validBit())", "(v0[0] & 1u)").replace("(v1[0] & validBit())", "(v1[0] & 1u)")
@@ -599,8 +605,9 @@ def text_problems(src):
     fams = [m.start() for m in re.finditer(r"IOAccelResource2::pageoff\(", po)]
     guards = [m.start() for m in re.finditer(r"if \(fRangeLen\) \{ nvSVRangedFail\(this, out, NVRM_SS_NO_VRAM, ", po)]
     head = [f for f in fams if f < br]
-    # each family call of the head has the plane's refusal as the statement right before it
-    if len(guards) != 2 or len(head) != 2 or any(not any(g < f and ";" not in po[po.find("return; }", g) + 9:f] for g in guards) for f in head):
+    # each family call of the head has the plane's refusal as the statement right before it (three: the first checks,
+    # after the unlocked wait, after the copy without the lock)
+    if len(guards) != 3 or len(head) != 3 or any(not any(g < f and ";" not in po[po.find("return; }", g) + 9:f] for g in guards) for f in head):
         out.append("a family fallback in the page-off's head takes a plane")
     rgd = func(s, "static void nvSVPageoffRanged(")
     if "IOAccelResource2::pageoff(" in rgd or "md->getPhysicalSegment(" in rgd:
