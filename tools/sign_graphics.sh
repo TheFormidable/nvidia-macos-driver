@@ -66,7 +66,7 @@ for u in $UNITS; do
   esac
 done
 
-LEAF_FP=$(openssl x509 -in "$KEYDIR/leaf.cert.pem" -noout -fingerprint -sha256 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
+LEAF_FP=$(openssl x509 -in "$KEYDIR/leaf.cert.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f')
 echo "Signed graphics units written to: $OUTABS"
 echo "Import them with:"
 echo "  python3 tools/stage_signed_graphics.py --base $BASE \\"
