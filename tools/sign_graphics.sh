@@ -62,7 +62,16 @@ for u in $UNITS; do
       # shellcheck disable=SC2086
       "$RCODESIGN" sign -C /dev/null --timestamp-url none $PEM "$OUTABS/$u" >/dev/null 2>&1 \
         || die "could not seal $u"
-      "$RCODESIGN" verify "$OUTABS/$u" >/dev/null 2>&1 || die "$u does not verify after sealing";;
+      # rcodesign 0.29.0 verifies only Mach-O, not a bundle ("provided path is a Bundle"), so check each
+      # Mach-O with rcodesign and the resource seal with codesign, exactly as stage_signed_graphics.py does.
+      find "$OUTABS/$u" -type f | while IFS= read -r f; do
+        is_macho "$f" || continue
+        "$RCODESIGN" verify "$f" >/dev/null 2>&1 || { echo "sign_graphics: ${f#"$OUTABS/"} does not verify" >&2; exit 1; }
+      done || die "$u has a Mach-O that does not verify"
+      # A private chain the host does not trust still seals correctly; CSSMERR_TP_NOT_TRUSTED is not a failure.
+      err=$(codesign --verify --deep --strict "$OUTABS/$u" 2>&1) \
+        || printf '%s\n' "$err" | grep -q CSSMERR_TP_NOT_TRUSTED \
+        || die "$u seal does not verify: $err";;
   esac
 done
 
