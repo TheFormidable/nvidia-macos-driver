@@ -28,5 +28,13 @@ system-wide changes:
   relaxes a related protection on task ports.
 - **System Integrity Protection** is partly off (`csr-active-config` 0x0A43).
 
+There is an experimental alternative to the two AMFI boot arguments: sign the driver's graphics bundles with your own
+certificate authority and register that CA in OpenCore as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor.
+AMFI then stays enforcing for the rest of the system, and only code signed by your CA is trusted to load — a much
+narrower change than turning off signature checks entirely. This is a staging experiment, booted once on the RTX 5050,
+not the tested default; it still relaxes SIP and makes your signing CA a system trust anchor (keep its private key
+safe), and the two AMFI arguments remain the documented path until a signed-only boot is qualified on your machine. See
+[docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md).
+
 Removing the driver with the Mac app restores what its setup changed. `uninstall.sh` on its own does not change them. While
 these settings are on, only run software you trust, as you would on any Mac with these protections off.

@@ -1,5 +1,15 @@
 # AMFI compatibility and graphics recovery
 
+> **Since resolved for one configuration (2026-11-26).** The trust-chain route
+> described below as an architecture milestone was built and reached gate 3 on
+> an RTX 5050 / macOS 26.7.3 (25G342): signing the graphics bundles with a
+> private CA and registering that CA as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor)
+> anchor let WindowServer load them with AMFI enforcing, the GPU driving the
+> display at Metal 4, no `amfi_get_out_of_my_way`/`amfi=` boot arguments. That
+> is a single boot and a staging experiment, not the tested default — see
+> [SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md). The failure
+> analysis and the open acceptance work below remain accurate.
+
 ## Observed failure
 On macOS build 25G342, RTX 5050, AMFIPass 1.4.1 and Lilu 1.7.3, a trial without the global AMFI-disabling arguments reached the NVIDIA kernel driver's initialization but WindowServer aborted in CoreDisplay. The observed policy is platform-binary library validation of NVMTLDriver. The existing package seals that bundle ad hoc. Integrity validation and permission to load a third-party bundle into an Apple platform process are distinct.
 
