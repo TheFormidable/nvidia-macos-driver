@@ -55,6 +55,8 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
     unsigned_in "$D" | while IFS= read -r f; do codesign -f -s - "$D/$f" >/dev/null 2>&1; done
   done
   # the package check's rule, here where it is cheap to act on: every Mach-O outside a kext's Contents/MacOS is signed
+  # The kits are published: no copy of Apple's SkyLight Configuration.plist (stage_options.sh no longer writes one).
+  [ -z "$(/usr/bin/find "$D" -name 'Configuration.plist*' -print -quit)" ] || die "an Apple Configuration.plist is in the kit for $rel"
   bad=$(unsigned_in "$D")
   [ -z "$bad" ] || { echo "$bad" | sed 's/^/  unsigned: /'; die "unsigned programs in the kit for $rel (signed by the stagers: userland/stage_legacy.sh, gl/package/stage.sh)"; }
   ( cd "$D" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS ) || die "sums $rel"
