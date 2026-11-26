@@ -4,7 +4,7 @@ Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork 
 Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Development status — November 25, 2026.** `fable` is at 3.0.19, the first heading of
+> **Development status — November 26, 2026.** `fable` is at 3.0.19, the first heading of
 > [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.19 are merged. None is a published release or a certified binary: each
 > is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
 > 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
@@ -17,7 +17,12 @@ Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK
 > buffer uploads that would wait for the GPU through a staging buffer; its Zink library was built on that machine and
 > copied by hand, and the card has not yet shown the wait it removes while it was in place. 3.0.17 turns on the GPU's
 > hierarchical Z (ZCULL) in NVK, tested on Linux only. 3.0.18 merges everything the original project has published up
-> to its 3.1, including its experimental driver kits for macOS 14 down to 10.7, tested on Linux only.
+> to its 3.1, including its experimental driver kits for macOS 14 down to 10.7, tested on Linux only. An
+> experimental route (merged, [PR #28](https://github.com/TheFormidable/nvidia-macos-driver/pull/28)) loads the signed
+> graphics stack with AMFI left on: the bundles are signed by a private CA that OpenCore registers as an
+> [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor, instead of the global `amfi_get_out_of_my_way`/`amfi=` boot
+> arguments. It booted once on the RTX 5050 with AMFI enforcing and the GPU at Metal 4 — a staging experiment, not the
+> tested default ([docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md)).
 
 **Everything is on by default.** Nothing has to be switched on after `install.sh`: every path in the table below runs
 on an ordinary install. A change that could go wrong on some machine has one way back, nearly always written `name=0`
@@ -36,6 +41,7 @@ on an ordinary install. A change that could go wrong on some machine has one way
 | Sleep and wake | System sleep with video memory preserved; a display head that does not light at power-on is tried again (3.0.5) | [docs/SLEEP-WAKE.md](docs/SLEEP-WAKE.md). The retry was taken from an open pull request of the original project and has no card result of its own here. |
 | Media | VideoToolbox decode and encode; in Firefox the video library and the plugin's surface imports work inside its sandbox (3.0.5) | Feature- and generation-dependent: no claim of full Windows, CUDA, DRM or Metal parity. No VP9 or AV1 hardware decode on RTX 50. |
 | Shader caches | A shader-compiler switch that is set gets a cache key of its own, so it is never served a binary compiled under another setting (3.0.12) | Reproduced and checked on Linux; with no switch set the key is unchanged. 3.0.12 is installed on the RTX 5050 machine. |
+| AMFI compatibility (experimental) | An optional trust-chain route so the graphics bundles load under AMFI without `amfi_get_out_of_my_way`/`amfi=0x80`: they are signed by a private CA created on the builder (`tools/make_amfi_anchor.sh`, `tools/sign_graphics.sh`) and that CA is registered with [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) in OpenCore (3.0.19) | Staging experiment, not the tested default. On the RTX 5050 / macOS 26.7.3 it booted with AMFI enforcing, the anchor registered (`InstallStatus 1`), WindowServer loaded the Metal plugin with no rejection, and the GPU reported Metal 4 — one boot; repeated boots, sleep/wake, gaming and App Store/iMessage not qualified. [docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md), [docs/AMFI-COMPATIBILITY.md](docs/AMFI-COMPATIBILITY.md) |
 
 See the [current status and evidence](docs/STATUS.md), [documentation index](docs/README.md),
 [changelog](CHANGELOG.md), and [hardware test checklist](docs/TESTING-ON-HARDWARE.md).
@@ -163,6 +169,11 @@ does not change OpenCore, and the driver does not start until OpenCore has these
 - `Misc > Security > SecureBootModel` is `Disabled`
 - `Lilu.kext` and `AMFIPass.kext` are in `Kernel > Add` and enabled
 
+Experimental alternative to the two AMFI arguments: sign the graphics stack with your own CA and register it in
+OpenCore as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor, which lets the signed bundles load with AMFI
+enforcing — see [docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md). It is a staging experiment,
+not the tested default; keep the AMFI arguments until a signed-only boot is qualified on your machine.
+
 Download `nullmoth-nvidia-<version>.tar.gz` from **Releases**, then:
 
 ```bash
@@ -209,7 +220,7 @@ them from `EFI/OC/Kexts`. OpenCore only needs to set SIP and boot-args.
 | Key | Value | Why |
 |---|---|---|
 | `csr-active-config` | `<430A0000>` (Data) | the value tested with release 2.9: unsigned kexts, plus what root patches need |
-| `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle |
+| `boot-args` | `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0` | framebuffer + accelerator, 4 display heads; the AMFI args let WindowServer load the driver bundle. The experimental signed-graphics + AMFIAnchor route aims to drop the two AMFI args ([docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md)); keep them until a signed-only boot is qualified |
 
 Optional boot arguments, for troubleshooting:
 
