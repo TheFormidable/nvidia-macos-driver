@@ -521,22 +521,32 @@ if "$ZPROBE" NVMTLDriver >/dev/null 2>&1; then
 else
   echo "   note: macOS's GPU-bundle lookup does not answer for NVMTLDriver.bundle here, so $ZINK_GB was not checked by it"
 fi
-# An update replaces kexts the user already allowed. macOS keeps that approval per bundle (kext_policy; these kexts have
-# no team) and the code hash of the copy it last loaded from each path (kext_load_history_v3). For a kext the user
-# already allowed at this path, record the new hash, so the record matches what the next start loads. A kext never
-# allowed is left to macOS. The database is SIP-protected; the driver's SIP setting (0x0A43) allows root to write it.
-# Measured on an update (Core Ultra 5 225F, macOS 26): while this script replaces the loaded kexts macOS shows a
-# "kext upgrade" notice, but the first restart loads the new kexts from the collection built below (kernelmanagerd:
-# every one "approved", 0 filtered), so an update needs one restart. ALLOWED counts the kexts macOS already allows.
-# rollback_install does not undo this write. It comes after the OpenGL bundle check above, the last check of the
-# installed bundles. A later stop (the shader caches or the collection build below) still rolls the kexts back with
-# their new hashes recorded, and macOS then asks to allow the restored kexts again.
+# macOS loads a third-party kext only once its bundle is allowed. The Allow button in System Settings > Privacy &
+# Security writes allowed=1 to kext_policy (these kexts have no team); macOS then records the code hash of the copy it
+# loads from each path (kext_load_history_v3). On a first install the driver's own kexts have no such row, so without
+# this step macOS blocks them and asks the user to allow each one by hand and restart a second time. The installer
+# records that approval itself, scoped to exactly the kexts it just installed and built into the collection above (the
+# id is constrained to [A-Za-z0-9.] below): the user's Allow and this write set the same allowed=1 on the user's own
+# machine, whose SIP the driver already configures to permit it (0x0A43). Where the SIP-protected database is read-only
+# the install still works and macOS asks as before. For a kext already allowed at this path, the recorded hash is
+# refreshed so it matches the copy the next start loads.
+# Measured on an update (Core Ultra 5 225F, macOS 26): macOS shows a "kext upgrade" notice, but the first restart loads
+# the new kexts from the collection built below (kernelmanagerd: every one "approved", 0 filtered), so one restart is
+# enough. ALLOWED counts the kexts macOS will load without asking. rollback_install does not undo this write; it comes
+# after the OpenGL bundle check above. A later stop still rolls the kexts back, and macOS then asks for the restored ones.
 KPDB=/var/db/SystemPolicyConfiguration/KextPolicy; ALLOWED=0
 if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
   for k in $KEXTS; do
     id=$(primary_bundle_id "$k"); p="$EXT/$k.kext"
     printf '%s' "$id" | grep -Eq '^[A-Za-z0-9.]+$' || continue
-    [ "$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)" = 1 ] || continue
+    cur=$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)
+    if [ "$cur" != 1 ]; then
+      # Record approval for this one driver kext (no team, as its install records it): the same row the Allow button
+      # writes. Nothing outside $KEXTS is touched, and the id is already constrained above.
+      /usr/bin/sqlite3 "$KPDB" "insert or replace into kext_policy (team_id,bundle_id,allowed,developer_name,flags) values ('','$id',1,'NullMoth',1)" 2>/dev/null || true
+      cur=$(/usr/bin/sqlite3 "$KPDB" "select allowed from kext_policy where ifnull(team_id,'')='' and bundle_id='$id'" 2>/dev/null)
+    fi
+    [ "$cur" = 1 ] || { echo "   note: could not record approval for $k here (the approval database is read-only); macOS will ask to allow it and restart"; continue; }
     ALLOWED=$((ALLOWED + 1))
     # only NVRM is signed in the package; macOS records the unsigned ones' hashes itself
     ch=$(codesign -dvvv "$p" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
@@ -1089,10 +1099,12 @@ fi
 echo; echo "Done. Reboot now: sudo shutdown -r now"
 [ -z "$AUDIO_NOTE" ] || echo "Audio: $AUDIO_NOTE."
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
-  echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"
-  echo "updated; the new driver loads on this restart without allowing them again."
+  echo "The driver's extensions are approved (this install recorded the approval, or you had already allowed them): one"
+  echo "restart is enough. macOS may show a notice that they were added or updated; the new driver loads on this restart"
+  echo "without allowing them in System Settings by hand."
 else
-  echo "If macOS asks, allow the extensions in System Settings > Privacy & Security, then reboot once more."
+  echo "macOS's approval database was read-only here, so it will ask: allow the extensions in System Settings > Privacy &"
+  echo "Security, then reboot once more."
 fi
 # uninstall.sh only removes the driver; it restores nothing. Say where the driver from before is kept, if anywhere.
 if [ -n "$FB" ] && [ "$FBKEPT" = 1 ]; then
