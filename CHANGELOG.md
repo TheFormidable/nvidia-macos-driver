@@ -1,5 +1,62 @@
 # Changelog
 
+## 3.0.20
+
+**Not released.** On top of 3.0.19. One change, in NVAccel: while a program reads a screen capture with the processor,
+WindowServer no longer waits behind the copy engine.
+
+### What changed
+
+- **A page-off reads the GPU's memory without the accelerator lock** (`nvPoCopyUnlocked` in
+  `kexts/NVRM/accel/nvrm-accel.cpp`). Measured on the RTX 5050 with 3.0.19 (2026-11-26), sharing a window from
+  Firefox: Firefox locks every frame ScreenCaptureKit hands it for the processor, about 90 a second, and each lock is a
+  page-off that held the accelerator lock for its whole copy, about 1.06 ms on the copy engine into the staging buffer
+  and 0.9 to 1.7 ms from the processor into the surface's pages. WindowServer's surface marks and VRAM grants waited
+  for it: 301 waits and 420 ms in ten seconds, the longest 26 ms. The copy engine now fills a buffer of the page-off's
+  own while the lock is free, and the lock is taken back for everything that touches the surface or the resource. The
+  buffer is written into the surface only when nothing it was read from changed meanwhile (resource, surface, VRAM
+  allocation by its cookie, validity bit, no new mark of a GPU write by the plugin) and no other page-off made the
+  copy first; otherwise it is thrown away and the page-off copies with the lock held, as in 3.0.19. What the lock
+  covers per frame goes from about 2 ms to the processor's part, about 1 ms. Firefox, OBS, Zoom and any other
+  program that reads captured frames with the processor take this path; Chromium browsers read them on the GPU and
+  never did. It does not change the frame rate a web page asks of a share (Google Meet asks 5 frames per second of
+  Firefox and Safari).
+  - It runs where the unlocked wait of 3.0 may let the lock go (the family's caller owns it at one level and the
+    driver did not pin it), on a GPU without a DMA mapper. Behind a mapper, and for a plane of a two-plane surface,
+    page-offs are as before.
+  - The buffer is physically contiguous, as large as the largest surface paged off so far (up to 64 MB), kept for
+    the boot like the shared staging buffer. When none can be had, the next 1024 page-offs copy with the lock held.
+  - `NVVidMemory::releaseVram` waits for a copy engine read of that VRAM to end before giving the VRAM back
+    (`debug.nvaccel_pageoff_copy_unlocked_vm_waits`).
+  - `nvaccel_pageoff_copy_end` keeps the larger copy number, so the record never goes back.
+  - New read-only counters `debug.nvaccel_pageoff_copy_unlocked*` (`docs/SWITCHES.md`).
+- `tools/test_pageoff_copy_unlocked.py` (new): the function lifted from the source and run on the host in 16 arms
+  (other threads mark, page off, write or reallocate while the copy engine reads; the engine fails or times out; the
+  lock cannot be taken back; the paths that never let it go), with four altered copies that must fail.
+  `tools/test_pageoff_paths.py` and `tools/test_surf_planes_accel.py` read the new call.
+
+### What ran where
+
+Linux only: NVAccel compiled for macOS 15 and 26 against MacKernelSDK with the warnings Apple's clang adds for kexts
+(no warning), `test_pageoff_copy_unlocked.py`, `test_pageoff_paths.py`, `test_pageoff_hold.py`, `test_pageoff_recheck.c`,
+`test_surf_planes_accel.py`, the registry's `check` and the CI set.
+
+On the RTX 5050 (2026-11-26, macOS 26.7.3, the package built and signed with the owner's chain on his Mac, AMFI on):
+the three tests above passed on the Mac, and with Firefox 161 sharing a window of a 60 fps test pattern, ten seconds
+gave 835 page-offs, 809 of them copied without the lock (none failed, found no buffer or waited in a VRAM release;
+13 thrown away and copied again with the lock). WindowServer's marks and grants waited 130 times and 116 ms, against
+301 and 420 ms with 3.0.19. The kernel log gives each copy about 0.55 ms on the copy engine without the lock and 0.38
+to 0.67 ms of the processor with it. The WebRTC getDisplayMedia sample, slow in Firefox with 3.0.19, now runs
+smoothly; Google Meet still gets 5 frames per second from Firefox and Safari, which it asks of every browser that does
+not call itself Chrome (`docs/TROUBLESHOOTING.md`).
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `nvaccel_pageoff_copy_locked=1` | boot argument | The page-off's copy keeps the accelerator lock, as in 3.0.19 |
+| `nvaccel_pageoff_locked=1` | boot argument | As before: the page-off's wait keeps the lock, and so does its copy |
+
 ## 3.0.19
 
 **Not released.** This section describes the branch being prepared as 3.0.19, on top of 3.0.18 (below, not released

@@ -30,16 +30,19 @@
    Pure: tools/test_pageoff_recheck.c runs these rules and the numbering against every short order of events. */
 #ifndef NVACCEL_PAGEOFF_RECHECK_H
 #define NVACCEL_PAGEOFF_RECHECK_H
-/* One per resource. `started` goes up by one when a copy begins, with the accelerator lock held; a waiter reads it
-   without the lock when its wait ends. `finished` is the number of the last copy that finished well, written and read
-   with the lock held only. A copy holds the lock from its number to its end, so numbers finish in order. */
+/* One per resource. `started` goes up by one when a copy begins, with the accelerator lock held, or (the copy without
+   the lock, 3.0.20) just before its copy engine reads, with that copy's own buffer lock held; a waiter reads it without
+   the lock when its wait ends. `finished` is the number of the last copy that finished well, written and read with the
+   lock held only. A copy with the lock holds it from its number to its end. A copy without it ends, with the lock back,
+   only after nvaccel_pageoff_already_done found no later copy finished: numbers finish in order. The end keeps the
+   larger number all the same, so `finished` never goes back. */
 typedef struct { unsigned long long started; unsigned long long finished; } nvaccel_pageoff_copies;
 
 static inline unsigned long long nvaccel_pageoff_copy_begin(nvaccel_pageoff_copies *c)
 {
     return __atomic_add_fetch(&c->started, 1ull, __ATOMIC_RELEASE);
 }
-static inline void nvaccel_pageoff_copy_end(nvaccel_pageoff_copies *c, unsigned long long number) { c->finished = number; }
+static inline void nvaccel_pageoff_copy_end(nvaccel_pageoff_copies *c, unsigned long long number) { if (number > c->finished) c->finished = number; }
 /* How many copies have begun. A copy that begins after this call gets a larger number. */
 static inline unsigned long long nvaccel_pageoff_copies_started(const nvaccel_pageoff_copies *c)
 {

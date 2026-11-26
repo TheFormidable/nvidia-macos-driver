@@ -43,6 +43,7 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nmsmn", NVRM_SW_HARDWARE },
     { "nmxvt", NVRM_SW_DEV },
     { "nvaccel", NVRM_SW_INSTALL },
+    { "nvaccel_pageoff_copy_locked", NVRM_SW_ESCAPE },
     { "nvaccel_pageoff_locked", NVRM_SW_ESCAPE },
     { "nvaccel_surf_planes", NVRM_SW_ESCAPE },
     { "nvagdcheads", NVRM_SW_HARDWARE },
@@ -106,5 +107,5 @@ static const struct nvrm_switch_name nvrm_switch_names[] = {
     { "nvselector", NVRM_SW_HARDWARE },
     { "nvzink", NVRM_SW_ESCAPE },
 };
-#define NVRM_SWITCH_COUNT 100u
+#define NVRM_SWITCH_COUNT 101u
 #endif
