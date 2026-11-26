@@ -115,6 +115,28 @@ target macOS build (gate 3 below). The installer still prints the legacy
 arguments; that advice is unchanged and is not evidence the signed package can
 boot without them.
 
+## Confirmed on hardware (2026-11-26)
+
+On an RTX 5050 / macOS 26.7.3 (25G342), booting the anchor EFI (Lilu →
+AMFIAnchor 0.1.2 → this project's anchor → AMFIPass) with a package whose three
+graphics units were signed by the private chain:
+
+- `ioreg -r -c AMFIAnchor -l` reports `InstallStatus = 1` and `LoadedAnchors`
+  containing the project anchor (`org.theformidable.nvidia-signing`, 550-byte SPKI).
+- `sysctl -n kern.bootargs` shows no `amfi_get_out_of_my_way` or `amfi=` — AMFI
+  enforcing.
+- The unified log for that boot has no `Failed to create MetalDevice` or
+  `mapping process is a platform binary` entries.
+- `system_profiler SPDisplaysDataType` reports the RTX 5050 with Metal 4 driving
+  the display.
+
+This satisfies gate 3 (actual WindowServer load policy and a stable Metal device
+with AMFI enabled) for this configuration and a single boot from an external
+disk. Gate 4 remains open: repeated boots, sleep/wake, sustained GPU/gaming
+load, and separately App Store and iMessage, are not yet qualified. Writing the
+EFI to the internal disk and persistence are the operator's decision, and the
+private keys that back the anchor must be kept.
+
 ## Acceptance gates
 
 1. Verify complete signed payload, original source provenance, nested code,
