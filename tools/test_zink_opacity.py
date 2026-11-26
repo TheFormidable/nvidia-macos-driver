@@ -70,7 +70,7 @@ def read_adapter(cgl, native, check):
           "GLint opacity = 1;" in reader and "return error == kCGLNoError;" in reader)
     asks = function(cgl, "static int opaque_drawable(struct nvk_cgl_bridge *b)\n{")
     check("the switch is read once per process, by its name, and the kept answer is what a swap is given",
-          cgl.count('nvk_zink_cfg_on("NVK_ZINK_OPACITY_KEEP")') == 1 and "pthread_once(&cgl_switches_once, read_cgl_switches);" in asks
+          cgl.count('nvk_zink_cfg_on("NVK_ZINK_OPACITY_KEEP")') == 1 and "pthread_once(&opacity_once, read_opacity_switch);" in asks
           and "nvk_opacity_get(&b->opacity, opacity_keep, nvk_opacity_now_ns(), read_opacity, b->context)" in asks)
     check("nothing but opaque_drawable asks", cgl.count("read_opacity, ") == 1 and cgl.count("opaque_drawable(") == 3,
           f"{cgl.count('opaque_drawable(')} mentions of opaque_drawable(")
