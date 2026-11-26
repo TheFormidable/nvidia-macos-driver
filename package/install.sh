@@ -134,7 +134,49 @@ trap 'die "installer interrupted (signal HUP)"' HUP
 trap 'die "installer interrupted (signal INT)"' INT
 trap 'die "installer interrupted (signal TERM)"' TERM
 
+# --- one package for every release (package/pick_kit.sh) ---
+# On macOS 10.7 to 14 this package installs the kit built for that release (build/legacy, package/legacy): the kit is
+# checked against this package's SHA256SUMS and run from a root-owned private copy, as step 2 does for the whole package
+# on 15 and 26. Plain shasum: the one of 10.7 has no --strict. CHECK=1 becomes the kit installer's --check.
+legacy_install() {
+  local v=$1 pick rel kit
+  [ -f "$HERE/pick_kit.sh" ] || die "This driver is built for macOS 15 and 26 (this is $v); no changes made"
+  pick=$(/bin/bash "$HERE/pick_kit.sh" "$v" "$HERE")
+  case "$pick" in
+    "legacy "*) rel=${pick#legacy } ;;
+    "none "*) die "${pick#none }; no changes made" ;;
+    *) die "This driver is built for macOS 15 and 26 (this is $v); no changes made" ;;
+  esac
+  step "1. this Mac: macOS $v, so the kit built for macOS $rel"
+  STAGE=$(mktemp -d /var/tmp/nullmoth-legacy.XXXXXX) && [ -n "$STAGE" ] && [ -d "$STAGE" ] || die "create private kit copy"
+  kit=$STAGE/kit
+  ditto "$HERE/legacy/$rel" "$kit" && chown -R root:wheel "$STAGE" && chmod -R go-w "$STAGE" || die "copy the kit to $STAGE"
+  [ -z "$(find "$kit" -type l | sed -n 1p)" ] || die "the kit for macOS $rel holds a link: re-download the package"
+  # The kit's lines of SHA256SUMS, each one well formed (a malformed line stops it, as --strict would), then every
+  # file of the copy hashed one by one against them, and none left unlisted.
+  awk -v a="legacy/$rel/" '{ p = substr($0, 67); if (index(p, "./") == 1) p = substr(p, 3)
+    if (index(p, a) != 1) next
+    h = substr($0, 1, 64); s = substr($0, 65, 2)
+    if (h !~ /^[0-9a-f]+$/ || length(h) != 64 || (s != "  " && s != " *") || length(p) == length(a)) { print "BAD"; exit }
+    print h " " substr(p, length(a) + 1) }' "$HERE/SHA256SUMS" > "$STAGE/kit.sums"
+  [ -s "$STAGE/kit.sums" ] || die "SHA256SUMS lists no file of the kit for macOS $rel: re-download the package"
+  ! grep -qx BAD "$STAGE/kit.sums" || die "SHA256SUMS has a malformed line for the kit for macOS $rel: re-download the package"
+  local h f n=0 got
+  while read -r h f; do
+    got=$(cd "$kit" && shasum -a 256 "./$f" 2>/dev/null | cut -c1-64)
+    [ "$got" = "$h" ] || die "the kit for macOS $rel does not match SHA256SUMS ($f): re-download the package"
+    n=$((n + 1))
+  done < "$STAGE/kit.sums"
+  [ "$(find "$kit" -type f | wc -l | tr -d ' ')" = "$n" ] || die "the kit for macOS $rel holds files SHA256SUMS does not list: re-download the package"
+  ok "the kit for macOS $rel matches SHA256SUMS ($n files)"
+  if [ "${CHECK:-0}" = 1 ]; then /bin/bash "$kit/install-legacy.sh" --check; else /bin/bash "$kit/install-legacy.sh"; fi
+  exit $?
+}
+# --- end of one package for every release ---
+
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
+v=$(sw_vers -productVersion)
+case "${v%%.*}" in 15|26) ;; *) legacy_install "$v" ;; esac
 step "1. this Mac"
 [ "$(uname -m)" = x86_64 ] || die "Intel/x86_64 only"
 v=$(sw_vers -productVersion); MAJ=${v%%.*}

@@ -4,8 +4,8 @@ Based on [NullMoth](https://github.com/nullmoth/nvidia-macos-driver), this fork 
 Intel macOS and OpenCore PCs, with additional contributions from HighDelay's NVK fork and the companion
 [NVMetrics](https://github.com/TheFormidable/NVMetrics) project.
 
-> **Development status — November 24, 2026.** `fable` is at 3.0.18, the first heading of
-> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.18 are merged. None is a published release or a certified binary: each
+> **Development status — November 25, 2026.** `fable` is at 3.0.19, the first heading of
+> [CHANGELOG.md](CHANGELOG.md); 3.0.1 to 3.0.19 are merged. None is a published release or a certified binary: each
 > is a source version, built and installed by hand. One machine has run this fork (AMD Ryzen 5 5500, RTX 5050, macOS
 > 26.7.3, one 1920x1080 display at 100 Hz): 3.0, 3.0.1, 3.0.2, 3.0.6, 3.0.7, 3.0.8, 3.0.9, 3.0.11 and 3.0.12 were
 > installed and started there, the packages from 3.0.6 on built on that machine. 3.0.3 to 3.0.5 reached the card only

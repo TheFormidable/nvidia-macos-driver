@@ -191,6 +191,13 @@ static void dmaPut(nv_dma_device *d) { if (d) OSDecrementAtomic(&d->users); }
 static NvU64 dmaVerify(nv_dma_device *d, IOMemoryDescriptor *md, const NvU64 *seg_addr, const NvU64 *seg_len, unsigned nseg,
                        NvU64 pages, bool full)
 {
+#if defined(NM_ERA) && NM_ERA < 1011
+    // IOMapper::mapToPhysicalAddress arrived in 10.11: an older mapper's tables cannot be read back, so no page counts
+    // as verified. The attach self-test then fails and a GPU behind a mapper is refused (mode REFUSE); a GPU without
+    // one is mode NONE and never gets here.
+    (void)d; (void)md; (void)seg_addr; (void)seg_len; (void)nseg; (void)full;
+    return pages;
+#else
     IOMapper *mp = dmaMapper(d);
     if (!mp) return pages;
     NvU64 bad = 0, page = 0;
@@ -210,6 +217,7 @@ static NvU64 dmaVerify(nv_dma_device *d, IOMemoryDescriptor *md, const NvU64 *se
         }
     }
     return bad;
+#endif
 }
 
 static void dmaRelease(nv_xnu_dmamap *m)

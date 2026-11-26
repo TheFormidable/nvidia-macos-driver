@@ -220,7 +220,7 @@ check_pins() {
 # ---------------------------------------------------------------------------------------------------------- settings
 # Every setting: name, default, meaning. Precedence: built-in default < configuration file < environment < option.
 OPTION_VARS="NM_WORK NM_JOBS NM_ASSUME_YES NM_NO_INSTALL NM_OFFLINE NM_DRY_RUN NM_FLAVOUR NM_ACCEL NM_VERBOSE NM_FORCE
-NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION NM_TOOLS_FROM"
+NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION NM_TOOLS_FROM NM_LEGACY_KITS"
 # where outside things come from
 LOCATION_VARS="NM_OGKM_URL NM_MESA_URL NM_KHRONOS_URL NM_OPEN_GPU_DOC_URL NM_RYZENADJ_URL NM_WEBKIT_SPI_URL NM_RUSTUP_URL
 NM_SPIRV_LLVM_URL NM_SPIRV_HEADERS_URL RUSTUP_DIST_SERVER DEVELOPER_DIR NM_BREW NM_PYTHON NM_LLVM_PREFIX NM_SPIRV_TOOLS_PREFIX NM_OGKM620_PRISTINE NM_OGKM620 NM_OGKM610 NM_MESA_GIT
@@ -2049,7 +2049,7 @@ comp_info() {
     nmhda) C_DESC="NMHDA.kext (optional; needs Lilu, MacKernelSDK)"; C_SRC="kexts/NMHDA build/check_kext_libraries.sh"
            C_VARS="NM_LILU_DEBUG_KEXT NM_MACKERNELSDK"; C_OUT="$O/kexts/nmhda/NMHDA.kext/Contents/MacOS/NMHDA" ;;
     package) C_DESC="the package directory"; C_DEPS="$ALL_COMPONENTS"
-           C_SRC="build/package_local.sh package licenses NOTICE LICENSE"; C_VARS="NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION"; C_TOOLS="xcode"
+           C_SRC="build/package_local.sh package licenses NOTICE LICENSE"; C_VARS="NM_BASE_PACKAGE NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION NM_LEGACY_KITS"; C_TOOLS="xcode"
            C_OUT="$PKGDIR/pkgroot/SHA256SUMS" ;;
     *) return 1 ;;
   esac
@@ -2282,7 +2282,7 @@ run_component() {
     nmhda) x "${STEP_ENV[@]}" bash "$HERE/kexts/NMHDA/build.sh" "$NM_LILU_DEBUG_KEXT" "$NM_MACKERNELSDK" "$O/kexts/nmhda" ;;
     package)
       write_build_info
-      lines_to_array < <(passthru NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION)
+      lines_to_array < <(passthru NM_BASE_PACKAGE_SHA256 NM_PACKAGE_VERSION NM_LEGACY_KITS)
       x "${STEP_ENV[@]}" "NM_BUILD_INFO=$PKGDIR/build-info.txt" "NM_PACKAGE_NAME=$(package_name)" ${ARR[@]+"${ARR[@]}"} \
         bash "$HERE/build/package_local.sh" "$NM_BASE_PACKAGE" "$O" "$PKGDIR" ;;
   esac

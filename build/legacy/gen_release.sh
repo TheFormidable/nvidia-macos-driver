@@ -1,7 +1,10 @@
 #!/bin/bash
 # gen_release.sh <release e.g. 10.13> <era MMmm> [newer release whose names may be borrowed]: read that release's accelerator family (and Apple's vendor drivers
 # for the names of its pure slots) and write the regenerated headers to gen-<era>.
-B=${B:?audit folder}; cd $B; rel=$1; era=$2
+H=$(cd "$(dirname "$0")" && pwd); B=${B:?audit folder}; cd $B; rel=$1; era=$2
+# The headers this fork keeps (build/legacy/era-headers/<release>, made where Apple's vendor drivers of the release were
+# at hand, from its full installer): used when this machine has none of them, so nobody needs those installers.
+KEPT=${NM_ERA_HEADERS:-$H/era-headers}/$rel; [ -d "$KEPT" ] || KEPT=$B/legacy-src/build/legacy/era-headers/$rel
 fam=$(ls gl/full/$rel/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2 kdk/$rel/vendor/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2 kdk/$rel/from-recovery/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2 2>/dev/null | head -1)
 [ -n "$fam" ] || { echo "$rel: no accelerator family binary"; exit 1; }
 python3 vtdump.py "$fam" vt/fam-$rel.json | cut -c1-110
@@ -10,6 +13,11 @@ for k in gl/full/$rel/Extensions/GeForce.kext kdk/$rel/vendor/GeForce.kext kdk/$
   b="$k/Contents/MacOS/$(basename $k .kext)"; [ -f "$b" ] || continue
   o=vt/v$era-$(basename $k .kext).json; python3 vtdump.py "$b" $o >/dev/null && V="$V $o"
 done
+if [ -z "$V" ] && [ -z "${3:-}" ] && [ -d "$KEPT/gen-$era" ]; then
+  rm -rf gen-$era && cp -R "$KEPT/gen-$era" gen-$era && cp "$KEPT/named-$rel.json" "$KEPT/base-$rel.json" vt/ \
+    || { echo "$rel: cannot copy the kept headers from $KEPT"; exit 1; }
+  echo "$rel: no vendor drivers of this release here; gen-$era is the copy kept in $KEPT"; exit 0
+fi
 [ -n "${KEEP_NAMED:-}" ] && [ -f vt/named-$rel.json ] || python3 named.py vt/fam-$rel.json vt/named-$rel.json $V vt/fam-$rel.json | head -1
 kern=$(find kdk/$rel -type f \( -name kernel -o -name mach_kernel \) -not -path "*dSYM*" -size +1000k | head -1)
 gfx=$(find kdk/$rel -type f -name IOGraphicsFamily -not -path "*dSYM*" | head -1)
