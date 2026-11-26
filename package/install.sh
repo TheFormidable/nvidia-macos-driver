@@ -1033,8 +1033,9 @@ fi
 # NULLMOTH_DLSS=1); NULLMOTH_DLSS=0 skips the step. An install with the same versions already in place downloads
 # nothing. A failure here never undoes the driver install.
 # dlss_fetch.sh runs as root from the private copy; it is only trusted when SHA256SUMS covered it and its tools.
-if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *]dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/dlss_cache$' "$HERE/SHA256SUMS" \
-      && grep -qE '[ *]dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *]dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
+# A line names its file as "<path>" or "./<path>" (build/package_local.sh writes the second through sums_refresh.sh).
+if [ -f "$HERE/dlss_fetch.sh" ] && ! { grep -qE '[ *](\./)?dlss_fetch\.sh$' "$HERE/SHA256SUMS" && grep -qE '[ *](\./)?dlss/dlss_cache$' "$HERE/SHA256SUMS" \
+      && grep -qE '[ *](\./)?dlss/nm_unzstd$' "$HERE/SHA256SUMS" && grep -qE '[ *](\./)?dlss/assertfail_trap\.ptx$' "$HERE/SHA256SUMS"; }; then
   echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if [ "${NULLMOTH_DLSS:-1}" != 0 ]; then
@@ -1049,7 +1050,7 @@ fi
 # Optional, off by default: a copy of the driver bundle where Safari's sandboxed graphics process looks for GPU bundles
 # (WebGL in Safari). Run only from the checked root-owned copy; a failure never undoes the driver install.
 if [ "${NULLMOTH_SAFARI_GPU_COPY:-0}" = 1 ]; then
-  if [ -f "$HERE/safari_gpu_copy.sh" ] && grep -qE '[ *]safari_gpu_copy\.sh$' "$HERE/SHA256SUMS" 2>/dev/null; then
+  if [ -f "$HERE/safari_gpu_copy.sh" ] && grep -qE '[ *](\./)?safari_gpu_copy\.sh$' "$HERE/SHA256SUMS" 2>/dev/null; then
     step "Safari WebGL: driver copy for Safari's graphics process"
     /bin/bash "$HERE/safari_gpu_copy.sh" install "$GB/NVMTLDriver.bundle" || echo "   NOTE: the Safari copy was not made; the driver itself is installed."
   else
@@ -1060,8 +1061,8 @@ fi
 # Optional, off by default: the GPU boost daemon (a run-time switch for the system-wide boost request). Run only from the
 # checked root-owned copy; a failure never undoes the driver install.
 if [ "${NULLMOTH_GPU_BOOST:-0}" = 1 ]; then
-  if [ -f "$HERE/boost_daemon.sh" ] && grep -qE '[ *]boost_daemon\.sh$' "$HERE/SHA256SUMS" 2>/dev/null \
-     && grep -qE '[ *]Library/NullMoth/boost/nvmtl-boost$' "$HERE/SHA256SUMS" 2>/dev/null; then
+  if [ -f "$HERE/boost_daemon.sh" ] && grep -qE '[ *](\./)?boost_daemon\.sh$' "$HERE/SHA256SUMS" 2>/dev/null \
+     && grep -qE '[ *](\./)?Library/NullMoth/boost/nvmtl-boost$' "$HERE/SHA256SUMS" 2>/dev/null; then
     step "GPU boost daemon"
     /bin/bash "$HERE/boost_daemon.sh" install "$HERE" || echo "   NOTE: the boost daemon was not installed; the driver itself is."
   else
