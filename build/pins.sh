@@ -65,18 +65,18 @@ NM_PIN_CI_BASEPKG_URL=https://github.com/nullmoth/nvidia-macos-driver/releases/d
 NM_PIN_CI_BASEPKG_SIZE=68833656
 NM_PIN_CI_BASEPKG_SHA256=b624bf07c78cea03043e096383d5c8b01e4fb2c804a6ba377a4e66a2566422ef
 
-# Khronos Vulkan-Headers and Vulkan-Loader v1.4.367: build/build_vulkan_loader.sh (TAG=, LOADER_SHA=, HEADERS_SHA=),
+# Khronos Vulkan-Headers and Vulkan-Loader v1.4.369: build/build_vulkan_loader.sh (TAG=, LOADER_SHA=, HEADERS_SHA=),
 # NOTICE. The mirror variable is a base URL (".../KhronosGroup"); build_vulkan_loader.sh reads the same variable.
-NM_PIN_VKHEADERS_NAME="Khronos Vulkan-Headers v1.4.367 (for the Vulkan loader)"
+NM_PIN_VKHEADERS_NAME="Khronos Vulkan-Headers v1.4.369 (for the Vulkan loader)"
 NM_PIN_VKHEADERS_URL=https://github.com/KhronosGroup/Vulkan-Headers
 NM_PIN_VKHEADERS_MIRROR=NM_KHRONOS_URL
-NM_PIN_VKHEADERS_REF=v1.4.367
-NM_PIN_VKHEADERS_COMMIT=9fbc2a782ee3f8a4db64e7d991e23da75e893f44
-NM_PIN_VKLOADER_NAME="Khronos Vulkan-Loader v1.4.367"
+NM_PIN_VKHEADERS_REF=v1.4.369
+NM_PIN_VKHEADERS_COMMIT=d277a0a3cda9c682708c93279f0c72cd6b0ae3f3
+NM_PIN_VKLOADER_NAME="Khronos Vulkan-Loader v1.4.369"
 NM_PIN_VKLOADER_URL=https://github.com/KhronosGroup/Vulkan-Loader
 NM_PIN_VKLOADER_MIRROR=NM_KHRONOS_URL
-NM_PIN_VKLOADER_REF=v1.4.367
-NM_PIN_VKLOADER_COMMIT=aa6dee8385afe4b2cc0152d086af2184743e16fd
+NM_PIN_VKLOADER_REF=v1.4.369
+NM_PIN_VKLOADER_COMMIT=bdeb6dc40fe4330a7dda0aa630a5b80c65c5f8f3
 
 # NVIDIA open-gpu-doc (video class headers of libnvencvt): build/build_nvencvt.sh ("fetch ogd"), vendor/nvenc/SOURCE.
 # Commit only.
@@ -193,7 +193,7 @@ NM_PIN_TOOL_PYTHON_FORMULA=python@3.14
 # meson: Mesa meson.build:940-942 (1.7.0 with Rust). ninja: meson's own minimum (1.8.2).
 NM_PIN_TOOL_MESON_MIN=1.7.0
 NM_PIN_TOOL_NINJA_MIN=1.8.2
-# cmake: cmake_minimum_required(VERSION 3.22.1) in Vulkan-Loader and Vulkan-Headers v1.4.367 CMakeLists.txt.
+# cmake: cmake_minimum_required(VERSION 3.22.1) in Vulkan-Loader and Vulkan-Headers v1.4.369 CMakeLists.txt.
 NM_PIN_TOOL_CMAKE_MIN=3.22.1
 # LLVM 22 for the native mesa_clc/vtn_bindgen2 build: build/build_nvk.sh (its NVK_PATH comment: "LLVM 22.1.x");
 # nvk-macos.patch includes <clang/Options/OptionUtils.h>, a clang 22 header. SPIRV-LLVM-Translator must have the same

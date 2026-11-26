@@ -623,8 +623,8 @@ def make_remotes(root, tamper=False):
     git("tag", "-a", "-m", "mesa-26.3.0", "mesa-26.3.0", cwd=mw)
     git("push", "-q", root / "gitlab.freedesktop.org/mesa/mesa.git", "zink", "refs/tags/mesa-26.3.0", cwd=mw)
     commits["ZINKMESA"] = git("rev-parse", "HEAD", cwd=mw)
-    _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.367"])
-    _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.367"])
+    _, commits["VKHEADERS"] = make_repo(gh / "KhronosGroup/Vulkan-Headers", {"README": "headers\n" + salt}, tags=["v1.4.369"])
+    _, commits["VKLOADER"] = make_repo(gh / "KhronosGroup/Vulkan-Loader", {"README": "loader\n" + salt}, tags=["v1.4.369"])
     _, commits["OPENGPUDOC"] = make_repo(gh / "NVIDIA/open-gpu-doc.git", {"classes/video/clc9b0.h": "/* doc */\n" + salt})
     _, commits["SPIRVHEADERS"] = make_repo(gh / "KhronosGroup/SPIRV-Headers.git", {"include/spirv/unified1/spirv.hpp": "// headers\n" + salt})
     _, commits["SPIRVLLVM"] = make_repo(gh / "KhronosGroup/SPIRV-LLVM-Translator.git",
@@ -3005,8 +3005,8 @@ FETCH_WANT = [("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/ta
               ("https://github.com/NVIDIA/open-gpu-kernel-modules.git", "refs/tags/610.57.04"),
               ("https://gitlab.freedesktop.org/mesa/mesa.git", "refs/tags/mesa-26.3.0-rc3"),
               ("https://gitlab.freedesktop.org/mesa/mesa.git", "refs/tags/mesa-26.3.0"),
-              ("https://github.com/KhronosGroup/Vulkan-Headers", "refs/tags/v1.4.367"),
-              ("https://github.com/KhronosGroup/Vulkan-Loader", "refs/tags/v1.4.367"),
+              ("https://github.com/KhronosGroup/Vulkan-Headers", "refs/tags/v1.4.369"),
+              ("https://github.com/KhronosGroup/Vulkan-Loader", "refs/tags/v1.4.369"),
               ("https://github.com/NVIDIA/open-gpu-doc.git", "@OPENGPUDOC"),
               ("https://github.com/FlyGoat/RyzenAdj.git", "refs/tags/v0.19.0")]
 
@@ -3848,8 +3848,8 @@ def arm_stamps(mac):
         check("the variable removed again re-runs that step", keys == ["fb"], keys)
         pins = mac.co / "build/pins.sh"
         t = pins.read_text()
-        pins.write_text(t.replace("NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.367\"",
-                                  "NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.367 (renamed)\""))
+        pins.write_text(t.replace("NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.369\"",
+                                  "NM_PIN_VKLOADER_NAME=\"Khronos Vulkan-Loader v1.4.369 (renamed)\""))
         rc, keys, out = rebuilt(mac)
         check("a changed pin re-runs exactly the steps that use that source", keys == ["vulkan"], (keys, out[-300:]))
         pins.write_text(pins.read_text() + "# a comment\n")

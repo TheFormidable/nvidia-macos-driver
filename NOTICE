@@ -20,10 +20,10 @@ NVK          Vulkan driver from Mesa, MIT (licenses/Mesa-license.rst). NullMoth'
              kernel side they come from; nothing of Mesa is relicensed.
              NAK's Rust crates (paste, proc-macro2, quote, rustc-hash, syn, unicode-ident; MIT and/or Apache-2.0): licenses/nvk-rust-crates.txt.
 
-Vulkan loader  The Khronos Vulkan-Loader v1.4.367 (commit aa6dee8385afe4b2cc0152d086af2184743e16fd), built unmodified from source
+Vulkan loader  The Khronos Vulkan-Loader v1.4.369 (commit bdeb6dc40fe4330a7dda0aa630a5b80c65c5f8f3), built unmodified from source
              for x86_64 by build/build_vulkan_loader.sh and offered to applications by package/vulkan-for-apps.sh,
              Apache-2.0 (licenses/Vulkan-Loader-LICENSE.txt), https://github.com/KhronosGroup/Vulkan-Loader. Built against
-             Vulkan-Headers v1.4.367 (commit 9fbc2a782ee3f8a4db64e7d991e23da75e893f44), Apache-2.0.
+             Vulkan-Headers v1.4.369 (commit d277a0a3cda9c682708c93279f0c72cd6b0ae3f3), Apache-2.0.
 
 GSP firmware gsp_tu10x.bin, gsp_ga10x.bin and the matching ucode images are not part of this package. The installer
              (package/fw_fetch.sh) reads them, unmodified, from NVIDIA's own 620.70.06 Linux driver package downloaded

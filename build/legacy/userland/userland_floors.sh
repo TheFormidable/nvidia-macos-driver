@@ -24,8 +24,8 @@ done
 L=$U/loader-src
 if [ ! -d "$L/Vulkan-Loader" ]; then
   mkdir -p "$L"
-  git clone -q --depth 1 --branch v1.4.367 https://github.com/KhronosGroup/Vulkan-Headers "$L/Vulkan-Headers"
-  git clone -q --depth 1 --branch v1.4.367 https://github.com/KhronosGroup/Vulkan-Loader "$L/Vulkan-Loader"
+  git clone -q --depth 1 --branch v1.4.369 https://github.com/KhronosGroup/Vulkan-Headers "$L/Vulkan-Headers"
+  git clone -q --depth 1 --branch v1.4.369 https://github.com/KhronosGroup/Vulkan-Loader "$L/Vulkan-Loader"
 fi
 for F in $FL; do
   O=$U/loader-$F; rm -rf "$O"; mkdir -p "$O"

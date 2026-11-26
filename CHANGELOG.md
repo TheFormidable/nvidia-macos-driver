@@ -82,11 +82,21 @@ older release has been installed on;** the kits are the original's older-release
   install printed "this package's SHA256SUMS does not cover the DLSS step; skipping it" and downloaded nothing. The
   same checks of the optional Safari copy (`NULLMOTH_SAFARI_GPU_COPY=1`) and GPU boost daemon (`NULLMOTH_GPU_BOOST=1`)
   had the same fault. All seven now accept both spellings. Found by installing 3.0.19 on the test machine.
+- The Khronos Vulkan loader the package offers to applications moves from v1.4.367 to **v1.4.369**
+  (`build/build_vulkan_loader.sh` TAG/SHAs, `build/pins.sh`, `NOTICE`, `docs/PROVENANCE.md`; the legacy userland loader
+  floors in `build/legacy/userland/userland_floors.sh` with it). This is the standalone Khronos loader built from source
+  and handed to applications by `package/vulkan-for-apps.sh`; it carries loader-side fixes and newer extension
+  dispatch. **It does not change what NVK advertises.** NVK's own Vulkan version stays at **1.4.363**, the headers of
+  its pinned Mesa 26.3.0 base (`nvk/MESA_BASE`): moving it would mean rebasing Mesa, which
+  [docs/NVK-BASE-AND-HEADERS.md](docs/NVK-BASE-AND-HEADERS.md) deliberately keeps fixed because there is no card here to
+  validate the re-based patch chain. The plugin's own bundled loader (`libvulkan.1.4.362`, prebuilt, no source here) is
+  unchanged too. `tools/test_vulkan_loader.py` passes with the new pin (and the `v1.4.369` tags resolve to the recorded
+  commits). The loader is built on macOS, so it is not built here.
 
 ### What ran where
 
-Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh, the package and build.sh's
-settings pass as before.
+Linux: `tools/test_pick_kit.py` and `tools/test_vulkan_loader.py` pass; the tests that read install.sh, uninstall.sh,
+the package and build.sh's settings pass as before.
 
 On the owner's Mac (macOS 26.7.3, 2026-11-25), from 2e4b9cc4, in a separate work folder, with Apple's SDK and Kernel
 Debug Kit of each release: the 13 kits were built and packed, and so was the full package with them inside

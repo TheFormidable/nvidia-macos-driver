@@ -428,7 +428,7 @@ bash build/fb_build.sh kexts "$NM_WORK/out/kexts/fb"
 | `nvk` | NVK, el driver Vulkan |
 | `boost` | nvmtl-boost |
 | `nvkbridge` | el runtime nativo de presentación Vulkan (libnvk_minecraft.dylib), que el paquete instala en `/Library/GPUBundles/nvmtl/minecraft` |
-| `vulkan` | el cargador de Vulkan de Khronos v1.4.367, que el paquete ofrece a las aplicaciones (`vulkan-for-apps.sh`); no es el cargador propio del plugin |
+| `vulkan` | el cargador de Vulkan de Khronos v1.4.369, que el paquete ofrece a las aplicaciones (`vulkan-for-apps.sh`); no es el cargador propio del plugin |
 | `plugin` | el plugin de Metal (NVMTLDriver) |
 | `xlate` | el traductor de shaders |
 | `nvencvt` | libnvencvt.dylib (video) |

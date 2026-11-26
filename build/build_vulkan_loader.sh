@@ -7,9 +7,9 @@
 # NM_KHRONOS_URL replaces https://github.com/KhronosGroup (for example a folder of local clones that hold the tag).
 set -euo pipefail
 OUT=${1:?output directory}
-TAG=v1.4.367
-LOADER_SHA=aa6dee8385afe4b2cc0152d086af2184743e16fd
-HEADERS_SHA=9fbc2a782ee3f8a4db64e7d991e23da75e893f44
+TAG=v1.4.369
+LOADER_SHA=bdeb6dc40fe4330a7dda0aa630a5b80c65c5f8f3
+HEADERS_SHA=d277a0a3cda9c682708c93279f0c72cd6b0ae3f3
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 clone() { git clone -q --depth 1 --branch "$TAG" "${NM_KHRONOS_URL:-https://github.com/KhronosGroup}/$1" "$W/$1"
           [ "$(git -C "$W/$1" rev-parse HEAD)" = "$2" ] || { echo "STOP: $1 $TAG is not commit $2"; exit 2; }; }
