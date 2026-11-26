@@ -896,9 +896,23 @@ while [ "$n" -lt 48 ]; do
     fi
     if { [ "$r1" -ge 3 ] || [ "$#" -ge 4 ]; } && [ "$ours" = 1 ]; then
       prev=$(nvram $V:nullmoth-ws-loop 2>/dev/null | cut -f2)
-      nvram $V:nullmoth-nv-starts=%02 2>/dev/null
+      # Do not restart on the assumption that firmware accepted the recovery state.
+      # Readback is necessary, but not proof that the value survives a power cycle.
+      if ! nvram $V:nullmoth-nv-starts=%02 2>/dev/null ||
+         [ "$(nvram $V:nullmoth-nv-starts 2>/dev/null | cut -f2)" != "%02" ]; then
+        echo "$(date) WindowServer loop: recovery start count not verified; no automatic restart" >> "$LOG"
+        exit 0
+      fi
       nvram -d $V:nullmoth-nv-ok 2>/dev/null
-      nvram $V:nullmoth-ws-loop=$r1 2>/dev/null
+      if nvram $V:nullmoth-nv-ok >/dev/null 2>&1; then
+        echo "$(date) WindowServer loop: good-start marker still present; no automatic restart" >> "$LOG"
+        exit 0
+      fi
+      if ! nvram $V:nullmoth-ws-loop=$r1 2>/dev/null ||
+         [ "$(nvram $V:nullmoth-ws-loop 2>/dev/null | cut -f2)" != "$r1" ]; then
+        echo "$(date) WindowServer loop: restart latch not verified; no automatic restart" >> "$LOG"
+        exit 0
+      fi
       echo "$(date) WindowServer keeps dying ($r1 reports since boot, $# processes seen) on the NVIDIA display; the driver is off for the next boot" >> $LOG
       # At the login window nothing is open yet, and the screen stays black until a restart. Restart once; a second
       # loop (the previous driver, or the next boot still looping) is left to the user.

@@ -65,8 +65,14 @@ esac''',
     "nvram": r'''#!/bin/bash
 echo "nvram $*" >> "$T/calls"
 case "$1" in
-  -d) rm -f "$T/nv.${2##*:}";;
-  *=*) k=${1%%=*}; echo "${1#*=}" > "$T/nv.${k##*:}";;
+  -d) if [ "$NV_FAULT" = keep-ok ] && [ "${2##*:}" = nullmoth-nv-ok ]; then exit 1; fi
+      rm -f "$T/nv.${2##*:}";;
+  *=*) k=${1%%=*}
+      case "$NV_FAULT:${k##*:}" in
+        fail-starts:nullmoth-nv-starts|fail-latch:nullmoth-ws-loop) exit 1;;
+        drop-starts:nullmoth-nv-starts|drop-latch:nullmoth-ws-loop) exit 0;;
+      esac
+      echo "${1#*=}" > "$T/nv.${k##*:}";;
   *) [ -f "$T/nv.${1##*:}" ] || exit 1; printf '%s\t%s\n' "$1" "$(cat "$T/nv.${1##*:}")";;
 esac''',
     # stat -f %Su /dev/console is the console user; anything else goes to the real stat
@@ -99,7 +105,7 @@ GOOD = dict(registry=CLAIMED, cleared="1")
 
 
 def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, registry="", cleared="", card="",
-        displays="", starts=None):
+        displays="", starts=None, nv_fault=""):
     t = pathlib.Path(tempfile.mkdtemp(prefix="bgws-"))
     fake = t / "bin"
     fake.mkdir()
@@ -117,12 +123,14 @@ def run(job, *, pids, armed="1", crashes=0, console="root", prior_loop=None, reg
         (t / "nv.nullmoth-ws-loop").write_text(prior_loop + "\n")
     if starts is not None:
         (t / "nv.nullmoth-nv-starts").write_text(starts + "\n")
+    if nv_fault == "keep-ok":
+        (t / "nv.nullmoth-nv-ok").write_text("1\n")
     text = redirect(job, fake, t, dr)
     script = t / "bootguard.sh"
     script.write_text(text)
     env = dict(os.environ, T=str(t), WS_PIDS=" ".join(map(str, pids)), ARMED=armed or "", CRASHES=str(crashes),
                CONSOLE=console, DRDIR=str(dr), BOOT_SEC=str(int(time.time()) - 120), REGISTRY=registry,
-               CLEARED=cleared, CARD=card, DISPLAYS=displays)
+               CLEARED=cleared, CARD=card, DISPLAYS=displays, NV_FAULT=nv_fault)
     try:
         # JOB_BASH: the shell the job runs under (macOS runs it with bash 3.2)
         p = subprocess.run([os.environ.get("JOB_BASH", "/bin/bash"), str(script)], env=env, capture_output=True,
@@ -202,6 +210,11 @@ arm("a WindowServer that keeps dying on the NVIDIA display turns the driver off 
 arm("  and never calls that start good", "counts as good" not in log and "nullmoth-nv-ok=1" not in calls, log)
 arm("  and restarts once from the login window", "shutdown -r now" in calls, calls)
 arm("  and leaves the reason for the desktop report", "nullmoth-ws-loop=" in calls, calls)
+
+for fault in ("fail-starts", "drop-starts", "fail-latch", "drop-latch", "keep-ok"):
+    p, log, calls = run(job, pids=loop, crashes=99, nv_fault=fault)
+    arm("unverified recovery state must not restart: " + fault,
+        "shutdown" not in calls and "no automatic restart" in log, log + calls + p.stderr)
 
 p, log, calls = run(job, pids=loop, crashes=99, console="user1")
 arm("with someone logged in it turns the driver off but does not restart", "nv-starts=%02" in calls
