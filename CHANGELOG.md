@@ -39,7 +39,16 @@ WindowServer no longer waits behind the copy engine.
 
 Linux only: NVAccel compiled for macOS 15 and 26 against MacKernelSDK with the warnings Apple's clang adds for kexts
 (no warning), `test_pageoff_copy_unlocked.py`, `test_pageoff_paths.py`, `test_pageoff_hold.py`, `test_pageoff_recheck.c`,
-`test_surf_planes_accel.py`, the registry's `check` and the CI set. Nothing of it has run on a card.
+`test_surf_planes_accel.py`, the registry's `check` and the CI set.
+
+On the RTX 5050 (2026-11-26, macOS 26.7.3, the package built and signed with the owner's chain on his Mac, AMFI on):
+the three tests above passed on the Mac, and with Firefox 161 sharing a window of a 60 fps test pattern, ten seconds
+gave 835 page-offs, 809 of them copied without the lock (none failed, found no buffer or waited in a VRAM release;
+13 thrown away and copied again with the lock). WindowServer's marks and grants waited 130 times and 116 ms, against
+301 and 420 ms with 3.0.19. The kernel log gives each copy about 0.55 ms on the copy engine without the lock and 0.38
+to 0.67 ms of the processor with it. The WebRTC getDisplayMedia sample, slow in Firefox with 3.0.19, now runs
+smoothly; Google Meet still gets 5 frames per second from Firefox and Safari, which it asks of every browser that does
+not call itself Chrome (`docs/TROUBLESHOOTING.md`).
 
 ### The ways back
 
