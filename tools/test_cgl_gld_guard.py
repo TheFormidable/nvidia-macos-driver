@@ -939,6 +939,7 @@ def main():
     head_text = ("EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver) { "
                  "if (!engine || !driver) return 0; "
                  "if (nvk_cgl_obs_compatibility_enabled()) return 0; "
+                 "if (gecko_stays_apple()) return 0; "
                  "if (native_surface_copy_context()) return 0; "
                  "unsigned char profile = 0; void *context_ptr = NULL; void **back = NULL; "
                  "struct nvk_cgl_layout_report report; "

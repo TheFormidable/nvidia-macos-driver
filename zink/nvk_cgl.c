@@ -5,6 +5,7 @@
 #include "nvk_opacity.h"
 #include "nvk_newest.h"
 #include "nvk_zink_cfg.h"
+#include "nvk_gecko.h"
 #define GL_DO_NOT_WARN_IF_MULTI_GL_VERSION_HEADERS_INCLUDED 1
 #include <OpenGL/gl3.h>
 #include <OpenGL/gl.h>
@@ -14,6 +15,7 @@
 #include <execinfo.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach-o/dyld.h>
 #include <malloc/malloc.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -167,6 +169,33 @@ static int initialize_capabilities(struct nvk_cgl_bridge *b);
 #include "cgl_api.inc"
 void nvk_cgl_install_lwjgl_appkit(void);
 int nvk_cgl_obs_compatibility_enabled(void);
+
+/* This library's switches (zink/nvk_zink_cfg.h), read once per process and together, since that reader is not for two
+ * threads at once. NVK_ZINK_OPACITY_KEEP=0: every swap asks WindowServer for the opacity again (3.0.8).
+ * NVK_ZINK_GECKO_APPLE=0: Firefox and the other Gecko browsers are served by Zink like any application, as in 3.0.19
+ * (3.0.20; zink/nvk_gecko.h says why they stay on Apple's OpenGL otherwise). */
+static pthread_once_t cgl_switches_once = PTHREAD_ONCE_INIT;
+static int opacity_keep, gecko_apple;
+static void read_cgl_switches(void)
+{
+   opacity_keep = nvk_zink_cfg_on("NVK_ZINK_OPACITY_KEEP");
+   gecko_apple = nvk_zink_cfg_on("NVK_ZINK_GECKO_APPLE");
+}
+
+static const char *loaded_image(unsigned index) { return _dyld_get_image_name(index); }
+static pthread_once_t gecko_once = PTHREAD_ONCE_INIT;
+static int gecko;
+static void find_gecko(void) { gecko = nvk_gecko_process(_dyld_image_count(), loaded_image); }
+
+/* Whether this process's OpenGL stays Apple's because it is a Gecko browser's. Asked when a context is made, by
+ * which time Gecko's library is loaded: it is what makes the context. */
+static int gecko_stays_apple(void)
+{
+   pthread_once(&cgl_switches_once, read_cgl_switches);
+   if (!gecko_apple) return 0;
+   pthread_once(&gecko_once, find_gecko);
+   return gecko;
+}
 
 __attribute__((noinline)) static int fail(const char *error) { last_error = error; return 0; }
 EXPORT const char *nvk_cgl_last_error(void) { return last_error ? last_error : "none"; }
@@ -704,6 +733,8 @@ EXPORT int nvk_cgl_prepare_gld(void *engine, void *driver)
    /* OBS keeps all of its GL objects in Apple's driver, together with its
     * CGL/IOSurface interop. Never switch a live context. */
    if (nvk_cgl_obs_compatibility_enabled()) return 0;
+   /* Gecko browsers bind IOSurfaces for everything they draw: Apple's renderer keeps those in video memory. */
+   if (gecko_stays_apple()) return 0;
    if (native_surface_copy_context()) return 0;
    /* Check that the recorded private offsets land in memory shaped as the record
     * says before any read past a pointer or any write through one, and before the
@@ -1087,16 +1118,11 @@ static int read_opacity(void *context, int *opaque)
    return error == kCGLNoError;
 }
 
-/* NVK_ZINK_OPACITY_KEEP=0 (zink/nvk_zink_cfg.h), read once per process: every swap asks WindowServer again. */
-static pthread_once_t opacity_once = PTHREAD_ONCE_INIT;
-static int opacity_keep;
-static void read_opacity_switch(void) { opacity_keep = nvk_zink_cfg_on("NVK_ZINK_OPACITY_KEEP"); }
-
 /* Whether the drawable is opaque, for one swap: asked at most once per swap, the answer kept for 100 ms
  * (zink/nvk_opacity.h). */
 static int opaque_drawable(struct nvk_cgl_bridge *b)
 {
-   pthread_once(&opacity_once, read_opacity_switch);
+   pthread_once(&cgl_switches_once, read_cgl_switches);
    return nvk_opacity_get(&b->opacity, opacity_keep, nvk_opacity_now_ns(), read_opacity, b->context);
 }
 
