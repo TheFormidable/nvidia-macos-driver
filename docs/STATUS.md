@@ -1,13 +1,21 @@
-# Fork status and evidence — 2026-11-24
+# Fork status and evidence — 2026-11-26
 
-This is the current snapshot of TheFormidable's `fable` branch with [PR #18](https://github.com/TheFormidable/nvidia-macos-driver/pull/18)
-merged. The first numeric heading in [CHANGELOG.md](../CHANGELOG.md) is 3.0.17: the development package version, not
-a published or qualified release. 3.0.1 to 3.0.17 are merged; there is no 3.0.10, and 3.0.15 was tried and not kept.
-3.0.14 adds statistics of the shader compiler, a development tool tested on Linux only. 3.0.16 writes OpenGL buffer
+This is the current snapshot of TheFormidable's `fable` branch. The first numeric heading in
+[CHANGELOG.md](../CHANGELOG.md) is 3.0.19: the development package version, not a published or qualified release.
+3.0.1 to 3.0.19 are merged; there is no 3.0.10, and 3.0.15 was tried and not kept. 3.0.16 writes OpenGL buffer
 uploads that would wait for the GPU through a staging buffer; on the card it has not yet met the wait it removes.
-3.0.17 turns on the GPU's hierarchical Z (ZCULL) in NVK, host-tested only. The upstream baseline
-is NullMoth 2.9. Keep inherited upstream evidence separate from this fork's experiments and from the NVMetrics
-application.
+3.0.17 turns on the GPU's hierarchical Z (ZCULL) in NVK, host-tested only. 3.0.18 merges everything the original
+project published up to its 3.1, including its support for older macOS releases, none of it built on a Mac or run on
+a card. 3.0.19 makes one universal package whose installer picks the kit for the macOS it runs on (10.7 to 14, or the
+modern kit on 15 and 26); its 13 older-release kits were built and packed on the owner's Mac but no kit has run on a
+card, and 3.0.19 itself was installed once on the test machine. The upstream baseline is NullMoth 2.9.
+
+An experimental route to drop the global AMFI-disabling boot arguments landed in the fork
+([PR #28](https://github.com/TheFormidable/nvidia-macos-driver/pull/28)): sign the graphics bundles with a private CA
+and register it as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor
+([docs/SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)). It reached gate 3 on one boot (below) and is a
+staging experiment, not the tested default. Keep inherited upstream evidence separate from this fork's experiments and
+from the NVMetrics application.
 
 Every path of the driver is on by default; a user turns nothing on. What exists for a risky change is one way back
 (`name=0`), listed in the [README](../README.md#what-is-on-by-default-and-the-ways-back), in each release's "The ways
@@ -42,6 +50,9 @@ frame counter, reported in words: no capture was taken and no scene was matched.
 | 3.0.15, [PR #20](https://github.com/TheFormidable/nvidia-macos-driver/pull/20), not kept | Built on the RTX 5050 machine and its NVK copied by hand over 3.0.12. Three captures at a fixed place in ATM10 with the shader pack, phase 1 on, off, on: 1.285, 1.283 and 1.277 J per frame, 75 to 79 game frames a second with the GPU at 63 to 68 %. No gain, so it was closed without merging; the render thread waited 19 to 25 % of its time in `glBufferSubData` | Its patch is not in the tree ([CHANGELOG.md](../CHANGELOG.md#3015-tried-on-top-of-3014-and-not-kept)) |
 | 3.0.16 | Linux: the patch applies to Mesa 26.3.0 with `prepare_zink.py`; the threaded context and Zink compile with GCC without a warning; `test_zink_subdata_stage.py` passes. RTX 5050 machine: built without a warning, Zink copied by hand over 3.0.12; two ATM10 captures, as installed and with `NVK_ZINK_SUBDATA_STAGE=0`, both without the wait (GPU 96 to 98 %) | Whether the render thread of ATM10 stops waiting in `glBufferSubData`: the state that waits did not come while 3.0.16 was in place |
 | 3.0.17 (hierarchical Z) | Linux only: `test_nvk_zcull.py` passes; the new device-setup code compiled on its own against the RM 610.57.04 headers; the patch applies last in the 3.0 chain | Not cross-built for macOS, not built on a Mac, not on a card: whether RM answers the ZCULL query on the RTX 5050, and any gain or artefact in a game |
+| 3.0.18 (merge of the original up to 3.1) | Linux: the tests that read install.sh, uninstall.sh, the package and build.sh pass | Nothing of it built on a Mac or run on a card |
+| 3.0.19 (one universal package) | Linux: `tools/test_pick_kit.py` passes. On the owner's Mac (macOS 26.7.3, 2026-11-25) the 13 older-release kits (10.7 to 14) and the full package with them inside were built and packed (`nullmoth-nvidia-local-2e4b9cc4.tar.gz`, `check_package.sh` passes over 591 files); each kit's kexts went through that release's kxld where it exists (up to 10.15). `pick_kit.sh` picked the right kit per release without installing. 3.0.19 itself was installed once on the test machine (found the DLSS-fetch path bug) | No older-release kit has run on a card; no 10.x/11–14 release booted the kit |
+| Signed graphics + AMFIAnchor, 2026-11-26 (experimental) | RTX 5050 / macOS 26.7.3 (25G342), external disk, one boot. Graphics bundles signed by a private CA; OpenCore loads Lilu → AMFIAnchor 0.1.2 → the project anchor → AMFIPass. `ioreg` reports `InstallStatus` 1 with the anchor `org.theformidable.nvidia-signing` (550-byte SPKI); `kern.bootargs` has no `amfi_get_out_of_my_way`/`amfi=` (AMFI enforcing); the boot's log has no `Failed to create MetalDevice` or platform-binary rejection; `system_profiler` shows the RTX 5050 at Metal 4. Satisfies gate 3 for this configuration ([SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)) | Gate 4: repeated boots, sleep/wake, sustained GPU/gaming load, and separately App Store and iMessage, not qualified; internal-disk persistence not done |
 
 Build UUIDs and the exact meaning of the GPU Caps records are in [GPU-CAPS.md](GPU-CAPS.md) and
 [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md).
