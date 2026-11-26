@@ -63,6 +63,9 @@ older release has been installed on;** the kits are the original's older-release
   writes it with underscores for slashes (`_Users_<name>_...`, the names `kxld_run.py` gives its thinned copies), and
   the machine's per-user temporary folder (`/var/folders/<id>/<id>`). The 10.11 and 10.12 kits named the build
   account that way.
+- `./build.sh package` builds the package again when the kits in `NM_LEGACY_KITS` were packed again: its recipe now
+  carries the SHA-256 of that folder's `legacy_kits.json`, which names every kit by its own SHA-256. Before, it held
+  only the folder's path, so new kits at the same path left the package "up to date" with the old ones.
 
 ### What ran where
 
