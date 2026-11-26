@@ -60,6 +60,17 @@ lists_driver() {
   return 1
 }
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
+# --- one package for every release (package/pick_kit.sh) ---
+# On macOS 10.7 to 14 the driver was put in by that release's kit: its own remover does the removal. install-legacy.sh
+# keeps a copy of it in /Library/NullMoth/legacy/<release>/ (root's folder; a package folder's copy is not run as root).
+OSV=$(sw_vers -productVersion)
+case "${OSV%%.*}" in 15|26) ;; *)
+  case "$OSV" in 10.*) LREL=$(echo "$OSV" | cut -d. -f1-2);; *) LREL=${OSV%%.*};; esac
+  u=/Library/NullMoth/legacy/$LREL/uninstall-legacy.sh
+  [ -f "$u" ] && [ ! -L "$u" ] && [ "$(stat -f %u "$u")" = 0 ] && exec /bin/bash "$u"
+  die "no NullMoth driver kit for macOS $LREL is installed here (nothing to remove)";;
+esac
+# --- end of one package for every release ---
 # SIP's filesystem protection makes the driver's files and the kernel collection read-only even for root: removal then
 # failed half-way ("Operation not permitted" on every bundle, then kmutil). The driver cannot load in that state either,
 # so stop before anything is touched and say how to get out of it.

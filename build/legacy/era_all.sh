@@ -8,7 +8,10 @@ while read era mv kit tag khdr; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$mv" ] && continue
   rm -rf "$B/out/$mv"; echo "=================== macOS $mv"
   # headers regenerated for this release from its own tables (gen_era_headers.py), when they exist
-  if [ -d "$B/gen-$era" ]; then export ACCEL_HDR="$B/gen-$era"; else unset ACCEL_HDR; fi
+  # or, where this machine never made them, the copy this fork keeps (build/legacy/era-headers, see its README)
+  if [ -d "$B/gen-$era" ]; then export ACCEL_HDR="$B/gen-$era"
+  elif [ -d "$H/era-headers/$mv/gen-$era" ]; then export ACCEL_HDR="$H/era-headers/$mv/gen-$era"
+  else unset ACCEL_HDR; fi
   # names the release's kernel exports, for the duplicate-global rule of the kernel's kext linker (before 11 only:
   # from 11 on kexts are linked into a collection by a different tool that has no such rule)
   unset KERN_SYMS FAMBIN

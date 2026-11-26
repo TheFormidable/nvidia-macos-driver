@@ -9,6 +9,16 @@ B=${B:?audit folder}; V=${1:?version}
 SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 P=$B/pkg; rm -rf "$P"; mkdir -p "$P/tools"
 die() { echo "STOP $*"; exit 1; }
+# unsigned_in <dir>: the Mach-O files outside a kext's Contents/MacOS that carry no valid signature, one per line.
+# A function, not inline in $(...): bash 3.2 reads the ")" of a case pattern there as the end of the substitution.
+unsigned_in() {
+  find "$1" -type f ! -path '*.kext/Contents/MacOS/*' -print0 | while IFS= read -r -d '' f; do
+    m=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$m" in
+      cffaedfe|cefaedfe|cafebabe|feedfacf) codesign -v "$f" >/dev/null 2>&1 || echo "${f#"$1/"}";;
+    esac
+  done
+}
 # one decoder for all releases: 10.7 is the oldest release a kit is packaged for
 xcrun clang -O2 -arch x86_64 -mmacosx-version-min=10.7 -DZSTD_DISABLE_ASM -o "$P/tools/nm_unzstd" "$SRC/dlss/nm_unzstd.c" \
   "$SRC"/dlss/zstd/common/*.c "$SRC"/dlss/zstd/decompress/*.c 2>"$P/tools/unzstd.log" || { cat "$P/tools/unzstd.log"; die "decoder build"; }
@@ -38,6 +48,15 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   find "$D" -name .DS_Store -delete
   # no build machine's folder names in what ships (3.0's kits carried them in four binaries and the link log)
   python3 "$(dirname "$0")/scrub_kit.py" "$D" || die "scrub $rel"
+  # The bundle version set above and scrub_kit.py's rewrites change files inside signed bundles, which breaks their
+  # seals (NVMTLDriver: "invalid Info.plist"). Sign again what no longer verifies; a second pass takes a bundle's own
+  # program when codesign refused it the first time because a neighbour in its folder came later in the list.
+  for pass in 1 2; do
+    unsigned_in "$D" | while IFS= read -r f; do codesign -f -s - "$D/$f" >/dev/null 2>&1; done
+  done
+  # the package check's rule, here where it is cheap to act on: every Mach-O outside a kext's Contents/MacOS is signed
+  bad=$(unsigned_in "$D")
+  [ -z "$bad" ] || { echo "$bad" | sed 's/^/  unsigned: /'; die "unsigned programs in the kit for $rel (signed by the stagers: userland/stage_legacy.sh, gl/package/stage.sh)"; }
   ( cd "$D" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS ) || die "sums $rel"
   ( cd "$D" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "sums do not verify $rel"
   # a plain ustar archive without extended attributes or resource forks: 10.7's tar must read it

@@ -1,5 +1,87 @@
 # Changelog
 
+## 3.0.19
+
+**Not released.** This section describes the branch being prepared as 3.0.19, on top of 3.0.18 (below, not released
+either). **One package for every release:** the package carries the kits for macOS 10.7 to 14, built by this fork from
+its own tree with Apple's SDK and Kernel Debug Kit of each release, and the installer picks the kit of the macOS it runs
+on. Nothing to choose: the same `sudo ./install.sh` on 10.7 to 14, 15 and 26. **No kit has been run on a card, and no
+older release has been installed on;** the kits are the original's older-release lane (3.0.18) built here.
+
+### What changed
+
+- `package/pick_kit.sh` (new) names the part of the package for a macOS version: `modern` on 15 and 26, `legacy
+  <release>` on 10.7 to 14, `none <reason>` otherwise (10.6 and older, an unknown release, or a package without the
+  kit). Plain bash 3.2, as on 10.7.
+- `package/install.sh`: right after the root check, on any release but 15 and 26, it runs `pick_kit.sh`, copies that
+  kit to a root-owned folder in /var/tmp, checks every file of the copy against the package's `SHA256SUMS` (one file at
+  a time with plain `shasum`, since 10.7's has no `--strict`; a malformed line or an unlisted file stops it), and runs
+  the kit's own `install-legacy.sh` from the copy (`CHECK=1` becomes its `--check`). It does not change boot
+  arguments; the kit's installer says what to add. On 15 and 26 nothing changed.
+- `package/uninstall.sh`: on 10.7 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
+- `build/package_local.sh` and `./build.sh package`: `NM_LEGACY_KITS=<folder of build/legacy/package_kits.sh>` puts the
+  13 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
+  13 or the package is not made. Without it the package has no kits and `install.sh` says so on an older release.
+- `tools/test_pick_kit.py` (new): every release and the versions around them; the installer's dispatch lifted out and
+  run with stand-ins, with a changed kit file, an unlisted file, a malformed line and a list without the kit as controls.
+- NVRM builds for 10.7 to 14 again. Three things this fork added since 2.9 need a newer kernel than the oldest kits:
+  - Thread names (10.15) do nothing before 10.15 (`kexts/compat/nm_era.h`).
+  - The DMA read-back (`IOMapper::mapToPhysicalAddress`, 10.11) counts nothing as verified before 10.11. A GPU behind
+    a DMA mapper is then refused at the self-test, as with `nvrmdma=0`; without a mapper nothing changes
+    (`kexts/NVRM/nvrm_dma.cpp`).
+  - The host-contiguous allocation option (10.8) is no option on 10.7. It is used only while DMA is remapped, which
+    never happens there.
+- NVAccel builds for 10.11 to 10.14 with the headers regenerated from each release's own accelerator family and Apple's
+  vendor drivers (from the full installers). `NVL_VT` in `kexts/NVRM/nvrm_layout.h` (and its copy in NVRMAGDC) writes
+  out `NVL_BUILT` instead of calling it: an argument handed on to another macro is expanded first, and the
+  regenerated headers define `IOAccelLegacyDisplayPipe` as `IOAccelDisplayPipe2`, so the call named a struct that
+  `NVL_TAIL` never declared. Builds without that alias expand the same as before.
+  - On those headers the class's vtable is `IOAccelDisplayPipe2`'s, so the layout check's vtable symbol follows the
+    alias (`kexts/NVRM/accel/nvaccel_layout.h`). Without it, 10.14's kext linker refused NVAccel.
+  - Before 10.14, `NVResource::calculateIOSurfaceDeviceCacheVRAMBytes` takes `unsigned int *` for its second result,
+    as the regenerated 10.12 and 10.13 headers declare (`kexts/NVRM/accel/nvaccel_stubs.h`). It wrote 4 bytes there
+    already; now the override matches. `build/legacy/gen_era_headers.py` gives it `uint64_t`: with no matching newer
+    declaration it fell back to `void`, and a value a caller ignores is harmless where a missing one is not.
+  - 10.11 is not covered: its family lacks the GPU page-table methods NVAccel overrides. That kit keeps OpenGL.
+- `build/legacy/assemble_kits.sh`: a kext the release's own kext linker refused goes to `held-back/`, not `kexts/`.
+  `install-legacy.sh` test-links every kext in `kexts/` and stops the whole install on one refusal.
+- The kits' programs are all signed (ad hoc), as `package/check_package.sh` asks of the package. There were 23
+  unsigned Mach-O files:
+  - `build/legacy/userland/stage_legacy.sh` signed `NVMTLDriver` first. Signing a bundle's main program seals the
+    bundle, and codesign refused because its neighbours were not signed yet; the error was hidden. It now signs them
+    first, the plugin last, and a failure stops the stage.
+  - `gl/package/stage.sh` signed nothing. It now signs the Vulkan driver, then the engine, before it writes
+    `MANIFEST.json`.
+  - `build/legacy/package_kits.sh` signs again what its own changes unsealed (the bundle version it writes into
+    `NVMTLDriver.bundle`'s Info.plist, the rewrites of `scrub_kit.py`), then stops on any program still unsigned and
+    names it.
+
+### What ran where
+
+Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh, the package and build.sh's
+settings pass as before.
+
+On the owner's Mac (macOS 26.7.3, 2026-11-25), from 2e4b9cc4, in a separate work folder, with Apple's SDK and Kernel
+Debug Kit of each release: the 13 kits were built and packed, and so was the full package with them inside
+(`nullmoth-nvidia-local-2e4b9cc4.tar.gz`, 415,814,046 bytes; `check_package.sh` passes over its 591 files). Each kit's
+kexts went through that release's kernel extension linker (kxld), which exists up to 10.15; from 11 to 14 they are only
+linked at build time.
+
+| macOS | kexts | link test | Metal | OpenGL |
+|---|---|---|---|---|
+| 10.7 | NVRM, NVRMFB | linked | not on that release | yes |
+| 10.8 | NVRM, NVRMFB (NVRMAGDC held back) | linked | not on that release | yes |
+| 10.9, 10.10 | NVRM, NVRMFB, NVRMAGDC | linked | not on that release | yes |
+| 10.11 | NVRM, NVRMFB, NVRMAGDC | linked | userland only, no accelerator | yes |
+| 10.12, 10.13 | all four | linked | yes | yes |
+| 10.14, 10.15 | all four | linked | yes | no (by design) |
+| 11 to 14 | all four | build time only | yes | no (by design) |
+
+`pick_kit.sh` was run against the built package without installing: it picks the 10.7, 10.13, 10.14, 12 and 14 kits
+for 10.7.5, 10.13.6, 10.14.6, 12.7.6 and 14.8.3, and the usual driver for 26.7.3. The accelerator headers of 10.10 to
+10.14 made on that run are kept in `build/legacy/era-headers` (see its README). Nothing was installed, and no older
+release has run on a card.
+
 ## 3.0.18
 
 **Not released.** This section describes the branch being prepared as 3.0.18, on top of 3.0.17 (below, not released

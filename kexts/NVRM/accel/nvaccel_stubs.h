@@ -42,16 +42,16 @@ public:
         }
         return (unsigned long long)a0 * nvResFaceSize(r);
     }
+#if defined(NM_ERA) && NM_ERA < 1014
+    // Before 10.14 the second result is a 32-bit count: Apple's own driver and the release's table declare it so (the
+    // headers gen_era_headers.py regenerates say unsigned int *), and writing 8 bytes would run past the caller's variable.
+    uint64_t calculateIOSurfaceDeviceCacheVRAMBytes(unsigned long long* a0, unsigned int* a1) APPLE_KEXT_OVERRIDE {
+#else
     uint64_t calculateIOSurfaceDeviceCacheVRAMBytes(unsigned long long* a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
+#endif
         const unsigned char *r = (const unsigned char *)this;
         unsigned long long size = nvResFaceSize(r);
-#if defined(NM_ERA) && NM_ERA < 1014
-        // Before 10.14 the second result is a 32-bit count (Apple's own driver declares it so); writing 8 bytes would
-        // run past the caller's variable.
-        if (a1) *(unsigned int *)a1 = 1;
-#else
         if (a1) *a1 = 1;
-#endif
         if (a0) *a0 = size;
         return size;
     }

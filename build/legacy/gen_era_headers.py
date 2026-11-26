@@ -137,7 +137,11 @@ BUILTIN = set("unsigned int long short char bool void const signed float double 
 fwd = set(); bodies = {}; report = []; emitted = {}; inlined = []
 # Return types the newer headers cannot supply, read from Apple's vendor drivers of the release (what the method
 # leaves in the return register and how the family's callers use it).
-RET_KNOWN = {("canTmpAlloc", "unsignedint", False): "bool"}   # Apple's NVIDIA surface returns the constant 1; callers store and test %al
+RET_KNOWN = {("canTmpAlloc", "unsignedint", False): "bool",   # Apple's NVIDIA surface returns the constant 1; callers store and test %al
+             # Before 10.14 the second result is 32 bits, so the macOS 15 declaration (uint64_t, two 64-bit pointers) does
+             # not match and the fallback would say void. The driver returns the size as on every later release: a value
+             # in %rax that a caller ignores is harmless, a caller that reads a void method's %rax is not.
+             ("calculateIOSurfaceDeviceCacheVRAMBytes", "unsignedlonglong*,unsignedint*", False): "uint64_t"}
 RENAMED = [("IOAccelSurface2", "IOAccelSurface"), ("IOAccelDisplayPipe2", "IOAccelDisplayPipe"), ("IOAccelDisplayMachine2", "IOAccelDisplayMachine")]
 def old_spelling(a):
     for n_, o_ in RENAMED: a = re.sub(r"\b%s\b" % n_, o_, a)
