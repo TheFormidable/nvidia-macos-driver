@@ -11,6 +11,7 @@ records. A historical test applies to its named revision, not all later code.
 - [Hardware test checklist](TESTING-ON-HARDWARE.md) / [Pruebas en hardware](TESTING-ON-HARDWARE.es.md)
 - [Supported cards](CARD-SUPPORT.md), [troubleshooting](TROUBLESHOOTING.md), [switches](SWITCHES.md) (generated from source)
 - [Architecture](HOW-IT-WORKS.md), [changelog](../CHANGELOG.md), [provenance](PROVENANCE.md), [security](../SECURITY.md), [contributing](../CONTRIBUTING.md)
+- AMFI: [signed-graphics + AMFIAnchor experiment](SIGNED-GRAPHICS-EXPERIMENT.md), [compatibility and recovery notes](AMFI-COMPATIBILITY.md) (experimental; keep the AMFI boot arguments until a signed-only boot is qualified)
 
 ## Telemetry, power and GPU selection
 
