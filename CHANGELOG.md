@@ -138,6 +138,39 @@ for 10.7.5, 10.13.6, 10.14.6, 12.7.6 and 14.8.3, and the usual driver for 26.7.3
 10.14 made on that run are kept in `build/legacy/era-headers` (see its README). Nothing was installed, and no older
 release has run on a card.
 
+### AMFI compatibility (experimental, [PR #28](https://github.com/TheFormidable/nvidia-macos-driver/pull/28))
+
+An experimental route to drop the global AMFI-disabling boot arguments `amfi_get_out_of_my_way=0x1 amfi=0x80`. Instead
+of turning off macOS's signature check for the whole system, the graphics bundles are signed with your own certificate
+authority, and that CA is registered in OpenCore as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) trust anchor;
+AMFI stays enforcing and only code signed by your CA is trusted to load. It follows the separation of signing from
+packaging documented by [WhateverXe-Graphics](https://github.com/b00t0x/WhateverXe-Graphics), without reusing any other
+project's signing identity or vendoring keys. **A staging experiment, not the tested default — keep the two AMFI boot
+arguments until a signed-only boot is qualified on your machine.**
+
+- `tools/make_amfi_anchor.sh` (new): builds a dedicated 4096/4096/2048-bit RSA signing chain and, from its **public**
+  root, the codeless anchor kext (via a cloned AMFIAnchor's own `make_injector.py`), all on the operator's machine. It
+  refuses to write keys inside a git checkout; the private keys never leave the machine and never go to GitHub.
+- `tools/sign_graphics.sh` (new): re-signs the three graphics units (`NVMTLDriver.bundle`, `NVKZinkGLDriver.bundle`,
+  `nvmtl`) of a finished pkgroot with that chain, deepest Mach-O first then the bundle seals, into a separate signed
+  directory. It never runs as root and changes nothing installed. rcodesign 0.29.0 cannot verify a bundle, so the
+  post-seal check verifies each Mach-O with rcodesign and the resource seal with `codesign` (a private chain the host
+  does not trust seals correctly; `CSSMERR_TP_NOT_TRUSTED` is not a failure).
+- `tools/stage_signed_graphics.py` (new): imports the signed units back over a pkgroot, checking the build UUIDs are
+  unchanged and the expected leaf certificate is present, and recomputes `SHA256SUMS`. Nothing is installed.
+- `docs/SIGNED-GRAPHICS-EXPERIMENT.md` (new) documents the local signing identity, the signing and import steps, the
+  OpenCore load order (Lilu → AMFIAnchor → the anchor → AMFIPass), and the acceptance gates.
+  `docs/AMFI-COMPATIBILITY.md` carries the original failure analysis and now points to this result.
+
+**What ran where.** Linux: the signing chain, `make_injector.py` anchor build and certificate profile were validated
+in the container. On the owner's RTX 5050 / macOS 26.7.3 (25G342), external disk, one boot: with the three graphics
+units signed by the private chain and the anchor EFI loaded, `ioreg -r -c AMFIAnchor -l` reported `InstallStatus` 1 and
+the anchor `org.theformidable.nvidia-signing` (550-byte SPKI); `kern.bootargs` had no AMFI arguments (enforcing); the
+boot's unified log had no `Failed to create MetalDevice` or platform-binary rejection; `system_profiler` showed the
+RTX 5050 driving the display at Metal 4. This satisfies gate 3 (WindowServer load policy and a stable Metal device with
+AMFI enabled) for one configuration and a single boot. Gate 4 — repeated boots, sleep/wake, sustained GPU/gaming load,
+and separately App Store and iMessage — is not qualified, and internal-disk persistence is left to the operator.
+
 ## 3.0.18
 
 **Not released.** This section describes the branch being prepared as 3.0.18, on top of 3.0.17 (below, not released
