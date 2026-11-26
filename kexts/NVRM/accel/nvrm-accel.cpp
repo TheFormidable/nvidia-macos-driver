@@ -1457,8 +1457,20 @@ void NVVidMemory::deallocPhysical()
     *(volatile unsigned long long *)((unsigned char *)this + kNvVidMemPhysOff) = 0;
 }
 
+static SInt64 gCntPoCuVmWaits;   // debug.nvaccel_pageoff_copy_unlocked_vm_waits
 void NVVidMemory::releaseVram(void *handle, void *kva, unsigned long long bytes, unsigned long long cookie)
 {
+    // A page-off may be reading this object's VRAM on the copy engine without the accelerator lock (nvPoCopyUnlocked),
+    // through the NVKMS memory named here: it is not given back before that copy has ended. The copy takes no lock of
+    // this driver to end (only NVRM's own), so waiting for it here, with or without the accelerator lock, cannot close
+    // a circle. It is as long as the same copy held the accelerator lock before 3.0.20.
+    if (__atomic_load_n(&fPoCopyBusy, __ATOMIC_ACQUIRE)) {
+        OSAddAtomic64(1, &gCntPoCuVmWaits);
+        for (unsigned n = 0; __atomic_load_n(&fPoCopyBusy, __ATOMIC_ACQUIRE); n++) {
+            if (n == 2000) ALOG("NVVidMemory::releaseVram(%p): an unlocked page-off copy has read this VRAM for 2 s -- still waiting", this);
+            IOSleep(1);
+        }
+    }
     struct NVRMVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
     r.version = NVRM_VRAM_ABI_VERSION;
@@ -2073,6 +2085,23 @@ NVACCEL_CNT(nvaccel_pageoff_unlocked_recopied,  gCntPoRecopied,  "unlocked page-
 NVACCEL_CNT(nvaccel_pageoff_unlocked_changed,   gCntPoChanged,   "unlocked page-offs whose resource pointed at another surface or VRAM allocation, or used another validity bit, after the wait");
 NVACCEL_CNT(nvaccel_pageoff_unlocked_standdown, gCntPoStandDown, "times the unlocked page-off wait turned itself off for this boot (0 or 1)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_unlocked_wait_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoUnlockedMaxUs, 0, "longest unlocked page-off wait, us");
+// The copy of a page-off reads the GPU's memory without the accelerator lock (nvPoCopyUnlocked, 3.0.20): the copy
+// engine fills a buffer of the page-off's own while other threads may take the lock, and everything that touches the
+// surface or the resource (the checks, the processor's copy into the surface's pages, the validity bit) is done with
+// the lock back. It runs where the unlocked wait may let the lock go (gPoUnlocked, owner at one level, not pinned), on
+// a GPU without a DMA mapper. Boot-arg nvaccel_pageoff_copy_locked=1, read once with nvaccel_pageoff_locked, keeps the
+// copy under the lock for the whole boot, as in 3.0.19; nvaccel_pageoff_locked=1 or a stand-down turns it off too.
+static int gPoCopyUnlocked = 1;
+static SInt64 gCntPoCuOk, gCntPoCuChanged, gCntPoCuAlready, gCntPoCuNoBuf, gCntPoCuFailed;   // gCntPoCuVmWaits: by releaseVram
+static int gPoCuMaxUs;
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_copy_unlocked, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoCopyUnlocked, 0, "1 = a page-off reads the GPU's memory into a buffer of its own without the accelerator lock (0: boot-arg nvaccel_pageoff_copy_locked=1)");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_ok,      gCntPoCuOk,      "page-offs whose copy engine read ran without the accelerator lock and whose pixels were then written into the surface");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_changed, gCntPoCuChanged, "unlocked page-off copies thrown away because the resource, its VRAM or surface changed, or the plugin marked a GPU write, while the lock was free (copied again with the lock held)");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_already, gCntPoCuAlready, "unlocked page-off copies thrown away because another page-off had made system memory current meanwhile");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_nobuf,   gCntPoCuNoBuf,   "times no physically contiguous buffer could be had for an unlocked page-off copy (the next 1024 copy with the lock held)");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_failed,  gCntPoCuFailed,  "unlocked page-off copies the copy engine did not make (copied again with the lock held)");
+NVACCEL_CNT(nvaccel_pageoff_copy_unlocked_vm_waits, gCntPoCuVmWaits, "VRAM releases that waited for an unlocked page-off copy still reading that VRAM");
+SYSCTL_INT(_debug, OID_AUTO, nvaccel_pageoff_copy_unlocked_max_us, CTLFLAG_RD | CTLFLAG_LOCKED, &gPoCuMaxUs, 0, "longest time an unlocked page-off copy kept the accelerator lock free, us");
 // What a screen capture's page-offs cost the threads that mark surfaces: how often and how long a mark or a grant that
 // waits for the accelerator lock found it taken (most often by a page-off's copy). Read-only; nothing here changes what
 // the driver does.
@@ -2155,6 +2184,12 @@ static void nvPoReadOptOut(void)
         gPoUnlocked = 0;
         ALOG("page-off: unlocked wait off (boot-arg nvaccel_pageoff_locked=%d): page-offs wait with the accelerator lock held", v);
     }
+    v = 0;
+    if (PE_parse_boot_argn("nvaccel_pageoff_copy_locked", &v, sizeof v) && v) {
+        gPoCopyUnlocked = 0;
+        ALOG("page-off: unlocked copy off (boot-arg nvaccel_pageoff_copy_locked=%d): the copy keeps the accelerator lock, as in 3.0.19", v);
+    }
+    if (!gPoUnlocked) gPoCopyUnlocked = 0;   // reported as off: the copy lets the lock go only where the wait may
 }
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "1 = WindowServer swaps wait for GPU completion here (same value as nvaccel_surface_gpu_on)");
 SYSCTL_INT(_debug, OID_AUTO, nvaccel_surface_gpu_on, CTLFLAG_RW | CTLFLAG_LOCKED, &gSurfGpuOn, 0, "0 = WindowServer waits for its own composites again (the plugin re-asks every second)");
@@ -2231,6 +2266,10 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_already); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_changed);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_recopied);
     sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_unlocked_standdown);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_ok);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_changed); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_already);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_nobuf); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_failed);
+    sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_vm_waits); sysctl_register_oid(&sysctl__debug_nvaccel_pageoff_copy_unlocked_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_waits); sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_lock_wait_max_us);
     sysctl_register_oid(&sysctl__debug_nvaccel_surf_mark_moved);
@@ -2469,6 +2508,7 @@ static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= bit;
     valid[0] &= (unsigned short)~bit;
+    res->fMarks++;
     { NVVidMemory *vm = nvres_vidmem(res); res->fPluginWroteCookie = vm ? vm->fAllocationCookie : 0; }
     return 0;
 }
@@ -2971,6 +3011,184 @@ static void nvSVPageoffRanged(NVResource *res, IOMemoryDescriptor *md, void *sur
     if (out) *out = ok;
 }
 
+// The copy of a page-off without the accelerator lock (3.0.20, debug.nvaccel_pageoff_copy_unlocked).
+// Measured on the RTX 5050 (2026-11-26): sharing a window from Firefox, Firefox locks every frame ScreenCaptureKit hands
+// it for the processor, about 90 a second, and each of those page-offs held the accelerator lock for its whole copy,
+// ~1.06 ms on the copy engine into the staging buffer and 0.9 to 1.7 ms from the processor into the surface's pages.
+// WindowServer's marks and grants queued behind it (301 waits, 420 ms in ten seconds, the longest 26 ms).
+// Here the copy engine reads the GPU's memory into a buffer of this copy's own with the lock let go, under the same
+// conditions as the unlocked wait: gPoUnlocked, the thread owns the lock at one level and the driver did not pin it.
+// The lock is taken back before anything reaches the surface or the resource: the checks, the processor's copy from the
+// buffer into the surface's pages, the validity bit, the copy's end. With it back, the buffer is written into the surface
+// only when nothing it was read from changed while the lock was free: the same resource, surface, validity bit and
+// NVVidMemory with the same VRAM allocation (its cookie is never reused), no mark of a GPU write by the plugin
+// (fMarks), and system memory still not current (nvaccel_pageoff_recheck.h, with this copy's own number taken before
+// the copy engine read). Anything else throws the buffer away: either another page-off has made the copy (done), or
+// the page-off copies again with the lock held, as 3.0.19 did.
+// - The copy's number is taken before the copy engine reads and its end is written with the lock held, after the
+//   checks: a copy that began later and finished first means this one is done, so ends stay in order.
+// - The buffer has its own lock, gPoCuLock, taken without the accelerator lock and held while the accelerator lock is
+//   taken back; nothing takes gPoCuLock with the accelerator lock held, so the two never wait for each other in a circle.
+// - The VRAM is named to NVRM through its NVKMS memory, which NVRM reads. NVVidMemory::releaseVram waits for
+//   fPoCopyBusy to clear before it gives VRAM back, and the NVVidMemory is held: the memory outlives the read.
+// - Only on a GPU without a DMA mapper (mode 0: the buffer's physical pages are its bus addresses). Behind a mapper and
+//   for a plane of a two-plane surface, page-offs copy with the lock held, as before.
+enum { kPoCuNotTaken = 0, kPoCuDone, kPoCuLocked };
+static IOLock *volatile gPoCuLock;
+static IOBufferMemoryDescriptor *gPoCuBuf;
+static volatile SInt32 gPoCuBackoff;   // page-offs left that copy with the lock held after a buffer was refused
+static IOLock *nvPoCuLock(void)
+{
+    if (!gPoCuLock) {
+        IOLock *l = IOLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gPoCuLock)) IOLockFree(l);
+    }
+    return gPoCuLock;
+}
+// The buffer for an unlocked copy of len bytes (gPoCuLock held): physically contiguous, kept and grown like the shared
+// staging buffer. None to be had: the next 1024 page-offs copy with the lock held.
+static IOBufferMemoryDescriptor *nvPoCuBuffer(unsigned long long len)
+{
+    if (gPoCuBuf && gPoCuBuf->getLength() >= len) return gPoCuBuf;
+    if (len > (64ull << 20)) return nullptr;
+    const unsigned long long want = (len + 0xFFFFFull) & ~0xFFFFFull;
+    IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+                                                                      (vm_size_t)want, PAGE_SIZE);
+    if (b && b->prepare() != kIOReturnSuccess) { b->release(); b = nullptr; }
+    if (!b) {
+        gPoCuBackoff = 1024;
+        if (OSAddAtomic64(1, &gCntPoCuNoBuf) < 8)
+            ALOG("page-off: no %llu B physically contiguous buffer for an unlocked copy -- the next 1024 copy with the lock held", want);
+        return nullptr;
+    }
+    if (gPoCuBuf) { gPoCuBuf->complete(); gPoCuBuf->release(); }
+    gPoCuBuf = b;
+    ALOG("page-off: unlocked copy buffer %llu B, physically contiguous", want);
+    return b;
+}
+// Called by NVResource::pageoff with the accelerator lock held by the family's caller, after its first checks passed
+// (surface, VRAM, RM handles). kPoCuNotTaken: nothing was done and the lock was never let go. kPoCuDone: the page-off is
+// over (*out says how it went), with the lock held again. kPoCuLocked: the lock was let go and is held again, nothing
+// reached the surface, and the page-off is to be made with the lock held: the caller reads the resource again first.
+// holdRes and holdAccel are NVResource::pageoff's holds: set here when the lock is let go, released when it returns.
+static int nvPoCopyUnlocked(NVResource *res, NVAccel *a, void *surf, NVVidMemory *vm, const struct NVRMRmHandles *h,
+                            bool pending, OSObject **holdRes, OSObject **holdAccel, bool *out)
+{
+    if (!gPoUnlocked || !gPoCopyUnlocked || !a || res->fRangeLen || !a->mayRelease()) return kPoCuNotTaken;
+    if (nvAccelDmaMode(a) != NVRM_DMA_NONE) return kPoCuNotTaken;
+    if (gPoCuBackoff > 0) { OSDecrementAtomic(&gPoCuBackoff); return kPoCuNotTaken; }   // no buffer lately: not worth letting go
+    volatile unsigned char *const r = (volatile unsigned char *)res;
+    volatile unsigned short *const v0 = *(unsigned short *volatile *)(r + kNvResValid);
+    const unsigned short bit0 = res->validBit();
+    if (!v0 || (v0[0] & bit0)) return kPoCuNotTaken;   // system memory already current: copied as 2.9 did
+    IOMemoryDescriptor *const md0 = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
+    if (!md0) return kPoCuNotTaken;
+    unsigned long long len = md0->getLength();
+    if (len > vm->fBytes) len = vm->fBytes;
+    const unsigned long long pages = (len + 4095) >> 12;
+    if (!pages || len > (64ull << 20)) return kPoCuNotTaken;
+    IOService *const nvrm = nvAccelNVRM(a);
+    if (!nvrm) return kPoCuNotTaken;
+    const unsigned sid = _ZNK9IOSurface12getSurfaceIDEv(surf);
+    // what the copy reads and the state it is checked against, with the lock held
+    void *const kapiDevice = h->kapiDevice, *const kapiMemory = vm->fRmHandle;
+    const unsigned long long cookie0 = vm->fAllocationCookie, marks0 = res->fMarks;
+    const unsigned long long copies0 = nvaccel_pageoff_copies_started(&res->fPoCopies);
+    if (!kapiMemory || !cookie0) return kPoCuNotTaken;
+    res->retain(); *holdRes = res;
+    a->retain(); *holdAccel = a;
+    vm->retain();
+    __atomic_store_n(&vm->fPoCopyBusy, 1u, __ATOMIC_RELEASE);
+    const uint64_t t0 = mach_absolute_time();
+    nvFamUnlock(a);
+    // No lock of this driver held. The 2.9 wait is made as with the lock held, without its 100 ms bound.
+    nvSurfWaitReadyFor(sid, NVRM_FENCE_WAIT_MAX_MS);
+    if (pending) OSAddAtomic64(1, &gCntPoUnlocked);
+    IOLock *const lk = nvPoCuLock();
+    IOBufferMemoryDescriptor *sb = nullptr;
+    unsigned long long copyNumber = 0, usec = 0;
+    unsigned st = NVRM_SS_OFF;
+    if (lk) {
+        IOLockLock(lk);   // held until the buffer has been written into the surface or thrown away
+        sb = nvPoCuBuffer(len);
+        IOByteCount sl = 0;
+        const addr64_t sp = sb ? sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone) : 0;
+        unsigned long long *spa = (sp && sl >= len) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
+        if (spa) {
+            for (unsigned long long k = 0; k < pages; k++) spa[k] = sp + k * 4096;
+            copyNumber = nvaccel_pageoff_copy_begin(&res->fPoCopies);   // before the GPU's memory is read
+            struct NVRMSurfPageoff q; nvSVZero(&q, sizeof q);
+            q.version = NVRM_SS_RM_VERSION; q.status = NVRM_SS_OFF; q.kapiDevice = kapiDevice; q.kapiMemory = kapiMemory;
+            q.pages = spa; q.pageCount = pages; q.length = len;
+            const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
+            if (sym) { nvrm->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr); sym->release(); }
+            st = q.status; usec = q.usec;
+            IOFree(spa, pages * sizeof *spa);
+        }
+        if (st == 0x65u) {   // the copy engine may still write into the buffer: it is left to it
+            ALOG("page-off: unlocked copy TIMED OUT on the copy engine -- abandoning its buffer (%llu B)", (unsigned long long)sb->getLength());
+            gPoCuBuf = nullptr;
+            sb = nullptr;
+        }
+    }
+    __atomic_store_n(&vm->fPoCopyBusy, 0u, __ATOMIC_RELEASE);   // NVRM is done with the VRAM
+    if (!nvFamLock(a, false)) {
+        if (lk) IOLockUnlock(lk);
+        nvPoStandDown("the accelerator lock could not be taken back after an unlocked copy");
+        // vm is not released without the lock (the release could free it there): kept, one object leaked
+        if (out) *out = false;
+        return kPoCuDone;
+    }
+    a->unpinLock();   // nvFamLock pins the driver's own locks; this one is the family's caller's again
+    { uint64_t ns = 0; absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+      if ((int)(ns / 1000) > gPoCuMaxUs) gPoCuMaxUs = (int)(ns / 1000); }
+    if (st == NVRM_SS_NO_DMA) nvAccelDmaForget(a);   // its GPU translates now: asked again next time
+    // The hold is the last reference: nothing is read through the resource any more (NVHold keeps it, and stands down).
+    if (res->getRetainCount() <= 1) { if (lk) IOLockUnlock(lk); vm->release(); if (out) *out = false; return kPoCuDone; }
+    int ret = kPoCuLocked;
+    if (st != 0 || !sb) {
+        if (st != NVRM_SS_OFF || sb) OSAddAtomic64(1, &gCntPoCuFailed);
+    } else {
+        void *const cache1 = *(void *volatile *)(r + kNvResCache);
+        NVVidMemory *const vm1 = nvres_vidmem(res);
+        void *const surf1 = (r[kNvResType] == 0xc0 && cache1) ? *(void *volatile *)((unsigned char *)cache1 + 0x10) : nullptr;
+        volatile unsigned short *const v1 = *(unsigned short *volatile *)(r + kNvResValid);
+        IOMemoryDescriptor *const md = surf1 ? (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf1) : nullptr;
+        const bool same = surf1 == surf && vm1 == vm && vm->fRmHandle == kapiMemory && vm->fAllocationCookie == cookie0 &&
+                          !vm->fScanout && vm->fBytes >= len && res->validBit() == bit0 && res->fMarks == marks0 &&
+                          v1 == v0 && md == md0 && md->getLength() >= len && !res->fRangeLen;
+        // Asked first, as after the unlocked wait: another page-off that began after this copy's read and has finished, or
+        // the family, made system memory current. Done, whatever else changed; a copy now would go over a CPU write.
+        if (v1 && res->validBit() == bit0 && nvaccel_pageoff_already_done(&res->fPoCopies, 0, (v1[0] & bit0) != 0, copies0, copyNumber)) {
+            OSAddAtomic64(1, &gCntPoCuAlready);
+            if (out) *out = true;
+            ret = kPoCuDone;
+        } else if (!same) OSAddAtomic64(1, &gCntPoCuChanged);
+        else if (md->prepare(kIODirectionNone) == kIOReturnSuccess) {
+            const uint64_t c0 = mach_absolute_time();
+            const IOByteCount w = md->writeBytes(0, sb->getBytesNoCopy(), (IOByteCount)len);
+            const unsigned long long cpuUs = (mach_absolute_time() - c0) / 1000;
+            md->complete(kIODirectionNone);
+            const bool ok = w == (IOByteCount)len;
+            if (ok) {
+                nvSVPend(sid, 0);
+                v1[0] |= bit0;
+                nvaccel_pageoff_copy_end(&res->fPoCopies, copyNumber);
+                gNVSVPageoff++;
+                const SInt64 n = OSAddAtomic64(1, &gCntPoCuOk);
+                if (n < 8 || (n & 1023) == 0)
+                    ALOG("surfvram pageoff: res %p %llu B on the copy engine in %llu us without the accelerator lock + cpu %llu us with it (unlocked copies %lld)",
+                         res, len, usec, cpuUs, (long long)n + 1);
+            } else { gNVSVPageoffFail++; OSAddAtomic64(1, &gCntPoCuFailed); }
+            if (out) *out = ok;
+            ret = kPoCuDone;
+        } else OSAddAtomic64(1, &gCntPoCuFailed);   // the surface's pages could not be wired: the locked path says so
+    }
+    if (lk) IOLockUnlock(lk);
+    vm->release();
+    return ret;
+}
+
 // The family's own page-off. From 10.12 on it forwards to the short form, whose base body is empty; before 10.12 the
 // family has no body at all, so there is nothing to call.
 #if defined(NM_ERA) && NM_ERA < 1012
@@ -3009,7 +3227,21 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
         NVAccel *a = NVAccel::resolve(fAccel);
         // Asked once: the question takes NVRM's fence lock, and a yes is counted (nvaccel_surface_fence_pending).
         const bool pending = gPoUnlocked && a && nvSurfIsPending(sid);
-        if (pending && a->mayRelease()) {
+        // The copy without the lock (nvPoCopyUnlocked) makes its own wait for the GPU, unlocked too.
+        const int cu = nvPoCopyUnlocked(this, a, surf, vm, &h, pending, &holdRes.o, &holdAccel.o, out);
+        if (cu == kPoCuDone) return;
+        if (cu == kPoCuLocked) {
+            // The lock was free and the GPU waited for: read everything again, wait again with the lock held (a mark
+            // made meanwhile is waited for here) and copy with it held, as before 3.0.20.
+            cache = *(void *volatile *)(r + kNvResCache);
+            vm = nvres_vidmem(this);
+            surf = (r[kNvResType] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
+            if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(fAccel, &h)) {
+                if (fRangeLen) { nvSVRangedFail(this, out, NVRM_SS_NO_VRAM, "no surface, VRAM or RM handles after an unlocked copy"); return; }
+                NV_FAM_PAGEOFF(ev, a1, out, a3); return;
+            }
+            nvSurfWaitReadyFor(_ZNK9IOSurface12getSurfaceIDEv(surf), kSurfGpuWaitMs);
+        } else if (pending && a->mayRelease()) {
             const uint64_t t0 = mach_absolute_time();
             // What the copy below would act on, as it stood with the lock held, so the state after the wait can be
             // compared with it. valid[0] = the system-memory copy holds the newest pixels (set by a page-off), on bit 0,
