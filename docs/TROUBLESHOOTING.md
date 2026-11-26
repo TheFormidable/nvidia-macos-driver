@@ -247,7 +247,9 @@ worth a report with the macOS build.
 accelerator lock is the cause: please report it with the output of `sysctl debug | grep nvaccel_pageoff` and the
 kernel log lines `NVAccel: page-off: ...`, and keep a spindump of WindowServer and kernel_task taken while it is
 frozen. `debug.nvaccel_pageoff_unlocked_standdown` = 1 without the boot argument means the driver already turned that
-path off for the boot; the log line says why.
+path off for the boot; the log line says why. Since 3.0.20 the page-off's copy also reads the GPU's memory without
+the lock; `nvaccel_pageoff_copy_locked=1` keeps only the copy under it, as in 3.0.19, and is the first thing to try when
+the freeze or a wrong frame comes with a program reading the capture (Firefox, OBS, Zoom).
 
 **Screen sharing, recording or video shows wrong colours, a green or purple cast, a frame from a moment ago, or
 frames that flicker between two.** Boot once with `nvaccel_surf_planes=0` and say whether it goes away. Before that,

@@ -22,8 +22,8 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | env |  | 6 |  |  | 47 | 1 | 58 | 405 | 12 |  | 529 |
-| bootarg | 4 | 13 | 30 | 21 | 16 |  | 8 | 6 | 2 |  | 100 |
-| sysctl |  | 5 | 4 | 12 |  |  | 380 |  | 1 |  | 402 |
+| bootarg | 4 | 13 | 30 | 21 | 17 |  | 8 | 6 | 2 |  | 101 |
+| sysctl |  | 5 | 4 | 12 |  |  | 388 |  | 1 |  | 410 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 15 |  | 15 |
 | build |  |  |  |  | 1 |  |  | 1 | 6 |  | 8 |
@@ -83,6 +83,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVMTL_YUV422` | on (NVMTL_YUV422=0 in the settings file: 4:2:2 textures are refused, as in 2.9) | 3.2 | Textures in the packed 4:2:2 video formats (BGRG422, GBGR422), which CoreVideo uses for camera frames, are created and sampled instead of refused. |
 | env | `NVRM_EVENT_WAIT` | on (NVRM_EVENT_WAIT=0 in the settings file: every process polls, as 2.9's applications did; 2.9's WindowServer slept on the event) | 3.2 | A thread that waits for the GPU sleeps until the kernel reports the GPU's event, after a spin whose length follows how long such waits take. 2.9 did this in WindowServer and in applications whose built-in profile asked for it. |
 | bootarg | `-nvrmoldwaits` | on (-nvrmoldwaits present: the fixed waits and one-second polls of 2.9) | 3.2 | Start-up waits for what it needs (start finished, heads published, a head scanning) in short polls, each bounded by the time 2.9 slept, instead of sleeping fixed times. |
+| bootarg | `nvaccel_pageoff_copy_locked` | on (nvaccel_pageoff_copy_locked=1: the copy keeps the accelerator lock, as in 3.0.19) | 3.2 | A page-off reads the GPU's memory into a buffer of its own without the accelerator lock, so WindowServer's marks and grants are not held behind the copy engine while a screen-capture client reads frames. |
 | bootarg | `nvaccel_pageoff_locked` | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. |
 | bootarg | `nvaccel_surf_planes` | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. |
 | bootarg | `nvfbceclear` | on (nvfbceclear=0: a new block of video memory that has to be zero is filled from the processor through BAR1, as in 3.0) | 3.2 | A new block of video memory that has to be zero (after the GPU's first standby, or once a block read as not zero although the RM clears) is cleared by the GPU's copy engine through NVRM instead of being filled with zeros from the processor through BAR1, which took 27 ms for the 9 MB of one captured frame of a screen share; the probes check the result, and the processor fills whatever the engine did not do. |
@@ -684,6 +685,7 @@ Each of these does nothing unless it is set.
 | `nmsmn` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NMSMN/nmsmn.cpp |
 | `nmxvt` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `nvaccel` | install | absent: the accelerator does not start (boot-loop guard) | 2.9 | - | part of the install line in README.md; set by the installer's instructions | kexts/NVRM/accel/nvrm-accel.cpp |
+| `nvaccel_pageoff_copy_locked` | escape | on (nvaccel_pageoff_copy_locked=1: the copy keeps the accelerator lock, as in 3.0.19) | 3.0 | 3.2 | A page-off reads the GPU's memory into a buffer of its own without the accelerator lock, so WindowServer's marks and grants are not held behind the copy engine while a screen-capture client reads frames. | kexts/NVRM/accel/nvrm-accel.cpp |
 | `nvaccel_pageoff_locked` | escape | on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9) | 3.0 | 3.2 | A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it. | kexts/NVRM/accel/nvrm-accel.cpp |
 | `nvaccel_surf_planes` | escape | on (nvaccel_surf_planes=0: planes are not offered, as in 2.9) | 3.0 | 3.2 | Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed. | kexts/NVRM/accel/nvrm-accel.cpp |
 | `nvagdcheads` | hardware | unset | 2.9 | - | depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it | kexts/NVRMAGDC/nvrm-agdc.cpp |
@@ -827,6 +829,14 @@ Each of these does nothing unless it is set.
 | `debug.nvaccel_map_commit` | diag | read-only | 2.9 | - | GPU page-table commits (MAP_MEMORY_DMA ok) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_free` | diag | read-only | 2.9 | - | GPU VA ranges freed (nvAccelGpuVaFree) | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_map_release` | diag | read-only | 2.9 | - | GPU page-table releases (UNMAP_ONLY) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked` | diag | read-only | 3.0.19 | - | 1 = a page-off reads the GPU's memory into a buffer of its own without the accelerator lock (0: boot-arg nvaccel_pageoff_copy_locked=1) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_already` | diag | read-only | 3.0.19 | - | unlocked page-off copies thrown away because another page-off had made system memory current meanwhile | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_changed` | diag | read-only | 3.0.19 | - | unlocked page-off copies thrown away because the resource, its VRAM or surface changed, or the plugin marked a GPU write, while the lock was free (copied again with the lock held) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_failed` | diag | read-only | 3.0.19 | - | unlocked page-off copies the copy engine did not make (copied again with the lock held) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_max_us` | diag | read-only | 3.0.19 | - | longest time an unlocked page-off copy kept the accelerator lock free, us | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_nobuf` | diag | read-only | 3.0.19 | - | times no physically contiguous buffer could be had for an unlocked page-off copy (the next 1024 copy with the lock held) | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_ok` | diag | read-only | 3.0.19 | - | page-offs whose copy engine read ran without the accelerator lock and whose pixels were then written into the surface | kexts/NVRM/accel/nvrm-accel.cpp |
+| `debug.nvaccel_pageoff_copy_unlocked_vm_waits` | diag | read-only | 3.0.19 | - | VRAM releases that waited for an unlocked page-off copy still reading that VRAM | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_locked_not_owner` | diag | read-only | 2.9 | - | page-offs with a pending surface that waited locked because the thread was not the lock's owner at one level | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_locked_pinned` | diag | read-only | 3.0 | - | page-offs with a pending surface that waited locked because the driver's own code held the lock | kexts/NVRM/accel/nvrm-accel.cpp |
 | `debug.nvaccel_pageoff_ranged` | diag | read-only | 3.0 | - | plane-ranged page-offs that copied the plane into its range | kexts/NVRM/accel/nvrm-accel.cpp |

@@ -581,6 +581,7 @@ bootarg	nmkblhid	hardware	unset	2.9	-	depends on the machine (laptop, panel, fir
 bootarg	nmsmn	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
 bootarg	nmxvt	dev	unset	2.9	-	unreviewed
 bootarg	nvaccel	install	absent: the accelerator does not start (boot-loop guard)	2.9	-	part of the install line in README.md; set by the installer's instructions
+bootarg	nvaccel_pageoff_copy_locked	escape	on (nvaccel_pageoff_copy_locked=1: the copy keeps the accelerator lock, as in 3.0.19)	3.0	3.2	A page-off reads the GPU's memory into a buffer of its own without the accelerator lock, so WindowServer's marks and grants are not held behind the copy engine while a screen-capture client reads frames.
 bootarg	nvaccel_pageoff_locked	escape	on (nvaccel_pageoff_locked=1: the wait keeps the accelerator lock, as in 2.9)	3.0	3.2	A page-off that has to wait for WindowServer's GPU write waits without the accelerator lock, so other threads are not held behind it.
 bootarg	nvaccel_surf_planes	escape	on (nvaccel_surf_planes=0: planes are not offered, as in 2.9)	3.0	3.2	Each plane of a two-plane video surface (NV12) gets its own video memory and is paged off on its own, once a round-trip self-test in the process has passed.
 bootarg	nvagdcheads	hardware	unset	2.9	-	depends on the machine (laptop, panel, firmware, second card); cannot be defaulted without it
@@ -719,6 +720,14 @@ sysctl	debug.nvaccel_layout_vtshort	diag	read-only	3.0	-	vtables that read short
 sysctl	debug.nvaccel_map_commit	diag	read-only	2.9	-	GPU page-table commits (MAP_MEMORY_DMA ok)
 sysctl	debug.nvaccel_map_free	diag	read-only	2.9	-	GPU VA ranges freed (nvAccelGpuVaFree)
 sysctl	debug.nvaccel_map_release	diag	read-only	2.9	-	GPU page-table releases (UNMAP_ONLY)
+sysctl	debug.nvaccel_pageoff_copy_unlocked	diag	read-only	3.0.19	-	1 = a page-off reads the GPU's memory into a buffer of its own without the accelerator lock (0: boot-arg nvaccel_pageoff_copy_locked=1)
+sysctl	debug.nvaccel_pageoff_copy_unlocked_already	diag	read-only	3.0.19	-	unlocked page-off copies thrown away because another page-off had made system memory current meanwhile
+sysctl	debug.nvaccel_pageoff_copy_unlocked_changed	diag	read-only	3.0.19	-	unlocked page-off copies thrown away because the resource, its VRAM or surface changed, or the plugin marked a GPU write, while the lock was free (copied again with the lock held)
+sysctl	debug.nvaccel_pageoff_copy_unlocked_failed	diag	read-only	3.0.19	-	unlocked page-off copies the copy engine did not make (copied again with the lock held)
+sysctl	debug.nvaccel_pageoff_copy_unlocked_max_us	diag	read-only	3.0.19	-	longest time an unlocked page-off copy kept the accelerator lock free, us
+sysctl	debug.nvaccel_pageoff_copy_unlocked_nobuf	diag	read-only	3.0.19	-	times no physically contiguous buffer could be had for an unlocked page-off copy (the next 1024 copy with the lock held)
+sysctl	debug.nvaccel_pageoff_copy_unlocked_ok	diag	read-only	3.0.19	-	page-offs whose copy engine read ran without the accelerator lock and whose pixels were then written into the surface
+sysctl	debug.nvaccel_pageoff_copy_unlocked_vm_waits	diag	read-only	3.0.19	-	VRAM releases that waited for an unlocked page-off copy still reading that VRAM
 sysctl	debug.nvaccel_pageoff_locked_not_owner	diag	read-only	2.9	-	page-offs with a pending surface that waited locked because the thread was not the lock's owner at one level
 sysctl	debug.nvaccel_pageoff_locked_pinned	diag	read-only	3.0	-	page-offs with a pending surface that waited locked because the driver's own code held the lock
 sysctl	debug.nvaccel_pageoff_ranged	diag	read-only	3.0	-	plane-ranged page-offs that copied the plane into its range

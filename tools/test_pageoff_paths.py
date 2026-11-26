@@ -179,6 +179,12 @@ void IOAccelResource2::pageoff(IOAccelEvent *, bool, bool *out, unsigned long lo
 }
 static int gGpu, gSys, gCpuWrites;                    // the frame in the GPU's memory, the frame in system memory, CPU writes no copy has overwritten
 static int gCopies, gCopiesUnlocked; static void *gCopySurf; static NVVidMemory *gCopyVm;
+// The copy without the lock (3.0.20) has its own test, tools/test_pageoff_copy_unlocked.py: here it is not taken, as on
+// a GPU behind a DMA mapper, and the head goes on as before. It is asked with the lock held.
+enum { kPoCuNotTaken = 0, kPoCuDone, kPoCuLocked };
+static int gCuAsked, gCuAskedUnlocked;
+static int nvPoCopyUnlocked(NVResource *, NVAccel *, void *, NVVidMemory *, const struct NVRMRmHandles *, bool, OSObject **, OSObject **, bool *)
+{ gCuAsked++; if (!lockMine()) gCuAskedUnlocked++; return kPoCuNotTaken; }
 @@HEAD@@
     // The copy, in place of the function's own.
     gCopies++; if (!lockMine()) gCopiesUnlocked++;

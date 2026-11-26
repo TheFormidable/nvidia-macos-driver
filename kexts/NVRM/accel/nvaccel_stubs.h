@@ -79,6 +79,10 @@ public:
     // The driver's own page-off copies of this resource, numbered (nvaccel_pageoff_recheck.h): a page-off that waited
     // for the GPU without the accelerator lock reads it to see whether another thread has made its copy meanwhile.
     nvaccel_pageoff_copies fPoCopies = { 0, 0 };
+    // The plugin's accepted marks of a GPU write to this resource (nvAccelSurfDirty), counted with the accelerator lock
+    // held. A page-off that read the GPU's memory without the lock compares it, with the lock back, with what it was
+    // before: a mark in between means the GPU may have written while the copy engine read.
+    unsigned long long fMarks = 0;
     // One plane of a two-plane surface (nvaccel_plane_range.h): where the plane's bytes are in the surface's memory, and
     // the bit of the family's validity words this resource uses. Written once, by the first grant that names the range
     // (NVRM_SS_PLANE_RANGED), with the accelerator lock held, and read with it held. fRangeLen 0: the resource is paged
@@ -111,6 +115,9 @@ public:
     void              *fParkHandle = nullptr;
     void              *fParkKva    = nullptr;
     unsigned long long fParkPhys = 0, fParkBytes = 0, fParkCookie = 0;
+    // 1 while a page-off's copy engine reads this VRAM without the accelerator lock (nvPoCopyUnlocked). Set with the
+    // lock held, cleared without it when NVRM's copy has returned; releaseVram waits for 0 before it gives VRAM back.
+    volatile unsigned int fPoCopyBusy = 0;
     void releaseVram(void *handle, void *kva, unsigned long long bytes, unsigned long long cookie);
     void releaseParked();
 
