@@ -11,9 +11,14 @@ own releases, use [NullMoth's advisory channel](https://github.com/nullmoth/nvid
 
 This repository is an independent fork. [Fork releases](https://github.com/TheFormidable/nvidia-macos-driver/releases)
 and builds from this source are not [official NullMoth releases](https://github.com/nullmoth/nvidia-macos-driver/releases),
-whatever the package's file name says (`nullmoth-nvidia-local-<commit>.tar.gz`). A package's `SHA256SUMS` verifies its
+whatever the package's file name says (`nullmoth-nvidia-3.0.20.tar.gz`, `nullmoth-nvidia-local-<commit>.tar.gz`). A package's `SHA256SUMS` verifies its
 contents against its manifest, not the identity of its publisher: `install.sh` checks a package's integrity, not who
 built it. Verify where a package comes from, and keep a known-good package to go back to.
+
+The anchor kext published with release 2 (`NVAnchorInjector.kext.zip`, for AMFIAnchor) holds only the public key of the
+maintainer's root certificate. Once it is loaded, AMFI on that Mac accepts anything signed with the maintainer's key,
+not only this driver. Load it only if you trust that signer, or make your own CA and anchor
+([docs/SIGNED-GRAPHICS-EXPERIMENT.md](docs/SIGNED-GRAPHICS-EXPERIMENT.md)). The private keys are not in this repository.
 
 GPU Caps is read-only. It does not authorize fan, voltage, clock or power writes. NVMetrics is a separate project:
 its experimental manual cooling relies on qualified hardware, live telemetry, watchdog and verified AUTO recovery.

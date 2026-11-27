@@ -50,13 +50,19 @@ this fork's own work only, is in [docs/releases/RELEASE-2.md](docs/releases/RELE
   before (the closing message says which happened). `tools/test_kext_preapprove.py` (new) runs the same SQL against a
   stand-in `KextPolicy` database and checks the driver's kexts end up allowed once each while an already-allowed kext
   and an unrelated third-party row are left untouched. Not yet exercised on a Mac.
+- **The release package is signed for the AMFIAnchor route.** Release 2's package carries the graphics stack
+  (NVMTLDriver.bundle, NVKZinkGLDriver.bundle and the nvmtl libraries) signed with the maintainer's CA, made and kept
+  on the maintainer's Mac (`tools/sign_graphics.sh`, `tools/stage_signed_graphics.py`). The matching anchor kext,
+  `NVAnchorInjector.kext.zip`, which holds only the public root certificate, is published beside it. With the two AMFI
+  boot arguments the signature changes nothing.
 - **Build files and documentation for release 2.** `build/build.conf.example` lists `NM_LEGACY_KITS`.
   `build/legacy/package_kits.sh` writes this fork's release address into `legacy_kits.json` (it named the original's;
   nothing reads it). `package/install.sh`, `package/fw_fetch.sh` and the kits' `package/legacy/install-legacy.sh` no
   longer send users to the original's 1401 app or its USB stick: the notes about boot-args point to the README's
   OpenCore settings, and the AMFI note names the optional AMFIAnchor route. The README is new, and every document was
   brought to 3.0.20 with the original's 1401 app, Discord and maintainer process taken out
-  ([docs/releases/RELEASE-2.md](docs/releases/RELEASE-2.md) is the release's own page).
+  ([docs/releases/RELEASE-2.md](docs/releases/RELEASE-2.md) is the release's own page). The kits inside the release 2
+  package were packed at 3.0.19, so their own installer keeps the old messages until they are packed again.
 
 ### What ran where
 

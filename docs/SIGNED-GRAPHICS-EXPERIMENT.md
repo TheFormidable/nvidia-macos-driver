@@ -7,6 +7,12 @@
 > **experimental** for every other machine, and gate 4 below is open. The documented default install keeps the two
 > AMFI boot arguments. Keep an EFI that still has them ([Going back](#going-back-to-the-amfi-boot-arguments)).
 
+**Release 2's ready-made anchor.** The 3.0.20 release package comes with its graphics stack signed with the
+maintainer's CA, and the matching anchor kext, `NVAnchorInjector.kext.zip`, is published on the
+[release page](https://github.com/TheFormidable/nvidia-macos-driver/releases/tag/3.0.20). The OpenCore steps below are
+the same with `NVAnchorInjector.kext` as the anchor kext. That anchor makes AMFI accept anything signed with the
+maintainer's key on your Mac, not only this driver: make your own chain (next section) to trust only yourself.
+
 This experiment follows the separation of signing from packaging documented by
 [WhateverXe-Graphics](https://github.com/b00t0x/WhateverXe-Graphics/blob/main/docs/SOURCES.md), and loads its trust
 anchor through [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor), both by b00t0x. AMFIAnchor documents a modified
