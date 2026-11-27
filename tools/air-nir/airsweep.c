@@ -226,10 +226,11 @@ main(int argc, char **argv)
          if ((fcs = strchr(only, '\t')))
             *fcs++ = 0;
       }
-      uint32_t fc_idx[64], fc_sz[64], nfc = 0;
-      static uint8_t fc_bytes[64][64];
-      const uint8_t *fc_pay[64];
-      for (char *tok = fcs ? strtok(fcs, ",") : NULL; tok && nfc < 64; tok = strtok(NULL, ",")) {
+      static uint32_t fc_idx[1024], fc_sz[1024];
+      static uint8_t fc_bytes[1024][64];
+      static const uint8_t *fc_pay[1024];
+      uint32_t nfc = 0;
+      for (char *tok = fcs ? strtok(fcs, ",") : NULL; tok && nfc < 1024; tok = strtok(NULL, ",")) {
          char *eq = strchr(tok, '=');
          if (!eq)
             continue;

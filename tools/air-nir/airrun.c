@@ -2221,6 +2221,190 @@ tex_fence_check(struct run *r)
    return true;
 }
 
+/* tex_pixel: constexpr pixel-coordinate samplers */
+static void
+tex_pixel_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   float *xy = slot(r, 0, 256 * 8);
+   slot(r, 1, 256 * 3 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      for (unsigned k = 0; k < 2; k++) {
+         unsigned kind = rnd() % 3;
+         float v = kind == 0 ? (float)(rnd() % 8) + 0.5f            /* a texel centre */
+                 : kind == 1 ? (float)(rnd() % 9)                   /* an exact texel edge, 8 included */
+                             : rndf(-3, 11);                        /* anywhere, outside too */
+         xy[i * 2 + k] = v;
+      }
+   }
+}
+
+static bool
+tex_pixel_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   uint32_t slots = 0;
+   for (unsigned k = 0; k < res->static_sampler_count && k < 32; k++)
+      slots |= 1u << res->static_samplers[k].slot;
+   if (res->static_sampler_count != 3 || slots != 7)
+      return FAILF(r, "%u constexpr samplers at slots 0x%x: expected 3 at 0x7", res->static_sampler_count, slots);
+   return true;
+}
+
+static bool
+tex_pixel_check(struct run *r)
+{
+   const float *xy = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      float x = xy[i * 2], y = xy[i * 2 + 1], w[3][4];
+      int ix = (int)floorf(x), iy = (int)floorf(y);
+      bool inside = ix >= 0 && ix < 8 && iy >= 0 && iy < 8;
+      sample_nearest(r, 0, 0, x / 8, y / 8, 0, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[0]);
+      for (unsigned c = 0; c < 4; c++)
+         w[1][c] = inside ? w[0][c] : 0.0f;
+      sample_linear(r, 0, 0, x / 8, y / 8, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[2]);
+      static const char *what[3] = { "nearest clamp_to_edge", "nearest clamp_to_zero", "linear clamp_to_edge" };
+      static const float tol[3] = { 1e-6f, 1e-6f, 1.0f / 128 };
+      for (unsigned k = 0; k < 3; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 3 + k) * 4 + c];
+            if (!(fabsf(g - w[k][c]) <= tol[k]))
+               return FAILF(r, "%s, thread %u (%.4f, %.4f) lane %u = %.6f, expected %.6f", what[k], i, x, y, c, g, w[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_offset: run-time and constant offsets */
+static void
+tex_offset_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *uv = slot(r, 0, 256 * 8);
+   int32_t *off = slot(r, 1, 256 * 8);
+   slot(r, 2, 256 * 3 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, 0, 8);
+      uv[i * 2 + 1] = centre_coord(8, 0, 8);
+      off[i * 2] = (int32_t)(rnd() % 8) - 4;
+      off[i * 2 + 1] = (int32_t)(rnd() % 8) - 4;
+   }
+}
+
+static bool
+tex_offset_check(struct run *r)
+{
+   const float *uv = S(r, 0), *got = S(r, 2);
+   const int32_t *off = S(r, 1);
+   VkSamplerAddressMode cl = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   for (unsigned i = 0; i < 256; i++) {
+      float u = uv[i * 2], v = uv[i * 2 + 1], w[3][4];
+      int x = (int)floorf(u * 8), y = (int)floorf(v * 8);
+      for (unsigned c = 0; c < 4; c++) {
+         w[0][c] = rgba8_at(r, 0, 0, wrap(x + off[i * 2], 8, cl), wrap(y + off[i * 2 + 1], 8, cl), 0, c);
+         w[1][c] = rgba8_at(r, 0, 0, wrap(x + 2, 8, cl), wrap(y - 3, 8, cl), 0, c);
+      }
+      int i0 = (int)floorf(u * 8 - 0.5f) - 1, j0 = (int)floorf(v * 8 - 0.5f) + 2;
+      int x0 = wrap(i0, 8, cl), x1 = wrap(i0 + 1, 8, cl), y0 = wrap(j0, 8, cl), y1 = wrap(j0 + 1, 8, cl);
+      w[2][0] = rgba8_at(r, 0, 0, x0, y1, 0, 0), w[2][1] = rgba8_at(r, 0, 0, x1, y1, 0, 0);
+      w[2][2] = rgba8_at(r, 0, 0, x1, y0, 0, 0), w[2][3] = rgba8_at(r, 0, 0, x0, y0, 0, 0);
+      static const char *what[3] = { "run-time offset", "constant offset", "gather with an offset" };
+      for (unsigned k = 0; k < 3; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 3 + k) * 4 + c];
+            if (fabsf(g - w[k][c]) > 1e-6f)
+               return FAILF(r, "%s, thread %u (uv %.4f %.4f, offset %d %d) lane %u = %.6f, expected %.6f", what[k], i, u, v,
+                            off[i * 2], off[i * 2 + 1], c, g, w[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* fc_texture: a texture index from a function constant, and sincos */
+static const struct fcset fc_tex = { 1, { { 0, 4, { 2 } } } };   /* tex_base = 2: texture(3) */
+
+static void
+fc_texture_setup(struct run *r)
+{
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 3);
+   float *in = slot(r, 0, 64 * 4);
+   slot(r, 1, 64 * 2 * 16);
+   for (unsigned i = 0; i < 64; i++)
+      in[i] = rndf(-4, 4);
+}
+
+static bool
+fc_texture_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   if (res->texture_mask[0] != 1u << 3)
+      return FAILF(r, "texture mask 0x%x: expected texture 3 alone (0x8)", res->texture_mask[0]);
+   return true;
+}
+
+static bool
+fc_texture_check(struct run *r)
+{
+   const float *in = S(r, 0), *got = S(r, 1);
+   for (unsigned y = 0; y < 8; y++) {
+      for (unsigned x = 0; x < 8; x++) {
+         unsigned i = y * 8 + x;
+         for (unsigned c = 0; c < 4; c++) {
+            if (fabsf(got[i * 8 + c] - rgba8_at(r, 3, 0, (int)x, (int)y, 0, c)) > 1e-6f)
+               return FAILF(r, "read, thread %u lane %u = %g, expected %g", i, c, got[i * 8 + c], rgba8_at(r, 3, 0, (int)x, (int)y, 0, c));
+         }
+         float ws = sinf(in[i]), wc = cosf(in[i]);
+         if (fabsf(got[i * 8 + 4] - ws) > 2e-5f || fabsf(got[i * 8 + 5] - wc) > 2e-5f)
+            return FAILF(r, "sincos(%g), thread %u = %g %g, expected %g %g", in[i], i, got[i * 8 + 4], got[i * 8 + 5], ws, wc);
+      }
+   }
+   return true;
+}
+
+/* tex_pixel_array: a nearest pixel-coordinate sampler on a 2D array, and uniform<T> */
+static void
+tex_pixel_array_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 3, 1, false);
+   fill_bytes(r, 0);
+   float *xy = slot(r, 0, 256 * 8);
+   uint32_t *layer = slot(r, 1, 256 * 4);
+   slot(r, 2, 256 * 16);
+   slot(r, 3, 256 * 4);
+   for (unsigned i = 0; i < 256; i++) {
+      for (unsigned k = 0; k < 2; k++) {
+         unsigned kind = rnd() % 3;
+         xy[i * 2 + k] = kind == 0 ? (float)(rnd() % 8) + 0.5f : kind == 1 ? (float)(rnd() % 9) : rndf(-3, 11);
+      }
+      layer[i] = rnd() % 3;
+   }
+}
+
+static bool
+tex_pixel_array_check(struct run *r)
+{
+   const float *xy = S(r, 0), *got = S(r, 2);
+   const uint32_t *layer = S(r, 1), *ugot = S(r, 3);
+   for (unsigned i = 0; i < 256; i++) {
+      float w[4];
+      if (layer[i] >= 3)
+         return FAILF(r, "thread %u has layer %u, outside the texture", i, layer[i]);
+      sample_nearest(r, 0, 0, xy[i * 2] / 8, xy[i * 2 + 1] / 8, layer[i], VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w);
+      for (unsigned c = 0; c < 4; c++) {
+         if (fabsf(got[i * 4 + c] - w[c]) > 1e-6f)
+            return FAILF(r, "thread %u (%.4f, %.4f, layer %u) lane %u = %.6f, expected %.6f", i, xy[i * 2], xy[i * 2 + 1],
+                         layer[i], c, got[i * 4 + c], w[c]);
+      }
+      if (ugot[i] != (layer[0] + 5u) * 3u + i)
+         return FAILF(r, "uniform, thread %u = %u, expected %u", i, ugot[i], (layer[0] + 5u) * 3u + i);
+   }
+   return true;
+}
+
 static const struct test tests[] = {
    { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
    { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
@@ -2266,6 +2450,13 @@ static const struct test tests[] = {
    { "tex_depth", NULL, "tex_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_depth_setup, tex_depth_check,
      tex_depth_expect },
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
+   { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
+   { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
+   { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,
+     fc_texture_expect },
+   { "fc_texture_none", "fc_texture", "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "tex_pixel_array", NULL, "tex_pixel_array", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_array_setup,
+     tex_pixel_array_check },
 };
 
 /* ---------------------------------------------------------------------------------------------------------------- */
