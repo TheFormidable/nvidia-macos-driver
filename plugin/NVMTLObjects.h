@@ -329,6 +329,17 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 // A function whose AIR is the translator's own rewrite (a mesh or object stage's kernel, a tile function's, a kernel with
 // a stage-in layout): its compute pipeline takes the SPIR-V road only.
 @interface NVMTLFunction () { @public BOOL _spirvOnly; } @end
+// Phase 4 of AIR to NIR (NVMTLAirNir.m): _spirvLazy, newFunctionWithName: left the translator out because the frontend
+// translates the function and gave its reflection (_nrefl, also in _refl); its SPIR-V is made the first time something
+// needs it (nvmtl_function_spirv), exactly as newFunctionWithName: would have made it. _samplerStates: the AIR state words of
+// the pixel-coordinate argument samplers a sampler variant on the road is translated for (slot to [word0, word1]);
+// _roadOnly: such a variant's stage, which never takes the SPIR-V road (the variant falls back to the translator's then).
+@interface NVMTLFunction () { @public BOOL _spirvLazy, _roadOnly; NSDictionary *_nrefl, *_samplerStates; } @end
+NSData *nvmtl_function_spirv(NVMTLFunction *f, const char *why);
+static inline BOOL nvmtl_function_has_spirv(NVMTLFunction *f) { return f && (f->_spirv.length || f->_spirvLazy || f->_roadOnly); }
+BOOL nvmtl_air_nir_lazy(NVMTLFunction *f);
+void nvmtl_air_nir_refl_check(NVMTLFunction *f);
+NSArray *nvmtl_air_nir_sampler_stages(NVMTLFunction *vf, NVMTLFunction *ff, NSDictionary *vS, NSDictionary *fS, NSString **why);
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
 // The road the pipeline's stages took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V
 @interface NVMTLRenderPipelineState () { @public uint8_t _road; } @end

@@ -3466,6 +3466,12 @@ static void nvmtl_air_dump(NSString *name, NSString *air)
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
     }
+    // Phase 4 (NVMTLAirNir.m): a function the AIR-to-NIR frontend translates and reflects is made without the translator;
+    // its SPIR-V is made the first time something needs it
+    if (spv) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fname = name; lf->_stage = (_stages[name] ?: @""); lf->_air = _airs[name]; lf->_lib = self;
+        if (nvmtl_air_nir_lazy(lf)) return lf;
+    }
     if (spv) { NSError *te = nil; NSData *es = [self nvmtlEntrySpirv:name error:&te];
         if (!es && _airs[name] && nvmtl_needs_visible_link(_airs[name], te.localizedDescription)) {
             nvlog("library: \"%s\" calls a visible function (by reference or table) - DEFERRED to pipeline creation", name.UTF8String);
@@ -3478,7 +3484,9 @@ static void nvmtl_air_dump(NSString *name, NSString *air)
             f->_air = _airs[name]; f->_lib = self; return f;
         }
         spv = es; if (!spv) return nil; }
-    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; return f;
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self;
+    nvmtl_air_nir_refl_check(f);
+    return f;
 }
 static size_t nvmtl_fc_width(NSUInteger dataType)
 {
@@ -3554,11 +3562,17 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
     }
     if (vals.count == 0) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fname = name; lf->_stage = (_stages[name] ?: @""); lf->_air = _airs[name]; lf->_lib = self; lf->_fcv = cv;
+        if (nvmtl_air_nir_lazy(lf)) {
+            nvlog("newFunctionWithName:constantValues: \"%s\" - no constants, made without the translator", name.UTF8String);
+            return lf;
+        }
         spv = [self nvmtlEntrySpirv:name error:error]; if (!spv) return nil;
         NVMTLFunction *f0 = [NVMTLFunction new];
         f0->_spirv = spv; f0->_fname = name; f0->_stage = (_stages[name] ?: @""); f0->_air = _airs[name]; f0->_lib = self; f0->_fcv = cv;
         nvlog("newFunctionWithName:constantValues: \"%s\" - no constants, unspecialized module (%lu B)",
               name.UTF8String, (unsigned long)spv.length);
+        nvmtl_air_nir_refl_check(f0);
         return f0;
     }
     NSUInteger capacity = vals.count;
@@ -3601,6 +3615,14 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
     const BOOL linkFirst = !eagerProbe && _airs[name] && nvmtl_needs_visible_link(_airs[name], nil);
     NSData *spec = nil;
     if (!linkFirst) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fc = [constants copy]; lf->_fname = name; lf->_stage = (_stages[name] ?: @"");
+        lf->_air = _airs[name]; lf->_lib = self; lf->_fcv = cv;
+        if (nvmtl_air_nir_lazy(lf)) {
+            nvlog("newFunctionWithName:constantValues: \"%s\" with %zu constant(s), made without the translator", name.UTF8String, n);
+            return lf;
+        }
+    }
+    if (!linkFirst) {
         nvmtl_fc_expect_link(1);
         spec = nvmtl_translate_with_fc_cached(_airs[name], _stages[name], name, constants, idx, sz, pay, n, &e);
         nvmtl_fc_expect_link(0);
@@ -3617,7 +3639,9 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         return nil;
     }
     nvlog("newFunctionWithName:constantValues: \"%s\" specialized with %zu constant(s)", name.UTF8String, n);
-    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spec; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spec; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; f->_fcv = cv;
+    nvmtl_air_nir_refl_check(f);
+    return f;
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)cv
           completionHandler:(void (^)(id<MTLFunction>, NSError *))handler {
@@ -4577,6 +4601,17 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
                 const uint32_t amp=nvmtl_mv_popcount(_ps->_p.view_mask);   // an amplified pipeline's variants stay multiview shaders
+                // A pipeline on the AIR-to-NIR road: the variant's stages are translated by the frontend with the samplers'
+                // state (NVMTLAirNir.m); when it does not make them, the translator's variant below, as before
+                if(!selected && _ps->_road==1 && ff && vf==(id)_ps->_descriptor.vertexFunction && ff==(id)_ps->_descriptor.fragmentFunction) {
+                    NSArray *st=nvmtl_air_nir_sampler_stages(vf,ff,vS,fS,&why);
+                    if(st) {
+                        MTLRenderPipelineDescriptor *desc=[_ps->_descriptor copy];desc.vertexFunction=st[0];desc.fragmentFunction=st[1];
+                        NSError *error=nil;selected=(id)[(id<MTLDevice>)gNVMTLMainDevice newRenderPipelineStateWithDescriptor:desc error:&error];
+                        if(selected) { nvmtl_sampvar_put(gk,selected,vf,ff); nvlog("render pixel sampler variant built on the AIR-to-NIR road: %s / %s",vf->_fname.UTF8String?:"?",ff->_fname.UTF8String?:"?"); }
+                        else why=error.localizedDescription;
+                    }
+                }
                 NSData *v=selected?nil:nvmtl_translate_samplers_amp(vf,vS,0,amp,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers_amp(ff,fS,_ps->_a8mask,amp,&why):[NSData data]);
                 if(v && f) {
                     NVMTLFunction *vs=[NVMTLFunction new],*fs=ff?[NVMTLFunction new]:nil;

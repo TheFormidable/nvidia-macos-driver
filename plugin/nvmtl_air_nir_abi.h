@@ -75,6 +75,11 @@
                                                  * by its user semantic; a varying they do not name is refused. Without
                                                  * it each takes the translator's own (fragment inputs in their order,
                                                  * vertex outputs by air.location_index or their order). */
+/* Since version 5: */
+#define NVMTL_AIR_NIR_REFLECT       (1u << 8)   /* the result carries the function's reflection (result.reflection) */
+#define NVMTL_AIR_NIR_SAMPLER_STATES (1u << 9)  /* sampler_state_* give the state of argument samplers the dispatch or
+                                                 * draw binds (a pixel-coordinate one is sampled as the translator's
+                                                 * with_runtime_sampler variant samples it) */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
@@ -130,9 +135,19 @@ struct nvmtl_air_nir_request {
    uint32_t varying_count;
    const char *const *varying_keys;
    const uint32_t *varying_locations;
+
+   /* Since version 5, read only with NVMTL_AIR_NIR_SAMPLER_STATES and a size that reaches them: the state of the
+    * [[sampler(n)]] arguments the pipeline is bound with, as the plugin hands them to the translator's
+    * nvmtl_translate_sampler (the AIR constexpr-sampler word layout: filters, address modes, coordinates at bit 15,
+    * ...). An argument sampler given here with pixel coordinates is sampled as such; one not given is a normalized
+    * one, as before. */
+   uint32_t sampler_state_count;
+   const uint32_t *sampler_state_slots;     /* [[sampler(n)]] */
+   const uint64_t *sampler_state_words;     /* two words per sampler */
 };
 #define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V3_SIZE 208u   /* the request without the varying_* fields */
+#define NVMTL_AIR_NIR_REQUEST_V4_SIZE 232u   /* the request without the sampler_state_* fields */
 
 struct nvmtl_air_nir_result {
    uint32_t size;                    /* sizeof(struct nvmtl_air_nir_result), set by the caller */
@@ -170,10 +185,20 @@ struct nvmtl_air_nir_result {
    uint32_t color_outputs;           /* fragment: bit n, [[color(n)]] is written */
    uint32_t fragment_flags;          /* NVMTL_AIR_NIR_FS_* */
    uint32_t reserved4;
+
+   /* Since version 5, written with NVMTL_AIR_NIR_REFLECT when the caller's size reaches them and the function is
+    * translated: the function's reflection as the translator's nvmtl_reflect gives it (JSON, the keys and values the
+    * plugin reads: bindings, varyings, vertex_attributes, local_size, ...), malloc'd (the caller frees it with
+    * free()), reflection_size bytes without a terminating 0 (one follows); NULL and why in reflection_why when this
+    * frontend does not model what the function's reflection would hold. */
+   char *reflection;
+   size_t reflection_size;
+   char reflection_why[128];
 };
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 #define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
 #define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */
+#define NVMTL_AIR_NIR_RESULT_V4_SIZE 1192u   /* the result up to reflection */
 
 #ifdef __cplusplus
 extern "C" {

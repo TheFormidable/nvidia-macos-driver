@@ -41,6 +41,7 @@ struct rtest {
    bool (*check)(struct rrun *);
    const char *tolerance;
    bool spirv_road;                  /* the frontend must refuse it: it passes only on the SPIR-V road */
+   bool fc_both;                     /* the vertex function is made with the constants too */
 };
 
 static id<MTLBuffer>
@@ -337,6 +338,41 @@ rt_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_argpixel (round 5) ---------------------------------------------------------------------------------------- */
+
+static void
+rap_setup(struct rrun *r)
+{
+   rt_setup(r);
+   [r->fsamp[0] release];
+   for (unsigned i = 0; i < 2; i++) {
+      MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+      sd.minFilter = sd.magFilter = i ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+      sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+      sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+      sd.normalizedCoordinates = NO;
+      r->fsamp[i] = [dev newSamplerStateWithDescriptor:sd];
+      [sd release];
+   }
+}
+
+/* ---- r_fcout (round 5) -------------------------------------------------------------------------------------------- */
+
+/* fco_tint true (its varying exists), fco_extra false (its does not), fco_target 0: the output is [[color(1)]] */
+static const struct fcset fc_fcout = { 3, { { 0, 1, { 1 } }, { 1, 1, { 0 } }, { 2, 4, { 0 } } } };
+
+static bool
+rfo_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float want[4] = { px_u(px), px_w(py), 0.5f, 1 };
+         if (!rwant(r, 0, px, py, clear_col, 4, 1e-6f) || !rwant(r, 1, px, py, want, 4, 1e-4f))
+            return false;
+      }
+   return true;
+}
+
 /* ---- r_discard ---------------------------------------------------------------------------------------------------- */
 
 static bool
@@ -585,6 +621,10 @@ static const struct rtest rtests[] = {
      NULL, setup_quad, rc_check, "1e-4" },
    { "r_primid", "r_primid", "rq_vs", "rq_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
      NULL, setup_quad, rq_check, "exact; must take the SPIR-V road", true },
+   { "r_argpixel", "r_argpixel", "rap_vs", "rap_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
+     NULL, rap_setup, rt_check, "nearest 1e-6, linear 1/128" },
+   { "r_fcout", "r_fcout", "rfo_vs", "rfo_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcout,
+     NULL, setup_quad, rfo_check, "1e-4; attachment 0 keeps its clear colour", false, true },
 };
 #undef F32
 #undef NOC

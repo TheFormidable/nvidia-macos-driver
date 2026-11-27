@@ -330,6 +330,14 @@ samp_create(struct run *r, unsigned slot, VkFilter filter, VkSamplerAddressMode 
    CK(vkCreateSampler(dev, &sci, NULL, &r->samp[slot]));
 }
 
+/* airrun cannot hand a sampler's state to the frontend: the tests that bind a pixel-coordinate sampler are the plugin's
+ * (PLUGIN_ONLY), and are not run here */
+static void
+samp_create_pixel(struct run *r, unsigned slot, VkFilter filter, VkSamplerAddressMode address)
+{
+   (void)r; (void)slot; (void)filter; (void)address;
+}
+
 static float h2f(uint16_t h);
 static float
 half_bits_to_float(uint16_t h)
@@ -862,7 +870,9 @@ main(int argc, char **argv)
       bool chosen = argc == 4;
       for (int a = 4; a < argc && !chosen; a++)
          chosen = !strcmp(argv[a], tests[i].name);
-      if (chosen)
+      if (chosen && (tests[i].flags & PLUGIN_ONLY))
+         printf("%-16s SKIPPED  the plugin's (it binds a pixel-coordinate sampler)\n", tests[i].name);
+      else if (chosen)
          n[run_test(&tests[i])]++;
    }
    read_counters(end);

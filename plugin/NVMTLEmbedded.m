@@ -173,10 +173,8 @@ static NSArray<NSArray *> *nvmtl_static_samplers(NVMTLFunction *fn)
     @synchronized (fn) {
         cached = objc_getAssociatedObject(fn, NVMTL_SSAMP_KEY);
         if (cached) return cached;
-        char e[512] = { 0 };
-        NSData *d = (fn->_air && fn->_stage.length && nvmtl_xlate_ready() && xlate_refl)
-                  ? nvmtl_reflect_air_cached(fn, fn->_air, fn->_stage, e, sizeof e) : nil;
-        NSDictionary *refl = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
+        // the function's reflection: the frontend's for one newFunctionWithName: made without the translator (phase 4)
+        NSDictionary *refl = (fn->_air && fn->_stage.length) ? nvmtl_function_reflection(fn) : nil;
         NSArray *all = [refl isKindOfClass:[NSDictionary class]] ? refl[@"bindings"] : nil;
         for (NSDictionary *b in [all isKindOfClass:[NSArray class]] ? all : @[]) {
             if (![b isKindOfClass:[NSDictionary class]] || ![b[@"kind"] isEqual:@"StaticSampler"]) continue;
@@ -240,8 +238,11 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
         cached = objc_getAssociatedObject(fn, &nvmtl_embedded_plan_key);
         if (cached) return cached;
         NSMutableArray *plans = [NSMutableArray new];
-        uint64_t decl[2][8]; const BOOL haveDecl = nvmtl_spirv_declared(fn->_spirv, decl); unsigned heapRouted = 0;
-        for (NSDictionary *entry in nvmtl_embedded_bindings(fn)) {
+        // the SPIR-V's declared bindings, read only when there is an argument-buffer resource to route (a function made
+        // without the translator has none: the frontend refuses argument buffers)
+        NSArray *embedded = nvmtl_embedded_bindings(fn);
+        uint64_t decl[2][8]; const BOOL haveDecl = embedded.count && nvmtl_spirv_declared(nvmtl_function_spirv(fn, "argument-buffer routing"), decl); unsigned heapRouted = 0;
+        for (NSDictionary *entry in embedded) {
             NSDictionary *src = entry[@"embedded_source"];
             NSNumber *slotNum = entry[@"metal_index"];
             if (![src isKindOfClass:[NSDictionary class]] || !slotNum) continue;

@@ -190,6 +190,7 @@ enum {
    X(LLVMValueRef, LLVMGetFirstFunction, (LLVMModuleRef))                                                        \
    X(LLVMValueRef, LLVMGetNextFunction, (LLVMValueRef))                                                          \
    X(unsigned, LLVMGetEnumAttributeKindForName, (const char *, size_t))                                          \
+   X(LLVMAttributeRef, LLVMGetEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned))                          \
    X(LLVMAttributeRef, LLVMCreateEnumAttribute, (LLVMContextRef, unsigned, uint64_t))                            \
    X(void, LLVMAddAttributeAtIndex, (LLVMValueRef, unsigned, LLVMAttributeRef))                                  \
    X(void, LLVMRemoveEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned))                                   \
@@ -360,10 +361,18 @@ struct air_tr {
    uint8_t vertex_input_kind[32];
    unsigned next_varying;       /* the translator's own Locations: the next one in order */
    nir_variable *sysval[8];     /* the system values read, one variable each */
+
+   /* the reflection (since version 5, NVMTL_AIR_NIR_REFLECT) */
+   uint8_t *rf_param;           /* the entry's parameters before the passes: AIR_RF_* */
+   unsigned rf_params;
+   bool rf_rewrite;             /* the translator's specialization rewrites function-constant gates (values given) */
+   char *rf_json;
+   const char *rf_why;
 };
 
 /* One member of a vertex or fragment function's return value: where it goes. */
 struct air_output {
+   bool dropped;                   /* it exists only under a function constant that is false: nothing is written */
    nir_variable *var;
    unsigned array;                 /* clip distances: the length of the compact array, else 0 */
    enum glsl_base_type base;       /* of the variable's components (32-bit) */
@@ -401,6 +410,10 @@ _Static_assert(offsetof(struct nvmtl_air_nir_request, varying_count) == NVMTL_AI
                "version 3 of the request ends at varying_count");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, stage) == NVMTL_AIR_NIR_RESULT_V3_SIZE,
                "version 3 of the result ends at stage");
+_Static_assert(offsetof(struct nvmtl_air_nir_request, sampler_state_count) == NVMTL_AIR_NIR_REQUEST_V4_SIZE,
+               "version 4 of the request ends at sampler_state_count");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, reflection) == NVMTL_AIR_NIR_RESULT_V4_SIZE,
+               "version 4 of the result ends at reflection");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
@@ -590,10 +603,21 @@ air_aggregate(struct air_tr *t, unsigned n)
    return r;
 }
 
+/* The value's NIR def, refusing a texture or sampler handle (and an aggregate) used as a plain value: they have no def,
+ * and Apple's compiler writes is_null_texture of a handle as a ptrtoint and a compare (a SceneKit fragment did). */
+static nir_def *
+air_vdef(struct air_tr *t, const struct air_val *x)
+{
+   if (!x->def)
+      unsupported(t, "a %s used as a value (a null-texture test, a select or a phi of handles, ...)",
+                  x->kind == AIR_TEXTURE ? "texture handle" : x->kind == AIR_SAMPLER ? "sampler handle" : "value without one");
+   return x->def;
+}
+
 static nir_def *
 air_def(struct air_tr *t, LLVMValueRef v)
 {
-   return air_get(t, v)->def;
+   return air_vdef(t, air_get(t, v));
 }
 
 static uint32_t
@@ -875,7 +899,7 @@ air_gep(struct air_tr *t, nir_builder *b, LLVMValueRef gep, LLVMValueRef result_
    if (base->kind == AIR_VALUE)
       unsupported(t, "a GEP on a value that is not a pointer");
    uint32_t align = base->align;
-   unsigned bits = base->def->bit_size;
+   unsigned bits = air_vdef(t, base)->bit_size;
    nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1,
                                  (unsigned)L.LLVMGetNumOperands(gep), bits, &align);
    nir_def *addr = off ? nir_iadd(b, base->def, off) : base->def;
@@ -1017,7 +1041,7 @@ air_store_val(struct air_tr *t, struct air_val *ptr, struct air_val *val, LLVMTy
    struct air_type ty = air_type_of(t, lty);
    if (ty.width != ty.bits)
       unsupported(t, "a store of an i%u", ty.width);
-   nir_def *v = val->def;
+   nir_def *v = air_vdef(t, val);
    if (ty.is_pointer)
       v = nir_u2u64(b, v);
    else if (ty.bits == 1)
@@ -1565,19 +1589,54 @@ air_bind_outputs(struct air_tr *t)
    t->num_outputs = n;
    for (unsigned i = 0; i < n; i++) {
       LLVMValueRef *ops;
-      const unsigned count = air_md_operands(nodes[i], &ops, t->mem);
+      unsigned count = air_md_operands(nodes[i], &ops, t->mem);
       const char *kind = count ? air_md_string(ops[0]) : NULL;
       if (!kind)
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "output %u of the function has malformed metadata", i);
+      /* an output that exists only when a function constant is true: {"air.function_constant", {gate}, kind, ...}; the
+       * request's values say whether it does (the translator drops one whose constant is false) */
+      if (!strcmp(kind, "air.function_constant")) {
+         const struct air_arg gate = { .fc_node = count > 1 ? ops[1] : NULL };
+         const char *inner = count > 2 ? air_md_string(ops[2]) : NULL;
+         if (!inner || !gate.fc_node)
+            air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "output %u of the function has malformed metadata", i);
+         const int present = air_fc_arg_present(t, &gate);
+         if (present < 0)
+            unsupported(t, "the %s output %s exists only under a function constant the request does not give",
+                        vs ? "vertex" : "fragment", inner);
+         if (!present) {
+            t->outputs[i].dropped = true;
+            continue;
+         }
+         ops += 2;
+         count -= 2;
+         kind = inner;
+      }
       const char *semantic = NULL, *type_name = NULL, *name = NULL, *qualifier = NULL;
       uint64_t location = ~0ull, clip = 0, rt = ~0ull, rt_index = 0;
       unsigned first = 1;
       if (!strcmp(kind, "air.vertex_output") && count > 1 && air_md_string(ops[1]) && strncmp(air_md_string(ops[1]), "air.", 4))
          semantic = air_md_string(ops[first++]);
       if (!strcmp(kind, "air.render_target")) {
-         if (count < 3 || !air_md_int(ops[1], &rt) || !air_md_int(ops[2], &rt_index))
+         /* {"air.render_target", n, [index,] ...}: n a literal, or a global Apple's compiler computes from function
+          * constants ([[color(expr)]]), which the static initializer filled; the dual-source index is there or not */
+         if (count < 2)
             air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "colour output %u has malformed metadata", i);
-         first = 3;
+         if (!air_md_int(ops[1], &rt)) {
+            LLVMValueRef g = ops[1];
+            while (g && L.LLVMIsAConstantExpr(g))
+               g = L.LLVMGetOperand(g, 0);
+            LLVMValueRef init = g && L.LLVMIsAGlobalVariable(g) && L.LLVMIsGlobalConstant(g) && !L.LLVMIsExternallyInitialized(g)
+                                ? L.LLVMGetInitializer(g) : NULL;
+            if (!init || !L.LLVMIsAConstantInt(init))
+               unsupported(t, "colour output %u's [[color(n)]] is %s, which depends on a function constant %s", i,
+                           g ? air_name(g, NULL) : "(?)", air_has_fc_values(t) ? "the request does not give" :
+                           "(the request has no function-constant values)");
+            rt = L.LLVMConstIntGetZExtValue(init);
+         }
+         first = 2;
+         if (count >= 3 && air_md_int(ops[2], &rt_index))
+            first = 3;
       }
       for (unsigned k = first; k + 1 < count; k++) {
          const char *key = air_md_string(ops[k]);
@@ -1677,6 +1736,8 @@ air_store_outputs(struct air_tr *t, LLVMValueRef value)
    const bool whole = L.LLVMGetTypeKind(L.LLVMTypeOf(value)) != TY_STRUCT;
    for (unsigned i = 0; i < t->num_outputs; i++) {
       struct air_output *o = &t->outputs[i];
+      if (o->dropped)
+         continue;
       struct air_val *e = whole ? v : (v->kind == AIR_AGGREGATE && i < v->num_elems) ? v->elems[i] : NULL;
       if (!e)
          unsupported(t, "a return value of another shape than the function's");
@@ -2471,7 +2532,8 @@ struct air_texture {
 struct air_sampler {
    unsigned slot;                /* binding 160 + slot */
    bool is_static, read_sampler, absent;
-   uint64_t words[2];            /* a constexpr sampler's AIR state */
+   bool given;                   /* an argument sampler whose state the request gives (version 5) */
+   uint64_t words[2];            /* a constexpr sampler's AIR state, or the state the request gives */
    nir_variable *var, *shadow_var;
    LLVMValueRef global;
 };
@@ -2568,7 +2630,25 @@ air_bind_sampler(struct air_tr *t, const struct air_arg *a, unsigned i)
       unsupported(t, "sampler argument %u has no sampler index below 16", i);
    s->slot = (unsigned)a->location;
    t->sampler_args |= 1u << s->slot;
+   /* the state the pipeline is bound with, when the request gives it (a pixel-coordinate sampler's variant) */
+   if ((t->req->flags & NVMTL_AIR_NIR_SAMPLER_STATES) &&
+       t->req->size >= offsetof(struct nvmtl_air_nir_request, sampler_state_words) + sizeof t->req->sampler_state_words) {
+      for (uint32_t k = 0; k < t->req->sampler_state_count && t->req->sampler_state_slots && t->req->sampler_state_words; k++) {
+         if (t->req->sampler_state_slots[k] != s->slot)
+            continue;
+         s->given = true;
+         s->words[0] = t->req->sampler_state_words[2 * k];
+         s->words[1] = t->req->sampler_state_words[2 * k + 1];
+      }
+   }
    return s;
+}
+
+/* a sampler whose state is known here (a constexpr one, or an argument one the request gives) has pixel coordinates */
+static bool
+air_sampler_pixel(const struct air_sampler *s)
+{
+   return (s->is_static || s->given) && ((s->words[0] >> 15) & 1);
 }
 
 /* The order of __air_sampler_state globals the translator's reflection takes (meta::static_sampler_name_order): the
@@ -2656,12 +2736,12 @@ air_sampler_deref(struct air_tr *t, struct air_sampler *s, bool shadow)
       unsupported(t, "a sample through the read sampler");
    if (s->absent)
       unsupported(t, "a sampler a function constant leaves out is used");
-   if (s->is_static) {
+   if (s->is_static || s->given) {
       uint64_t w = s->words[0];
       if (((w >> 9) & 3) == 2 || ((w >> 11) & 3) == 2)
-         unsupported(t, "a constexpr sampler with bicubic filtering");
+         unsupported(t, "a %s sampler with bicubic filtering", s->is_static ? "constexpr" : "bound");
       if (((w >> 58) & 3) != 0)
-         unsupported(t, "a constexpr sampler with min/max reduction");
+         unsupported(t, "a %s sampler with min/max reduction", s->is_static ? "constexpr" : "bound");
    }
    if (!*var) {
       *var = nir_variable_create(t->nir, nir_var_uniform, shadow ? glsl_bare_shadow_sampler_type() : glsl_bare_sampler_type(),
@@ -3121,7 +3201,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
    }
    nir_deref_instr *tex_deref = air_texture_deref(t, x);
    nir_def *size0 = NULL;
-   if (dyn_offset || (s->is_static && ((s->words[0] >> 15) & 1))) {
+   if (dyn_offset || air_sampler_pixel(s)) {
       struct air_tex_srcs q = { .texture = tex_deref, .lod = nir_imm_int(b, 0) };
       size0 = nir_i2f32(b, nir_trim_vector(b, air_build_tex(t, nir_texop_txs, x, &q, -1), spatial));
    }
@@ -3130,9 +3210,10 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       sp = nir_fadd(b, sp, nir_fdiv(b, nir_i2f32(b, dyn_offset), size0));
       coord = x->array ? air_append(b, sp, nir_channel(b, coord, spatial)) : sp;
    }
-   if (s->is_static && ((s->words[0] >> 15) & 1)) {
-      /* a pixel-coordinate constexpr sampler: the plugin's VkSampler for it is normalized with the same filter and
-       * address modes (the translator says so of its own), so a linear sample of a 2D texture at level 0 with
+   if (air_sampler_pixel(s)) {
+      /* a pixel-coordinate sampler (constexpr, or bound with its state in the request): the plugin's VkSampler for it is
+       * normalized with the same filter and address modes (the translator says so of its own, and of the one a
+       * pixel-coordinate MTLSamplerDescriptor makes), so a linear sample of a 2D texture at level 0 with
        * clamp_to_edge is the hardware's at coord / size; a nearest one fetches floor(coord) clamped, or zero outside
        * with clamp_to_zero, as the translator's pixel_fetch does */
       uint64_t w = s->words[0];
@@ -3244,7 +3325,7 @@ air_call(struct air_tr *t, LLVMValueRef call)
          unsupported(t, "a call to %s with %u operands", name, nargs);
       for (unsigned i = 0; i < nargs; i++) {
          struct air_val *v = air_get(t, L.LLVMGetOperand(call, i));
-         s[i] = v->def;
+         s[i] = air_vdef(t, v);
       }
    }
 
@@ -3386,8 +3467,10 @@ air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
 {
    if (x->kind != y->kind)
       unsupported(t, "a select between pointers of two kinds");
+   if ((x->kind == AIR_TEXTURE || x->kind == AIR_SAMPLER) && x->res == y->res)
+      return x;   /* the same handle either way */
    if (x->kind != AIR_AGGREGATE)
-      return air_make(t, nir_bcsel(&t->b, c, x->def, y->def), x->kind, MIN2(x->align, y->align));
+      return air_make(t, nir_bcsel(&t->b, c, air_vdef(t, x), air_vdef(t, y)), x->kind, MIN2(x->align, y->align));
    if (x->num_elems != y->num_elems)
       unsupported(t, "a select between two shapes of aggregate");
    struct air_val *r = air_aggregate(t, x->num_elems);
@@ -3410,7 +3493,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_FDIV: case OP_FREM: {
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0)), *y = air_get(t, L.LLVMGetOperand(inst, 1));
       struct air_type ty = air_type_of(t, lty);
-      nir_def *xd = x->def, *yd = y->def;
+      nir_def *xd = air_vdef(t, x), *yd = air_vdef(t, y);
       if (ty.width != ty.bits && !ty.is_float) {
          if (op == OP_SDIV || op == OP_SREM || op == OP_ASHR)
             xd = air_signed(b, xd, ty.width);
@@ -3464,11 +3547,11 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    }
    case OP_ICMP: {
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0)), *y = air_get(t, L.LLVMGetOperand(inst, 1));
-      if (x->def->bit_size != y->def->bit_size)
+      if (air_vdef(t, x)->bit_size != air_vdef(t, y)->bit_size)
          unsupported(t, "a comparison of pointers of two kinds");
       int pred = L.LLVMGetICmpPredicate(inst);
       unsigned width = air_width_of(t, L.LLVMGetOperand(inst, 0));
-      nir_def *xd = x->def, *yd = y->def;
+      nir_def *xd = air_vdef(t, x), *yd = air_vdef(t, y);
       if (pred >= ICMP_SGT) {
          xd = air_signed(b, xd, width);
          yd = air_signed(b, yd, width);
@@ -3501,7 +3584,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
       if (to.is_pointer)
          air_set(t, inst, x->def, x->kind, x->align);
       else
-         air_set(t, inst, air_bitcast(t, x->def, &to), AIR_VALUE, 0);
+         air_set(t, inst, air_bitcast(t, air_vdef(t, x), &to), AIR_VALUE, 0);
       return;
    }
    case OP_ADDRSPACECAST: {
@@ -3515,7 +3598,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_PTRTOINT: {
       struct air_type to = air_type_of(t, lty);
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
-      air_set(t, inst, air_canon(b, air_resize(b, x->def, to.bits, false), to.width), AIR_VALUE, 0);
+      air_set(t, inst, air_canon(b, air_resize(b, air_vdef(t, x), to.bits, false), to.width), AIR_VALUE, 0);
       return;
    }
    case OP_INTTOPTR: {
@@ -3726,7 +3809,7 @@ air_emit_function(struct air_tr *t)
          }
          if (v->kind != phi->kind)
             unsupported(t, "a phi joining pointers of two kinds");
-         nir_store_var(&t->b, phi->var, v->def, BITFIELD_MASK(v->def->num_components));
+         nir_store_var(&t->b, phi->var, air_vdef(t, v), BITFIELD_MASK(v->def->num_components));
       }
    }
 }
@@ -4677,6 +4760,971 @@ air_run_passes(struct air_tr *t, LLVMContextRef ctx, bool fold)
    }
 }
 
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Reflection (version 5, docs/AIR-TO-NIR.md phase 4)                                                                 */
+/*                                                                                                                    */
+/* With NVMTL_AIR_NIR_REFLECT the result also carries, as JSON, what the plugin reads from the translator's           */
+/* reflection (nvmtl_reflect / nvmtl_reflect_fc: translator/translator/src/reflect and meta), with the translator's   */
+/* keys and values: the bindings (kind, metal_index, descriptor, param_index, address_space, declared_size, extent,  */
+/* type_layout, type_name, texture_shape, access, static_sampler), the varyings, the vertex attributes, the kernel's  */
+/* default threadgroup size (local_size) and its max_work_group_size, and the keys a function this frontend          */
+/* translates never has (tessellation, fragment_sample_positions, argument_buffer_fields, null or empty). It is read */
+/* from the module as the translator's function-constant specialization leaves it (an argument a constant that is    */
+/* known to be true keeps, one it knows to be false drops, one it cannot decide stays gated), by the translator's     */
+/* rules for each stage, from the same metadata: so the plugin can take it instead of the translator's for a function */
+/* this frontend translates. The keys the plugin never reads (footprints, descriptor_layout, render_targets, the     */
+/* function constants, ...) are not written. A module whose reflection would need what this does not model gives    */
+/* none (reflection NULL and reflection_why), and the plugin asks the translator.                                     */
+
+#define AIR_RF_USED      1u   /* the parameter has a use in the entry (the translator: its name occurs in the body) */
+#define AIR_RF_READNONE  2u
+#define AIR_RF_READONLY  4u
+#define AIR_RF_WRITEONLY 8u
+
+struct air_rf_node {
+   LLVMValueRef *ops;
+   unsigned n;
+};
+
+static struct air_rf_node
+air_rf_node(struct air_tr *t, LLVMValueRef node)
+{
+   struct air_rf_node x = { NULL, 0 };
+   if (node && L.LLVMIsAMDNode(node))
+      x.n = air_md_operands(node, &x.ops, t->mem);
+   return x;
+}
+
+/* the index of the first operand that is the string marker, or -1 */
+static int
+air_rf_find(const struct air_rf_node *x, const char *marker)
+{
+   for (unsigned i = 0; i < x->n; i++) {
+      const char *s = air_md_string(x->ops[i]);
+      if (s && !strcmp(s, marker))
+         return (int)i;
+   }
+   return -1;
+}
+
+/* an operand the translator's text reads as "i32 N", N a u32 */
+static bool
+air_rf_i32(LLVMValueRef v, uint32_t *out)
+{
+   if (!v || !L.LLVMIsAConstantInt(v) || L.LLVMGetIntTypeWidth(L.LLVMTypeOf(v)) != 32)
+      return false;
+   long long s = L.LLVMConstIntGetSExtValue(v);
+   if (s < 0)
+      return false;
+   *out = (uint32_t)s;
+   return true;
+}
+
+/* meta::i32_after_marker: the first "i32 N" after the marker */
+static bool
+air_rf_i32_after(const struct air_rf_node *x, const char *marker, uint32_t *out)
+{
+   int k = air_rf_find(x, marker);
+   for (unsigned i = k < 0 ? x->n : (unsigned)k + 1; i < x->n; i++) {
+      if (air_rf_i32(x->ops[i], out))
+         return true;
+   }
+   return false;
+}
+
+/* meta::string_after_marker: the next string after the marker */
+static const char *
+air_rf_string_after(const struct air_rf_node *x, const char *marker)
+{
+   int k = air_rf_find(x, marker);
+   for (unsigned i = k < 0 ? x->n : (unsigned)k + 1; i < x->n; i++) {
+      const char *s = air_md_string(x->ops[i]);
+      if (s)
+         return s;
+   }
+   return NULL;
+}
+
+/* meta::declared_buffer_access: the node's text holds air.read_write, air.write or air.read */
+static const char *
+air_rf_declared_access(const struct air_rf_node *x)
+{
+   bool rw = false, w = false, r = false;
+   for (unsigned i = 0; i < x->n; i++) {
+      const char *s = air_md_string(x->ops[i]);
+      if (!s)
+         continue;
+      rw |= strstr(s, "air.read_write") != NULL;
+      w |= strstr(s, "air.write") != NULL;
+      r |= strstr(s, "air.read") != NULL;
+   }
+   return rw ? "ReadWrite" : w ? "WriteOnly" : r ? "ReadOnly" : NULL;
+}
+
+/* The value of the global a function-constant gate {global, ...} names, as the translator's static initializer
+ * evaluation knows it: 1 or 0, -1 when not known */
+static int
+air_rf_gate_value(struct air_tr *t, LLVMValueRef gate)
+{
+   struct air_rf_node g = air_rf_node(t, gate);
+   for (unsigned i = 0; i < g.n; i++) {
+      LLVMValueRef v = g.ops[i];
+      while (v && L.LLVMIsAConstantExpr(v))
+         v = L.LLVMGetOperand(v, 0);
+      if (!v || !L.LLVMIsAGlobalVariable(v))
+         continue;
+      if (!L.LLVMIsGlobalConstant(v) || L.LLVMIsExternallyInitialized(v))
+         return -1;
+      LLVMValueRef init = L.LLVMGetInitializer(v);
+      if (!init || !L.LLVMIsAConstantInt(init))
+         return -1;
+      return L.LLVMConstIntGetZExtValue(init) != 0;
+   }
+   return -1;
+}
+
+/* The node's role strings (the air.* strings, without "air.") as the translator's function-constant specialization
+ * leaves them (meta::specialize_function_constant_metadata): a gate known true is taken out, one known false makes
+ * the first "function_constant_disabled". *gated: the first is still "function_constant" (a gate not known). */
+static unsigned
+air_rf_roles(struct air_tr *t, const struct air_rf_node *x, const char **roles, unsigned max)
+{
+   unsigned n = 0;
+   int first_at = -1;
+   for (unsigned i = 0; i < x->n && n < max; i++) {
+      const char *s = air_md_string(x->ops[i]);
+      if (s && !strncmp(s, "air.", 4)) {
+         if (!n)
+            first_at = (int)i;
+         roles[n++] = s + 4;
+      }
+   }
+   if (n && !strcmp(roles[0], "function_constant") && t->rf_rewrite) {
+      int v = first_at >= 0 && (unsigned)first_at + 1 < x->n ? air_rf_gate_value(t, x->ops[first_at + 1]) : -1;
+      if (v == 1) {
+         memmove(roles, roles + 1, (n - 1) * sizeof *roles);
+         n--;
+      } else if (v == 0) {
+         roles[0] = "function_constant_disabled";
+      }
+   }
+   return n;
+}
+
+/* meta::primary_role: the first role that is not "function_constant" */
+static const char *
+air_rf_primary(const char **roles, unsigned n)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (strcmp(roles[i], "function_constant"))
+         return roles[i];
+   }
+   return NULL;
+}
+
+/* the first operand after air.location_index (the slot) and the one after it (an array's count); a global is the
+ * value the static initializer left in it. 1: a literal or a known global, 0: none, -1: a global not known */
+static int
+air_rf_location(struct air_tr *t, const struct air_rf_node *x, uint32_t *slot, uint32_t *count)
+{
+   int k = air_rf_find(x, "air.location_index");
+   *count = 0;
+   if (k < 0 || (unsigned)k + 1 >= x->n)
+      return 0;
+   if ((unsigned)k + 2 < x->n)
+      air_rf_i32(x->ops[k + 2], count);
+   if (air_rf_i32(x->ops[k + 1], slot))
+      return 1;
+   LLVMValueRef g = x->ops[k + 1];
+   while (g && L.LLVMIsAConstantExpr(g))
+      g = L.LLVMGetOperand(g, 0);
+   if (!g || !L.LLVMIsAGlobalVariable(g))
+      return 0;
+   LLVMValueRef init = L.LLVMIsGlobalConstant(g) && !L.LLVMIsExternallyInitialized(g) ? L.LLVMGetInitializer(g) : NULL;
+   if (!init || !L.LLVMIsAConstantInt(init))
+      return -1;
+   *slot = (uint32_t)L.LLVMConstIntGetZExtValue(init);
+   return 1;
+}
+
+/* meta::declared_slot for air.location_index: the slot, or the fallback */
+static uint32_t
+air_rf_slot(struct air_tr *t, const struct air_rf_node *x, uint32_t fallback, bool *global)
+{
+   uint32_t slot = fallback, count;
+   int k = air_rf_find(x, "air.location_index");
+   *global = k >= 0 && (unsigned)k + 1 < x->n && !L.LLVMIsAConstantInt(x->ops[k + 1]);
+   if (air_rf_location(t, x, &slot, &count) <= 0)
+      slot = fallback;
+   return slot;
+}
+
+/* ---- JSON ---- */
+
+static void
+air_rf_jstr(char **j, const char *s)
+{
+   if (!s) {
+      ralloc_strcat(j, "null");
+      return;
+   }
+   ralloc_strcat(j, "\"");
+   for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      if (*p == '"' || *p == '\\')
+         ralloc_asprintf_append(j, "\\%c", *p);
+      else if (*p < 0x20)
+         ralloc_asprintf_append(j, "\\u%04x", *p);
+      else
+         ralloc_asprintf_append(j, "%c", *p);
+   }
+   ralloc_strcat(j, "\"");
+}
+
+static void
+air_rf_jopt(char **j, bool have, uint32_t v)
+{
+   if (have)
+      ralloc_asprintf_append(j, "%u", v);
+   else
+      ralloc_strcat(j, "null");
+}
+
+/* ---- types (meta::types): a buffer's type_layout from its air.struct_type_info ---- */
+
+static const char *const air_rf_scalars[][2] = {
+   { "ulong", "ULong" }, { "long", "SLong" }, { "ushort", "UShort" }, { "short", "SShort" }, { "uchar", "UChar" },
+   { "char", "UChar" }, { "float", "Float" }, { "half", "Half" }, { "uint", "UInt" }, { "int", "SInt" },
+   { "bool", "Bool" },
+};
+
+/* meta::primitive_air_type_from_name as JSON into *j; false when the name is no primitive */
+static bool
+air_rf_primitive(char **j, const char *name)
+{
+   while (*name == ' ' || *name == '\t' || *name == '\n')
+      name++;
+   size_t len = strlen(name);
+   while (len && (name[len - 1] == ' ' || name[len - 1] == '\t' || name[len - 1] == '\n'))
+      len--;
+   char raw[128];
+   if (len >= sizeof raw)
+      return false;
+   memcpy(raw, name, len);
+   raw[len] = 0;
+   const char *n = raw;
+   bool packed = false;
+   if (!strncmp(n, "packed_", 7)) {
+      n += 7;
+      packed = true;
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(air_rf_scalars); i++) {
+      size_t b = strlen(air_rf_scalars[i][0]);
+      if (strncmp(n, air_rf_scalars[i][0], b))
+         continue;
+      const char *rest = n + b, *scalar = air_rf_scalars[i][1];
+      if (!*rest) {
+         ralloc_asprintf_append(j, "{\"Scalar\":\"%s\"}", scalar);
+         return true;
+      }
+      const char *x = strchr(rest, 'x');
+      if (x) {
+         /* "CxR": both parse as u32 after trimming */
+         char a[32], c[32];
+         size_t la = (size_t)(x - rest);
+         if (la >= sizeof a || strlen(x + 1) >= sizeof c)
+            return false;
+         memcpy(a, rest, la);
+         a[la] = 0;
+         strcpy(c, x + 1);
+         char *e1, *e2;
+         unsigned long cols = strtoul(a, &e1, 10), rows = strtoul(c, &e2, 10);
+         if (e1 == a || *e1 || e2 == c || *e2 || a[0] == '-' || a[0] == '+' || c[0] == '-' || c[0] == '+')
+            return false;
+         ralloc_asprintf_append(j, "{\"Matrix\":{\"scalar\":\"%s\",\"cols\":%lu,\"rows\":%lu}}", scalar, cols, rows);
+         return true;
+      }
+      char *e;
+      if (*rest < '0' || *rest > '9')
+         return false;
+      unsigned long lanes = strtoul(rest, &e, 10);
+      if (*e)
+         return false;
+      if (lanes >= 1 && packed)
+         ralloc_asprintf_append(j, "{\"PackedVec\":{\"scalar\":\"%s\",\"lanes\":%lu}}", scalar, lanes);
+      else if (lanes >= 2)
+         ralloc_asprintf_append(j, "{\"Vec\":{\"scalar\":\"%s\",\"lanes\":%lu}}", scalar, lanes);
+      else
+         return false;
+      return true;
+   }
+   return false;
+}
+
+/* meta::storage_air_type_for_size */
+static void
+air_rf_storage(char **j, uint32_t size)
+{
+   switch (size) {
+   case 0:
+   case 4: ralloc_strcat(j, "{\"Scalar\":\"UInt\"}"); return;
+   case 1: ralloc_strcat(j, "{\"Scalar\":\"UChar\"}"); return;
+   case 2: ralloc_strcat(j, "{\"Scalar\":\"UShort\"}"); return;
+   case 8: ralloc_strcat(j, "{\"Scalar\":\"ULong\"}"); return;
+   default:
+      if (size % 4 == 0)
+         ralloc_asprintf_append(j, "{\"Array\":{\"elem\":{\"Scalar\":\"UInt\"},\"len\":%u}}", size / 4);
+      else
+         ralloc_asprintf_append(j, "{\"Array\":{\"elem\":{\"Scalar\":\"UChar\"},\"len\":%u}}", size);
+   }
+}
+
+/* meta::types::tokenize: an i32 that is a u32 is an Int, a string a Str (as far as its first comma: the translator
+ * splits the node's text at every comma), a node a Ref; anything else is no token */
+enum air_rf_tok_kind { AIR_RF_INT, AIR_RF_STR, AIR_RF_REF };
+struct air_rf_tok {
+   enum air_rf_tok_kind kind;
+   uint32_t i;
+   const char *s;
+   LLVMValueRef ref;
+};
+
+static unsigned
+air_rf_tokens(struct air_tr *t, LLVMValueRef node, struct air_rf_tok **out)
+{
+   struct air_rf_node x = air_rf_node(t, node);
+   struct air_rf_tok *tk = rzalloc_array(t->mem, struct air_rf_tok, x.n + 1);
+   unsigned n = 0;
+   for (unsigned i = 0; i < x.n; i++) {
+      LLVMValueRef v = x.ops[i];
+      const char *s = air_md_string(v);
+      if (s) {
+         const char *c = strchr(s, ',');
+         tk[n].kind = AIR_RF_STR;
+         tk[n].s = c ? ralloc_strndup(t->mem, s, (size_t)(c - s)) : s;
+         n++;
+      } else if (v && L.LLVMIsAMDNode(v)) {
+         tk[n].kind = AIR_RF_REF;
+         tk[n].ref = v;
+         n++;
+      } else if (air_rf_i32(v, &tk[n].i)) {
+         tk[n].kind = AIR_RF_INT;
+         n++;
+      }
+   }
+   *out = tk;
+   return n;
+}
+
+static bool
+air_rf_tok_is(const struct air_rf_tok *tk, unsigned n, unsigned i, enum air_rf_tok_kind k)
+{
+   return i < n && tk[i].kind == k;
+}
+
+/* meta::types::struct_member_starts_at */
+static bool
+air_rf_member_starts(const struct air_rf_tok *tk, unsigned n, unsigned i)
+{
+   if (air_rf_tok_is(tk, n, i, AIR_RF_STR) && !strcmp(tk[i].s, "air.struct_type_info") && air_rf_tok_is(tk, n, i + 1, AIR_RF_REF))
+      i += 2;
+   return air_rf_tok_is(tk, n, i, AIR_RF_INT) && air_rf_tok_is(tk, n, i + 1, AIR_RF_INT) &&
+          air_rf_tok_is(tk, n, i + 2, AIR_RF_INT) && air_rf_tok_is(tk, n, i + 3, AIR_RF_STR) &&
+          air_rf_tok_is(tk, n, i + 4, AIR_RF_STR);
+}
+
+/* whether a node's role strings name a resource other than an indirect constant (meta::types::member_holds_resource_handle) */
+static bool
+air_rf_resource_handle(struct air_tr *t, LLVMValueRef node)
+{
+   if (!node)
+      return false;
+   struct air_rf_node x = air_rf_node(t, node);
+   const char *roles[64];
+   unsigned n = 0;
+   for (unsigned i = 0; i < x.n && n < 64; i++) {
+      const char *s = air_md_string(x.ops[i]);
+      if (s && !strncmp(s, "air.", 4))
+         roles[n++] = s + 4;
+   }
+   const char *p = air_rf_primary(roles, n);
+   return p && strcmp(p, "indirect_constant");
+}
+
+/* meta::types::parse_struct_info as JSON into *j; false (nothing written) when the translator's gives None */
+static bool
+air_rf_struct(struct air_tr *t, char **j, LLVMValueRef node, unsigned depth)
+{
+   if (depth > 16 || !node || !L.LLVMIsAMDNode(node))
+      return false;
+   struct air_rf_tok *tk;
+   const unsigned n = air_rf_tokens(t, node, &tk);
+   struct air_rf_member { uint32_t offset, size, len; const char *name; LLVMValueRef nested, arg; } *m =
+      rzalloc_array(t->mem, struct air_rf_member, n + 1);
+   unsigned count = 0;
+   for (unsigned i = 0; i < n;) {
+      LLVMValueRef nested = NULL;
+      if (air_rf_tok_is(tk, n, i, AIR_RF_STR) && !strcmp(tk[i].s, "air.struct_type_info") && air_rf_tok_is(tk, n, i + 1, AIR_RF_REF)) {
+         nested = tk[i + 1].ref;
+         i += 2;
+      }
+      if (!air_rf_tok_is(tk, n, i, AIR_RF_INT) || !air_rf_tok_is(tk, n, i + 1, AIR_RF_INT) ||
+          !air_rf_tok_is(tk, n, i + 2, AIR_RF_INT) || !air_rf_tok_is(tk, n, i + 3, AIR_RF_STR))
+         break;
+      struct air_rf_member *e = &m[count++];
+      e->offset = tk[i].i;
+      e->size = tk[i + 1].i;
+      e->len = tk[i + 2].i;
+      e->name = tk[i + 3].s;
+      e->nested = nested;
+      i += 5;
+      while (i < n && !air_rf_member_starts(tk, n, i)) {
+         if (air_rf_tok_is(tk, n, i, AIR_RF_STR) && !strcmp(tk[i].s, "air.indirect_argument") && air_rf_tok_is(tk, n, i + 1, AIR_RF_REF))
+            e->arg = tk[i + 1].ref;
+         i++;
+      }
+   }
+   if (!count)
+      return false;
+   for (unsigned k = 0; k + 1 < count; k++) {
+      if ((uint64_t)m[k].offset + (uint64_t)m[k].size * MAX2(m[k].len, 1u) > m[k + 1].offset)
+         return false;
+   }
+   ralloc_strcat(j, "{\"Struct\":[");
+   for (unsigned k = 0; k < count; k++) {
+      ralloc_asprintf_append(j, "%s{\"offset\":%u,\"ty\":", k ? "," : "", m[k].offset);
+      if (m[k].len > 0)
+         ralloc_strcat(j, "{\"Array\":{\"elem\":");
+      char *sub = ralloc_strdup(t->mem, "");
+      if (m[k].nested) {
+         if (!air_rf_struct(t, &sub, m[k].nested, depth + 1)) {
+            sub[0] = 0;
+            air_rf_storage(&sub, m[k].size);
+         }
+      } else if (air_rf_resource_handle(t, m[k].arg) || !air_rf_primitive(&sub, m[k].name)) {
+         if (air_rf_resource_handle(t, m[k].arg))
+            air_rf_storage(&sub, m[k].size);
+         else
+            ralloc_asprintf_append(&sub, "{\"Opaque\":{\"size\":%u}}", m[k].size);
+      }
+      ralloc_strcat(j, sub);
+      if (m[k].len > 0)
+         ralloc_asprintf_append(j, ",\"len\":%u}}", m[k].len);
+      ralloc_strcat(j, "}");
+   }
+   ralloc_strcat(j, "]}");
+   return true;
+}
+
+/* ---- textures (meta::textures::texture_shape_from_name) ---- */
+
+struct air_rf_shape {
+   const char *dimension, *component, *format;
+   bool arrayed, multisampled, writable, array_ref;
+};
+
+static struct air_rf_shape
+air_rf_texture_shape(const char *name)
+{
+   struct air_rf_shape s = { "D2", "Float", NULL, false, false, false, false };
+   /* texture_handle_array: array_ref<texture...> or array<texture...> */
+   char compact[256];
+   size_t c = 0;
+   for (const char *p = name; *p && c + 1 < sizeof compact; p++) {
+      if (*p != ' ' && *p != '\t' && *p != '\n')
+         compact[c++] = *p;
+   }
+   compact[c] = 0;
+   s.array_ref = !strncmp(compact, "array_ref<texture", 17) || !strncmp(compact, "array_ref<depth", 15) ||
+                 !strncmp(compact, "array<texture", 13) || !strncmp(compact, "array<depth", 11);
+   /* texture_access_from_name: the second field inside the first <...> is write or read_write */
+   const char *lt = strchr(name, '<');
+   if (lt) {
+      const char *gt = strchr(lt + 1, '>');
+      size_t inner = gt ? (size_t)(gt - lt - 1) : strlen(lt + 1);
+      char buf[128];
+      if (inner < sizeof buf) {
+         memcpy(buf, lt + 1, inner);
+         buf[inner] = 0;
+         char *comma = strchr(buf, ',');
+         if (comma) {
+            char *f = comma + 1, *end = strchr(f, ',');
+            if (end)
+               *end = 0;
+            while (*f == ' ' || *f == '\t')
+               f++;
+            size_t fl = strlen(f);
+            while (fl && (f[fl - 1] == ' ' || f[fl - 1] == '\t'))
+               f[--fl] = 0;
+            s.writable = !strcmp(f, "write") || !strcmp(f, "read_write");
+         }
+      }
+   }
+   const char *shape = name;
+   if (s.array_ref) {
+      const char *a = strstr(name, "texture");
+      if (!a)
+         a = strstr(name, "depth");
+      if (a)
+         shape = a;
+   }
+   char head[128];
+   const char *hl = strchr(shape, '<');
+   size_t hn = hl ? (size_t)(hl - shape) : strlen(shape);
+   if (hn >= sizeof head)
+      hn = sizeof head - 1;
+   memcpy(head, shape, hn);
+   head[hn] = 0;
+   if (strstr(head, "texture_buffer"))
+      s.dimension = "Buffer";
+   else if (strstr(head, "1d"))
+      s.dimension = "D1";
+   else if (strstr(head, "3d"))
+      s.dimension = "D3";
+   else if (strstr(head, "cube"))
+      s.dimension = "Cube";
+   s.arrayed = hn >= 6 && !strcmp(head + hn - 6, "_array");
+   s.multisampled = strstr(head, "_ms") != NULL;
+   /* texture_component_from_name: the first word after the first '<' (after a nested '<') */
+   const char *r = strchr(shape, '<');
+   if (r) {
+      r++;
+      while (*r == ',' || *r == '>' || *r == ' ' || *r == '\t' || *r == '\n')
+         r++;
+      char word[64];
+      size_t w = 0;
+      while (r[w] && r[w] != ',' && r[w] != '>' && r[w] != ' ' && r[w] != '\t' && r[w] != '\n' && w + 1 < sizeof word) {
+         word[w] = r[w];
+         w++;
+      }
+      word[w] = 0;
+      const char *last = strrchr(word, '<');
+      const char *scalar = last ? last + 1 : word;
+      if (!strcmp(scalar, "uint") || !strcmp(scalar, "ushort") || !strcmp(scalar, "uchar"))
+         s.component = "Uint";
+      else if (!strcmp(scalar, "int") || !strcmp(scalar, "short") || !strcmp(scalar, "char"))
+         s.component = "Sint";
+   }
+   if (s.writable) {
+      if (!strcmp(s.component, "Float"))
+         s.format = strstr(name, "<half") ? "Rgba16f" : strstr(name, "<float") ? "R32f" : "Rgba32f";
+      else if (!strcmp(s.component, "Uint"))
+         s.format = strstr(name, "<ushort") ? "Rgba16ui" : "Rgba8ui";
+      else
+         s.format = strstr(name, "<short") ? "Rgba16i" : "Rgba8i";
+   }
+   return s;
+}
+
+/* ---- static samplers (reflect::StaticSamplerState::from_air_words) ---- */
+
+static float
+air_rf_half(uint16_t h)
+{
+   return _mesa_half_to_float(h);
+}
+
+static bool
+air_rf_sampler_state(char **j, const uint64_t words[2])
+{
+   const uint64_t w = words[0];
+   static const char *const border[] = { "TransparentBlack", "OpaqueBlack", "OpaqueWhite" };
+   static const char *const filter[] = { "Nearest", "Linear", "Bicubic" };
+   static const char *const mip[] = { "None", "Nearest", "Linear" };
+   static const char *const compare[] = { "None", "Less", "LessEqual", "Greater", "GreaterEqual", "Equal", "NotEqual",
+                                          "Always", "Never" };
+   static const char *const reduction[] = { "WeightedAverage", "Minimum", "Maximum" };
+   const unsigned b = (unsigned)((w >> 56) & 3), mf = (unsigned)((w >> 13) & 3), cf = (unsigned)((w >> 16) & 0xf),
+                  rd = (unsigned)((w >> 58) & 3), fmin = (unsigned)((w >> 11) & 3), fmag = (unsigned)((w >> 9) & 3);
+   if (b > 2 || mf > 2 || cf > 8 || rd > 2 || fmin > 2 || fmag > 2)
+      return false;
+   const char *addr[3];
+   for (unsigned k = 0; k < 3; k++) {
+      unsigned a = (unsigned)((w >> (3 * k)) & 7);
+      if (a > 3)
+         return false;
+      addr[k] = a == 0 ? (b ? "ClampToBorder" : "ClampToZero") : a == 1 ? "ClampToEdge" : a == 2 ? "Repeat" : "MirroredRepeat";
+   }
+   ralloc_asprintf_append(j, "{\"min_filter\":\"%s\",\"mag_filter\":\"%s\",\"mip_filter\":\"%s\",\"address_mode_s\":\"%s\","
+                          "\"address_mode_t\":\"%s\",\"address_mode_r\":\"%s\",\"coordinates\":\"%s\",\"compare_function\":\"%s\","
+                          "\"max_anisotropy\":%u,\"lod_min_clamp\":%.9g,\"lod_max_clamp\":%.9g,\"border_color\":\"%s\","
+                          "\"reduction\":\"%s\",\"lod_bias\":%.9g,\"raw_words\":[%llu,%llu]}",
+                          filter[fmin], filter[fmag], mip[mf], addr[0], addr[1], addr[2], ((w >> 15) & 1) ? "Pixel" : "Normalized",
+                          compare[cf], (unsigned)((w >> 20) & 0xf) + 1, (double)air_rf_half((uint16_t)((w >> 24) & 0xffff)),
+                          (double)air_rf_half((uint16_t)((w >> 40) & 0xffff)), border[b], reduction[rd],
+                          (double)air_rf_half((uint16_t)(words[1] & 0xffff)), (unsigned long long)words[0],
+                          (unsigned long long)words[1]);
+   return true;
+}
+
+/* ---- the reflection ---- */
+
+/* The entry's parameters as the module has them before the passes run (the translator reads the text it was given):
+ * used, readnone, readonly, writeonly */
+static LLVMValueRef
+air_rf_entry(struct air_tr *t)
+{
+   static const char *const lists[] = { "air.kernel", "air.vertex", "air.fragment" };
+   LLVMValueRef found = NULL;
+   for (unsigned l = 0; l < ARRAY_SIZE(lists); l++) {
+      unsigned n = L.LLVMGetNamedMetadataNumOperands(t->module, lists[l]);
+      if (!n)
+         continue;
+      LLVMValueRef *nodes = rzalloc_array(t->mem, LLVMValueRef, n);
+      L.LLVMGetNamedMetadataOperands(t->module, lists[l], nodes);
+      for (unsigned i = 0; i < n; i++) {
+         LLVMValueRef *ops;
+         unsigned c = air_md_operands(nodes[i], &ops, t->mem);
+         if (c < 3 || !ops[0] || !L.LLVMIsAFunction(ops[0]))
+            continue;
+         if (t->req->entry && strcmp(air_name(ops[0], NULL), t->req->entry))
+            continue;
+         if (found)
+            return NULL;
+         found = ops[0];
+      }
+   }
+   return found;
+}
+
+static void
+air_rf_before_passes(struct air_tr *t)
+{
+   LLVMValueRef f = air_rf_entry(t);
+   t->rf_rewrite = false;
+   if (air_has_fc_values(t)) {
+      for (LLVMValueRef g = L.LLVMGetFirstGlobal(t->module); g && !t->rf_rewrite; g = L.LLVMGetNextGlobal(g)) {
+         uint32_t index, size;
+         t->rf_rewrite = air_fc_index(g, &index) && air_fc_given(t, index, &size);
+      }
+   }
+   if (!f)
+      return;
+   const unsigned n = L.LLVMCountParams(f);
+   const unsigned kn = L.LLVMGetEnumAttributeKindForName("readnone", 8),
+                  ko = L.LLVMGetEnumAttributeKindForName("readonly", 8),
+                  kw = L.LLVMGetEnumAttributeKindForName("writeonly", 9);
+   t->rf_param = rzalloc_array(t->mem, uint8_t, n + 1);
+   t->rf_params = n;
+   for (unsigned p = 0; p < n; p++) {
+      LLVMValueRef v = L.LLVMGetParam(f, p);
+      uint8_t m = L.LLVMGetFirstUse(v) ? AIR_RF_USED : 0;
+      if (kn && L.LLVMGetEnumAttributeAtIndex(f, p + 1, kn))
+         m |= AIR_RF_READNONE;
+      if (ko && L.LLVMGetEnumAttributeAtIndex(f, p + 1, ko))
+         m |= AIR_RF_READONLY;
+      if (kw && L.LLVMGetEnumAttributeAtIndex(f, p + 1, kw))
+         m |= AIR_RF_WRITEONLY;
+      t->rf_param[p] = m;
+   }
+}
+
+/* reflect::ShaderReflection::refine_buffer_access_from_entry */
+static const char *
+air_rf_refined_access(struct air_tr *t, uint32_t param, const char *access)
+{
+   if (param >= t->rf_params)
+      return access;
+   const uint8_t m = t->rf_param[param];
+   if (!(m & AIR_RF_USED) || (m & AIR_RF_READNONE))
+      return "Unused";
+   if (m & AIR_RF_READONLY)
+      return "ReadOnly";
+   if (m & AIR_RF_WRITEONLY)
+      return "WriteOnly";
+   return access;
+}
+
+struct air_rf_state {
+   char *b;              /* the bindings, comma-separated */
+   unsigned bindings;
+   uint8_t occupied[704]; /* descriptor bindings taken (the band of the static samplers is 160 to 191) */
+};
+
+static void
+air_rf_binding_head(struct air_rf_state *s, const char *kind, uint32_t metal, bool have_desc, uint32_t binding,
+                    uint32_t count, bool have_param, uint32_t param)
+{
+   ralloc_asprintf_append(&s->b, "%s{\"kind\":\"%s\",\"metal_index\":%u,\"descriptor\":", s->bindings++ ? "," : "", kind, metal);
+   if (have_desc) {
+      ralloc_asprintf_append(&s->b, "{\"set\":0,\"binding\":%u,\"count\":%u}", binding, count);
+      if (binding < ARRAY_SIZE(s->occupied))
+         s->occupied[binding] = 1;
+   } else
+      ralloc_strcat(&s->b, "null");
+   ralloc_strcat(&s->b, ",\"param_index\":");
+   air_rf_jopt(&s->b, have_param, param);
+   ralloc_strcat(&s->b, ",\"stage_input_location\":null");
+}
+
+/* a Buffer or ThreadgroupBuffer binding of the argument node x (parameter idx, slot n) */
+static void
+air_rf_buffer(struct air_tr *t, struct air_rf_state *s, const struct air_rf_node *x, uint32_t idx, uint32_t n,
+              bool kernel, LLVMValueRef param)
+{
+   uint32_t space = 0, size = 0, object = 0;
+   bool have_space = air_rf_i32_after(x, "air.address_space", &space);
+   if (!have_space && param && L.LLVMGetTypeKind(L.LLVMTypeOf(param)) == TY_POINTER) {
+      /* the parameter's pointer type: the translator reads addrspace(N) off the define line */
+      space = L.LLVMGetPointerAddressSpace(L.LLVMTypeOf(param));
+      have_space = space != 0;
+   }
+   if (!have_space && kernel) {
+      space = 1;
+      have_space = true;
+   }
+   const bool threadgroup = kernel && have_space && space == 3;
+   const bool have_size = air_rf_i32_after(x, "air.arg_type_size", &size) || air_rf_i32_after(x, "air.buffer_size", &size);
+   const bool have_object = air_rf_i32_after(x, "air.buffer_size", &object);
+   const char *type_name = air_rf_string_after(x, "air.arg_type_name");
+   air_rf_binding_head(s, threadgroup ? "ThreadgroupBuffer" : "Buffer", n, !threadgroup && n < 32, n, 1, true, idx);
+   ralloc_strcat(&s->b, ",\"address_space\":");
+   air_rf_jopt(&s->b, have_space, space);
+   ralloc_strcat(&s->b, ",\"declared_size\":");
+   air_rf_jopt(&s->b, have_size, size);
+   if (have_object)
+      ralloc_asprintf_append(&s->b, ",\"extent\":{\"Object\":{\"bytes\":%u}}", object);
+   else
+      ralloc_asprintf_append(&s->b, ",\"extent\":\"%s\"", have_size || type_name ? "Unbounded" : "Unknown");
+   ralloc_strcat(&s->b, ",\"footprint\":null,\"type_layout\":");
+   int k = air_rf_find(x, "air.struct_type_info");
+   if (k < 0 || (unsigned)k + 1 >= x->n || !air_rf_struct(t, &s->b, x->ops[k + 1], 0))
+      ralloc_strcat(&s->b, "null");
+   ralloc_strcat(&s->b, ",\"type_name\":");
+   air_rf_jstr(&s->b, type_name);
+   ralloc_strcat(&s->b, ",\"texture_shape\":null,\"embedded_source\":null,\"access\":");
+   const char *access = air_rf_declared_access(x);
+   if (!access && have_space && space == 2)
+      access = "ReadOnly";
+   access = air_rf_refined_access(t, idx, access);
+   air_rf_jstr(&s->b, access);
+   ralloc_strcat(&s->b, ",\"static_sampler\":null}");
+}
+
+static void
+air_rf_texture(struct air_tr *t, struct air_rf_state *s, const struct air_rf_node *x, uint32_t idx, uint32_t n)
+{
+   const char *type_name = air_rf_string_after(x, "air.arg_type_name");
+   struct air_rf_shape sh = type_name ? air_rf_texture_shape(type_name) : (struct air_rf_shape){ 0 };
+   const char *kind = !type_name ? "Texture" : sh.array_ref ? "TextureArray" : sh.writable ? "StorageImage" : "Texture";
+   const char *access = type_name && sh.writable ? "Storage" : "Sampled";
+   const bool storage = !strcmp(access, "Storage");
+   const uint32_t binding = (storage ? 480 : 32) + n;
+   air_rf_binding_head(s, kind, n, n < 128, binding, 1, true, idx);
+   ralloc_strcat(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                        "\"type_layout\":null,\"type_name\":");
+   air_rf_jstr(&s->b, type_name);
+   ralloc_strcat(&s->b, ",\"texture_shape\":");
+   if (type_name) {
+      ralloc_asprintf_append(&s->b, "{\"dimension\":\"%s\",\"arrayed\":%s,\"multisampled\":%s,\"component\":\"%s\","
+                             "\"writable\":%s,\"array_ref\":%s,\"array_length\":null,\"storage_format\":",
+                             sh.dimension, sh.arrayed ? "true" : "false", sh.multisampled ? "true" : "false", sh.component,
+                             sh.writable ? "true" : "false", sh.array_ref ? "true" : "false");
+      air_rf_jstr(&s->b, sh.format);
+      ralloc_strcat(&s->b, "}");
+   } else
+      ralloc_strcat(&s->b, "null");
+   ralloc_asprintf_append(&s->b, ",\"embedded_source\":null,\"access\":\"%s\",\"static_sampler\":null}", access);
+}
+
+static void
+air_rf_sampler(struct air_tr *t, struct air_rf_state *s, const struct air_rf_node *x, uint32_t idx, uint32_t n)
+{
+   uint32_t slot, count = 0;
+   if (air_rf_location(t, x, &slot, &count) <= 0 || count <= 1)
+      count = 1;
+   air_rf_binding_head(s, "Sampler", n, n < 32, 160 + n, count, true, idx);
+   ralloc_strcat(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                        "\"type_layout\":null,\"type_name\":null,\"texture_shape\":null,\"embedded_source\":null,"
+                        "\"access\":null,\"static_sampler\":null}");
+}
+
+static int
+air_rf_loc_cmp(const void *a, const void *b)
+{
+   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+   return x < y ? -1 : x > y;
+}
+
+/* Writes t->rf_json, or leaves it NULL with t->rf_why. Called once the function is translated (t->statics holds the
+ * module's constexpr samplers in the translator's order). */
+static void
+air_reflect(struct air_tr *t, LLVMValueRef args_node)
+{
+   const bool kernel = t->stage == NVMTL_AIR_NIR_STAGE_KERNEL, vertex = t->stage == NVMTL_AIR_NIR_STAGE_VERTEX;
+   struct air_rf_state *s = rzalloc(t->mem, struct air_rf_state);
+   s->b = ralloc_strdup(t->mem, "");
+   char *attrs = ralloc_strdup(t->mem, ""), *vary = ralloc_strdup(t->mem, "");
+   unsigned nattrs = 0, nvary = 0;
+   /* a fragment's varyings are listed by Location (a BTreeSet in the translator), a vertex's in their order */
+   struct air_rf_item { uint32_t loc; char *json; } fvary[64], vattr[64];
+   unsigned nfvary = 0;
+   uint32_t vin_loc = 0, frag_loc = 0;
+   LLVMValueRef *nodes = NULL;
+   const unsigned n = args_node && L.LLVMIsAMDNode(args_node) ? air_md_operands(args_node, &nodes, t->mem) : 0;
+   if (!t->rf_param) {
+      t->rf_why = "the entry's parameters were not read before the passes";
+      return;
+   }
+   for (unsigned i = 0; i < n; i++) {
+      struct air_rf_node x = air_rf_node(t, nodes[i]);
+      uint32_t idx;
+      bool have_idx = false;
+      for (unsigned k = 0; k < x.n && !have_idx; k++)
+         have_idx = air_rf_i32(x.ops[k], &idx);
+      if (!have_idx)
+         continue;
+      const char *roles[64];
+      const unsigned nr = air_rf_roles(t, &x, roles, ARRAY_SIZE(roles));
+      if (!nr)
+         continue;
+      const char *first = roles[0], *primary = air_rf_primary(roles, nr);
+      LLVMValueRef param = idx < L.LLVMCountParams(t->function) ? L.LLVMGetParam(t->function, idx) : NULL;
+      bool global_slot = false;
+      const uint32_t slot = air_rf_slot(t, &x, idx, &global_slot);
+      /* the role each stage's parse takes: a kernel's and a vertex function's promote a gated resource (not a buffer),
+       * a fragment function's take the primary role of every argument */
+      const char *role;
+      if (!kernel && !vertex)
+         role = primary;
+      else if (strcmp(first, "function_constant"))
+         role = first;
+      else if (primary && (!strcmp(primary, "texture") || !strcmp(primary, "sampler") || !strcmp(primary, "stage_in") ||
+                           !strcmp(primary, "imageblock") || !strcmp(primary, "visible_function_table") ||
+                           !strcmp(primary, "intersection_function_table") ||
+                           (vertex && (!strcmp(primary, "vertex_input") || !strcmp(primary, "patch_input")))))
+         role = primary;
+      else
+         role = first;   /* "function_constant": a gated buffer whose gate is not known is not bound */
+      if (!role)
+         continue;
+      /* a texture whose slot a function constant sums and whose gate is known false is absent */
+      if (!strcmp(role, "texture") && global_slot && !strcmp(first, "function_constant") && x.n &&
+          air_rf_find(&x, "air.function_constant") >= 0) {
+         int g = air_rf_find(&x, "air.function_constant");
+         if ((unsigned)g + 1 < x.n && air_rf_gate_value(t, x.ops[g + 1]) == 0)
+            continue;
+      }
+      if (!strcmp(role, "buffer")) {
+         air_rf_buffer(t, s, &x, idx, slot, kernel, param);
+      } else if (!strcmp(role, "texture")) {
+         air_rf_texture(t, s, &x, idx, slot);
+      } else if (!strcmp(role, "sampler")) {
+         air_rf_sampler(t, s, &x, idx, slot);
+      } else if (vertex && !strcmp(role, "vertex_input")) {
+         uint32_t loc = vin_loc++;
+         bool g;
+         loc = air_rf_slot(t, &x, loc, &g);
+         /* by Location (a BTreeSet), a later argument at the same Location replacing what an earlier one said */
+         unsigned at = 0;
+         while (at < nattrs && vattr[at].loc != loc)
+            at++;
+         if (at == nattrs) {
+            if (nattrs >= ARRAY_SIZE(vattr)) {
+               t->rf_why = "more than 64 vertex attributes";
+               return;
+            }
+            nattrs++;
+         }
+         char *v = ralloc_asprintf(t->mem, "{\"location\":%u,\"type_name\":", loc);
+         air_rf_jstr(&v, air_rf_string_after(&x, "air.arg_type_name"));
+         ralloc_strcat(&v, ",\"name\":");
+         air_rf_jstr(&v, air_rf_string_after(&x, "air.arg_name"));
+         ralloc_strcat(&v, "}");
+         vattr[at].loc = loc;
+         vattr[at].json = v;
+      } else if (!kernel && !vertex && !strcmp(role, "fragment_input")) {
+         if (nfvary >= ARRAY_SIZE(fvary)) {
+            t->rf_why = "more than 64 fragment inputs";
+            return;
+         }
+         char *v = ralloc_asprintf(t->mem, "{\"location\":%u,\"type_name\":", frag_loc);
+         air_rf_jstr(&v, air_rf_string_after(&x, "air.arg_type_name"));
+         ralloc_strcat(&v, ",\"name\":");
+         air_rf_jstr(&v, air_rf_string_after(&x, "air.arg_name"));
+         ralloc_strcat(&v, ",\"user_semantic\":");
+         air_rf_jstr(&v, air_rf_string_after(&x, "air.fragment_input"));
+         ralloc_strcat(&v, "}");
+         fvary[nfvary].loc = frag_loc++;
+         fvary[nfvary++].json = v;
+      } else if (!strcmp(role, "indirect_buffer") || !strcmp(role, "render_target") || !strcmp(role, "stage_in") ||
+                 !strcmp(role, "imageblock") || !strcmp(role, "visible_function_table") ||
+                 !strcmp(role, "intersection_function_table") || !strcmp(role, "instance_acceleration_structure") ||
+                 !strcmp(role, "primitive_acceleration_structure") || !strcmp(role, "patch_input")) {
+         /* refused by the translation; a reflection of it is not this frontend's to give */
+         t->rf_why = ralloc_asprintf(t->mem, "an argument of the role %s", role);
+         return;
+      }
+   }
+   /* a vertex function's varyings: its outputs, in order (meta: the vertex output roles) */
+   if (vertex) {
+      LLVMValueRef *outs = NULL;
+      const unsigned no = t->outputs_node && L.LLVMIsAMDNode(t->outputs_node) ? air_md_operands(t->outputs_node, &outs, t->mem) : 0;
+      uint32_t out_loc = 0;
+      for (unsigned i = 0; i < no; i++) {
+         struct air_rf_node x = air_rf_node(t, outs[i]);
+         const char *roles[64];
+         const unsigned nr = air_rf_roles(t, &x, roles, ARRAY_SIZE(roles));
+         if (!nr)
+            continue;
+         const char *first = roles[0];
+         if (!strcmp(first, "function_constant")) {
+            const char *p = air_rf_primary(roles, nr);
+            if (p && (!strcmp(p, "vertex_output") || !strcmp(p, "position") || !strcmp(p, "point_size") ||
+                      !strcmp(p, "clip_distance") || !strcmp(p, "viewport_array_index") ||
+                      !strcmp(p, "render_target_array_index")))
+               first = p;
+         }
+         if (strcmp(first, "vertex_output"))
+            continue;
+         bool g;
+         const uint32_t loc = air_rf_slot(t, &x, out_loc, &g);
+         out_loc++;
+         ralloc_asprintf_append(&vary, "%s{\"location\":%u,\"type_name\":", nvary++ ? "," : "", loc);
+         air_rf_jstr(&vary, air_rf_string_after(&x, "air.arg_type_name"));
+         ralloc_strcat(&vary, ",\"name\":");
+         air_rf_jstr(&vary, air_rf_string_after(&x, "air.arg_name"));
+         ralloc_strcat(&vary, ",\"user_semantic\":");
+         air_rf_jstr(&vary, air_rf_string_after(&x, "air.vertex_output"));
+         ralloc_strcat(&vary, "}");
+      }
+   } else if (!kernel) {
+      /* by Location: the inputs are numbered in order, so their order is the Locations' */
+      for (unsigned i = 0; i < nfvary; i++)
+         ralloc_asprintf_append(&vary, "%s%s", nvary++ ? "," : "", fvary[i].json);
+   }
+   qsort(vattr, nattrs, sizeof vattr[0], air_rf_loc_cmp);
+   for (unsigned i = 0; i < nattrs; i++)
+      ralloc_asprintf_append(&attrs, "%s%s", i ? "," : "", vattr[i].json);
+   /* the constexpr samplers: each the first free binding of the sampler band, in the translator's order */
+   util_dynarray_foreach(&t->statics, struct air_sampler *, ps) {
+      unsigned binding = 160;
+      while (binding < 192 && s->occupied[binding])
+         binding++;
+      if (binding >= 192) {
+         t->rf_why = "more constexpr samplers than the sampler band holds";
+         return;
+      }
+      air_rf_binding_head(s, "StaticSampler", binding - 160, true, binding, 1, false, 0);
+      ralloc_strcat(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                           "\"type_layout\":null,\"type_name\":null,\"texture_shape\":null,\"embedded_source\":null,"
+                           "\"access\":null,\"static_sampler\":");
+      if (!air_rf_sampler_state(&s->b, (*ps)->words)) {
+         t->rf_why = "a constexpr sampler's state the translator does not decode";
+         return;
+      }
+      ralloc_strcat(&s->b, "}");
+   }
+   char *j = ralloc_asprintf(t->mem, "{\"reflection_source\":\"air-to-nir\",\"stage\":\"%s\",\"entry_point\":",
+                             kernel ? "Kernel" : vertex ? "Vertex" : "Fragment");
+   air_rf_jstr(&j, air_name(t->function, NULL));
+   ralloc_asprintf_append(&j, ",\"bindings\":[%s],\"argument_buffer_fields\":[],\"vertex_attributes\":[%s],\"varyings\":[%s],"
+                          "\"tessellation\":null,\"fragment_sample_positions\":null,\"local_size\":",
+                          s->b, attrs, vary);
+   /* a kernel's default size: the translator's (TransformOptions::default().kernel_local_size), its SpecIds' defaults */
+   ralloc_strcat(&j, kernel ? "[64,1,1]}" : "null}");
+   t->rf_json = j;
+}
+
 static nir_shader *
 air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const struct vk_pipeline_robustness_state *rs)
 {
@@ -4723,6 +5771,8 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    t->table_type = glsl_array_type(glsl_uint64_t_type(), NVMTL_AIR_NIR_MAX_BUFFERS, 8);
 
    air_bind_arguments(t, args_node);
+   if (t->req->flags & NVMTL_AIR_NIR_REFLECT)
+      air_reflect(t, args_node);
    air_emit_function(t);
 
    t->nir->info.shared_size = t->shared_size;
@@ -4879,6 +5929,8 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the bitcode does not parse%s%s", t->llvm_error[0] ? ": " : "",
                     t->llvm_error);
       bool fold = air_fc_specialize(t, ctx);
+      if (req->flags & NVMTL_AIR_NIR_REFLECT)
+         air_rf_before_passes(t);
       const char *dump_fc = getenv("NVMTL_AIR_NIR_DUMP_FC");   /* the module once the function constants are in */
       if (dump_fc && *dump_fc) {
          FILE *f = fopen(dump_fc, "w");
@@ -4937,6 +5989,19 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       res->varyings = t->varyings;
       res->color_outputs = t->color_outputs;
       res->fragment_flags = t->fragment_flags;
+   }
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, reflection_why) + sizeof res->reflection_why &&
+       (req->flags & NVMTL_AIR_NIR_REFLECT) && t->out) {
+      if (t->rf_json) {
+         const size_t n = strlen(t->rf_json);
+         res->reflection = malloc(n + 1);
+         if (res->reflection) {
+            memcpy(res->reflection, t->rf_json, n + 1);
+            res->reflection_size = n;
+         } else
+            snprintf(res->reflection_why, sizeof res->reflection_why, "out of memory");
+      } else
+         snprintf(res->reflection_why, sizeof res->reflection_why, "%s", t->rf_why ? t->rf_why : "not reflected");
    }
    if (t->out)
       snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread",

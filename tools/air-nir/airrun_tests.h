@@ -7,14 +7,17 @@
  * a build of NVK, and plugin_run.m, which runs it through the Metal plugin's own compute path. Before including it, a
  * harness defines struct buf (.map), struct timg (.stage.map, .w, .h, .d, .layers, .mips, .texel), struct run (.t,
  * .slot[], .tex[16], .threads, .why[256]) and the functions the setups call: slot (a buffer for [[buffer(i)]]),
- * tex_image, tex_buffer, tex_at, tex_level_offset, mip_size and samp_create, which take Vulkan's format, view-type and
- * sampler enums (vulkan_core.h) whatever the harness makes of them.
+ * tex_image, tex_buffer, tex_at, tex_level_offset, mip_size, samp_create and samp_create_pixel (a sampler with pixel
+ * coordinates; airrun.c, which cannot hand its state to the frontend, runs no test that makes one), which take Vulkan's
+ * format, view-type and sampler enums (vulkan_core.h) whatever the harness makes of them.
  */
 /* struct test flags: how the push constants describe the grid */
 #define GRID_INDIRECT (1u << 0)   /* threads_per_grid = 0x80000000 | threadgroup size, groups 0x80000000: an indirect
                                    * dispatch, the kernel reads the group count from the hardware */
 #define GRID_BASE     (1u << 1)   /* the second half of a 64x64 grid: thread_base.y 32, threadgroup_base.y 4 */
 #define MUST_REFUSE   (1u << 2)   /* passes only if the frontend refuses the kernel (nothing is dispatched) */
+#define PLUGIN_ONLY   (1u << 3)   /* the dispatch binds what only the plugin hands the frontend (a pixel-coordinate
+                                   * sampler's state): plugin_run.m runs it, airrun.c does not */
 
 /* function-constant values a test's request carries (NVMTL_AIR_NIR_FC_VALUES) */
 struct fcval {
@@ -1894,6 +1897,16 @@ tex_pixel_check(struct run *r)
    return true;
 }
 
+/* tex_argpixel: argument samplers bound with pixel coordinates (round 5: their state reaches the frontend) */
+static void
+tex_argpixel_setup(struct run *r)
+{
+   tex_pixel_setup(r);
+   samp_create_pixel(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+   samp_create_pixel(r, 1, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);   /* clamp_to_zero */
+   samp_create_pixel(r, 2, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+}
+
 /* tex_offset: run-time and constant offsets */
 static void
 tex_offset_setup(struct run *r)
@@ -2069,6 +2082,7 @@ static const struct test tests[] = {
      tex_depth_expect },
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
+   { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
    { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,
      fc_texture_expect },

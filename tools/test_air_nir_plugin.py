@@ -9,7 +9,12 @@
 # frontend's text-IR parse changes nothing between setjmp and longjmp (it once freed its buffer twice on a refusal); a
 # render pipeline asks the road first and takes the SPIR-V road unchanged otherwise, never with a stage the SPIR-V road
 # rewrites, its stages translated with the device's robustness, ALIGN4 and their linked varyings, both roads linking
-# by one remap, a fragment stage's resources in set 1.
+# by one remap, a fragment stage's resources in set 1. Phase 4 (round 5): newFunctionWithName: asks the frontend before
+# the translator and keeps the translator for every function it does not take, off with NVMTL_AIR_NIR=0, an application
+# profile or the check run (a development switch only); the SPIR-V is made on demand exactly as newFunctionWithName: made
+# it, and every SPIR-V road reads it through nvmtl_function_spirv; every reader of the reflection takes the function's
+# own (the frontend's when the translator was left out); a pixel-coordinate sampler's variant on the road carries the
+# sampler's state, and its render stages never take the SPIR-V road.
 # Each check is also run on a copy of the source with what it guards taken out, and must fail there. Then builds and runs
 # tools/test_air_nir_plugin.c (the pure helpers, plugin/nvmtl_air_nir.h).
 import pathlib, re, subprocess, sys, tempfile
@@ -17,7 +22,7 @@ import pathlib, re, subprocess, sys, tempfile
 root = pathlib.Path(__file__).resolve().parent.parent
 rd = lambda p: (root / p).read_text()
 src = {p: rd(p) for p in ("plugin/NVMTLAirNir.m", "plugin/nvmtl_vk.c", "plugin/NVMTLDevice.m", "plugin/NVMTLObjects.m",
-                          "plugin/NVMTLLibraryLoad.m", "nvk/air/nvk_air_to_nir.c")}
+                          "plugin/NVMTLLibraryLoad.m", "nvk/air/nvk_air_to_nir.c", "plugin/NVMTLEmbedded.m")}
 fails = 0
 def arm(what, ok):
     global fails
@@ -82,8 +87,10 @@ def reasons(s):
 def cache_key(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
     sh = body(an, 'static int nvmtl_air_nir_shader(')
-    keys = all(f'@"{k}"' in sh for k in ("abi", "entry", "constants", "threadgroup", "size", "flags", "ids"))
-    path = 'nvmtl_spvcache_path_air(ad, tail, @"nir1")' in sh and 'nvmtl_air_state(f->_air)' in sh
+    ky = body(an, 'static void nvmtl_air_nir_key(')
+    keys = all(f'@"{k}"' in ky for k in ("abi", "entry", "constants", "threadgroup", "size", "flags", "ids", "samplers"))
+    path = ('nvmtl_spvcache_path_air(ad, tail, @"nir1")' in ky and 'nvmtl_air_state(f->_air)' in ky and
+            'nvmtl_air_nir_key(f, tgLen, flags, local, varyings, stageKey, samplers, path, memoKey);' in sh)
     ids = 'nvmtl_air_nir_image_uuid((const void *)pnvk_air_to_nir' in an and 'st.st_mtimespec' in an
     stored = re.search(r'if \(st == NVMTL_AIR_NIR_UNSUPPORTED \|\| st == NVMTL_AIR_NIR_BAD_AIR\) nvmtl_air_nir_store\(', sh) is not None
     return keys and path and ids and stored
@@ -129,10 +136,10 @@ def render_fallback(s):
     return 0 <= mv < ask < make < note < ret < link < spv and 'if (onNir) {' in m[note:ret]
 
 RENDER_REFUSALS = ('if (noFrag || !ff)', 'if (vf->_spirvOnly || ff->_spirvOnly)', 'if (getenv("NVMTL_BDA_PROBE_FILE"))',
-                   'if (a8mask)', 'if (amplified)', 'if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps))',
+                   'if (a8mask)', 'if (amplified)', 'if (!vf->_spirvLazy && nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps))',
                    'if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32)',
-                   'if (nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length))',
-                   'if (nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length))',
+                   'if (!ff->_spirvLazy && nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length))',
+                   'if (!ff->_spirvLazy && nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length))',
                    'if (samplePayload && samplePayload != [NSNull null])', 'nvmtl_app_profile_edit_module(g_app_profile')
 def render_rewrites(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
@@ -144,9 +151,10 @@ def render_requests(s):
     fl = body(an, 'static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)')
     rp = body(an, 'int nvmtl_air_nir_render_pipeline(')
     sh = body(an, 'static int nvmtl_air_nir_shader(')
+    ky = body(an, 'static void nvmtl_air_nir_key(')
     return ('(g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)' in fl and '(render ? NVMTL_AIR_NIR_VARYINGS : 0)' in fl
             and rp.count('NVMTL_AIR_NIR_ALIGN4') == 2 and 'nvmtl_air_nir_flags(extra, varyings != nil)' in sh
-            and 'k[@"varyings"] = varyings;' in sh and '@"vertex_descriptor": vdesc' in rp and '@{ @"stage": @"fragment" }' in rp)
+            and 'k[@"varyings"] = varyings;' in ky and '@"vertex_descriptor": vdesc' in rp and '@{ @"stage": @"fragment" }' in rp)
 
 def render_link(s):
     an, dv = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/NVMTLDevice.m"])
@@ -160,6 +168,56 @@ def fragment_set(s):
     return ('t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;' in fe and
             fe.count('.desc_set = t->set') == 1 and fe.count('descriptor_set = t->set') == 2 and
             not re.search(r'desc(riptor)?_set = 0', fe))
+
+# --- phase 4 (round 5): functions made without the translator --------------------------------------------------------
+def lazy_first(s):
+    ob = strip_comments(s["plugin/NVMTLObjects.m"])
+    plain = body(ob, '- (id<MTLFunction>)newFunctionWithName:(NSString *)name {')
+    fc = body(ob, '- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)cv error:(NSError **)error {')
+    a, b = plain.find('if (nvmtl_air_nir_lazy(lf)) return lf;'), plain.find('[self nvmtlEntrySpirv:name error:&te]')
+    c, d = fc.find('if (nvmtl_air_nir_lazy(lf)) {'), fc.find('spv = [self nvmtlEntrySpirv:name error:error]')
+    e, g = fc.find('if (nvmtl_air_nir_lazy(lf)) {', d), fc.find('spec = nvmtl_translate_with_fc_cached(')
+    return 0 <= a < b and 0 <= c < d and d < e < g and fc.count('nvmtl_air_nir_lazy(lf)') == 2
+
+def lazy_off(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    lz = body(an, 'BOOL nvmtl_air_nir_lazy(NVMTLFunction *f)')
+    ck = body(an, 'static int nvmtl_air_nir_refl_check_on(void)')
+    return (all(x in lz for x in ('nvmtl_air_nir_refl_check_on()', 'g_app_profile', 'getenv("NVMTL_BDA_PROBE_FILE")',
+                                  'if (!nvmtl_air_nir_on()) return NO;', 'f->_spirvLazy = YES;', '@"__entry_"'))
+            and re.search(r'#if NVMTL_RELEASE\s*return 0;', ck) is not None)
+
+def lazy_same(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    sp = body(an, 'NSData *nvmtl_function_spirv(NVMTLFunction *f, const char *why)')
+    return ('@synchronized (f)' in sp and 'spv = nvmtl_translate_with_fc_cached(f->_air, f->_stage, f->_fname, f->_fc, idx, sz, pay, n, &e);' in sp
+            and 'spv = [(NVMTLLibrary *)f->_lib nvmtlEntrySpirv:f->_fname error:&err];' in sp and 'f->_spirvLazy = NO;' in sp)
+
+def spirv_roads(s):
+    dv = strip_comments(s["plugin/NVMTLDevice.m"])
+    cm = body(dv, '- (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {')
+    rm = body(dv, '- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {')
+    c1, c2 = cm.find('if (!nvmtl_function_spirv(f, nirWhy'), cm.find('nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)')
+    r1, r2 = rm.find('NSData *vsp = nvmtl_function_spirv(vf,'), rm.find('NSData *flk = nvmtl_varying_link(vf, ffx);')
+    only = rm.find('if (vf->_roadOnly || ff->_roadOnly)')
+    return 0 <= c1 < c2 and 0 <= only < r1 < r2 and 'nvmtl_function_has_spirv(f)' in cm
+
+def refl_readers(s):
+    an, em = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/NVMTLEmbedded.m"])
+    ll = strip_comments(s["plugin/NVMTLLibraryLoad.m"])
+    direct = sum(len(re.findall(r'nvmtl_reflect_air_cached\(', t)) for k, t in s.items())
+    return ('nvmtl_function_reflection(f);' in body(an, 'static int nvmtl_air_nir_reflected_statics_w(') and
+            'nvmtl_function_reflection(fn)' in body(em, 'static NSArray<NSArray *> *nvmtl_static_samplers(NVMTLFunction *fn)') and
+            'nvmtl_function_reflection(function);' in body(ll, 'NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)') and
+            direct == 3)   # its definition, nvmtl_function_reflection and the check run
+
+def sampler_states(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    vr = body(an, 'NVMTLComputePipelineState *nvmtl_air_nir_variant(')
+    tr = body(an, 'static int nvmtl_air_nir_translate(')
+    sb = body(an, 'int nvmtl_air_nir_safe_build(')
+    return ('nvmtl_air_nir_sampler_words_all(samplers, why)' in vr and 'req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;' in tr and
+            'o.count != 3' in sb and 'sw = [o[2] count] ? o[2] : nil' in sb)
 
 CHECKS = [
     ("NVMTL_AIR_NIR is read once, in one place, through nvmtl_air_nir_switch", switch_once,
@@ -182,7 +240,7 @@ CHECKS = [
     ("the frontend's text-IR parse changes nothing between setjmp and longjmp", text_ir_setjmp,
      ("nvk/air/nvk_air_to_nir.c", '      if (buf && text) {', '      if (buf && text) {\n         buf = NULL;')),
     ("newRenderPipelineState asks the road first, after the multiview variants, and goes on to the SPIR-V road unchanged", render_fallback,
-     ("plugin/NVMTLDevice.m", '          return ps;\n      } }', '      } }')),
+     ("plugin/NVMTLDevice.m", '          return ps;\n      }\n', '      }\n')),
     ("every pipeline whose stages the SPIR-V road rewrites stays on it (A8, multiview, tessellation, GL, fetch, stencil, ...)",
      render_rewrites, ("plugin/NVMTLAirNir.m", '    if (a8mask) {', '    if (0) {')),
     ("render stages are translated with the device's robustness, ALIGN4, their varyings, and keyed by them", render_requests,
@@ -191,6 +249,18 @@ CHECKS = [
      ("plugin/NVMTLAirNir.m", 'link > 0 ? remap : NULL', 'NULL')),
     ("the frontend puts a fragment stage's resources in set 1, a vertex stage's and a kernel's in set 0", fragment_set,
      ("nvk/air/nvk_air_to_nir.c", '   x->var->data.descriptor_set = t->set;', '   x->var->data.descriptor_set = 0;')),
+    ("newFunctionWithName: (and with constants) asks the frontend before the translator", lazy_first,
+     ("plugin/NVMTLObjects.m", '        if (nvmtl_air_nir_lazy(lf)) return lf;\n', '')),
+    ("the translator is left out only with the road on, no app profile, no check run (a development switch)", lazy_off,
+     ("plugin/NVMTLAirNir.m", '    if (!nvmtl_air_nir_on()) return NO;\n    const uint64_t t0', '    const uint64_t t0')),
+    ("a function's SPIR-V made on demand is what newFunctionWithName: made", lazy_same,
+     ("plugin/NVMTLAirNir.m", '        f->_spirv = spv; f->_spirvLazy = NO;', '        f->_spirv = spv;')),
+    ("every SPIR-V road reads the SPIR-V through nvmtl_function_spirv; a road-only variant never takes it", spirv_roads,
+     ("plugin/NVMTLDevice.m", '    NSData *vsp = nvmtl_function_spirv(vf, "its render pipeline takes the SPIR-V road");', '    NSData *vsp = vf->_spirv;')),
+    ("every reader of the reflection takes the function's own (the frontend's without the translator)", refl_readers,
+     ("plugin/NVMTLEmbedded.m", '? nvmtl_function_reflection(fn) : nil;', '? nvmtl_reflect_air_cached(fn, fn->_air, fn->_stage, NULL, 0) : nil;')),
+    ("a pixel-coordinate sampler's variant on the road carries the state words, into the align guard's build too", sampler_states,
+     ("plugin/NVMTLAirNir.m", '    if (at) req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;', '')),
 ]
 for what, check, (path, old, new) in CHECKS:
     arm(what, check(src))

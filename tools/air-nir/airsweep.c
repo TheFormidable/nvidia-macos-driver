@@ -17,12 +17,20 @@
  * One line per kernel on stdout, tab-separated: "BEGIN<TAB>file" before a file is read (so a caller can tell which file
  * a crash was in), then "<status><TAB>file<TAB>kernel<TAB>message", status OK, REFUSED<n> or PIPELINE<vkresult>, and
  * "NOTEXT<TAB>file<TAB>-<TAB>reason" for a file that does not parse. tools/air-nir/sweep.py runs it and counts.
+ *
+ * airsweep --reflect NVK.dylib LLVM.dylib TRANSLATOR.dylib LIST (round 5): every kernel, vertex and fragment function
+ * of the files through the frontend as the plugin asks it at newFunctionWithName: (the text IR, its function-constant
+ * values, NVMTL_AIR_NIR_REFLECT; translation only, no pipeline), and through the translator's reflection
+ * (nvmtl_reflect, or nvmtl_reflect_fc with the values), one line each:
+ * "RFL<TAB>status<TAB>file<TAB>function<TAB>stage<TAB>message<TAB>frontend JSON or -<TAB>translator JSON or ERR:why",
+ * status the frontend's (0 translated). sweep.py --reflect compares the two.
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
 
 #include <dlfcn.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,15 +143,35 @@ layout_for(VkDevice dev, const struct nvmtl_air_nir_result *res, VkDescriptorSet
    return layout;
 }
 
+typedef int (*refl_fn)(const char *, const char *, uint8_t **, size_t *, char *, size_t);
+typedef int (*refl_fc_fn)(const char *, const char *, const uint32_t *, const uint32_t *, const uint8_t *const *, size_t,
+                          uint8_t **, size_t *, char *, size_t);
+typedef void (*xfree_fn)(uint8_t *, size_t);
+static refl_fn xrefl;
+static refl_fc_fn xrefl_fc;
+static xfree_fn xfree;
+
 int
 main(int argc, char **argv)
 {
-   if (argc != 4) {
-      fprintf(stderr, "usage: airsweep NVK.dylib LLVM.dylib LIST\n");
+   const bool reflect = argc == 6 && !strcmp(argv[1], "--reflect");
+   if (reflect) {
+      void *x = dlopen(argv[4], RTLD_NOW | RTLD_LOCAL);
+      xrefl = x ? (refl_fn)dlsym(x, "nvmtl_reflect") : NULL;
+      xrefl_fc = x ? (refl_fc_fn)dlsym(x, "nvmtl_reflect_fc") : NULL;
+      xfree = x ? (xfree_fn)dlsym(x, "nvmtl_translate_free") : NULL;
+      if (!xrefl || !xrefl_fc) {
+         fprintf(stderr, "airsweep: %s has no nvmtl_reflect\n", argv[4]);
+         return 2;
+      }
+   }
+   if (!reflect && argc != 4) {
+      fprintf(stderr, "usage: airsweep NVK.dylib LLVM.dylib LIST | airsweep --reflect NVK.dylib LLVM.dylib TRANSLATOR.dylib LIST\n");
       return 2;
    }
-   void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
-   void *llvm = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
+   const char *nvk_path = argv[reflect ? 2 : 1], *llvm_path = argv[reflect ? 3 : 2], *list_path = argv[reflect ? 5 : 3];
+   void *lib = dlopen(nvk_path, RTLD_NOW | RTLD_LOCAL);
+   void *llvm = dlopen(llvm_path, RTLD_NOW | RTLD_LOCAL);
    if (!lib || !llvm) {
       fprintf(stderr, "airsweep: %s\n", dlerror());
       return 2;
@@ -151,7 +179,7 @@ main(int argc, char **argv)
 #define SYM(var, name)                                                                                           \
    *(void **)&var = dlsym(llvm, name);                                                                           \
    if (!var) {                                                                                                   \
-      fprintf(stderr, "airsweep: %s has no %s\n", argv[2], name);                                                \
+      fprintf(stderr, "airsweep: %s has no %s\n", llvm_path, name);                                              \
       return 2;                                                                                                  \
    }
    SYM(ContextCreate, "LLVMContextCreate");
@@ -178,7 +206,7 @@ main(int argc, char **argv)
    nvmtl_air_to_nir_v1_fn to_nir = (nvmtl_air_to_nir_v1_fn)dlsym(lib, "nvmtl_air_to_nir_v1");
    nvmtl_air_nir_free_v1_fn free_nir = (nvmtl_air_nir_free_v1_fn)dlsym(lib, "nvmtl_air_nir_free_v1");
    if (!gipa || !to_nir || !free_nir) {
-      fprintf(stderr, "airsweep: %s lacks the exports\n", argv[1]);
+      fprintf(stderr, "airsweep: %s lacks the exports\n", nvk_path);
       return 2;
    }
    PFN_vkCreateInstance create_instance = (PFN_vkCreateInstance)gipa(NULL, "vkCreateInstance");
@@ -211,7 +239,7 @@ main(int argc, char **argv)
    PFN_vkDestroyPipeline dp = (PFN_vkDestroyPipeline)gdpa(dev, "vkDestroyPipeline");
    PFN_vkDestroyDevice dd = (PFN_vkDestroyDevice)gdpa(dev, "vkDestroyDevice");
 
-   FILE *list = fopen(argv[3], "r");
+   FILE *list = fopen(list_path, "r");
    if (!list)
       return 2;
    char path[16384];
@@ -277,6 +305,80 @@ main(int argc, char **argv)
       }
       if (!text)
          DisposeBuffer(in);   /* LLVMParseIRInContext took its buffer; the bitcode reader did not */
+      if (reflect) {
+         static const char *const lists[3][2] = { { "air.kernel", "kernel" }, { "air.vertex", "vertex" },
+                                                  { "air.fragment", "fragment" } };
+         for (unsigned l = 0; l < 3; l++) {
+            unsigned nf = NamedMDCount(mod, lists[l][0]);
+            Val *fns = calloc(nf + 1, sizeof *fns);
+            NamedMDOps(mod, lists[l][0], fns);
+            for (unsigned k = 0; k < nf; k++) {
+               unsigned c = MDCount(fns[k]);
+               Val *ops = calloc(c + 1, sizeof *ops);
+               MDOps(fns[k], ops);
+               if (!c || !ops[0] || !IsAFunction(ops[0])) {
+                  free(ops);
+                  continue;
+               }
+               size_t len = 0;
+               const char *nm = ValueName(ops[0], &len);
+               char name[512];
+               snprintf(name, sizeof name, "%.*s", (int)len, nm ? nm : "");
+               free(ops);
+               if (only && strcmp(name, only))
+                  continue;
+               /* a function the translator's reflection or the frontend works on for over 60 s ends the process
+                * (SIGALRM): sweep.py records the file as a crash and goes on after it */
+               alarm(60);
+               /* as the plugin asks at newFunctionWithName: (NVMTLAirNir.m nvmtl_air_nir_flags, no varyings) */
+               struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_TG_DEFAULT |
+                                                    NVMTL_AIR_NIR_REFLECT | (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0),
+                                                    llvm_path, data, size, name, { 64, 1, 1 } };
+               if (fcs) {
+                  req.fc_count = nfc;
+                  req.fc_indices = fc_idx;
+                  req.fc_sizes = fc_sz;
+                  req.fc_payloads = fc_pay;
+               }
+               struct nvmtl_air_nir_result res = { sizeof res };
+               int st = to_nir(dev, &req, &res);
+               if (res.nir)
+                  free_nir(res.nir);
+               uint8_t *j = NULL;
+               size_t jn = 0;
+               char e[512] = { 0 };
+               int rc = fcs ? xrefl_fc(data, lists[l][1], fc_idx, fc_sz, fc_pay, nfc, &j, &jn, e, sizeof e)
+                            : xrefl(data, lists[l][1], &j, &jn, e, sizeof e);
+               clean(res.message);
+               clean(res.reflection_why);
+               clean(e);
+               clean(name);
+               printf("RFL\t%d\t%s\t%s\t%s\t%s\t", st, path, name, lists[l][1],
+                      st ? res.message : res.reflection ? "-" : res.reflection_why);
+               if (res.reflection)
+                  fwrite(res.reflection, 1, res.reflection_size, stdout);
+               else
+                  fputs("-", stdout);
+               fputs("\t", stdout);
+               if (rc == 0 && j) {
+                  for (size_t q = 0; q < jn; q++)
+                     putchar(j[q] == '\t' || j[q] == '\n' ? ' ' : j[q]);
+               } else
+                  printf("ERR:%s", e[0] ? e : "?");
+               putchar('\n');
+               free(res.reflection);
+               if (j && xfree)
+                  xfree(j, jn);
+               alarm(0);
+            }
+            free(fns);
+         }
+         fflush(stdout);
+         DisposeModule(mod);
+         ContextDispose(ctx);
+         free(data);
+         continue;
+      }
       Buf bc = WriteBitcode(mod);
       unsigned kernels = NamedMDCount(mod, "air.kernel");
       Val *nodes = calloc(kernels + 1, sizeof *nodes);
@@ -296,7 +398,7 @@ main(int argc, char **argv)
          free(ops);
          if (only && strcmp(name, only))
             continue;
-         struct nvmtl_air_nir_request req = { sizeof req, 0, argv[2], BufferStart(bc), BufferSize(bc), name,
+         struct nvmtl_air_nir_request req = { sizeof req, 0, llvm_path, BufferStart(bc), BufferSize(bc), name,
                                               { 64, 1, 1 } };
          for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
             req.threadgroup_lengths[i] = 1024;

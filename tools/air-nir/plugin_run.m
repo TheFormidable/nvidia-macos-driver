@@ -233,6 +233,20 @@ samp_create(struct run *r, unsigned slot_, VkFilter filter, VkSamplerAddressMode
    [sd release];
 }
 
+/* a sampler with pixel coordinates (normalizedCoordinates NO): Metal allows nearest or linear, no mipmaps, and the two
+ * clamps */
+static void
+samp_create_pixel(struct run *r, unsigned slot_, VkFilter filter, VkSamplerAddressMode address)
+{
+   MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+   sd.minFilter = sd.magFilter = filter == VK_FILTER_LINEAR ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+   sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+   sd.sAddressMode = sd.tAddressMode = sd.rAddressMode = mtl_address(address);
+   sd.normalizedCoordinates = NO;
+   r->samp[slot_] = [dev newSamplerStateWithDescriptor:sd];
+   [sd release];
+}
+
 #include "airrun_tests.h"
 
 /* ---- NVRM's fault counters ------------------------------------------------------------------------------------- */
@@ -759,14 +773,19 @@ run_render_test(const struct rtest *t)
       return FAIL;
    }
    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-   id<MTLFunction> vf = [lib newFunctionWithName:@(t->vfn)], ff = nil;
+   id<MTLFunction> vf = nil, ff = nil;
    if (t->fc) {
       MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
       for (unsigned i = 0; i < t->fc->n; i++)
          [cv setConstantValue:t->fc->v[i].bytes type:t->fc->v[i].size == 1 ? MTLDataTypeBool : MTLDataTypeUInt atIndex:t->fc->v[i].index];
+      if (t->fc_both)
+         vf = [lib newFunctionWithName:@(t->vfn) constantValues:cv error:&e];
       ff = [lib newFunctionWithName:@(t->ffn) constantValues:cv error:&e];
       [cv release];
-   } else
+   }
+   if (!vf)
+      vf = [lib newFunctionWithName:@(t->vfn)];
+   if (!t->fc)
       ff = [lib newFunctionWithName:@(t->ffn)];
    const double fn_ms = ms_since(t0);
    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];

@@ -21,7 +21,7 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 48 | 1 | 61 | 405 | 12 |  | 533 |
+| env |  | 6 |  |  | 48 | 1 | 62 | 405 | 12 |  | 534 |
 | bootarg | 4 | 13 | 30 | 21 | 17 |  | 8 | 6 | 2 |  | 101 |
 | sysctl |  | 5 | 4 | 12 |  |  | 388 |  | 1 |  | 410 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
@@ -270,6 +270,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_AIR_NIR_DEBUG` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend says on standard error where a module's static initializer could not be run, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
 | `NVMTL_AIR_NIR_DUMP` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend writes the module it read (after its passes) to the file named, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
 | `NVMTL_AIR_NIR_DUMP_FC` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend writes the module once the function constants are in to the file named, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
+| `NVMTL_AIR_NIR_REFL_CHECK` | diag | unset | 3.0.22 | 3.2 | development plugins only (a release plugin ignores it): every function is made with the translator, as with NVMTL_AIR_NIR=0, and the plugin log compares the AIR-to-NIR frontend's reflection of it with the translator's, key by key, and its default threadgroup size with the SPIR-V's (docs/AIR-TO-NIR.md phase 4) | plugin/NVMTLAirNir.m |
 | `NVMTL_ANGLE_METAL` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_APPLE_FAMILY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m, plugin/nvmtl_app_profile.h |
 | `NVMTL_APPLE_PIPELINE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLVendorCompiler.m |

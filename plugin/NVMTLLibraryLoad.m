@@ -2676,20 +2676,18 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
             function->_embedded = @[];
             return function->_embedded;
         }
-        uint8_t *j = NULL; size_t jn = 0; char e[512] = { 0 };
-        if (!nvmtl_xlate_ready() || !xlate_refl) {
+        if (!function->_nrefl && (!nvmtl_xlate_ready() || !xlate_refl)) {
             nvlog("embedded: no reflection in this translator — %s's argument-buffer resources CANNOT be resolved", who);
             function->_embedded = @[];
             return function->_embedded;
         }
-        (void)j; (void)jn;
-        NSData *d = nvmtl_reflect_air_cached(function, ll, stage, e, sizeof e);
-        if (!d) {
-            nvlog("embedded: reflection for %s FAILED: %s — resources NOT resolved", who, e);
+        // the function's reflection: the frontend's for one newFunctionWithName: made without the translator (phase 4)
+        NSDictionary *refl = nvmtl_function_reflection(function);
+        if (!refl) {
+            nvlog("embedded: reflection for %s FAILED — resources NOT resolved", who);
             function->_embedded = @[];
             return function->_embedded;
         }
-        NSDictionary *refl = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
         NSArray *all = refl[@"bindings"];
         NSMutableArray *mine = [NSMutableArray new];
         if ([all isKindOfClass:[NSArray class]]) {
@@ -2709,7 +2707,7 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
 }
 
 NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count && !g_translate_variant_forced) return fn->_spirv;
+    if (!states.count && !tgLen.count && !g_translate_variant_forced) return nvmtl_function_spirv(fn, "a variant without specialization");
     if (!fn->_air || !nvmtl_xlate_ready()) { if(err)*err=@"specialization has no AIR or translator";return nil; }
     if (states.count && !xlate_sampler) { if(err)*err=@"sampler specialization has no translator";return nil; }
     if (tgLen.count && !xlate_tglen) { if(err)*err=@"this translator cannot size threadgroup memory";return nil; }
@@ -2767,7 +2765,7 @@ NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states
 }
 
 NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count) return fn->_spirv;
+    if (!states.count && !tgLen.count) return nvmtl_function_spirv(fn, "a variant without specialization");
     if (!fn->_air || !nvmtl_xlate_ready()) return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
     NSDictionary *config=@{@"stage":fn->_stage ?: @"",@"entry":fn->_fname ?: @"",
         @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{}};
@@ -2802,7 +2800,7 @@ NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32
 // amp: the vertex amplification count of the pipeline (2 or more makes a multiview variant; 0 and 1 are the ordinary shader).
 NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err) {
     if (amp < 2) amp = 0;
-    if (!states.count && !a8 && !amp) return fn->_spirv;
+    if (!states.count && !a8 && !amp) return nvmtl_function_spirv(fn, "a sampler variant of another stage");
     if (!fn->_air && !states.count && !amp) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
     NSMutableDictionary *jd=[@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} mutableCopy];

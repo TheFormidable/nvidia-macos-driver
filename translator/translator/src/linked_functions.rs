@@ -1409,6 +1409,16 @@ fn append_dependency_module(output: &mut String, module: &str) {
     if DEDUPE_DEPENDENCIES.with(|d| d.get()) {
         return append_dependency_module_dedupe(output, module);
     }
+    // A global the output already defines with the very same line (both modules' `@__air_sampler_state` of one
+    // constexpr sampler, say) is not defined a second time: the translator reads either line the same, and LLVM, which
+    // the AIR-to-NIR frontend parses this text with, refuses a module that defines a global twice. A global defined
+    // again with another line is kept as it was.
+    let globals: HashSet<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('@') && l.contains(" = "))
+        .map(str::to_string)
+        .collect();
     for line in module.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("; ModuleID =")
@@ -1417,6 +1427,7 @@ fn append_dependency_module(output: &mut String, module: &str) {
             || trimmed.starts_with("target triple =")
             || trimmed.starts_with("attributes #")
             || trimmed.starts_with('!')
+            || (trimmed.starts_with('@') && globals.contains(line.trim()))
         {
             continue;
         }
@@ -2507,6 +2518,25 @@ fn split_top_level(text: &str, delimiter: char) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dependency_defining_the_same_global_with_the_same_line_does_not_define_it_twice() {
+        let mut output = String::from(
+            "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 34901797601020489, i64 0], align 8\n\
+             define void @main() {\nentry:\n  ret void\n}\n",
+        );
+        let dependency = "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 34901797601020489, i64 0], align 8\n\
+                          @__air_sampler_state.1 = internal addrspace(2) constant [2 x i64] [i64 7, i64 0], align 8\n\
+                          define float @leaf() {\nentry:\n  ret float 0.0\n}\n";
+        append_dependency_module(&mut output, dependency);
+        assert_eq!(output.matches("@__air_sampler_state = ").count(), 1, "{output}");
+        assert_eq!(output.matches("@__air_sampler_state.1 = ").count(), 1, "{output}");
+        assert!(output.contains("define float @leaf()"));
+        // another definition under the same name is kept as it was: the translator's reading of the text is unchanged
+        let mut other = String::from("@g = internal addrspace(2) constant i32 1, align 4\n");
+        append_dependency_module(&mut other, "@g = internal addrspace(2) constant i32 2, align 4\n");
+        assert_eq!(other.matches("@g = ").count(), 2, "{other}");
+    }
 
     #[test]
     fn direct_visible_references_close_the_authored_dependency_graph() {

@@ -2521,7 +2521,8 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
                                   (b->src_alpha >= 15 && b->src_alpha <= 18) || (b->dst_alpha >= 15 && b->dst_alpha <= 18));
         if (!dual) continue;
         if (i != 0) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u uses a dual-source factor; only attachment 0 may (Metal and Vulkan alike)", i]);
-        if (!nvmtl_spirv_has_index1(ff->_spirv.bytes, ff->_spirv.length))
+        NSData *fsp1 = nvmtl_function_spirv(ff, "a dual-source blend reads its Index 1 output");
+        if (!nvmtl_spirv_has_index1(fsp1.bytes, fsp1.length))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ uses a dual-source blend factor and its fragment SPIR-V has no Index 1 output (the translator predates dual-source)", ff->_fname]);
         static int said; if (said++ < 4) nvlog("pipeline: par2 dual-source blending on %s", ff->_fname.UTF8String);
     }
@@ -2559,10 +2560,10 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
     /* _descriptor keeps the caller's (unlinked) functions; a pixel-sampler variant re-translates from these, the
      * stages the pipeline was actually built from (RenderBox's custom_fn fragments only translate once linked). */
     ps->_linkedVert = vf; ps->_linkedFrag = noFrag ? nil : ff;
-    if (!vf->_spirv.length || !ff->_spirv.length)
+    if (!nvmtl_function_has_spirv(vf) || !nvmtl_function_has_spirv(ff))
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"pipeline: REFUSED — %@ is a visible function, not an entry point (vertex %lu B, fragment %lu B)",
-            !vf->_spirv.length ? vf->_fname : ff->_fname,
+            !nvmtl_function_has_spirv(vf) ? vf->_fname : ff->_fname,
             (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length]);
     NVMTLFunction *ffx = ff;   // the fragment stage as built: an A8-target variant when a colour attachment is A8Unorm
     ps->_a8mask = a8mask;
@@ -2582,9 +2583,10 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
     if (nvmtl_vk_multiview_views() && [d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1) {
         const uint32_t want = (uint32_t)d.maxVertexAmplificationCount, mask = nvmtl_mv_mask_for_count(want, nvmtl_vk_multiview_views());
         if (!mask) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - vertex amplification count %u is more views than this device can run in one pass (%u)", want, nvmtl_vk_multiview_views()]);
-        if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &(uint32_t){0}, &(uint32_t){0}))
+        NSData *vspa = nvmtl_function_spirv(vf, "vertex amplification");
+        if (nvmtl_spirv_tess_info(vspa.bytes, vspa.length, &(uint32_t){0}, &(uint32_t){0}))
             return nvmtl_fail(err, @"pipeline: REFUSED - vertex amplification with tessellation is not carried");
-        const char *mvwhy = nvmtl_mv_vertex_refusal(vf->_spirv.bytes, vf->_spirv.length / 4);
+        const char *mvwhy = nvmtl_mv_vertex_refusal(vspa.bytes, vspa.length / 4);
         if (mvwhy) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - %s (%@)", mvwhy, vf->_fname]);
         NSString *mw = nil;
         if (vf->_air) {
@@ -2616,7 +2618,15 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
           nvmtl_render_keep_linked(ps, vf, ff);
           if (NVMTL_SINCE(10.14, BOOL, d.supportIndirectCommandBuffers, NO)) nvmtl_icb_register_pipeline(ps, NO);
           return ps;
-      } }
+      }
+      // a pixel-sampler variant's stages made for the road only (NVMTLAirNir.m): the translator's variant is made instead
+      if (vf->_roadOnly || ff->_roadOnly)
+          return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: the AIR-to-NIR road does not make this sampler variant: %@", nirWhy ?: @"?"]); }
+    // The SPIR-V road: a stage newFunctionWithName: made without the translator (phase 4) is translated now
+    NSData *vsp = nvmtl_function_spirv(vf, "its render pipeline takes the SPIR-V road");
+    if (ffx == ff) (void)nvmtl_function_spirv(ff, "its render pipeline takes the SPIR-V road");
+    if (!vsp.length || !ffx->_spirv.length)
+        return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ does not translate to SPIR-V", !vsp.length ? vf->_fname : ff->_fname]);
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
@@ -3024,12 +3034,13 @@ void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why,
               f->_fname.UTF8String, (__bridge void *)ps);
         return ps;
     }
-    if (!f || !f->_spirv) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
+    if (!f || !nvmtl_function_has_spirv(f)) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
     // A replacement module for one translated kernel, from a whole file (a developer override). The application profile's
     // kernel edit is applied later, where every compute pipeline is created (nvmtl_vk_compute_pipeline_create_g).
     const char *compatPath = getenv("NVMTL_BDA_PROBE_FILE");
     static char compatShaderKey;
     if (compatPath && !objc_getAssociatedObject(f, &compatShaderKey)) {
+        (void)nvmtl_function_spirv(f, "NVMTL_BDA_PROBE_FILE hashes it");
         uint32_t hash = 2166136261u;
         for (NSUInteger i = 0; i < f->_spirv.length; i++) { hash ^= ((const uint8_t *)f->_spirv.bytes)[i]; hash *= 16777619u; }
         const char *targetText = getenv("NVMTL_BDA_PROBE_HASH");
@@ -3066,6 +3077,9 @@ void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why,
     ps->_function = f;
     nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
     ps->_attrT = nvmtl_air_max_tg(f);
+    // The SPIR-V road: a kernel newFunctionWithName: made without the translator (phase 4) is translated now
+    if (!nvmtl_function_spirv(f, nirWhy ? "its pipeline takes the SPIR-V road" : "its pipeline takes the SPIR-V road (the road is off)").length)
+        return nvmtl_fail(err, [NSString stringWithFormat:@"newComputePipelineState: %@ does not translate to SPIR-V", f->_fname]);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
     nvmtl_air_nir_note(f, 0, NO, nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
