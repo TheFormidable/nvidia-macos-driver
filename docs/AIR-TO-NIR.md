@@ -7,8 +7,10 @@ vertex and fragment functions.
 
 Phase 1 is the frontend and its tests (on Linux, then on the card). Since phase 2 (round 3, 2026-11-27) the plugin
 asks it first for every compute pipeline, and since phase 3 (round 4, the same day) for every render pipeline, and
-keeps the SPIR-V road as the fallback (below, "In the plugin" and "Render pipelines"). NVMTL_AIR_NIR=0 turns it off;
-it is off in WindowServer for now.
+keeps the SPIR-V road as the fallback (below, "In the plugin" and "Render pipelines"). Since phase 4 (round 5, the same
+day) the frontend also gives the function's reflection, and `newFunctionWithName:` leaves the translator out of every
+function the frontend translates: its SPIR-V is made only when something needs it ("Functions made without the
+translator"). NVMTL_AIR_NIR=0 turns all of it off; it is off in WindowServer for now.
 
 ## Pieces
 
@@ -26,6 +28,7 @@ it is off in WindowServer for now.
 | `tools/air-nir/airrun_tests.h` | the tests' grids, inputs and references, shared by `airrun.c` and `plugin_run.m` |
 | `tools/air-nir/plugin_run.m`, `plugin-run.sh` | the same tests through the plugin's own compute path, from a build, nothing installed |
 | `tools/air-nir/metal-render/`, `render_tests.h` | vertex and fragment pairs through the plugin's own render path (plugin_run), offscreen, checked per pixel |
+| `airsweep.c --reflect`, `sweep.py --reflect` | every kernel, vertex and fragment function of AIR files: the frontend's reflection against the translator's (round 5) |
 
 ## How it works
 
@@ -54,6 +57,19 @@ it is off in WindowServer for now.
   it reads a SPIR-V module's), `varyings` (the Locations written or read), `color_outputs`, and `fragment_flags`
   (`NVMTL_AIR_NIR_FS_DEPTH`, `_SAMPLE_MASK`, `_DISCARD`, `_EARLY_TESTS`, `_PER_SAMPLE`). An older NVK refuses a vertex
   or fragment function ("no kernel named"), and an older plugin's version-3 request is read as before.
+- Version 5 (round 5): with `NVMTL_AIR_NIR_REFLECT` the result carries the function's reflection (`reflection`, JSON,
+  malloc'd, the caller frees it; or `reflection_why`), read from the module once its function constants are in and
+  before LLVM's passes, by the translator's rules for each stage (`translator/translator/src/meta`, `reflect`), with the
+  translator's keys and values for everything the plugin reads of it: `bindings` (kind, metal_index, descriptor,
+  param_index, address_space, declared_size, extent, type_layout, type_name, texture_shape, access as the entry's
+  argument attributes and uses refine it, the constexpr samplers' decoded state with their `raw_words`), `varyings`,
+  `vertex_attributes`, `local_size` (a kernel's default, the translator's 64x1x1, which its SpecIds default to), and
+  `tessellation`, `fragment_sample_positions` and `argument_buffer_fields` (null or empty: the frontend refuses what
+  would fill them). Keys no reader of the plugin's takes (footprints, descriptor_layout, render_targets, the function
+  constants, the BufferAddressTable binding) are not written. With `NVMTL_AIR_NIR_SAMPLER_STATES` the request carries
+  the state of argument samplers (`sampler_state_*`: slot and the two AIR constexpr-sampler words), and a sampler given
+  there with pixel coordinates is sampled as a constexpr one with that state is (the plugin's VkSampler of a
+  pixel-coordinate MTLSamplerDescriptor is normalized with the same filter and address modes).
 - A render stage's contract, the plugin's render layout: set 0 holds the vertex stage's resources, set 1
   (`NVMTL_AIR_NIR_FRAGMENT_SET`) the fragment stage's, each with the same bands as a kernel's (the table at 640,
   textures at 32 + n, samplers at 160 + n, storage textures at 480 + n), and no push constants are read. A
@@ -131,8 +147,10 @@ outputs `[[position]]`, `[[point_size]]`, `[[clip_distance]]`, `[[render_target_
 `[[viewport_array_index]]` and user varyings of one Location with their interpolation (`center` / `centroid` /
 `sample`, `perspective` / `no_perspective` / `flat`; integers flat); fragment inputs `[[position]]`,
 `[[front_facing]]`, `[[point_coord]]`, `[[sample_id]]`, `[[sample_mask]]`, `[[render_target_array_index]]`; outputs
-`[[color(n)]]` (n < 8) of float, half, signed and unsigned types, `[[depth(any|greater|less)]]` (with that depth
-layout) and `[[sample_mask]]`; `discard_fragment` (a demote, as the translator's), `[[early_fragment_tests]]`, sampling
+`[[color(n)]]` (n < 8, a literal or since round 5 an expression of function constants, and the old form without the
+index operand) of float, half, signed and unsigned types, `[[depth(any|greater|less)]]` (with that depth
+layout) and `[[sample_mask]]`; since round 5 an output that exists only under a function constant (the request's values
+say whether it does; one whose constant is false is written nowhere, as the translator drops it); `discard_fragment` (a demote, as the translator's), `[[early_fragment_tests]]`, sampling
 at the level the derivatives give (with a bias), `dfdx`, `dfdy`, `fwidth`; buffers, textures, samplers and function
 constants as in a kernel, the SIMD-group builtins.
 
@@ -151,13 +169,16 @@ fetch), `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0)
 threadgroup arguments, a varying the request gives no Location; and of textures: multisampled ones, a written cube or depth texture and a texel read of a cube
 (the translator goes through a 2D-array view of them), sampling an integer texture (the translator emulates it with
 fetches), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
-level other than 0, `air.is_null_texture`/`get_null_texture`, and constexpr samplers with pixel coordinates,
+level other than 0, `air.is_null_texture`/`get_null_texture` (and, since round 5, a texture or sampler handle used as a plain value:
+a `ptrtoint` and a compare, a select or a phi of two handles, which Apple's compiler writes for a null-texture test; the
+frontend read such a handle's missing value and crashed, below), and samplers with pixel coordinates (constexpr, or an
+argument one whose state the request gives) other than nearest with a clamp and linear 2D `clamp_to_edge`, and with
 bicubic filtering or min/max reduction (the translator emulates the first two).
 
-An argument sampler's state is not known when the kernel is translated: the frontend treats it as one with
-normalized coordinates, as a sampler the plugin creates from a normalized `MTLSamplerState` is. A pipeline bound
-with a pixel-coordinate sampler needs that state in the request (the translator takes it through
-`with_runtime_sampler`), which phase 3 adds.
+An argument sampler's state is not known when the function is translated: the frontend treats it as one with
+normalized coordinates, as a sampler the plugin creates from a normalized `MTLSamplerState` is. A dispatch or draw
+bound with a pixel-coordinate sampler makes a variant whose request carries the bound state (version 5, round 5), as
+the translator takes it through `with_runtime_sampler`.
 
 Math functions compiled without fast math (`-fno-fast-math`) are translated to the same hardware approximations as
 the fast ones (`MUFU`): within the bounds `airrun` checks for the arguments it uses, not Metal's ulp limits for
@@ -427,6 +448,115 @@ Leftovers of round 3:
   `tex_pixel` slots 0 to 2, `tex_pixel_array` slot 0) and `r_texture`'s fragment stage (slot 1), the frontend's words
   are the translator's reflection's (`raw_words`) exactly. The plugin now logs the comparison once per function.
 
+## Functions made without the translator (round 5, phase 4)
+
+`newFunctionWithName:` and its function-constant variants (`constantValues:`, the completion-handler and descriptor
+forms, which end there) ask the frontend first (`nvmtl_air_nir_lazy`, `plugin/NVMTLAirNir.m`): the function is translated
+with `NVMTL_AIR_NIR_REFLECT` as its pipeline will ask (a kernel at its reflection's default size, 64x1x1, with the flags
+and threadgroup-memory lengths `nvmtl_air_nir_make` uses, so its NIR is stored where the pipeline looks it up; a vertex
+or fragment function with its own Locations), and when the frontend translates it and gives its reflection, the
+function is made with that reflection (`_nrefl`, also `_refl`, which every reader of the reflection takes) and no
+SPIR-V (`_spirvLazy`). The translator then runs only the first time something needs SPIR-V of the function
+(`nvmtl_function_spirv`, which makes it exactly as `newFunctionWithName:` would have: `nvmtlEntrySpirv`, or
+`nvmtl_translate_with_fc_cached` with the constants): a pipeline the frontend refuses or NVK will not make, a render
+pipeline that needs a rewrite of the SPIR-V road's (A8, multiview, tessellation, the GL uniform buffer, framebuffer
+fetch, stencil export, programmable sample positions), a variant the road does not make, a dual-source blend check,
+`NVMTL_BDA_PROBE_FILE`. A function the frontend refuses or does not reflect is made as before, and so is every function
+with `NVMTL_AIR_NIR=0`, in WindowServer, with an application profile (it edits SPIR-V), in the check run, and OpenCL's
+(by-value `air.constant` arguments and `__entry_` wrappers, which stay deferred to `newFunctionWithPluginData`). The
+frontend's reflection is kept in the shader cache (stage `nrf1`, keyed by the AIR, the entry, the constants, the stage
+and the identity of NVK and LLVM; a function it does not take is an entry too). The plugin logs once per process, at
+exit, `functions in <process>: <n> made without the translator (<ms> of the frontend), <k> of them translated later
+(<ms> of the translator)` (also in the system log), and in its log file the function each time one is translated later
+and why.
+
+What the plugin read of the SPIR-V of every function before, and where it comes from now for a function made without
+the translator: the reflection (arguments, varyings, vertex attributes, constexpr samplers, embedded resources) from
+the frontend's; the kernel's default threadgroup size (`nvmtl_cvar_seed_size` of the SPIR-V's SpecId defaults) from the
+reflection's `local_size`; the hazard model's writes and the GL uniform check from the reflection, as before; the
+binding masks from the frontend's result, as on the road before; the tessellation, framebuffer-fetch and stencil-export
+checks of the render road are not made (the frontend refuses a post-tessellation vertex function, `[[color(n)]]` inputs
+and `[[stencil]]`); the multiview check, the A8 variant and the SPIR-V road translate first. The SPIR-V FNV hash the
+per-kernel profile rows and the fault-context records carry is 0 for a function made without the translator (their AIR
+key is there as before).
+
+The check run (`NVMTL_AIR_NIR_REFL_CHECK=1`, development plugins only): every function is made as before, and the
+plugin log compares the frontend's reflection of it with the translator's, key by key (the frontend's keys; the
+bindings as a set, the translator's BufferAddressTable left out), and its default size with its SPIR-V's.
+
+Argument samplers with pixel coordinates (step 3): the dispatch's or draw's bound pixel-coordinate samplers (the
+translator's state names `NVMTLSamplerState` keeps) become the AIR state words in the request (`nvmtl_air_nir_sampler_words`),
+so that variant is the frontend's: a compute variant is translated with them (and the align guard's build of it too), a
+render variant's two stages are copies of the pipeline's that carry them and take only the road (`_roadOnly`); when the
+road does not make it, the translator's variant is made as before. A sampler whose state the words cannot hold
+(`MirrorClampToEdge`) keeps the translator's variant.
+
+### Tested (round 5)
+
+- Reflection: `NVMTL_AIR_NIR_REFL_CHECK=1` through `plugin-run.sh` over all 61 tests: the frontend's reflection equals
+  the translator's for all 70 functions it translates (43 kernels with their function-constant sets, 14 vertex and 13
+  fragment functions; the default size equals the SPIR-V's for every kernel); the frontend refuses the other five (four
+  that must be refused, and `r_primid`'s fragment). `sweep.py --reflect` over the plugin's AIR cache (22,689 files, 10,814
+  kernel, vertex and fragment functions, no function-constant values; 32 minutes): the frontend translates 5,001 (3,481
+  kernels, 488 vertex and 1,032 fragment functions) and its reflection equals the translator's for every one of them, by
+  every key it gives; it gives one for every function it translates; it refuses 5,811 (most read function constants the
+  cache holds no values for; then buffer arguments whose metadata names no address space (475: the parameter's pointer type says it), post-tessellation vertex functions,
+  argument indices from function constants, texture arrays, framebuffer fetch); two the translator's reflection did not
+  finish (below). With function-constant values (all 0, and all 1), the 36 functions of the cache with the output and
+  colour-index forms of the last item of this list that the frontend now translates compare equal too.
+- The sweep found that the frontend crashed (SIGSEGV) on two SceneKit fragment functions of the cache: a null-texture
+  test written as `ptrtoint` of a texture handle, whose NIR value it read though a handle has none. On 3.0.21 any
+  process making a render pipeline with such a fragment would crash in `newRenderPipelineStateWithDescriptor:`; such
+  uses are refused now (`air_vdef`), and those pipelines take the SPIR-V road.
+- The translator's reflection (`nvmtl_reflect`, 3.0.21's) did not return in 20 minutes on the two copies of MPS's
+  `cnnConvArrayGeneralA14` in the cache (38 MB of text IR each; it loops in `lower_air_text`'s
+  `inline_and_forward_object_fields`); the frontend refuses them in 8 s (an argument index from function constants it is
+  not given). A function on the road no longer asks the translator's reflection; `airsweep` now ends a function after 60 s
+  (a CRASH with signal 14) and the sweep goes on.
+- Through the plugin, on the RTX 5050, the NVK of this tree and the installed plugin's air-runtime and translator (two
+  runs on each road, one with the caches of the first and one with `PLUGIN_RUN_CORRUPT=1`; the fault counters stayed at 0):
+  all 47 compute tests (the 46 of round 4 and `tex_argpixel`), `align_misaligned` and the 16 render pairs (the 14 of round
+  4, `r_argpixel` and `r_fcout`) pass on the road, the five the frontend must refuse taking the SPIR-V road, and 75
+  functions are made without the translator, one of which is translated later (`r_primid`'s vertex function, whose
+  pipeline takes the SPIR-V road). With `NVMTL_AIR_NIR=0` the same five tests as in round 4 fail (`fmath`,
+  `fmath_precise`, `math_lib`, `tex_offset`, `align_misaligned`: old, not the road's), and the new three pass. With
+  `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails.
+
+| test | what | tolerance |
+|---|---|---|
+| tex_argpixel | argument samplers bound with pixel coordinates: nearest clamp_to_edge, nearest clamp_to_zero, linear clamp_to_edge | nearest exact, linear 1/128 |
+| r_argpixel | a fragment sampling through argument samplers with pixel coordinates, nearest and linear | nearest 1e-6, linear 1/128 |
+| r_fcout | vertex outputs under function constants (one true, one false), `[[color(fc + 1)]]` | 1e-4 |
+
+  The variants of `tex_argpixel` and `r_argpixel` are made on the road (`compute pixel sampler variant built: tex_argpixel
+  (AIR to NIR)`, `render pixel sampler variant built on the AIR-to-NIR road`).
+- The time saved (function creation plus pipeline creation, the first of each kind in the process left out; runs 1 and 2):
+
+| | AIR to NIR | NVMTL_AIR_NIR=0 |
+|---|---|---|
+| compute, 42 kernels: newFunctionWithName: | median 0.68 / 0.69 ms, max 1.40 / 1.35 | median 4.66 / 4.73 ms (the translator), max 10.95 / 11.09 |
+| compute: pipeline | median 1.53 / 1.52 ms, max 9.86 / 9.49 | median 2.62 / 2.48 ms, max 22.12 / 21.48 |
+| compute: both | median 2.34 / 2.29 ms, max 10.51 / 10.15, all 119 / 116 ms | median 7.16 / 6.91 ms, max 28.56 / 27.87, all 346 / 337 ms |
+| render, 14 pairs: both newFunctionWithName: | median 0.79 / 0.78 ms, max 1.79 / 1.69 | median 3.63 / 3.61 ms, max 5.46 / 5.59 |
+| render: pipeline | median 2.12 / 2.11 ms, max 2.43 / 2.55 | median 2.82 / 2.82 ms, max 3.71 / 4.09 |
+| render: both | median 3.02 / 2.93 ms, max 3.92 / 3.89, all 41 / 41 ms | median 6.82 / 6.69 ms, max 8.60 / 8.94, all 90 / 90 ms |
+
+  So a kernel is made in a third of the time and a render pipeline in less than half (4.6 and 3.7 ms saved per test,
+  the median of the differences). With the caches of the first run: 1.87 ms (compute) and 2.07 ms (render), the
+  frontend's work 8.4 ms in all for the 75 functions (39.7 ms without its caches).
+- Three refusals real processes met since the 3.0.21 boot are gone (the plugin cached 33 refusals then): an output
+  that exists only under a function constant (`the vertex output air.function_constant (float)`, 10 of them), a colour
+  output whose index is an expression of function constants or has no index operand (`colour output 0 has malformed
+  metadata`, 4), and the text IR of a linked function that defined a constexpr sampler's global twice (`redefinition of
+  global '@__air_sampler_state'`, 4): the translator's linker appended a dependency module's global even when the output
+  already defined it with the very same line; it no longer does (`append_dependency_module`, a unit test), which changes
+  nothing the translator reads, and a global defined again with another line is kept as before. The cached refusals
+  hold only the message, not the function or its constants, so they cannot be run again; over the functions of the AIR
+  cache with the first two forms, each with all its function constants 0 and all 1: 3.0.21's frontend translates none
+  of 170, this one 36, whose reflections equal the translator's; the rest are refused for other reasons (argument
+  buffers, stage inputs under a function constant, framebuffer fetch, `unpack`). Framebuffer fetch (`the fragment
+  argument kind air.render_target`, 15) stays refused.
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).
@@ -460,10 +590,10 @@ Leftovers of round 3:
    targets, multiview, tessellation, the GL uniform buffer, programmable sample positions), a pipeline without a
    fragment function, and the builtins the frontend refuses (`[[primitive_id]]`, `[[barycentric_coord]]`, the
    amplification ones); those rewrites would have to be done on NIR or by the frontend for the road to take them.
-4. Make the road the only translation for what it takes: today `newFunctionWithName:` still runs the translator for
-   every function (the fallback, the reflection, the hazard model, the constexpr samplers' and argument buffers'
-   binding and the varyings' Locations read its output), so the road adds the frontend's work to the translator's. What
-   is left before that:
+4. Make the road the only translation for what it takes (round 5, done: "Functions made without the translator"
+   above): the frontend gives the reflection, `newFunctionWithName:` leaves the translator out of every function the
+   frontend translates and reflects, and a pixel-coordinate argument sampler's state reaches the frontend. What round 4
+   listed, and where it landed:
    - the SPIR-V twin on demand: translate a function only when a pipeline or variant of it takes the SPIR-V road (a
      refusal, a rewrite, a threadgroup size the road does not run, a pixel-coordinate argument sampler, the variants
      made from SPIR-V), which needs `newFunctionWithName:` to keep the AIR and the constants and translate later;
@@ -477,3 +607,9 @@ Leftovers of round 3:
    - WindowServer, after the road has run on applications' kernels and pipelines (the measured ones are the tests');
    - a measurement on applications' pipelines (the sweep covers compute kernels only) before the translator is left out
      by default.
+   Done in round 5: the SPIR-V on demand (`nvmtl_function_spirv`); the reflection, default size and varyings from the
+   frontend; the hazard model's and the GL check's reads from the reflection; the tessellation, fetch and stencil checks
+   known from what the frontend refuses; the pixel-coordinate sampler in the request; the sweep over vertex and fragment
+   functions too. Left: WindowServer (off; the next decision, after applications have run on this road), the refusals
+   that still send real functions to the SPIR-V road (framebuffer fetch, argument buffers, stage inputs under a function
+   constant, and the rest of the sweep's list), and applications' own pipelines measured on the card.

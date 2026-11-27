@@ -2,7 +2,36 @@
 
 ## Not in a package yet
 
-### AIR to NIR, phase 3: render pipelines from NIR
+### AIR to NIR, phase 4: functions made without the translator
+
+- **`newFunctionWithName:` (and its function-constant, completion-handler and descriptor variants) asks NVK's AIR-to-NIR
+  frontend first** (`plugin/NVMTLAirNir.m`, `nvmtl_air_nir_lazy`): a kernel, vertex or fragment function it translates
+  and reflects is made with the frontend's reflection and no SPIR-V, and the translator runs only the first time
+  something needs SPIR-V of it (a pipeline or variant that takes the SPIR-V road, a rewrite of that road's), then exactly
+  as `newFunctionWithName:` would have run it (`nvmtl_function_spirv`). Every other function is made as before, and so
+  is every function with `NVMTL_AIR_NIR=0`, in WindowServer, with an application profile and in the check run. Through
+  the plugin on the RTX 5050: a kernel's function and pipeline in 2.3 ms instead of 7.2 (median of 42), a render
+  pipeline's two functions and pipeline in 3.0 ms instead of 6.8 (median of 14); 75 of the tests' 80 functions skip the
+  translator, one is translated later. The count is logged once per process (`functions in <process>: ...`).
+- **The frontend gives the function's reflection** (request and result version 5, `NVMTL_AIR_NIR_REFLECT`): the
+  bindings, varyings, vertex attributes and default threadgroup size the plugin reads, in the translator's form, read
+  from the same metadata by the translator's rules. Every reader of the reflection (arguments, constexpr samplers,
+  embedded resources, the hazard model, the GL check, the varyings' link) takes the function's own. Kept in the shader
+  cache (stage `nrf1`). `NVMTL_AIR_NIR_REFL_CHECK=1` (development plugins only) makes every function as before and
+  compares the two reflections key by key in the log; equal for all 70 functions of the tests the frontend translates.
+  `tools/air-nir/airsweep.c --reflect` and `sweep.py --reflect` compare them over an AIR cache (vertex and fragment
+  functions too).
+- **Pixel-coordinate argument samplers stay on the road**: the state a dispatch or draw binds goes into the request
+  (`NVMTL_AIR_NIR_SAMPLER_STATES`), so their compute and render variants are the frontend's (`tex_argpixel`,
+  `r_argpixel`).
+- **Fixed: the 3.0.21 render road crashed** (SIGSEGV in the frontend, inside `newRenderPipelineStateWithDescriptor:`)
+  on a fragment function that tests a texture for null through `ptrtoint` of its handle, as two SceneKit fragments of the
+  AIR cache do; a texture or sampler handle used as a plain value is refused now, and such a pipeline takes the SPIR-V
+  road.
+- The frontend now takes an output that exists only under a function constant (the request's values say whether it
+  does), a colour output whose index is an expression of function constants or has no index operand (`r_fcout`), and
+  the translator's linker no longer defines a global twice when a linked module defines it with the same line (LLVM,
+  which the frontend parses the text with, refused such a module; nothing the translator reads changes).
 
 - **Every render pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): both stages' AIR, their
   function-constant values and their varyings' Locations go to the frontend, and the pipeline is made from the two NIR
