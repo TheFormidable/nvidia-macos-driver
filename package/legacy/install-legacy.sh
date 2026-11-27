@@ -9,7 +9,7 @@
 # What it does, in order, and it stops before changing anything if a step up to 3 fails:
 #   1. checks the kit's files against SHA256SUMS, the release, and that an NVIDIA card is present
 #   2. test-links the kexts against this system's own kernel (kextutil -n -t, or a test kernel collection on 11+)
-#   3. unpacks the GPU firmware from NVIDIA's own driver package (the 1401 stick carries it; or --run FILE)
+#   3. unpacks the GPU firmware from NVIDIA's own driver package (found in Downloads or on a USB stick; or --run FILE)
 #   4. copies the kexts, the Metal files (10.11 and later) and the firmware into place, keeping a copy of what it replaced
 #   5. rebuilds the kernel cache
 # It does NOT change boot arguments. The display driver starts with nvfb=1; the accelerator stays off until nvaccel=1
@@ -57,10 +57,10 @@ for need in NVRM NVRMFB; do case " $KEXTS " in *" $need "*) ;; *) die "the kit l
 if [ "$MAJOR" = 10 ] && [ "$MINOR" -lt 9 ]; then EXT=$R/System/Library/Extensions; else EXT=$R/Library/Extensions; fi
 # releases that refuse unsigned kexts: 10.10 needs the boot argument, 10.11 and later the protection switched off
 if [ "$MAJOR" = 10 ] && [ "$MINOR" = 10 ]; then
-  nvram boot-args 2>/dev/null | grep -q 'kext-dev-mode=1' || die "macOS 10.10 loads these kexts only with the boot argument kext-dev-mode=1 (the 1401 stick sets it; start from the stick)"
+  nvram boot-args 2>/dev/null | grep -q 'kext-dev-mode=1' || die "macOS 10.10 loads these kexts only with the boot argument kext-dev-mode=1: add it to boot-args in OpenCore's config.plist and restart"
 fi
 if [ "$MAJOR" != 10 ] || [ "$MINOR" -ge 11 ]; then
-  csrutil status 2>/dev/null | grep -qiE 'disabled|unknown|Kext Signing: disabled' || die "System Integrity Protection is on, so macOS will not load these kexts (the 1401 stick switches it off; start from the stick)"
+  csrutil status 2>/dev/null | grep -qiE 'disabled|unknown|Kext Signing: disabled' || die "System Integrity Protection is on, so macOS will not load these kexts (set csr-active-config in OpenCore's config.plist, as the README says, and restart)"
 fi
 
 step "2. link test against this system"
@@ -137,8 +137,8 @@ fi
 ok "rebuilt"
 
 echo
-echo "Installed for macOS $REL. Restart from the 1401 stick."
-echo "The display driver starts with the boot argument nvfb=1 (the stick sets it). Confirm the desktop first."
+echo "Installed for macOS $REL. Restart."
+echo "The display driver starts with the boot argument nvfb=1 (add it to boot-args in OpenCore's config.plist). Confirm the desktop first."
 case " $KEXTS " in *" NVAccel "*) echo "Then, to switch Metal acceleration on:   sudo nvram boot-args=\"\$(nvram boot-args | cut -f2-) nvaccel=1\"   and restart."
   echo "To undo that: choose Reset NVRAM in the boot picker.";; esac
 [ -d "$HERE/opengl" ] && echo "The OpenGL accelerator is copied to /Library/NullMoth/legacy/$REL/opengl and is not switched on; its notes say what it needs."

@@ -1,5 +1,8 @@
 # GPU Caps phase 1 — experimental read-only ABI
 
+The record of Phase 1 alone, measured on this fork's test machine on its feature branch before 3.0.3. The current state
+(Phase 1 and 2B together, 15 verified and 150 unknown records) is in [GPU-CAPS.md](GPU-CAPS.md).
+
 ## Scope
 
 NVRM selector 14 returns a bounded, versioned, read-only, per-GPU snapshot to NVMetrics. Selector 7 advertises GPU Caps only when the lock and cache buffer exist. The NVK patch carries an identical copy of the shared ABI header.
@@ -21,5 +24,5 @@ Platform: macOS Tahoe 26.7.3 x86_64, Xcode 26.5, NVIDIA RTX 5050 (PCI 10DE:2D83,
 
 Validated on one card and one macOS environment, not a general compatibility guarantee. Thermal/fan/power capabilities remain unknown, not verified. The selector does not implement RPM discovery or manual fan control. Full system reliability, multiple GPUs, kernel memory stress, crash recovery, and long-duration regression remain to be evaluated.
 
-This is the historical Phase 1 evidence. Phase 1 and Phase 2B are now merged into `fable` (PR #7); see
+Phase 1 and Phase 2B are in this fork since 3.0.3 (PR #7) and unchanged in Release 2 (3.0.20); see
 [GPU-CAPS.md](GPU-CAPS.md) for the newer counts and boundaries. Neither result certifies a stable release.

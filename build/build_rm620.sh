@@ -1,5 +1,5 @@
 #!/bin/bash
-# build_rm620.sh: NVIDIA's RM core 615.71.10 compiled for macOS (libnvkernel.a), the way the 610 archive was made:
+# build_rm620.sh: NVIDIA's RM core (620.70.06, NV_VERSION) compiled for macOS (libnvkernel.a), the way the 610 archive was made:
 # NVIDIA's own Makefile dry-run with TARGET_OS=Darwin, then cc -> clang -mkernel, -DNV_DARWIN, -fcf-protection=branch,
 # without -mcmodel=kernel / -fno-pic, for macOS 15.0 like the kext that links it (built for the SDK's macOS instead, every
 # object drew a linker note against NVRM's 15.0 target), and without the options the Makefile adds only when the build

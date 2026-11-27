@@ -24,7 +24,7 @@ xcrun clang -O2 -arch x86_64 -mmacosx-version-min=10.7 -DZSTD_DISABLE_ASM -o "$P
   "$SRC"/dlss/zstd/common/*.c "$SRC"/dlss/zstd/decompress/*.c 2>"$P/tools/unzstd.log" || { cat "$P/tools/unzstd.log"; die "decoder build"; }
 strip -S "$P/tools/nm_unzstd"
 xcrun otool -l "$P/tools/nm_unzstd" | grep -q "version 10.7" || die "the decoder is not built for 10.7"
-printf '{\n  "version": "%s",\n  "base": "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v%s/",\n  "kits": {' "$V" "$V" > "$P/legacy_kits.json"
+printf '{\n  "version": "%s",\n  "base": "https://github.com/TheFormidable/nvidia-macos-driver/releases/download/%s/",\n  "kits": {' "$V" "$V" > "$P/legacy_kits.json"
 first=1
 for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   K=$B/kit/$rel; [ -d "$K/kexts/NVRM.kext" ] || die "no kit for $rel"

@@ -3,8 +3,9 @@
 Photo Booth draws its camera preview with Core Image into the drawables of a CAMetalLayer. Two separate things in the
 Metal plugin decide whether that preview shows: whether Core Image accepts the drawable as a destination, and which
 way up the rows land in it. Both changes come from the HighDelay/nvidia-macos-driver-nvk fork, which reports the
-preview visible and upright with them on an RTX 2060 SUPER, macOS 26.7.1, with a USB webcam. On this branch they are
-built and checked on Linux only; nothing of them has run on a card here.
+preview visible and upright with them on an RTX 2060 SUPER, macOS 26.7.1, with a USB webcam. They are in the driver
+since 3.0 and on by default. On this fork's RTX 5050 (macOS 26.7.3) their card-check rows passed at 3.0.7 (below,
+"Checks"); no run of Photo Booth itself, with a camera, is recorded in this fork.
 
 ## A destination Core Image accepts
 
@@ -49,3 +50,8 @@ renders it. Quit and reopen Photo Booth after changing it.
 - `tools/photobooth_surface_probe.m`, on a Mac with the driver installed: Core Image renders into eight synthetic
   IOSurface drawables of the installed driver and every pixel is read back. It opens no camera and changes nothing on
   the system. Its build and run line is in its header.
+- The card checks (`tools/card/checks_plugin.py`, run by `tools/card_selftest.py`): `plugin.pb-preconditions` (the
+  adapter's two method signatures hold on this macOS, and it stays out of a process that is not Photo Booth),
+  `plugin.pb-orientation` (Core Image's legacy render into a drawable equals the same render offscreen) and
+  `plugin.photobooth-surface` (the probe above). They passed on the RTX 5050 at 3.0.7, where 130 of the 134 rows
+  passed and none of the three that failed was one of these (CHANGELOG.md, 3.0.7, "What ran where").

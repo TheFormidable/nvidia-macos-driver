@@ -34,6 +34,10 @@
 # written to the package's VERSION (digits and dots), which install.sh records as the installed version
 # (/Library/NullMoth/driver-version); unset: the version of CHANGELOG.md's first heading, the release this checkout is
 #NM_PACKAGE_VERSION=
+# the folder build/legacy/package_kits.sh wrote (legacy_kits.json and the 13 kit archives for macOS 10.7 to 14): the
+# package then carries them and install.sh installs the kit of the release it runs on; unset: a package for 15 and 26
+# only (docs/BUILDING.md, "Building the kits for macOS 10.7 to 14")
+#NM_LEGACY_KITS=~/nullmoth-legacy/B/pkg
 
 # --- mirrors (default: the URLs in build/pins.sh; the commit ids and SHA-256 are checked either way) ---------------
 #NM_OGKM_URL=https://github.com/NVIDIA/open-gpu-kernel-modules.git

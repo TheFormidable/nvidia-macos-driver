@@ -1,5 +1,9 @@
 # NAK changes on the speed-267 lane (applied to the speed267 Mesa build tree, in this order)
 
+History of the original project's NAK work (2026-11-01). Status at 3.0.20: `build/build_nvk.sh` does not run these
+scripts; items 1 to 5 and 7 are part of `nvk/nvk-macos.patch`, which every NVK this fork builds starts from, with the
+switches named below (`docs/SWITCHES.md`). Item 6 is not: no patch in `nvk/` reads `NVMTL_NAK_STRONG_STORES`.
+
 1. `patch_smemcap.py` (qmd.rs) - `NAK_SMEM_TARGET_CAP_KB`: cap the shared-memory carve-out target. Off by default.
    Measured neutral in GB7 (11-01); kept only as a diagnostic.
 2. `patch_u2fmagic.py`, then `patch_u2fmagic2.py` (nak_nir.c) - u2f32 of an 8/16-bit value as
@@ -32,7 +36,8 @@
 6. `patch_weakstore.py` (nak/from_nir.rs) - plain global stores are weak (STG.E), coherent/volatile stay strong.gpu;
    `NVMTL_NAK_STRONG_STORES=1` = previous behaviour. Found 11-01: GPU writes to Shared (system-RAM) buffers cost ~70-100 ns
    per threadgroup - a near-empty kernel 317 us (Shared) vs 5.6 us (Private, or Shared with NVMTL_SHARED_VRAM=1), GB7's own
-   particle kernel 512 us vs 66 us (M1 Pro 188 us), outputs bit-identical. Timing of this patch pending (session23.sh).
+   particle kernel 512 us vs 66 us (M1 Pro 188 us), outputs bit-identical. Staged for timing (session23.sh, not kept
+   here) and not taken into `nvk-macos.patch`.
 7. `patch_small_arrays_def16.py` (nvmtl_raw_policy.h, nak_nir.c) - per-thread arrays of up to 16 elements go to
    registers (if-else trees) by default instead of local memory. The plugin's own fp32 conv kernels kept their tile
    accumulators and row tables in local memory (45 loads, 39 stores in the 64x32 kernel): the Metal front end leaves

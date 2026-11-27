@@ -2,9 +2,11 @@
 
 NVMetrics is a separate macOS application and privileged runtime:
 [TheFormidable/NVMetrics](https://github.com/TheFormidable/NVMetrics).
-The driver does not install this application or its RM guard. This page describes
-the interface and the observations available as of 2026-11-19, not a release
-announcement for either repository.
+It has its own releases; the driver does not install this application or its RM
+guard. This page describes the driver's side as it is in Release 2 (3.0.20;
+selector 13 came in 3.0.1, selector 14 in 3.0.3) and the NVMetrics observations
+available on 2026-11-19 from this fork's RTX 5050. Later NVMetrics versions are
+not covered.
 
 ## Driver-facing interface
 
@@ -12,13 +14,17 @@ announcement for either repository.
 |---|---|---|
 | NVRM selector 7 | Advertise supported user-client capabilities | Check before using selector 14 |
 | NVRM selector 13 | Root-controlled live boost policy | Not a fan, clock offset or voltage control |
-| NVRM selector 14 | GPU Caps ABI 1.0, cached per-GPU read-only snapshot | Unknown is not supported; manual authorization is false in the recorded test |
+| NVRM selector 14 | GPU Caps ABI 1.0, cached per-GPU read-only snapshot; on by default, boot argument `nvgpucaps=0` turns the producer off | Unknown is not supported; manual authorization is false in the recorded test |
 | RUSD (RM class 0xde) | Shared sensor observations, also consumed by `tools/nvmtl-smi` | Validate read result, timestamp and freshness; no automatic write authority |
 
 See [GPU-CAPS.md](GPU-CAPS.md) for kernel cache lifecycle and native evidence and
 [GPU-UTILIZATION.md](GPU-UTILIZATION.md) for NVAccel's IORegistry counters.
 
 ## Experimental fan control: physical findings
+
+**Caution.** Manual fan control is NVMetrics', experimental and supervised, and
+was tested on one card. The driver itself issues no fan, clock or voltage write,
+and nothing it reports, GPU Caps included, authorizes one.
 
 On the tested RTX 5050 with two observed RPM channels, a supervised NVMetrics
 0.15.6 audit reported a successful 50% Manual session and verified return to

@@ -3,9 +3,12 @@
 An opt-in automatic selector is described in [AUTO-PRIMARY-GPU.md](AUTO-PRIMARY-GPU.md),
 including its four-card boot result and the limits of its installer test coverage.
 
-This is a manual workaround verified with driver **1.14.7**, macOS **15.8.1 (24H32)**,
+This is a manual workaround from the original project (its #197, by is-pan),
+verified by its author with driver **1.14.7**, macOS **15.8.1 (24H32)**,
 a Supermicro H12SSL-i, one EPYC 7542, and four RTX 4090s. The monitor was connected
-to `C2:00.0`. It does not add support for accelerating all four cards.
+to `C2:00.0`. It does not add support for accelerating all four cards; the
+experimental `nvmultigpu=1` does that ([MULTI-GPU-DESIGN.md](MULTI-GPU-DESIGN.md)).
+This fork's one test machine has one card, so neither has run here (3.0.20).
 
 ## Check what failed
 
@@ -120,7 +123,7 @@ reported LOCAL+mapped allocations using system RAM with an 8 GiB BAR1. This vali
 desktop output and Metal device registration, not Blender/editing performance, video
 engines, sleep/wake, or long-term stability.
 
-Official updates can overwrite these matching rules. Reapply them to the new release's
+A new install or update can overwrite these matching rules. Reapply them to the new release's
 property lists and rebuild from the permanent paths. If maintaining the per-OS NVAccel
 cache under `/Library/NullMoth/kexts`, keep its matching rule and checksum manifest
 consistent too; otherwise an OS-update switch may restore unrestricted matching.
