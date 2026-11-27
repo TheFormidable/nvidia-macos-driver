@@ -745,7 +745,8 @@ rbpp(MTLPixelFormat f)
    switch (f) {
    case MTLPixelFormatRGBA32Float: return 16;
    case MTLPixelFormatR8Unorm: return 1;
-   case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatR32Float: case MTLPixelFormatDepth32Float: return 4;
+   case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatR32Float: case MTLPixelFormatR32Uint:
+   case MTLPixelFormatDepth32Float: return 4;
    default: fprintf(stderr, "plugin_run: format %lu has no size here\n", (unsigned long)f); exit(2);
    }
 }

@@ -5340,6 +5340,8 @@ static int nvmtl_fetch_copy_on(void)
     }
     return on && !nvmtl_fbfetch_on();
 }
+/* the AIR-to-NIR road leaves a colour-reading fragment shader to the SPIR-V road while fetch is emulated by copies */
+int nvmtl_vk_fetch_copy_active(void) { return nvmtl_fetch_copy_on(); }
 static VkDescriptorSetLayout g_fcopyLayout;
 static VkDescriptorPool g_fcopyPools[64]; static unsigned g_nfcopyPools;
 static int nvmtl_fcopy_layout_locked(void)
@@ -6844,8 +6846,11 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
 // input and fixed and dynamic state of the SPIR-V road's (set 0 the vertex stage's, set 1 the fragment stage's, set 2 the
 // heap; the fragment stage's push range of the sample positions when the device has them, which the draw pushes), so a
 // draw binds what it binds for any pipeline. The descriptor masks come from the results, the vertex attributes' formats
-// from the component kinds the vertex result names. NVK clones both shaders; they stay the caller's. None of the SPIR-V
-// road's rewrites applies: the plugin sends a pipeline that needs one (A8 targets, framebuffer fetch, stencil export,
+// from the component kinds the vertex result names. NVK clones both shaders; they stay the caller's. A fragment stage
+// that reads [[color(n)]] (framebuffer fetch, result.color_inputs) gets what the SPIR-V road gives its module: set 3
+// holds its input attachments (the pass's colour views behind the by-region barrier with fetch on, the dummy image with
+// it off), set 2 the heap or an empty layout, and the same fetch masks drive the draw. None of the SPIR-V road's
+// rewrites applies: the plugin sends a pipeline that needs one (A8 targets, framebuffer fetch by copies, stencil export,
 // multiview, tessellation, the GL uniform buffer) down that road instead.
 int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *vres, void *fnir, const struct nvmtl_air_nir_result *fres,
                                  const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, nvk_pipeline *out_)
@@ -6876,13 +6881,25 @@ int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *
     memcpy(out->gmask2, out->gmask, sizeof out->gmask2);
     out->gmask_ok = out->gmask2_ok = 1;
     out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
+    // [[color(n)]] inputs: the fetch masks and set 3 as the SPIR-V road makes them of its module's bindings 192 + n
+    const uint32_t cin = fres->size >= offsetof(struct nvmtl_air_nir_result, reserved6) ? fres->color_inputs & ((1u << NVMTL_NCOL) - 1u) : 0;
+    if (cin && nvmtl_fetch_copy_on()) { nvlog("vk: AIR-to-NIR fragment reads [[color(n)]] while fetch is emulated by copies - not used"); return -1; }
+    out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;
+    out->fetch_zero = nvmtl_fbfetch_on() ? 0 : cin;
+    VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
+    uint32_t nsl = g_heapSet ? 3 : 2;
+    if (cin) {
+        pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
+        if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - AIR-to-NIR pipeline not used"); return -1; }
+        if (!g_heapSet) sl2[2] = g_emptyLayout;
+        sl2[3] = g_fetchLayout; nsl = 4;
+    }
     VkRenderPass pass = VK_NULL_HANDLE;
     VkResult r = nvmtl_make_render_pass(out, 0, &pass);
     if (r != VK_SUCCESS) { nvlog("vk: vkCreateRenderPass(AIR-to-NIR) -> %d", r); return -1; }
     out->rp = pass;
-    VkDescriptorSetLayout sl2[3] = { g_setLayout, g_setLayout, g_heapLayout };
     VkPushConstantRange pc = { VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
-    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2,
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2,
                                         g_sample_locations ? 1u : 0u, g_sample_locations ? &pc : NULL };
     r = nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout);
     if (r == VK_SUCCESS) {

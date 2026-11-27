@@ -80,12 +80,20 @@
 #define NVMTL_AIR_NIR_SAMPLER_STATES (1u << 9)  /* sampler_state_* give the state of argument samplers the dispatch or
                                                  * draw binds (a pixel-coordinate one is sampled as the translator's
                                                  * with_runtime_sampler variant samples it) */
+/* Since version 6: */
+#define NVMTL_AIR_NIR_COLOR_INPUTS  (1u << 10)  /* a fragment function's [[color(n)]] inputs (framebuffer fetch) are read
+                                                 * as the translator reads them: an input attachment at set
+                                                 * NVMTL_AIR_NIR_FETCH_SET, binding NVMTL_AIR_NIR_FETCH_BINDING + n,
+                                                 * input attachment index n (result.color_inputs names them). Without it
+                                                 * such a function is refused, as before. */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
 #define NVMTL_AIR_NIR_STAGE_VERTEX   1u
 #define NVMTL_AIR_NIR_STAGE_FRAGMENT 2u
 #define NVMTL_AIR_NIR_FRAGMENT_SET   1u          /* the descriptor set a fragment stage's resources are in */
+#define NVMTL_AIR_NIR_FETCH_SET      3u          /* [[color(n)]] inputs: the set the plugin binds the pass's colour views at */
+#define NVMTL_AIR_NIR_FETCH_BINDING  192u        /* ... at binding 192 + n, an input attachment (the translator's band) */
 
 /* result.fragment_flags */
 #define NVMTL_AIR_NIR_FS_DEPTH        (1u << 0)  /* writes [[depth(any|greater|less)]] */
@@ -194,11 +202,18 @@ struct nvmtl_air_nir_result {
    char *reflection;
    size_t reflection_size;
    char reflection_why[128];
+
+   /* Since version 6, written when the caller's size reaches them: */
+   uint32_t color_inputs;            /* fragment, with NVMTL_AIR_NIR_COLOR_INPUTS: bit n, a [[color(n)]] input is declared
+                                      * (read or not, as the translator declares every one): the plugin binds the open
+                                      * pass's colour view n at set 3, binding 192 + n, as for the SPIR-V road's module */
+   uint32_t reserved6;
 };
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 #define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
 #define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */
 #define NVMTL_AIR_NIR_RESULT_V4_SIZE 1192u   /* the result up to reflection */
+#define NVMTL_AIR_NIR_RESULT_V5_SIZE 1336u   /* the result up to color_inputs */
 
 #ifdef __cplusplus
 extern "C" {
@@ -218,9 +233,10 @@ typedef int (*nvmtl_air_nir_serialize_v1_fn)(void *nir, void **data, size_t *siz
 typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data, size_t size);
 /* Since version 5. The version of the request and result this NVK reads and writes (NVMTL_AIR_NIR_VERSION); an NVK
  * without the export is version 4 or older, and ignores NVMTL_AIR_NIR_REFLECT and NVMTL_AIR_NIR_SAMPLER_STATES (the
- * plugin then neither leaves the translator out nor hands it a sampler's state). */
+ * plugin then neither leaves the translator out nor hands it a sampler's state). A version-5 NVK ignores
+ * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs. */
 typedef int (*nvmtl_air_nir_version_v1_fn)(void);
-#define NVMTL_AIR_NIR_VERSION 5
+#define NVMTL_AIR_NIR_VERSION 6
 #ifdef __cplusplus
 }
 #endif

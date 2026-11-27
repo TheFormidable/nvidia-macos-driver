@@ -359,6 +359,7 @@ struct air_tr {
    struct air_output *outputs;
    unsigned num_outputs;
    uint32_t vertex_inputs, varyings, color_outputs, fragment_flags;
+   uint32_t color_inputs;       /* [[color(n)]] inputs declared (since version 6, NVMTL_AIR_NIR_COLOR_INPUTS) */
    uint8_t vertex_input_kind[32];
    unsigned next_varying;       /* the translator's own Locations: the next one in order */
    nir_variable *sysval[8];     /* the system values read, one variable each */
@@ -418,6 +419,8 @@ _Static_assert(offsetof(struct nvmtl_air_nir_request, sampler_state_count) == NV
                "version 4 of the request ends at sampler_state_count");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, reflection) == NVMTL_AIR_NIR_RESULT_V4_SIZE,
                "version 4 of the result ends at reflection");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, color_inputs) == NVMTL_AIR_NIR_RESULT_V5_SIZE,
+               "version 5 of the result ends at color_inputs");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
@@ -1294,6 +1297,8 @@ struct air_arg {
    bool flat, no_perspective, centroid, at_sample;   /* a fragment input's interpolation */
    bool raster_order_group;
    bool sized;             /* air.buffer_size: a block of a fixed size, not an array the data indexes */
+   uint64_t rt_index;      /* a [[color(n)]] input: n */
+   const char *rt_unknown; /* ... a global no value is known for (a function constant's) */
 };
 
 static struct air_arg
@@ -1314,6 +1319,22 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
       a.kind = air_md_string(ops[3]);
       a.fc_node = ops[2];
       first = 4;
+   }
+   /* a [[color(n)]] input's n follows its kind: {index, "air.render_target", n, ...}, n a literal or a global Apple's
+    * compiler computes from function constants, which the static initializer filled (as for a colour output) */
+   if (!strcmp(a.kind, "air.render_target") && first < count) {
+      if (!air_md_int(ops[first], &a.rt_index)) {
+         LLVMValueRef g = ops[first];
+         while (g && L.LLVMIsAConstantExpr(g))
+            g = L.LLVMGetOperand(g, 0);
+         LLVMValueRef init = g && L.LLVMIsAGlobalVariable(g) && L.LLVMIsGlobalConstant(g) &&
+                             !L.LLVMIsExternallyInitialized(g) ? L.LLVMGetInitializer(g) : NULL;
+         if (init && L.LLVMIsAConstantInt(init))
+            a.rt_index = L.LLVMConstIntGetZExtValue(init);
+         else
+            a.rt_unknown = g ? air_name(g, NULL) : "(?)";
+      }
+      first++;
    }
    /* a varying's semantic follows its kind: {index, "air.fragment_input", "user(x)", ...} */
    if ((!strcmp(a.kind, "air.fragment_input") || !strcmp(a.kind, "air.vertex_output")) && first < count &&
@@ -1500,6 +1521,8 @@ air_sysval(struct air_tr *t, gl_system_value sv, const struct glsl_type *type)
    return nir_load_var(&t->top, var);
 }
 
+static nir_def *air_f2f16(nir_builder *b, nir_def *x);
+
 /* A vertex or fragment function's argument that is a stage input or a builtin: true when a is one */
 static bool
 air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
@@ -1550,6 +1573,49 @@ air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
             t->fragment_flags |= NVMTL_AIR_NIR_FS_PER_SAMPLE;
       }
       air_set(t, a->param, air_io_narrow(b, nir_load_var(b, var), &ty), AIR_VALUE, 0);
+      return true;
+   }
+   if (fs && !strcmp(k, "air.render_target") && (t->req->flags & NVMTL_AIR_NIR_COLOR_INPUTS)) {
+      /* [[color(n)]] read, framebuffer fetch (version 6), as the translator's stage-input pass reads it
+       * (passes/stage_input/mod.rs, resources/collapse.rs adapt_input_attachment_read): an input attachment (SubpassData,
+       * not multisampled) at set 3, binding 192 + n, InputAttachmentIndex n, read once at the entry with OpImageRead at
+       * offset (0, 0) as a vec4 of 32-bit floats (for a float or a half input) or of unsigned 32-bit integers (LLVM's
+       * integers are unsigned there), then cut to the argument's components and narrowed to a half exactly. The NIR is
+       * what spirv_to_nir and vk_nir_lower_input_attachment_loads make of that, so NVK lowers it as it lowers the
+       * SPIR-V road's. Every one declared is in result.color_inputs, used or not, as the module's decorations are. */
+      const int present = air_fc_arg_present(t, a);
+      if (present <= 0)
+         unsupported(t, "the [[color(n)]] input %s exists only under a function constant %s", name,
+                     present < 0 ? "the request does not give" : "that is false");
+      if (a->rt_unknown)
+         unsupported(t, "the [[color(n)]] input %s's n is %s, which depends on a function constant %s", name, a->rt_unknown,
+                     air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");
+      if (a->rt_index >= 8)
+         unsupported(t, "a [[color(%llu)]] input", (unsigned long long)a->rt_index);
+      if (air_is_aggregate(lty))
+         unsupported(t, "the [[color(n)]] input %s of type %s", name, a->type_name ? a->type_name : "?");
+      const struct air_type ty = air_type_of(t, lty);
+      if (ty.is_pointer || ty.components > 4 || (ty.is_float ? ty.bits != 16 && ty.bits != 32 : ty.bits != 32))
+         unsupported(t, "the [[color(n)]] input %s of type %s (the translator reads 32-bit floats or integers, and halves)",
+                     name, a->type_name ? a->type_name : "?");
+      const unsigned n = (unsigned)a->rt_index;
+      const enum glsl_base_type base = ty.is_float ? GLSL_TYPE_FLOAT : GLSL_TYPE_UINT;
+      nir_variable *var = nir_variable_create(t->nir, nir_var_image, glsl_image_type(GLSL_SAMPLER_DIM_SUBPASS, false, base), name);
+      var->data.descriptor_set = NVMTL_AIR_NIR_FETCH_SET;
+      var->data.binding = NVMTL_AIR_NIR_FETCH_BINDING + n;
+      var->data.index = n;
+      var->data.image.format = PIPE_FORMAT_NONE;
+      nir_def *v = nir_image_deref_input_attachment_load(b, 4, 32, &nir_build_deref_var(b, var)->def, nir_imm_ivec2(b, 0, 0),
+                                                         nir_undef(b, 1, 32), nir_imm_int(b, 0),
+                                                         .image_dim = GLSL_SAMPLER_DIM_SUBPASS, .image_array = false,
+                                                         .dest_type = ty.is_float ? nir_type_float32 : nir_type_uint32,
+                                                         .base = n, .range = 1);
+      if (ty.components < 4)
+         v = nir_trim_vector(b, v, ty.components);
+      if (ty.is_float && ty.bits == 16)
+         v = air_f2f16(b, v);
+      t->color_inputs |= 1u << n;
+      air_set(t, a->param, v, AIR_VALUE, 0);
       return true;
    }
    static const struct {
@@ -5993,6 +6059,24 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
          ralloc_strcat(&v, "}");
          fvary[nfvary].loc = frag_loc++;
          fvary[nfvary++].json = v;
+      } else if (!kernel && !vertex && !strcmp(role, "render_target") && (t->req->flags & NVMTL_AIR_NIR_COLOR_INPUTS)) {
+         /* a [[color(n)]] input (reflect FragRole::ColorInput): n is meta::declared_slot of air.render_target (a literal,
+          * or a global's known value, else the parameter's index), its descriptor the colour-input band's 192 + n */
+         uint32_t n = idx;
+         const int k = air_rf_find(&x, "air.render_target");
+         if (k >= 0 && (unsigned)k + 1 < x.n && !air_rf_i32(x.ops[k + 1], &n)) {
+            LLVMValueRef g = x.ops[k + 1];
+            while (g && L.LLVMIsAConstantExpr(g))
+               g = L.LLVMGetOperand(g, 0);
+            LLVMValueRef init = g && L.LLVMIsAGlobalVariable(g) && L.LLVMIsGlobalConstant(g) && !L.LLVMIsExternallyInitialized(g)
+                                ? L.LLVMGetInitializer(g) : NULL;
+            n = init && L.LLVMIsAConstantInt(init) ? (uint32_t)L.LLVMConstIntGetZExtValue(init) : idx;
+         }
+         air_rf_binding_head(s, "ColorInput", n, n < 8, NVMTL_AIR_NIR_FETCH_BINDING + n, 1, true, idx);
+         ralloc_strcat(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                              "\"type_layout\":null,\"type_name\":");
+         air_rf_jstr(&s->b, air_rf_string_after(&x, "air.arg_type_name"));
+         ralloc_strcat(&s->b, ",\"texture_shape\":null,\"embedded_source\":null,\"access\":null,\"static_sampler\":null}");
       } else if (!strcmp(role, "indirect_buffer") || !strcmp(role, "render_target") || !strcmp(role, "stage_in") ||
                  !strcmp(role, "imageblock") || !strcmp(role, "visible_function_table") ||
                  !strcmp(role, "intersection_function_table") || !strcmp(role, "instance_acceleration_structure") ||
@@ -6448,6 +6532,8 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       res->color_outputs = t->color_outputs;
       res->fragment_flags = t->fragment_flags;
    }
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, reserved6) + sizeof res->reserved6 && t->out)
+      res->color_inputs = t->color_inputs;
    if (res->size >= offsetof(struct nvmtl_air_nir_result, reflection_why) + sizeof res->reflection_why &&
        (req->flags & NVMTL_AIR_NIR_REFLECT) && t->out) {
       if (t->rf_json) {

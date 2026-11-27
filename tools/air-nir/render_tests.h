@@ -810,6 +810,99 @@ rob_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_fetch, r_fetch_mrt, r_fetch_noatt: framebuffer fetch -------------------------------------------------------- */
+
+/* With NVMTL_NO_FBFETCH=1 (WindowServer's default) the plugin binds the zeroed dummy image for every [[color(n)]] read,
+ * on either road: the references then read zeros. With NVMTL_FETCH_COPY=1 too, the reads see copies of the attachments
+ * made before the draw (the SPIR-V road's emulation, which the road leaves to it): what the draw's earlier instances
+ * wrote is not seen. */
+static int
+rfetch_mode(void)   /* 0 fetch, 1 zeros, 2 copies */
+{
+   const char *e = getenv("NVMTL_NO_FBFETCH"), *c = getenv("NVMTL_FETCH_COPY");
+   return !(e && e[0] == '1') ? 0 : c && c[0] == '1' ? 2 : 1;
+}
+static bool rfetch_off(void) { return rfetch_mode() == 1; }
+
+static float
+q8(float x)
+{
+   return (float)lrintf(fminf(fmaxf(x, 0.0f), 1.0f) * 255.0f) / 255.0f;
+}
+
+static bool
+rff_check(struct rrun *r)
+{
+   const bool off = rfetch_off(), copies = rfetch_mode() == 2;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float src0[4] = { px_u(px), px_w(py), 0.25f, 1 }, src1[4] = { px_u(px), px_w(py), 0.75f, 1 };
+         float want[4];
+         for (unsigned c = 0; c < 4; c++) {
+            const float c1 = (off ? 0.0f : clear_col[c]) * 0.5f + src0[c] * 0.5f;
+            want[c] = (off ? 0.0f : copies ? clear_col[c] : c1) * 0.5f + src1[c] * 0.5f;
+         }
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
+static bool
+rfm_check(struct rrun *r)
+{
+   const bool off = rfetch_off(), copies = rfetch_mode() == 2;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float u = px_u(px), w = px_w(py);
+         const float src0[4] = { u, w, 0.25f, 1 }, src1[4] = { u, w, 0.75f, 1 };
+         float d[4], c0[4];
+         for (unsigned c = 0; c < 4; c++)
+            d[c] = off ? 0.0f : q8(clear_col[c]);
+         static const unsigned sw[4] = { 2, 1, 0, 3 };   /* .bgra */
+         for (unsigned c = 0; c < 4; c++)
+            c0[c] = q8(d[sw[c]] * 0.5f + src0[c] * 0.5f);
+         for (unsigned c = 0; c < 4; c++)
+            d[c] = off ? 0.0f : copies ? q8(clear_col[c]) : c0[c];
+         const uint8_t *g = (const uint8_t *)r->back[0].contents + ((size_t)py * RW + px) * 4;
+         for (unsigned c = 0; c < 4; c++) {
+            const int want = (int)lrintf((d[sw[c]] * 0.5f + src1[c] * 0.5f) * 255.0f);
+            if (abs((int)g[c] - want) > 2) {
+               snprintf(r->why, sizeof r->why, "rgba8 pixel (%u,%u) component %u: %u, want %d (2 LSB)", px, py, c, g[c], want);
+               return false;
+            }
+         }
+         const float f = ((const float *)r->back[1].contents)[py * RW + px];
+         const float f0 = (off ? 0.0f : clear_col[0]) * 2 + u, fw = (off ? 0.0f : copies ? clear_col[0] : f0) * 2 + u;
+         if (!(fabsf(f - fw) <= 1e-5f * fmaxf(fw, 1.0f))) {
+            snprintf(r->why, sizeof r->why, "r32float pixel (%u,%u): %.7g, want %.7g (1e-5 relative)", px, py, f, fw);
+            return false;
+         }
+         const uint32_t k = ((const uint32_t *)r->back[2].contents)[py * RW + px], kw = off ? 1u : (px + 7u) * 3u + 1u;
+         if (k != kw && !copies) {   /* the copies' first value is the integer clear, which the reference does not model */
+            snprintf(r->why, sizeof r->why, "r32uint pixel (%u,%u): %u, want %u", px, py, k, kw);
+            return false;
+         }
+      }
+   return true;
+}
+
+static bool
+rfn_check(struct rrun *r)
+{
+   const bool off = rfetch_off();
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float src[4] = { px_u(px), px_w(py), 0.5f, 1 };
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = (off ? 0.0f : clear_col[c]) * 0.5f + src[c] * 0.5f;
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -870,6 +963,13 @@ static const struct rtest rtests[] = {
      "r8 1 LSB; a NaN index reads byte 0 (before 3.0.24 the road read 2 GiB below the buffer: Terminal's Xid 31)" },
    { "r_oob", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup, rob_check,
      "exact; a read past the end gives 0; must take the SPIR-V road (a data-dependent index into a buffer)", true },
+   { "r_fetch", "r_fetch", "rff_vs", "rff_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, setup_quad, rff_check,
+     "1e-6; [[color(0)]] read, two instances (the second reads the first's); NVMTL_NO_FBFETCH=1: zeros read" },
+   { "r_fetch_mrt", "r_fetch", "rff_vs", "rfm_fs", { MTLPixelFormatRGBA8Unorm, MTLPixelFormatR32Float, MTLPixelFormatR32Uint }, NOC,
+     MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, setup_quad, rfm_check,
+     "rgba8 2 LSB, r32float 1e-5, r32uint exact; color(0..2) read as half4, float, uint" },
+   { "r_fetch_noatt", "r_fetch", "rff_vs", "rfn_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, setup_quad, rfn_check,
+     "1e-6; color(1) read with no attachment 1: the dummy image's zeros" },
 };
 #undef F32
 #undef NOC
