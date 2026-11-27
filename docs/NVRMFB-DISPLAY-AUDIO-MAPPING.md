@@ -1,13 +1,41 @@
 # NVRMFB display audio mapping
 
-This extends the display-codec association introduced by [Hi-Jiajun in PR #284](https://github.com/nullmoth/nvidia-macos-driver/pull/284). The five AppleHDA properties and shared CEA scan follow that contribution; this extension reads the connector type from NVKMS, copies the owning GPU's `hda-gfx` value without changing its `OSData` or `OSString` type, and lets a machine name its own codec/pin mapping.
+What NVRMFB publishes so that AppleHDA puts a display's audio under Sound > Output, and the single-display setting
+`NVRMFBDisplayAudioCodecInfo`. The display-codec association was introduced by
+[Hi-Jiajun in PR #284](https://github.com/nullmoth/nvidia-macos-driver/pull/284) and extended by Ersiter in PR #313,
+both to the original project (its 2.5.2). How the codec and pin are chosen today (per-connector overrides, automatic
+matching through NMHDA, the fallback, several displays) is in [DISPLAY-AUDIO-MAPPING.md](DISPLAY-AUDIO-MAPPING.md);
+this page is the part underneath it.
 
-Set `NVRMFBDisplayAudioCodecInfo` as a four-byte `OSData` property on the NVRMFB personality or framebuffer service. The property is passed through as `audio-codec-info`; it must identify the codec and pin used by the GPU. For example, `00 01 05 00` describes the local RTX 5080 Laptop test mapping to pin 05. Without the property the driver uses `00 01 04 00` (codec 0, pin 04), the mapping measured on an RTX 5060 desktop in #284. A board whose display audio is on another pin sets the property; a malformed value publishes no association.
+Both pages are about AppleHDA: macOS 15, or a macOS 26 where the user restored it. macOS 26 ships no AppleHDA; there the
+installer adds the package's own HD Audio driver, NMXAudio, where an HD Audio controller is present
+(`package/install.sh`).
 
-The current mapping describes one external audio display per GPU: one codec/pin value is shared by the framebuffer personality, and `port-number` is zero. Do not apply the same mapping to multiple active external displays unless they are known to share the same codec route. Concurrent multi-display audio and per-connector mapping are not implemented.
+## What is published
 
-Without a mapping, NVRMFB keeps its existing ELD and `hda-gfx` publication behavior and does not publish an effective five-property audio route. The five route properties are published only for an external display with a valid mapping, an NVKMS HDMI/DisplayPort connector, and at least one CEA Short Audio Descriptor. Disconnects clear the ELD and all association properties; reconnects and monitor swaps refresh them.
+The five AppleHDA properties (`connector-type`, `port-number`, `av-signal-type`, `audio-codec-info`, `IODisplayEDID`)
+and the shared CEA scan follow PR #284. The extension reads the connector type from NVKMS and copies the owning GPU's
+`hda-gfx` value without changing its `OSData` or `OSString` type. Without a chosen codec and pin, NVRMFB keeps its ELD
+and `hda-gfx` publication and publishes no effective five-property audio route. The five route properties are published
+only for an external display with a chosen codec and pin, an NVKMS HDMI/DisplayPort connector, and at least one CEA
+Short Audio Descriptor. Disconnects clear the ELD and all association properties; reconnects and monitor swaps refresh
+them.
+
+## `NVRMFBDisplayAudioCodecInfo`
+
+A four-byte `OSData` property on the NVRMFB personality or framebuffer service (codec address, function group, pin,
+zero), passed through as `audio-codec-info`; it must identify the codec and pin used by the GPU. For example,
+`00 01 05 00` is the RTX 5080 Laptop mapping of PR #313's tests (pin 05). It counts only while one external display is
+connected, after a per-connector override and before automatic matching (DISPLAY-AUDIO-MAPPING.md, "Overrides and priority"). A
+malformed value publishes no association. When nothing chooses a pin, a single non-MST external display gets
+`00 01 04 00` (codec 0, pin 04), the mapping measured on an RTX 5060 desktop in #284.
 
 ## Checks
 
-Run `python3 tools/check_nvrmfb_display_audio_mapping.py` to compile and execute the production connector-type and CEA-scan helpers in a host fixture, and to check the publication/cleanup path. This check is not a kext build or a substitute for a physical boot. The 5080 Laptop/macOS 26.7/pin 05 playback result comes from the submitter's prior hardware validation; other GPUs, connectors, and concurrent displays remain unverified.
+`python3 tools/check_nvrmfb_display_audio_mapping.py` compiled and ran the production connector-type and CEA-scan
+helpers in a host fixture and checked the publication and cleanup path. It is not part of `tools/run_all_tests.py`, and
+at 3.0.20 it stops at the start: it looks for `publishDisplayAudioProperties()` in `fb/nvrm-fb.cpp`, which has moved to
+`fb/nvrm-audio-auto.inc`. The tests of the
+current selection are listed in DISPLAY-AUDIO-MAPPING.md. The RTX 5080 Laptop, macOS 26.7, pin 05 playback result is
+the PR author's hardware validation; other GPUs, connectors and concurrent displays remain unverified, and this fork
+has no display audio result of its own.

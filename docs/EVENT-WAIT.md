@@ -1,9 +1,14 @@
 # Event waits: when a waiting thread sleeps instead of polling
 
+Status at 3.0.20: on by default since 3.0, and in every package the fork's one test machine (RTX 5050, macOS 26.7.3)
+has run, 3.0 to 3.0.20 ([STATUS.md](STATUS.md)). The fork has not measured it on its own: the one measurement on this
+page is the original project's, made before 2.9 and before the adaptive rule below existed. `NVRM_EVENT_WAIT=0` is the
+way back ("The setting").
+
 A thread that waits for GPU work (a fence wait, or a channel waiting for its own work to finish) can either poll the
 completion value or sleep in the NVRM kext until the GPU's graphics completion event arrives. Polling costs CPU for as
-long as the wait lasts; sleeping costs one wake-up latency at the end (about 0.13 ms measured below). Since this
-release every process uses both, chosen per wait:
+long as the wait lasts; sleeping costs one wake-up latency at the end (about 0.13 ms in the measurement below). Since
+3.0 every process uses both, chosen per wait:
 
 - WindowServer: as before, the wait spins for 20 microseconds and then sleeps on the event, at most 2 ms per sleep.
   As before, that sleep does not look at the caller's timeout: a wait with a timeout can return up to 2 ms after it in
@@ -50,7 +55,7 @@ included:
 | Value | Every process |
 |---|---|
 | unset or empty (the default) | WindowServer sleeps after 20 microseconds; every other process follows the rule above |
-| `0` | polls, as every process did in 2.9 with `0`. This is the way back if the event wait is suspected; it also makes WindowServer poll, which costs WindowServer more CPU than both 2.9's default and this release's |
+| `0` | polls, as every process did in 2.9 with `0`. This is the way back if the event wait is suspected; it also makes WindowServer poll, which costs WindowServer more CPU than both 2.9's default and 3.0's |
 | `2` | the rule above, WindowServer included |
 | `1` (or any other value) | sleeps after 20 microseconds, as WindowServer always did |
 
@@ -67,8 +72,8 @@ times the events came back (`back`).
 
 ## What the kext reports
 
-Selector 6 still returns the event count in its low 32 bits, so an older user space reads the same number. From this
-release the kext also says, in bits 32..39, why the call returned: the count was read, it had already moved, an event
+Selector 6 still returns the event count in its low 32 bits, so an older user space reads the same number. Since 3.0
+the kext also says, in bits 32..39, why the call returned: the count was read, it had already moved, an event
 woke the sleep, the sleep ran to its timeout, the sleep was interrupted, it woke with nothing posted, or too many
 threads (256) were already asleep. In the last case the call returns at once, as before, but the caller now knows it
 did not sleep and takes one polling step instead of coming straight back.
@@ -97,8 +102,8 @@ Read these together, while an application that waits on the GPU is running:
   again (and the line `nvrm: event wait back ON for this process` after the first one) is the event coming back: the
   process sleeps on it again. When that happens has not been observed on a GPU, and it is not the expected answer to a
   display mode change, a display waking or a wake from sleep: if you see the counter rise, report it and say what the
-  machine was doing. A counter that rises and `nvrm_evt_woken` that stays still while the GPU is busy means the
-  events do not come back.
+  machine was doing ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "Reporting a problem"). A counter that rises and
+  `nvrm_evt_woken` that stays still while the GPU is busy means the events do not come back.
 - `nvrm_evt_capped` 0 (more than 256 threads asleep at once otherwise).
 - `nvrm_evt_post_drain_stuck` 0. When a process closes, the kext waits for an RM event post that is still being
   delivered to it (microseconds, normally never) before it frees the connection. It waits twice: up to 200 ms when
@@ -110,11 +115,12 @@ Read these together, while an application that waits on the GPU is running:
 
 ## The measurement behind the 1 ms threshold
 
-The measurement below compared polling (`0`) with the eager sleep (`1`) on the code of release 1.13.0 (the baseline
-named below; 2.9 kept both policies unchanged); the adaptive rule that is now
-the default for applications was not part of it. On a 0.6 ms compute wait the eager sleep cost 0.127 ms of latency per
-wait, which the default no longer pays on waits that short; on longer waits it saved CPU. It was made on one machine
-and does not show what the new default does there.
+The measurement below was contributed to the original project, NullMoth, by missikuo (commit b539ace1, in the
+history before 2.9). It compared polling (`0`) with the eager sleep (`1`) on the original's release 1.13.0 (2.9 kept
+both policies unchanged); the adaptive rule that is the default for applications since 3.0 was not part of it. On a
+0.6 ms compute wait the eager sleep cost 0.127 ms of latency per wait, which the default no longer pays on waits that
+short; on longer waits it saved CPU. It was made on one machine and does not show what the adaptive default does
+there.
 
 ## Measured system
 
@@ -122,11 +128,12 @@ and does not show what the new default does there.
 - Intel Core i7-13700HX, 16 GiB RAM, AC power.
 - macOS 26.7.1 (`25G241`), SMBIOS `MacBookPro16,2`.
 - Built-in display at 2560 x 1600, 180 Hz, NVIDIA-driven.
-- Driver source baseline: v1.13.0 (`0960b2ef5dbc4a573056d4c8e042a5bd2e15d651`).
+- Driver source baseline: the original's v1.13.0 (`0960b2ef5dbc4a573056d4c8e042a5bd2e15d651`).
 - Both arms used the same locally repaired plugin and Tahoe NVAccel. The plugin
-  included the specialized AIR symbol / sampler linking fixes from PR #79, and
-  NVAccel had been rebuilt for the Tahoe ABI. This is **not an unmodified release
-  package result** and does not qualify macOS 26 support generally.
+  included the specialized AIR symbol / sampler linking fixes from the original's
+  PR #79, and NVAccel had been rebuilt for the Tahoe ABI. This is **not an
+  unmodified release package result** and does not qualify macOS 26 support
+  generally.
 
 ## Results
 
@@ -177,9 +184,9 @@ The test was short, on one system, with its normal desktop session running.
   no overrides logged `event wait ON` and passed the same functional checks.
   No driver binary was replaced by this configuration trial.
 
-Existing icon and Tahoe ABI repairs are disclosed as the test baseline, not
-submitted as new work here. Alternative compiler flags, memory-mapping changes,
-and an experimental wait-threshold patch were not deployed or included.
+The contributor's local icon and Tahoe ABI repairs were part of the baseline; no
+other experimental change (compiler flags, memory mapping, a wait-threshold
+patch) was deployed for the measurement.
 
 ## Reproduce without editing the system configuration
 

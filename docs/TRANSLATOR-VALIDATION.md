@@ -3,7 +3,7 @@
 The shader translator (`translator/translator`, the `metal2vulkan` crate, and `translator/wrapper`, the
 `libnvmtl_translate` C library the plugin loads) is checked by its Rust tests, which run on any host, and by programs
 that need a Mac with the driver's GPU. This page lists both for the repairs that came from the
-HighDelay/nvidia-macos-driver-nvk fork, and says where each has run.
+HighDelay/nvidia-macos-driver-nvk fork (in the translator since 3.0), and says where each has run.
 
 ## Rust tests
 
@@ -34,7 +34,8 @@ variable never reaches tests that run beside it.
 
 ### On Linux
 
-These tests were built and run on Linux only (x86_64, Rust 1.97.0, the distribution's `spirv-val`). The library's
+When the repairs were merged (3.0), these tests were built and run on Linux (x86_64, Rust 1.97.0, the distribution's
+`spirv-val`). The library's
 tests that sweep public shader fixtures fail there because the fixtures are not in the tree (for example
 `every_public_fixture_reflects_the_images_it_binds`: "only 5 fixtures carrying 0 texture shapes were inspected"), and
 the wrapper's `compositor_pixel_sampler_spirv_validates` and `ca_named_modules_validate` need private shader files;
@@ -46,8 +47,16 @@ place fail.
 ## GPU programs (a Mac with the driver)
 
 None of these is a host test: `tools/run_all_tests.py` does not run them. They install nothing, restart nothing and
-change no setting. None has run on a Mac from this tree; on Linux they were checked for syntax against a stand-in SDK
-(the Objective-C files) and the macOS sysroot with the plugin's Vulkan headers (`tools/translator_readback.cpp`).
+change no setting. Each is a row of the card checks (`tools/card/checks_xlate.py`, run by `tools/card_selftest.py`):
+`xlate.sampler-array`, `xlate.int-handle`, `xlate.msaa`, `xlate.readback-prepare`, one `xlate.readback-<case>` row
+per readback case, and the `xlate.paths-*` rows of `tools/card/xlate_paths.m` (written for this fork: the repairs no
+other program checks on the card, such as argument-buffer texture arrays by a run-time index, a sampler picked among
+8, 9 and 16, a back-edge pointer phi, RGB10A2 and RGB565 packing, and textures in a local object's fields).
+
+Where they ran: on this fork's RTX 5050 (macOS 26.7.3) with 3.0.1's package, where `xlate.paths-samplerphi`,
+`xlate.paths-abarray` and `xlate.paths-walk` failed (3.0.6 fixed the three translations); and at 3.0.7, where every
+translator row passed (of 134 rows, 130 passed; the three that failed were Zink and 3.0.1 rows: CHANGELOG.md, 3.0.7,
+"What ran where"). No card-check run since 3.0.7 is recorded.
 
 - `tools/translator_readback.py` translates bounded compute kernels (taken from the unit tests' LLVM fixtures, with
   observable outputs added) through the built translator's C entry point, validates them with `spirv-val`, builds

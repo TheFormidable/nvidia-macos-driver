@@ -1,10 +1,13 @@
 # The surface fence: the kernel knows who is still drawing into a surface
 
-Status: the kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and
-macOS 26 export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real threads.
-Earlier fork builds started on an RTX 5050 (see [STATUS.md](STATUS.md)); the fence-specific acceptance
-criteria below still require dedicated evidence. It is on by default. Boot-arg `nvrmfence=0` switches it off, and the driver's surface sync
-then behaves as 2.9's did ("The one switch" lists what still differs).
+Status at 3.0.20: on by default since 3.0, and in every package the fork's one test machine (RTX 5050, macOS 26.7.3)
+has run, 3.0 to 3.0.20 ([STATUS.md](STATUS.md)). NVAccel finds its holds there: in the ATM10 captures of 2026-11-23
+(3.0.12 with NVK of 3.0.15) the game's frames were counted by `debug.nvaccel_surface_fence_waits`, NVAccel's waits that
+found a fence hold on the surface (CHANGELOG.md, 3.0.14). No reading of the steps of "What to look at on the card" is
+recorded yet. The kernel code compiles with the kext's flags at 0 warnings and uses only symbols that macOS 15 and
+macOS 26 export to kexts; its logic (the table, the bounds, the wait loop) runs in host tests, also under real
+threads. Boot-arg `nvrmfence=0` switches it off, and the driver's surface sync then behaves as 2.9's did ("The one
+switch" lists what still differs).
 Nothing of 2.9's surface sync was removed: it is what every fallback below lands on.
 
 ## What it is for
@@ -179,8 +182,7 @@ the GPU in standby, which tells the fence about sleep as a system sleep does); i
 wake after the GPU is back. When a connection closes, the holds and channels it registered end before the RM frees
 what that connection owns. When a process exits, all its holds and channels end at the first of its connections to
 close, before the RM frees anything of it (NVRM.kext's `clientClose` calls `nvrm_fence_pid_gone` for this; see "A
-process exits" below). After every interrupt the work loop serves, whatever the RM answered,
-and after every bottom half, the fence is kicked so that waits on finished work end at once.
+process exits" below). It kicks the fence after every interrupt and bottom half ("What wakes a waiter").
 
 **NVK** registers every channel that takes one of its asynchronous submission slots (all of them unless `NVRM_ASYNC=0`
 or the slots run out) with the kernel when the channel is created: it gives the kernel the
@@ -211,7 +213,10 @@ From then on every wait for a surface WindowServer is drawing asks the fence fir
 
 - the flip (on the asynchronous flip thread or WindowServer's), the copied frame and the hybrid paths wait as long
   as the GPU needs, at most 2 s;
-- a page-off that has let go of the accelerator lock waits the same way, at most 2 s;
+- a page-off that has let go of the accelerator lock waits the same way, at most 2 s. Since 3.0.20, on a GPU without
+  a DMA mapper, such a page-off also makes its copy engine read without the lock, into a buffer of its own, and takes
+  the lock back to check the surface and write it (`nvPoCopyUnlocked`; boot-arg `nvaccel_pageoff_copy_locked=1` keeps
+  the copy under the lock);
 - a page-off that holds the accelerator lock keeps 2.9's 100 ms, fence and marks together. That bound holds whatever
   NVRM answers: the time its wait took comes off the 100 ms before the marks are looked at.
 
@@ -299,7 +304,7 @@ fence is off for the boot, and the kick returns at once. The plugin, NVK and NVA
 try if anything about frames looks worse than in 2.9. `nvrm_fence_off_by_bootarg()` tells NVRM.kext's other parts
 that the fence is off for the whole boot, as opposed to not started yet.
 
-It switches the surface fence off, not everything this release changed next to it. With `nvrmfence=0` these still
+It switches the surface fence off, not everything 3.0 changed next to it. With `nvrmfence=0` these still
 differ from 2.9:
 
 - NVAccel writes one line, `surface fence: off for this boot (boot-arg nvrmfence=0) -- waits use the 2.9 marks; NVRM
@@ -310,7 +315,8 @@ differ from 2.9:
 - NVK still writes the word at 0xFF0 of each channel's semaphore page before each submission, and the one at 0xFF8
   when it registers the channel. Nothing reads them.
 - NVK's wait for a completion event and NVAccel's page-off without the accelerator lock are not part of the fence and
-  have their own ways back: environment `NVRM_EVENT_WAIT=0` and boot-arg `nvaccel_pageoff_locked=1`.
+  have their own ways back: the settings line `NVRM_EVENT_WAIT=0` ([EVENT-WAIT.md](EVENT-WAIT.md)) and boot-arg
+  `nvaccel_pageoff_locked=1` (the wait and the copy), or `nvaccel_pageoff_copy_locked=1` for 3.0.20's copy alone.
 
 ## The counters
 
@@ -493,9 +499,10 @@ is not a fault and is said only with `NVK_DIAG=1` in `nvrm610.conf`, as `nvrm: s
 Read with `sysctl debug.nvrm_fence_state` and so on.
 
 1. **After login.** `state` 1, `accel` 1, `chan_adds` above 0, `map_fail` 0, `map_mismatch` 0. If `map_fail` or
-   `map_mismatch` is not 0, send the `NVRM-xnu: fence:` lines: the driver is running as 2.9 for those processes and that
-   is the thing to fix first. No result of this step has been reported yet: the first registration of a channel happens
-   in WindowServer at the login window.
+   `map_mismatch` is not 0, attach the `NVRM-xnu: fence:` lines to an issue ([TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+   "Reporting a problem"): the driver is running as 2.9 for those processes and that is the thing to fix first. No
+   reading of this step is recorded yet: the first registration of a channel happens in WindowServer at the login
+   window.
 2. **Desktop in use for a minute.** `opens`, `arms` and `closes` grow together; `auto` grows with every WindowServer
    frame; `done_on_irq` is far larger than `done_on_slice`; `chan_noirq` 0; `expired_gpu`, `expired_cpu`, `strikes`
    and `owners_distrusted` 0; `close_gpu_behind` 0 or a handful. 2.9's counters

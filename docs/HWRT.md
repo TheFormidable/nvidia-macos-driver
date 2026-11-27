@@ -1,7 +1,9 @@
 # Ray queries on the RT cores
 
-Status in 2.9: written, tested offline, **off by default**. Software traversal on the shader cores is what runs until the
-measurements at the end of this document pass on a card.
+Status (3.0.20): compiled into NVK since 2.9 and **off by default**; no run on a card is recorded, on this fork's RTX 5050
+or elsewhere. Software traversal on the shader cores is what runs until the measurements at the end of this
+document pass on a card. It stays a developer switch, not on by default like the fork's other changes, because a
+structure the card cannot read faults the GPU channel (below).
 
 What is proven and what is not: the lowering's algorithm (flags, candidates, boxes) is checked against a brute-force reference
 on the CPU; the machine code of the query and of the lowering is checked on the CPU; the encode pass compiles and its index
@@ -9,11 +11,15 @@ mapping is checked by a C port. **The node and leaf contents the encoder writes 
 card**: the header rows R01..R13 are measured, the rest are our own rule. A structure the card cannot read faults the GPU
 channel, so the first run follows the P0 ladder below and nothing else turns the switch on.
 
-- `NVK_HWRT_QUERY=1` in the process environment (or in the user's block of `nvrm610.conf`) switches the hardware part on for
-  that process: acceleration structures then carry a second part for the RT cores, and ray queries use it.
+- `NVK_HWRT_QUERY=1` switches the hardware part on for one process: acceleration structures then carry a second part
+  for the RT cores, and ray queries use it. A Vulkan program (the probe below) takes it from its environment. A Metal
+  application takes it from the user's block of `nvrm610.conf`, or from its own environment when it is started with
+  `NVMTL_PROCESS_ENV=1` too (a release plugin forgets the driver variables a process inherits otherwise).
 - `NVMTL_HWRT=1` does the same for the Cyberpunk 2077 profile only (`plugin/nvmtl_app_profile.h`). A user's own
   `NVK_HWRT_QUERY` always wins.
 - Unset, nothing in the build or the shaders changes: the software structure and the software walk are what they were.
+  Since 3.0.12 `NVK_HWRT_QUERY` is part of NVK's shader cache key (`nvk/nvk-nak-switch-key.patch`), so turning it on or
+  off never reuses a shader compiled under the other setting.
 
 ## What the RT cores answer
 
@@ -49,6 +55,8 @@ is supported and rewrites the structure's own address (`mode 1` of `encode_ttu.c
 |---|---|
 | `ttu-nak.patch` | NAK: one NIR intrinsic `ttu_query_nv` and one op `OpTtuQuery` encoded as the 15-instruction region |
 | `ttu-rq.patch` | NVK: the hybrid ray-query lowering, `nvk_hwrt.h` consumers, the encode pass, build sizes, copy relocation |
+| `ttu-rq-split.patch` | the lowering reads a geometry entry as two 4-byte loads, which NAK accepts (from the original's 3.1, merged in 3.0.18; a patch of its own so that `ttu-rq.patch` stays 2.9's) |
+| `wide.patch`, `hwrt_wide.c`, `encode_wide.comp`, `encode_wide_body.h`, `hwrt_wide_shader.cpp` | the 8-wide node option (below) |
 | `nvk_hwrt.h`, `nvk_hwrt_layout.h` | appendix and layout constants, shared by C and GLSL; `build/build_nvk.sh` copies them into the Mesa tree |
 | `hwrt_model.[ch]`, `hwrt_model_test.c` | the lowering's algorithm in C, against a brute-force reference of the ray-query rules |
 | `hwrt_ref.c` | a C port of the encode mapping, a walk over its output, bit-exact against the model |
@@ -59,11 +67,10 @@ is supported and rewrites the structure's own address (`mode 1` of `encode_ttu.c
 | `run_cpu_checks.sh` | machine-code checks that need a built NVK tree (see below) |
 | `probe/hwrt_probe.c`, `probe/hwrt_probe.comp` | the on-card test for the measurement procedure |
 
-NVK patch order (appended to the chain in `docs/HOW-IT-WORKS.md` section 7, applied by `build/build_nvk.sh` for 2.9):
-`nvk-macos`, `nvk-fixes-after-def16`, `nvk-620-kernel`, `nvk-recycle`, `nvk-slab`, `nvk-slabdef`, `nvk-hubfix`,
-`nvk-perf-boost-burst`, `nvk-rated-tdp`, `nvk-gps-maxpower`, `nvk-metal-wsi`, `nvk-card-select`, **`hwrt/ttu-nak`**,
-**`hwrt/ttu-rq`**, and the patches after them listed in `build/build_nvk.sh`; then the two shared headers are copied
-in and `nvk/dlss/patch_dlss_cache.py` runs.
+Place in the NVK patch chain (`build/build_nvk.sh`; the whole order is in [HOW-IT-WORKS.md](HOW-IT-WORKS.md), section 7):
+**`hwrt/ttu-nak`**, **`hwrt/ttu-rq`**, `curves/curves` and `hwrt/wide` come right after `nvk-card-select` in the 2.9
+part of the chain, and **`hwrt/ttu-rq-split`** is the last patch of the 3.0 chain; then the two shared headers are
+copied in and `nvk/dlss/patch_dlss_cache.py` runs.
 
 ## Structure of an acceleration structure with the hardware part
 
@@ -146,8 +153,8 @@ Fifteen instructions, SM120, in this order. Offsets are in the 40..55 bit field 
 ## Measurement procedure (on a card)
 
 Everything below uses our own driver and our own data. Nothing is read from, decompiled from, or compared with a vendor
-binary. Run every GPU step through the bounded runner (own log directory, fault and WindowServer watch) and reboot after any
-fault, as for every other GPU run. Only the process that sets `NVK_HWRT_QUERY` is affected; WindowServer never sees it.
+binary. Run every GPU step as one process with a time limit, keep its output and the kernel log, and restart the Mac
+after any GPU fault. Only the process that sets `NVK_HWRT_QUERY` is affected; WindowServer never sees it.
 
 **The probe.** `nvk/hwrt/probe/hwrt_probe.c` with `hwrt_probe.comp` builds a bottom and top level structure through the
 driver under test, queries 256 rays under four flag sets (opaque, cull back, cull front, non-opaque with every candidate
@@ -155,7 +162,13 @@ confirmed) and compares each ray with a CPU reference; `--dump <dir>` writes `bl
 Cases `A`, `nNN` (NN triangles in a strip) and `big`. It compiles clean against the Vulkan headers and its shader compiles
 with glslang; it has not been run on a card.
 `glslangValidator -V --target-env vulkan1.2 hwrt_probe.comp -o hwrt_probe.spv`, then
-`NVK_HWRT_QUERY=1 ./hwrt_probe <loader dylib> hwrt_probe.spv A`.
+`NVK_HWRT_QUERY=1 ./hwrt_probe <loader dylib> hwrt_probe.spv A`. `<loader dylib>` is a Vulkan loader that finds the
+driver's NVK, for example `/usr/local/lib/libvulkan.1.dylib` after this command in the package's folder, which installs
+the Khronos loader v1.4.367 the package carries and a loader manifest for NVK:
+
+```
+sudo bash Library/NullMoth/vulkan/vulkan-for-apps.sh --install --with-loader Library/NullMoth/vulkan/libvulkan.1.dylib
+```
 
 **P0 safety ladder.** One compute dispatch, one lane, `NVK_HWRT_QUERY=1`, a structure built by `encode_ttu.comp` for one
 triangle (`hwrt_probe ... A`). Pass: no fault, and a miss or a hit is returned. A fault stops the session: record the first faulting address

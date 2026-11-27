@@ -13,9 +13,16 @@ Selection is frozen before requesting matching; it is not recomputed after BAR
 relocation. `nvselector=1` enables the marker. Without it, the module only records
 the selection in I/O Registry and does not activate the new match.
 
+It comes from the original project (its pull request 247 by is-pan, in its 2.5.2)
+and is unchanged in this fork at 3.0.20. It is an optional component, not in the
+package by default, and stays off by default: it only makes sense on a machine
+with several NVIDIA cards (`nvselector`, tier `hardware` in [SWITCHES.md](SWITCHES.md)).
+This fork's one test machine has one card, so nothing below has run here.
+
 ## Build and initial qualification
 
-Build using the same kernel SDK as the other kexts:
+Build using the same kernel SDK as the other kexts, with `./build.sh build selector` or
+directly:
 
 ```sh
 build/build_primary_selector.sh /private/var/tmp/primary-build
@@ -47,7 +54,8 @@ release's code/data sections stay unchanged; code signatures are regenerated.
 
 ## Hardware evidence and limits
 
-The standalone selector and property matching booted with release 2.1.0 on macOS
+This is the original project's evidence, from the pull request's author. The
+standalone selector and property matching booted with release 2.1.0 on macOS
 15.8.1 (24H32), a Supermicro H12SSL-i, one EPYC 7542 and four RTX 4090s. One of four
 cards uniquely owned the console. NVRM and NVAccel each had one active instance,
 on the connected `C2:00.0` card, with automatic-property matching rather than a
@@ -60,11 +68,11 @@ This establishes startup display selection on that topology. Moving the cable
 or card, sleep/wake, long-running graphics workloads and other machines are
 unqualified. It does not implement multi-GPU acceleration or runtime switching.
 The update-preservation changes have private installer fixture coverage; that
-exact upstream installer path has not been used to upgrade the test machine.
+exact installer path has not been used to upgrade the four-card machine.
 macOS 26 is not hardware-qualified by this report. Raw user logs are not included.
 
 The installer side lives in the driver's `package/install.sh` and
-`package/uninstall.sh`; the 1401 application is unchanged. The installer tests
+`package/uninstall.sh`. The installer tests
 below run against mocked system commands. Building and signing the selector,
 and a run on a multi-card machine, are separate checks.
 

@@ -3,9 +3,13 @@
 An opt-in VirtualSMC plugin that gives a laptop's keyboard backlight to macOS the way an Intel MacBook does: through the
 SMC keys `LKSB` and `LKSS`, which CoreBrightness reads and writes. Off unless the boot argument `nmkbl=1` is present.
 
+Status at 3.0.20: an optional kext from the original project's 2.9. `./build.sh` builds it (component `nmkbl`) only
+when `NM_LILU_DEBUG_KEXT`, `NM_VIRTUALSMC_SRC` and `NM_MACKERNELSDK` are set, and it stays opt-in because what it
+drives depends on the laptop. The fork's one test machine is a desktop, so nothing below has run in this fork.
+
 ## What it covers
 
-Matched by what the machine's ACPI tables carry, not by vendor name. Counts are from 648 DSDTs in user uploads.
+Matched by what the machine's ACPI tables carry, not by vendor name. Counts are from 648 DSDTs that users uploaded to the original project.
 
 | Laptop family | How the light is reached | Tables | State |
 |---|---|---|---|
@@ -31,8 +35,9 @@ Two routes exist in the Intel build of macOS, and a PC's SMBIOS model decides wh
 2. HID route, for T2-era Macs, which are every Intel Mac that macOS 26 supports. The HID keyboard driver
    (`AppleHIDKeyboardEventDriverV2::initKeyboardBacklight`) scans the keyboard's HID elements for usage page `0xFF00`
    (65280), usage `0x0F`, and talks to it with feature report id `0xBF` (191). CoreBrightness then finds the backlight as an
-   HID service with a primary usage page and usage, not through the SMC. The SMBIOS models 1401 picks (MacPro7,1,
-   iMac20,x, MacBookPro16,x) are T2-era models, so this is the route macOS 26 takes for them.
+   HID service with a primary usage page and usage, not through the SMC. The SMBIOS models the original project's setup
+   app picked for macOS 26 (MacPro7,1, iMac20,x, MacBookPro16,x) are T2-era models, so this is the route macOS 26 takes
+   for them.
 
 This plugin implements both. Route 2 is a virtual built-in keyboard (`NMKbdBacklightHID`, an IOHIDDevice) whose report
 descriptor carries the vendor element 0xFF00:0x0F as an input, a feature report 0xBF that answers `{ version 1, off, on_min,

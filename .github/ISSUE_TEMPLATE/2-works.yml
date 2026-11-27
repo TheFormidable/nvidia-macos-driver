@@ -1,17 +1,49 @@
 name: It works on my machine
-description: Tell us a machine that reached the desktop, so 1401 sets it up the same way for everyone with it.
-title: "[Works] <CPU> + <GPU> + <board or laptop>"
+description: Tell us about a machine that reached the desktop with this fork's driver. The fork has run on one machine only, so every other one is news.
+title: "[Works] <GPU> + <CPU> + <board or laptop> + macOS <version>"
 labels: [works]
 body:
-  - type: input
-    id: report
+  - type: markdown
     attributes:
-      label: Send logs report ID from the working Mac
-      placeholder: NM-
+      value: |
+        What was checked on a card, and how, is in [TESTING-ON-HARDWARE.md](https://github.com/TheFormidable/nvidia-macos-driver/blob/fable/docs/TESTING-ON-HARDWARE.md). Read what you paste before you post it: logs and paths carry your account name and your Mac's name.
+  - type: input
+    id: version
+    attributes:
+      label: Driver version and package
+      description: "`cat /Library/NullMoth/driver-version`. For a package you built, also the commit from NULLMOTH-LOCAL-BUILD.txt."
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS build
+      description: "`sw_vers`"
+    validations:
+      required: true
+  - type: input
+    id: card
+    attributes:
+      label: Card and machine
+      description: The card (and its PCI ID if you know it), the CPU, the board or Mac or laptop model, the SMBIOS model, and the displays (resolution and refresh rate).
+    validations:
+      required: true
+  - type: input
+    id: bootargs
+    attributes:
+      label: boot-args
+      description: "`nvram boot-args`"
+    validations:
+      required: true
+  - type: textarea
+    id: checked
+    attributes:
+      label: What you checked
+      description: For example `system_profiler SPDisplaysDataType` showing the card with Metal, `sysctl debug.nvrm_switches_nondefault`, sleep and wake, and the apps or games you ran (with their frame rate if you read it).
     validations:
       required: true
   - type: textarea
     id: notes
     attributes:
-      label: Anything you had to do that 1401 did not do for you
-      description: BIOS settings, boot-args, kexts. This is what we build into 1401 next.
+      label: Anything you had to do beyond the README
+      description: BIOS settings, OpenCore settings, boot-args, kexts, settings in nvrm610.conf. "Nothing" is a fine answer.

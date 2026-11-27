@@ -2,8 +2,10 @@
 
 ## 3.0.20
 
-**Not released.** On top of 3.0.19. One change, in NVAccel: while a program reads a screen capture with the processor,
-WindowServer no longer waits behind the copy engine.
+**Release 2 of this fork** (pre-release; release 1 was 3.0.2). On top of 3.0.19. In NVAccel, while a program reads a
+screen capture with the processor, WindowServer no longer waits behind the copy engine; a first install needs no manual
+Allow; and the build files and documentation were brought up to this release. What release 2 brings over release 1,
+this fork's own work only, is in [docs/releases/RELEASE-2.md](docs/releases/RELEASE-2.md).
 
 ### What changed
 
@@ -35,10 +37,35 @@ WindowServer no longer waits behind the copy engine.
   lock cannot be taken back; the paths that never let it go), with four altered copies that must fail.
   `tools/test_pageoff_paths.py` and `tools/test_surf_planes_accel.py` read the new call.
 
+
+### Also in this release
+
+- **A first install no longer needs the user to click Allow in System Settings > Privacy & Security.** macOS loads a
+  third-party kext only once its bundle is allowed (`allowed=1` in `kext_policy`). Until now `package/install.sh` only
+  refreshed that record for kexts already allowed (an update needed one restart), and a fresh install was blocked until
+  the user allowed each kext by hand and restarted a second time. It now writes the same `allowed=1` row the Allow
+  button writes, scoped to the driver's own kexts (the four in `KEXTS`, plus the primary-GPU selector when built) with
+  the id already constrained to `[A-Za-z0-9.]`, so one restart is enough. The approval database is SIP-protected; the
+  driver's SIP setting (0x0A43) lets root write it, and where it is read-only the install still works and macOS asks as
+  before (the closing message says which happened). `tools/test_kext_preapprove.py` (new) runs the same SQL against a
+  stand-in `KextPolicy` database and checks the driver's kexts end up allowed once each while an already-allowed kext
+  and an unrelated third-party row are left untouched. Not yet exercised on a Mac.
+- **Build files and documentation for release 2.** `build/build.conf.example` lists `NM_LEGACY_KITS`.
+  `build/legacy/package_kits.sh` writes this fork's release address into `legacy_kits.json` (it named the original's;
+  nothing reads it). `package/install.sh`, `package/fw_fetch.sh` and the kits' `package/legacy/install-legacy.sh` no
+  longer send users to the original's 1401 app or its USB stick: the notes about boot-args point to the README's
+  OpenCore settings, and the AMFI note names the optional AMFIAnchor route. The README is new, and every document was
+  brought to 3.0.20 with the original's 1401 app, Discord and maintainer process taken out
+  ([docs/releases/RELEASE-2.md](docs/releases/RELEASE-2.md) is the release's own page).
+
 ### What ran where
 
-Linux only: NVAccel compiled for macOS 15 and 26 against MacKernelSDK with the warnings Apple's clang adds for kexts
-(no warning), `test_pageoff_copy_unlocked.py`, `test_pageoff_paths.py`, `test_pageoff_hold.py`, `test_pageoff_recheck.c`,
+The kext approval and the release 2 build files and documents: Linux only (`test_kext_preapprove.py`,
+`test_install_amfi_note.py`, `test_install_legacy.py`, `test_pick_kit.py`, the docs arm of `test_build_sh.py`, and the
+tests that read the documents and the switch registry).
+
+The page-off change, on Linux: NVAccel compiled for macOS 15 and 26 against MacKernelSDK with the warnings Apple's
+clang adds for kexts (no warning), `test_pageoff_copy_unlocked.py`, `test_pageoff_paths.py`, `test_pageoff_hold.py`, `test_pageoff_recheck.c`,
 `test_surf_planes_accel.py`, the registry's `check` and the CI set.
 
 On the RTX 5050 (2026-11-26, macOS 26.7.3, the package built and signed with the owner's chain on his Mac, AMFI on):
@@ -75,16 +102,6 @@ older release has been installed on;** the kits are the original's older-release
   a time with plain `shasum`, since 10.7's has no `--strict`; a malformed line or an unlisted file stops it), and runs
   the kit's own `install-legacy.sh` from the copy (`CHECK=1` becomes its `--check`). It does not change boot
   arguments; the kit's installer says what to add. On 15 and 26 nothing changed.
-- **A first install no longer needs the user to click Allow in System Settings > Privacy & Security.** macOS loads a
-  third-party kext only once its bundle is allowed (`allowed=1` in `kext_policy`). Until now `package/install.sh` only
-  refreshed that record for kexts already allowed (an update needed one restart), and a fresh install was blocked until
-  the user allowed each kext by hand and restarted a second time. It now writes the same `allowed=1` row the Allow
-  button writes, scoped to the driver's own kexts (the four in `KEXTS`, plus the primary-GPU selector when built) with
-  the id already constrained to `[A-Za-z0-9.]`, so one restart is enough. The approval database is SIP-protected; the
-  driver's SIP setting (0x0A43) lets root write it, and where it is read-only the install still works and macOS asks as
-  before (the closing message says which happened). `tools/test_kext_preapprove.py` (new) runs the same SQL against a
-  stand-in `KextPolicy` database and checks the driver's kexts end up allowed once each while an already-allowed kext
-  and an unrelated third-party row are left untouched. Not yet exercised on a Mac.
 - `package/uninstall.sh`: on 10.7 to 14 it runs the remover the kit left in `/Library/NullMoth/legacy/<release>/`.
 - `build/package_local.sh` and `./build.sh package`: `NM_LEGACY_KITS=<folder of build/legacy/package_kits.sh>` puts the
   13 kits in `legacy/<release>/` of the package, each checked against `legacy_kits.json` and its own `SHA256SUMS`. All
@@ -142,8 +159,8 @@ older release has been installed on;** the kits are the original's older-release
 
 ### What ran where
 
-Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh, the package and build.sh's
-settings pass as before.
+Linux: `tools/test_pick_kit.py` passes; the tests that read install.sh, uninstall.sh,
+the package and build.sh's settings pass as before.
 
 On the owner's Mac (macOS 26.7.3, 2026-11-25), from 2e4b9cc4, in a separate work folder, with Apple's SDK and Kernel
 Debug Kit of each release: the 13 kits were built and packed, and so was the full package with them inside

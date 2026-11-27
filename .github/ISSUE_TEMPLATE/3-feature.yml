@@ -1,8 +1,12 @@
 name: Feature request
-description: Something the driver or the apps should do.
+description: Something the driver, its installer or its tools should do.
 title: "[Feature] <what you want>"
 labels: [enhancement]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [docs/STATUS.md](https://github.com/TheFormidable/nvidia-macos-driver/blob/fable/docs/STATUS.md) first: it says what has run and what is still open.
   - type: textarea
     id: want
     attributes:

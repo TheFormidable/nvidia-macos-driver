@@ -1,15 +1,19 @@
 # System sleep and wake
 
-Before this change the driver had no system sleep support. On a desktop the PCIe slot loses power in S3, so the GPU
+Before system sleep support came in (the original project's 2.0.3, its pull request 182 by danlt150) the driver had none. On a desktop the PCIe slot loses power in S3, so the GPU
 came back reset while NVRM still thought GSP-RM was running. On wake NVRMFB re-lit its head through NVKMS, the push to
 the core channel spun in `nvEvoMakeRoom` forever, and the Mac needed a hard reset ("Darkwake Exit Failure",
 `Sleep Wake Failure` report). The work below makes sleep and wake behave as on Linux, plus the steps macOS needs on top.
 
-Tested on an RTX 5050 (GB207, FSP boot), MacPro7,1 SMBIOS, macOS 15.8.1: repeated sleep and wake with the desktop,
-windows and Metal apps intact. That test was of 2.9. The additions of release 3.0 (the interrupt gate, the paused 1 Hz
-timer, the surface fence's sleep step, the bounded waits for RM work, DMA through VT-d) are marked "(3.0)" below.
-GPU Caps Phase 1/2B later observed a cache generation advance after resume on an RTX 5050, macOS 26.7.3
-([GPU-CAPS.md](GPU-CAPS.md)). That is lifecycle evidence, not a dedicated validation of every 3.0 sleep path.
+Evidence at 3.0.20. The original project tested its 2.9 on an RTX 5050 (GB207, FSP boot), MacPro7,1 SMBIOS, macOS
+15.8.1: repeated sleep and wake with the desktop, windows and Metal apps intact (its evidence, not this fork's). The
+additions of this fork's 3.0 (the interrupt gate, the paused 1 Hz timer, the surface fence's sleep step, the bounded
+waits for RM work, DMA through VT-d) are marked "(3.0)" below; no dedicated sleep test of them on a card is recorded. On this
+fork's RTX 5050 with macOS 26.7.3, GPU Caps Phase 1/2B observed a cache generation advance after a resume (2026-11-17,
+[GPU-CAPS.md](GPU-CAPS.md)): lifecycle evidence, not a validation of the 3.0 sleep paths. With AMFI left on through
+the AMFIAnchor route, sleep and wake are not qualified either (gate 4 of
+[SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)). The test to run is section 6 of
+[TESTING-ON-HARDWARE.md](TESTING-ON-HARDWARE.md).
 
 ## What happens
 
@@ -68,8 +72,8 @@ because it holds the display gate: one lock for every framebuffer, which the fli
 video memory worker take as well. The kernel log says which way a power-on went:
 `power on: paging N, GPU standby seen N` when it did not do the family's wake work (`paging 0, GPU standby seen 0` is
 normal at the first power-on after start, once for each framebuffer), and `replay N ms` in the `system wake:` line for
-how long the owed `DidWake(false)` replay took. From pull request 597 of the original project, adapted: it slept 500
-ms under the display gate and tried once more. Not run through a sleep on a card yet.
+how long the owed `DidWake(false)` replay took. From pull request 597 of the original project (by Geek, taken in 3.0.5),
+adapted: it slept 500 ms under the display gate and tried once more. No sleep on a card is recorded for it at 3.0.20.
 
 **NVAccel and VRAM across sleep.** At sleep IOGraphicsAccelerator2 pages off its VRAM resources, and the wake's mode
 change pages them back on. If page-on got fresh VRAM, WindowServer kept drawing into the memory it had imported before
@@ -116,13 +120,13 @@ ordinary clock, as in 2.9 (a wait across a long sleep can then be called lost at
 
 **VT-d.** With a DMA mapper (DMA modes 1 and 2, [DMA-IOMMU.md](DMA-IOMMU.md)) the GPU's bus addresses stay valid
 across sleep: AppleVTD keeps its tables in memory and restores them before drivers wake. `debug.nvrm_dma_live` reads
-the same before and after a sleep with nothing else running. Not yet reported from hardware.
+the same before and after a sleep with nothing else running. Not yet reported from hardware (3.0.20).
 
 ## Switches and diagnostics
 
 | Name | Kind | Effect |
 |---|---|---|
-| `-nvrmnopm` | boot-arg | NVRM stays out of the power tree and keeps the stock RM settings: the behaviour before this change. |
+| `-nvrmnopm` | boot-arg | NVRM stays out of the power tree and keeps the stock RM settings: no system sleep support, as before it came in. |
 | `debug.nvaccel_vm_sticky` | sysctl (rw) | `1` (default) a surface keeps its VRAM across page-off; `0` page-off gives it back and the desktop is black after wake. |
 | `debug.nvaccel_vm_parked`, `debug.nvaccel_vm_unparked` | sysctl | Page-offs that kept their VRAM, and page-ons answered with it. |
 | `debug.nvrm_pm_waited` | sysctl | RM calls that waited at the gate for a resume. |
@@ -131,8 +135,8 @@ the same before and after a sleep with nothing else running. Not yet reported fr
 | `debug.nvrm_isr_skipped` | sysctl | GPU interrupts that arrived while the interrupt path was closed (sleep, shutdown, stop) and were not given to the RM. |
 | `debug.nvrm_irq_settle_timeouts` | sysctl | Waits for the interrupt path to go quiet before standby that ran out. Should stay 0. |
 | `debug.nvrm_fence_end_pm`, `debug.nvrm_fence_state` | sysctl | Surface holds ended by a sleep; the fence's state (1 on, 3 off after a failed resume). |
-| `debug.nvrm_pat_passes`, `debug.nvrm_pat_cpus` | sysctl | Since 3.0.13, on a machine where NVRM put write-combining back into the CPU's page attribute table at start (an AMD kernel with a fix-PAT patch), it does so again at each wake before the GPU resumes, because the patched kernel writes its own table back on every CPU at wake. The first counts the passes that changed a CPU (start, then one per wake); the second says how many CPUs had the entry after the last one (compare with `hw.ncpu`). Not run on a card yet. |
-| `nvpatwc=0` | boot-arg | The page attribute table is left as the kernel wrote it, at start and at wake, as in 3.0.12. |
+| `debug.nvrm_pat_passes`, `debug.nvrm_pat_cpus` | sysctl | Since 3.0.13, on a machine where NVRM put write-combining back into the CPU's page attribute table at start (an AMD kernel with a fix-PAT patch), it does so again at each wake before the GPU resumes, because the patched kernel writes its own table back on every CPU at wake. The first counts the passes that changed a CPU (start, then one per wake); the second says how many CPUs had the entry after the last one (compare with `hw.ncpu`). No reading after a wake is recorded at 3.0.20. |
+| `nvpatwc=0` | boot-arg | The page attribute table is left as the kernel wrote it, at start and at wake, as in 3.0.12. The README's first thing to try for a hang right at boot or after a sleep on an AMD machine. |
 
 Kernel log lines to look for (`/usr/bin/log show --predicate 'process == "kernel"'`): `NVRM-xnu: sleep #`,
 `NVRM-xnu: wake #`, `VRAM save file closed: N MB held`, `NVRM-fb: system wake:`.
@@ -146,3 +150,11 @@ Kernel log lines to look for (`/usr/bin/log show --predicate 'process == "kernel
 - Some boards wake every minute through USB (`pmset -g log`: `DarkWake ... due to XDCI ... XHCI`). That is the
   firmware's USB wake GPE (0x6D), not the driver; the usual `GPRW` → `XPRW` rename with `SSDT-GPRW` stops it, and then
   only the power button wakes the Mac.
+- The two start-up additions of 3.0.18 (the original project's, taken in the merge of its 3.1) do nothing at a wake. The panel brightness
+  job (its #582, [NVRMFB-BACKLIGHT-POWER.md](NVRMFB-BACKLIGHT-POWER.md)) copies the level every 30 s and at shutdown
+  and restores it once after a restart; across a sleep the framebuffer keeps the user's level, and the display's
+  full-power request at wake goes back to it. And a kernel panic in
+  `IOFramebuffer::postOpen` as the NVIDIA display first opens, with WhateverGreen loaded and no `gfxrst=4`, comes at
+  start, not at wake: it is WhateverGreen's boot screen copy. The installer adds `gfxrst=4` to the NVRAM boot-args
+  when WhateverGreen is loaded and none is set; an OpenCore that writes its own boot-args needs it in `config.plist`
+  (README, "OpenCore settings").

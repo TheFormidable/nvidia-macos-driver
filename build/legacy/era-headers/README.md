@@ -12,8 +12,9 @@ One folder per release:
 Most names of the family's pure slots are read from Apple's own graphics drivers of the release (GeForce,
 AMDRadeonX4000/X5000, AppleIntel*Graphics). Those drivers ship only in the full macOS installer, not in the Kernel
 Debug Kit or the recovery image. So the headers were made once on a machine that had them, and are kept here.
-`gen_release.sh` uses this copy when it finds no vendor drivers, and `era_all.sh` uses it when the build machine never
-made a `gen-<era>`. With it, nobody needs those installers. The family binary itself (from the Kernel Debug Kit or the
+`gen_release.sh` uses this copy when it finds no vendor drivers and is given no newer release to borrow names from
+(`NM_ERA_HEADERS` names another copy), and `era_all.sh` uses it when the build machine never made a `gen-<era>`. With
+it, nobody needs those installers. The family binary itself (from the Kernel Debug Kit or the
 recovery image) is still read for the table check and the inherited inline methods.
 
 What these files hold: class declarations (slot order, method names and argument types, instance sizes), plus a few
@@ -27,4 +28,6 @@ one-line method bodies that Apple's headers define inline (a field read or a con
 | 10.13 | 17G66 | 105 of 105 |
 | 10.14 | 18G103 | 105 of 106 |
 
-All five sets were made on 2026-11-25 with `gen_era_headers.py` as of 2e4b9cc4.
+All five sets were made on 2026-11-25 with `gen_era_headers.py` as of 2e4b9cc4, for the kits of 3.0.19. How they fit
+into the build of the kits for macOS 10.7 to 14: [docs/BUILDING.md](../../../docs/BUILDING.md), "Building the kits for
+macOS 10.7 to 14".

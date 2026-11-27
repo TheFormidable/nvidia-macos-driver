@@ -1,18 +1,43 @@
 name: Something is broken
-description: Boot stops, black screen, flicker, an app crashes, or something else does not work.
+description: Boot stops, black screen, flicker, an app crashes, or something else does not work with this fork's driver.
 title: "[Bug] <what happens>"
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        **First press Send logs** (1401 on Windows, or the 1401 Mac app). It sends your hardware, BIOS settings, OpenCore config and logs, with your name and serial numbers removed, and gives you a report ID. Flicker? Use **Record the flicker** in the Mac app while it happens.
+        This is the tracker of TheFormidable's fork. A problem with the original NullMoth project's own releases belongs to that project: its builds differ.
+
+        Look in [docs/TROUBLESHOOTING.md](https://github.com/TheFormidable/nvidia-macos-driver/blob/fable/docs/TROUBLESHOOTING.md) first. The commands below are the ones it and [TESTING-ON-HARDWARE.md](https://github.com/TheFormidable/nvidia-macos-driver/blob/fable/docs/TESTING-ON-HARDWARE.md) ("What to attach to an issue") ask for. **Read what you paste or attach before you post it:** logs and paths carry your account name and your Mac's name.
   - type: input
-    id: report
+    id: version
     attributes:
-      label: Send logs report ID
-      description: Looks like NM-ABCD1234. Several are fine, separated by commas.
-      placeholder: NM-
+      label: Driver version and package
+      description: "`cat /Library/NullMoth/driver-version` (or `cat VERSION` in the package's pkgroot). For a package you built, also the commit from NULLMOTH-LOCAL-BUILD.txt."
+      placeholder: 3.0.20, package nullmoth-nvidia-local-<commit>.tar.gz
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS build
+      description: "`sw_vers`"
+      placeholder: 26.7.3 (25G342)
+    validations:
+      required: true
+  - type: input
+    id: card
+    attributes:
+      label: Card and machine
+      description: The card (and its PCI ID if you know it), the CPU, the board or Mac or laptop model, and the SMBIOS model in OpenCore.
+      placeholder: RTX 5050, Ryzen 5 5500, B550 board, iMacPro1,1
+    validations:
+      required: true
+  - type: input
+    id: bootargs
+    attributes:
+      label: boot-args
+      description: "`nvram boot-args`, or the boot-args line of OpenCore's config.plist."
     validations:
       required: true
   - type: dropdown
@@ -20,14 +45,14 @@ body:
     attributes:
       label: Where does it go wrong?
       options:
-        - Building or writing the USB stick (1401 on Windows)
-        - Before the OpenCore picker / no picker
-        - After picking the installer (Apple logo, prohibited sign, text stops)
-        - During the macOS install
-        - Installing the NVIDIA driver (Mac app)
-        - Booting macOS after the driver (black / grey screen, restarts)
-        - On the desktop (flicker, lag, displays, sleep)
-        - An app or game
+        - Building from source (./build.sh)
+        - Installing the package (install.sh, or CHECK=1)
+        - Starting macOS after the driver (stops, black or grey screen, restarts)
+        - On the desktop (flicker, lag, displays, sleep and wake)
+        - An app or game (Metal, OpenGL, Vulkan)
+        - Video, screen sharing or capture
+        - With AMFI left on (the AMFIAnchor route)
+        - macOS 10.7 to 14 (a kit)
         - Something else
     validations:
       required: true
@@ -35,16 +60,45 @@ body:
     id: what
     attributes:
       label: What happens
-      description: What you see, and the last line on screen if it stops. A photo of the screen helps.
+      description: What you see, in a few sentences of your own, and the last line on screen if it stops. A photo of the screen helps (with -v in boot-args for a boot that stops).
     validations:
       required: true
-  - type: checkboxes
-    id: own-words
+  - type: textarea
+    id: install
     attributes:
-      label: Verified report
-      options:
-        - label: I reviewed this report and confirm that it describes real observations, not invented results (see CONTRIBUTING.md).
-          required: true
+      label: Output of install.sh
+      description: The whole output of `sudo ./install.sh`, copied from Terminal. For a build problem, paste the end of the ./build.sh output and its log instead.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: sysctl
+    attributes:
+      label: The driver's state
+      description: |
+        Taken while or right after the problem shows. Write "driver not loaded" if the commands print nothing.
+
+            sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault
+            sysctl debug | grep -e nvrm -e nvaccel
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs of that boot
+      description: |
+        Make the two files below and drag them into this box, with /Library/NullMoth/lastgood.log and /Library/NullMoth/bootguard.log when they exist. Paste here the lines the troubleshooting entry asks for (for example the `NVRM-fb:` lines).
+
+            log show --last boot --predicate 'process == "kernel"' > ~/kernel.txt
+            log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"' > ~/nullmoth.txt
+    validations:
+      required: true
+  - type: textarea
+    id: wayback
+    attributes:
+      label: Which way back did you try?
+      description: The way back of the change you suspect (README, "What is on by default, and the ways back"), and whether the problem went away with it. "None yet" is a fine answer.
   - type: input
     id: app
     attributes:
@@ -54,4 +108,13 @@ body:
     id: changed
     attributes:
       label: Did you change anything yourself?
-      description: Extra boot-args, kexts or settings from a guide, a forum, an AI assistant or someone else's EFI. "No" is a fine answer.
+      description: Extra boot-args, kexts, settings in /Library/GPUBundles/nvmtl/nvrm610.conf, or settings from a guide, a forum, an AI assistant or someone else's EFI. "No" is a fine answer.
+  - type: checkboxes
+    id: own-words
+    attributes:
+      label: Verified report
+      options:
+        - label: I reviewed this report and confirm that it describes real observations, not invented results (see CONTRIBUTING.md).
+          required: true
+        - label: I read the files and output I attached and removed what I do not want to share.
+          required: true

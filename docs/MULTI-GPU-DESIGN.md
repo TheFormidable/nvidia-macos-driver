@@ -1,8 +1,10 @@
 # Multi-GPU acceleration: what it takes, measured on this tree
 
-Today one NVIDIA card is accelerated per boot. [AUTO-PRIMARY-GPU.md](AUTO-PRIMARY-GPU.md) picks which one, and the others stay
+By default one NVIDIA card is accelerated per boot. [AUTO-PRIMARY-GPU.md](AUTO-PRIMARY-GPU.md) picks which one, and the others stay
 visible on the PCI bus. This page is the inventory of what stands between that and one Metal device per card, so the work can
-be done in slices that each keep the single-card path unchanged. Status after the 2.9 work is in the last section.
+be done in slices that each keep the single-card path unchanged. The slices were built in the original project's 2.9 and are in
+3.0.20 as the experimental `nvmultigpu=1`, off by default; their state is in the last section. No run on two cards is recorded,
+in the original's record or in this fork's (one card).
 
 ## Why it is not a small change
 
@@ -19,8 +21,9 @@ The accelerator, the display side and the resource-manager glue all assume exact
 The first two columns, the uses of `gNVRMService` and `gAccel` and the plugin's lookup sites describe the tree before
 the work in the last section: 2.9 replaced `gNVRMService` with the device table `gNVRMTab` (slice 1; the two accessors
 now return its primary entry) and turned most reads of `gAccel` into per-object lookups (slice 2). The counts of
-file-level statics are of this release's sources: a file-level static is counted here as one line at file scope that
-declares a static variable that is not `const` (a line that declares several counts once).
+file-level statics are of this fork's 3.0 sources (2026-11-13), not counted again since: a file-level static is counted
+here as one line at file scope that declares a static variable that is not `const` (a line that declares several counts
+once).
 
 ## Slices, each provable before the next
 
@@ -32,7 +35,8 @@ declares a static variable that is not `const` (a line that declares several cou
    take the device from the object they already hold (surfaces, user clients and memory objects know their accelerator) and only
    fall back to `primary()` where there is no context.
 3. **NVKMS table with N slots**, display bound to the card that owns the console; the other cards expose compute and render only.
-4. **Matching.** Drop the primary-selector requirement on NVAccel's personality behind `nvmulti=1` (default off).
+4. **Matching.** Drop the primary-selector requirement on NVAccel's personality behind a boot argument, default off
+   (`nvmultigpu=1` as built).
 5. **Plugin.** One Metal device per accelerator; `MTLCopyAllDevices` lists each; the default device stays the primary; the second
    card is opt-in until measured.
 
@@ -45,8 +49,9 @@ a display failure, so slice 4 has to be measured before it is allowed to default
 
 ## Status in 2.9
 
-Everything below is off unless the boot argument `nvmultigpu=1` is present. Without it, one card and several cards run the code
-they ran before.
+Built in 2.9. Everything below is off unless the boot argument `nvmultigpu=1` is present
+(in OpenCore's `boot-args`; per-application card choice is `NVMTL_CARD`, a settings line). Without it, one card and several cards
+run the code they ran before.
 
 | Slice | State |
 |---|---|
@@ -78,7 +83,7 @@ bound to; one process does not drive two cards at once.
 - `tools/test_nvrm_devtab.cpp` (host, 26 arms): table and gate rules against a model of the old code, the four-card overlapping
   start, the re-offer sequencing, `resolve()` for one and two cards. Two mutants of the header fail it.
 - `tools/check_accel_resolution.py`, `tools/test_card_select.c` (11 arms), `tools/test_multigpu_wiring.py` (8 arms).
-- Builds on the mini: NVRM 43 warnings before and after; NVAccel 24 and 24 for macOS 15 and 26; the plugin 330 and 330; NVK with
+- Builds on the original project's build Mac at 2.9: NVRM 43 warnings before and after; NVAccel 24 and 24 for macOS 15 and 26; the plugin 330 and 330; NVK with
   both window and card patches, 2274 exports, the same set as before.
 - Not proven, because it needs two cards: that IOKit offers a re-registered card again exactly as modelled, and a real second
   card's Metal and Vulkan work.
