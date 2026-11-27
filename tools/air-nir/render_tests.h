@@ -24,6 +24,7 @@ struct rrun {
    id<MTLSamplerState> fsamp[4];
    id<MTLBuffer> back[RMAXCOL], dback;            /* the attachments, read back */
    uint8_t tex[16 * 16 * 4];                      /* r_texture's texels */
+   uint8_t texn[3][16 * 16 * 4];                  /* r_handlechoice's three textures */
    float pal[16][4];                              /* r_buffers' palette */
    uint32_t idx[1000];
    char why[256];
@@ -43,6 +44,7 @@ struct rtest {
    bool spirv_road;                  /* the frontend must refuse it: it passes only on the SPIR-V road */
    bool fc_both;                     /* the vertex function is made with the constants too */
    const char *linked_air, *linked_fn; /* a visible function of another library, linked into the fragment stage */
+   const char *road_only;            /* why the SPIR-V road makes no pipeline of it: skipped there */
 };
 
 static id<MTLBuffer>
@@ -934,6 +936,63 @@ rls_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_handlechoice: a texture call through a phi of argument handles chosen by a known value ------------------- */
+
+static void
+rhc_setup(struct rrun *r)
+{
+   setup_quad(r);
+   for (unsigned k = 0; k < 3; k++) {
+      for (unsigned i = 0; i < sizeof r->texn[k]; i++)
+         r->texn[k][i] = (uint8_t)(rnd() >> 24);
+      MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModePrivate;
+      r->ftex[k] = [dev newTextureWithDescriptor:td];
+      r->tstage[k] = rbuf(r->texn[k], sizeof r->texn[k]);
+      r->tw[k] = r->th[k] = 16;
+      r->tbpp[k] = 4;
+   }
+   for (unsigned k = 0; k < 2; k++) {
+      MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+      sd.minFilter = sd.magFilter = k ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+      sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+      sd.normalizedCoordinates = YES;
+      r->fsamp[k] = [dev newSamplerStateWithDescriptor:sd];
+      [sd release];
+   }
+}
+
+static float
+rhc_texel(const struct rrun *r, unsigned k, int x, int y, unsigned c)
+{
+   x = x < 0 ? 0 : x > 15 ? 15 : x;
+   y = y < 0 ? 0 : y > 15 ? 15 : y;
+   return r->texn[k][(y * 16 + x) * 4 + c] / 255.0f;
+}
+
+static bool
+rhc_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float u = px_u(px), w = px_w(py);
+         const float tx = u * 16 - 0.5f, ty = w * 16 - 0.5f;
+         const int x0 = (int)floorf(tx), y0 = (int)floorf(ty);
+         const float fx = tx - x0, fy = ty - y0;
+         float want[4];
+         for (unsigned c = 0; c < 4; c++) {
+            /* pick(2): texture 2 through sampler 1 (linear); pick(0): texture 0 through sampler 0 (nearest) */
+            const float l = (1 - fy) * ((1 - fx) * rhc_texel(r, 2, x0, y0, c) + fx * rhc_texel(r, 2, x0 + 1, y0, c)) +
+                            fy * ((1 - fx) * rhc_texel(r, 2, x0, y0 + 1, c) + fx * rhc_texel(r, 2, x0 + 1, y0 + 1, c));
+            want[c] = l + 4 * rhc_texel(r, 0, (int)(u * 16), (int)(w * 16), c);
+         }
+         if (!rwant(r, 0, px, py, want, 4, 1.0f / 128))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -1001,6 +1060,9 @@ static const struct rtest rtests[] = {
      "rgba8 2 LSB, r32float 1e-5, r32uint exact; color(0..2) read as half4, float, uint" },
    { "r_fetch_noatt", "r_fetch", "rff_vs", "rfn_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, setup_quad, rfn_check,
      "1e-6; color(1) read with no attachment 1: the dummy image's zeros" },
+   { "r_handlechoice", "r_handlechoice", "rhc_vs", "rhc_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rhc_setup,
+     rhc_check, "1/128; textures and samplers chosen through a switch on a known value (built with -O0)", false, false, NULL, NULL,
+     "the translator does not take the -O0 module (a texture operand from a local object it does not forward)" },
    { "r_linksamp", "r_linksamp", "rls_vs", "rls_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rt_setup, rls_check,
      "exact; the fragment's constexpr sampler (nearest, clamp_to_zero) and a linked visible function's (nearest, repeat), "
      "both @__air_sampler_state in their modules", false, false, "r_linksamp_fx", "rls_fx" },

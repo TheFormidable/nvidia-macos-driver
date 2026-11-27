@@ -342,9 +342,12 @@ main(int argc, char **argv)
                /* a function the translator's reflection or the frontend works on for over 60 s ends the process
                 * (SIGALRM): sweep.py records the file as a crash and goes on after it */
                alarm(60);
-               /* as the plugin asks at newFunctionWithName: (NVMTLAirNir.m nvmtl_air_nir_flags, no varyings) */
+               /* as the plugin asks at newFunctionWithName: (NVMTLAirNir.m nvmtl_air_nir_flags, no varyings), with a
+                * version-6 NVK and the bindless heap: [[color(n)]] inputs, arrays of textures (round 8) */
                struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_TG_DEFAULT |
-                                                    NVMTL_AIR_NIR_REFLECT | (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0),
+                                                    NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_COLOR_INPUTS |
+                                                    NVMTL_AIR_NIR_TEXTURE_ARRAYS | NVMTL_AIR_NIR_HEAP |
+                                                    (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0),
                                                     llvm_path, data, size, name, { 64, 1, 1 } };
                if (fcs) {
                   req.fc_count = nfc;
@@ -410,8 +413,9 @@ main(int argc, char **argv)
          free(ops);
          if (only && strcmp(name, only))
             continue;
-         struct nvmtl_air_nir_request req = { sizeof req, 0, llvm_path, BufferStart(bc), BufferSize(bc), name,
-                                              { 64, 1, 1 } };
+         /* arrays of textures by known index (an element chosen at run time needs the heap, which this layout has not) */
+         struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXTURE_ARRAYS, llvm_path, BufferStart(bc),
+                                              BufferSize(bc), name, { 64, 1, 1 } };
          for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
             req.threadgroup_lengths[i] = 1024;
          if (fcs) {

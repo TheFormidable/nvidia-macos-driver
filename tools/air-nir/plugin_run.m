@@ -873,6 +873,12 @@ run_render_test(const struct rtest *t)
       [ps release]; [vf release]; [ff release]; [lib release];
       return FAIL;
    }
+   if (!ps && t->road_only && getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0")) {
+      printf("%-16s SKIPPED  on the SPIR-V road: %s\n", name, t->road_only);
+      fprintf(rtsv, "%s\tspirv\tSKIPPED\t\t\t\t\t0\t%s\t%s\n", name, t->road_only, t->tolerance);
+      [vf release]; [ff release]; [lib release];
+      return SKIPPED;
+   }
    if (!ps) {
       printf("%-16s FAIL     no pipeline: %s\n", name, e.localizedDescription.UTF8String ?: (vf && ff ? "?" : "no function"));
       fprintf(rtsv, "%s\tnone\tFAIL\t%.3f\t%.3f\t\t\t0\tno pipeline\t%s\n", name, fn_ms, ps_ms, t->tolerance);

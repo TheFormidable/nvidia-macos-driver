@@ -5314,6 +5314,46 @@ air_mark_inline(struct air_tr *t, LLVMContextRef ctx)
    }
 }
 
+/* whether v is one of f's parameters */
+static bool
+air_is_param(LLVMValueRef f, LLVMValueRef v)
+{
+   const unsigned n = L.LLVMCountParams(f);
+   for (unsigned i = 0; i < n; i++)
+      if (L.LLVMGetParam(f, i) == v)
+         return true;
+   return false;
+}
+
+/* A phi or a select of handles the function takes as arguments (textures, samplers: pointers in address spaces 1 and
+ * 2): Apple's GL compiles a GLSL helper that takes a sampler2D by passing every texture and sampler the shader binds
+ * and choosing one with a switch on a constant the caller stored, which the inliner and SROA leave as a switch on a
+ * literal (Minecraft's __main). */
+static bool
+air_has_handle_choice(struct air_tr *t)
+{
+   for (LLVMValueRef f = L.LLVMGetFirstFunction(t->module); f; f = L.LLVMGetNextFunction(f))
+   for (LLVMBasicBlockRef bb = L.LLVMIsDeclaration(f) ? NULL : L.LLVMGetFirstBasicBlock(f); bb; bb = L.LLVMGetNextBasicBlock(bb)) {
+      for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i)) {
+         const int op = L.LLVMGetInstructionOpcode(i);
+         if (op != OP_PHI && op != OP_SELECT)
+            continue;
+         LLVMTypeRef ty = L.LLVMTypeOf(i);
+         if (L.LLVMGetTypeKind(ty) != TY_POINTER || (L.LLVMGetPointerAddressSpace(ty) != 1 && L.LLVMGetPointerAddressSpace(ty) != 2))
+            continue;
+         bool all = true;
+         if (op == OP_PHI) {
+            for (unsigned k = 0; all && k < L.LLVMCountIncoming(i); k++)
+               all = air_is_param(f, L.LLVMGetIncomingValue(i, k));
+         } else
+            all = air_is_param(f, L.LLVMGetOperand(i, 1)) && air_is_param(f, L.LLVMGetOperand(i, 2));
+         if (all)
+            return true;
+      }
+   }
+   return false;
+}
+
 static void
 air_run_passes(struct air_tr *t, LLVMContextRef ctx, bool fold)
 {
@@ -5323,6 +5363,11 @@ air_run_passes(struct air_tr *t, LLVMContextRef ctx, bool fold)
     * request did not give is refused only where a live path still reads it */
    LLVMErrorRef err = L.LLVMRunPasses(t->module, fold ? "always-inline,inline,function(sroa,sccp,instsimplify,simplifycfg,adce)"
                                                       : "always-inline,inline,function(sroa)", NULL, opts);
+   /* a choice of argument handles: the branches on known values are folded, as the translator folds such a phi to the
+    * one incoming value its known branches leave (passes/resource_phi_fold.rs); one that is still a choice after
+    * that stays refused where a texture call meets it */
+   if (!err && !fold && air_has_handle_choice(t))
+      err = L.LLVMRunPasses(t->module, "function(sccp,instsimplify,simplifycfg,adce)", NULL, opts);
    L.LLVMDisposePassBuilderOptions(opts);
    /* NVMTL_AIR_NIR_DUMP=<file>: the module as the kernel is read from it, for looking into a refusal */
    const char *dump = getenv("NVMTL_AIR_NIR_DUMP");

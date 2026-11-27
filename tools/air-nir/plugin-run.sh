@@ -34,6 +34,7 @@ done
 for f in "$HERE"/metal/*.metal "$HERE"/metal-render/*.metal; do
   n=$(basename "$f" .metal); flags=
   [ "$n" = fmath_precise ] && flags=-fno-fast-math
+  [ "$n" = r_handlechoice ] && flags=-O0   # the choice of handles stays a switch on a literal, as Apple's GL leaves it
   xcrun -sdk macosx metal $flags -c -o "$OUT/air/$n.air" "$f" || { echo "plugin-run.sh: $n.metal does not compile" >&2; exit 2; }
   xcrun -sdk macosx metallib -o "$OUT/air/$n.metallib" "$OUT/air/$n.air" || { echo "plugin-run.sh: $n.metallib not made" >&2; exit 2; }
 done
