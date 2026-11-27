@@ -192,6 +192,16 @@ struct run {
 #define GRID_BASE     (1u << 1)   /* the second half of a 64x64 grid: thread_base.y 32, threadgroup_base.y 4 */
 #define MUST_REFUSE   (1u << 2)   /* passes only if the frontend refuses the kernel (nothing is dispatched) */
 
+/* function-constant values a test's request carries (NVMTL_AIR_NIR_FC_VALUES) */
+struct fcval {
+   uint32_t index, size;
+   uint8_t bytes[8];
+};
+struct fcset {
+   unsigned n;
+   struct fcval v[8];
+};
+
 struct test {
    const char *name;
    const char *air;       /* AIRDIR/<air>.air */
@@ -200,6 +210,7 @@ struct test {
    unsigned groups[3];    /* threadgroups in the grid */
    unsigned tg_len[2];    /* bytes of [[threadgroup(0)]] and [[threadgroup(1)]] */
    unsigned flags;
+   const struct fcset *fc;   /* NULL: the request has no function-constant values */
    void (*setup)(struct run *);
    bool (*check)(struct run *);
 };
@@ -1487,36 +1498,109 @@ agg_ops_check(struct run *r)
    return ok;
 }
 
+/* --- fc_kernel ------------------------------------------------------------------------------------------------ */
+
+#define FC_F32(f) { (uint8_t)(f), (uint8_t)((f) >> 8), (uint8_t)((f) >> 16), (uint8_t)((f) >> 24) }
+/* set A: every constant given; set B leaves out scale (read only under use_scale, which is false) and bias (it has a
+ * default); set C leaves out scale while use_scale is true: the frontend must refuse it */
+static const struct fcset fc_a = { 5, { { 0, 1, { 1 } }, { 1, 4, FC_F32(0x40200000u) /* 2.5 */ }, { 2, 4, { 1 } },
+                                        { 3, 4, { 7 } }, { 4, 1, { 1 } } } };
+static const struct fcset fc_b = { 3, { { 0, 1, { 0 } }, { 2, 4, { 2 } }, { 4, 1, { 0 } } } };
+static const struct fcset fc_c = { 3, { { 0, 1, { 1 } }, { 2, 4, { 0 } }, { 4, 1, { 0 } } } };
+
+static const uint8_t *
+fc_get(const struct fcset *fc, uint32_t index)
+{
+   for (unsigned i = 0; fc && i < fc->n; i++) {
+      if (fc->v[i].index == index)
+         return fc->v[i].bytes;
+   }
+   return NULL;
+}
+
+static void
+fc_kernel_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 4);
+   uint32_t *extra = slot(r, 2, n * 4);
+   slot(r, 3, n * 4);
+   for (unsigned i = 0; i < n; i++) {
+      in[i] = rndf(-8, 8);
+      extra[i] = rnd() & 0xffffu;
+   }
+}
+
+static bool
+fc_kernel_check(struct run *r)
+{
+   const struct fcset *fc = r->t->fc;
+   unsigned n = r->threads;
+   const float *in = S(r, 0);
+   const uint32_t *extra = S(r, 2);
+   const uint8_t *p;
+   bool use_scale = (p = fc_get(fc, 0)) && p[0], has_extra = (p = fc_get(fc, 4)) && p[0];
+   float scale = 0;
+   int32_t mode = 0;
+   uint32_t bias = 1000;
+   if ((p = fc_get(fc, 1)))
+      memcpy(&scale, p, 4);
+   if ((p = fc_get(fc, 2)))
+      memcpy(&mode, p, 4);
+   if ((p = fc_get(fc, 3)))
+      memcpy(&bias, p, 4);
+   float *want = calloc(n, 4);
+   uint32_t *iwant = calloc(n, 4);
+   for (unsigned i = 0; i < n; i++) {
+      float x = in[i];
+      if (use_scale)
+         x *= scale;
+      x = mode == 0 ? x + 1.0f : mode == 1 ? -x : x * x;
+      want[i] = x;
+      iwant[i] = i + bias + (has_extra ? extra[i] : 0);
+   }
+   static const float zero[1] = { 0 };
+   bool ok = check_f32(r, "out", S(r, 1), want, n, 1, zero, zero) && check_u32(r, "iout", S(r, 3), iwant, n, 1);
+   free(want);
+   free(iwant);
+   return ok;
+}
+
 static const struct test tests[] = {
-   { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, fmath_setup, fmath_check },
-   { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, fmath_setup, fmath_check },
-   { "imath", NULL, "imath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, imath_setup, imath_check },
-   { "conv", NULL, "conv", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, conv_setup, conv_check },
-   { "loop_phi", NULL, "loop_phi", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, loop_phi_setup, loop_phi_check },
-   { "switch", NULL, "switch_case", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, switch_setup, switch_check },
-   { "tg_reduce", NULL, "tg_reduce", { 256, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, tg_reduce_setup, tg_reduce_check },
-   { "tg_arg", NULL, "tg_arg", { 128, 1, 1 }, { 32, 1, 1 }, { 128 * 4, 128 * 2 }, 0, tg_arg_setup, tg_arg_check },
-   { "dev_atomics", NULL, "dev_atomics", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, dev_atomics_setup, dev_atomics_check },
-   { "tg_atomics", NULL, "tg_atomics", { 256, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, tg_atomics_setup, tg_atomics_check },
-   { "const_table", NULL, "const_table", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, const_table_setup, const_table_check },
-   { "struct_buf", NULL, "struct_buf", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, struct_buf_setup, struct_buf_check },
-   { "grid2d", NULL, "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, 0, grid2d_setup, grid2d_check },
-   { "grid2d_indirect", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_INDIRECT, grid2d_setup, grid2d_check },
-   { "grid2d_base", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_BASE, grid2d_setup, grid2d_check },
-   { "simd_builtins", NULL, "simd_builtins", { 128, 1, 1 }, { 8, 1, 1 }, { 0 }, 0, simd_setup, simd_check },
-   { "narrow", NULL, "narrow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, narrow_setup, narrow_check },
-   { "vec_ops", NULL, "vec_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, vec_ops_setup, vec_ops_check },
-   { "tg_transpose", NULL, "tg_transpose", { 16, 16, 1 }, { 4, 4, 1 }, { 0 }, 0, tg_transpose_setup, tg_transpose_check },
-   { "thread_array", NULL, "thread_array", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, thread_array_setup, thread_array_check },
-   { "ptr_ops", NULL, "ptr_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, ptr_ops_setup, ptr_ops_check },
-   { "simd_funcs", NULL, "simd_funcs", { 128, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, simd_funcs_setup, simd_funcs_check },
-   { "math_lib", NULL, "math_lib", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, math_lib_setup, math_lib_check },
-   { "mat_const", NULL, "mat_const", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, mat_const_setup, mat_const_check },
-   { "ctrl_flow", NULL, "ctrl_flow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, ctrl_flow_setup, ctrl_flow_check },
-   { "atomic_float", NULL, "atomic_float", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, atomic_float_setup, atomic_float_check },
-   { "grid3d", NULL, "grid3d", { 4, 4, 4 }, { 4, 2, 2 }, { 0 }, 0, grid3d_setup, grid3d_check },
-   { "agg_ops", NULL, "agg_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, agg_ops_setup, agg_ops_check },
-   { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL },
+   { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
+   { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
+   { "imath", NULL, "imath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, imath_setup, imath_check },
+   { "conv", NULL, "conv", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, conv_setup, conv_check },
+   { "loop_phi", NULL, "loop_phi", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, loop_phi_setup, loop_phi_check },
+   { "switch", NULL, "switch_case", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, switch_setup, switch_check },
+   { "tg_reduce", NULL, "tg_reduce", { 256, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, tg_reduce_setup, tg_reduce_check },
+   { "tg_arg", NULL, "tg_arg", { 128, 1, 1 }, { 32, 1, 1 }, { 128 * 4, 128 * 2 }, 0, NULL, tg_arg_setup, tg_arg_check },
+   { "dev_atomics", NULL, "dev_atomics", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, dev_atomics_setup, dev_atomics_check },
+   { "tg_atomics", NULL, "tg_atomics", { 256, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, NULL, tg_atomics_setup, tg_atomics_check },
+   { "const_table", NULL, "const_table", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, const_table_setup, const_table_check },
+   { "struct_buf", NULL, "struct_buf", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, NULL, struct_buf_setup, struct_buf_check },
+   { "grid2d", NULL, "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, 0, NULL, grid2d_setup, grid2d_check },
+   { "grid2d_indirect", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_INDIRECT, NULL, grid2d_setup, grid2d_check },
+   { "grid2d_base", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_BASE, NULL, grid2d_setup, grid2d_check },
+   { "simd_builtins", NULL, "simd_builtins", { 128, 1, 1 }, { 8, 1, 1 }, { 0 }, 0, NULL, simd_setup, simd_check },
+   { "narrow", NULL, "narrow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, narrow_setup, narrow_check },
+   { "vec_ops", NULL, "vec_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, vec_ops_setup, vec_ops_check },
+   { "tg_transpose", NULL, "tg_transpose", { 16, 16, 1 }, { 4, 4, 1 }, { 0 }, 0, NULL, tg_transpose_setup, tg_transpose_check },
+   { "thread_array", NULL, "thread_array", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, thread_array_setup, thread_array_check },
+   { "ptr_ops", NULL, "ptr_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, ptr_ops_setup, ptr_ops_check },
+   { "simd_funcs", NULL, "simd_funcs", { 128, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, NULL, simd_funcs_setup, simd_funcs_check },
+   { "math_lib", NULL, "math_lib", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, math_lib_setup, math_lib_check },
+   { "mat_const", NULL, "mat_const", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, NULL, mat_const_setup, mat_const_check },
+   { "ctrl_flow", NULL, "ctrl_flow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, ctrl_flow_setup, ctrl_flow_check },
+   { "atomic_float", NULL, "atomic_float", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, atomic_float_setup, atomic_float_check },
+   { "grid3d", NULL, "grid3d", { 4, 4, 4 }, { 4, 2, 2 }, { 0 }, 0, NULL, grid3d_setup, grid3d_check },
+   { "agg_ops", NULL, "agg_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, agg_ops_setup, agg_ops_check },
+   { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "fc_kernel_a", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_a, fc_kernel_setup, fc_kernel_check },
+   { "fc_kernel_b", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_b, fc_kernel_setup, fc_kernel_check },
+   { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, &fc_c, NULL, NULL },
+   { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
 };
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -1562,6 +1646,20 @@ run_test(const struct test *t)
                                         { t->tg[0], t->tg[1], t->tg[2] } };
    req.threadgroup_lengths[0] = t->tg_len[0];
    req.threadgroup_lengths[1] = t->tg_len[1];
+   uint32_t fc_idx[8], fc_sz[8];
+   const uint8_t *fc_pay[8];
+   if (t->fc) {
+      req.flags |= NVMTL_AIR_NIR_FC_VALUES;
+      for (unsigned i = 0; i < t->fc->n; i++) {
+         fc_idx[i] = t->fc->v[i].index;
+         fc_sz[i] = t->fc->v[i].size;
+         fc_pay[i] = t->fc->v[i].bytes;
+      }
+      req.fc_count = t->fc->n;
+      req.fc_indices = fc_idx;
+      req.fc_sizes = fc_sz;
+      req.fc_payloads = fc_pay;
+   }
    struct nvmtl_air_nir_result res = { sizeof res };
    int st = to_nir(dev, &req, &res);
    free(bc);

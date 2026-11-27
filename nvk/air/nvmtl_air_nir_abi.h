@@ -17,6 +17,18 @@
  * Every Metal buffer argument [[buffer(n)]] is read through entry n of the address table, a 64-bit GPU address, so the
  * kernel binds no storage-buffer descriptor.
  *
+ * Textures and samplers use the bands of set 0 the plugin's set layout has and the translator's kernels bind
+ * (translator/translator/docs/REFLECTION.md, plugin/nvmtl_vk.c binding_type):
+ *    32 + n   [[texture(n)]] read or sampled: a sampled image (a uniform texel buffer for texture_buffer)
+ *   480 + n   [[texture(n)]] with access::write or access::read_write: a storage image (a storage texel buffer for
+ *             texture_buffer), declared without a format (the plugin tells the translator the device reads and writes
+ *             storage images without one, nvmtl_translate_set_caps bits 0 and 1)
+ *   160 + n   [[sampler(n)]], and each constexpr sampler at the slot the translator's reflection gives it (the first
+ *             sampler slot no [[sampler(n)]] argument takes, in the order of their __air_sampler_state globals): the
+ *             result lists them with their AIR state words, which the plugin binds as it binds the translator's
+ *             StaticSampler entries
+ * The result's masks say which of them the kernel reads.
+ *
  * No LLVM is linked into NVK: the frontend opens the LLVM library named in the request (the plugin's air-runtime)
  * and finds its C API there.
  *
@@ -36,6 +48,7 @@
 /* request.flags */
 #define NVMTL_AIR_NIR_TABLE_SSBO    (1u << 0)   /* binding 640 is a storage buffer, not a dynamic uniform buffer */
 #define NVMTL_AIR_NIR_NO_PASSES     (1u << 1)   /* do not run LLVM's inliner and SROA on the module first */
+#define NVMTL_AIR_NIR_FC_VALUES     (1u << 2)   /* fc_* hold the function's complete set of function-constant values */
 
 enum nvmtl_air_nir_status {
    NVMTL_AIR_NIR_OK          = 0,
@@ -57,7 +70,19 @@ struct nvmtl_air_nir_request {
    /* bytes of each [[threadgroup(n)]] argument, as setThreadgroupMemoryLength:atIndex: set them; a kernel with such an
     * argument whose length is 0 here is refused */
    uint32_t threadgroup_lengths[NVMTL_AIR_NIR_MAX_BUFFERS];
+
+   /* Since version 2, read only with NVMTL_AIR_NIR_FC_VALUES and a size that reaches them. The function constants the
+    * function was made with (newFunctionWithName:constantValues:), as the plugin hands them to the translator's
+    * nvmtl_translate_fc: [[function_constant(index)]] index, payload size in bytes and payload (a bool is one byte, 0
+    * or 1). A constant left out is not defined: air.is_function_constant_defined reads false, and a kernel that still
+    * reads its value once the others are folded is refused (the translator reads it as 0). Without the flag a kernel
+    * that reads any function constant is refused, as in version 1. */
+   uint32_t fc_count;
+   const uint32_t *fc_indices;
+   const uint32_t *fc_sizes;
+   const uint8_t *const *fc_payloads;
 };
+#define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
 
 struct nvmtl_air_nir_result {
    uint32_t size;                    /* sizeof(struct nvmtl_air_nir_result), set by the caller */
@@ -68,7 +93,19 @@ struct nvmtl_air_nir_result {
    uint32_t scratch_bytes;           /* thread-private memory LLVM could not keep in registers */
    uint32_t instructions;            /* LLVM instructions translated */
    char message[256];                /* why it was refused, or a one-line summary on success */
+
+   /* Since version 2, written when the caller's size reaches them. Bit n of word n / 32: */
+   uint32_t texture_mask[4];         /* [[texture(n)]] read through binding 32 + n */
+   uint32_t storage_mask[4];         /* [[texture(n)]] written or read-written through binding 480 + n */
+   uint32_t sampler_mask;            /* sampler slots read through binding 160 + n: arguments and constexpr samplers */
+   uint32_t static_sampler_count;
+   struct {
+      uint32_t slot;                 /* binding 160 + slot */
+      uint32_t pad;
+      uint64_t words[2];             /* the AIR state words of its __air_sampler_state global (filter, address, ...) */
+   } static_samplers[16];
 };
+#define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 
 #ifdef __cplusplus
 extern "C" {

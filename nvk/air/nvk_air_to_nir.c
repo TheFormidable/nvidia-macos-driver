@@ -74,6 +74,7 @@ typedef struct air_llvm_error *LLVMErrorRef;
 typedef struct air_llvm_pass_options *LLVMPassBuilderOptionsRef;
 typedef struct air_llvm_diagnostic *LLVMDiagnosticInfoRef;
 typedef struct air_llvm_attribute *LLVMAttributeRef;
+typedef struct air_llvm_use *LLVMUseRef;
 typedef void (*LLVMDiagnosticHandler)(LLVMDiagnosticInfoRef, void *);
 
 /* llvm-c/Core.h: LLVMOpcode and LLVMTypeKind keep their values across LLVM releases */
@@ -189,7 +190,33 @@ enum {
    X(unsigned, LLVMGetNumIndices, (LLVMValueRef))                                                                \
    X(const unsigned *, LLVMGetIndices, (LLVMValueRef))                                                           \
    X(int, LLVMIsGlobalConstant, (LLVMValueRef))                                                                  \
-   X(int, LLVMIsExternallyInitialized, (LLVMValueRef))
+   X(int, LLVMIsExternallyInitialized, (LLVMValueRef))                                                           \
+   X(LLVMValueRef, LLVMGetFirstGlobal, (LLVMModuleRef))                                                          \
+   X(LLVMValueRef, LLVMGetNextGlobal, (LLVMValueRef))                                                            \
+   X(const char *, LLVMGetSection, (LLVMValueRef))                                                               \
+   X(void, LLVMSetInitializer, (LLVMValueRef, LLVMValueRef))                                                     \
+   X(void, LLVMSetGlobalConstant, (LLVMValueRef, int))                                                           \
+   X(void, LLVMSetExternallyInitialized, (LLVMValueRef, int))                                                    \
+   X(LLVMValueRef, LLVMConstInt, (LLVMTypeRef, unsigned long long, int))                                         \
+   X(LLVMValueRef, LLVMConstReal, (LLVMTypeRef, double))                                                         \
+   X(LLVMValueRef, LLVMConstNull, (LLVMTypeRef))                                                                 \
+   X(LLVMValueRef, LLVMConstVector, (LLVMValueRef *, unsigned))                                                  \
+   X(LLVMValueRef, LLVMConstArray2, (LLVMTypeRef, LLVMValueRef *, uint64_t))                                     \
+   X(LLVMValueRef, LLVMConstNamedStruct, (LLVMTypeRef, LLVMValueRef *, unsigned))                                \
+   X(LLVMValueRef, LLVMConstStructInContext, (LLVMContextRef, LLVMValueRef *, unsigned, int))                    \
+   X(int, LLVMIsPackedStruct, (LLVMTypeRef))                                                                     \
+   X(const char *, LLVMGetStructName, (LLVMTypeRef))                                                             \
+   X(LLVMTypeRef, LLVMInt1TypeInContext, (LLVMContextRef))                                                       \
+   X(LLVMValueRef, LLVMGetNamedFunction, (LLVMModuleRef, const char *))                                          \
+   X(LLVMUseRef, LLVMGetFirstUse, (LLVMValueRef))                                                                \
+   X(LLVMUseRef, LLVMGetNextUse, (LLVMUseRef))                                                                   \
+   X(LLVMValueRef, LLVMGetUser, (LLVMUseRef))                                                                    \
+   X(void, LLVMReplaceAllUsesWith, (LLVMValueRef, LLVMValueRef))                                                 \
+   X(void, LLVMInstructionEraseFromParent, (LLVMValueRef))                                                       \
+   X(LLVMBasicBlockRef, LLVMGetInstructionParent, (LLVMValueRef))                                                \
+   X(LLVMBasicBlockRef, LLVMGetFirstBasicBlock, (LLVMValueRef))                                                  \
+   X(LLVMBasicBlockRef, LLVMGetNextBasicBlock, (LLVMBasicBlockRef))                                              \
+   X(char *, LLVMPrintModuleToString, (LLVMModuleRef))
 
 static struct {
 #define X(ret, name, args) ret(*name) args;
@@ -334,6 +361,11 @@ air_refuse(struct air_tr *t, int status, const char *fmt, ...)
    longjmp(t->fail, 1);
 }
 #define unsupported(t, ...) air_refuse(t, NVMTL_AIR_NIR_UNSUPPORTED, __VA_ARGS__)
+
+_Static_assert(offsetof(struct nvmtl_air_nir_request, fc_count) == NVMTL_AIR_NIR_REQUEST_V1_SIZE,
+               "version 1 of the request ends at fc_count");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
+               "version 1 of the result ends at its message");
 
 static const char *
 air_name(LLVMValueRef v, size_t *len)
@@ -687,6 +719,9 @@ air_put_bytes(struct air_tr *t, uint8_t *out, uint64_t size, LLVMValueRef c, LLV
    }
 }
 
+static bool air_has_fc_values(const struct air_tr *t);
+static bool air_fc_index(LLVMValueRef g, uint32_t *index);
+
 static struct air_val *
 air_global(struct air_tr *t, LLVMValueRef g)
 {
@@ -715,8 +750,17 @@ air_global(struct air_tr *t, LLVMValueRef g)
        * initialized) and what Apple's compiler derives from them (__metal_implicit_fc_pred_*, the "...Defined"
        * flags: addrspace(2) globals that are not constant, written by the module's initializer) get their values
        * when the pipeline is specialized, which this request cannot say. */
-      if (!L.LLVMIsGlobalConstant(g) || L.LLVMIsExternallyInitialized(g))
-         unsupported(t, "the kernel reads %s, a function constant or a value derived from one", air_name(g, NULL));
+      if (!L.LLVMIsGlobalConstant(g) || L.LLVMIsExternallyInitialized(g)) {
+         uint32_t index;
+         if (!air_has_fc_values(t))
+            unsupported(t, "the kernel reads %s, a function constant or a value derived from one, and the request "
+                        "has no function-constant values", air_name(g, NULL));
+         if (air_fc_index(g, &index))
+            unsupported(t, "the kernel reads function constant %u (%s), which the request does not give", index,
+                        air_name(g, NULL));
+         unsupported(t, "the kernel reads %s, which depends on a function constant the request does not give",
+                     air_name(g, NULL));
+      }
       if (size > 64 * 1024)
          unsupported(t, "a constant table of %llu bytes", (unsigned long long)size);
       unsigned at = ALIGN_POT(util_dynarray_num_elements(&t->constant_data, uint8_t), align);
@@ -1130,6 +1174,9 @@ struct air_arg {
    LLVMValueRef param;
    const char *kind;
    uint64_t location, space, align;
+   LLVMValueRef fc_node;   /* an argument that exists only under a function constant: its {global, type, name} */
+   const char *type_name;  /* air.arg_type_name */
+   const char *access;     /* air.read, air.write, air.read_write, air.sample */
 };
 
 static struct air_arg
@@ -1148,12 +1195,20 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
    unsigned first = 2;
    if (!strcmp(a.kind, "air.function_constant") && count >= 4 && air_md_string(ops[3])) {
       a.kind = air_md_string(ops[3]);
+      a.fc_node = ops[2];
       first = 4;
    }
-   for (unsigned k = first; k + 1 < count; k++) {
+   for (unsigned k = first; k < count; k++) {
       const char *key = air_md_string(ops[k]);
       if (!key)
          continue;
+      if (!strcmp(key, "air.read") || !strcmp(key, "air.write") || !strcmp(key, "air.read_write") ||
+          !strcmp(key, "air.sample"))
+         a.access = key;
+      if (k + 1 >= count)
+         continue;
+      if (!strcmp(key, "air.arg_type_name"))
+         a.type_name = air_md_string(ops[k + 1]);
       if (!strcmp(key, "air.location_index"))
          air_md_int(ops[k + 1], &a.location);
       else if (!strcmp(key, "air.address_space"))
@@ -1170,6 +1225,28 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
    if (!strcmp(a.kind, "air.buffer") && a.space == 3)
       a.kind = "air.threadgroup";
    return a;
+}
+
+/* Whether an argument guarded by a function constant exists: 1 yes, 0 no, -1 not known (the request has no values,
+ * or its predicate depends on one it does not give). */
+static int
+air_fc_arg_present(struct air_tr *t, const struct air_arg *a)
+{
+   if (!a->fc_node)
+      return 1;
+   if (!air_has_fc_values(t) || !L.LLVMIsAMDNode(a->fc_node))
+      return -1;
+   LLVMValueRef *ops;
+   unsigned n = air_md_operands(a->fc_node, &ops, t->mem);
+   LLVMValueRef g = n ? ops[0] : NULL;
+   while (g && L.LLVMIsAConstantExpr(g))
+      g = L.LLVMGetOperand(g, 0);
+   if (!g || !L.LLVMIsAGlobalVariable(g) || !L.LLVMIsGlobalConstant(g) || L.LLVMIsExternallyInitialized(g))
+      return -1;
+   LLVMValueRef init = L.LLVMGetInitializer(g);
+   if (!init || !L.LLVMIsAConstantInt(init))
+      return -1;
+   return L.LLVMConstIntGetZExtValue(init) != 0;
 }
 
 /* Buffers read their address from the table, builtins from the system values; threadgroup arguments take the
@@ -1195,6 +1272,11 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
             unsupported(t, "buffer argument %u in address space %llu", i, (unsigned long long)a->space);
          if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
             unsupported(t, "buffer argument %u is not a pointer", i);
+         if (!air_fc_arg_present(t, a)) {
+            /* a function constant leaves it out: nothing is bound at its slot, and what read it was folded away */
+            air_set(t, a->param, nir_imm_int64(&t->top, 0), AIR_GLOBAL, 16);
+            continue;
+         }
          air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
                  a->align ? MIN2((uint32_t)a->align, 16) : 4);
       } else if (!strcmp(a->kind, "air.threadgroup")) {
@@ -2376,6 +2458,708 @@ air_emit_function(struct air_tr *t)
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* Entry points                                                                                                       */
 
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Function constants                                                                                                 */
+/*                                                                                                                    */
+/* Apple's compiler writes [[function_constant(n)]] as an externally initialized global <name>.MTL_FC_INIT_<n>_<abi>   */
+/* (section air.fc_initializer), and a static initializer (a function in section air.static_init) copies it, and what  */
+/* is_function_constant_defined says of it, into addrspace(2) globals that are not constant (the "...Defined" flags,  */
+/* __metal_implicit_fc_pred_*, the constant's own global). With the request's values each given constant becomes a    */
+/* constant global, is_function_constant_defined a constant, and the static initializer is run here, so every global  */
+/* it fills becomes a constant with the value it leaves; LLVM then folds the branches they decide. A global that      */
+/* depends on a constant the request does not give stays unknown, and a kernel that still reads one is refused.      */
+
+static bool
+air_fc_index(LLVMValueRef g, uint32_t *index)
+{
+   const char *name = air_name(g, NULL);
+   const char *m = strstr(name, ".MTL_FC_INIT_");
+   if (!m)
+      return false;
+   m += strlen(".MTL_FC_INIT_");
+   if (*m < '0' || *m > '9')
+      return false;
+   *index = (uint32_t)strtoul(m, NULL, 10);
+   return true;
+}
+
+static bool
+air_fc_bool_abi(LLVMValueRef g)
+{
+   const char *name = air_name(g, NULL);
+   const char *m = strstr(name, ".MTL_FC_INIT_");
+   if (!m)
+      return false;
+   m += strlen(".MTL_FC_INIT_");
+   while (*m >= '0' && *m <= '9')
+      m++;
+   if (*m == '_')
+      m++;
+   const char *last = strrchr(m, '_');
+   return !strcmp(m, "b") || (last && !strcmp(last + 1, "b"));
+}
+
+static bool
+air_has_fc_values(const struct air_tr *t)
+{
+   return (t->req->flags & NVMTL_AIR_NIR_FC_VALUES) &&
+          t->req->size >= offsetof(struct nvmtl_air_nir_request, fc_payloads) + sizeof(t->req->fc_payloads);
+}
+
+/* The payload the request gives for a constant, or NULL. */
+static const uint8_t *
+air_fc_given(const struct air_tr *t, uint32_t index, uint32_t *size)
+{
+   if (!air_has_fc_values(t))
+      return NULL;
+   for (uint32_t i = 0; i < t->req->fc_count; i++) {
+      if (t->req->fc_indices[i] == index) {
+         *size = t->req->fc_sizes[i];
+         return t->req->fc_payloads[i];
+      }
+   }
+   return NULL;
+}
+
+/* An LLVM constant of a type from bytes in memory (little endian, LLVM's data layout), or NULL where this cannot
+ * say it. */
+static LLVMValueRef
+air_constant_from_bytes(struct air_tr *t, LLVMContextRef ctx, LLVMTypeRef ty, const uint8_t *bytes)
+{
+   switch (L.LLVMGetTypeKind(ty)) {
+   case TY_INTEGER: {
+      unsigned w = L.LLVMGetIntTypeWidth(ty);
+      if (w > 64)
+         return NULL;
+      uint64_t v = 0;
+      memcpy(&v, bytes, (w + 7) / 8);
+      if (w < 64)
+         v &= BITFIELD64_MASK(w);
+      return L.LLVMConstInt(ty, v, 0);
+   }
+   case TY_HALF: {
+      uint16_t h;
+      memcpy(&h, bytes, 2);
+      return L.LLVMConstReal(ty, _mesa_half_to_float(h));
+   }
+   case TY_FLOAT: {
+      float f;
+      memcpy(&f, bytes, 4);
+      return L.LLVMConstReal(ty, f);
+   }
+   case TY_DOUBLE: {
+      double d;
+      memcpy(&d, bytes, 8);
+      return L.LLVMConstReal(ty, d);
+   }
+   case TY_POINTER: {
+      uint64_t v = 0;
+      memcpy(&v, bytes, (size_t)MIN2(8, air_size(t, ty)));
+      return v ? NULL : L.LLVMConstNull(ty);
+   }
+   case TY_VECTOR: case TY_ARRAY: {
+      LLVMTypeRef ety = L.LLVMGetElementType(ty);
+      uint64_t n = L.LLVMGetTypeKind(ty) == TY_VECTOR ? L.LLVMGetVectorSize(ty) : L.LLVMGetArrayLength2(ty);
+      uint64_t stride = air_size(t, ety);
+      if (n > 4096)
+         return NULL;
+      LLVMValueRef *e = ralloc_array(t->mem, LLVMValueRef, n ? n : 1);
+      for (uint64_t i = 0; i < n; i++) {
+         if (!(e[i] = air_constant_from_bytes(t, ctx, ety, bytes + i * stride)))
+            return NULL;
+      }
+      return L.LLVMGetTypeKind(ty) == TY_VECTOR ? L.LLVMConstVector(e, (unsigned)n) : L.LLVMConstArray2(ety, e, n);
+   }
+   case TY_STRUCT: {
+      unsigned n = L.LLVMCountStructElementTypes(ty);
+      LLVMValueRef *e = ralloc_array(t->mem, LLVMValueRef, n ? n : 1);
+      for (unsigned i = 0; i < n; i++) {
+         e[i] = air_constant_from_bytes(t, ctx, L.LLVMStructGetTypeAtIndex(ty, i),
+                                        bytes + L.LLVMOffsetOfElement(t->layout, ty, i));
+         if (!e[i])
+            return NULL;
+      }
+      if (L.LLVMGetStructName(ty))
+         return L.LLVMConstNamedStruct(ty, e, n);
+      return L.LLVMConstStructInContext(ctx, e, n, L.LLVMIsPackedStruct(ty));
+   }
+   default:
+      return NULL;
+   }
+}
+
+/* The bytes of a constant; *known cleared where it is undef. False where this cannot read the constant. */
+static bool
+air_bytes_of_constant(struct air_tr *t, uint8_t *out, uint8_t *known, uint64_t size, LLVMValueRef c, LLVMTypeRef ty)
+{
+   if (L.LLVMIsAUndefValue(c)) {
+      memset(out, 0, size);
+      memset(known, 0, size);
+      return true;
+   }
+   memset(known, 1, size);
+   if (L.LLVMIsAConstantAggregateZero(c) || L.LLVMIsAConstantPointerNull(c)) {
+      memset(out, 0, size);
+      return true;
+   }
+   switch (L.LLVMGetTypeKind(ty)) {
+   case TY_INTEGER: {
+      if (!L.LLVMIsAConstantInt(c))
+         return false;
+      uint64_t u = L.LLVMConstIntGetZExtValue(c);
+      for (uint64_t i = 0; i < size && i < 8; i++)
+         out[i] = (uint8_t)(u >> (8 * i));
+      return true;
+   }
+   case TY_HALF: case TY_FLOAT: case TY_DOUBLE: {
+      if (!L.LLVMIsAConstantFP(c))
+         return false;
+      int loses = 0;
+      double d = L.LLVMConstRealGetDouble(c, &loses);
+      if (L.LLVMGetTypeKind(ty) == TY_HALF) {
+         uint16_t h = _mesa_float_to_half((float)d);
+         memcpy(out, &h, 2);
+      } else if (L.LLVMGetTypeKind(ty) == TY_FLOAT) {
+         float f = (float)d;
+         memcpy(out, &f, 4);
+      } else {
+         memcpy(out, &d, 8);
+      }
+      return true;
+   }
+   case TY_ARRAY: case TY_VECTOR: {
+      LLVMTypeRef ety = L.LLVMGetElementType(ty);
+      uint64_t stride = air_size(t, ety);
+      uint64_t n = L.LLVMGetTypeKind(ty) == TY_VECTOR ? L.LLVMGetVectorSize(ty) : L.LLVMGetArrayLength2(ty);
+      for (uint64_t i = 0; i < n; i++) {
+         LLVMValueRef e = L.LLVMGetAggregateElement(c, (unsigned)i);
+         if (!e || !air_bytes_of_constant(t, out + i * stride, known + i * stride, stride, e, ety))
+            return false;
+      }
+      return true;
+   }
+   case TY_STRUCT: {
+      unsigned n = L.LLVMCountStructElementTypes(ty);
+      for (unsigned i = 0; i < n; i++) {
+         LLVMTypeRef fty = L.LLVMStructGetTypeAtIndex(ty, i);
+         uint64_t off = L.LLVMOffsetOfElement(t->layout, ty, i);
+         LLVMValueRef e = L.LLVMGetAggregateElement(c, i);
+         if (!e || !air_bytes_of_constant(t, out + off, known + off, air_size(t, fty), e, fty))
+            return false;
+      }
+      return true;
+   }
+   default:
+      return false;
+   }
+}
+
+/* What the static initializer leaves in one global. */
+struct air_mem {
+   LLVMValueRef global;
+   uint64_t size;
+   uint8_t *bytes, *known;
+   bool stored;
+};
+
+/* A value while the static initializer runs: up to 16 bytes, or a pointer into a global. */
+struct air_ev {
+   uint8_t b[16];
+   unsigned size;
+   bool known;
+   struct air_mem *mem;   /* a pointer: the global it points into */
+   uint64_t off;
+};
+
+struct air_eval {
+   struct air_tr *t;
+   struct hash_table *mems;     /* global -> struct air_mem */
+   struct hash_table *vals;     /* instruction -> struct air_ev */
+   unsigned steps;
+};
+
+static struct air_mem *
+air_eval_mem(struct air_eval *e, LLVMValueRef g)
+{
+   struct hash_entry *he = _mesa_hash_table_search(e->mems, g);
+   if (he)
+      return he->data;
+   struct air_tr *t = e->t;
+   struct air_mem *m = rzalloc(t->mem, struct air_mem);
+   LLVMTypeRef vty = L.LLVMGlobalGetValueType(g);
+   m->global = g;
+   m->size = air_size(t, vty);
+   m->bytes = rzalloc_array(t->mem, uint8_t, m->size ? m->size : 1);
+   m->known = rzalloc_array(t->mem, uint8_t, m->size ? m->size : 1);
+   LLVMValueRef init = L.LLVMGetInitializer(g);
+   if (init && !L.LLVMIsDeclaration(g) && !L.LLVMIsExternallyInitialized(g) && m->size <= 1u << 20 &&
+       !air_bytes_of_constant(t, m->bytes, m->known, m->size, init, vty))
+      memset(m->known, 0, m->size);
+   _mesa_hash_table_insert(e->mems, g, m);
+   return m;
+}
+
+static unsigned
+air_eval_size(struct air_tr *t, LLVMTypeRef ty)
+{
+   if (L.LLVMGetTypeKind(ty) == TY_INTEGER && L.LLVMGetIntTypeWidth(ty) == 1)
+      return 1;
+   return (unsigned)L.LLVMStoreSizeOfType(t->layout, ty);
+}
+
+static uint64_t
+air_ev_u64(const struct air_ev *v)
+{
+   uint64_t u = 0;
+   memcpy(&u, v->b, MIN2(v->size, 8));
+   return u;
+}
+
+static struct air_ev
+air_ev_int(uint64_t u, LLVMTypeRef ty)
+{
+   struct air_ev r = { .known = true };
+   unsigned w = L.LLVMGetIntTypeWidth(ty);
+   r.size = w == 1 ? 1 : (w + 7) / 8;
+   if (w < 64)
+      u &= BITFIELD64_MASK(w);
+   memcpy(r.b, &u, 8);
+   return r;
+}
+
+/* The value of an operand: an instruction already run, a constant, or a pointer into a global. */
+static struct air_ev
+air_eval_value(struct air_eval *e, LLVMValueRef v)
+{
+   struct air_tr *t = e->t;
+   struct air_ev r = { 0 };
+   struct hash_entry *he = _mesa_hash_table_search(e->vals, v);
+   if (he)
+      return *(struct air_ev *)he->data;
+   if (L.LLVMIsAGlobalVariable(v)) {
+      r.mem = air_eval_mem(e, v);
+      r.known = true;
+      r.size = 8;
+      return r;
+   }
+   if (L.LLVMIsAConstantExpr(v)) {
+      int op = L.LLVMGetConstOpcode(v);
+      if (op == OP_BITCAST || op == OP_ADDRSPACECAST)
+         return air_eval_value(e, L.LLVMGetOperand(v, 0));
+      if (op == OP_GEP) {
+         r = air_eval_value(e, L.LLVMGetOperand(v, 0));
+         if (!r.mem)
+            return (struct air_ev) { 0 };
+         LLVMTypeRef ty = L.LLVMGetGEPSourceElementType(v);
+         unsigned n = (unsigned)L.LLVMGetNumOperands(v);
+         for (unsigned i = 1; i < n; i++) {
+            LLVMValueRef index = L.LLVMGetOperand(v, i);
+            if (!L.LLVMIsAConstantInt(index))
+               return (struct air_ev) { 0 };
+            int64_t k = L.LLVMConstIntGetSExtValue(index);
+            if (i == 1) {
+               r.off += (uint64_t)k * air_size(t, ty);
+            } else if (L.LLVMGetTypeKind(ty) == TY_STRUCT) {
+               r.off += L.LLVMOffsetOfElement(t->layout, ty, (unsigned)k);
+               ty = L.LLVMStructGetTypeAtIndex(ty, (unsigned)k);
+            } else if (L.LLVMGetTypeKind(ty) == TY_ARRAY || L.LLVMGetTypeKind(ty) == TY_VECTOR) {
+               ty = L.LLVMGetElementType(ty);
+               r.off += (uint64_t)k * air_size(t, ty);
+            } else {
+               return (struct air_ev) { 0 };
+            }
+         }
+         return r;
+      }
+      return r;
+   }
+   LLVMTypeRef ty = L.LLVMTypeOf(v);
+   if (L.LLVMIsAUndefValue(v) || L.LLVMGetTypeKind(ty) == TY_VOID)
+      return r;
+   unsigned size = air_eval_size(t, ty);
+   if (size > sizeof r.b || L.LLVMGetTypeKind(ty) == TY_POINTER)
+      return r;
+   uint8_t known[16];
+   r.size = size;
+   if ((L.LLVMIsAConstantInt(v) || L.LLVMIsAConstantFP(v) || L.LLVMIsAConstantAggregateZero(v) ||
+        L.LLVMIsAConstantDataSequential(v) || L.LLVMIsAConstantVector(v)) &&
+       air_bytes_of_constant(t, r.b, known, size, v, ty)) {
+      r.known = true;
+      for (unsigned i = 0; i < size; i++)
+         r.known &= known[i];
+   }
+   return r;
+}
+
+static void
+air_eval_set(struct air_eval *e, LLVMValueRef inst, struct air_ev v)
+{
+   struct air_ev *p = ralloc(e->t->mem, struct air_ev);
+   *p = v;
+   _mesa_hash_table_insert(e->vals, inst, p);
+}
+
+static bool
+air_eval_icmp(int pred, uint64_t x, uint64_t y, unsigned bits)
+{
+   int64_t sx = bits < 64 ? (int64_t)(x << (64 - bits)) >> (64 - bits) : (int64_t)x;
+   int64_t sy = bits < 64 ? (int64_t)(y << (64 - bits)) >> (64 - bits) : (int64_t)y;
+   switch (pred) {
+   case ICMP_EQ: return x == y;
+   case ICMP_NE: return x != y;
+   case ICMP_UGT: return x > y;
+   case ICMP_UGE: return x >= y;
+   case ICMP_ULT: return x < y;
+   case ICMP_ULE: return x <= y;
+   case ICMP_SGT: return sx > sy;
+   case ICMP_SGE: return sx >= sy;
+   case ICMP_SLT: return sx < sy;
+   default: return sx <= sy;
+   }
+}
+
+/* Runs one instruction of the static initializer. False: this cannot run it (the whole initializer then counts as
+ * unknown). */
+static bool
+air_eval_instruction(struct air_eval *e, LLVMValueRef inst, LLVMBasicBlockRef prev)
+{
+   struct air_tr *t = e->t;
+   int op = L.LLVMGetInstructionOpcode(inst);
+   LLVMTypeRef ty = L.LLVMTypeOf(inst);
+   struct air_ev r = { 0 };
+   switch (op) {
+   case OP_LOAD: {
+      struct air_ev p = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      unsigned size = air_eval_size(t, ty);
+      if (!p.mem || size > sizeof r.b || L.LLVMGetTypeKind(ty) == TY_POINTER || p.off + size > p.mem->size)
+         return false;
+      r.size = size;
+      r.known = true;
+      memcpy(r.b, p.mem->bytes + p.off, size);
+      for (unsigned i = 0; i < size; i++)
+         r.known &= p.mem->known[p.off + i];
+      break;
+   }
+   case OP_STORE: {
+      struct air_ev v = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      struct air_ev p = air_eval_value(e, L.LLVMGetOperand(inst, 1));
+      unsigned size = air_eval_size(t, L.LLVMTypeOf(L.LLVMGetOperand(inst, 0)));
+      if (!p.mem || v.mem || size > sizeof v.b || p.off + size > p.mem->size)
+         return false;
+      memcpy(p.mem->bytes + p.off, v.b, size);
+      memset(p.mem->known + p.off, v.known, size);
+      p.mem->stored = true;
+      return true;
+   }
+   case OP_GEP: {
+      r = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      if (!r.mem)
+         return false;
+      LLVMTypeRef sty = L.LLVMGetGEPSourceElementType(inst);
+      unsigned n = (unsigned)L.LLVMGetNumOperands(inst);
+      for (unsigned i = 1; i < n; i++) {
+         struct air_ev k = air_eval_value(e, L.LLVMGetOperand(inst, i));
+         if (!k.known || k.mem)
+            return false;
+         int64_t idx = (int64_t)air_ev_u64(&k);
+         unsigned bits = air_width_of(t, L.LLVMGetOperand(inst, i));
+         if (bits < 64)
+            idx = (idx << (64 - bits)) >> (64 - bits);
+         if (i == 1) {
+            r.off += (uint64_t)idx * air_size(t, sty);
+         } else if (L.LLVMGetTypeKind(sty) == TY_STRUCT) {
+            r.off += L.LLVMOffsetOfElement(t->layout, sty, (unsigned)idx);
+            sty = L.LLVMStructGetTypeAtIndex(sty, (unsigned)idx);
+         } else if (L.LLVMGetTypeKind(sty) == TY_ARRAY || L.LLVMGetTypeKind(sty) == TY_VECTOR) {
+            sty = L.LLVMGetElementType(sty);
+            r.off += (uint64_t)idx * air_size(t, sty);
+         } else {
+            return false;
+         }
+      }
+      break;
+   }
+   case OP_BITCAST: case OP_ADDRSPACECAST: case OP_FREEZE:
+      r = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      break;
+   case OP_TRUNC: case OP_ZEXT: case OP_SEXT: {
+      struct air_ev x = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      if (L.LLVMGetTypeKind(ty) != TY_INTEGER || L.LLVMGetIntTypeWidth(ty) > 64 || x.mem)
+         return false;
+      uint64_t u = air_ev_u64(&x);
+      unsigned from = air_width_of(t, L.LLVMGetOperand(inst, 0));
+      if (op == OP_SEXT && from < 64)
+         u = (uint64_t)((int64_t)(u << (64 - from)) >> (64 - from));
+      r = air_ev_int(u, ty);
+      r.known = x.known;
+      break;
+   }
+   case OP_ICMP: {
+      struct air_ev x = air_eval_value(e, L.LLVMGetOperand(inst, 0)), y = air_eval_value(e, L.LLVMGetOperand(inst, 1));
+      if (x.mem || y.mem || L.LLVMGetTypeKind(L.LLVMTypeOf(L.LLVMGetOperand(inst, 0))) != TY_INTEGER)
+         return false;
+      r = air_ev_int(air_eval_icmp(L.LLVMGetICmpPredicate(inst), air_ev_u64(&x), air_ev_u64(&y),
+                                   air_width_of(t, L.LLVMGetOperand(inst, 0))), ty);
+      r.known = x.known && y.known;
+      break;
+   }
+   case OP_SELECT: {
+      struct air_ev c = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      if (!c.known || L.LLVMGetTypeKind(L.LLVMTypeOf(L.LLVMGetOperand(inst, 0))) == TY_VECTOR)
+         return false;
+      r = air_eval_value(e, L.LLVMGetOperand(inst, (c.b[0] & 1) ? 1 : 2));
+      break;
+   }
+   case OP_AND: case OP_OR: case OP_XOR: case OP_ADD: case OP_SUB: case OP_MUL: case OP_SHL: case OP_LSHR: {
+      struct air_ev x = air_eval_value(e, L.LLVMGetOperand(inst, 0)), y = air_eval_value(e, L.LLVMGetOperand(inst, 1));
+      if (x.mem || y.mem || L.LLVMGetTypeKind(ty) != TY_INTEGER || L.LLVMGetIntTypeWidth(ty) > 64)
+         return false;
+      uint64_t a = air_ev_u64(&x), b = air_ev_u64(&y), u;
+      switch (op) {
+      case OP_AND: u = a & b; break;
+      case OP_OR: u = a | b; break;
+      case OP_XOR: u = a ^ b; break;
+      case OP_ADD: u = a + b; break;
+      case OP_SUB: u = a - b; break;
+      case OP_MUL: u = a * b; break;
+      case OP_SHL: u = b < 64 ? a << b : 0; break;
+      default: u = b < 64 ? a >> b : 0; break;
+      }
+      r = air_ev_int(u, ty);
+      r.known = x.known && y.known;
+      break;
+   }
+   case OP_EXTRACTELEMENT: case OP_INSERTELEMENT: {
+      LLVMTypeRef vty = L.LLVMTypeOf(L.LLVMGetOperand(inst, 0));
+      LLVMValueRef index = L.LLVMGetOperand(inst, op == OP_EXTRACTELEMENT ? 1 : 2);
+      if (L.LLVMGetTypeKind(vty) != TY_VECTOR || !L.LLVMIsAConstantInt(index))
+         return false;
+      unsigned es = air_eval_size(t, L.LLVMGetElementType(vty)), k = (unsigned)L.LLVMConstIntGetZExtValue(index);
+      struct air_ev v = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+      if (v.mem || (k + 1) * es > sizeof v.b)
+         return false;
+      if (op == OP_EXTRACTELEMENT) {
+         r.size = es;
+         r.known = v.known;
+         memcpy(r.b, v.b + k * es, es);
+      } else {
+         struct air_ev x = air_eval_value(e, L.LLVMGetOperand(inst, 1));
+         r = v;
+         r.size = air_eval_size(t, vty);
+         memcpy(r.b + k * es, x.b, es);
+         r.known = (v.known || L.LLVMIsAUndefValue(L.LLVMGetOperand(inst, 0))) && x.known;
+      }
+      break;
+   }
+   case OP_PHI: {
+      unsigned n = L.LLVMCountIncoming(inst);
+      bool found = false;
+      for (unsigned i = 0; i < n && !found; i++) {
+         if (L.LLVMGetIncomingBlock(inst, i) == prev) {
+            r = air_eval_value(e, L.LLVMGetIncomingValue(inst, i));
+            found = true;
+         }
+      }
+      if (!found)
+         return false;
+      break;
+   }
+   case OP_CALL: {
+      LLVMValueRef callee = L.LLVMGetCalledValue(inst);
+      const char *name = callee && L.LLVMIsAFunction(callee) ? air_name(callee, NULL) : "";
+      if (air_starts(name, "llvm.lifetime.") || air_starts(name, "llvm.dbg.") || air_starts(name, "llvm.assume"))
+         return true;
+      if (air_starts(name, "air.normalize_function_constant_predicate.") && L.LLVMGetTypeKind(ty) == TY_INTEGER) {
+         struct air_ev x = air_eval_value(e, L.LLVMGetOperand(inst, 0));
+         r = air_ev_int(air_ev_u64(&x) != 0, ty);
+         r.known = x.known;
+         break;
+      }
+      if (air_starts(name, "llvm.memcpy.") || air_starts(name, "llvm.memmove.")) {
+         struct air_ev d = air_eval_value(e, L.LLVMGetOperand(inst, 0)), s = air_eval_value(e, L.LLVMGetOperand(inst, 1));
+         LLVMValueRef len = L.LLVMGetOperand(inst, 2);
+         if (!d.mem || !s.mem || !L.LLVMIsAConstantInt(len))
+            return false;
+         uint64_t n = L.LLVMConstIntGetZExtValue(len);
+         if (d.off + n > d.mem->size || s.off + n > s.mem->size)
+            return false;
+         memmove(d.mem->bytes + d.off, s.mem->bytes + s.off, n);
+         memmove(d.mem->known + d.off, s.mem->known + s.off, n);
+         d.mem->stored = true;
+         return true;
+      }
+      return false;
+   }
+   default:
+      return false;
+   }
+   air_eval_set(e, inst, r);
+   return true;
+}
+
+/* The globals a static initializer stores to, found without running it. */
+static void
+air_eval_mark_stored(struct air_eval *e, LLVMValueRef fn)
+{
+   for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(fn); bb; bb = L.LLVMGetNextBasicBlock(bb)) {
+      for (LLVMValueRef inst = L.LLVMGetFirstInstruction(bb); inst; inst = L.LLVMGetNextInstruction(inst)) {
+         int op = L.LLVMGetInstructionOpcode(inst);
+         LLVMValueRef ptr = op == OP_STORE ? L.LLVMGetOperand(inst, 1) : NULL;
+         if (op == OP_CALL) {
+            LLVMValueRef callee = L.LLVMGetCalledValue(inst);
+            const char *name = callee && L.LLVMIsAFunction(callee) ? air_name(callee, NULL) : "";
+            if (air_starts(name, "llvm.memcpy.") || air_starts(name, "llvm.memmove.") || air_starts(name, "llvm.memset."))
+               ptr = L.LLVMGetOperand(inst, 0);
+         }
+         /* down to the global: GEPs, casts */
+         for (unsigned k = 0; ptr && k < 16 && !L.LLVMIsAGlobalVariable(ptr); k++) {
+            if (L.LLVMIsAConstantExpr(ptr) || L.LLVMGetInstructionOpcode(ptr) == OP_GEP ||
+                L.LLVMGetInstructionOpcode(ptr) == OP_BITCAST || L.LLVMGetInstructionOpcode(ptr) == OP_ADDRSPACECAST)
+               ptr = L.LLVMGetOperand(ptr, 0);
+            else
+               ptr = NULL;
+         }
+         if (ptr && L.LLVMIsAGlobalVariable(ptr)) {
+            struct air_mem *m = air_eval_mem(e, ptr);
+            m->stored = true;
+            memset(m->known, 0, m->size);
+         }
+      }
+   }
+}
+
+static void
+air_eval_static_init(struct air_eval *e, LLVMValueRef fn)
+{
+   LLVMBasicBlockRef bb = L.LLVMGetEntryBasicBlock(fn), prev = NULL;
+   while (bb) {
+      LLVMBasicBlockRef next = NULL;
+      for (LLVMValueRef inst = L.LLVMGetFirstInstruction(bb); inst; inst = L.LLVMGetNextInstruction(inst)) {
+         if (++e->steps > 200000)
+            goto unknown;
+         int op = L.LLVMGetInstructionOpcode(inst);
+         if (op == OP_RET)
+            return;
+         if (op == OP_BR) {
+            if (L.LLVMIsConditional(inst)) {
+               struct air_ev c = air_eval_value(e, L.LLVMGetCondition(inst));
+               if (!c.known)
+                  goto unknown;
+               next = L.LLVMGetSuccessor(inst, (c.b[0] & 1) ? 0 : 1);
+            } else {
+               next = L.LLVMGetSuccessor(inst, 0);
+            }
+            break;
+         }
+         if (!air_eval_instruction(e, inst, prev))
+            goto unknown;
+      }
+      if (!next)
+         goto unknown;
+      prev = bb;
+      bb = next;
+   }
+unknown:
+   /* what this initializer would have left is not known: every global it stores to is unknown */
+   air_eval_mark_stored(e, fn);
+}
+
+/* Applies the request's function-constant values to the module before LLVM's passes; true when the module has function
+ * constants (and the passes that fold what they decide should run). */
+static bool
+air_fc_specialize(struct air_tr *t, LLVMContextRef ctx)
+{
+   if (!air_has_fc_values(t))
+      return false;
+   for (uint32_t i = 0; i < t->req->fc_count; i++) {
+      for (uint32_t j = 0; j < i; j++) {
+         if (t->req->fc_indices[j] == t->req->fc_indices[i])
+            air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "function constant %u is given twice", t->req->fc_indices[i]);
+      }
+      if (!t->req->fc_payloads[i] && t->req->fc_sizes[i])
+         air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "function constant %u has no payload", t->req->fc_indices[i]);
+   }
+   t->layout = L.LLVMGetModuleDataLayout(t->module);
+   bool any = false;
+   for (LLVMValueRef g = L.LLVMGetFirstGlobal(t->module); g; g = L.LLVMGetNextGlobal(g)) {
+      uint32_t index, size = 0;
+      if (!air_fc_index(g, &index))
+         continue;
+      any = true;
+      const uint8_t *payload = air_fc_given(t, index, &size);
+      if (!payload)
+         continue;
+      LLVMTypeRef vty = L.LLVMGlobalGetValueType(g);
+      uint64_t want = L.LLVMStoreSizeOfType(t->layout, vty);
+      if (size != want)
+         air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "function constant %u has %u bytes, its type %llu", index, size,
+                    (unsigned long long)want);
+      if (air_fc_bool_abi(g) && payload[0] > 1)
+         air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "function constant %u is a bool, given %u", index, payload[0]);
+      uint8_t bytes[64] = { 0 };
+      if (size > sizeof bytes)
+         unsupported(t, "function constant %u of %u bytes", index, size);
+      memcpy(bytes, payload, size);
+      LLVMValueRef c = air_constant_from_bytes(t, ctx, vty, bytes);
+      if (!c)
+         unsupported(t, "function constant %u of a type this cannot build (%s)", index, air_name(g, NULL));
+      L.LLVMSetInitializer(g, c);
+      L.LLVMSetExternallyInitialized(g, 0);
+      L.LLVMSetGlobalConstant(g, 1);
+   }
+   if (!any)
+      return false;
+
+   /* air.is_function_constant_defined(@x.MTL_FC_INIT_n): whether the request gives n */
+   LLVMValueRef defined = L.LLVMGetNamedFunction(t->module, "air.is_function_constant_defined");
+   if (defined) {
+      struct util_dynarray calls;
+      util_dynarray_init(&calls, t->mem);
+      for (LLVMUseRef u = L.LLVMGetFirstUse(defined); u; u = L.LLVMGetNextUse(u)) {
+         LLVMValueRef call = L.LLVMGetUser(u);
+         if (L.LLVMGetInstructionOpcode(call) == OP_CALL && L.LLVMGetCalledValue(call) == defined)
+            util_dynarray_append(&calls, call);
+      }
+      util_dynarray_foreach(&calls, LLVMValueRef, pc) {
+         LLVMValueRef g = L.LLVMGetOperand(*pc, 0);
+         while (L.LLVMIsAConstantExpr(g))
+            g = L.LLVMGetOperand(g, 0);
+         uint32_t index, size;
+         if (!L.LLVMIsAGlobalVariable(g) || !air_fc_index(g, &index))
+            unsupported(t, "air.is_function_constant_defined of something that is not a function constant");
+         L.LLVMReplaceAllUsesWith(*pc, L.LLVMConstInt(L.LLVMInt1TypeInContext(ctx), air_fc_given(t, index, &size) != NULL, 0));
+         L.LLVMInstructionEraseFromParent(*pc);
+      }
+   }
+
+   /* run the static initializers; every global they fill with known bytes becomes that constant */
+   struct air_eval e = { .t = t };
+   e.mems = _mesa_pointer_hash_table_create(t->mem);
+   e.vals = _mesa_pointer_hash_table_create(t->mem);
+   for (LLVMValueRef f = L.LLVMGetFirstFunction(t->module); f; f = L.LLVMGetNextFunction(f)) {
+      const char *section = L.LLVMGetSection(f);
+      if (!L.LLVMIsDeclaration(f) && section && !strcmp(section, "air.static_init"))
+         air_eval_static_init(&e, f);
+   }
+   hash_table_foreach(e.mems, he) {
+      struct air_mem *m = he->data;
+      if (!m->stored)
+         continue;
+      bool known = true;
+      for (uint64_t i = 0; i < m->size && known; i++)
+         known = m->known[i];
+      if (!known)
+         continue;
+      LLVMValueRef c = air_constant_from_bytes(t, ctx, L.LLVMGlobalGetValueType(m->global), m->bytes);
+      if (!c)
+         continue;
+      L.LLVMSetInitializer(m->global, c);
+      L.LLVMSetExternallyInitialized(m->global, 0);
+      L.LLVMSetGlobalConstant(m->global, 1);
+   }
+   return true;
+}
+
 /* Every function the kernel may call is inlined: Apple's compiler builds with optsize, and the inliner's threshold
  * for it leaves calls (Espresso's and MPS's helpers among them) that this frontend cannot translate. */
 static void
@@ -2399,12 +3183,27 @@ air_mark_inline(struct air_tr *t, LLVMContextRef ctx)
 }
 
 static void
-air_run_passes(struct air_tr *t, LLVMContextRef ctx)
+air_run_passes(struct air_tr *t, LLVMContextRef ctx, bool fold)
 {
    air_mark_inline(t, ctx);
    LLVMPassBuilderOptionsRef opts = L.LLVMCreatePassBuilderOptions();
-   LLVMErrorRef err = L.LLVMRunPasses(t->module, "always-inline,inline,function(sroa)", NULL, opts);
+   /* with function constants fixed, the branches they decide are folded before the kernel is read, so a value the
+    * request did not give is refused only where a live path still reads it */
+   LLVMErrorRef err = L.LLVMRunPasses(t->module, fold ? "always-inline,inline,function(sroa,sccp,instsimplify,simplifycfg,adce)"
+                                                      : "always-inline,inline,function(sroa)", NULL, opts);
    L.LLVMDisposePassBuilderOptions(opts);
+   /* NVMTL_AIR_NIR_DUMP=<file>: the module as the kernel is read from it, for looking into a refusal */
+   const char *dump = getenv("NVMTL_AIR_NIR_DUMP");
+   if (dump && *dump && !err) {
+      FILE *f = fopen(dump, "w");
+      char *text = f ? L.LLVMPrintModuleToString(t->module) : NULL;
+      if (text) {
+         fputs(text, f);
+         L.LLVMDisposeMessage(text);
+      }
+      if (f)
+         fclose(f);
+   }
    if (err) {
       char *m = L.LLVMGetErrorMessage(err);
       snprintf(t->llvm_error, sizeof t->llvm_error, "%s", m ? m : "?");
@@ -2486,15 +3285,17 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
 {
    if (!res || res->size < offsetof(struct nvmtl_air_nir_result, message) + 16)
       return NVMTL_AIR_NIR_BAD_REQUEST;
+   /* both structs start with their size: an older caller's shorter result gets what it has room for */
    char *message = res->message;
    size_t message_len = res->size - offsetof(struct nvmtl_air_nir_result, message);
    if (message_len > sizeof res->message)
       message_len = sizeof res->message;
-   memset(res, 0, offsetof(struct nvmtl_air_nir_result, message));
-   res->size = (uint32_t)(message_len + offsetof(struct nvmtl_air_nir_result, message));
+   const uint32_t res_size = MIN2(res->size, (uint32_t)sizeof *res);
+   memset(res, 0, res_size);
+   res->size = res_size;
    message[0] = 0;
 
-   if (!device || !req || req->size < sizeof *req || !req->bitcode || !req->bitcode_size || !req->llvm_library ||
+   if (!device || !req || req->size < NVMTL_AIR_NIR_REQUEST_V1_SIZE || !req->bitcode || !req->bitcode_size || !req->llvm_library ||
        !req->local_size[0] || !req->local_size[1] || !req->local_size[2] ||
        (uint64_t)req->local_size[0] * req->local_size[1] * req->local_size[2] > 1024) {
       snprintf(message, message_len, "bad request");
@@ -2530,8 +3331,9 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       if (!buf || L.LLVMParseBitcodeInContext2(ctx, buf, &t->module))
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the bitcode does not parse%s%s", t->llvm_error[0] ? ": " : "",
                     t->llvm_error);
+      bool fold = air_fc_specialize(t, ctx);
       if (!(req->flags & NVMTL_AIR_NIR_NO_PASSES))
-         air_run_passes(t, ctx);
+         air_run_passes(t, ctx, fold);
       t->out = air_translate(t, pdev, &rs);
       t->status = NVMTL_AIR_NIR_OK;
    } else if (t->nir) {

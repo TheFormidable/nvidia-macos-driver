@@ -10,6 +10,10 @@
  * export as bitcode it writes. Each kernel of a module is translated on its own (request.entry), for threadgroups of
  * 64 threads, with 1024 bytes for each [[threadgroup(n)]] argument.
  *
+ * A line of LIST may name one kernel and its function-constant values: "path<TAB>entry<TAB>index=hexbytes,index=hexbytes"
+ * (the request then carries them, NVMTL_AIR_NIR_FC_VALUES, as the plugin would for that function); a line with only a
+ * path translates every kernel of the file without function-constant values.
+ *
  * One line per kernel on stdout, tab-separated: "BEGIN<TAB>file" before a file is read (so a caller can tell which file
  * a crash was in), then "<status><TAB>file<TAB>kernel<TAB>message", status OK, REFUSED<n> or PIPELINE<vkresult>, and
  * "NOTEXT<TAB>file<TAB>-<TAB>reason" for a file that does not parse. tools/air-nir/sweep.py runs it and counts.
@@ -181,11 +185,38 @@ main(int argc, char **argv)
    FILE *list = fopen(argv[3], "r");
    if (!list)
       return 2;
-   char path[4096];
+   char path[16384];
    while (fgets(path, sizeof path, list)) {
       path[strcspn(path, "\r\n")] = 0;
       if (!path[0])
          continue;
+      /* path [TAB entry [TAB index=hex,...]] */
+      char *only = NULL, *fcs = NULL;
+      if ((only = strchr(path, '\t'))) {
+         *only++ = 0;
+         if ((fcs = strchr(only, '\t')))
+            *fcs++ = 0;
+      }
+      uint32_t fc_idx[64], fc_sz[64], nfc = 0;
+      static uint8_t fc_bytes[64][64];
+      const uint8_t *fc_pay[64];
+      for (char *tok = fcs ? strtok(fcs, ",") : NULL; tok && nfc < 64; tok = strtok(NULL, ",")) {
+         char *eq = strchr(tok, '=');
+         if (!eq)
+            continue;
+         fc_idx[nfc] = (uint32_t)strtoul(tok, NULL, 10);
+         size_t len = strlen(eq + 1) / 2;
+         if (len > 64)
+            len = 64;
+         for (size_t k = 0; k < len; k++) {
+            unsigned v = 0;
+            sscanf(eq + 1 + 2 * k, "%2x", &v);
+            fc_bytes[nfc][k] = (uint8_t)v;
+         }
+         fc_sz[nfc] = (uint32_t)len;
+         fc_pay[nfc] = fc_bytes[nfc];
+         nfc++;
+      }
       printf("BEGIN\t%s\n", path);
       fflush(stdout);
       size_t size;
@@ -233,10 +264,19 @@ main(int argc, char **argv)
          char name[512];
          snprintf(name, sizeof name, "%.*s", (int)len, nm ? nm : "");
          free(ops);
+         if (only && strcmp(name, only))
+            continue;
          struct nvmtl_air_nir_request req = { sizeof req, 0, argv[2], BufferStart(bc), BufferSize(bc), name,
                                               { 64, 1, 1 } };
          for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
             req.threadgroup_lengths[i] = 1024;
+         if (fcs) {
+            req.flags |= NVMTL_AIR_NIR_FC_VALUES;
+            req.fc_count = nfc;
+            req.fc_indices = fc_idx;
+            req.fc_sizes = fc_sz;
+            req.fc_payloads = fc_pay;
+         }
          struct nvmtl_air_nir_result res = { sizeof res };
          int st = to_nir(dev, &req, &res);
          clean(res.message);

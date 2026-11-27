@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # usage: tools/air-nir/sweep.py AIRSWEEP NVK.dylib LLVM.dylib OUT.tsv FILE|@LIST...
+# (a LIST line may be "path<TAB>entry<TAB>index=hex,...": one kernel with function-constant values, airsweep.c)
 #
 # Runs airsweep (airsweep.c) over the files, restarting it after the file it was in when it crashed (that file's
 # kernels are recorded as CRASH), writes every kernel's line to OUT.tsv and prints the counts: kernels translated and
@@ -11,7 +12,7 @@ def main():
     exe, nvk, llvm, out = sys.argv[1:5]
     files = []
     for a in sys.argv[5:]:   # @LIST: the paths in LIST, one per line
-        files += [l.strip() for l in open(a[1:]) if l.strip()] if a.startswith("@") else [a]
+        files += [l.rstrip("\n") for l in open(a[1:]) if l.strip()] if a.startswith("@") else [a]
     lines = []
     env = dict(os.environ, MESA_SHADER_CACHE_DISABLE="true")
     while files:
@@ -36,7 +37,8 @@ def main():
             break
         if rc < 0 and current:
             lines.append(["CRASH", current, "-", "signal %d" % -rc])
-            files = files[files.index(current) + 1:]
+            at = next(i for i, f in enumerate(files) if f.split("\t")[0] == current)
+            files = files[at + 1:]
             continue
         sys.exit("airsweep stopped with status %d" % rc)
     with open(out, "w") as o:
