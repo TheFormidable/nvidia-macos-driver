@@ -845,9 +845,9 @@ run_render_test(const struct rtest *t)
    if (ok && corrupt) {
       for (unsigned i = 0; i < RMAXCOL; i++)
          if (r.back[i])
-            ((uint8_t *)r.back[i].contents)[(35 * RW + 33) * rbpp(t->col[i]) + 2] ^= 0x40;   /* a pixel no test skips */
+            ((uint8_t *)r.back[i].contents)[(40 * RW + 30) * rbpp(t->col[i]) + 2] ^= 0x40;   /* a pixel no test skips */
       if (r.dback)
-         ((uint8_t *)r.dback.contents)[(35 * RW + 33) * 4 + 2] ^= 0x40;
+         ((uint8_t *)r.dback.contents)[(40 * RW + 30) * 4 + 2] ^= 0x40;
    }
    if (ok) {
       ok = t->check(&r);

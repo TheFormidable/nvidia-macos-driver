@@ -2,6 +2,44 @@
 
 ## Not in a package yet
 
+### AIR to NIR, phase 3: render pipelines from NIR
+
+- **Every render pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): both stages' AIR, their
+  function-constant values and their varyings' Locations go to the frontend, and the pipeline is made from the two NIR
+  shaders with the SPIR-V road's layout, render pass, vertex input and state (`nvmtl_vk_pipeline_create_nir`; the state
+  is now one function both roads call). The varyings take the Locations the translator's reflection gives them, a
+  fragment input's moved onto the vertex output of the same name by the remap the SPIR-V road applies to its module
+  (`nvmtl_varying_remap`, now shared). The SPIR-V road stays the fallback, exactly as before, for a pipeline with a
+  stage the frontend refuses, one with no fragment function or a stage without AIR, one that needs a SPIR-V rewrite of
+  its stages (A8 targets, vertex amplification, tessellation, the GL uniform buffer, framebuffer fetch, stencil
+  export, programmable sample positions, a stage-in rewrite, an application-profile edit, `NVMTL_BDA_PROBE_FILE`) and
+  one NVK will not make; the reason is logged once per pipeline, and the render roads are counted apart from compute.
+  Each stage is a `nir1` entry of the shader cache, keyed also by its stage, its varyings and the vertex descriptor.
+  `NVMTL_AIR_NIR=0` keeps render pipelines on the SPIR-V road too.
+- The frontend (request and result version 4) reads vertex and fragment functions: stage_in attributes at the vertex
+  descriptor's Locations, the vertex and instance builtins, position, point size, clip distances, layer and viewport
+  outputs, varyings by user semantic with their interpolation, the fragment builtins (position, front_facing,
+  point_coord, sample_id, sample mask), colour outputs of any type, depth with its qualifier, sample mask out,
+  `discard_fragment` (a demote), `[[early_fragment_tests]]`, sampling at the level the derivatives give, derivatives;
+  a fragment stage's resources in set 1. Post-tessellation, mesh and object functions, imageblocks, raster order
+  groups, framebuffer fetch inputs, stencil export, dual-source outputs, `[[primitive_id]]`, `[[barycentric_coord]]`
+  and vertex amplification are refused with a message.
+- **Proven through the plugin without installing it** (`tools/air-nir/metal-render`, `render_tests.h`, `plugin_run`):
+  14 vertex and fragment pairs drawn offscreen and checked per pixel on the RTX 5050. On the road 13 take it and pass
+  and the one the frontend must refuse (`[[primitive_id]]`) takes the SPIR-V road and passes; with `NVMTL_AIR_NIR=0`
+  all 14 pass; with corrupted read-backs all 14 fail. Pipeline creation median 2.7 ms on the road and 2.8 ms on the
+  SPIR-V road (whose translator runs when the functions are made, on either road), 1.9 ms from the shader cache; the
+  GPU time of a draw the same on both. The 46 compute tests give what they gave in round 3; the fault counters stayed
+  at 0. Details in `docs/AIR-TO-NIR.md`.
+- The align guard through the plugin (`align_misaligned`): with a kernel's float4 buffers at offsets 4 and 8 the road
+  runs the frontend's `ALIGN4` build and the result is exact. The SPIR-V road gives a wrong result for that dispatch,
+  as the plugin before round 3 did: its guard does not see that kernel's promise (not changed here). The constexpr
+  samplers' state words the frontend reads are the translator's reflection's for every test that has one; the plugin
+  logs the comparison once per function.
+- `tools/test_air_nir_plugin.py`: the render road's contract (asked first, after the multiview variants, the SPIR-V
+  road unchanged otherwise; no stage the SPIR-V road rewrites; robustness, `ALIGN4` and varyings in the requests and
+  the key; one remap for both roads; a fragment stage in set 1), each with a control; `.c`: the version-4 layout.
+
 ### AIR to NIR, phase 2: the plugin makes compute pipelines from NIR
 
 - **Every compute pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): the kernel's AIR as

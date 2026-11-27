@@ -2,11 +2,13 @@
 
 The plugin runs a Metal function on NVK by translating its AIR (the LLVM bitcode inside a metallib) to SPIR-V with
 the translator (`translator/`), which NVK then turns into NIR and NAK into the GPU's code. `nvk/air` is a second
-road for compute kernels that skips SPIR-V: NVK reads the AIR itself and builds the NIR directly.
+road that skips SPIR-V: NVK reads the AIR itself and builds the NIR directly, for compute kernels and, since round 4,
+vertex and fragment functions.
 
 Phase 1 is the frontend and its tests (on Linux, then on the card). Since phase 2 (round 3, 2026-11-27) the plugin
-asks it first for every compute pipeline, and keeps the SPIR-V road as the fallback (below, "In the plugin").
-NVMTL_AIR_NIR=0 turns it off; it is off in WindowServer for now.
+asks it first for every compute pipeline, and since phase 3 (round 4, the same day) for every render pipeline, and
+keeps the SPIR-V road as the fallback (below, "In the plugin" and "Render pipelines"). NVMTL_AIR_NIR=0 turns it off;
+it is off in WindowServer for now.
 
 ## Pieces
 
@@ -23,6 +25,7 @@ NVMTL_AIR_NIR=0 turns it off; it is off in WindowServer for now.
 | `plugin/nvmtl_air_nir_abi.h` | a copy of the ABI header (the plugin is built from `plugin/` alone); `tools/test_air_nir_plugin.py` holds the two equal |
 | `tools/air-nir/airrun_tests.h` | the tests' grids, inputs and references, shared by `airrun.c` and `plugin_run.m` |
 | `tools/air-nir/plugin_run.m`, `plugin-run.sh` | the same tests through the plugin's own compute path, from a build, nothing installed |
+| `tools/air-nir/metal-render/`, `render_tests.h` | vertex and fragment pairs through the plugin's own render path (plugin_run), offscreen, checked per pixel |
 
 ## How it works
 
@@ -40,6 +43,26 @@ NVMTL_AIR_NIR=0 turns it off; it is off in WindowServer for now.
   shader for another threadgroup size: the translation reads the size only through the shader's workgroup size),
   `nvmtl_air_nir_serialize_v1` and `nvmtl_air_nir_deserialize_v1` (for the plugin's shader cache; only the NVK that
   wrote a blob reads it).
+- Version 4 (round 4) reads vertex and fragment functions too: the function is looked for in `!air.kernel`,
+  `!air.vertex` and `!air.fragment` (a mesh or object function is refused), and the result says which it was
+  (`stage`). New request fields, read with `NVMTL_AIR_NIR_VARYINGS` and a size that reaches them: `varying_count`,
+  `varying_keys` and `varying_locations`, the Location each varying takes by its user semantic as the AIR names it
+  (`user(x)`, or the compiler's `generated(...)` name for one without; its field name when it has neither). Without the
+  flag each varying takes the translator's own Location (fragment inputs in their order, vertex outputs by
+  `air.location_index` or their order). New result fields: `stage`, `vertex_inputs` and `vertex_input_kind[32]` (the
+  attributes a vertex stage reads, and whether each is float, signed or unsigned, for the plugin to pick its VkFormat as
+  it reads a SPIR-V module's), `varyings` (the Locations written or read), `color_outputs`, and `fragment_flags`
+  (`NVMTL_AIR_NIR_FS_DEPTH`, `_SAMPLE_MASK`, `_DISCARD`, `_EARLY_TESTS`, `_PER_SAMPLE`). An older NVK refuses a vertex
+  or fragment function ("no kernel named"), and an older plugin's version-3 request is read as before.
+- A render stage's contract, the plugin's render layout: set 0 holds the vertex stage's resources, set 1
+  (`NVMTL_AIR_NIR_FRAGMENT_SET`) the fragment stage's, each with the same bands as a kernel's (the table at 640,
+  textures at 32 + n, samplers at 160 + n, storage textures at 480 + n), and no push constants are read. A
+  `[[stage_in]]` attribute `[[attribute(n)]]` is the vertex input at Location n, as the vertex descriptor binds it;
+  builtins are Vulkan's (VertexIndex, InstanceIndex, BaseVertex, BaseInstance, Position, PointSize, ClipDistance,
+  Layer, ViewportIndex, FragCoord, FrontFacing, PointCoord, SampleId, SampleMask, FragDepth), read through system-value
+  variables as spirv_to_nir declares them, so NVK lowers them as it lowers the SPIR-V road's. Every varying travels as
+  32-bit components (a half as a float, a narrow integer or a bool as a 32-bit integer, flat): the two stages agree
+  because both come from this frontend.
 - NVK links no LLVM (it is built with `-Dllvm=disabled`). The frontend opens the library the request names (the
   plugin's `air-runtime/libLLVM.dylib`, which already reads AIR) once per process and uses its C API to parse the
   bitcode, inline every function the kernel calls (each is marked `alwaysinline` first: Apple's compiler builds with
@@ -102,14 +125,30 @@ values; function constants with their values; textures (`texture1d`/`2d`/`2d_arr
 gathered, compared (`depth2d`), written and read-written (storage), fenced, and their sizes and level counts;
 argument and constexpr samplers.
 
+Vertex and fragment functions (round 4): `[[stage_in]]` attributes of one Location (float, half, and 8-, 16- and
+32-bit integer scalars and vectors), `[[vertex_id]]`, `[[instance_id]]`, `[[base_vertex]]`, `[[base_instance]]`;
+outputs `[[position]]`, `[[point_size]]`, `[[clip_distance]]`, `[[render_target_array_index]]`,
+`[[viewport_array_index]]` and user varyings of one Location with their interpolation (`center` / `centroid` /
+`sample`, `perspective` / `no_perspective` / `flat`; integers flat); fragment inputs `[[position]]`,
+`[[front_facing]]`, `[[point_coord]]`, `[[sample_id]]`, `[[sample_mask]]`, `[[render_target_array_index]]`; outputs
+`[[color(n)]]` (n < 8) of float, half, signed and unsigned types, `[[depth(any|greater|less)]]` (with that depth
+layout) and `[[sample_mask]]`; `discard_fragment` (a demote, as the translator's), `[[early_fragment_tests]]`, sampling
+at the level the derivatives give (with a bias), `dfdx`, `dfdy`, `fwidth`; buffers, textures, samplers and function
+constants as in a kernel, the SIMD-group builtins.
+
 Where NAK has no instruction for a NIR operation and does not ask NIR to lower it (`[u|i][r]hadd`, `fisnormal`),
 the frontend writes the expansion itself: a NIR opcode that reaches NAK unsupported is a compiler panic and a failed
 pipeline, not a refusal.
 
 Everything else is refused with a message, never guessed (`result.message`, status `NVMTL_AIR_NIR_UNSUPPORTED`):
 argument buffers, imageblocks, ray tracing, function constants read without their values, function pointers and
-recursive calls, doubles, run-time-sized `alloca`s, a `select` or phi between two kinds of memory, vertex, fragment
-and mesh functions; and of textures: multisampled ones, a written cube or depth texture and a texel read of a cube
+recursive calls, doubles, run-time-sized `alloca`s, a `select` or phi between two kinds of memory, mesh and object
+functions; of vertex and fragment functions: post-tessellation vertex functions (and any metadata after a function's
+arguments other than `early_fragment_tests`), a stage input or output of more than one Location (a matrix, an array, a
+nested structure), a stage input that exists only under a function constant, `[[color(n)]]` inputs (framebuffer
+fetch), `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0), index(1)]]`), raster order groups,
+`[[primitive_id]]`, `[[barycentric_coord]]`, the amplification builtins and any other builtin not listed above,
+threadgroup arguments, a varying the request gives no Location; and of textures: multisampled ones, a written cube or depth texture and a texel read of a cube
 (the translator goes through a 2D-array view of them), sampling an integer texture (the translator emulates it with
 fetches), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
 level other than 0, `air.is_null_texture`/`get_null_texture`, and constexpr samplers with pixel coordinates,
@@ -292,6 +331,102 @@ On the RTX 5050 (2026-11-27, NVK of this tree, the installed plugin's air-runtim
   against 629 us, max 1036 and 985. The first pair gave the same per kernel to a few percent, except for a stretch of consecutive tests that took about twice as long in one run than in the other,
   on either road (the GPU's clock changing during a run, not the code).
 
+## Render pipelines in the plugin (round 4)
+
+`newRenderPipelineStateWithDescriptor:` (and every variant that ends there) asks the road first, after it has made what
+the SPIR-V road needs anyway (the linked stages, the colour and depth formats, the blend state, the vertex input, the
+multiview variants), and before the SPIR-V road's varying link and pipeline: both stages go through the frontend
+(`nvmtl_air_nir_render_pipeline`, `plugin/NVMTLAirNir.m`) and the pipeline is made from their NIR
+(`nvmtl_vk_pipeline_create_nir`, `plugin/nvmtl_vk.c`) with the SPIR-V road's pipeline layout (set 0 the vertex
+stage's, set 1 the fragment stage's, set 2 the heap, the fragment stage's push range of the sample positions when the
+device has them), render pass, vertex input and fixed and dynamic state (`nvmtl_graphics_pipeline_make`, now one
+function both roads call), so a draw binds what it binds for any pipeline. The descriptor masks of each stage come from
+its result, the vertex attributes' VkFormats from the component kinds the vertex result names. Each stage's request
+carries its AIR text, its function-constant values and its varyings: the Locations the translator's reflection gives
+them, a fragment input's moved onto the vertex output of the same name by the same remap the SPIR-V road applies to
+its fragment module (`nvmtl_varying_remap`, which `nvmtl_varying_link` now calls too), so both roads link a pipeline
+the same way. A render stage is translated with the device's robustness (render pipelines keep robustBufferAccess) and
+with `NVMTL_AIR_NIR_ALIGN4`, since the SPIR-V road builds every render module whose accesses promise more than 4 bytes
+SAFE. Its constexpr samplers are bound from the translator's reflection, as the SPIR-V road's are: the road is taken
+only when the result puts them at the slots reflection names (and the state words are compared and logged).
+
+The whole pipeline takes the SPIR-V road, exactly as before, when:
+- either stage is refused (the reason names the stage and the frontend's message), or is not the function the
+  descriptor names it as;
+- it has no fragment function (the SPIR-V road's empty one stands in), or a stage has no AIR (the pixel-sampler and
+  other variants made from SPIR-V);
+- it needs one of the SPIR-V road's rewrites of render stages: an A8 colour attachment, vertex amplification,
+  tessellation, the GL uniform buffer, framebuffer fetch (`[[color(n)]]` reads, A8 remaps and fetch copies), stencil
+  export (emulated), programmable sample positions, a stage-in rewrite (`_spirvOnly`), an application-profile edit of
+  either stage, `NVMTL_BDA_PROBE_FILE`;
+- NVK will not make the pipeline of the two NIR shaders;
+- the road is off (`NVMTL_AIR_NIR=0`, WindowServer, an NVK without the frontend).
+The reason is logged once per pipeline (`air-nir: pipeline <vertex> / <fragment> stays on the SPIR-V road: <why>`), the
+road taken once per pipeline (`air-nir: pipeline <vertex> / <fragment>: AIR to NIR (<ms>, translated | both stages'
+NIR from the shader cache)`), and the counts at every power of two of their sum, apart from the compute counts:
+`render roads in <process>: AIR to NIR <n> pipeline(s), SPIR-V <n> pipeline(s); <n> took the SPIR-V road after AIR to
+NIR said no`. The pipeline state's `_road` is 1 on the road.
+
+Cache: each stage is its own `nir1` entry, keyed as a kernel's (`abi` 4) and by its stage, its varyings (semantic to
+Location) and, for the vertex stage, the vertex descriptor (the translation does not read it: a later change that does
+cannot then read a stale entry). NVK's pipeline cache keeps the compiled binaries.
+
+### Tested through the plugin (round 4)
+
+`plugin-run.sh` now also builds the vertex and fragment pairs of `tools/air-nir/metal-render` and runs them through the
+plugin's render path (`render_tests.h`, `TEST` names one, `render` all of them, `compute` all the kernels): each pair's
+pipeline from its descriptor, one draw into offscreen targets of 64x64 (at most four colour attachments and a depth
+attachment), the targets read back and compared per pixel with the CPU's reference; pixels within 1.5 pixels of an
+edge of a primitive that does not cover the whole target are not compared. Then passes of 1 and of 22 draws, three of
+each, for the GPU time of a draw: (median of 22 - median of 1) / 21, from each command buffer's GPU interval (the
+plugin's timestamps around it; it has none per draw). `render.tsv` in the run's folder has the results.
+
+| test | what | tolerance |
+|---|---|---|
+| r_stage_in | stage_in from a vertex descriptor: float2, float3, float4, uchar4 normalized, half2, uchar4 (integer), at buffer 2 | 1e-4 |
+| r_instanced | vertex_id, instance_id, base_instance: 8 instances from base instance 2, vertices from 3, corners from a buffer | exact |
+| r_link | four varyings with user semantics, declared in another order in the fragment stage (the link moves them) | 1e-4 |
+| r_interp | perspective, no_perspective and flat varyings on a triangle whose vertices have w 1, 2 and 4 | 2e-3; flat exact (the first vertex's) |
+| r_texture | an argument sampler (nearest) and a constexpr sampler (linear), at the level the derivatives give | nearest 1e-6, linear 1/128 |
+| r_discard | discard_fragment on a checkerboard, [[position]] in the fragment stage | 1e-6 |
+| r_depth | [[depth(any)]] into a Depth32Float attachment (less, write), read back; [[position]].z and .w | 1e-6 |
+| r_mrt | two colour attachments, rgba8 and r32float | rgba8 1 LSB, r32float 1e-4 relative |
+| r_front | [[front_facing]] with culling off: a clockwise and a counter-clockwise triangle | exact |
+| r_points | [[point_size]] 8 and [[point_coord]] with a point draw | 1e-5 |
+| r_fc | function constants (bool, float, int) in the fragment function | 1e-6 |
+| r_buffers | a fragment reading a constant palette, a device index buffer and a constant count through the table | exact |
+| r_clip | [[clip_distance]]: the part of the target where it is negative is clipped | 1e-4 |
+| r_primid | [[primitive_id]], which the frontend refuses: must take the SPIR-V road, and draw right there | exact |
+
+On the RTX 5050 (2026-11-27, NVK of this tree, the installed plugin's air-runtime and translator), two runs of every
+test (46 compute, `align_misaligned`, 14 render) on each road, one with the caches of the first and one with
+`PLUGIN_RUN_CORRUPT=1`; the fault counters stayed at 0 throughout:
+- AIR to NIR first: the 13 render pairs take the road and pass, `r_primid` takes the SPIR-V road (`fragment rq_fs:
+  the fragment argument kind air.primitive_id`) and passes; the compute tests are as in round 3 (42 on the road and
+  passing, the four that must be refused on the SPIR-V road); `align_misaligned` passes (below). With the caches of
+  the first run every render pipeline's two stages came from the shader cache, with the same results. With
+  `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails.
+- `NVMTL_AIR_NIR=0`: all 14 render pairs pass on the SPIR-V road; the compute tests as in round 3 (38 of 42, the same
+  four failures); `align_misaligned` fails (below).
+- Pipeline creation of the 13 render pairs on the road, the two runs: median 2.7 and 2.8 ms (max 4.0 and 4.5); on the
+  SPIR-V road 2.8 and 2.7 ms (max 3.9 and 3.7), which is NVK's and NAK's work only: the translator ran when the
+  functions were made, on either road (both functions: median 3.5 ms). With the caches: 1.9 ms (max 2.9). Compute, as
+  in round 3: 2.2 ms on the road, 2.5 ms on the SPIR-V road plus 4.5 ms of translator at `newFunctionWithName:`.
+- GPU time of a draw (64x64 targets, so mostly the draw's fixed cost): the same on both roads, median 0.13 us, except
+  `r_texture`: 0.36 us on the road, 0.52 to 0.58 us on the SPIR-V road.
+
+Leftovers of round 3:
+- The align guard through the plugin (`align_misaligned`, `metal/align_guard.metal`): a kernel whose float4 accesses
+  promise 16 bytes, dispatched with its buffers at offsets 0 and 0, then 4 and 8. On the road the first runs the
+  kernel's own build, the second the frontend's `NVMTL_AIR_NIR_ALIGN4` build (the log says `align guard: buffer 0 bound
+  at GPU address ... is not 16-aligned - this kernel now runs its SAFE module`), and both results are exact. On the
+  SPIR-V road the misaligned dispatch writes nothing where it should (its float4 accesses go to the address rounded
+  down: element 0 reads 0) and no SAFE module is made: the plugin of the commit before round 3 gives the same, so the
+  SPIR-V road's guard does not see this kernel's promise. Not changed here.
+- The constexpr samplers' state words: for the round-2 kernels that have them (`tex_sample` slot 2, `tex_depth` slot 1,
+  `tex_pixel` slots 0 to 2, `tex_pixel_array` slot 0) and `r_texture`'s fragment stage (slot 1), the frontend's words
+  are the translator's reflection's (`raw_words`) exactly. The plugin now logs the comparison once per function.
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).
@@ -319,8 +454,26 @@ On the RTX 5050 (2026-11-27, NVK of this tree, the installed plugin's air-runtim
    but has not run through the plugin with a misaligned buffer (if the guard missed one, that dispatch would fault);
    the constexpr samplers' state words are not compared with the translator's; WindowServer stays off; the measured
    kernels are the test kernels, not applications'.
-3. Vertex and fragment functions. What the compute road does not have yet and they need: a stage's inputs and outputs
-   and their link (the plugin links varyings on SPIR-V, `nvmtl_varying_link`), and the plugin's SPIR-V rewrites of
-   render stages (framebuffer fetch copies, stencil-export emulation, A8 targets, multiview, the GL uniform buffer),
-   which have to be done on NIR or by the frontend.
-4. Prefer it to SPIR-V where it measures the same or better.
+3. Vertex and fragment functions (round 4, done: "Render pipelines" above). The stages' inputs, outputs and builtins
+   are the frontend's, the link is the SPIR-V road's remap handed over as Locations. Left on the SPIR-V road: the
+   pipelines that need one of its rewrites of render stages (framebuffer fetch copies, stencil-export emulation, A8
+   targets, multiview, tessellation, the GL uniform buffer, programmable sample positions), a pipeline without a
+   fragment function, and the builtins the frontend refuses (`[[primitive_id]]`, `[[barycentric_coord]]`, the
+   amplification ones); those rewrites would have to be done on NIR or by the frontend for the road to take them.
+4. Make the road the only translation for what it takes: today `newFunctionWithName:` still runs the translator for
+   every function (the fallback, the reflection, the hazard model, the constexpr samplers' and argument buffers'
+   binding and the varyings' Locations read its output), so the road adds the frontend's work to the translator's. What
+   is left before that:
+   - the SPIR-V twin on demand: translate a function only when a pipeline or variant of it takes the SPIR-V road (a
+     refusal, a rewrite, a threadgroup size the road does not run, a pixel-coordinate argument sampler, the variants
+     made from SPIR-V), which needs `newFunctionWithName:` to keep the AIR and the constants and translate later;
+   - what is read from the translation today without a pipeline: the reflection (arguments, varyings, constexpr
+     samplers, the kernel's default threadgroup size, `fragment_sample_positions`), which the translator can give
+     without the SPIR-V (`ShaderReflection::from_*` or a reflection-only call), or the frontend's result can give;
+     the hazard model's and the texel-buffer masks' reads of SPIR-V; the GL uniform index and the multiview and
+     tessellation checks, which read the SPIR-V;
+   - the pixel-coordinate argument sampler in the request (`with_runtime_sampler` on the translator's side), so that
+     variant can stay on the road;
+   - WindowServer, after the road has run on applications' kernels and pipelines (the measured ones are the tests');
+   - a measurement on applications' pipelines (the sweep covers compute kernels only) before the translator is left out
+     by default.
