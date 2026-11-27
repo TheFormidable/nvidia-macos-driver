@@ -427,6 +427,11 @@ int  nvmtl_vk_pipeline_create_rt(const void *vs, size_t vn, const void *fs, size
                                  const nvk_tess_desc *td, void *out);
 void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vi, uint32_t fi,
                                      const nvk_rt *rt, const void *vin, uint32_t samples, nvk_pipeline *base);
+/* A render pipeline from two AIR-to-NIR results, a vertex and a fragment stage (nvmtl_vk.c): the SPIR-V road's layout,
+   render pass, vertex input and state, the descriptor masks from the results. vnir and fnir stay the caller's (NVK
+   clones them). 0 on success. */
+int  nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *vres, void *fnir, const struct nvmtl_air_nir_result *fres,
+                                  const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, nvk_pipeline *out);
 int  nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int  nvmtl_vk_fetch_copy(nvk_cmdbuf *c, const nvk_pass *ps, uint32_t mask);   /* after the pass has ended: copy the colour attachments in mask */
 int  nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps);

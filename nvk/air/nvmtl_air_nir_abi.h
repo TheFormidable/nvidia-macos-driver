@@ -4,7 +4,7 @@
  *
  * The interface between the Metal plugin and NVK's AIR-to-NIR frontend (nvk_air_to_nir.c).
  *
- * The plugin hands NVK a kernel's AIR (the LLVM bitcode of a Metal function) and gets back a NIR shader built in
+ * The plugin hands NVK a function's AIR (the LLVM bitcode of a Metal function) and gets back a NIR shader built in
  * NVK's own copy of the compiler. It then creates the compute pipeline with that shader in
  * VkPipelineShaderStageNirCreateInfoMESA (module VK_NULL_HANDLE, pName "main", no specialization), with the layout it
  * uses for translated kernels: set 0 holds the buffer-address table at binding 640, a uniform buffer with a dynamic
@@ -31,6 +31,17 @@
  *
  * No LLVM is linked into NVK: the frontend opens the LLVM library named in the request (the plugin's air-runtime)
  * and finds its C API there.
+ *
+ * Since version 4 the function may also be a vertex or a fragment function (found in !air.vertex or !air.fragment), for
+ * a render pipeline the plugin creates with its render layout: set 0 is the vertex stage's (the same bands as above,
+ * the table at 640), set 1 the fragment stage's (the same bands), set 2 the heap; no push constants are read. Vertex
+ * inputs ([[attribute(n)]] of a stage_in) are read at Location n, as the vertex descriptor binds them (the plugin picks
+ * each attribute's VkFormat by the component kind the result names, as it reads a SPIR-V module's); the vertex outputs
+ * and fragment inputs (varyings) take the Locations the request gives by their user semantic, every varying as 32-bit
+ * components (a half as a float, an 8- or 16-bit integer or a bool as a 32-bit integer, flat), so the two stages agree
+ * because both come from this frontend. Builtins are Vulkan's (VertexIndex, InstanceIndex, BaseVertex, BaseInstance,
+ * Position, PointSize, ClipDistance, Layer, ViewportIndex, FragCoord, FrontFacing, PointCoord, SampleId, SampleMask,
+ * FragDepth), as the translator's stages read and write them.
  *
  * Both structs start with their own size, so the plugin and NVK can be built from different trees: a field added at
  * the end is invisible to an older caller, and a shorter struct from one is read only as far as it goes.
@@ -59,6 +70,24 @@
 #define NVMTL_AIR_NIR_ALIGN4        (1u << 6)   /* no device or constant buffer access promises more than 4-byte
                                                  * alignment: the build for a buffer bound at an address its kernel's
                                                  * accesses are not aligned to (the plugin's align guard) */
+/* Since version 4: */
+#define NVMTL_AIR_NIR_VARYINGS      (1u << 7)   /* varying_* give the Location of every vertex output and fragment input
+                                                 * by its user semantic; a varying they do not name is refused. Without
+                                                 * it each takes the translator's own (fragment inputs in their order,
+                                                 * vertex outputs by air.location_index or their order). */
+
+/* result.stage */
+#define NVMTL_AIR_NIR_STAGE_KERNEL   0u
+#define NVMTL_AIR_NIR_STAGE_VERTEX   1u
+#define NVMTL_AIR_NIR_STAGE_FRAGMENT 2u
+#define NVMTL_AIR_NIR_FRAGMENT_SET   1u          /* the descriptor set a fragment stage's resources are in */
+
+/* result.fragment_flags */
+#define NVMTL_AIR_NIR_FS_DEPTH        (1u << 0)  /* writes [[depth(any|greater|less)]] */
+#define NVMTL_AIR_NIR_FS_SAMPLE_MASK  (1u << 1)  /* writes [[sample_mask]] */
+#define NVMTL_AIR_NIR_FS_DISCARD      (1u << 2)  /* calls discard_fragment (a demote, as the translator's) */
+#define NVMTL_AIR_NIR_FS_EARLY_TESTS  (1u << 3)  /* [[early_fragment_tests]] */
+#define NVMTL_AIR_NIR_FS_PER_SAMPLE   (1u << 4)  /* reads [[sample_id]] or a sample-interpolated varying */
 
 enum nvmtl_air_nir_status {
    NVMTL_AIR_NIR_OK          = 0,
@@ -91,8 +120,19 @@ struct nvmtl_air_nir_request {
    const uint32_t *fc_indices;
    const uint32_t *fc_sizes;
    const uint8_t *const *fc_payloads;
+
+   /* Since version 4, read only with NVMTL_AIR_NIR_VARYINGS and a size that reaches them: a vertex or fragment
+    * function's varyings. varying_keys[i] is a user semantic as the AIR names it (air.vertex_output or
+    * air.fragment_input: user(x) for [[user(x)]], the compiler's generated(...) name for the others; the name
+    * (air.arg_name) of one without a semantic), varying_locations[i] the Location it takes (0 to 31): the translator's
+    * reflection's for a vertex output, and for a fragment input the vertex output's Location of the same semantic, as
+    * the plugin links them (nvmtl_varying_link). */
+   uint32_t varying_count;
+   const char *const *varying_keys;
+   const uint32_t *varying_locations;
 };
 #define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
+#define NVMTL_AIR_NIR_REQUEST_V3_SIZE 208u   /* the request without the varying_* fields */
 
 struct nvmtl_air_nir_result {
    uint32_t size;                    /* sizeof(struct nvmtl_air_nir_result), set by the caller */
@@ -120,9 +160,20 @@ struct nvmtl_air_nir_result {
    /* Since version 3, written when the caller's size reaches it: */
    uint32_t global_align;            /* the largest alignment a device or constant buffer access promises (bytes) */
    uint32_t reserved;
+
+   /* Since version 4, written when the caller's size reaches them: */
+   uint32_t stage;                   /* NVMTL_AIR_NIR_STAGE_* */
+   uint32_t vertex_inputs;           /* vertex: bit n, [[attribute(n)]] is read at Location n */
+   uint8_t vertex_input_kind[32];    /* its components: 1 float, 2 signed integer, 3 unsigned integer (the plugin picks the
+                                      * attribute's VkFormat by it, as nvmtl_spv_input_kinds reads a module) */
+   uint32_t varyings;                /* the Locations the vertex writes or the fragment reads */
+   uint32_t color_outputs;           /* fragment: bit n, [[color(n)]] is written */
+   uint32_t fragment_flags;          /* NVMTL_AIR_NIR_FS_* */
+   uint32_t reserved4;
 };
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 #define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
+#define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */
 
 #ifdef __cplusplus
 extern "C" {

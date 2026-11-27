@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Holds the plugin's AIR-to-NIR road for compute pipelines (plugin/NVMTLAirNir.m, docs/AIR-TO-NIR.md phase 2) to its
-# contract, on the source: the switch is NVMTL_AIR_NIR read once and only through nvmtl_air_nir_switch; NVK's exports are
+# Holds the plugin's AIR-to-NIR road for compute and render pipelines (plugin/NVMTLAirNir.m, docs/AIR-TO-NIR.md phases 2
+# and 3) to its contract, on the source: the switch is NVMTL_AIR_NIR read once and only through nvmtl_air_nir_switch; NVK's exports are
 # looked up only when the plugin opened NVK directly, all five or none; newComputePipelineState asks the road first and
 # makes the SPIR-V pipeline exactly as before whenever the road gave none, with the reason; the cache key carries the
 # AIR, the entry, the constants, the threadgroup size and lengths, the flags and the identity of NVK and LLVM; a variant
 # of a kernel on the road is a copy of its NIR; the kernels whose AIR is the translator's rewrite stay on SPIR-V; the
-# frontend's text-IR parse changes nothing between setjmp and longjmp (it once freed its buffer twice on a refusal).
+# frontend's text-IR parse changes nothing between setjmp and longjmp (it once freed its buffer twice on a refusal); a
+# render pipeline asks the road first and takes the SPIR-V road unchanged otherwise, never with a stage the SPIR-V road
+# rewrites, its stages translated with the device's robustness, ALIGN4 and their linked varyings, both roads linking
+# by one remap, a fragment stage's resources in set 1.
 # Each check is also run on a copy of the source with what it guards taken out, and must fail there. Then builds and runs
 # tools/test_air_nir_plugin.c (the pure helpers, plugin/nvmtl_air_nir.h).
 import pathlib, re, subprocess, sys, tempfile
@@ -69,7 +72,7 @@ def reasons(s):
     # every way out without a pipeline says why: the shader lookup sets *why itself, the others just before
     ok = bool(nils)
     for p in nils:
-        before = mk[max(0, p - 400):p]
+        before = mk[max(0, p - 250):p]
         ok &= ('*why = ' in before) or before.rstrip().endswith('&memoKey, &hit)) ') or 'nvmtl_air_nir_shader(' in before[-200:]
     sh = body(an, 'static int nvmtl_air_nir_shader(')
     rets = [m.start() for m in re.finditer(r'return -1;', sh)]
@@ -112,6 +115,52 @@ def size_twin(s):
     ob = strip_comments(s["plugin/NVMTLObjects.m"])
     return ob.count('selected = nvmtl_air_nir_for_size(selected, l);') == 3
 
+# --- render pipelines (round 4) ----------------------------------------------------------------------------------------
+def render_fallback(s):
+    dv = strip_comments(s["plugin/NVMTLDevice.m"])
+    m = body(dv, '- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {')
+    ask = m.find('nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, &nirWhy) &&')
+    make = m.find('!nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, &ps->_p, &nirWhy)')
+    note = m.find('nvmtl_air_nir_render_note(vf, noFrag ? nil : ff, onNir, onNir ? nil : nirWhy,')
+    ret = m.find('return ps;', note)
+    link, spv = m.find('NSData *flk = nvmtl_varying_link(vf, ffx);'), m.find('prc = nvmtl_vk_pipeline_create_rt(')
+    # after the multiview variants (they set rt.view_mask) and before the SPIR-V road's link and pipeline
+    mv = m.find('rt.view_mask = mask;')
+    return 0 <= mv < ask < make < note < ret < link < spv and 'if (onNir) {' in m[note:ret]
+
+RENDER_REFUSALS = ('if (noFrag || !ff)', 'if (vf->_spirvOnly || ff->_spirvOnly)', 'if (getenv("NVMTL_BDA_PROBE_FILE"))',
+                   'if (a8mask)', 'if (amplified)', 'if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps))',
+                   'if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32)',
+                   'if (nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length))',
+                   'if (nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length))',
+                   'if (samplePayload && samplePayload != [NSNull null])', 'nvmtl_app_profile_edit_module(g_app_profile')
+def render_rewrites(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    w = body(an, 'BOOL nvmtl_air_nir_render_wanted(')
+    return all(r in w for r in RENDER_REFUSALS) and w.count('return NO;') >= len(RENDER_REFUSALS)
+
+def render_requests(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    fl = body(an, 'static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)')
+    rp = body(an, 'int nvmtl_air_nir_render_pipeline(')
+    sh = body(an, 'static int nvmtl_air_nir_shader(')
+    return ('(g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)' in fl and '(render ? NVMTL_AIR_NIR_VARYINGS : 0)' in fl
+            and rp.count('NVMTL_AIR_NIR_ALIGN4') == 2 and 'nvmtl_air_nir_flags(extra, varyings != nil)' in sh
+            and 'k[@"varyings"] = varyings;' in sh and '@"vertex_descriptor": vdesc' in rp and '@{ @"stage": @"fragment" }' in rp)
+
+def render_link(s):
+    an, dv = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/NVMTLDevice.m"])
+    rp = body(an, 'int nvmtl_air_nir_render_pipeline(')
+    lk = body(dv, 'static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {')
+    return ('nvmtl_varying_remap(vf, ff, remap, have, NULL)' in rp and 'link > 0 ? remap : NULL' in rp
+            and 'nvmtl_varying_remap(vf, ff, remap, have, &unmatched)' in lk)
+
+def fragment_set(s):
+    fe = strip_comments(s["nvk/air/nvk_air_to_nir.c"])
+    return ('t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;' in fe and
+            fe.count('.desc_set = t->set') == 1 and fe.count('descriptor_set = t->set') == 2 and
+            not re.search(r'desc(riptor)?_set = 0', fe))
+
 CHECKS = [
     ("NVMTL_AIR_NIR is read once, in one place, through nvmtl_air_nir_switch", switch_once,
      ("plugin/NVMTLAirNir.m", 'BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why)\n{',
@@ -132,6 +181,16 @@ CHECKS = [
      ("plugin/NVMTLObjects.m", '    selected = nvmtl_air_nir_for_size(selected, l);\n    if (nvmtl_vk_tg_reject(l, NULL,', '    if (nvmtl_vk_tg_reject(l, NULL,')),
     ("the frontend's text-IR parse changes nothing between setjmp and longjmp", text_ir_setjmp,
      ("nvk/air/nvk_air_to_nir.c", '      if (buf && text) {', '      if (buf && text) {\n         buf = NULL;')),
+    ("newRenderPipelineState asks the road first, after the multiview variants, and goes on to the SPIR-V road unchanged", render_fallback,
+     ("plugin/NVMTLDevice.m", '          return ps;\n      } }', '      } }')),
+    ("every pipeline whose stages the SPIR-V road rewrites stays on it (A8, multiview, tessellation, GL, fetch, stencil, ...)",
+     render_rewrites, ("plugin/NVMTLAirNir.m", '    if (a8mask) {', '    if (0) {')),
+    ("render stages are translated with the device's robustness, ALIGN4, their varyings, and keyed by them", render_requests,
+     ("plugin/NVMTLAirNir.m", '(g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)', '(g_compute_unchecked ? NVMTL_AIR_NIR_UNCHECKED : 0)')),
+    ("both roads link varyings by the one remap (nvmtl_varying_remap)", render_link,
+     ("plugin/NVMTLAirNir.m", 'link > 0 ? remap : NULL', 'NULL')),
+    ("the frontend puts a fragment stage's resources in set 1, a vertex stage's and a kernel's in set 0", fragment_set,
+     ("nvk/air/nvk_air_to_nir.c", '   x->var->data.descriptor_set = t->set;', '   x->var->data.descriptor_set = 0;')),
 ]
 for what, check, (path, old, new) in CHECKS:
     arm(what, check(src))

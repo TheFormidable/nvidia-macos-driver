@@ -2,13 +2,15 @@
  * NullMoth NVIDIA driver for macOS
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  *
- * Metal AIR to NIR, for compute kernels, without SPIR-V.
+ * Metal AIR to NIR, for compute kernels and (since version 4 of the request) vertex and fragment functions, without
+ * SPIR-V.
  *
- * AIR is LLVM bitcode with Apple's conventions: kernel arguments described by !air.kernel metadata, builtins named
+ * AIR is LLVM bitcode with Apple's conventions: kernel arguments described by !air.kernel metadata (a vertex or fragment
+ * function's by !air.vertex or !air.fragment, with its outputs), builtins named
  * air.<function>.<type>, address spaces 0 thread, 1 device, 2 constant, 3 threadgroup. This file reads it with LLVM's C
  * API (from the LLVM library the plugin already ships, opened at run time, so NVK links no LLVM) and builds NIR with
- * nir_builder, in NVK's own copy of the compiler, for the plugin to hand to vkCreateComputePipelines through
- * VkPipelineShaderStageNirCreateInfoMESA. The interface, and the descriptor and push-constant contract the result
+ * nir_builder, in NVK's own copy of the compiler, for the plugin to hand to vkCreateComputePipelines (or
+ * vkCreateGraphicsPipelines) through VkPipelineShaderStageNirCreateInfoMESA. The interface, and the descriptor and push-constant contract the result
  * reads, are in nvmtl_air_nir_abi.h.
  *
  * The design follows the one Stela (an AIR-to-NIR compiler for NVK, GPL) showed works: walk LLVM's CFG into
@@ -166,6 +168,7 @@ enum {
    X(int, LLVMGetConstOpcode, (LLVMValueRef))                                                                    \
    X(LLVMValueRef, LLVMGetInitializer, (LLVMValueRef))                                                           \
    X(LLVMTypeRef, LLVMGlobalGetValueType, (LLVMValueRef))                                                        \
+   X(LLVMTypeRef, LLVMGetReturnType, (LLVMTypeRef))                                                              \
    X(unsigned, LLVMGetAlignment, (LLVMValueRef))                                                                 \
    X(int, LLVMIsDeclaration, (LLVMValueRef))                                                                     \
    X(const char *, LLVMGetValueName2, (LLVMValueRef, size_t *))                                                  \
@@ -346,6 +349,25 @@ struct air_tr {
    nir_def *num_workgroups;
    nir_shader *out;
    char llvm_error[160];
+
+   /* a vertex or fragment function (since version 4) */
+   unsigned stage;              /* NVMTL_AIR_NIR_STAGE_* */
+   unsigned set;                /* the descriptor set of its resources: 0, NVMTL_AIR_NIR_FRAGMENT_SET for a fragment */
+   LLVMValueRef outputs_node;   /* the entry's outputs: the members of what it returns */
+   struct air_output *outputs;
+   unsigned num_outputs;
+   uint32_t vertex_inputs, varyings, color_outputs, fragment_flags;
+   uint8_t vertex_input_kind[32];
+   unsigned next_varying;       /* the translator's own Locations: the next one in order */
+   nir_variable *sysval[8];     /* the system values read, one variable each */
+};
+
+/* One member of a vertex or fragment function's return value: where it goes. */
+struct air_output {
+   nir_variable *var;
+   unsigned array;                 /* clip distances: the length of the compact array, else 0 */
+   enum glsl_base_type base;       /* of the variable's components (32-bit) */
+   unsigned components;
 };
 
 static void
@@ -375,6 +397,10 @@ air_refuse(struct air_tr *t, int status, const char *fmt, ...)
 
 _Static_assert(offsetof(struct nvmtl_air_nir_request, fc_count) == NVMTL_AIR_NIR_REQUEST_V1_SIZE,
                "version 1 of the request ends at fc_count");
+_Static_assert(offsetof(struct nvmtl_air_nir_request, varying_count) == NVMTL_AIR_NIR_REQUEST_V3_SIZE,
+               "version 3 of the request ends at varying_count");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, stage) == NVMTL_AIR_NIR_RESULT_V3_SIZE,
+               "version 3 of the result ends at stage");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
@@ -1068,7 +1094,7 @@ air_table_entry(struct air_tr *t, unsigned slot)
    if (!t->table) {
       nir_def *index = nir_vulkan_resource_index(b, nir_address_format_num_components(t->table_format),
                                                  nir_address_format_bit_size(t->table_format), nir_imm_int(b, 0),
-                                                 .desc_set = 0, .binding = NVMTL_AIR_NIR_TABLE_BINDING,
+                                                 .desc_set = t->set, .binding = NVMTL_AIR_NIR_TABLE_BINDING,
                                                  .desc_type = t->table_mode == nir_var_mem_ubo ?
                                                     nir_descriptor_type_uniform_buffer :
                                                     nir_descriptor_type_storage_buffer);
@@ -1170,30 +1196,59 @@ air_md_int(LLVMValueRef v, uint64_t *out)
    return true;
 }
 
-/* The kernel's !air.kernel node: {function, outputs, arguments, ...}. */
+/* The entry's node in !air.kernel, !air.vertex or !air.fragment: {function, outputs, arguments, ...}. A vertex or
+ * fragment function's node may say more after its arguments: a fragment function's early_fragment_tests is read, and
+ * anything else (a post-tessellation vertex function's patch, ...) is refused. Mesh and object functions are refused. */
 static LLVMValueRef
 air_find_kernel(struct air_tr *t, LLVMValueRef *args_node)
 {
-   unsigned n = L.LLVMGetNamedMetadataNumOperands(t->module, "air.kernel");
-   if (!n)
-      air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the module has no !air.kernel");
-   LLVMValueRef *kernels = rzalloc_array(t->mem, LLVMValueRef, n);
-   L.LLVMGetNamedMetadataOperands(t->module, "air.kernel", kernels);
-   LLVMValueRef found = NULL;
-   for (unsigned i = 0; i < n; i++) {
-      LLVMValueRef *ops;
-      unsigned count = air_md_operands(kernels[i], &ops, t->mem);
-      if (count < 3 || !ops[0] || !L.LLVMIsAFunction(ops[0]))
+   static const struct { const char *md; unsigned stage; } lists[] = {
+      { "air.kernel", NVMTL_AIR_NIR_STAGE_KERNEL }, { "air.vertex", NVMTL_AIR_NIR_STAGE_VERTEX },
+      { "air.fragment", NVMTL_AIR_NIR_STAGE_FRAGMENT }, { "air.mesh", ~0u }, { "air.object", ~0u },
+   };
+   LLVMValueRef found = NULL, *found_ops = NULL;
+   unsigned total = 0, found_count = 0;
+   for (unsigned l = 0; l < ARRAY_SIZE(lists); l++) {
+      unsigned n = L.LLVMGetNamedMetadataNumOperands(t->module, lists[l].md);
+      if (!n)
          continue;
-      if (t->req->entry && strcmp(air_name(ops[0], NULL), t->req->entry))
-         continue;
-      if (found)
-         air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "the module has more than one kernel and the request names none");
-      found = ops[0];
-      *args_node = ops[2];
+      total += n;
+      LLVMValueRef *nodes = rzalloc_array(t->mem, LLVMValueRef, n);
+      L.LLVMGetNamedMetadataOperands(t->module, lists[l].md, nodes);
+      for (unsigned i = 0; i < n; i++) {
+         LLVMValueRef *ops;
+         unsigned count = air_md_operands(nodes[i], &ops, t->mem);
+         if (count < 3 || !ops[0] || !L.LLVMIsAFunction(ops[0]))
+            continue;
+         if (t->req->entry && strcmp(air_name(ops[0], NULL), t->req->entry))
+            continue;
+         if (found)
+            air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "the module has more than one function and the request names none");
+         found = ops[0];
+         found_ops = ops;
+         found_count = count;
+         t->stage = lists[l].stage;
+      }
    }
+   if (!total)
+      air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the module has no !air.kernel, !air.vertex or !air.fragment");
    if (!found)
-      air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "no kernel named %s", t->req->entry ? t->req->entry : "(any)");
+      air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "no function named %s", t->req->entry ? t->req->entry : "(any)");
+   if (t->stage == ~0u)
+      unsupported(t, "a mesh or object function");
+   *args_node = found_ops[2];
+   t->outputs_node = found_ops[1];
+   if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL) {
+      for (unsigned k = 3; k < found_count; k++) {
+         const char *what = air_md_string(found_ops[k]);
+         if (t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT && what && !strcmp(what, "early_fragment_tests"))
+            t->fragment_flags |= NVMTL_AIR_NIR_FS_EARLY_TESTS;
+         else
+            unsupported(t, "a %s function with %s%s", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment",
+                        what ? what : "metadata this does not read (a post-tessellation vertex function's patch, ...)",
+                        what ? " in its metadata" : "");
+      }
+   }
    return found;
 }
 
@@ -1206,6 +1261,10 @@ struct air_arg {
    const char *type_name;  /* air.arg_type_name */
    const char *access;     /* air.read, air.write, air.read_write, air.sample */
    const char *location_unknown;   /* the index is a global no value is known for (a function constant's) */
+   const char *semantic;   /* a varying's user semantic: user(x), or the compiler's generated(...) */
+   const char *arg_name;   /* air.arg_name */
+   bool flat, no_perspective, centroid, at_sample;   /* a fragment input's interpolation */
+   bool raster_order_group;
 };
 
 static struct air_arg
@@ -1227,6 +1286,10 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
       a.fc_node = ops[2];
       first = 4;
    }
+   /* a varying's semantic follows its kind: {index, "air.fragment_input", "user(x)", ...} */
+   if ((!strcmp(a.kind, "air.fragment_input") || !strcmp(a.kind, "air.vertex_output")) && first < count &&
+       air_md_string(ops[first]) && strncmp(air_md_string(ops[first]), "air.", 4))
+      a.semantic = air_md_string(ops[first++]);
    for (unsigned k = first; k < count; k++) {
       const char *key = air_md_string(ops[k]);
       if (!key)
@@ -1234,6 +1297,13 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
       if (!strcmp(key, "air.read") || !strcmp(key, "air.write") || !strcmp(key, "air.read_write") ||
           !strcmp(key, "air.sample"))
          a.access = key;
+      a.flat |= !strcmp(key, "air.flat");
+      a.no_perspective |= !strcmp(key, "air.no_perspective");
+      a.centroid |= !strcmp(key, "air.centroid");
+      a.at_sample |= !strcmp(key, "air.sample");
+      a.raster_order_group |= !strcmp(key, "air.raster_order_group");
+      if (k + 1 < count && !strcmp(key, "air.arg_name"))
+         a.arg_name = air_md_string(ops[k + 1]);
       if (k + 1 >= count)
          continue;
       if (!strcmp(key, "air.arg_type_name"))
@@ -1296,6 +1366,339 @@ static struct air_texture *air_bind_texture(struct air_tr *t, const struct air_a
 static struct air_sampler *air_bind_sampler(struct air_tr *t, const struct air_arg *a, unsigned i);
 static void air_assign_static_samplers(struct air_tr *t);
 
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Vertex and fragment functions: stage inputs, builtins and outputs                                                  */
+/*                                                                                                                    */
+/* As the translator's stages read and write them: a vertex input [[attribute(n)]] at Location n (the vertex          */
+/* descriptor's), the builtins as Vulkan's, and the varyings at the Locations the request gives by user semantic, or  */
+/* the translator's own order without them. Every varying travels as 32-bit components (a half as a float, a narrow   */
+/* integer or a bool as a 32-bit integer, flat), which both stages agree on because both come from here; a vertex     */
+/* input is declared with 32-bit components too, as Vulkan delivers it. System values are variables, as               */
+/* spirv_to_nir declares them, so NVK lowers them exactly as it lowers the SPIR-V road's.                             */
+
+static bool
+air_has_varyings(const struct air_tr *t)
+{
+   return (t->req->flags & NVMTL_AIR_NIR_VARYINGS) &&
+          t->req->size >= offsetof(struct nvmtl_air_nir_request, varying_locations) + sizeof t->req->varying_locations;
+}
+
+/* The Location of the varying named key (own: its air.location_index, or ~0) */
+static unsigned
+air_varying_location(struct air_tr *t, const char *key, uint64_t own)
+{
+   uint64_t loc = ~0ull;
+   if (air_has_varyings(t)) {
+      for (uint32_t i = 0; i < t->req->varying_count; i++) {
+         if (!key || !t->req->varying_keys || !t->req->varying_keys[i] || strcmp(t->req->varying_keys[i], key))
+            continue;
+         if (loc != ~0ull)
+            unsupported(t, "the request names the varying %s twice", key);
+         loc = t->req->varying_locations ? t->req->varying_locations[i] : ~0ull;
+      }
+      if (loc == ~0ull)
+         unsupported(t, "the varying %s has no Location in the request", key ? key : "(unnamed)");
+   } else {
+      loc = own != ~0ull ? own : t->next_varying;
+      t->next_varying++;
+   }
+   if (loc >= 32)
+      unsupported(t, "the varying %s at Location %llu", key ? key : "(unnamed)", (unsigned long long)loc);
+   if (t->varyings & (1u << loc))
+      unsupported(t, "two varyings at Location %llu", (unsigned long long)loc);
+   t->varyings |= 1u << loc;
+   return (unsigned)loc;
+}
+
+/* The 32-bit components a stage input or output of AIR type ty travels in; the type's name tells a signed integer
+ * from an unsigned one, which LLVM's types do not */
+static enum glsl_base_type
+air_io_base(const struct air_type *ty, const char *type_name)
+{
+   if (ty->is_float)
+      return GLSL_TYPE_FLOAT;
+   const char *n = type_name ? type_name : "";
+   if (!strncmp(n, "packed_", 7))
+      n += 7;
+   return n[0] == 'u' || !strncmp(n, "bool", 4) ? GLSL_TYPE_UINT : GLSL_TYPE_INT;
+}
+
+static nir_def *
+air_io_widen(nir_builder *b, nir_def *v, enum glsl_base_type base)
+{
+   if (base == GLSL_TYPE_FLOAT)
+      return v->bit_size == 32 ? v : nir_f2f32(b, v);
+   if (v->bit_size == 1)
+      return nir_b2i32(b, v);
+   if (v->bit_size == 32)
+      return v;
+   return base == GLSL_TYPE_INT ? nir_i2i32(b, v) : nir_u2u32(b, v);
+}
+
+static nir_def *
+air_io_narrow(nir_builder *b, nir_def *v, const struct air_type *ty)
+{
+   if (ty->bits == 1)
+      return v->bit_size == 1 ? v : nir_ine_imm(b, v, 0);
+   if (v->bit_size == 1)
+      return nir_b2iN(b, v, ty->bits);
+   if (ty->bits == v->bit_size)
+      return v;
+   return ty->is_float ? nir_f2fN(b, v, ty->bits) : nir_u2uN(b, v, ty->bits);
+}
+
+static nir_def *
+air_sysval(struct air_tr *t, gl_system_value sv, const struct glsl_type *type)
+{
+   nir_variable *var = NULL;
+   unsigned i = 0;
+   for (; i < ARRAY_SIZE(t->sysval) && t->sysval[i]; i++)
+      if (t->sysval[i]->data.location == (int)sv)
+         var = t->sysval[i];
+   if (!var) {
+      if (i == ARRAY_SIZE(t->sysval))
+         unsupported(t, "more than %u system values", (unsigned)ARRAY_SIZE(t->sysval));
+      var = t->sysval[i] = nir_variable_create(t->nir, nir_var_system_value, type, gl_system_value_name(sv));
+      var->data.location = sv;
+   }
+   return nir_load_var(&t->top, var);
+}
+
+/* A vertex or fragment function's argument that is a stage input or a builtin: true when a is one */
+static bool
+air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
+{
+   nir_builder *b = &t->top;
+   const bool vs = t->stage == NVMTL_AIR_NIR_STAGE_VERTEX, fs = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT;
+   const char *k = a->kind;
+   const char *name = a->arg_name ? a->arg_name : "(unnamed)";
+   LLVMTypeRef lty = L.LLVMTypeOf(a->param);
+   if ((vs && !strcmp(k, "air.vertex_input")) || (fs && !strcmp(k, "air.fragment_input"))) {
+      if (a->fc_node)
+         unsupported(t, "the stage input %s exists only under a function constant", name);
+      if (air_is_aggregate(lty))
+         unsupported(t, "the stage input %s of type %s (more than one Location)", name, a->type_name ? a->type_name : "?");
+      struct air_type ty = air_type_of(t, lty);
+      if (ty.is_pointer || ty.components > 4 || ty.bits > 32)
+         unsupported(t, "the stage input %s of type %s", name, a->type_name ? a->type_name : "?");
+      const enum glsl_base_type base = air_io_base(&ty, a->type_name);
+      nir_variable *var;
+      if (vs) {
+         if (a->location >= 32)
+            unsupported(t, "the vertex input %s at attribute %llu", name, (unsigned long long)a->location);
+         const unsigned loc = (unsigned)a->location;
+         if (t->vertex_inputs & (1u << loc))
+            unsupported(t, "two vertex inputs at attribute %u", loc);
+         t->vertex_inputs |= 1u << loc;
+         t->vertex_input_kind[loc] = base == GLSL_TYPE_FLOAT ? 1 : base == GLSL_TYPE_INT ? 2 : 3;
+         var = nir_variable_create(t->nir, nir_var_shader_in, glsl_vector_type(base, ty.components), name);
+         var->data.location = VERT_ATTRIB_GENERIC0 + loc;
+      } else {
+         const unsigned loc = air_varying_location(t, a->semantic ? a->semantic : a->arg_name, ~0ull);
+         var = nir_variable_create(t->nir, nir_var_shader_in, glsl_vector_type(base, ty.components), name);
+         var->data.location = VARYING_SLOT_VAR0 + loc;
+         var->data.interpolation = base != GLSL_TYPE_FLOAT || a->flat ? INTERP_MODE_FLAT :
+                                   a->no_perspective ? INTERP_MODE_NOPERSPECTIVE : INTERP_MODE_SMOOTH;
+         var->data.centroid = a->centroid;
+         var->data.sample = a->at_sample;
+         if (a->at_sample)
+            t->fragment_flags |= NVMTL_AIR_NIR_FS_PER_SAMPLE;
+      }
+      air_set(t, a->param, air_io_narrow(b, nir_load_var(b, var), &ty), AIR_VALUE, 0);
+      return true;
+   }
+   static const struct {
+      unsigned stage;
+      const char *kind;
+      gl_system_value sv;
+      unsigned components;
+      bool is_bool, is_float;
+   } builtins[] = {
+      { NVMTL_AIR_NIR_STAGE_VERTEX, "air.vertex_id", SYSTEM_VALUE_VERTEX_ID, 1 },
+      { NVMTL_AIR_NIR_STAGE_VERTEX, "air.instance_id", SYSTEM_VALUE_INSTANCE_INDEX, 1 },
+      { NVMTL_AIR_NIR_STAGE_VERTEX, "air.base_vertex", SYSTEM_VALUE_FIRST_VERTEX, 1 },   /* Vulkan's BaseVertex */
+      { NVMTL_AIR_NIR_STAGE_VERTEX, "air.base_instance", SYSTEM_VALUE_BASE_INSTANCE, 1 },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.position", SYSTEM_VALUE_FRAG_COORD, 4, false, true },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.front_facing", SYSTEM_VALUE_FRONT_FACE, 1, true },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.point_coord", SYSTEM_VALUE_POINT_COORD, 2, false, true },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.sample_id", SYSTEM_VALUE_SAMPLE_ID, 1 },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.sample_mask_in", SYSTEM_VALUE_SAMPLE_MASK_IN, 1 },
+      { NVMTL_AIR_NIR_STAGE_FRAGMENT, "air.render_target_array_index", SYSTEM_VALUE_LAYER_ID, 1 },
+   };
+   for (unsigned j = 0; j < ARRAY_SIZE(builtins); j++) {
+      if (builtins[j].stage != t->stage || strcmp(builtins[j].kind, k))
+         continue;
+      if (air_is_aggregate(lty))
+         unsupported(t, "%s as an aggregate", k);
+      struct air_type ty = air_type_of(t, lty);
+      if (ty.is_pointer || ty.is_float != builtins[j].is_float || ty.components > builtins[j].components ||
+          (builtins[j].is_float && ty.components != builtins[j].components))
+         unsupported(t, "%s of type %s", k, a->type_name ? a->type_name : "?");
+      const struct glsl_type *gt = builtins[j].is_bool ? glsl_bool_type() :
+                                   builtins[j].is_float ? glsl_vec_type(builtins[j].components) :
+                                   builtins[j].sv == SYSTEM_VALUE_SAMPLE_MASK_IN ? glsl_int_type() : glsl_uint_type();
+      nir_def *v = air_sysval(t, builtins[j].sv, gt);
+      if (builtins[j].sv == SYSTEM_VALUE_SAMPLE_ID)
+         t->fragment_flags |= NVMTL_AIR_NIR_FS_PER_SAMPLE;
+      if (ty.components < v->num_components)
+         v = nir_trim_vector(b, v, ty.components);
+      air_set(t, a->param, air_io_narrow(b, v, &ty), AIR_VALUE, 0);
+      (void)i;
+      return true;
+   }
+   return false;
+}
+
+/* A vertex or fragment function's return value: one output variable per member its outputs node describes */
+static void
+air_bind_outputs(struct air_tr *t)
+{
+   const bool vs = t->stage == NVMTL_AIR_NIR_STAGE_VERTEX;
+   LLVMTypeRef rty = L.LLVMGetReturnType(L.LLVMGlobalGetValueType(t->function));
+   LLVMValueRef *nodes = NULL;
+   const unsigned n = t->outputs_node && L.LLVMIsAMDNode(t->outputs_node) ? air_md_operands(t->outputs_node, &nodes, t->mem) : 0;
+   const bool is_struct = L.LLVMGetTypeKind(rty) == TY_STRUCT;
+   const unsigned members = L.LLVMGetTypeKind(rty) == TY_VOID ? 0 : is_struct ? L.LLVMCountStructElementTypes(rty) : 1;
+   if (members != n)
+      unsupported(t, "a return value of %u members that its metadata describes as %u outputs", members, n);
+   t->outputs = rzalloc_array(t->mem, struct air_output, n + 1);
+   t->num_outputs = n;
+   for (unsigned i = 0; i < n; i++) {
+      LLVMValueRef *ops;
+      const unsigned count = air_md_operands(nodes[i], &ops, t->mem);
+      const char *kind = count ? air_md_string(ops[0]) : NULL;
+      if (!kind)
+         air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "output %u of the function has malformed metadata", i);
+      const char *semantic = NULL, *type_name = NULL, *name = NULL, *qualifier = NULL;
+      uint64_t location = ~0ull, clip = 0, rt = ~0ull, rt_index = 0;
+      unsigned first = 1;
+      if (!strcmp(kind, "air.vertex_output") && count > 1 && air_md_string(ops[1]) && strncmp(air_md_string(ops[1]), "air.", 4))
+         semantic = air_md_string(ops[first++]);
+      if (!strcmp(kind, "air.render_target")) {
+         if (count < 3 || !air_md_int(ops[1], &rt) || !air_md_int(ops[2], &rt_index))
+            air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "colour output %u has malformed metadata", i);
+         first = 3;
+      }
+      for (unsigned k = first; k + 1 < count; k++) {
+         const char *key = air_md_string(ops[k]);
+         if (!key)
+            continue;
+         if (!strcmp(key, "air.arg_type_name"))
+            type_name = air_md_string(ops[k + 1]);
+         else if (!strcmp(key, "air.arg_name"))
+            name = air_md_string(ops[k + 1]);
+         else if (!strcmp(key, "air.depth_qualifier"))
+            qualifier = air_md_string(ops[k + 1]);
+         else if (!strcmp(key, "air.location_index"))
+            air_md_int(ops[k + 1], &location);
+         else if (!strcmp(key, "air.clip_distance_array_size"))
+            air_md_int(ops[k + 1], &clip);
+      }
+      LLVMTypeRef ety = is_struct ? L.LLVMStructGetTypeAtIndex(rty, i) : rty;
+      struct air_output *o = &t->outputs[i];
+      const char *vname = name ? name : kind;
+      if (vs && !strcmp(kind, "air.clip_distance")) {
+         uint64_t len = L.LLVMGetTypeKind(ety) == TY_ARRAY ? L.LLVMGetArrayLength2(ety) : 1;
+         LLVMTypeRef el = L.LLVMGetTypeKind(ety) == TY_ARRAY ? L.LLVMGetElementType(ety) : ety;
+         if (L.LLVMGetTypeKind(el) != TY_FLOAT || !len || len > 8 || (clip && clip != len))
+            unsupported(t, "clip distances of this type (%s)", type_name ? type_name : "?");
+         o->array = L.LLVMGetTypeKind(ety) == TY_ARRAY ? (unsigned)len : 0;
+         o->base = GLSL_TYPE_FLOAT;
+         o->components = 1;
+         o->var = nir_variable_create(t->nir, nir_var_shader_out, glsl_array_type(glsl_float_type(), (unsigned)len, 0), vname);
+         o->var->data.location = VARYING_SLOT_CLIP_DIST0;
+         o->var->data.compact = true;
+         t->nir->info.clip_distance_array_size = (unsigned)len;
+         if (!o->array)
+            o->array = 1;   /* a single float: element 0 */
+         continue;
+      }
+      if (air_is_aggregate(ety))
+         unsupported(t, "the output %s of type %s (more than one Location)", vname, type_name ? type_name : "?");
+      struct air_type ty = air_type_of(t, ety);
+      if (ty.is_pointer || ty.components > 4 || ty.bits > 32)
+         unsupported(t, "the output %s of type %s", vname, type_name ? type_name : "?");
+      o->base = air_io_base(&ty, type_name);
+      o->components = ty.components;
+      int slot = -1;
+      if (vs) {
+         if (!strcmp(kind, "air.position") && ty.is_float && ty.components == 4)
+            slot = VARYING_SLOT_POS;
+         else if (!strcmp(kind, "air.point_size") && ty.is_float && ty.components == 1)
+            slot = VARYING_SLOT_PSIZ;
+         else if (!strcmp(kind, "air.render_target_array_index") && !ty.is_float && ty.components == 1)
+            slot = VARYING_SLOT_LAYER;
+         else if (!strcmp(kind, "air.viewport_array_index") && !ty.is_float && ty.components == 1)
+            slot = VARYING_SLOT_VIEWPORT;
+         else if (!strcmp(kind, "air.vertex_output"))
+            slot = VARYING_SLOT_VAR0 + air_varying_location(t, semantic ? semantic : name, location);
+         else
+            unsupported(t, "the vertex output %s (%s)", kind, type_name ? type_name : "?");
+      } else {
+         if (!strcmp(kind, "air.render_target")) {
+            if (rt >= 8)
+               unsupported(t, "[[color(%llu)]]", (unsigned long long)rt);
+            if (rt_index)
+               unsupported(t, "a dual-source colour output ([[color(%llu), index(%llu)]])", (unsigned long long)rt,
+                           (unsigned long long)rt_index);
+            if (t->color_outputs & (1u << rt))
+               unsupported(t, "two outputs of [[color(%llu)]]", (unsigned long long)rt);
+            t->color_outputs |= 1u << rt;
+            slot = FRAG_RESULT_DATA0 + (int)rt;
+         } else if (!strcmp(kind, "air.depth") && ty.is_float && ty.components == 1) {
+            slot = FRAG_RESULT_DEPTH;
+            t->fragment_flags |= NVMTL_AIR_NIR_FS_DEPTH;
+            t->nir->info.fs.depth_layout = !qualifier || !strcmp(qualifier, "air.any") ? FRAG_DEPTH_LAYOUT_ANY :
+                                           !strcmp(qualifier, "air.greater") ? FRAG_DEPTH_LAYOUT_GREATER :
+                                           !strcmp(qualifier, "air.less") ? FRAG_DEPTH_LAYOUT_LESS : FRAG_DEPTH_LAYOUT_ANY;
+         } else if (!strcmp(kind, "air.sample_mask") && !ty.is_float && ty.components == 1) {
+            slot = FRAG_RESULT_SAMPLE_MASK;
+            t->fragment_flags |= NVMTL_AIR_NIR_FS_SAMPLE_MASK;
+            t->nir->info.fs.sample_mask_out_declared = true;
+            o->base = GLSL_TYPE_INT;
+         } else
+            unsupported(t, "the fragment output %s (%s)", kind, type_name ? type_name : "?");
+      }
+      o->var = nir_variable_create(t->nir, nir_var_shader_out, glsl_vector_type(o->base, o->components), vname);
+      o->var->data.location = slot;
+      if (!vs && o->base != GLSL_TYPE_FLOAT && slot >= FRAG_RESULT_DATA0)
+         o->var->data.interpolation = INTERP_MODE_FLAT;
+   }
+}
+
+/* At a return: each member of the value into its output */
+static void
+air_store_outputs(struct air_tr *t, LLVMValueRef value)
+{
+   nir_builder *b = &t->b;
+   if (!t->num_outputs)
+      return;
+   struct air_val *v = air_get(t, value);
+   const bool whole = L.LLVMGetTypeKind(L.LLVMTypeOf(value)) != TY_STRUCT;
+   for (unsigned i = 0; i < t->num_outputs; i++) {
+      struct air_output *o = &t->outputs[i];
+      struct air_val *e = whole ? v : (v->kind == AIR_AGGREGATE && i < v->num_elems) ? v->elems[i] : NULL;
+      if (!e)
+         unsupported(t, "a return value of another shape than the function's");
+      if (o->array) {
+         const bool single = o->array == 1 && e->kind != AIR_AGGREGATE;
+         if (!single && (e->kind != AIR_AGGREGATE || e->num_elems != o->array))
+            unsupported(t, "clip distances of another shape than declared");
+         for (unsigned k = 0; k < o->array; k++) {
+            struct air_val *c = single ? e : e->elems[k];
+            if (c->kind != AIR_VALUE || !c->def)
+               unsupported(t, "a clip distance that is not a value");
+            nir_store_deref(b, nir_build_deref_array_imm(b, nir_build_deref_var(b, o->var), k),
+                            air_io_widen(b, c->def, GLSL_TYPE_FLOAT), 1);
+         }
+         continue;
+      }
+      if (e->kind != AIR_VALUE || !e->def || e->def->num_components != o->components)
+         unsupported(t, "an output that is not a value of its type");
+      nir_store_var(b, o->var, air_io_widen(b, e->def, o->base), BITFIELD_MASK(o->components));
+   }
+}
+
 /* Buffers read their address from the table, builtins from the system values; threadgroup arguments take the
  * first bytes of threadgroup memory, in index order, at the lengths the request gives, and the kernel's static
  * threadgroup variables follow them as the instructions meet them. */
@@ -1316,6 +1719,10 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       if (a->location_unknown && air_fc_arg_present(t, a) != 0)
          unsupported(t, "argument %u's index is %s, which depends on a function constant %s", i, a->location_unknown,
                      air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");
+      if (a->raster_order_group)
+         unsupported(t, "argument %u is in a raster order group", i);
+      if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && air_bind_stage_input(t, a, i))
+         continue;
       if (!strcmp(a->kind, "air.buffer")) {
          if (!air_fc_arg_present(t, a)) {
             /* a function constant leaves it out: nothing is bound at its slot, and what read it was folded away */
@@ -1337,6 +1744,8 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          struct air_val *v = air_set(t, a->param, NULL, AIR_SAMPLER, 1);
          v->res = air_bind_sampler(t, a, i);
       } else if (!strcmp(a->kind, "air.threadgroup")) {
+         if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)
+            unsupported(t, "a threadgroup argument of a vertex or fragment function");
          if (a->location >= NVMTL_AIR_NIR_MAX_BUFFERS)
             unsupported(t, "threadgroup argument %u has no index below %u", i, NVMTL_AIR_NIR_MAX_BUFFERS);
          uint32_t len = t->req->threadgroup_lengths[a->location];
@@ -1350,6 +1759,10 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          tg_len[a->location] = len;
          tg_used[a->location] = true;
       } else {
+         /* a vertex or fragment function reads only the SIMD-group builtins among the kernel's (Metal allows no more) */
+         if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && strcmp(a->kind, "air.thread_index_in_simdgroup") &&
+             strcmp(a->kind, "air.threads_per_simdgroup") && strcmp(a->kind, "air.thread_execution_width"))
+            unsupported(t, "the %s argument kind %s", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment", a->kind);
          nir_def *v = air_builtin(t, a->kind);
          if (!v)
             unsupported(t, "the kernel argument kind %s", a->kind);
@@ -1380,9 +1793,11 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
 
    for (unsigned p = 0; p < params; p++) {
       if (!_mesa_hash_table_search(t->values, L.LLVMGetParam(t->function, p)))
-         unsupported(t, "kernel parameter %u has no !air.kernel description", p);
+         unsupported(t, "parameter %u of the function has no description in its metadata", p);
    }
    air_assign_static_samplers(t);
+   if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)
+      air_bind_outputs(t);
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -1540,6 +1955,15 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
    nir_def *x = n > 0 ? s[0] : NULL;
 #define IS(name) (!strcmp(fn, name))
 #define NEED(k) do { if (n != (k)) unsupported(t, "air.%s with %u operands", fn, n); } while (0)
+   if (IS("dfdx") || IS("dfdy") || IS("fwidth")) {
+      NEED(1);
+      if (t->stage != NVMTL_AIR_NIR_STAGE_FRAGMENT)
+         unsupported(t, "air.%s outside a fragment function", fn);
+      nir_def *w = air_widen(b, x);
+      nir_def *r = IS("dfdx") ? nir_ddx(b, w) : IS("dfdy") ? nir_ddy(b, w)
+                              : nir_fadd(b, nir_fabs(b, nir_ddx(b, w)), nir_fabs(b, nir_ddy(b, w)));
+      return air_narrow(b, r, x->bit_size);
+   }
    if (IS("fabs") || IS("abs")) { NEED(1); return nir_fabs(b, x); }
    if (IS("saturate")) { NEED(1); return nir_fsat(b, x); }
    if (IS("floor")) { NEED(1); return nir_ffloor(b, x); }
@@ -2124,7 +2548,7 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
    const struct glsl_type *type = x->storage ? glsl_image_type(x->dim, x->array, x->base)
                                              : glsl_texture_type(x->dim, x->array, x->base);
    x->var = nir_variable_create(t->nir, x->storage ? nir_var_image : nir_var_uniform, type, a->type_name);
-   x->var->data.descriptor_set = 0;
+   x->var->data.descriptor_set = t->set;
    x->var->data.binding = (x->storage ? 480 : 32) + x->index;
    if (x->storage) {
       x->var->data.access = x->access;
@@ -2242,7 +2666,7 @@ air_sampler_deref(struct air_tr *t, struct air_sampler *s, bool shadow)
    if (!*var) {
       *var = nir_variable_create(t->nir, nir_var_uniform, shadow ? glsl_bare_shadow_sampler_type() : glsl_bare_sampler_type(),
                                  s->is_static ? "constexpr_sampler" : "sampler");
-      (*var)->data.descriptor_set = 0;
+      (*var)->data.descriptor_set = t->set;
       (*var)->data.binding = 160 + s->slot;
    }
    t->sampler_mask |= 1u << s->slot;
@@ -2283,7 +2707,7 @@ air_tex_type(const struct air_texture *x)
 }
 
 struct air_tex_srcs {
-   nir_def *coord, *lod, *comparator, *ddx, *ddy, *offset;
+   nir_def *coord, *lod, *bias, *comparator, *ddx, *ddy, *offset;
    nir_deref_instr *texture, *sampler;
 };
 
@@ -2300,6 +2724,8 @@ air_build_tex(struct air_tr *t, nir_texop op, const struct air_texture *x, const
       srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_coord, in->coord);
    if (in->lod)
       srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, in->lod);
+   if (in->bias)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_bias, in->bias);
    if (in->comparator)
       srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_comparator, in->comparator);
    if (in->ddx) {
@@ -2642,8 +3068,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          comparator = nir_f2f32(b, comparator);
    }
    bool grad = strstr(name, "_grad") != NULL;
-   nir_def *ddx = NULL, *ddy = NULL, *lod = NULL, *offset = NULL, *dyn_offset = NULL;
-   bool seen_offset = false;
+   nir_def *ddx = NULL, *ddy = NULL, *lod = NULL, *bias = NULL, *offset = NULL, *dyn_offset = NULL;
+   bool seen_offset = false, implicit = false;
    if (grad) {
       ddx = air_def(t, ARG(at));
       ddy = air_def(t, ARG(at + 1));
@@ -2675,10 +3101,19 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (!grad && !lod && air_is_float_scalar(v) && i > at && air_is_bool(ARG(i - 1))) {
          LLVMValueRef flag = ARG(i - 1);
          bool level = !L.LLVMIsAConstantInt(flag) || (L.LLVMConstIntGetZExtValue(flag) & 1);
-         if (!level && !air_is_zero(v))
-            unsupported(t, "a sample with a bias in a kernel (no derivatives here)");
-         lod = air_def(t, v);
-         lod = !level ? nir_imm_float(b, 0) : lod->bit_size == 32 ? lod : nir_f2f32(b, lod);
+         if (!level && t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT) {
+            /* a fragment function samples at the level its derivatives give, moved by the bias */
+            implicit = true;
+            if (!air_is_zero(v)) {
+               bias = air_def(t, v);
+               bias = bias->bit_size == 32 ? bias : nir_f2f32(b, bias);
+            }
+         } else {
+            if (!level && !air_is_zero(v))
+               unsupported(t, "a sample with a bias outside a fragment function (no derivatives there)");
+            lod = air_def(t, v);
+            lod = !level ? nir_imm_float(b, 0) : lod->bit_size == 32 ? lod : nir_f2f32(b, lod);
+         }
          i++;   /* the float after the level (a minimum LOD clamp) */
          if (i < nargs && air_is_float_scalar(ARG(i)) && !air_is_zero(ARG(i)))
             unsupported(t, "a sample with a minimum LOD clamp");
@@ -2746,15 +3181,16 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
    if (s->is_static && comparator && ((s->words[0] >> 16) & 0xf) == 0)
       unsupported(t, "a compare sample through a constexpr sampler without a compare function");
    struct air_tex_srcs in = { .texture = tex_deref, .sampler = air_sampler_deref(t, s, comparator != NULL),
-                              .coord = coord, .lod = grad ? NULL : lod ? lod : nir_imm_float(b, 0),
-                              .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset };
+                              .coord = coord, .lod = grad || implicit ? NULL : lod ? lod : nir_imm_float(b, 0),
+                              .bias = bias, .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset };
    if (ddx && (ddx->num_components != spatial || ddy->num_components != spatial))
       unsupported(t, "gradients of %u components", ddx->num_components);
    if (ddx && ddx->bit_size != 32) {
       in.ddx = nir_f2f32(b, ddx);
       in.ddy = nir_f2f32(b, ddy);
    }
-   nir_def *color = air_build_tex(t, grad ? nir_texop_txd : nir_texop_txl, x, &in, -1);
+   nir_def *color = air_build_tex(t, grad ? nir_texop_txd : implicit ? (bias ? nir_texop_txb : nir_texop_tex) : nir_texop_txl,
+                                  x, &in, -1);
    *out = air_texel_result(t, call, color);
    return true;
 #undef ARG
@@ -2774,6 +3210,15 @@ air_call(struct air_tr *t, LLVMValueRef call)
 
    if (!L.LLVMIsDeclaration(callee))
       unsupported(t, "a call to %s, which LLVM did not inline", name);
+
+   if (!strcmp(name, "air.discard_fragment")) {
+      /* a demote, as the translator's (OpDemoteToHelperInvocation): derivatives after it stay defined */
+      if (t->stage != NVMTL_AIR_NIR_STAGE_FRAGMENT)
+         unsupported(t, "discard_fragment outside a fragment function");
+      nir_demote(b);
+      t->fragment_flags |= NVMTL_AIR_NIR_FS_DISCARD;
+      return;
+   }
 
    struct air_val *tex_result;
    if (air_texture_call(t, name, call, nargs, &tex_result)) {
@@ -3168,6 +3613,10 @@ air_terminator(struct air_tr *t, struct air_block *blk, LLVMValueRef term, struc
    blk->end = nir_nop(b);
    switch (L.LLVMGetInstructionOpcode(term)) {
    case OP_RET:
+      if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && L.LLVMGetNumOperands(term) > 0)
+         air_store_outputs(t, L.LLVMGetOperand(term, 0));
+      nir_goto(b, t->impl->end_block);
+      return;
    case OP_UNREACHABLE:
       nir_goto(b, t->impl->end_block);
       return;
@@ -4236,10 +4685,15 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    t->layout = L.LLVMGetModuleDataLayout(t->module);
 
    const nir_shader_compiler_options *options = nak_nir_options(pdev->nak);
-   t->nir = nir_shader_create(NULL, MESA_SHADER_COMPUTE, options);
+   const bool kernel = t->stage == NVMTL_AIR_NIR_STAGE_KERNEL;
+   t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;
+   t->nir = nir_shader_create(NULL, kernel ? MESA_SHADER_COMPUTE : t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ?
+                                    MESA_SHADER_VERTEX : MESA_SHADER_FRAGMENT, options);
    t->nir->info.name = ralloc_strdup(t->nir, air_name(t->function, NULL));
-   for (unsigned i = 0; i < 3; i++)
+   for (unsigned i = 0; kernel && i < 3; i++)
       t->nir->info.workgroup_size[i] = t->req->local_size[i];
+   if (t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT)
+      t->nir->info.fs.early_fragment_tests = (t->fragment_flags & NVMTL_AIR_NIR_FS_EARLY_TESTS) != 0;
    t->nir->info.api_subgroup_size = 32;
    t->nir->info.max_subgroup_size = 32;
    t->nir->info.min_subgroup_size = 32;
@@ -4251,11 +4705,13 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    t->b = nir_builder_at(nir_after_impl(t->impl));
    t->top = nir_builder_at(nir_before_impl(t->impl));
 
-   struct glsl_struct_field fields[12];
-   for (unsigned i = 0; i < 12; i++)
-      fields[i] = (struct glsl_struct_field) { .type = glsl_uint_type(), .name = "w", .offset = (int)(4 * i) };
-   t->push = nir_variable_create(t->nir, nir_var_mem_push_const,
-                                 glsl_interface_type(fields, 12, GLSL_INTERFACE_PACKING_STD430, false, "grid"), "grid");
+   if (kernel) {   /* a vertex or fragment function reads no push constants */
+      struct glsl_struct_field fields[12];
+      for (unsigned i = 0; i < 12; i++)
+         fields[i] = (struct glsl_struct_field) { .type = glsl_uint_type(), .name = "w", .offset = (int)(4 * i) };
+      t->push = nir_variable_create(t->nir, nir_var_mem_push_const,
+                                    glsl_interface_type(fields, 12, GLSL_INTERFACE_PACKING_STD430, false, "grid"), "grid");
+   }
 
    if (t->req->flags & NVMTL_AIR_NIR_TABLE_SSBO) {
       t->table_mode = nir_var_mem_ssbo;
@@ -4283,6 +4739,8 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    nir_lower_goto_ifs(t->nir);
    NIR_PASS(_, t->nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, t->nir, nir_opt_dce);
+   if (!kernel)
+      nir_shader_gather_info(t->nir, nir_shader_get_entrypoint(t->nir));
    nir_validate_shader(t->nir, "after AIR to NIR");
    return t->nir;
 }
@@ -4472,6 +4930,14 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, global_align) + sizeof res->global_align && t->out)
       res->global_align = t->global_align;
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, reserved4) + sizeof res->reserved4 && t->out) {
+      res->stage = t->stage;
+      res->vertex_inputs = t->vertex_inputs;
+      memcpy(res->vertex_input_kind, t->vertex_input_kind, sizeof res->vertex_input_kind);
+      res->varyings = t->varyings;
+      res->color_outputs = t->color_outputs;
+      res->fragment_flags = t->fragment_flags;
+   }
    if (t->out)
       snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread",
                t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size);

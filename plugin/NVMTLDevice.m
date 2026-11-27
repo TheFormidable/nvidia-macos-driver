@@ -1277,30 +1277,44 @@ static int nvmtl_varying_one_location(id v) {
     id t = [v isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)v)[@"type_name"] : nil;
     return ![t isKindOfClass:[NSString class]] || ([(NSString *)t rangeOfString:@"x"].location == NSNotFound && [(NSString *)t rangeOfString:@"["].location == NSNotFound);
 }
-static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {
+// The link of a pipeline's varyings: the fragment input at reflected Location L reads the vertex output of the same name
+// (user semantic, or field name), remap[L], and one no vertex output writes takes a Location no vertex output uses. 1 when
+// a Location moves, 0 when none does or the fragment reads none, -1 when the pipeline keeps its Locations (said once).
+// The SPIR-V road moves the fragment module's Input Locations by it (nvmtl_varying_link); the AIR-to-NIR road hands the
+// frontend the moved Locations (NVMTLAirNir.m). *unmatchedOut: fragment inputs no vertex output writes.
+static int nvmtl_varying_remap(NVMTLFunction *vf, NVMTLFunction *ff, uint32_t remap[128], uint8_t have[128], int *unmatchedOut) {
     NSDictionary *vr = nvmtl_function_reflection(vf), *fr = nvmtl_function_reflection(ff);
     NSArray *vv = [vr isKindOfClass:[NSDictionary class]] ? vr[@"varyings"] : nil, *fv = [fr isKindOfClass:[NSDictionary class]] ? fr[@"varyings"] : nil;
-    if (![fv isKindOfClass:[NSArray class]] || !fv.count) return nil;
-    if (![vv isKindOfClass:[NSArray class]]) { static int said; if (!said++) nvlog("varylink: %s has no reflected varyings - %s keeps its own Locations", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?"); return nil; }
     enum { NL = 128 };
-    uint8_t used[NL] = { 0 }, have[NL] = { 0 }; uint32_t remap[NL]; for (uint32_t i = 0; i < NL; i++) remap[i] = i;
+    for (uint32_t i = 0; i < NL; i++) { remap[i] = i; have[i] = 0; }
+    if (unmatchedOut) *unmatchedOut = 0;
+    if (![fv isKindOfClass:[NSArray class]] || !fv.count) return 0;
+    if (![vv isKindOfClass:[NSArray class]]) { static int said; if (!said++) nvlog("varylink: %s has no reflected varyings - %s keeps its own Locations", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?"); return -1; }
+    uint8_t used[NL] = { 0 };
     NSMutableDictionary<NSString *, NSNumber *> *out = [NSMutableDictionary new];
     for (id v in vv) {
         NSNumber *l = [v isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)v)[@"location"] : nil;
-        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(v)) { static int said; if (!said++) nvlog("varylink: a vertex varying of %s is not one Location in 0..127 - pipeline keeps its Locations", vf->_fname.UTF8String ?: "?"); return nil; }
+        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(v)) { static int said; if (!said++) nvlog("varylink: a vertex varying of %s is not one Location in 0..127 - pipeline keeps its Locations", vf->_fname.UTF8String ?: "?"); return -1; }
         used[l.unsignedIntValue] = 1; NSString *k = nvmtl_varying_key(v); if (k) out[k] = l;
     }
     uint32_t next = 0; int change = 0, unmatched = 0;
     for (id f in fv) {
         NSNumber *l = [f isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)f)[@"location"] : nil;
-        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(f)) { static int said; if (!said++) nvlog("varylink: a fragment varying of %s is not one Location in 0..127 - pipeline keeps its Locations", ff->_fname.UTF8String ?: "?"); return nil; }
+        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(f)) { static int said; if (!said++) nvlog("varylink: a fragment varying of %s is not one Location in 0..127 - pipeline keeps its Locations", ff->_fname.UTF8String ?: "?"); return -1; }
         uint32_t L = l.unsignedIntValue, T; NSString *k = nvmtl_varying_key(f); NSNumber *to = k ? out[k] : nil;
         if (to) T = to.unsignedIntValue;
-        else { while (next < NL && used[next]) next++; if (next >= NL) return nil; T = next; used[next] = 1; unmatched++; }
-        if (have[L]) return nil;
+        else { while (next < NL && used[next]) next++; if (next >= NL) return -1; T = next; used[next] = 1; unmatched++; }
+        if (have[L]) return -1;
         have[L] = 1; remap[L] = T; if (T != L) change = 1;
     }
-    if (!change) return nil;
+    if (unmatchedOut) *unmatchedOut = unmatched;
+    return change;
+}
+static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {
+    enum { NL = 128 };
+    uint32_t remap[NL]; uint8_t have[NL]; int unmatched = 0;
+    const int change = nvmtl_varying_remap(vf, ff, remap, have, &unmatched);
+    if (change <= 0) return nil;
     const uint32_t *w = (const uint32_t *)ff->_spirv.bytes; size_t n = ff->_spirv.length / 4;
     if (n < 5 || w[0] != 0x07230203u) return nil;
     NSMutableData *md = [ff->_spirv mutableCopy]; uint32_t *m = (uint32_t *)md.mutableBytes;
@@ -2444,6 +2458,12 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     nvlog_every("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", x, air,
           fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
 }
+// The AIR-to-NIR road for render pipelines (NVMTLAirNir.m, imported at the end of this file)
+BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFrag, uint32_t a8mask, BOOL amplified,
+                                 id samplePayload, NSString **why);
+int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
+                                  uint32_t samples, NSString *vdesc, nvk_pipeline *out, NSString **why);
+void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, NSString *why, uint64_t ns);
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
     // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
@@ -2582,6 +2602,21 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     }
     // a descriptor without rasterSampleCount answers the older sampleCount message, sent by name since that property is deprecated
     uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : ((NSUInteger (*)(id, SEL))objc_msgSend)(d, @selector(sampleCount))); if (!rsc) rsc = 1;
+    // AIR to NIR first (NVMTLAirNir.m): NVK translates both stages' AIR itself. A pipeline either stage of which it refuses,
+    // one that needs a SPIR-V rewrite of its stages, or one NVK will not make, takes the SPIR-V road below, unchanged.
+    { NSString *nirWhy = nil; const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      const BOOL amplified = rt.view_mask != 0 || ([d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1);
+      const BOOL onNir = nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, &nirWhy) &&
+                         !nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, &ps->_p, &nirWhy);
+      nvmtl_air_nir_render_note(vf, noFrag ? nil : ff, onNir, onNir ? nil : nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+      if (onNir) {
+          ps->_road = 1;
+          nvlog("newRenderPipelineStateWithDescriptor: -> %p (VkPipeline from the AIR of %s and %s, AIR to NIR)",
+                (__bridge void *)ps, vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
+          nvmtl_render_keep_linked(ps, vf, ff);
+          if (NVMTL_SINCE(10.14, BOOL, d.supportIndirectCommandBuffers, NO)) nvmtl_icb_register_pipeline(ps, NO);
+          return ps;
+      } }
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {

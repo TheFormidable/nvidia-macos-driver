@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # usage: tools/air-nir/plugin-run.sh NVMTLDriver NVK.dylib OUTDIR [TEST...]
 #
-# Runs the kernels of tools/air-nir/metal through the Metal plugin's own compute path (plugin_run.m), without installing
-# anything: NVMTLDriver is a development build of the plugin (build/build_plugin_dev.sh), NVK.dylib a build of NVK
+# Runs the kernels of tools/air-nir/metal through the Metal plugin's own compute path, and the vertex and fragment pairs
+# of tools/air-nir/metal-render through its render path (plugin_run.m, render_tests.h), without installing anything
+# (TEST names one; "compute" or "render" all of one kind): NVMTLDriver is a development build of the plugin (build/build_plugin_dev.sh), NVK.dylib a build of NVK
 # (build_nvk.sh's out dir). OUTDIR gets a bundle folder for the plugin (OUTDIR/bundle/NVMTLDriver.bundle: the plugin
 # copied into Contents/MacOS, and links to the installed bundle's Info.plist, Resources, air-runtime, translator and AIR
 # decoder, which are only read), the kernels as .air and .metallib (Apple's Metal compiler, as run-mac.sh compiles
 # them), the harness, and what one run writes (driver.log, results.tsv, the AIR and shader caches, the plugin's
-# per-dispatch GPU times). OUTDIR must not exist yet: every run starts with empty caches.
+# per-dispatch GPU times, render.tsv). OUTDIR must not exist yet: every run starts with empty caches.
 #
 # NVMTL_AIR_NIR in the environment picks the road (unset: AIR to NIR first; 0: the SPIR-V road only);
 # PLUGIN_RUN_CORRUPT=1 checks the checks. PLUGIN_RUN_VULKAN_INCLUDE: the Vulkan headers (default: the Mesa tree next
@@ -30,7 +31,7 @@ ln -s "$INST/Contents/Resources" "$B/Resources"
 for f in "$INST"/Contents/MacOS/*; do
   n=$(basename "$f"); [ "$n" = NVMTLDriver ] || ln -s "$f" "$B/MacOS/$n"
 done
-for f in "$HERE"/metal/*.metal; do
+for f in "$HERE"/metal/*.metal "$HERE"/metal-render/*.metal; do
   n=$(basename "$f" .metal); flags=
   [ "$n" = fmath_precise ] && flags=-fno-fast-math
   xcrun -sdk macosx metal $flags -c -o "$OUT/air/$n.air" "$f" || { echo "plugin-run.sh: $n.metal does not compile" >&2; exit 2; }

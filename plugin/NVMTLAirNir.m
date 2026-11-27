@@ -2,7 +2,8 @@
  * NullMoth NVIDIA driver for macOS
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  *
- * NVMTLAirNir.m - compute pipelines through NVK's AIR-to-NIR frontend (nvk/air, docs/AIR-TO-NIR.md phase 2).
+ * NVMTLAirNir.m - compute pipelines (docs/AIR-TO-NIR.md phase 2) and render pipelines (phase 3) through NVK's AIR-to-NIR
+ * frontend (nvk/air). The render road is at the end of this file.
  *
  * newComputePipelineStateWithFunction: asks here first for every compute kernel. NVK reads the kernel's AIR (the text IR
  * the plugin keeps, with the function's function-constant values) and builds its NIR, and the pipeline is created from
@@ -92,7 +93,7 @@ static int nvmtl_air_nir_on(void)
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
             on = 1;
         }
-        nvlog_notice("compute: AIR to NIR %s in %s (%s)", on ? "ON - a kernel it does not take stays on the SPIR-V road" : "off",
+        nvlog_notice("compute and render pipelines: AIR to NIR %s in %s (%s)", on ? "ON - a kernel or pipeline it does not take stays on the SPIR-V road" : "off",
                      me ? me : "?", off ? off : (e ? "NVMTL_AIR_NIR set, not 0" : "NVMTL_AIR_NIR unset"));
     });
     return on;
@@ -135,10 +136,13 @@ void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why,
 
 // ---- the frontend, through the shader cache ----------------------------------------------------------------------
 
-static uint32_t nvmtl_air_nir_flags(uint32_t extra)
+// A render stage (varyings given) is made with the device's robustness, as every render pipeline is; a kernel without
+// buffer robustness when compute pipelines are made so
+static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
 {
     return NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_FC_VALUES | NVMTL_AIR_NIR_TG_DEFAULT
-         | (nvmtl_table_ubo() ? 0 : NVMTL_AIR_NIR_TABLE_SSBO) | (g_compute_unchecked ? NVMTL_AIR_NIR_UNCHECKED : 0) | extra;
+         | (nvmtl_table_ubo() ? 0 : NVMTL_AIR_NIR_TABLE_SSBO) | (g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)
+         | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | extra;
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's
@@ -152,9 +156,10 @@ static void nvmtl_air_nir_local(NVMTLFunction *f, uint32_t local[3])
     else local[0] = local[1] = local[2] = 1;
 }
 
-// The frontend itself: the function's AIR text, its constants, the lengths; the status, and the result in *res
+// The frontend itself: the function's AIR text, its constants, the lengths, a render stage's varyings (user semantic to
+// Location); the status, and the result in *res
 static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32_t flags, const uint32_t local[3],
-                                   struct nvmtl_air_nir_result *res)
+                                   NSDictionary<NSString *, NSNumber *> *varyings, struct nvmtl_air_nir_result *res)
 {
     memset(res, 0, sizeof *res); res->size = sizeof *res;
     const char *text = f->_air.UTF8String;
@@ -184,6 +189,15 @@ static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32
     }
     for (uint32_t k = 0; k < n; k++) pay[k] = (const uint8_t *)bytes.bytes + [offsets[k] unsignedLongValue];
     req.fc_count = n; req.fc_indices = idx; req.fc_sizes = sz; req.fc_payloads = pay;
+    const NSUInteger nv = varyings.count;
+    NSMutableData *vk = [NSMutableData dataWithLength:(nv ? nv : 1) * sizeof(const char *)];
+    NSMutableData *vl = [NSMutableData dataWithLength:(nv ? nv : 1) * sizeof(uint32_t)];
+    NSArray *names = [varyings.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    for (NSUInteger i = 0; i < nv; i++) {
+        ((const char **)vk.mutableBytes)[i] = [names[i] UTF8String];
+        ((uint32_t *)vl.mutableBytes)[i] = [varyings[names[i]] unsignedIntValue];
+    }
+    req.varying_count = (uint32_t)nv; req.varying_keys = (const char *const *)vk.bytes; req.varying_locations = vl.bytes;
     return pnvk_air_to_nir((void *)g_dev, &req, res);
 }
 
@@ -201,15 +215,18 @@ static void nvmtl_air_nir_store(NSString *path, NSString *memoKey, int32_t statu
 
 // 0 and the kernel's NIR in *nir (the caller owns it) with its result in *res, or -1 and why the road does not take it.
 // *path and *memoKey name its cache entry, for a refusal found later (NVK would not make the pipeline).
+// A render stage (varyings non-nil) adds its stage, its varyings and what else keys it (stageKey) to the entry's key.
 static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t extra, const uint32_t local[3],
+                                NSDictionary *varyings, NSDictionary *stageKey,
                                 struct nvmtl_air_nir_result *res, void **nir, NSString **why,
                                 NSString **path, NSString **memoKey, BOOL *hit)
 {
     *nir = NULL; *path = nil; *memoKey = nil; *hit = NO;
-    const uint32_t flags = nvmtl_air_nir_flags(extra);
+    const uint32_t flags = nvmtl_air_nir_flags(extra, varyings != nil);
     NVMTLAirDigest *ad = nvmtl_air_state(f->_air);
-    NSDictionary *k = @{ @"abi": @3, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
-                         @"size": @[ @(local[0]), @(local[1]), @(local[2]) ], @"flags": @(flags), @"ids": g_air_nir_ids ?: @"" };
+    NSMutableDictionary *k = [@{ @"abi": @4, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
+                         @"size": @[ @(local[0]), @(local[1]), @(local[2]) ], @"flags": @(flags), @"ids": g_air_nir_ids ?: @"" } mutableCopy];
+    if (varyings) { k[@"varyings"] = varyings; [k addEntriesFromDictionary:stageKey ?: @{}]; }
     NSData *tail = [NSJSONSerialization dataWithJSONObject:k options:NSJSONWritingSortedKeys error:NULL];
     if (ad && tail) {
         *path = nvmtl_spvcache_path_air(ad, tail, @"nir1");
@@ -229,7 +246,7 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
         }
         nvlog("air-nir: a cached shader of %s does not read back - translated again", f->_fname.UTF8String ?: "?");
     }
-    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, res);
+    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, varyings, res);
     if (st != NVMTL_AIR_NIR_OK) {
         *why = @(res->message[0] ? res->message : "the frontend said no");
         if (st == NVMTL_AIR_NIR_UNSUPPORTED || st == NVMTL_AIR_NIR_BAD_AIR) nvmtl_air_nir_store(*path, *memoKey, st, res, NULL, 0);
@@ -243,8 +260,9 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
     return 0;
 }
 
-// The constexpr-sampler slots the translator's reflection gives the function (the ones the dispatch binds), or -1
-static int nvmtl_air_nir_reflected_statics(NVMTLFunction *f, uint32_t slots[32], unsigned *n)
+// The constexpr-sampler slots the translator's reflection gives the function (the ones the dispatch binds), or -1; and
+// with words, each one's AIR state words as reflection read them (raw_words), for the comparison with the frontend's
+static int nvmtl_air_nir_reflected_statics_w(NVMTLFunction *f, uint32_t slots[32], uint64_t (*words)[2], unsigned *n)
 {
     *n = 0;
     char e[512] = { 0 };
@@ -256,9 +274,48 @@ static int nvmtl_air_nir_reflected_statics(NVMTLFunction *f, uint32_t slots[32],
         if (![b isKindOfClass:[NSDictionary class]] || ![b[@"kind"] isEqual:@"StaticSampler"]) continue;
         NSNumber *slot = b[@"metal_index"];
         if (![slot isKindOfClass:[NSNumber class]] || *n >= 32) return -1;
+        if (words) {
+            NSDictionary *st = [b[@"static_sampler"] isKindOfClass:[NSDictionary class]] ? b[@"static_sampler"] : nil;
+            NSArray *raw = [st[@"raw_words"] isKindOfClass:[NSArray class]] ? st[@"raw_words"] : nil;
+            words[*n][0] = raw.count == 2 && [raw[0] isKindOfClass:[NSNumber class]] ? [raw[0] unsignedLongLongValue] : ~0ull;
+            words[*n][1] = raw.count == 2 && [raw[1] isKindOfClass:[NSNumber class]] ? [raw[1] unsignedLongLongValue] : ~0ull;
+        }
         slots[(*n)++] = slot.unsignedIntValue;
     }
     return 0;
+}
+static int nvmtl_air_nir_reflected_statics(NVMTLFunction *f, uint32_t slots[32], unsigned *n)
+{
+    return nvmtl_air_nir_reflected_statics_w(f, slots, NULL, n);
+}
+
+// The constexpr samplers' state words the frontend read against reflection's, slot by slot: logged once per function,
+// whether they agree or not (the plugin binds reflection's state either way). 0 when they all agree.
+static int nvmtl_air_nir_statics_compare(NVMTLFunction *f, const struct nvmtl_air_nir_result *res)
+{
+    uint32_t slots[32]; uint64_t words[32][2]; unsigned n = 0;
+    if (!res->static_sampler_count || nvmtl_air_nir_reflected_statics_w(f, slots, words, &n)) return 0;
+    char line[512]; size_t at = 0; int differ = 0;
+    for (unsigned k = 0; k < res->static_sampler_count && k < 32; k++) {
+        unsigned j = 0;
+        while (j < n && slots[j] != res->static_samplers[k].slot) j++;
+        const int same = j < n && words[j][0] == res->static_samplers[k].words[0] && words[j][1] == res->static_samplers[k].words[1];
+        differ |= !same;
+        if (at < sizeof line - 1)
+            at += (size_t)snprintf(line + at, sizeof line - at, " slot %u %s", res->static_samplers[k].slot, same ? "same" : "DIFFERENT");
+        if (!same && at < sizeof line - 1)
+            at += (size_t)snprintf(line + at, sizeof line - at, " (frontend %#llx %#llx, reflection %#llx %#llx)",
+                                   (unsigned long long)res->static_samplers[k].words[0], (unsigned long long)res->static_samplers[k].words[1],
+                                   j < n ? (unsigned long long)words[j][0] : 0ull, j < n ? (unsigned long long)words[j][1] : 0ull);
+    }
+    static NSMutableSet *said; static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    os_unfair_lock_lock(&lock);
+    if (!said) said = [NSMutableSet new];
+    const BOOL first = said.count < 1024 && ![said containsObject:f->_fname ?: @"?"];
+    if (first) [said addObject:f->_fname ?: @"?"];
+    os_unfair_lock_unlock(&lock);
+    if (first) nvmtl_air_nir_line("air-nir: %s: constexpr sampler state words against the translator's reflection:%s", f->_fname.UTF8String ?: "?", line);
+    return differ;
 }
 
 // A pipeline state of the kernel on the road, translated with tgLen (nil: none), or nil and why not
@@ -269,9 +326,11 @@ static NVMTLComputePipelineState *nvmtl_air_nir_make(NVMTLFunction *f, NSDiction
     uint32_t local[3];
     nvmtl_air_nir_local(f, local);
     struct nvmtl_air_nir_result res; void *nir = NULL; NSString *path = nil, *memoKey = nil; BOOL hit = NO;
-    if (nvmtl_air_nir_shader(f, tgLen, 0, local, &res, &nir, why, &path, &memoKey, &hit)) return nil;
+    if (nvmtl_air_nir_shader(f, tgLen, 0, local, nil, nil, &res, &nir, why, &path, &memoKey, &hit)) return nil;
+    if (res.stage != NVMTL_AIR_NIR_STAGE_KERNEL) { pnvk_air_nir_free(nir); *why = @"it is not a kernel"; return nil; }
     if (res.static_sampler_count) {
         uint32_t slots[32]; unsigned n = 0;
+        (void)nvmtl_air_nir_statics_compare(f, &res);
         if (nvmtl_air_nir_reflected_statics(f, slots, &n) || !nvmtl_air_nir_statics_match(&res, slots, n)) {
             pnvk_air_nir_free(nir);
             *why = @"its constexpr samplers would not sit at the slots the translator's reflection binds";
@@ -366,7 +425,7 @@ int nvmtl_air_nir_safe_build(const nvk_pipeline *base, nvk_pipeline *out)
     if (![o isKindOfClass:[NSArray class]] || o.count != 2) return -1;
     NVMTLFunction *f = o[0]; NSDictionary *tg = [o[1] count] ? o[1] : nil;
     struct nvmtl_air_nir_result res; void *nir = NULL; NSString *path = nil, *memoKey = nil, *why = nil; BOOL hit = NO;
-    if (nvmtl_air_nir_shader(f, tg, NVMTL_AIR_NIR_ALIGN4, base->nir_local, &res, &nir, &why, &path, &memoKey, &hit)) {
+    if (nvmtl_air_nir_shader(f, tg, NVMTL_AIR_NIR_ALIGN4, base->nir_local, nil, nil, &res, &nir, &why, &path, &memoKey, &hit)) {
         nvmtl_air_nir_line("air-nir: kernel %s: no build without alignment promises: %s", f->_fname.UTF8String ?: "?", why.UTF8String ?: "?");
         return -1;
     }
@@ -375,3 +434,131 @@ int nvmtl_air_nir_safe_build(const nvk_pipeline *base, nvk_pipeline *out)
     out->nir_owner = (void *)CFBridgingRetain(o);
     return 0;
 } }
+
+// ---- render pipelines (phase 3) -----------------------------------------------------------------------------------
+//
+// newRenderPipelineStateWithDescriptor: asks here first: both stages through the frontend, the pipeline from their NIR
+// with the SPIR-V road's layout and state (nvmtl_vk_pipeline_create_nir). When either stage is refused, when the pipeline
+// needs one of the SPIR-V road's rewrites of render stages, or when NVK will not make it, the whole pipeline takes the
+// SPIR-V road exactly as before, and the reason is logged once per pipeline. The varyings take the Locations the
+// translator's reflection gives them, the fragment's moved onto the vertex outputs of the same name by the link the SPIR-V
+// road applies to its module (nvmtl_varying_remap), so both roads link a pipeline the same way.
+
+static _Atomic unsigned long long g_air_nir_rroads[2], g_air_nir_rfallbacks;
+
+void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, NSString *why, uint64_t ns)
+{
+    atomic_fetch_add(&g_air_nir_rroads[road ? 1 : 0], 1);
+    if (why) atomic_fetch_add(&g_air_nir_rfallbacks, 1);
+    if (vf && (road || why)) {
+        static NSMutableSet *said; static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+        NSString *key = [NSString stringWithFormat:@"%@/%@%d", vf->_fname ?: @"?", ff ? ff->_fname ?: @"?" : @"-", road ? 1 : 0];
+        os_unfair_lock_lock(&lock);
+        if (!said) said = [NSMutableSet new];
+        const BOOL first = said.count < 1024 && ![said containsObject:key];
+        if (first) [said addObject:key];
+        os_unfair_lock_unlock(&lock);
+        if (first && road)
+            nvmtl_air_nir_line("air-nir: pipeline %s / %s: AIR to NIR (%.2f ms, %s)", vf->_fname.UTF8String ?: "?",
+                               ff ? ff->_fname.UTF8String ?: "?" : "-", (double)ns / 1e6,
+                               g_air_nir_hit ? "both stages' NIR from the shader cache" : "translated");
+        else if (first)
+            nvmtl_air_nir_line("air-nir: pipeline %s / %s stays on the SPIR-V road: %s", vf->_fname.UTF8String ?: "?",
+                               ff ? ff->_fname.UTF8String ?: "?" : "-", why.UTF8String ?: "?");
+    }
+    const unsigned long long n = atomic_load(&g_air_nir_rroads[0]) + atomic_load(&g_air_nir_rroads[1]);
+    if (n && !(n & (n - 1)))
+        nvlog_notice("render roads in %s: AIR to NIR %llu pipeline(s), SPIR-V %llu pipeline(s); %llu took the SPIR-V road "
+                     "after AIR to NIR said no", getprogname() ?: "?", atomic_load(&g_air_nir_rroads[1]),
+                     atomic_load(&g_air_nir_rroads[0]), atomic_load(&g_air_nir_rfallbacks));
+}
+
+// Whether newRenderPipelineState asks the road for the pipeline of vf and ff; NO with *why left nil when the road is off
+// for the process. Every pipeline whose stages the SPIR-V road rewrites goes that road.
+BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFrag, uint32_t a8mask, BOOL amplified,
+                                 id samplePayload, NSString **why)
+{
+    if (!vf || !nvmtl_air_nir_on()) return NO;
+    if (noFrag || !ff) { *why = @"it has no fragment function (the SPIR-V road's empty one stands in)"; return NO; }
+    if (!vf->_air.length || !ff->_air.length) { *why = @"a stage has no AIR (a variant made from SPIR-V)"; return NO; }
+    if (vf->_spirvOnly || ff->_spirvOnly) { *why = @"a stage's AIR is the translator's rewrite (a stage-in layout)"; return NO; }
+    if (getenv("NVMTL_BDA_PROBE_FILE")) { *why = @"a replacement module may be configured (NVMTL_BDA_PROBE_FILE)"; return NO; }
+    if (a8mask) { *why = @"it renders to an A8 target (its fragment stage is the translator's A8 variant)"; return NO; }
+    if (amplified) { *why = @"vertex amplification (its stages are the translator's multiview variants)"; return NO; }
+    uint32_t tpt = 0, tcps = 0;
+    if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) { *why = @"tessellation"; return NO; }
+    if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32) { *why = @"the GL uniform buffer"; return NO; }
+    if (nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length)) { *why = @"it reads [[color(n)]] (framebuffer fetch)"; return NO; }
+    if (nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length)) { *why = @"it exports stencil (emulated on the SPIR-V road)"; return NO; }
+    if (samplePayload && samplePayload != [NSNull null]) { *why = @"it reads programmable sample positions"; return NO; }
+    if (g_app_profile) {
+        NVMTLFunction *fs[2] = { vf, ff };
+        for (int i = 0; i < 2; i++) {
+            size_t en = 0; uint32_t *edited = fs[i]->_spirv.length ? nvmtl_app_profile_edit_module(g_app_profile, fs[i]->_spirv.bytes, fs[i]->_spirv.length, &en) : NULL;
+            if (edited) { free(edited); *why = @"the application profile edits a stage's SPIR-V"; return NO; }
+        }
+    }
+    return YES;
+}
+
+// A stage's varyings as the translator's reflection gives them, user semantic (or field name) to Location, a
+// fragment's moved by the link; nil (and *why) when they cannot be handed over
+static NSDictionary *nvmtl_air_nir_varyings(NVMTLFunction *f, const uint32_t *remap, NSString **why)
+{
+    NSDictionary *r = nvmtl_function_reflection(f);
+    NSArray *vs = [r isKindOfClass:[NSDictionary class]] ? r[@"varyings"] : nil;
+    if (![vs isKindOfClass:[NSArray class]]) { *why = [NSString stringWithFormat:@"%@ has no reflected varyings", f->_fname]; return nil; }
+    NSMutableDictionary *d = [NSMutableDictionary new];
+    for (id v in vs) {
+        NSNumber *l = [v isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)v)[@"location"] : nil;
+        NSString *k = nvmtl_varying_key(v);
+        if (!k || ![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= 128 || !nvmtl_varying_one_location(v)) {
+            *why = [NSString stringWithFormat:@"a varying of %@ is not one named Location", f->_fname]; return nil; }
+        const uint32_t L = remap ? remap[l.unsignedIntValue] : l.unsignedIntValue;
+        if (L >= 32 || d[k]) { *why = [NSString stringWithFormat:@"a varying of %@ is past Location 31 or named twice", f->_fname]; return nil; }
+        d[k] = @(L);
+    }
+    return d;
+}
+
+// The pipeline of vf and ff from their NIR into *out, or -1 and why not. Render stages promise no buffer alignment
+// above 4 bytes (NVMTL_AIR_NIR_ALIGN4), as the SPIR-V road builds every render module whose accesses promise more SAFE.
+int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
+                                  uint32_t samples, NSString *vdesc, nvk_pipeline *out, NSString **why)
+{
+    uint32_t remap[128]; uint8_t have[128];
+    const int link = nvmtl_varying_remap(vf, ff, remap, have, NULL);
+    NSDictionary *vv = nvmtl_air_nir_varyings(vf, NULL, why), *fv = vv ? nvmtl_air_nir_varyings(ff, link > 0 ? remap : NULL, why) : nil;
+    if (!vv || !fv) return -1;
+    const uint32_t one[3] = { 1, 1, 1 };
+    struct nvmtl_air_nir_result vres, fres; void *vn = NULL, *fn = NULL; NSString *path = nil, *memoKey = nil; BOOL vhit = NO, fhit = NO;
+    NSString *stageWhy = nil;
+    if (nvmtl_air_nir_shader(vf, nil, NVMTL_AIR_NIR_ALIGN4, one, vv, @{ @"stage": @"vertex", @"vertex_descriptor": vdesc ?: @"" },
+                             &vres, &vn, &stageWhy, &path, &memoKey, &vhit)) {
+        *why = [NSString stringWithFormat:@"vertex %@: %@", vf->_fname, stageWhy ?: @"?"]; return -1; }
+    if (nvmtl_air_nir_shader(ff, nil, NVMTL_AIR_NIR_ALIGN4, one, fv, @{ @"stage": @"fragment" },
+                             &fres, &fn, &stageWhy, &path, &memoKey, &fhit)) {
+        pnvk_air_nir_free(vn);
+        *why = [NSString stringWithFormat:@"fragment %@: %@", ff->_fname, stageWhy ?: @"?"]; return -1; }
+    int rc = -1;
+    if (vres.stage != NVMTL_AIR_NIR_STAGE_VERTEX || fres.stage != NVMTL_AIR_NIR_STAGE_FRAGMENT)
+        *why = @"a stage is not the function the descriptor names it as";
+    else {
+        rc = 0;
+        NVMTLFunction *fs[2] = { vf, ff }; const struct nvmtl_air_nir_result *rs[2] = { &vres, &fres };
+        for (int i = 0; i < 2 && !rc; i++) {
+            if (!rs[i]->static_sampler_count) continue;
+            uint32_t slots[32]; unsigned n = 0;
+            (void)nvmtl_air_nir_statics_compare(fs[i], rs[i]);
+            if (nvmtl_air_nir_reflected_statics(fs[i], slots, &n) || !nvmtl_air_nir_statics_match(rs[i], slots, n)) {
+                *why = [NSString stringWithFormat:@"the constexpr samplers of %@ would not sit at the slots the translator's reflection binds", fs[i]->_fname];
+                rc = -1;
+            }
+        }
+        if (!rc && nvmtl_vk_pipeline_create_nir(vn, &vres, fn, &fres, rt, vin, samples, out)) {
+            *why = @"NVK would not make a pipeline of the two stages' NIR"; rc = -1; }
+    }
+    pnvk_air_nir_free(vn); pnvk_air_nir_free(fn);
+    g_air_nir_hit = vhit && fhit;
+    return rc;
+}

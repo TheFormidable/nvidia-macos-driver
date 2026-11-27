@@ -5829,12 +5829,13 @@ static VkFormat nvmtl_vertex_vkformat(uint32_t mtl, int kind)
     }
     return v;
 }
-static int nvmtl_vertex_input_build(const nvk_vertex_input *vin, const void *vs, size_t vn, VkVertexInputBindingDescription *vib, uint32_t *nvib,
+// kind[n]: what the vertex stage reads at Location n (0 nothing, 1 float, 2 signed, 3 unsigned integer): a SPIR-V module's
+// from nvmtl_spv_input_kinds, an AIR-to-NIR stage's from its result
+static int nvmtl_vertex_input_build(const nvk_vertex_input *vin, const uint8_t kind[32], VkVertexInputBindingDescription *vib, uint32_t *nvib,
                                     VkVertexInputAttributeDescription *via, uint32_t *nvia, VkVertexInputBindingDivisorDescriptionKHR *vdiv,
                                     uint32_t *ndiv, uint32_t *mask, uint32_t *dyn, uint32_t stv[32])
 {
     *nvib = *nvia = *ndiv = *mask = *dyn = 0; memset(stv, 0, 32 * sizeof *stv);
-    uint8_t kind[32]; nvmtl_spv_input_kinds(vs, vn, kind);
     uint32_t described = 0;
     for (uint32_t k = 0; vin && k < vin->nattr && k < NVMTL_NVIN; k++) {
         uint32_t loc = vin->attr[k].location, buf = vin->attr[k].buffer;
@@ -6394,6 +6395,75 @@ void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs,
         syslog(LOG_NOTICE, "NullMoth: uniform-cbuf: GL pipeline ready (vertex slot %u, %u B; fragment slot %u, %u B); original retained",
                vi, extents[0], fi, extents[1]);
 }
+// The fixed and dynamic state every render pipeline is made with, and the pipeline: the SPIR-V road's stages
+// (nvmtl_vk_pipeline_create_impl_lifetime_body) and the AIR-to-NIR road's (nvmtl_vk_pipeline_create_nir) alike.
+static VkResult nvmtl_graphics_pipeline_make(nvk_pipeline *out, const VkPipelineShaderStageCreateInfo *stages, uint32_t nstages,
+                                             const VkVertexInputBindingDescription *vib, uint32_t nvib,
+                                             const VkVertexInputAttributeDescription *via, uint32_t nvia,
+                                             const VkVertexInputBindingDivisorDescriptionKHR *vdiv, uint32_t ndiv,
+                                             const nvk_tess_desc *td, const nvk_rt *rt, uint32_t samples, int hasDepth)
+{
+    VkPipelineVertexInputDivisorStateCreateInfoKHR vdi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR, NULL, ndiv, vdiv };
+    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, ndiv ? &vdi : NULL, 0, nvib, vib, nvia, via };
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
+        td ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
+    VkPipelineTessellationStateCreateInfo tss = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, 1 };
+    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL };
+    // At most 25 states with stencil, depth bounds, dynamic vertex stride, line width, sample locations and dynamic-state3.
+    VkDynamicState dyn[26] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
+        VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
+        VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_FRONT_FACE,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+        VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK };
+    uint32_t ndyn = hasDepth ? (out->has_stencil ? 16u : 12u) : 9u;
+    dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE; // core Vulkan 1.3, like primitive-restart enable
+    // Metal's depth bounds test (macOS 26) is set on the encoder, not the pipeline, and compares the depth already STORED
+    // in the attachment, which is Vulkan's depth bounds test exactly (measured on Apple silicon: stored 0.25 with a
+    // fragment at 0.9 and bounds [0.5, 1] is discarded). Both the switch and the range are dynamic.
+    out->db_dyn = hasDepth && g_depth_bounds;
+    if (out->db_dyn) { dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE; dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS; }
+    if (g_dyn3) {
+        dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
+        if (g_provoking) dyn[ndyn++] = VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT;
+        if (g_clip) dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT;
+    }
+    if (out->vin_dyn) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
+    if (g_wide) dyn[ndyn++] = VK_DYNAMIC_STATE_LINE_WIDTH;
+    if (g_sample_locations && samples > 1) dyn[ndyn++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
+    VkPipelineDynamicStateCreateInfo dsci = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, ndyn, dyn };
+    // Metal has no depth-bias enable switch. Enable it dynamically for nonzero bias, keeping the ordinary zero-bias
+    // path disabled rather than making every pipeline use depth bias, and reset it for every new Metal encoder.
+    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0,
+        VK_FALSE, rt->discard ? VK_TRUE : VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f };
+    if (rt->a2one && !g_a2one) { nvlog("pipeline REFUSED: alphaToOneEnabled and this device has no alphaToOne feature"); return VK_ERROR_FEATURE_NOT_PRESENT; }
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0,
+        (VkSampleCountFlagBits)(samples > 1 ? samples : 1), VK_FALSE, 0, NULL,
+        rt->a2c ? VK_TRUE : VK_FALSE, rt->a2one ? VK_TRUE : VK_FALSE };
+    nvmtl_sample_pattern default_sample;
+    VkSampleLocationEXT default_vk[8];
+    VkPipelineSampleLocationsStateCreateInfoEXT sample_state = { VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT };
+    if (g_sample_locations && samples > 1) {
+        if (nvmtl_sample_default(samples > 1 ? samples : 1, &default_sample)) return VK_ERROR_INITIALIZATION_FAILED;
+        sample_state.sampleLocationsEnable = VK_TRUE;
+        sample_state.sampleLocationsInfo = nvmtl_sample_info(&default_sample, default_vk);
+        ms.pNext = &sample_state;
+    }
+    VkPipelineColorBlendAttachmentState cba[NVMTL_NCOL];
+    for (uint32_t i = 0; i < rt->ncol; i++) {
+        const nvk_blend_state *b = &rt->blend[i];
+        cba[i] = rt->cfmt[i]
+            ? (VkPipelineColorBlendAttachmentState){ b->enabled, b->src_rgb, b->dst_rgb, b->op_rgb, b->src_alpha, b->dst_alpha, b->op_alpha, b->write_mask }
+            : (VkPipelineColorBlendAttachmentState){ VK_FALSE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+                                                     VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, 0 };
+    }
+    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0,
+        VK_FALSE, VK_LOGIC_OP_COPY, rt->ncol, rt->ncol ? cba : NULL, { 0, 0, 0, 0 } };
+    VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, NULL, 0,
+        VK_TRUE, VK_TRUE, VK_COMPARE_OP_LESS, VK_FALSE, VK_FALSE, { 0 }, { 0 }, 0.0f, 1.0f };
+    VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, NULL, 0, nstages, stages,
+        &vi, &ia, td ? &tss : NULL, &vps, &rs, &ms, hasDepth ? &ds : NULL, &cb, &dsci, out->layout, out->rp, 0, VK_NULL_HANDLE, -1 };
+    return nvmtl_opaque_CreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &out->pipe);
+}
 static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, const void *blend_,
                                          const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_, int uniform_layout)
 {
@@ -6449,7 +6519,8 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkVertexInputBindingDescription vib[NVMTL_NVIN]; VkVertexInputAttributeDescription via[NVMTL_NVIN]; uint32_t nvib = 0, nvia = 0;
     VkVertexInputBindingDivisorDescriptionKHR vdiv[NVMTL_NVIN]; uint32_t ndiv = 0;
     out->vin_dyn = 0;
-    if (!td && nvmtl_vertex_input_build(vin, vs, vn, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
+    uint8_t vkind[32]; nvmtl_spv_input_kinds(vs, vn, vkind);
+    if (!td && nvmtl_vertex_input_build(vin, vkind, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
     if (out->vin_dyn && !pvkCmdBindVertexBuffers2) { nvlog("apps-dyn pipeline: layout(s) %#x are MTLBufferLayoutStrideDynamic and "
         "vkCmdBindVertexBuffers2 is not loaded — REFUSED", out->vin_dyn); return -1; }
     int hasDepth = rt->dfmt != 0;
@@ -6535,66 +6606,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2, npc, npc ? pc : NULL };
     NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout), "vkCreatePipelineLayout");
 
-    VkPipelineVertexInputDivisorStateCreateInfoKHR vdi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_DIVISOR_STATE_CREATE_INFO_KHR, NULL, ndiv, vdiv };
-    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, ndiv ? &vdi : NULL, 0, nvib, vib, nvia, via };
-    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, NULL, 0,
-        td ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
-    VkPipelineTessellationStateCreateInfo tss = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, NULL, 0, 1 };
-    VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, NULL, 0, 1, NULL, 1, NULL };
-    // At most 25 states with stencil, depth bounds, dynamic vertex stride, line width, sample locations and dynamic-state3.
-    VkDynamicState dyn[26] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
-        VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_DEPTH_BIAS,
-        VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE, VK_DYNAMIC_STATE_FRONT_FACE,
-        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
-        VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK };
-    uint32_t ndyn = hasDepth ? (out->has_stencil ? 16u : 12u) : 9u;
-    dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE; // core Vulkan 1.3, like primitive-restart enable
-    // Metal's depth bounds test (macOS 26) is set on the encoder, not the pipeline, and compares the depth already STORED
-    // in the attachment, which is Vulkan's depth bounds test exactly (measured on Apple silicon: stored 0.25 with a
-    // fragment at 0.9 and bounds [0.5, 1] is discarded). Both the switch and the range are dynamic.
-    out->db_dyn = hasDepth && g_depth_bounds;
-    if (out->db_dyn) { dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE; dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_BOUNDS; }
-    if (g_dyn3) {
-        dyn[ndyn++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
-        if (g_provoking) dyn[ndyn++] = VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT;
-        if (g_clip) dyn[ndyn++] = VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT;
-    }
-    if (out->vin_dyn) dyn[ndyn++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
-    if (g_wide) dyn[ndyn++] = VK_DYNAMIC_STATE_LINE_WIDTH;
-    if (g_sample_locations && samples > 1) dyn[ndyn++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
-    VkPipelineDynamicStateCreateInfo dsci = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, NULL, 0, ndyn, dyn };
-    // Metal has no depth-bias enable switch. Enable it dynamically for nonzero bias, keeping the ordinary zero-bias
-    // path disabled rather than making every pipeline use depth bias, and reset it for every new Metal encoder.
-    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, NULL, 0,
-        VK_FALSE, rt->discard ? VK_TRUE : VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f };
-    if (rt->a2one && !g_a2one) { nvlog("pipeline REFUSED: alphaToOneEnabled and this device has no alphaToOne feature"); goto pipeline_failed; }
-    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, NULL, 0,
-        (VkSampleCountFlagBits)(samples > 1 ? samples : 1), VK_FALSE, 0, NULL,
-        rt->a2c ? VK_TRUE : VK_FALSE, rt->a2one ? VK_TRUE : VK_FALSE };
-    nvmtl_sample_pattern default_sample;
-    VkSampleLocationEXT default_vk[8];
-    VkPipelineSampleLocationsStateCreateInfoEXT sample_state = { VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT };
-    if (g_sample_locations && samples > 1) {
-        if (nvmtl_sample_default(samples > 1 ? samples : 1, &default_sample)) goto pipeline_failed;
-        sample_state.sampleLocationsEnable = VK_TRUE;
-        sample_state.sampleLocationsInfo = nvmtl_sample_info(&default_sample, default_vk);
-        ms.pNext = &sample_state;
-    }
-    VkPipelineColorBlendAttachmentState cba[NVMTL_NCOL];
-    for (uint32_t i = 0; i < rt->ncol; i++) {
-        const nvk_blend_state *b = &rt->blend[i];
-        cba[i] = rt->cfmt[i]
-            ? (VkPipelineColorBlendAttachmentState){ b->enabled, b->src_rgb, b->dst_rgb, b->op_rgb, b->src_alpha, b->dst_alpha, b->op_alpha, b->write_mask }
-            : (VkPipelineColorBlendAttachmentState){ VK_FALSE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
-                                                     VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, 0 };
-    }
-    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, NULL, 0,
-        VK_FALSE, VK_LOGIC_OP_COPY, rt->ncol, rt->ncol ? cba : NULL, { 0, 0, 0, 0 } };
-    VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, NULL, 0,
-        VK_TRUE, VK_TRUE, VK_COMPARE_OP_LESS, VK_FALSE, VK_FALSE, { 0 }, { 0 }, 0.0f, 1.0f };
-    VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, NULL, 0, nstages, stages,
-        &vi, &ia, td ? &tss : NULL, &vps, &rs, &ms, hasDepth ? &ds : NULL, &cb, &dsci, out->layout, out->rp, 0, VK_NULL_HANDLE, -1 };
-    NVMTL_PIPELINE_STAGE(nvmtl_opaque_CreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &out->pipe), "vkCreateGraphicsPipelines");
+    NVMTL_PIPELINE_STAGE(nvmtl_graphics_pipeline_make(out, stages, nstages, vib, nvib, via, nvia, vdiv, ndiv, td, rt, samples, hasDepth), "vkCreateGraphicsPipelines");
     if (tcm) pvkDestroyShaderModule(g_dev, tcm, NULL);
     if (tvm) pvkDestroyShaderModule(g_dev, tvm, NULL);
     pvkDestroyShaderModule(g_dev, fmod, NULL);
@@ -6818,6 +6830,66 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
     }
     memcpy(out->nir_local, local, sizeof out->nir_local);
     out->air_nir = nir;
+    return 0;
+}
+
+// A render pipeline whose two stages the AIR-to-NIR frontend translated (NVMTLAirNir.m): the layout, render pass, vertex
+// input and fixed and dynamic state of the SPIR-V road's (set 0 the vertex stage's, set 1 the fragment stage's, set 2 the
+// heap; the fragment stage's push range of the sample positions when the device has them, which the draw pushes), so a
+// draw binds what it binds for any pipeline. The descriptor masks come from the results, the vertex attributes' formats
+// from the component kinds the vertex result names. NVK clones both shaders; they stay the caller's. None of the SPIR-V
+// road's rewrites applies: the plugin sends a pipeline that needs one (A8 targets, framebuffer fetch, stencil export,
+// multiview, tessellation, the GL uniform buffer) down that road instead.
+int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *vres, void *fnir, const struct nvmtl_air_nir_result *fres,
+                                 const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, nvk_pipeline *out_)
+{
+    if (!vnir || !fnir || !vres || !fres || !rt || !out_ || !pnvk_air_to_nir || rt->ncol > NVMTL_NCOL) return -1;
+    if (nvmtl_vk_init() || ensure_descriptors()) return -1;
+    if (samples != 1 && samples != 2 && samples != 4 && samples != 8) return -1;
+    uint32_t f0 = 0; while (f0 < rt->ncol && !rt->cfmt[f0]) f0++;
+    for (uint32_t i = f0 + 1; !g_indep && i < rt->ncol; i++)
+        if (rt->cfmt[i] && memcmp(&rt->blend[i], &rt->blend[f0], sizeof rt->blend[i])) return -1;
+    nvk_pipeline pending; memset(&pending, 0, sizeof pending);
+    nvk_pipeline *out = &pending;
+    uint8_t kind[32];
+    for (uint32_t l = 0; l < 32; l++) kind[l] = ((vres->vertex_inputs >> l) & 1u) ? vres->vertex_input_kind[l] : 0;
+    VkVertexInputBindingDescription vib[NVMTL_NVIN]; VkVertexInputAttributeDescription via[NVMTL_NVIN]; uint32_t nvib = 0, nvia = 0;
+    VkVertexInputBindingDivisorDescriptionKHR vdiv[NVMTL_NVIN]; uint32_t ndiv = 0;
+    if (nvmtl_vertex_input_build(vin, kind, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
+    if (out->vin_dyn && !pvkCmdBindVertexBuffers2) return -1;
+    const int hasDepth = rt->dfmt != 0;
+    out->has_depth = hasDepth; out->dfmt = rt->dfmt; out->cfmt = rt->ncol ? rt->cfmt[0] : 0u; out->samples = samples;
+    out->ncol = rt->ncol; memcpy(out->cfmts, rt->cfmt, sizeof out->cfmts);
+    out->has_stencil = rt->dfmt >= VK_FORMAT_S8_UINT && rt->dfmt <= VK_FORMAT_D32_SFLOAT_S8_UINT;
+    out->view_mask = 0;
+    for (uint32_t i = 0; samples > 1 && i < rt->ncol; i++) if (rt->cfmt[i]) out->rmask |= 1u << i;
+    if (nvmtl_air_nir_masks(vres, out->gmask[0], &out->stex_hi[0], out->tbm[0]) ||
+        nvmtl_air_nir_masks(fres, out->gmask[1], &out->stex_hi[1], out->tbm[1])) {
+        nvlog("vk: AIR-to-NIR result names a texel buffer that is no texture - not used"); return -1; }
+    memcpy(out->gmask2, out->gmask, sizeof out->gmask2);
+    out->gmask_ok = out->gmask2_ok = 1;
+    out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    VkResult r = nvmtl_make_render_pass(out, 0, &pass);
+    if (r != VK_SUCCESS) { nvlog("vk: vkCreateRenderPass(AIR-to-NIR) -> %d", r); return -1; }
+    out->rp = pass;
+    VkDescriptorSetLayout sl2[3] = { g_setLayout, g_setLayout, g_heapLayout };
+    VkPushConstantRange pc = { VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2,
+                                        g_sample_locations ? 1u : 0u, g_sample_locations ? &pc : NULL };
+    r = nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout);
+    if (r == VK_SUCCESS) {
+        nvmtl_nir_stage_info vi = { NVMTL_STYPE_NIR_STAGE, NULL, vnir }, fi = { NVMTL_STYPE_NIR_STAGE, NULL, fnir };
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &vi, 0, VK_SHADER_STAGE_VERTEX_BIT, VK_NULL_HANDLE, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &fi, 0, VK_SHADER_STAGE_FRAGMENT_BIT, VK_NULL_HANDLE, "main", NULL } };
+        r = nvmtl_graphics_pipeline_make(out, stages, 2, vib, nvib, via, nvia, vdiv, ndiv, NULL, rt, samples, hasDepth);
+    }
+    if (r != VK_SUCCESS || !out->pipe) {
+        nvlog("vk: vkCreateGraphicsPipelines(AIR-to-NIR) -> %d", r);
+        nvmtl_failed_pipeline(&pending); memset(out_, 0, sizeof *out_); return -1;
+    }
+    *out_ = pending;
     return 0;
 }
 

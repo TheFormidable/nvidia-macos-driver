@@ -330,6 +330,8 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 // a stage-in layout): its compute pipeline takes the SPIR-V road only.
 @interface NVMTLFunction () { @public BOOL _spirvOnly; } @end
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
+// The road the pipeline's stages took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V
+@interface NVMTLRenderPipelineState () { @public uint8_t _road; } @end
 // _descriptor's vertex and fragment functions, read once when the pipeline is made: the descriptor is a copy nothing
 // changes afterwards, and a draw read them through two getters
 @interface NVMTLRenderPipelineState () { @public id<MTLFunction> _vfn, _ffn; } @end

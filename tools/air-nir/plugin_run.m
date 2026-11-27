@@ -560,6 +560,356 @@ run_test(const struct test *t)
    return ok ? PASS : FAIL;
 } }
 
+/* ---- the align guard (round 4) ------------------------------------------------------------------------------------
+ * align_copy's float4 accesses promise 16 bytes. Dispatched once with its buffers at offsets that keep the promise (the
+ * kernel's own build runs) and once at offsets 4 and 8 (the plugin's align guard must run the build the frontend made
+ * with NVMTL_AIR_NIR_ALIGN4, and say so in the log); both results are checked exactly. */
+static bool
+align_dispatch(id<MTLComputePipelineState> ps, unsigned off_in, unsigned off_out, unsigned n, char *why, size_t whylen)
+{
+   id<MTLBuffer> in = [dev newBufferWithLength:16 * n + 32 options:MTLResourceStorageModeShared];
+   id<MTLBuffer> out = [dev newBufferWithLength:16 * n + 32 options:MTLResourceStorageModeShared];
+   memset(out.contents, 0, 16 * n + 32);
+   float *src = (float *)((uint8_t *)in.contents + off_in), *dst = (float *)((uint8_t *)out.contents + off_out);
+   for (unsigned k = 0; k < 4 * n; k++)
+      src[k] = rndf(-4, 4);
+   id<MTLCommandBuffer> cb = [queue commandBuffer];
+   id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+   [ce setComputePipelineState:ps];
+   [ce setBuffer:in offset:off_in atIndex:0];
+   [ce setBuffer:out offset:off_out atIndex:1];
+   [ce dispatchThreadgroups:MTLSizeMake(n / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+   [ce endEncoding];
+   bool ok = submit(cb, "align_misaligned", why, whylen);
+   static const float add[4] = { 1, 2, 3, 4 };
+   for (unsigned k = 0; ok && k < 4 * n; k++) {
+      const float want = src[k] * 2 + add[k % 4];
+      if (dst[k] != want) {
+         snprintf(why, whylen, "offsets %u/%u: element %u is %.7g, want %.7g", off_in, off_out, k, dst[k], want);
+         ok = false;
+      }
+   }
+   if (ok && corrupt) {
+      dst[5] += 1;
+      ok = dst[5] == src[5] * 2 + add[1];
+      if (!ok)
+         snprintf(why, whylen, "offsets %u/%u: element 5 changed (PLUGIN_RUN_CORRUPT)", off_in, off_out);
+   }
+   [in release];
+   [out release];
+   return ok;
+}
+
+static enum outcome
+run_align_test(void)
+{ @autoreleasepool {
+   const char *name = "align_misaligned";
+   char path[2048], why[256] = "";
+   snprintf(path, sizeof path, "%s/align_guard.metallib", air_dir);
+   NSError *e = nil;
+   id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
+   id<MTLFunction> fn = [lib newFunctionWithName:@"align_copy"];
+   id<MTLComputePipelineState> ps = fn ? [dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+   const int road = ps && road_ivar ? *((const uint8_t *)(__bridge void *)ps + ivar_getOffset(road_ivar)) : ps ? 0 : -1;
+   const char *road_name = road == 1 ? "nir" : road == 0 ? "spirv" : "none";
+   bool ok = ps != nil;
+   if (!ok)
+      snprintf(why, sizeof why, "no pipeline: %s", e.localizedDescription.UTF8String ?: "?");
+   rng_state = 0x2545f491u;
+   char logp[1024];
+   snprintf(logp, sizeof logp, "%s/driver.log", out_dir);
+   const long before = count_lines(logp);
+   if (ok)
+      ok = align_dispatch(ps, 0, 0, 256, why, sizeof why);
+   const long mid = count_lines(logp);
+   if (ok)
+      ok = align_dispatch(ps, 4, 8, 256, why, sizeof why);
+   /* the guard's line, after the misaligned dispatch only */
+   bool guard_aligned = false, guard_misaligned = false;
+   FILE *f = fopen(logp, "r");
+   char line[1024];
+   long at = 0;
+   while (f && fgets(line, sizeof line, f)) {
+      at++;
+      if (at <= before || !strstr(line, "align guard: buffer") || !strstr(line, "SAFE module"))
+         continue;
+      if (strstr(line, "FAILED"))
+         continue;
+      if (at <= mid)
+         guard_aligned = true;
+      else
+         guard_misaligned = true;
+   }
+   if (f)
+      fclose(f);
+   if (ok && road == 1 && (guard_aligned || !guard_misaligned)) {
+      ok = false;
+      snprintf(why, sizeof why, "the align guard %s", guard_aligned ? "ran the SAFE build for aligned buffers" : "did not run the SAFE build for the misaligned ones");
+   }
+   printf("%-16s %s road %-5s aligned and misaligned (4, 8) offsets, ALIGN4 build %s%s%s\n", name, ok ? "PASS    " : "FAIL    ",
+          road_name, guard_misaligned ? "ran" : "did not run", ok ? "" : "  ", ok ? "" : why);
+   fprintf(tsv, "%s\t%s\t%s\t\t\t\t\t\t0\t%s\n", name, road_name, ok ? "PASS" : "FAIL", ok ? "" : why);
+   fflush(tsv);
+   [ps release];
+   [fn release];
+   [lib release];
+   return ok ? PASS : FAIL;
+} }
+
+/* ---- render pipelines (render_tests.h) ---------------------------------------------------------------------------- */
+
+#include "render_tests.h"
+
+static Ivar rroad_ivar;
+static FILE *rtsv;
+
+static double
+median(double *v, unsigned n)
+{
+   for (unsigned i = 1; i < n; i++)
+      for (unsigned j = i; j && v[j - 1] > v[j]; j--) {
+         double x = v[j];
+         v[j] = v[j - 1];
+         v[j - 1] = x;
+      }
+   return n ? v[n / 2] : 0;
+}
+
+static id<MTLTexture>
+rtarget(MTLPixelFormat f)
+{
+   MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:RW height:RH mipmapped:NO];
+   td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+   td.storageMode = MTLStorageModePrivate;
+   id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+   if (!t) {
+      fprintf(stderr, "plugin_run: no %ux%u render target of format %lu\n", RW, RH, (unsigned long)f);
+      exit(2);
+   }
+   return t;
+}
+
+static unsigned
+rbpp(MTLPixelFormat f)
+{
+   switch (f) {
+   case MTLPixelFormatRGBA32Float: return 16;
+   case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatR32Float: case MTLPixelFormatDepth32Float: return 4;
+   default: fprintf(stderr, "plugin_run: format %lu has no size here\n", (unsigned long)f); exit(2);
+   }
+}
+
+/* one pass over the targets with n draws (the first clears them) */
+static void
+rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRenderPipelineState> ps, id<MTLDepthStencilState> ds,
+        id<MTLTexture> const *col, id<MTLTexture> depth, unsigned n)
+{
+   MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+   for (unsigned i = 0; i < RMAXCOL; i++) {
+      if (!col[i])
+         continue;
+      rp.colorAttachments[i].texture = col[i];
+      rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+      rp.colorAttachments[i].storeAction = MTLStoreActionStore;
+      rp.colorAttachments[i].clearColor = MTLClearColorMake(clear_col[0], clear_col[1], clear_col[2], clear_col[3]);
+   }
+   if (depth) {
+      rp.depthAttachment.texture = depth;
+      rp.depthAttachment.loadAction = MTLLoadActionClear;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.depthAttachment.clearDepth = 1.0;
+   }
+   id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+   [re setRenderPipelineState:ps];
+   if (ds)
+      [re setDepthStencilState:ds];
+   [re setCullMode:MTLCullModeNone];
+   for (unsigned i = 0; i < RMAXBUF; i++) {
+      if (r->vbuf[i])
+         [re setVertexBuffer:r->vbuf[i] offset:0 atIndex:i];
+      if (r->fbuf[i])
+         [re setFragmentBuffer:r->fbuf[i] offset:0 atIndex:i];
+   }
+   for (unsigned i = 0; i < 4; i++) {
+      if (r->ftex[i])
+         [re setFragmentTexture:r->ftex[i] atIndex:i];
+      if (r->fsamp[i])
+         [re setFragmentSamplerState:r->fsamp[i] atIndex:i];
+   }
+   for (unsigned k = 0; k < n; k++) {
+      if (t->instances > 1 || t->base_instance)
+         [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount instanceCount:t->instances baseInstance:t->base_instance];
+      else
+         [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount];
+   }
+   [re endEncoding];
+}
+
+static enum outcome
+run_render_test(const struct rtest *t)
+{ @autoreleasepool {
+   char path[2048], why[256] = "";
+   const char *name = t->name;
+   snprintf(path, sizeof path, "%s/%s.metallib", air_dir, t->air);
+   NSError *e = nil;
+   id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
+   if (!lib) {
+      printf("%-16s FAIL     no library from %s: %s\n", name, path, e.localizedDescription.UTF8String ?: "?");
+      fprintf(rtsv, "%s\tnone\tFAIL\t\t\t\t\t0\tno library\t%s\n", name, t->tolerance);
+      return FAIL;
+   }
+   uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+   id<MTLFunction> vf = [lib newFunctionWithName:@(t->vfn)], ff = nil;
+   if (t->fc) {
+      MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+      for (unsigned i = 0; i < t->fc->n; i++)
+         [cv setConstantValue:t->fc->v[i].bytes type:t->fc->v[i].size == 1 ? MTLDataTypeBool : MTLDataTypeUInt atIndex:t->fc->v[i].index];
+      ff = [lib newFunctionWithName:@(t->ffn) constantValues:cv error:&e];
+      [cv release];
+   } else
+      ff = [lib newFunctionWithName:@(t->ffn)];
+   const double fn_ms = ms_since(t0);
+   MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+   d.vertexFunction = vf;
+   d.fragmentFunction = ff;
+   for (unsigned i = 0; i < RMAXCOL; i++)
+      d.colorAttachments[i].pixelFormat = t->col[i];
+   d.depthAttachmentPixelFormat = t->depth ? t->depth : MTLPixelFormatInvalid;
+   if (t->prim == MTLPrimitiveTypePoint)
+      d.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+   if (t->vdesc) {
+      MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
+      t->vdesc(vd);
+      d.vertexDescriptor = vd;
+   }
+   t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+   id<MTLRenderPipelineState> ps = vf && ff ? [dev newRenderPipelineStateWithDescriptor:d error:&e] : nil;
+   const double ps_ms = ms_since(t0);
+   [d release];
+   const int road = ps && rroad_ivar ? *((const uint8_t *)(__bridge void *)ps + ivar_getOffset(rroad_ivar)) : ps ? 0 : -1;
+   const char *road_name = road == 1 ? "nir" : road == 0 ? "spirv" : "none";
+   if (!ps) {
+      printf("%-16s FAIL     no pipeline: %s\n", name, e.localizedDescription.UTF8String ?: (vf && ff ? "?" : "no function"));
+      fprintf(rtsv, "%s\tnone\tFAIL\t%.3f\t%.3f\t\t\t0\tno pipeline\t%s\n", name, fn_ms, ps_ms, t->tolerance);
+      [vf release]; [ff release]; [lib release];
+      return FAIL;
+   }
+   id<MTLDepthStencilState> ds = nil;
+   if (t->depth) {
+      MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+      dd.depthCompareFunction = MTLCompareFunctionLess;
+      dd.depthWriteEnabled = YES;
+      ds = [dev newDepthStencilStateWithDescriptor:dd];
+      [dd release];
+   }
+   struct rrun r;
+   memset(&r, 0, sizeof r);
+   r.t = t;
+   rng_state = 0x9e3779b9u ^ (uint32_t)strlen(t->name) * 2654435761u;
+   t->setup(&r);
+   id<MTLTexture> col[RMAXCOL] = { nil }, depth = nil;
+   for (unsigned i = 0; i < RMAXCOL; i++)
+      if (t->col[i]) {
+         col[i] = rtarget(t->col[i]);
+         r.back[i] = rbuf(NULL, (size_t)RW * RH * rbpp(t->col[i]));
+      }
+   if (t->depth) {
+      depth = rtarget(t->depth);
+      r.dback = rbuf(NULL, (size_t)RW * RH * 4);
+   }
+   id<MTLCommandBuffer> cb = [queue commandBuffer];
+   bool up = false;
+   for (unsigned i = 0; i < 4; i++)
+      up |= r.tstage[i] != nil;
+   if (up) {
+      id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+      for (unsigned i = 0; i < 4; i++)
+         if (r.tstage[i])
+            [be copyFromBuffer:r.tstage[i] sourceOffset:0 sourceBytesPerRow:(NSUInteger)r.tw[i] * r.tbpp[i]
+               sourceBytesPerImage:(NSUInteger)r.tw[i] * r.th[i] * r.tbpp[i] sourceSize:MTLSizeMake(r.tw[i], r.th[i], 1)
+                         toTexture:r.ftex[i] destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+      [be endEncoding];
+   }
+   rencode(cb, t, &r, ps, ds, col, depth, 1);
+   id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+   for (unsigned i = 0; i < RMAXCOL; i++)
+      if (col[i])
+         [be copyFromTexture:col[i] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
+                    toBuffer:r.back[i] destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * rbpp(t->col[i])
+     destinationBytesPerImage:(NSUInteger)RW * RH * rbpp(t->col[i])];
+   if (depth)
+      [be copyFromTexture:depth sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
+                 toBuffer:r.dback destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * 4 destinationBytesPerImage:(NSUInteger)RW * RH * 4];
+   [be endEncoding];
+   bool ok = submit(cb, name, why, sizeof why);
+   if (ok && corrupt) {
+      for (unsigned i = 0; i < RMAXCOL; i++)
+         if (r.back[i])
+            ((uint8_t *)r.back[i].contents)[(35 * RW + 33) * rbpp(t->col[i]) + 2] ^= 0x40;   /* a pixel no test skips */
+      if (r.dback)
+         ((uint8_t *)r.dback.contents)[(35 * RW + 33) * 4 + 2] ^= 0x40;
+   }
+   if (ok) {
+      ok = t->check(&r);
+      if (!ok)
+         snprintf(why, sizeof why, "%s", r.why);
+   }
+   if (ok && t->spirv_road && road == 1) {
+      ok = false;
+      snprintf(why, sizeof why, "took the AIR-to-NIR road, which must refuse it");
+   }
+   /* GPU time per draw: passes of 1 and of 22 draws, three of each, from the command buffers' GPU times (the plugin's
+    * timestamps around each command buffer); (median of 22 - median of 1) / 21 */
+   double per_draw = 0, t1[3], t22[3];
+   unsigned timed = 0;
+   if (!corrupt) {
+      for (unsigned k = 0; k < 6; k++) {
+         @autoreleasepool {
+            id<MTLCommandBuffer> tcb = [queue commandBuffer];
+            rencode(tcb, t, &r, ps, ds, col, depth, k < 3 ? 1 : 22);
+            char w2[256];
+            if (!submit(tcb, name, w2, sizeof w2))
+               break;
+            const double g = (tcb.GPUEndTime - tcb.GPUStartTime) * 1e6;
+            if (k < 3)
+               t1[k] = g;
+            else
+               t22[k - 3] = g;
+            timed++;
+         }
+      }
+      if (timed == 6)
+         per_draw = (median(t22, 3) - median(t1, 3)) / 21;
+   }
+   printf("%-16s %s road %-5s functions %.2f ms, pipeline %.2f ms, GPU %.2f us per draw (tolerance %s)%s%s\n", name,
+          ok ? "PASS    " : "FAIL    ", road_name, fn_ms, ps_ms, per_draw, t->tolerance, ok ? "" : "  ", ok ? "" : why);
+   fprintf(rtsv, "%s\t%s\t%s\t%.3f\t%.3f\t%.2f\t%.2f\t%u\t%s\t%s\n", name, road_name, ok ? "PASS" : "FAIL", fn_ms, ps_ms, per_draw,
+           timed == 6 ? median(t1, 3) : 0, timed, ok ? "" : why, t->tolerance);
+   fflush(stdout);
+   fflush(rtsv);
+   for (unsigned i = 0; i < RMAXBUF; i++) {
+      [r.vbuf[i] release];
+      [r.fbuf[i] release];
+   }
+   for (unsigned i = 0; i < 4; i++) {
+      [r.ftex[i] release];
+      [r.tstage[i] release];
+      [r.fsamp[i] release];
+   }
+   for (unsigned i = 0; i < RMAXCOL; i++) {
+      [col[i] release];
+      [r.back[i] release];
+   }
+   [depth release];
+   [r.dback release];
+   [ds release];
+   [ps release];
+   [vf release];
+   [ff release];
+   [lib release];
+   return ok ? PASS : FAIL;
+} }
+
 @protocol PluginDevice <MTLDevice>
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port;
 @end
@@ -595,6 +945,13 @@ main(int argc, char **argv)
       return 2;
    }
    fprintf(tsv, "test\troad\toutcome\tlibrary_ms\tfunction_ms\tpipeline_ms\tgpu_us_median\tgpu_us_max\truns\twhy\n");
+   snprintf(p, sizeof p, "%s/render.tsv", out_dir);
+   rtsv = fopen(p, "w");
+   if (!rtsv) {
+      fprintf(stderr, "plugin_run: cannot write %s\n", p);
+      return 2;
+   }
+   fprintf(rtsv, "test\troad\toutcome\tfunctions_ms\tpipeline_ms\tgpu_us_per_draw\tgpu_us_pass_of_one\truns\twhy\ttolerance\n");
 
    if (objc_lookUpClass("NVMTLDevice")) {
       fprintf(stderr, "plugin_run: a Metal plugin is already loaded in this process\n");
@@ -607,6 +964,8 @@ main(int argc, char **argv)
    Class cls = objc_lookUpClass("NVMTLDevice");
    Class pscls = objc_lookUpClass("NVMTLComputePipelineState");
    road_ivar = pscls ? class_getInstanceVariable(pscls, "_road") : NULL;   /* a plugin before the road has none: "none" */
+   Class rpscls = objc_lookUpClass("NVMTLRenderPipelineState");
+   rroad_ivar = rpscls ? class_getInstanceVariable(rpscls, "_road") : NULL;
    if (!cls) {
       fprintf(stderr, "plugin_run: %s has no NVMTLDevice\n", argv[1]);
       return 2;
@@ -632,7 +991,7 @@ main(int argc, char **argv)
    for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
       bool want = argc == 5;
       for (int a = 5; a < argc; a++)
-         want |= !strcmp(argv[a], tests[i].name);
+         want |= !strcmp(argv[a], tests[i].name) || !strcmp(argv[a], "compute");
       if (!want)
          continue;
       switch (run_test(&tests[i])) {
@@ -641,6 +1000,26 @@ main(int argc, char **argv)
       case SKIPPED: skipped++; break;
       }
    }
+   {
+      bool want = argc == 5;
+      for (int a = 5; a < argc; a++)
+         want |= !strcmp(argv[a], "align_misaligned") || !strcmp(argv[a], "compute");
+      if (want)
+         run_align_test() == PASS ? pass++ : fail++;
+   }
+   for (unsigned i = 0; i < sizeof rtests / sizeof *rtests; i++) {
+      bool want = argc == 5;
+      for (int a = 5; a < argc; a++)
+         want |= !strcmp(argv[a], rtests[i].name) || !strcmp(argv[a], "render");
+      if (!want)
+         continue;
+      switch (run_render_test(&rtests[i])) {
+      case PASS: pass++; break;
+      case FAIL: fail++; break;
+      case SKIPPED: skipped++; break;
+      }
+   }
+   fclose(rtsv);
    read_counters(c1);
    print_counters("at end", c1);
    printf("pass %u, fail %u, skipped %u\n", pass, fail, skipped);

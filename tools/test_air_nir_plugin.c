@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-   test_air_nir_plugin.c - the pure parts of the plugin's AIR-to-NIR road for compute pipelines (plugin/nvmtl_air_nir.h):
+   test_air_nir_plugin.c - the pure parts of the plugin's AIR-to-NIR road (plugin/nvmtl_air_nir.h):
    the switch, the descriptor masks a frontend result gives the plugin's set-0 bands, the threadgroup sizes the road
    runs, the constexpr-sampler agreement with the translator's reflection, and the shader-cache entry, which must read
    back exactly what was written and turn away anything else (another build's layout, a cut or changed file).
@@ -95,6 +95,15 @@ int main(void)
     arm("a success without a shader is a miss", nvmtl_air_nir_entry_unpack(e, rn, &st, &back, &bb, &bn) == -1);
     free(e);
     arm("the ABI's version-2 result ends where version 3 starts", offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE);
+    arm("the ABI's version-3 result ends where version 4 starts", offsetof(struct nvmtl_air_nir_result, stage) == NVMTL_AIR_NIR_RESULT_V3_SIZE);
+    arm("the ABI's version-3 request ends where version 4 starts", offsetof(struct nvmtl_air_nir_request, varying_count) == NVMTL_AIR_NIR_REQUEST_V3_SIZE);
+    arm("a stage is one of three, and a fragment stage's set is the plugin's second",
+        NVMTL_AIR_NIR_STAGE_KERNEL == 0 && NVMTL_AIR_NIR_STAGE_VERTEX == 1 && NVMTL_AIR_NIR_STAGE_FRAGMENT == 2 && NVMTL_AIR_NIR_FRAGMENT_SET == 1);
+    /* a render stage's masks land in the same bands (its set is chosen by the pipeline layout, not by the masks) */
+    memset(&r, 0, sizeof r); r.size = sizeof r; r.stage = NVMTL_AIR_NIR_STAGE_FRAGMENT;
+    SET(r.texture_mask, 0); r.sampler_mask = 1u << 1;
+    arm("a fragment result's texture and sampler land in the bands a kernel's do",
+        nvmtl_air_nir_masks(&r, b, &hi, tb) == 0 && HAS(b, 32) && HAS(b, 161) && HAS(b, NVMTL_AN_TABLE) && hi == 0);
 
     printf(fails ? "FAILED %d\n" : "ok\n", fails);
     return fails ? 1 : 0;
