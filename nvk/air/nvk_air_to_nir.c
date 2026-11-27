@@ -621,6 +621,8 @@ air_get(struct air_tr *t, LLVMValueRef v)
        L.LLVMIsAConstantAggregateZero(v) || L.LLVMIsAConstantDataSequential(v) || L.LLVMIsAConstantVector(v) ||
        L.LLVMIsAConstantPointerNull(v) || L.LLVMIsAUndefValue(v))
       return air_constant(t, v);
+   if (L.LLVMIsAFunction(v))
+      unsupported(t, "the function %s used as a value (a function pointer)", air_name(v, NULL));
    unsupported(t, "a value used before it is defined (%s)", air_name(v, NULL));
 }
 

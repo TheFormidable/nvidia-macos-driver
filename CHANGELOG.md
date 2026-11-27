@@ -14,6 +14,20 @@
 - `tools/air-nir/run.sh` (new): the frontend and NAK on Linux, on Mesa's nouveau drm-shim as an RTX 5050. Of the 62
   kernels it takes (its two fixtures and the translator's), 48 compile to shader model 120 code and 14 are refused
   with a reason (ray tracing, a function pointer, a select between a constant table and a buffer); none fails.
+- **Run on the card** (`tools/air-nir/run-mac.sh`, `airrun.c`, kernels in `tools/air-nir/metal`): 29 tests of
+  Metal kernels compiled with Apple's compiler, translated by the frontend and dispatched on the RTX 5050 through a
+  build of NVK opened directly, each result compared with a reference computed on the CPU; all pass, and NVRM's fault
+  counters stayed at 0. It found two bugs the Linux test could not: `any()` of a bool vector was translated as
+  `all()`, and `hadd`/`rhadd` (and `isnormal`) reached NAK as operations it has no instruction for, a compiler panic.
+- The frontend now also translates SIMD-group and quad functions, structures and arrays held as values, calls
+  Apple's compiler left un-inlined (every callee is inlined), arguments guarded by a function constant, and the
+  second operand Apple's `air.clz`/`air.ctz` carry. `tools/air-nir/sweep.py` (`airsweep.c`) runs every compute kernel
+  of the plugin's AIR cache through it and NAK without dispatching: on this Mac 699 of 8273 give a
+  pipeline, none fails or crashes, the rest are refused with a reason (textures above all). It found that a kernel
+  reading a function constant was compiled as if the constant were 0 (the frontend took the placeholder global's
+  initializer for its value): such kernels are refused now, until the request carries the values.
+- `build/build_nvk.sh`: `NVK_CRATE_CACHE` names a folder of Rust crates an earlier build fetched, copied into the
+  fresh Mesa tree so meson downloads nothing (it still checks each against Mesa's wrap hashes).
 
 ## 3.0.20
 
