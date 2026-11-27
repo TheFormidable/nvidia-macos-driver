@@ -498,7 +498,9 @@ road does not make it, the translator's variant is made as before. A sampler who
   the translator's for all 70 functions it translates (43 kernels with their function-constant sets, 14 vertex and 13
   fragment functions; the default size equals the SPIR-V's for every kernel); the frontend refuses the other five (four
   that must be refused, and `r_primid`'s fragment). `sweep.py --reflect` over the plugin's AIR cache (22,689 files, 10,814
-  kernel, vertex and fragment functions, no function-constant values; 32 minutes): the frontend translates 5,001 (3,481
+  kernel, vertex and fragment functions, no function-constant values; 32 minutes; with the frontend as it was before
+  its outputs under function constants and colour indices from them, which the next sentence but one covers): the
+  frontend translates 5,001 (3,481
   kernels, 488 vertex and 1,032 fragment functions) and its reflection equals the translator's for every one of them, by
   every key it gives; it gives one for every function it translates; it refuses 5,811 (most read function constants the
   cache holds no values for; then buffer arguments whose metadata names no address space (475: the parameter's pointer type says it), post-tessellation vertex functions,
