@@ -4,8 +4,9 @@ The plugin runs a Metal function on NVK by translating its AIR (the LLVM bitcode
 the translator (`translator/`), which NVK then turns into NIR and NAK into the GPU's code. `nvk/air` is a second
 road for compute kernels that skips SPIR-V: NVK reads the AIR itself and builds the NIR directly.
 
-Phase 1 (this tree) is the frontend and its test on Linux. Nothing calls it yet: the plugin still translates every
-kernel to SPIR-V, so the driver behaves exactly as before.
+Phase 1 is the frontend and its tests (on Linux, then on the card). Since phase 2 (round 3, 2026-11-27) the plugin
+asks it first for every compute pipeline, and keeps the SPIR-V road as the fallback (below, "In the plugin").
+NVMTL_AIR_NIR=0 turns it off; it is off in WindowServer for now.
 
 ## Pieces
 
@@ -17,6 +18,11 @@ kernel to SPIR-V, so the driver behaves exactly as before.
 | `tools/air-nir/` | `run.sh`, `airtest.c` and two fixtures: the Linux test |
 | `tools/air-nir/metal/`, `airrun.c`, `run-mac.sh` | the test on the card (macOS): Metal kernels, run and checked against the CPU |
 | `tools/air-nir/airsweep.c`, `sweep.py` | every compute kernel of the plugin's AIR cache through the frontend and NAK, no dispatch |
+| `plugin/NVMTLAirNir.m` | the plugin's road: the request, the shader cache, the pipeline states, the variants, the log |
+| `plugin/nvmtl_air_nir.h` | its pure parts (the switch, the masks, the sizes, the cache entry), tested by `tools/test_air_nir_plugin.c` |
+| `plugin/nvmtl_air_nir_abi.h` | a copy of the ABI header (the plugin is built from `plugin/` alone); `tools/test_air_nir_plugin.py` holds the two equal |
+| `tools/air-nir/airrun_tests.h` | the tests' grids, inputs and references, shared by `airrun.c` and `plugin_run.m` |
+| `tools/air-nir/plugin_run.m`, `plugin-run.sh` | the same tests through the plugin's own compute path, from a build, nothing installed |
 
 ## How it works
 
@@ -24,7 +30,16 @@ kernel to SPIR-V, so the driver behaves exactly as before.
   the bitcode, the kernel's name, the threadgroup size the pipeline is for, the length of each `[[threadgroup(n)]]`
   argument, the path of an LLVM library and, since version 2, the function's function-constant values (below).
   Both structs start with their size: a version-1 request (176 bytes) and a version-1 result (288 bytes, up to its
-  message) are read and written as far as they go.
+  message) are read and written as far as they go. Version 3 (round 3) adds request flags an older NVK ignores:
+  `NVMTL_AIR_NIR_TEXT_IR` (the module is LLVM text IR, as the plugin keeps AIR; parsed with `LLVMParseIRInContext`),
+  `NVMTL_AIR_NIR_TG_DEFAULT` (a `[[threadgroup(n)]]` argument with no length gets the translator's default, 512
+  elements of its type up to 32 KB), `NVMTL_AIR_NIR_UNCHECKED` (the pipeline is made with buffer robustness off, as the
+  plugin makes compute pipelines, so the table is addressed as such a pipeline lowers it) and `NVMTL_AIR_NIR_ALIGN4`
+  (no device or constant buffer access promises more than 4 bytes: the align guard's build); the result's
+  `global_align` (the largest alignment a buffer access promises); and three exports: `nvmtl_air_nir_clone_v1` (the
+  shader for another threadgroup size: the translation reads the size only through the shader's workgroup size),
+  `nvmtl_air_nir_serialize_v1` and `nvmtl_air_nir_deserialize_v1` (for the plugin's shader cache; only the NVK that
+  wrote a blob reads it).
 - NVK links no LLVM (it is built with `-Dllvm=disabled`). The frontend opens the library the request names (the
   plugin's `air-runtime/libLLVM.dylib`, which already reads AIR) once per process and uses its C API to parse the
   bitcode, inline every function the kernel calls (each is marked `alwaysinline` first: Apple's compiler builds with
@@ -189,11 +204,99 @@ function constant compiled as if it were 0: Apple's compiler copies each constan
 `MTL_FC_INIT_` global) into an `addrspace(2)` global that is not constant, in the module's static initializer, and
 the frontend took that global's initializer as its value. Such kernels are refused now.
 
+## In the plugin (round 3)
+
+`newComputePipelineStateWithFunction:` (and every descriptor and options variant, which end there) asks
+`plugin/NVMTLAirNir.m` first. The request carries the function's AIR as the plugin keeps it (text IR), its
+function-constant values (`f->_fc`, all of them, `NVMTL_AIR_NIR_FC_VALUES`), the threadgroup size the translator's module
+defaults to (its SpecId defaults, as the SPIR-V road's creation-time pipeline is compiled for; 1x1x1 when it has none),
+and the flags above. The pipeline is created from the NIR with the pipeline layout every compute pipeline has (both
+stage sets and the heap, 48 bytes of push constants: the SPIR-V road's, so the dispatch binds what it binds for any
+kernel), and its descriptor masks come from the result: the table (binding 640), each sampled texture (32 + n) and
+sampler slot (160 + n), the storage textures (480 + n, up to the highest), and which of them are texel buffers. The
+constexpr samplers are bound by the plugin's existing path, from the translator's reflection: the road is taken only
+when the result puts them at exactly the slots that reflection names (the slots are compared, not the state words).
+
+The SPIR-V road, exactly as before, takes:
+- a kernel the frontend refuses, with the frontend's reason, among them an incomplete function-constant set (the
+  frontend refuses a kernel that still reads a constant the set does not give; the translator reads it as 0);
+- a kernel NVK will not make a pipeline of, and one whose constexpr samplers would not sit where reflection binds them;
+- a kernel whose AIR is the translator's own rewrite (a mesh or object stage's kernel, a tile function's, a kernel
+  with a stage-in layout), one a replacement module is configured for (`NVMTL_BDA_PROBE_FILE`), and one the
+  application profile edits;
+- a dispatch that binds a pixel-coordinate argument sampler: its variant is the translator's, as before (the request
+  carries no sampler state yet);
+- a dispatch of a threadgroup size the road does not run (over the device's per-dimension limit, which the SPIR-V road
+  linearizes): the kernel's SPIR-V twin, made the first time;
+- every kernel with `NVMTL_AIR_NIR=0`, in WindowServer, and with an NVK that has no frontend (an older one) or that the
+  plugin did not open directly (through the loader, its `VkDevice` is not NVK's own). The exports are looked up with
+  `dlsym` from the NVK the plugin opened, all five or none.
+
+Variants: a threadgroup-size variant of a kernel on the road is a copy of its NIR with the size changed
+(`nvmtl_compute_variant`; the creation-time size is kept as the first variant); a threadgroup-memory variant
+(`setThreadgroupMemoryLength:`) is translated again with the lengths; and when the kernel's buffer accesses promise more
+than 4 bytes, the align guard watches all of its buffers, and a dispatch with one bound at an address the promise does
+not hold runs a build translated again with `NVMTL_AIR_NIR_ALIGN4` (the SPIR-V road's SAFE module).
+
+Cache: the result and the serialized NIR are an entry of the plugin's shader cache (the spvcache folder, stage `nir1`,
+named and swept by the translator's build tag as every entry there), keyed like the function-constant SPIR-V entries
+(the AIR's digest, the entry, the constants) and by the threadgroup size, the threadgroup-memory lengths, the request's
+flags and the identity of the NVK (its Mach-O UUID) and of the LLVM library. A refusal is an entry too, so a process
+does not ask the frontend about it again. NVK's own pipeline cache keeps the compiled binary, as for the SPIR-V road.
+
+The function still gets its SPIR-V when it is made (newFunctionWithName: translates, as before): the fallback, the
+reflection, the hazard model and the binding of constexpr samplers and argument-buffer resources read it. So in phase 2
+the road adds the frontend's work to the translator's rather than replacing it; phase 4 is where the translation would
+be left out for the kernels the road takes.
+
+The log (the plugin's log file; a release plugin writes it only for a process with `NVMTL_PROCESS_ENV=1`):
+`compute: AIR to NIR ON ...` or `... off (<why>)` once per process, also in the system log;
+`air-nir: kernel <name>: AIR to NIR (<ms>, translated | its NIR from the shader cache)` the first time a function takes
+the road; `air-nir: kernel <name> stays on the SPIR-V road: <reason>` once per function that falls back;
+`compute roads in <process>: AIR to NIR <n> pipeline(s) and <n> variant(s), SPIR-V <n> pipeline(s) and <n> variant(s);
+<n> took the SPIR-V road after AIR to NIR said no` at every power of two of their sum, also in the system log.
+
+### Tested through the plugin (round 3)
+
+`tools/air-nir/plugin-run.sh NVMTLDriver NVK.dylib OUTDIR [TEST...]` runs the tests of `tools/air-nir/metal` through the
+plugin's own compute path without installing anything: a development build of the plugin (`build/build_plugin_dev.sh`)
+in a bundle folder of its own (the installed bundle's air-runtime and translator linked in, read only) is opened in a
+normal process and its `NVMTLDevice` made over the NVAccel service, as the card programs of `tools/` do with a selected
+driver; it opens the NVK named. Each test makes its library from a metallib, its function (with its constants), its
+pipeline state (the road it took is read from the pipeline state), its buffers, textures and samplers through Metal,
+dispatches through a compute encoder (indirectly for `grid2d_indirect`), copies written textures back and checks the
+outputs against the CPU's reference (`airrun_tests.h`, shared with `airrun.c`). Then the same dispatch 21 more times in
+one command buffer, on copies of its buffers in video memory, timed by the plugin's per-dispatch timestamp queries
+(`NVMTL_DISPATCH_TIME`). Caches go to OUTDIR (empty at each run, or an earlier run's with `PLUGIN_RUN_CACHE`), Mesa's
+disk cache is off, every command buffer is waited for at most 2 s and NVRM's four fault counters are read around every
+test. `grid2d_base` is not run (Metal has no dispatch base).
+
+On the RTX 5050 (2026-11-27, NVK of this tree, the installed plugin's air-runtime and translator):
+- AIR to NIR first: the 42 tests that dispatch all take the road and pass; the four the frontend must refuse
+  (`fc_refuse`, `fc_kernel_c`, `fc_kernel_none`, `fc_texture_none`) take the SPIR-V road, with the reason in the log;
+  `tg_arg`'s threadgroup-memory variant takes the road too. With `PLUGIN_RUN_CORRUPT=1` all 42 fail. Two runs with
+  empty caches and one with the caches of the first (every shader on the road then came from the cache) gave the same;
+  the counters stayed at 0.
+- `NVMTL_AIR_NIR=0`: every pipeline on the SPIR-V road; 38 of the 42 pass. `fmath` and `fmath_precise` (an `fma`
+  1.3e-6 off, the check allows 1e-6), `math_lib` (one value 1e-4 off) and `tex_offset` (a sample with an offset
+  known only at run time) fail the checks these tests were written with for the frontend; the plugin of the commit
+  before this round gives exactly the same four failures, with the same values.
+- Pipeline creation, first pair of runs, empty caches (41 kernels, the first pipeline of the process left out: it pays for NVK and NAK
+  starting, 43 ms on the road and 54 ms on the SPIR-V road): on the road (frontend and NAK) median 2.2 ms, max 10.2 ms;
+  on the SPIR-V road (the translator at newFunctionWithName, then the address lowering and NAK) median 6.9 ms
+  (translator 4.5, pipeline 2.6), max 28.0 ms. With the caches of that run: 1.6 ms (max 10.3) and 2.6 ms (max 21.7).
+- GPU time of the dispatch, second pair of runs (median of 21, each kernel's own grid of at most 64K threads, so mostly
+  the launch): the median over kernels is 7.9 us on the road and 9.5 us on the SPIR-V road (the longest single time,
+  `dev_atomics` apart, 22.6 and 33.1 us). Of the 41 kernels timed (`grid2d_indirect`'s indirect dispatch is not), 38 are more than 2% faster on the
+  road, `tex_write` and `tex_fence` within 2%, and `dev_atomics` (contended atomics on few addresses) slower: 657
+  against 629 us, max 1036 and 985. The first pair gave the same per kernel to a few percent, except for a stretch of consecutive tests that took about twice as long in one run than in the other,
+  on either road (the GPU's clock changing during a run, not the code).
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).
-2. The plugin calls it (round 3), first for the kernels the translator refuses, with `NVMTL_AIR_NIR=0` to turn it
-   off. What that needs from the plugin side:
+2. The plugin calls it (round 3, done: "In the plugin" above), for every compute kernel first, with `NVMTL_AIR_NIR=0` to
+   turn it off. What round 2 listed for it, and where each landed:
    - the call: `newComputePipelineStateWithFunction:` (`plugin/NVMTLDevice.m`) creates every compute pipeline through
      `nvmtl_vk_compute_pipeline_create` (`plugin/nvmtl_vk.c`) from `f->_spirv`; a NIR road beside it takes the
      function's AIR (`f->_air`, text: written to bitcode with the air-runtime's LLVM, or the bitcode kept from the
@@ -211,5 +314,13 @@ the frontend took that global's initializer as its value. Such kernels are refus
      unchanged, with the reason logged once per function;
    - a pipeline bound with a pixel-coordinate argument sampler (its state is known only at the dispatch) stays on the
      SPIR-V road until the request carries sampler state.
-3. Vertex and fragment functions.
+   Left open by round 3: the request carries no argument-sampler state (pixel-coordinate samplers stay on SPIR-V); the
+   align guard's build is checked by `airrun` (`AIRRUN_ALIGN4=1`: all 47 pass, no access promising more than 4 bytes)
+   but has not run through the plugin with a misaligned buffer (if the guard missed one, that dispatch would fault);
+   the constexpr samplers' state words are not compared with the translator's; WindowServer stays off; the measured
+   kernels are the test kernels, not applications'.
+3. Vertex and fragment functions. What the compute road does not have yet and they need: a stage's inputs and outputs
+   and their link (the plugin links varyings on SPIR-V, `nvmtl_varying_link`), and the plugin's SPIR-V rewrites of
+   render stages (framebuffer fetch copies, stencil-export emulation, A8 targets, multiview, the GL uniform buffer),
+   which have to be done on NIR or by the frontend.
 4. Prefer it to SPIR-V where it measures the same or better.

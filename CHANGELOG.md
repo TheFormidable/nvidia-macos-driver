@@ -2,6 +2,36 @@
 
 ## Not in a package yet
 
+### AIR to NIR, phase 2: the plugin makes compute pipelines from NIR
+
+- **Every compute pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): the kernel's AIR as
+  the plugin keeps it, its function-constant values, its default threadgroup size and the threadgroup-memory lengths
+  go to `nvmtl_air_to_nir_v1`, and the pipeline is made from the NIR with the layout every compute pipeline has and
+  the descriptor masks the result gives. The translator's SPIR-V stays the fallback, exactly as before, for a kernel
+  the frontend refuses (an incomplete function-constant set among them), one NVK will not make a pipeline of, one whose
+  constexpr samplers would not sit where the translator's reflection binds them, the translator's own rewrites (mesh,
+  object, tile and stage-in kernels), a dispatch with a pixel-coordinate argument sampler and a threadgroup size over
+  the per-dimension limit; the reason is logged once per function, and the count of pipelines on each road at every
+  power of two. Threadgroup-size variants are copies of the NIR, threadgroup-memory variants and the align guard's
+  build are translated again; the result and the serialized NIR are kept in the shader cache (stage `nir1`).
+- **`NVMTL_AIR_NIR=0`** (the environment or the settings file) keeps every compute pipeline on the SPIR-V road, as in
+  3.0.20 (`tools/switches.tsv`, `docs/SWITCHES.md`). The road is off in WindowServer for now, and with an NVK that
+  has no frontend or that the plugin reached through the loader.
+- The frontend (request version 3): text IR, the translator's default length for a threadgroup argument the request
+  leaves at 0, the robustness the plugin makes compute pipelines with, a build with no buffer access promising more
+  than 4 bytes, the largest promise in the result; exports to copy a shader for another threadgroup size and to
+  serialize and read one back. A refusal of a text module no longer frees its buffer twice.
+- **Proven through the plugin without installing it** (`tools/air-nir/plugin-run.sh`, `plugin_run.m`; the tests now in
+  `airrun_tests.h`, shared with `airrun.c`): a development build of the plugin, opened in a normal process with a build
+  of NVK, on the RTX 5050. All 42 tests that dispatch take the road and pass, the four the frontend must refuse take
+  the SPIR-V road; with `NVMTL_AIR_NIR=0` 38 pass, and the four that fail fail the same way with the plugin of the
+  commit before. Pipeline creation median 2.2 ms on the road and 6.9 ms on the SPIR-V road (translator included); the
+  dispatches' GPU time median 7.9 and 9.5 us; the fault counters stayed at 0. The function is still translated to
+  SPIR-V when it is made, so this phase does not yet save the translator's time. Details in `docs/AIR-TO-NIR.md`.
+- `tools/test_air_nir_plugin.py`, `.c` (new host tests): the switch, the masks, the sizes, the constexpr-sampler
+  check, the cache entry, the fallback and the exports, each with a control. `tools/switches.tsv` now also lists the
+  frontend's three diagnostics and `NVK_CRATE_CACHE`, which rounds 1 and 2 had left out.
+
 ### AIR to NIR, phase 1: compute kernels without SPIR-V
 
 - **NVK reads Metal AIR itself** (`nvk/air/nvk_air_to_nir.c`, added to NVK's build by `nvk/nvk-air-nir.patch`, last
