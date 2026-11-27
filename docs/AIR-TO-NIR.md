@@ -797,9 +797,9 @@ linked function's own constexpr samplers were missing from `!air.sampler_states`
 reflection, which the plugin binds from, did not list them). Fixed at the source: a dependency's local global that the
 module defines with another line gets a fresh name (`name.linkedN`) with every use in that module; a line that differs
 only in a trailing `, align N` is the same definition; the dependency's constexpr samplers are added to the module's
-`!air.sampler_states` (new nodes after the module's highest one). The draw binds the constexpr samplers and embedded
-resources of the stages the pipeline was built from (`_linkedVert`/`_linkedFrag`, the linked ones), not the caller's
-unlinked functions. The frontend drops, before LLVM parses the text, a declaration of a function the text defines and a
+`!air.sampler_states` (new nodes after the module's highest one). A render pipeline's `_vfn`/`_ffn`, which the draw binds the
+constexpr samplers and embedded resources of, are now the stages the pipeline was built from (the linked ones; the same
+objects as the descriptor's when nothing is linked), not the caller's unlinked functions. The frontend drops, before LLVM parses the text, a declaration of a function the text defines and a
 repeated declaration of the same signature (the linker leaves both; LLVM takes a name once); a function declared twice
 with different signatures is refused.
 
@@ -845,8 +845,9 @@ copy (embedded plans); matching both exactly is the next round's.
 | fc_argindex | a buffer and a texture whose indices are function-constant expressions | 1e-6 |
 
 - Through the plugin (`r8/final-runs.sh`, the translator of this tree, two runs on each road, one with the caches of
-  the first, one with `PLUGIN_RUN_CORRUPT=1`; the fault counters stayed at 0 apart from the one fault injected on
-  purpose): on the road 88 pass (round 7's 81 and the seven above), `grid2d_base` skipped as before; the same eight as
+  the first, one with `PLUGIN_RUN_CORRUPT=1`; `xid_count` and `chan_gave_up` stayed at 0, and `chan_recovered` and
+  `chan_dropped` rose only for the faults `fallback` injects on purpose, one channel rebuild in the harness's own
+  process each; WindowServer logged no GPU error): on the road 88 pass (round 7's 81 and the seven above), `grid2d_base` skipped as before; the same eight as
   in round 7 take the SPIR-V road as they must. With `NVMTL_AIR_NIR=0` the same five as in rounds 4 to 7 fail (`fmath`,
   `fmath_precise`, `math_lib`, `tex_offset`, `align_misaligned`) and `tex_arrays` (element 1 of the written array is
   lost: the translator's descriptor array at 480 + n meets the plugin's count-1 bindings; old), `r_handlechoice` is

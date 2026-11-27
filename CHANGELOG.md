@@ -2,6 +2,30 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 8: framebuffer fetch on the road, linked samplers, arrays of textures
+
+- **Framebuffer fetch takes the road** (NVK's AIR-to-NIR frontend, ABI version 6): a fragment function's `[[color(n)]]`
+  inputs are read as the translator reads them, an input attachment at set 3, binding 192 + n, read once at the entry,
+  and the road's pipeline gets the SPIR-V road's set 3 and fetch masks, so a draw binds the pass's colour views (the
+  dummy image's zeros with fetch off, WindowServer's default) and splits as before. Core Animation's and RenderBox's
+  fragments read their attachments: 161 of the 209 refusals the desktop's processes cached on 3.0.24. Fetch emulated by
+  copies (`NVMTL_FETCH_COPY=1`) stays on the SPIR-V road.
+- **Fixed: a fragment linked with a visible function sampled with the wrong constexpr sampler** (SPIR-V road): RenderBox's
+  `custom_effect_fragment` and the effect linked into it (`custom_fn`) each name their constexpr sampler
+  `@__air_sampler_state`, with different states; the translator's linker kept both definitions under one name and the
+  fragment sampled with the effect's (repeat for clamp-to-zero in `r_linksamp`), and a linked function's own constexpr
+  samplers were bound nowhere. The linker now renames a dependency's local global the module already defines
+  differently, and lists the dependency's constexpr samplers; a pipeline binds the samplers of the stages it is built
+  from. Those pipelines now also take the road (the frontend refused the text; it also drops the repeated function
+  declarations the linker leaves).
+- Arrays of textures (`array<texture2d<T>, N>`): an element by a known index is that texture's own binding, a sampled
+  one chosen at run time is read through the bindless heap as the translator reads it. Texture calls through a choice of
+  argument handles that known branches decide (Apple's GL `__main`, Minecraft's) take the road. Argument indices from
+  function constants already did with their values (`fc_argindex`). Argument buffers stay on the SPIR-V road.
+- Tests (`tools/air-nir`): `r_fetch`, `r_fetch_mrt`, `r_fetch_noatt`, `r_linksamp`, `r_handlechoice` (render),
+  `tex_arrays`, `fc_argindex` (compute). The AIR-cache sweep: 5,559 functions translate (5,517), every reflection equal
+  to the translator's; WindowServer's functions on disk: 173 of 211 (166).
+
 ### AIR to NIR, round 7: Terminal's GPU fault, a per-process fallback, WindowServer on the road
 
 - **Fixed: Terminal's window stopped drawing on 3.0.21 to 3.0.23** (Xid 31, three channel rebuilds, then the device
