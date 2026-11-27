@@ -89,6 +89,7 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
 /* 1 when NVK exports the AIR-to-NIR road (the plugin opened it directly), 0 otherwise */
 int nvmtl_vk_air_nir_exports(void);
 int nvmtl_vk_air_nir_version(void);
+int nvmtl_vk_bindless_heap(void);       /* set 2 of the pipeline layouts is the bindless heap */
 int nvmtl_vk_fetch_copy_active(void);   /* framebuffer fetch is emulated by copies in this process (NVMTL_FETCH_COPY) */
 /* 1 when a dispatch of threadgroup size l can run p, a kernel on the AIR-to-NIR road (always 1 on the SPIR-V road) */
 int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3]);

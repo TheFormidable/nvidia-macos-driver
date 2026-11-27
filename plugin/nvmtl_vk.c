@@ -6802,6 +6802,8 @@ static void nvmtl_air_nir_release(nvk_pipeline *p)
 int nvmtl_vk_air_nir_exports(void) { return pnvk_air_to_nir != NULL && g_dev != VK_NULL_HANDLE; }
 // the request and result version the NVK's frontend reads and writes: 4 for one without the version export, 0 for none
 int nvmtl_vk_air_nir_version(void) { return !pnvk_air_to_nir ? 0 : pnvk_air_nir_version ? pnvk_air_nir_version() : 4; }
+/* the bindless heap is set 2 of every pipeline layout (both roads): the road may read texture-array elements there */
+int nvmtl_vk_bindless_heap(void) { return !ensure_descriptors() && g_heapSet != VK_NULL_HANDLE; }
 int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3])
 {
     return !p || !p->air_nir || nvmtl_air_nir_size_ok(l, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations);
@@ -6882,7 +6884,7 @@ int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *
     out->gmask_ok = out->gmask2_ok = 1;
     out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
     // [[color(n)]] inputs: the fetch masks and set 3 as the SPIR-V road makes them of its module's bindings 192 + n
-    const uint32_t cin = fres->size >= offsetof(struct nvmtl_air_nir_result, reserved6) ? fres->color_inputs & ((1u << NVMTL_NCOL) - 1u) : 0;
+    const uint32_t cin = fres->size >= offsetof(struct nvmtl_air_nir_result, resource_flags) ? fres->color_inputs & ((1u << NVMTL_NCOL) - 1u) : 0;
     if (cin && nvmtl_fetch_copy_on()) { nvlog("vk: AIR-to-NIR fragment reads [[color(n)]] while fetch is emulated by copies - not used"); return -1; }
     out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;
     out->fetch_zero = nvmtl_fbfetch_on() ? 0 : cin;

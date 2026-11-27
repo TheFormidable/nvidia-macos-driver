@@ -269,9 +269,11 @@ static int nvmtl_air_nir_fetch_ok(void) { return g_air_nir_v6 && !nvmtl_vk_fetch
 // buffer robustness when compute pipelines are made so
 static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
 {
+    // version 6: arrays of textures (an element chosen at run time through the bindless heap, as the translator reads it)
     return NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_FC_VALUES | NVMTL_AIR_NIR_TG_DEFAULT
          | (nvmtl_table_ubo() ? 0 : NVMTL_AIR_NIR_TABLE_SSBO) | (g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)
-         | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | (render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0) | extra;
+         | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | (render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0)
+         | (g_air_nir_v6 ? NVMTL_AIR_NIR_TEXTURE_ARRAYS : 0) | (g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0) | extra;
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's

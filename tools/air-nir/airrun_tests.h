@@ -1631,6 +1631,57 @@ tex_read_check(struct run *r)
    return ok;
 }
 
+/* tex_arrays: array<texture2d<float>, 4> at [[texture(1)]] (rgba8 at slots 1 to 4) by known and run-time indices, and
+ * array<texture2d<float, access::write>, 2> at [[texture(8)]] (rgba16f at slots 8 and 9) written */
+static const uint32_t tex_arrays_k[2] = { 1, 7 };   /* 7: past the end, the last element (the translator's clamp) */
+
+static void
+tex_arrays_setup(struct run *r)
+{
+   for (unsigned i = 1; i <= 4; i++) {
+      tex_image(r, i, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+      fill_bytes(r, i);
+   }
+   for (unsigned i = 8; i <= 9; i++)
+      tex_image(r, i, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 1, 1, true);
+   slot(r, 0, 64 * 4 * 16);
+   memcpy(slot(r, 1, sizeof tex_arrays_k), tex_arrays_k, sizeof tex_arrays_k);
+}
+
+static bool
+tex_arrays_check(struct run *r)
+{
+   float *want = calloc(64 * 16, 4), *w0 = calloc(64 * 4, 4), *w1 = calloc(64 * 4, 4);
+   for (uint32_t y = 0; y < 8; y++) {
+      for (uint32_t x = 0; x < 8; x++) {
+         const unsigned i = y * 8 + x;
+         float *o = want + i * 16;
+         const unsigned dyn = 1 + (i & 3), kk = tex_arrays_k[i & 1] > 3 ? 3 : tex_arrays_k[i & 1];
+         for (unsigned c = 0; c < 4; c++) {
+            o[c] = U8(((const uint8_t *)tex_at(r, 3, 0, x, y, 0))[c]);
+            o[4 + c] = U8(((const uint8_t *)tex_at(r, dyn, 0, x, y, 0))[c]);
+            o[8 + c] = U8(((const uint8_t *)tex_at(r, 1 + kk, 0, y, x, 0))[c]);
+            o[12 + c] = U8(((const uint8_t *)tex_at(r, 1, 0, x, y, 0))[c]) + U8(((const uint8_t *)tex_at(r, 4, 0, x, y, 0))[c]);
+            w0[i * 4 + c] = o[12 + c];
+            w1[i * 4 + c] = U8(((const uint8_t *)tex_at(r, 2, 0, x, y, 0))[c]) * 2.0f;
+         }
+      }
+   }
+   float *g0 = calloc(64 * 4, 4), *g1 = calloc(64 * 4, 4);
+   for (unsigned k = 0; k < 64 * 4; k++) {
+      g0[k] = h2f(((const uint16_t *)tex_at(r, 8, 0, 0, 0, 0))[k]);
+      g1[k] = h2f(((const uint16_t *)tex_at(r, 9, 0, 0, 0, 0))[k]);
+   }
+   bool ok = check_f4(r, "out", S(r, 0), want, 64 * 16, 1e-6f) && check_f4(r, "w[0]", g0, w0, 64 * 4, 2e-3f) &&
+             check_f4(r, "w[1]", g1, w1, 64 * 4, 2e-3f);
+   free(g0);
+   free(g1);
+   free(want);
+   free(w0);
+   free(w1);
+   return ok;
+}
+
 /* tex_write: storage rgba8, r32f, r32ui (read_write), rgba16f */
 static void
 tex_write_setup(struct run *r)
@@ -2436,4 +2487,5 @@ static const struct test tests[] = {
      tex_intsample_check },
    { "pack", NULL, "pack", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, pack_setup, pack_check },
    { "tex_ms", NULL, "tex_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_ms_setup, tex_ms_check },
+   { "tex_arrays", NULL, "tex_arrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_arrays_setup, tex_arrays_check },
 };

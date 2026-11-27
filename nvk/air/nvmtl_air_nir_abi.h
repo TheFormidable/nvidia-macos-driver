@@ -86,6 +86,15 @@
                                                  * NVMTL_AIR_NIR_FETCH_SET, binding NVMTL_AIR_NIR_FETCH_BINDING + n,
                                                  * input attachment index n (result.color_inputs names them). Without it
                                                  * such a function is refused, as before. */
+#define NVMTL_AIR_NIR_TEXTURE_ARRAYS (1u << 11) /* an array<texture, N> argument at [[texture(n)]] is translated: its
+                                                 * element k is texture n + k, at binding 32 + n + k (480 + n + k when
+                                                 * written) when k is known; without it such a function is refused */
+#define NVMTL_AIR_NIR_HEAP          (1u << 12)  /* set NVMTL_AIR_NIR_HEAP_SET, binding NVMTL_AIR_NIR_HEAP_BINDING is the
+                                                 * plugin's bindless heap of sampled images, and entry
+                                                 * NVMTL_AIR_NIR_TABLE_TEXTURE0 + n of the table holds texture n's slot
+                                                 * in it: a sampled array element chosen at run time is read there, as
+                                                 * the translator reads it (result.resource_flags NVMTL_AIR_NIR_RES_HEAP).
+                                                 * Without it such a read is refused. */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
@@ -94,6 +103,11 @@
 #define NVMTL_AIR_NIR_FRAGMENT_SET   1u          /* the descriptor set a fragment stage's resources are in */
 #define NVMTL_AIR_NIR_FETCH_SET      3u          /* [[color(n)]] inputs: the set the plugin binds the pass's colour views at */
 #define NVMTL_AIR_NIR_FETCH_BINDING  192u        /* ... at binding 192 + n, an input attachment (the translator's band) */
+#define NVMTL_AIR_NIR_HEAP_SET       2u          /* the bindless heap (reflect::BINDLESS_HEAP_SET) */
+#define NVMTL_AIR_NIR_HEAP_BINDING   0u          /* its sampled images (reflect::BINDLESS_HEAP_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_SLOTS     131072u     /* reflect::BINDLESS_HEAP_SLOTS: a table slot is masked to it */
+#define NVMTL_AIR_NIR_TABLE_TEXTURE0 64u         /* the table's entry of texture 0's heap slot (TEXTURE_INDEX_BASE) */
+#define NVMTL_AIR_NIR_TABLE_ENTRIES  192u        /* 32 buffers, 32 of their entries' addresses, 128 textures */
 
 /* result.fragment_flags */
 #define NVMTL_AIR_NIR_FS_DEPTH        (1u << 0)  /* writes [[depth(any|greater|less)]] */
@@ -207,8 +221,9 @@ struct nvmtl_air_nir_result {
    uint32_t color_inputs;            /* fragment, with NVMTL_AIR_NIR_COLOR_INPUTS: bit n, a [[color(n)]] input is declared
                                       * (read or not, as the translator declares every one): the plugin binds the open
                                       * pass's colour view n at set 3, binding 192 + n, as for the SPIR-V road's module */
-   uint32_t reserved6;
+   uint32_t resource_flags;          /* NVMTL_AIR_NIR_RES_*: what else the shader reads */
 };
+#define NVMTL_AIR_NIR_RES_HEAP      (1u << 0)   /* the bindless heap (set 2) and the table's texture slots */
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 #define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
 #define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */

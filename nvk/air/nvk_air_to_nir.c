@@ -283,6 +283,7 @@ enum air_kind {
    AIR_AGGREGATE, /* a structure or array held as a value: its elements, no def */
    AIR_TEXTURE,   /* a [[texture(n)]] argument: res is its struct air_texture, no def */
    AIR_SAMPLER,   /* a sampler: res is its struct air_sampler, no def */
+   AIR_TEXARRAY,  /* a pointer into an array<texture, N> argument: res is its struct air_texarray, def the element */
 };
 
 struct air_val {
@@ -291,7 +292,7 @@ struct air_val {
    uint32_t align;    /* known alignment of a pointer, in bytes */
    unsigned num_elems;
    struct air_val **elems;   /* AIR_AGGREGATE */
-   void *res;                /* AIR_TEXTURE, AIR_SAMPLER */
+   void *res;                /* AIR_TEXTURE, AIR_SAMPLER, AIR_TEXARRAY */
 };
 
 #define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
@@ -360,6 +361,7 @@ struct air_tr {
    unsigned num_outputs;
    uint32_t vertex_inputs, varyings, color_outputs, fragment_flags;
    uint32_t color_inputs;       /* [[color(n)]] inputs declared (since version 6, NVMTL_AIR_NIR_COLOR_INPUTS) */
+   bool heap_textures;          /* an array<texture, N> element is read through the bindless heap (version 6) */
    uint8_t vertex_input_kind[32];
    unsigned next_varying;       /* the translator's own Locations: the next one in order */
    nir_variable *sysval[8];     /* the system values read, one variable each */
@@ -905,6 +907,24 @@ air_gep(struct air_tr *t, nir_builder *b, LLVMValueRef gep, LLVMValueRef result_
    struct air_val *base = air_get(t, L.LLVMGetOperand(gep, 0));
    if (base->kind == AIR_VALUE)
       unsupported(t, "a GEP on a value that is not a pointer");
+   if (base->kind == AIR_TEXARRAY) {
+      /* into an array<texture, N> argument (its handles, 8 bytes each, each the one field of a metal::texture): the
+       * element index */
+      uint32_t align = 8;
+      nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1, (unsigned)L.LLVMGetNumOperands(gep),
+                                    32, &align);
+      if (align % 8)
+         unsupported(t, "a GEP into an array of textures that is not at one of its handles");
+      nir_def *e = base->def;
+      if (off && nir_src_is_const(nir_src_for_ssa(off)) && nir_src_is_const(nir_src_for_ssa(base->def)))
+         /* a known element stays known: it is that texture's own binding */
+         e = nir_imm_int(b, (int)(nir_src_as_uint(nir_src_for_ssa(base->def)) + (nir_src_as_uint(nir_src_for_ssa(off)) >> 3)));
+      else if (off)
+         e = nir_iadd(b, base->def, nir_ushr_imm(b, off, 3));
+      struct air_val *r = air_set(t, result_key, e, AIR_TEXARRAY, 8);
+      r->res = base->res;
+      return r;
+   }
    uint32_t align = base->align;
    unsigned bits = air_vdef(t, base)->bit_size;
    nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1,
@@ -921,7 +941,9 @@ air_constant_expr(struct air_tr *t, LLVMValueRef c)
       return air_gep(t, &t->top, c, c);
    case OP_BITCAST: case OP_ADDRSPACECAST: {
       struct air_val *src = air_get(t, L.LLVMGetOperand(c, 0));
-      return air_set(t, c, src->def, src->kind, src->align);
+      struct air_val *r = air_set(t, c, src->def, src->kind, src->align);
+      r->res = src->res;
+      return r;
    }
    default:
       unsupported(t, "a constant expression with LLVM opcode %d", L.LLVMGetConstOpcode(c));
@@ -993,10 +1015,17 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
 
 /* A load of an LLVM type: bools are bytes in memory, thread and threadgroup pointers 64-bit words; a structure or an
  * array element by element, at the offsets of LLVM's data layout. */
+static struct air_val *air_texarray_load(struct air_tr *t, struct air_val *ptr);
+
 static struct air_val *
 air_load_val(struct air_tr *t, struct air_val *ptr, LLVMTypeRef lty, uint32_t align)
 {
    nir_builder *b = &t->b;
+   if (ptr->kind == AIR_TEXARRAY) {
+      if (L.LLVMGetTypeKind(lty) != TY_POINTER)
+         unsupported(t, "a load from an array of textures that is not one of its handles");
+      return air_texarray_load(t, ptr);
+   }
    if (air_is_aggregate(lty)) {
       unsigned n = air_num_elems(t, lty);
       struct air_val *r = air_aggregate(t, n);
@@ -1118,8 +1147,9 @@ air_push_word(struct air_tr *t, unsigned i)
    return t->push_word[i];
 }
 
-static nir_def *
-air_table_entry(struct air_tr *t, unsigned slot)
+/* the table's descriptor, loaded once at the entry */
+static void
+air_table_desc(struct air_tr *t)
 {
    nir_builder *b = &t->top;
    if (!t->table) {
@@ -1135,6 +1165,13 @@ air_table_entry(struct air_tr *t, unsigned slot)
                                                nir_descriptor_type_uniform_buffer :
                                                nir_descriptor_type_storage_buffer);
    }
+}
+
+static nir_def *
+air_table_entry(struct air_tr *t, unsigned slot)
+{
+   nir_builder *b = &t->top;
+   air_table_desc(t);
    nir_deref_instr *d = nir_build_deref_cast(b, t->table, t->table_mode, t->table_type, 0);
    d->cast.align_mul = 16;
    d->cast.align_offset = 0;
@@ -1419,7 +1456,11 @@ air_fc_arg_present(struct air_tr *t, const struct air_arg *a)
 
 struct air_texture;
 struct air_sampler;
+struct air_texarray;
 static struct air_texture *air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i);
+static bool air_texarray_type(struct air_tr *t, const char *name, char **elem, unsigned *count);
+static struct air_texarray *air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const char *elem,
+                                              unsigned count);
 static struct air_sampler *air_bind_sampler(struct air_tr *t, const struct air_arg *a, unsigned i);
 static void air_assign_static_samplers(struct air_tr *t);
 
@@ -1968,6 +2009,13 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
                  a->align ? MIN2((uint32_t)a->align, 16) : 4);
       } else if (!strcmp(a->kind, "air.texture")) {
+         char *elem = NULL;
+         unsigned count = 0;
+         if ((t->req->flags & NVMTL_AIR_NIR_TEXTURE_ARRAYS) && air_texarray_type(t, a->type_name, &elem, &count)) {
+            struct air_val *v = air_set(t, a->param, nir_imm_int(&t->top, 0), AIR_TEXARRAY, 8);
+            v->res = air_bind_texarray(t, a, i, elem, count);
+            continue;
+         }
          struct air_val *v = air_set(t, a->param, NULL, AIR_TEXTURE, 1);
          v->res = air_bind_texture(t, a, i);
       } else if (!strcmp(a->kind, "air.sampler")) {
@@ -2843,6 +2891,24 @@ struct air_texture {
    enum gl_access_qualifier access;
    nir_variable *var;
    const char *type_name;
+   nir_def *heap_slot;           /* an array<texture, N> element chosen at run time: its slot in the bindless heap
+                                  * (var is the heap seen as an array of this shape), read non-uniform */
+};
+
+/* An array<texture, N> argument at [[texture(n)]] (version 6): element k is the texture at index n + k. One the index
+ * of which is known is that texture's own binding, as a [[texture(n + k)]] is; one chosen at run time is read as the
+ * translator reads every element (resources/texture_array.rs route_texture_array_elements_through_heap): the slot in
+ * the per-draw table at entry 64 + n + min(i, N - 1), its low 32 bits masked to the heap's 131072 slots, into the
+ * bindless heap (set 2, binding 0), non-uniform; with NVMTL_AIR_NIR_HEAP only, and only for sampled textures (the
+ * translator's storage arrays are descriptor arrays the plugin's count-1 bindings do not hold). */
+struct air_texarray {
+   unsigned base, count;
+   struct air_arg arg;           /* the argument, with the element's type name */
+   unsigned param;               /* its parameter's index, for messages */
+   struct air_texture proto;     /* an element's shape */
+   struct air_texture **elems;   /* by known index, made when first read */
+   nir_variable *heap;
+   bool absent;
 };
 
 struct air_sampler {
@@ -2934,6 +3000,114 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
       x->var->data.image.format = PIPE_FORMAT_NONE;
    }
    return x;
+}
+
+/* the element type and the length of "array<texture2d<float, sample>, 4>" (meta::texture_handle_array); false for
+ * anything else, an array_ref<...> among them */
+static bool
+air_texarray_type(struct air_tr *t, const char *name, char **elem, unsigned *count)
+{
+   if (!name || strncmp(name, "array<", 6) || (strncmp(name + 6, "texture", 7) && strncmp(name + 6, "depth", 5)))
+      return false;
+   const char *end = strrchr(name, '>'), *comma = NULL;
+   for (const char *p = name; end && p < end; p++)
+      if (*p == ',')
+         comma = p;
+   if (!end || !comma)
+      return false;
+   char *e = ralloc_strndup(t->mem, name + 6, comma - (name + 6));
+   unsigned long n = strtoul(comma + 1, NULL, 10);
+   if (!n || n > 128)
+      return false;
+   *elem = e;
+   *count = (unsigned)n;
+   return true;
+}
+
+static struct air_texarray *
+air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const char *elem, unsigned count)
+{
+   struct air_texarray *x = rzalloc(t->mem, struct air_texarray);
+   x->arg = *a;
+   x->arg.type_name = elem;
+   x->arg.fc_node = NULL;
+   x->param = i;
+   x->count = count;
+   x->base = (unsigned)MIN2(a->location, 127);
+   const int present = air_fc_arg_present(t, a);
+   if (present < 0)
+      unsupported(t, "texture argument %u exists only under a function constant %s", i,
+                  air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");
+   x->absent = present == 0;
+   if (x->absent)
+      return x;
+   if (a->location + count > 128)
+      unsupported(t, "texture argument %u, an array of %u from index %llu, has no texture indices below 128", i, count,
+                  (unsigned long long)a->location);
+   if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
+      unsupported(t, "texture argument %u, an array of textures, is not passed by its address", i);
+   x->proto.index = x->base;
+   x->proto.type_name = elem;
+   air_texture_shape(t, &x->proto, elem);
+   const char *access = a->access ? a->access : "air.sample";
+   x->proto.storage = !strcmp(access, "air.write") || !strcmp(access, "air.read_write");
+   x->elems = rzalloc_array(t->mem, struct air_texture *, count);
+   return x;
+}
+
+/* a handle loaded from an array<texture, N> argument: element ptr->def */
+static struct air_val *
+air_texarray_load(struct air_tr *t, struct air_val *ptr)
+{
+   nir_builder *b = &t->b;
+   struct air_texarray *x = ptr->res;
+   struct air_val *v = air_make(t, NULL, AIR_TEXTURE, 1);
+   if (x->absent) {
+      struct air_texture *a = rzalloc(t->mem, struct air_texture);
+      a->absent = true;
+      a->index = x->base;
+      v->res = a;
+      return v;
+   }
+   if (nir_src_is_const(nir_src_for_ssa(ptr->def))) {
+      /* the translator clamps an index past the array to its last element */
+      const unsigned k = (unsigned)MIN2(nir_src_as_uint(nir_src_for_ssa(ptr->def)), (uint64_t)x->count - 1);
+      if (!x->elems[k]) {
+         struct air_arg e = x->arg;
+         e.location = x->base + k;
+         x->elems[k] = air_bind_texture(t, &e, x->param);
+      }
+      v->res = x->elems[k];
+      return v;
+   }
+   if (x->proto.storage)
+      unsupported(t, "an element of a written array of textures chosen at run time (the translator's is a descriptor array "
+                  "the plugin's bindings do not hold)");
+   if (x->proto.dim == GLSL_SAMPLER_DIM_BUF)
+      unsupported(t, "an element of an array of texture_buffers chosen at run time");
+   if (!(t->req->flags & NVMTL_AIR_NIR_HEAP))
+      unsupported(t, "an element of an array of textures chosen at run time, without the bindless heap (NVMTL_AIR_NIR_HEAP)");
+   if (!x->heap) {
+      const struct glsl_type *et = glsl_texture_type(x->proto.dim, x->proto.array, x->proto.base);
+      x->heap = nir_variable_create(t->nir, nir_var_uniform, glsl_array_type(et, 0, 0), "bindless_heap");
+      x->heap->data.descriptor_set = NVMTL_AIR_NIR_HEAP_SET;
+      x->heap->data.binding = NVMTL_AIR_NIR_HEAP_BINDING;
+   }
+   nir_def *i = nir_umin(b, nir_u2u32(b, ptr->def), nir_imm_int(b, (int)x->count - 1));
+   nir_def *entry = nir_iadd_imm(b, i, NVMTL_AIR_NIR_TABLE_TEXTURE0 + x->base);
+   air_table_desc(t);
+   nir_deref_instr *d = nir_build_deref_cast(b, t->table, t->table_mode,
+                                             glsl_array_type(glsl_uint64_t_type(), NVMTL_AIR_NIR_TABLE_ENTRIES, 8), 0);
+   d->cast.align_mul = 16;
+   d->cast.align_offset = 0;
+   nir_def *word = nir_load_deref_with_access(b, nir_build_deref_array(b, d, entry), ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER);
+   struct air_texture *e = rzalloc(t->mem, struct air_texture);
+   *e = x->proto;
+   e->var = x->heap;
+   e->heap_slot = nir_iand_imm(b, nir_u2u32(b, word), NVMTL_AIR_NIR_HEAP_SLOTS - 1);
+   t->heap_textures = true;
+   v->res = e;
+   return v;
 }
 
 static struct air_sampler *
@@ -3081,6 +3255,8 @@ air_texture_deref(struct air_tr *t, struct air_texture *x)
 {
    if (x->absent)
       unsupported(t, "texture %u, which a function constant leaves out, is used", x->index);
+   if (x->heap_slot)
+      return nir_build_deref_array(&t->b, nir_build_deref_var(&t->b, x->var), x->heap_slot);
    if (x->storage) {
       air_mask_set(t->storage_mask, x->index);
       if (x->dim == GLSL_SAMPLER_DIM_BUF)
@@ -3143,6 +3319,7 @@ air_build_tex(struct air_tr *t, nir_texop op, const struct air_texture *x, const
    tex->op = op;
    tex->sampler_dim = x->dim;
    tex->is_array = x->array;
+   tex->texture_non_uniform = x->heap_slot != NULL;   /* the translator's heap accesses are NonUniform */
    tex->is_shadow = in->comparator != NULL;
    tex->is_new_style_shadow = in->comparator != NULL;
    const bool int_query = op == nir_texop_txs || op == nir_texop_query_levels || op == nir_texop_texture_samples;
@@ -3985,7 +4162,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
       struct air_type to = air_type_of(t, lty);
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
       if (to.is_pointer)
-         air_set(t, inst, x->def, x->kind, x->align);
+         air_set(t, inst, x->def, x->kind, x->align)->res = x->res;
       else
          air_set(t, inst, air_bitcast(t, air_vdef(t, x), &to), AIR_VALUE, 0);
       return;
@@ -5633,6 +5810,7 @@ air_rf_struct(struct air_tr *t, char **j, LLVMValueRef node, unsigned depth)
 struct air_rf_shape {
    const char *dimension, *component, *format;
    bool arrayed, multisampled, writable, array_ref;
+   unsigned array_length;        /* array<texture, N>: N (meta::texture_handle_array); 0 for none or an array_ref */
 };
 
 static struct air_rf_shape
@@ -5649,6 +5827,17 @@ air_rf_texture_shape(const char *name)
    compact[c] = 0;
    s.array_ref = !strncmp(compact, "array_ref<texture", 17) || !strncmp(compact, "array_ref<depth", 15) ||
                  !strncmp(compact, "array<texture", 13) || !strncmp(compact, "array<depth", 11);
+   if (s.array_ref && compact[5] == '<') {
+      /* the number after the last ',' before the last '>' */
+      const char *gt = strrchr(compact, '>'), *comma = NULL;
+      for (const char *p = compact; gt && p < gt; p++)
+         if (*p == ',')
+            comma = p;
+      char *e = NULL;
+      unsigned long n = comma ? strtoul(comma + 1, &e, 10) : 0;
+      if (comma && e == gt && e > comma + 1 && n <= UINT32_MAX)
+         s.array_length = (unsigned)n;
+   }
    /* texture_access_from_name: the second field inside the first <...> is write or read_write */
    const char *lt = strchr(name, '<');
    if (lt) {
@@ -5922,16 +6111,19 @@ air_rf_texture(struct air_tr *t, struct air_rf_state *s, const struct air_rf_nod
    const char *access = type_name && sh.writable ? "Storage" : "Sampled";
    const bool storage = !strcmp(access, "Storage");
    const uint32_t binding = (storage ? 480 : 32) + n;
-   air_rf_binding_head(s, kind, n, n < 128, binding, 1, true, idx);
+   /* TextureShape::descriptor_count: N, an array_ref's 128 (TEXTURE_HANDLE_ARRAY_DESCRIPTOR_COUNT), else 1 */
+   air_rf_binding_head(s, kind, n, n < 128, binding, sh.array_ref ? (sh.array_length ? sh.array_length : 128) : 1, true, idx);
    ralloc_strcat(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
                         "\"type_layout\":null,\"type_name\":");
    air_rf_jstr(&s->b, type_name);
    ralloc_strcat(&s->b, ",\"texture_shape\":");
    if (type_name) {
       ralloc_asprintf_append(&s->b, "{\"dimension\":\"%s\",\"arrayed\":%s,\"multisampled\":%s,\"component\":\"%s\","
-                             "\"writable\":%s,\"array_ref\":%s,\"array_length\":null,\"storage_format\":",
+                             "\"writable\":%s,\"array_ref\":%s,\"array_length\":",
                              sh.dimension, sh.arrayed ? "true" : "false", sh.multisampled ? "true" : "false", sh.component,
                              sh.writable ? "true" : "false", sh.array_ref ? "true" : "false");
+      air_rf_jopt(&s->b, sh.array_length != 0, sh.array_length);
+      ralloc_strcat(&s->b, ",\"storage_format\":");
       air_rf_jstr(&s->b, sh.format);
       ralloc_strcat(&s->b, "}");
    } else
@@ -6602,8 +6794,10 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       res->color_outputs = t->color_outputs;
       res->fragment_flags = t->fragment_flags;
    }
-   if (res->size >= offsetof(struct nvmtl_air_nir_result, reserved6) + sizeof res->reserved6 && t->out)
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, resource_flags) + sizeof res->resource_flags && t->out) {
       res->color_inputs = t->color_inputs;
+      res->resource_flags = t->heap_textures ? NVMTL_AIR_NIR_RES_HEAP : 0;
+   }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, reflection_why) + sizeof res->reflection_why &&
        (req->flags & NVMTL_AIR_NIR_REFLECT) && t->out) {
       if (t->rf_json) {
