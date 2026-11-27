@@ -63,9 +63,9 @@ for key, fn in (("NVMTL_SSAMP_KEY", "static NSArray<NSArray *> *nvmtl_static_sam
         allm.count(f"objc_setAssociatedObject(fn, {key},") == 1 and f"objc_setAssociatedObject(fn, {key}," in body
         and body.count(f"objc_getAssociatedObject(fn, {key});") == 2 and allm.count(f"objc_getAssociatedObject(fn, {key});") == 2)
 
-arm("the pipeline's descriptor is set in one place, and its two functions are read right there",
+arm("the pipeline's descriptor is set in one place, and the two functions a draw binds (the linked stages) right there",
     len(re.findall(r"->_descriptor\s*=", allm)) == 1
-    and "ps->_vdesc = vdesc; ps->_descriptor = [d copy];\n    ps->_vfn = ps->_descriptor.vertexFunction; ps->_ffn = ps->_descriptor.fragmentFunction;" in dev)
+    and "ps->_vdesc = vdesc; ps->_descriptor = [d copy];\n    ps->_vfn = vf; ps->_ffn = noFrag ? ps->_descriptor.fragmentFunction : ff;" in dev)
 arm("nothing changes the descriptor's functions afterwards",
     not re.search(r"_descriptor\.(vertex|fragment)Function\s*=|_descriptor set(Vertex|Fragment)Function", allm))
 arm("the ivars are strong and written only there", "@public id<MTLFunction> _vfn, _ffn; }" in objh

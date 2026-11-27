@@ -138,13 +138,31 @@ def render_fallback(s):
 RENDER_REFUSALS = ('if (noFrag || !ff)', 'if (vf->_spirvOnly || ff->_spirvOnly)', 'if (getenv("NVMTL_BDA_PROBE_FILE"))',
                    'if (a8mask)', 'if (amplified)', 'if (!vf->_spirvLazy && nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps))',
                    'if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32)',
-                   'if (!ff->_spirvLazy && nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length))',
+                   'if (!ff->_spirvLazy && nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length) && !nvmtl_air_nir_fetch_ok())',
                    'if (!ff->_spirvLazy && nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length))',
                    'if (samplePayload && samplePayload != [NSNull null])', 'nvmtl_app_profile_edit_module(g_app_profile')
 def render_rewrites(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
     w = body(an, 'BOOL nvmtl_air_nir_render_wanted(')
     return all(r in w for r in RENDER_REFUSALS) and w.count('return NO;') >= len(RENDER_REFUSALS)
+
+# --- round 8: framebuffer fetch and arrays of textures on the road ----------------------------------------------------
+def fetch_road(s):
+    an, vk = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/nvmtl_vk.c"])
+    fl = body(an, 'static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)')
+    nirp = body(vk, 'int nvmtl_vk_pipeline_create_nir(')
+    return ('(render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0)' in fl
+            and 'return g_air_nir_v6 && !nvmtl_vk_fetch_copy_active();' in an
+            and 'out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;' in nirp and 'out->fetch_zero = nvmtl_fbfetch_on() ? 0 : cin;' in nirp
+            and 'sl2[3] = g_fetchLayout; nsl = 4;' in nirp and 'if (cin && nvmtl_fetch_copy_on())' in nirp)
+
+def heap_arrays(s):
+    an, fe = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["nvk/air/nvk_air_to_nir.c"])
+    fl = body(an, 'static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)')
+    return ('(g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0)' in fl
+            and 'tex->texture_non_uniform = x->heap_slot != NULL;' in fe
+            and 'if (!(t->req->flags & NVMTL_AIR_NIR_HEAP))' in fe
+            and 'nir_umin(b, nir_u2u32(b, ptr->def), nir_imm_int(b, (int)x->count - 1))' in fe)
 
 def render_requests(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
@@ -285,6 +303,12 @@ CHECKS = [
      ("plugin/NVMTLDevice.m", '          return ps;\n      }\n', '      }\n')),
     ("every pipeline whose stages the SPIR-V road rewrites stays on it (A8, multiview, tessellation, GL, fetch, stencil, ...)",
      render_rewrites, ("plugin/NVMTLAirNir.m", '    if (a8mask) {', '    if (0) {')),
+    ("a fragment's [[color(n)]] inputs take the road only with a version-6 NVK and fetch not by copies, its pipeline with the "
+     "SPIR-V road's set 3 and fetch masks", fetch_road,
+     ("plugin/nvmtl_vk.c", 'out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;', 'out->fetch_mask = 0;')),
+    ("an array element chosen at run time is read through the heap only when the plugin says it has one, non-uniform and "
+     "clamped to the array", heap_arrays,
+     ("nvk/air/nvk_air_to_nir.c", 'tex->texture_non_uniform = x->heap_slot != NULL;', '')),
     ("render stages are translated with the device's robustness, ALIGN4, their varyings, and keyed by them", render_requests,
      ("plugin/NVMTLAirNir.m", '(g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)', '(g_compute_unchecked ? NVMTL_AIR_NIR_UNCHECKED : 0)')),
     ("both roads link varyings by the one remap (nvmtl_varying_remap)", render_link,

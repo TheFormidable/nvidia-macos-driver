@@ -1625,9 +1625,19 @@ air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
        * what spirv_to_nir and vk_nir_lower_input_attachment_loads make of that, so NVK lowers it as it lowers the
        * SPIR-V road's. Every one declared is in result.color_inputs, used or not, as the module's decorations are. */
       const int present = air_fc_arg_present(t, a);
-      if (present <= 0)
-         unsupported(t, "the [[color(n)]] input %s exists only under a function constant %s", name,
-                     present < 0 ? "the request does not give" : "that is false");
+      if (present < 0)
+         unsupported(t, "the [[color(n)]] input %s exists only under a function constant the request does not give", name);
+      if (!present) {
+         /* the translator's specialization drops it (function_constant_disabled: no input attachment, no binding), and
+          * what reads it is folded away under the same constant: zeros, nothing declared, as for a stage input */
+         if (air_is_aggregate(lty))
+            unsupported(t, "the [[color(n)]] input %s of type %s", name, a->type_name ? a->type_name : "?");
+         const struct air_type zt = air_type_of(t, lty);
+         if (zt.is_pointer || zt.components > 4)
+            unsupported(t, "the [[color(n)]] input %s of type %s", name, a->type_name ? a->type_name : "?");
+         air_set(t, a->param, nir_imm_zero(b, zt.components, zt.bits), AIR_VALUE, 0);
+         return true;
+      }
       if (a->rt_unknown)
          unsupported(t, "the [[color(n)]] input %s's n is %s, which depends on a function constant %s", name, a->rt_unknown,
                      air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");

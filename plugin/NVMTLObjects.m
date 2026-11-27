@@ -4666,10 +4666,8 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     if (selected->_p.fetch_copy && _begun && ![self nvmtlFetchCopy:&selected->_p]) return NO;
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
-    // the stages the pipeline was built from: a linked function's own constexpr samplers are in the linked stage's
-    // reflection (the translator lists them since round 8), not in the caller's unlinked function's (r_linksamp)
-    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   _ps->_linkedVert ?: (NVMTLFunction *)_ps->_vfn, _vbufAt, _vbufOff);
-    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, _ps->_linkedFrag ?: (NVMTLFunction *)_ps->_ffn, _fbufAt, _fbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_vfn, _vbufAt, _vbufOff);
+    nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_ffn, _fbufAt, _fbufOff);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     return YES;
 }

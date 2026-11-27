@@ -2555,8 +2555,11 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
         [vdesc appendFormat:@" a%lu=fmt%lu@buf%lu+%lu(stride %lu step %lu/%lu)", (unsigned long)a, (unsigned long)ad.format, (unsigned long)bi,
             (unsigned long)ad.offset, (unsigned long)ld.stride, (unsigned long)ld.stepFunction, (unsigned long)ld.stepRate];
     }
+    // _vfn/_ffn, what a draw binds the embedded arguments and constexpr samplers of: the stages the pipeline is built from,
+    // the linked ones (the same objects as the descriptor's when nothing is linked); a linked function's own constexpr
+    // samplers are in the linked stage's reflection only (the translator lists them since round 8, r_linksamp)
     ps->_vdesc = vdesc; ps->_descriptor = [d copy];
-    ps->_vfn = ps->_descriptor.vertexFunction; ps->_ffn = ps->_descriptor.fragmentFunction;
+    ps->_vfn = vf; ps->_ffn = noFrag ? ps->_descriptor.fragmentFunction : ff;
     /* _descriptor keeps the caller's (unlinked) functions; a pixel-sampler variant re-translates from these, the
      * stages the pipeline was actually built from (RenderBox's custom_fn fragments only translate once linked). */
     ps->_linkedVert = vf; ps->_linkedFrag = noFrag ? nil : ff;

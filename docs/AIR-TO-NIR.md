@@ -174,15 +174,15 @@ recursive calls, doubles, run-time-sized `alloca`s, a `select` or phi between tw
 functions; of vertex and fragment functions: post-tessellation vertex functions (and any metadata after a function's
 arguments other than `early_fragment_tests`), a stage input or output of more than one Location (a matrix, an array, a
 nested structure), a stage input or output under a function constant the request gives no value for, `[[color(n)]]` inputs (framebuffer
-fetch), `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0), index(1)]]`), raster order groups,
+fetch) without `NVMTL_AIR_NIR_COLOR_INPUTS` (round 8) and of 16- or 8-bit integers, `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0), index(1)]]`), raster order groups,
 `[[primitive_id]]`, `[[barycentric_coord]]`, the amplification builtins and any other builtin not listed above,
-threadgroup arguments, a varying the request gives no Location; and of textures: arrays of textures (`array<texture2d<T>,
-N>` and `array_ref<...>`: the translator binds one descriptor array, binding 32 + n with count N, which the road's set-0
-layout does not declare yet), multisampled depth textures and written multisampled ones, a written cube or depth texture and a texel read of a cube
+threadgroup arguments, a varying the request gives no Location; and of textures: `array_ref<...>` (MPS's, passed through
+objects in thread memory), and of `array<texture2d<T>, N>` (round 8) a written element or a `texture_buffer` element
+chosen at run time, multisampled depth textures and written multisampled ones, a written cube or depth texture and a texel read of a cube
 (the translator goes through a 2D-array view of them), a gradient sample or a cube sample of an integer texture through a
 sampler known here (the translator's nearest fetch has neither), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
 level other than 0, `air.is_null_texture`/`get_null_texture` (and, since round 5, a texture or sampler handle used as a plain value:
-a `ptrtoint` and a compare, a select or a phi of two handles, which Apple's compiler writes for a null-texture test; the
+a `ptrtoint` and a compare, a select or a phi of two handles that known branches do not decide (round 8), which Apple's compiler writes for a null-texture test; the
 frontend read such a handle's missing value and crashed, below), and samplers with pixel coordinates (constexpr, or an
 argument one whose state the request gives) other than nearest with a clamp and linear 2D `clamp_to_edge`, and with
 bicubic filtering or min/max reduction (the translator emulates the first two); `pack`/`unpack` of `srgb`, `rgb10a2`,
@@ -754,6 +754,124 @@ only; NVK takes no mode `ws`) runs that logic in a normal process.
   finds it, stays on the SPIR-V road, puts itself on the list and removes the marker.
 - Host: `tools/test_air_nir_plugin.py` (53: the list's and the marker's helpers, the fault hooks, the NaN rule and the
   marker, each with its negative control), `tools/test_switch_registry.py`.
+
+## Framebuffer fetch, linked samplers, arrays of textures and choices of handles (round 8)
+
+Part A of round 8 (3.0.24, the desktop since its boot): no fault, no fallback; of the 440 `nir1` shader-cache entries
+the boot's processes made, 209 were refusals, 161 of them framebuffer fetch (`the fragment argument kind
+air.render_target`: Core Animation's and RenderBox's fragments read `[[color(n)]]`), 10 a constexpr sampler's global
+defined twice differently. Round 8 took those two first, then the rest of round 7's list.
+
+**Framebuffer fetch on the road** (ABI version 6, `NVMTL_AIR_NIR_COLOR_INPUTS`). How the SPIR-V road carries a
+`[[color(n)]]` read: the translator's stage-input pass makes it an input attachment (`SubpassData`, not multisampled) at
+set 3, binding 192 + n, `InputAttachmentIndex` n, read once at the entry with `OpImageRead` at offset (0, 0) as a vec4
+of 32-bit floats (a float or half input) or unsigned 32-bit integers, then cut to the argument's components and
+narrowed to a half (`passes/stage_input/mod.rs`, `resources/collapse.rs` `adapt_input_attachment_read`). The plugin
+finds the bindings 192 + n in the module (`nvmtl_spirv_fetch_mask`) and, with fetch on (every process but
+WindowServer), declares every pass's colour attachments as input attachments in `GENERAL` layout, puts set 3 (the
+input-attachment layout) in the pipeline layout, binds the open pass's colour views there behind a by-region barrier
+before each draw (`fetch_mask`), and draws a small triangle list one triangle at a time so later triangles read earlier
+ones (`nvmtl_fetch_split`); with fetch off (WindowServer) set 3 holds the zeroed dummy image (`fetch_zero`); with fetch
+emulated by copies (`NVMTL_FETCH_COPY=1`, WindowServer's `nvfetchcopy=1`) the module is rewritten to texel fetches of
+copies (`nvmtl_fetch_copy.h`). Now: the frontend makes the same read, as NIR (`nvk/air/nvk_air_to_nir.c`, the
+`air.render_target` branch of `air_bind_stage_input`): an image variable `glsl_image_type(SUBPASS, ...)` at set 3,
+binding 192 + n, `data.index` n, and one `image_deref_input_attachment_load` at the entry with base n, range 1, offset
+(0, 0), what `spirv_to_nir` and `vk_nir_lower_input_attachment_loads` make of that `OpImageRead`, so NVK lowers it as it
+lowers the SPIR-V road's (`nir_lower_input_attachments` in `nvk_preprocess_nir`, which runs for NIR stages too); every
+input declared is in `result.color_inputs`, read or not, as the module's decorations are; the reflection gives each as
+the translator's `ColorInput` binding. The road's render pipeline (`nvmtl_vk_pipeline_create_nir`) takes the SPIR-V
+road's `fetch_mask`/`fetch_zero` from that mask and its set 3, so the draw binds and splits exactly as before. A process
+that emulates fetch by copies leaves such a pipeline to the SPIR-V road (the plugin does not ask for color inputs there);
+so does an NVK older than version 6. An input of 16- or 8-bit integers stays refused (the translator does not convert
+them), and one under a function constant: known false, zeros and nothing declared (`function_constant_disabled`), not
+given, refused.
+
+**A linked function keeps its own constexpr sampler.** The 10 refusals: RenderBox's `custom_effect_fragment` (and its
+`accumulator_`, `filter_` and `primitive_custom_fragment` siblings) calls the effect through `custom_fn.MTL_VISIBLE_FN_REF`,
+linked at pipeline creation; each module names its first constexpr sampler `@__air_sampler_state`, with different
+states (the fragment's repeat and linear, `0x...80a92`; the effects' clamp-to-zero, pixel coordinates, `0x...88a00`, and
+others), not equivalent. The translator's linker (`linked_functions.rs` `append_dependency_module`) appended the effect's
+definition beside the fragment's, so its emitter resolved both functions' samplers to the last definition: on the SPIR-V
+road the fragment sampled with the effect's state (`r_linksamp`, fixed); and it dropped the dependency's metadata, so a
+linked function's own constexpr samplers were missing from `!air.sampler_states` (the emitter bound them, the
+reflection, which the plugin binds from, did not list them). Fixed at the source: a dependency's local global that the
+module defines with another line gets a fresh name (`name.linkedN`) with every use in that module; a line that differs
+only in a trailing `, align N` is the same definition; the dependency's constexpr samplers are added to the module's
+`!air.sampler_states` (new nodes after the module's highest one). The draw binds the constexpr samplers and embedded
+resources of the stages the pipeline was built from (`_linkedVert`/`_linkedFrag`, the linked ones), not the caller's
+unlinked functions. The frontend drops, before LLVM parses the text, a declaration of a function the text defines and a
+repeated declaration of the same signature (the linker leaves both; LLVM takes a name once); a function declared twice
+with different signatures is refused.
+
+**Arrays of textures** (`NVMTL_AIR_NIR_TEXTURE_ARRAYS`). `array<texture2d<T>, N>` at `[[texture(n)]]` arrives as a byval
+pointer to N handles; element k is texture n + k. The translator under bindless-all (the default) reads every element
+of a sampled array through the per-draw table and the bindless heap (`resources/texture_array.rs`
+`route_texture_array_elements_through_heap`: the slot at table entry 64 + n + min(i, N - 1), low 32 bits masked to the
+heap's 131072 slots, into the heap at set 2, binding 0, non-uniform), because the plugin declares every texture index
+as its own count-1 binding and an `[N x image]` variable at 32 + n read element 1 past it; a written array is a
+descriptor array at 480 + n. The frontend: an element whose index is known is texture n + k at its own binding (32 + n
++ k, 480 + n + k when written), as a `[[texture(n + k)]]` is; a sampled element chosen at run time takes the
+translator's heap path exactly (`NVMTL_AIR_NIR_HEAP`, which the plugin sets when its layouts have the heap;
+`result.resource_flags` `NVMTL_AIR_NIR_RES_HEAP`). A written element or a `texture_buffer` element chosen at run time,
+and `array_ref<...>` (MPS's histograms pass it through objects in thread memory), stay refused. The reflection gives an
+array's `array_length` and its descriptor count N, as the translator's.
+
+**Texture calls through a choice of argument handles.** Apple's GL compiles a GLSL helper that takes a `sampler2D`
+(Minecraft's `sample_lightmap`) by passing every texture and sampler and a switch on a literal the caller stored; after
+the inliner and SROA the frontend met a phi of the argument handles. The translator folds such a phi to the one incoming
+value its known branches leave (`passes/resource_phi_fold.rs`); the frontend now, when the function has a phi or select
+of parameters in address spaces 1 and 2, runs LLVM's `sccp,instsimplify,simplifycfg,adce` after SROA, which folds the
+same branches. A choice left after that stays refused where a texture call meets it.
+
+**Argument indices from function constants** (`[[buffer(bidx + 1)]]`, `[[texture(tidx * 2)]]`: a
+`__metal_implicit_attr_int_expr` global the static initializer fills) already translate with the constants' values, on
+both roads (`fc_argindex`); the 572 of the cache sweep are refused only because the sweep gives no values.
+
+**Argument buffers** (102 functions of the cache) are not done in round 8: a texture in an argument buffer is a
+resource ID in memory (`NVMTLEmbedded.m`: bit 62 and a heap slot, bit 63 for a sampler), which the translator reads
+through the heap, and the plugin also binds some of an argument buffer's resources into per-draw slots from the CPU
+copy (embedded plans); matching both exactly is the next round's.
+
+### Tested (round 8)
+
+| test | what | tolerance |
+|---|---|---|
+| r_fetch | `[[color(0)]]` of an RGBA32Float attachment read and blended by hand, two instances (the second reads the first's) | 1e-6 |
+| r_fetch_mrt | `[[color(0..2)]]` read as half4 (RGBA8Unorm, swizzled), float (R32Float), uint (R32Uint), two instances | rgba8 2 LSB, 1e-5, exact |
+| r_fetch_noatt | `[[color(1)]]` read with no attachment 1: the dummy image's zeros | 1e-6 |
+| r_linksamp | a fragment's constexpr sampler (nearest, clamp_to_zero) and a linked visible function's (nearest, repeat), both `@__air_sampler_state` in their modules | exact |
+| r_handlechoice | textures and samplers chosen by a switch on a known value (built with `-O0`; skipped on the SPIR-V road, whose translator does not take that module) | 1/128 |
+| tex_arrays | `array<texture2d<float>, 4>` read by known and run-time indices (one past the end: the last element), `array<texture2d<float, access::write>, 2>` written | 1e-6; rgba16f 2e-3 |
+| fc_argindex | a buffer and a texture whose indices are function-constant expressions | 1e-6 |
+
+- Through the plugin (`r8/final-runs.sh`, the translator of this tree, two runs on each road, one with the caches of
+  the first, one with `PLUGIN_RUN_CORRUPT=1`; the fault counters stayed at 0 apart from the one fault injected on
+  purpose): on the road 88 pass (round 7's 81 and the seven above), `grid2d_base` skipped as before; the same eight as
+  in round 7 take the SPIR-V road as they must. With `NVMTL_AIR_NIR=0` the same five as in rounds 4 to 7 fail (`fmath`,
+  `fmath_precise`, `math_lib`, `tex_offset`, `align_misaligned`) and `tex_arrays` (element 1 of the written array is
+  lost: the translator's descriptor array at 480 + n meets the plugin's count-1 bindings; old), `r_handlechoice` is
+  skipped, the others pass. With `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails. The fetch tests with
+  `NVMTL_NO_FBFETCH=1` (zeros) pass on both roads; with `NVMTL_FETCH_COPY=1` too they take the SPIR-V road and pass.
+  `r_linksamp` with the installed 3.0.24 translator fails on the SPIR-V road (the fragment's sampler read as repeat).
+  The frontend's reflection equals the translator's for every new function (`NVMTL_AIR_NIR_REFL_CHECK=1`).
+- `sweep.py --reflect` over the AIR cache (round 5's list): of 10,814 functions the frontend translates 5,559 (round 6:
+  5,517; 3,539 kernels, 689 vertex and 1,331 fragment functions), every reflection equal to the translator's (different
+  0, not reflected 0); it refuses 5,253 (5,295); two are the MPS modules whose translator reflection does not finish.
+  Refused, the first ten: a function constant read without its value 4,023, an argument index from one 572 (no values
+  in the sweep), post-tessellation vertex functions 223, a stage input under a constant without its value 71,
+  `array_ref` texture arrays 56, fragment argument buffers 44, vertex argument buffers 37, imageblocks 33, a
+  `[[color(n)]]` input under a constant without its value 27, kernel argument buffers 21. Framebuffer fetch (56 in round
+  6, apart from those 27) and the texture call through a choice of handles (42) are gone.
+- WindowServer's functions on disk (SkyLight's and QuartzCore's metallibs, offline in a normal process): 173 of 211
+  translate with reflections equal to the translator's (round 6: 166); refused: imageblocks 16, linear pixel-coordinate
+  samples other than 2D `clamp_to_edge` 5, stage inputs and outputs under constants without values 7, the bounds rule
+  of round 7 2, raster order groups 2, function constants without values 6. With each module's constants all 0 and all
+  1 (26 variants): 10 equal, 8 not reflected (initializer-computed gates), 8 refused.
+- Host: `tools/test_air_nir_plugin.py` (57, with the two round-8 checks and their negative controls),
+  `tools/test_embedded_fast.py`, `test_fetch_copy.py`, `test_a8_framebuffer_fetch.py`, `test_graphics_bindings.py`,
+  `test_address_snapshot.py`, `test_switch_registry.py`, `test_refusal_reasons.py`; the translator's unit tests (2,304,
+  with the two linker tests) and its integration tests (2,333 pass; the four of `declared_capabilities_are_needed.rs`
+  fail as they do at the round-7 commit: they inspect no fixture here).
 
 ## Phases
 
