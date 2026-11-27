@@ -1,10 +1,28 @@
 # OpenGL for the releases that composite through OpenGL (10.6 to 10.13)
 
-Status: built and checked offline for 10.6 to 10.13; never run on a GPU or on any of those releases. The engine
-carries Mesa's state tracker with zink linked in and the Vulkan driver beside it, both import-checked against each
-release's own libraries; host tests render through the CPU rasteriser only. The accelerator's two card-facing hooks
-(video-memory surfaces, present into the scanout) go through the framebuffer kext's platform functions and are
-compiled and symbol-checked per release; its personality cannot match hardware. Nothing here is part of a package.
+This is the original project's (NullMoth's) OpenGL lane for older macOS releases, merged here in 3.0.18. It is an
+OpenGL engine bundle that carries Mesa's state tracker with Zink linked in and the Vulkan driver (NVK built for that
+release's floor) beside it, and an accelerator kext of its own, `NMLegacyAccel`.
+
+**How it is used now.** Since 3.0.19 the package carries the kits for macOS 10.7 to 14, and the kits for 10.7 to 10.13
+have an `opengl/` folder made from this one: `package/stage.sh` (in this folder) stages each release's engine, Vulkan driver and
+accelerator and signs the programs, and `build/legacy/assemble_kits.sh` copies that stage into the kit
+([BUILDING.md](../docs/BUILDING.md#building-the-kits-for-macos-107-to-14)). 10.6 is built here too but is not packed.
+On those releases `install.sh` hands over to the kit's `install-legacy.sh`, which copies `opengl/` to
+`/Library/NullMoth/legacy/<release>/opengl` and **does not switch it on**: the folder's `MANIFEST.json` says where each
+file would go and what has to happen first (Apple's `GLEngine.bundle` renamed to `NMOriginalEngine.bundle` beside it,
+because the engine forwards to it by that fixed path; System Integrity Protection off on 10.11 and later), and the
+kext's personality names a class that does not exist, so it cannot attach until that is changed for an approved run.
+The kits for 10.14 and later have no `opengl/`: there Apple's OpenGL runs over the driver's Metal device.
+
+Status: built and checked offline for 10.6 to 10.13; never run on a GPU or on any of those releases (no kit has run on
+a card or an older macOS). The engine and the Vulkan driver are import-checked against each release's own libraries;
+host tests render through the CPU rasteriser only. The accelerator's two card-facing hooks (video-memory surfaces,
+present into the scanout) go through the framebuffer kext's platform functions and are compiled and symbol-checked per
+release.
+
+Licence lines (four files here carry PolyForm-Noncommercial-1.0.0) and the data read from Apple's binaries (the lists
+in `names/` and the contract in `engine/nm_gli.h`) are in [PROVENANCE.md](../docs/PROVENANCE.md).
 
 ## What is in this folder
 
@@ -33,7 +51,7 @@ compiled and symbol-checked per release; its personality cannot match hardware. 
 | `context/build_context.sh` | builds the engine with the context layer for 10.11, checks exports and imports, and runs the end-to-end test that draws through the table on the CPU rasteriser and counts pixels |
 | `mesa/build_mesa_gl.sh` | builds Mesa's static libraries (API layer, state tracker, zink, CPU rasteriser) for a deployment target |
 | `context/build_releases.sh` | runs the context build and its tests for every release from 10.13 down to 10.6 with that release's headers, lists and libraries |
-| `package/stage.sh` | assembles the per-release folder tree and manifest; copies build outputs only |
+| `package/stage.sh` | assembles the per-release folder tree and `MANIFEST.json` from build outputs, and signs the Vulkan driver and the engine (ad hoc, since 3.0.19); installs nothing |
 | `mesa/patch_mesa_no_tls.py`, `mesa/nm_tls.h` | per-thread-key variants of the tree's 13 compiler thread-local lines, for the 10.6 floor only |
 | `context/nm_cxx_min.cpp` | the nine C++ library symbols 10.6's older library lacks |
 | `tools/usersym.py` | import checker used by the build scripts |
@@ -50,5 +68,5 @@ It includes a control: a build with one name removed must be reported as exactly
 
 OpenGL on these releases has two plug-in levels. The engine level owns the whole OpenGL API of a context (the public
 function table in `OpenGL/gliDispatch.h`); the renderer level sits below Apple's own engine and is handed Apple's
-private state structures. The design notes and the evidence for choosing between them are in the lane's map
-document (`OPENGL-LEGACY.md`).
+private state structures. The engine level is the one this lane builds on (`engine/`, `context/`, `glue/`). The
+original's design notes on the choice (its `OPENGL-LEGACY.md`) are not part of this repository.

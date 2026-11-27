@@ -4,17 +4,40 @@ What each part of the driver package came from, under which licence, and what ha
 plain: nothing here may come from taking apart a closed binary, and everything that is somebody else's keeps its licence
 and credit. `NOTICE` is the short form that ships; the texts are in `licenses/`.
 
+This audit was made by the original project ([NullMoth](https://github.com/nullmoth/nvidia-macos-driver)) for its 2.9
+and is kept by this fork; it describes the fork's release 2 (3.0.20). A count or a check that was made for 2.9 only
+says so.
+
 ## 1. Written here (PolyForm Noncommercial 1.0.0, `LICENSE`)
 
 NullMoth's own code: the kexts' glue and policy (`kexts/NVRM`, `NVRMFB`, `NVRMAGDC`, `NMIntelFB`, `NMHDA`, `NMDRM`,
-`NVPrimarySelector`), the Metal plugin (`plugin/`), the installers (`package/`), the build scripts and the tests. Every one
-of these files carries an SPDX line. The 107 files checked on this branch name PolyForm-Noncommercial-1.0.0 and nothing
-else; none contains GPL text.
+`NVPrimarySelector`), the Metal plugin (`plugin/`), the installers (`package/`), the build scripts and the tests, with
+this fork's changes to them since 2.9. Not every one of these files carries an SPDX line (the shell scripts of `package/`
+carry none, in 2.9 as in 3.0.20); `README.md` gives `LICENSE` for `plugin/`, `kexts/`, `build/` and `package/` as a whole.
+The 107 files checked for 2.9 name PolyForm-Noncommercial-1.0.0 and nothing else; none contains GPL text. In 3.0.20,
+261 tracked files carry the PolyForm SPDX line (129 in 2.9).
+
+The sources of the kits for macOS 10.7 to 14 are NullMoth's too. They come from the original's 3.0 and 3.1, were merged
+here in 3.0.18 (`build/legacy/`, `package/legacy/`, `gl/`, `kexts/compat/nm_era.h`, `kexts/NVRM/accel/nvres_fields.h`,
+`plugin/nvmtl_avail.h`), and 3.0.19 built the 13 kits from this tree with Apple's SDK and Kernel Debug Kit of each
+release. In `build/legacy/`, `package/legacy/`, `gl/` and `kexts/compat/` 99 files carry a licence line, all PolyForm-Noncommercial-1.0.0 (95 era headers in
+`build/legacy/era-headers`, four files of `gl/`); the others carry none. Two files came with them into trees under
+another licence: `nvk/nvk-legacy-floor.patch` (a change to Mesa, MIT like the rest of `nvk/`) and
+`vendor/nvenc/src/nv_floor.h` (in the MIT `vendor/nvenc`; `vendor/nvenc/SOURCE` does not list it yet). The era
+headers, `nvres_fields.h` and parts of `gl/` hold data read from Apple's binaries (item P5); what the kits carry of the
+licence texts is item P11.
+
+Written for this fork: `package/pick_kit.sh` (3.0.19) and the signing tools of the optional AMFI route,
+`tools/make_amfi_anchor.sh`, `tools/sign_graphics.sh` and `tools/stage_signed_graphics.py` (PR #28). None of the four
+carries a licence line, and `README.md`'s licence list does not name `tools/`. The signing tools hold nothing of
+AMFIAnchor and no key or certificate: `make_amfi_anchor.sh` runs AMFIAnchor's own `tools/make_injector.py` from a
+clone the operator passes (`--amfianchor`), refuses a key folder inside a git working tree, and writes the keys and the
+generated anchor kext to a folder the operator controls (default `~/nullmoth-signing`).
 
 Not copied from the PolyForm-licensed `mickys/nvidia-macos-driver`: `NOTICE` records the three places where an idea came from
 that project (EDID override files, the shared VRAM import cache, the browser surface default), each implemented
 independently. In this tree the name occurs only in the MIT `mickys/nvenc` import and in the credit lines of `NOTICE`,
-`CHANGELOG.md` and `docs/HOW-IT-WORKS.md`; code written from ideas in that project was not compared line by line against its
+`CHANGELOG.md`, `docs/HOW-IT-WORKS.md` and this page; code written from ideas in that project was not compared line by line against its
 source, which this audit could not fetch, so the owner's statement that none was copied is what stands.
 
 ## 2. Taken from other projects, with their licence
@@ -50,10 +73,17 @@ source, which this audit could not fetch, so the owner's statement that none was
 | Native OpenGL's build helpers `build/prepare_zink.py` and `build/generate_gld_forward.py` | the same fork: commit eaf7d128 added them together with `build/build_zink.sh` | no licence line of its own, in the fork or here; the fork's `docs/ZINK-OPENGL.md` says of the contribution eaf7d128 is part of: "its original MIT attribution is retained" | `NOTICE`, each commit's `Ported-from` lines |
 | OpenGL registry data in the generated capability lists (`cgl_api.inc`) | Khronos OpenGL-Registry `gl.xml` as Mesa 26.3.0 ships it | Apache-2.0 | `NOTICE`, `licenses/Khronos-OpenGL-Registry-Apache-2.0.txt` |
 | Zink's Vulkan driver (`nvmtl/zink/libnvk_zink_vulkan.dylib`, `libnvk_renderer.dylib`) | the `tools/nvk-bridge` frontend and its copy of this package's NVK, copied by `build/package_local.sh` | PolyForm Noncommercial 1.0.0; MIT | as the two rows above |
+| Changes adapted from open pull requests to the original project (3.0.4, 3.0.5) | pull requests 573 and 575 to 580 by luckiest-luk (GL and ANGLE uniform promotion, address tables, the bounds check of textures over buffers, read-only blit sources, the deallocator of imported caller pages), 597 by Geek (the retry of a head that does not light at power-on, with its log lines), 487 by dreamelite96 (the family-VRAM import where a sandbox refuses /dev/null, the import cache's limit for 8 GB cards, and in the video library the sandboxed kernel connections, pictures kept after they are emitted and the VP9 and AV1 decoders' error counts) and 524 by emretascii (the translator's whole-object views and iOS Simulator fixtures, protected IOSurfaces, the one-time copy of read-only buffers and the submit-ahead; its commits signed "Antigravity (local port)"); adapted to this tree | PolyForm Noncommercial 1.0.0 in `plugin/`, `kexts/NVRMFB` and `tools/`; LGPL-3.0-or-later in `translator/`; MIT in `vendor/nvenc` | `NOTICE` (one entry per pull request, with the files), `CHANGELOG.md` 3.0.4 and 3.0.5, `vendor/nvenc/SOURCE` |
+| What the kits for macOS 10.7 to 14 are built from (`build/legacy/userland`, `gl/mesa`) | the sources of the rows above, built for each release's floor: NVK with `nvk/nvk-legacy-floor.patch`, the translator, `libnvencvt`, the Khronos loader v1.4.367 (`build/legacy/userland/userland_floors.sh`), the Zstandard decoder `nm_unzstd`, and, where a kit has `opengl/`, the `gl/` engine with Mesa's OpenGL state tracker and Zink | as the rows above | `CHANGELOG.md` 3.0.18 and 3.0.19; item P11 |
 
 Downloaded on the user's Mac, never shipped: NVIDIA's DLSS runtimes (SDK 310.9.16, from NVIDIA's GitHub), the NGX core
 (one file from NVIDIA's Linux 620.70.06 package) and `libnvJitLink` (from NVIDIA's PyPI wheel). `package/dlss_fetch.sh` pins
 each by SHA-256, asks before downloading, and installs them root-owned. They stay under NVIDIA's licences.
+
+Used by the optional AMFI route, never shipped: AMFIAnchor (b00t0x, https://github.com/b00t0x/AMFIAnchor), which
+OpenCore loads after Lilu, and the anchor kext its `make_injector.py` builds on the operator's Mac from the operator's
+own public root certificate ([SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)). Neither is in this tree
+or in the package.
 
 Downloaded on the building Mac, never shipped: the build tools of `./build.sh deps`. On an Intel Mac it builds them from
 pinned sources in its working directory (ninja, CMake, OpenSSL, zstd, xz, CPython, pkgconf, SPIRV-Headers, SPIRV-Tools,
@@ -85,7 +115,11 @@ files were not ours to ship:
 Carried and still shipped, built outside this tree: NullMoth's own hardware video libraries in the plugin bundle
 (`libnvdec_h264.dylib`, `libnvdec_h264_t2d.dylib`, `libnvdec_hevc.dylib`, `libnvenc_h264*.dylib`, `libnvenc_hevc*.dylib`),
 the Vulkan loader `nvmtl/libvulkan.1.4.362.dylib` (Khronos, Apache-2.0) and `nullmoth-runtime-check`. Their sources are
-not in this repository yet, so a 2.9 package does not rebuild them. Section 2a says which card needs which of the nine
+not in this repository, so no package of this fork rebuilds them: `./build.sh package` takes them, with the plugin
+bundle's `Info.plist`, `air-runtime`, `nvk_icd.json` and `nvrm610.conf`, from the original's 2.9 release package it
+starts from (`build/package_local.sh`). `Library/Extensions/NMXAudio.kext` (the HD Audio row above, in the original's
+packages since 2.7) is in the same position: nothing in this tree builds it, and `install.sh` installs it on macOS 26
+only when the package carries it. Section 2a says which card needs which of the nine
 video libraries and what `libnvencvt` would have to learn before each can go.
 
 ## 2a. Hardware video: who serves what, by generation
@@ -100,7 +134,7 @@ Two providers register with VideoToolbox: NullMoth's own libraries (carried bina
 | Turing TU116, TU10x: GTX 1660, RTX 20 (c4b7 / c4b0) | own `_t2d`; nvencvt opt-in (new) | own; nvencvt opt-in (new) | VP9 nvencvt opt-in (new) | nvencvt opt-in (new) | own `_tu10x` only | none in hardware |
 | Ampere GA10x (c7b7 / c7b0) | own `_t2d`; nvencvt with `NVENCVT_AMPERE_ALL_DEC=1` | own; nvencvt with the same switch | nvencvt auto | nvencvt with the same switch | own `_ga10x`; nvencvt with `NVENCVT_AMPERE_ENC=1`, untried | none in hardware |
 | Ada (c9b7 / c9b0) | nvencvt auto (own `_t2d` registers below it) | nvencvt auto (own below it) | nvencvt auto | nvencvt auto | nvencvt auto (own: none) | nvencvt auto |
-| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt auto in the decode service once its self-test has passed on the card, opt-in in other processes behind the same test (new, no run on a card reported yet) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
+| Blackwell (cfb7 / cfb0) | own `libnvdec_h264`; nvencvt auto in the decode service once its self-test has passed on the card, opt-in in other processes behind the same test (added in 2.9; no self-test result is recorded in this tree, this fork's RTX 5050 included) | own only | - | - | own `libnvenc_h264`, `libnvenc_hevc` only | - |
 
 What each carried library is still needed for, and what is missing before `libnvencvt` can replace it:
 
@@ -149,7 +183,7 @@ bytes, so they do not depend on this library or on any NVIDIA software.
   no file in this tree is GPL.
 * The translator is LGPL-3.0-or-later and is a separate dynamic library the plugin loads; its source and licence ship with
   the repository. Its crates are permissive.
-* NMX (separate repository): the NPU kext is GPL-2.0 by design and is its own product; xe, i915 and amdgpu are MIT; LinuxKPI
+* NMX (the original project's separate repository, not part of this fork; as recorded for 2.9): the NPU kext is GPL-2.0 by design and is its own product; xe, i915 and amdgpu are MIT; LinuxKPI
   and the FreeBSD layer are BSD. `xkpi/all-xe.sh` stops the build if a GPL file is left in the xe sources, and
   `tools/test_licence_audit.py` audits the licences; the build manifest records exact upstream commits so the GPL parts can
   be offered in source.
@@ -163,27 +197,27 @@ of them is an ancestor of `rel-29` or of this branch, none of their files exists
 The ray-query code in `nvk/nvk-macos.patch` is Mesa's own `nir_lower_ray_queries`. 2.9's hardware ray tracing is the
 translator's own BVH path.
 
-> Status (the branch prepared as 3.0): open, and not this branch's to settle. The paragraph above is release 2.9's text,
-> and release 2.9's own tree, like this one, holds what it says is absent: `nvk/hwrt/` with the `ttu` files, whose
-> patches `build/build_nvk.sh` applies, and the setting `NVK_HWRT_QUERY` in NVK and in the plugin's profile
-> ([HWRT.md](HWRT.md) describes that work and how its layout rows were measured). This branch changed no file under
-> `nvk/hwrt/` and makes no statement about how those files relate to `hwrt-28`: that is the original project's to say.
+> Status (3.0.20): open, and not this fork's to settle. The paragraph above is release 2.9's text, and release 2.9's
+> own tree, like this one, holds what it says is absent: `nvk/hwrt/` with the `ttu` files, whose patches
+> `build/build_nvk.sh` applies, and the setting `NVK_HWRT_QUERY` in NVK and in the plugin's profile ([HWRT.md](HWRT.md)
+> describes that work and how its layout rows were measured). Since 2.9 one file was added there:
+> `nvk/hwrt/ttu-rq-split.patch` (3.0.18), the original's 3.1 change to `hwrt/ttu-rq.patch` (ray queries read a geometry
+> entry as two 4-byte loads), kept as a patch of its own at the end of the 3.0 chain so that `ttu-rq.patch` stays 2.9's
+> file. This fork makes no statement about how those files relate to `hwrt-28`: that is the original project's to say.
 
 ## 5. Items that must change or be decided
 
 Severity is the legal exposure, not a code defect. Each names the evidence and the action.
 
-> Status (2.9): resolved. The package no longer carries the firmware. `package/fw_fetch.sh` takes the four files from NVIDIA's own 620.70.06 Linux driver package (the .run that `dlss_fetch.sh` already pins), checks each against a SHA-256, and `install.sh` runs it before it changes anything; an earlier install that still matches is reused, and with no network and no earlier install the installer stops with the download address and changes nothing. Test: `tools/test_fw_fetch.py`.
+> Status (2.9): resolved. The package no longer carries the firmware. `package/fw_fetch.sh` takes the four files from NVIDIA's own 620.70.06 Linux driver package (the .run that `dlss_fetch.sh` already pins), checks each against a SHA-256, and `install.sh` runs it before it changes anything; an earlier install that still matches is reused, and with no network and no earlier install the installer stops with the download address and changes nothing. Test: `tools/test_fw_fetch.py`. Since 3.0.18 (the original's 3.1) `fw_fetch.sh` first looks for that package, checked by its SHA-256, in Downloads, on the Desktop, in `/Users/Shared` and on a USB stick, and continues a download that stopped.
 
 **P1. GSP firmware redistribution (decision for the owner, highest).** `licenses/NVIDIA-firmware-LICENCE.txt` is the licence
 `linux-firmware` ships these files under. Its only redistribution grant (section 2.1.2) is "solely for use on operating
 systems distributed under the terms of an OSI-approved open source license", binary unmodified, with the licence copied.
 macOS is not such an operating system, so the package's right to carry the firmware is doubtful, and `NOTICE` says "the same
 terms under which linux-firmware redistributes" without noting that limit. Options: (a) fetch the firmware on the user's Mac
-at install time from NVIDIA's package or `linux-firmware`, pinned by SHA-256, exactly as `dlss_fetch.sh` does for DLSS (the
-1401 app already downloads other pinned files while it builds an EFI; a Mac installed offline would need the stick to carry
-a download step); (b) ask NVIDIA for permission in writing; (c) keep shipping and accept the risk. Not changed here because it
-reshapes the installer and the 1401 flow.
+at install time from NVIDIA's package or `linux-firmware`, pinned by SHA-256, exactly as `dlss_fetch.sh` does for DLSS; (b) ask NVIDIA for permission in writing; (c) keep shipping and accept the
+risk. 2.9 took (a) (status above).
 
 > Status (2.9): resolved. The relocation kinds and the instruction bits they patch are LLVM's public CUDA ELF definitions; the stub words come from NAK's own encoder source at patch time (`nvk/dlss/legal/nak_stub.py`); the trap is a NAK-encoded store to address 0 followed by EXIT. Sources, commands and tests: `nvk/dlss/legal/README.md`. Following the public definition also fixed the placement of kind 75 and added kind 58, which the older placement refused.
 
@@ -217,6 +251,25 @@ tables and vtables of Apple's kernel collection (`vtable.py`, noted in `IOAccele
 reading Apple's binaries is outside what Apple's licence allows apart from interoperability rights. These layouts are what
 lets a third-party accelerator be the class Apple's frameworks expect, so the practical choice is to keep them as
 interoperability data and not publish more than the signatures. Listed so the owner knows.
+
+Of the same kind, added with the kits for macOS 10.7 to 14 (merged in 3.0.18, built in 3.0.19):
+
+* The era headers in `build/legacy/era-headers` (141 files for 10.10 to 10.14: 130 headers, ten JSON tables of the
+  family's named slots and of the kernel classes under it, and a README). Their README says where they come from: `build/legacy/gen_era_headers.py` regenerates each class body from
+  that release's IOAcceleratorFamily2 virtual tables (slot order, method names, which slots are pure) and the instance
+  sizes its metaclasses register; most names of the pure slots are read from Apple's own graphics drivers of the
+  release (GeForce, AMDRadeonX4000/X5000, AppleIntel*Graphics), which ship only in the full macOS installer; the
+  declaration text is taken from the hand-written macOS 15 headers above; and a few one-line bodies that Apple's
+  headers define inline (a field read or a constant) are reproduced from the copies in the family binary. In the
+  README's words, "They hold no Apple binary." All five sets were made on 2026-11-25 with `gen_era_headers.py` as of
+  2e4b9cc4, for the kits of 3.0.19. 95 of the headers carry the PolyForm-Noncommercial-1.0.0 line of the macOS 15
+  headers they are written from; the other 35 and the JSON tables carry no licence line.
+* `kexts/NVRM/accel/nvres_fields.h`: where the fields the driver reads sit in the family's resource object on each
+  release, each value "read from the family's own code for that release".
+* In `gl/`, the entry-point lists of `gl/names` and the engine contract `gl/engine/nm_gli.h`, which `gl/README.md`
+  says were read from the binaries of each release.
+
+No separate decision on these is recorded; they are listed so the owner knows.
 
 **P6. The DLSS host runs NVIDIA's Linux libraries on macOS** (`plugin/dlss/elfhost.c`, `lnxlibc.c`, `nvmtl_dlss.c`). The ELF
 loader is written from the ELF and System V ABI specifications; the libc shim, the NVML and Vulkan stand-ins and the facts in
@@ -256,7 +309,19 @@ so at run time: the fork's LLDB generator, `zink/gld_abi.h`, `zink/gld_trace.*` 
 taken, and `zink/nvk_cgl_guard.h` checks at run time that the memory is shaped as recorded before any read or write. The
 dispatch table itself comes from the SDK's public headers. The options were to keep the offsets as interoperability
 data, as for P5, or to leave native OpenGL out of the package until they can be derived from a public source. The owner
-chose on 2026-11-16 to keep them as interoperability data.
+chose on 2026-11-16 to keep them as interoperability data. 3.0.3 changed what the guard accepts, for the context seen
+on this fork's RTX 5050 with macOS 26.7.3 (25G342), working from the guard's own refusal lines; what the adapter writes,
+and when, is still what the source fork writes.
+
+**P11. Licence texts on the path for macOS 10.7 to 14 (found in the 3.0.20 pass; nothing changed).** A kit archive
+(`build/legacy/package_kits.sh`) carries `LICENSE`, `dlss/nm_unzstd.LICENSE` and, where the kit has a userland
+payload, the Vulkan loader's licence (`userland/payload/Library/NullMoth/vulkan/LICENSE.txt`, `build/legacy/userland/stage_legacy.sh`).
+It carries no `NOTICE` and none of the other texts of `licenses/` (Mesa for NVK and Zink, the translator's LGPL,
+`libnvencvt`'s MIT), although it ships those parts. The package that holds the 13 kits has `NOTICE` and `licenses/`,
+so the download carries them; but on macOS 10.7 to 14 `install.sh` hands over to the kit before the step that copies
+`licenses/` to `/Library/NullMoth/licenses`, and `install-legacy.sh` installs no licence text beyond that loader licence in
+the payload. For the owner:
+put `NOTICE` and `licenses/` into each kit, or have the older-release path copy them too.
 
 ## 6. Reviewed, nothing to change
 

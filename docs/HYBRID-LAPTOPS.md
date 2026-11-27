@@ -5,8 +5,15 @@ driver that can only scan out of the GPU it drives shows nothing there. This pag
 NVIDIA GPU do the rendering while the integrated GPU keeps the panel, what a tester switches on, and which log line
 proves each step.
 
-Status: built and tested offline (host tests, kernel builds for macOS 15 and 26). It has not run on a hybrid laptop. It is
-off unless the boot-arg `nmhybrid` is set, and with the boot-arg absent every code path behaves as before.
+Status at 3.0.20 (Release 2): the original project's 2.9 work with this fork's 3.0 fixes (CHANGELOG.md, 3.0), built and
+tested offline (host tests, kernel builds for macOS 15 and 26). It has not run on a hybrid laptop, in the original's
+record or in this fork's, whose only test machine is a desktop. It is off unless the boot-arg `nmhybrid` is set, and
+with the boot-arg absent every code path behaves as before. Unlike the fork's own changes it is not on by default:
+whether it can work depends on the laptop (tier `hardware` in [SWITCHES.md](SWITCHES.md)). The panel drivers
+(`NMIntelFB`, `NMGopFB`) are not in the package; `uninstall.sh` removes them with the driver. To try it: "Before you
+start", "Switching it on and off" and "Check it" below, then the step order in
+[HYBRID-TESTER-PLAN.md](HYBRID-TESTER-PLAN.md); report on the
+[fork's issue tracker](https://github.com/TheFormidable/nvidia-macos-driver/issues).
 
 ## How the other systems do it
 
@@ -36,8 +43,8 @@ pipe sees that, and for every composited frame does one of two things.
 | copy engine | `nmhybrid=4` | as owned, and a frame whose newest pixels are still only in the GPU's memory is written by the GPU's copy engine straight into the pages of an owned buffer (the same engine that pages a surface out to system memory), then the plane is flipped to that buffer. No CPU copy, no mapping of the application's surface. The order is fixed and tested: the GPU has finished drawing (no lock held), the accelerator lock is taken for the resource lookup and the copy only, an owned buffer is taken and flushed from the CPU caches, the copy engine writes it and the call returns only when it is done, the lock is released, and only then is the plane flipped, whose wait for the next vertical blank (up to 40 ms) never holds the accelerator lock. A copy that fails cleanly returns the buffer and the frame is copied the old way; a copy that timed out may still be writing, so that buffer is quarantined, never shown and never handed out again. Needs the surface to have exactly the panel's size and pitch (a linear byte copy), 8-bit BGRA. Intel display versions 12 and 13. This is done in the kernel through the resource manager's copy-engine call, not in the Metal plugin: the plugin has no mapping of the panel driver's pages and does not need one. |
 
 Panels covered: Intel display versions 12 to 20 through `NMIntelFB` (copy, import on 12 and 13); AMD integrated GPUs macOS
-has no driver for through `NMGopFB` (copy, see the next section); AMD and Intel through `NMXGPU` (copy). The NMXGPU part is in the NMX tree: `xkpi/xnu/nmx_hybrid.h` holds the answer the panel gives the display
-pipe, `xkpi/xnu/nmx_fb.cpp` has the three-hunk hook that uses it.
+has no driver for through `NMGopFB` (copy, see the next section); AMD and Intel through `NMXGPU` (copy), the original project's separate AMD/Intel GPU driver, which is not in this repository: its NMX tree holds `xkpi/xnu/nmx_hybrid.h`, the answer the panel gives the display
+pipe, and `xkpi/xnu/nmx_fb.cpp`, the three-hunk hook that uses it.
 
 Not part of this path: acceleration on the integrated GPU (apps do not run on it as a Metal device) and switching the
 panel to the NVIDIA GPU (see "Mux switching" below).
@@ -64,8 +71,8 @@ Which driver takes which GPU (`kexts/NMGopFB/nm_gopfb.h`, tested on the host):
 
 ### What a tester on an AMD-iGPU laptop does
 
-1. Install the NVIDIA driver and the optional `NMGopFB.kext` component (it is not in the standard package; it does nothing
-   without the switch).
+1. Install the NVIDIA driver and `NMGopFB.kext`, built with `kexts/NMGopFB/build.sh` (it is not in the package; it does
+   nothing without the switch).
 2. In the BIOS, give the integrated GPU the primary display if there is a setting for it, and leave a UEFI GOP framebuffer
    in the firmware (the default).
 3. In OpenCore, turn the `Fix PAT` kernel patch off (the AMD Vanilla `_mtrr_update_action | Fix PAT` entry). With it on,
@@ -74,12 +81,12 @@ Which driver takes which GPU (`kexts/NMGopFB/nm_gopfb.h`, tested on the host):
    off.) Test from a USB stick first. Since 3.0.13 NVRM, where it is loaded, puts write-combining back into that
    table by itself (`sysctl debug.nvrm_pat_wc` reads 1; boot argument `nvpatwc=0` leaves the table alone), which is
    meant to make this step unnecessary; that has not been run on a hybrid laptop, so keep the step until it has.
-4. Switch it on: `sudo tools/hybrid_switch.sh copy` (boot-arg `nmhybrid=1`). Level 2 behaves as level 1 here.
+4. Switch it on: boot-arg `nmhybrid=1` (see "Switching it on and off"). Level 2 behaves as level 1 here.
 5. Restart. To see the log: `log show --last boot --predicate 'eventMessage CONTAINS "NMGopFB"'`. A healthy start prints
    `selected (hybrid level 1)`, `firmware framebuffer WxH pitch P at 0x... (BARn +0x...)`, `provider NMGopFB ...` and
    `built-in panel published`. `tools/hybrid_verify.sh` then reports `copy proven` when the first frame arrives.
-6. Black panel afterwards: plug a monitor into the NVIDIA card, or remove `nmhybrid` (OpenCore picker, NVRAM reset), or add
-   `-nmgopfboff` for one boot. A GPU the table does not know can be named with `nmgopid=0xVVVVDDDD` (for example
+6. Black panel afterwards: plug a monitor into the NVIDIA card, or remove `nmhybrid` (from a USB stick or second EFI
+   whose `config.plist` lacks it), or add `-nmgopfboff` for one boot. A GPU the table does not know can be named with `nmgopid=0xVVVVDDDD` (for example
    `nmgopid=0x10021681`); this is for reports, not for daily use.
 
 Limits, as for any copy path: the single scan-out buffer can tear; the pacing timer is 60 Hz because the Radeon's display
@@ -89,8 +96,8 @@ MIT), which runs on a Radeon 680M laptop with NullMoth 2.6.3.
 
 ## Start-up controls and diagnosis
 
-- **Stands down on its own.** If the NVIDIA boot guard has the driver off (boot-arg `-nvoff`, the boot picker's remove
-  flag, or two starts in a row that never lit a display) the panel driver does not take the panel; the firmware framebuffer
+- **Stands down on its own.** If the NVIDIA boot guard has the driver off (boot-arg `-nvoff`, the `nullmoth-remove`
+  NVRAM flag of [TROUBLESHOOTING.md](TROUBLESHOOTING.md) section 4, or two starts in a row that never lit a display) the panel driver does not take the panel; the firmware framebuffer
   keeps it. Log: `hybrid: standing down, the firmware framebuffer keeps the panel: <reason>`.
 - **`nmhybriddelay=<s>`** (0 to 120, default 0): wait before taking the panel. Some machines froze without a wait after
   the NVIDIA driver started. The guard's verdict is read again after the wait.
@@ -239,7 +246,9 @@ system's own sleep and wake suspend and resume the GPU then. On a hybrid laptop 
 So the combinations are: `nmhybrid` off plus `nvrtd3=1`: the integrated GPU draws the desktop, the NVIDIA GPU powers off
 after 60 s without a Metal application and powers on when one starts. `nmhybrid` on: the GPU stays on, with or without
 `nvrtd3`. Not measured on hardware: the wake latency of the first Metal application, and whether the power resource path
-is right for a given laptop (the 1401 scan reports the candidates).
+is right for a given laptop (it is the power resource the GPU's `_PR3` names in the laptop's ACPI tables, for example
+`\_SB.PCI0.PEG1.PG01`; it is given by boot-arg because those references cannot be read through the registry on every
+machine, `kexts/NVRM/nv_rtd3.cpp`).
 
 ## Mux switching (Advanced Optimus)
 
@@ -248,21 +257,25 @@ WMI or embedded-controller method, with its own method numbers, and a wrong writ
 apply the change only after a restart, through a firmware setting; the no-restart switch on Windows is done by NVIDIA's
 closed display-mux driver, which may not be disassembled (licence 2.2/2.3). (3) The result a user wants is already reached
 by the BIOS setting in "Before you start": set to discrete, the panel is on the NVIDIA GPU and the normal driver drives it.
-What the 1401 scan records per machine (mux present, its setting, which GPU owns each port) is what decides which path a
-machine takes.
+Which path a machine takes is decided by whether it has a mux, how that is set, and which GPU owns each port.
 
 ## Before you start
 
 1. If the BIOS has a graphics mode setting (Advanced Optimus, MUX switch, "discrete graphics only"), set it to discrete.
    The panel is then wired to the NVIDIA GPU and you do not need this page.
-2. Run the 1401 scan so the report says which GPU owns the internal panel and each external port. An external display on
-   an HDMI or DisplayPort connector that belongs to the NVIDIA GPU works without this path.
-3. Be able to remove the boot-arg without the screen: boot to the OpenCore picker, or keep a second boot entry. Level 2
-   writes display registers; level 1 and the framebuffer's start-up do not.
+2. Know which GPU owns the internal panel and each external port. An external display on an HDMI or DisplayPort
+   connector that belongs to the NVIDIA GPU works without this path.
+3. Be able to remove the boot-arg without the screen: keep a USB stick or a second EFI whose `config.plist` does not set
+   it (README, "If something goes wrong"). Level 2 writes display registers; level 1 and the framebuffer's start-up do
+   not.
 
 ## Switching it on and off
 
-The order to try every switch in, with what to send back, is in `docs/HYBRID-TESTER-PLAN.md`. `copy` sets
+The order to try every switch in, with what to attach to an issue, is in `docs/HYBRID-TESTER-PLAN.md`. Every switch
+here is a boot-arg: put it in `boot-args` in OpenCore's `config.plist` and restart. The README's OpenCore settings list
+`boot-args` under `NVRAM → Delete`, so OpenCore writes them at every start and a change made with `nvram`, which is
+what the helper below does, lasts only where OpenCore does not rewrite them; there, use `--dry-run` to print the line
+to copy into `config.plist`. `copy` sets
 `nmhybrid=1`, `import` sets `nmhybrid=2`, `off` removes `nmhybrid`, `status` shows it, and `copy --dry-run` prints the
 boot-args it would write:
 
@@ -273,17 +286,18 @@ boot-args it would write:
     tools/hybrid_switch.sh copy --dry-run
 
 Other boot-args are kept. Restart after changing it. The Intel panel driver (`NMIntelFB`, built by
-`kexts/NMIntelFB/build.sh`) is a separate opt-in kext and is not in the standard package; it declines to start unless the
-boot-arg is 1 or 2, so installing it without the switch changes nothing. The AMD and Intel NMXGPU kext reads the same
-boot-arg.
+`kexts/NMIntelFB/build.sh`) is a separate opt-in kext and is not in the package; it declines to start unless the
+boot-arg is 1 to 4, so installing it without the switch changes nothing. The original project's NMXGPU kext reads the
+same boot-arg.
 
-If the screen is dark after a restart: remove `nmhybrid` (OpenCore picker, reset NVRAM, or edit boot-args), restart. With
+If the screen is dark after a restart: remove `nmhybrid` (boot from the stick or EFI of "Before you start", or edit
+`config.plist` from another system), restart. With
 the boot-arg gone the panel driver does not start and the firmware framebuffer owns the panel again.
 
 ## Check it
 
 After the restart, the first command reads this boot's log and the live sysctls, the second saves the boot's hybrid
-lines in `hybrid.log` (the file to send us), and the third reads that file:
+lines in `hybrid.log` (the file to attach to an issue), and the third reads that file:
 
     tools/hybrid_verify.sh
     log show --last boot --predicate 'eventMessage CONTAINS "hybrid:"' > hybrid.log
@@ -310,7 +324,7 @@ Other lines you may see, none of them an error by itself:
   Shown for the first eight only; `debug.nmhybrid_import_fail` counts all.
 - `hybrid: flip to an import slot did not reach the screen in 40 ms` followed by `hybrid: fallback to copy: a flip never
   reached the screen`: import is over for this boot; the plane is put back on the firmware surface and frames are copied.
-  Send us this log.
+  Attach this log to an issue.
 - `hybrid: plane back on the boot surface`: the copy path took over from an imported surface.
 
 Counters (all read-only sysctls): `debug.nmhybrid` (level), `nmhybrid_frames`, `nmhybrid_words`, `nmhybrid_words_skipped`,
@@ -400,7 +414,8 @@ tester sets `nmhybridp2p=2`.
   vertical blank).
 - No hybrid laptop has run this. Nothing here has measured frame rate, tearing, the 40 ms flip wait on real hardware, or
   whether an Intel part leaves the unused-entry run this code expects.
-- Backlight: `NMIntelFB` has a backlight handler; the AMD panel through NMXGPU has none yet (the NMXGPU lane).
+- Backlight: `NMIntelFB` has a backlight handler; the AMD panel through NMXGPU had none at the original's 2.9, and
+  `NMGopFB` has none (see its section).
 - The panel is the only head on the integrated GPU. External ports owned by the integrated GPU follow the same path only
   if their driver publishes them as heads.
 - The NVIDIA GPU stays powered while the desktop is up.
@@ -421,7 +436,7 @@ open row.
   geometry (32 bpp, pitch, wholly inside a BAR, no wrap-around). `tools/test_gopfb_wiring.py`: the provider is off by default,
   never writes the Radeon, and the accelerator counts it as a head only with the switch on.
 - `tools/test_hybrid_wiring.py`: the switch is off by default, bounded waits, guarded table writes. Fails on a tree without
-  this change.
+  the hybrid path.
 - `tools/test_hybrid_fb_dependent_id.py`: `NMIntelFB` (both start paths) and `NMGopFB` set the dependent ID and index before
   `IOFramebuffer::start`; `NMIntelFB` maps the panel surface before it publishes anything another thread reaches, and a
   failed start undoes what it published through the routine `stop()` uses. Its negative controls are made from the text
@@ -441,6 +456,6 @@ open row.
 - `tools/test_hybrid_vbt.c`: the video BIOS reader (6000 corrupted tables under the sanitisers, the OpRegion locations).
 - `tools/test_hybrid_dmc.c`, `tools/test_dmc_fetch.sh`: the firmware package reader and load plan (and the real files when `NMH_DMC_DIR` names them), the fetch script and the root helper.
 - `tools/test_gpu_policy.c`: the per-process choice. `tools/test_hybrid_rtd3.c`: idle power-down counts.
-- NMX tree: `tools/test_nmx_hybrid.cpp`.
+- The NMXGPU half is tested in the original's NMX tree (`tools/test_nmx_hybrid.cpp` there), not in this repository.
 - `tools/hy_nometal_bucket.py`: sorts kernel logs from machines with no Metal device into the causes the accelerator logs
   (accelerator never started, no head and no other accelerated GPU, panel on a GPU macOS cannot accelerate, late head).

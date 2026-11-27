@@ -1,9 +1,13 @@
 # WebGPU argument-buffer textures in Safari
 
 Safari runs WebGPU on Metal, and WebKit's Metal shaders reach their textures through argument buffers. Three shapes of
-those shaders lost a texture in the translator. They come from the HighDelay/nvidia-macos-driver-nvk fork, which found
-them with a WebGPU game in Safari: the menu was drawn over a black car and garage, and after the first repair the
-scene was too dark. Chromium browsers drew the game correctly.
+those shaders lost a texture in the translator. The repairs come from the HighDelay/nvidia-macos-driver-nvk fork, which
+found them with a WebGPU game in Safari: the menu was drawn over a black car and garage, and after the first repair the
+scene was too dark. Chromium browsers drew the game correctly. The repairs are in the translator since 3.0 and apply to
+any shader with these shapes, not only to Safari's.
+
+With this driver Safari itself does not reach them: its GPU process cannot load the Metal plugin, so WebGPU in Safari
+draws in software ([SAFARI-WEBGL.md](SAFARI-WEBGL.md)). Chromium browsers and Firefox use the GPU.
 
 ## What the translator does
 
@@ -60,8 +64,10 @@ Without it those queries returned zero sizes and counts of one.
   textures and turns on a nonzero fog uniform (four frames); the second renders the resolve and the queries through
   the reflected and the descriptor-built argument encoders (six frames).
 
-The two Rust tests ran here on Linux and pass. The two Metal programs were checked for syntax on Linux against a
-stand-in SDK only; they have not run on a Mac from this tree.
+The two Rust tests ran on Linux and pass. The two Metal programs are the card-check rows `xlate.int-handle` and
+`xlate.msaa` (`tools/card/checks_xlate.py`, run by `tools/card_selftest.py`). On this fork's RTX 5050 (macOS 26.7.3)
+they ran with 3.0.1's package, and again at 3.0.7, where every translator row passed (of 134 rows, 130 passed; the
+three that failed were Zink and 3.0.1 rows: CHANGELOG.md, 3.0.7, "What ran where").
 
 ## Reported by the source fork
 
@@ -69,4 +75,5 @@ On an RTX 2060 SUPER, macOS 26.7.1, Safari 27: the shader errors were gone after
 scene stayed dark; with the multisample and query repair the resolve probe returned the clear color (0.2, 0.4, 0.6, 1)
 instead of (0.05, 0.10, 0.15, 0.25), the size and sample query returned (4, 4, 4, 1), and the game drew the car and
 the garage. The four texture-swap and fog readbacks and the six resolve and query readbacks passed there. Other GPUs,
-macOS 15 and full gameplay were not tested by the source fork.
+macOS 15 and full gameplay were not tested by the source fork. How Safari's GPU process loaded the plugin there is not recorded in
+this repository; with this driver it cannot ([SAFARI-WEBGL.md](SAFARI-WEBGL.md)).

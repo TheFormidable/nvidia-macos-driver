@@ -7,7 +7,11 @@ The runtime is a complete Vulkan driver for the Vulkan loader (an ICD): it expor
 `nvk_bridge_icd.json`.
 
 It needs an x86_64 application and the driver installed on macOS 15 or 26. Nothing selects it by default: each launch
-chooses it, as below, and an application launched without that setting keeps its usual provider.
+chooses it, as below, and an application launched without that setting keeps its usual provider. It offers the FIFO,
+IMMEDIATE and MAILBOX present modes: IMMEDIATE shows the newest frame without waiting for the window since 3.0.9, and
+MAILBOX (since 3.0.11) does the same once per refresh of the display. `NVK_BRIDGE_PRESENT_NEWEST=0` in your own block
+of `/Library/GPUBundles/nvmtl/nvrm610.conf` goes back to presenting every frame synchronously, as the Minecraft guide
+(`MINECRAFT-NVK.md` in the package) says under "Going back".
 
 ```sh
 NVK_BRIDGE_RUNTIME=/Library/GPUBundles/nvmtl/minecraft
@@ -42,6 +46,15 @@ For an application that uses the Vulkan loader, set the manifest for that launch
 
 ```sh
 VK_DRIVER_FILES=/Library/GPUBundles/nvmtl/minecraft/nvk_bridge_icd.json /path/to/application
+```
+
+An application that expects a Vulkan loader on the system and brings none can use the Khronos loader v1.4.367 the
+package carries. From the package's folder, this installs it as `/usr/local/lib/libvulkan.1.dylib`, with a loader
+manifest for the driver's NVK (whose windows are copied on the CPU, not through this runtime); `--remove` takes that
+manifest away. Launch the application with `VK_DRIVER_FILES` as above to use this runtime.
+
+```sh
+sudo bash Library/NullMoth/vulkan/vulkan-for-apps.sh --install --with-loader Library/NullMoth/vulkan/libvulkan.1.dylib
 ```
 
 For an application with a window, quit it completely first, then start it through LaunchServices with the setting:

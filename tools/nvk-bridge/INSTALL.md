@@ -62,30 +62,35 @@ Remove the `-Dorg.lwjgl.vulkan.libname=...` argument and restart Minecraft compl
 provider. When the library named by the argument fails to load, the game does not fall back to MoltenVK in the same
 run.
 
-To keep the runtime and go back only on how frames are presented with vertical sync off (3.0.9), write the line
-`NVK_BRIDGE_PRESENT_NEWEST=0` into your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf`, from the first column
-and without blanks, and restart the game. Every present then waits for its frame on the game's thread, as before
-3.0.9, and the game's log has `NVK Bridge: swapchain presentation=synchronous` for every swapchain. With vertical sync
-off in the game it also has, once, `NVK Bridge: NVK_BRIDGE_PRESENT_NEWEST=0: IMMEDIATE swapchains present
-synchronously`, on a device where the runtime has a copy queue of its own; the switch is read when the game first
-makes a swapchain without vertical sync, so that line is missing while the game has only made swapchains with it.
-Turning vertical sync on in the game does the same for that game without the file.
+To keep the runtime and go back only on how frames are presented with vertical sync off (3.0.9 and 3.0.11), write
+the line `NVK_BRIDGE_PRESENT_NEWEST=0` into your own block of `/Library/GPUBundles/nvmtl/nvrm610.conf` (between
+`# --- my settings, kept on update ---` and `# --- end my settings ---`), from the first column and without blanks,
+and restart the game. Every present then waits for its frame on the game's thread, as before 3.0.9, the MAILBOX present
+mode is no longer offered, and the game's log has `NVK Bridge: swapchain presentation=synchronous` for every
+swapchain. The runtime reads the switch once, when the game first asks which present modes its window offers or makes
+its first swapchain without vertical sync, and then logs `NVK Bridge: NVK_BRIDGE_PRESENT_NEWEST=0: IMMEDIATE swapchains
+present synchronously`. Turning vertical sync on in the game does the same for that game without the file.
 
 ## What is known
 
 The source fork reports Minecraft 26.3 with Fabric 0.19.5 and with NeoForge 26.3.0.99 rendering through this frontend
-on an RTX 2060 SUPER, macOS 26.7.1, and checks the vanilla start with `ModFreeProbe.java`. This tree's runtime has run
-Minecraft 26.3 without mods on one Mac (AMD Ryzen 5 5500, RTX 5050, macOS 26.7.3).
+on an RTX 2060 SUPER, macOS 26.7.1, and checks the vanilla start with `ModFreeProbe.java`. This driver's runtime has run
+Minecraft 26.3 without mods on this fork's test machine (AMD Ryzen 5 5500, RTX 5050, macOS 26.7.3, a display of
+100 Hz).
 
-Through 3.0.8 the game stood at a multiple of the display's rate with vertical sync off (200 frames a second on a
-display of 100 Hz there), because every present waited for the window on the game's thread. Since 3.0.9 a present made
-with vertical sync off does not wait for the window: whenever the window can take a frame the runtime shows the newest
-one the game has presented, once it has finished rendering, and a frame that a newer one overtook first is not shown.
-That lets the game's frame rate leave the display's. 3.0.9 was built and installed on that Mac on 2026-11-22: it
-restarted without a fault, and with vertical sync off its owner read up to 1000 frames a second on the game's own
-counter, where a capture on 3.0.8 had 200. No capture was taken on 3.0.9, so that figure is a reading, not a
-measurement. Since 3.0.11 the runtime also offers the MAILBOX present mode (the newest frame, one for each refresh of
-the display), which an application that prefers it to IMMEDIATE will choose. The game's log says which way a swapchain presents (`NVK
-Bridge: swapchain presentation=newest frame` or `=synchronous`), and when the game closes or resizes its window, how
-many frames it handed over, how many were shown and how many were overtaken (`newest_frames_presented`,
-`newest_frames_shown`, `newest_frames_dropped`).
+How frames are presented with vertical sync off:
+
+- **Through 3.0.8** every present waited for the window on the game's thread, so the game stood at a multiple of the
+  display's rate: 200 frames a second there.
+- **Since 3.0.9** (IMMEDIATE) a present does not wait for the window: whenever the window can take a frame the runtime
+  shows the newest one the game has presented, once it has finished rendering, and a frame that a newer one overtook
+  first is not shown. The game's frame rate can leave the display's. 3.0.9 was built and installed on that Mac on
+  2026-11-22; it restarted without a fault, and with vertical sync off its owner read up to 1000 frames a second on
+  the game's own counter, where a capture on 3.0.8 had 200. No capture was taken on 3.0.9, so that figure is a
+  reading, not a measurement.
+- **Since 3.0.11** the runtime also offers MAILBOX (the newest frame, one for each refresh of the display), which an
+  application that prefers it to IMMEDIATE will choose.
+
+The game's log says which way a swapchain presents (`NVK Bridge: swapchain presentation=newest frame` or
+`=synchronous`), and when the game closes or resizes its window, how many frames it handed over, how many were shown
+and how many were overtaken (`newest_frames_presented`, `newest_frames_shown`, `newest_frames_dropped`).

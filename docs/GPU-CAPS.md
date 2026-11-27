@@ -1,8 +1,12 @@
 # GPU Caps — experimental read-only API
 
-Merged into `fable` by [PR #7](https://github.com/TheFormidable/nvidia-macos-driver/pull/7) on 2026-11-19.
-Development branches: `feature/gpu-caps-phase1` and `feature/gpu-caps-phase2B`. Companion application:
-[NVMetrics](https://github.com/TheFormidable/NVMetrics), which has its own releases and runtime supervision.
+In this fork since 3.0.3: Phase 1 and Phase 2B were merged into `fable` by
+[PR #7](https://github.com/TheFormidable/nvidia-macos-driver/pull/7) on 2026-11-19 (development branches
+`feature/gpu-caps-phase1` and `feature/gpu-caps-phase2B`). The code is unchanged since, in Release 2 (3.0.20). It is on
+by default; boot argument `nvgpucaps=0` turns the producer off (below). Companion application:
+[NVMetrics](https://github.com/TheFormidable/NVMetrics), which has its own releases and runtime supervision. The two
+other pages are [Phase 1 evidence](GPU-CAPS-PHASE1-VALIDACION.md) and [Phase 2](GPU-CAPS-PHASE2.md); this page has the
+current counts.
 
 ## Contract
 
@@ -10,7 +14,8 @@ Development branches: `feature/gpu-caps-phase1` and `feature/gpu-caps-phase2B`. 
 
 ## Native evidence (2026-11-17)
 
-One Intel macOS 26.7.3 system, Xcode 26.5, RTX 5050 ASUS (10de:2d83, subsystem 1043:8a3f), GB207-A, RM/GSP 620.70.06. Phase 1: 9 verified, 156 unknown. Phase 2B: 15 verified, 150 unknown; reported generation 1 then 2 after resume; `manual_authorized=false`. Phase 2B NVRM UUID `8DF107FB-C17F-343D-8848-B70CDDB2E387`; build and package CHECK succeeded, screen and capability queries worked after installation. This is a partial hardware validation, not a full stability certification.
+Measured on the feature branches, before 3.0.3, and not again on a later version. This fork's test machine: macOS
+26.7.3 x86_64 (an AMD Ryzen 5 5500 hackintosh), Xcode 26.5, RTX 5050 ASUS (10de:2d83, subsystem 1043:8a3f), GB207-A, RM/GSP 620.70.06. Phase 1: 9 verified, 156 unknown. Phase 2B: 15 verified, 150 unknown; reported generation 1 then 2 after resume; `manual_authorized=false`. Phase 2B NVRM UUID `8DF107FB-C17F-343D-8848-B70CDDB2E387`; build and package CHECK succeeded, screen and capability queries worked after installation. This is a partial hardware validation, not a full stability certification.
 
 The companion userspace RUSD probe returned tachometer mask 0x3, thermal mask 0x3, power mask 0x7. These identify independently observed channels, not physical cooler topology, firmware limits or permission to write. A later NVMetrics package was compiled and installed successfully by the tester.
 

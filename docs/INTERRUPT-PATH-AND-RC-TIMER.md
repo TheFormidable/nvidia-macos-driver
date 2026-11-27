@@ -1,11 +1,11 @@
 # Interrupt path, RC timer, nano timers and RM work: what differs from Linux, and the switches
 
-Status: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. Earlier fork builds have
-run on an RTX 5050 ([STATUS.md](STATUS.md)); these specific timer/interrupt acceptance results remain unreported. Apple's
-compiler has built this code as it stands at commit 3933ff6, every change below included: on one Intel Mac (12 threads,
-macOS 26.7, Xcode 26.5), with no warning, and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
-Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against the
-export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on
+Status at 3.0.20: written from a reading of this tree against NVIDIA's open kernel modules 620.70.06. Every change
+below came in 3.0 and is in every package the fork's one test machine (RTX 5050, macOS 26.7.3) has run, 3.0 to 3.0.20
+([STATUS.md](STATUS.md)); no reading of the counters below from it is recorded yet. Apple's compiler built this code
+for 3.0, every change below included, with no warning (at 3933ff6 on one Mac with macOS 26.7 and Xcode 26.5, and on
+GitHub's macos-15-intel runner, Xcode 26.3 with the 26.2 SDK). The kernel functions the code calls are checked against
+the export lists of macOS 15 and 26. The gates and the hold against the idle power-down monitor are run with threads on
 the host (`tools/test_quiesce_gates.cpp`, `tools/test_rtd3_hold.cpp`); `tools/test_irq_timer_wiring.py` checks the
 source text. Every change below is **on by default**; the five in the
 table below have a boot-arg that turns them off, the others (the interrupt gate, the per-GPU interrupt mark, the CPU count,
@@ -28,7 +28,8 @@ readable over SSH while the screen is frozen.
 Linux registers the GPU interrupt with `request_threaded_irq`: `rm_isr` runs in the hard interrupt and `rm_isr_bh` on
 the interrupt's own kernel thread. Here the primary filter only counts and time-stamps the MSI; `rm_isr` runs on the
 GPU's work-loop thread (`NVRM::interruptOccurred`), and `rm_isr_bh` on a thread of its own, one per GPU, named
-`NVRM bottom half` (it shows in spindumps). A long bottom half (it runs with the GPU lock that `rm_isr` took for it)
+`NVRM bottom half` (it shows in spindumps; in the kits for macOS before 10.15, where kernel threads have no names, it
+has none: `kexts/compat/nm_era.h`). A long bottom half (it runs with the GPU lock that `rm_isr` took for it)
 then no longer delays the next `rm_isr`.
 
 When `rm_isr` asks for a bottom half, it has handed the GPU lock over to it: only `rm_isr_bh` gives it back. So the
@@ -73,7 +74,8 @@ How to read them: 2.9 has none of these counters, so compare `debug.nvrm_isr_lat
 `debug.nvrm_isr_latency_max_us` after the same session (one that stuttered in 2.9: 4K playback, screen capture, a
 browser with video) booted once as it is and once with `nvrmbhthread=0`; with the thread they should be lower or
 equal. If something hangs and
-`debug.nvrm_bh_runs` stops growing, boot with `nvrmbhthread=0` and say so in the report.
+`debug.nvrm_bh_runs` stops growing, boot with `nvrmbhthread=0` and say so in the report
+([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "Reporting a problem").
 
 ## The RC timer
 
@@ -253,7 +255,7 @@ start a card again before a restart.
 
 A GPU that goes away is still stopped and torn down as described above; only the code stays. Installing, updating
 and removing the driver are not affected: each rebuilds the kernel collection and takes effect at the restart it asks
-for, and none of them unloads the running kext. Not yet reported from hardware.
+for, and none of them unloads the running kext. No attempt to unload it on the card is recorded.
 
 ## The wait queue
 

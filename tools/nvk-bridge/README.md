@@ -74,9 +74,10 @@ rebuilds the runtime, because the component depends on `nvk`.
   NVK's own clock (`os_time_get_nano`), which counts a sleep.
 - The frontend reads no environment variable. The plugin's developer switches `NVMTL_NO_SURFACE_PAGEOFF` and
   `NVMTL_NO_SURFACE_SHARE` do not reach it: it always imports the drawable's VRAM and always marks it newest. It reads
-  one switch from the settings file `/Library/GPUBundles/nvmtl/nvrm610.conf`, once, when a process makes its first
-  IMMEDIATE swapchain: `NVK_BRIDGE_PRESENT_NEWEST=0` makes every swapchain present synchronously, as before 3.0.9. The
-  way out of the runtime is per application: remove the JVM argument or `VK_DRIVER_FILES`.
+  one switch from the settings file `/Library/GPUBundles/nvmtl/nvrm610.conf`, once, when a process first asks a
+  surface's present modes or makes its first IMMEDIATE swapchain: `NVK_BRIDGE_PRESENT_NEWEST=0` makes every swapchain
+  present synchronously, as before 3.0.9, and takes MAILBOX off the list of present modes. The way out of the runtime
+  is per application: remove the JVM argument or `VK_DRIVER_FILES`.
 
 ## Interfaces with the driver
 
@@ -105,7 +106,9 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
   `nvk_bridge_icd.json` and `NVKBRIDGE_TEST_FRONTEND` set to the frontend's absolute path.
 - `window_check.mm` needs no SDL3: it presents through the installed runtime into an AppKit window of its own, reads
   every copy back, and covers a resize, an old swapchain, a minimize and a restore. `tools/card_selftest.py` builds
-  and runs it and `smoke.mm`, directly and through the installed and the built loader (`tools/card/checks_vulkan.py`).
+  and runs it and `smoke.mm`, directly and through two Vulkan loaders (`tools/card/checks_vulkan.py`): the installed
+  one beside the plugin (`nvmtl/libvulkan.1.dylib`, Khronos 1.4.362 from the 2.9 base package) and the one this build
+  makes (`build/build_vulkan_loader.sh`, Khronos v1.4.367, the loader the package offers to applications).
   It reads the copies through the present observer, and a present made while an observer is set is synchronous: these
   two programs check the synchronous path, and no check on a card hands a frame to a presentation thread.
 - `tools/test_nvk_bridge_newest.py` runs `present_newest.h` on any system, with a GPU, a layer and an application of
@@ -121,16 +124,23 @@ The frontend needs these from the driver, and this tree's NVK and plugin provide
 ## What is known
 
 The source fork reports Minecraft 26.3 (Fabric and NeoForge) rendering through this frontend on an RTX 2060 SUPER,
-macOS 26.7.1, with its own NVK build and a full 8 GiB BAR. This tree's version was built and checked on Linux only:
+macOS 26.7.1, with its own NVK build and a full 8 GiB BAR. This tree's version was first built and checked on Linux:
 `bridge.mm`, `host_test.mm` and `smoke.mm` pass a syntax-only compile for x86_64 macOS 15.0 against a stand-in SDK, with
 two declarations the stand-in lacks (`CGSizeMake`, `CALayer.opaque`) added for the check, and its build and package
-wiring passes this repository's tests. Since then it has run on one Mac with this tree's NVK (AMD Ryzen 5 5500, RTX
-5050, macOS 26.7.3, one display at 100 Hz): Minecraft 26.3 without mods renders through it. There, with vertical sync
-off, the game stood at 200 frames a second through 3.0.8, its render thread 69 % inside `vkQueuePresentKHR` and most of
-that waiting for the layer's next drawable; 3.0.9's presentation thread comes from that capture (CHANGELOG.md). 3.0.9
-and 3.0.11 were then built on that Mac without a warning and installed there (2026-11-22); the Mac restarted without a
-fault, and with 3.0.9 its owner read up to 1000 frames a second on the game's own counter. No capture was taken, and
-no card check presents through the thread (`window_check` sets the present observer, `smoke` uses FIFO).
+wiring passes this repository's tests.
+
+On this fork's test machine (AMD Ryzen 5 5500, RTX 5050, macOS 26.7.3, one display at 100 Hz), with this tree's NVK:
+
+- Minecraft 26.3 without mods renders through it. With vertical sync off the game stood at 200 frames a second through
+  3.0.8, its render thread 69 % inside `vkQueuePresentKHR` and most of that waiting for the layer's next drawable;
+  3.0.9's presentation thread comes from that capture (CHANGELOG.md, 3.0.9).
+- 3.0.9 and 3.0.11 were built on that Mac without a warning and installed there (2026-11-22); the Mac restarted
+  without a fault, and with 3.0.9 its owner read up to 1000 frames a second on the game's own counter. That is a
+  reading, not a measurement: no capture was taken.
+- The card checks' Vulkan rows (`window_check.mm`, `smoke.mm`) ran with 3.0.1's package and at 3.0.7, where all of
+  them passed but `vulkan.smoke-sdl`, which was skipped for want of SDL3 (CHANGELOG.md, 3.0.7, "What ran where"). Both
+  runs predate the presentation thread, and no card check presents through it (`window_check` sets the present
+  observer, `smoke` uses FIFO).
 
 Limits: one window per swapchain, formats `B8G8R8A8_SRGB` and `B8G8R8A8_UNORM` only, the FIFO, IMMEDIATE and (since
 3.0.11) MAILBOX present modes, and two identical NVIDIA GPUs are refused (the frontend cannot tell their Metal devices apart). Each copy allocates
@@ -141,9 +151,10 @@ submission alone. Nothing paces the presentation thread of an IMMEDIATE swapchai
 out, which can be more than the display shows. A MAILBOX swapchain (offered since 3.0.11, while
 `NVK_BRIDGE_PRESENT_NEWEST` is not 0) has the same thread with the layer's display synchronization left on, so its
 thread copies one frame for each refresh and the application is still not held to the display; on a device without a
-copy queue of the frontend's own it presents as FIFO does. During a screen share a captured frame is paged off
-under the accelerator's lock,
-and a page-off can hold it while it waits for the GPU (the accelerator's `debug.nvaccel_surf_mark_lock_wait_*` counters
-measure such waits). The cost of these calls has not been measured on a card. The Metal plugin imports each surface's
+copy queue of the frontend's own it presents as FIFO does. During a screen share a captured frame is paged off, and
+those two calls wait for the accelerator's lock while a page-off holds it (the accelerator's
+`debug.nvaccel_surf_mark_lock_wait_*` counters measure such waits of marks and grants); since 3.0.20 a page-off's copy
+engine read runs without that lock on a GPU without a DMA mapper (CHANGELOG.md, 3.0.20). The cost of the two calls has
+not been measured on a card. The Metal plugin imports each surface's
 VRAM once and keeps it. With a BAR smaller than VRAM, NVK's own memory types are those of this tree's NVK: the source
 fork's change of NVK memory types for a small BAR is not part of this runtime.
