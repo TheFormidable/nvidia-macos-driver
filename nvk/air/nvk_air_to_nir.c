@@ -187,7 +187,9 @@ enum {
    X(void, LLVMRemoveEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned))                                   \
    X(uint64_t, LLVMGetArrayLength2, (LLVMTypeRef))                                                               \
    X(unsigned, LLVMGetNumIndices, (LLVMValueRef))                                                                \
-   X(const unsigned *, LLVMGetIndices, (LLVMValueRef))
+   X(const unsigned *, LLVMGetIndices, (LLVMValueRef))                                                           \
+   X(int, LLVMIsGlobalConstant, (LLVMValueRef))                                                                  \
+   X(int, LLVMIsExternallyInitialized, (LLVMValueRef))
 
 static struct {
 #define X(ret, name, args) ret(*name) args;
@@ -707,6 +709,12 @@ air_global(struct air_tr *t, LLVMValueRef g)
       LLVMValueRef init = L.LLVMGetInitializer(g);
       if (!init || L.LLVMIsDeclaration(g))
          unsupported(t, "the constant %s has no value here (a function constant?)", air_name(g, NULL));
+      /* Only a constant table's initializer is its value. A function constant (its MTL_FC_INIT_ global is externally
+       * initialized) and what Apple's compiler derives from them (__metal_implicit_fc_pred_*, the "...Defined"
+       * flags: addrspace(2) globals that are not constant, written by the module's initializer) get their values
+       * when the pipeline is specialized, which this request cannot say. */
+      if (!L.LLVMIsGlobalConstant(g) || L.LLVMIsExternallyInitialized(g))
+         unsupported(t, "the kernel reads %s, a function constant or a value derived from one", air_name(g, NULL));
       if (size > 64 * 1024)
          unsupported(t, "a constant table of %llu bytes", (unsigned long long)size);
       unsigned at = ALIGN_POT(util_dynarray_num_elements(&t->constant_data, uint8_t), align);
