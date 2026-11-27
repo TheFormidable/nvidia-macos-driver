@@ -2171,6 +2171,34 @@ tex_offset_check(struct run *r)
    return true;
 }
 
+/* fc_argindex: a buffer index (bidx + 1 = 3) and a texture index (tidx * 2 = 4) from function constants */
+static const struct fcset fc_argidx = { 2, { { 0, 4, { 2 } }, { 1, 4, { 2 } } } };
+
+static void
+fc_argindex_setup(struct run *r)
+{
+   tex_image(r, 4, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 4);
+   slot(r, 0, 64 * 16);
+   float *in = slot(r, 3, 64 * 4);
+   for (unsigned i = 0; i < 64; i++)
+      in[i] = rndf(-4, 4);
+}
+
+static bool
+fc_argindex_check(struct run *r)
+{
+   const float *in = S(r, 3);
+   float want[64 * 4];
+   for (unsigned y = 0; y < 8; y++)
+      for (unsigned x = 0; x < 8; x++) {
+         const uint8_t *p = tex_at(r, 4, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++)
+            want[(y * 8 + x) * 4 + c] = U8(p[c]) + in[y * 8 + x];
+      }
+   return check_f4(r, "out", S(r, 0), want, 64 * 4, 1e-6f);
+}
+
 /* fc_texture: a texture index from a function constant, and sincos */
 static const struct fcset fc_tex = { 1, { { 0, 4, { 2 } } } };   /* tex_base = 2: texture(3) */
 
@@ -2461,6 +2489,7 @@ static const struct test tests[] = {
    { "agg_ops", NULL, "agg_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, agg_ops_setup, agg_ops_check },
    { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
    { "fc_kernel_a", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_a, fc_kernel_setup, fc_kernel_check },
+   { "fc_argindex", NULL, "fc_argindex", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_argidx, fc_argindex_setup, fc_argindex_check },
    { "fc_kernel_b", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_b, fc_kernel_setup, fc_kernel_check },
    { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, &fc_c, NULL, NULL },
    { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
