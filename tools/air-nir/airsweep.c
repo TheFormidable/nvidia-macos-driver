@@ -97,6 +97,44 @@ clean(char *s)
    }
 }
 
+/* The set layout the plugin's would hold for what the kernel reads: binding 640 and each texture, storage texture and
+ * sampler binding the result's masks name, with the descriptor types the plugin's set layout gives those bands. */
+static PFN_vkCreateDescriptorSetLayout cdsl;
+static PFN_vkCreatePipelineLayout cpl;
+static PFN_vkDestroyDescriptorSetLayout ddsl;
+static PFN_vkDestroyPipelineLayout dpl;
+
+static VkPipelineLayout
+layout_for(VkDevice dev, const struct nvmtl_air_nir_result *res, VkDescriptorSetLayout *sl)
+{
+   VkDescriptorSetLayoutBinding b[300];
+   unsigned n = 0;
+   b[n++] = (VkDescriptorSetLayoutBinding){ NVMTL_AIR_NIR_TABLE_BINDING, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
+                                            VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+   for (unsigned i = 0; i < 128; i++) {
+      if ((res->texture_mask[i / 32] >> (i % 32)) & 1)
+         b[n++] = (VkDescriptorSetLayoutBinding){ 32 + i, ((res->texbuf_mask[i / 32] >> (i % 32)) & 1) ?
+                                                  VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                                  1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+      if ((res->storage_mask[i / 32] >> (i % 32)) & 1)
+         b[n++] = (VkDescriptorSetLayoutBinding){ 480 + i, ((res->stexbuf_mask[i / 32] >> (i % 32)) & 1) ?
+                                                  VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                                  1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+   }
+   for (unsigned i = 0; i < 32; i++) {
+      if ((res->sampler_mask >> i) & 1)
+         b[n++] = (VkDescriptorSetLayoutBinding){ 160 + i, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+   }
+   VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = n, .pBindings = b };
+   cdsl(dev, &dl, NULL, sl);
+   VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_AIR_NIR_PUSH_BYTES };
+   VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+   VkPipelineLayout layout;
+   cpl(dev, &pl, NULL, &layout);
+   return layout;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -165,22 +203,13 @@ main(int argc, char **argv)
    VkDevice dev;
    if (create_device(pd, &dci, NULL, &dev) != VK_SUCCESS)
       return 2;
-   PFN_vkCreateDescriptorSetLayout cdsl = (PFN_vkCreateDescriptorSetLayout)gdpa(dev, "vkCreateDescriptorSetLayout");
-   PFN_vkCreatePipelineLayout cpl = (PFN_vkCreatePipelineLayout)gdpa(dev, "vkCreatePipelineLayout");
+   cdsl = (PFN_vkCreateDescriptorSetLayout)gdpa(dev, "vkCreateDescriptorSetLayout");
+   cpl = (PFN_vkCreatePipelineLayout)gdpa(dev, "vkCreatePipelineLayout");
+   ddsl = (PFN_vkDestroyDescriptorSetLayout)gdpa(dev, "vkDestroyDescriptorSetLayout");
+   dpl = (PFN_vkDestroyPipelineLayout)gdpa(dev, "vkDestroyPipelineLayout");
    PFN_vkCreateComputePipelines ccp = (PFN_vkCreateComputePipelines)gdpa(dev, "vkCreateComputePipelines");
    PFN_vkDestroyPipeline dp = (PFN_vkDestroyPipeline)gdpa(dev, "vkDestroyPipeline");
    PFN_vkDestroyDevice dd = (PFN_vkDestroyDevice)gdpa(dev, "vkDestroyDevice");
-   VkDescriptorSetLayoutBinding bind = { NVMTL_AIR_NIR_TABLE_BINDING, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-                                         VK_SHADER_STAGE_COMPUTE_BIT, NULL };
-   VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1,
-                                          .pBindings = &bind };
-   VkDescriptorSetLayout sl;
-   cdsl(dev, &dl, NULL, &sl);
-   VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_AIR_NIR_PUSH_BYTES };
-   VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
-                                     .pSetLayouts = &sl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
-   VkPipelineLayout layout;
-   cpl(dev, &pl, NULL, &layout);
 
    FILE *list = fopen(argv[3], "r");
    if (!list)
@@ -285,6 +314,8 @@ main(int argc, char **argv)
             printf("REFUSED%d\t%s\t%s\t%s\n", st, path, name, res.message);
             continue;
          }
+         VkDescriptorSetLayout sl;
+         VkPipelineLayout layout = layout_for(dev, &res, &sl);
          NirInfo ni = { STYPE_NIR, NULL, res.nir };
          VkComputePipelineCreateInfo cpi = {
             VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -295,6 +326,8 @@ main(int argc, char **argv)
          VkPipeline pipe;
          VkResult r = ccp(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &pipe);
          free_nir(res.nir);
+         dpl(dev, layout, NULL);
+         ddsl(dev, sl, NULL);
          if (r != VK_SUCCESS) {
             printf("PIPELINE%d\t%s\t%s\t%s\n", r, path, name, res.message);
             continue;

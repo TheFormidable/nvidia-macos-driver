@@ -97,13 +97,15 @@ struct nvmtl_air_nir_result {
    /* Since version 2, written when the caller's size reaches them. Bit n of word n / 32: */
    uint32_t texture_mask[4];         /* [[texture(n)]] read through binding 32 + n */
    uint32_t storage_mask[4];         /* [[texture(n)]] written or read-written through binding 480 + n */
+   uint32_t texbuf_mask[4];          /* the texture_mask bits that are texture_buffers (uniform texel buffers) */
+   uint32_t stexbuf_mask[4];         /* the storage_mask bits that are texture_buffers (storage texel buffers) */
    uint32_t sampler_mask;            /* sampler slots read through binding 160 + n: arguments and constexpr samplers */
    uint32_t static_sampler_count;
    struct {
       uint32_t slot;                 /* binding 160 + slot */
       uint32_t pad;
       uint64_t words[2];             /* the AIR state words of its __air_sampler_state global (filter, address, ...) */
-   } static_samplers[16];
+   } static_samplers[32];            /* every constexpr sampler of the module, in slot order */
 };
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 

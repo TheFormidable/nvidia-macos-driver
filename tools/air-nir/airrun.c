@@ -60,7 +60,9 @@ typedef struct {
    X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) X(vkEndCommandBuffer)              \
    X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdDispatch) X(vkCmdPipelineBarrier)  \
    X(vkQueueSubmit) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences)                        \
-   X(vkResetCommandBuffer) X(vkDeviceWaitIdle)
+   X(vkResetCommandBuffer) X(vkDeviceWaitIdle) X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements)      \
+   X(vkBindImageMemory) X(vkCreateImageView) X(vkDestroyImageView) X(vkCreateBufferView) X(vkDestroyBufferView)       \
+   X(vkCreateSampler) X(vkDestroySampler) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) X(vkResetDescriptorPool)
 
 #define X(n) static PFN_##n n;
 VK_FUNCS(X)
@@ -72,10 +74,8 @@ static VkPhysicalDevice pdev;
 static VkDevice dev;
 static VkQueue queue;
 static uint32_t mem_type = ~0u;
-static VkDescriptorSetLayout set_layout;
-static VkPipelineLayout layout;
+static VkPhysicalDeviceMemoryProperties mem_props;
 static VkDescriptorPool pool;
-static VkDescriptorSet set;
 static VkCommandPool cmd_pool;
 static VkCommandBuffer cmd;
 static VkFence fence;
@@ -178,13 +178,213 @@ buf_destroy(struct buf *b)
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* Tests                                                                                                             */
 
+/* a [[texture(n)]] resource: an image (uploaded from stage before the dispatch and, when it is written, copied back
+ * into stage after it) or a texel buffer (stage is the buffer itself) */
+struct timg {
+   VkImage image;
+   VkDeviceMemory mem;
+   VkImageView view;
+   VkBufferView bview;
+   struct buf stage;
+   VkFormat fmt;
+   VkImageViewType vtype;
+   uint32_t w, h, d, layers, mips, texel;
+   bool storage, depth, is_buffer;
+};
+
 struct test;
 struct run {
    const struct test *t;
    struct buf slot[NVMTL_AIR_NIR_MAX_BUFFERS];
+   struct timg tex[16];
+   VkSampler samp[32];
+   VkSampler statics[32];
    unsigned threads;                       /* in the whole grid */
    char why[256];                          /* the first mismatch */
 };
+
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Textures and samplers, made as the plugin makes them (plugin/nvmtl_vk.c nvmtl_vk_image_create_typed): optimal      */
+/* tiling, transfer, sampled and (when written) storage usage, colour-attachment usage for colour formats, a cube     */
+/* image cube-compatible; sampled images bound in SHADER_READ_ONLY_OPTIMAL, storage images in GENERAL.               */
+
+static uint32_t
+local_type(uint32_t bits)
+{
+   for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+      if ((bits & (1u << i)) && (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+         return i;
+   }
+   for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+      if (bits & (1u << i))
+         return i;
+   }
+   return ~0u;
+}
+
+static uint32_t
+mip_size(uint32_t v, uint32_t m)
+{
+   return v >> m ? v >> m : 1;
+}
+
+/* bytes of every mip level and layer before level m in the staging copy (levels one after the other, each holding all
+ * its layers, as vkCmdCopyBufferToImage reads them below) */
+static size_t
+tex_level_offset(const struct timg *x, uint32_t m)
+{
+   size_t off = 0;
+   for (uint32_t k = 0; k < m; k++)
+      off += (size_t)mip_size(x->w, k) * mip_size(x->h, k) * mip_size(x->d, k) * x->layers * x->texel;
+   return off;
+}
+
+/* the texel (x, y, z or layer) of level m in the staging copy */
+static void *
+tex_at(struct run *r, unsigned i, uint32_t m, uint32_t x, uint32_t y, uint32_t zl)
+{
+   struct timg *t = &r->tex[i];
+   uint32_t w = mip_size(t->w, m), h = mip_size(t->h, m);
+   return (uint8_t *)t->stage.map + tex_level_offset(t, m) + (((size_t)zl * h + y) * w + x) * t->texel;
+}
+
+/* An image for [[texture(i)]]: vt its view type, layers 6 for a cube, d the depth of a 3D image. Returns the staging
+ * copy, filled by the test, uploaded before the dispatch. */
+static void
+tex_image(struct run *r, unsigned i, VkImageViewType vt, VkFormat fmt, uint32_t texel, uint32_t w, uint32_t h, uint32_t d,
+          uint32_t layers, uint32_t mips, bool storage)
+{
+   struct timg *t = &r->tex[i];
+   memset(t, 0, sizeof *t);
+   t->fmt = fmt;
+   t->vtype = vt;
+   t->w = w;
+   t->h = h;
+   t->d = d;
+   t->layers = layers;
+   t->mips = mips;
+   t->texel = texel;
+   t->storage = storage;
+   t->depth = fmt == VK_FORMAT_D32_SFLOAT;
+   VkImageCreateInfo ici = {
+      VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL,
+      (vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+      vt == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : (vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY) ?
+                                                         VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
+      fmt, { w, h, d }, mips, layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+      (t->depth ? 0 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+         VK_IMAGE_USAGE_SAMPLED_BIT | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
+      VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
+   CK(vkCreateImage(dev, &ici, NULL, &t->image));
+   VkMemoryRequirements req;
+   vkGetImageMemoryRequirements(dev, t->image, &req);
+   VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, req.size, local_type(req.memoryTypeBits) };
+   CK(vkAllocateMemory(dev, &mai, NULL, &t->mem));
+   CK(vkBindImageMemory(dev, t->image, t->mem, 0));
+   VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0, t->image, vt, fmt,
+                                 { 0 }, { t->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers } };
+   CK(vkCreateImageView(dev, &vci, NULL, &t->view));
+   t->stage = buf_create(tex_level_offset(t, mips), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+}
+
+/* A texture_buffer for [[texture(i)]]: n texels in a host-visible buffer, the buffer itself the test's view of it */
+static void *
+tex_buffer(struct run *r, unsigned i, VkFormat fmt, uint32_t texel, uint32_t n, bool storage)
+{
+   struct timg *t = &r->tex[i];
+   memset(t, 0, sizeof *t);
+   t->fmt = fmt;
+   t->texel = texel;
+   t->w = n;
+   t->h = t->d = t->layers = t->mips = 1;
+   t->storage = storage;
+   t->is_buffer = true;
+   t->stage = buf_create((size_t)n * texel, VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT);
+   VkBufferViewCreateInfo bvi = { VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, NULL, 0, t->stage.buffer, fmt, 0, VK_WHOLE_SIZE };
+   CK(vkCreateBufferView(dev, &bvi, NULL, &t->bview));
+   return t->stage.map;
+}
+
+static void
+tex_destroy(struct timg *t)
+{
+   if (t->view)
+      vkDestroyImageView(dev, t->view, NULL);
+   if (t->image)
+      vkDestroyImage(dev, t->image, NULL);
+   if (t->mem)
+      vkFreeMemory(dev, t->mem, NULL);
+   if (t->bview)
+      vkDestroyBufferView(dev, t->bview, NULL);
+   buf_destroy(&t->stage);
+   memset(t, 0, sizeof *t);
+}
+
+static void
+samp_create(struct run *r, unsigned slot, VkFilter filter, VkSamplerAddressMode address, VkSamplerMipmapMode mip, float max_lod)
+{
+   VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, NULL, 0, filter, filter, mip, address, address, address,
+                               0, VK_FALSE, 1, VK_FALSE, VK_COMPARE_OP_NEVER, 0, max_lod,
+                               VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE };
+   CK(vkCreateSampler(dev, &sci, NULL, &r->samp[slot]));
+}
+
+static float h2f(uint16_t h);
+static float
+half_bits_to_float(uint16_t h)
+{
+   return h2f(h);
+}
+
+/* A constexpr sampler from its two AIR words, as the plugin makes one from the translator's StaticSampler state
+ * (plugin/NVMTLEmbedded.m nvmtl_static_sampler_from: an MTLSamplerDescriptor, then the plugin's VkSampler). */
+static VkSampler
+static_sampler(uint64_t w)
+{
+   static const VkFilter filters[3] = { VK_FILTER_NEAREST, VK_FILTER_LINEAR, VK_FILTER_LINEAR };
+   static const VkSamplerAddressMode modes[4] = { VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                                  VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT };
+   static const VkCompareOp ops[9] = { VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL,
+                                       VK_COMPARE_OP_GREATER, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_EQUAL,
+                                       VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_NEVER };
+   unsigned mip = (w >> 13) & 3, cmp = (w >> 16) & 0xf;
+   float lo = half_bits_to_float((uint16_t)(w >> 24)), hi = half_bits_to_float((uint16_t)(w >> 40));
+   VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, NULL, 0, filters[(w >> 9) & 3], filters[(w >> 11) & 3],
+                               mip == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                               modes[w & 3], modes[(w >> 3) & 3], modes[(w >> 6) & 3], 0, VK_FALSE, 1,
+                               cmp ? VK_TRUE : VK_FALSE, ops[cmp < 9 ? cmp : 0], mip ? lo : 0, mip ? hi : 0.25f,
+                               VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE };
+   VkSampler s;
+   CK(vkCreateSampler(dev, &sci, NULL, &s));
+   return s;
+}
+
+static void
+image_barrier(VkImage image, bool depth, VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst,
+              VkPipelineStageFlags ss, VkPipelineStageFlags ds)
+{
+   VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, src, dst, from, to, VK_QUEUE_FAMILY_IGNORED,
+                              VK_QUEUE_FAMILY_IGNORED, image,
+                              { depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0,
+                                VK_REMAINING_ARRAY_LAYERS } };
+   vkCmdPipelineBarrier(cmd, ss, ds, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
+static void
+tex_copy(struct timg *t, bool to_image)
+{
+   VkBufferImageCopy c[16];
+   for (uint32_t m = 0; m < t->mips && m < 16; m++) {
+      c[m] = (VkBufferImageCopy){ tex_level_offset(t, m), 0, 0,
+                                  { t->depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, m, 0, t->layers },
+                                  { 0, 0, 0 }, { mip_size(t->w, m), mip_size(t->h, m), mip_size(t->d, m) } };
+   }
+   if (to_image)
+      vkCmdCopyBufferToImage(cmd, t->stage.buffer, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, t->mips, c);
+   else
+      vkCmdCopyImageToBuffer(cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t->stage.buffer, t->mips, c);
+}
+
 
 /* struct test flags: how the push constants describe the grid */
 #define GRID_INDIRECT (1u << 0)   /* threads_per_grid = 0x80000000 | threadgroup size, groups 0x80000000: an indirect
@@ -213,6 +413,8 @@ struct test {
    const struct fcset *fc;   /* NULL: the request has no function-constant values */
    void (*setup)(struct run *);
    bool (*check)(struct run *);
+   /* optional, before the dispatch: what the result must say (bindings, constexpr sampler slots) */
+   bool (*expect)(struct run *, const struct nvmtl_air_nir_result *);
 };
 
 static uint32_t rng_state;
@@ -1567,6 +1769,458 @@ fc_kernel_check(struct run *r)
    return ok;
 }
 
+/* --- textures ------------------------------------------------------------------------------------------------- */
+
+#define U8(v) ((float)(v) / 255.0f)
+
+static bool
+check_f4(struct run *r, const char *what, const float *got, const float *want, unsigned n, float tol)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (!(fabsf(got[i] - want[i]) <= tol))
+         return FAILF(r, "%s[%u] (item %u, lane %u) = %.7g, expected %.7g (tolerance %g)", what, i, i / 4, i % 4, got[i],
+                      want[i], tol);
+   }
+   return true;
+}
+
+static void
+fill_bytes(struct run *r, unsigned i)
+{
+   struct timg *x = &r->tex[i];
+   uint8_t *p = x->stage.map;
+   for (size_t k = 0; k < x->stage.size; k++)
+      p[k] = (uint8_t)rnd();
+}
+
+/* tex_read: rgba8 (2 levels), r8, rgba16f, r32f, r32ui read with texel fetches */
+static void
+tex_read_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 2, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UNORM, 1, 16, 16, 1, 1, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 16, 16, 1, 1, 1, false);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, false);
+   tex_image(r, 4, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 4, 16, 16, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   fill_bytes(r, 1);
+   fill_bytes(r, 4);
+   uint16_t *h = r->tex[2].stage.map;
+   for (unsigned k = 0; k < 16 * 16 * 4; k++)
+      h[k] = f2h(rndf(-50, 50));
+   float *f = r->tex[3].stage.map;
+   for (unsigned k = 0; k < 16 * 16; k++)
+      f[k] = rndf(-1000, 1000);
+   slot(r, 0, 256 * 5 * 16);
+   slot(r, 1, 256 * 16);
+}
+
+static bool
+tex_read_check(struct run *r)
+{
+   float *want = calloc(256 * 5 * 4, 4);
+   uint32_t *uwant = calloc(256 * 4, 4);
+   for (uint32_t y = 0; y < 16; y++) {
+      for (uint32_t x = 0; x < 16; x++) {
+         unsigned i = y * 16 + x;
+         float *o = want + i * 20;
+         const uint8_t *a = tex_at(r, 0, 0, x, y, 0), *a1 = tex_at(r, 0, 1, x / 2, y / 2, 0);
+         const uint8_t *b = tex_at(r, 1, 0, x, y, 0);
+         const uint16_t *h = tex_at(r, 2, 0, x, y, 0);
+         const float *f = tex_at(r, 3, 0, x, y, 0);
+         const uint32_t *u = tex_at(r, 4, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++) {
+            o[c] = U8(a[c]);
+            o[4 + c] = U8(a1[c]);
+            o[12 + c] = h2f(h[c]);
+         }
+         o[8] = U8(b[0]), o[9] = 0, o[10] = 0, o[11] = 1;
+         o[16] = f[0], o[17] = 0, o[18] = 0, o[19] = 1;
+         uwant[i * 4] = u[0], uwant[i * 4 + 1] = 0, uwant[i * 4 + 2] = 0, uwant[i * 4 + 3] = 1;
+      }
+   }
+   bool ok = check_f4(r, "out", S(r, 0), want, 256 * 20, 1e-6f) && check_u32(r, "uout", S(r, 1), uwant, 256 * 4, 4);
+   free(want);
+   free(uwant);
+   return ok;
+}
+
+/* tex_write: storage rgba8, r32f, r32ui (read_write), rgba16f */
+static void
+tex_write_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 16, 16, 1, 1, 1, true);
+   uint32_t *u = r->tex[2].stage.map;
+   for (unsigned k = 0; k < 256; k++)
+      u[k] = rnd() & 0xffffffu;
+   /* a copy of what the GPU reads, for the check (stage is overwritten by the readback) */
+   uint32_t *keep = slot(r, 30, 256 * 4);
+   memcpy(keep, u, 256 * 4);
+}
+
+static bool
+tex_write_check(struct run *r)
+{
+   const uint32_t *before = S(r, 30);
+   for (uint32_t y = 0; y < 16; y++) {
+      for (uint32_t x = 0; x < 16; x++) {
+         float px = (float)x / 15.0f, py = (float)y / 15.0f;
+         float v8[4] = { px, py, 1.0f - px, 0.5f };
+         const uint8_t *g8 = tex_at(r, 0, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++) {
+            int want = (int)floorf(v8[c] * 255.0f + 0.5f);
+            if (abs((int)g8[c] - want) > 1)   /* a tie (0.5 * 255) may round either way */
+               return FAILF(r, "rgba8 (%u,%u)[%u] = %u, expected %d", x, y, c, g8[c], want);
+         }
+         float gf = *(const float *)tex_at(r, 1, 0, x, y, 0), wf = px * 100.0f + py;
+         if (fabsf(gf - wf) > 1e-4f)
+            return FAILF(r, "r32f (%u,%u) = %.7g, expected %.7g", x, y, gf, wf);
+         uint32_t gu = *(const uint32_t *)tex_at(r, 2, 0, x, y, 0), wu = before[y * 16 + x] * 3u + 1u;
+         if (gu != wu)
+            return FAILF(r, "r32ui (%u,%u) = %u, expected %u", x, y, gu, wu);
+         const uint16_t *gh = tex_at(r, 3, 0, x, y, 0);
+         float vh[4] = { px, py, -1.5f, 2.0f };
+         for (unsigned c = 0; c < 4; c++) {
+            float want = h2f(f2h(vh[c]));
+            if (fabsf(h2f(gh[c]) - want) > fabsf(want) * 1e-3f)
+               return FAILF(r, "rgba16f (%u,%u)[%u] = %g, expected %g", x, y, c, h2f(gh[c]), want);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_array3d: 2D-array and 3D reads, 3D and 2D-array writes */
+static void
+tex_array3d_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 3, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 8, 8, 4, 1, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 8, 8, 4, 1, 1, true);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R32_UINT, 4, 8, 8, 1, 3, 1, true);
+   fill_bytes(r, 0);
+   float *f = r->tex[1].stage.map;
+   for (unsigned k = 0; k < 8 * 8 * 4; k++)
+      f[k] = rndf(-10, 10);
+   slot(r, 0, 256 * 2 * 16);
+}
+
+static bool
+tex_array3d_check(struct run *r)
+{
+   float *want = calloc(256 * 8, 4);
+   for (uint32_t z = 0; z < 4; z++) {
+      for (uint32_t y = 0; y < 8; y++) {
+         for (uint32_t x = 0; x < 8; x++) {
+            unsigned i = (z * 8 + y) * 8 + x;
+            const uint8_t *a = tex_at(r, 0, 0, x, y, z % 3);
+            for (unsigned c = 0; c < 4; c++)
+               want[i * 8 + c] = U8(a[c]);
+            want[i * 8 + 4] = *(const float *)tex_at(r, 1, 0, x, y, z);
+            want[i * 8 + 5] = 0, want[i * 8 + 6] = 0, want[i * 8 + 7] = 1;
+            float gv = *(const float *)tex_at(r, 2, 0, x, y, z);
+            if (gv != (float)i * 0.5f)
+               return FAILF(r, "3D write (%u,%u,%u) = %g, expected %g", x, y, z, gv, (float)i * 0.5f);
+            if (z < 3 && *(const uint32_t *)tex_at(r, 3, 0, x, y, z) != i * 7u)
+               return FAILF(r, "2D-array write (%u,%u,%u) = %u, expected %u", x, y, z, *(const uint32_t *)tex_at(r, 3, 0, x, y, z), i * 7u);
+         }
+      }
+   }
+   bool ok = check_f4(r, "out", S(r, 0), want, 256 * 8, 1e-6f);
+   free(want);
+   return ok;
+}
+
+/* sampling references: Vulkan's nearest and linear filtering of a normalized coordinate */
+static int
+wrap(int i, int n, VkSamplerAddressMode m)
+{
+   if (m == VK_SAMPLER_ADDRESS_MODE_REPEAT)
+      return ((i % n) + n) % n;
+   return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+static float
+rgba8_at(struct run *r, unsigned t, uint32_t m, int x, int y, uint32_t layer, unsigned c)
+{
+   return U8(((const uint8_t *)tex_at(r, t, m, (uint32_t)x, (uint32_t)y, layer))[c]);
+}
+
+static void
+sample_nearest(struct run *r, unsigned t, uint32_t m, float u, float v, uint32_t layer, VkSamplerAddressMode mode, float *out)
+{
+   int w = (int)mip_size(r->tex[t].w, m), h = (int)mip_size(r->tex[t].h, m);
+   int x = wrap((int)floorf(u * w), w, mode), y = wrap((int)floorf(v * h), h, mode);
+   for (unsigned c = 0; c < 4; c++)
+      out[c] = rgba8_at(r, t, m, x, y, layer, c);
+}
+
+static void
+sample_linear(struct run *r, unsigned t, uint32_t m, float u, float v, VkSamplerAddressMode mode, float *out)
+{
+   int w = (int)mip_size(r->tex[t].w, m), h = (int)mip_size(r->tex[t].h, m);
+   float fu = u * w - 0.5f, fv = v * h - 0.5f;
+   int i0 = (int)floorf(fu), j0 = (int)floorf(fv);
+   float a = fu - floorf(fu), b = fv - floorf(fv);
+   int i1 = wrap(i0 + 1, w, mode), j1 = wrap(j0 + 1, h, mode);
+   i0 = wrap(i0, w, mode), j0 = wrap(j0, h, mode);
+   for (unsigned c = 0; c < 4; c++)
+      out[c] = (1 - a) * (1 - b) * rgba8_at(r, t, m, i0, j0, 0, c) + a * (1 - b) * rgba8_at(r, t, m, i1, j0, 0, c) +
+               (1 - a) * b * rgba8_at(r, t, m, i0, j1, 0, c) + a * b * rgba8_at(r, t, m, i1, j1, 0, c);
+}
+
+/* a coordinate a jitter of 0.1 to 0.4 texel off a texel centre, for n texels; k texels below 0 to above 1 */
+static float
+centre_coord(int n, int lo, int hi)
+{
+   int k = lo + (int)(rnd() % (uint32_t)(hi - lo));
+   float j = rndf(0.1f, 0.4f) * ((rnd() & 1) ? 1.0f : -1.0f);
+   return ((float)k + 0.5f + j) / (float)n;
+}
+
+static void
+tex_sample_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 2, false);
+   fill_bytes(r, 0);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16);
+   samp_create(r, 1, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16);
+   slot(r, 0, 256 * 5 * 16);
+   float *uv = slot(r, 1, 256 * 8);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, -8, 16);
+      uv[i * 2 + 1] = centre_coord(8, -8, 16);
+   }
+}
+
+static bool
+tex_sample_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   /* the constexpr sampler takes slot 2, the first no [[sampler(n)]] argument takes, as the translator's reflection says */
+   if (res->static_sampler_count != 1 || res->static_samplers[0].slot != 2 || res->sampler_mask != 7)
+      return FAILF(r, "constexpr samplers %u, the first at slot %u, sampler mask 0x%x: expected one at slot 2, mask 0x7",
+                   res->static_sampler_count, res->static_samplers[0].slot, res->sampler_mask);
+   return true;
+}
+
+static bool
+tex_sample_check(struct run *r)
+{
+   const float *uv = S(r, 1), *got = S(r, 0);
+   for (unsigned i = 0; i < 256; i++) {
+      float u = uv[i * 2], v = uv[i * 2 + 1], w[5][4];
+      sample_nearest(r, 0, 0, u, v, 0, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[0]);
+      sample_linear(r, 0, 0, u, v, VK_SAMPLER_ADDRESS_MODE_REPEAT, w[1]);
+      sample_linear(r, 0, 1, u, v, VK_SAMPLER_ADDRESS_MODE_REPEAT, w[2]);
+      sample_linear(r, 0, 0, u, v, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[3]);
+      /* gather of red: (i0,j1), (i1,j1), (i1,j0), (i0,j0) of the bilinear footprint, clamped */
+      int i0 = (int)floorf(u * 8 - 0.5f), j0 = (int)floorf(v * 8 - 0.5f);
+      VkSamplerAddressMode cl = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      int x0 = wrap(i0, 8, cl), x1 = wrap(i0 + 1, 8, cl), y0 = wrap(j0, 8, cl), y1 = wrap(j0 + 1, 8, cl);
+      w[4][0] = rgba8_at(r, 0, 0, x0, y1, 0, 0), w[4][1] = rgba8_at(r, 0, 0, x1, y1, 0, 0);
+      w[4][2] = rgba8_at(r, 0, 0, x1, y0, 0, 0), w[4][3] = rgba8_at(r, 0, 0, x0, y0, 0, 0);
+      static const char *what[5] = { "nearest clamp", "linear repeat", "linear repeat level 1", "constexpr linear clamp",
+                                     "gather" };
+      /* linear filtering: NVIDIA's 8-bit filter weights give up to 2/256 of the texel difference */
+      static const float tol[5] = { 1e-6f, 1.0f / 128, 1.0f / 128, 1.0f / 128, 1e-6f };
+      for (unsigned k = 0; k < 5; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 5 + k) * 4 + c];
+            if (!(fabsf(g - w[k][c]) <= tol[k]))
+               return FAILF(r, "%s, thread %u (uv %.5f %.5f) lane %u = %.6f, expected %.6f (tolerance %g)", what[k], i, u, v,
+                            c, g, w[k][c], tol[k]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_cube: a cube sampled by direction (nearest), a 2D array by layer */
+static void
+tex_cube_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 4, 1, 6, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 4, 1, 2, 1, false);
+   fill_bytes(r, 0);
+   fill_bytes(r, 1);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *dir = slot(r, 0, 256 * 16);
+   slot(r, 1, 256 * 2 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      float *d = dir + i * 4;
+      for (;;) {
+         unsigned face = rnd() % 6;
+         float sc = centre_coord(4, 0, 4) * 2 - 1, tc = centre_coord(4, 0, 4) * 2 - 1, m = rndf(0.5f, 3.0f);
+         float x = 0, y = 0, z = 0;
+         switch (face) {
+         case 0: x = m, z = -sc * m, y = -tc * m; break;
+         case 1: x = -m, z = sc * m, y = -tc * m; break;
+         case 2: y = m, x = sc * m, z = tc * m; break;
+         case 3: y = -m, x = sc * m, z = -tc * m; break;
+         case 4: z = m, x = sc * m, y = -tc * m; break;
+         default: z = -m, x = -sc * m, y = -tc * m; break;
+         }
+         /* the 2D-array coordinate d.xy * 0.5 + 0.5 must not sit on a texel edge either */
+         float au = (x * 0.5f + 0.5f) * 4, av = (y * 0.5f + 0.5f) * 4;
+         if (fabsf(au - roundf(au)) < 0.05f || fabsf(av - roundf(av)) < 0.05f)
+            continue;
+         d[0] = x, d[1] = y, d[2] = z, d[3] = (float)(rnd() % 4);
+         break;
+      }
+   }
+}
+
+static bool
+tex_cube_check(struct run *r)
+{
+   const float *dir = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      const float *d = dir + i * 4;
+      float ax = fabsf(d[0]), ay = fabsf(d[1]), az = fabsf(d[2]), sc, tc, ma;
+      unsigned face;
+      if (ax >= ay && ax >= az) {
+         face = d[0] >= 0 ? 0 : 1, sc = d[0] >= 0 ? -d[2] : d[2], tc = -d[1], ma = ax;
+      } else if (ay >= az) {
+         face = d[1] >= 0 ? 2 : 3, sc = d[0], tc = d[1] >= 0 ? d[2] : -d[2], ma = ay;
+      } else {
+         face = d[2] >= 0 ? 4 : 5, sc = d[2] >= 0 ? d[0] : -d[0], tc = -d[1], ma = az;
+      }
+      float want[2][4];
+      sample_nearest(r, 0, 0, (sc / ma + 1) * 0.5f, (tc / ma + 1) * 0.5f, face, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, want[0]);
+      sample_nearest(r, 1, 0, d[0] * 0.5f + 0.5f, d[1] * 0.5f + 0.5f, (uint32_t)d[3] % 2, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                     want[1]);
+      for (unsigned k = 0; k < 2; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 2 + k) * 4 + c];
+            if (fabsf(g - want[k][c]) > 1e-6f)
+               return FAILF(r, "%s, thread %u (%.4f %.4f %.4f, face %u) lane %u = %.6f, expected %.6f",
+                            k ? "2D array" : "cube", i, d[0], d[1], d[2], face, c, g, want[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_query */
+static void
+tex_query_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 3, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 6, 1, 5, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 4, 4, 7, 1, 1, false);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 5, 3, 1, 1, 1, true);
+   tex_buffer(r, 4, VK_FORMAT_R32_SFLOAT, 4, 100, false);
+   slot(r, 0, 12 * 4);
+}
+
+static bool
+tex_query_check(struct run *r)
+{
+   static const uint32_t want[12] = { 8, 4, 3, 4, 6, 5, 4, 7, 5, 3, 100, 2 };
+   return check_u32(r, "out", S(r, 0), want, 12, 1);
+}
+
+/* tex_buffer */
+static void
+tex_buffer_setup(struct run *r)
+{
+   float *in = tex_buffer(r, 0, VK_FORMAT_R32_SFLOAT, 4, 256, false);
+   tex_buffer(r, 1, VK_FORMAT_R32_UINT, 4, 256, true);
+   for (unsigned i = 0; i < 256; i++)
+      in[i] = rndf(0, 1000);
+   slot(r, 0, 256 * 16);
+}
+
+static bool
+tex_buffer_check(struct run *r)
+{
+   const float *in = r->tex[0].stage.map;
+   const uint32_t *out = r->tex[1].stage.map;
+   float *want = calloc(256 * 4, 4);
+   uint32_t *uwant = calloc(256, 4);
+   for (unsigned i = 0; i < 256; i++) {
+      want[i * 4] = in[i], want[i * 4 + 3] = 1;
+      uwant[i] = (uint32_t)(in[i] * 4.0f) + i;
+   }
+   bool ok = check_f4(r, "o", S(r, 0), want, 256 * 4, 0) && check_u32(r, "storage texel buffer", out, uwant, 256, 1);
+   free(want);
+   free(uwant);
+   return ok;
+}
+
+/* tex_depth */
+static void
+tex_depth_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_D32_SFLOAT, 4, 8, 8, 1, 1, 1, false);
+   float *d = r->tex[0].stage.map;
+   for (unsigned k = 0; k < 64; k++) {
+      d[k] = rndf(0, 1);
+      if (fabsf(d[k] - 0.5f) < 1e-3f)
+         d[k] = 0.25f;
+   }
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *uv = slot(r, 0, 256 * 8);
+   slot(r, 1, 256 * 3 * 4);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, 0, 8);
+      uv[i * 2 + 1] = centre_coord(8, 0, 8);
+   }
+}
+
+static bool
+tex_depth_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   if (res->static_sampler_count != 1 || res->static_samplers[0].slot != 1)
+      return FAILF(r, "constexpr samplers %u, the first at slot %u: expected one at slot 1", res->static_sampler_count,
+                   res->static_samplers[0].slot);
+   return true;
+}
+
+static bool
+tex_depth_check(struct run *r)
+{
+   const float *uv = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      float fx = floorf(uv[i * 2] * 8), fy = floorf(uv[i * 2 + 1] * 8);
+      if (!(fx >= 0 && fx < 8 && fy >= 0 && fy < 8))
+         return FAILF(r, "thread %u has the coordinate %g %g, outside the texture", i, uv[i * 2], uv[i * 2 + 1]);
+      int x = (int)fx, y = (int)fy;
+      float d = *(const float *)tex_at(r, 0, 0, (uint32_t)x, (uint32_t)y, 0);
+      float want[3] = { d, 0.5f < d ? 1.0f : 0.0f, d };
+      for (unsigned k = 0; k < 3; k++) {
+         if (got[i * 3 + k] != want[k])
+            return FAILF(r, "%s, thread %u = %g, expected %g", k == 0 ? "sample" : k == 1 ? "sample_compare less 0.5" : "read",
+                         i, got[i * 3 + k], want[k]);
+      }
+   }
+   return true;
+}
+
+/* tex_fence */
+static void
+tex_fence_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, true);
+   float *f = r->tex[0].stage.map, *keep = slot(r, 30, 256 * 4);
+   for (unsigned k = 0; k < 256; k++)
+      keep[k] = f[k] = (float)(int)(rnd() % 1000);
+}
+
+static bool
+tex_fence_check(struct run *r)
+{
+   const float *before = S(r, 30), *after = r->tex[0].stage.map;
+   for (unsigned k = 0; k < 256; k++) {
+      if (after[k] != (before[k] + 1.0f) * 2.0f)
+         return FAILF(r, "texel %u = %g, expected %g", k, after[k], (before[k] + 1.0f) * 2.0f);
+   }
+   return true;
+}
+
 static const struct test tests[] = {
    { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
    { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
@@ -1601,6 +2255,17 @@ static const struct test tests[] = {
    { "fc_kernel_b", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_b, fc_kernel_setup, fc_kernel_check },
    { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, &fc_c, NULL, NULL },
    { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "tex_read", NULL, "tex_read", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_read_setup, tex_read_check },
+   { "tex_write", NULL, "tex_write", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_write_setup, tex_write_check },
+   { "tex_array3d", NULL, "tex_array3d", { 8, 8, 1 }, { 1, 1, 4 }, { 0 }, 0, NULL, tex_array3d_setup, tex_array3d_check },
+   { "tex_sample", NULL, "tex_sample", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_sample_setup, tex_sample_check,
+     tex_sample_expect },
+   { "tex_cube", NULL, "tex_cube", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_cube_setup, tex_cube_check },
+   { "tex_query", NULL, "tex_query", { 1, 1, 1 }, { 1, 1, 1 }, { 0 }, 0, NULL, tex_query_setup, tex_query_check },
+   { "tex_buffer", NULL, "tex_buffer", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_buffer_setup, tex_buffer_check },
+   { "tex_depth", NULL, "tex_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_depth_setup, tex_depth_check,
+     tex_depth_expect },
+   { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
 };
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -1626,6 +2291,25 @@ slurp(const char *p, size_t *n)
 }
 
 enum outcome { PASS, FAIL, REFUSED, PIPELINE_FAILED, MISSING };
+
+static void
+run_cleanup(struct run *r, struct buf *table, VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSetLayout set_layout)
+{
+   buf_destroy(table);
+   for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
+      buf_destroy(&r->slot[i]);
+   for (unsigned i = 0; i < 16; i++)
+      tex_destroy(&r->tex[i]);
+   for (unsigned i = 0; i < 32; i++) {
+      if (r->samp[i])
+         vkDestroySampler(dev, r->samp[i], NULL);
+      if (r->statics[i])
+         vkDestroySampler(dev, r->statics[i], NULL);
+   }
+   vkDestroyPipeline(dev, pipe, NULL);
+   vkDestroyPipelineLayout(dev, layout, NULL);
+   vkDestroyDescriptorSetLayout(dev, set_layout, NULL);
+}
 
 static bool only_translate, corrupt;
 static const char *llvm_path;
@@ -1675,6 +2359,35 @@ run_test(const struct test *t)
       return REFUSED;
    }
 
+   /* the set layout holds what the result says the kernel reads, with the types the plugin's layout gives those
+    * bands: a binding the kernel reads and the result leaves out fails pipeline creation */
+   VkDescriptorSetLayoutBinding bind[300];
+   unsigned nbind = 0;
+   bind[nbind++] = (VkDescriptorSetLayoutBinding){ NVMTL_AIR_NIR_TABLE_BINDING, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+#define BIT(m, i) (((m)[(i) / 32] >> ((i) % 32)) & 1)
+   for (unsigned i = 0; i < 128; i++) {
+      if (BIT(res.texture_mask, i))
+         bind[nbind++] = (VkDescriptorSetLayoutBinding){ 32 + i, BIT(res.texbuf_mask, i) ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER :
+                                                         VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+      if (BIT(res.storage_mask, i))
+         bind[nbind++] = (VkDescriptorSetLayoutBinding){ 480 + i, BIT(res.stexbuf_mask, i) ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER :
+                                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+   }
+   for (unsigned i = 0; i < 32; i++) {
+      if ((res.sampler_mask >> i) & 1)
+         bind[nbind++] = (VkDescriptorSetLayoutBinding){ 160 + i, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+   }
+   VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nbind,
+                                          .pBindings = bind };
+   VkDescriptorSetLayout set_layout;
+   CK(vkCreateDescriptorSetLayout(dev, &dl, NULL, &set_layout));
+   VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_AIR_NIR_PUSH_BYTES };
+   VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
+   VkPipelineLayout layout;
+   CK(vkCreatePipelineLayout(dev, &pl, NULL, &layout));
+
    NirInfo ni = { STYPE_NIR, NULL, res.nir };
    VkComputePipelineCreateInfo cpi = {
       VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -1687,11 +2400,15 @@ run_test(const struct test *t)
    free_nir(res.nir);
    if (vr != VK_SUCCESS) {
       printf("%-16s PIPELINE FAILED %d (%s)\n", t->name, vr, res.message);
+      vkDestroyPipelineLayout(dev, layout, NULL);
+      vkDestroyDescriptorSetLayout(dev, set_layout, NULL);
       return PIPELINE_FAILED;
    }
    if (only_translate) {
       printf("%-16s OK       %s\n", t->name, res.message);
       vkDestroyPipeline(dev, pipe, NULL);
+      vkDestroyPipelineLayout(dev, layout, NULL);
+      vkDestroyDescriptorSetLayout(dev, set_layout, NULL);
       return PASS;
    }
 
@@ -1705,24 +2422,86 @@ run_test(const struct test *t)
    }
    rng_state = 0x9e3779b9u ^ (uint32_t)strlen(t->name) * 2654435761u;
    t->setup(&r);
+   const char *missing = NULL;
+   unsigned missing_index = 0;
    for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++) {
-      if ((res.buffer_mask & (1u << i)) && !r.slot[i].buffer) {
-         printf("%-16s FAIL     the kernel reads buffer %u, which the test does not bind\n", t->name, i);
-         vkDestroyPipeline(dev, pipe, NULL);
-         return FAIL;
-      }
+      if ((res.buffer_mask & (1u << i)) && !r.slot[i].buffer)
+         missing = "buffer", missing_index = i;
+   }
+   for (unsigned i = 0; i < 128; i++) {
+      bool want = BIT(res.texture_mask, i) || BIT(res.storage_mask, i);
+      if (want && (i >= 16 || (!r.tex[i].image && !r.tex[i].bview) ||
+                   r.tex[i].is_buffer != (BIT(res.texbuf_mask, i) || BIT(res.stexbuf_mask, i)) ||
+                   (BIT(res.storage_mask, i) && !r.tex[i].storage)))
+         missing = "texture", missing_index = i;
+   }
+   /* the constexpr samplers at the slots the result gives them, made from their AIR state as the plugin makes them */
+   for (unsigned k = 0; k < res.static_sampler_count && k < 32; k++) {
+      unsigned slot = res.static_samplers[k].slot;
+      if (slot < 32 && !r.statics[slot])
+         r.statics[slot] = static_sampler(res.static_samplers[k].words[0]);
+   }
+   for (unsigned i = 0; i < 32; i++) {
+      if (((res.sampler_mask >> i) & 1) && !r.samp[i] && !r.statics[i])
+         missing = "sampler", missing_index = i;
+   }
+   struct buf table = buf_create(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+   if (missing) {
+      printf("%-16s FAIL     the kernel reads %s %u, which the test does not bind as that\n", t->name, missing, missing_index);
+      run_cleanup(&r, &table, pipe, layout, set_layout);
+      return FAIL;
+   }
+   if (t->expect && !t->expect(&r, &res)) {
+      printf("%-16s FAIL     %s\n", t->name, r.why);
+      run_cleanup(&r, &table, pipe, layout, set_layout);
+      return FAIL;
    }
 
    /* the address table: one 64-bit address per Metal buffer slot */
-   struct buf table = buf_create(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
    uint64_t *addr = table.map;
    for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
       addr[i] = r.slot[i].address;
+   CK(vkResetDescriptorPool(dev, pool, 0));
+   VkDescriptorSet set;
+   VkDescriptorSetAllocateInfo dsa = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = pool,
+                                       .descriptorSetCount = 1, .pSetLayouts = &set_layout };
+   CK(vkAllocateDescriptorSets(dev, &dsa, &set));
    VkDescriptorBufferInfo dbi = { table.buffer, 0, 256 };
-   VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = NVMTL_AIR_NIR_TABLE_BINDING,
-                              .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                              .pBufferInfo = &dbi };
-   vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+   VkWriteDescriptorSet w[300];
+   VkDescriptorImageInfo ii[300];
+   unsigned nw = 0;
+   w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = NVMTL_AIR_NIR_TABLE_BINDING,
+                                     .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                                     .pBufferInfo = &dbi };
+   for (unsigned i = 0; i < 16; i++) {
+      struct timg *x = &r.tex[i];
+      for (unsigned storage = 0; storage < 2; storage++) {
+         if (!BIT(storage ? res.storage_mask : res.texture_mask, i))
+            continue;
+         VkWriteDescriptorSet *d = &w[nw];
+         *d = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+                                      .dstBinding = (storage ? 480 : 32) + i, .descriptorCount = 1 };
+         if (x->is_buffer) {
+            d->descriptorType = storage ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+            d->pTexelBufferView = &x->bview;
+         } else {
+            ii[nw] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, x->view, x->storage ? VK_IMAGE_LAYOUT_GENERAL :
+                                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            d->descriptorType = storage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            d->pImageInfo = &ii[nw];
+         }
+         nw++;
+      }
+   }
+   for (unsigned i = 0; i < 32; i++) {
+      if (!((res.sampler_mask >> i) & 1))
+         continue;
+      ii[nw] = (VkDescriptorImageInfo){ r.statics[i] ? r.statics[i] : r.samp[i], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+      w[nw] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 160 + i,
+                                      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = &ii[nw] };
+      nw++;
+   }
+   vkUpdateDescriptorSets(dev, nw, w, 0, NULL);
 
    uint32_t push[12] = { 0 };
    for (unsigned i = 0; i < 3; i++) {
@@ -1744,15 +2523,38 @@ run_test(const struct test *t)
    VkCommandBufferBeginInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
    CK(vkBeginCommandBuffer(cmd, &cbi));
+   /* images: uploaded, then in the layout their descriptor names */
+   for (unsigned i = 0; i < 16; i++) {
+      struct timg *x = &r.tex[i];
+      if (!x->image)
+         continue;
+      image_barrier(x->image, x->depth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+      tex_copy(x, true);
+      image_barrier(x->image, x->depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    x->storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+   }
    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
    uint32_t dyn = 0;
    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 1, &dyn);
    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, push);
    vkCmdDispatch(cmd, t->groups[0], t->groups[1], t->groups[2]);
-   VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+   /* written images: copied back into their staging copy */
+   for (unsigned i = 0; i < 16; i++) {
+      struct timg *x = &r.tex[i];
+      if (!x->image || !x->storage)
+         continue;
+      image_barrier(x->image, x->depth, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+      tex_copy(x, false);
+   }
+   VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                           .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
-   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0,
-                        NULL);
+   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                        0, 1, &mb, 0, NULL, 0, NULL);
    CK(vkEndCommandBuffer(cmd));
 
    int64_t before[NCOUNTERS], after[NCOUNTERS];
@@ -1781,12 +2583,13 @@ run_test(const struct test *t)
          if (r.slot[i].map)
             ((uint8_t *)r.slot[i].map)[3] ^= 0x40;
       }
+      for (unsigned i = 0; i < 16; i++) {
+         if (r.tex[i].stage.map)
+            ((uint8_t *)r.tex[i].stage.map)[3] ^= 0x40;
+      }
       bool caught = !t->check(&r);
       printf("%-16s %s %s\n", t->name, caught ? "PASS    " : "FAIL    ", caught ? r.why : "a corrupted result passed the check");
-      buf_destroy(&table);
-      for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
-         buf_destroy(&r.slot[i]);
-      vkDestroyPipeline(dev, pipe, NULL);
+      run_cleanup(&r, &table, pipe, layout, set_layout);
       return caught ? PASS : FAIL;
    }
    bool ok = t->check(&r);
@@ -1796,10 +2599,7 @@ run_test(const struct test *t)
    else
       printf("%-16s FAIL     %s\n", t->name, r.why);
    fflush(stdout);
-   buf_destroy(&table);
-   for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
-      buf_destroy(&r.slot[i]);
-   vkDestroyPipeline(dev, pipe, NULL);
+   run_cleanup(&r, &table, pipe, layout, set_layout);
    return ok ? PASS : FAIL;
 }
 
@@ -1852,6 +2652,7 @@ main(int argc, char **argv)
    vkGetPhysicalDeviceProperties(pdev, &props);
    VkPhysicalDeviceMemoryProperties mp;
    vkGetPhysicalDeviceMemoryProperties(pdev, &mp);
+   mem_props = mp;
    /* host-visible coherent memory, system RAM first */
    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
    for (uint32_t i = 0; i < mp.memoryTypeCount && mem_type == ~0u; i++) {
@@ -1885,8 +2686,11 @@ main(int argc, char **argv)
                                    .queueCount = 1, .pQueuePriorities = &prio };
    VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .bufferDeviceAddress = VK_TRUE };
+   /* the plugin's device reads and writes storage images without a format (it tells the translator so) */
+   VkPhysicalDeviceFeatures feat = { .shaderStorageImageReadWithoutFormat = VK_TRUE,
+                                     .shaderStorageImageWriteWithoutFormat = VK_TRUE };
    VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f12, .queueCreateInfoCount = 1,
-                              .pQueueCreateInfos = &qci };
+                              .pQueueCreateInfos = &qci, .pEnabledFeatures = &feat };
    CK(vkCreateDevice(pdev, &dci, NULL, &dev));
 #define X(n)                                                                                                     \
    n = (PFN_##n)vkGetDeviceProcAddr(dev, #n);                                                                    \
@@ -1898,23 +2702,12 @@ main(int argc, char **argv)
 #undef X
    vkGetDeviceQueue(dev, qf, 0, &queue);
 
-   VkDescriptorSetLayoutBinding bind = { NVMTL_AIR_NIR_TABLE_BINDING, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1,
-                                         VK_SHADER_STAGE_COMPUTE_BIT, NULL };
-   VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1,
-                                          .pBindings = &bind };
-   CK(vkCreateDescriptorSetLayout(dev, &dl, NULL, &set_layout));
-   VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_AIR_NIR_PUSH_BYTES };
-   VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
-                                     .pSetLayouts = &set_layout, .pushConstantRangeCount = 1,
-                                     .pPushConstantRanges = &pr };
-   CK(vkCreatePipelineLayout(dev, &pl, NULL, &layout));
-   VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1 };
-   VkDescriptorPoolCreateInfo dpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1,
-                                      .pPoolSizes = &ps };
+   VkDescriptorPoolSize ps[6] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 128 },
+                                  { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 128 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 32 },
+                                  { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 128 }, { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 128 } };
+   VkDescriptorPoolCreateInfo dpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 6,
+                                      .pPoolSizes = ps };
    CK(vkCreateDescriptorPool(dev, &dpi, NULL, &pool));
-   VkDescriptorSetAllocateInfo dsa = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = pool,
-                                       .descriptorSetCount = 1, .pSetLayouts = &set_layout };
-   CK(vkAllocateDescriptorSets(dev, &dsa, &set));
    VkCommandPoolCreateInfo cpci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qf };
    CK(vkCreateCommandPool(dev, &cpci, NULL, &cmd_pool));
@@ -1943,8 +2736,6 @@ main(int argc, char **argv)
    vkDestroyFence(dev, fence, NULL);
    vkDestroyCommandPool(dev, cmd_pool, NULL);
    vkDestroyDescriptorPool(dev, pool, NULL);
-   vkDestroyPipelineLayout(dev, layout, NULL);
-   vkDestroyDescriptorSetLayout(dev, set_layout, NULL);
    vkDestroyDevice(dev, NULL);
    vkDestroyInstance(inst, NULL);
    return n[FAIL] || n[PIPELINE_FAILED] ? 1 : 0;

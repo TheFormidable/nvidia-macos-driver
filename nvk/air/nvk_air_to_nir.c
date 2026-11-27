@@ -273,6 +273,8 @@ enum air_kind {
    AIR_SHARED,    /* 32-bit offset into threadgroup memory */
    AIR_SCRATCH,   /* 32-bit offset into thread memory */
    AIR_AGGREGATE, /* a structure or array held as a value: its elements, no def */
+   AIR_TEXTURE,   /* a [[texture(n)]] argument: res is its struct air_texture, no def */
+   AIR_SAMPLER,   /* a sampler: res is its struct air_sampler, no def */
 };
 
 struct air_val {
@@ -281,6 +283,7 @@ struct air_val {
    uint32_t align;    /* known alignment of a pointer, in bytes */
    unsigned num_elems;
    struct air_val **elems;   /* AIR_AGGREGATE */
+   void *res;                /* AIR_TEXTURE, AIR_SAMPLER */
 };
 
 #define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
@@ -332,6 +335,9 @@ struct air_tr {
    const struct glsl_type *table_type;
 
    uint32_t shared_size, scratch_size, buffer_mask, instructions;
+   uint32_t texture_mask[4], storage_mask[4], texbuf_mask[4], stexbuf_mask[4], sampler_mask;
+   uint32_t sampler_args;       /* sampler slots [[sampler(n)]] arguments declare, used or not */
+   struct util_dynarray statics; /* struct air_sampler *: the constexpr samplers, in their slot order */
    nir_def *num_workgroups;
    nir_shader *out;
    char llvm_error[160];
@@ -1249,6 +1255,12 @@ air_fc_arg_present(struct air_tr *t, const struct air_arg *a)
    return L.LLVMConstIntGetZExtValue(init) != 0;
 }
 
+struct air_texture;
+struct air_sampler;
+static struct air_texture *air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i);
+static struct air_sampler *air_bind_sampler(struct air_tr *t, const struct air_arg *a, unsigned i);
+static void air_assign_static_samplers(struct air_tr *t);
+
 /* Buffers read their address from the table, builtins from the system values; threadgroup arguments take the
  * first bytes of threadgroup memory, in index order, at the lengths the request gives, and the kernel's static
  * threadgroup variables follow them as the instructions meet them. */
@@ -1279,6 +1291,12 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          }
          air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
                  a->align ? MIN2((uint32_t)a->align, 16) : 4);
+      } else if (!strcmp(a->kind, "air.texture")) {
+         struct air_val *v = air_set(t, a->param, NULL, AIR_TEXTURE, 1);
+         v->res = air_bind_texture(t, a, i);
+      } else if (!strcmp(a->kind, "air.sampler")) {
+         struct air_val *v = air_set(t, a->param, NULL, AIR_SAMPLER, 1);
+         v->res = air_bind_sampler(t, a, i);
       } else if (!strcmp(a->kind, "air.threadgroup")) {
          if (a->location >= NVMTL_AIR_NIR_MAX_BUFFERS)
             unsupported(t, "threadgroup argument %u has no index below %u", i, NVMTL_AIR_NIR_MAX_BUFFERS);
@@ -1319,6 +1337,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       if (!_mesa_hash_table_search(t->values, L.LLVMGetParam(t->function, p)))
          unsupported(t, "kernel parameter %u has no !air.kernel description", p);
    }
+   air_assign_static_samplers(t);
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -1962,6 +1981,684 @@ air_simd(struct air_tr *t, const char *name, LLVMValueRef call, nir_def **s, uns
    return nir_vec(b, comps, x->num_components);
 }
 
+/* ---------------------------------------------------------------------------------------------------------------- */
+/* Textures and samplers                                                                                              */
+/*                                                                                                                    */
+/* The bindings are the translator's (nvmtl_air_nir_abi.h): a texture read or sampled is a sampled image at 32 + n    */
+/* read with txf/txl/txd/tg4 (a texture_buffer a uniform texel buffer), a texture written or read-written a storage   */
+/* image without a format at 480 + n, an argument sampler 160 + n, a constexpr sampler the slot the translator's      */
+/* reflection gives it.                                                                                               */
+
+struct air_texture {
+   unsigned index;               /* [[texture(n)]] */
+   enum glsl_sampler_dim dim;
+   bool array, storage, depth, absent;
+   enum glsl_base_type base;     /* float, int or uint: what a read gives before narrowing */
+   enum gl_access_qualifier access;
+   nir_variable *var;
+   const char *type_name;
+};
+
+struct air_sampler {
+   unsigned slot;                /* binding 160 + slot */
+   bool is_static, read_sampler, absent;
+   uint64_t words[2];            /* a constexpr sampler's AIR state */
+   nir_variable *var, *shadow_var;
+   LLVMValueRef global;
+};
+
+/* texture2d<float, read>, texture2d_array<half, sample>, depth2d<float>, texture_buffer<uint, read_write>, ... */
+static void
+air_texture_shape(struct air_tr *t, struct air_texture *x, const char *type_name)
+{
+   static const struct { const char *name; enum glsl_sampler_dim dim; bool array, depth; } shapes[] = {
+      { "texture1d_array", GLSL_SAMPLER_DIM_1D, true, false },   { "texture1d", GLSL_SAMPLER_DIM_1D, false, false },
+      { "texture2d_ms_array", GLSL_SAMPLER_DIM_MS, true, false }, { "texture2d_ms", GLSL_SAMPLER_DIM_MS, false, false },
+      { "texture2d_array", GLSL_SAMPLER_DIM_2D, true, false },   { "texture2d", GLSL_SAMPLER_DIM_2D, false, false },
+      { "texture3d", GLSL_SAMPLER_DIM_3D, false, false },
+      { "texturecube_array", GLSL_SAMPLER_DIM_CUBE, true, false }, { "texturecube", GLSL_SAMPLER_DIM_CUBE, false, false },
+      { "texture_buffer", GLSL_SAMPLER_DIM_BUF, false, false },
+      { "depth2d_ms_array", GLSL_SAMPLER_DIM_MS, true, true },   { "depth2d_ms", GLSL_SAMPLER_DIM_MS, false, true },
+      { "depth2d_array", GLSL_SAMPLER_DIM_2D, true, true },      { "depth2d", GLSL_SAMPLER_DIM_2D, false, true },
+      { "depthcube_array", GLSL_SAMPLER_DIM_CUBE, true, true },  { "depthcube", GLSL_SAMPLER_DIM_CUBE, false, true },
+   };
+   if (!type_name)
+      unsupported(t, "texture argument %u has no air.arg_type_name", x->index);
+   for (unsigned i = 0; i < ARRAY_SIZE(shapes); i++) {
+      size_t n = strlen(shapes[i].name);
+      if (!strncmp(type_name, shapes[i].name, n) && (type_name[n] == '<' || type_name[n] == 0)) {
+         x->dim = shapes[i].dim;
+         x->array = shapes[i].array;
+         x->depth = shapes[i].depth;
+         const char *c = type_name[n] == '<' ? type_name + n + 1 : "float";
+         if (!strncmp(c, "uint", 4) || !strncmp(c, "ushort", 6) || !strncmp(c, "uchar", 5))
+            x->base = GLSL_TYPE_UINT;
+         else if (!strncmp(c, "int", 3) || !strncmp(c, "short", 5) || !strncmp(c, "char", 4))
+            x->base = GLSL_TYPE_INT;
+         else if (!strncmp(c, "float", 5) || !strncmp(c, "half", 4))
+            x->base = GLSL_TYPE_FLOAT;
+         else
+            unsupported(t, "a texture of %s", type_name);
+         return;
+      }
+   }
+   unsupported(t, "the texture type %s", type_name);
+}
+
+static void
+air_mask_set(uint32_t *mask, unsigned bit)
+{
+   mask[bit / 32] |= 1u << (bit % 32);
+}
+
+static struct air_texture *
+air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
+{
+   if (a->location >= 128)
+      unsupported(t, "texture argument %u has no texture index below 128", i);
+   if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
+      unsupported(t, "texture argument %u is not a handle", i);
+   struct air_texture *x = rzalloc(t->mem, struct air_texture);
+   x->index = (unsigned)a->location;
+   x->type_name = a->type_name;
+   air_texture_shape(t, x, a->type_name);
+   const char *access = a->access ? a->access : "air.sample";
+   x->storage = !strcmp(access, "air.write") || !strcmp(access, "air.read_write");
+   if (!strcmp(access, "air.write"))
+      x->access = ACCESS_NON_READABLE;
+   if (x->dim == GLSL_SAMPLER_DIM_MS)
+      unsupported(t, "the multisampled texture %s", a->type_name);
+   if (x->storage && (x->dim == GLSL_SAMPLER_DIM_CUBE || x->depth))
+      unsupported(t, "a written %s (the translator writes it through a 2D-array view)", a->type_name);
+   x->absent = air_fc_arg_present(t, a) == 0;
+   if (x->absent)
+      return x;
+   const struct glsl_type *type = x->storage ? glsl_image_type(x->dim, x->array, x->base)
+                                             : glsl_texture_type(x->dim, x->array, x->base);
+   x->var = nir_variable_create(t->nir, x->storage ? nir_var_image : nir_var_uniform, type, a->type_name);
+   x->var->data.descriptor_set = 0;
+   x->var->data.binding = (x->storage ? 480 : 32) + x->index;
+   if (x->storage) {
+      x->var->data.access = x->access;
+      x->var->data.image.format = PIPE_FORMAT_NONE;
+   }
+   return x;
+}
+
+static struct air_sampler *
+air_bind_sampler(struct air_tr *t, const struct air_arg *a, unsigned i)
+{
+   if (a->location >= 16)
+      unsupported(t, "sampler argument %u has no sampler index below 16", i);
+   struct air_sampler *s = rzalloc(t->mem, struct air_sampler);
+   s->slot = (unsigned)a->location;
+   s->absent = air_fc_arg_present(t, a) == 0;
+   t->sampler_args |= 1u << s->slot;
+   return s;
+}
+
+/* The order of __air_sampler_state globals the translator's reflection takes (meta::static_sampler_name_order): the
+ * numbers after the prefix, then the name. */
+static int
+air_sampler_name_cmp(const void *pa, const void *pb)
+{
+   const char *a = air_name(*(LLVMValueRef const *)pa, NULL), *b = air_name(*(LLVMValueRef const *)pb, NULL);
+   const char *prefix = "__air_sampler_state";
+   const char *x = strncmp(a, prefix, strlen(prefix)) ? "" : a + strlen(prefix);
+   const char *y = strncmp(b, prefix, strlen(prefix)) ? "" : b + strlen(prefix);
+   for (;;) {
+      while (*x == '.')
+         x++;
+      while (*y == '.')
+         y++;
+      if (!*x || !*y)
+         return *x ? 1 : *y ? -1 : strcmp(a, b);
+      char *ex, *ey;
+      unsigned long long u = strtoull(x, &ex, 10), v = strtoull(y, &ey, 10);
+      if (ex == x)
+         u = ~0ull;
+      if (ey == y)
+         v = ~0ull;
+      if (u != v)
+         return u < v ? -1 : 1;
+      x = ex == x ? x + strcspn(x, ".") : ex;
+      y = ey == y ? y + strcspn(y, ".") : ey;
+   }
+}
+
+/* Every constexpr sampler of !air.sampler_states takes the first sampler slot no [[sampler(n)]] argument takes, in the
+ * translator's order, used or not, as its reflection gives them to the plugin (reflect::add_static_samplers). */
+static void
+air_assign_static_samplers(struct air_tr *t)
+{
+   unsigned n = L.LLVMGetNamedMetadataNumOperands(t->module, "air.sampler_states");
+   if (!n)
+      return;
+   LLVMValueRef *nodes = rzalloc_array(t->mem, LLVMValueRef, n);
+   L.LLVMGetNamedMetadataOperands(t->module, "air.sampler_states", nodes);
+   LLVMValueRef *globals = rzalloc_array(t->mem, LLVMValueRef, n);
+   unsigned count = 0;
+   for (unsigned i = 0; i < n; i++) {
+      LLVMValueRef *ops;
+      unsigned k = air_md_operands(nodes[i], &ops, t->mem);
+      LLVMValueRef g = k >= 2 ? ops[1] : NULL;
+      while (g && L.LLVMIsAConstantExpr(g))
+         g = L.LLVMGetOperand(g, 0);
+      if (!g || !L.LLVMIsAGlobalVariable(g))
+         unsupported(t, "an air.sampler_state without its global");
+      globals[count++] = g;
+   }
+   qsort(globals, count, sizeof *globals, air_sampler_name_cmp);
+   uint32_t taken = t->sampler_args;
+   for (unsigned i = 0; i < count; i++) {
+      unsigned slot = 0;
+      while (slot < 32 && (taken & (1u << slot)))
+         slot++;
+      if (slot >= 32)
+         unsupported(t, "more constexpr samplers than the sampler band holds");
+      taken |= 1u << slot;
+      struct air_sampler *s = rzalloc(t->mem, struct air_sampler);
+      s->slot = slot;
+      s->is_static = true;
+      s->global = globals[i];
+      LLVMValueRef init = L.LLVMGetInitializer(globals[i]);
+      for (unsigned w = 0; w < 2 && init; w++) {
+         LLVMValueRef e = L.LLVMGetAggregateElement(init, w);
+         if (e && L.LLVMIsAConstantInt(e))
+            s->words[w] = L.LLVMConstIntGetZExtValue(e);
+      }
+      util_dynarray_append(&t->statics, s);
+      struct air_val *v = air_make(t, NULL, AIR_SAMPLER, 1);
+      v->res = s;
+      _mesa_hash_table_insert(t->globals, globals[i], v);
+   }
+}
+
+static nir_deref_instr *
+air_sampler_deref(struct air_tr *t, struct air_sampler *s, bool shadow)
+{
+   nir_variable **var = shadow ? &s->shadow_var : &s->var;
+   if (s->read_sampler)
+      unsupported(t, "a sample through the read sampler");
+   if (s->absent)
+      unsupported(t, "a sampler a function constant leaves out is used");
+   if (s->is_static) {
+      uint64_t w = s->words[0];
+      if ((w >> 15) & 1)
+         unsupported(t, "a constexpr sampler with pixel coordinates (the translator emulates it)");
+      if (((w >> 9) & 3) == 2 || ((w >> 11) & 3) == 2)
+         unsupported(t, "a constexpr sampler with bicubic filtering");
+      if (((w >> 58) & 3) != 0)
+         unsupported(t, "a constexpr sampler with min/max reduction");
+   }
+   if (!*var) {
+      *var = nir_variable_create(t->nir, nir_var_uniform, shadow ? glsl_bare_shadow_sampler_type() : glsl_bare_sampler_type(),
+                                 s->is_static ? "constexpr_sampler" : "sampler");
+      (*var)->data.descriptor_set = 0;
+      (*var)->data.binding = 160 + s->slot;
+   }
+   t->sampler_mask |= 1u << s->slot;
+   return nir_build_deref_var(&t->b, *var);
+}
+
+static nir_deref_instr *
+air_texture_deref(struct air_tr *t, struct air_texture *x)
+{
+   if (x->absent)
+      unsupported(t, "texture %u, which a function constant leaves out, is used", x->index);
+   if (x->storage) {
+      air_mask_set(t->storage_mask, x->index);
+      if (x->dim == GLSL_SAMPLER_DIM_BUF)
+         air_mask_set(t->stexbuf_mask, x->index);
+   } else {
+      air_mask_set(t->texture_mask, x->index);
+      if (x->dim == GLSL_SAMPLER_DIM_BUF)
+         air_mask_set(t->texbuf_mask, x->index);
+   }
+   return nir_build_deref_var(&t->b, x->var);
+}
+
+static unsigned
+air_spatial(const struct air_texture *x)
+{
+   switch (x->dim) {
+   case GLSL_SAMPLER_DIM_1D: case GLSL_SAMPLER_DIM_BUF: return 1;
+   case GLSL_SAMPLER_DIM_3D: case GLSL_SAMPLER_DIM_CUBE: return 3;
+   default: return 2;
+   }
+}
+
+static nir_alu_type
+air_tex_type(const struct air_texture *x)
+{
+   return x->base == GLSL_TYPE_UINT ? nir_type_uint32 : x->base == GLSL_TYPE_INT ? nir_type_int32 : nir_type_float32;
+}
+
+struct air_tex_srcs {
+   nir_def *coord, *lod, *comparator, *ddx, *ddy, *offset;
+   nir_deref_instr *texture, *sampler;
+};
+
+static nir_def *
+air_build_tex(struct air_tr *t, nir_texop op, const struct air_texture *x, const struct air_tex_srcs *in, int component)
+{
+   nir_builder *b = &t->b;
+   nir_tex_src srcs[8];
+   unsigned n = 0;
+   srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, &in->texture->def);
+   if (in->sampler)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_sampler_deref, &in->sampler->def);
+   if (in->coord)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_coord, in->coord);
+   if (in->lod)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, in->lod);
+   if (in->comparator)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_comparator, in->comparator);
+   if (in->ddx) {
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_ddx, in->ddx);
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_ddy, in->ddy);
+   }
+   if (in->offset)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_offset, in->offset);
+   nir_tex_instr *tex = nir_tex_instr_create(b->shader, n);
+   tex->op = op;
+   tex->sampler_dim = x->dim;
+   tex->is_array = x->array;
+   tex->is_shadow = in->comparator != NULL;
+   tex->is_new_style_shadow = in->comparator != NULL;
+   tex->dest_type = op == nir_texop_txs || op == nir_texop_query_levels ? nir_type_int32 : air_tex_type(x);
+   if (x->depth && op != nir_texop_txs && op != nir_texop_query_levels)
+      tex->dest_type = nir_type_float32;
+   tex->component = component > 0 ? (unsigned)component : 0;
+   tex->coord_components = in->coord ? in->coord->num_components : 0;
+   memcpy(tex->src, srcs, n * sizeof *srcs);
+   nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
+   nir_builder_instr_insert(b, &tex->instr);
+   return &tex->def;
+}
+
+static bool
+air_is_int(LLVMValueRef v)
+{
+   LLVMTypeRef ty = L.LLVMTypeOf(v);
+   if (L.LLVMGetTypeKind(ty) == TY_VECTOR)
+      ty = L.LLVMGetElementType(ty);
+   return L.LLVMGetTypeKind(ty) == TY_INTEGER;
+}
+
+static bool
+air_is_bool(LLVMValueRef v)
+{
+   LLVMTypeRef ty = L.LLVMTypeOf(v);
+   return L.LLVMGetTypeKind(ty) == TY_INTEGER && L.LLVMGetIntTypeWidth(ty) == 1;
+}
+
+static bool
+air_is_float_scalar(LLVMValueRef v)
+{
+   int k = L.LLVMGetTypeKind(L.LLVMTypeOf(v));
+   return k == TY_FLOAT || k == TY_HALF;
+}
+
+static bool
+air_is_zero(LLVMValueRef v)
+{
+   if (L.LLVMIsAConstantAggregateZero(v))
+      return true;
+   if (L.LLVMIsAConstantInt(v))
+      return L.LLVMConstIntGetZExtValue(v) == 0;
+   if (L.LLVMIsAConstantFP(v)) {
+      int loses;
+      return L.LLVMConstRealGetDouble(v, &loses) == 0.0;
+   }
+   return false;
+}
+
+static nir_def *
+air_int32(struct air_tr *t, LLVMValueRef v)
+{
+   nir_def *d = air_def(t, v);
+   return d->bit_size == 32 ? d : nir_u2u32(&t->b, d);
+}
+
+static nir_def *
+air_append(nir_builder *b, nir_def *v, nir_def *last)
+{
+   nir_def *c[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < v->num_components; i++)
+      c[i] = nir_channel(b, v, i);
+   c[v->num_components] = last;
+   return nir_vec(b, c, v->num_components + 1);
+}
+
+static nir_def *
+air_pad4(nir_builder *b, nir_def *v)
+{
+   nir_def *c[4];
+   for (unsigned i = 0; i < 4; i++)
+      c[i] = i < v->num_components ? nir_channel(b, v, i) : nir_imm_int(b, 0);
+   return nir_vec(b, c, 4);
+}
+
+/* What a texture call returns: {<4 x T>, i8} (the i8, residency, is 0 here) or the color itself; the color narrowed to
+ * the call's component type (half, short) and its width (a depth sample is one float). */
+static struct air_val *
+air_texel_result(struct air_tr *t, LLVMValueRef call, nir_def *color)
+{
+   nir_builder *b = &t->b;
+   LLVMTypeRef rty = L.LLVMTypeOf(call);
+   LLVMTypeRef cty = L.LLVMGetTypeKind(rty) == TY_STRUCT ? L.LLVMStructGetTypeAtIndex(rty, 0) : rty;
+   struct air_type ct = air_type_of(t, cty);
+   if (ct.components < color->num_components)
+      color = nir_trim_vector(b, color, ct.components);
+   else if (ct.components > color->num_components)
+      unsupported(t, "a texture call giving %u components", ct.components);
+   if (ct.bits != color->bit_size)
+      color = ct.is_float ? nir_f2fN(b, color, ct.bits) : nir_u2uN(b, color, ct.bits);
+   struct air_val *c = air_make(t, color, AIR_VALUE, 0);
+   if (L.LLVMGetTypeKind(rty) != TY_STRUCT)
+      return c;
+   unsigned n = L.LLVMCountStructElementTypes(rty);
+   struct air_val *r = air_aggregate(t, n);
+   r->elems[0] = c;
+   for (unsigned i = 1; i < n; i++) {
+      struct air_type et = air_type_of(t, L.LLVMStructGetTypeAtIndex(rty, i));
+      r->elems[i] = air_make(t, nir_imm_intN_t(&t->top, 0, et.bits), AIR_VALUE, 0);
+   }
+   return r;
+}
+
+static struct air_texture *
+air_texture_of(struct air_tr *t, LLVMValueRef v)
+{
+   struct air_val *x = air_get(t, v);
+   if (x->kind != AIR_TEXTURE)
+      unsupported(t, "a texture call on a value that is not a texture argument");
+   return x->res;
+}
+
+static struct air_sampler *
+air_sampler_of(struct air_tr *t, LLVMValueRef v)
+{
+   struct air_val *x = air_get(t, v);
+   if (x->kind != AIR_SAMPLER)
+      unsupported(t, "a sample through a value that is not a sampler");
+   return x->res;
+}
+
+/* The texture calls: true when name is one (and *out its result). */
+static bool
+air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned nargs, struct air_val **out)
+{
+   nir_builder *b = &t->b;
+   *out = NULL;
+#define ARG(i) ((i) < nargs ? L.LLVMGetOperand(call, i) : NULL)
+   if (air_starts(name, "air.get_read_sampler")) {
+      struct air_sampler *s = rzalloc(t->mem, struct air_sampler);
+      s->read_sampler = true;
+      *out = air_make(t, NULL, AIR_SAMPLER, 1);
+      (*out)->res = s;
+      return true;
+   }
+   bool read_depth = air_starts(name, "air.read_depth_");
+   bool read = air_starts(name, "air.read_texture_") || read_depth, write = air_starts(name, "air.write_texture_");
+   bool sample = air_starts(name, "air.sample_texture_"), depth_sample = air_starts(name, "air.sample_depth_");
+   bool compare = air_starts(name, "air.sample_compare_depth_"), gather = air_starts(name, "air.gather_texture_");
+   bool fence = air_starts(name, "air.fence_texture_");
+   const char *query = NULL;
+   static const char *const queries[] = { "air.get_width_", "air.get_height_", "air.get_depth_",
+                                          "air.get_array_size_", "air.get_num_mip_levels_" };
+   for (unsigned i = 0; i < ARRAY_SIZE(queries); i++) {
+      if (air_starts(name, queries[i]) && (strstr(name, "_texture_") || strstr(name, "_depth_")))
+         query = queries[i];
+   }
+   if (!read && !write && !sample && !depth_sample && !compare && !gather && !fence && !query) {
+      if (air_starts(name, "air.gather_depth_") ||
+          air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
+          air_starts(name, "air.get_num_samples_") || air_starts(name, "air.is_null_texture") ||
+          air_starts(name, "air.get_null_texture") || strstr(name, "_texture_") || strstr(name, "texture_buffer"))
+         unsupported(t, "the texture call %s", name);
+      return false;
+   }
+   struct air_texture *x = air_texture_of(t, ARG(0));
+
+   if (fence) {
+      nir_barrier(b, .execution_scope = SCOPE_NONE, .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_image);
+      return true;
+   }
+
+   if (query) {
+      nir_deref_instr *d = air_texture_deref(t, x);
+      LLVMValueRef lodv = ARG(1);
+      nir_def *lod = lodv ? air_int32(t, lodv) : nir_imm_int(b, 0);
+      nir_def *r;
+      unsigned comp = 0;
+      if (!strcmp(query, "air.get_height_"))
+         comp = 1;
+      else if (!strcmp(query, "air.get_depth_"))
+         comp = 2;
+      else if (!strcmp(query, "air.get_array_size_"))
+         comp = air_spatial(x) == 3 ? 3 : air_spatial(x);
+      if (x->dim == GLSL_SAMPLER_DIM_CUBE && comp == 3)
+         comp = 2;   /* txs of a cube array: width, height, cubes */
+      if (!strcmp(query, "air.get_num_mip_levels_")) {
+         if (x->storage) {
+            r = nir_imm_int(b, 1);
+         } else {
+            struct air_tex_srcs in = { .texture = d };
+            r = air_build_tex(t, nir_texop_query_levels, x, &in, -1);
+         }
+      } else if (x->storage) {
+         if (!air_is_zero(lodv ? lodv : NULL) && lodv)
+            unsupported(t, "a size query of a storage texture at a level other than 0");
+         unsigned nc = glsl_get_sampler_dim_coordinate_components(x->dim) + (x->array ? 1 : 0);
+         r = nir_image_deref_size(b, nc, 32, &d->def, nir_imm_int(b, 0), .image_dim = x->dim, .image_array = x->array);
+      } else {
+         struct air_tex_srcs in = { .texture = d, .lod = x->dim == GLSL_SAMPLER_DIM_BUF ? NULL : lod };
+         r = air_build_tex(t, nir_texop_txs, x, &in, -1);
+      }
+      if (r->num_components > 1) {
+         if (comp >= r->num_components)
+            unsupported(t, "%s of a texture without that dimension", name);
+         r = nir_channel(b, r, comp);
+      }
+      *out = air_make(t, air_resize(b, r, air_type_of(t, L.LLVMTypeOf(call)).bits, false), AIR_VALUE, 0);
+      return true;
+   }
+
+   if (write) {
+      if (!x->storage)
+         unsupported(t, "a write to a texture that is not access::write or read_write");
+      LLVMValueRef coord = ARG(1), layer = NULL, texel, lodv;
+      if (x->array) {
+         layer = ARG(2);
+         texel = ARG(3);
+         lodv = ARG(4);
+      } else {
+         texel = ARG(2);
+         lodv = x->dim == GLSL_SAMPLER_DIM_BUF ? NULL : ARG(3);
+      }
+      if (!coord || !texel)
+         unsupported(t, "%s with %u operands", name, nargs);
+      if (lodv && !air_is_zero(lodv))
+         unsupported(t, "a write to a level other than 0 of a storage texture");
+      nir_def *c = nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
+      if (x->array)
+         c = air_append(b, c, air_int32(t, layer));
+      nir_def *v = air_def(t, texel);
+      if (v->num_components != 4)
+         unsupported(t, "a texture write of %u components", v->num_components);
+      if (x->base == GLSL_TYPE_FLOAT)
+         v = v->bit_size == 32 ? v : nir_f2f32(b, v);
+      else
+         v = v->bit_size == 32 ? v : x->base == GLSL_TYPE_INT ? nir_i2i32(b, v) : nir_u2u32(b, v);
+      nir_deref_instr *d = air_texture_deref(t, x);
+      nir_image_deref_store(b, &d->def, air_pad4(b, c), nir_undef(b, 1, 32), v, nir_imm_int(b, 0),
+                            .image_dim = x->dim, .image_array = x->array, .format = PIPE_FORMAT_NONE,
+                            .access = x->access, .src_type = air_tex_type(x));
+      return true;
+   }
+
+   if (read) {
+      /* the translator's read_operands: (texture, [read sampler,] coord, [layer,] [offset,] lod, access) */
+      LLVMValueRef coord, layer = NULL, lodv = NULL;
+      if (read_depth) {
+         /* (texture, read sampler, i32, coord, [layer,] offset, lod, access) */
+         coord = ARG(3);
+         layer = x->array ? ARG(4) : NULL;
+         lodv = ARG(x->array ? 6 : 5);
+      } else if (air_is_int(ARG(1))) {
+         coord = ARG(1);
+         if (x->array) {
+            layer = ARG(2);
+            lodv = ARG(3);
+         } else {
+            lodv = ARG(2);
+         }
+      } else if (x->array) {
+         coord = ARG(2);
+         layer = ARG(3);
+         lodv = nargs >= 7 ? ARG(5) : ARG(4);
+      } else {
+         coord = ARG(2);
+         lodv = nargs == 5 ? ARG(3) : ARG(4);
+      }
+      if (x->dim == GLSL_SAMPLER_DIM_BUF)
+         lodv = NULL;
+      if (x->dim == GLSL_SAMPLER_DIM_CUBE)
+         unsupported(t, "a read of a texturecube (the translator reads it through a 2D-array view)");
+      if (!coord)
+         unsupported(t, "%s with %u operands", name, nargs);
+      nir_def *c = nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
+      if (x->array)
+         c = air_append(b, c, air_int32(t, layer));
+      nir_def *color;
+      nir_deref_instr *d = air_texture_deref(t, x);
+      if (x->storage) {
+         if (lodv && !air_is_zero(lodv))
+            unsupported(t, "a read of a level other than 0 of a storage texture");
+         color = nir_image_deref_load(b, 4, 32, &d->def, air_pad4(b, c), nir_undef(b, 1, 32), nir_imm_int(b, 0),
+                                      .image_dim = x->dim, .image_array = x->array, .format = PIPE_FORMAT_NONE,
+                                      .access = x->access, .dest_type = air_tex_type(x));
+      } else {
+         struct air_tex_srcs in = { .texture = d, .coord = c,
+                                    .lod = x->dim == GLSL_SAMPLER_DIM_BUF ? NULL : lodv ? air_int32(t, lodv) : nir_imm_int(b, 0) };
+         color = air_build_tex(t, nir_texop_txf, x, &in, -1);
+      }
+      *out = air_texel_result(t, call, color);
+      return true;
+   }
+
+   /* sample, sample_depth, sample_compare_depth, gather: (texture, sampler, [i32,] coord, [layer,] [reference,] rest) */
+   if (x->storage)
+      unsupported(t, "a sample of a storage texture");
+   if (x->dim == GLSL_SAMPLER_DIM_BUF)
+      unsupported(t, "a sample of a texture_buffer");
+   struct air_sampler *s = air_sampler_of(t, ARG(1));
+   unsigned at = 2;
+   if ((depth_sample || compare) && ARG(at) && air_is_int(ARG(at)) && !air_is_bool(ARG(at)) &&
+       L.LLVMGetTypeKind(L.LLVMTypeOf(ARG(at))) == TY_INTEGER)
+      at++;   /* sample_depth's leading i32 */
+   LLVMValueRef coordv = ARG(at);
+   at++;
+   if (!coordv || air_is_int(coordv))
+      unsupported(t, "%s without a float coordinate", name);
+   nir_def *coord = air_def(t, coordv);
+   if (coord->bit_size != 32)
+      coord = nir_f2f32(b, coord);
+   unsigned spatial = air_spatial(x);
+   if (coord->num_components < spatial)
+      unsupported(t, "a %u-component coordinate for a %u-dimensional texture", coord->num_components, spatial);
+   coord = nir_trim_vector(b, coord, spatial);
+   if (x->array) {
+      LLVMValueRef layer = ARG(at);
+      at++;
+      if (!layer)
+         unsupported(t, "an array sample without its layer");
+      nir_def *l = air_def(t, layer);
+      l = air_is_int(layer) ? nir_u2f32(b, air_int32(t, layer)) : l->bit_size == 32 ? l : nir_f2f32(b, l);
+      coord = air_append(b, coord, l);
+   }
+   nir_def *comparator = NULL;
+   if (compare) {
+      LLVMValueRef ref = ARG(at);
+      at++;
+      if (!ref || !air_is_float_scalar(ref))
+         unsupported(t, "%s without its reference", name);
+      comparator = air_def(t, ref);
+      if (comparator->bit_size != 32)
+         comparator = nir_f2f32(b, comparator);
+   }
+   bool grad = strstr(name, "_grad") != NULL;
+   nir_def *ddx = NULL, *ddy = NULL, *lod = NULL, *offset = NULL;
+   if (grad) {
+      ddx = air_def(t, ARG(at));
+      ddy = air_def(t, ARG(at + 1));
+      LLVMValueRef clamp = ARG(at + 2);
+      if (!ddx || !ddy)
+         unsupported(t, "%s without its gradients", name);
+      if (clamp && air_is_float_scalar(clamp) && !air_is_zero(clamp))
+         unsupported(t, "a gradient sample with a minimum LOD clamp");
+      at += 3;
+   }
+   for (unsigned i = at; i < nargs; i++) {
+      LLVMValueRef v = ARG(i);
+      LLVMTypeRef ty = L.LLVMTypeOf(v);
+      /* the offset: the first integer vector with the texture's spatial width */
+      if (!offset && L.LLVMGetTypeKind(ty) == TY_VECTOR && air_is_int(v) && L.LLVMGetVectorSize(ty) == spatial &&
+          x->dim != GLSL_SAMPLER_DIM_CUBE) {
+         if (!air_is_zero(v)) {
+            if (!L.LLVMIsAConstantVector(v) && !L.LLVMIsAConstantDataSequential(v))
+               unsupported(t, "a sample with an offset known only at run time");
+            offset = air_int32(t, v);
+         }
+         continue;
+      }
+      /* the level: the first float scalar, after the bool that says whether it is a level (true) or a bias */
+      if (!grad && !lod && air_is_float_scalar(v) && i > at && air_is_bool(ARG(i - 1))) {
+         LLVMValueRef flag = ARG(i - 1);
+         bool level = !L.LLVMIsAConstantInt(flag) || (L.LLVMConstIntGetZExtValue(flag) & 1);
+         if (!level && !air_is_zero(v))
+            unsupported(t, "a sample with a bias in a kernel (no derivatives here)");
+         lod = air_def(t, v);
+         lod = !level ? nir_imm_float(b, 0) : lod->bit_size == 32 ? lod : nir_f2f32(b, lod);
+         i++;   /* the float after the level (a minimum LOD clamp) */
+         if (i < nargs && air_is_float_scalar(ARG(i)) && !air_is_zero(ARG(i)))
+            unsupported(t, "a sample with a minimum LOD clamp");
+      }
+   }
+   if (gather) {
+      if (x->depth || grad)
+         unsupported(t, "%s", name);
+      /* (texture, sampler, coord, [layer,] bool, offset, component, ...) */
+      LLVMValueRef comp = ARG(x->array ? 6 : 5);
+      if (!comp || !L.LLVMIsAConstantInt(comp) || L.LLVMConstIntGetZExtValue(comp) > 3)
+         unsupported(t, "a gather of a component not known here");
+      struct air_tex_srcs in = { .texture = air_texture_deref(t, x), .sampler = air_sampler_deref(t, s, false),
+                                 .coord = coord, .offset = offset };
+      *out = air_texel_result(t, call, air_build_tex(t, nir_texop_tg4, x, &in, (int)L.LLVMConstIntGetZExtValue(comp)));
+      return true;
+   }
+   if (x->base != GLSL_TYPE_FLOAT)
+      unsupported(t, "a sample of an integer texture (the translator emulates it with fetches)");
+   if (s->is_static && comparator && ((s->words[0] >> 16) & 0xf) == 0)
+      unsupported(t, "a compare sample through a constexpr sampler without a compare function");
+   struct air_tex_srcs in = { .texture = air_texture_deref(t, x), .sampler = air_sampler_deref(t, s, comparator != NULL),
+                              .coord = coord, .lod = grad ? NULL : lod ? lod : nir_imm_float(b, 0),
+                              .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset };
+   if (ddx && (ddx->num_components != spatial || ddy->num_components != spatial))
+      unsupported(t, "gradients of %u components", ddx->num_components);
+   if (ddx && ddx->bit_size != 32) {
+      in.ddx = nir_f2f32(b, ddx);
+      in.ddy = nir_f2f32(b, ddy);
+   }
+   nir_def *color = air_build_tex(t, grad ? nir_texop_txd : nir_texop_txl, x, &in, -1);
+   *out = air_texel_result(t, call, color);
+   return true;
+#undef ARG
+}
+
 static void
 air_call(struct air_tr *t, LLVMValueRef call)
 {
@@ -1973,12 +2670,22 @@ air_call(struct air_tr *t, LLVMValueRef call)
    unsigned nargs = L.LLVMGetNumArgOperands(call);
    LLVMTypeRef rlty = L.LLVMTypeOf(call);
    bool returns = L.LLVMGetTypeKind(rlty) != TY_VOID;
-   struct air_type rt = { 0 };
-   if (returns)
-      rt = air_type_of(t, rlty);
 
    if (!L.LLVMIsDeclaration(callee))
       unsupported(t, "a call to %s, which LLVM did not inline", name);
+
+   struct air_val *tex_result;
+   if (air_texture_call(t, name, call, nargs, &tex_result)) {
+      if (returns) {
+         if (!tex_result)
+            unsupported(t, "%s gives no value here", name);
+         air_set_val(t, call, tex_result);
+      }
+      return;
+   }
+   struct air_type rt = { 0 };
+   if (returns)
+      rt = air_type_of(t, rlty);
 
    /* operands that are plain values; pointers stay with their kinds */
    nir_def *s[8] = { NULL };
@@ -3321,6 +4028,7 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    t->blocks = _mesa_pointer_hash_table_create(t);
    t->globals = _mesa_pointer_hash_table_create(t);
    util_dynarray_init(&t->phis, t);
+   util_dynarray_init(&t->statics, t);
    util_dynarray_init(&t->constant_data, t);
 
    LLVMContextRef ctx = L.LLVMContextCreate();
@@ -3353,6 +4061,23 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    res->shared_bytes = t->shared_size;
    res->scratch_bytes = t->scratch_size;
    res->instructions = t->instructions;
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, static_samplers) + sizeof res->static_samplers && t->out) {
+      memcpy(res->texture_mask, t->texture_mask, sizeof t->texture_mask);
+      memcpy(res->storage_mask, t->storage_mask, sizeof t->storage_mask);
+      memcpy(res->texbuf_mask, t->texbuf_mask, sizeof t->texbuf_mask);
+      memcpy(res->stexbuf_mask, t->stexbuf_mask, sizeof t->stexbuf_mask);
+      res->sampler_mask = t->sampler_mask;
+      unsigned n = 0;
+      util_dynarray_foreach(&t->statics, struct air_sampler *, ps) {
+         if (n < ARRAY_SIZE(res->static_samplers)) {
+            res->static_samplers[n].slot = (*ps)->slot;
+            res->static_samplers[n].words[0] = (*ps)->words[0];
+            res->static_samplers[n].words[1] = (*ps)->words[1];
+         }
+         n++;
+      }
+      res->static_sampler_count = n;
+   }
    if (t->out)
       snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread",
                t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size);
