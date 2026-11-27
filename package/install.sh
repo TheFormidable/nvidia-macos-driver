@@ -381,7 +381,7 @@ kmutil_blocker() {  # <kmutil log> <extensions folder>: prints a sentence for th
     [ -f "$x/Contents/Info.plist" ] || continue
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$x/Contents/Info.plist" 2>/dev/null)" = "$id" ] && { path=$x; break; }
   done
-  printf '%s needs %s, which this macOS does not have, so macOS cannot build a kernel collection while it is there. It is not part of this driver. Move %s out of %s (or load it from OpenCore instead), then run 1401 again' \
+  printf '%s needs %s, which this macOS does not have, so macOS cannot build a kernel collection while it is there. It is not part of this driver. Move %s out of %s (or load it from OpenCore instead), then run install.sh again' \
     "$id" "$dep" "${path:-the kext with that identifier}" "$ext"
 }
 step "3. test kernel collection"
@@ -403,12 +403,12 @@ ok "test collection holds all four kexts"
 
 # The GPU firmware is NVIDIA's and is not part of this download: it is read from NVIDIA's own driver package, or reused
 # from an earlier install when it still matches its pinned SHA-256 (package/fw_fetch.sh). A package that does carry it
-# (Users/Shared/nvfw, e.g. a stick prepared by the 1401 app) is used as it is. This happens before anything is changed,
+# (Users/Shared/nvfw) is used as it is. This happens before anything is changed,
 # so a Mac with no network and no earlier install stops here with nothing touched.
 FWSRC="$HERE/Users/Shared/nvfw"
 if [ ! -d "$FWSRC" ]; then
   [ -x "$HERE/fw_fetch.sh" ] || die "this package lacks fw_fetch.sh; no changes made"
-  # NULLMOTH_FW_RUN: NVIDIA's driver package already on this Mac or on the install stick (the 1401 apps put it there);
+  # NULLMOTH_FW_RUN: NVIDIA's driver package already on this Mac or on a USB stick;
   # fw_fetch.sh copies it first and checks its SHA-256, so a wrong or replaced file is refused, never trusted.
   mkdir -m 700 "$T/fw" && "$HERE/fw_fetch.sh" --dest "$T/fw" --installed "$FW" ${NULLMOTH_FW_RUN:+--run "$NULLMOTH_FW_RUN"} || die "the GPU firmware is not available (see above); no changes made"
   FWSRC="$T/fw"
@@ -1013,13 +1013,13 @@ chmod 644 "$BLP" && chown root:wheel "$BLP" || die "backlight job permissions"
 ok "panel brightness is kept on disk too, for firmware that drops NVRAM writes"
 
 ba=$(nvram boot-args 2>/dev/null | cut -f2-)
-for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
+for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: OpenCore settings)";; esac; done
 # WindowServer is a platform binary: with AMFI enforcing it refuses the Metal plugin ("mapping process is a platform
 # binary, but mapped file is not"), reaches the desktop with no Metal device and asserts "Failed to create MetalDevice".
 # Two reports had boot-args with nvfb/nvaccel but neither AMFI argument.
 amfi_note() {
   case " $1 " in *" amfi_get_out_of_my_way="*|*" amfi="*) ;;
-    *) echo "   NOTE: boot-args lack 'amfi_get_out_of_my_way=0x1 amfi=0x80' — without them WindowServer refuses the NVIDIA Metal plugin and the desktop has no Metal device; add them in your OpenCore config.plist, or let the 1401 Mac app set OpenCore up";;
+    *) echo "   NOTE: boot-args lack 'amfi_get_out_of_my_way=0x1 amfi=0x80' — without them WindowServer refuses the NVIDIA Metal plugin and the desktop has no Metal device; add them in your OpenCore config.plist (README: OpenCore settings), or sign the graphics stack with your own CA and load it through AMFIAnchor (README: AMFI left on)";;
   esac
 }
 amfi_note "$ba"
@@ -1028,7 +1028,7 @@ amfi_note "$ba"
 # jack or microphone, only the display outputs. A user who restored AppleHDA (SimpleHDA, a root patch) wants exactly that.
 alc_note() {
   case " $1 " in *" alcid="*|*" alcverbs"*|*" -alcverbs"*)
-    echo "   NOTE: boot-args carry AppleALC's 'alcid' or 'alcverbs'. macOS 26 has no AppleHDA for AppleALC to use, and the audio driver (NMXAudio) leaves your onboard sound to AppleALC while either is set, so the speakers, headphone jack and microphone do not appear. Remove them from boot-args in your OpenCore config.plist (README: Wiring into an existing OpenCore setup), unless you restored AppleHDA yourself";;
+    echo "   NOTE: boot-args carry AppleALC's 'alcid' or 'alcverbs'. macOS 26 has no AppleHDA for AppleALC to use, and the audio driver (NMXAudio) leaves your onboard sound to AppleALC while either is set, so the speakers, headphone jack and microphone do not appear. Remove them from boot-args in your OpenCore config.plist (README: OpenCore settings), unless you restored AppleHDA yourself";;
   esac
 }
 case " $KEXTS " in *" NMXAudio "*) alc_note "$ba";; esac

@@ -1,8 +1,11 @@
 # Curve geometry for Metal ray tracing
 
-Status in 2.9: written, tested offline, **off by default**. `NVK_CURVES=1` turns it on for a process (NVK and the plugin read the
-same variable). It is software traversal on the shader cores: the RT cores have no curves, and `NVK_HWRT_QUERY` neither helps nor
-hinders (a hybrid query sends curve boxes through the same software walk as other boxes).
+Status (3.0.20): compiled into NVK and the plugin since 2.9 and **off by default**; measured against Apple GPUs by the original
+project (below); no run on an NVIDIA card is recorded. `NVK_CURVES=1` turns it on for a process (NVK and the plugin read the same
+variable): for a Metal application, a line in the user's block of `nvrm610.conf`, or its own environment when it is started
+with `NVMTL_PROCESS_ENV=1` too. Since 3.0.12 the switch is part of NVK's shader cache key (`nvk/nvk-nak-switch-key.patch`). It
+is software traversal on the shader cores: the RT cores have no curves, and `NVK_HWRT_QUERY` neither helps nor hinders (a hybrid
+query sends curve boxes through the same software walk as other boxes).
 
 ## What is carried
 
@@ -34,6 +37,8 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
 
 ## Measured against Apple (M6, macOS 27.2)
 
+These measurements were taken by the original project (NullMoth) for its 2.9, on its own Apple machines.
+
 `oracle/fixtures/fixture_apple_m6.txt` is the oracle's dump: 24 cases x 576 rays, every case accepted by the GPU (no refusal).
 `oracle/compare_oracle` against `curve_math.h` at the default 16 steps:
 
@@ -46,7 +51,7 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
 - Apple's round curves are the exact swept sphere. The targeted probe (`oracle/fixtures/fixture_apple_m6_probe.txt`: one curve per
   failing case, 192 rays aimed at each end and 192 at the middle) shows every Apple hit on a round curve lies within 0.004 of the exact
   swept sphere (distance to the curve minus the radius, minimum over the parameter), except the end-disk hits. So the radius law, the
-  basis and the shape are right, and the remaining differences are my straight pieces and the end rules.
+  basis and the shape are right, and the remaining differences are the model's straight pieces and the end rules.
 - The end cut was the bug in `bezier4_round_disk`. The plane through each end point applied to the whole curve, which cuts away real
   surface when a curve bends back on itself (the sample Bezier does). Apple does not. Each plane now applies only to the pieces in its own
   quarter of the curve. The plane is perpendicular to the curve's tangent at the end point (two close evaluations; `CV_END_PIECE_AXIS`
@@ -103,13 +108,13 @@ half-width equal to the radius, facing the ray. This is an approximation of the 
 
 ## Measurements still to take (M-series, then a card)
 
-1. Done on the M6 (above); open: the three cases, the M4 and the M1. The oracle: `nvk/curves/oracle/` builds a curve
+1. Done on the M6 and the M4 (above); an M1 is not measured. The oracle: `nvk/curves/oracle/` builds a curve
    acceleration structure for each of 24 cases (six basis and count pairs, round with three cap modes, flat) on the machine's own GPU,
    intersects 576 fixed rays, and dumps hit, distance, `curve_parameter` and primitive id as bits. `compare_oracle` judges the dump against
    `curve_math.h` (hit/miss on 98 percent of rays, distance within 0.02, parameter within 0.03) and is proven without a GPU
    (`oracle/selftest.sh`: a dump made from the same curves passes, one made from curves with 1.5 times the radii fails 24 of 24 cases).
-   `oracle/run_oracle.sh <dir>` runs it and refuses while the Mac is near swap. It ran on the M6 only: the laptop was at 84 to 92 percent of its swap file when this was written and the M4 run was refused by the
-   classifier. `oracle/run_oracle.sh <dir>` still refuses under pressure. If a GPU refuses curves, the dump names the error on the case line.
+   `oracle/run_oracle.sh <dir>` runs it and refuses while the Mac is near swap. If a GPU refuses curves, the dump names the error on
+   the case line.
 2. On the card with `NVK_CURVES=1`: the 14 blocks of the hybrid ray-query probe plus a curve scene; compare against the float model.
 3. Cost: curves are tested with 16 pieces and about 6,600 instructions per candidate box (it was 2,800 at 8). Measure before turning anything on by default.
 

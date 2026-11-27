@@ -1,8 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Every known problem and what to do
-    url: https://nullmothsystems.com/help
-    about: Check here first - most problems have a one-step fix.
-  - name: Send logs without opening an issue
-    url: https://nullmothsystems.com/#send
-    about: Upload logs from a PC or Mac that cannot run the apps.
+    url: https://github.com/TheFormidable/nvidia-macos-driver/blob/fable/docs/TROUBLESHOOTING.md
+    about: Check here first. It also lists what to attach to an issue.
+  - name: Report a vulnerability privately
+    url: https://github.com/TheFormidable/nvidia-macos-driver/security/advisories/new
+    about: Do not open a public issue for a security problem (see SECURITY.md).
+  - name: Using the original NullMoth project's own releases?
+    url: https://github.com/nullmoth/nvidia-macos-driver/issues
+    about: Report those to the original project. Its builds differ from this fork's.

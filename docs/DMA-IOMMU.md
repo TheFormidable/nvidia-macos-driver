@@ -4,15 +4,19 @@ This page is for the owner of a machine: what the driver does when Intel VT-d (o
 mapper") sits between the GPU and memory, how to see which case a machine is in, and what has and has not been
 tried on real hardware.
 
+Status at 3.0.20: the DMA layer came in 3.0 and is on in every package. No machine with a mapper has run it; the
+fork's one test machine is an AMD Ryzen PC with an RTX 5050 ("What has not been reported from hardware"). Two later
+versions touch it: the kits for macOS before 10.11 (3.0.19) refuse a GPU behind a mapper at the self-test, and 3.0.20's
+page-off copy without the accelerator lock skips a GPU behind a mapper ("The accelerator's copies").
+
 ## Why it matters
 
 The GPU reads and writes system memory itself: the firmware it boots from, its command buffers, the pages an app
 shares with it, the copies the accelerator makes of surfaces. Every such address goes out on the PCI bus.
 
 - **Without a mapper** the address on the bus is the physical address of the page. Up to 2.9 the driver always gave
-  the GPU physical addresses, and that is correct here. This is the case on every machine the driver works on today:
-  VT-d off in the firmware, the DMAR table dropped (the installer does this on Core Ultra machines), or the mapper
-  disabled.
+  the GPU physical addresses, and that is correct here. This is the case on every machine the driver has run on so
+  far: VT-d off in the firmware, the DMAR table dropped in the boot loader, the mapper disabled, or no VT-d at all.
 - **With a mapper** every address on the bus is translated by AppleVTD. A physical address then means nothing, or
   worse, means some other device's buffer. 2.9 did exactly that. Nobody has tried 2.9 on such a machine; what to
   expect, from how VT-d works, is GPU firmware that does not boot or, worse, GPU writes landing in memory that belongs
@@ -27,7 +31,7 @@ The driver now asks IOKit, once per GPU at start, which case it is in, and acts 
 | 0, none | No mapper translates the GPU (no system mapper, or IOKit marked the GPU untranslated) | Exactly what 2.9 did: physical addresses everywhere. |
 | 1, system mapper | AppleVTD's shared space translates the GPU | Every block of system memory the GPU uses is mapped through the mapper, as the Linux driver does with an IOMMU. Each mapping is read back from the mapper's own tables before the GPU is given its address: its first and last page always, and every page (up to 4096) of the first 64 mappings and of every 64th after them. |
 | 2, device mapper | IOKit gave the GPU a translated space of its own | As mode 1, on that space. The driver never asks for one; it uses what IOKit chose. |
-| 3, refused | A mapper translates the GPU and the driver may not or cannot use it (boot-arg `nvrmdma=0`, a failed self-test, or a build that does not route the GPU's memory requests through the mapper) | The GPU is not started. This is a clean "not started", not a failed boot: the boot guard does not count it. |
+| 3, refused | A mapper translates the GPU and the driver may not or cannot use it (boot-arg `nvrmdma=0`, a failed self-test, or a build that does not route the GPU's memory requests through the mapper; in the kits for macOS before 10.11 the self-test always fails, below) | The GPU is not started. This is a clean "not started", not a failed boot: the boot guard does not count it. |
 
 In modes 1 and 2:
 - before the GPU is started, two pages are mapped and read back from the mapper, and at least one of their bus
@@ -41,6 +45,11 @@ In modes 1 and 2:
 - the accelerator's surface copies (page-off) go through a staging buffer that is itself mapped through the mapper;
   a list of raw physical pages is refused before the copy engine sees it;
 - when a GPU stops, anything still mapped for it is unmapped (and counted).
+
+Before 10.11 the mapper's tables cannot be read back: `IOMapper::mapToPhysicalAddress` arrived in 10.11. In the kits
+for 10.7 to 10.10 that 3.0.19 builds into the package, no page therefore counts as verified, the self-test fails, and
+a GPU behind a mapper is refused (mode 3), as with `nvrmdma=0`; a GPU without one is mode 0 and unaffected
+(`dmaVerify` in `kexts/NVRM/nvrm_dma.cpp`). No kit has run on a card.
 
 Sleep and wake: the driver does nothing special. According to AppleVTD's published source it keeps its tables in
 memory and turns translation back on before drivers are woken, so a mapping made before sleep is still valid after
@@ -101,6 +110,12 @@ reach the bus, and keeps the answer until NVRM refuses one of its page lists (th
 every other `nvaccel_dma_*` counter stays 0. With a mapper its copies of GPU memory to the CPU go through a staging buffer that NVRM mapped for the
 GPU, instead of raw physical addresses that the mapper would send elsewhere.
 
+Since 3.0.20 a page-off on a GPU without a mapper, where the unlocked wait may let the accelerator lock go, reads VRAM
+with the copy engine into a buffer of its own while the lock is free, and takes the lock back to write the surface
+(`nvPoCopyUnlocked` in `kexts/NVRM/accel/nvrm-accel.cpp`; boot-arg `nvaccel_pageoff_copy_locked=1` goes back). A GPU
+behind a mapper (this accelerator's answer not 0) never takes that path: its page-offs copy with the lock held, as in
+3.0.19.
+
 | Name | Meaning | Healthy |
 |---|---|---|
 | `nvaccel_dma_mode` | -1 before the first page-off; then 0 no mapper, 1 system mapper, 2 device mapper, 3 a mapper the driver may not use | 0 without VT-d |
@@ -125,18 +140,18 @@ answer).
   fails in modes 1 or 2, `nvrmdma=0` gives a clean "GPU not started" with VT-d still on, which separates the mapping
   code from everything else VT-d changes.
 
-The way back to a working desktop on a VT-d machine where modes 1 or 2 fail is to turn VT-d off (or keep the
-installer's dropped DMAR table), which gives mode 0.
+The way back to a working desktop on a VT-d machine where modes 1 or 2 fail is to turn VT-d off (or drop the DMAR
+table in the boot loader), which gives mode 0.
 
 ## What has not been reported from hardware
 
-Everything in modes 1, 2 and 3, and mode 0 too: a package of commit aa27c73 has been installed and started on one
-machine with an RTX 5050, and nothing of it has been reported from there. The DMA layer as it stands at commit 3933ff6,
-the self-test's check for an untranslated address included, was compiled and linked for macOS 15 and later on one Intel
-Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors, macOS 15,
-Xcode 26.3 with the 26.2 SDK). Its kernel imports were checked against the export lists in the published source of the
-macOS 15 and 26 kernels, and on that Mac `kmutil libraries` found every symbol NVRM imported at an earlier state of the
-branch; the decisions were tested on a host. No result of it with a real mapper has been reported:
+Nothing in modes 1, 2 and 3. On the fork's one test machine, an AMD Ryzen PC (no Intel VT-d) with an RTX 5050, the
+GPU started in every version installed there from 3.0 to 3.0.20, which mode 3 would not allow; no reading of
+`debug.nvrm_dma_mode` or of the counters from it is recorded. The DMA layer, the self-test's check for an untranslated
+address included, was compiled and linked for macOS 15 and later with Apple's tools for 3.0 (at 3933ff6 on one Mac
+with macOS 26.7 and Xcode 26.5, and on GitHub's macos-15-intel runner, Xcode 26.3 with the 26.2 SDK). Its kernel
+imports were checked against the export lists in the published source of the macOS 15 and 26 kernels, and NVRM.kext
+loads on the test machine; the decisions are tested on a host. No result of it with a real mapper has been reported:
 
 - the NVIDIA RM's own bus-address path (it is compiled into the driver and is the path Linux always uses, but no run of
   it on macOS has been reported);
@@ -145,10 +160,11 @@ branch; the decisions were tested on a host. No result of it with a real mapper 
 - surface copies through a mapped staging buffer, and the cost of mapping under load;
 - sleep and wake with live mappings.
 
-Mode 0 is the one that runs on every machine the driver supports today. There, the only new work is at GPU start:
+Mode 0 is the case of every machine the driver has run on so far. There, the only new work is at GPU start:
 two questions to IOKit about the mapper (is there a system mapper, does the GPU have one of its own), one property
 read, one lock, the read-only counters, one log line and the `nvrm-dma` property. Allocation
-options, addresses and the surface copies are those of 2.9.
+options and the addresses the GPU is given are those of 2.9 (what the surface copies changed since, such as 3.0.20's
+copy without the lock, is not the DMA layer's).
 
 ## Checking a VT-d machine (optional, with the rollback at hand)
 
@@ -158,4 +174,5 @@ options, addresses and the surface copies are those of 2.9.
    `nvrm_dma_hi` below 128 GB.
 3. Sleep and wake once: `nvrm_dma_live` unchanged, the desktop comes back.
 4. Look for AppleVTD fault lines naming the GPU (`log show --last boot | grep -i "vtd"`). Any such line is a path that
-   still sends an untranslated address; the whole line belongs in a report.
+   still sends an untranslated address; the whole line belongs in a report ([TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+   "Reporting a problem").

@@ -1,10 +1,18 @@
-# Probar el driver de desarrollo 3.0.x en una tarjeta
+# Probar el driver en una tarjeta
 
-Esta lista sirve para paquetes nuevos, incluida la 3.0.13, que no ha corrido en una tarjeta. En una RTX 5050 las
-versiones hasta la 3.0.12 se instalaron y arrancaron, las pruebas de tarjeta corrieron en la 3.0.1 y en la 3.0.7 (133
-filas, 130 pasan) y GPU Caps tiene evidencia física de alcance limitado.
-Consulta [STATUS.md](STATUS.md) y [BUILDING.es.md](BUILDING.es.md). Cada "bien" de abajo es un criterio de
-aceptación, no un resultado confirmado del árbol actual. Guarda cada resultado con la revisión exacta del paquete.
+Esta lista está escrita para la Release 2 del fork, la 3.0.20 (la Release 1 fue la 3.0.2). El fork tiene una sola
+máquina de pruebas: un hackintosh AMD Ryzen 5 5500 con una RTX 5050 (Blackwell, GB207) en macOS 26.7.3 y una pantalla
+de 1920x1080 a 100 Hz. La 3.0.20 funciona allí, compilada y firmada en ese Mac y cargada con AMFI activo mediante la vía
+de AMFIAnchor; las pruebas de tarjeta corrieron allí en la 3.0.1 y en la 3.0.7 (133 filas, 130 pasan) y GPU Caps tiene
+evidencia física de alcance limitado. El fork no ha probado macOS 15, y ninguna otra tarjeta ha ejecutado una versión
+3.0.x suya. Consulta [STATUS.md](STATUS.md) para lo que se ejecutó de verdad y [BUILDING.es.md](BUILDING.es.md) para
+los registros de compilación. Cada "bien" de abajo es un criterio de aceptación, no la afirmación de que el árbol
+actual lo cumple en tu máquina. Guarda cada resultado con la revisión exacta del paquete.
+
+Lo que añadieron las versiones 3.0.13 a 3.0.20 se comprueba en la sección 1, paso 6 (los kits para macOS 10.7 a 14),
+la sección 2, pasos 1 (la aprobación de los kexts, DLSS), 9 (escritura combinada) y 10 (la vía de AMFIAnchor), la
+sección 3, paso 4 (compartir pantalla), la sección 4, pasos 6 (ZCULL) y 7 (subidas de búferes de OpenGL), y la
+sección 6 (escritura combinada tras un reposo).
 
 Después de arrancar, valida GPU Caps únicamente mediante lecturas según [GPU-CAPS.md](GPU-CAPS.md).
 El control manual de ventiladores pertenece a NVMetrics; consulta [NVMETRICS.md](NVMETRICS.md).
@@ -52,12 +60,12 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
 
 ## 1. Antes de instalar
 
-1. **Una vuelta atrás que hayas probado.** Ten a mano el paquete descomprimido de la versión sobre la que instalas
-   (2.9): instalarlo de nuevo con su propio `install.sh` devuelve cada archivo a su sitio
-   ([BUILDING.md](BUILDING.md), "Installing the result and going back", que también dice qué hace y qué no hace
-   `uninstall.sh`). Antes de cambiar nada, el instalador copia lo que está instalado ahora (los kexts, el bundle del
-   plugin, la carpeta `/Library/GPUBundles/nvmtl` con su archivo de ajustes, la colección del kernel, el firmware) en
-   una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
+1. **Una vuelta atrás que hayas probado.** Ten a mano el paquete descomprimido del driver sobre el que instalas
+   (la Release 1, una compilación anterior o la 2.9): instalarlo de nuevo con su propio `install.sh` devuelve cada
+   archivo a su sitio ([BUILDING.md](BUILDING.md), "Installing the result and going back", que también dice qué hace y
+   qué no hace `uninstall.sh`). Antes de cambiar nada, el instalador copia lo que está instalado ahora (los kexts, el
+   bundle del plugin, la carpeta `/Library/GPUBundles/nvmtl` con su archivo de ajustes, la colección del kernel, el
+   firmware) en una carpeta nueva `/Library/NullMoth/backup-<fecha>-<hora>.<aleatorio>`, cuyo nombre imprime en su línea
    `== 4. back up what is there now -> ...`; anótalo. Si vuelves a ejecutar el instalador antes de un arranque que
    haya encendido la pantalla, la vuelta atrás sigue siendo la carpeta de la primera ejecución, y su paso `== 6b.`
    lo dice. También deja una tarea que se ejecuta en cada arranque: cuando el driver nuevo se apagó solo tras dos
@@ -70,53 +78,52 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    la que se instaló, así que no actualices macOS entre la instalación y estas pruebas. Se borra sola en el primer
    arranque después de aquel en que encontró la pantalla encendida, así que no ayuda con un problema que aparezca más
    tarde. Ten claro cómo arrancarás el Mac si el escritorio no aparece ([TROUBLESHOOTING.md](TROUBLESHOOTING.md),
-   "4. Getting back in"; las entradas de 1401 en el selector de arranque solo existen en un Mac preparado con la app
-   1401). Ten claro también cómo editarás el `config.plist` de OpenCore cuando macOS no arranque (desde la Terminal de
-   Recuperación o desde otro sistema, con la partición EFI montada): un argumento de arranque que pusiste para una
-   prueba solo se puede quitar desde allí. Activa Sesión remota (Configuración del Sistema, o Ajustes del
-   Sistema según el idioma, General, Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios
-   fallos de abajo dejan el Mac sin escritorio o con el escritorio congelado, y entonces los registros se leen por la
-   red.
+   "4. Getting back in"; `-nvoff` en los argumentos de arranque arranca macOS sin el driver). Ten claro también cómo
+   editarás el `config.plist` de OpenCore cuando macOS no arranque (desde la Terminal de Recuperación o desde otro
+   sistema, con la partición EFI montada): un argumento de arranque que pusiste para una prueba solo se puede quitar
+   desde allí. Activa Sesión remota (Configuración del Sistema, o Ajustes del Sistema según el idioma, General,
+   Compartir) y comprueba que llegas al Mac por `ssh` desde otra computadora: varios fallos de abajo dejan el Mac sin
+   escritorio o con el escritorio congelado, y entonces los registros se leen por la red.
    Bien: has arrancado el Mac una vez por esa vuelta atrás y has entrado por `ssh`. Mal: alguna de las dos no
    funciona; no sigas.
 2. **Un punto de partida limpio.** `nvram boot-args` muestra la línea `boot-args`: debe tener la línea de instalación
-   de README.md y nada más del driver salvo los ajustes que elegiste para la máquina, como `nvfbhidpi=1` (`gfxrst=4`
-   se queda si WhateverGreen lo necesita). Tu bloque de `nvrm610.conf` (paso 5) no debe tener ningún ajuste de
-   prueba. Quita lo que dejó una prueba anterior, reinicia y vuelve a comprobarlo.
-3. **Números de 2.9.** En la versión que funciona ahora, guarda lo que informa el driver, para comparar después:
+   de README.md ("Install — by hand"; en la vía de AMFIAnchor sin los dos argumentos de AMFI, sección 2, paso 10) y
+   nada más del driver salvo los ajustes que elegiste para la máquina, como `nvfbhidpi=1` (`gfxrst=4` se queda si
+   WhateverGreen lo necesita). En macOS 26 no tiene `alcid=` ni `alcverbs`: macOS 26 no tiene AppleHDA, y con
+   cualquiera de los dos el sonido de la placa no aparece (README.md, "Wiring into an existing OpenCore setup"). Tu
+   bloque de `nvrm610.conf` (paso 5) no debe tener ningún ajuste de prueba. Quita lo que dejó una prueba anterior,
+   reinicia y vuelve a comprobarlo.
+3. **Números del driver que usas ahora.** Antes de instalar, guarda lo que informa el driver, para comparar después:
 
    ```bash
-   sw_vers > ~/before-3.0.txt; nvram boot-args >> ~/before-3.0.txt
-   sysctl debug | grep -e nvrm -e nvaccel >> ~/before-3.0.txt
+   sw_vers > ~/before.txt; nvram boot-args >> ~/before.txt
+   sysctl debug | grep -e nvrm -e nvaccel >> ~/before.txt
    ```
 
    Apunta cuánto tarda el escritorio en aparecer después del selector, y el uso de CPU de WindowServer con el
    escritorio en reposo y con un video en marcha (Monitor de Actividad).
-4. **El paquete.** La versión 3.0 no tiene paquete ya compilado: compila uno a partir de esta rama
-   ([BUILDING.es.md](BUILDING.es.md), "Inicio rápido"), con el paquete de la versión 2.9 como base:
+4. **El paquete.** Usa el paquete de versión del fork (la Release 2, la 3.0.20, es una versión preliminar en la
+   [página de versiones del fork](https://github.com/TheFormidable/nvidia-macos-driver/releases)), o compila uno a
+   partir de la rama `fable` ([BUILDING.es.md](BUILDING.es.md), "Inicio rápido"); `./build.sh package` necesita el
+   paquete de la versión 2.9 como base:
 
    ```bash
    ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
    ```
 
    Prepara el paquete en `package/pkgroot` de su directorio de trabajo y un archivo comprimido
-   `nullmoth-nvidia-local-<commit>.tar.gz`, no instala nada y termina con las órdenes de este paso y de la sección 2,
-   paso 1. En el Mac Intel nombrado arriba el paquete tenía 101 archivos (214 MB), y después de la compilación nada
-   había cambiado fuera del directorio de trabajo, así que compilar no toca la vuelta atrás del paso 1. El driver
-   entero se ha compilado allí con Xcode 26.5 en macOS 26.7, y en la máquina de GitHub con Xcode 26.3 (SDK 26.2, el
-   Xcode más nuevo que funciona en macOS 15); Xcode 26.0 a 26.2 no se han probado. En Apple silicon,
-   `./build.sh deps` toma sus herramientas de Homebrew, un camino que solo se ha ejecutado contra sustitutos, y allí no
-   se ha hecho ninguna compilación completa. Nada de lo que compila `./build.sh` pide un macOS posterior a 15.0: el
-   traductor de shaders está hecho para 10.12 y posteriores, los dos programas de la caché de DLSS para 12.0, todo lo
-   demás que declara un mínimo para 15.0, y los kexts no declaran ninguno. Así que un paquete compilado en macOS 26
-   está hecho también para macOS 15; las comprobaciones de las clases de Apple de la sección 2, paso 3, deciden en cada
-   macOS en su primer arranque. En ese Mac `./build.sh deps` tardó 46,5 minutos en un directorio de trabajo vacío en
-   el commit 650db45, descargas incluidas; en el commit 3933ff6 la compilación de los 17 componentes tardó 5 minutos
-   41 segundos y el paquete 27 segundos, y el directorio de trabajo ocupaba después unos 8 GB.
-   Después, desde `pkgroot`, `sudo env CHECK=1 ./install.sh` comprueba el paquete y el Mac y no cambia nada. Que pase no
-   dice nada del firmware, que la instalación de verdad toma de la instalación anterior o descarga de NVIDIA antes de
-   cambiar nada. No se ha informado de ningún resultado suyo con un paquete hecho por `./build.sh`. Bien: su última
-   línea es `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
+   `nullmoth-nvidia-local-<commit>.tar.gz`, no instala nada, no cambia nada fuera de su directorio de trabajo (así que
+   no toca la vuelta atrás del paso 1) y termina con las órdenes de este paso y de la sección 2, paso 1. Los paquetes
+   de la 3.0.6 a la 3.0.12 y el de la 3.0.20 se compilaron en la propia máquina de la RTX 5050; BUILDING.md tiene los
+   registros de compilación y las versiones de Xcode probadas. Nada de lo que compila `./build.sh` pide un macOS
+   posterior a 15.0: el traductor de shaders está hecho para 10.12 y posteriores, los dos programas de la caché de
+   DLSS para 12.0, todo lo demás que declara un mínimo para 15.0, y los kexts no declaran ninguno. Así que un paquete
+   compilado en macOS 26 está hecho también para macOS 15 (el fork todavía no lo ha probado); las comprobaciones de
+   las clases de Apple de la sección 2, paso 3, deciden en cada macOS en su primer arranque.
+   Después, desde `pkgroot`, `shasum -a 256 -c SHA256SUMS` (todos los archivos OK) y `sudo env CHECK=1 ./install.sh`,
+   que comprueba el paquete y el Mac y no cambia nada. Que pase no dice nada del firmware, que la instalación de
+   verdad toma de la instalación anterior o descarga de NVIDIA antes de cambiar nada. Bien: su última línea es
+   `CHECK PASS (nothing changed)`. Mal: una línea `STOP:` dice qué rechazó; arréglalo primero.
 5. **Tu archivo de ajustes.** Léelo antes de instalar: `cat /Library/GPUBundles/nvmtl/nvrm610.conf`. El instalador
    reemplaza la carpeta `/Library/GPUBundles/nvmtl` entera por la del paquete, y de tu archivo anterior solo vuelve a
    poner, al final del archivo del paquete, las líneas que están entre `# --- my settings, kept on update ---` y
@@ -129,26 +136,50 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    instalar (el instalador la conserva), o en el archivo nuevo después. Para ver cuáles de tus líneas no son del
    paquete, compara tu archivo con el del paquete, `Library/GPUBundles/nvmtl/nvrm610.conf` dentro de su `pkgroot`.
    Volver a 2.9 instalándola de nuevo también conserva solo ese bloque.
+6. **Solo en macOS 10.7 a 14: el kit que elige el paquete (3.0.19).** Un paquete compilado con los kits para macOS
+   anteriores (`NM_LEGACY_KITS`, [BUILDING.es.md](BUILDING.es.md)) lleva un kit por versión de la 10.7 a la 14, e
+   `install.sh` instala el del macOS en el que se ejecuta. Ningún kit ha funcionado todavía en una tarjeta ni en un
+   macOS anterior, así que cualquier resultado aquí es nuevo. Desde `pkgroot`,
+   `bash pick_kit.sh "$(sw_vers -productVersion)" .` no cambia nada e imprime `modern` en 15 y 26, `legacy <kit>`
+   en 10.7 a 14 y `none <motivo>` en otro caso (también para un paquete compilado sin los kits). Después,
+   `sudo env CHECK=1 ./install.sh` imprime `== 1. this Mac: macOS <versión>, so the kit built for macOS <kit>` y
+   `ok  the kit for macOS <kit> matches SHA256SUMS (<n> files)`, y ejecuta el propio `install-legacy.sh` del kit en
+   modo de comprobación, que termina con `CHECK PASS (nothing changed)`. Bien: el `<kit>` nombrado es la versión que
+   usas, y esa última línea. Mal: otra versión, una línea `none` de un paquete que tiene los kits, o una línea `STOP`;
+   envía la salida con `sw_vers`. El instalador del kit dice qué argumentos de arranque añadir; el resto de esta lista
+   está escrito para macOS 15 y 26.
 
 ## 2. El primer arranque
 
-1. **La tarjeta arrancó.** Instala y reinicia. Bien: la ventana de inicio de sesión aparece en la tarjeta NVIDIA;
+1. **La tarjeta arrancó.** Instala con `sudo ./install.sh` y lee el final de su salida antes de reiniciar. Desde la
+   3.0.19 el instalador registra él mismo la aprobación de los kexts en la base de datos KextPolicy de macOS, así que
+   debe decir `The driver's extensions are approved (this install recorded the approval, or you had already allowed
+   them): one restart is enough.`, y un solo reinicio carga entonces el driver sin ningún **Permitir** en Ajustes del
+   Sistema > Privacidad y seguridad. Donde esa base de datos es de solo lectura dice `macOS's approval database was
+   read-only here, so it will ask: allow the extensions in System Settings > Privacy & Security, then reboot once
+   more.`: hazlo, y di en el informe qué mensaje te salió (todavía no se ha probado una primera instalación en un Mac
+   que nunca permitió estos kexts). Su salida también debe tener el paso `== DLSS 4 / 4.5 files` (unos 750 MB la
+   primera vez) salvo que pusieras `NULLMOTH_DLSS=0`; la línea `this package's SHA256SUMS does not cover the DLSS
+   step; skipping it` es el fallo que corrigió la 3.0.19. Reinicia.
+   Bien: la ventana de inicio de sesión aparece en la tarjeta NVIDIA;
    `kmutil showloaded --list-only | grep nullmoth` muestra las líneas de NVRM, NVAccel, NVRMFB y NVRMAGDC, y en
    macOS 26 también `com.nullmoth.NMXAudio`, el driver de audio que el instalador agrega allí para un controlador HD
    Audio;
    `system_profiler SPDisplaysDataType` muestra la GeForce con Metal soportado. Mal: no aparece la ventana de inicio
    de sesión (la pantalla conserva la última imagen del arranque, o queda en negro), o el Mac se reinicia solo y
-   vuelve a arrancar con 2.9. En el primer caso busca, por `ssh`, en el registro del kernel `NOT STARTING THE GPU` (la
-   línea da el motivo) y sigue con los pasos 3 y 5 de abajo, que distinguen los motivos. En el segundo,
-   `cat /Library/NullMoth/lastgood.log` dice por qué la tarea del instalador devolvió 2.9 (el paso 3 explica el
-   rechazo que puede nombrar); envía ese archivo con `sw_vers`. Una pantalla negra con solo el puntero, o una ventana
+   vuelve a arrancar con el driver anterior (y, aparte de estos, un instalador que dijo que los kexts están aprobados
+   mientras macOS sigue pidiendo permitirlos tras el reinicio: envía su salida con `sw_vers`). En el primer caso
+   busca, por `ssh`, en el registro del kernel `NOT STARTING THE GPU` (la línea da el motivo) y sigue con los pasos 3
+   y 5 de abajo, que distinguen los motivos. En el segundo, `cat /Library/NullMoth/lastgood.log` dice por qué la
+   tarea del instalador devolvió el driver anterior (el paso 3 explica el rechazo que puede nombrar); envía ese
+   archivo con `sw_vers`. Una pantalla negra con solo el puntero, o una ventana
    de inicio de sesión que vuelve una y otra vez, es WindowServer cayéndose: `cat /Library/NullMoth/bootguard.log`
    por `ssh` lo dice (`WindowServer keeps dying ...`). El driver queda entonces apagado para el arranque siguiente, y
-   la tarea del instalador, mientras siga ahí, devuelve 2.9 en ese arranque; el Mac se reinicia solo únicamente desde
-   la ventana de inicio de sesión y únicamente tras la primera de esas caídas en serie, así que con una sesión abierta
-   ejecuta `sudo shutdown -r now`. El mismo registro dice cómo se contó cada arranque que llegó a un escritorio:
-   `... this start counts as good` termina la prueba de la instalación; `... with no NVIDIA driver running; the
-   start count is cleared and the install's trial goes on` quiere decir que el driver no se ejecutó en ese arranque;
+   la tarea del instalador, mientras siga ahí, devuelve el driver anterior en ese arranque; el Mac se reinicia solo
+   únicamente desde la ventana de inicio de sesión y únicamente tras la primera de esas caídas en serie, así que con una
+   sesión abierta ejecuta `sudo shutdown -r now`. El mismo registro dice cómo se contó cada arranque que llegó a un
+   escritorio: `... this start counts as good` termina la prueba de la instalación; `... with no NVIDIA driver running;
+   the start count is cleared and the install's trial goes on` quiere decir que el driver no se ejecutó en ese arranque;
    `... the driver shows no picture and no other GPU has a display; this start keeps its count` quiere decir que NVRM
    arrancó la tarjeta y que 45 segundos después de aparecer WindowServer no había nada encendido (dos arranques así
    seguidos apagan el driver).
@@ -165,14 +196,14 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    Ejecútalas en el escritorio que apareció tras la instalación. La primera nombra `NVRMNVDAFramebuffer` cuando el
    driver dibuja la pantalla (bien) e `IONDRVFramebuffer` cuando lo hace el framebuffer de firmware de Apple (mal: el
    driver rechazó la tarjeta, el paso 3 dice por qué). La segunda dice qué hizo entonces la tarea del instalador. En
-   un Mac así reinicia sola a 2.9 a los pocos segundos del arranque, también tras un inicio de sesión automático: el
-   archivo termina con `previous driver restored; restarting`, o, si ya habías iniciado sesión en el escritorio lento
-   de Apple, con `... the previous driver is back; restarting`. Tras ese reinicio la primera orden nombra el
-   framebuffer de 2.9, así que lee el archivo. Solo cuando otra GPU muestra una pantalla y has iniciado sesión te deja
-   a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous driver starts at the
-   next restart`). Envía el archivo con `sw_vers`. Si la primera orden nombra `NVRMBootFB`, el driver está apagado en
-   este arranque (dos arranques sin pantalla, las caídas en serie de WindowServer, `nullmoth-remove` o `-nvoff`) y no
-   se devolvió nada: instala 2.9 de nuevo.
+   un Mac así reinicia sola al driver anterior a los pocos segundos del arranque, también tras un inicio de sesión
+   automático: el archivo termina con `previous driver restored; restarting`, o, si ya habías iniciado sesión en el
+   escritorio lento de Apple, con `... the previous driver is back; restarting`. Tras ese reinicio la primera orden
+   nombra el framebuffer del driver anterior, así que lee el archivo. Solo cuando otra GPU muestra una pantalla y has
+   iniciado sesión te deja a ti el reinicio (el archivo termina con `... so the Mac is not restarted now: the previous
+   driver starts at the next restart`). Envía el archivo con `sw_vers`. Si la primera orden nombra `NVRMBootFB`, el
+   driver está apagado en este arranque (dos arranques sin pantalla, las caídas en serie de WindowServer,
+   `nullmoth-remove` o `-nvoff`) y no se devolvió nada: instala de nuevo el paquete anterior.
 2. **Ningún interruptor olvidado.**
    `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`. Bien:
    `debug.nvrm_switches_nondefault` es 0. Mal: hay puesto un nombre marcado con `!`; quítalo de `boot-args` y
@@ -208,9 +239,9 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
        del instalador de la sección 1, paso 1, busca el rechazo cada cinco segundos durante los primeros cuatro
        minutos del arranque; copia las líneas `nvrm-layout` y `nvrmfb-layout` en `/Library/NullMoth/lastgood.log` y,
        en la compilación de macOS en la que se instaló, devuelve el driver anterior y reinicia, así que vuelves a
-       estar en 2.9 y ese archivo es lo que hay que enviar (solo cuando otra GPU muestra una pantalla y has iniciado
-       sesión te deja a ti el reinicio, y el archivo lo dice; el framebuffer de firmware de Apple en esta tarjeta no
-       detiene el reinicio, ni siquiera tras un inicio de sesión automático). Sin la tarea (una primera
+       estar en el driver anterior y ese archivo es lo que hay que enviar (solo cuando otra GPU muestra una pantalla y
+       has iniciado sesión te deja a ti el reinicio, y el archivo lo dice; el framebuffer de firmware de Apple en esta
+       tarjeta no detiene el reinicio, ni siquiera tras un inicio de sesión automático). Sin la tarea (una primera
        instalación, o cuando la tarea ya se borró sola en el arranque siguiente a uno que encendió la pantalla), o en
        otra compilación de macOS, no se devuelve nada, y cada arranque termina como este hasta que uses `nvlayout=0` o
        quites el driver. `debug.nvrmfb_layout` no existe (el framebuffer no arrancó).
@@ -234,11 +265,13 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
      en su lugar `/Library/NullMoth/lastgood.log`). Después arranca una vez con `nvlayout=0` solo para ver si
      funciona lo demás (la comprobación se sigue haciendo, y su línea empieza entonces por
      `overridden (nvlayout=0):`), y vuelve a quitarlo (TROUBLESHOOTING.md explica qué arriesga ese arranque). Si la
-     tarea ya devolvió 2.9, eso significa instalar de nuevo con `nvlayout=0` ya puesto en los argumentos de arranque.
+     tarea ya devolvió el driver anterior, eso significa instalar de nuevo con `nvlayout=0` ya puesto en los argumentos
+     de arranque.
      Si ese arranque falla, ningún otro interruptor ayuda (con `nvlayout=0` también arranca el framebuffer que muestra
      la imagen del firmware con el driver apagado): quita `nvlayout=0` del `config.plist` desde fuera de macOS.
 4. **Tiempo de arranque.** `sysctl debug | grep nvrm_boot_` da cada fase del arranque en milisegundos. Bien: el
-   escritorio aparece no más tarde que con 2.9, y `debug.nvrm_boot_heads_why` no es 7 con una pantalla conectada.
+   escritorio aparece no más tarde que con el driver anterior (sección 1, paso 3), y `debug.nvrm_boot_heads_why` no
+   es 7 con una pantalla conectada.
    Mal: aparece más tarde, o 7 con una pantalla conectada; arranca una vez con `-nvrmoldwaits` y envía los dos juegos
    de números.
 5. **DMA (VT-d).** `sysctl debug.nvrm_dma_mode` e `ioreg -l -w0 | grep nvrm-dma`, una vez, para que el informe diga
@@ -270,10 +303,48 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    motivos). Mal: cualquier otro valor; envía las líneas `NVRM-xnu: fence:`.
 8. **Canales.** `sysctl debug | grep nvrm_chan_`. Bien: todo 0. Mal: cualquier otra cosa en un escritorio que todavía
    no ha hecho nada; envíalo con `sysctl debug.nvrm_xid_count`.
+9. **Escritura combinada en máquinas AMD (3.0.13).** Donde la tabla de atributos de página del kernel no tiene
+   escritura combinada (write-combining) en la entrada 6 (el parche "Fix PAT" de AMD_Vanilla), NVRM vuelve a ponerla en
+   esa entrada en todas las CPU al arrancar:
+
+   ```bash
+   sysctl debug.nvrm_pat_found debug.nvrm_pat_wc debug.nvrm_pat_why debug.nvrm_pat_passes debug.nvrm_pat_cpus hw.ncpu
+   ```
+
+   Bien: `debug.nvrm_pat_wc` 1. En una máquina con ese parche, además, `debug.nvrm_pat_passes` 1,
+   `debug.nvrm_pat_cpus` igual a `hw.ncpu`, y la línea del kernel `NVRM-xnu: page attribute table (start): entry 6 set
+   to write-combining on <n> CPU(s); <n> CPU(s) have it now ...`; con la tabla por defecto de AMD_Vanilla,
+   `debug.nvrm_pat_why` empieza por `0x0001010600070106` (`debug.nvrm_pat_found`, impreso en decimal, es la tabla que
+   escribió el kernel). Donde la entrada 6 ya era de escritura combinada (un Mac de verdad, una máquina sin el parche),
+   `debug.nvrm_pat_passes` vale 0: no se escribió nada. Mal: `debug.nvrm_pat_wc` 0 sin tener puesto `nvpatwc=0`,
+   `debug.nvrm_pat_cpus` por debajo de `hw.ncpu`, o un arranque que se cuelga o da un kernel panic donde el driver
+   anterior no lo hacía: arranca una vez con `nvpatwc=0` (la tabla se queda como la escribió el kernel; desde fuera de
+   macOS si no arranca) y envía los valores y las líneas `NVRM-xnu: page attribute table`. La sección 6 los vuelve a
+   leer tras un reposo.
+10. **Solo en la vía de AMFIAnchor (experimental).** Esta vía carga la pila gráfica con AMFI activo, sin
+    `amfi_get_out_of_my_way=0x1 amfi=0x80`: los bundles van firmados por tu propia autoridad certificadora (CA), que
+    OpenCore registra mediante Lilu y [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) (b00t0x)
+    ([SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)). Conserva una EFI que todavía tenga los dos
+    argumentos de AMFI, y arranca una vez desde ella antes (sección 1, paso 1). Tras un arranque por esta vía:
+
+    ```bash
+    ioreg -r -c AMFIAnchor -l | grep -E 'InstallStatus|LoadedAnchors'
+    sysctl -n kern.bootargs
+    log show --last boot --predicate 'eventMessage CONTAINS "Failed to create MetalDevice" OR eventMessage CONTAINS "mapping process is a platform binary"'
+    system_profiler SPDisplaysDataType
+    ```
+
+    Bien: `InstallStatus` 1 y tu ancla en `LoadedAnchors`; `kern.bootargs` no tiene ni `amfi_get_out_of_my_way` ni
+    `amfi=`; el `log show` no encuentra ninguna de esas líneas; `system_profiler` muestra la GeForce manejando la
+    pantalla con Metal. La máquina de pruebas mostró esto en su primer arranque por esta vía (2026-11-26), y la 3.0.20
+    funciona así allí. Después recorre las secciones 3 a 6 y di en el informe que AMFI estaba activo: no se han
+    validado en esta vía los arranques repetidos, el reposo y la activación, los juegos, ni App Store e iMessage. Mal:
+    cualquiera de estos resultados es distinto; arranca desde la EFI con los argumentos de AMFI y envía las cuatro
+    salidas con `sw_vers`.
 
 ## 3. El escritorio
 
-1. **Grabar la pantalla: la primera prueba que solo una tarjeta puede hacer.** Graba la pantalla (o compártela)
+1. **Grabar la pantalla (la espera de page-off de la 3.0).** Graba la pantalla (o compártela)
    durante diez minutos mientras arrastras ventanas sobre un video en marcha y abres Mission Control. Una captura o
    una grabación espera ahora al trabajo de GPU de WindowServer sin tener el cerrojo del acelerador; si el código de
    Apple mantiene durante esa espera otro cerrojo que también necesita un hilo con el cerrojo del acelerador, el
@@ -301,6 +372,24 @@ OpenCore setup") y necesitan reiniciar. Quita cada ajuste de prueba cuando termi
    tirón de hasta 100 ms por la detenida, que suma uno a `debug.nvrm_fence_expired_cpu` y uno a
    `debug.nvrm_fence_strikes` (aquí es lo esperado, a diferencia del punto 2). Mal: el escritorio se atasca, o
    `debug.nvrm_fence_state` pasa a 2.
+4. **Compartir una ventana con un programa que la lee con el procesador (3.0.20).** Firefox, OBS, Zoom y otros
+   programas que leen los fotogramas capturados con el procesador hacen un page-off por fotograma; desde la 3.0.20 su
+   copia desde la memoria de vídeo se hace sin el cerrojo del acelerador, así que WindowServer ya no espera detrás de
+   ella (los navegadores Chromium leen los fotogramas en la GPU y nunca usaron este camino). Comparte una ventana con
+   una imagen en movimiento desde Firefox (una página WebRTC con `getDisplayMedia`, o una llamada), o grábala con OBS,
+   durante un minuto, y ejecuta `sysctl debug | grep nvaccel_pageoff_copy` antes y después. Bien:
+   `debug.nvaccel_pageoff_copy_unlocked` 1; `debug.nvaccel_pageoff_copy_unlocked_ok` sube mientras dura la compartición
+   (en la RTX 5050 con la 3.0.20, 809 de 835 page-offs en diez segundos de una compartición desde Firefox); la
+   compartición muestra el fotograma actual y se mueve con fluidez. `nvaccel_pageoff_copy_unlocked_changed` y
+   `_already` por encima de 0 no son un fallo (cada uno cuenta una copia descartada y hecha otra vez con el cerrojo:
+   13 en esa prueba), ni tampoco `_vm_waits` (una liberación de memoria de vídeo esperó a la copia que la leía);
+   `_failed` o `_nobuf` por encima de 0 dejan bien la imagen (esos page-offs copian con el cerrojo), pero envíalo. Con
+   VT-d activo (`debug.nvrm_dma_mode` 1 o 2, sección 2, paso 5), y para los planos de una superficie de dos planos, la
+   copia sigue con el cerrojo como antes y `_ok` no sube. Google Meet en Firefox y Safari se queda en 5 fotogramas por
+   segundo: Meet pide eso a todo navegador que no se presenta como Chrome ([TROUBLESHOOTING.md](TROUBLESHOOTING.md));
+   no es el driver. Mal: la compartición muestra un fotograma viejo o equivocado, o el escritorio se congela; arranca
+   una vez con `nvaccel_pageoff_copy_locked=1` (la copia mantiene el cerrojo, como en la 3.0.19) y di si desaparece.
+   Envía `sysctl debug | grep nvaccel_pageoff` y las líneas `NVAccel: page-off:` del kernel.
 
 ### Superficies de dos planos
 
@@ -333,8 +422,8 @@ largas que miden este camino.
 
    Bien: `nvrm_evt_clients` 2 o más (las aplicaciones duermen en el evento, no solo WindowServer); la mayoría de las
    esperas dormidas acaban despertadas; `nvrm_evt_user_missed` pequeño al lado de `nvrm_evt_woken`;
-   `nvrm_evt_user_fallbacks` y `nvrm_evt_capped` 0; el uso de CPU de la aplicación menor que con 2.9 o igual, y los
-   fotogramas por segundo iguales. Mal: más tirones o más CPU que con 2.9, o `nvrm_evt_user_fallbacks` por encima de
+   `nvrm_evt_user_fallbacks` y `nvrm_evt_capped` 0; el uso de CPU de la aplicación menor que antes o igual, y los
+   fotogramas por segundo iguales. Mal: más tirones o más CPU que antes, o `nvrm_evt_user_fallbacks` por encima de
    0 (esto vale para diez minutos sin ningún cambio de pantalla; si entre medias la pantalla o el Mac se duermen, una
    subida suya seguida de nuevas subidas de `nvrm_evt_woken` es el proceso que vuelve al evento, no un fallo, pero no
    se conoce nada que provoque esa subida: repórtala diciendo qué hacía la máquina). Lanza la aplicación una vez desde
@@ -359,15 +448,16 @@ largas que miden este camino.
    límite de memoria; una aplicación que deja un búfer de órdenes sin confirmar (commit) retiene toda textura liberada
    después de él hasta que lo confirma o lo descarta, o hasta 1024 envíos después; la ranura bindless de una textura
    liberada sigue la regla anterior.
-4. **Dibujo.** Juega a los juegos y usa las aplicaciones que usabas con 2.9, en RTX 50 sobre todo (el compilador de
-   shaders lleva las correcciones posteriores de Mesa). Bien: la misma imagen que con 2.9 o mejor; los shaders se
-   compilan otra vez una vez, así que el primer arranque de cada uno tarda más. Mal: un fallo de dibujo que 2.9 no
-   tenía; envíalo con el nombre del juego y la tarjeta. Si compilas desde el código fuente, `NVK_SKIP_PATCHES` compila
+4. **Dibujo.** Juega a los juegos y usa las aplicaciones que usabas antes, en RTX 50 sobre todo (el compilador de
+   shaders lleva las correcciones posteriores de Mesa). Bien: la misma imagen que antes o mejor; los shaders se
+   compilan otra vez una vez, así que el primer arranque de cada uno tarda más. Mal: un fallo de dibujo que antes no
+   había; envíalo con el nombre del juego y la tarjeta. Si compilas desde el código fuente, `NVK_SKIP_PATCHES` compila
    NVK sin uno de los parches del compilador para encontrar cuál lo causa
    ([NVK-BASE-AND-HEADERS.md](NVK-BASE-AND-HEADERS.md)).
-5. **OpenGL (macOS 15.5 o posterior).** El OpenGL nativo a través de Zink aún no se ha ejecutado en un Mac con este
-   árbol, y la disposición de GLEngine en la que se apoya se registró solo en macOS 15.8.1 (24H32) y 26.7.1 (25G241).
-   Primero mira qué renderizador nombró el acelerador:
+5. **OpenGL (macOS 15.5 o posterior).** El OpenGL nativo a través de Zink funciona en la RTX 5050 con macOS 26.7.3
+   desde la 3.0.6, pero la disposición de GLEngine en la que se apoya se registró solo en macOS 15.8.1 (24H32) y
+   26.7.1 (25G241), así que en otra compilación decide la guarda de la disposición. Primero mira qué renderizador
+   nombró el acelerador:
 
    ```bash
    log show --last boot --predicate 'eventMessage CONTAINS "NVAccel: OpenGL:"'
@@ -375,7 +465,7 @@ largas que miden este camino.
 
    Nombra `NVKZinkGLDriver (Zink on NVK)`, o `AppleMetalOpenGLRenderer` con `nvzink=0` o antes de macOS 15.5. Luego
    abre una aplicación OpenGL desde Terminal (un juego que use OpenGL, o Minecraft con su renderizador OpenGL) y
-   guarda lo que escribe. Bien: dibuja como con 2.9 y no escribe ninguna línea que empiece por `NVKZinkGLDriver:` ni
+   guarda lo que escribe. Bien: dibuja como antes y no escribe ninguna línea que empiece por `NVKZinkGLDriver:` ni
    por `NVK Zink:`. Una línea `NVK Zink: OpenGL stays Apple's; GLEngine's private layout does not match the record
    (...)` quiere decir que el adaptador encontró distinta la disposición de esta compilación y dejó un contexto OpenGL
    de la aplicación en el OpenGL de Apple, como debe. La línea se escribe solo para el primer contexto rechazado en
@@ -400,10 +490,31 @@ largas que miden este camino.
    `sudo ./uninstall.sh` de este paquete: los instaladores de esos paquetes no conocen
    `/Library/GPUBundles/NVKZinkGLDriver.bundle` y lo dejan en su sitio. Su acelerador no lo nombra, así que no se
    carga, y `sudo rm -rf /Library/GPUBundles/NVKZinkGLDriver.bundle` lo quita.
+6. **Z jerárquico (ZCULL, 3.0.17).** NVK descarta los fragmentos ocultos detrás de una profundidad ya dibujada, en todo
+   proceso salvo WindowServer. Abre un juego Vulkan, OpenGL o Metal desde Terminal con
+   `NVMTL_PROCESS_ENV=1 NVK_ZCULL_LOG=1` delante de su orden: NVK escribe una línea por dispositivo,
+   `nvrm: zcull on (...)` con las cifras del RM, o `nvrm: zcull off: <motivo> (...)`. Bien: `zcull on`, y el juego
+   dibuja como antes: nada se ve a través de las paredes, ninguna profundidad parpadea. `off: NVK_ZCULL=0` u
+   `off: NVRM_610_ZCULL=0` es lo que dan esos ajustes; `off: GR_GET_ZCULL_INFO failed`, `off: no ZCULL context buffer`
+   u `off: figures out of range` quiere decir que el RM no dio lo que NVK necesita: envía la línea con la tarjeta.
+   Mal: cosas dibujadas a través de las paredes o una profundidad que parpadea; pon `NVK_ZCULL=0` en tu bloque de
+   `nvrm610.conf`, abre de nuevo el juego y di si desaparece. Lo que gana ZCULL no se ha medido: los fotogramas por
+   segundo en la misma escena con y sin `NVK_ZCULL=0` son bienvenidos.
+7. **Subidas de búferes en OpenGL (3.0.16).** En OpenGL con Zink, un `glBufferSubData` (o un `glBufferData` del
+   mismo tamaño) que haría esperar a la GPU al hilo del juego pasa en su lugar por un búfer intermedio (staging).
+   Bien: los juegos OpenGL dibujan como antes. Donde los fotogramas por segundo de un juego caen mientras la GPU está
+   por debajo del 80 % más o menos (ATM10 con un paquete de shaders, cuyo hilo de dibujo pasaba ahí del 19 al 25 % de
+   su tiempo esperando en la 3.0.14), compara la misma escena tal como queda instalado y con
+   `NVK_ZINK_SUBDATA_STAGE=0` en tu bloque de `nvrm610.conf` (abre de nuevo el juego entre una y otra): mientras la
+   3.0.16 estuvo instalada la tarjeta no mostró esa espera (CHANGELOG.md, 3.0.16), así que esa comparación todavía
+   falta. Mal: geometría, texto u otros datos que salen mal o con un fotograma de retraso y que desaparecen con
+   `NVK_ZINK_SUBDATA_STAGE=0` (un programa que lee un búfer que mantiene mapeado justo después de `glBufferSubData`,
+   sin una barrera (fence), ve los bytes viejos con el búfer intermedio); envía el nombre del juego.
 
 ## 5. Video
 
-1. **Qué decodificador hizo los fotogramas (RTX 50).** Reproduce un video H.264 en Safari, y después:
+1. **Qué decodificador hizo los fotogramas (RTX 50).** RTX 50 no tiene decodificación por hardware de VP9 ni de AV1
+   con este driver. Reproduce un video H.264 en Safari, y después:
 
    ```bash
    log show --last 10m --predicate 'eventMessage CONTAINS "decode self-test"'
@@ -433,8 +544,8 @@ largas que miden este camino.
    proceso que carga la biblioteca escribe entonces `/tmp/nvencvt-<pid>.log`. El servicio de decodificación funciona
    en un sandbox y puede que no se le permita: si no aparece ese archivo para él, eso no dice nada de la prueba, cuyo
    veredicto es la línea del registro del sistema de arriba.
-2. **RTX 30 y 40.** Reproduce videos H.264, HEVC, VP9 y AV1 en Safari y QuickTime. Bien: como con 2.9. Mal: un video
-   que se veía con 2.9 no se ve; envía los datos del video y
+2. **RTX 30 y 40.** Reproduce videos H.264, HEVC, VP9 y AV1 en Safari y QuickTime. Bien: como antes. Mal: un video
+   que se veía antes no se ve; envía los datos del video y
    `log show --last 10m --predicate 'eventMessage CONTAINS "nvencvt"'`.
 
 ## 6. Reposo y activación
@@ -448,6 +559,11 @@ largas que miden este camino.
    un reposo sin nada más en marcha. Mal: pantalla negra o congelada tras la activación, `debug.nvrm_fence_state` 3
    (la GPU no se reanudó), o una aplicación que perdió su dispositivo; envía las líneas `NVRM-xnu:` y `NVRM-fb:` de
    ese arranque ([SLEEP-WAKE.md](SLEEP-WAKE.md) las enumera).
+2. Después de los reposos, `sysctl debug.nvrm_pat_passes debug.nvrm_pat_cpus hw.ncpu` (sección 2, paso 9). Donde
+   `debug.nvrm_pat_passes` valía 1 tras el arranque, sube uno por cada reposo: el kernel parcheado vuelve a escribir
+   su propia tabla en cada activación, y NVRM vuelve a poner la entrada 6 antes de que la GPU se reanude (línea del
+   kernel `NVRM-xnu: page attribute table (wake): ...`). Bien: `debug.nvrm_pat_cpus` sigue igual a `hw.ncpu`. Mal: es
+   menor; envía los valores y las líneas `NVRM-xnu: page attribute table`, y prueba un arranque con `nvpatwc=0`.
 
 ## 7. Dos GPU
 
@@ -463,11 +579,11 @@ tarjeta en esos contadores, o una activación pierde una; envía el registro del
 
 `tools/card_selftest.py` ejecuta las comprobaciones en la tarjeta de las partes nuevas (Vulkan nativo, OpenGL nativo
 con Zink, el plugin de Metal y el traductor) y de los cambios propios de la versión 3.0.1 en una sola pasada sin
-atención, en el Mac con el paquete instalado y su driver cargado. Se ha ejecutado una vez en una tarjeta, en macOS
-26.7.3 (25G342) con el paquete de la versión 3.0.1. Desde entonces se añadió `install.plugin-translator`, se reescribió
-el caso `abarray-c` de `xlate.paths-abarray`, que el compilador de Apple rechazó allí, y `plugin.photobooth-surface`,
-que no se compiló allí, enlaza ahora CoreGraphics: estas todavía no se han ejecutado en una tarjeta. Su prueba de host
-`tools/test_card_selftest.py` solo se ha ejecutado en Linux.
+atención, en el Mac con el paquete instalado y su driver cargado. Se ha ejecutado dos veces en la RTX 5050 con macOS
+26.7.3: con el paquete de la versión 3.0.1, y en 9682b3a2 (3.0.7), donde de sus 134 filas se ejecutaron 133, pasaron
+130 y fallaron 3 (`zink.win-thread`, el caso "limit" de `v301.async-upload` y `zink.migrate`; CHANGELOG.md, 3.0.7,
+"What ran where"), y se omitió `vulkan.smoke-sdl` (necesita SDL3). No hay constancia de ninguna pasada posterior a la
+3.0.7. Su prueba de host es `tools/test_card_selftest.py`.
 
 Hay 134 comprobaciones en seis partes: `install`, `xlate`, `plugin`, `vulkan`, `zink` y `v301`. Las diez de `v301`
 (`tools/card/checks_v301.py`) comprueban los cambios de la versión 3.0.1: la subida asíncrona de replaceRegion y la
@@ -506,9 +622,8 @@ Solo un rechazo antes de crear la carpeta (una carpeta de salida o un archivo de
 una opción equivocada (salida 2) no deja `DONE`; lo dice el archivo de salida. `--list` muestra cada comprobación y no
 compila nada; `--plan` mira las condiciones del párrafo siguiente, todas menos la sonda de Metal, y muestra qué se
 compilaría y ejecutaría, sin ningún programa de GPU; `--no-window` deja fuera las comprobaciones que abren una ventana;
-`--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit del paquete instalado
-cuando no es el de por defecto. El de por defecto es el commit de la versión 3.0: para un paquete de la versión 3.0.1
-o posterior, da el commit con el que se compiló.
+`--only REGEX` ejecuta solo las comprobaciones cuyo id coincide; `--expect COMMIT` da el commit con el que se compiló
+el paquete instalado. Dalo siempre: el de por defecto es el commit de la versión 3.0.
 
 Antes de compilar ninguna comprobación rechaza la pasada (salida 3) salvo que la carpeta de salida esté dentro de
 `~/nullmoth-claude`, fuera de `src` y de `build2`, vacía o inexistente y con 2 GB libres; el checkout esté limpio y sus
@@ -559,15 +674,17 @@ solo mientras se ejecutan.
 
 ## Las vueltas atrás
 
-Una por cambio; cada una devuelve el comportamiento de 2.9 solo de ese cambio. Están para saber si un cambio está
-detrás de un problema, no para dejarlas puestas. Un argumento de arranque actúa en el siguiente reinicio: los cuatro
+Una por cambio; cada una devuelve el comportamiento de antes solo de ese cambio (el de 2.9 para los cambios de la
+3.0, el de la versión que nombra la fila para los posteriores). Están para saber si un cambio está detrás de un
+problema, no para dejarlas puestas. Un argumento de arranque actúa en el siguiente reinicio: los cuatro
 kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantiene cargado desde que arrancó
 (`kmutil unload` lo rechaza hasta el siguiente reinicio).
 
 | Cambio | Vuelta atrás | Dónde |
 |---|---|---|
 | Valla de superficies | `nvrmfence=0` (la sincronización de superficies es la de 2.9; la valla sigue respondiendo a un proceso que pregunta si está activa, y NVK sigue abriendo su conexión) | argumento de arranque |
-| Espera de page-off sin el cerrojo del acelerador | `nvaccel_pageoff_locked=1` | argumento de arranque |
+| Espera de page-off sin el cerrojo del acelerador | `nvaccel_pageoff_locked=1` (entonces la copia también mantiene el cerrojo) | argumento de arranque |
+| Copia de page-off sin el cerrojo del acelerador (3.0.20) | `nvaccel_pageoff_copy_locked=1` (la copia mantiene el cerrojo, como en la 3.0.19) | argumento de arranque |
 | Superficies de dos planos en VRAM | `nvaccel_surf_planes=0` | argumento de arranque |
 | Comprobaciones de las clases de Apple | `nvlayout=0` | argumento de arranque |
 | Esperas del arranque | `-nvrmoldwaits` | argumento de arranque |
@@ -585,19 +702,34 @@ kexts no se pueden descargar y volver a cargar a mano, porque cada uno se mantie
 | Texturas de video 4:2:2 (fotogramas de cámara) | `NVMTL_YUV422=0` (las texturas 4:2:2 se rechazan) | `nvrm610.conf` |
 | OpenGL nativo a través de Zink | `nvzink=0` (el OpenGL de Apple sobre Metal para todas las aplicaciones) | argumento de arranque |
 | Correcciones del compilador de NVK | `NVK_SKIP_PATCHES="<nombres de parches>"` | al compilar desde el código fuente |
+| Escritura combinada en la tabla de atributos de página (3.0.13) | `nvpatwc=0` (la tabla como la escribió el kernel, como en la 3.0.12) | argumento de arranque |
+| Archivos de DLSS que descarga el instalador (3.0.13) | `sudo env NULLMOTH_DLSS=0 ./install.sh` se salta el paso | instalador |
+| Zink: glBufferSubData a través de un búfer intermedio (3.0.16) | `NVK_ZINK_SUBDATA_STAGE=0` (como en la 3.0.14) | `nvrm610.conf` |
+| Z jerárquico (ZCULL) en NVK (3.0.17) | `NVK_ZCULL=0` (sin ZCULL, como en la 3.0.16) | `nvrm610.conf` |
 
-CHANGELOG.md, "The ways back", y SWITCHES.md dicen qué devuelve cada una en detalle.
+Las vueltas atrás de la 3.0.1 a la 3.0.12 (la presentación de Zink y del runtime de Vulkan, la auditoría de la
+3.0.6, los cambios tomados de los pull requests del proyecto original) están en README.md, "What is on by default,
+and the ways back". CHANGELOG.md, "The ways back" de cada versión, y SWITCHES.md dicen qué devuelve cada una en
+detalle.
 
-## Qué adjuntar a un informe
+## Qué adjuntar a una incidencia
 
+Abre una incidencia (issue) en el [gestor del fork](https://github.com/TheFormidable/nvidia-macos-driver/issues) (no en
+el del proyecto original: sus compilaciones son otras) y adjunta:
+
+- El paquete: `cat VERSION` en su `pkgroot` y, para un paquete que compilaste, `NULLMOTH-LOCAL-BUILD.txt` a su lado
+  (su commit). La salida entera de `sudo ./install.sh`, copiada de Terminal.
 - `sw_vers`, la tarjeta y `nvram boot-args`.
 - `sysctl debug.nvrm_switches debug.nvrm_switches_set debug.nvrm_switches_nondefault`.
 - Tu bloque de `/Library/GPUBundles/nvmtl/nvrm610.conf`.
 - `sysctl debug | grep -e nvrm -e nvaccel`, tomado mientras o justo después de que aparezca el problema, y lo mismo
-  de 2.9 (`~/before-3.0.txt`).
+  de antes de la instalación (`~/before.txt`, sección 1, paso 3).
 - El registro del kernel del arranque: `log show --last boot --predicate 'process == "kernel"' > ~/kernel.txt`.
 - Las líneas de fallo del plugin:
   `log show --last boot --predicate 'eventMessage CONTAINS "NullMoth:"' > ~/nullmoth.txt`.
+- `/Library/NullMoth/lastgood.log` y `/Library/NullMoth/bootguard.log`, cuando existan.
 - Para una aplicación lanzada con `NVMTL_PROCESS_ENV=1`: su `nvmtl.log`, y las líneas `nvrm:` que imprimió en
   Terminal.
 - Qué sección y qué punto de arriba fallaron, y si su vuelta atrás hizo desaparecer el problema.
+
+Lee los archivos antes de publicarlos: los registros y las rutas llevan el nombre de tu cuenta y el de tu Mac.

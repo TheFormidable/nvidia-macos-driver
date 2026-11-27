@@ -4,16 +4,23 @@ On macOS 15.5 or later the accelerator names `NVKZinkGLDriver.bundle` as its Ope
 applications then are routed to NVK through Mesa's Zink when the guard accepts the context, instead of on Apple's
 OpenGL over Metal. Boot argument `nvzink=0` keeps Apple's renderer for every application, as in 2.9.
 
-Earlier fork hardware testing (round 11, RTX 5050, macOS 26.7.3) found 39 inactive Zink rows, including 38 renderer-word
-guard refusals. The 3.0.3 correction below was built and checked on Linux only when it was written. It has since run
-on that card inside 3.0.6 and later: the accelerator reports `IOGLBundleName` `NVKZinkGLDriver`, the OpenGL rows of
-the 3.0.7 card run went through Zink (none inactive), and the games measured there draw through it. That is one card
-on one macOS build: on another, a selected bundle is not proof that Zink serves a context. See [STATUS.md](STATUS.md).
+**Status at 3.0.20.** On the fork's one test machine (RTX 5050, macOS 26.7.3, build 25G342) OpenGL goes through Zink
+since 3.0.6, the first package installed there with the 3.0.3 guard: the accelerator reports `IOGLBundleName`
+`NVKZinkGLDriver`, the OpenGL rows of the 3.0.7 card run went through Zink (none inactive), and the games measured
+there draw through it. A card run there before 3.0.3 had 39 Zink rows inactive, 38 of them refused by the older guard.
+That is one card on one macOS build: on another, a selected bundle is not proof that Zink serves a context, so check
+GL_RENDERER in the application. See [STATUS.md](STATUS.md).
 
-What a swap does today, each on by default and each with one way back (below, "Presentation" and
-"The way out"): it runs one frame ahead of the GPU and keeps its import of the window's video memory (3.0.7), asks
-WindowServer for the window's opacity once and keeps the answer 100 ms (3.0.8), and with the swap interval at 0
-leaves its frame to a sender thread and does not wait for the display (3.0.11).
+What later versions changed; from 3.0.7 on each change is on by default and has one way back ("The way out"):
+
+| Version | What changed | Section |
+|---|---|---|
+| 3.0.3 | The layout guard accepts a CGL context whose `rend` does not yet hold the GLI engine, which is what 26.7.3 hands over | "The layout guard" |
+| 3.0.7 | A swap runs one frame ahead of the GPU and keeps its import of the window's video memory (kernel, NVK and Zink) | "Presentation" |
+| 3.0.8 | A swap asks WindowServer for the window's opacity at most once and keeps the answer 100 ms | "Presentation" |
+| 3.0.11 | With the swap interval at 0 a swap leaves its frame to a sender thread and does not wait for the display: the newest frame is shown | "Presentation" |
+| 3.0.16 | `glBufferSubData` writes through a staging buffer where Mesa's threaded context would wait for the GPU | "Buffer uploads" |
+| 3.0.17 | NVK uses the GPU's hierarchical Z (ZCULL); under Zink it acts in the render passes that clear depth at load | "Hierarchical Z" |
 
 ## The parts
 
@@ -83,7 +90,8 @@ framework binary, the shared cache or a kernel to find them, and nothing does so
 ## The layout guard
 
 On any other macOS build (26.7.3, for example) the private offsets above are not known to hold. A build whose layout
-differs would have these reads and writes land in the wrong memory of every OpenGL application.
+differs would have these reads and writes land in the wrong memory of every OpenGL application. On 26.7.3 (25G342)
+the guard of 3.0.3 and later accepts the contexts and Zink serves them (Status, above).
 Before it reads past any recorded pointer or writes through one, `nvk_cgl_prepare_gld` checks that the memory is
 shaped as the record says, using only facts the process already has and the sizes the public SDK headers give
 (`zink/nvk_cgl_guard.h`). It runs before the process's Zink screen (a Vulkan instance and an NVK device) is made. On
@@ -98,11 +106,10 @@ hands over (the sections above call it GLEngine's context; Apple's headers type 
 - the profile byte is legacy (0) or core (1);
 - the CGL context derived from the recorded dispatch pointer is the start of a heap block of its own, not the GLI
   engine, that holds a whole `struct _CGLContextObject`. This ties the recorded pointer to the public layout: a
-  pointer read from a wrong offset, minus 8, almost never lands on the start of a block that size. Card-test round 11
-  on 26.7.3 (25G342) ran the guard of 3.0.1, which asked there only for a heap block of at least 0x1e90 bytes: that
-  held for the context the refusal below was printed for (the first the guard refused) in each of the 38 rows that
-  reported it. The 39th inactive row, glbench, was inactive on its own test of GL_RENDERER and its standard error was
-  not read. Whether that block is the CGL context, and that it is not the GLI engine itself, was not checked there;
+  pointer read from a wrong offset, minus 8, almost never lands on the start of a block that size. On 26.7.3 (25G342)
+  the guard of 3.0.1, which asked here only for a heap block of at least 0x1e90 bytes, found that held in each of the
+  38 card rows it then refused at the older `rend` check. Whether that block is the CGL context, and that it is not
+  the GLI engine itself, was not checked there;
 - the context's first member (`rend`) is null, this GLI engine, a value that is no aligned user address, or one that
   starts no heap block, points into neither the engine nor the context and lies in heap memory or in no mapped
   region. This check rests on an assumption no record confirms: that CGL stores the new GLI engine in `rend` only
@@ -221,15 +228,6 @@ Since 3.0.7 a swap is one frame ahead (`zink/nvk_present_queue.h`, the second ha
   have happened. A context never has more than one frame on its way, so the scratch image is drawn into again only
   when nothing reads it, and what is on screen is at most one frame behind what was swapped.
 - A front-buffer flush, and a swap while a diagnostic observer is set, wait for their own frame as before.
-
-Since 3.0.11 a swap with the swap interval at 0 does not ask the layer either (`zink/nvk_newest.h`). It copies the
-frame into the scratch image, flushes, waits for the GPU to have finished the frame parked before it, and returns; the
-frame stays parked in the scratch image. A sender thread waits for the frame in flight, asks the layer for a drawable,
-and hands the frame that is parked by then to the presentation thread. The application is one frame ahead of the GPU
-as before and is not held to the display; a frame replaced before the layer had room is never copied, and the last
-frame drawn always is. A front-buffer flush parks the front buffer the same way. Only a frame after one that was presented
-by its own swap or flush goes this way: the first frame, a resize, a missing view, an observer and every failure are
-presented by the swap, after the sender has been stopped. `tools/test_zink_newest.py` runs the agreement between the two threads.
 - A frame the presentation thread could not publish (the mark of an import made for that frame was refused, the
   channel was rebuilt under the copy) is released unpresented, and the next swap of that context says so on standard
   error, once and then at every doubling of the count. The swap that sent it had already returned 1.
@@ -255,13 +253,14 @@ presented by the swap, after the sender has been stopped. `tools/test_zink_newes
 - The presentation thread takes none of the application's signals, except the ones a fault of its own raises (SIGSEGV,
   SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGSYS), which stay open so that a crash there is reported as one.
 
-What this rests on and could not be run here: a duplicate of the RM object keeps a surface's video memory alive in
+What this rests on, and no test isolates: a duplicate of the RM object keeps a surface's video memory alive in
 this process after the surface gave it up (the Metal plugin's imports rely on the same); a drawable may be presented
 and released from a thread that is not the one that asked for it (the card check `zink.win-thread` does that with
 the swap itself); and the waits of an application that reads back or queries its own frame move into the next
-frame. Of it only this ran on a card, on 3.0.7 (CHANGELOG.md, 3.0.7, What ran where): `zink.win-thread`, which failed
-there for the time of its own pixel reader, and the swap one frame ahead in one capture of the modded pack. No card
-row runs a swap one frame ahead.
+frame. Every package the test machine has run since 3.0.7 presents this way by default. On 3.0.7 a capture of the
+modded pack gave 90 frames a second with the GPU 83 % busy, where a comparable capture on 3.0.6 gave 61 and 51 % (not
+the identical scene; CHANGELOG.md, 3.0.7, What ran where). No card row runs a swap one frame ahead (the rows set the
+diagnostic observer), and `zink.win-thread` failed on 3.0.7 for the time of its own pixel reader.
 
 Whether the drawable is opaque decides the layer's `opaque` and whether the copy writes alpha 1. It is the context's
 `kCGLCPSurfaceOpacity`, and CGL answers it with a message to WindowServer and its reply. Through 3.0.7
@@ -276,7 +275,53 @@ which AppKit's `setView:` and `update` reach on the main thread), the native tar
 an application changes `kCGLCPSurfaceOpacity` of a context that has swapped, the swaps of up to the next 100 ms are
 composed with the old value, where 3.0.7 used the new one from the next swap. Where `CGLSetParameter` of that parameter
 (236) passes the GLI integer callback the adapter replaces for `CGLTexImageIOSurface2D`, the next swap asks at once;
-whether it does has not been seen, and nothing depends on it. The gain has not been measured.
+whether it does has not been seen, and nothing depends on it. The gain has not been measured: 3.0.8 was put in place on
+the test machine without a capture.
+
+Since 3.0.11 a swap with the swap interval at 0 does not ask the layer either (`zink/nvk_newest.h`). It copies the
+frame into the scratch image, flushes, waits for the GPU to have finished the frame parked before it, and returns; the
+frame stays parked in the scratch image. A sender thread waits for the frame in flight, asks the layer for a drawable,
+and hands the frame that is parked by then to the presentation thread. The application is one frame ahead of the GPU
+as before and is not held to the display; a frame replaced before the layer had room is never copied, and the last
+frame drawn always is. A front-buffer flush parks the front buffer the same way. Only a frame after one that was presented
+by its own swap or flush goes this way: the first frame, a resize, a missing view, an observer and every failure are
+presented by the swap, after the sender has been stopped. `tools/test_zink_newest.py` runs the agreement between the two threads.
+On the test machine Minecraft without mods on OpenGL through Zink gave 490 frames a second on 3.0.11, read by its
+owner on the game's own counter (no capture, and no figure on Zink from before); a resize, a minimize and a second
+display under the sender have not been tried.
+
+## Buffer uploads (3.0.16)
+
+Mesa's threaded context (`u_threaded_context.c`) normally writes a busy buffer through a staging buffer and a copy
+queued on the GPU. It maps the buffer itself, and waits for the buffer's whole batch, in two cases: a write of more
+than 320 bytes into a buffer the application has mapped, and a write it infers to be unsynchronized that overlaps the
+range of a staging upload not executed yet (Mesa never resets its record of that range, so the overlap is often with
+an upload long done). In ATM10 with a shader pack on the test machine (2026-11-23, 3.0.12 with NVK of 3.0.15), the
+game's render thread spent 19 to 25 % of its time asleep in that wait, inside `glBufferSubData`.
+
+Since 3.0.16 `zink/mesa-zink-nvk.patch` gives the threaded context an option, `subdata_never_wait`, which Zink sets on
+NVK on macOS; `tc_buffer_subdata` then writes those two cases through the threaded context's own staging path
+(`tc_subdata_stage_instead` in `u_threaded_context.h`). A subdata call writes every byte of its range and the copy is
+queued after every earlier call, so the buffer ends up as the mapping would have left it. Excluded, as before: a buffer
+of user memory, with CPU storage, in a client pointer heap, sparse or unmappable; a persistent mapping; a write the
+threaded context already stages; a write of 320 bytes or fewer that is not unsynchronized. What an application can
+see: in a buffer it keeps mapped, the bytes reach the mapping when the GPU runs the copy, not when the call returns.
+The GL specification asks for a fence before such a read; `NVK_ZINK_SUBDATA_STAGE=0` is for a program that reads
+without one.
+
+On the card the change has been seen only where the game did not wait: two ATM10 captures on 2026-11-24, as installed
+and with `NVK_ZINK_SUBDATA_STAGE=0`, both without the wait (GPU at 96 to 98 %). A capture taken while the wait is there
+has not been recorded.
+
+## Hierarchical Z (3.0.17)
+
+NVK's ZCULL code (a ZCULL plane for a depth image, the unit programmed at the start of a render pass) runs only when
+the device reports the unit's geometry, and the NVRM backend reported none before 3.0.17; `nvk/nvk-zcull.patch` asks
+RM for it (`NV2080_CTRL_CMD_GR_GET_ZCULL_INFO`). NVK keeps a ZCULL plane only for a depth image that cannot be a copy
+destination. Zink creates its depth images as copy destinations, so for OpenGL applications ZCULL acts in the render
+passes that clear depth at load, which is how a frame usually starts. It stays off in WindowServer. `NVK_ZCULL=0` turns
+it off for NVK in every process, Zink's included; `NVK_ZCULL_LOG=1` prints NVK's decision once per device. Whether RM
+answers the query on the RTX 5050, and any gain or artefact in a game, are not recorded.
 
 ## The way out
 
@@ -284,17 +329,20 @@ Native OpenGL has one way out, boot argument `nvzink=0` (a row in tools/switches
 accelerator names AppleMetalOpenGLRenderer again, read once when it starts, so every application keeps Apple's
 OpenGL. Nothing else switches native OpenGL off.
 
-How it presents has two switches of its own since 3.0.7, each a line of the settings file
-(`/Library/GPUBundles/nvmtl/nvrm610.conf`) that a process reads once, when its first context presents:
-`NVK_ZINK_PRESENT_AHEAD=0` makes every swap wait for the GPU and publish its own frame, through the code of 3.0.6;
-`NVK_ZINK_SURFACE_KEEP=0` leaves swaps one frame ahead and imports the drawable's video memory for every frame.
-Since 3.0.11 `NVK_ZINK_PRESENT_NEWEST=0` makes a swap with the interval at 0 ask the layer itself again, as in 3.0.9.
-Since 3.0.8 `NVK_ZINK_OPACITY_KEEP=0`, read the same way by the CGL adapter (`libnvk_cgl.dylib`), makes every swap ask
-WindowServer for the drawable's opacity again, once.
+Each change from 3.0.7 on has a switch of its own, a line of the settings file
+(`/Library/GPUBundles/nvmtl/nvrm610.conf`). The Zink frontend reads its four once per process, together, at the
+process's first Zink context:
+`NVK_ZINK_PRESENT_AHEAD=0` (3.0.7) makes every swap wait for the GPU and publish its own frame, through the code of
+3.0.6; `NVK_ZINK_SURFACE_KEEP=0` (3.0.7) leaves swaps one frame ahead and imports the drawable's video memory for every
+frame; `NVK_ZINK_PRESENT_NEWEST=0` (3.0.11) makes a swap with the interval at 0 ask the layer itself again, as in
+3.0.9; `NVK_ZINK_SUBDATA_STAGE=0` (3.0.16) leaves the threaded context's option off, so `glBufferSubData` maps and
+waits as in 3.0.14. `NVK_ZINK_OPACITY_KEEP=0` (3.0.8), read the same way by the CGL adapter (`libnvk_cgl.dylib`) when
+its first context presents, makes every swap ask WindowServer for the drawable's opacity again, once.
 A line may have blanks before the name, around the `=` and before the value, so every spelling that turns a switch
 of the Metal plugin off in that file turns one of these off (the plugin itself keeps a blank after the `=` as part
 of the value); the last line that names a switch decides. As for those settings, a variable of that name in a process's own
 environment counts only when that process also sets `NVMTL_PROCESS_ENV=1`.
+`NVK_ZCULL=0` (3.0.17) is NVK's: it turns hierarchical Z off in every process that runs on NVK, not only under Zink.
 
 In OBS, OpenGL always stays Apple's and a screen capture asks for BGRA8 instead of RGBA16F, which can fail before the
 first frame on this driver.
@@ -315,8 +363,17 @@ the HighDelay/nvidia-macos-driver-nvk fork). If the lookup finds `NVMTLDriver.bu
 the install stops and rolls back, since every OpenGL application would otherwise find no driver. If the lookup does
 not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer says so and goes on.
 
+On the optional route that keeps AMFI enforcing, `tools/sign_graphics.sh` signs `NVKZinkGLDriver.bundle` with
+`NVMTLDriver.bundle` and the `nvmtl` libraries, with a CA of your own that OpenCore registers through AMFIAnchor
+([SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md)). 3.0.20 ran that way on the test machine; it is
+experimental, and the documented install keeps the AMFI boot arguments.
+
 ## What was checked
 
+- On the card (RTX 5050, macOS 26.7.3): every package installed since 3.0.6, built with Xcode on that Mac; the card
+  checks of 3.0.7 (133 of 134 rows ran, the OpenGL rows through Zink, no Xid; `zink.win-thread` and `zink.migrate`
+  failed, described in CHANGELOG.md, 3.0.7); the captures and game readings above. [STATUS.md](STATUS.md) has each
+  version.
 - The darwin cross-build on Linux: Mesa's 834 objects of libnvk_zink.dylib and zink_sync_probe with 0 errors and 0
   warnings, a link against empty framework stubs, the dispatch table generated from the 11.3 SDK's OpenGL headers,
   and `nvk_cgl.c` and `gld_bridge.c` compiled with `-Wall -Wextra -Werror` (`-fsyntax-only`).
@@ -325,26 +382,19 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
   Mesa 26.3.0's grammars need Bison 3.0 or newer: a bison of 3.0 or newer passes, and macOS's 2.3, a bison that
   prints no version, a missing bison and a missing flex each stop the script before meson, naming `./build.sh deps`
   where a bison is the reason.
-- `tools/test_cgl_gld_guard.py`: the layout guard's checks, compiled for the Linux host from `zink/nvk_cgl_guard.h`
-  and fed synthetic heap blocks and VM regions. It accepts the layouts the record allows and refuses each way the
-  layout can differ, with controls: a GLI engine that is not a block or is one byte too small, a profile byte out of
-  range, a null, unaligned or interior dispatch pointer, a CGL context that is the GLI engine; a `rend` that is null,
-  stale, not a heap pointer, or inside heap memory at no block start (accepted) or another GLI engine, another heap
-  block, a pointer into the engine or the context, aligned or not, or a pointer into an image's data or a stack
-  (refused); a saved table past the context's public part or a span of writable heap memory at no block start
-  (accepted) or too small, inside the GLI engine, in the CGL context's public part, unaligned there, past its block,
-  another engine of the context, unaligned, unmapped, in an image's data, read-only, running past its heap region, or
-  reaching the start of the GLI engine or of the CGL context (refused); a span of memory at no block start under
-  each VM tag from 0 to 31 and each protection (a saved table only under the tags malloc gives, readable and
-  writable); each refusal's text, with the sizes it prints; the text of the dropped-call line; which engines count
-  as further engines of a context adopted or left unadopted; and `nvk_cgl_room`, the question
-  `integer_dispatch_slot` asks of the CGL private object and its engine list. Its other checks read
-  `zink/nvk_cgl.c`, which the host cannot compile: that prepare reads through no recorded offset before the check,
-  returns from every refusal before the screen and any write, and holds no other return and no other write to the
-  refusal's reason before it allocates the bridge, and that the three lines are printed where this document says and
-  are quoted here, in TESTING-ON-HARDWARE and in the CHANGELOG as the code builds them. It loads no Apple framework
-  and touches no GPU; `malloc_size` has no Linux name, so a shim behind the header's macros uses
-  `malloc_usable_size`, and a table of synthetic regions stands in for the VM map. It has run on Linux only.
+- `tools/test_cgl_gld_guard.py` (3.0.3): `zink/nvk_cgl_guard.h` compiled for the host and fed synthetic heap blocks
+  and VM regions. It accepts the layouts the record allows and refuses each way the layout can differ, at the
+  boundaries and with controls: the GLI engine's block, the profile byte, the dispatch pointers, the CGL context, each
+  kind of `rend` and of saved table listed under "The layout guard", and a span of memory at no block start under each
+  VM tag from 0 to 31 and each protection (a saved table only under the tags malloc gives, readable and writable); each
+  refusal's text with the sizes it prints, the text of the dropped-call line, which engines count as further engines,
+  and `nvk_cgl_room`. Its other checks read `zink/nvk_cgl.c`, which the host cannot compile: that prepare reads
+  through no recorded offset before the check, returns from every refusal before the screen and any write, and holds
+  no other return and no other write to the refusal's reason before it allocates the bridge, and that the three lines
+  are printed where this document says and are quoted here, in TESTING-ON-HARDWARE and in the CHANGELOG as the code
+  builds them. It loads no Apple framework and touches no GPU; `malloc_size` has no Linux name, so a shim behind the
+  header's macros uses `malloc_usable_size` on Linux (`malloc_size` on a Mac), and a table of synthetic regions stands
+  in for the VM map.
 - `nvk_cgl.c` and `appkit.m` with clang 18 `-fsyntax-only` on Linux against the public macOS 11.3 SDK's own headers
   (`-isysroot`, target `x86_64-apple-macos15.0`, the flags of `build/build_zink.sh`): no diagnostic. This covers
   `nvk_cgl_vm_region`'s call of `mach_vm_region_recurse` and the VM tag names; the 11.3 SDK names tag 13
@@ -352,38 +402,44 @@ not find `NVMTLDriver.bundle` either, the probe cannot judge, and the installer 
 - The card checks' two programs, `tools/card/zink_gl_check.m` and `tools/card/zink_win_check.m` (both include
   `tools/card/zink_common.h`), with clang 18 `-fsyntax-only` on Linux against the same SDK, with the flags of their
   rows and Mesa's Vulkan headers: no error, and no warning but three that say `NSOpenGLContext`'s `view` is
-  deprecated, in lines this change does not touch. The shell fragment of the glbench row under sh and bash, with a
+  deprecated, in lines 3.0.3 did not touch. The shell fragment of the glbench row under sh and bash, with a
   first line that names Zink, "(null)", another renderer and none.
-- `tools/test_zink_present_queue.py` (3.0.7): the presentation queue, as it is, with real threads (who may be inside,
-  who waits for whom, how the limit is the presentation thread's time at one frame and not a swap's wait, teardown,
-  two threads presenting one context, a fork, which signals the presentation thread takes), and the half of
-  `nvk_present.c` that presents one frame ahead, cut out of the file as it is, against a scripted GPU and a scripted
-  kernel that remembers which block each surface has: the order fence, mark, tag, drawable; a fence that is reset
-  before it is used again; kept imports, their eviction and their age to the frame; a block that moved under a kept
-  import and the frame sent again from the presentation thread without another swap; a context that stops keeping; a
-  GPU that does not finish, and a frame that is not sent again once the share group is quarantined; every refusal;
-  both switches and how their lines may be written; an NVK and a kernel from before 3.0.7. A third program runs the
-  end of `present_drawable` and `native_frame_done`, cut out of `nvk_cgl.c` as they are, for who releases the drawable
-  in each answer of the frontend. The queue without its two fork arms and the frame's first four sets run again under
-  ThreadSanitizer and AddressSanitizer, and all of it runs against 31 copies of the sources with one rule broken each,
-  every one of which has to fail. It also holds the text of 3.0.6's path, which every way back leads to, unchanged.
-  `nvk_zink_present_frame` itself is not run, only read for the order of its steps, and the limit of 12 s is read too
-  (the programs run with 0.4 s). It has run on Linux only, with gcc 13 and clang 18. `tools/test_surf_keep.py` runs
-  the kernel's side of a kept import the same way: the two rules and the lines of the escape that apply them.
+- `tools/test_zink_present_queue.py` (3.0.7): the presentation queue as it is, with real threads (who waits for whom,
+  the limit as the presentation thread's time at one frame and not a swap's wait, teardown, two threads presenting one
+  context, a fork, which signals the thread takes), and the half of `nvk_present.c` that presents one frame ahead, cut
+  out of the file as it is, against a scripted GPU and a scripted kernel that remembers which block each surface has:
+  the order fence, mark, tag, drawable; a fence reset before it is used again; kept imports, their eviction and their
+  age to the frame; a block that moved under a kept import and the frame sent again without another swap; a context
+  that stops keeping; a GPU that does not finish, and no frame sent
+  again once the share group is quarantined; every refusal; both switches and how their lines may be written; an NVK
+  and a kernel from before 3.0.7. A third program runs the end of `present_drawable` and `native_frame_done`, cut out
+  of `nvk_cgl.c`, for who releases the drawable in each answer of the frontend. Parts run again under ThreadSanitizer
+  and AddressSanitizer, and all of it against 31 copies of the sources with one rule broken each, every one of which
+  has to fail; the text of 3.0.6's path, which every way back leads to, is held unchanged. `nvk_zink_present_frame`
+  itself and the 12 s limit are read, not run (the programs run with 0.4 s). Its recorded runs are on Linux, with
+  gcc 13 and clang 18. `tools/test_surf_keep.py` runs the kernel's side of a kept import the same way: the two rules
+  and the lines of the escape that apply them.
 - `tools/test_zink_opacity.py` (3.0.8): `zink/nvk_opacity.h`, as it is, with a clock and a reader of its own: the
   first swap asks, nothing is asked within 100 ms, one ask at 100 ms, a change of the output asks at once, with the
   switch off every swap asks once, a failed ask answers opaque and is not kept, a clock that goes back or wraps keeps
   no answer for good; plain and under AddressSanitizer and UndefinedBehaviorSanitizer, and against 13 copies with one
   rule broken each, every one of which has to fail. It reads `nvk_cgl.c` and `native_drawable.m` for one ask per swap,
   the switch, and each place that makes the next swap ask, and against 3 copies of them with one such place broken
-  each, every one of which has to fail that reading. It has run on Linux only, with gcc 13 and clang 18.
+  each, every one of which has to fail that reading. Its recorded runs are on Linux, with gcc 13 and clang 18.
+- `tools/test_zink_newest.py` (3.0.11): `zink/nvk_newest.h` as it is, with real threads (a frame parked while another
+  is sent goes with the same sender, a stop waits for the frame being sent, 20000 frames at an uneven pace against a
+  slow layer end with the last one sent), plain and under ThreadSanitizer, against six copies with one rule broken
+  each, and a reading of the adapter and the frontend for every path that has to stop the sender.
+- `tools/test_zink_subdata_stage.py` (3.0.16): the decision over every case of "Buffer uploads", the code around it,
+  the switch, and eight broken copies, each of which has to fail. `tools/test_nvk_zcull.py` (3.0.17): the patch's
+  place in the chain, each of RM's figures in its field, and the decision compiled out of the patch over 20 cases.
 - The frontend with the queue (`nvk_zink.c`, `nvk_present.c`, `nvk_present_queue.c`, `nvk_iosurface.c`) in the
   darwin cross-build on Linux, 0 warnings, and `nvk_cgl.c`, `appkit.m` and `native_drawable.m` with `-fsyntax-only`
   (the last with the 11.3 SDK's older name standing in for `kIOMainPortDefault`).
   The NVK patch `nvk-surface-keep` applies at the end of the chain without fuzz; NVK itself was not compiled here.
-- Not checked: `native_drawable.m` as it is (it names `kIOMainPortDefault`, which the 11.3 SDK does not have), a compile with
-  Xcode against a current SDK, the real link, running anything; where the recorded builds keep the CGL private object
-  and its engine list (`integer_dispatch_slot` has not run on a Mac); when CGL stores `rend` relative to
-  gldCreateContext, what `rend` holds afterwards and how CGL allocates the context, on any build (25G342 refused at
-  the earlier `rend == engine` check: card-test round 11); where the saved dispatch table is on any build (the
-  saved-table check has not run on a Mac); and the VM tags malloc gives its regions on macOS 26.7.3.
+- Not checked: anything on the two recorded builds, 24H32 and 25G241 (the fork has run only 26.7.3, and macOS 15 not
+  at all); on any build, when CGL stores `rend` relative to gldCreateContext, what `rend` holds afterwards and how CGL
+  allocates the context (25G342 refused at the earlier `rend == engine` check before 3.0.3); where the saved dispatch
+  table, the CGL private object and its engine list lie (on 26.7.3 the guard accepts the saved table and
+  `integer_dispatch_slot` runs in every process Zink serves, but no reading of where they were is recorded); and the
+  VM tags malloc gives its regions on macOS 26.7.3.

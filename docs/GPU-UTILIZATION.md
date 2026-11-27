@@ -6,6 +6,8 @@ NVAccel publishes `Device Utilization %`, `GPU Core Utilization %`,
 value is RM's GR engine utilization. Memory is bandwidth utilization, not VRAM
 allocation. Values are whole percentages rounded from RM's percent-times-100
 units. No helper daemon, writable sysctl, or additional sensor kext is needed.
+It is on by default. The sampler is the original project's (by GeekAudio, part
+of its 2.9); the pause after a slow read below is this fork's 3.0.
 
 These counters are distinct from the RUSD shared sensor data and the versioned
 GPU Caps snapshot. [NVMetrics integration](NVMETRICS.md) explains the userspace
@@ -18,7 +20,7 @@ the read-only `PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2` command. Its roughly
 gate; teardown drains queries before releasing the RM client.
 
 The latest nonzero timestamp wins within the bounded 72-entry ring. On the
-tested RTX 3080, firmware leaves `count` at zero and returns a byte-offset
+RTX 3080 the original was tested on, firmware leaves `count` at zero and returns a byte-offset
 `tracker`; a tracker and its sample payload can also disagree by one entry.
 Reading only `samples[0]` can return a sample about 14 seconds old. The parser
 accepts entry and aligned byte offsets, validates sizes and utilization ranges,
@@ -27,8 +29,8 @@ and never substitutes an older sample for an invalid newest sample.
 The existing 250 ms statistics publisher copies the cached reading without
 calling RM on the graphics work loop. Failed queries and samples unchanged for
 more than five seconds remove utilization keys instead of reporting a false
-0%. Cache age includes time spent asleep. Both NVRM and NVAccel must be built
-from this change; an older NVRM does not implement the query interface.
+0%. Cache age includes time spent asleep. NVRM and NVAccel must come from the
+same package: an NVRM without the sampler does not implement the query interface.
 
 A read holds the RM's locks until the firmware answers, and the RM waits about
 6 s for an answer before it gives up. Issued again every second, a read the
@@ -55,7 +57,8 @@ and `src/common/inc` include paths to exercise the same parser with the public
 RM structures. Optional positional arguments replay raw V2 parameter buffers
 captured by a read-only probe.
 
-Build NVAccel with `build/accel_build.sh`, once with `NM_TAHOE=1` for macOS 26
-and once without it for macOS 15. Rebuild NVRM with its matching Darwin RM and
-NVKMS archives. Before deploying, boot the paired kexts on real hardware and
-check idle/load/recovery, sleep/wake, missing telemetry, and GPU teardown.
+`./build.sh build nvrm accel` builds both: NVAccel through `build/accel_build.sh`,
+once with `NM_TAHOE=1` for macOS 26 and once without it for macOS 15, and NVRM
+with its matching Darwin RM and NVKMS archives. Not recorded on a card in this
+fork at 3.0.20: idle, load and recovery readings, sleep and wake, missing
+telemetry and GPU teardown.

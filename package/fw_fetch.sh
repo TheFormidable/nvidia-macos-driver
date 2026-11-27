@@ -59,7 +59,7 @@ fail() {
   echo "   To supply it by hand: download $URL_RUN on any computer" >&2
   echo "   (SHA-256 $SHA_RUN), put it in this Mac's Downloads folder, on a USB stick," >&2
   echo "   or next to this installer as NVIDIA-Linux-x86_64-$VER.run, and run the installer again." >&2
-  echo "   The 1401 stick already carries it in its NullMoth folder. Nothing on this Mac was changed." >&2
+  echo "   Nothing on this Mac was changed." >&2
   rm -rf "$DEST/nvidia" 2>/dev/null
   exit 1
 }

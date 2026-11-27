@@ -4,54 +4,45 @@
 de preguntar), descarga cada fuente externa en una versión fijada y verificada, compila cada componente en orden y
 puede preparar un paquete instalable. Nunca usa `sudo` y nunca instala el driver: al final imprime el comando para
 hacerlo. La guía completa, en inglés, es [BUILDING.md](BUILDING.md); aquí están el inicio rápido, la referencia de
-comandos y opciones y la solución de problemas.
+comandos y opciones, los kits para macOS 10.7 a 14, la firma para AMFI y la solución de problemas.
 
-> **Qué se ha ejecutado, y dónde.** Un paquete hecho con `./build.sh package` en el commit aa27c73 en el Mac Intel de
-> abajo se ha instalado sobre la versión 2.9 y ha arrancado en una máquina con una RTX 5050: la máquina arrancó con él
-> dos veces, y la tarea del instalador que devuelve la versión anterior no devolvió la 2.9. Este es el registro
-> histórico hasta aa27c73; las pruebas posteriores con RTX 5050 y GPU Caps están en [STATUS.md](STATUS.md).
-> Después, las versiones 3.0.6 a 3.0.12 se compilaron en la propia máquina de la RTX 5050 y se instalaron allí; la
-> 3.0.7 desde una carpeta de resultados vacía (los 19 componentes en 512 s y sin avisos, con las herramientas y las
-> fuentes fijadas ya presentes). La 3.0.13 no tiene todavía compilación nativa. Lo que se ejecutó entonces:
+> **Qué se ha ejecutado, y dónde.** La única máquina de prueba del fork es un hackintosh con Ryzen 5 5500 y una
+> RTX 5050 con macOS 26.7.3. Las versiones 3.0.6 a 3.0.12 (no hay 3.0.10), 3.0.19 y 3.0.20 se compilaron en esa misma
+> máquina y se instalaron allí, y la 3.0.17 también se instaló allí. La 3.0.7 se compiló desde una carpeta de
+> resultados vacía (los 19 componentes en 512 s y sin avisos, con las herramientas y las fuentes fijadas ya
+> presentes); el paquete de la 3.0.19 llevaba los 13 kits para macOS 10.7 a 14
+> ([Compilar los kits](#compilar-los-kits-para-macos-107-a-14)); la 3.0.20, instalada el 2026-11-26, llevaba la pila
+> gráfica firmada con la CA propia del dueño y funcionó con AMFI activo
+> ([Firmar la pila gráfica](#firmar-la-pila-gráfica-para-amfi-opcional)). Lo comprobado en la tarjeta está en
+> [STATUS.md](STATUS.md). Antes, en la campaña de compilación del 2026-11-13 y 14 (entonces 17 componentes):
 >
 > - En un Mac Intel (12 hilos, macOS 26.7, Xcode 26.5). En el commit 650db45, `./build.sh deps` empezó con un
 >   directorio de trabajo vacío y compiló en él todas las herramientas que necesitan NVK y el traductor en
->   46,5 minutos, sin Homebrew. En el commit 3933ff6, con esas herramientas ya hechas, `deps`, `doctor` y `fetch`
->   terminaron bien, `./build.sh --no-install build` compiló los 17 componentes en 5 minutos 41 segundos sin ningún
->   aviso, y `package` preparó un paquete sobre la versión 2.9 en 27 segundos. `./build.sh test` pasó allí
->   303 de las 315 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 20 minutos 49 segundos. Nada
->   fuera del directorio de trabajo cambió, salvo los informes de fallo que macOS escribe de los programas pequeños que
->   las pruebas hacen fallar a propósito (ver `test` en [Comandos](#comandos)). En el commit ee7f332, `build` volvió a
->   compilar los 17 componentes en 401 segundos sin ningún aviso y `package` preparó el paquete en 28 segundos; las
->   pruebas no se ejecutaron allí en ese commit. En el commit aa27c73, `build` compiló los 17 componentes en
->   361 segundos sin ningún aviso, `package` preparó el paquete en 26 segundos y `./build.sh test` pasó allí 305 de las
->   317 pruebas y no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 25 minutos 50 segundos.
-> - En la máquina Intel de GitHub (macos-15-intel: 4 procesadores, macOS 15, Xcode 26.3 con el SDK 26.2), en el commit
->   3933ff6. En el flujo `ci`, de las 315 pruebas pasaron 303 y no falló ninguna (3 se saltaron y 9 no se ejecutaron
->   allí), `tools/test_build_sh.py` entre ellas. El flujo `full-build`, que compila todo en un directorio de trabajo
->   vacío con las herramientas recuperadas de la caché de GitHub, ejecutó `deps`, `doctor` y `fetch`, compiló los 17
->   componentes en 30 minutos 20 segundos y preparó el paquete en 60 segundos. Su paso `./build.sh test` falló allí: el
->   clon del trabajo no tenía historial, y 16 de las 315 pruebas leen revisiones anteriores: 14 fallaron y 2 se saltaron
->   (las mismas pruebas pasan desde un clon completo en el mismo tipo de máquina y en el Mac Intel). De sus doce
->   comprobaciones de lo compilado pasaron once; la duodécima pedía a los seis kexts una versión mínima de macOS, que el
->   enlazador no escribe en un kext. Las dos causas están corregidas en los commits posteriores a 3933ff6.
-> - En las máquinas de GitHub, en el commit ee7f332. En el flujo `ci`, de las 316 pruebas pasaron 304 y no falló
->   ninguna (3 se saltaron y 9 no se ejecutaron) en la máquina Intel y, por primera vez completas, en la máquina con
->   Apple silicon (macos-15). El flujo `full-build` (macOS 15.7.9, Xcode 26.3 con el SDK 26.2, las herramientas
->   recuperadas de la caché de GitHub) terminó bien en todos sus pasos: compiló los 17 componentes en 19 minutos
->   26 segundos, preparó el paquete en 57 segundos, pasó 304 de las 316 pruebas sin ningún fallo, y sus doce
->   comprobaciones de lo compilado pasaron; el trabajo entero tardó 1 hora 18 minutos.
+>   46,5 minutos, sin Homebrew. En los commits 3933ff6, ee7f332 y aa27c73, con esas herramientas ya hechas, `build`
+>   compiló los 17 componentes sin ningún aviso en 5 minutos 41 segundos, 401 y 361 segundos, y `package` preparó un
+>   paquete sobre la versión 2.9 en 26 a 28 segundos. En aa27c73, `./build.sh test` pasó allí 305 de las 317 pruebas y
+>   no falló ninguna (3 se saltaron y 9 no se ejecutaron), en 25 minutos 50 segundos, y el paquete de aa27c73 se
+>   instaló sobre la 2.9 en la máquina de la RTX 5050 y arrancó dos veces; la tarea del instalador que devuelve la
+>   versión anterior no devolvió la 2.9. Nada fuera del directorio de trabajo cambió, salvo los informes de fallo que
+>   macOS escribe de los programas pequeños que las pruebas hacen fallar a propósito (ver `test` en
+>   [Comandos](#comandos)).
+> - En las máquinas de GitHub (macos-15-intel y macos-15; macOS 15, Xcode 26.3 con el SDK 26.2). En el commit ee7f332
+>   el flujo `ci` pasó 304 de las 316 pruebas sin ningún fallo (3 se saltaron y 9 no se ejecutaron) en la máquina
+>   Intel y, por primera vez completas, en la máquina con Apple silicon, y el flujo `full-build` (con las herramientas
+>   recuperadas de la caché de GitHub) terminó bien en todos sus pasos: los 17 componentes en 19 minutos 26 segundos,
+>   el paquete en 57 segundos y sus doce comprobaciones de lo compilado; el trabajo entero tardó 1 hora 18 minutos. En
+>   el commit 3933ff6 su paso `test` había fallado porque el clon del trabajo no tenía historial (16 de las 315 pruebas
+>   leen revisiones anteriores), y una comprobación pedía a los seis kexts una versión mínima de macOS, que el enlazador
+>   no escribe en un kext; las dos causas se corrigieron después de 3933ff6.
 > - Solo contra sustitutos de las herramientas de macOS, Xcode, Homebrew, rustup, los remotos de git y cada script de
 >   compilación (`tools/test_build_sh.py`, en Linux y en las máquinas de GitHub): `deps` tomando sus herramientas de
 >   Homebrew, que es lo que hace en un Mac con Apple silicon, y la parada en un Mac sin Xcode.
-> - En ninguna parte cuando se escribió este aviso (2026-11-14): una compilación completa en Apple silicon (ver
->   [Requisitos](#requisitos)), ni una compilación o una prueba de los commits de esta rama posteriores a ee7f332 en las
->   máquinas de GitHub, ni de los posteriores a aa27c73 en ningún Mac (se compilaron y sus pruebas se ejecutaron solo en
->   Linux; las que necesitan un Mac no se han ejecutado).
+> - En ninguna parte: una compilación completa en Apple silicon (ver [Requisitos](#requisitos)). Aquí no consta
+>   ninguna ejecución en las máquinas de GitHub posterior al commit ee7f332.
 >
 > `build.sh` está escrito para el `/bin/bash` 3.2 de macOS y sus herramientas BSD. En un sistema que no es macOS solo
 > funcionan `doctor`, `fetch`, `test`, `env`, `clean`, `help` y la prueba en seco de cualquier comando salvo `deps`. Un
-> paso todavía puede detenerse por algo que no mostraron ni los sustitutos ni estos dos Mac (otro Xcode u otro SDK, el
+> paso todavía puede detenerse por algo que no mostraron ni los sustitutos ni estos Mac (otro Xcode u otro SDK, el
 > nombre de una fórmula, un aviso del compilador). Ejecuta primero `./build.sh doctor` y después `./build.sh`; si un
 > paso se detiene, el mensaje dice cuál es y da un archivo de informe para adjuntar al reportar el fallo (ver
 > [Cuando falla la compilación](#cuando-falla-la-compilación)). Un paso que falla nunca queda marcado como terminado,
@@ -75,8 +66,9 @@ comandos y opciones y la solución de problemas.
   en la máquina Intel de GitHub. Xcode 26.3 es el Xcode más nuevo que funciona en macOS 15 (Xcode 26.4.1,
   26.5 y 26.6 necesitan macOS 26.2 o posterior), y con un SDK anterior al 26.4 el plugin compila una parte propia que
   el SDK 26.5 deja fuera. Xcode 26.0 a 26.2 no se han probado. Las herramientas de línea de comandos solas no bastan:
-  el plugin usa cabeceras de Metal 4 (`Metal/MTL4CommandQueue.h`) que solo tiene el SDK de macOS 26. No hace falta
-  ningún Kernel Debug Kit: ningún paso lee uno. En un Mac sin Xcode ni herramientas de línea de comandos, todos los
+  el plugin usa cabeceras de Metal 4 (`Metal/MTL4CommandQueue.h`) que solo tiene el SDK de macOS 26. `build.sh` no
+  necesita ningún Kernel Debug Kit: ninguno de sus pasos lee uno (los kits para macOS anteriores sí:
+  [Compilar los kits](#compilar-los-kits-para-macos-107-a-14)). En un Mac sin Xcode ni herramientas de línea de comandos, todos los
   comandos salvo `help` se detienen al empezar con las instrucciones (`doctor` nombra Xcode como lo único que falta): el `git`, `make`, `python3` y `xcrun`
   de macOS son entonces sustitutos que ofrecen instalar las herramientas de línea de comandos, y no se ejecuta ninguno.
   Lo mismo ocurre si la carpeta de desarrollo que indican `DEVELOPER_DIR` o `xcode-select -p` no existe o no contiene
@@ -211,15 +203,21 @@ Todas las fuentes salen de las versiones fijadas en [build/pins.sh](../build/pin
 lo fijado detiene la compilación y no se usa nada de ella. `./build.sh doctor` compara lo fijado con los scripts que
 usan las mismas fuentes.
 
-Paquetes locales anteriores arrancaron en una RTX 5050; compilaciones y pruebas posteriores tienen resultados
-de alcance limitado en [STATUS.md](STATUS.md). La 3.0.13 aún necesita una compilación nativa y un arranque en una tarjeta.
-Los kexts comparan las clases IOKit del macOS en ejecución con las suyas al arrancar; compilar correctamente
+Los paquetes hechos así han funcionado en la única máquina de prueba con RTX 5050, hasta la 3.0.20 (el aviso del
+principio; lo comprobado en la tarjeta está en [STATUS.md](STATUS.md)); ningún kit para 10.7 a 14 ha funcionado en
+ninguna parte. Los kexts comparan las clases IOKit del macOS en ejecución con las suyas al arrancar; compilar correctamente
 no demuestra que esas comprobaciones acepten otra versión del sistema.
 
-Para hacer un paquete instalable hace falta el paquete publicado de la versión 2.9 como base, porque algunos archivos
-que `install.sh` necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo
-que lleve algo más que carpetas, archivos normales y enlaces a un archivo de su misma carpeta). El paquete resultante
-no lleva el nombre de tu cuenta en sus cabeceras ni los atributos extendidos de tu Mac, así que se puede pasar a otros:
+Para hacer un paquete instalable hace falta como base el paquete de la versión 2.9 del proyecto original,
+[`nullmoth-nvidia-2.9.tar.gz`](https://github.com/nullmoth/nvidia-macos-driver/releases/download/v2.9/nullmoth-nvidia-2.9.tar.gz)
+(`NM_PIN_CI_BASEPKG_URL` y `NM_PIN_CI_BASEPKG_SHA256` en build/pins.sh), porque algunos archivos que `install.sh`
+necesita no tienen código fuente en este repositorio (otra versión se rechaza, y también un archivo que lleve algo más
+que carpetas, archivos normales y enlaces a un archivo de su misma carpeta). Con `NM_LEGACY_KITS` el paquete lleva
+además los kits para macOS 10.7 a 14 ([Compilar los kits para macOS 10.7 a 14](#compilar-los-kits-para-macos-107-a-14));
+para cargar la pila gráfica con AMFI activo, fírmala antes de instalar
+([Firmar la pila gráfica para AMFI (opcional)](#firmar-la-pila-gráfica-para-amfi-opcional)) e instala desde el
+`pkgroot` firmado. El paquete resultante no lleva el nombre de tu cuenta en sus cabeceras ni los atributos extendidos
+de tu Mac, así que se puede pasar a otros:
 
 ```bash
 ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
@@ -241,9 +239,8 @@ por completo: `sudo ./uninstall.sh && sudo shutdown -r now`. Los detalles están
 Ejecuta los comandos tal como aparecen (`./install.sh`, no `bash install.sh`: install.sh reconoce por ese nombre una
 instalación en curso). install.sh comprueba la integridad de un paquete, no quién lo hizo, así que acepta este.
 `uninstall.sh` se niega con SIP activado, y no restaura la copia que nombra install.sh: quita el driver. En un paquete
-de prueba NVK, el traductor y las demás bibliotecas van firmados ad hoc; el ryzenadj compilado aquí tiene otro SHA-256
-que el que fija la app 1401, que no lo instalará (el driver no se ve afectado). El firmware GSP lo descarga install.sh
-al instalar.
+hecho con `./build.sh package`, NVK, el traductor y las demás bibliotecas van firmados ad hoc, y un kext va firmado ad
+hoc donde la copia del paquete base lo estaba. El firmware GSP lo descarga install.sh al instalar.
 
 Instalar una compilación de prueba sobre una versión publicada deja el mismo trabajo de respaldo que deja la
 instalación de una versión publicada: si el framebuffer de esta compilación rechaza las clases de Apple del macOS en
@@ -307,8 +304,8 @@ Variables sin opción (su significado completo está en [BUILDING.md](BUILDING.m
 | Variable | Para qué |
 |---|---|
 | `NM_BASE_PACKAGE_SHA256` | SHA-256 del paquete base, de la página de la versión (para la 2.9 es también `NM_PIN_CI_BASEPKG_SHA256` en build/pins.sh), comprobado antes de usarlo |
-| `NM_PACKAGE_VERSION` | Versión escrita en `VERSION` del paquete, que install.sh guarda en `/Library/NullMoth/driver-version` (la versión instalada que leen la búsqueda de actualizaciones de la app y Send logs). Por defecto, la del primer encabezado de CHANGELOG.md (`3.0.3`), no la del paquete base; `package` se detiene si ese encabezado no es una versión y la variable no está puesta, y también si la variable tiene algo más que cifras y puntos (install.sh solo guarda esos: `3.0rc1` quedaría como `3.01`) |
-| `NM_LEGACY_KITS` | La carpeta que escribe `build/legacy/package_kits.sh` (`legacy_kits.json` y los 13 kits, macOS 10.7 a 14). `package` comprueba cada archivo contra su pin y su propio `SHA256SUMS` y lo desempaqueta en `legacy/<versión>/`; luego `install.sh` instala el kit de la versión en la que corre (`package/pick_kit.sh`). Los 13 o no se hace el paquete. Sin ella, el paquete no lleva kits |
+| `NM_PACKAGE_VERSION` | Versión escrita en `VERSION` del paquete, que install.sh guarda en `/Library/NullMoth/driver-version` (la versión instalada). Por defecto, la del primer encabezado de CHANGELOG.md (`3.0.20`), no la del paquete base; `package` se detiene si ese encabezado no es una versión y la variable no está puesta, y también si la variable tiene algo más que cifras y puntos (install.sh solo guarda esos: `3.0rc1` quedaría como `3.01`) |
+| `NM_LEGACY_KITS` | La carpeta que escribe `build/legacy/package_kits.sh` (`legacy_kits.json` y los 13 kits, macOS 10.7 a 14). `package` comprueba cada archivo contra su pin y su propio `SHA256SUMS` y lo desempaqueta en `legacy/<versión>/`; luego `install.sh` instala el kit de la versión en la que corre (`package/pick_kit.sh`). Los 13 o no se hace el paquete. Sin ella, el paquete no lleva kits. Cómo se hacen: [Compilar los kits para macOS 10.7 a 14](#compilar-los-kits-para-macos-107-a-14) |
 | `NM_OGKM_URL` | Réplica de open-gpu-kernel-modules de NVIDIA |
 | `NM_MESA_URL` | Réplica de Mesa |
 | `NM_KHRONOS_URL` | Prefijo de URL con `Vulkan-Headers` y `Vulkan-Loader` |
@@ -444,6 +441,144 @@ Se compilan en el orden de la tabla. Grupos: `all`, `kexts` y `userland`. Ejempl
 Cada paso guarda un sello de lo que lo compuso; un paso cuyo sello no cambió y cuya salida existe se salta, y un cambio
 recompila ese paso y los que dependen de él. Una sola ejecución a la vez por directorio de trabajo.
 
+## Compilar los kits para macOS 10.7 a 14
+
+Además del driver para macOS 15 y 26, un paquete puede llevar un kit para cada versión anterior: 10.7, 10.8, 10.9,
+10.10, 10.11, 10.12, 10.13, 10.14, 10.15, 11, 12, 13 y 14. `install.sh` lee la versión de macOS y `package/pick_kit.sh`
+elige la parte: el driver de siempre en 15 y 26, el kit de esa versión en 10.7 a 14, cuyo propio `install-legacy.sh`
+lo instala. Un kit lleva los kexts de esa versión (NVRM y NVRMFB en todas, NVRMAGDC desde 10.9, NVAccel desde 10.12),
+la parte de usuario de Metal donde la versión tiene Metal (10.11 a 14), el motor OpenGL y su acelerador donde hay uno
+preparado (10.7 a 10.13), opciones para el momento de instalar (ninguna aplicada), su instalador y su desinstalador de
+`package/legacy/`, el descargador del firmware y un README. **Ningún kit ha funcionado en una tarjeta ni en un macOS
+anterior.** Cuando se compilaron los kits de la 3.0.19, cada kext se compiló y enlazó para su versión, sus
+importaciones se comprobaron contra el kernel y los kexts de Apple de esa versión y, hasta 10.15, lo enlazó el propio
+enlazador de kexts de esa versión ([CHANGELOG.md](../CHANGELOG.md), 3.0.19, tiene la tabla por versión).
+
+`./build.sh` no compila los kits. Se compilan a mano en un Mac, en una carpeta de trabajo propia (los scripts la
+llaman carpeta de auditoría: `B`, y `AUDIT` en los scripts de la parte de usuario) que contiene una copia de este
+árbol, con el SDK y el Kernel Debug Kit de Apple de cada versión. Los kits de la 3.0.19 se compilaron así en el Mac
+del dueño (macOS 26.7.3) el 2026-11-25, desde el commit 2e4b9cc4. Los scripts están en `build/legacy/`; la cabecera
+de cada uno dice qué lee y qué escribe, y algunos ejecutan ayudantes que esperan en la carpeta de trabajo
+(gen_release.sh ejecuta `vtdump.py`, `named.py` y `gen_era_headers.py` desde `$B`; kxld_all.sh ejecuta
+`$B/kxld/kxld_run.py`; kxld_build.sh compila `$K/kxlink.c`). En el orden en que se ejecutan:
+
+1. **Cabeceras del acelerador.** En 10.10 a 10.14 la familia del acelerador de Apple difiere de las cabeceras de
+   macOS 15 de `kexts/NVRM/accel`, así que esas versiones tienen cabeceras propias.
+   `gen_release.sh <versión> <era> [versión más nueva]` (la era como `MMmm`: `1013` para 10.13) lee la familia del
+   acelerador de la versión (de su Kernel Debug Kit o de su imagen de recuperación) y los drivers gráficos de los
+   fabricantes que trae Apple (para los nombres de las ranuras puras de la familia) y escribe las cabeceras en
+   `$B/gen-<era>`. Esos drivers solo vienen en el instalador completo de macOS, así que las cabeceras hechas con ellos
+   para 10.10 a 10.14 se guardan en [build/legacy/era-headers](../build/legacy/era-headers/README.md): gen_release.sh
+   las copia cuando no encuentra ningún driver de fabricante, y era_all.sh las usa cuando la carpeta de trabajo no
+   tiene `gen-<era>`. No hace falta ningún instalador completo de macOS.
+2. **Los kexts por versión.** `era_all.sh`, con `B` conteniendo `sdk/` (los SDK desempaquetados: su lista indica,
+   por versión, de qué paquete de Command Line Tools, o de Xcode 3.2.6 para 10.6, salen), `kdk/` (los Kernel Debug
+   Kits desempaquetados) y `out/`, y con `OGKM` apuntando al árbol de NVIDIA parcheado con el RM compilado (los pasos
+   `rm` y `kms` de `./build.sh` dejan uno en `<workdir>/build/rm620/ogkm-620.70.06`). Para cada versión de 10.6 a 14
+   (`ONLY=10.13` u `ONLY=11.0` para una, como las escribe su lista) ejecuta `era_kexts.sh`, que compila NVRM, NVRMFB,
+   NVRMAGDC y NVAccel con las cabeceras del kernel de esa versión y `kexts/compat/nm_era.h` (NVAccel con las cabeceras
+   del paso 1 donde las hay) y enlaza lo que compiló en `$B/out/<versión>`; después `era_symcheck.py` comprueba cada
+   importación de cada kext contra el kernel y los kexts de Apple de esa versión. `era_route_b.sh <versión>` compila
+   en `$B/out-options` la variante del framebuffer de la opción "compositor route B" de 10.13 y 10.14.
+3. **Pruebas de enlace con el propio enlazador de kexts de cada versión** (10.6 a 10.15; desde 11 el kernel ya no
+   enlaza kexts por sí mismo, así que 11 a 14 solo se enlazan al compilar). `kxld_build.sh <etiqueta de xnu>` compila
+   el enlazador de kexts de esa versión (libkxld) y el programa `kxlink` desde el código publicado del kernel de Apple
+   en `$K/bin/<etiqueta>` (`K=$B/kxld`). `kxld_pull_sys.sh` descarga la imagen de recuperación de cada versión con
+   macrecovery (`$B/macrecovery/macrecovery.py`), copia de ella, montada solo para lectura, el kernel y los kexts de
+   Apple en `$B/kxld/sys/<versión>` y borra la imagen. `kxld_all.sh [versión...]` enlaza después los kexts de cada
+   versión de `$B/out` (y el acelerador OpenGL preparado) con ese enlazador mediante `kxld_run.py`: primero las
+   familias de Apple como control, después los nuestros y luego un control negativo (nuestro acelerador sin su
+   familia) que debe rechazarse. Los resultados van a `$B/kxld/results/<versión>.txt`.
+4. **La parte de usuario por versión mínima de macOS.** En `$AUDIT`, `userland/userland_floors.sh` compila de prueba
+   el traductor, el cargador de Vulkan (v1.4.367), la biblioteca de códecs de vídeo, el decodificador AIR y la
+   biblioteca de versión en cada mínimo, `userland/nvk_floors.sh` NVK, `userland/plugin_floors.sh` el plugin de Metal
+   y `userland/codec_floors.sh` la biblioteca de códecs con todos los avisos de API más nueva (`FLOORS` cambia la lista
+   de mínimos; cada cabecera nombra las variables que necesita). `userland/stage_legacy.sh [versión...]` reúne después
+   con esas compilaciones la parte de usuario de cada versión en `$AUDIT/stage/<versión>` (10.11 a 14), firmando cada
+   programa ad hoc, el plugin el último, y `userland/stage_options.sh` escribe a su lado las opciones para el momento
+   de instalar (texto, archivos de parche y listas de propiedades; ninguna aplicada, y sin copias de archivos de
+   Apple). assemble_kits.sh lee esa carpeta como `$B/metal/stage`. La parte OpenGL para 10.7 a 10.13 sale de `gl/`
+   ([gl/README.md](../gl/README.md)); `gl/package/stage.sh` la prepara, y assemble_kits.sh la lee como `$B/gl/stage`.
+5. **Una carpeta por versión.** `assemble_kits.sh` reúne lo de cada versión en `$B/kit/<versión>`: `kexts/`,
+   `userland/`, `opengl/`, `options/`, `README.txt` y `MANIFEST.sha256`. Un kext que el enlazador de esa versión rechazó
+   en el paso 3 va a `held-back/` en vez de a `kexts/` (también el NVRMAGDC de 10.8), porque `install-legacy.sh` prueba
+   a enlazar cada kext de `kexts/` y detiene toda la instalación con un solo rechazo.
+6. **Los archivos.** `package_kits.sh <versión del paquete>` hace un archivo por versión de 10.7 a 14 (la 10.6, que
+   los pasos anteriores también compilan, no se empaqueta):
+   `$B/pkg/nullmoth-nvidia-legacy-<versión>-<versión del paquete>.tar.gz`, con `$B/pkg/legacy_kits.json` (nombre y
+   SHA-256 de cada archivo) y `$B/pkg/SHA256SUMS`. Cada archivo lleva el kit, el instalador y el desinstalador de
+   `package/legacy/`, `package/fw_fetch.sh`, un decodificador Zstandard compilado para 10.7, la licencia, `RELEASE` y
+   `VERSION` (la versión del paquete indicada, que también se escribe en la versión del bundle del plugin). Ejecuta
+   scrub_kit.py en cada kit, vuelve a firmar ad hoc lo que eso y el cambio de versión dejaron sin sellar, y se detiene
+   ante un programa que siga sin firmar o una copia del `Configuration.plist` de Apple. Los archivos son ustar simples,
+   que el tar de 10.7 lee.
+7. **`scrub_kit.py <carpeta del kit>`**, que ejecuta package_kits.sh, sustituye los nombres de carpeta del Mac de
+   compilación (`/Users/<nombre>`, `/Volumes/<nombre>`, lo mismo con guiones bajos en vez de barras como lo escribe el
+   registro de enlace, y la carpeta temporal del usuario en `/var/folders`) por otros neutros de la misma longitud,
+   vuelve a firmar ad hoc cada Mach-O cambiado y termina con código 1 si queda alguno.
+
+Después pasa la carpeta al paquete:
+
+```bash
+NM_LEGACY_KITS=<carpeta de trabajo>/pkg ./build.sh --base-package ~/Downloads/nullmoth-nvidia-2.9.tar.gz package
+```
+
+`build/package_local.sh` comprueba cada archivo (su SHA-256 contra `legacy_kits.json`; una sola carpeta con su
+nombre, sin enlaces y solo con archivos y carpetas; su `RELEASE`; que lleve `install-legacy.sh` y NVRM.kext; sus
+archivos contra su propio `SHA256SUMS`) y lo desempaqueta en `legacy/<versión>/` del paquete. Los 13 o no hay
+paquete. `./build.sh package` vuelve a hacer el paquete cuando cambia `legacy_kits.json`. Sin `NM_LEGACY_KITS` el
+paquete no lleva kits, e `install.sh` lo dice en una versión anterior.
+
+## Firmar la pila gráfica para AMFI (opcional)
+
+La instalación documentada impide que AMFI haga cumplir las firmas con los argumentos de arranque
+`amfi_get_out_of_my_way=0x1 amfi=0x80` (README.md, "Install — by hand"). Opcionalmente, la pila gráfica puede cargarse
+con AMFI activo: la firmas con una autoridad de certificación propia y OpenCore registra esa CA como ancla de
+confianza mediante [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) (de b00t0x). Ha funcionado en la única máquina
+de prueba (la 3.0.20 funcionó firmada así, 2026-11-26) y sigue siendo **experimental** para todos los demás: guarda un
+EFI que funcione y que aún tenga los dos argumentos de AMFI. Las comprobaciones, lo que aún no está validado y los
+antecedentes están en [SIGNED-GRAPHICS-EXPERIMENT.md](SIGNED-GRAPHICS-EXPERIMENT.md) y
+[AMFI-COMPATIBILITY.md](AMFI-COMPATIBILITY.md).
+
+1. Una sola vez, crea la cadena de firma y el kext del ancla, con un clon de AMFIAnchor (su propio
+   `tools/make_injector.py` hace el kext):
+
+   ```bash
+   bash tools/make_amfi_anchor.sh --amfianchor /ruta/a/AMFIAnchor
+   ```
+
+   Escribe una cadena RSA privada (raíz e intermedia de 4096 bits, hoja de 2048 bits) en `~/nullmoth-signing` (otra
+   carpeta con `--keydir` o `NULLMOTH_SIGNING_DIR`) y rechaza una carpeta dentro de cualquier repositorio git: **las
+   claves se quedan en tu Mac, fuera de todo repositorio, y nunca van a GitHub.** Guárdalas; el ancla se hace con
+   ellas. Solo el `root.cert.pem` público y el kext del ancla están pensados para salir del Mac. Imprime la huella del
+   certificado hoja.
+2. Después de `./build.sh package`, firma en una carpeta nueva las tres unidades gráficas del `pkgroot` terminado
+   (NVMTLDriver.bundle, NVKZinkGLDriver.bundle y las bibliotecas de `nvmtl`). Necesita `rcodesign` (apple-codesign
+   0.29.0), nunca se ejecuta como root y no cambia nada instalado:
+
+   ```bash
+   bash tools/sign_graphics.sh --base ~/nullmoth-build/package/pkgroot \
+     --keydir ~/nullmoth-signing --output ~/nullmoth-build/signed-GPUBundles
+   ```
+
+3. Ponlas en un árbol de paquete nuevo, como dicen las últimas líneas de sign_graphics.sh:
+   `tools/stage_signed_graphics.py` comprueba que los UUID de compilación no cambiaron y que el certificado hoja es el
+   tuyo, y vuelve a calcular `SHA256SUMS`. No ejecutes `package/finish_package.sh` sobre lo firmado. Instala desde el
+   árbol nuevo como en [Inicio rápido](#inicio-rápido).
+
+   ```bash
+   python3 tools/stage_signed_graphics.py --base ~/nullmoth-build/package/pkgroot \
+     --signed-gpu ~/nullmoth-build/signed-GPUBundles --leaf-fingerprint <huella> \
+     --output ~/nullmoth-build/pkgroot-signed
+   ```
+
+4. En OpenCore, `Kernel > Add`, en este orden y cada uno con `PlistPath` `Contents/Info.plist`: `Lilu.kext` (1.7.2 o
+   posterior), después `AMFIAnchor.kext` (de las versiones publicadas de b00t0x/AMFIAnchor) y después el kext del ancla
+   que escribió make_amfi_anchor.sh (`ExecutablePath` vacío); `MinKernel` `20.0.0` y `MaxKernel` `25.99.99` en los dos
+   últimos. Tras reiniciar, `ioreg -r -c AMFIAnchor -l` muestra `InstallStatus` 1 y tu ancla en `LoadedAnchors`; solo
+   entonces prueba un arranque sin los dos argumentos de AMFI. (El arranque confirmado en la máquina de prueba cargaba
+   también AMFIPass después del ancla.)
+
 ## Solución de problemas
 
 | Mensaje o síntoma | Causa | Qué hacer |
@@ -477,8 +612,8 @@ recompila ese paso y los que dependen de él. Una sola ejecución a la vez por d
 | `building LLVM needs about 10 GB free` | Poco espacio libre donde está el directorio de trabajo | Haz sitio o elige otro directorio con `--workdir` |
 | `libvulkan_nouveau.dylib loads a library from outside macOS` | Se enlazó una biblioteca de fuera de macOS (de Homebrew, por ejemplo) | Repórtalo con el archivo de informe |
 | `the base package does not match its own SHA256SUMS` | El paquete publicado está dañado o modificado | Descárgalo de nuevo |
-| `the base package is release <x>, not 2.9` | `package` solo parte de la versión 2.9: los archivos de otra versión que no tienen fuente aquí saldrían bajo la versión de esta compilación | Usa `nullmoth-nvidia-2.9.tar.gz` de Releases |
-| `the base package holds a link that leaves its folder` (o `a device, pipe or socket`, `a set-user-id or set-group-id file`) | El archivo no es un paquete publicado: uno publicado solo lleva carpetas, archivos normales y enlaces a un archivo de su misma carpeta | Descarga otra vez el paquete de Releases; no uses ese archivo |
+| `the base package is release <x>, not 2.9` | `package` solo parte de la versión 2.9: los archivos de otra versión que no tienen fuente aquí saldrían bajo la versión de esta compilación | Usa el `nullmoth-nvidia-2.9.tar.gz` del proyecto original (dirección en [Inicio rápido](#inicio-rápido)) |
+| `the base package holds a link that leaves its folder` (o `a device, pipe or socket`, `a set-user-id or set-group-id file`) | El archivo no es un paquete publicado: uno publicado solo lleva carpetas, archivos normales y enlaces a un archivo de su misma carpeta | Descarga otra vez el paquete del proyecto original; no uses ese archivo |
 | `a package must carry NVAccel for macOS 15 and 26` | `package` con `--accel 15` o `26` | Usa `--accel both` |
 | el resumen dice que el plugin se compiló desde "the working tree ... with its uncommitted changes" | Tu clon tiene cambios locales | Es lo esperado; los archivos sin seguimiento no entran en esa compilación |
 

@@ -24,11 +24,12 @@ tools/nak-corpus/run.sh /tmp/after.jsonl NVMTL_NAK_NO_PREPASS=1      # a switch,
 tools/nak_stats_diff.py /tmp/before.jsonl /tmp/after.jsonl --gate-instrs 5 --gate-spills
 ```
 
-On Linux the NVK is the fork's, built on Mesa's nouveau drm-shim: `LD_PRELOAD=<build>/src/nouveau/drm-shim/libnouveau_noop_drm_shim.so`,
+On Linux the NVK is this tree's, built on Mesa's nouveau drm-shim: `LD_PRELOAD=<build>/src/nouveau/drm-shim/libnouveau_noop_drm_shim.so`,
 `NOUVEAU_CHIPSET=1b7` (GB207, shader model 120) and `VK_DRIVER_FILES=<build>/src/nouveau/vulkan/nouveau_devenv_icd.x86_64.json`.
 Nothing runs on a GPU there: only compilation is meaningful. Figures from the host say what the compiler emits, not
 how fast it runs; a change that moves them still has to be measured on a card (for the same frame rate, lower
-graphics utilisation or fewer watts).
+graphics utilisation or fewer watts). The corpus came with 3.0.14; its recorded runs are host runs like the baseline, and no
+run of `NAK_STATS=1` on a Mac is recorded.
 
 Not here, because they cannot be put in the repository: the shaders of a game's shader pack and Apple's Core
 Animation kernels. Shaders captured from an application can be run the same way from a local folder, and compared

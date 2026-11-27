@@ -1,17 +1,17 @@
 # Channel recovery: a GPU fault costs the frames in flight, not the device
 
-Status: at commit 3933ff6 the kext's, NVK's and the Metal plugin's parts were compiled and linked with Apple's own tools
-on one Intel Mac (12 threads, macOS 26.7, Xcode 26.5) and on GitHub's Intel runner (macos-15-intel: 4 processors,
-macOS 15, Xcode 26.3 with the 26.2 SDK). Their pure logic runs in host tests. The corrections made after commit ee7f332
-were built and their host tests run on that Mac at commit aa27c73. Later native evidence is tracked in
-[STATUS.md](STATUS.md); **no specific successful rebuild of a real channel has been reported here.**
-It is on by default. `NVK_CHANNEL_RECOVER=0` in
-`/Library/GPUBundles/nvmtl/nvrm610.conf` switches it off, and NVK then runs the 2.9 code.
+Status at 3.0.20: on by default since 3.0, and in every package the fork's one test machine (RTX 5050, macOS 26.7.3)
+has run, 3.0 to 3.0.20 ([STATUS.md](STATUS.md)). The kext's, NVK's and the Metal plugin's parts were built with
+Apple's tools for 3.0 (at aa27c73 on one Mac with macOS 26.7 and Xcode 26.5; earlier commits also on GitHub's
+macos-15-intel runner, Xcode 26.3 with the 26.2 SDK), and their pure logic runs in host tests. **No rebuild of a real
+channel, and no run of the injected faults of "What to look at on the machine", is recorded on the card.**
+`NVK_CHANNEL_RECOVER=0` in `/Library/GPUBundles/nvmtl/nvrm610.conf` switches it off, and NVK then runs the 2.9 code.
 
 ## What changed
 
-In 2.9 a GPU fault on one channel ended the application's Metal device: every later command buffer was refused, and
-in WindowServer the session ended. The GPU itself was fine; only the faulting channel had been torn down.
+What this page describes came in 3.0. In 2.9 a GPU fault on one channel ended the application's Metal device: every
+later command buffer was refused, and in WindowServer the session ended. The GPU itself was fine; only the faulting
+channel had been torn down.
 
 A GPU fault on one channel no longer ends the application's Metal device. When a wait finds that its channel faulted
 with an exception that ends only that channel (Xid 13, 31, 32, 43, 44, 45, 69, 109, or a fault on any copy engine:
@@ -90,6 +90,15 @@ Nothing is printed on a healthy GPU.
   the desktop freezes after a recovered fault in WindowServer (the failed-part path had not been seen there with a
   frame that never rendered).
 
+## The Vulkan frontend and Zink
+
+- The native Vulkan frontend (`tools/nvk-bridge`, since 3.0.9): its presentation thread asks
+  `nvmtl_nvk_fence_dropped_v1` of a frame's own fence before it copies and of its copy's fence before it publishes. A
+  frame whose fence was dropped is not copied, a copy that never ran is not published, and each counts as a frame that
+  could not be shown (CHANGELOG.md, 3.0.9).
+- OpenGL on Zink (since 3.0.7): a frame whose channel was rebuilt under its copy is released unpresented, and the next
+  swap of that context says so on standard error ([ZINK-OPENGL.md](ZINK-OPENGL.md), "Presentation").
+
 ## What the kext does: it counts
 
 NVRM.kext takes no part in the rebuild. NVK tells it what it did through a private escape (0xE8, through the
@@ -118,7 +127,7 @@ On a healthy machine all of them except the two Xid counters stay 0. The escape 
 channel fault. The counters cannot be written, and nothing in the kernel acts on them: a process could make them lie,
 which is why they are only a diagnostic.
 
-A kext older than this branch does not know escape 0xE8: the RM refuses it, NVK treats the power state as unknown,
+A kext older than 3.0 (2.9's) does not know escape 0xE8: the RM refuses it, NVK treats the power state as unknown,
 does not ask again in that process, and the rebuild works without it. A new kext with an older NVK is never asked.
 `debug.nvrm_xid_count` counts with any NVK.
 
@@ -196,5 +205,5 @@ rebuild gives up (`debug.nvrm_chan_last_why` 6) and the application loses its de
    `debug.nvrm_xid_count` rises (43, then 31 or 32), `debug.nvrm_chan_last_xid` matches, and the outcome is that of
    step 3. Another app and the desktop must not notice.
 5. Only after that, WindowServer: `NVK_FAULT_INJECT=fake:2000:WindowServer`, log out and in; one glitch and the session
-   stays up. If the desktop freezes afterwards, repeat with `NVMTL_DROP_REPORT=0` and report which behaves. Remove both
-   lines afterwards.
+   stays up. If the desktop freezes afterwards, repeat with `NVMTL_DROP_REPORT=0` and report which behaves
+   ([TROUBLESHOOTING.md](TROUBLESHOOTING.md), "Reporting a problem"). Remove both lines afterwards.
