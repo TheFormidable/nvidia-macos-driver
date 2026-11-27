@@ -26,6 +26,15 @@
   pipeline, none fails or crashes, the rest are refused with a reason (textures above all). It found that a kernel
   reading a function constant was compiled as if the constant were 0 (the frontend took the placeholder global's
   initializer for its value): such kernels are refused now, until the request carries the values.
+- **Function constants and textures** (round 2 on the card): the request (version 2) carries the function's
+  function-constant values as the plugin hands them to the translator, and the frontend folds them in, running the
+  module's static initializer itself; textures and samplers use the bands the translator's kernels bind (sampled
+  32 + n, storage 480 + n without a format, samplers 160 + n, constexpr samplers at the slots the translator's
+  reflection gives them, listed in the result with their state). 18 new tests (reads, writes, sampling with levels,
+  gradients, offsets, gathers, cube, array, 3D, texel buffers, depth compare, pixel-coordinate samplers, sizes,
+  fences; two value sets of one kernel) pass on the RTX 5050, 47 in all. Of the plugin's 8273 cached compute
+  kernels, 3481 now give a pipeline (699 after round 1); 4555 of the rest read function constants the cache holds no
+  values for, and the 13 sets the plugin recorded all compile.
 - `build/build_nvk.sh`: `NVK_CRATE_CACHE` names a folder of Rust crates an earlier build fetched, copied into the
   fresh Mesa tree so meson downloads nothing (it still checks each against Mesa's wrap hashes).
 
