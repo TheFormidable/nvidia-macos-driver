@@ -1377,14 +1377,17 @@ air_integer_function(struct air_tr *t, const char *fn, bool is_signed, nir_def *
       return nir_bcsel(b, lt, nir_isub(b, s[1], s[0]), nir_isub(b, s[0], s[1]));
    }
    if (IS("popcount")) { NEED(1); return air_to_bits(b, nir_bit_count(b, x), x->bit_size); }
+   /* air.clz and air.ctz carry LLVM's is-zero-poison flag as a second operand; Metal defines both at zero */
    if (IS("clz")) {
-      NEED(1);
+      if (n != 1 && n != 2)
+         unsupported(t, "air.%s with %u operands", fn, n);
       nir_def *w = nir_u2u32(b, x);
       nir_def *z = nir_isub_imm(b, (int)x->bit_size - 32, nir_imm_int(b, 0));
       return air_to_bits(b, nir_iadd(b, nir_uclz(b, w), z), x->bit_size);
    }
    if (IS("ctz")) {
-      NEED(1);
+      if (n != 1 && n != 2)
+         unsupported(t, "air.%s with %u operands", fn, n);
       nir_def *w = nir_u2u32(b, x);
       nir_def *l = nir_find_lsb(b, w);
       return air_to_bits(b, nir_bcsel(b, nir_ieq_imm(b, w, 0), nir_imm_int(b, x->bit_size), l), x->bit_size);

@@ -88,6 +88,9 @@
 #                   The summary line of a build made with either variable (also kept in <out dir>/BUILD.txt) ends with
 #                   "WITHOUT <names>" or "PLUS <names>"; unset both for a library that is meant to be used.
 #   NVK_REF_EXPORTS optional file with the exported symbols to compare against (one name per line, sorted)
+#   NVK_CRATE_CACHE optional folder holding the Rust crates an earlier build fetched (its mesa/subprojects/packagecache):
+#                   copied into the fresh tree so meson setup downloads nothing; meson still checks each one against the
+#                   hash in Mesa's wrap file
 #
 # The Mesa git must contain the commit in nvk/MESA_BASE (3.0 and 2.9: 90a959eb, mesa-26.3.0-rc3) and, for 2.8, 17ca6174. The tree is exported with git archive, so no .git is
 # present and the binary carries no git sha. Rebuilding is deterministic: the same inputs give the same LC_UUID.
@@ -208,6 +211,7 @@ git -C "$MESA_GIT" cat-file -e "$BASE^{commit}" || { echo "STOP: $MESA_GIT has n
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 S=$OUT/mesa; rm -rf "$S" "$OUT/ogkm"; mkdir -p "$S"
 git -C "$MESA_GIT" archive "$BASE" | tar -x -C "$S"
+if [ -n "${NVK_CRATE_CACHE:-}" ]; then mkdir -p "$S/subprojects/packagecache"; cp "$NVK_CRATE_CACHE"/*.tar.gz "$S/subprojects/packagecache/"; fi
 
 # Headers: NVK compiles against the 610 open kernel module headers with the 620 nvos.h change applied.
 cp -R "$OGKM" "$OUT/ogkm"
