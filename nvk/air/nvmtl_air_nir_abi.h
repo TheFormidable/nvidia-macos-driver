@@ -216,6 +216,11 @@ typedef void *(*nvmtl_air_nir_clone_v1_fn)(void *nir, const uint32_t local_size[
  * format is NVK's build's own. 0 / non-NULL on success. */
 typedef int (*nvmtl_air_nir_serialize_v1_fn)(void *nir, void **data, size_t *size);
 typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data, size_t size);
+/* Since version 5. The version of the request and result this NVK reads and writes (NVMTL_AIR_NIR_VERSION); an NVK
+ * without the export is version 4 or older, and ignores NVMTL_AIR_NIR_REFLECT and NVMTL_AIR_NIR_SAMPLER_STATES (the
+ * plugin then neither leaves the translator out nor hands it a sampler's state). */
+typedef int (*nvmtl_air_nir_version_v1_fn)(void);
+#define NVMTL_AIR_NIR_VERSION 5
 #ifdef __cplusplus
 }
 #endif

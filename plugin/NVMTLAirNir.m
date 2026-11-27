@@ -34,6 +34,7 @@
 static _Thread_local int g_air_nir_force_spirv;   // set while the SPIR-V twin of a kernel on the road is made
 static _Thread_local int g_air_nir_hit;           // the last shader nvmtl_air_nir_make took came from the shader cache
 static char g_air_nir_llvm[PATH_MAX];              // air-runtime/libLLVM.dylib beside this plugin
+static int g_air_nir_v5;                           // the NVK reads version 5: the reflection and the samplers' state
 static NSString *g_air_nir_ids;                    // this NVK's and this LLVM's identity, in every cache key
 
 // The log of this road: the plugin's log file, never the system log (a refusal message names what the frontend does not
@@ -89,12 +90,15 @@ static int nvmtl_air_nir_on(void)
         else {
             char uuid[33] = "unknown";
             nvmtl_air_nir_image_uuid((const void *)pnvk_air_to_nir, uuid);
+            g_air_nir_v5 = nvmtl_vk_air_nir_version() >= 5;
             g_air_nir_ids = [NSString stringWithFormat:@"nvk %s llvm %llu.%ld.%llu", uuid, (unsigned long long)st.st_size,
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
             on = 1;
         }
-        nvlog_notice("compute and render pipelines: AIR to NIR %s in %s (%s)", on ? "ON - a kernel or pipeline it does not take stays on the SPIR-V road" : "off",
-                     me ? me : "?", off ? off : (e ? "NVMTL_AIR_NIR set, not 0" : "NVMTL_AIR_NIR unset"));
+        nvlog_notice("compute and render pipelines: AIR to NIR %s in %s (%s%s)", on ? "ON - a kernel or pipeline it does not take stays on the SPIR-V road" : "off",
+                     me ? me : "?", off ? off : (e ? "NVMTL_AIR_NIR set, not 0" : "NVMTL_AIR_NIR unset"),
+                     on && !g_air_nir_v5 ? "; this NVK's frontend is older than version 5: every function is made with the translator, and a "
+                                           "pixel-coordinate sampler's variant stays on the SPIR-V road" : "");
     });
     return on;
 }
@@ -415,6 +419,7 @@ NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, 
 {
     if (!ps || ps->_road != 1 || !ps->_function) return nil;
     NSDictionary *words = nil;
+    if (samplers.count && !g_air_nir_v5) { *why = @"a pixel-coordinate sampler is bound and this NVK's frontend takes no sampler state (older than version 5)"; return nil; }
     if (samplers.count && !(words = nvmtl_air_nir_sampler_words_all(samplers, why))) return nil;
     if (!tgLen.count && !words.count) return nil;
     uint64_t ns = 0;
@@ -851,7 +856,7 @@ BOOL nvmtl_air_nir_lazy(NVMTLFunction *f)
     if (![f->_stage isEqualToString:@"kernel"] && ![f->_stage isEqualToString:@"vertex"] && ![f->_stage isEqualToString:@"fragment"]) return NO;
     // OpenCL's (AMOGL): a by-value constant argument or an __entry_ wrapper, deferred to newFunctionWithPluginData as before
     if ([f->_fname hasPrefix:@"__entry_"] || [f->_air rangeOfString:@"!\"air.constant\"" options:NSLiteralSearch].location != NSNotFound) return NO;
-    if (!nvmtl_air_nir_on()) return NO;
+    if (!nvmtl_air_nir_on() || !g_air_nir_v5) return NO;
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     NSString *why = nil;
     NSDictionary *d;
@@ -922,6 +927,7 @@ NSData *nvmtl_function_spirv(NVMTLFunction *f, const char *why)
 NSArray *nvmtl_air_nir_sampler_stages(NVMTLFunction *vf, NVMTLFunction *ff, NSDictionary *vS, NSDictionary *fS, NSString **why)
 {
     if (!vf || !ff || !vf->_air.length || !ff->_air.length) { if (why) *why = @"a stage has no AIR"; return nil; }
+    if (!nvmtl_air_nir_on() || !g_air_nir_v5) { if (why) *why = @"this NVK's frontend takes no sampler state (older than version 5)"; return nil; }
     NSDictionary *vw = vS.count ? nvmtl_air_nir_sampler_words_all(vS, why) : @{}, *fw = fS.count ? nvmtl_air_nir_sampler_words_all(fS, why) : @{};
     if (!vw || !fw) return nil;
     NVMTLFunction *(^copy)(NVMTLFunction *, NSDictionary *) = ^NVMTLFunction *(NVMTLFunction *s, NSDictionary *w) {

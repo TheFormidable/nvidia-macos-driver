@@ -23,7 +23,8 @@
   functions too).
 - **Pixel-coordinate argument samplers stay on the road**: the state a dispatch or draw binds goes into the request
   (`NVMTL_AIR_NIR_SAMPLER_STATES`), so their compute and render variants are the frontend's (`tex_argpixel`,
-  `r_argpixel`).
+  `r_argpixel`). NVK exports its frontend's version (`nvmtl_air_nir_version_v1`); with an older NVK the plugin keeps the
+  translator at `newFunctionWithName:` and those variants on the SPIR-V road, which an older NVK would sample wrongly.
 - **Fixed: the 3.0.21 render road crashed** (SIGSEGV in the frontend, inside `newRenderPipelineStateWithDescriptor:`)
   on a fragment function that tests a texture for null through `ptrtoint` of its handle, as two SceneKit fragments of the
   AIR cache do; a texture or sampler handle used as a plain value is refused now, and such a pipeline takes the SPIR-V

@@ -873,6 +873,7 @@ static nvmtl_air_nir_free_v1_fn pnvk_air_nir_free;
 static nvmtl_air_nir_clone_v1_fn pnvk_air_nir_clone;
 static nvmtl_air_nir_serialize_v1_fn pnvk_air_nir_serialize;
 static nvmtl_air_nir_deserialize_v1_fn pnvk_air_nir_deserialize;
+static nvmtl_air_nir_version_v1_fn pnvk_air_nir_version;   // since version 5; without it the NVK is version 4 or older
 static int nvmtl_drop_report_on(void)
 {
     static int on = -1;
@@ -1233,6 +1234,7 @@ static int nvmtl_vk_initialize(void)
                 pnvk_air_nir_deserialize = (nvmtl_air_nir_deserialize_v1_fn)dlsym(g_lib, "nvmtl_air_nir_deserialize_v1");
                 if (!pnvk_air_to_nir || !pnvk_air_nir_free || !pnvk_air_nir_clone || !pnvk_air_nir_serialize || !pnvk_air_nir_deserialize)
                     pnvk_air_to_nir = NULL;   // all five or none: the road needs each of them
+                pnvk_air_nir_version = (nvmtl_air_nir_version_v1_fn)dlsym(g_lib, "nvmtl_air_nir_version_v1");
             }
         }
         else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
@@ -6793,6 +6795,8 @@ static void nvmtl_air_nir_release(nvk_pipeline *p)
     p->air_nir = NULL; p->nir_owner = NULL;
 }
 int nvmtl_vk_air_nir_exports(void) { return pnvk_air_to_nir != NULL && g_dev != VK_NULL_HANDLE; }
+// the request and result version the NVK's frontend reads and writes: 4 for one without the version export, 0 for none
+int nvmtl_vk_air_nir_version(void) { return !pnvk_air_to_nir ? 0 : pnvk_air_nir_version ? pnvk_air_nir_version() : 4; }
 int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3])
 {
     return !p || !p->air_nir || nvmtl_air_nir_size_ok(l, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations);

@@ -88,6 +88,7 @@ struct nvmtl_air_nir_result;
 int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_result *res, const uint32_t local[3], nvk_pipeline *out);
 /* 1 when NVK exports the AIR-to-NIR road (the plugin opened it directly), 0 otherwise */
 int nvmtl_vk_air_nir_exports(void);
+int nvmtl_vk_air_nir_version(void);
 /* 1 when a dispatch of threadgroup size l can run p, a kernel on the AIR-to-NIR road (always 1 on the SPIR-V road) */
 int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3]);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;

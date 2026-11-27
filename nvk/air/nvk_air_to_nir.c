@@ -5800,6 +5800,13 @@ int nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, s
 void *nvmtl_air_nir_clone_v1(void *nir, const uint32_t local_size[3]);
 int nvmtl_air_nir_serialize_v1(void *nir, void **data, size_t *size);
 void *nvmtl_air_nir_deserialize_v1(void *device, const void *data, size_t size);
+int nvmtl_air_nir_version_v1(void);
+
+__attribute__((visibility("default"))) int
+nvmtl_air_nir_version_v1(void)
+{
+   return NVMTL_AIR_NIR_VERSION;
+}
 
 /* The kernel for another threadgroup size: the translation reads the size only through nir_load_workgroup_size, which
  * NVK lowers from the shader's workgroup size, so a copy with that size changed is the kernel translated for it. */

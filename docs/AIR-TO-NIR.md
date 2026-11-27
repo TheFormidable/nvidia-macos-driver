@@ -69,7 +69,8 @@ translator"). NVMTL_AIR_NIR=0 turns all of it off; it is off in WindowServer for
   constants, the BufferAddressTable binding) are not written. With `NVMTL_AIR_NIR_SAMPLER_STATES` the request carries
   the state of argument samplers (`sampler_state_*`: slot and the two AIR constexpr-sampler words), and a sampler given
   there with pixel coordinates is sampled as a constexpr one with that state is (the plugin's VkSampler of a
-  pixel-coordinate MTLSamplerDescriptor is normalized with the same filter and address modes).
+  pixel-coordinate MTLSamplerDescriptor is normalized with the same filter and address modes). NVK exports
+  `nvmtl_air_nir_version_v1` (5): the plugin uses neither flag with an NVK that does not (an older one ignores both).
 - A render stage's contract, the plugin's render layout: set 0 holds the vertex stage's resources, set 1
   (`NVMTL_AIR_NIR_FRAGMENT_SET`) the fragment stage's, each with the same bands as a kernel's (the table at 640,
   textures at 32 + n, samplers at 160 + n, storage textures at 480 + n), and no push constants are read. A
@@ -521,6 +522,12 @@ road does not make it, the translator's variant is made as before. A sampler who
   pipeline takes the SPIR-V road). With `NVMTL_AIR_NIR=0` the same five tests as in round 4 fail (`fmath`,
   `fmath_precise`, `math_lib`, `tex_offset`, `align_misaligned`: old, not the road's), and the new three pass. With
   `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails.
+- The plugin and an NVK of another version (a release plugin loads only the installed NVK, so the package's release
+  plugin ran on the installed 3.0.21 NVK): a version-4 NVK ignores `NVMTL_AIR_NIR_REFLECT` and
+  `NVMTL_AIR_NIR_SAMPLER_STATES`, and sampling a pixel-coordinate sampler as a normalized one gave wrong results
+  (`tex_argpixel`, `r_argpixel` failed). NVK now exports `nvmtl_air_nir_version_v1` (5); with an NVK without it the
+  plugin makes every function with the translator and keeps pixel-sampler variants on the SPIR-V road, and says so in
+  the road's line. The development plugin with the 3.0.21 NVK: those tests pass, their variants on the SPIR-V road.
 
 | test | what | tolerance |
 |---|---|---|
@@ -534,16 +541,17 @@ road does not make it, the translator's variant is made as before. A sampler who
 
 | | AIR to NIR | NVMTL_AIR_NIR=0 |
 |---|---|---|
-| compute, 42 kernels: newFunctionWithName: | median 0.68 / 0.69 ms, max 1.40 / 1.35 | median 4.66 / 4.73 ms (the translator), max 10.95 / 11.09 |
-| compute: pipeline | median 1.53 / 1.52 ms, max 9.86 / 9.49 | median 2.62 / 2.48 ms, max 22.12 / 21.48 |
-| compute: both | median 2.34 / 2.29 ms, max 10.51 / 10.15, all 119 / 116 ms | median 7.16 / 6.91 ms, max 28.56 / 27.87, all 346 / 337 ms |
-| render, 14 pairs: both newFunctionWithName: | median 0.79 / 0.78 ms, max 1.79 / 1.69 | median 3.63 / 3.61 ms, max 5.46 / 5.59 |
-| render: pipeline | median 2.12 / 2.11 ms, max 2.43 / 2.55 | median 2.82 / 2.82 ms, max 3.71 / 4.09 |
-| render: both | median 3.02 / 2.93 ms, max 3.92 / 3.89, all 41 / 41 ms | median 6.82 / 6.69 ms, max 8.60 / 8.94, all 90 / 90 ms |
+| compute, 42 kernels: newFunctionWithName: | median 0.67 / 0.68 ms, max 1.33 / 1.33 | median 4.56 / 4.56 ms (the translator), max 10.91 / 10.91 |
+| compute: pipeline | median 1.53 / 1.53 ms, max 10.47 / 9.46 | median 2.59 / 2.49 ms, max 22.32 / 21.75 |
+| compute: both | median 2.24 / 2.22 ms, max 11.11 / 10.15, all 124 / 115 ms | median 6.89 / 6.90 ms, max 28.54 / 27.98, all 335 / 332 ms |
+| render, 14 pairs: both newFunctionWithName: | median 0.77 / 0.80 ms, max 1.60 / 1.61 | median 3.48 / 3.49 ms, max 6.74 / 5.55 |
+| render: pipeline | median 1.98 / 2.08 ms, max 2.60 / 2.38 | median 2.94 / 2.82 ms, max 3.64 / 3.83 |
+| render: both | median 2.84 / 2.91 ms, max 3.67 / 3.71, all 40 / 40 ms | median 6.61 / 6.65 ms, max 9.96 / 8.67, all 91 / 90 ms |
 
-  So a kernel is made in a third of the time and a render pipeline in less than half (4.6 and 3.7 ms saved per test,
-  the median of the differences). With the caches of the first run: 1.87 ms (compute) and 2.07 ms (render), the
-  frontend's work 8.4 ms in all for the 75 functions (39.7 ms without its caches).
+  So a kernel is made in a third of the time and a render pipeline in less than half (4.6 and 3.6 ms saved per test,
+  the median of the differences). With the caches of the first run: 1.83 ms (compute) and 2.09 ms (render), the
+  frontend's work 8.8 ms in all for the 75 functions (40.9 ms without its caches). (The runs of the package's code; an
+  earlier pair, before the version check below, gave the same to 0.1 ms.)
 - Three refusals real processes met since the 3.0.21 boot are gone (the plugin cached 33 refusals then): an output
   that exists only under a function constant (`the vertex output air.function_constant (float)`, 10 of them), a colour
   output whose index is an expression of function constants or has no index operand (`colour output 0 has malformed

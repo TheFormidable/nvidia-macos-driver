@@ -184,7 +184,7 @@ def lazy_off(s):
     lz = body(an, 'BOOL nvmtl_air_nir_lazy(NVMTLFunction *f)')
     ck = body(an, 'static int nvmtl_air_nir_refl_check_on(void)')
     return (all(x in lz for x in ('nvmtl_air_nir_refl_check_on()', 'g_app_profile', 'getenv("NVMTL_BDA_PROBE_FILE")',
-                                  'if (!nvmtl_air_nir_on()) return NO;', 'f->_spirvLazy = YES;', '@"__entry_"'))
+                                  'if (!nvmtl_air_nir_on() || !g_air_nir_v5) return NO;', 'f->_spirvLazy = YES;', '@"__entry_"'))
             and re.search(r'#if NVMTL_RELEASE\s*return 0;', ck) is not None)
 
 def lazy_same(s):
@@ -210,6 +210,15 @@ def refl_readers(s):
             'nvmtl_function_reflection(fn)' in body(em, 'static NSArray<NSArray *> *nvmtl_static_samplers(NVMTLFunction *fn)') and
             'nvmtl_function_reflection(function);' in body(ll, 'NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)') and
             direct == 3)   # its definition, nvmtl_function_reflection and the check run
+
+def version_guard(s):
+    an, vk = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/nvmtl_vk.c"])
+    lz = body(an, 'BOOL nvmtl_air_nir_lazy(NVMTLFunction *f)')
+    vr = body(an, 'NVMTLComputePipelineState *nvmtl_air_nir_variant(')
+    st = body(an, 'NSArray *nvmtl_air_nir_sampler_stages(')
+    return ('!g_air_nir_v5' in lz and 'samplers.count && !g_air_nir_v5' in vr and '!g_air_nir_v5' in st and
+            'g_air_nir_v5 = nvmtl_vk_air_nir_version() >= 5;' in an and
+            'pnvk_air_nir_version ? pnvk_air_nir_version() : 4' in vk and 'dlsym(g_lib, "nvmtl_air_nir_version_v1")' in vk)
 
 def sampler_states(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
@@ -252,13 +261,15 @@ CHECKS = [
     ("newFunctionWithName: (and with constants) asks the frontend before the translator", lazy_first,
      ("plugin/NVMTLObjects.m", '        if (nvmtl_air_nir_lazy(lf)) return lf;\n', '')),
     ("the translator is left out only with the road on, no app profile, no check run (a development switch)", lazy_off,
-     ("plugin/NVMTLAirNir.m", '    if (!nvmtl_air_nir_on()) return NO;\n    const uint64_t t0', '    const uint64_t t0')),
+     ("plugin/NVMTLAirNir.m", '    if (!nvmtl_air_nir_on() || !g_air_nir_v5) return NO;\n    const uint64_t t0', '    const uint64_t t0')),
     ("a function's SPIR-V made on demand is what newFunctionWithName: made", lazy_same,
      ("plugin/NVMTLAirNir.m", '        f->_spirv = spv; f->_spirvLazy = NO;', '        f->_spirv = spv;')),
     ("every SPIR-V road reads the SPIR-V through nvmtl_function_spirv; a road-only variant never takes it", spirv_roads,
      ("plugin/NVMTLDevice.m", '    NSData *vsp = nvmtl_function_spirv(vf, "its render pipeline takes the SPIR-V road");', '    NSData *vsp = vf->_spirv;')),
     ("every reader of the reflection takes the function's own (the frontend's without the translator)", refl_readers,
      ("plugin/NVMTLEmbedded.m", '? nvmtl_function_reflection(fn) : nil;', '? nvmtl_reflect_air_cached(fn, fn->_air, fn->_stage, NULL, 0) : nil;')),
+    ("an NVK older than version 5 gets no lazy function and no sampler state (it would ignore both)", version_guard,
+     ("plugin/NVMTLAirNir.m", '    if (samplers.count && !g_air_nir_v5) {', '    if (0) {')),
     ("a pixel-coordinate sampler's variant on the road carries the state words, into the align guard's build too", sampler_states,
      ("plugin/NVMTLAirNir.m", '    if (at) req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;', '')),
 ]
