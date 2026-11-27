@@ -73,6 +73,7 @@ typedef struct air_llvm_target_data *LLVMTargetDataRef;
 typedef struct air_llvm_error *LLVMErrorRef;
 typedef struct air_llvm_pass_options *LLVMPassBuilderOptionsRef;
 typedef struct air_llvm_diagnostic *LLVMDiagnosticInfoRef;
+typedef struct air_llvm_attribute *LLVMAttributeRef;
 typedef void (*LLVMDiagnosticHandler)(LLVMDiagnosticInfoRef, void *);
 
 /* llvm-c/Core.h: LLVMOpcode and LLVMTypeKind keep their values across LLVM releases */
@@ -83,7 +84,8 @@ enum {
    OP_STORE = 28, OP_GEP = 29, OP_TRUNC = 30, OP_ZEXT = 31, OP_SEXT = 32, OP_FPTOUI = 33, OP_FPTOSI = 34,
    OP_UITOFP = 35, OP_SITOFP = 36, OP_FPTRUNC = 37, OP_FPEXT = 38, OP_PTRTOINT = 39, OP_INTTOPTR = 40,
    OP_BITCAST = 41, OP_ICMP = 42, OP_FCMP = 43, OP_PHI = 44, OP_CALL = 45, OP_SELECT = 46, OP_EXTRACTELEMENT = 50,
-   OP_INSERTELEMENT = 51, OP_SHUFFLEVECTOR = 52, OP_ADDRSPACECAST = 60, OP_FNEG = 66, OP_FREEZE = 68,
+   OP_INSERTELEMENT = 51, OP_SHUFFLEVECTOR = 52, OP_EXTRACTVALUE = 53, OP_INSERTVALUE = 54, OP_ADDRSPACECAST = 60,
+   OP_FNEG = 66, OP_FREEZE = 68,
 };
 enum {
    TY_VOID = 0, TY_HALF = 1, TY_FLOAT = 2, TY_DOUBLE = 3, TY_INTEGER = 8, TY_STRUCT = 10, TY_ARRAY = 11,
@@ -176,7 +178,16 @@ enum {
    X(LLVMTypeRef, LLVMGetGEPSourceElementType, (LLVMValueRef))                                                   \
    X(unsigned, LLVMGetNumMaskElements, (LLVMValueRef))                                                           \
    X(int, LLVMGetMaskValue, (LLVMValueRef, unsigned))                                                            \
-   X(LLVMTypeRef, LLVMGetAllocatedType, (LLVMValueRef))
+   X(LLVMTypeRef, LLVMGetAllocatedType, (LLVMValueRef))                                                          \
+   X(LLVMValueRef, LLVMGetFirstFunction, (LLVMModuleRef))                                                        \
+   X(LLVMValueRef, LLVMGetNextFunction, (LLVMValueRef))                                                          \
+   X(unsigned, LLVMGetEnumAttributeKindForName, (const char *, size_t))                                          \
+   X(LLVMAttributeRef, LLVMCreateEnumAttribute, (LLVMContextRef, unsigned, uint64_t))                            \
+   X(void, LLVMAddAttributeAtIndex, (LLVMValueRef, unsigned, LLVMAttributeRef))                                  \
+   X(void, LLVMRemoveEnumAttributeAtIndex, (LLVMValueRef, unsigned, unsigned))                                   \
+   X(uint64_t, LLVMGetArrayLength2, (LLVMTypeRef))                                                               \
+   X(unsigned, LLVMGetNumIndices, (LLVMValueRef))                                                                \
+   X(const unsigned *, LLVMGetIndices, (LLVMValueRef))
 
 static struct {
 #define X(ret, name, args) ret(*name) args;
@@ -232,13 +243,19 @@ enum air_kind {
    AIR_CONSTANT,  /* 32-bit offset into the shader's constant data */
    AIR_SHARED,    /* 32-bit offset into threadgroup memory */
    AIR_SCRATCH,   /* 32-bit offset into thread memory */
+   AIR_AGGREGATE, /* a structure or array held as a value: its elements, no def */
 };
 
 struct air_val {
    nir_def *def;
    uint8_t kind;
    uint32_t align;    /* known alignment of a pointer, in bytes */
+   unsigned num_elems;
+   struct air_val **elems;   /* AIR_AGGREGATE */
 };
+
+#define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
+#define AIR_MAX_DEPTH 8      /* aggregates nested in a phi */
 
 struct air_block {
    LLVMBasicBlockRef llvm;
@@ -251,6 +268,8 @@ struct air_phi {
    LLVMValueRef phi;
    nir_variable *var;
    uint8_t kind;
+   uint8_t depth;                  /* an element of an aggregate phi: the indices down to it */
+   uint16_t path[AIR_MAX_DEPTH];
 };
 
 struct air_tr {
@@ -435,13 +454,66 @@ air_width_of(struct air_tr *t, LLVMValueRef v)
 static struct air_val *air_get(struct air_tr *t, LLVMValueRef v);
 
 static struct air_val *
-air_set(struct air_tr *t, LLVMValueRef v, nir_def *def, enum air_kind kind, uint32_t align)
+air_make(struct air_tr *t, nir_def *def, enum air_kind kind, uint32_t align)
 {
-   struct air_val *r = ralloc(t->mem, struct air_val);
+   struct air_val *r = rzalloc(t->mem, struct air_val);
    r->def = def;
    r->kind = kind;
    r->align = align ? align : 1;
+   return r;
+}
+
+static struct air_val *
+air_set_val(struct air_tr *t, LLVMValueRef v, struct air_val *r)
+{
    _mesa_hash_table_insert(t->values, v, r);
+   return r;
+}
+
+static struct air_val *
+air_set(struct air_tr *t, LLVMValueRef v, nir_def *def, enum air_kind kind, uint32_t align)
+{
+   return air_set_val(t, v, air_make(t, def, kind, align));
+}
+
+/* Structures and arrays held as values (insertvalue and extractvalue, loads, stores, phis and selects of them): a tree
+ * of their elements, each a value of its own. */
+static bool
+air_is_aggregate(LLVMTypeRef ty)
+{
+   int k = L.LLVMGetTypeKind(ty);
+   return k == TY_STRUCT || k == TY_ARRAY;
+}
+
+static unsigned
+air_num_elems(struct air_tr *t, LLVMTypeRef ty)
+{
+   uint64_t n = L.LLVMGetTypeKind(ty) == TY_STRUCT ? L.LLVMCountStructElementTypes(ty) : L.LLVMGetArrayLength2(ty);
+   if (n > AIR_MAX_ELEMS)
+      unsupported(t, "an aggregate value of %llu elements", (unsigned long long)n);
+   return (unsigned)n;
+}
+
+static LLVMTypeRef
+air_elem_type(LLVMTypeRef ty, unsigned i)
+{
+   return L.LLVMGetTypeKind(ty) == TY_STRUCT ? L.LLVMStructGetTypeAtIndex(ty, i) : L.LLVMGetElementType(ty);
+}
+
+static uint64_t
+air_elem_offset(struct air_tr *t, LLVMTypeRef ty, unsigned i)
+{
+   if (L.LLVMGetTypeKind(ty) == TY_STRUCT)
+      return L.LLVMOffsetOfElement(t->layout, ty, i);
+   return (uint64_t)i * L.LLVMABISizeOfType(t->layout, L.LLVMGetElementType(ty));
+}
+
+static struct air_val *
+air_aggregate(struct air_tr *t, unsigned n)
+{
+   struct air_val *r = air_make(t, NULL, AIR_AGGREGATE, 1);
+   r->num_elems = n;
+   r->elems = rzalloc_array(t->mem, struct air_val *, n ? n : 1);
    return r;
 }
 
@@ -529,6 +601,20 @@ air_get(struct air_tr *t, LLVMValueRef v)
       return e->data;
    if (L.LLVMIsAGlobalVariable(v))
       return air_global(t, v);
+   if (air_is_aggregate(L.LLVMTypeOf(v))) {
+      if (!L.LLVMIsAConstantAggregateZero(v) && !L.LLVMIsAUndefValue(v) && !L.LLVMIsAConstantStruct(v) &&
+          !L.LLVMIsAConstantArray(v) && !L.LLVMIsAConstantDataSequential(v))
+         unsupported(t, "an aggregate value used before it is defined (%s)", air_name(v, NULL));
+      unsigned n = air_num_elems(t, L.LLVMTypeOf(v));
+      struct air_val *r = air_aggregate(t, n);
+      for (unsigned i = 0; i < n; i++) {
+         LLVMValueRef c = L.LLVMGetAggregateElement(v, i);
+         if (!c)
+            unsupported(t, "an aggregate constant whose element %u LLVM will not give", i);
+         r->elems[i] = air_get(t, c);
+      }
+      return air_set_val(t, v, r);
+   }
    if (L.LLVMIsAConstantInt(v) || L.LLVMIsAConstantFP(v) || L.LLVMIsAConstantExpr(v) ||
        L.LLVMIsAConstantAggregateZero(v) || L.LLVMIsAConstantDataSequential(v) || L.LLVMIsAConstantVector(v) ||
        L.LLVMIsAConstantPointerNull(v) || L.LLVMIsAUndefValue(v))
@@ -766,39 +852,75 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
    }
 }
 
-/* A load of an LLVM type: bools are bytes in memory, thread and threadgroup pointers 64-bit words. */
+/* A load of an LLVM type: bools are bytes in memory, thread and threadgroup pointers 64-bit words; a structure or an
+ * array element by element, at the offsets of LLVM's data layout. */
 static struct air_val *
-air_load(struct air_tr *t, LLVMValueRef inst, struct air_val *ptr, LLVMTypeRef lty, uint32_t align)
+air_load_val(struct air_tr *t, struct air_val *ptr, LLVMTypeRef lty, uint32_t align)
 {
-   struct air_type ty = air_type_of(t, lty);
    nir_builder *b = &t->b;
+   if (air_is_aggregate(lty)) {
+      unsigned n = air_num_elems(t, lty);
+      struct air_val *r = air_aggregate(t, n);
+      for (unsigned i = 0; i < n; i++) {
+         uint64_t off = air_elem_offset(t, lty, i);
+         uint32_t a = air_gcd_align(align ? align : 1, off);
+         struct air_val *at = air_make(t, off ? nir_iadd_imm(b, ptr->def, off) : ptr->def, ptr->kind, a);
+         r->elems[i] = air_load_val(t, at, air_elem_type(lty, i), a);
+      }
+      return r;
+   }
+   struct air_type ty = air_type_of(t, lty);
    if (ty.width != ty.bits)
       unsupported(t, "a load of an i%u", ty.width);
    if (ty.is_pointer) {
       nir_def *v = air_load_mem(t, ptr, 1, 64, align);
       enum air_kind k = air_kind_of_space(ty.address_space);
-      return air_set(t, inst, k == AIR_GLOBAL ? v : nir_u2u32(b, v), k, 1);
+      return air_make(t, k == AIR_GLOBAL ? v : nir_u2u32(b, v), k, 1);
    }
    if (ty.bits == 1) {
       nir_def *v = air_load_mem(t, ptr, ty.components, 8, align);
-      return air_set(t, inst, nir_ine_imm(b, v, 0), AIR_VALUE, 0);
+      return air_make(t, nir_ine_imm(b, v, 0), AIR_VALUE, 0);
    }
-   return air_set(t, inst, air_load_mem(t, ptr, ty.components, ty.bits, align), AIR_VALUE, 0);
+   return air_make(t, air_load_mem(t, ptr, ty.components, ty.bits, align), AIR_VALUE, 0);
+}
+
+static struct air_val *
+air_load(struct air_tr *t, LLVMValueRef inst, struct air_val *ptr, LLVMTypeRef lty, uint32_t align)
+{
+   return air_set_val(t, inst, air_load_val(t, ptr, lty, align));
 }
 
 static void
-air_store(struct air_tr *t, struct air_val *ptr, LLVMValueRef value, uint32_t align)
+air_store_val(struct air_tr *t, struct air_val *ptr, struct air_val *val, LLVMTypeRef lty, uint32_t align)
 {
-   struct air_type ty = air_type_of(t, L.LLVMTypeOf(value));
    nir_builder *b = &t->b;
+   if (air_is_aggregate(lty)) {
+      unsigned n = air_num_elems(t, lty);
+      if (val->kind != AIR_AGGREGATE || val->num_elems != n)
+         unsupported(t, "a store of an aggregate whose value is not one");
+      for (unsigned i = 0; i < n; i++) {
+         uint64_t off = air_elem_offset(t, lty, i);
+         uint32_t a = air_gcd_align(align ? align : 1, off);
+         struct air_val *at = air_make(t, off ? nir_iadd_imm(b, ptr->def, off) : ptr->def, ptr->kind, a);
+         air_store_val(t, at, val->elems[i], air_elem_type(lty, i), a);
+      }
+      return;
+   }
+   struct air_type ty = air_type_of(t, lty);
    if (ty.width != ty.bits)
       unsupported(t, "a store of an i%u", ty.width);
-   nir_def *v = air_def(t, value);
+   nir_def *v = val->def;
    if (ty.is_pointer)
       v = nir_u2u64(b, v);
    else if (ty.bits == 1)
       v = nir_b2iN(b, v, 8);
    air_store_mem(t, ptr, v, align);
+}
+
+static void
+air_store(struct air_tr *t, struct air_val *ptr, LLVMValueRef value, uint32_t align)
+{
+   air_store_val(t, ptr, air_get(t, value), L.LLVMTypeOf(value), align);
 }
 
 /* llvm.memcpy / llvm.memmove / llvm.memset with a length known here, in the widest pieces both ends allow. */
@@ -1011,7 +1133,14 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
    if (!a.kind || !air_md_int(ops[0], &index) || index >= params)
       air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "argument %u of the kernel has malformed metadata", i);
    a.param = L.LLVMGetParam(t->function, (unsigned)index);
-   for (unsigned k = 2; k + 1 < count; k++) {
+   /* an argument that exists only when a function constant is true: {index, "air.function_constant", constant, kind,
+    * ...}; it is bound as its kind says (a kernel that reads the constant itself is refused where it does) */
+   unsigned first = 2;
+   if (!strcmp(a.kind, "air.function_constant") && count >= 4 && air_md_string(ops[3])) {
+      a.kind = air_md_string(ops[3]);
+      first = 4;
+   }
+   for (unsigned k = first; k + 1 < count; k++) {
       const char *key = air_md_string(ops[k]);
       if (!key)
          continue;
@@ -1344,7 +1473,13 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
    if (IS("isnan")) { NEED(1); return nir_fneu(b, x, x); }
    if (IS("isinf")) { NEED(1); return nir_feq(b, nir_fabs(b, x), nir_imm_floatN_t(b, INFINITY, x->bit_size)); }
    if (IS("isfinite")) { NEED(1); return nir_fisfinite(b, x); }
-   if (IS("isnormal")) { NEED(1); return nir_fisnormal(b, x); }
+   if (IS("isnormal")) {
+      /* NAK does not ask NIR to lower fisnormal: the exponent is neither 0 nor all ones */
+      NEED(1);
+      if (x->bit_size == 16)
+         return nir_ult(b, nir_imm_intN_t(b, 0xfff, 16), nir_iadd_imm(b, nir_ishl_imm(b, x, 1), 0x800));
+      return nir_ult(b, nir_imm_int(b, 0x1ffffff), nir_iadd_imm(b, nir_ishl_imm(b, x, 1), 0x1000000));
+   }
    if (IS("signbit")) { NEED(1); return nir_ilt_imm(b, x, 0); }
    (void)rt;
    return NULL;
@@ -1369,8 +1504,13 @@ air_integer_function(struct air_tr *t, const char *fn, bool is_signed, nir_def *
    if (IS("mul_hi")) { NEED(2); return is_signed ? nir_imul_high(b, s[0], s[1]) : nir_umul_high(b, s[0], s[1]); }
    if (IS("add_sat")) { NEED(2); return is_signed ? nir_iadd_sat(b, s[0], s[1]) : nir_uadd_sat(b, s[0], s[1]); }
    if (IS("sub_sat")) { NEED(2); return is_signed ? nir_isub_sat(b, s[0], s[1]) : nir_usub_sat(b, s[0], s[1]); }
-   if (IS("hadd")) { NEED(2); return is_signed ? nir_ihadd(b, s[0], s[1]) : nir_uhadd(b, s[0], s[1]); }
-   if (IS("rhadd")) { NEED(2); return is_signed ? nir_irhadd(b, s[0], s[1]) : nir_urhadd(b, s[0], s[1]); }
+   /* NAK has no [u|i][r]hadd and does not ask NIR to lower them: (x & y) + ((x ^ y) >> 1), (x | y) - ((x ^ y) >> 1) */
+   if (IS("hadd") || IS("rhadd")) {
+      NEED(2);
+      nir_def *half = nir_ixor(b, s[0], s[1]);
+      half = is_signed ? nir_ishr_imm(b, half, 1) : nir_ushr_imm(b, half, 1);
+      return IS("hadd") ? nir_iadd(b, nir_iand(b, s[0], s[1]), half) : nir_isub(b, nir_ior(b, s[0], s[1]), half);
+   }
    if (IS("abs_diff") || IS("absdiff")) {
       NEED(2);
       nir_def *lt = is_signed ? nir_ilt(b, s[0], s[1]) : nir_ult(b, s[0], s[1]);
@@ -1603,6 +1743,133 @@ air_llvm_intrinsic(struct air_tr *t, const char *name, LLVMValueRef call, nir_de
    return NULL;
 }
 
+/* A SIMD-group (or quad) operation on one 32-bit or 64-bit scalar: narrower integers and halves are widened first. */
+static nir_def *
+air_simd_scalar(struct air_tr *t, const char *fn, bool quad, bool is_float, bool is_signed, nir_def *x, nir_def *arg)
+{
+   nir_builder *b = &t->b;
+   const unsigned width = quad ? 4 : 32;
+   const unsigned bits = x->bit_size;
+   nir_def *w = x;
+   if (bits == 1)
+      w = nir_b2i32(b, x);
+   else if (bits < 32)
+      w = is_float ? nir_f2f32(b, x) : is_signed ? nir_i2i32(b, x) : nir_u2u32(b, x);
+#define IS(name) (!strcmp(fn, name))
+   nir_op op = nir_num_opcodes;
+   const char *red = fn;
+   bool inclusive = false, exclusive = false;
+   if (air_starts(fn, "prefix_inclusive_")) {
+      inclusive = true;
+      red = fn + strlen("prefix_inclusive_");
+   } else if (air_starts(fn, "prefix_exclusive_")) {
+      exclusive = true;
+      red = fn + strlen("prefix_exclusive_");
+   }
+   if (!strcmp(red, "sum")) op = is_float ? nir_op_fadd : nir_op_iadd;
+   else if (!strcmp(red, "product")) op = is_float ? nir_op_fmul : nir_op_imul;
+   else if (!strcmp(red, "min")) op = is_float ? nir_op_fmin : is_signed ? nir_op_imin : nir_op_umin;
+   else if (!strcmp(red, "max")) op = is_float ? nir_op_fmax : is_signed ? nir_op_imax : nir_op_umax;
+   else if (!strcmp(red, "and") && !is_float) op = nir_op_iand;
+   else if (!strcmp(red, "or") && !is_float) op = nir_op_ior;
+   else if (!strcmp(red, "xor") && !is_float) op = nir_op_ixor;
+
+   nir_def *r = NULL;
+   if (op != nir_num_opcodes) {
+      if ((inclusive || exclusive) && quad)
+         unsupported(t, "air.quad_%s", fn);
+      if (inclusive)
+         r = nir_inclusive_scan(b, w, .reduction_op = op);
+      else if (exclusive)
+         r = nir_exclusive_scan(b, w, .reduction_op = op);
+      else
+         r = nir_reduce(b, w, .reduction_op = op, .cluster_size = quad ? 4 : 0);
+   } else {
+      /* shuffles: the lane to read, and whether a lane that falls outside the group keeps its own value */
+      nir_def *lane = nir_load_subgroup_invocation(b);
+      nir_def *base = quad ? nir_iand_imm(b, lane, ~3u) : nir_imm_int(b, 0);
+      nir_def *in_group = quad ? nir_iand_imm(b, lane, 3) : lane;
+      nir_def *a = arg ? nir_u2u32(b, arg) : NULL;
+      nir_def *src = NULL, *keep = NULL;
+      if (IS("shuffle") || IS("broadcast")) {
+         src = nir_iand_imm(b, a, width - 1);
+      } else if (IS("shuffle_xor")) {
+         src = nir_ixor(b, in_group, nir_iand_imm(b, a, width - 1));
+      } else if (IS("shuffle_down")) {
+         src = nir_iadd(b, in_group, a);
+         keep = nir_uge_imm(b, src, width);
+      } else if (IS("shuffle_up")) {
+         src = nir_isub(b, in_group, a);
+         keep = nir_ult(b, in_group, a);
+      } else if (IS("shuffle_rotate_down")) {
+         src = nir_iand_imm(b, nir_iadd(b, in_group, a), width - 1);
+      } else if (IS("shuffle_rotate_up")) {
+         src = nir_iand_imm(b, nir_isub(b, in_group, a), width - 1);
+      } else if (IS("broadcast_first") && !quad) {
+         r = nir_read_first_invocation(b, w);
+      } else {
+         unsupported(t, "air.%s_%s", quad ? "quad" : "simd", fn);
+      }
+      if (!r) {
+         r = nir_shuffle(b, w, nir_iadd(b, base, nir_iand_imm(b, src, width - 1)));
+         if (keep)
+            r = nir_bcsel(b, keep, w, r);
+      }
+   }
+#undef IS
+   if (bits == 1)
+      return nir_ine_imm(b, r, 0);
+   if (bits < 32)
+      return is_float ? nir_f2fN(b, r, bits) : nir_u2uN(b, r, bits);
+   return r;
+}
+
+/* air.simd_<fn>[.<s|u>].<type>(value[, lane]) and air.quad_<fn>...: Metal's SIMD-group functions, on NVIDIA's warp of 32
+ * (thread_execution_width). Vectors go component by component. */
+static nir_def *
+air_simd(struct air_tr *t, const char *name, LLVMValueRef call, nir_def **s, unsigned n, const struct air_type *rt)
+{
+   nir_builder *b = &t->b;
+   bool quad = air_starts(name, "air.quad_");
+   const char *p = name + strlen("air.simd_");
+   char fn[48];
+   const char *dot = strchr(p, '.');
+   size_t len = dot ? (size_t)(dot - p) : strlen(p);
+   if (len >= sizeof fn)
+      unsupported(t, "the AIR function %s", name);
+   memcpy(fn, p, len);
+   fn[len] = 0;
+   bool is_signed = dot && air_starts(dot, ".s.");
+   bool is_float = n > 0 && L.LLVMGetTypeKind(L.LLVMTypeOf(L.LLVMGetOperand(call, 0))) != TY_POINTER &&
+                   air_type_of(t, L.LLVMTypeOf(L.LLVMGetOperand(call, 0))).is_float;
+
+   if (!strcmp(fn, "ballot") || !strcmp(fn, "active_threads_mask")) {
+      if (quad)
+         unsupported(t, "%s", name);
+      nir_def *c = n ? s[0] : nir_imm_true(b);
+      if (c->bit_size != 1 || c->num_components != 1)
+         unsupported(t, "%s of a %u-bit value", name, c->bit_size);
+      nir_def *m = nir_ballot(b, 1, 32, c);
+      return rt->bits == 32 ? m : nir_u2uN(b, m, rt->bits);
+   }
+   if (!strcmp(fn, "all") || !strcmp(fn, "any")) {
+      if (quad || n != 1 || s[0]->bit_size != 1 || s[0]->num_components != 1)
+         unsupported(t, "%s", name);
+      return fn[1] == 'l' ? nir_vote_all(b, 1, s[0]) : nir_vote_any(b, 1, s[0]);
+   }
+   if (!strcmp(fn, "is_first") && !quad)
+      return nir_elect(b, 1);
+   if (n < 1 || n > 2)
+      unsupported(t, "%s with %u operands", name, n);
+   nir_def *x = s[0];
+   if (x->bit_size > 32 && !strcmp(fn, "sum") && is_float)
+      unsupported(t, "%s of doubles", name);
+   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < x->num_components; i++)
+      comps[i] = air_simd_scalar(t, fn, quad, is_float, is_signed, nir_channel(b, x, i), n > 1 ? s[1] : NULL);
+   return nir_vec(b, comps, x->num_components);
+}
+
 static void
 air_call(struct air_tr *t, LLVMValueRef call)
 {
@@ -1684,11 +1951,16 @@ air_call(struct air_tr *t, LLVMValueRef call)
       if (!v)
          unsupported(t, "the AIR function %s", name);
       r = nir_vector_extract(b, v, nir_u2u32(b, s[0]));
+   } else if (air_starts(name, "air.simd_") || air_starts(name, "air.quad_")) {
+      if (!returns)
+         unsupported(t, "%s gives no value", name);
+      r = air_simd(t, name, call, s, nargs, &rt);
    } else if (air_starts(name, "air.any.") || air_starts(name, "air.all.")) {
+      const bool any = air_starts(name, "air.any.");
       nir_def *v = s[0]->bit_size == 1 ? s[0] : nir_ine_imm(b, s[0], 0);
       r = nir_channel(b, v, 0);
       for (unsigned i = 1; i < v->num_components; i++)
-         r = name[4] == 'n' ? nir_ior(b, r, nir_channel(b, v, i)) : nir_iand(b, r, nir_channel(b, v, i));
+         r = any ? nir_ior(b, r, nir_channel(b, v, i)) : nir_iand(b, r, nir_channel(b, v, i));
    } else if (air_starts(name, "air.")) {
       /* air.[fast_]<function>.<type> or air.<function>.<s|u>.<type> */
       char fn[48];
@@ -1745,6 +2017,21 @@ air_block(struct air_tr *t, LLVMBasicBlockRef bb, struct list_head *work)
    return blk;
 }
 
+static struct air_val *
+air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
+{
+   if (x->kind != y->kind)
+      unsupported(t, "a select between pointers of two kinds");
+   if (x->kind != AIR_AGGREGATE)
+      return air_make(t, nir_bcsel(&t->b, c, x->def, y->def), x->kind, MIN2(x->align, y->align));
+   if (x->num_elems != y->num_elems)
+      unsupported(t, "a select between two shapes of aggregate");
+   struct air_val *r = air_aggregate(t, x->num_elems);
+   for (unsigned i = 0; i < x->num_elems; i++)
+      r->elems[i] = air_select(t, c, x->elems[i], y->elems[i]);
+   return r;
+}
+
 static void
 air_instruction(struct air_tr *t, LLVMValueRef inst)
 {
@@ -1772,9 +2059,43 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_FNEG:
       air_set(t, inst, nir_fneg(b, air_def(t, L.LLVMGetOperand(inst, 0))), AIR_VALUE, 0);
       return;
-   case OP_FREEZE: {
-      struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
-      air_set(t, inst, x->def, x->kind, x->align);
+   case OP_FREEZE:
+      air_set_val(t, inst, air_get(t, L.LLVMGetOperand(inst, 0)));
+      return;
+   case OP_EXTRACTVALUE: {
+      struct air_val *v = air_get(t, L.LLVMGetOperand(inst, 0));
+      unsigned n = L.LLVMGetNumIndices(inst);
+      const unsigned *idx = L.LLVMGetIndices(inst);
+      for (unsigned i = 0; i < n; i++) {
+         if (v->kind != AIR_AGGREGATE || idx[i] >= v->num_elems)
+            unsupported(t, "an extractvalue outside its aggregate");
+         v = v->elems[idx[i]];
+      }
+      air_set_val(t, inst, v);
+      return;
+   }
+   case OP_INSERTVALUE: {
+      /* a copy of the aggregate down the indices, the element at their end replaced */
+      struct air_val *root = air_get(t, L.LLVMGetOperand(inst, 0)), *elem = air_get(t, L.LLVMGetOperand(inst, 1));
+      unsigned n = L.LLVMGetNumIndices(inst);
+      const unsigned *idx = L.LLVMGetIndices(inst);
+      if (!n)
+         unsupported(t, "an insertvalue without indices");
+      struct air_val *copy = NULL, *parent = NULL;
+      for (unsigned i = 0; i < n; i++) {
+         if (root->kind != AIR_AGGREGATE || idx[i] >= root->num_elems)
+            unsupported(t, "an insertvalue outside its aggregate");
+         struct air_val *c = air_aggregate(t, root->num_elems);
+         memcpy(c->elems, root->elems, root->num_elems * sizeof *c->elems);
+         if (parent)
+            parent->elems[idx[i - 1]] = c;
+         else
+            copy = c;
+         parent = c;
+         root = root->elems[idx[i]];
+      }
+      parent->elems[idx[n - 1]] = elem;
+      air_set_val(t, inst, copy);
       return;
    }
    case OP_ICMP: {
@@ -1797,10 +2118,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
       return;
    case OP_SELECT: {
       nir_def *c = air_def(t, L.LLVMGetOperand(inst, 0));
-      struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 1)), *y = air_get(t, L.LLVMGetOperand(inst, 2));
-      if (x->kind != y->kind)
-         unsupported(t, "a select between pointers of two kinds");
-      air_set(t, inst, nir_bcsel(b, c, x->def, y->def), x->kind, MIN2(x->align, y->align));
+      air_set_val(t, inst, air_select(t, c, air_get(t, L.LLVMGetOperand(inst, 1)), air_get(t, L.LLVMGetOperand(inst, 2))));
       return;
    }
    case OP_TRUNC: case OP_ZEXT: case OP_SEXT: case OP_FPTOUI: case OP_FPTOSI: case OP_UITOFP: case OP_SITOFP:
@@ -1970,6 +2288,29 @@ air_terminator(struct air_tr *t, struct air_block *blk, LLVMValueRef term, struc
    }
 }
 
+/* A phi's variable, one per element of an aggregate phi (each with the indices down to it), read where the phi is. */
+static struct air_val *
+air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
+{
+   if (air_is_aggregate(lty)) {
+      if (phi->depth >= AIR_MAX_DEPTH)
+         unsupported(t, "a phi of aggregates nested %u deep", phi->depth);
+      unsigned n = air_num_elems(t, lty);
+      struct air_val *r = air_aggregate(t, n);
+      for (unsigned i = 0; i < n; i++) {
+         struct air_phi sub = *phi;
+         sub.path[sub.depth++] = (uint16_t)i;
+         r->elems[i] = air_phi_value(t, &sub, air_elem_type(lty, i));
+      }
+      return r;
+   }
+   struct air_type ty = air_type_of(t, lty);
+   phi->var = nir_local_variable_create(t->impl, air_glsl_type(&ty), "phi");
+   phi->kind = ty.is_pointer ? air_kind_of_space(ty.address_space) : AIR_VALUE;
+   util_dynarray_append(&t->phis, *phi);
+   return air_make(t, nir_load_var(&t->b, phi->var), phi->kind, 1);
+}
+
 static void
 air_emit_function(struct air_tr *t)
 {
@@ -1990,14 +2331,8 @@ air_emit_function(struct air_tr *t)
       for (LLVMValueRef inst = L.LLVMGetFirstInstruction(blk->llvm); inst && inst != term;
            inst = L.LLVMGetNextInstruction(inst)) {
          if (L.LLVMGetInstructionOpcode(inst) == OP_PHI) {
-            struct air_type ty = air_type_of(t, L.LLVMTypeOf(inst));
-            struct air_phi phi = {
-               .phi = inst,
-               .var = nir_local_variable_create(t->impl, air_glsl_type(&ty), "phi"),
-               .kind = ty.is_pointer ? air_kind_of_space(ty.address_space) : AIR_VALUE,
-            };
-            util_dynarray_append(&t->phis, phi);
-            air_set(t, inst, nir_load_var(&t->b, phi.var), phi.kind, 1);
+            struct air_phi phi = { .phi = inst };
+            air_set_val(t, inst, air_phi_value(t, &phi, L.LLVMTypeOf(inst)));
             continue;
          }
          air_instruction(t, inst);
@@ -2016,6 +2351,11 @@ air_emit_function(struct air_tr *t)
             continue;
          t->b.cursor = nir_after_instr(&pred->end->instr);
          struct air_val *v = air_get(t, L.LLVMGetIncomingValue(phi->phi, i));
+         for (unsigned d = 0; d < phi->depth; d++) {
+            if (v->kind != AIR_AGGREGATE || phi->path[d] >= v->num_elems)
+               unsupported(t, "a phi of aggregates of two shapes");
+            v = v->elems[phi->path[d]];
+         }
          if (v->kind != phi->kind)
             unsupported(t, "a phi joining pointers of two kinds");
          nir_store_var(&t->b, phi->var, v->def, BITFIELD_MASK(v->def->num_components));
@@ -2026,9 +2366,32 @@ air_emit_function(struct air_tr *t)
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* Entry points                                                                                                       */
 
+/* Every function the kernel may call is inlined: Apple's compiler builds with optsize, and the inliner's threshold
+ * for it leaves calls (Espresso's and MPS's helpers among them) that this frontend cannot translate. */
 static void
-air_run_passes(struct air_tr *t)
+air_mark_inline(struct air_tr *t, LLVMContextRef ctx)
 {
+   const unsigned always = L.LLVMGetEnumAttributeKindForName("alwaysinline", 12);
+   const unsigned never = L.LLVMGetEnumAttributeKindForName("noinline", 8);
+   const unsigned optnone = L.LLVMGetEnumAttributeKindForName("optnone", 7);
+   if (!always)
+      return;
+   LLVMAttributeRef attr = L.LLVMCreateEnumAttribute(ctx, always, 0);
+   for (LLVMValueRef f = L.LLVMGetFirstFunction(t->module); f; f = L.LLVMGetNextFunction(f)) {
+      if (L.LLVMIsDeclaration(f))   /* a kernel is called by nothing: marking it changes nothing */
+         continue;
+      if (never)
+         L.LLVMRemoveEnumAttributeAtIndex(f, ~0u /* the function */, never);
+      if (optnone)
+         L.LLVMRemoveEnumAttributeAtIndex(f, ~0u, optnone);
+      L.LLVMAddAttributeAtIndex(f, ~0u, attr);
+   }
+}
+
+static void
+air_run_passes(struct air_tr *t, LLVMContextRef ctx)
+{
+   air_mark_inline(t, ctx);
    LLVMPassBuilderOptionsRef opts = L.LLVMCreatePassBuilderOptions();
    LLVMErrorRef err = L.LLVMRunPasses(t->module, "always-inline,inline,function(sroa)", NULL, opts);
    L.LLVMDisposePassBuilderOptions(opts);
@@ -2158,7 +2521,7 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the bitcode does not parse%s%s", t->llvm_error[0] ? ": " : "",
                     t->llvm_error);
       if (!(req->flags & NVMTL_AIR_NIR_NO_PASSES))
-         air_run_passes(t);
+         air_run_passes(t, ctx);
       t->out = air_translate(t, pdev, &rs);
       t->status = NVMTL_AIR_NIR_OK;
    } else if (t->nir) {
