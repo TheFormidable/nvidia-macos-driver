@@ -1,0 +1,2078 @@
+/*
+ * NullMoth NVIDIA driver for macOS
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ *
+ * airrun_tests.h - the tests of tools/air-nir/metal: for each kernel its grid, its inputs and the reference its outputs
+ * are checked against. Two harnesses include it: airrun.c, which runs each kernel through NVK's AIR-to-NIR frontend on
+ * a build of NVK, and plugin_run.m, which runs it through the Metal plugin's own compute path. Before including it, a
+ * harness defines struct buf (.map), struct timg (.stage.map, .w, .h, .d, .layers, .mips, .texel), struct run (.t,
+ * .slot[], .tex[16], .threads, .why[256]) and the functions the setups call: slot (a buffer for [[buffer(i)]]),
+ * tex_image, tex_buffer, tex_at, tex_level_offset, mip_size and samp_create, which take Vulkan's format, view-type and
+ * sampler enums (vulkan_core.h) whatever the harness makes of them.
+ */
+/* struct test flags: how the push constants describe the grid */
+#define GRID_INDIRECT (1u << 0)   /* threads_per_grid = 0x80000000 | threadgroup size, groups 0x80000000: an indirect
+                                   * dispatch, the kernel reads the group count from the hardware */
+#define GRID_BASE     (1u << 1)   /* the second half of a 64x64 grid: thread_base.y 32, threadgroup_base.y 4 */
+#define MUST_REFUSE   (1u << 2)   /* passes only if the frontend refuses the kernel (nothing is dispatched) */
+
+/* function-constant values a test's request carries (NVMTL_AIR_NIR_FC_VALUES) */
+struct fcval {
+   uint32_t index, size;
+   uint8_t bytes[8];
+};
+struct fcset {
+   unsigned n;
+   struct fcval v[8];
+};
+
+struct test {
+   const char *name;
+   const char *air;       /* AIRDIR/<air>.air */
+   const char *entry;     /* the kernel's name */
+   unsigned tg[3];        /* threads per threadgroup */
+   unsigned groups[3];    /* threadgroups in the grid */
+   unsigned tg_len[2];    /* bytes of [[threadgroup(0)]] and [[threadgroup(1)]] */
+   unsigned flags;
+   const struct fcset *fc;   /* NULL: the request has no function-constant values */
+   void (*setup)(struct run *);
+   bool (*check)(struct run *);
+   /* optional, before the dispatch: what the result must say (bindings, constexpr sampler slots) */
+   bool (*expect)(struct run *, const struct nvmtl_air_nir_result *);
+};
+
+static uint32_t rng_state;
+
+static uint32_t
+rnd(void)
+{
+   uint32_t x = rng_state;
+   x ^= x << 13;
+   x ^= x >> 17;
+   x ^= x << 5;
+   return rng_state = x;
+}
+
+static float
+rndf(float lo, float hi)
+{
+   return lo + (hi - lo) * (float)(rnd() >> 8) * (1.0f / 16777216.0f);
+}
+
+
+static void *
+S(struct run *r, unsigned i)
+{
+   return r->slot[i].map;
+}
+
+#define FAILF(r, ...) (snprintf((r)->why, sizeof (r)->why, __VA_ARGS__), false)
+
+static bool
+check_u32(struct run *r, const char *what, const uint32_t *got, const uint32_t *want, unsigned n, unsigned stride)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (got[i] != want[i]) {
+         if (stride > 1)
+            return FAILF(r, "%s[%u] (thread %u, value %u) = 0x%08x (%u), expected 0x%08x (%u)", what, i, i / stride,
+                         i % stride, got[i], got[i], want[i], want[i]);
+         return FAILF(r, "%s[%u] = 0x%08x (%u), expected 0x%08x (%u)", what, i, got[i], got[i], want[i], want[i]);
+      }
+   }
+   return true;
+}
+
+/* |got - want| <= abs_tol + rel_tol * |want| (NaNs and infinities must match) */
+static bool
+check_f32(struct run *r, const char *what, const float *got, const float *want, unsigned n, unsigned stride,
+          const float *abs_tol, const float *rel_tol)
+{
+   for (unsigned i = 0; i < n; i++) {
+      float g = got[i], w = want[i];
+      unsigned k = i % stride;
+      bool ok;
+      if (isnan(w) || isinf(w))
+         ok = (isnan(w) && isnan(g)) || g == w;
+      else
+         ok = !isnan(g) && fabsf(g - w) <= abs_tol[k] + rel_tol[k] * fabsf(w);
+      if (!ok)
+         return FAILF(r, "%s[%u] (thread %u, value %u) = %.9g, expected %.9g", what, i, i / stride, k, g, w);
+   }
+   return true;
+}
+
+/* half <-> float, round to nearest even */
+static uint16_t
+f2h(float f)
+{
+   uint32_t x;
+   memcpy(&x, &f, 4);
+   uint32_t sign = (x >> 16) & 0x8000u, e = (x >> 23) & 0xff, m = x & 0x7fffffu;
+   if (e == 0xff)
+      return (uint16_t)(sign | 0x7c00u | (m ? 0x200u : 0));
+   int ee = (int)e - 127 + 15;
+   if (ee >= 31)
+      return (uint16_t)(sign | 0x7c00u);
+   if (ee <= 0) {
+      if (ee < -10)
+         return (uint16_t)sign;
+      m |= 0x800000u;
+      unsigned shift = (unsigned)(14 - ee);
+      uint32_t h = m >> shift, rem = m & ((1u << shift) - 1), half = 1u << (shift - 1);
+      if (rem > half || (rem == half && (h & 1)))
+         h++;
+      return (uint16_t)(sign | h);
+   }
+   uint32_t h = ((uint32_t)ee << 10) | (m >> 13), rem = m & 0x1fffu;
+   if (rem > 0x1000u || (rem == 0x1000u && (h & 1)))
+      h++;
+   return (uint16_t)(sign | h);
+}
+
+static float
+h2f(uint16_t h)
+{
+   uint32_t sign = (uint32_t)(h & 0x8000u) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ffu, x;
+   if (e == 0x1f)
+      x = sign | 0x7f800000u | (m << 13);
+   else if (e)
+      x = sign | ((e + 112) << 23) | (m << 13);
+   else if (!m)
+      x = sign;
+   else {
+      e = 113;
+      while (!(m & 0x400u)) {
+         m <<= 1;
+         e--;
+      }
+      x = sign | (e << 23) | ((m & 0x3ffu) << 13);
+   }
+   float f;
+   memcpy(&f, &x, 4);
+   return f;
+}
+
+static uint32_t
+fbits(float f)
+{
+   uint32_t u;
+   memcpy(&u, &f, 4);
+   return u;
+}
+
+/* --- fmath, fmath_precise ------------------------------------------------------------------------------------- */
+
+static void
+fmath_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *a = slot(r, 0, n * 4), *b = slot(r, 1, n * 4), *c = slot(r, 2, n * 4);
+   slot(r, 3, n * 12 * 4);
+   for (unsigned i = 0; i < n; i++) {
+      a[i] = rndf(-4, 4);
+      b[i] = rndf(0.5f, 4) * ((rnd() & 1) ? -1.0f : 1.0f);
+      c[i] = rndf(-4, 4);
+   }
+}
+
+static bool
+fmath_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *a = S(r, 0), *b = S(r, 1), *c = S(r, 2);
+   float *want = calloc(n * 12, 4);
+   for (unsigned i = 0; i < n; i++) {
+      float x = a[i], y = b[i], z = c[i], *o = want + i * 12;
+      o[0] = x + y;
+      o[1] = x * y;
+      o[2] = fmaf(x, y, z);
+      o[3] = sqrtf(fabsf(x));
+      o[4] = expf(x);
+      o[5] = sinf(x);
+      o[6] = x / y;
+      o[7] = 1.0f / sqrtf(fabsf(y) + 1.0f);
+      o[8] = log2f(fabsf(z) + 1.0f);
+      o[9] = floorf(x * 3.0f);
+      o[10] = fmaxf(x, y) - fminf(y, z);
+      o[11] = cosf(z) + tanhf(y * 0.25f);
+   }
+   /* the GPU's transcendental units are approximations: these bounds check the translation, not Metal's ulp
+    * limits */
+   static const float abs_tol[12] = { 0, 0, 0, 0, 0, 2e-5f, 0, 0, 2e-5f, 0, 0, 1e-4f };
+   static const float rel_tol[12] = { 1e-6f, 1e-6f, 1e-6f, 2e-6f, 2e-5f, 0, 4e-6f, 4e-6f, 1e-5f, 0, 0, 0 };
+   bool ok = check_f32(r, "out", S(r, 3), want, n * 12, 12, abs_tol, rel_tol);
+   free(want);
+   return ok;
+}
+
+/* --- imath ---------------------------------------------------------------------------------------------------- */
+
+static void
+imath_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   int32_t *a = slot(r, 0, n * 4), *b = slot(r, 1, n * 4);
+   slot(r, 2, n * 16 * 4);
+   for (unsigned i = 0; i < n; i++) {
+      a[i] = (int32_t)rnd();
+      int32_t y = (int32_t)rnd() >> (rnd() % 31);
+      if (y == 0 || (y == -1 && a[i] == INT32_MIN))
+         y = 7;
+      b[i] = y;
+   }
+   a[0] = 0;
+   b[0] = 1;
+   a[1] = -7;
+   b[1] = 2;
+   a[2] = INT32_MIN;
+   b[2] = 3;
+}
+
+static bool
+imath_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const int32_t *a = S(r, 0), *b = S(r, 1);
+   uint32_t *want = calloc(n * 16, 4);
+   for (unsigned i = 0; i < n; i++) {
+      int32_t x = a[i], y = b[i];
+      uint32_t ux = (uint32_t)x, uy = (uint32_t)y, s = uy & 31u, *o = want + i * 16;
+      o[0] = (uint32_t)(x / y);
+      o[1] = (uint32_t)(x % y);
+      o[2] = ux / uy;
+      o[3] = ux % uy;
+      o[4] = ux << s;
+      o[5] = ux >> s;
+      o[6] = (uint32_t)(x >> s);
+      o[7] = (uint32_t)(x < y ? x : y);
+      o[8] = (uint32_t)(x > y ? x : y);
+      o[9] = ux < uy ? ux : uy;
+      o[10] = ux > uy ? ux : uy;
+      o[11] = (uint32_t)__builtin_popcount(ux);
+      o[12] = ux ? (uint32_t)__builtin_clz(ux) : 32u;
+      o[13] = uy ? (uint32_t)__builtin_ctz(uy) : 32u;
+      o[14] = (uint32_t)(((uint64_t)ux * uy) >> 32);
+      uint32_t rot = s ? (ux << s) | (ux >> (32 - s)) : ux;
+      int32_t d = (int32_t)(ux - uy);
+      uint32_t ad = d < 0 ? 0u - (uint32_t)d : (uint32_t)d;
+      o[15] = rot ^ (ux * uy) ^ ad;
+   }
+   bool ok = check_u32(r, "out", S(r, 2), want, n * 16, 16);
+   free(want);
+   return ok;
+}
+
+/* --- conv ----------------------------------------------------------------------------------------------------- */
+
+static void
+conv_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *f = slot(r, 0, n * 4);
+   int32_t *k = slot(r, 1, n * 4);
+   uint16_t *h = slot(r, 2, n * 2);
+   slot(r, 3, n * 10 * 4);
+   slot(r, 4, n * 2 * 2);
+   for (unsigned i = 0; i < n; i++) {
+      f[i] = rndf(-1000, 1000);
+      k[i] = (int32_t)rnd();
+      h[i] = f2h(rndf(-100, 100));
+   }
+   f[0] = 0.5f;
+   f[1] = -0.5f;
+   f[2] = 2.5f;
+   f[3] = 1.00048828125f;   /* a tie between two halves: rounds to even */
+}
+
+static bool
+conv_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *f = S(r, 0);
+   const int32_t *kk = S(r, 1);
+   const uint16_t *hh = S(r, 2);
+   uint32_t *want = calloc(n * 10, 4);
+   uint16_t *hwant = calloc(n * 2, 2);
+   for (unsigned i = 0; i < n; i++) {
+      float x = f[i], y = h2f(hh[i]);
+      int32_t k = kk[i];
+      uint32_t *o = want + i * 10;
+      o[0] = (uint32_t)(int32_t)x;
+      o[1] = (uint32_t)fabsf(x);
+      o[2] = fbits((float)k);
+      o[3] = fbits((float)(uint32_t)k);
+      o[4] = fbits(h2f(f2h(x)));
+      o[5] = (uint32_t)(int32_t)y;
+      o[6] = fbits(y * 2.0f);
+      o[7] = (uint32_t)(int32_t)(int16_t)k;
+      o[8] = (uint32_t)(uint8_t)k | ((uint32_t)(uint16_t)k << 8);
+      o[9] = (uint32_t)(int32_t)(int8_t)(k >> 4);
+      hwant[i * 2] = f2h(h2f(f2h(x)) + y);
+      hwant[i * 2 + 1] = f2h(h2f(f2h((float)(k & 255))) * y);
+   }
+   bool ok = check_u32(r, "out", S(r, 3), want, n * 10, 10);
+   if (ok) {
+      const uint16_t *g = S(r, 4);
+      for (unsigned i = 0; i < n * 2 && ok; i++) {
+         if (g[i] != hwant[i])
+            ok = FAILF(r, "hout[%u] (thread %u) = 0x%04x (%g), expected 0x%04x (%g)", i, i / 2, g[i], h2f(g[i]),
+                       hwant[i], h2f(hwant[i]));
+      }
+   }
+   free(want);
+   free(hwant);
+   return ok;
+}
+
+/* --- loop_phi ------------------------------------------------------------------------------------------------- */
+
+static void
+loop_phi_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 3 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = 1 + rnd() % 100000;
+   in[0] = 1;
+   in[1] = 27;
+   in[2] = 15;
+}
+
+static bool
+loop_phi_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(n * 3, 4);
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t x = in[i], steps = 0, peak = x;
+      while (x != 1u) {
+         x = (x & 1u) ? 3u * x + 1u : x >> 1;
+         peak = peak > x ? peak : x;
+         if (++steps >= 500u)
+            break;
+      }
+      uint32_t a = 1, b = 0;
+      for (uint32_t j = 0; j < (in[i] & 15u); j++) {
+         uint32_t t = a + b;
+         b = a;
+         a = t;
+         if (a > 1000u)
+            break;
+      }
+      want[i * 3] = steps;
+      want[i * 3 + 1] = peak;
+      want[i * 3 + 2] = a * 65536u + b;
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n * 3, 3);
+   free(want);
+   return ok;
+}
+
+/* --- switch_case ---------------------------------------------------------------------------------------------- */
+
+static void
+switch_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 2 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = i < 64 ? i : rnd();
+}
+
+static bool
+switch_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(n * 2, 4);
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t x = in[i], v = 0, t;
+      switch (x % 9u) {
+      case 0: v = x * 3u; break;
+      case 1: v = x + 7u; break;
+      case 2: x ^= 0x55u; /* fall through */
+      case 3: v = x << 2; break;
+      case 5: v = x / 3u; break;
+      case 7: v = ~x; break;
+      default: v = x - 1u; break;
+      }
+      static const uint32_t table[8] = { 11, 23, 5, 99, 1000, 7, 64, 3 };
+      t = table[x & 7u];
+      want[i * 2] = v;
+      want[i * 2 + 1] = t;
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n * 2, 2);
+   free(want);
+   return ok;
+}
+
+/* --- tg_reduce ------------------------------------------------------------------------------------------------ */
+
+static void
+tg_reduce_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, (n / 256) * 4);
+   slot(r, 2, (n / 256) * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd() & 0xfffffu;
+}
+
+static bool
+tg_reduce_check(struct run *r)
+{
+   unsigned n = r->threads, groups = n / 256;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(groups, 4);
+   float *fwant = calloc(groups, 4);
+   for (unsigned g = 0; g < groups; g++) {
+      for (unsigned j = 0; j < 256; j++) {
+         want[g] += in[g * 256 + j];
+         fwant[g] += (float)(in[g * 256 + j] & 1023u) * 0.5f;
+      }
+   }
+   static const float zero[1] = { 0 };
+   bool ok = check_u32(r, "sums", S(r, 1), want, groups, 1) &&
+             check_f32(r, "fsums", S(r, 2), fwant, groups, 1, zero, zero);
+   free(want);
+   free(fwant);
+   return ok;
+}
+
+/* --- tg_arg --------------------------------------------------------------------------------------------------- */
+
+static void
+tg_arg_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+}
+
+static bool
+tg_arg_check(struct run *r)
+{
+   unsigned n = r->threads, tg = 128;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(n, 4);
+   for (unsigned i = 0; i < n; i++) {
+      unsigned base = i / tg * tg, lid = i % tg;
+      want[i] = in[base + tg - 1 - lid] + (uint32_t)(uint16_t)(((lid + 1) % tg) * 3);
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n, 1);
+   free(want);
+   return ok;
+}
+
+/* --- dev_atomics ---------------------------------------------------------------------------------------------- */
+
+static void
+dev_atomics_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4), *counters = slot(r, 1, 8 * 4);
+   slot(r, 2, n * 4);
+   slot(r, 3, 16 * 4);
+   slot(r, 4, 2 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+   counters[2] = 0xffffffffu;
+   counters[4] = 0xffffffffu;
+   counters[5] = 1000000000u;
+   memset(S(r, 2), 0xff, n * 4);
+}
+
+static bool
+dev_atomics_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0), *counters = S(r, 1), *slots = S(r, 2), *hist = S(r, 3), *cas = S(r, 4);
+   uint32_t want[8] = { n, 0, 0xffffffffu, 0, 0xffffffffu, 1000000000u, 0, 0 }, hwant[16] = { 0 }, cwant[2] = { 0, 7 };
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t v = in[i];
+      hwant[v & 15u]++;
+      want[1] = want[1] > v ? want[1] : v;
+      want[2] = want[2] < v ? want[2] : v;
+      want[3] |= 1u << (v & 31u);
+      want[4] &= ~(1u << ((v >> 5) & 31u));
+      want[5] -= v & 7u;
+      if (v & 1u)
+         cwant[0] += v & 255u;
+   }
+   if (!check_u32(r, "counters", counters, want, 8, 1) || !check_u32(r, "hist", hist, hwant, 16, 1) ||
+       !check_u32(r, "cas", cas, cwant, 2, 1))
+      return false;
+   /* every thread took one slot: the slots hold each thread id once */
+   unsigned char *seen = calloc(n, 1);
+   bool ok = true;
+   for (unsigned i = 0; i < n && ok; i++) {
+      if (slots[i] >= n || seen[slots[i]])
+         ok = FAILF(r, "slots[%u] = %u: not a thread id, or one seen before", i, slots[i]);
+      else
+         seen[slots[i]] = 1;
+   }
+   free(seen);
+   return ok;
+}
+
+/* --- tg_atomics ----------------------------------------------------------------------------------------------- */
+
+static void
+tg_atomics_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, (n / 256) * 18 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+}
+
+static bool
+tg_atomics_check(struct run *r)
+{
+   unsigned n = r->threads, groups = n / 256;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(groups * 18, 4);
+   for (unsigned g = 0; g < groups; g++) {
+      uint32_t *o = want + g * 18;
+      for (unsigned j = 0; j < 256; j++) {
+         uint32_t v = in[g * 256 + j];
+         o[v & 15u]++;
+         o[16] = o[16] > v ? o[16] : v;
+         o[17] ^= v;
+      }
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, groups * 18, 18);
+   free(want);
+   return ok;
+}
+
+/* --- const_table ---------------------------------------------------------------------------------------------- */
+
+static void
+const_table_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 3 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+}
+
+static bool
+const_table_check(struct run *r)
+{
+   static const float kF[16] = { 0.5f, 1.25f, -3.0f, 7.75f, 100.0f, -0.125f, 2.0f, 9.5f,
+                                 -11.0f, 13.25f, 0.0f, 1e-3f, 42.0f, -42.0f, 3.5f, 6.0f };
+   static const uint32_t kU[13] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41 };
+   static const struct { uint32_t key; float scale; int16_t bias; } kE[5] = {
+      { 1, 2.0f, -3 }, { 10, 0.5f, 4 }, { 100, -1.0f, 5 }, { 1000, 4.0f, -6 }, { 7, 8.0f, 7 } };
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   float *want = calloc(n * 3, 4);
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t x = in[i];
+      want[i * 3] = kF[x & 15u] * 2.0f;
+      want[i * 3 + 1] = (float)kU[(x >> 4) % 13u];
+      want[i * 3 + 2] = (float)kE[x % 5u].key * kE[x % 5u].scale + (float)kE[x % 5u].bias;
+   }
+   static const float zero[3] = { 0, 0, 0 };
+   bool ok = check_f32(r, "out", S(r, 1), want, n * 3, 3, zero, zero);
+   free(want);
+   return ok;
+}
+
+/* --- struct_buf ----------------------------------------------------------------------------------------------- */
+
+struct particle {         /* Metal's layout of struct Particle in struct_buf.metal */
+   float pos[4];          /* float3: 16 bytes */
+   float vel[3];          /* packed_float3 */
+   float mass;
+   uint32_t id;
+   uint32_t pad[3];
+};
+_Static_assert(sizeof(struct particle) == 48, "Particle is 48 bytes in Metal");
+
+static void
+struct_buf_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   struct particle *in = slot(r, 0, n * sizeof *in);
+   slot(r, 1, n * sizeof *in);
+   float *dt = slot(r, 2, 16);
+   *dt = 0.125f;
+   for (unsigned i = 0; i < n; i++) {
+      for (unsigned k = 0; k < 3; k++) {
+         in[i].pos[k] = rndf(-10, 10);
+         in[i].vel[k] = rndf(-2, 2);
+      }
+      in[i].pos[3] = 0;
+      in[i].mass = rndf(0, 5);
+      in[i].id = rnd() >> 2;
+   }
+}
+
+static bool
+struct_buf_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const struct particle *in = S(r, 0), *got = S(r, 1);
+   const float dt = 0.125f;
+   for (unsigned i = 0; i < n; i++) {
+      float pos[3], vel[3];
+      for (unsigned k = 0; k < 3; k++)
+         pos[k] = in[i].pos[k] + in[i].vel[k] * dt;
+      for (unsigned k = 0; k < 3; k++)
+         vel[k] = in[i].vel[k] * 0.5f + pos[(k + 1) % 3];
+      float mass = sqrtf(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]) + in[i].mass;
+      uint32_t id = in[i].id * 2u + 1u;
+      for (unsigned k = 0; k < 3; k++) {
+         if (fabsf(got[i].pos[k] - pos[k]) > 1e-5f + 1e-6f * fabsf(pos[k]))
+            return FAILF(r, "out[%u].pos[%u] = %.9g, expected %.9g", i, k, got[i].pos[k], pos[k]);
+         if (fabsf(got[i].vel[k] - vel[k]) > 1e-5f + 1e-6f * fabsf(vel[k]))
+            return FAILF(r, "out[%u].vel[%u] = %.9g, expected %.9g", i, k, got[i].vel[k], vel[k]);
+      }
+      if (fabsf(got[i].mass - mass) > 1e-5f + 4e-6f * fabsf(mass))
+         return FAILF(r, "out[%u].mass = %.9g, expected %.9g", i, got[i].mass, mass);
+      if (got[i].id != id)
+         return FAILF(r, "out[%u].id = %u, expected %u", i, got[i].id, id);
+   }
+   return true;
+}
+
+/* --- grid2d --------------------------------------------------------------------------------------------------- */
+
+static void
+grid2d_setup(struct run *r)
+{
+   slot(r, 0, 64 * 64 * 4 * 4);
+}
+
+static bool
+grid2d_check(struct run *r)
+{
+   /* a 64x32 grid of 16x8 threadgroups; with GRID_BASE, rows 32-63 of a 64x64 one (rows 0-31 stay 0) */
+   const bool based = r->t->flags & GRID_BASE;
+   const unsigned W = 64, H = based ? 64 : 32, Y0 = based ? 32 : 0, TX = 16, TY = 8;
+   uint32_t *want = calloc(64 * 64 * 4, 4);
+   for (unsigned y = Y0; y < H; y++) {
+      for (unsigned x = 0; x < W; x++) {
+         uint32_t *o = want + (y * W + x) * 4;
+         o[0] = x | (y << 16);
+         o[1] = (x % TX) | ((y % TY) << 8) | ((x / TX) << 16) | ((y / TY) << 24);
+         o[2] = W | (H << 16);
+         o[3] = (W / TX) | ((H / TY) << 8) | (TX << 16) | (TY << 24);
+      }
+   }
+   bool ok = check_u32(r, "out", S(r, 0), want, 64 * 64 * 4, 4);
+   free(want);
+   return ok;
+}
+
+/* --- simd_builtins -------------------------------------------------------------------------------------------- */
+
+static void
+simd_setup(struct run *r)
+{
+   slot(r, 0, r->threads * 4 * 4);
+}
+
+static bool
+simd_check(struct run *r)
+{
+   unsigned n = r->threads, tg = 128;
+   uint32_t *want = calloc(n * 4, 4);
+   for (unsigned i = 0; i < n; i++) {
+      unsigned lid = i % tg;
+      want[i * 4] = lid % 32;
+      want[i * 4 + 1] = lid / 32;
+      want[i * 4 + 2] = 32 | ((tg / 32) << 16);
+      want[i * 4 + 3] = lid;
+   }
+   bool ok = check_u32(r, "out", S(r, 0), want, n * 4, 4);
+   free(want);
+   return ok;
+}
+
+/* --- narrow --------------------------------------------------------------------------------------------------- */
+
+static void
+narrow_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   int8_t *a = slot(r, 0, n);
+   int16_t *b = slot(r, 1, n * 2);
+   uint8_t *c = slot(r, 2, n);
+   uint16_t *d = slot(r, 3, n * 2);
+   slot(r, 4, n * 2);
+   slot(r, 5, n);
+   slot(r, 6, n * 3 * 4);
+   for (unsigned i = 0; i < n; i++) {
+      a[i] = (int8_t)rnd();
+      b[i] = (int16_t)rnd();
+      c[i] = (uint8_t)rnd();
+      d[i] = (uint16_t)rnd();
+   }
+}
+
+static bool
+narrow_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const int8_t *a = S(r, 0), *oc = S(r, 5);
+   const int16_t *b = S(r, 1), *os = S(r, 4);
+   const uint8_t *c = S(r, 2);
+   const uint16_t *d = S(r, 3);
+   const int32_t *oi = S(r, 6);
+   for (unsigned i = 0; i < n; i++) {
+      int16_t ws = (int16_t)(a[i] * b[i]);
+      int8_t wc = (int8_t)(a[i] + (int8_t)c[i]);
+      int32_t w0 = a[i] * 1000 + b[i], w1 = (int32_t)c[i] - (int32_t)d[i], w2 = (int16_t)d[i] + (uint8_t)a[i];
+      if (os[i] != ws)
+         return FAILF(r, "os[%u] = %d, expected %d", i, os[i], ws);
+      if (oc[i] != wc)
+         return FAILF(r, "oc[%u] = %d, expected %d", i, oc[i], wc);
+      if (oi[i * 3] != w0 || oi[i * 3 + 1] != w1 || oi[i * 3 + 2] != w2)
+         return FAILF(r, "oi[%u..] = %d %d %d, expected %d %d %d", i * 3, oi[i * 3], oi[i * 3 + 1], oi[i * 3 + 2], w0,
+                      w1, w2);
+   }
+   return true;
+}
+
+/* --- vec_ops -------------------------------------------------------------------------------------------------- */
+
+static void
+vec_ops_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *a = slot(r, 0, n * 16), *b = slot(r, 1, n * 16);
+   uint32_t *u = slot(r, 2, n * 4);
+   slot(r, 3, n * 4 * 16);
+   slot(r, 4, n * 16);
+   for (unsigned i = 0; i < n * 4; i++) {
+      a[i] = rndf(-4, 4);
+      b[i] = rndf(-4, 4);
+   }
+   for (unsigned i = 0; i < n; i++)
+      u[i] = rnd();
+}
+
+static bool
+vec_ops_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *a = S(r, 0), *b = S(r, 1);
+   const uint32_t *u = S(r, 2);
+   float *want = calloc(n * 16, 4);
+   uint32_t *iwant = calloc(n * 4, 4);
+   for (unsigned i = 0; i < n; i++) {
+      const float *x = a + i * 4, *y = b + i * 4;
+      float *o = want + i * 16;
+      bool gt[4], any = false, all = true;
+      for (unsigned k = 0; k < 4; k++) {
+         o[k] = x[k] * y[k] + x[3 - k];
+         gt[k] = x[k] > y[k];
+         any |= gt[k];
+         all &= gt[k];
+      }
+      o[4] = x[1] * y[2] - x[2] * y[1];
+      o[5] = x[2] * y[0] - x[0] * y[2];
+      o[6] = x[0] * y[1] - x[1] * y[0];
+      o[7] = x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3];
+      float v[3] = { y[0] + 0.5f, y[1] + 0.5f, y[2] + 0.5f };
+      float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+      for (unsigned k = 0; k < 3; k++)
+         o[8 + k] = v[k] / len;
+      o[11] = sqrtf(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]);
+      float extra[4] = { any ? 1.0f : 0.0f, all ? 1.0f : 0.0f, x[1], x[1] };
+      for (unsigned k = 0; k < 4; k++)
+         o[12 + k] = (gt[k] ? y[k] : x[k]) + extra[k];
+      uint32_t w = u[i], bytes[4];
+      for (unsigned k = 0; k < 4; k++)
+         bytes[k] = (w >> (8 * k)) & 255u;
+      static const int32_t mul[4] = { 3, -1, 7, 2 };
+      uint32_t hw = w & 0x3bff3bffu;
+      uint32_t add[4] = { (uint32_t)(h2f((uint16_t)hw) * 1024.0f), (uint32_t)(h2f((uint16_t)(hw >> 16)) * 1024.0f),
+                          w >> 24, w & 0xffu };
+      for (unsigned k = 0; k < 4; k++) {
+         int32_t iv = (int32_t)bytes[k] - 128 + (int32_t)x[k];
+         iwant[i * 4 + k] = (uint32_t)(iv * mul[k]) ^ (bytes[3 - k] + add[k]);
+      }
+   }
+   static const float abs_tol[16] = { 1e-6f, 1e-6f, 1e-6f, 1e-6f, 1e-5f, 1e-5f, 1e-5f, 1e-5f,
+                                      1e-6f, 1e-6f, 1e-6f, 1e-6f, 0, 0, 0, 0 };
+   static const float rel_tol[16] = { 1e-6f, 1e-6f, 1e-6f, 1e-6f, 1e-6f, 1e-6f, 1e-6f, 1e-6f,
+                                      1e-5f, 1e-5f, 1e-5f, 4e-6f, 0, 0, 0, 0 };
+   bool ok = check_f32(r, "out", S(r, 3), want, n * 16, 16, abs_tol, rel_tol) &&
+             check_u32(r, "iout", S(r, 4), iwant, n * 4, 4);
+   free(want);
+   free(iwant);
+   return ok;
+}
+
+/* --- tg_transpose --------------------------------------------------------------------------------------------- */
+
+static void
+tg_transpose_setup(struct run *r)
+{
+   float *in = slot(r, 0, 64 * 64 * 4);
+   slot(r, 1, 64 * 64 * 4);
+   slot(r, 2, 16 * 64 * 16);
+   uint32_t *size = slot(r, 3, 16);
+   size[0] = 64;
+   size[1] = 64;
+   for (unsigned i = 0; i < 64 * 64; i++)
+      in[i] = (float)i + 0.5f;
+}
+
+static bool
+tg_transpose_check(struct run *r)
+{
+   const float *in = S(r, 0);
+   float *want = calloc(64 * 64, 4), *vwant = calloc(16 * 64 * 4, 4);
+   for (unsigned y = 0; y < 64; y++) {
+      for (unsigned x = 0; x < 64; x++)
+         want[y * 64 + x] = in[x * 64 + y];
+   }
+   for (unsigned ty = 0; ty < 4; ty++) {
+      for (unsigned tx = 0; tx < 4; tx++) {
+         for (unsigned l = 0; l < 64; l++) {
+            float *o = vwant + ((ty * 4 + tx) * 64 + l) * 4;
+            o[0] = (float)((l * 7u) & 63u) * 2.0f;
+            o[1] = (float)tx * 2.0f;
+            o[2] = (float)ty * 2.0f;
+            o[3] = 2.0f;
+         }
+      }
+   }
+   static const float zero[4] = { 0 };
+   bool ok = check_f32(r, "out", S(r, 1), want, 64 * 64, 1, zero, zero) &&
+             check_f32(r, "vout", S(r, 2), vwant, 16 * 64 * 4, 4, zero, zero);
+   free(want);
+   free(vwant);
+   return ok;
+}
+
+/* --- thread_array --------------------------------------------------------------------------------------------- */
+
+static void
+thread_array_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 12 * 4);
+   slot(r, 1, n * 20 * 4);
+   for (unsigned i = 0; i < n * 12; i++)
+      in[i] = rnd() % 1000;
+}
+
+static bool
+thread_array_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(n * 20, 4);
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t v[12], *o = want + i * 20;
+      memcpy(v, in + i * 12, sizeof v);
+      for (unsigned k = 0; k < 12; k++)
+         o[12 + (v[k] & 7u)]++;
+      for (unsigned k = 1; k < 12; k++) {
+         uint32_t x = v[k];
+         int j = (int)k - 1;
+         while (j >= 0 && v[j] > x) {
+            v[j + 1] = v[j];
+            j--;
+         }
+         v[j + 1] = x;
+      }
+      memcpy(o, v, sizeof v);
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n * 20, 20);
+   free(want);
+   return ok;
+}
+
+/* --- ptr_ops -------------------------------------------------------------------------------------------------- */
+
+struct rec {   /* struct Rec in ptr_ops.metal */
+   uint32_t a;
+   float b;
+   uint32_t c[4];
+};
+
+static void
+ptr_ops_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *x = slot(r, 0, n * 16), *y = slot(r, 1, n * 16);
+   struct rec *recs = slot(r, 2, 7 * sizeof(struct rec));
+   slot(r, 3, n * 16);
+   for (unsigned i = 0; i < n * 4; i++) {
+      x[i] = rnd();
+      y[i] = rnd();
+   }
+   for (unsigned i = 0; i < 7; i++) {
+      recs[i].a = rnd();
+      recs[i].b = rndf(0, 1000);
+      for (unsigned k = 0; k < 4; k++)
+         recs[i].c[k] = rnd();
+   }
+}
+
+static bool
+ptr_ops_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *x = S(r, 0), *y = S(r, 1);
+   const struct rec *recs = S(r, 2);
+   uint32_t *want = calloc(n * 4, 4);
+   for (unsigned i = 0; i < n; i++) {
+      const uint32_t *p = (i & 1u) ? x : y;
+      uint32_t s = 0;
+      for (unsigned k = 0; k < 4; k++)
+         s += p[i * 4 + k];
+      const struct rec *rr = recs + i % 7u;
+      uint64_t big = (uint64_t)x[i * 4] * 0x100000001ull + i;
+      want[i * 4] = s;
+      want[i * 4 + 1] = rr->c[i & 3u] + rr->a;
+      want[i * 4 + 2] = (uint32_t)(big >> 13) ^ (uint32_t)(big % 1000003ull);
+      want[i * 4 + 3] = (uint32_t)(rr->b * 4.0f);
+   }
+   bool ok = check_u32(r, "out", S(r, 3), want, n * 4, 4);
+   free(want);
+   return ok;
+}
+
+/* --- simd_funcs ----------------------------------------------------------------------------------------------- */
+
+static void
+simd_funcs_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   float *fin = slot(r, 1, n * 4);
+   slot(r, 2, n * 8 * 4);
+   slot(r, 3, n * 2 * 4);
+   for (unsigned i = 0; i < n; i++) {
+      in[i] = (i / 32) % 2 ? rnd() % 8 : 1 + rnd() % 999;   /* every other SIMD-group has no zero */
+      fin[i] = (float)((int)(rnd() % 128) - 64) * 0.25f;
+   }
+}
+
+static bool
+simd_funcs_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   const float *fin = S(r, 1);
+   uint32_t *want = calloc(n * 8, 4);
+   float *fwant = calloc(n * 2, 4);
+   for (unsigned g = 0; g < n / 32; g++) {
+      const uint32_t *v = in + g * 32;
+      const float *f = fin + g * 32;
+      uint32_t sum = 0, mx = 0, mn = ~0u, ballot = 0;
+      bool all = true, any = false;
+      float fsum = 0;
+      for (unsigned l = 0; l < 32; l++) {
+         sum += v[l];
+         mx = v[l] > mx ? v[l] : mx;
+         mn = v[l] < mn ? v[l] : mn;
+         ballot |= ((v[l] & 3u) == 0u) << l;
+         all &= v[l] != 0u;
+         any |= v[l] == 5u;
+         fsum += f[l];
+      }
+      uint32_t pre = 0;
+      float fpre = 0;
+      for (unsigned l = 0; l < 32; l++) {
+         uint32_t *o = want + (g * 32 + l) * 8;
+         o[0] = sum;
+         o[1] = mx;
+         o[2] = pre;
+         pre += v[l];
+         o[3] = v[(l * 5u + 3u) & 31u];
+         o[4] = v[7];
+         o[5] = l + 3 < 32 ? v[l + 3] : v[l];
+         o[6] = ballot;
+         o[7] = (uint32_t)all | ((uint32_t)any << 1) | (mn & ~3u);
+         fpre += f[l];
+         fwant[(g * 32 + l) * 2] = fsum;
+         fwant[(g * 32 + l) * 2 + 1] = fpre;
+      }
+   }
+   static const float zero[2] = { 0, 0 };
+   bool ok = check_u32(r, "out", S(r, 2), want, n * 8, 8) && check_f32(r, "fout", S(r, 3), fwant, n * 2, 2, zero, zero);
+   free(want);
+   free(fwant);
+   return ok;
+}
+
+/* --- math_lib ------------------------------------------------------------------------------------------------- */
+
+static void
+math_lib_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *a = slot(r, 0, n * 4), *b = slot(r, 1, n * 4);
+   int32_t *k = slot(r, 2, n * 4);
+   slot(r, 3, n * 16 * 4);
+   slot(r, 4, n * 8 * 4);
+   for (unsigned i = 0; i < n; i++) {
+      a[i] = rndf(-6, 6);
+      b[i] = rndf(0.5f, 3) * ((rnd() & 1) ? -1.0f : 1.0f);
+      k[i] = (int32_t)rnd();
+   }
+   a[0] = 2.5f;
+   a[1] = -2.5f;
+   a[2] = 0.0f;
+   k[0] = INT32_MAX;
+   k[1] = 5;
+   k[2] = INT32_MIN;
+   k[3] = 7;
+}
+
+static float
+smoothstep_ref(float e0, float e1, float x)
+{
+   float t = (x - e0) / (e1 - e0);
+   t = t < 0 ? 0 : t > 1 ? 1 : t;
+   return t * t * (3.0f - 2.0f * t);
+}
+
+static bool
+math_lib_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *a = S(r, 0), *b = S(r, 1);
+   const int32_t *kk = S(r, 2);
+   float *want = calloc(n * 16, 4);
+   uint32_t *iwant = calloc(n * 8, 4);
+   for (unsigned i = 0; i < n; i++) {
+      float x = a[i], y = b[i], *o = want + i * 16;
+      o[0] = roundf(x);
+      o[1] = truncf(x);
+      o[2] = ceilf(x);
+      o[3] = x - floorf(x);
+      o[4] = fmodf(x, y);
+      o[5] = copysignf(y, x);
+      o[6] = x < -1.0f ? -1.0f : x > 2.0f ? 2.0f : x;
+      o[7] = x + (y - x) * 0.25f;
+      o[8] = (x < y ? 0.0f : 1.0f) + smoothstep_ref(-1.0f, 1.0f, x);
+      o[9] = (x < 0 ? 0 : x > 1 ? 1 : x) + (y > 0 ? 1.0f : y < 0 ? -1.0f : 0.0f);
+      o[10] = powf(fabsf(x) + 0.5f, 1.5f);
+      o[11] = atan2f(x, y);
+      float cx = x * 0.1f, cy = y * 0.1f;
+      o[12] = asinf(cx < -1 ? -1 : cx > 1 ? 1 : cx) + acosf(cy < -1 ? -1 : cy > 1 ? 1 : cy);
+      o[13] = sinhf(x * 0.5f);
+      o[14] = h2f(f2h(h2f(f2h(x)) * 0.5f + h2f(f2h(y))));
+      o[15] = exp2f(x) - logf(fabsf(y) + 1.0f);
+      int32_t k = kk[i], m = kk[i ^ 1u];
+      uint32_t uk = (uint32_t)k, um = (uint32_t)m, *u = iwant + i * 8;
+      int64_t sum = (int64_t)k + m, dif = (int64_t)k - m;
+      u[0] = (uint32_t)(int32_t)(sum > INT32_MAX ? INT32_MAX : sum < INT32_MIN ? INT32_MIN : sum);
+      u[1] = (uint32_t)(int32_t)(dif > INT32_MAX ? INT32_MAX : dif < INT32_MIN ? INT32_MIN : dif);
+      u[2] = (uint32_t)(dif < 0 ? -dif : dif);
+      u[3] = (uk >> 3) & 0x1ffu;
+      u[4] = (uint32_t)((int32_t)(uk << (32 - 12)) >> (32 - 7));
+      uint32_t rev = 0;
+      for (unsigned bit = 0; bit < 32; bit++)
+         rev |= ((uk >> bit) & 1u) << (31 - bit);
+      u[5] = rev;
+      uint32_t uh = (uint32_t)(((uint64_t)uk + um) >> 1);
+      int32_t ir = (int32_t)((sum + 1) >> 1);
+      u[6] = uh ^ (uint32_t)ir;
+      u[7] = ((uk & ~(0xfffu << 4)) | ((um & 0xfffu) << 4)) + ((uk & 0xffffu) * (um & 0xffffu) + 5u);
+   }
+   static const float abs_tol[16] = { 0, 0, 0, 0, 1e-4f, 0, 0, 1e-6f, 1e-6f, 0, 0, 2e-5f, 1e-4f, 2e-6f, 4e-3f, 1e-4f };
+   static const float rel_tol[16] = { 0, 0, 0, 1e-6f, 0, 0, 0, 1e-6f, 1e-6f, 0, 1e-5f, 1e-6f, 0, 1e-4f, 0, 1e-5f };
+   bool ok = check_f32(r, "out", S(r, 3), want, n * 16, 16, abs_tol, rel_tol) &&
+             check_u32(r, "iout", S(r, 4), iwant, n * 8, 8);
+   free(want);
+   free(iwant);
+   return ok;
+}
+
+/* --- mat_const ------------------------------------------------------------------------------------------------ */
+
+struct params {   /* struct Params in mat_const.metal */
+   float m[4][4];  /* column-major: m[column][row] */
+   float scale[2];
+   uint32_t count;
+   int32_t offset;
+};
+_Static_assert(sizeof(struct params) == 80, "Params is 80 bytes in Metal");
+
+static void
+mat_const_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   struct params *p = slot(r, 0, sizeof *p);
+   float *in = slot(r, 1, n * 16);
+   slot(r, 2, n * 16);
+   for (unsigned c = 0; c < 4; c++) {
+      for (unsigned k = 0; k < 4; k++)
+         p->m[c][k] = rndf(-2, 2);
+   }
+   p->scale[0] = 1.5f;
+   p->scale[1] = -0.75f;
+   p->count = 40;
+   p->offset = -13;
+   for (unsigned i = 0; i < n * 4; i++)
+      in[i] = rndf(-10, 10);
+}
+
+static bool
+mat_const_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const struct params *p = S(r, 0);
+   const float *in = S(r, 1);
+   float *want = calloc(n * 4, 4);
+   for (unsigned i = 0; i < n; i++) {
+      float v[4], rr[4];
+      memcpy(v, in + i * 4, sizeof v);
+      for (unsigned row = 0; row < 4; row++) {
+         rr[row] = 0;
+         for (unsigned c = 0; c < 4; c++)
+            rr[row] += p->m[c][row] * v[c];
+      }
+      rr[0] *= p->scale[0];
+      rr[1] *= p->scale[1];
+      rr[3] += (float)((int32_t)p->count + p->offset);
+      for (unsigned row = 0; row < 4; row++) {
+         float s = 0;
+         for (unsigned c = 0; c < 4; c++)
+            s += p->m[row][c] * rr[c];
+         want[i * 4 + row] = s * 0.0625f;
+      }
+   }
+   static const float abs_tol[4] = { 1e-4f, 1e-4f, 1e-4f, 1e-4f }, rel_tol[4] = { 1e-5f, 1e-5f, 1e-5f, 1e-5f };
+   bool ok = check_f32(r, "out", S(r, 2), want, n * 4, 4, abs_tol, rel_tol);
+   free(want);
+   return ok;
+}
+
+/* --- ctrl_flow ------------------------------------------------------------------------------------------------ */
+
+static void
+ctrl_flow_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 3 * 4);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+   in[0] = 0;
+   in[1] = 0xffffffffu;
+}
+
+static bool
+ctrl_flow_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   uint32_t *want = calloc(n * 3, 4);
+   for (unsigned i = 0; i < n; i++) {
+      uint32_t x = in[i], acc = 0;
+      for (uint32_t a = 0; a < 8u; a++) {
+         if (((x >> a) & 1u) == 0u)
+            continue;
+         for (uint32_t b = 0; b < 8u; b++) {
+            if (b > a)
+               break;
+            acc += a * 8u + b;
+            if (acc > 300u)
+               break;
+         }
+      }
+      uint32_t y = x, steps = 0;
+      do {
+         y = y * 1103515245u + 12345u;
+         steps++;
+      } while ((y >> 28) != 0u && steps < 40u);
+      want[i * 3] = acc;
+      want[i * 3 + 1] = steps;
+      want[i * 3 + 2] = 99u;
+      for (uint32_t k = 0; k < 32u; k++) {
+         if ((((x * 2654435761u) >> k) & 1u) && k > (x & 15u)) {
+            want[i * 3 + 2] = k;
+            break;
+         }
+      }
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n * 3, 3);
+   free(want);
+   return ok;
+}
+
+/* --- atomic_float --------------------------------------------------------------------------------------------- */
+
+static void
+atomic_float_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   uint32_t *in = slot(r, 0, n * 4);
+   slot(r, 1, 16);
+   slot(r, 2, 16);
+   for (unsigned i = 0; i < n; i++)
+      in[i] = rnd();
+}
+
+static bool
+atomic_float_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const uint32_t *in = S(r, 0);
+   float want[4] = { 0 };
+   uint32_t cwant[4] = { 0 };
+   for (unsigned i = 0; i < n; i++) {
+      want[in[i] & 3u] += (float)(in[i] & 255u) * 0.25f;
+      cwant[in[i] & 3u] += in[i] >> 20;
+   }
+   static const float zero[1] = { 0 };
+   return check_f32(r, "sums", S(r, 1), want, 4, 1, zero, zero) && check_u32(r, "counts", S(r, 2), cwant, 4, 1);
+}
+
+/* --- grid3d --------------------------------------------------------------------------------------------------- */
+
+static void
+grid3d_setup(struct run *r)
+{
+   slot(r, 0, r->threads * 2 * 4);
+}
+
+static bool
+grid3d_check(struct run *r)
+{
+   const unsigned W = 16, H = 8, D = 8;
+   uint32_t *want = calloc(W * H * D * 2, 4);
+   for (unsigned z = 0; z < D; z++) {
+      for (unsigned y = 0; y < H; y++) {
+         for (unsigned x = 0; x < W; x++) {
+            uint32_t *o = want + ((z * H + y) * W + x) * 2;
+            unsigned lx = x % 4, ly = y % 4, lz = z % 4;
+            o[0] = x | (y << 8) | (z << 16) | ((lx + ly * 4 + lz * 16) << 24);
+            o[1] = lx | (ly << 4) | (lz << 8) | ((x / 4) << 12) | ((y / 4) << 16) | ((z / 4) << 20);
+         }
+      }
+   }
+   bool ok = check_u32(r, "out", S(r, 0), want, W * H * D * 2, 2);
+   free(want);
+   return ok;
+}
+
+/* --- agg_ops -------------------------------------------------------------------------------------------------- */
+
+static void
+agg_ops_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *in = slot(r, 0, n * 16);
+   slot(r, 1, n * 16);
+   slot(r, 2, n * 8);
+   for (unsigned i = 0; i < n * 4; i++)
+      in[i] = rndf(-100, 100);
+}
+
+struct pair {
+   float v[4];
+   uint32_t tag;
+   uint16_t small;
+};
+
+static struct pair
+make_pair_ref(const float *in, uint32_t i, uint32_t mode)
+{
+   struct pair p;
+   for (unsigned k = 0; k < 4; k++)
+      p.v[k] = (mode & 1u) ? in[i * 4 + k] * 2.0f : in[i * 4 + 3 - k] + 1.0f;
+   p.tag = (mode & 1u) ? i : ~i;
+   p.small = (uint16_t)((mode & 1u) ? i * 3u : i + 7u);
+   return p;
+}
+
+static bool
+agg_ops_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *in = S(r, 0);
+   float *want = calloc(n * 4, 4);
+   uint32_t *twant = calloc(n * 2, 4);
+   for (uint32_t i = 0; i < n; i++) {
+      struct pair p = make_pair_ref(in, i, i), q = make_pair_ref(in, i ^ 1u, i >> 1);
+      for (unsigned k = 0; k < 4; k++)
+         want[i * 4 + k] = p.v[k] - q.v[(k + 1) & 3];
+      twant[i * 2] = p.tag ^ q.small;
+      twant[i * 2 + 1] = q.tag + p.small;
+   }
+   static const float zero[4] = { 0 };
+   bool ok = check_f32(r, "out", S(r, 1), want, n * 4, 4, zero, zero) && check_u32(r, "tags", S(r, 2), twant, n * 2, 2);
+   free(want);
+   free(twant);
+   return ok;
+}
+
+/* --- fc_kernel ------------------------------------------------------------------------------------------------ */
+
+#define FC_F32(f) { (uint8_t)(f), (uint8_t)((f) >> 8), (uint8_t)((f) >> 16), (uint8_t)((f) >> 24) }
+/* set A: every constant given; set B leaves out scale (read only under use_scale, which is false) and bias (it has a
+ * default); set C leaves out scale while use_scale is true: the frontend must refuse it */
+static const struct fcset fc_a = { 5, { { 0, 1, { 1 } }, { 1, 4, FC_F32(0x40200000u) /* 2.5 */ }, { 2, 4, { 1 } },
+                                        { 3, 4, { 7 } }, { 4, 1, { 1 } } } };
+static const struct fcset fc_b = { 3, { { 0, 1, { 0 } }, { 2, 4, { 2 } }, { 4, 1, { 0 } } } };
+static const struct fcset fc_c = { 3, { { 0, 1, { 1 } }, { 2, 4, { 0 } }, { 4, 1, { 0 } } } };
+
+static const uint8_t *
+fc_get(const struct fcset *fc, uint32_t index)
+{
+   for (unsigned i = 0; fc && i < fc->n; i++) {
+      if (fc->v[i].index == index)
+         return fc->v[i].bytes;
+   }
+   return NULL;
+}
+
+static void
+fc_kernel_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *in = slot(r, 0, n * 4);
+   slot(r, 1, n * 4);
+   uint32_t *extra = slot(r, 2, n * 4);
+   slot(r, 3, n * 4);
+   for (unsigned i = 0; i < n; i++) {
+      in[i] = rndf(-8, 8);
+      extra[i] = rnd() & 0xffffu;
+   }
+}
+
+static bool
+fc_kernel_check(struct run *r)
+{
+   const struct fcset *fc = r->t->fc;
+   unsigned n = r->threads;
+   const float *in = S(r, 0);
+   const uint32_t *extra = S(r, 2);
+   const uint8_t *p;
+   bool use_scale = (p = fc_get(fc, 0)) && p[0], has_extra = (p = fc_get(fc, 4)) && p[0];
+   float scale = 0;
+   int32_t mode = 0;
+   uint32_t bias = 1000;
+   if ((p = fc_get(fc, 1)))
+      memcpy(&scale, p, 4);
+   if ((p = fc_get(fc, 2)))
+      memcpy(&mode, p, 4);
+   if ((p = fc_get(fc, 3)))
+      memcpy(&bias, p, 4);
+   float *want = calloc(n, 4);
+   uint32_t *iwant = calloc(n, 4);
+   for (unsigned i = 0; i < n; i++) {
+      float x = in[i];
+      if (use_scale)
+         x *= scale;
+      x = mode == 0 ? x + 1.0f : mode == 1 ? -x : x * x;
+      want[i] = x;
+      iwant[i] = i + bias + (has_extra ? extra[i] : 0);
+   }
+   static const float zero[1] = { 0 };
+   bool ok = check_f32(r, "out", S(r, 1), want, n, 1, zero, zero) && check_u32(r, "iout", S(r, 3), iwant, n, 1);
+   free(want);
+   free(iwant);
+   return ok;
+}
+
+/* --- textures ------------------------------------------------------------------------------------------------- */
+
+#define U8(v) ((float)(v) / 255.0f)
+
+static bool
+check_f4(struct run *r, const char *what, const float *got, const float *want, unsigned n, float tol)
+{
+   for (unsigned i = 0; i < n; i++) {
+      if (!(fabsf(got[i] - want[i]) <= tol))
+         return FAILF(r, "%s[%u] (item %u, lane %u) = %.7g, expected %.7g (tolerance %g)", what, i, i / 4, i % 4, got[i],
+                      want[i], tol);
+   }
+   return true;
+}
+
+static void
+fill_bytes(struct run *r, unsigned i)
+{
+   struct timg *x = &r->tex[i];
+   uint8_t *p = x->stage.map;
+   for (size_t k = 0; k < x->stage.size; k++)
+      p[k] = (uint8_t)rnd();
+}
+
+/* tex_read: rgba8 (2 levels), r8, rgba16f, r32f, r32ui read with texel fetches */
+static void
+tex_read_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 2, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8_UNORM, 1, 16, 16, 1, 1, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 16, 16, 1, 1, 1, false);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, false);
+   tex_image(r, 4, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 4, 16, 16, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   fill_bytes(r, 1);
+   fill_bytes(r, 4);
+   uint16_t *h = r->tex[2].stage.map;
+   for (unsigned k = 0; k < 16 * 16 * 4; k++)
+      h[k] = f2h(rndf(-50, 50));
+   float *f = r->tex[3].stage.map;
+   for (unsigned k = 0; k < 16 * 16; k++)
+      f[k] = rndf(-1000, 1000);
+   slot(r, 0, 256 * 5 * 16);
+   slot(r, 1, 256 * 16);
+}
+
+static bool
+tex_read_check(struct run *r)
+{
+   float *want = calloc(256 * 5 * 4, 4);
+   uint32_t *uwant = calloc(256 * 4, 4);
+   for (uint32_t y = 0; y < 16; y++) {
+      for (uint32_t x = 0; x < 16; x++) {
+         unsigned i = y * 16 + x;
+         float *o = want + i * 20;
+         const uint8_t *a = tex_at(r, 0, 0, x, y, 0), *a1 = tex_at(r, 0, 1, x / 2, y / 2, 0);
+         const uint8_t *b = tex_at(r, 1, 0, x, y, 0);
+         const uint16_t *h = tex_at(r, 2, 0, x, y, 0);
+         const float *f = tex_at(r, 3, 0, x, y, 0);
+         const uint32_t *u = tex_at(r, 4, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++) {
+            o[c] = U8(a[c]);
+            o[4 + c] = U8(a1[c]);
+            o[12 + c] = h2f(h[c]);
+         }
+         o[8] = U8(b[0]), o[9] = 0, o[10] = 0, o[11] = 1;
+         o[16] = f[0], o[17] = 0, o[18] = 0, o[19] = 1;
+         uwant[i * 4] = u[0], uwant[i * 4 + 1] = 0, uwant[i * 4 + 2] = 0, uwant[i * 4 + 3] = 1;
+      }
+   }
+   bool ok = check_f4(r, "out", S(r, 0), want, 256 * 20, 1e-6f) && check_u32(r, "uout", S(r, 1), uwant, 256 * 4, 4);
+   free(want);
+   free(uwant);
+   return ok;
+}
+
+/* tex_write: storage rgba8, r32f, r32ui (read_write), rgba16f */
+static void
+tex_write_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 4, 16, 16, 1, 1, 1, true);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 16, 16, 1, 1, 1, true);
+   uint32_t *u = r->tex[2].stage.map;
+   for (unsigned k = 0; k < 256; k++)
+      u[k] = rnd() & 0xffffffu;
+   /* a copy of what the GPU reads, for the check (stage is overwritten by the readback) */
+   uint32_t *keep = slot(r, 30, 256 * 4);
+   memcpy(keep, u, 256 * 4);
+}
+
+static bool
+tex_write_check(struct run *r)
+{
+   const uint32_t *before = S(r, 30);
+   for (uint32_t y = 0; y < 16; y++) {
+      for (uint32_t x = 0; x < 16; x++) {
+         float px = (float)x / 15.0f, py = (float)y / 15.0f;
+         float v8[4] = { px, py, 1.0f - px, 0.5f };
+         const uint8_t *g8 = tex_at(r, 0, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++) {
+            int want = (int)floorf(v8[c] * 255.0f + 0.5f);
+            if (abs((int)g8[c] - want) > 1)   /* a tie (0.5 * 255) may round either way */
+               return FAILF(r, "rgba8 (%u,%u)[%u] = %u, expected %d", x, y, c, g8[c], want);
+         }
+         float gf = *(const float *)tex_at(r, 1, 0, x, y, 0), wf = px * 100.0f + py;
+         if (fabsf(gf - wf) > 1e-4f)
+            return FAILF(r, "r32f (%u,%u) = %.7g, expected %.7g", x, y, gf, wf);
+         uint32_t gu = *(const uint32_t *)tex_at(r, 2, 0, x, y, 0), wu = before[y * 16 + x] * 3u + 1u;
+         if (gu != wu)
+            return FAILF(r, "r32ui (%u,%u) = %u, expected %u", x, y, gu, wu);
+         const uint16_t *gh = tex_at(r, 3, 0, x, y, 0);
+         float vh[4] = { px, py, -1.5f, 2.0f };
+         for (unsigned c = 0; c < 4; c++) {
+            float want = h2f(f2h(vh[c]));
+            if (fabsf(h2f(gh[c]) - want) > fabsf(want) * 1e-3f)
+               return FAILF(r, "rgba16f (%u,%u)[%u] = %g, expected %g", x, y, c, h2f(gh[c]), want);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_array3d: 2D-array and 3D reads, 3D and 2D-array writes */
+static void
+tex_array3d_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 3, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 8, 8, 4, 1, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 8, 8, 4, 1, 1, true);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R32_UINT, 4, 8, 8, 1, 3, 1, true);
+   fill_bytes(r, 0);
+   float *f = r->tex[1].stage.map;
+   for (unsigned k = 0; k < 8 * 8 * 4; k++)
+      f[k] = rndf(-10, 10);
+   slot(r, 0, 256 * 2 * 16);
+}
+
+static bool
+tex_array3d_check(struct run *r)
+{
+   float *want = calloc(256 * 8, 4);
+   for (uint32_t z = 0; z < 4; z++) {
+      for (uint32_t y = 0; y < 8; y++) {
+         for (uint32_t x = 0; x < 8; x++) {
+            unsigned i = (z * 8 + y) * 8 + x;
+            const uint8_t *a = tex_at(r, 0, 0, x, y, z % 3);
+            for (unsigned c = 0; c < 4; c++)
+               want[i * 8 + c] = U8(a[c]);
+            want[i * 8 + 4] = *(const float *)tex_at(r, 1, 0, x, y, z);
+            want[i * 8 + 5] = 0, want[i * 8 + 6] = 0, want[i * 8 + 7] = 1;
+            float gv = *(const float *)tex_at(r, 2, 0, x, y, z);
+            if (gv != (float)i * 0.5f)
+               return FAILF(r, "3D write (%u,%u,%u) = %g, expected %g", x, y, z, gv, (float)i * 0.5f);
+            if (z < 3 && *(const uint32_t *)tex_at(r, 3, 0, x, y, z) != i * 7u)
+               return FAILF(r, "2D-array write (%u,%u,%u) = %u, expected %u", x, y, z, *(const uint32_t *)tex_at(r, 3, 0, x, y, z), i * 7u);
+         }
+      }
+   }
+   bool ok = check_f4(r, "out", S(r, 0), want, 256 * 8, 1e-6f);
+   free(want);
+   return ok;
+}
+
+/* sampling references: Vulkan's nearest and linear filtering of a normalized coordinate */
+static int
+wrap(int i, int n, VkSamplerAddressMode m)
+{
+   if (m == VK_SAMPLER_ADDRESS_MODE_REPEAT)
+      return ((i % n) + n) % n;
+   return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+static float
+rgba8_at(struct run *r, unsigned t, uint32_t m, int x, int y, uint32_t layer, unsigned c)
+{
+   return U8(((const uint8_t *)tex_at(r, t, m, (uint32_t)x, (uint32_t)y, layer))[c]);
+}
+
+static void
+sample_nearest(struct run *r, unsigned t, uint32_t m, float u, float v, uint32_t layer, VkSamplerAddressMode mode, float *out)
+{
+   int w = (int)mip_size(r->tex[t].w, m), h = (int)mip_size(r->tex[t].h, m);
+   int x = wrap((int)floorf(u * w), w, mode), y = wrap((int)floorf(v * h), h, mode);
+   for (unsigned c = 0; c < 4; c++)
+      out[c] = rgba8_at(r, t, m, x, y, layer, c);
+}
+
+static void
+sample_linear(struct run *r, unsigned t, uint32_t m, float u, float v, VkSamplerAddressMode mode, float *out)
+{
+   int w = (int)mip_size(r->tex[t].w, m), h = (int)mip_size(r->tex[t].h, m);
+   float fu = u * w - 0.5f, fv = v * h - 0.5f;
+   int i0 = (int)floorf(fu), j0 = (int)floorf(fv);
+   float a = fu - floorf(fu), b = fv - floorf(fv);
+   int i1 = wrap(i0 + 1, w, mode), j1 = wrap(j0 + 1, h, mode);
+   i0 = wrap(i0, w, mode), j0 = wrap(j0, h, mode);
+   for (unsigned c = 0; c < 4; c++)
+      out[c] = (1 - a) * (1 - b) * rgba8_at(r, t, m, i0, j0, 0, c) + a * (1 - b) * rgba8_at(r, t, m, i1, j0, 0, c) +
+               (1 - a) * b * rgba8_at(r, t, m, i0, j1, 0, c) + a * b * rgba8_at(r, t, m, i1, j1, 0, c);
+}
+
+/* a coordinate a jitter of 0.1 to 0.4 texel off a texel centre, for n texels; k texels below 0 to above 1 */
+static float
+centre_coord(int n, int lo, int hi)
+{
+   int k = lo + (int)(rnd() % (uint32_t)(hi - lo));
+   float j = rndf(0.1f, 0.4f) * ((rnd() & 1) ? 1.0f : -1.0f);
+   return ((float)k + 0.5f + j) / (float)n;
+}
+
+static void
+tex_sample_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 2, false);
+   fill_bytes(r, 0);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16);
+   samp_create(r, 1, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16);
+   slot(r, 0, 256 * 5 * 16);
+   float *uv = slot(r, 1, 256 * 8);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, -8, 16);
+      uv[i * 2 + 1] = centre_coord(8, -8, 16);
+   }
+}
+
+static bool
+tex_sample_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   /* the constexpr sampler takes slot 2, the first no [[sampler(n)]] argument takes, as the translator's reflection says */
+   if (res->static_sampler_count != 1 || res->static_samplers[0].slot != 2 || res->sampler_mask != 7)
+      return FAILF(r, "constexpr samplers %u, the first at slot %u, sampler mask 0x%x: expected one at slot 2, mask 0x7",
+                   res->static_sampler_count, res->static_samplers[0].slot, res->sampler_mask);
+   return true;
+}
+
+static bool
+tex_sample_check(struct run *r)
+{
+   const float *uv = S(r, 1), *got = S(r, 0);
+   for (unsigned i = 0; i < 256; i++) {
+      float u = uv[i * 2], v = uv[i * 2 + 1], w[5][4];
+      sample_nearest(r, 0, 0, u, v, 0, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[0]);
+      sample_linear(r, 0, 0, u, v, VK_SAMPLER_ADDRESS_MODE_REPEAT, w[1]);
+      sample_linear(r, 0, 1, u, v, VK_SAMPLER_ADDRESS_MODE_REPEAT, w[2]);
+      sample_linear(r, 0, 0, u, v, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[3]);
+      /* gather of red: (i0,j1), (i1,j1), (i1,j0), (i0,j0) of the bilinear footprint, clamped */
+      int i0 = (int)floorf(u * 8 - 0.5f), j0 = (int)floorf(v * 8 - 0.5f);
+      VkSamplerAddressMode cl = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      int x0 = wrap(i0, 8, cl), x1 = wrap(i0 + 1, 8, cl), y0 = wrap(j0, 8, cl), y1 = wrap(j0 + 1, 8, cl);
+      w[4][0] = rgba8_at(r, 0, 0, x0, y1, 0, 0), w[4][1] = rgba8_at(r, 0, 0, x1, y1, 0, 0);
+      w[4][2] = rgba8_at(r, 0, 0, x1, y0, 0, 0), w[4][3] = rgba8_at(r, 0, 0, x0, y0, 0, 0);
+      static const char *what[5] = { "nearest clamp", "linear repeat", "linear repeat level 1", "constexpr linear clamp",
+                                     "gather" };
+      /* linear filtering: NVIDIA's 8-bit filter weights give up to 2/256 of the texel difference */
+      static const float tol[5] = { 1e-6f, 1.0f / 128, 1.0f / 128, 1.0f / 128, 1e-6f };
+      for (unsigned k = 0; k < 5; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 5 + k) * 4 + c];
+            if (!(fabsf(g - w[k][c]) <= tol[k]))
+               return FAILF(r, "%s, thread %u (uv %.5f %.5f) lane %u = %.6f, expected %.6f (tolerance %g)", what[k], i, u, v,
+                            c, g, w[k][c], tol[k]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_cube: a cube sampled by direction (nearest), a 2D array by layer */
+static void
+tex_cube_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 4, 1, 6, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 4, 1, 2, 1, false);
+   fill_bytes(r, 0);
+   fill_bytes(r, 1);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *dir = slot(r, 0, 256 * 16);
+   slot(r, 1, 256 * 2 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      float *d = dir + i * 4;
+      for (;;) {
+         unsigned face = rnd() % 6;
+         float sc = centre_coord(4, 0, 4) * 2 - 1, tc = centre_coord(4, 0, 4) * 2 - 1, m = rndf(0.5f, 3.0f);
+         float x = 0, y = 0, z = 0;
+         switch (face) {
+         case 0: x = m, z = -sc * m, y = -tc * m; break;
+         case 1: x = -m, z = sc * m, y = -tc * m; break;
+         case 2: y = m, x = sc * m, z = tc * m; break;
+         case 3: y = -m, x = sc * m, z = -tc * m; break;
+         case 4: z = m, x = sc * m, y = -tc * m; break;
+         default: z = -m, x = -sc * m, y = -tc * m; break;
+         }
+         /* the 2D-array coordinate d.xy * 0.5 + 0.5 must not sit on a texel edge either */
+         float au = (x * 0.5f + 0.5f) * 4, av = (y * 0.5f + 0.5f) * 4;
+         if (fabsf(au - roundf(au)) < 0.05f || fabsf(av - roundf(av)) < 0.05f)
+            continue;
+         d[0] = x, d[1] = y, d[2] = z, d[3] = (float)(rnd() % 4);
+         break;
+      }
+   }
+}
+
+static bool
+tex_cube_check(struct run *r)
+{
+   const float *dir = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      const float *d = dir + i * 4;
+      float ax = fabsf(d[0]), ay = fabsf(d[1]), az = fabsf(d[2]), sc, tc, ma;
+      unsigned face;
+      if (ax >= ay && ax >= az) {
+         face = d[0] >= 0 ? 0 : 1, sc = d[0] >= 0 ? -d[2] : d[2], tc = -d[1], ma = ax;
+      } else if (ay >= az) {
+         face = d[1] >= 0 ? 2 : 3, sc = d[0], tc = d[1] >= 0 ? d[2] : -d[2], ma = ay;
+      } else {
+         face = d[2] >= 0 ? 4 : 5, sc = d[2] >= 0 ? d[0] : -d[0], tc = -d[1], ma = az;
+      }
+      float want[2][4];
+      sample_nearest(r, 0, 0, (sc / ma + 1) * 0.5f, (tc / ma + 1) * 0.5f, face, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, want[0]);
+      sample_nearest(r, 1, 0, d[0] * 0.5f + 0.5f, d[1] * 0.5f + 0.5f, (uint32_t)d[3] % 2, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                     want[1]);
+      for (unsigned k = 0; k < 2; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 2 + k) * 4 + c];
+            if (fabsf(g - want[k][c]) > 1e-6f)
+               return FAILF(r, "%s, thread %u (%.4f %.4f %.4f, face %u) lane %u = %.6f, expected %.6f",
+                            k ? "2D array" : "cube", i, d[0], d[1], d[2], face, c, g, want[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_query */
+static void
+tex_query_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 3, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 6, 1, 5, 1, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 4, 4, 7, 1, 1, false);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 5, 3, 1, 1, 1, true);
+   tex_buffer(r, 4, VK_FORMAT_R32_SFLOAT, 4, 100, false);
+   slot(r, 0, 12 * 4);
+}
+
+static bool
+tex_query_check(struct run *r)
+{
+   static const uint32_t want[12] = { 8, 4, 3, 4, 6, 5, 4, 7, 5, 3, 100, 2 };
+   return check_u32(r, "out", S(r, 0), want, 12, 1);
+}
+
+/* tex_buffer */
+static void
+tex_buffer_setup(struct run *r)
+{
+   float *in = tex_buffer(r, 0, VK_FORMAT_R32_SFLOAT, 4, 256, false);
+   tex_buffer(r, 1, VK_FORMAT_R32_UINT, 4, 256, true);
+   for (unsigned i = 0; i < 256; i++)
+      in[i] = rndf(0, 1000);
+   slot(r, 0, 256 * 16);
+}
+
+static bool
+tex_buffer_check(struct run *r)
+{
+   const float *in = r->tex[0].stage.map;
+   const uint32_t *out = r->tex[1].stage.map;
+   float *want = calloc(256 * 4, 4);
+   uint32_t *uwant = calloc(256, 4);
+   for (unsigned i = 0; i < 256; i++) {
+      want[i * 4] = in[i], want[i * 4 + 3] = 1;
+      uwant[i] = (uint32_t)(in[i] * 4.0f) + i;
+   }
+   bool ok = check_f4(r, "o", S(r, 0), want, 256 * 4, 0) && check_u32(r, "storage texel buffer", out, uwant, 256, 1);
+   free(want);
+   free(uwant);
+   return ok;
+}
+
+/* tex_depth */
+static void
+tex_depth_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_D32_SFLOAT, 4, 8, 8, 1, 1, 1, false);
+   float *d = r->tex[0].stage.map;
+   for (unsigned k = 0; k < 64; k++) {
+      d[k] = rndf(0, 1);
+      if (fabsf(d[k] - 0.5f) < 1e-3f)
+         d[k] = 0.25f;
+   }
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *uv = slot(r, 0, 256 * 8);
+   slot(r, 1, 256 * 3 * 4);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, 0, 8);
+      uv[i * 2 + 1] = centre_coord(8, 0, 8);
+   }
+}
+
+static bool
+tex_depth_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   if (res->static_sampler_count != 1 || res->static_samplers[0].slot != 1)
+      return FAILF(r, "constexpr samplers %u, the first at slot %u: expected one at slot 1", res->static_sampler_count,
+                   res->static_samplers[0].slot);
+   return true;
+}
+
+static bool
+tex_depth_check(struct run *r)
+{
+   const float *uv = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      float fx = floorf(uv[i * 2] * 8), fy = floorf(uv[i * 2 + 1] * 8);
+      if (!(fx >= 0 && fx < 8 && fy >= 0 && fy < 8))
+         return FAILF(r, "thread %u has the coordinate %g %g, outside the texture", i, uv[i * 2], uv[i * 2 + 1]);
+      int x = (int)fx, y = (int)fy;
+      float d = *(const float *)tex_at(r, 0, 0, (uint32_t)x, (uint32_t)y, 0);
+      float want[3] = { d, 0.5f < d ? 1.0f : 0.0f, d };
+      for (unsigned k = 0; k < 3; k++) {
+         if (got[i * 3 + k] != want[k])
+            return FAILF(r, "%s, thread %u = %g, expected %g", k == 0 ? "sample" : k == 1 ? "sample_compare less 0.5" : "read",
+                         i, got[i * 3 + k], want[k]);
+      }
+   }
+   return true;
+}
+
+/* tex_fence */
+static void
+tex_fence_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 16, 16, 1, 1, 1, true);
+   float *f = r->tex[0].stage.map, *keep = slot(r, 30, 256 * 4);
+   for (unsigned k = 0; k < 256; k++)
+      keep[k] = f[k] = (float)(int)(rnd() % 1000);
+}
+
+static bool
+tex_fence_check(struct run *r)
+{
+   const float *before = S(r, 30), *after = r->tex[0].stage.map;
+   for (unsigned k = 0; k < 256; k++) {
+      if (after[k] != (before[k] + 1.0f) * 2.0f)
+         return FAILF(r, "texel %u = %g, expected %g", k, after[k], (before[k] + 1.0f) * 2.0f);
+   }
+   return true;
+}
+
+/* tex_pixel: constexpr pixel-coordinate samplers */
+static void
+tex_pixel_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   float *xy = slot(r, 0, 256 * 8);
+   slot(r, 1, 256 * 3 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      for (unsigned k = 0; k < 2; k++) {
+         unsigned kind = rnd() % 3;
+         float v = kind == 0 ? (float)(rnd() % 8) + 0.5f            /* a texel centre */
+                 : kind == 1 ? (float)(rnd() % 9)                   /* an exact texel edge, 8 included */
+                             : rndf(-3, 11);                        /* anywhere, outside too */
+         xy[i * 2 + k] = v;
+      }
+   }
+}
+
+static bool
+tex_pixel_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   uint32_t slots = 0;
+   for (unsigned k = 0; k < res->static_sampler_count && k < 32; k++)
+      slots |= 1u << res->static_samplers[k].slot;
+   if (res->static_sampler_count != 3 || slots != 7)
+      return FAILF(r, "%u constexpr samplers at slots 0x%x: expected 3 at 0x7", res->static_sampler_count, slots);
+   return true;
+}
+
+static bool
+tex_pixel_check(struct run *r)
+{
+   const float *xy = S(r, 0), *got = S(r, 1);
+   for (unsigned i = 0; i < 256; i++) {
+      float x = xy[i * 2], y = xy[i * 2 + 1], w[3][4];
+      int ix = (int)floorf(x), iy = (int)floorf(y);
+      bool inside = ix >= 0 && ix < 8 && iy >= 0 && iy < 8;
+      sample_nearest(r, 0, 0, x / 8, y / 8, 0, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[0]);
+      for (unsigned c = 0; c < 4; c++)
+         w[1][c] = inside ? w[0][c] : 0.0f;
+      sample_linear(r, 0, 0, x / 8, y / 8, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w[2]);
+      static const char *what[3] = { "nearest clamp_to_edge", "nearest clamp_to_zero", "linear clamp_to_edge" };
+      static const float tol[3] = { 1e-6f, 1e-6f, 1.0f / 128 };
+      for (unsigned k = 0; k < 3; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 3 + k) * 4 + c];
+            if (!(fabsf(g - w[k][c]) <= tol[k]))
+               return FAILF(r, "%s, thread %u (%.4f, %.4f) lane %u = %.6f, expected %.6f", what[k], i, x, y, c, g, w[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* tex_offset: run-time and constant offsets */
+static void
+tex_offset_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *uv = slot(r, 0, 256 * 8);
+   int32_t *off = slot(r, 1, 256 * 8);
+   slot(r, 2, 256 * 3 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, 0, 8);
+      uv[i * 2 + 1] = centre_coord(8, 0, 8);
+      off[i * 2] = (int32_t)(rnd() % 8) - 4;
+      off[i * 2 + 1] = (int32_t)(rnd() % 8) - 4;
+   }
+}
+
+static bool
+tex_offset_check(struct run *r)
+{
+   const float *uv = S(r, 0), *got = S(r, 2);
+   const int32_t *off = S(r, 1);
+   VkSamplerAddressMode cl = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   for (unsigned i = 0; i < 256; i++) {
+      float u = uv[i * 2], v = uv[i * 2 + 1], w[3][4];
+      int x = (int)floorf(u * 8), y = (int)floorf(v * 8);
+      for (unsigned c = 0; c < 4; c++) {
+         w[0][c] = rgba8_at(r, 0, 0, wrap(x + off[i * 2], 8, cl), wrap(y + off[i * 2 + 1], 8, cl), 0, c);
+         w[1][c] = rgba8_at(r, 0, 0, wrap(x + 2, 8, cl), wrap(y - 3, 8, cl), 0, c);
+      }
+      int i0 = (int)floorf(u * 8 - 0.5f) - 1, j0 = (int)floorf(v * 8 - 0.5f) + 2;
+      int x0 = wrap(i0, 8, cl), x1 = wrap(i0 + 1, 8, cl), y0 = wrap(j0, 8, cl), y1 = wrap(j0 + 1, 8, cl);
+      w[2][0] = rgba8_at(r, 0, 0, x0, y1, 0, 0), w[2][1] = rgba8_at(r, 0, 0, x1, y1, 0, 0);
+      w[2][2] = rgba8_at(r, 0, 0, x1, y0, 0, 0), w[2][3] = rgba8_at(r, 0, 0, x0, y0, 0, 0);
+      static const char *what[3] = { "run-time offset", "constant offset", "gather with an offset" };
+      for (unsigned k = 0; k < 3; k++) {
+         for (unsigned c = 0; c < 4; c++) {
+            float g = got[(i * 3 + k) * 4 + c];
+            if (fabsf(g - w[k][c]) > 1e-6f)
+               return FAILF(r, "%s, thread %u (uv %.4f %.4f, offset %d %d) lane %u = %.6f, expected %.6f", what[k], i, u, v,
+                            off[i * 2], off[i * 2 + 1], c, g, w[k][c]);
+         }
+      }
+   }
+   return true;
+}
+
+/* fc_texture: a texture index from a function constant, and sincos */
+static const struct fcset fc_tex = { 1, { { 0, 4, { 2 } } } };   /* tex_base = 2: texture(3) */
+
+static void
+fc_texture_setup(struct run *r)
+{
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 3);
+   float *in = slot(r, 0, 64 * 4);
+   slot(r, 1, 64 * 2 * 16);
+   for (unsigned i = 0; i < 64; i++)
+      in[i] = rndf(-4, 4);
+}
+
+static bool
+fc_texture_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   if (res->texture_mask[0] != 1u << 3)
+      return FAILF(r, "texture mask 0x%x: expected texture 3 alone (0x8)", res->texture_mask[0]);
+   return true;
+}
+
+static bool
+fc_texture_check(struct run *r)
+{
+   const float *in = S(r, 0), *got = S(r, 1);
+   for (unsigned y = 0; y < 8; y++) {
+      for (unsigned x = 0; x < 8; x++) {
+         unsigned i = y * 8 + x;
+         for (unsigned c = 0; c < 4; c++) {
+            if (fabsf(got[i * 8 + c] - rgba8_at(r, 3, 0, (int)x, (int)y, 0, c)) > 1e-6f)
+               return FAILF(r, "read, thread %u lane %u = %g, expected %g", i, c, got[i * 8 + c], rgba8_at(r, 3, 0, (int)x, (int)y, 0, c));
+         }
+         float ws = sinf(in[i]), wc = cosf(in[i]);
+         if (fabsf(got[i * 8 + 4] - ws) > 2e-5f || fabsf(got[i * 8 + 5] - wc) > 2e-5f)
+            return FAILF(r, "sincos(%g), thread %u = %g %g, expected %g %g", in[i], i, got[i * 8 + 4], got[i * 8 + 5], ws, wc);
+      }
+   }
+   return true;
+}
+
+/* tex_pixel_array: a nearest pixel-coordinate sampler on a 2D array, and uniform<T> */
+static void
+tex_pixel_array_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 3, 1, false);
+   fill_bytes(r, 0);
+   float *xy = slot(r, 0, 256 * 8);
+   uint32_t *layer = slot(r, 1, 256 * 4);
+   slot(r, 2, 256 * 16);
+   slot(r, 3, 256 * 4);
+   for (unsigned i = 0; i < 256; i++) {
+      for (unsigned k = 0; k < 2; k++) {
+         unsigned kind = rnd() % 3;
+         xy[i * 2 + k] = kind == 0 ? (float)(rnd() % 8) + 0.5f : kind == 1 ? (float)(rnd() % 9) : rndf(-3, 11);
+      }
+      layer[i] = rnd() % 3;
+   }
+}
+
+static bool
+tex_pixel_array_check(struct run *r)
+{
+   const float *xy = S(r, 0), *got = S(r, 2);
+   const uint32_t *layer = S(r, 1), *ugot = S(r, 3);
+   for (unsigned i = 0; i < 256; i++) {
+      float w[4];
+      if (layer[i] >= 3)
+         return FAILF(r, "thread %u has layer %u, outside the texture", i, layer[i]);
+      sample_nearest(r, 0, 0, xy[i * 2] / 8, xy[i * 2 + 1] / 8, layer[i], VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, w);
+      for (unsigned c = 0; c < 4; c++) {
+         if (fabsf(got[i * 4 + c] - w[c]) > 1e-6f)
+            return FAILF(r, "thread %u (%.4f, %.4f, layer %u) lane %u = %.6f, expected %.6f", i, xy[i * 2], xy[i * 2 + 1],
+                         layer[i], c, got[i * 4 + c], w[c]);
+      }
+      if (ugot[i] != (layer[0] + 5u) * 3u + i)
+         return FAILF(r, "uniform, thread %u = %u, expected %u", i, ugot[i], (layer[0] + 5u) * 3u + i);
+   }
+   return true;
+}
+
+static const struct test tests[] = {
+   { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
+   { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
+   { "imath", NULL, "imath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, imath_setup, imath_check },
+   { "conv", NULL, "conv", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, conv_setup, conv_check },
+   { "loop_phi", NULL, "loop_phi", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, loop_phi_setup, loop_phi_check },
+   { "switch", NULL, "switch_case", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, switch_setup, switch_check },
+   { "tg_reduce", NULL, "tg_reduce", { 256, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, tg_reduce_setup, tg_reduce_check },
+   { "tg_arg", NULL, "tg_arg", { 128, 1, 1 }, { 32, 1, 1 }, { 128 * 4, 128 * 2 }, 0, NULL, tg_arg_setup, tg_arg_check },
+   { "dev_atomics", NULL, "dev_atomics", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, dev_atomics_setup, dev_atomics_check },
+   { "tg_atomics", NULL, "tg_atomics", { 256, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, NULL, tg_atomics_setup, tg_atomics_check },
+   { "const_table", NULL, "const_table", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, const_table_setup, const_table_check },
+   { "struct_buf", NULL, "struct_buf", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, NULL, struct_buf_setup, struct_buf_check },
+   { "grid2d", NULL, "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, 0, NULL, grid2d_setup, grid2d_check },
+   { "grid2d_indirect", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_INDIRECT, NULL, grid2d_setup, grid2d_check },
+   { "grid2d_base", "grid2d", "grid2d", { 16, 8, 1 }, { 4, 4, 1 }, { 0 }, GRID_BASE, NULL, grid2d_setup, grid2d_check },
+   { "simd_builtins", NULL, "simd_builtins", { 128, 1, 1 }, { 8, 1, 1 }, { 0 }, 0, NULL, simd_setup, simd_check },
+   { "narrow", NULL, "narrow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, narrow_setup, narrow_check },
+   { "vec_ops", NULL, "vec_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, vec_ops_setup, vec_ops_check },
+   { "tg_transpose", NULL, "tg_transpose", { 16, 16, 1 }, { 4, 4, 1 }, { 0 }, 0, NULL, tg_transpose_setup, tg_transpose_check },
+   { "thread_array", NULL, "thread_array", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, thread_array_setup, thread_array_check },
+   { "ptr_ops", NULL, "ptr_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, ptr_ops_setup, ptr_ops_check },
+   { "simd_funcs", NULL, "simd_funcs", { 128, 1, 1 }, { 32, 1, 1 }, { 0 }, 0, NULL, simd_funcs_setup, simd_funcs_check },
+   { "math_lib", NULL, "math_lib", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, math_lib_setup, math_lib_check },
+   { "mat_const", NULL, "mat_const", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, NULL, mat_const_setup, mat_const_check },
+   { "ctrl_flow", NULL, "ctrl_flow", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, ctrl_flow_setup, ctrl_flow_check },
+   { "atomic_float", NULL, "atomic_float", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, atomic_float_setup, atomic_float_check },
+   { "grid3d", NULL, "grid3d", { 4, 4, 4 }, { 4, 2, 2 }, { 0 }, 0, NULL, grid3d_setup, grid3d_check },
+   { "agg_ops", NULL, "agg_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, agg_ops_setup, agg_ops_check },
+   { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "fc_kernel_a", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_a, fc_kernel_setup, fc_kernel_check },
+   { "fc_kernel_b", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_b, fc_kernel_setup, fc_kernel_check },
+   { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, &fc_c, NULL, NULL },
+   { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "tex_read", NULL, "tex_read", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_read_setup, tex_read_check },
+   { "tex_write", NULL, "tex_write", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_write_setup, tex_write_check },
+   { "tex_array3d", NULL, "tex_array3d", { 8, 8, 1 }, { 1, 1, 4 }, { 0 }, 0, NULL, tex_array3d_setup, tex_array3d_check },
+   { "tex_sample", NULL, "tex_sample", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_sample_setup, tex_sample_check,
+     tex_sample_expect },
+   { "tex_cube", NULL, "tex_cube", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_cube_setup, tex_cube_check },
+   { "tex_query", NULL, "tex_query", { 1, 1, 1 }, { 1, 1, 1 }, { 0 }, 0, NULL, tex_query_setup, tex_query_check },
+   { "tex_buffer", NULL, "tex_buffer", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_buffer_setup, tex_buffer_check },
+   { "tex_depth", NULL, "tex_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_depth_setup, tex_depth_check,
+     tex_depth_expect },
+   { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
+   { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
+   { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
+   { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,
+     fc_texture_expect },
+   { "fc_texture_none", "fc_texture", "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "tex_pixel_array", NULL, "tex_pixel_array", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_array_setup,
+     tex_pixel_array_check },
+};
